@@ -1,0 +1,347 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.sha1 — SHA-1 (RFC 3174) in pure Aether, ported from
+// Bouncy Castle's Sha1Digest. NO externs to OpenSSL or any C crypto.
+//
+// Import with:  import std.cryptography.sha1
+
+import std.bits
+import std.bytes
+import std.intarr
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    new, update, update_bytes, final_hex, final_bytes, free_ctx,
+    sha1_hex, sha1_bytes
+)
+
+struct Sha1Ctx {
+    v0: long
+    v1: long
+    v2: long
+    v3: long
+    v4: long
+    block: ptr        // std.bytes buffer, 64 bytes
+    block_len: int
+    count_lo: long
+    w: ptr            // intarr(80) message schedule
+}
+
+m32(x: long) -> long {
+    return x & 0xFFFFFFFF
+}
+
+rl(x: long, n: int) -> long {
+    return bits.rotl32(x & 0xFFFFFFFF, n) & 0xFFFFFFFF
+}
+
+F(u: long, v: long, w: long) -> long {
+    return ((u & v) | ((~u) & w)) & 0xFFFFFFFF
+}
+
+H(u: long, v: long, w: long) -> long {
+    return (u ^ v ^ w) & 0xFFFFFFFF
+}
+
+G(u: long, v: long, w: long) -> long {
+    return ((u & v) | (u & w) | (v & w)) & 0xFFFFFFFF
+}
+
+process_block(c: *Sha1Ctx) {
+    w = c.w
+    // Load 16 big-endian words
+    i = 0
+    while i < 16 {
+        word = bytes.get_be32(c.block, i * 4) & 0xFFFFFFFF
+        intarr_set_unchecked(w, i, word)
+        i = i + 1
+    }
+    // Expand to 80 words
+    i = 16
+    while i < 80 {
+        w3 = intarr_get_unchecked(w, i - 3) & 0xFFFFFFFF
+        w8 = intarr_get_unchecked(w, i - 8) & 0xFFFFFFFF
+        w14 = intarr_get_unchecked(w, i - 14) & 0xFFFFFFFF
+        w16 = intarr_get_unchecked(w, i - 16) & 0xFFFFFFFF
+        t = w3 ^ w8 ^ w14 ^ w16
+        rot = rl(t, 1)
+        intarr_set_unchecked(w, i, rot)
+        i = i + 1
+    }
+
+    a = c.v0
+    b = c.v1
+    cc = c.v2
+    d = c.v3
+    e = c.v4
+
+    // Round 1
+    idx = 0
+    while idx < 20 {
+        e = m32(e + rl(a, 5) + F(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        b = rl(b, 30)
+        idx = idx + 1
+
+        d = m32(d + rl(e, 5) + F(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        a = rl(a, 30)
+        idx = idx + 1
+
+        cc = m32(cc + rl(d, 5) + F(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        e = rl(e, 30)
+        idx = idx + 1
+
+        b = m32(b + rl(cc, 5) + F(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        d = rl(d, 30)
+        idx = idx + 1
+
+        a = m32(a + rl(b, 5) + F(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x5a827999)
+        cc = rl(cc, 30)
+        idx = idx + 1
+    }
+
+    // Round 2
+    while idx < 40 {
+        e = m32(e + rl(a, 5) + H(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        b = rl(b, 30)
+        idx = idx + 1
+
+        d = m32(d + rl(e, 5) + H(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        a = rl(a, 30)
+        idx = idx + 1
+
+        cc = m32(cc + rl(d, 5) + H(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        e = rl(e, 30)
+        idx = idx + 1
+
+        b = m32(b + rl(cc, 5) + H(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        d = rl(d, 30)
+        idx = idx + 1
+
+        a = m32(a + rl(b, 5) + H(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x6ed9eba1)
+        cc = rl(cc, 30)
+        idx = idx + 1
+    }
+
+    // Round 3
+    while idx < 60 {
+        e = m32(e + rl(a, 5) + G(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        b = rl(b, 30)
+        idx = idx + 1
+
+        d = m32(d + rl(e, 5) + G(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        a = rl(a, 30)
+        idx = idx + 1
+
+        cc = m32(cc + rl(d, 5) + G(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        e = rl(e, 30)
+        idx = idx + 1
+
+        b = m32(b + rl(cc, 5) + G(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        d = rl(d, 30)
+        idx = idx + 1
+
+        a = m32(a + rl(b, 5) + G(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0x8f1bbcdc)
+        cc = rl(cc, 30)
+        idx = idx + 1
+    }
+
+    // Round 4
+    while idx < 80 {
+        e = m32(e + rl(a, 5) + H(b, cc, d) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        b = rl(b, 30)
+        idx = idx + 1
+
+        d = m32(d + rl(e, 5) + H(a, b, cc) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        a = rl(a, 30)
+        idx = idx + 1
+
+        cc = m32(cc + rl(d, 5) + H(e, a, b) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        e = rl(e, 30)
+        idx = idx + 1
+
+        b = m32(b + rl(cc, 5) + H(d, e, a) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        d = rl(d, 30)
+        idx = idx + 1
+
+        a = m32(a + rl(b, 5) + H(cc, d, e) + (intarr_get_unchecked(w, idx) & 0xFFFFFFFF) + 0xca62c1d6)
+        cc = rl(cc, 30)
+        idx = idx + 1
+    }
+
+    c.v0 = m32(c.v0 + a)
+    c.v1 = m32(c.v1 + b)
+    c.v2 = m32(c.v2 + cc)
+    c.v3 = m32(c.v3 + d)
+    c.v4 = m32(c.v4 + e)
+}
+
+new() -> {
+    ctx = malloc(128) as *Sha1Ctx
+    if ctx == null {
+        return null, "allocation failed"
+    }
+    ctx.v0 = 0x67452301
+    ctx.v1 = 0xefcdab89
+    ctx.v2 = 0x98badcfe
+    ctx.v3 = 0x10325476
+    ctx.v4 = 0xc3d2e1f0
+    ctx.block_len = 0
+    ctx.count_lo = 0
+    ctx.block = bytes.new(64)
+    j = 0
+    while j < 64 {
+        bytes.set(ctx.block, j, 0)
+        j = j + 1
+    }
+    ctx.w = intarr_new_raw(80)
+    return ctx, ""
+}
+
+update(ctx: ptr, data: string, length: int) {
+    c = ctx as *Sha1Ctx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = string_char_at_n(data, length, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 64 {
+            process_block(c)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+    c.count_lo = c.count_lo + length
+}
+
+update_bytes(ctx: ptr, data: ptr, length: int) {
+    c = ctx as *Sha1Ctx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = bytes.get(data, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 64 {
+            process_block(c)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+    c.count_lo = c.count_lo + length
+}
+
+push_pad_byte(c: *Sha1Ctx, b: int) {
+    bytes.set(c.block, c.block_len, b & 255)
+    c.block_len = c.block_len + 1
+    if c.block_len == 64 {
+        process_block(c)
+        c.block_len = 0
+    }
+}
+
+finalize_to_bytes(c: *Sha1Ctx) -> ptr {
+    bit_len = c.count_lo << 3
+
+    push_pad_byte(c, 0x80)
+    while c.block_len != 56 {
+        push_pad_byte(c, 0)
+    }
+    bytes.set_be64(c.block, 56, bit_len)
+    process_block(c)
+    c.block_len = 0
+
+    out = bytes.new(20)
+    bytes.set_be32(out, 0, c.v0)
+    bytes.set_be32(out, 4, c.v1)
+    bytes.set_be32(out, 8, c.v2)
+    bytes.set_be32(out, 12, c.v3)
+    bytes.set_be32(out, 16, c.v4)
+    return out
+}
+
+free_internals(c: *Sha1Ctx) {
+    if c.block != null {
+        bytes.free(c.block)
+        c.block = null
+    }
+    if c.w != null {
+        intarr_free(c.w)
+        c.w = null
+    }
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *Sha1Ctx
+    out = finalize_to_bytes(c)
+    s = bytes.finish(out, 20)
+    free_internals(c)
+    free(ctx)
+    res = bytes.new(20)
+    bytes.copy_from_string(res, 0, s, 20)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *Sha1Ctx
+    out = finalize_to_bytes(c)
+    hexbuf = bytes.new(40)
+    i = 0
+    while i < 20 {
+        b = bytes.get(out, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    bytes.free(out)
+    s = bytes.finish(hexbuf, 40)
+    free_internals(c)
+    free(ctx)
+    return s
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *Sha1Ctx
+    free_internals(c)
+    free(ctx)
+}
+
+sha1_hex(data: string, len: int) -> string {
+    ctx, err = new()
+    if err != "" {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+sha1_bytes(data: string, len: int) -> ptr {
+    ctx, err = new()
+    if err != "" {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}
