@@ -1928,6 +1928,11 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* audio_libs = "";
 #endif
+#ifdef AETHER_YAML_LIBS
+    const char* yaml_libs = AETHER_YAML_LIBS;
+#else
+    const char* yaml_libs = "";
+#endif
     char opt[600];
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "-static %s %s", opt_flags(optimize), user_cflags);
@@ -1946,8 +1951,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         char* slash = (!bs) ? fs : (!fs) ? bs : (bs > fs ? bs : fs);
         if (slash) *slash = '\0';
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s -L\"%s\" -laether -o \"%s\" %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, win_link_libs, link_flags);
+            "\"%s\" %s %s \"%s\" %s -L\"%s\" -laether -o \"%s\" %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -1955,8 +1960,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s -o \"%s\" %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, win_link_libs, link_flags);
+            "\"%s\" %s %s \"%s\" %s %s -o \"%s\" %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -2095,6 +2100,11 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* audio_libs = "";
 #endif
+#ifdef AETHER_YAML_LIBS
+    const char* yaml_libs = AETHER_YAML_LIBS;
+#else
+    const char* yaml_libs = "";
+#endif
 
     if (tc.has_lib) {
         char lib_dir[1024];
@@ -2119,8 +2129,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // BEFORE -laether on the link line — gcc resolves undefined
         // references left-to-right through static archives.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu) — "
@@ -2133,8 +2143,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu) — "
@@ -5973,6 +5983,9 @@ static int cmd_cflags(int argc, char** argv) {
 #endif
 #ifdef AETHER_PCRE2_LIBS
         if (AETHER_PCRE2_LIBS[0])   { fputc(' ', stdout); fputs(AETHER_PCRE2_LIBS, stdout); }
+#endif
+#ifdef AETHER_YAML_LIBS
+        if (AETHER_YAML_LIBS[0])    { fputc(' ', stdout); fputs(AETHER_YAML_LIBS, stdout); }
 #endif
     }
 

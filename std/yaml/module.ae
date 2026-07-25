@@ -1,0 +1,130 @@
+// std.yaml - YAML Module
+// Import with: import std.yaml
+//
+// Parses and serializes YAML per YAML 1.2 using libfyaml.
+//
+// API shape:
+//   - Raw externs end in `_raw` and return ptr/int in the old C-style convention.
+//   - Aether-native wrappers (below) use Go-style `(value, err)` tuple returns.
+//
+// YAML node type constants:
+//   YAML_SCALAR = 1, YAML_SEQUENCE = 2, YAML_MAPPING = 3
+
+exports (
+    parse, free, root, type, get_scalar,
+    sequence_size, sequence_get,
+    mapping_size, mapping_get_key, mapping_get_value, mapping_lookup,
+    emit_node, emit_document,
+    YAML_SCALAR, YAML_SEQUENCE, YAML_MAPPING
+)
+
+const YAML_SCALAR   = 1
+const YAML_SEQUENCE = 2
+const YAML_MAPPING  = 3
+
+// ---- Raw C Bindings Externs ----
+extern yaml_parse_raw(yaml_str: string) -> ptr
+extern yaml_last_error() -> string
+extern yaml_free_raw(doc: ptr)
+extern yaml_root_raw(doc: ptr) -> ptr
+extern yaml_node_type_raw(node: ptr) -> int
+extern yaml_node_get_scalar_raw(node: ptr) -> string
+extern yaml_sequence_size_raw(node: ptr) -> int
+extern yaml_sequence_get_raw(node: ptr, index: int) -> ptr
+extern yaml_mapping_size_raw(node: ptr) -> int
+extern yaml_mapping_get_key_raw(node: ptr, index: int) -> ptr
+extern yaml_mapping_get_value_raw(node: ptr, index: int) -> ptr
+extern yaml_mapping_lookup_raw(node: ptr, key: string) -> ptr
+extern yaml_emit_node_raw(node: ptr) -> string
+extern yaml_emit_document_raw(doc: ptr) -> string
+
+// Helper for uniform-heap returns
+extern string_concat(a: string, b: string) -> string
+
+// ---- Go-style Aether Wrappers ----
+
+// Parse a YAML string. Returns (document_ptr, "") on success, (null, error) on failure.
+// Caller owns the returned document and must free it using yaml.free.
+parse(yaml_str: string) -> ptr! {
+    doc = yaml_parse_raw(yaml_str)
+    if doc == null {
+        return null, string_concat(yaml_last_error(), "")
+    }
+    return doc, string_concat("", "")
+}
+
+// Free a parsed YAML document.
+free(doc: ptr) {
+    yaml_free_raw(doc)
+}
+
+// Get the root node of the parsed document.
+root(doc: ptr) -> ptr {
+    return yaml_root_raw(doc)
+}
+
+// Get the type of a node (returns YAML_SCALAR, YAML_SEQUENCE, YAML_MAPPING, or 0 if null).
+type(node: ptr) -> int {
+    return yaml_node_type_raw(node)
+}
+
+// Read the scalar string value out of a YAML node.
+// Returns (scalar_str, "") on success, ("", error) if node is not a scalar.
+get_scalar(node: ptr) -> string! {
+    if type(node) != YAML_SCALAR {
+        return string_concat("", ""), string_concat("not a scalar", "")
+    }
+    raw = yaml_node_get_scalar_raw(node)
+    if raw == null {
+        return string_concat("", ""), string_concat("not a scalar", "")
+    }
+    return string_concat(raw, ""), string_concat("", "")
+}
+
+// Get the size of a sequence node. Returns -1 if not a sequence.
+sequence_size(node: ptr) -> int {
+    return yaml_sequence_size_raw(node)
+}
+
+// Get the item node at the given index in a sequence node. Returns null if index out of bounds.
+sequence_get(node: ptr, index: int) -> ptr {
+    return yaml_sequence_get_raw(node, index)
+}
+
+// Get the number of key-value pairs in a mapping node. Returns -1 if not a mapping.
+mapping_size(node: ptr) -> int {
+    return yaml_mapping_size_raw(node)
+}
+
+// Get the key node at the given index in a mapping node. Returns null if index out of bounds.
+mapping_get_key(node: ptr, index: int) -> ptr {
+    return yaml_mapping_get_key_raw(node, index)
+}
+
+// Get the value node at the given index in a mapping node. Returns null if index out of bounds.
+mapping_get_value(node: ptr, index: int) -> ptr {
+    return yaml_mapping_get_value_raw(node, index)
+}
+
+// Look up a value node by a string key in a mapping node. Returns null if not found or not a mapping.
+mapping_lookup(node: ptr, key: string) -> ptr {
+    return yaml_mapping_lookup_raw(node, key)
+}
+
+// Emit a YAML node to a string representation.
+emit_node(node: ptr) -> string! {
+    raw = yaml_emit_node_raw(node)
+    if raw == null {
+        return string_concat("", ""), string_concat("emission failed", "")
+    }
+    return string_concat(raw, ""), string_concat("", "")
+}
+
+// Emit a YAML document to a string representation.
+emit_document(doc: ptr) -> string! {
+    raw = yaml_emit_document_raw(doc)
+    if raw == null {
+        return string_concat("", ""), string_concat("emission failed", "")
+    }
+    return string_concat(raw, ""), string_concat("", "")
+}
