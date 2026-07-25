@@ -13,10 +13,14 @@
 // into fresh std.bytes. Ported from Bouncy Castle's asn1/ codec
 // (crypto/src/asn1/, MIT) — same tag constants and length rules.
 //
-// Scope is the subset RSA/X.509 need: INTEGER (via std.bignum), SEQUENCE,
-// OBJECT IDENTIFIER, OCTET STRING, BIT STRING, NULL, BOOLEAN, plus generic
-// TLV read for anything else. Constructed parsing is done by reading the
-// SEQUENCE content as a new sub-reader.
+// Core types RSA/X.509 need: INTEGER (via std.bignum), SEQUENCE, OBJECT
+// IDENTIFIER, OCTET STRING, BIT STRING, NULL, BOOLEAN. Extended for
+// general-purpose ASN.1: SET (canonical DER sort), ENUMERATED, the string
+// zoo (UTF8/IA5/Printable/Numeric/T61/Videotex/Graphic/Visible/General/
+// BMP (UTF-16BE)/Universal (UTF-32BE)), UTCTime/GeneralizedTime, high-tag-
+// number (>=31) tag encoding, explicit/implicit context/application/private
+// tagging (encode_tagged / read_tagged_ext), and BER indefinite-length
+// parsing. Constructed parsing reads a SEQUENCE/SET body as a sub-reader.
 //
 // Surface (read):
 //   r = asn1.reader_new(bytes_buf)
@@ -669,7 +673,11 @@ read_string_type(r: ptr, tag: int) -> (string, string) {
     }
     slen = bytes.length(content)
     s = bytes.finish(content, slen)
-    return s, ""
+    // Return the (empty) `err` variable rather than a fresh "" literal: a
+    // bare "" in the error slot is wrapped into a new 1-byte heap string the
+    // caller discards without releasing (a 1-byte-per-call leak). Reusing the
+    // tracked `err` var — already "" on this path — avoids the extra alloc.
+    return s, err
 }
 
 encode_numeric_string(s: string) -> ptr { return encode_string_type(0x12, s) }
@@ -717,7 +725,7 @@ read_bmp_string(r: ptr) -> (string, string) {
     }
     s = decode_bmp_string_bytes(content)
     bytes.free(content)
-    return s, ""
+    return s, err   // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
 encode_universal_string(s: string) -> ptr {
@@ -732,7 +740,7 @@ read_universal_string(r: ptr) -> (string, string) {
     }
     s = decode_universal_string_bytes(content)
     bytes.free(content)
-    return s, ""
+    return s, err   // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
 encode_enumerated(v: int) -> ptr {
