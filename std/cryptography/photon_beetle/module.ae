@@ -1,0 +1,382 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.photon_beetle — Photon-Beetle Hash in pure Aether,
+// ported from Bouncy Castle's PhotonBeetleDigest.cs. NO externs to OpenSSL or any C crypto.
+//
+// Import with:  import std.cryptography.photon_beetle
+
+import std.bytes
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    new, update, update_bytes, final_hex, final_bytes, free_ctx,
+    photon_beetle_hex, photon_beetle_bytes
+)
+
+const RC_PB: int[96] = [
+     1,  0,  2,  6, 14, 15, 13,  9,
+     3,  2,  0,  4, 12, 13, 15, 11,
+     7,  6,  4,  0,  8,  9, 11, 15,
+    14, 15, 13,  9,  1,  0,  2,  6,
+    13, 12, 14, 10,  2,  3,  1,  5,
+    11, 10,  8, 12,  4,  5,  7,  3,
+     6,  7,  5,  1,  9,  8, 10, 14,
+    12, 13, 15, 11,  3,  2,  0,  4,
+     9,  8, 10, 14,  6,  7,  5,  1,
+     2,  3,  1,  5, 13, 12, 14, 10,
+     5,  4,  6,  2, 10, 11,  9, 13,
+    10, 11,  9, 13,  5,  4,  6,  2
+]
+
+const MixColMatrix: int[64] = [
+     2,  4,  2, 11,  2,  8,  5,  6,
+    12,  9,  8, 13,  7,  7,  5,  2,
+     4,  4, 13, 13,  9,  4, 13,  9,
+     1,  6,  5,  1, 12, 13, 15, 14,
+    15, 12,  9, 13, 14,  5, 14, 13,
+     9, 14,  5, 15,  4, 12,  9,  6,
+    12,  2,  2, 10,  3,  1,  1, 14,
+    15,  1, 13, 10,  5, 10,  2,  3
+]
+
+const SBOX_PB: int[16] = [ 12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2 ]
+
+struct PhotonBeetleCtx {
+    state: ptr        // std.bytes, 32 bytes
+    state_2d: ptr     // std.bytes, 64 bytes (8x8)
+    block: ptr        // std.bytes, 16 bytes
+    block_len: int
+    phase: int
+    temp_row: ptr     // std.bytes, 8 bytes
+    temp_mix: ptr     // std.bytes, 8 bytes
+}
+
+new() -> {
+    ctx = malloc(64) as *PhotonBeetleCtx
+    if ctx == null {
+        return null, "allocation failed"
+    }
+    ctx.state = bytes.new(32)
+    ctx.state_2d = bytes.new(64)
+    ctx.block = bytes.new(16)
+    ctx.temp_row = bytes.new(8)
+    ctx.temp_mix = bytes.new(8)
+
+    i = 0
+    while i < 32 {
+        bytes.set(ctx.state, i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 64 {
+        bytes.set(ctx.state_2d, i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        bytes.set(ctx.block, i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        bytes.set(ctx.temp_row, i, 0)
+        bytes.set(ctx.temp_mix, i, 0)
+        i = i + 1
+    }
+
+    ctx.block_len = 0
+    ctx.phase = 0
+    return ctx, ""
+}
+
+xor_to(len: int, src: ptr, src_off: int, dest: ptr, dest_off: int) {
+    i = 0
+    while i < len {
+        s_val = bytes.get(src, src_off + i)
+        d_val = bytes.get(dest, dest_off + i)
+        bytes.set(dest, dest_off + i, (d_val ^ s_val) & 255)
+        i = i + 1
+    }
+}
+
+photon_permutation(c: *PhotonBeetleCtx) {
+    D = 8
+    DSquare = 64
+    ROUND = 12
+
+    // Load state into state_2d
+    i = 0
+    while i < DSquare {
+        byte_idx = i >> 1
+        shift = (i & 1) * 4
+        nibble = (bytes.get(c.state, byte_idx) >> shift) & 15
+        bytes.set(c.state_2d, i, nibble)
+        i = i + 1
+    }
+
+    round_idx = 0
+    while round_idx < ROUND {
+        // AddConstant
+        rcOff = round_idx * D
+        i = 0
+        while i < D {
+            val = bytes.get(c.state_2d, i * D)
+            bytes.set(c.state_2d, i * D, (val ^ RC_PB[rcOff + i]) & 15)
+            i = i + 1
+        }
+
+        // SubCells
+        i = 0
+        while i < D {
+            j = 0
+            while j < D {
+                idx = i * D + j
+                val = bytes.get(c.state_2d, idx)
+                bytes.set(c.state_2d, idx, SBOX_PB[val])
+                j = j + 1
+            }
+            i = i + 1
+        }
+
+        // ShiftRows
+        row = 1
+        while row < D {
+            j = 0
+            while j < D {
+                bytes.set(c.temp_row, j, bytes.get(c.state_2d, row * D + j))
+                j = j + 1
+            }
+            j = 0
+            while j < D {
+                target_idx = (j - row + D) % D
+                bytes.set(c.state_2d, row * D + target_idx, bytes.get(c.temp_row, j))
+                j = j + 1
+            }
+            row = row + 1
+        }
+
+        // MixColumnSerial
+        j = 0
+        while j < D {
+            i = 0
+            while i < D {
+                sum = 0
+                k = 0
+                while k < D {
+                    x = MixColMatrix[i * D + k]
+                    b = bytes.get(c.state_2d, k * D + j)
+
+                    sum = sum ^ (x * (b & 1))
+                    sum = sum ^ (x * (b & 2))
+                    sum = sum ^ (x * (b & 4))
+                    sum = sum ^ (x * (b & 8))
+                    k = k + 1
+                }
+
+                t0 = sum >> 4
+                sum = (sum & 15) ^ t0 ^ (t0 << 1)
+
+                t1 = sum >> 4
+                sum = (sum & 15) ^ t1 ^ (t1 << 1)
+
+                bytes.set(c.temp_mix, i, sum & 15)
+                i = i + 1
+            }
+            i = 0
+            while i < D {
+                bytes.set(c.state_2d, i * D + j, bytes.get(c.temp_mix, i))
+                i = i + 1
+            }
+            j = j + 1
+        }
+
+        round_idx = round_idx + 1
+    }
+
+    // Save state_2d back to state
+    i = 0
+    while i < DSquare {
+        byte_idx = i >> 1
+        val_0 = bytes.get(c.state_2d, i) & 15
+        val_1 = bytes.get(c.state_2d, i + 1) & 15
+        bytes.set(c.state, byte_idx, val_0 | (val_1 << 4))
+        i = i + 2
+    }
+}
+
+process_buffer(c: *PhotonBeetleCtx, buf: ptr, pos: int) {
+    if c.phase == 0 {
+        bytes.copy_from_bytes(c.state, 0, buf, pos, 16)
+        c.phase = 1
+    } else {
+        photon_permutation(c)
+        xor_to(4, buf, pos + 0, c.state, 0)
+        photon_permutation(c)
+        xor_to(4, buf, pos + 4, c.state, 0)
+        photon_permutation(c)
+        xor_to(4, buf, pos + 8, c.state, 0)
+        photon_permutation(c)
+        xor_to(4, buf, pos + 12, c.state, 0)
+        c.phase = 2
+    }
+}
+
+update(ctx: ptr, data: string, length: int) {
+    c = ctx as *PhotonBeetleCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = string_char_at_n(data, length, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 16 {
+            process_buffer(c, c.block, 0)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+}
+
+update_bytes(ctx: ptr, data: ptr, length: int) {
+    c = ctx as *PhotonBeetleCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = bytes.get(data, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 16 {
+            process_buffer(c, c.block, 0)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+}
+
+finish_absorbing(c: *PhotonBeetleCtx) {
+    if c.phase == 0 {
+        if c.block_len != 0 {
+            bytes.copy_from_bytes(c.state, 0, c.block, 0, c.block_len)
+            val = bytes.get(c.state, c.block_len)
+            bytes.set(c.state, c.block_len, (val ^ 1) & 255)
+        }
+        val = bytes.get(c.state, 31)
+        bytes.set(c.state, 31, (val ^ (1 << 5)) & 255)
+    } else if c.phase == 1 && c.block_len == 0 {
+        val = bytes.get(c.state, 31)
+        bytes.set(c.state, 31, (val ^ (2 << 5)) & 255)
+    } else {
+        pos = 0
+        limit = c.block_len - 4
+        while pos <= limit {
+            photon_permutation(c)
+            xor_to(4, c.block, pos, c.state, 0)
+            pos = pos + 4
+        }
+        remaining = c.block_len - pos
+        if remaining != 0 {
+            photon_permutation(c)
+            xor_to(remaining, c.block, pos, c.state, 0)
+            val = bytes.get(c.state, remaining)
+            bytes.set(c.state, remaining, (val ^ 1) & 255)
+            val = bytes.get(c.state, 31)
+            bytes.set(c.state, 31, (val ^ (2 << 5)) & 255)
+        } else {
+            val = bytes.get(c.state, 31)
+            bytes.set(c.state, 31, (val ^ (1 << 5)) & 255)
+        }
+    }
+}
+
+finalize_to_bytes(c: *PhotonBeetleCtx) -> ptr {
+    finish_absorbing(c)
+    photon_permutation(c)
+    out = bytes.new(32)
+    bytes.copy_from_bytes(out, 0, c.state, 0, 16)
+    photon_permutation(c)
+    bytes.copy_from_bytes(out, 16, c.state, 0, 16)
+    return out
+}
+
+free_internals(c: *PhotonBeetleCtx) {
+    if c.state != null { bytes.free(c.state); c.state = null }
+    if c.state_2d != null { bytes.free(c.state_2d); c.state_2d = null }
+    if c.block != null { bytes.free(c.block); c.block = null }
+    if c.temp_row != null { bytes.free(c.temp_row); c.temp_row = null }
+    if c.temp_mix != null { bytes.free(c.temp_mix); c.temp_mix = null }
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *PhotonBeetleCtx
+    out = finalize_to_bytes(c)
+    s = bytes.finish(out, 32)
+    free_internals(c)
+    free(ctx)
+    res = bytes.new(32)
+    bytes.copy_from_string(res, 0, s, 32)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *PhotonBeetleCtx
+    out = finalize_to_bytes(c)
+    hexbuf = bytes.new(64)
+    i = 0
+    while i < 32 {
+        b = bytes.get(out, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    bytes.free(out)
+    s = bytes.finish(hexbuf, 64)
+    free_internals(c)
+    free(ctx)
+    return s
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *PhotonBeetleCtx
+    free_internals(c)
+    free(ctx)
+}
+
+photon_beetle_hex(data: string, len: int) -> string {
+    ctx, err = new()
+    if err != "" {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+photon_beetle_bytes(data: string, len: int) -> ptr {
+    ctx, err = new()
+    if err != "" {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}

@@ -1,0 +1,450 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.sparkle — ESCH-256 and ESCH-384 Hash in pure Aether,
+// ported from Bouncy Castle's SparkleDigest.cs / SparkleEngine.cs. NO externs to OpenSSL or any C crypto.
+//
+// Import with:  import std.cryptography.sparkle
+
+import std.bits
+import std.bytes
+import std.longarr
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    new, update, update_bytes, final_hex, final_bytes, free_ctx,
+    sparkle_hex, sparkle_bytes
+)
+
+const RCON: long[8] = [
+    0xB7E15162, 0xBF715880, 0x38B4DA56, 0x324E7738,
+    0xBB1185EB, 0x4F7C7B57, 0xCFBFA1C8, 0xC2B3293D
+]
+
+struct SparkleCtx {
+    state: ptr        // longarr(16)
+    block: ptr        // std.bytes, 16 bytes
+    block_len: int
+    digest_bytes: int
+    sparkle_steps_slim: int
+    sparkle_steps_big: int
+    state_words: int
+    algo: string      // "esch-256" or "esch-384"
+}
+
+ell(x: long) -> long {
+    return (bits.rotr32(x & 0xFFFFFFFF, 16) ^ (x & 0xFFFF)) & 0xFFFFFFFF
+}
+
+arx_box(rc: long, s00: long, s01: long) -> (long, long) {
+    s00 = (s00 + bits.rotr32(s01, 31)) & 0xFFFFFFFF
+    s01 = s01 ^ bits.rotr32(s00, 24)
+    s00 = s00 ^ rc
+    s00 = (s00 + bits.rotr32(s01, 17)) & 0xFFFFFFFF
+    s01 = s01 ^ bits.rotr32(s00, 17)
+    s00 = s00 ^ rc
+    s00 = (s00 + s01) & 0xFFFFFFFF
+    s01 = s01 ^ bits.rotr32(s00, 31)
+    s00 = s00 ^ rc
+    s00 = (s00 + bits.rotr32(s01, 24)) & 0xFFFFFFFF
+    s01 = s01 ^ bits.rotr32(s00, 16)
+    s00 = s00 ^ rc
+    return s00, s01
+}
+
+sparkle_opt12(state: ptr, steps: int) {
+    s00 = longarr_get_unchecked(state, 0)
+    s01 = longarr_get_unchecked(state, 1)
+    s02 = longarr_get_unchecked(state, 2)
+    s03 = longarr_get_unchecked(state, 3)
+    s04 = longarr_get_unchecked(state, 4)
+    s05 = longarr_get_unchecked(state, 5)
+    s06 = longarr_get_unchecked(state, 6)
+    s07 = longarr_get_unchecked(state, 7)
+    s08 = longarr_get_unchecked(state, 8)
+    s09 = longarr_get_unchecked(state, 9)
+    s10 = longarr_get_unchecked(state, 10)
+    s11 = longarr_get_unchecked(state, 11)
+
+    step = 0
+    while step < steps {
+        s01 = s01 ^ RCON[step & 7]
+        s03 = s03 ^ step
+
+        s00, s01 = arx_box(RCON[0], s00, s01)
+        s02, s03 = arx_box(RCON[1], s02, s03)
+        s04, s05 = arx_box(RCON[2], s04, s05)
+        s06, s07 = arx_box(RCON[3], s06, s07)
+        s08, s09 = arx_box(RCON[4], s08, s09)
+        s10, s11 = arx_box(RCON[5], s10, s11)
+
+        t024 = ell(s00 ^ s02 ^ s04)
+        t135 = ell(s01 ^ s03 ^ s05)
+
+        u00 = s00 ^ s06
+        u01 = s01 ^ s07
+        u02 = s02 ^ s08
+        u03 = s03 ^ s09
+        u04 = s04 ^ s10
+        u05 = s05 ^ s11
+
+        s06 = s00
+        s07 = s01
+        s08 = s02
+        s09 = s03
+        s10 = s04
+        s11 = s05
+
+        s00 = u02 ^ t135
+        s01 = u03 ^ t024
+        s02 = u04 ^ t135
+        s03 = u05 ^ t024
+        s04 = u00 ^ t135
+        s05 = u01 ^ t024
+
+        step = step + 1
+    }
+
+    longarr_set_unchecked(state, 0, s00)
+    longarr_set_unchecked(state, 1, s01)
+    longarr_set_unchecked(state, 2, s02)
+    longarr_set_unchecked(state, 3, s03)
+    longarr_set_unchecked(state, 4, s04)
+    longarr_set_unchecked(state, 5, s05)
+    longarr_set_unchecked(state, 6, s06)
+    longarr_set_unchecked(state, 7, s07)
+    longarr_set_unchecked(state, 8, s08)
+    longarr_set_unchecked(state, 9, s09)
+    longarr_set_unchecked(state, 10, s10)
+    longarr_set_unchecked(state, 11, s11)
+}
+
+sparkle_opt16(state: ptr, steps: int) {
+    s00 = longarr_get_unchecked(state, 0)
+    s01 = longarr_get_unchecked(state, 1)
+    s02 = longarr_get_unchecked(state, 2)
+    s03 = longarr_get_unchecked(state, 3)
+    s04 = longarr_get_unchecked(state, 4)
+    s05 = longarr_get_unchecked(state, 5)
+    s06 = longarr_get_unchecked(state, 6)
+    s07 = longarr_get_unchecked(state, 7)
+    s08 = longarr_get_unchecked(state, 8)
+    s09 = longarr_get_unchecked(state, 9)
+    s10 = longarr_get_unchecked(state, 10)
+    s11 = longarr_get_unchecked(state, 11)
+    s12 = longarr_get_unchecked(state, 12)
+    s13 = longarr_get_unchecked(state, 13)
+    s14 = longarr_get_unchecked(state, 14)
+    s15 = longarr_get_unchecked(state, 15)
+
+    step = 0
+    while step < steps {
+        // STEP 1
+        s01 = s01 ^ RCON[step & 7]
+        s03 = s03 ^ step
+        step = step + 1
+
+        s00, s01 = arx_box(RCON[0], s00, s01)
+        s02, s03 = arx_box(RCON[1], s02, s03)
+        s04, s05 = arx_box(RCON[2], s04, s05)
+        s06, s07 = arx_box(RCON[3], s06, s07)
+        s08, s09 = arx_box(RCON[4], s08, s09)
+        s10, s11 = arx_box(RCON[5], s10, s11)
+        s12, s13 = arx_box(RCON[6], s12, s13)
+        s14, s15 = arx_box(RCON[7], s14, s15)
+
+        t0246 = ell(s00 ^ s02 ^ s04 ^ s06)
+        t1357 = ell(s01 ^ s03 ^ s05 ^ s07)
+
+        u08 = s08
+        u09 = s09
+
+        s08 = s02 ^ s10 ^ t1357
+        s09 = s03 ^ s11 ^ t0246
+        s10 = s04 ^ s12 ^ t1357
+        s11 = s05 ^ s13 ^ t0246
+        s12 = s06 ^ s14 ^ t1357
+        s13 = s07 ^ s15 ^ t0246
+        s14 = s00 ^ u08 ^ t1357
+        s15 = s01 ^ u09 ^ t0246
+
+        // STEP 2
+        s09 = s09 ^ RCON[step & 7]
+        s11 = s11 ^ step
+        step = step + 1
+
+        s08, s09 = arx_box(RCON[0], s08, s09)
+        s10, s11 = arx_box(RCON[1], s10, s11)
+        s12, s13 = arx_box(RCON[2], s12, s13)
+        s14, s15 = arx_box(RCON[3], s14, s15)
+        s00, s01 = arx_box(RCON[4], s00, s01)
+        s02, s03 = arx_box(RCON[5], s02, s03)
+        s04, s05 = arx_box(RCON[6], s04, s05)
+        s06, s07 = arx_box(RCON[7], s06, s07)
+
+        t8ACE = ell(s08 ^ s10 ^ s12 ^ s14)
+        t9BDF = ell(s09 ^ s11 ^ s13 ^ s15)
+
+        u00 = s00
+        u01 = s01
+
+        s00 = s02 ^ s10 ^ t9BDF
+        s01 = s03 ^ s11 ^ t8ACE
+        s02 = s04 ^ s12 ^ t9BDF
+        s03 = s05 ^ s13 ^ t8ACE
+        s04 = s06 ^ s14 ^ t9BDF
+        s05 = s07 ^ s15 ^ t8ACE
+        s06 = u00 ^ s08 ^ t9BDF
+        s07 = u01 ^ s09 ^ t8ACE
+    }
+
+    longarr_set_unchecked(state, 0, s00)
+    longarr_set_unchecked(state, 1, s01)
+    longarr_set_unchecked(state, 2, s02)
+    longarr_set_unchecked(state, 3, s03)
+    longarr_set_unchecked(state, 4, s04)
+    longarr_set_unchecked(state, 5, s05)
+    longarr_set_unchecked(state, 6, s06)
+    longarr_set_unchecked(state, 7, s07)
+    longarr_set_unchecked(state, 8, s08)
+    longarr_set_unchecked(state, 9, s09)
+    longarr_set_unchecked(state, 10, s10)
+    longarr_set_unchecked(state, 11, s11)
+    longarr_set_unchecked(state, 12, s12)
+    longarr_set_unchecked(state, 13, s13)
+    longarr_set_unchecked(state, 14, s14)
+    longarr_set_unchecked(state, 15, s15)
+}
+
+process_block(c: *SparkleCtx, buf: ptr, off: int, steps: int) {
+    t0 = bytes.get_le32(buf, off)
+    t1 = bytes.get_le32(buf, off + 4)
+    t2 = bytes.get_le32(buf, off + 8)
+    t3 = bytes.get_le32(buf, off + 12)
+
+    tx = ell(t0 ^ t2)
+    ty = ell(t1 ^ t3)
+
+    longarr_set_unchecked(c.state, 0, longarr_get_unchecked(c.state, 0) ^ t0 ^ ty)
+    longarr_set_unchecked(c.state, 1, longarr_get_unchecked(c.state, 1) ^ t1 ^ tx)
+    longarr_set_unchecked(c.state, 2, longarr_get_unchecked(c.state, 2) ^ t2 ^ ty)
+    longarr_set_unchecked(c.state, 3, longarr_get_unchecked(c.state, 3) ^ t3 ^ tx)
+    longarr_set_unchecked(c.state, 4, longarr_get_unchecked(c.state, 4) ^ ty)
+    longarr_set_unchecked(c.state, 5, longarr_get_unchecked(c.state, 5) ^ tx)
+
+    if c.state_words == 16 {
+        longarr_set_unchecked(c.state, 6, longarr_get_unchecked(c.state, 6) ^ ty)
+        longarr_set_unchecked(c.state, 7, longarr_get_unchecked(c.state, 7) ^ tx)
+        sparkle_opt16(c.state, steps)
+    } else {
+        sparkle_opt12(c.state, steps)
+    }
+}
+
+new(algo: string) -> {
+    ctx = malloc(64) as *SparkleCtx
+    if ctx == null {
+        return null, "allocation failed"
+    }
+    ctx.algo = algo
+    if algo == "esch-256" {
+        ctx.digest_bytes = 32
+        ctx.sparkle_steps_slim = 7
+        ctx.sparkle_steps_big = 11
+        ctx.state_words = 12
+    } else if algo == "esch-384" {
+        ctx.digest_bytes = 48
+        ctx.sparkle_steps_slim = 8
+        ctx.sparkle_steps_big = 12
+        ctx.state_words = 16
+    } else {
+        free(ctx)
+        return null, "unknown algorithm"
+    }
+
+    ctx.state = longarr_new_raw(16)
+    ctx.block = bytes.new(16)
+    ctx.block_len = 0
+
+    i = 0
+    while i < 16 {
+        longarr_set_unchecked(ctx.state, i, 0)
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        bytes.set(ctx.block, i, 0)
+        i = i + 1
+    }
+
+    return ctx, ""
+}
+
+update(ctx: ptr, data: string, length: int) {
+    c = ctx as *SparkleCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = string_char_at_n(data, length, i)
+        // Process a FULL buffer only when another byte follows, so the block
+        // that fills the rate exactly is held for finalize (Esch runs its last
+        // data block with big steps + domain separation — see finalize). BC
+        // does the same: Update() processes the buffer BEFORE storing the new
+        // byte. Processing eagerly at block_len==16 hashed one byte short at
+        // every rate multiple.
+        if c.block_len == 16 {
+            process_block(c, c.block, 0, c.sparkle_steps_slim)
+            c.block_len = 0
+        }
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        i = i + 1
+    }
+}
+
+update_bytes(ctx: ptr, data: ptr, length: int) {
+    c = ctx as *SparkleCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = bytes.get(data, i)
+        // See update() — process the full buffer only when another byte
+        // follows, holding the rate-filling block for finalize.
+        if c.block_len == 16 {
+            process_block(c, c.block, 0, c.sparkle_steps_slim)
+            c.block_len = 0
+        }
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        i = i + 1
+    }
+}
+
+finalize_to_bytes(c: *SparkleCtx) -> ptr {
+    idx = (c.state_words >> 1) - 1
+    if c.block_len < 16 {
+        longarr_set_unchecked(c.state, idx, longarr_get_unchecked(c.state, idx) ^ (1 << 24))
+        bytes.set(c.block, c.block_len, 0x80)
+        c.block_len = c.block_len + 1
+        while c.block_len < 16 {
+            bytes.set(c.block, c.block_len, 0x00)
+            c.block_len = c.block_len + 1
+        }
+    } else {
+        longarr_set_unchecked(c.state, idx, longarr_get_unchecked(c.state, idx) ^ (1 << 25))
+    }
+
+    process_block(c, c.block, 0, c.sparkle_steps_big)
+
+    out = bytes.new(c.digest_bytes)
+    i = 0
+    while i < 4 {
+        bytes.set_le32(out, i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+        i = i + 1
+    }
+
+    if c.state_words == 16 {
+        sparkle_opt16(c.state, c.sparkle_steps_slim)
+        i = 0
+        while i < 4 {
+            bytes.set_le32(out, 16 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            i = i + 1
+        }
+        sparkle_opt16(c.state, c.sparkle_steps_slim)
+        i = 0
+        while i < 4 {
+            bytes.set_le32(out, 32 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            i = i + 1
+        }
+    } else {
+        sparkle_opt12(c.state, c.sparkle_steps_slim)
+        i = 0
+        while i < 4 {
+            bytes.set_le32(out, 16 + i * 4, longarr_get_unchecked(c.state, i) & 0xFFFFFFFF)
+            i = i + 1
+        }
+    }
+
+    return out
+}
+
+free_internals(c: *SparkleCtx) {
+    if c.state != null { longarr_free(c.state); c.state = null }
+    if c.block != null { bytes.free(c.block); c.block = null }
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *SparkleCtx
+    n = c.digest_bytes
+    out = finalize_to_bytes(c)
+    s = bytes.finish(out, n)
+    free_internals(c)
+    free(ctx)
+    res = bytes.new(n)
+    bytes.copy_from_string(res, 0, s, n)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *SparkleCtx
+    n = c.digest_bytes
+    out = finalize_to_bytes(c)
+    hexbuf = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        b = bytes.get(out, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    bytes.free(out)
+    s = bytes.finish(hexbuf, n * 2)
+    free_internals(c)
+    free(ctx)
+    return s
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *SparkleCtx
+    free_internals(c)
+    free(ctx)
+}
+
+sparkle_hex(algo: string, data: string, len: int) -> string {
+    ctx, err = new(algo)
+    if err != "" {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+sparkle_bytes(algo: string, data: string, len: int) -> ptr {
+    ctx, err = new(algo)
+    if err != "" {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}

@@ -1,0 +1,149 @@
+import std.cryptography.sparkle
+import std.bytes
+import std.string
+import std.io
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want}")
+    return 1
+}
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string.char_at(hex, i * 2)
+        c_lo = string.char_at(hex, i * 2 + 1)
+
+        hi = 0
+        if c_hi >= 48 && c_hi <= 57 {
+            hi = c_hi - 48
+        } else if c_hi >= 97 && c_hi <= 102 {
+            hi = c_hi - 87
+        } else if c_hi >= 65 && c_hi <= 70 {
+            hi = c_hi - 55
+        }
+
+        lo = 0
+        if c_lo >= 48 && c_lo <= 57 {
+            lo = c_lo - 48
+        } else if c_lo >= 97 && c_lo <= 102 {
+            lo = c_lo - 87
+        } else if c_lo >= 65 && c_lo <= 70 {
+            lo = c_lo - 55
+        }
+
+        val = (hi << 4) | lo
+        bytes.set(b, i, val)
+        i = i + 1
+    }
+    return b
+}
+
+incrementing(n: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n { bytes.set(b, i, i & 255); i = i + 1 }
+    return b
+}
+
+esch_digest(algo: string, b: ptr, n: int) -> string {
+    ctx, _ = sparkle.new(algo)
+    sparkle.update_bytes(ctx, b, n)
+    return sparkle.final_hex(ctx)
+}
+
+main() {
+    fails = 0
+
+    // ---- ESCH-256 ----
+    fails = fails + check("esch-256 empty",
+        sparkle.sparkle_hex("esch-256", "", 0),
+        "c0e815d78b875dc768c6c8b3afa51987cd69e5c087d387368628a511cfad5730")
+
+    b_00 = hex_to_bytes("00")
+    defer bytes.free(b_00)
+    ctx, _ = sparkle.new("esch-256")
+    sparkle.update_bytes(ctx, b_00, 1)
+    res_00 = sparkle.final_hex(ctx)
+    fails = fails + check("esch-256 00", res_00, "d515fd9c2852d9d6f00c9cf01d858af467eedf21ff68cc14c005b3eff7a6ecd3")
+
+    b_0001 = hex_to_bytes("0001")
+    defer bytes.free(b_0001)
+    ctx2, _ = sparkle.new("esch-256")
+    sparkle.update_bytes(ctx2, b_0001, 2)
+    res_0001 = sparkle.final_hex(ctx2)
+    fails = fails + check("esch-256 0001", res_0001, "fbcad7ab77fd4cc844534d2716d08c092b40b86e00647ecaa429afdfe3b3fc43")
+
+    // ---- ESCH-384 ----
+    fails = fails + check("esch-384 empty",
+        sparkle.sparkle_hex("esch-384", "", 0),
+        "2981715e2263ebd0cb6e5c2c99d0776d5e691ee737fde05247895e75d02e7447fd6ab707e2ec8385a539777965e472ee")
+
+    ctx3, _ = sparkle.new("esch-384")
+    sparkle.update_bytes(ctx3, b_00, 1)
+    res3_00 = sparkle.final_hex(ctx3)
+    fails = fails + check("esch-384 00", res3_00, "ca78366c86e82726c19ebd1dbbb1375cef93c570f856ce2ff5da0ca87140dacd65f3e1c5af5f84b3f6390b9ac1a2fa4d")
+
+    ctx4, _ = sparkle.new("esch-384")
+    sparkle.update_bytes(ctx4, b_0001, 2)
+    res4_0001 = sparkle.final_hex(ctx4)
+    fails = fails + check("esch-384 0001", res4_0001, "76a4f5b45a6062de68f974824fcc7de8ce4bd9ce64ce9a8958a3409151b2481d13b5d9c1bdca1a658d31110088c54922")
+
+    // ---- Rate-boundary vectors (BC LWC_HASH_KAT). These guard the bug where
+    // a rate-filling block (16 bytes) was absorbed eagerly with slim steps and
+    // finalize then ran on an empty padded block, hashing one block short.
+    // An input of EXACTLY the 16-byte rate is the critical case. ----
+    inc16 = incrementing(16)   // 0x00..0x0F
+    fails = fails + check("esch-256 16B(0x00..0x0F, exact rate)",
+        esch_digest("esch-256", inc16, 16),
+        "acff841e2a526d83d6e94ab5564d6d64c98f5e8016bb1c2950386ed156c6c174")
+    fails = fails + check("esch-384 16B(0x00..0x0F, exact rate)",
+        esch_digest("esch-384", inc16, 16),
+        "0008f97d6bbb701d5e33fcc178efe3e3d5e77915d4a4daf6e1ae34cd28edb895a053e19d930b50f72837e1a8f5b1f450")
+    bytes.free(inc16)
+
+    // Just under and one over the rate (15 and 17 bytes) — BC vectors.
+    inc15 = incrementing(15)
+    fails = fails + check("esch-256 15B(one under rate)",
+        esch_digest("esch-256", inc15, 15),
+        "5753e34e3fc970881e1752b59c573e89448d08a93eae46da2a5d8ab04790a60c")
+    bytes.free(inc15)
+
+    // 8-byte input (BC count 9) for esch-384.
+    inc8 = incrementing(8)
+    fails = fails + check("esch-384 8B",
+        esch_digest("esch-384", inc8, 8),
+        "571560322d28dc5f8039794b4a3290a17ccdd60fa6c36ee78dcf9c05ce592d64021ef324af69fcac6829fd84aa69f35b")
+
+    // Multi-part streaming across the rate: 16 bytes fed 7+9 must equal the
+    // one-shot 16-byte digest.
+    ctx_sp, _ = sparkle.new("esch-256")
+    inc16b = incrementing(16)
+    sparkle.update_bytes(ctx_sp, inc16b, 7)
+    tail9 = bytes.new(9)
+    k = 7
+    while k < 16 { bytes.set(tail9, k - 7, k); k = k + 1 }
+    sparkle.update_bytes(ctx_sp, tail9, 9)
+    fails = fails + check("esch-256 16B split 7+9",
+        sparkle.final_hex(ctx_sp),
+        "acff841e2a526d83d6e94ab5564d6d64c98f5e8016bb1c2950386ed156c6c174")
+    bytes.free(inc16b)
+    bytes.free(tail9)
+    bytes.free(inc8)
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

@@ -11,7 +11,31 @@ next version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **Five more pure-Aether hash/XOF submodules ported from Bouncy Castle** —
+  `std.cryptography.ascon_xof128` (Ascon-XOF128, NIST SP 800-232),
+  `std.cryptography.dstu7564` (Ukrainian DSTU 7564 / Kupyna, 256/384/512),
+  `std.cryptography.isap` (ISAP-Hash), `std.cryptography.photon_beetle`
+  (PHOTON-Beetle Hash), and `std.cryptography.sparkle` (Esch-256 / Esch-384).
+  No externs to OpenSSL or any C crypto. Verified against Bouncy Castle's
+  `LWC_HASH_KAT` vectors (present for ISAP/PHOTON/Sparkle) and BC's DSTU 7564
+  digest vectors across all three widths; Ascon-XOF128 is pinned to the
+  SP 800-232 reference output (BC's own XOF128 KAT is absent from the upstream
+  checkout) and anchored by its verified IV plus a variable-length XOF-prefix
+  check. Tests cover rate-boundary inputs and multi-part streaming for each.
+
 ### Fixed
+
+- **`std.cryptography.sparkle` (Esch) hashed one block short at every rate
+  multiple.** A message that filled the 16-byte rate exactly was absorbed
+  eagerly with slim steps in `update`, so `final` then ran on an empty padded
+  block with the wrong domain constant — e.g. a 16-byte input produced
+  `889f75ad…` instead of the correct `acff841e…`. `update` now holds a
+  rate-filling block until more data arrives (matching Bouncy Castle), so the
+  last data block gets the big-step + domain-separation treatment. Inputs
+  shorter than the rate were unaffected; the bug only appeared at 16, 32, …
+  byte lengths. Regression vectors at the rate boundary added.
 
 - **Cross-built binaries now compute a working `std.cryptography` HMAC (was a
   silent stub → fail-open).** The string-API `cryptography.hmac_sha256_hex` /

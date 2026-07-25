@@ -1,0 +1,128 @@
+import std.cryptography.photon_beetle
+import std.bytes
+import std.string
+import std.io
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want}")
+    return 1
+}
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string.char_at(hex, i * 2)
+        c_lo = string.char_at(hex, i * 2 + 1)
+
+        hi = 0
+        if c_hi >= 48 && c_hi <= 57 {
+            hi = c_hi - 48
+        } else if c_hi >= 97 && c_hi <= 102 {
+            hi = c_hi - 87
+        } else if c_hi >= 65 && c_hi <= 70 {
+            hi = c_hi - 55
+        }
+
+        lo = 0
+        if c_lo >= 48 && c_lo <= 57 {
+            lo = c_lo - 48
+        } else if c_lo >= 97 && c_lo <= 102 {
+            lo = c_lo - 87
+        } else if c_lo >= 65 && c_lo <= 70 {
+            lo = c_lo - 55
+        }
+
+        val = (hi << 4) | lo
+        bytes.set(b, i, val)
+        i = i + 1
+    }
+    return b
+}
+
+main() {
+    fails = 0
+
+    // Photon-Beetle Hash test vectors from LWC_HASH_KAT_256.txt
+    fails = fails + check("empty",
+        photon_beetle.photon_beetle_hex("", 0),
+        "44a99882fea033566856a27e7f0c94dc84fac7e411b08b890a4a574e3db75d4a")
+
+    // Msg = 00
+    b_00 = hex_to_bytes("00")
+    defer bytes.free(b_00)
+    ctx, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx, b_00, 1)
+    res_00 = photon_beetle.final_hex(ctx)
+    fails = fails + check("00", res_00, "f165ccd18640b9703e96f1bd9a4a4ee32dd4031e4680a1b9890891dcc63468a7")
+
+    // Msg = 0001
+    b_0001 = hex_to_bytes("0001")
+    defer bytes.free(b_0001)
+    ctx2, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx2, b_0001, 2)
+    res_0001 = photon_beetle.final_hex(ctx2)
+    fails = fails + check("0001", res_0001, "2ef2d38f71e77928df37fba337872b639f7748556c1a081821b9b8460ac68fac")
+
+    // Msg = 000102
+    b_000102 = hex_to_bytes("000102")
+    defer bytes.free(b_000102)
+    ctx3, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx3, b_000102, 3)
+    res_000102 = photon_beetle.final_hex(ctx3)
+    fails = fails + check("000102", res_000102, "f9a8c467209e7b5f32db28bde50d5210a81a9c6aa9c1686a05c3619cbf44061d")
+
+    // Msg = 00010203
+    b_00010203 = hex_to_bytes("00010203")
+    defer bytes.free(b_00010203)
+    ctx4, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx4, b_00010203, 4)
+    res_00010203 = photon_beetle.final_hex(ctx4)
+    fails = fails + check("00010203", res_00010203, "efab98a1ffeb6f9e832db6fa7fc6bff670895f8a2abe987cd962e93b0127ec3c")
+
+    // Rate-boundary vectors (PHOTON-Beetle absorbs a 16-byte rate). BC
+    // LWC_HASH_KAT counts 9 (8 bytes) and 17 (16 bytes, exact rate).
+    inc8 = bytes.new(8)
+    j = 0
+    while j < 8 { bytes.set(inc8, j, j); j = j + 1 }
+    defer bytes.free(inc8)
+    ctx8, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx8, inc8, 8)
+    fails = fails + check("8B", photon_beetle.final_hex(ctx8),
+        "87947eed1020ec45eec25cc05a135e08e5928fb6dc1f9214e6a69421a3bc30da")
+
+    inc16 = bytes.new(16)
+    j = 0
+    while j < 16 { bytes.set(inc16, j, j); j = j + 1 }
+    defer bytes.free(inc16)
+    ctx16, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx16, inc16, 16)
+    fails = fails + check("16B(exact rate)", photon_beetle.final_hex(ctx16),
+        "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
+
+    // Multi-part streaming across the rate: 16 bytes fed 5+11.
+    ctx_sp, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx_sp, inc16, 5)
+    tail11 = bytes.new(11)
+    k = 5
+    while k < 16 { bytes.set(tail11, k - 5, k); k = k + 1 }
+    defer bytes.free(tail11)
+    photon_beetle.update_bytes(ctx_sp, tail11, 11)
+    fails = fails + check("16B split 5+11", photon_beetle.final_hex(ctx_sp),
+        "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

@@ -1,0 +1,148 @@
+import std.cryptography.dstu7564
+import std.bytes
+import std.string
+import std.io
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want}")
+    return 1
+}
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string.char_at(hex, i * 2)
+        c_lo = string.char_at(hex, i * 2 + 1)
+
+        hi = 0
+        if c_hi >= 48 && c_hi <= 57 {
+            hi = c_hi - 48
+        } else if c_hi >= 97 && c_hi <= 102 {
+            hi = c_hi - 87
+        } else if c_hi >= 65 && c_hi <= 70 {
+            hi = c_hi - 55
+        }
+
+        lo = 0
+        if c_lo >= 48 && c_lo <= 57 {
+            lo = c_lo - 48
+        } else if c_lo >= 97 && c_lo <= 102 {
+            lo = c_lo - 87
+        } else if c_lo >= 65 && c_lo <= 70 {
+            lo = c_lo - 55
+        }
+
+        val = (hi << 4) | lo
+        bytes.set(b, i, val)
+        i = i + 1
+    }
+    return b
+}
+
+// A buffer of `n` incrementing bytes 0x00,0x01,... (mod 256) — BC's
+// hash256/384/512 vectors use these fixed-length sequences.
+incrementing(n: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n { bytes.set(b, i, i & 255); i = i + 1 }
+    return b
+}
+
+// One-shot digest of a byte buffer (the *_hex string wrapper only takes a
+// string, so drive the streaming API for binary inputs).
+digest_bytes(algo: string, b: ptr, n: int) -> string {
+    ctx, _ = dstu7564.new(algo)
+    dstu7564.update_bytes(ctx, b, n)
+    return dstu7564.final_hex(ctx)
+}
+
+main() {
+    fails = 0
+
+    b_ff = hex_to_bytes("ff")
+    defer bytes.free(b_ff)
+
+    // ---- dstu7564-256 (DSTU 7564:2014 / BC Dstu7564Test vectors) ----
+    fails = fails + check("dstu7564-256 empty",
+        dstu7564.dstu7564_hex("dstu7564-256", "", 0),
+        "cd5101d1ccdf0d1d1f4ada56e888cd724ca1a0838a3521e7131d4fb78d0f5eb6")
+
+    fails = fails + check("dstu7564-256 ff",
+        digest_bytes("dstu7564-256", b_ff, 1),
+        "ea7677ca4526555680441c117982ea14059ea6d0d7124d6ecdb3deec49e890f4")
+
+    b64 = incrementing(64)
+    fails = fails + check("dstu7564-256 64B(0x00..0x3F)",
+        digest_bytes("dstu7564-256", b64, 64),
+        "08f4ee6f1be6903b324c4e27990cb24ef69dd58dbe84813ee0a52f6631239875")
+
+    b128 = incrementing(128)
+    fails = fails + check("dstu7564-256 128B(0x00..0x7F)",
+        digest_bytes("dstu7564-256", b128, 128),
+        "0a9474e645a7d25e255e9e89fff42ec7eb31349007059284f0b182e452bda882")
+
+    b256 = incrementing(256)
+    fails = fails + check("dstu7564-256 256B(0x00..0xFF)",
+        digest_bytes("dstu7564-256", b256, 256),
+        "d305a32b963d149dc765f68594505d4077024f836c1bf03806e1624ce176c08f")
+
+    // ---- dstu7564-384 (was previously untested; BC's 95-byte vector) ----
+    b95 = incrementing(95)
+    fails = fails + check("dstu7564-384 95B(0x00..0x5E)",
+        digest_bytes("dstu7564-384", b95, 95),
+        "d9021692d84e5175735654846ba751e6d0ed0fac36dfbc0841287dcb0b5584c75016c3decc2a6e47c50b2f3811e351b8")
+    bytes.free(b95)
+
+    // ---- dstu7564-512 ----
+    fails = fails + check("dstu7564-512 empty",
+        dstu7564.dstu7564_hex("dstu7564-512", "", 0),
+        "656b2f4cd71462388b64a37043ea55dbe445d452aecd46c3298343314ef04019bcfa3f04265a9857f91be91fce197096187ceda78c9c1c021c294a0689198538")
+
+    fails = fails + check("dstu7564-512 ff",
+        digest_bytes("dstu7564-512", b_ff, 1),
+        "871b18cf754b72740307a97b449abeb32b64444cc0d5a4d65830ae5456837a72d8458f12c8f06c98c616abe11897f86263b5cb77c420fb375374bec52b6d0292")
+
+    fails = fails + check("dstu7564-512 64B(0x00..0x3F)",
+        digest_bytes("dstu7564-512", b64, 64),
+        "3813e2109118cdfb5a6d5e72f7208dccc80a2dfb3afdfb02f46992b5edbe536b3560dd1d7e29c6f53978af58b444e37ba685c0dd910533ba5d78efffc13de62a")
+
+    fails = fails + check("dstu7564-512 256B(0x00..0xFF)",
+        digest_bytes("dstu7564-512", b256, 256),
+        "0dd03d7350c409cb3c29c25893a0724f6b133fa8b9eb90a64d1a8fa93b56556611eb187d715a956b107e3bfc76482298133a9ce8cbc0bd5e1436a5b197284f7e")
+
+    // Multi-part streaming across the 64-byte (256) / 128-byte (512) block
+    // boundary must equal the one-shot digest.
+    ctx_s, _ = dstu7564.new("dstu7564-256")
+    dstu7564.update_bytes(ctx_s, b128, 40)
+    b128_tail = incrementing(128)
+    k = 40
+    while k < 128 {
+        bytes.set(b128_tail, k - 40, k & 255)
+        k = k + 1
+    }
+    dstu7564.update_bytes(ctx_s, b128_tail, 88)
+    fails = fails + check("dstu7564-256 128B split-streaming",
+        dstu7564.final_hex(ctx_s),
+        "0a9474e645a7d25e255e9e89fff42ec7eb31349007059284f0b182e452bda882")
+    bytes.free(b128_tail)
+
+    bytes.free(b64)
+    bytes.free(b128)
+    bytes.free(b256)
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

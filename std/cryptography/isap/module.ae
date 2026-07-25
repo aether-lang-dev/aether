@@ -1,0 +1,217 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.isap — ISAP Hash in pure Aether, ported from
+// Bouncy Castle's IsapDigest.cs. NO externs to OpenSSL or any C crypto.
+//
+// Import with:  import std.cryptography.isap
+
+import std.bits
+import std.bytes
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    new, update, update_bytes, final_hex, final_bytes, free_ctx,
+    isap_hex, isap_bytes
+)
+
+struct IsapCtx {
+    v0: long
+    v1: long
+    v2: long
+    v3: long
+    v4: long
+    block: ptr        // std.bytes buffer, 8 bytes
+    block_len: int
+}
+
+round(c: *IsapCtx, rc: long) {
+    sx = c.v2 ^ rc
+    t0 = c.v0 ^ c.v1 ^ sx ^ c.v3 ^ (c.v1 & (c.v0 ^ sx ^ c.v4))
+    t1 = c.v0 ^ sx ^ c.v3 ^ c.v4 ^ ((c.v1 ^ sx) & (c.v1 ^ c.v3))
+    t2 = c.v1 ^ sx ^ c.v4 ^ (c.v3 & c.v4)
+    t3 = c.v0 ^ c.v1 ^ sx ^ ((~c.v0) & (c.v3 ^ c.v4))
+    t4 = c.v1 ^ c.v3 ^ c.v4 ^ ((c.v0 ^ c.v4) & c.v1)
+
+    c.v0 = t0 ^ bits.rotr64(t0, 19) ^ bits.rotr64(t0, 28)
+    c.v1 = t1 ^ bits.rotr64(t1, 39) ^ bits.rotr64(t1, 61)
+    c.v2 = ~(t2 ^ bits.rotr64(t2, 1) ^ bits.rotr64(t2, 6))
+    c.v3 = t3 ^ bits.rotr64(t3, 10) ^ bits.rotr64(t3, 17)
+    c.v4 = t4 ^ bits.rotr64(t4, 7) ^ bits.rotr64(t4, 41)
+}
+
+p12(c: *IsapCtx) {
+    round(c, 0xf0)
+    round(c, 0xe1)
+    round(c, 0xd2)
+    round(c, 0xc3)
+    round(c, 0xb4)
+    round(c, 0xa5)
+    round(c, 0x96)
+    round(c, 0x87)
+    round(c, 0x78)
+    round(c, 0x69)
+    round(c, 0x5a)
+    round(c, 0x4b)
+}
+
+new() -> {
+    ctx = malloc(64) as *IsapCtx
+    if ctx == null {
+        return null, "allocation failed"
+    }
+    ctx.v0 = 0xee9398aadb67f03d
+    ctx.v1 = 0x8bb21831c60f1002
+    ctx.v2 = 0xb48a92db98d5da62
+    ctx.v3 = 0x43189921b8f8e3e8
+    ctx.v4 = 0x348fa5c9d525e140
+    ctx.block_len = 0
+    ctx.block = bytes.new(8)
+    j = 0
+    while j < 8 {
+        bytes.set(ctx.block, j, 0)
+        j = j + 1
+    }
+    return ctx, ""
+}
+
+update(ctx: ptr, data: string, length: int) {
+    c = ctx as *IsapCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = string_char_at_n(data, length, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 8 {
+            c.v0 = c.v0 ^ bytes.get_be64(c.block, 0)
+            p12(c)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+}
+
+update_bytes(ctx: ptr, data: ptr, length: int) {
+    c = ctx as *IsapCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        b = bytes.get(data, i)
+        bytes.set(c.block, c.block_len, b & 255)
+        c.block_len = c.block_len + 1
+        if c.block_len == 8 {
+            c.v0 = c.v0 ^ bytes.get_be64(c.block, 0)
+            p12(c)
+            c.block_len = 0
+        }
+        i = i + 1
+    }
+}
+
+finish_absorbing(c: *IsapCtx) {
+    bytes.set(c.block, c.block_len, 0x80)
+    j = c.block_len + 1
+    while j < 8 {
+        bytes.set(c.block, j, 0)
+        j = j + 1
+    }
+    val = bytes.get_be64(c.block, 0)
+    shift = 56 - (c.block_len << 3)
+    mask = 0xFFFFFFFFFFFFFFFF << shift
+    c.v0 = c.v0 ^ (val & mask)
+}
+
+finalize_to_bytes(c: *IsapCtx) -> ptr {
+    finish_absorbing(c)
+
+    out = bytes.new(32)
+    i = 0
+    while i < 4 {
+        p12(c)
+        bytes.set_be64(out, i * 8, c.v0)
+        i = i + 1
+    }
+    return out
+}
+
+free_internals(c: *IsapCtx) {
+    if c.block != null {
+        bytes.free(c.block)
+        c.block = null
+    }
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *IsapCtx
+    out = finalize_to_bytes(c)
+    s = bytes.finish(out, 32)
+    free_internals(c)
+    free(ctx)
+    res = bytes.new(32)
+    bytes.copy_from_string(res, 0, s, 32)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *IsapCtx
+    out = finalize_to_bytes(c)
+    hexbuf = bytes.new(64)
+    i = 0
+    while i < 32 {
+        b = bytes.get(out, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    bytes.free(out)
+    s = bytes.finish(hexbuf, 64)
+    free_internals(c)
+    free(ctx)
+    return s
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *IsapCtx
+    free_internals(c)
+    free(ctx)
+}
+
+isap_hex(data: string, len: int) -> string {
+    ctx, err = new()
+    if err != "" {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+isap_bytes(data: string, len: int) -> ptr {
+    ctx, err = new()
+    if err != "" {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}
