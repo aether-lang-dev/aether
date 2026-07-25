@@ -163,6 +163,12 @@ reader_remaining(r: ptr) -> int {
 // leaks the empty success-string when a caller doesn't forward it — an
 // Aether heap-string-tracker gap; the 2-tuple shape is clean.)
 read_tlv(r: ptr) -> (ptr, string) {
+    // A single tracked empty-string binding reused for the success returns:
+    // returning a bare "" literal in the string slot makes codegen wrap a
+    // fresh 1-byte heap string the caller discards without releasing (the
+    // heap-string-tracker gap noted above). read_tlv is on every reader's hot
+    // path, so this 1-byte-per-call leak is what the macOS leaks(1) gate flags.
+    ok = ""
     rr = r as *Reader
     if rr.pos >= rr.len {
         return null, "asn1: unexpected end of input (tag)"
@@ -246,11 +252,14 @@ read_tlv(r: ptr) -> (ptr, string) {
                     return null, "asn1: unexpected end of input in indefinite length"
                 }
                 start_pos = rr.pos
-                sub_content, err = read_tlv(r)
-                if string.equals(err, "") != 1 {
+                sub_content, suberr = read_tlv(r)
+                if string.equals(suberr, "") != 1 {
                     bytes.free(acc)
-                    return null, err
+                    return null, suberr
                 }
+                // suberr is the sub-call's (empty) success string; release it
+                // so the recursive read_tlv's "" doesn't leak per sub-TLV.
+                string.release(suberr)
                 bytes.free(sub_content)
                 end_pos = rr.pos
                 sub_tlv_len = end_pos - start_pos
@@ -266,7 +275,7 @@ read_tlv(r: ptr) -> (ptr, string) {
                 acc_len = acc_len + sub_tlv_len
             }
         }
-        return acc, ""
+        return acc, ok
     }
 
     if rr.pos + length > rr.len {
@@ -280,7 +289,7 @@ read_tlv(r: ptr) -> (ptr, string) {
         i = i + 1
     }
     rr.pos = rr.pos + length
-    return content, ""
+    return content, ok
 }
 
 // Tag of the most recently read TLV (-1 if none read yet).
@@ -782,7 +791,7 @@ read_enumerated(r: ptr) -> (int, string) {
     bytes.free(content)
     v = bignum_to_int(bn)
     bignum.free(bn)
-    return v, ""
+    return v, err
 }
 
 // BMPString / UniversalString helpers: UTF-8 <-> UTF-16BE / UTF-32BE
@@ -1053,7 +1062,7 @@ read_tagged_ext(r: ptr, is_explicit: int, want_class: int, want_number: int) -> 
         bytes.free(content)
         return null, "asn1: unexpected tag class or number"
     }
-    return content, ""
+    return content, err
 }
 
 decode_universal_string_bytes(content: ptr) -> string {
