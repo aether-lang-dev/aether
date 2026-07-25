@@ -4,6 +4,7 @@
 exports (
     os_system, os_exec_raw, os_run, os_run_capture_raw, os_run_capture_status_raw,
     os_run_pipe_raw, os_wait_pid_raw, os_run_pipe_drain_and_wait_raw,
+    os_spawn_raw, os_wait_raw, os_wait_any_raw,
     os_getenv, os_which,
     aether_args_count, aether_args_get, aether_argv0, aether_argv_raw,
     aether_args_seal, aether_args_sealed, args_seal, args_sealed,
@@ -23,6 +24,7 @@ exports (
     platform,
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
+    spawn_proc, wait, wait_any,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
@@ -85,16 +87,18 @@ extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @
 // (e.g. Aeocha test summaries), this is fine; for larger or
 // streaming payloads, prefer run_pipe_drain_and_wait.
 //
-// On Windows, returns (-1, -1, "unsupported on Windows") — fall
-// back to the file-marker pattern there.
+// On Windows the SPAWN works but there is no back-channel pipe:
+// position 0 (the read fd) is always -1 there, and position 1 is a
+// reap token (not an OS pid). For a pipe-less fan-out scheduler prefer
+// the cross-platform spawn / wait / wait_any trio below.
 extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 
 // Wait for a child to exit and reap it. Companion to
 // os_run_pipe_raw. Returns (exit_code, err). Calling this
 // once per spawn is required to avoid zombies; the
 // run_pipe_drain_and_wait convenience does it internally for
-// callers who don't need the read-fd loop. On Windows, returns
-// (-1, "unsupported on Windows").
+// callers who don't need the read-fd loop. Cross-platform (on
+// Windows it reaps the token os_run_pipe_raw returned).
 extern os_wait_pid_raw(pid: int) -> (int, string)
 
 // Convenience: spawn child with back-channel pipe, drain pipe to
@@ -121,6 +125,38 @@ extern os_wait_pid_raw(pid: int) -> (int, string)
 // payload anywhere in stdlib, tests/, examples/, tools/, or
 // contrib/. See #420 follow-up.
 extern os_run_pipe_drain_and_wait_raw(prog: string, argv: ptr, env: ptr) -> (string @heap, int, string)
+
+// --- Non-blocking spawn + reap (no IPC back-channel) -----------------
+//
+// The fan-out/fan-in pair a parallel scheduler needs: start up to N
+// ready children, wait for whichever finishes first, reap it, start
+// more. Unlike run_pipe these create NO pipe and set NO AETHER_IPC_FD,
+// which is exactly why they work on Windows too. The value returned by
+// spawn is an opaque reap TOKEN (the real pid on POSIX; a handle-table
+// index on Windows) — treat it as an identity to pass to wait/wait_any,
+// not as an OS pid. Each token MUST be reaped exactly once (via wait or
+// wait_any) or it leaks a zombie (POSIX) / process handle (Windows).
+//
+// Need a structured report back from the child? That's the pipe's job —
+// use run_pipe (POSIX-only) instead. These carry no back-channel.
+
+// Spawn a child without blocking. Returns (token, err). err is "" on a
+// successful spawn regardless of the child's eventual exit code.
+extern os_spawn_raw(prog: string, argv: ptr, env: ptr) -> (int, string)
+
+// Reap one token. Blocks until that child exits. Returns (exit_code,
+// err). err is non-empty only for a bad/unknown token or abnormal
+// termination — a non-zero exit_code with err == "" is a normal failed
+// child, distinct from a spawn/reap failure (exit_code -1, err set).
+extern os_wait_raw(token: int) -> (int, string)
+
+// Reap whichever of the given tokens finishes first. `tokens` is a
+// std.list whose elements are the int tokens from spawn, each boxed
+// INLINE via mem.long_to_ptr(token) (small ints stored as the pointer
+// slot itself, not heap-allocated boxes). Returns (token, exit_code,
+// err): which token completed, its exit code, and an error string. Only
+// tokens still live (not already reaped) are waited on. Scheduler fan-in.
+extern os_wait_any_raw(tokens: ptr) -> (int, int, string)
 
 // Get environment variable, returns string or NULL if not set
 extern os_getenv(name: string) -> string
@@ -274,6 +310,27 @@ wait_pid(pid: int) -> {
 // "unsupported on Windows").
 run_pipe_drain_and_wait(prog: string, argv: ptr, env: ptr) -> {
     return os_run_pipe_drain_and_wait_raw(prog, argv, env)
+}
+
+// Spawn a child without blocking, no back-channel pipe. Returns
+// (token, err). Cross-platform. Reap the token exactly once via
+// os.wait or os.wait_any. Named spawn_proc because `spawn` is a
+// reserved keyword (actor spawning). See os_spawn_raw.
+spawn_proc(prog: string, argv: ptr, env: ptr) -> {
+    return os_spawn_raw(prog, argv, env)
+}
+
+// Reap a single spawned token. Blocks until it exits. Returns
+// (exit_code, err). See os_wait_raw.
+wait(token: int) -> {
+    return os_wait_raw(token)
+}
+
+// Reap whichever spawned token finishes first. `tokens` is a list of
+// int tokens. Returns (token, exit_code, err). The fan-in half of a
+// spawn-N-wait-any scheduler loop. See os_wait_any_raw.
+wait_any(tokens: ptr) -> {
+    return os_wait_any_raw(tokens)
 }
 
 // --- Process-supervision primitives -----------------------------------

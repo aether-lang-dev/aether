@@ -56,6 +56,21 @@ _tuple_int_string os_wait_pid_raw(int pid) {
     _tuple_int_string out = { -1, "os.wait_pid unavailable" };
     return out;
 }
+_tuple_int_string os_spawn_raw(const char* p, void* a, void* e) {
+    (void)p; (void)a; (void)e;
+    _tuple_int_string out = { -1, "os.spawn unavailable" };
+    return out;
+}
+_tuple_int_string os_wait_raw(int token) {
+    (void)token;
+    _tuple_int_string out = { -1, "os.wait unavailable" };
+    return out;
+}
+_tuple_int_int_string os_wait_any_raw(void* token_list) {
+    (void)token_list;
+    _tuple_int_int_string out = { -1, -1, "os.wait_any unavailable" };
+    return out;
+}
 int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
 _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
     (void)pid; (void)secs;
@@ -1323,6 +1338,102 @@ _tuple_int_string os_wait_pid_raw(int pid) {
     return out;
 }
 
+/* ============================================================
+ * Non-blocking spawn + reap, WITHOUT the IPC back-channel pipe.
+ *
+ * These are the fan-out/fan-in pair a parallel build scheduler needs:
+ * start up to N ready children, wait for ANY to finish, reap it, start
+ * more. Unlike os_run_pipe_raw they create no pipe and set no
+ * AETHER_IPC_FD — which is exactly why they are cross-platform (the pipe
+ * is the part that needs coordinated _open_osfhandle on Windows). The
+ * "token" returned by spawn is the reap handle: on POSIX it is the real
+ * pid; on Windows it is an index into a process-handle table.
+ *
+ *   os_spawn_raw()     -> (token, err)       async spawn, no pipe
+ *   os_wait_raw()      -> (exit, err)        reap one token
+ *   os_wait_any_raw()  -> (token, exit, err) reap whichever finishes first
+ *
+ * Each spawned token MUST be reaped exactly once (via wait or wait_any)
+ * or it leaks a zombie (POSIX) / handle (Windows). ============ */
+
+/* Map a waitpid status to (exit, err), shared by wait and wait_any. */
+static _tuple_int_string posix_status_to_tuple(int st) {
+    _tuple_int_string out = { -1, "" };
+    if (WIFEXITED(st)) {
+        out._0 = WEXITSTATUS(st);
+    } else {
+        out._0 = -1;
+        out._1 = "child terminated abnormally";
+    }
+    return out;
+}
+
+_tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list) {
+    _tuple_int_string out = { -1, "" };
+    if (!prog) { out._1 = "null prog"; return out; }
+    if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
+
+    char** av = build_argv_array(prog, argv_list);
+    if (!av) { out._1 = "argv build failed"; return out; }
+    char** envp = build_envp_array(env_list);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        free(av); free(envp);
+        out._1 = "fork failed";
+        return out;
+    }
+    if (pid == 0) {
+        /* Child — no pipe, no fd 3, no AETHER_IPC_FD. Plain exec. */
+        if (envp) {
+            execve(prog, av, envp);
+            /* execve doesn't PATH-resolve; fall back to execvp so a bare
+             * program name still works when an explicit env was supplied. */
+            execvp(prog, av);
+        } else {
+            execvp(prog, av);
+        }
+        _exit(127);
+    }
+    free(av);
+    free(envp);
+    out._0 = (int)pid;   /* token == pid on POSIX */
+    return out;
+}
+
+_tuple_int_string os_wait_raw(int token) {
+    /* On POSIX the token IS the pid, so reap semantics match wait_pid. */
+    _tuple_int_string out = { -1, "" };
+    if (token <= 0) { out._1 = "invalid token"; return out; }
+    int st = 0;
+    if (waitpid((pid_t)token, &st, 0) < 0) { out._1 = "waitpid failed"; return out; }
+    return posix_status_to_tuple(st);
+}
+
+_tuple_int_int_string os_wait_any_raw(void* token_list) {
+    _tuple_int_int_string out = { -1, -1, "" };
+    int n = token_list ? list_size(token_list) : 0;
+    if (n <= 0) { out._2 = "no tokens"; return out; }
+
+    /* On POSIX the token IS the pid, and waitpid(-1) already reports which
+     * child finished — so the returned pid is itself the finished token. We
+     * don't unbox the list here (int-list element boxing is codegen-private
+     * and not part of this file's ABI); the Windows backend, which cannot
+     * wait on "any child" generically, is the one that consumes the list to
+     * build its HANDLE array. A scheduler that spawns only via os_spawn_raw
+     * has no foreign children, so the reaped pid is always one of its
+     * tokens. */
+    int st = 0;
+    pid_t got = waitpid(-1, &st, 0);
+    if (got < 0) { out._2 = "waitpid failed"; return out; }
+
+    _tuple_int_string s = posix_status_to_tuple(st);
+    out._0 = (int)got;      /* which token finished */
+    out._1 = s._0;          /* its exit code */
+    out._2 = s._1;          /* err (abnormal-termination note, if any) */
+    return out;
+}
+
 /* Convenience: spawn + drain pipe + wait. Reads the back-channel
  * to EOF (driven by the child closing fd 3 or exiting) while the
  * child runs, then waits for the child to exit. Returns the
@@ -2165,6 +2276,105 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
     return 0;
 }
 
+/* ============================================================
+ * Non-blocking spawn + reap on Windows (no IPC pipe).
+ *
+ * win_spawn is win_launch's front half: build the command line (reusing
+ * append_escaped_arg's CreateProcessW quoting), CreateProcessW, return the
+ * live process HANDLE without waiting. The wait/exit-code/close half lives
+ * in os_wait_raw / os_wait_any_raw.
+ *
+ * The Aether "token" ABI is int, but a HANDLE is a pointer — and a raw
+ * dwProcessId can be recycled after exit, so reaping by PID could race onto
+ * a different process. We therefore hand out a small monotonically-growing
+ * int token and keep the live HANDLE in a table keyed by that token. The
+ * token is never recycled within a run, so a stale token cleanly misses. */
+
+typedef struct { int token; HANDLE h; } WinProc;
+static WinProc  g_winprocs[4096];
+static int      g_winproc_count = 0;
+static int      g_winproc_next_token = 1;
+static CRITICAL_SECTION g_winproc_cs;
+static int      g_winproc_cs_init = 0;
+
+static void winproc_lock(void) {
+    /* One-time CS init. Spawns are effectively single-threaded from a build
+     * scheduler, but guard anyway so a threaded caller can't corrupt the
+     * table. The init race is itself benign for the single-threaded case. */
+    if (!g_winproc_cs_init) { InitializeCriticalSection(&g_winproc_cs); g_winproc_cs_init = 1; }
+    EnterCriticalSection(&g_winproc_cs);
+}
+static void winproc_unlock(void) { LeaveCriticalSection(&g_winproc_cs); }
+
+/* Register a live handle, return its token (or -1 if the table is full). */
+static int winproc_register(HANDLE h) {
+    winproc_lock();
+    if (g_winproc_count >= (int)(sizeof(g_winprocs)/sizeof(g_winprocs[0]))) {
+        winproc_unlock();
+        return -1;
+    }
+    int tok = g_winproc_next_token++;
+    g_winprocs[g_winproc_count].token = tok;
+    g_winprocs[g_winproc_count].h = h;
+    g_winproc_count++;
+    winproc_unlock();
+    return tok;
+}
+
+/* Look up a token's handle without removing it. Returns NULL if absent. */
+static HANDLE winproc_find(int token) {
+    HANDLE h = NULL;
+    winproc_lock();
+    for (int i = 0; i < g_winproc_count; i++) {
+        if (g_winprocs[i].token == token) { h = g_winprocs[i].h; break; }
+    }
+    winproc_unlock();
+    return h;
+}
+
+/* Remove a token's slot (after it has been reaped + CloseHandle'd). */
+static void winproc_remove(int token) {
+    winproc_lock();
+    for (int i = 0; i < g_winproc_count; i++) {
+        if (g_winprocs[i].token == token) {
+            g_winprocs[i] = g_winprocs[g_winproc_count - 1];
+            g_winproc_count--;
+            break;
+        }
+    }
+    winproc_unlock();
+}
+
+/* Front half of win_launch: spawn without waiting. Returns the process
+ * HANDLE, or NULL on failure. hThread is closed here (never needed by the
+ * caller); hProcess is the caller's to wait on and close. */
+static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
+    wchar_t* cmdline = build_command_line(prog, argv_list);
+    if (!cmdline) return NULL;
+    wchar_t* wenv = build_environ_block(env_list);
+
+    STARTUPINFOW si;
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+
+    PROCESS_INFORMATION pi;
+    memset(&pi, 0, sizeof(pi));
+
+    /* Same CreateProcessW contract as win_launch: lpApplicationName=NULL so
+     * cmdline[0] is PATH-resolved (issue #706); no handle inheritance (no
+     * pipe), inherit parent env when wenv is NULL. */
+    BOOL ok = CreateProcessW(
+        NULL, cmdline, NULL, NULL, FALSE,
+        CREATE_UNICODE_ENVIRONMENT, wenv, NULL, &si, &pi);
+
+    free(cmdline);
+    free(wenv);
+
+    if (!ok) return NULL;
+    CloseHandle(pi.hThread);   /* thread handle never used */
+    return pi.hProcess;
+}
+
 /* Working-directory accessors — Windows. UTF-8 path in / UTF-8 path out,
  * converted through the wide-char helpers so non-ASCII paths survive. */
 int os_chdir_raw(const char* path) {
@@ -2259,19 +2469,106 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; const char* _1; } _tuple_int_string;
 
+/* Reap one token: wait on its handle, read exit code, close, free slot.
+ * Shared by os_wait_raw and (per-handle) os_wait_any_raw. */
+static _tuple_int_string winproc_reap(int token, HANDLE h) {
+    _tuple_int_string out = { -1, "" };
+    WaitForSingleObject(h, INFINITE);
+    DWORD code = 0;
+    GetExitCodeProcess(h, &code);
+    CloseHandle(h);
+    winproc_remove(token);
+    out._0 = (int)code;
+    return out;
+}
+
+/* Non-blocking spawn (no pipe). Returns (token, err). */
+_tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list) {
+    _tuple_int_string out = { -1, "" };
+    if (!prog) { out._1 = "null prog"; return out; }
+    if (!aether_sandbox_check("exec", prog)) { out._1 = "denied by sandbox"; return out; }
+    HANDLE h = win_spawn(prog, argv_list, env_list);
+    if (!h) { out._1 = "spawn failed"; return out; }
+    int tok = winproc_register(h);
+    if (tok < 0) {
+        /* Table full — don't leak the process: wait+close it and error. */
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+        out._1 = "process table full";
+        return out;
+    }
+    out._0 = tok;
+    return out;
+}
+
+/* Reap a single token. Returns (exit, err). */
+_tuple_int_string os_wait_raw(int token) {
+    _tuple_int_string out = { -1, "" };
+    if (token <= 0) { out._1 = "invalid token"; return out; }
+    HANDLE h = winproc_find(token);
+    if (!h) { out._1 = "unknown token"; return out; }
+    return winproc_reap(token, h);
+}
+
+/* Reap whichever token finishes first. Returns (token, exit, err).
+ * WaitForMultipleObjects gives a true wait-any over the live handles. */
+_tuple_int_int_string os_wait_any_raw(void* token_list) {
+    _tuple_int_int_string out = { -1, -1, "" };
+    int n = token_list ? list_size(token_list) : 0;
+    if (n <= 0) { out._2 = "no tokens"; return out; }
+    if (n > MAXIMUM_WAIT_OBJECTS) { out._2 = "too many tokens for one wait_any"; return out; }
+
+    /* Snapshot (token, handle) pairs for the live tokens the caller named.
+     * Tokens are small ints stored INLINE as the list's pointer slot (the
+     * caller boxes them with mem.long_to_ptr(token)); read them back as the
+     * integer value of the pointer, NOT as a pointer-to-int. Only tokens
+     * still in the table (not yet reaped) contribute a handle. */
+    HANDLE handles[MAXIMUM_WAIT_OBJECTS];
+    int    toks[MAXIMUM_WAIT_OBJECTS];
+    int    m = 0;
+    for (int i = 0; i < n; i++) {
+        void* item = list_get_raw(token_list, i);
+        int tok = (int)(intptr_t)item;
+        HANDLE h = winproc_find(tok);
+        if (h) { handles[m] = h; toks[m] = tok; m++; }
+    }
+    if (m == 0) { out._2 = "no live tokens"; return out; }
+
+    DWORD r = WaitForMultipleObjects((DWORD)m, handles, FALSE, INFINITE);
+    /* WAIT_OBJECT_0 is 0, so the lower bound (r >= WAIT_OBJECT_0) is always
+     * true for the unsigned DWORD and -Wtype-limits flags it; only the upper
+     * bound distinguishes a signaled index from WAIT_TIMEOUT/WAIT_FAILED. */
+    if (r < WAIT_OBJECT_0 + (DWORD)m) {
+        int idx = (int)(r - WAIT_OBJECT_0);
+        _tuple_int_string s = winproc_reap(toks[idx], handles[idx]);
+        out._0 = toks[idx];
+        out._1 = s._0;
+        out._2 = s._1;
+        return out;
+    }
+    out._2 = "wait_any failed";
+    return out;
+}
+
+/* run_pipe on Windows: the SPAWN works (no back-channel pipe — that half
+ * needs coordinated _open_osfhandle and stays POSIX-only). Returns a -1
+ * pipe fd, the token, and ""; reap the token via os_wait_pid_raw. */
 _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* env_list) {
-    (void)prog; (void)argv_list; (void)env_list;
-    _tuple_int_int_string out = { -1, -1, "unsupported on Windows" };
+    _tuple_int_int_string out = { -1, -1, "" };
+    _tuple_int_string sp = os_spawn_raw(prog, argv_list, env_list);
+    if (sp._1[0]) { out._2 = sp._1; return out; }   /* err */
+    out._0 = -1;        /* no back-channel pipe on Windows */
+    out._1 = sp._0;     /* token doubles as the wait_pid handle */
     return out;
 }
 
 _tuple_int_string os_wait_pid_raw(int pid) {
-    (void)pid;
-    _tuple_int_string out = { -1, "unsupported on Windows" };
-    return out;
+    /* pid here is the token minted by os_run_pipe_raw / os_spawn_raw. */
+    return os_wait_raw(pid);
 }
 
 _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* argv_list, void* env_list) {
+    /* The back-channel pipe is the POSIX-only part; no Windows equivalent. */
     (void)prog; (void)argv_list; (void)env_list;
     _tuple_string_int_string out = { aether_os_empty_heap(), -1, "unsupported on Windows" };
     return out;
