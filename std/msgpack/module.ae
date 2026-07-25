@@ -1,0 +1,1092 @@
+// std.msgpack — MessagePack serialization and deserialization library (RFC 9562 equivalent / Portions copyright 3Hren/msgpack-rust).
+// Import with: import std.msgpack
+
+import std.bytes
+import std.bytes.cursor
+import std.string
+import std.list
+import std.heap
+
+exports (
+    nil_value, boolean, from_int, num, str, bin, arr, map, ext,
+    get_type, get_bool, get_int, get_float, get_string, get_bin,
+    array_size, array_get, array_add,
+    map_size, map_get_key, map_get_value, map_get, map_set,
+    free, pack, unpack,
+    TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BIN, TYPE_ARRAY, TYPE_MAP, TYPE_EXT
+)
+
+const TYPE_NIL      = 0
+const TYPE_BOOL     = 1
+const TYPE_INT      = 2
+const TYPE_FLOAT    = 3
+const TYPE_STR      = 4
+const TYPE_BIN      = 5
+const TYPE_ARRAY    = 6
+const TYPE_MAP      = 7
+const TYPE_EXT      = 8
+
+struct MsgValue {
+    type_id: int
+    b_val: bool
+    i_val: long
+    f_val: float
+    s_val: string
+    ext_type: int
+    arr_val: ptr      // list pointer (*std.list.List)
+    map_keys: ptr     // list pointer (*std.list.List)
+    map_values: ptr   // list pointer (*std.list.List)
+}
+
+extern aether_msgpack_float_to_bits(val: float) -> int
+extern aether_msgpack_bits_to_float(bits: int) -> float
+extern aether_msgpack_double_to_bits(val: float) -> long
+extern aether_msgpack_bits_to_double(bits: long) -> float
+
+// ---- Builders ----
+
+nil_value() -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_NIL
+    return v as ptr
+}
+
+boolean(val: bool) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_BOOL
+    v.b_val = val
+    return v as ptr
+}
+
+from_int(val: long) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_INT
+    v.i_val = val
+    return v as ptr
+}
+
+num(val: float) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_FLOAT
+    v.f_val = val
+    return v as ptr
+}
+
+str(val: string) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_STR
+    v.s_val = string.concat(val, "")
+    return v as ptr
+}
+
+bin(val: string) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_BIN
+    v.s_val = string.concat(val, "")
+    return v as ptr
+}
+
+arr() -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_ARRAY
+    v.arr_val = list.list_new()
+    return v as ptr
+}
+
+map() -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_MAP
+    v.map_keys = list.list_new()
+    v.map_values = list.list_new()
+    return v as ptr
+}
+
+ext(type_id: int, data: string) -> ptr {
+    let v = heap.new(MsgValue)
+    v.type_id = TYPE_EXT
+    v.ext_type = type_id
+    v.s_val = string.concat(data, "")
+    return v as ptr
+}
+
+// ---- Getters / Setters ----
+
+get_type(val: ptr) -> int {
+    if val == null { return TYPE_NIL }
+    return (val as *MsgValue).type_id
+}
+
+get_bool(val: ptr) -> bool {
+    if val == null { return false }
+    return (val as *MsgValue).b_val
+}
+
+get_int(val: ptr) -> long {
+    if val == null { return 0 }
+    return (val as *MsgValue).i_val
+}
+
+get_float(val: ptr) -> float {
+    if val == null { return 0.0 }
+    return (val as *MsgValue).f_val
+}
+
+get_string(val: ptr) -> string {
+    if val == null { return "" }
+    return (val as *MsgValue).s_val
+}
+
+get_bin(val: ptr) -> string {
+    if val == null { return "" }
+    return (val as *MsgValue).s_val
+}
+
+array_size(val: ptr) -> int {
+    if val == null { return -1 }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_ARRAY { return -1 }
+    return list.list_size(m.arr_val)
+}
+
+array_get(val: ptr, index: int) -> ptr {
+    if val == null { return null }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_ARRAY { return null }
+    if index < 0 || index >= list.list_size(m.arr_val) { return null }
+    return list.list_get_raw(m.arr_val, index)
+}
+
+array_add(val: ptr, item: ptr) -> int {
+    if val == null || item == null { return 0 }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_ARRAY { return 0 }
+    list.list_add_raw(m.arr_val, item)
+    return 1
+}
+
+map_size(val: ptr) -> int {
+    if val == null { return -1 }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_MAP { return -1 }
+    return list.list_size(m.map_keys)
+}
+
+map_get_key(val: ptr, index: int) -> ptr {
+    if val == null { return null }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_MAP { return null }
+    if index < 0 || index >= list.list_size(m.map_keys) { return null }
+    return list.list_get_raw(m.map_keys, index)
+}
+
+map_get_value(val: ptr, index: int) -> ptr {
+    if val == null { return null }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_MAP { return null }
+    if index < 0 || index >= list.list_size(m.map_values) { return null }
+    return list.list_get_raw(m.map_values, index)
+}
+
+map_get(val: ptr, key: string) -> ptr {
+    if val == null { return null }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_MAP { return null }
+    let sz = list.list_size(m.map_keys)
+    let i = 0
+    while i < sz {
+        let k = list.list_get_raw(m.map_keys, i) as *MsgValue
+        if k != null && k.type_id == TYPE_STR && k.s_val == key {
+            return list.list_get_raw(m.map_values, i)
+        }
+        i = i + 1
+    }
+    return null
+}
+
+map_set(val: ptr, key: string, value: ptr) -> int {
+    if val == null || value == null { return 0 }
+    let m = val as *MsgValue
+    if m.type_id != TYPE_MAP { return 0 }
+    let sz = list.list_size(m.map_keys)
+    let i = 0
+    while i < sz {
+        let k = list.list_get_raw(m.map_keys, i) as *MsgValue
+        if k != null && k.type_id == TYPE_STR && k.s_val == key {
+            let old_val = list.list_get_raw(m.map_values, i)
+            if old_val != null { free(old_val) }
+            list.list_set(m.map_values, i, value)
+            return 1
+        }
+        i = i + 1
+    }
+    let new_key = str(key)
+    list.list_add_raw(m.map_keys, new_key)
+    list.list_add_raw(m.map_values, value)
+    return 1
+}
+
+// ---- Recursive Free ----
+
+free(val: ptr) {
+    if val == null { return }
+    let m = val as *MsgValue
+    if m.type_id == TYPE_ARRAY {
+        if m.arr_val != null {
+            let sz = list.list_size(m.arr_val)
+            let i = 0
+            while i < sz {
+                let item = list.list_get_raw(m.arr_val, i)
+                if item != null { free(item) }
+                i = i + 1
+            }
+            list.list_free(m.arr_val)
+        }
+    } else if m.type_id == TYPE_MAP {
+        if m.map_keys != null {
+            let sz = list.list_size(m.map_keys)
+            let i = 0
+            while i < sz {
+                let k = list.list_get_raw(m.map_keys, i)
+                let v = list.list_get_raw(m.map_values, i)
+                if k != null { free(k) }
+                if v != null { free(v) }
+                i = i + 1
+            }
+            list.list_free(m.map_keys)
+            list.list_free(m.map_values)
+        }
+    }
+    heap.free(m)
+}
+
+// ---- Pack / Unpack ----
+
+pack(val: ptr) -> string {
+    let b = bytes.new(64)
+    let end = pack_val(val, b, 0)
+    let res = bytes.finish(b, end)
+    return res
+}
+
+unpack(bytes_str: string) -> ptr! {
+    let len = string.length(bytes_str)
+    if len == 0 {
+        return null, "empty input"
+    }
+    let b = bytes.new(len)
+    bytes.copy_from_string(b, 0, bytes_str, len)
+    defer bytes.free(b)
+
+    let c, err_c = cursor.new(b)
+    if err_c != "" {
+        return null, err_c
+    }
+    defer cursor.free(c)
+
+    let val, err = unpack_inner(c)
+    if err != "" {
+        return null, err
+    }
+    return val, ""
+}
+
+// ---- Packing implementation helper ----
+
+fn pack_val(val: ptr, b: ptr, offset: int) -> int {
+    if val == null {
+        bytes.set(b, offset, 0xc0)
+        return offset + 1
+    }
+    let m = val as *MsgValue
+    if m.type_id == 0 { // TYPE_NIL
+        bytes.set(b, offset, 0xc0)
+        return offset + 1
+    }
+    if m.type_id == 1 { // TYPE_BOOL
+        if m.b_val {
+            bytes.set(b, offset, 0xc3)
+        } else {
+            bytes.set(b, offset, 0xc2)
+        }
+        return offset + 1
+    }
+    if m.type_id == 2 { // TYPE_INT
+        let i = m.i_val
+        if i >= 0 {
+            if i <= 127 {
+                bytes.set(b, offset, i)
+                return offset + 1
+            }
+            if i <= 255 {
+                bytes.set(b, offset, 0xcc)
+                bytes.set(b, offset + 1, i)
+                return offset + 2
+            }
+            if i <= 65535 {
+                bytes.set(b, offset, 0xcd)
+                bytes.set_be16(b, offset + 1, i)
+                return offset + 3
+            }
+            if i <= 4294967295 {
+                bytes.set(b, offset, 0xce)
+                bytes.set_be32(b, offset + 1, i)
+                return offset + 5
+            }
+            bytes.set(b, offset, 0xcf)
+            bytes.set_be64(b, offset + 1, i)
+            return offset + 9
+        } else {
+            if i >= -32 {
+                bytes.set(b, offset, 0xe0 | (i & 31))
+                return offset + 1
+            }
+            if i >= -128 {
+                bytes.set(b, offset, 0xd0)
+                bytes.set(b, offset + 1, i & 255)
+                return offset + 2
+            }
+            if i >= -32768 {
+                bytes.set(b, offset, 0xd1)
+                bytes.set_be16(b, offset + 1, i)
+                return offset + 3
+            }
+            if i >= -2147483648 {
+                bytes.set(b, offset, 0xd2)
+                bytes.set_be32(b, offset + 1, i)
+                return offset + 5
+            }
+            bytes.set(b, offset, 0xd3)
+            bytes.set_be64(b, offset + 1, i)
+            return offset + 9
+        }
+    }
+    if m.type_id == 3 { // TYPE_FLOAT
+        let bits = aether_msgpack_double_to_bits(m.f_val)
+        bytes.set(b, offset, 0xcb)
+        bytes.set_be64(b, offset + 1, bits)
+        return offset + 9
+    }
+    if m.type_id == 4 { // TYPE_STR
+        let len = string.length(m.s_val)
+        let next_off = offset
+        if len <= 31 {
+            bytes.set(b, offset, 0xa0 | len)
+            next_off = offset + 1
+        } else if len <= 255 {
+            bytes.set(b, offset, 0xd9)
+            bytes.set(b, offset + 1, len)
+            next_off = offset + 2
+        } else if len <= 65535 {
+            bytes.set(b, offset, 0xda)
+            bytes.set_be16(b, offset + 1, len)
+            next_off = offset + 3
+        } else {
+            bytes.set(b, offset, 0xdb)
+            bytes.set_be32(b, offset + 1, len)
+            next_off = offset + 5
+        }
+        if len > 0 {
+            bytes.copy_from_string(b, next_off, m.s_val, len)
+        }
+        return next_off + len
+    }
+    if m.type_id == 5 { // TYPE_BIN
+        let len = string.length(m.s_val)
+        let next_off = offset
+        if len <= 255 {
+            bytes.set(b, offset, 0xc4)
+            bytes.set(b, offset + 1, len)
+            next_off = offset + 2
+        } else if len <= 65535 {
+            bytes.set(b, offset, 0xc5)
+            bytes.set_be16(b, offset + 1, len)
+            next_off = offset + 3
+        } else {
+            bytes.set(b, offset, 0xc6)
+            bytes.set_be32(b, offset + 1, len)
+            next_off = offset + 5
+        }
+        if len > 0 {
+            bytes.copy_from_string(b, next_off, m.s_val, len)
+        }
+        return next_off + len
+    }
+    if m.type_id == 6 { // TYPE_ARRAY
+        let sz = list.list_size(m.arr_val)
+        let next_off = offset
+        if sz <= 15 {
+            bytes.set(b, offset, 0x90 | sz)
+            next_off = offset + 1
+        } else if sz <= 65535 {
+            bytes.set(b, offset, 0xdc)
+            bytes.set_be16(b, offset + 1, sz)
+            next_off = offset + 3
+        } else {
+            bytes.set(b, offset, 0xdd)
+            bytes.set_be32(b, offset + 1, sz)
+            next_off = offset + 5
+        }
+        let i = 0
+        while i < sz {
+            let item = list.list_get_raw(m.arr_val, i)
+            next_off = pack_val(item, b, next_off)
+            i = i + 1
+        }
+        return next_off
+    }
+    if m.type_id == 7 { // TYPE_MAP
+        let sz = list.list_size(m.map_keys)
+        let next_off = offset
+        if sz <= 15 {
+            bytes.set(b, offset, 0x80 | sz)
+            next_off = offset + 1
+        } else if sz <= 65535 {
+            bytes.set(b, offset, 0xde)
+            bytes.set_be16(b, offset + 1, sz)
+            next_off = offset + 3
+        } else {
+            bytes.set(b, offset, 0xdf)
+            bytes.set_be32(b, offset + 1, sz)
+            next_off = offset + 5
+        }
+        let i = 0
+        while i < sz {
+            let k = list.list_get_raw(m.map_keys, i)
+            let v = list.list_get_raw(m.map_values, i)
+            next_off = pack_val(k, b, next_off)
+            next_off = pack_val(v, b, next_off)
+            i = i + 1
+        }
+        return next_off
+    }
+    if m.type_id == 8 { // TYPE_EXT
+        let len = string.length(m.s_val)
+        let next_off = offset
+        if len == 1 {
+            bytes.set(b, offset, 0xd4)
+            bytes.set(b, offset + 1, m.ext_type & 255)
+            next_off = offset + 2
+        } else if len == 2 {
+            bytes.set(b, offset, 0xd5)
+            bytes.set(b, offset + 1, m.ext_type & 255)
+            next_off = offset + 2
+        } else if len == 4 {
+            bytes.set(b, offset, 0xd6)
+            bytes.set(b, offset + 1, m.ext_type & 255)
+            next_off = offset + 2
+        } else if len == 8 {
+            bytes.set(b, offset, 0xd7)
+            bytes.set(b, offset + 1, m.ext_type & 255)
+            next_off = offset + 2
+        } else if len == 16 {
+            bytes.set(b, offset, 0xd8)
+            bytes.set(b, offset + 1, m.ext_type & 255)
+            next_off = offset + 2
+        } else if len <= 255 {
+            bytes.set(b, offset, 0xc7)
+            bytes.set(b, offset + 1, len)
+            bytes.set(b, offset + 2, m.ext_type & 255)
+            next_off = offset + 3
+        } else if len <= 65535 {
+            bytes.set(b, offset, 0xc8)
+            bytes.set_be16(b, offset + 1, len)
+            bytes.set(b, offset + 3, m.ext_type & 255)
+            next_off = offset + 4
+        } else {
+            bytes.set(b, offset, 0xc9)
+            bytes.set_be32(b, offset + 1, len)
+            bytes.set(b, offset + 5, m.ext_type & 255)
+            next_off = offset + 6
+        }
+        if len > 0 {
+            bytes.copy_from_string(b, next_off, m.s_val, len)
+        }
+        return next_off + len
+    }
+    return offset
+}
+
+// ---- Unpacking implementation helper ----
+
+fn unpack_inner(c: ptr) -> (ptr, string) {
+    let m = cursor.read_u8(c)
+    if m < 0 {
+        return null, "EOF"
+    }
+
+    // 1. Positive FixInt
+    if m >= 0x00 && m <= 0x7f {
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = m
+        return v as ptr, ""
+    }
+
+    // 2. FixMap
+    if m >= 0x80 && m <= 0x8f {
+        let sz = m & 0x0f
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_MAP
+        v.map_keys = list.list_new()
+        v.map_values = list.list_new()
+        let i = 0
+        while i < sz {
+            let key, err_k = unpack_inner(c)
+            if err_k != "" {
+                free(v)
+                return null, err_k
+            }
+            let val, err_v = unpack_inner(c)
+            if err_v != "" {
+                free(key)
+                free(v)
+                return null, err_v
+            }
+            list.list_add_raw(v.map_keys, key)
+            list.list_add_raw(v.map_values, val)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 3. FixArray
+    if m >= 0x90 && m <= 0x9f {
+        let sz = m & 0x0f
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_ARRAY
+        v.arr_val = list.list_new()
+        let i = 0
+        while i < sz {
+            let item, err = unpack_inner(c)
+            if err != "" {
+                free(v)
+                return null, err
+            }
+            list.list_add_raw(v.arr_val, item)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 4. FixStr
+    if m >= 0xa0 && m <= 0xbf {
+        let len = m & 0x1f
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_STR
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading FixStr data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 5. Nil
+    if m == 0xc0 {
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_NIL
+        return v as ptr, ""
+    }
+
+    // Reserved
+    if m == 0xc1 {
+        return null, "reserved marker 0xc1 encountered"
+    }
+
+    // 6. False
+    if m == 0xc2 {
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_BOOL
+        v.b_val = false
+        return v as ptr, ""
+    }
+
+    // 7. True
+    if m == 0xc3 {
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_BOOL
+        v.b_val = true
+        return v as ptr, ""
+    }
+
+    // 8. Bin 8
+    if m == 0xc4 {
+        if cursor.remaining(c) < 1 { return null, "EOF reading bin 8 length" }
+        let len = cursor.read_u8(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_BIN
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading bin 8 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 9. Bin 16
+    if m == 0xc5 {
+        if cursor.remaining(c) < 2 { return null, "EOF reading bin 16 length" }
+        let len = cursor.read_be_u16(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_BIN
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading bin 16 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 10. Bin 32
+    if m == 0xc6 {
+        if cursor.remaining(c) < 4 { return null, "EOF reading bin 32 length" }
+        let len = cursor.read_be_u32(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_BIN
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading bin 32 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 11. Ext 8
+    if m == 0xc7 {
+        if cursor.remaining(c) < 2 { return null, "EOF reading ext 8 length/type" }
+        let len = cursor.read_u8(c)
+        let et = cursor.read_u8(c)
+        // ext_type is signed i8
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading ext 8 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 12. Ext 16
+    if m == 0xc8 {
+        if cursor.remaining(c) < 3 { return null, "EOF reading ext 16 length/type" }
+        let len = cursor.read_be_u16(c)
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading ext 16 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 13. Ext 32
+    if m == 0xc9 {
+        if cursor.remaining(c) < 5 { return null, "EOF reading ext 32 length/type" }
+        let len = cursor.read_be_u32(c)
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading ext 32 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 14. Float 32
+    if m == 0xca {
+        if cursor.remaining(c) < 4 { return null, "EOF reading float 32" }
+        let bits = cursor.read_be_u32(c)
+        let f = aether_msgpack_bits_to_float(bits)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_FLOAT
+        v.f_val = f
+        return v as ptr, ""
+    }
+
+    // 15. Float 64
+    if m == 0xcb {
+        if cursor.remaining(c) < 8 { return null, "EOF reading float 64" }
+        let bits = cursor.read_be_u64(c)
+        let f = aether_msgpack_bits_to_double(bits)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_FLOAT
+        v.f_val = f
+        return v as ptr, ""
+    }
+
+    // 16. U8
+    if m == 0xcc {
+        if cursor.remaining(c) < 1 { return null, "EOF reading u8" }
+        let i = cursor.read_u8(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 17. U16
+    if m == 0xcd {
+        if cursor.remaining(c) < 2 { return null, "EOF reading u16" }
+        let i = cursor.read_be_u16(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 18. U32
+    if m == 0xce {
+        if cursor.remaining(c) < 4 { return null, "EOF reading u32" }
+        let i = cursor.read_be_u32(c)
+        let val: long = i
+        if val < 0 {
+            val = val + 4294967296
+        }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = val
+        return v as ptr, ""
+    }
+
+    // 19. U64
+    if m == 0xcf {
+        if cursor.remaining(c) < 8 { return null, "EOF reading u64" }
+        let i = cursor.read_be_u64(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 20. I8
+    if m == 0xd0 {
+        if cursor.remaining(c) < 1 { return null, "EOF reading i8" }
+        let i = cursor.read_u8(c)
+        if i >= 128 { i = i - 256 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 21. I16
+    if m == 0xd1 {
+        if cursor.remaining(c) < 2 { return null, "EOF reading i16" }
+        let i = cursor.read_be_u16(c)
+        if i >= 32768 { i = i - 65536 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 22. I32
+    if m == 0xd2 {
+        if cursor.remaining(c) < 4 { return null, "EOF reading i32" }
+        let i = cursor.read_be_u32(c)
+        let val: long = i
+        if val >= 2147483648 { val = val - 4294967296 }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = val
+        return v as ptr, ""
+    }
+
+    // 23. I64
+    if m == 0xd3 {
+        if cursor.remaining(c) < 8 { return null, "EOF reading i64" }
+        let i = cursor.read_be_u64(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    // 24. FixExt 1
+    if m == 0xd4 {
+        if cursor.remaining(c) < 2 { return null, "EOF reading fixext 1" }
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let slice = cursor.read_slice(c, 1)
+        if slice == null { return null, "EOF reading fixext 1 data" }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        v.s_val = bytes.finish(slice, 1)
+        return v as ptr, ""
+    }
+
+    // 25. FixExt 2
+    if m == 0xd5 {
+        if cursor.remaining(c) < 3 { return null, "EOF reading fixext 2" }
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let slice = cursor.read_slice(c, 2)
+        if slice == null { return null, "EOF reading fixext 2 data" }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        v.s_val = bytes.finish(slice, 2)
+        return v as ptr, ""
+    }
+
+    // 26. FixExt 4
+    if m == 0xd6 {
+        if cursor.remaining(c) < 5 { return null, "EOF reading fixext 4" }
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let slice = cursor.read_slice(c, 4)
+        if slice == null { return null, "EOF reading fixext 4 data" }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        v.s_val = bytes.finish(slice, 4)
+        return v as ptr, ""
+    }
+
+    // 27. FixExt 8
+    if m == 0xd7 {
+        if cursor.remaining(c) < 9 { return null, "EOF reading fixext 8" }
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let slice = cursor.read_slice(c, 8)
+        if slice == null { return null, "EOF reading fixext 8 data" }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        v.s_val = bytes.finish(slice, 8)
+        return v as ptr, ""
+    }
+
+    // 28. FixExt 16
+    if m == 0xd8 {
+        if cursor.remaining(c) < 17 { return null, "EOF reading fixext 16" }
+        let et = cursor.read_u8(c)
+        let ext_type = et
+        if ext_type >= 128 { ext_type = ext_type - 256 }
+        let slice = cursor.read_slice(c, 16)
+        if slice == null { return null, "EOF reading fixext 16 data" }
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_EXT
+        v.ext_type = ext_type
+        v.s_val = bytes.finish(slice, 16)
+        return v as ptr, ""
+    }
+
+    // 29. Str 8
+    if m == 0xd9 {
+        if cursor.remaining(c) < 1 { return null, "EOF reading str 8 length" }
+        let len = cursor.read_u8(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_STR
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading str 8 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 30. Str 16
+    if m == 0xda {
+        if cursor.remaining(c) < 2 { return null, "EOF reading str 16 length" }
+        let len = cursor.read_be_u16(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_STR
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading str 16 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 31. Str 32
+    if m == 0xdb {
+        if cursor.remaining(c) < 4 { return null, "EOF reading str 32 length" }
+        let len = cursor.read_be_u32(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_STR
+        if len > 0 {
+            let slice = cursor.read_slice(c, len)
+            if slice == null {
+                heap.free(v)
+                return null, "EOF reading str 32 data"
+            }
+            v.s_val = bytes.finish(slice, len)
+        } else {
+            v.s_val = ""
+        }
+        return v as ptr, ""
+    }
+
+    // 32. Array 16
+    if m == 0xdc {
+        if cursor.remaining(c) < 2 { return null, "EOF reading array 16 size" }
+        let sz = cursor.read_be_u16(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_ARRAY
+        v.arr_val = list.list_new()
+        let i = 0
+        while i < sz {
+            let item, err = unpack_inner(c)
+            if err != "" {
+                free(v)
+                return null, err
+            }
+            list.list_add_raw(v.arr_val, item)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 33. Array 32
+    if m == 0xdd {
+        if cursor.remaining(c) < 4 { return null, "EOF reading array 32 size" }
+        let sz = cursor.read_be_u32(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_ARRAY
+        v.arr_val = list.list_new()
+        let i = 0
+        while i < sz {
+            let item, err = unpack_inner(c)
+            if err != "" {
+                free(v)
+                return null, err
+            }
+            list.list_add_raw(v.arr_val, item)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 34. Map 16
+    if m == 0xde {
+        if cursor.remaining(c) < 2 { return null, "EOF reading map 16 size" }
+        let sz = cursor.read_be_u16(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_MAP
+        v.map_keys = list.list_new()
+        v.map_values = list.list_new()
+        let i = 0
+        while i < sz {
+            let key, err_k = unpack_inner(c)
+            if err_k != "" {
+                free(v)
+                return null, err_k
+            }
+            let val, err_v = unpack_inner(c)
+            if err_v != "" {
+                free(key)
+                free(v)
+                return null, err_v
+            }
+            list.list_add_raw(v.map_keys, key)
+            list.list_add_raw(v.map_values, val)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 35. Map 32
+    if m == 0xdf {
+        if cursor.remaining(c) < 4 { return null, "EOF reading map 32 size" }
+        let sz = cursor.read_be_u32(c)
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_MAP
+        v.map_keys = list.list_new()
+        v.map_values = list.list_new()
+        let i = 0
+        while i < sz {
+            let key, err_k = unpack_inner(c)
+            if err_k != "" {
+                free(v)
+                return null, err_k
+            }
+            let val, err_v = unpack_inner(c)
+            if err_v != "" {
+                free(key)
+                free(v)
+                return null, err_v
+            }
+            list.list_add_raw(v.map_keys, key)
+            list.list_add_raw(v.map_values, val)
+            i = i + 1
+        }
+        return v as ptr, ""
+    }
+
+    // 36. Negative FixInt
+    if m >= 0xe0 && m <= 0xff {
+        let i = m - 256
+        let v = heap.new(MsgValue)
+        v.type_id = TYPE_INT
+        v.i_val = i
+        return v as ptr, ""
+    }
+
+    return null, "unrecognized marker"
+}

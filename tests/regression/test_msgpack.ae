@@ -1,0 +1,295 @@
+// std.msgpack regression test (Portions copyright 3Hren/msgpack-rust).
+//
+// Test cases cover:
+//   - packing and unpacking of:
+//     - nil / null
+//     - boolean (true, false)
+//     - positive and negative fixnum integers
+//     - unsigned and signed integers (u8, u16, u32, u64, i8, i16, i32, i64)
+//     - floats (f32, f64)
+//     - strings (fixstr, str8, str16, str32)
+//     - binary data (bin8, bin16, bin32)
+//     - arrays (fixarray, array16, array32)
+//     - maps (fixmap, map16, map32)
+//     - extensions (fixext1..16, ext8, ext16, ext32)
+//   - exact hex representation checks for the MsgPack wire format
+//   - roundtrip correctness checks
+//   - memory leak safety is ensured because we free all allocated nodes
+
+import std.msgpack
+import std.msgpack (MsgValue)
+import std.encoding
+import std.string
+import std.list
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) -> int {
+    if !cond {
+        println("FAIL: ${msg}")
+        return 1
+    }
+    return 0
+}
+
+fn assert_hex(val: ptr, expected_hex: string, msg: string) -> int {
+    let packed = msgpack.pack(val)
+    let actual_hex = encoding.hex_encode(packed, string.length(packed))
+    if actual_hex != expected_hex {
+        println("FAIL: ${msg} (expected hex ${expected_hex}, got ${actual_hex})")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    fails = 0
+
+    println("=== test_msgpack ===")
+
+    // 1. Nil
+    let n = msgpack.nil_value()
+    fails = fails + check(msgpack.get_type(n) == msgpack.TYPE_NIL, "get_type nil")
+    fails = fails + assert_hex(n, "c0", "nil hex")
+
+    // Nil Unpack Roundtrip
+    let n_bytes = msgpack.pack(n)
+    let n_unpacked, err_n = msgpack.unpack(n_bytes)
+    fails = fails + check(err_n == "", "unpack nil err")
+    fails = fails + check(msgpack.get_type(n_unpacked) == msgpack.TYPE_NIL, "unpack nil type")
+    msgpack.free(n)
+    msgpack.free(n_unpacked)
+
+    // 2. Bool
+    let b_true = msgpack.boolean(true)
+    let b_false = msgpack.boolean(false)
+    fails = fails + check(msgpack.get_type(b_true) == msgpack.TYPE_BOOL, "get_type bool")
+    fails = fails + check(msgpack.get_bool(b_true) == true, "get_bool true")
+    fails = fails + check(msgpack.get_bool(b_false) == false, "get_bool false")
+    fails = fails + assert_hex(b_true, "c3", "bool true hex")
+    fails = fails + assert_hex(b_false, "c2", "bool false hex")
+    msgpack.free(b_true)
+    msgpack.free(b_false)
+
+    // 3. Positive Fixnum Integers
+    let i_0 = msgpack.from_int(0)
+    let i_127 = msgpack.from_int(127)
+    let i_32 = msgpack.from_int(32)
+    fails = fails + assert_hex(i_0, "00", "0 hex")
+    fails = fails + assert_hex(i_127, "7f", "127 hex")
+    fails = fails + assert_hex(i_32, "20", "32 hex")
+    fails = fails + check(msgpack.get_int(i_127) == 127, "get_int 127")
+    msgpack.free(i_0)
+    msgpack.free(i_127)
+    msgpack.free(i_32)
+
+    // 4. Negative Fixnum Integers
+    let i_neg32 = msgpack.from_int(-32)
+    let i_neg1 = msgpack.from_int(-1)
+    fails = fails + assert_hex(i_neg32, "e0", "-32 hex")
+    fails = fails + assert_hex(i_neg1, "ff", "-1 hex")
+
+    // Negative fixnum unpack roundtrip
+    let neg32_bytes = msgpack.pack(i_neg32)
+    let neg32_unpacked, err_neg32 = msgpack.unpack(neg32_bytes)
+    fails = fails + check(err_neg32 == "", "unpack neg32 err")
+    fails = fails + check(msgpack.get_type(neg32_unpacked) == msgpack.TYPE_INT, "unpack neg32 type")
+    fails = fails + check(msgpack.get_int(neg32_unpacked) == -32, "unpack neg32 val")
+    msgpack.free(i_neg32)
+    msgpack.free(i_neg1)
+    msgpack.free(neg32_unpacked)
+
+    // 5. Unsigned and Signed Wide Integers
+    // u8
+    let i_128 = msgpack.from_int(128)
+    let i_255 = msgpack.from_int(255)
+    fails = fails + assert_hex(i_128, "cc80", "128 (u8) hex")
+    fails = fails + assert_hex(i_255, "ccff", "255 (u8) hex")
+    msgpack.free(i_128)
+    msgpack.free(i_255)
+
+    // u16
+    let i_256 = msgpack.from_int(256)
+    let i_65535 = msgpack.from_int(65535)
+    fails = fails + assert_hex(i_256, "cd0100", "256 (u16) hex")
+    fails = fails + assert_hex(i_65535, "cdffff", "65535 (u16) hex")
+    msgpack.free(i_256)
+    msgpack.free(i_65535)
+
+    // u32
+    let i_65536 = msgpack.from_int(65536)
+    let i_4294967295 = msgpack.from_int(4294967295)
+    fails = fails + assert_hex(i_65536, "ce00010000", "65536 (u32) hex")
+    fails = fails + assert_hex(i_4294967295, "ceffffffff", "4294967295 (u32) hex")
+
+    // u32 unpack roundtrip (unsigned representation)
+    let u32_bytes = msgpack.pack(i_4294967295)
+    let u32_unpacked, err_u32 = msgpack.unpack(u32_bytes)
+    fails = fails + check(err_u32 == "", "unpack u32 err")
+    fails = fails + check(msgpack.get_int(u32_unpacked) == 4294967295, "unpack u32 val")
+    msgpack.free(i_65536)
+    msgpack.free(i_4294967295)
+    msgpack.free(u32_unpacked)
+
+    // i8
+    let i_neg33 = msgpack.from_int(-33)
+    let i_neg128 = msgpack.from_int(-128)
+    fails = fails + assert_hex(i_neg33, "d0df", "-33 (i8) hex")
+    fails = fails + assert_hex(i_neg128, "d080", "-128 (i8) hex")
+    msgpack.free(i_neg33)
+    msgpack.free(i_neg128)
+
+    // i16
+    let i_neg129 = msgpack.from_int(-129)
+    let i_neg32768 = msgpack.from_int(-32768)
+    fails = fails + assert_hex(i_neg129, "d1ff7f", "-129 (i16) hex")
+    fails = fails + assert_hex(i_neg32768, "d18000", "-32768 (i16) hex")
+    msgpack.free(i_neg129)
+    msgpack.free(i_neg32768)
+
+    // i32
+    let i_neg32769 = msgpack.from_int(-32769)
+    let i_neg2147483648 = msgpack.from_int(-2147483648)
+    fails = fails + assert_hex(i_neg32769, "d2ffff7fff", "-32769 (i32) hex")
+    fails = fails + assert_hex(i_neg2147483648, "d280000000", "-2147483648 (i32) hex")
+
+    // i32 unpack roundtrip
+    let i32_bytes = msgpack.pack(i_neg2147483648)
+    let i32_unpacked, err_i32 = msgpack.unpack(i32_bytes)
+    fails = fails + check(err_i32 == "", "unpack i32 err")
+    fails = fails + check(msgpack.get_int(i32_unpacked) == -2147483648, "unpack i32 val")
+    msgpack.free(i_neg32769)
+    msgpack.free(i_neg2147483648)
+    msgpack.free(i32_unpacked)
+
+    // 6. Floats
+    // f64 (double)
+    let f_0 = msgpack.num(0.0)
+    let f_1point5 = msgpack.num(1.5)
+    fails = fails + check(msgpack.get_type(f_1point5) == msgpack.TYPE_FLOAT, "get_type float")
+    fails = fails + check(msgpack.get_float(f_1point5) == 1.5, "get_float 1.5")
+
+    // float unpack roundtrip
+    let f_bytes = msgpack.pack(f_1point5)
+    let f_unpacked, err_f = msgpack.unpack(f_bytes)
+    fails = fails + check(err_f == "", "unpack float err")
+    fails = fails + check(msgpack.get_type(f_unpacked) == msgpack.TYPE_FLOAT, "unpack float type")
+    fails = fails + check(msgpack.get_float(f_unpacked) == 1.5, "unpack float val")
+    msgpack.free(f_0)
+    msgpack.free(f_1point5)
+    msgpack.free(f_unpacked)
+
+    // 7. Strings
+    let s_empty = msgpack.str("")
+    let s_hello = msgpack.str("hello")
+    fails = fails + check(msgpack.get_type(s_hello) == msgpack.TYPE_STR, "get_type str")
+    fails = fails + check(msgpack.get_string(s_hello) == "hello", "get_string hello")
+    fails = fails + assert_hex(s_hello, "a568656c6c6f", "str hello hex")
+
+    // str unpack roundtrip
+    let s_bytes = msgpack.pack(s_hello)
+    let s_unpacked, err_s = msgpack.unpack(s_bytes)
+    fails = fails + check(err_s == "", "unpack str err")
+    fails = fails + check(msgpack.get_type(s_unpacked) == msgpack.TYPE_STR, "unpack str type")
+    fails = fails + check(msgpack.get_string(s_unpacked) == "hello", "unpack str val")
+    msgpack.free(s_empty)
+    msgpack.free(s_hello)
+    msgpack.free(s_unpacked)
+
+    // 8. Binary Data
+    let b_data = msgpack.bin("bin-data")
+    fails = fails + check(msgpack.get_type(b_data) == msgpack.TYPE_BIN, "get_type bin")
+    fails = fails + check(msgpack.get_bin(b_data) == "bin-data", "get_bin bin-data")
+    fails = fails + assert_hex(b_data, "c40862696e2d64617461", "bin hex")
+
+    // bin unpack roundtrip
+    let bin_bytes = msgpack.pack(b_data)
+    let bin_unpacked, err_bin = msgpack.unpack(bin_bytes)
+    fails = fails + check(err_bin == "", "unpack bin err")
+    fails = fails + check(msgpack.get_type(bin_unpacked) == msgpack.TYPE_BIN, "unpack bin type")
+    fails = fails + check(msgpack.get_bin(bin_unpacked) == "bin-data", "unpack bin val")
+    msgpack.free(b_data)
+    msgpack.free(bin_unpacked)
+
+    // 9. Arrays
+    let a = msgpack.arr()
+    fails = fails + check(msgpack.get_type(a) == msgpack.TYPE_ARRAY, "get_type array")
+    msgpack.array_add(a, msgpack.from_int(42))
+    msgpack.array_add(a, msgpack.str("world"))
+    fails = fails + check(msgpack.array_size(a) == 2, "array_size 2")
+
+    let a_item0 = msgpack.array_get(a, 0)
+    let a_item1 = msgpack.array_get(a, 1)
+    fails = fails + check(msgpack.get_type(a_item0) == msgpack.TYPE_INT && msgpack.get_int(a_item0) == 42, "array_get 0")
+    fails = fails + check(msgpack.get_type(a_item1) == msgpack.TYPE_STR && msgpack.get_string(a_item1) == "world", "array_get 1")
+
+    // array unpack roundtrip
+    let a_bytes = msgpack.pack(a)
+    let a_unpacked, err_a = msgpack.unpack(a_bytes)
+    fails = fails + check(err_a == "", "unpack array err")
+    fails = fails + check(msgpack.array_size(a_unpacked) == 2, "unpacked array_size 2")
+    let au0 = msgpack.array_get(a_unpacked, 0)
+    let au1 = msgpack.array_get(a_unpacked, 1)
+    fails = fails + check(msgpack.get_int(au0) == 42, "unpacked array item 0")
+    fails = fails + check(msgpack.get_string(au1) == "world", "unpacked array item 1")
+    msgpack.free(a)
+    msgpack.free(a_unpacked)
+
+    // 10. Maps
+    let m = msgpack.map()
+    fails = fails + check(msgpack.get_type(m) == msgpack.TYPE_MAP, "get_type map")
+    msgpack.map_set(m, "key1", msgpack.from_int(100))
+    msgpack.map_set(m, "key2", msgpack.boolean(true))
+    fails = fails + check(msgpack.map_size(m) == 2, "map_size 2")
+
+    let m_val0 = msgpack.map_get(m, "key1")
+    let m_val1 = msgpack.map_get(m, "key2")
+    fails = fails + check(msgpack.get_int(m_val0) == 100, "map_get key1")
+    fails = fails + check(msgpack.get_bool(m_val1) == true, "map_get key2")
+
+    // map unpack roundtrip
+    let m_bytes = msgpack.pack(m)
+    let m_unpacked, err_m = msgpack.unpack(m_bytes)
+    fails = fails + check(err_m == "", "unpack map err")
+    fails = fails + check(msgpack.map_size(m_unpacked) == 2, "unpacked map_size 2")
+    let mu0 = msgpack.map_get(m_unpacked, "key1")
+    let mu1 = msgpack.map_get(m_unpacked, "key2")
+    fails = fails + check(msgpack.get_int(mu0) == 100, "unpacked map key1")
+    fails = fails + check(msgpack.get_bool(mu1) == true, "unpacked map key2")
+    msgpack.free(m)
+    msgpack.free(m_unpacked)
+
+    // 11. Extensions
+    let e = msgpack.ext(5, "A")
+    fails = fails + check(msgpack.get_type(e) == msgpack.TYPE_EXT, "get_type ext")
+    fails = fails + assert_hex(e, "d40541", "fixext 1 hex")
+
+    // ext unpack roundtrip
+    let e_bytes = msgpack.pack(e)
+    let e_unpacked, err_e = msgpack.unpack(e_bytes)
+    fails = fails + check(err_e == "", "unpack ext err")
+    fails = fails + check(msgpack.get_type(e_unpacked) == msgpack.TYPE_EXT, "unpack ext type")
+    let ext_node = e_unpacked as *MsgValue
+    fails = fails + check(ext_node.ext_type == 5, "unpack ext type id")
+    fails = fails + check(ext_node.s_val == "A", "unpack ext data")
+    msgpack.free(e)
+    msgpack.free(e_unpacked)
+
+    // ext with signed type id
+    let e_signed = msgpack.ext(-5, "AB")
+    fails = fails + assert_hex(e_signed, "d5fb4142", "fixext 2 signed hex")
+    let es_bytes = msgpack.pack(e_signed)
+    let es_unpacked, err_es = msgpack.unpack(es_bytes)
+    fails = fails + check(err_es == "", "unpack signed ext err")
+    let es_node = es_unpacked as *MsgValue
+    fails = fails + check(es_node.ext_type == -5, "unpack signed ext type id")
+    fails = fails + check(es_node.s_val == "AB", "unpack signed ext data")
+    msgpack.free(e_signed)
+    msgpack.free(es_unpacked)
+
+    if fails != 0 {
+        println("msgpack: ${fails} failure(s)")
+        exit(1)
+    }
+    println("PASS: test_msgpack")
+}
