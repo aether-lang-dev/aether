@@ -5015,13 +5015,31 @@ static int cmd_build(int argc, char** argv) {
         }
         char mod[64];
         if (cross_uses_unsupported_module(file, mod, sizeof(mod))) {
-            fprintf(stderr,
-                "Note: '%s' uses %s. Cross binaries are built without OpenSSL / zlib /\n"
-                "nghttp2 / PCRE2, so features that need them (HTTPS/TLS, hashing, base64,\n"
-                "regex, compression, HTTP/2) report errors at runtime on %s, exactly like\n"
-                "a native build on a host without those libraries. Plain sockets and pure\n"
-                "helpers still work. Building anyway.\n",
-                file, mod, target);
+            const char* xsr = getenv("CROSSBUILD_SYSROOT");
+            if (xsr && *xsr) {
+                /* A sysroot is staged: the ae_cross probe links + compiles the
+                 * real path for whichever Tier-2 libs it actually contains, so
+                 * we can't promise all features work (the sysroot may be a
+                 * subset) but we must NOT claim they're all unavailable. */
+                fprintf(stderr,
+                    "Note: '%s' uses %s. CROSSBUILD_SYSROOT is set, so each of OpenSSL /\n"
+                    "zlib / nghttp2 / PCRE2 that the sysroot actually stages is compiled\n"
+                    "and linked for real on %s; any it does not stage reports unavailable\n"
+                    "at runtime. Building.\n",
+                    file, mod, target);
+            } else {
+                /* No sysroot: openssl/zlib/nghttp2/pcre2-backed features stub
+                 * out. HMAC is the exception — std.cryptography's HMAC is
+                 * pure-Aether and works regardless — so it is NOT listed here. */
+                fprintf(stderr,
+                    "Note: '%s' uses %s. Without a CROSSBUILD_SYSROOT, cross binaries link\n"
+                    "no OpenSSL / zlib / nghttp2 / PCRE2, so features needing them (HTTPS/TLS,\n"
+                    "SHA/MD hashing, base64, regex, compression, HTTP/2) report errors at\n"
+                    "runtime on %s. HMAC (pure-Aether) and plain sockets still work. Stage a\n"
+                    "sysroot (aether-crossbuild) and set CROSSBUILD_SYSROOT to link them for\n"
+                    "real. Building anyway.\n",
+                    file, mod, target);
+            }
         }
     }
 

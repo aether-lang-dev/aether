@@ -18,6 +18,7 @@
 import std.string
 import std.bytes
 import std.encoding
+import std.cryptography.hmac
 
 exports (
     cryptography_sha1_hex_raw, cryptography_sha256_hex_raw,
@@ -165,10 +166,31 @@ md5_hex(data: string, length: int) -> {
 // key derivation (each round's output keys the next), use the raw
 // bytes form `hmac_sha256_bytes` so intermediate steps don't
 // round-trip through hex.
+// Copy a length-prefixed string payload (binary-safe, embedded NULs OK)
+// into a fresh AetherBytes buffer for the pure-Aether HMAC.
+hmac_str_to_bytes(s: string, n: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i))
+        i = i + 1
+    }
+    return b
+}
+
 hmac_sha256_hex(key: string, key_len: int, msg: string, msg_len: int) -> {
-    out = cryptography_hmac_sha256_hex_raw(key, key_len, msg, msg_len)
-    if out == 0 {
-        return "", "openssl unavailable"
+    // Delegate to the PURE-AETHER HMAC (std.cryptography.hmac): it needs no
+    // libcrypto and produces a byte-identical digest, so HMAC works on every
+    // target — including cross builds without an OpenSSL sysroot. This closes
+    // the fail-open where the openssl-backed path stubbed to "" on cross,
+    // making a wrong/empty MAC compare equal in auth checks.
+    kb = hmac_str_to_bytes(key, key_len)
+    mb = hmac_str_to_bytes(msg, msg_len)
+    out = hmac.hmac_sha256_hex(kb, key_len, mb, msg_len)
+    bytes.free(kb)
+    bytes.free(mb)
+    if out == "" {
+        return "", "hmac failed"
     }
     return out, ""
 }
@@ -179,14 +201,21 @@ hmac_sha256_hex(key: string, key_len: int, msg: string, msg_len: int) -> {
 // derivation (SigV4, HKDF-shaped flows) where each round's output
 // keys the next.
 hmac_sha256_bytes(key: string, key_len: int, msg: string, msg_len: int) -> {
-    ok = cryptography_hmac_sha256_bytes_raw(key, key_len, msg, msg_len)
-    if ok == 0 {
-        return "", 0, "openssl unavailable"
+    // Pure-Aether HMAC (see hmac_sha256_hex) — works on every target, no
+    // libcrypto. Returns the raw 32-byte digest as a length-preserving
+    // AetherString so embedded NULs survive (SigV4/HKDF chaining).
+    kb = hmac_str_to_bytes(key, key_len)
+    mb = hmac_str_to_bytes(msg, msg_len)
+    digest = hmac.hmac_sha256(kb, key_len, mb, msg_len)
+    bytes.free(kb)
+    bytes.free(mb)
+    if digest == null {
+        return "", 0, "hmac failed"
     }
-    raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
-    owned = string_new_with_length(raw, n)
-    cryptography_release_binary_digest()
+    n = bytes.length(digest)
+    // bytes.finish hands the buffer off to a length-preserving AetherString
+    // (binary-safe, embedded NULs intact) and consumes the buffer.
+    owned = bytes.finish(digest, n)
     return owned, n, ""
 }
 
