@@ -1,0 +1,323 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.xoodyak — Xoodyak Hash in pure Aether,
+// ported from Bouncy Castle's XoodyakDigest. NO externs to OpenSSL
+// or any C crypto.
+//
+// Xoodyak is a lightweight cryptographic hash function.
+//
+// Import with:  import std.cryptography.xoodyak
+
+import std.bits
+import std.bytes
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    new, update, update_bytes, final_hex, final_bytes, free_ctx,
+    xoodyak_hex, xoodyak_bytes
+)
+
+const XOODYAK_RC: int[12] = [
+    0x00000058, 0x00000038, 0x000003c0, 0x000000d0, 0x00000120, 0x00000014,
+    0x00000060, 0x0000002c, 0x00000380, 0x000000f0, 0x000001a0, 0x00000012
+]
+
+struct XoodyakCtx {
+    m_state: ptr
+    m_buf: ptr
+    m_bufPos: int
+    m_updated: int
+}
+
+rotl32(v: long, n: int) -> long {
+    v32 = v & 0xFFFFFFFF
+    return ((v32 << n) | (bits.lsr64(v32, 32 - n))) & 0xFFFFFFFF
+}
+
+up_state(c: *XoodyakCtx) {
+    long a0 = bytes.get_le32(c.m_state, 0)
+    long a1 = bytes.get_le32(c.m_state, 4)
+    long a2 = bytes.get_le32(c.m_state, 8)
+    long a3 = bytes.get_le32(c.m_state, 12)
+    long a4 = bytes.get_le32(c.m_state, 16)
+    long a5 = bytes.get_le32(c.m_state, 20)
+    long a6 = bytes.get_le32(c.m_state, 24)
+    long a7 = bytes.get_le32(c.m_state, 28)
+    long a8 = bytes.get_le32(c.m_state, 32)
+    long a9 = bytes.get_le32(c.m_state, 36)
+    long a10 = bytes.get_le32(c.m_state, 40)
+    long a11 = bytes.get_le32(c.m_state, 44)
+
+    i = 0
+    while i < 12 {
+        /* Theta: Column Parity Mixer */
+        long p0 = (a0 ^ a4 ^ a8) & 0xFFFFFFFF
+        long p1 = (a1 ^ a5 ^ a9) & 0xFFFFFFFF
+        long p2 = (a2 ^ a6 ^ a10) & 0xFFFFFFFF
+        long p3 = (a3 ^ a7 ^ a11) & 0xFFFFFFFF
+
+        long e0 = rotl32(p3, 5) ^ rotl32(p3, 14)
+        long e1 = rotl32(p0, 5) ^ rotl32(p0, 14)
+        long e2 = rotl32(p1, 5) ^ rotl32(p1, 14)
+        long e3 = rotl32(p2, 5) ^ rotl32(p2, 14)
+
+        a0 = (a0 ^ e0) & 0xFFFFFFFF
+        a4 = (a4 ^ e0) & 0xFFFFFFFF
+        a8 = (a8 ^ e0) & 0xFFFFFFFF
+
+        a1 = (a1 ^ e1) & 0xFFFFFFFF
+        a5 = (a5 ^ e1) & 0xFFFFFFFF
+        a9 = (a9 ^ e1) & 0xFFFFFFFF
+
+        a2 = (a2 ^ e2) & 0xFFFFFFFF
+        a6 = (a6 ^ e2) & 0xFFFFFFFF
+        a10 = (a10 ^ e2) & 0xFFFFFFFF
+
+        a3 = (a3 ^ e3) & 0xFFFFFFFF
+        a7 = (a7 ^ e3) & 0xFFFFFFFF
+        a11 = (a11 ^ e3) & 0xFFFFFFFF
+
+        /* Rho-west: plane shift */
+        long b0 = a0
+        long b1 = a1
+        long b2 = a2
+        long b3 = a3
+
+        long b4 = a7
+        long b5 = a4
+        long b6 = a5
+        long b7 = a6
+
+        long b8 = rotl32(a8, 11)
+        long b9 = rotl32(a9, 11)
+        long b10 = rotl32(a10, 11)
+        long b11 = rotl32(a11, 11)
+
+        /* Iota: round constant */
+        b0 = (b0 ^ XOODYAK_RC[i]) & 0xFFFFFFFF
+
+        /* Chi: non linear layer */
+        a0 = (b0 ^ ((~b4) & b8)) & 0xFFFFFFFF
+        a1 = (b1 ^ ((~b5) & b9)) & 0xFFFFFFFF
+        a2 = (b2 ^ ((~b6) & b10)) & 0xFFFFFFFF
+        a3 = (b3 ^ ((~b7) & b11)) & 0xFFFFFFFF
+
+        a4 = (b4 ^ ((~b8) & b0)) & 0xFFFFFFFF
+        a5 = (b5 ^ ((~b9) & b1)) & 0xFFFFFFFF
+        a6 = (b6 ^ ((~b10) & b2)) & 0xFFFFFFFF
+        a7 = (b7 ^ ((~b11) & b3)) & 0xFFFFFFFF
+
+        b8 = (b8 ^ ((~b0) & b4)) & 0xFFFFFFFF
+        b9 = (b9 ^ ((~b1) & b5)) & 0xFFFFFFFF
+        b10 = (b10 ^ ((~b2) & b6)) & 0xFFFFFFFF
+        b11 = (b11 ^ ((~b3) & b7)) & 0xFFFFFFFF
+
+        /* Rho-east: plane shift */
+        a4 = rotl32(a4, 1)
+        a5 = rotl32(a5, 1)
+        a6 = rotl32(a6, 1)
+        a7 = rotl32(a7, 1)
+
+        a8 = rotl32(b10, 8)
+        a9 = rotl32(b11, 8)
+        a10 = rotl32(b8, 8)
+        a11 = rotl32(b9, 8)
+
+        i = i + 1
+    }
+
+    bytes.set_le32(c.m_state, 0, a0 as int)
+    bytes.set_le32(c.m_state, 4, a1 as int)
+    bytes.set_le32(c.m_state, 8, a2 as int)
+    bytes.set_le32(c.m_state, 12, a3 as int)
+    bytes.set_le32(c.m_state, 16, a4 as int)
+    bytes.set_le32(c.m_state, 20, a5 as int)
+    bytes.set_le32(c.m_state, 24, a6 as int)
+    bytes.set_le32(c.m_state, 28, a7 as int)
+    bytes.set_le32(c.m_state, 32, a8 as int)
+    bytes.set_le32(c.m_state, 36, a9 as int)
+    bytes.set_le32(c.m_state, 40, a10 as int)
+    bytes.set_le32(c.m_state, 44, a11 as int)
+}
+
+down_state(c: *XoodyakCtx, buf: ptr, len: int) {
+    i = 0
+    while i < len {
+        b_st = bytes.get(c.m_state, i)
+        b_buf = bytes.get(buf, i)
+        bytes.set(c.m_state, i, (b_st ^ b_buf) & 255)
+        i = i + 1
+    }
+    b_last = bytes.get(c.m_state, len)
+    bytes.set(c.m_state, len, (b_last ^ 0x01) & 255)
+}
+
+reset_ctx(c: *XoodyakCtx) {
+    i = 0
+    while i < 48 {
+        bytes.set(c.m_state, i, 0)
+        i = i + 1
+    }
+    j = 0
+    while j < 16 {
+        bytes.set(c.m_buf, j, 0)
+        j = j + 1
+    }
+    c.m_bufPos = 0
+    c.m_updated = 0
+
+    // m_state[47] ^= 0x01
+    b = bytes.get(c.m_state, 47)
+    bytes.set(c.m_state, 47, (b ^ 0x01) & 255)
+}
+
+new() -> {
+    c = malloc(64) as *XoodyakCtx
+    if c == null {
+        return null, "allocation failed"
+    }
+    c.m_state = bytes.new(48)
+    c.m_buf = bytes.new(16)
+    reset_ctx(c)
+    return c, ""
+}
+
+update_byte(c: *XoodyakCtx, b: int) {
+    bytes.set(c.m_buf, c.m_bufPos, b & 255)
+    c.m_bufPos = c.m_bufPos + 1
+    if c.m_bufPos == 16 {
+        down_state(c, c.m_buf, 16)
+        up_state(c)
+        c.m_updated = 1
+        c.m_bufPos = 0
+    }
+}
+
+update(ctx: ptr, data: string, length: int) {
+    c = ctx as *XoodyakCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        update_byte(c, string_char_at_n(data, length, i))
+        i = i + 1
+    }
+}
+
+update_bytes(ctx: ptr, data: ptr, length: int) {
+    c = ctx as *XoodyakCtx
+    if length <= 0 {
+        return
+    }
+    i = 0
+    while i < length {
+        update_byte(c, bytes.get(data, i))
+        i = i + 1
+    }
+}
+
+finalize_to_bytes(c: *XoodyakCtx) -> ptr {
+    if (c.m_bufPos > 0) || (c.m_updated == 0) {
+        down_state(c, c.m_buf, c.m_bufPos)
+        up_state(c)
+    }
+
+    out = bytes.new(32)
+    // Copy first 16 bytes of m_state
+    bytes.copy_from_bytes(out, 0, c.m_state, 0, 16)
+
+    // m_state[0] ^= 0x01
+    b0 = bytes.get(c.m_state, 0)
+    bytes.set(c.m_state, 0, (b0 ^ 0x01) & 255)
+
+    up_state(c)
+
+    // Copy next 16 bytes of m_state into output[16..]
+    bytes.copy_from_bytes(out, 16, c.m_state, 0, 16)
+
+    return out
+}
+
+free_internals(c: *XoodyakCtx) {
+    if c.m_state != null {
+        bytes.free(c.m_state)
+        c.m_state = null
+    }
+    if c.m_buf != null {
+        bytes.free(c.m_buf)
+        c.m_buf = null
+    }
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *XoodyakCtx
+    out = finalize_to_bytes(c)
+    s = bytes.finish(out, 32)
+    free_internals(c)
+    free(ctx)
+    res = bytes.new(32)
+    bytes.copy_from_string(res, 0, s, 32)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *XoodyakCtx
+    out = finalize_to_bytes(c)
+    hexbuf = bytes.new(64)
+    i = 0
+    while i < 32 {
+        b = bytes.get(out, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    bytes.free(out)
+    s = bytes.finish(hexbuf, 64)
+    free_internals(c)
+    free(ctx)
+    return s
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *XoodyakCtx
+    free_internals(c)
+    free(ctx)
+}
+
+// One-shot wrappers
+xoodyak_hex(data: string, len: int) -> string {
+    ctx, err = new()
+    if err != "" {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+xoodyak_bytes(data: string, len: int) -> ptr {
+    ctx, err = new()
+    if err != "" {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}

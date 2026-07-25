@@ -1,0 +1,108 @@
+// Test std.cryptography.haraka256 against Bouncy Castle test vectors.
+import std.cryptography.haraka256
+import std.bytes
+import std.string
+import std.io
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string_char_at_n(hex, len, i * 2)
+        c_lo = string_char_at_n(hex, len, i * 2 + 1)
+
+        hi = 0
+        if (c_hi >= 48) && (c_hi <= 57) { hi = c_hi - 48 }
+        else if (c_hi >= 97) && (c_hi <= 102) { hi = c_hi - 97 + 10 }
+        else if (c_hi >= 65) && (c_hi <= 70) { hi = c_hi - 65 + 10 }
+
+        lo = 0
+        if (c_lo >= 48) && (c_lo <= 57) { lo = c_lo - 48 }
+        else if (c_lo >= 97) && (c_lo <= 102) { lo = c_lo - 97 + 10 }
+        else if (c_lo >= 65) && (c_lo <= 70) { lo = c_lo - 65 + 10 }
+
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+check_bytes(label: string, got: ptr, want_hex: string) -> int {
+    want = hex_to_bytes(want_hex)
+    i = 0
+    while i < 32 {
+        g = bytes.get(got, i)
+        w = bytes.get(want, i)
+        if g != w {
+            println("FAIL ${label} at byte ${i}")
+            bytes.free(want)
+            return 1
+        }
+        i = i + 1
+    }
+    println("ok   ${label}")
+    bytes.free(want)
+    return 0
+}
+
+main() {
+    fails = 0
+
+    // ---- Known Vector Test ----
+    // From Appendix B, Haraka-256 v2
+    input1 = bytes.new(32)
+    t = 0
+    while t < 32 {
+        bytes.set(input1, t, t)
+        t = t + 1
+    }
+
+    ctx1, _ = haraka256.new()
+    haraka256.update_bytes(ctx1, input1, 32)
+    res1 = haraka256.final_bytes(ctx1)
+    fails = fails + check_bytes("Haraka-256 known vector", res1, "8027ccb87949774b78d0545fb72bf70c695c2a0923cbd47bba1159efbf2b2c1c")
+    bytes.free(input1)
+    bytes.free(res1)
+
+
+    // ---- Monty Test ----
+    // Vector 1 (000102...)
+    result1 = hex_to_bytes("000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F")
+    t = 0
+    while t < 1000 {
+        ctx, _ = haraka256.new()
+        haraka256.update_bytes(ctx, result1, 32)
+        res = haraka256.final_bytes(ctx)
+        bytes.copy_from_bytes(result1, 0, res, 0, 32)
+        bytes.free(res)
+        t = t + 1
+    }
+    fails = fails + check_bytes("Haraka-256 Monty 1", result1, "e78599d7163ab58f1c90f0171c6fc4e852eb4b8cc29a4af63194fd9977c1de84")
+    bytes.free(result1)
+
+    // Vector 2 (FF...)
+    result2 = hex_to_bytes("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+    t = 0
+    while t < 1000 {
+        ctx, _ = haraka256.new()
+        haraka256.update_bytes(ctx, result2, 32)
+        res = haraka256.final_bytes(ctx)
+        bytes.copy_from_bytes(result2, 0, res, 0, 32)
+        bytes.free(res)
+        t = t + 1
+    }
+    fails = fails + check_bytes("Haraka-256 Monty 2", result2, "c4cebda63c00c4cd312f36ea92afd4b0f6048507c5b367326ef9d8fdd2d5c09a")
+    bytes.free(result2)
+
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}
