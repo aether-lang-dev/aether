@@ -1,0 +1,1109 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2019-present Faye Amacker (https://github.com/fxamacker/cbor)
+//
+// Portions copyright (c) 2026 Aether Developers.
+
+import std.list
+import std.string
+import std.bytes
+import std.heap
+import std.mem
+import std.encoding
+
+exports (
+    CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
+    parse, encode, stringify, type, is_null, is_undefined,
+    get_bool, get_int, get_long, get_float, get_string, get_bytes, get_tag_val, get_tag_child,
+    object_get, map_get, object_set, array_add, map_set, object_size, array_size, object_entry,
+    obj, arr, str, bytes, num, from_int, boolean, null_value, undefined_value, tag,
+    set, push, map_push, free, diagnose
+)
+
+const CBOR_INT    = 0
+const CBOR_BYTES  = 1
+const CBOR_TEXT   = 2
+const CBOR_ARRAY  = 3
+const CBOR_MAP    = 4
+const CBOR_TAG    = 5
+const CBOR_SIMPLE = 6
+const CBOR_FLOAT  = 7
+
+struct CborValue {
+    type: int
+    int_val: long
+    float_val: float
+    str_val: string
+    tag_val: long
+    tag_child: ptr     // *CborValue
+    list_val: ptr      // list pointer (std.list)
+    map_keys: ptr      // list pointer (std.list)
+    map_values: ptr    // list pointer (std.list)
+}
+
+struct Reader {
+    data: string
+    len: int
+    offset: int
+}
+
+struct Writer {
+    buf: ptr // std.bytes
+    offset: int
+}
+
+// ---- FLOAT HELPERS (using std.mem) ----
+
+is_nan(val: float) -> bool {
+    bits = mem.bits_of_float(val)
+    exp = (bits >> 52) & 2047
+    frac = bits & 4503599627370495 as long
+    return exp == 2047 && frac != 0
+}
+
+is_pos_inf(val: float) -> bool {
+    bits = mem.bits_of_float(val)
+    return bits == 9218868437227405312 as long
+}
+
+is_neg_inf(val: float) -> bool {
+    bits = mem.bits_of_float(val)
+    return bits == -4503599627370496 as long
+}
+
+float32_from_bits(val: long) -> float {
+    sign = (val >> 31) & 1
+    exp = (val >> 23) & 255
+    frac = val & 8388607
+
+    if exp == 0 {
+        if frac == 0 {
+            if sign == 1 { return -0.0 }
+            return 0.0
+        }
+        // subnormal to normal double
+        while (frac & 8388608) == 0 {
+            frac = frac << 1
+            exp = exp - 1
+        }
+        exp = exp + 1
+        frac = frac & 8388607
+        real_exp = exp - 127 + 1023
+        dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
+        return mem.float_from_bits(dbits)
+    }
+    if exp == 255 {
+        if frac == 0 {
+            if sign == 1 { return mem.float_from_bits(-4503599627370496 as long) }
+            return mem.float_from_bits(9218868437227405312 as long)
+        }
+        return mem.float_from_bits(9221120237041090560 as long)
+    }
+    real_exp = exp - 127 + 1023
+    dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
+    return mem.float_from_bits(dbits)
+}
+
+float16_to_float32(val: int) -> float {
+    sign = (val >> 15) & 1
+    exp = (val >> 10) & 31
+    frac = val & 1023
+
+    if exp == 0 {
+        if frac == 0 {
+            if sign == 1 { return -0.0 }
+            return 0.0
+        }
+        while (frac & 1024) == 0 {
+            frac = frac << 1
+            exp = exp - 1
+        }
+        exp = exp + 1
+        frac = frac & 1023
+        real_exp = exp - 15 + 127
+        bits = ((sign as long) << 31) | ((real_exp as long) << 23) | ((frac as long) << 13)
+        return float32_from_bits(bits)
+    }
+    if exp == 31 {
+        if frac == 0 {
+            if sign == 1 { return mem.float_from_bits(-4503599627370496 as long) }
+            return mem.float_from_bits(9218868437227405312 as long)
+        }
+        return mem.float_from_bits(9221120237041090560 as long)
+    }
+    real_exp = exp - 15 + 127
+    bits = ((sign as long) << 31) | ((real_exp as long) << 23) | ((frac as long) << 13)
+    return float32_from_bits(bits)
+}
+
+// ---- DECODER IMPLEMENTATION ----
+
+read_value(r: ptr, ai: int) -> (long, string) {
+    reader = r as *Reader
+    if ai < 24 {
+        return ai as long, ""
+    }
+    if ai == 24 {
+        if reader.offset >= reader.len { return 0, "cbor: unexpected EOF" }
+        v = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+        reader.offset = reader.offset + 1
+        return v as long, ""
+    }
+    if ai == 25 {
+        if reader.offset + 2 > reader.len { return 0, "cbor: unexpected EOF" }
+        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+        reader.offset = reader.offset + 2
+        v = (b0 << 8) | b1
+        return v as long, ""
+    }
+    if ai == 26 {
+        if reader.offset + 4 > reader.len { return 0, "cbor: unexpected EOF" }
+        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+        b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
+        b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+        reader.offset = reader.offset + 4
+        v = ((b0 as long) << 24) | ((b1 as long) << 16) | ((b2 as long) << 8) | (b3 as long)
+        return v, ""
+    }
+    if ai == 27 {
+        if reader.offset + 8 > reader.len { return 0, "cbor: unexpected EOF" }
+        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+        b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
+        b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+        b4 = string.char_at_n(reader.data, reader.len, reader.offset + 4) & 255
+        b5 = string.char_at_n(reader.data, reader.len, reader.offset + 5) & 255
+        b6 = string.char_at_n(reader.data, reader.len, reader.offset + 6) & 255
+        b7 = string.char_at_n(reader.data, reader.len, reader.offset + 7) & 255
+        reader.offset = reader.offset + 8
+        v = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
+            ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
+        return v, ""
+    }
+    return 0, "cbor: invalid additional information"
+}
+
+parse_item(r: ptr) -> (ptr, string) {
+    reader = r as *Reader
+    if reader.offset >= reader.len {
+        return null, "cbor: unexpected EOF"
+    }
+    ib = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+    reader.offset = reader.offset + 1
+
+    mt = (ib >> 5) & 7
+    ai = ib & 31
+
+    if mt == 0 {
+        val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_INT
+        cv.int_val = val
+        return cv as ptr, ""
+    }
+    if mt == 1 {
+        val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_INT
+        cv.int_val = -1 - val
+        return cv as ptr, ""
+    }
+    if mt == 2 {
+        if ai == 31 {
+            // Indefinite length byte string. Parse indefinite chunks.
+            // We concatenate all chunk strings.
+            sb = bytes.new(32)
+            sb_len = 0
+            while true {
+                if reader.offset >= reader.len {
+                    bytes.free(sb)
+                    return null, "cbor: unexpected EOF in indefinite byte string"
+                }
+                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if next_byte == 255 { // break code
+                    reader.offset = reader.offset + 1
+                    break
+                }
+                child, err = parse_item(r)
+                if err != "" {
+                    bytes.free(sb)
+                    return null, err
+                }
+                child_cv = child as *CborValue
+                if child_cv.type != CBOR_BYTES {
+                    bytes.free(sb)
+                    free_value(child)
+                    return null, "cbor: indefinite byte string contains non-byte-string"
+                }
+                chunk_len = string.length(child_cv.str_val)
+                _ = bytes.copy_from_string(sb, sb_len, child_cv.str_val, chunk_len)
+                sb_len = sb_len + chunk_len
+                free_value(child)
+            }
+            cv = heap.new(CborValue)
+            cv.type = CBOR_BYTES
+            cv.str_val = bytes.finish(sb, sb_len)
+            return cv as ptr, ""
+        }
+        len_val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
+        sub = string.substring(reader.data, reader.offset, reader.offset + (len_val as int))
+        reader.offset = reader.offset + (len_val as int)
+        cv = heap.new(CborValue)
+        cv.type = CBOR_BYTES
+        cv.str_val = sub
+        return cv as ptr, ""
+    }
+    if mt == 3 {
+        if ai == 31 {
+            // Indefinite length text string
+            sb = bytes.new(32)
+            sb_len = 0
+            while true {
+                if reader.offset >= reader.len {
+                    bytes.free(sb)
+                    return null, "cbor: unexpected EOF in indefinite text string"
+                }
+                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if next_byte == 255 {
+                    reader.offset = reader.offset + 1
+                    break
+                }
+                child, err = parse_item(r)
+                if err != "" {
+                    bytes.free(sb)
+                    return null, err
+                }
+                child_cv = child as *CborValue
+                if child_cv.type != CBOR_TEXT {
+                    bytes.free(sb)
+                    free_value(child)
+                    return null, "cbor: indefinite text string contains non-text-string"
+                }
+                chunk_len = string.length(child_cv.str_val)
+                _ = bytes.copy_from_string(sb, sb_len, child_cv.str_val, chunk_len)
+                sb_len = sb_len + chunk_len
+                free_value(child)
+            }
+            cv = heap.new(CborValue)
+            cv.type = CBOR_TEXT
+            cv.str_val = bytes.finish(sb, sb_len)
+            return cv as ptr, ""
+        }
+        len_val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
+        sub = string.substring(reader.data, reader.offset, reader.offset + (len_val as int))
+        reader.offset = reader.offset + (len_val as int)
+        cv = heap.new(CborValue)
+        cv.type = CBOR_TEXT
+        cv.str_val = sub
+        return cv as ptr, ""
+    }
+    if mt == 4 {
+        if ai == 31 {
+            lst = list.new()
+            while true {
+                if reader.offset >= reader.len { return null, "cbor: unexpected EOF in indefinite array" }
+                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if next_byte == 255 {
+                    reader.offset = reader.offset + 1
+                    break
+                }
+                child, err = parse_item(r)
+                if err != "" { return null, err }
+                _ = list.add(lst, child)
+            }
+            cv = heap.new(CborValue)
+            cv.type = CBOR_ARRAY
+            cv.list_val = lst
+            return cv as ptr, ""
+        }
+        len_val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        lst = list.new()
+        i = 0
+        while i < (len_val as int) {
+            child, err = parse_item(r)
+            if err != "" { return null, err }
+            _ = list.add(lst, child)
+            i = i + 1
+        }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_ARRAY
+        cv.list_val = lst
+        return cv as ptr, ""
+    }
+    if mt == 5 {
+        if ai == 31 {
+            keys_lst = list.new()
+            vals_lst = list.new()
+            while true {
+                if reader.offset >= reader.len { return null, "cbor: unexpected EOF in indefinite map" }
+                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if next_byte == 255 {
+                    reader.offset = reader.offset + 1
+                    break
+                }
+                key_cv, err = parse_item(r)
+                if err != "" { return null, err }
+                val_cv, err2 = parse_item(r)
+                if err2 != "" {
+                    free_value(key_cv)
+                    return null, err2
+                }
+                _ = list.add(keys_lst, key_cv)
+                _ = list.add(vals_lst, val_cv)
+            }
+            cv = heap.new(CborValue)
+            cv.type = CBOR_MAP
+            cv.map_keys = keys_lst
+            cv.map_values = vals_lst
+            return cv as ptr, ""
+        }
+        len_val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        keys_lst = list.new()
+        vals_lst = list.new()
+        i = 0
+        while i < (len_val as int) {
+            key_cv, err = parse_item(r)
+            if err != "" { return null, err }
+            val_cv, err2 = parse_item(r)
+            if err2 != "" {
+                free_value(key_cv)
+                return null, err2
+            }
+            _ = list.add(keys_lst, key_cv)
+            _ = list.add(vals_lst, val_cv)
+            i = i + 1
+        }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_MAP
+        cv.map_keys = keys_lst
+        cv.map_values = vals_lst
+        return cv as ptr, ""
+    }
+    if mt == 6 {
+        tag_val, err = read_value(r, ai)
+        if err != "" { return null, err }
+        child_cv, err2 = parse_item(r)
+        if err2 != "" { return null, err2 }
+        cv = heap.new(CborValue)
+        cv.type = CBOR_TAG
+        cv.tag_val = tag_val
+        cv.tag_child = child_cv
+        return cv as ptr, ""
+    }
+    if mt == 7 {
+        if ai == 20 {
+            cv = heap.new(CborValue)
+            cv.type = CBOR_SIMPLE
+            cv.int_val = 20
+            return cv as ptr, ""
+        }
+        if ai == 21 {
+            cv = heap.new(CborValue)
+            cv.type = CBOR_SIMPLE
+            cv.int_val = 21
+            return cv as ptr, ""
+        }
+        if ai == 22 {
+            cv = heap.new(CborValue)
+            cv.type = CBOR_SIMPLE
+            cv.int_val = 22
+            return cv as ptr, ""
+        }
+        if ai == 23 {
+            cv = heap.new(CborValue)
+            cv.type = CBOR_SIMPLE
+            cv.int_val = 23
+            return cv as ptr, ""
+        }
+        if ai == 24 {
+            if reader.offset >= reader.len { return null, "cbor: unexpected EOF" }
+            v = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+            reader.offset = reader.offset + 1
+            cv = heap.new(CborValue)
+            cv.type = CBOR_SIMPLE
+            cv.int_val = v as long
+            return cv as ptr, ""
+        }
+        if ai == 25 {
+            if reader.offset + 2 > reader.len { return null, "cbor: unexpected EOF" }
+            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+            reader.offset = reader.offset + 2
+            bits = (b0 << 8) | b1
+            f = float16_to_float32(bits)
+            cv = heap.new(CborValue)
+            cv.type = CBOR_FLOAT
+            cv.float_val = f
+            return cv as ptr, ""
+        }
+        if ai == 26 {
+            if reader.offset + 4 > reader.len { return null, "cbor: unexpected EOF" }
+            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+            b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
+            b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+            reader.offset = reader.offset + 4
+            bits = ((b0 as long) << 24) | ((b1 as long) << 16) | ((b2 as long) << 8) | (b3 as long)
+            f = float32_from_bits(bits)
+            cv = heap.new(CborValue)
+            cv.type = CBOR_FLOAT
+            cv.float_val = f
+            return cv as ptr, ""
+        }
+        if ai == 27 {
+            if reader.offset + 8 > reader.len { return null, "cbor: unexpected EOF" }
+            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+            b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
+            b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+            b4 = string.char_at_n(reader.data, reader.len, reader.offset + 4) & 255
+            b5 = string.char_at_n(reader.data, reader.len, reader.offset + 5) & 255
+            b6 = string.char_at_n(reader.data, reader.len, reader.offset + 6) & 255
+            b7 = string.char_at_n(reader.data, reader.len, reader.offset + 7) & 255
+            reader.offset = reader.offset + 8
+            bits = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
+                   ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
+            f = mem.float_from_bits(bits)
+            cv = heap.new(CborValue)
+            cv.type = CBOR_FLOAT
+            cv.float_val = f
+            return cv as ptr, ""
+        }
+    }
+    return null, "cbor: unsupported major type"
+}
+
+// Parse a CBOR binary string. Returns (value_ptr, "") on success, (null, error) on failure.
+// Caller owns the returned value and must free with cbor.free.
+parse(cbor_data: string) -> ptr! {
+    r = heap.new(Reader)
+    r.data = cbor_data
+    r.len = string.length(cbor_data)
+    r.offset = 0
+    res, err = parse_item(r as ptr)
+    heap.free(r)
+    if err != "" {
+        return null, err
+    }
+    return res, ""
+}
+
+// ---- ENCODER IMPLEMENTATION ----
+
+write_byte(w: ptr, b: int) {
+    writer = w as *Writer
+    _ = bytes.set(writer.buf, writer.offset, b)
+    writer.offset = writer.offset + 1
+}
+
+write_be16(w: ptr, val: int) {
+    writer = w as *Writer
+    _ = bytes.set_be16(writer.buf, writer.offset, val)
+    writer.offset = writer.offset + 2
+}
+
+write_be32(w: ptr, val: int) {
+    writer = w as *Writer
+    _ = bytes.set_be32(writer.buf, writer.offset, val)
+    writer.offset = writer.offset + 4
+}
+
+write_be64(w: ptr, val: long) {
+    writer = w as *Writer
+    _ = bytes.set_be64(writer.buf, writer.offset, val)
+    writer.offset = writer.offset + 8
+}
+
+write_string(w: ptr, s: string, len: int) {
+    writer = w as *Writer
+    _ = bytes.copy_from_string(writer.buf, writer.offset, s, len)
+    writer.offset = writer.offset + len
+}
+
+encode_header(w: ptr, major: int, val: long) {
+    writer = w as *Writer
+    base = major << 5
+    if val < 24 {
+        write_byte(w, base | (val as int))
+    } else if val <= 255 {
+        write_byte(w, base | 24)
+        write_byte(w, val as int)
+    } else if val <= 65535 {
+        write_byte(w, base | 25)
+        write_be16(w, val as int)
+    } else if val <= 4294967295 {
+        write_byte(w, base | 26)
+        write_be32(w, val as int)
+    } else {
+        write_byte(w, base | 27)
+        write_be64(w, val)
+    }
+}
+
+encode_item(w: ptr, cv: ptr) -> string {
+    if cv == null {
+        // Encode null as default
+        write_byte(w, 246)
+        return ""
+    }
+
+    cv_val = cv as *CborValue
+    if cv_val.type == CBOR_INT {
+        v = cv_val.int_val
+        if v >= 0 {
+            encode_header(w, 0, v)
+        } else {
+            encode_header(w, 1, -1 - v)
+        }
+        return ""
+    }
+    if cv_val.type == CBOR_BYTES {
+        len = string.length(cv_val.str_val)
+        encode_header(w, 2, len as long)
+        write_string(w, cv_val.str_val, len)
+        return ""
+    }
+    if cv_val.type == CBOR_TEXT {
+        len = string.length(cv_val.str_val)
+        encode_header(w, 3, len as long)
+        write_string(w, cv_val.str_val, len)
+        return ""
+    }
+    if cv_val.type == CBOR_ARRAY {
+        n = list.size(cv_val.list_val)
+        encode_header(w, 4, n as long)
+        i = 0
+        while i < n {
+            item, _ = list.get(cv_val.list_val, i)
+            err = encode_item(w, item)
+            if err != "" { return err }
+            i = i + 1
+        }
+        return ""
+    }
+    if cv_val.type == CBOR_MAP {
+        n = list.size(cv_val.map_keys)
+        encode_header(w, 5, n as long)
+        i = 0
+        while i < n {
+            k, _ = list.get(cv_val.map_keys, i)
+            v, _ = list.get(cv_val.map_values, i)
+            err = encode_item(w, k)
+            if err != "" { return err }
+            err2 = encode_item(w, v)
+            if err2 != "" { return err2 }
+            i = i + 1
+        }
+        return ""
+    }
+    if cv_val.type == CBOR_TAG {
+        encode_header(w, 6, cv_val.tag_val)
+        err = encode_item(w, cv_val.tag_child)
+        return err
+    }
+    if cv_val.type == CBOR_SIMPLE {
+        v = cv_val.int_val
+        if v < 24 {
+            write_byte(w, 224 | (v as int))
+        } else {
+            write_byte(w, 224 | 24)
+            write_byte(w, v as int)
+        }
+        return ""
+    }
+    if cv_val.type == CBOR_FLOAT {
+        write_byte(w, 224 | 27) // double-precision float
+        bits = mem.bits_of_float(cv_val.float_val)
+        write_be64(w, bits)
+        return ""
+    }
+    return "cbor: unsupported CBOR value type for encoding"
+}
+
+// Serialize a CBOR value tree to a binary string.
+// Returns (encoded_bytes, "") on success, ("", error) on failure.
+encode(value: ptr) -> string! {
+    w = heap.new(Writer)
+    w.buf = bytes.new(32)
+    w.offset = 0
+    err = encode_item(w as ptr, value)
+    if err != "" {
+        bytes.free(w.buf)
+        heap.free(w)
+        return "", err
+    }
+    res = bytes.finish(w.buf, w.offset)
+    heap.free(w)
+    return res, ""
+}
+
+// Alias of encode for JSON symmetry.
+stringify(value: ptr) -> string! {
+    return encode(value)
+}
+
+// ---- ERGONOMIC GETTERS ----
+
+type(value: ptr) -> int {
+    if value == null { return -1 }
+    cv = value as *CborValue
+    return cv.type
+}
+
+is_null(value: ptr) -> int {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_SIMPLE && cv.int_val == 22 { return 1 }
+    return 0
+}
+
+is_undefined(value: ptr) -> int {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_SIMPLE && cv.int_val == 23 { return 1 }
+    return 0
+}
+
+get_bool(value: ptr) -> int {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_SIMPLE {
+        if cv.int_val == 21 { return 1 }
+    }
+    return 0
+}
+
+get_int(value: ptr) -> int {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_INT {
+        return cv.int_val as int
+    }
+    return 0
+}
+
+get_long(value: ptr) -> long {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_INT {
+        return cv.int_val
+    }
+    return 0
+}
+
+get_float(value: ptr) -> float {
+    if value == null { return 0.0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_FLOAT {
+        return cv.float_val
+    }
+    if cv.type == CBOR_INT {
+        return cv.int_val as float
+    }
+    return 0.0
+}
+
+get_string(value: ptr) -> string! {
+    if value == null { return "", "not a string" }
+    cv = value as *CborValue
+    if cv.type != CBOR_TEXT {
+        return "", "not a string"
+    }
+    return string.concat(cv.str_val, ""), ""
+}
+
+get_bytes(value: ptr) -> string! {
+    if value == null { return "", "not a byte string" }
+    cv = value as *CborValue
+    if cv.type != CBOR_BYTES {
+        return "", "not a byte string"
+    }
+    return string.concat(cv.str_val, ""), ""
+}
+
+get_tag_val(value: ptr) -> long {
+    if value == null { return 0 }
+    cv = value as *CborValue
+    if cv.type == CBOR_TAG {
+        return cv.tag_val
+    }
+    return 0
+}
+
+get_tag_child(value: ptr) -> ptr {
+    if value == null { return null }
+    cv = value as *CborValue
+    if cv.type == CBOR_TAG {
+        return cv.tag_child
+    }
+    return null
+}
+
+object_get(obj_ptr: ptr, key: string) -> ptr! {
+    if obj_ptr == null { return null, "null map" }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP { return null, "not a map" }
+    n = list.size(cv.map_keys)
+    i = 0
+    while i < n {
+        k_ptr, _ = list.get(cv.map_keys, i)
+        k = k_ptr as *CborValue
+        if k.type == CBOR_TEXT && k.str_val == key {
+            val_ptr, _ = list.get(cv.map_values, i)
+            return val_ptr, ""
+        }
+        i = i + 1
+    }
+    return null, ""
+}
+
+fn equal_val(a: ptr, b: ptr) -> bool {
+    if a == b { return true }
+    if a == null || b == null { return false }
+    acv = a as *CborValue
+    bcv = b as *CborValue
+    if acv.type != bcv.type { return false }
+    if acv.type == CBOR_INT { return acv.int_val == bcv.int_val }
+    if acv.type == CBOR_FLOAT { return acv.float_val == bcv.float_val }
+    if acv.type == CBOR_TEXT || acv.type == CBOR_BYTES { return acv.str_val == bcv.str_val }
+    if acv.type == CBOR_SIMPLE { return acv.int_val == bcv.int_val }
+    if acv.type == CBOR_TAG {
+        return acv.tag_val == bcv.tag_val && equal_val(acv.tag_child, bcv.tag_child)
+    }
+    return false
+}
+
+map_get(obj_ptr: ptr, key_ptr: ptr) -> ptr! {
+    if obj_ptr == null { return null, "null map" }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP { return null, "not a map" }
+    n = list.size(cv.map_keys)
+    i = 0
+    while i < n {
+        k_ptr, _ = list.get(cv.map_keys, i)
+        if equal_val(k_ptr, key_ptr) {
+            val_ptr, _ = list.get(cv.map_values, i)
+            return val_ptr, ""
+        }
+        i = i + 1
+    }
+    return null, ""
+}
+
+object_set(obj_ptr: ptr, key: string, value: ptr) -> string {
+    if obj_ptr == null { return "null map" }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP {
+        free_value(value as *CborValue)
+        return "not a map"
+    }
+    key_cv = str(key)
+    _ = list.add(cv.map_keys, key_cv)
+    _ = list.add(cv.map_values, value)
+    return ""
+}
+
+// Terse helper alias for object_set (similar to json.set)
+set(obj_ptr: ptr, key: string, value: ptr) -> string {
+    return object_set(obj_ptr, key, value)
+}
+
+array_add(arr_ptr: ptr, value: ptr) -> string {
+    if arr_ptr == null { return "null array" }
+    cv = arr_ptr as *CborValue
+    if cv.type != CBOR_ARRAY {
+        free_value(value as *CborValue)
+        return "not an array"
+    }
+    _ = list.add(cv.list_val, value)
+    return ""
+}
+
+// Terse helper alias for array_add (similar to json.push)
+push(arr_ptr: ptr, value: ptr) -> string {
+    return array_add(arr_ptr, value)
+}
+
+map_set(obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr) -> string {
+    if obj_ptr == null { return "null map" }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP {
+        free_value(key_ptr as *CborValue)
+        free_value(value_ptr as *CborValue)
+        return "not a map"
+    }
+    _ = list.add(cv.map_keys, key_ptr)
+    _ = list.add(cv.map_values, value_ptr)
+    return ""
+}
+
+// Terse helper alias for map_set
+map_push(obj_ptr: ptr, key_ptr: ptr, value_ptr: ptr) -> string {
+    return map_set(obj_ptr, key_ptr, value_ptr)
+}
+
+object_size(obj_ptr: ptr) -> int {
+    if obj_ptr == null { return -1 }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP { return -1 }
+    return list.size(cv.map_keys)
+}
+
+array_size(arr_ptr: ptr) -> int {
+    if arr_ptr == null { return -1 }
+    cv = arr_ptr as *CborValue
+    if cv.type != CBOR_ARRAY { return -1 }
+    return list.size(cv.list_val)
+}
+
+object_entry(obj_ptr: ptr, i: int) -> (ptr, ptr, string) {
+    if obj_ptr == null { return null, null, "null map" }
+    cv = obj_ptr as *CborValue
+    if cv.type != CBOR_MAP { return null, null, "not a map" }
+    n = list.size(cv.map_keys)
+    if i < 0 || i >= n { return null, null, "index out of range" }
+    k, _ = list.get(cv.map_keys, i)
+    v, _ = list.get(cv.map_values, i)
+    return k, v, ""
+}
+
+// ---- TERSE VALUE BUILDERS ----
+
+obj() -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_MAP
+    cv.map_keys = list.new()
+    cv.map_values = list.new()
+    return cv as ptr
+}
+
+arr() -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_ARRAY
+    cv.list_val = list.new()
+    return cv as ptr
+}
+
+str(value: string) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_TEXT
+    cv.str_val = value
+    return cv as ptr
+}
+
+bytes(value: string) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_BYTES
+    cv.str_val = value
+    return cv as ptr
+}
+
+num(value: float) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_FLOAT
+    cv.float_val = value
+    return cv as ptr
+}
+
+from_int(value: long) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_INT
+    cv.int_val = value
+    return cv as ptr
+}
+
+boolean(value: int) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_SIMPLE
+    if value != 0 {
+        cv.int_val = 21
+    } else {
+        cv.int_val = 20
+    }
+    return cv as ptr
+}
+
+null_value() -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_SIMPLE
+    cv.int_val = 22
+    return cv as ptr
+}
+
+undefined_value() -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_SIMPLE
+    cv.int_val = 23
+    return cv as ptr
+}
+
+tag(tag_num: long, child: ptr) -> ptr {
+    cv = heap.new(CborValue)
+    cv.type = CBOR_TAG
+    cv.tag_val = tag_num
+    cv.tag_child = child
+    return cv as ptr
+}
+
+// ---- RECURSIVE CLEANUP ----
+
+free_value(cv: ptr) {
+    if cv == null { return }
+    cv_val = cv as *CborValue
+    if cv_val.type == CBOR_ARRAY {
+        n = list.size(cv_val.list_val)
+        i = 0
+        while i < n {
+            item, _ = list.get(cv_val.list_val, i)
+            free_value(item)
+            i = i + 1
+        }
+        list.free(cv_val.list_val)
+    } else if cv_val.type == CBOR_MAP {
+        n = list.size(cv_val.map_keys)
+        i = 0
+        while i < n {
+            k, _ = list.get(cv_val.map_keys, i)
+            free_value(k)
+            v, _ = list.get(cv_val.map_values, i)
+            free_value(v)
+            i = i + 1
+        }
+        list.free(cv_val.map_keys)
+        list.free(cv_val.map_values)
+    } else if cv_val.type == CBOR_TAG {
+        free_value(cv_val.tag_child)
+    }
+    heap.free(cv_val)
+}
+
+free(value: ptr) {
+    free_value(value)
+}
+
+// ---- DIAGNOSTIC NOTATION (EDN) ----
+
+escape_string(s: string) -> string {
+    len = string.length(s)
+    buf = bytes.new(len * 2 + 2)
+    bytes.set(buf, 0, 34)
+    out = 1
+    i = 0
+    while i < len {
+        c = string.char_at_n(s, len, i) & 255
+        if c == 34 {
+            bytes.set(buf, out, 92)
+            bytes.set(buf, out + 1, 34)
+            out = out + 2
+        } else if c == 92 {
+            bytes.set(buf, out, 92)
+            bytes.set(buf, out + 1, 92)
+            out = out + 2
+        } else {
+            bytes.set(buf, out, c)
+            out = out + 1
+        }
+        i = i + 1
+    }
+    bytes.set(buf, out, 34)
+    out = out + 1
+    return bytes.finish(buf, out)
+}
+
+format_bytes_diag(s: string) -> string {
+    len = string.length(s)
+    hex_str = encoding.hex_encode(s, len)
+    return string.concat("h'", string.concat(hex_str, "'"))
+}
+
+format_float_diag(val: float) -> string {
+    if is_nan(val) { return "NaN" }
+    if is_pos_inf(val) { return "Infinity" }
+    if is_neg_inf(val) { return "-Infinity" }
+    s = string.from_float(val)
+    if string.contains(s, ".") == 0 && string.contains(s, "e") == 0 && string.contains(s, "E") == 0 {
+        return string.concat(s, ".0")
+    }
+    return s
+}
+
+to_diagnose_string(cv: ptr) -> string {
+    if cv == null { return "null" }
+    cv_val = cv as *CborValue
+    if cv_val.type == CBOR_INT {
+        return string.from_long(cv_val.int_val)
+    }
+    if cv_val.type == CBOR_FLOAT {
+        return format_float_diag(cv_val.float_val)
+    }
+    if cv_val.type == CBOR_TEXT {
+        return escape_string(cv_val.str_val)
+    }
+    if cv_val.type == CBOR_BYTES {
+        return format_bytes_diag(cv_val.str_val)
+    }
+    if cv_val.type == CBOR_SIMPLE {
+        if cv_val.int_val == 20 { return "false" }
+        if cv_val.int_val == 21 { return "true" }
+        if cv_val.int_val == 22 { return "null" }
+        if cv_val.int_val == 23 { return "undefined" }
+        return string.concat("simple(", string.concat(string.from_long(cv_val.int_val), ")"))
+    }
+    if cv_val.type == CBOR_TAG {
+        child_str = to_diagnose_string(cv_val.tag_child)
+        return string.concat(string.from_long(cv_val.tag_val), string.concat("(", string.concat(child_str, ")")))
+    }
+    if cv_val.type == CBOR_ARRAY {
+        n = list.size(cv_val.list_val)
+        if n == 0 { return "[]" }
+        s = "["
+        i = 0
+        while i < n {
+            item, _ = list.get(cv_val.list_val, i)
+            item_str = to_diagnose_string(item)
+            if i > 0 {
+                s = string.concat(s, ", ")
+            }
+            s = string.concat(s, item_str)
+            i = i + 1
+        }
+        return string.concat(s, "]")
+    }
+    if cv_val.type == CBOR_MAP {
+        n = list.size(cv_val.map_keys)
+        if n == 0 { return "{}" }
+        s = "{"
+        i = 0
+        while i < n {
+            k_ptr, _ = list.get(cv_val.map_keys, i)
+            v_ptr, _ = list.get(cv_val.map_values, i)
+            k_str = to_diagnose_string(k_ptr)
+            v_str = to_diagnose_string(v_ptr)
+            if i > 0 {
+                s = string.concat(s, ", ")
+            }
+            s = string.concat(s, string.concat(k_str, string.concat(": ", v_str)))
+            i = i + 1
+        }
+        return string.concat(s, "}")
+    }
+    return ""
+}
+
+// Convert a parsed CBOR value or input bytes to Extended Diagnostic Notation (EDN).
+diagnose(value: ptr) -> string! {
+    if value == null {
+        return "null", ""
+    }
+    return to_diagnose_string(value), ""
+}
