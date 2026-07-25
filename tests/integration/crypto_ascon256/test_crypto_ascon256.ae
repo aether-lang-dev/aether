@@ -1,0 +1,92 @@
+// Validate std.cryptography.ascon256 (Ascon-Hash256, NIST SP 800-232) —
+// the pure-Aether port of Bouncy Castle's AsconHash256. This is a DISTINCT
+// standard from the deprecated v1.2 Ascon-Hash/HashA (see crypto_bouncy_castle):
+// little-endian absorption, a single 0x01 pad bit, and p12 throughout.
+//
+// Provenance note: bc-csharp's Ascon-Hash256 KAT resource
+// (crypto/ascon/asconhash256/LWC_HASH_KAT_256.txt) is not present in the
+// checkout we ported from, so these digests are pinned to the published
+// SP 800-232 reference value for the empty message and to the port's own
+// deterministic output for the other inputs, cross-checked by the one-shot
+// vs. split-streaming equality below (a mismatch there would expose any
+// absorption/padding drift regardless of the KAT).
+
+import std.cryptography.ascon256
+import std.bytes
+import std.io
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    // Empty message — the published NIST SP 800-232 Ascon-Hash256 reference.
+    fails = fails + check("empty",
+        ascon256.ascon256_hex("", 0),
+        "0b3be5850f2f6b98caf29f8fdea89b64a1fa70aa249b8f839bd53baa304d92b2")
+
+    // Single 0x00 byte (fed as bytes to avoid NUL string truncation).
+    b0 = bytes.new(1)
+    bytes.set(b0, 0, 0)
+    c0, e0 = ascon256.new()
+    if e0 != "" {
+        println("FAIL: ascon256.new failed: ${e0}")
+        fails = fails + 1
+    } else {
+        ascon256.update_bytes(c0, b0, 1)
+        fails = fails + check("byte 0x00", ascon256.final_hex(c0),
+            "0728621035af3ed2bca03bf6fde900f9456f5330e4b5ee23e7f6a1e70291bc80")
+    }
+    bytes.free(b0)
+
+    // Two bytes 0x00 0x01.
+    b1 = bytes.new(2)
+    bytes.set(b1, 0, 0)
+    bytes.set(b1, 1, 1)
+    c1, e1 = ascon256.new()
+    if e1 != "" {
+        println("FAIL: ascon256.new failed: ${e1}")
+        fails = fails + 1
+    } else {
+        ascon256.update_bytes(c1, b1, 2)
+        fails = fails + check("bytes 0x00 0x01", ascon256.final_hex(c1),
+            "6115e7c9c4081c2797fc8fe1bc57a836afa1c5381e556dd583860ca2dfb48dd2")
+    }
+    bytes.free(b1)
+
+    // A 43-byte ASCII message that crosses the 8-byte absorption rate
+    // several times — one-shot digest.
+    fox = "The quick brown fox jumps over the lazy dog"
+    fails = fails + check("fox one-shot",
+        ascon256.ascon256_hex(fox, 43),
+        "23414503bf4bde7ad0e85aec94c22ae2d7cd807996b537f9564fc2974053f139")
+
+    // Same message split across two updates at a non-block-aligned boundary
+    // must produce the identical digest — proves multi-part absorption.
+    cs, es = ascon256.new()
+    if es != "" {
+        println("FAIL: ascon256.new failed: ${es}")
+        fails = fails + 1
+    } else {
+        ascon256.update(cs, "The quick brown fox ", 20)
+        ascon256.update(cs, "jumps over the lazy dog", 23)
+        fails = fails + check("fox split-streaming", ascon256.final_hex(cs),
+            "23414503bf4bde7ad0e85aec94c22ae2d7cd807996b537f9564fc2974053f139")
+    }
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

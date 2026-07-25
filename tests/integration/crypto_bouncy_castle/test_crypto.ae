@@ -3,7 +3,6 @@ import std.cryptography.md5
 import std.cryptography.md4
 import std.cryptography.sha1
 import std.cryptography.ascon
-import std.cryptography.ascon256
 import std.bytes
 import std.string
 import std.io
@@ -74,7 +73,20 @@ main() {
         md5.md5_hex("abcdefghijklmnopqrstuvwxyz", 26),
         "c3fcd3d76192e4007dfb496cca67e13b")
 
-    // MD5 Streaming
+    // Remaining RFC 1321 / HAC suite vectors (BC tests a subset; full suite here).
+    fails = fails + check("MD5 message digest",
+        md5.md5_hex("message digest", 14),
+        "f96b697d7cb7938d525a2f31aaf161d0")
+
+    fails = fails + check("MD5 mixcase62",
+        md5.md5_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 62),
+        "d174ab98d277d9f5a5611c2c9f419d9f")
+
+    fails = fails + check("MD5 digits80",
+        md5.md5_hex("12345678901234567890123456789012345678901234567890123456789012345678901234567890", 80),
+        "57edf4a22be3c955ac49da2e2107b67a")
+
+    // MD5 Streaming (two-part, at "abc" boundary)
     ctx_md5, err_md5 = md5.new()
     if err_md5 != "" {
         println("FAIL: md5.new failed: ${err_md5}")
@@ -84,6 +96,19 @@ main() {
         md5.update(ctx_md5, "c", 1)
         res_md5 = md5.final_hex(ctx_md5)
         fails = fails + check("MD5 streaming abc", res_md5, "900150983cd24fb0d6963f7d28e17f72")
+    }
+
+    // MD5 multi-part streaming crossing the 64-byte block boundary: the
+    // 80-digit vector split unevenly must equal the one-shot digest.
+    ctx_md5b, err_md5b = md5.new()
+    if err_md5b != "" {
+        println("FAIL: md5.new failed: ${err_md5b}")
+        fails = fails + 1
+    } else {
+        md5.update(ctx_md5b, "1234567890123456789012345678901234567890", 40)
+        md5.update(ctx_md5b, "1234567890123456789012345678901234567890", 40)
+        res_md5b = md5.final_hex(ctx_md5b)
+        fails = fails + check("MD5 streaming digits80 (cross-block)", res_md5b, "57edf4a22be3c955ac49da2e2107b67a")
     }
 
     // ---- MD4 Tests ----
@@ -104,7 +129,20 @@ main() {
         md4.md4_hex("12345678901234567890123456789012345678901234567890123456789012345678901234567890", 80),
         "e33b4ddc9c38f2199c3e7b164fcc0536")
 
-    // MD4 Streaming
+    // Remaining RFC 1320 suite vectors (BC tests a subset; full suite here).
+    fails = fails + check("MD4 message digest",
+        md4.md4_hex("message digest", 14),
+        "d9130a8164549fe818874806e1c7014b")
+
+    fails = fails + check("MD4 alphabet",
+        md4.md4_hex("abcdefghijklmnopqrstuvwxyz", 26),
+        "d79e1c308aa5bbcdeea8ed63df412da9")
+
+    fails = fails + check("MD4 mixcase62",
+        md4.md4_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 62),
+        "043f8582f241db351ce627e153e7f0e4")
+
+    // MD4 Streaming (two-part, at "abc" boundary)
     ctx_md4, err_md4 = md4.new()
     if err_md4 != "" {
         println("FAIL: md4.new failed: ${err_md4}")
@@ -114,6 +152,18 @@ main() {
         md4.update(ctx_md4, "bc", 2)
         res_md4 = md4.final_hex(ctx_md4)
         fails = fails + check("MD4 streaming abc", res_md4, "a448017aaf21d8525fc10ae87aa6729d")
+    }
+
+    // MD4 multi-part streaming crossing the 64-byte block boundary.
+    ctx_md4b, err_md4b = md4.new()
+    if err_md4b != "" {
+        println("FAIL: md4.new failed: ${err_md4b}")
+        fails = fails + 1
+    } else {
+        md4.update(ctx_md4b, "1234567890123456789012345678901234567890", 40)
+        md4.update(ctx_md4b, "1234567890123456789012345678901234567890", 40)
+        res_md4b = md4.final_hex(ctx_md4b)
+        fails = fails + check("MD4 streaming digits80 (cross-block)", res_md4b, "e33b4ddc9c38f2199c3e7b164fcc0536")
     }
 
     // ---- SHA-1 Tests ----
@@ -134,7 +184,20 @@ main() {
         sha1.sha1_hex("abcdefghijklmnopqrstuvwxyz", 26),
         "32d10c7b8cf96570ca04ce37f2a19d84240d3a89")
 
-    // SHA-1 Streaming
+    // Additional standard vectors (HAC / RFC 3174 companion set).
+    fails = fails + check("SHA-1 message digest",
+        sha1.sha1_hex("message digest", 14),
+        "c12252ceda8be8994d5fa0290a47231c1d16aae3")
+
+    fails = fails + check("SHA-1 mixcase62",
+        sha1.sha1_hex("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789", 62),
+        "761c457bf73b14d27e9e9265c46f4b4dda11f940")
+
+    fails = fails + check("SHA-1 digits80",
+        sha1.sha1_hex("12345678901234567890123456789012345678901234567890123456789012345678901234567890", 80),
+        "50abf5706a150990a08b2c5ea40fa0e585554732")
+
+    // SHA-1 Streaming (two-part, at "abc" boundary)
     ctx_sha1, err_sha1 = sha1.new()
     if err_sha1 != "" {
         println("FAIL: sha1.new failed: ${err_sha1}")
@@ -144,6 +207,18 @@ main() {
         sha1.update(ctx_sha1, "c", 1)
         res_sha1 = sha1.final_hex(ctx_sha1)
         fails = fails + check("SHA-1 streaming abc", res_sha1, "a9993e364706816aba3e25717850c26c9cd0d89d")
+    }
+
+    // SHA-1 multi-part streaming crossing the 64-byte block boundary.
+    ctx_sha1b, err_sha1b = sha1.new()
+    if err_sha1b != "" {
+        println("FAIL: sha1.new failed: ${err_sha1b}")
+        fails = fails + 1
+    } else {
+        sha1.update(ctx_sha1b, "1234567890123456789012345678901234567890", 40)
+        sha1.update(ctx_sha1b, "1234567890123456789012345678901234567890", 40)
+        res_sha1b = sha1.final_hex(ctx_sha1b)
+        fails = fails + check("SHA-1 streaming digits80 (cross-block)", res_sha1b, "50abf5706a150990a08b2c5ea40fa0e585554732")
     }
 
     // ---- Ascon Tests ----
@@ -207,22 +282,9 @@ main() {
         fails = fails + check("Ascon-Hash streaming \\x00\\x01", res_ascon_stream, "f77ca13bf89146d3254f1cfb7eddba8fa1bf162284bb29e7f645545cf9e08424")
     }
 
-    // ---- Ascon-Hash256 Tests ----
-    println("=== Ascon-Hash256 Tests ===")
-    fails = fails + check("Ascon-Hash256 empty",
-        ascon256.ascon256_hex("", 0),
-        "0b3be5850f2f6b98caf29f8fdea89b64a1fa70aa249b8f839bd53baa304d92b2")
-
-    // Ascon-Hash256 Streaming
-    ctx_ascon256, err_ascon256 = ascon256.new()
-    if err_ascon256 != "" {
-        println("FAIL: ascon256.new failed: ${err_ascon256}")
-        fails = fails + 1
-    } else {
-        ascon256.update(ctx_ascon256, "", 0)
-        res_ascon256 = ascon256.final_hex(ctx_ascon256)
-        fails = fails + check("Ascon-Hash256 streaming empty", res_ascon256, "0b3be5850f2f6b98caf29f8fdea89b64a1fa70aa249b8f839bd53baa304d92b2")
-    }
+    // Ascon-Hash256 (NIST SP 800-232) has its own dedicated test:
+    // tests/integration/crypto_ascon256/test_crypto_ascon256.ae — it is a
+    // distinct standard from the deprecated v1.2 Ascon-Hash/HashA above.
 
     if fails == 0 {
         println("ALL PASS")
