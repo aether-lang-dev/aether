@@ -74,6 +74,16 @@ extern char** environ;
 #endif
 #define AE_VERSION AETHER_VERSION
 
+/* Buffer size for assembled gcc/aetherc command lines. Must hold the full
+ * link command: cc + one -I per std/ subdirectory (100+ and growing as std
+ * modules are added) + the -L/-l tail + I/O paths. On macOS CI the toolchain
+ * lives under a long temp path (/var/folders/.../T/tmp.XXXX/inst/current/...),
+ * so every -I carries that prefix; the old 16 KiB buffer truncated the link
+ * command there (dropping -L lib) once enough std dirs existed. 64 KiB leaves
+ * generous headroom. The command runners (posix_run/win_run) use the same
+ * size so a large command isn't re-truncated when handed off. */
+#define AE_CMD_BUF 65536
+
 // --------------------------------------------------------------------------
 // Cross-platform temp directory
 // --------------------------------------------------------------------------
@@ -339,7 +349,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
 // quiet=0: show all output, quiet=1: hide stdout+stderr, quiet=2: hide stdout only (keep stderr for warnings)
 static int posix_run(const char* cmd_str, int quiet) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[16384];
+    char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
@@ -407,7 +417,7 @@ static int posix_run(const char* cmd_str, int quiet) {
 #endif
 static int win_run(const char* cmd_str, int quiet) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
-    char buf[16384];
+    char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
@@ -2781,7 +2791,7 @@ static int cmd_run(int argc, char** argv) {
         return 1;
     }
 
-    char c_file[2048], exe_file[2048], cmd[16384];
+    char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
 
     // Merge toml [[bin]] extra_sources into extra_files BEFORE the cache
     // check. Otherwise editing an FFI shim listed in aether.toml wouldn't
@@ -4900,7 +4910,7 @@ static int cmd_build(int argc, char** argv) {
     }
 
     const char* base = get_basename(file);
-    char c_file[2048], exe_file[2048], cmd[16384];
+    char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
 
     if (output_name) {
         // Explicit -o: use the path as-is
@@ -5411,7 +5421,7 @@ static int cmd_test(int argc, char** argv) {
         printf("  %-45s ", test);
         fflush(stdout);
 
-        char c_file[2048], exe_file[2048], cmd[16384];
+        char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
 
         if (tc.dev_mode) {
             snprintf(c_file, sizeof(c_file), "%s/build/_test_%d.c", tc.root, i);
@@ -5697,7 +5707,7 @@ static int cmd_examples(int argc, char** argv) {
         printf("  %-30s ", base);
         fflush(stdout);
 
-        char c_file[2048], exe_file[2048], cmd[16384];
+        char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
         snprintf(c_file, sizeof(c_file), "build/examples/%s.c", base);
         snprintf(exe_file, sizeof(exe_file), "build/examples/%s" EXE_EXT, base);
 
