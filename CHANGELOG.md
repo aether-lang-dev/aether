@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Four more pure-Aether hash submodules ported from Bouncy Castle** —
+  `std.cryptography.gost3411_2012` (GOST R 34.11-2012 / Streebog, 256- and
+  512-bit), `std.cryptography.haraka256`, `std.cryptography.haraka512`
+  (Haraka v2 short-input hashes), and `std.cryptography.xoodyak` (Xoodyak
+  hash mode over the Xoodoo permutation). No externs to OpenSSL or any C
+  crypto. Verified against Bouncy Castle: Streebog's canonical M1/M2 and
+  RFC 6986 empty vectors for both widths; Haraka's Appendix-B known-answer
+  vectors plus BC's 1000-iteration Monte-Carlo tests (including Haraka-512's
+  alternating-halves feedback); Xoodyak against BC's `LWC_HASH_KAT_256`
+  vectors. GOST and Xoodyak add split-update streaming tests that cross the
+  block/absorb boundary. The Haraka modules reject wrong-length input
+  (returning null / "") to mirror BC's exact-32/64-byte contract, rather
+  than silently zero-padding a short input or truncating an over-long one.
+
 ## [0.440.0]
 
 ### Changed

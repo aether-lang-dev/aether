@@ -118,6 +118,32 @@ main() {
     }
     bytes.free(input_m2)
 
+    // ---- Wrong-length input is rejected (BC's exact-64-bytes contract) ----
+    short_in = bytes.new(10)
+    s = 0
+    while s < 10 { bytes.set(short_in, s, s); s = s + 1 }
+    ctx_short, _ = haraka512.new()
+    haraka512.update_bytes(ctx_short, short_in, 10)
+    if haraka512.final_hex(ctx_short) == "" {
+        println("ok   Haraka-512 rejects short input")
+    } else {
+        println("FAIL Haraka-512 accepted a 10-byte input")
+        fails = fails + 1
+    }
+    bytes.free(short_in)
+
+    long_in = bytes.new(72)
+    s = 0
+    while s < 72 { bytes.set(long_in, s, s); s = s + 1 }
+    ctx_long, _ = haraka512.new()
+    haraka512.update_bytes(ctx_long, long_in, 72)
+    if haraka512.final_hex(ctx_long) == "" {
+        println("ok   Haraka-512 rejects over-long input")
+    } else {
+        println("FAIL Haraka-512 accepted a 72-byte input")
+        fails = fails + 1
+    }
+    bytes.free(long_in)
 
     if fails == 0 {
         println("ALL PASS")

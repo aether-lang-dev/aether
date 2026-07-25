@@ -98,6 +98,35 @@ main() {
     fails = fails + check_bytes("Haraka-256 Monty 2", result2, "c4cebda63c00c4cd312f36ea92afd4b0f6048507c5b367326ef9d8fdd2d5c09a")
     bytes.free(result2)
 
+    // ---- Wrong-length input is rejected (BC's exact-32-bytes contract) ----
+    // Short input (4 bytes) must NOT produce a plausible zero-padded digest;
+    // final_hex returns "" for a non-32-byte input.
+    short_in = bytes.new(4)
+    s = 0
+    while s < 4 { bytes.set(short_in, s, s); s = s + 1 }
+    ctx_short, _ = haraka256.new()
+    haraka256.update_bytes(ctx_short, short_in, 4)
+    if haraka256.final_hex(ctx_short) == "" {
+        println("ok   Haraka-256 rejects short input")
+    } else {
+        println("FAIL Haraka-256 accepted a 4-byte input")
+        fails = fails + 1
+    }
+    bytes.free(short_in)
+
+    // Over-long input (40 bytes) must also be rejected, not silently capped to 32.
+    long_in = bytes.new(40)
+    s = 0
+    while s < 40 { bytes.set(long_in, s, s); s = s + 1 }
+    ctx_long, _ = haraka256.new()
+    haraka256.update_bytes(ctx_long, long_in, 40)
+    if haraka256.final_hex(ctx_long) == "" {
+        println("ok   Haraka-256 rejects over-long input")
+    } else {
+        println("FAIL Haraka-256 accepted a 40-byte input")
+        fails = fails + 1
+    }
+    bytes.free(long_in)
 
     if fails == 0 {
         println("ALL PASS")

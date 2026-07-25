@@ -83,6 +83,33 @@ main() {
     res_one_shot = xoodyak.xoodyak_hex("", 0)
     fails = fails + check("xoodyak one-shot empty", res_one_shot, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
 
+    // Multi-part streaming across the 16-byte absorb rate: a 20-byte message
+    // (00..13) fed as 7+13 must equal the one-shot digest. The expected value
+    // is the port's own output pinned here; the split-vs-one-shot equality is
+    // what proves multi-block absorption independent of the pinned constant.
+    msg20 = bytes.new(20)
+    q = 0
+    while q < 20 { bytes.set(msg20, q, q); q = q + 1 }
+    ctx20, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx20, msg20, 20)
+    res20 = xoodyak.final_hex(ctx20)
+    fails = fails + check("xoodyak 20B one-shot", res20, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
+
+    ctx_sp2, _ = xoodyak.new()
+    part_a = bytes.new(7)
+    q = 0
+    while q < 7 { bytes.set(part_a, q, q); q = q + 1 }
+    xoodyak.update_bytes(ctx_sp2, part_a, 7)
+    part_b = bytes.new(13)
+    q = 0
+    while q < 13 { bytes.set(part_b, q, 7 + q); q = q + 1 }
+    xoodyak.update_bytes(ctx_sp2, part_b, 13)
+    res_sp = xoodyak.final_hex(ctx_sp2)
+    fails = fails + check("xoodyak 20B split 7+13", res_sp, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
+    bytes.free(msg20)
+    bytes.free(part_a)
+    bytes.free(part_b)
+
     if fails == 0 {
         println("ALL PASS")
         return

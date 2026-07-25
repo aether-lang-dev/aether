@@ -86,6 +86,7 @@ const HARAKA_RC: int[640] = [
 struct Haraka256Ctx {
     buf: ptr
     buf_pos: int
+    total_fed: int    // total bytes fed; Haraka-256 requires EXACTLY 32 (BC throws otherwise)
     s_scratch: ptr
     t_scratch: ptr
     s1_0: ptr
@@ -223,6 +224,7 @@ haraka256_256(c: *Haraka256Ctx, msg: ptr, output: ptr, outOff: int) {
 
 reset_ctx(c: *Haraka256Ctx) {
     c.buf_pos = 0
+    c.total_fed = 0
     i = 0
     while i < 32 {
         bytes.set(c.buf, i, 0)
@@ -247,8 +249,9 @@ new() -> {
 }
 
 update_byte(c: *Haraka256Ctx, b: int) {
+    c.total_fed = c.total_fed + 1
     if c.buf_pos >= 32 {
-        // Haraka-256 takes exactly 32 bytes max
+        // Over-length: count it (so finalize can reject) but don't overrun buf.
         return
     }
     bytes.set(c.buf, c.buf_pos, b & 255)
@@ -279,8 +282,14 @@ update_bytes(ctx: ptr, data: ptr, length: int) {
     }
 }
 
+// Haraka-256 is a fixed-width compression: exactly 32 input bytes. BC throws
+// on any other length; we mirror that contract by refusing to produce a digest
+// for a wrong-length input (returns null / "") rather than silently zero-padding
+// a short input or truncating an over-long one to a plausible-looking hash.
 finalize_to_bytes(c: *Haraka256Ctx) -> ptr {
-    // If buf_pos != 32, it will just hash whatever we have padded with 0s
+    if c.total_fed != 32 {
+        return null
+    }
     out = bytes.new(32)
     haraka256_256(c, c.buf, out, 0)
     return out
@@ -320,6 +329,12 @@ free_internals(c: *Haraka256Ctx) {
 final_bytes(ctx: ptr) -> ptr {
     c = ctx as *Haraka256Ctx
     out = finalize_to_bytes(c)
+    if out == null {
+        // wrong-length input — refuse, per BC's exact-32-bytes contract.
+        free_internals(c)
+        free(ctx)
+        return null
+    }
     s = bytes.finish(out, 32)
     free_internals(c)
     free(ctx)
@@ -331,6 +346,12 @@ final_bytes(ctx: ptr) -> ptr {
 final_hex(ctx: ptr) -> string {
     c = ctx as *Haraka256Ctx
     out = finalize_to_bytes(c)
+    if out == null {
+        // wrong-length input — refuse, per BC's exact-32-bytes contract.
+        free_internals(c)
+        free(ctx)
+        return ""
+    }
     hexbuf = bytes.new(64)
     i = 0
     while i < 32 {
