@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Five pure-Aether hash submodules ported from Bouncy Castle** —
+  `std.cryptography.md5`, `.md4`, `.sha1` (classic digests) plus
+  `.ascon` (ASCON v1.2 Ascon-Hash / Ascon-HashA) and `.ascon256`
+  (Ascon-Hash256, NIST SP 800-232). No externs to OpenSSL or any C
+  crypto — the permutations, IVs, endianness (big-endian for v1.2,
+  little-endian for the SP 800-232 variant), and padding are ported
+  faithfully from BC's `MD5Digest`/`MD4Digest`/`Sha1Digest`/
+  `AsconDigest`/`AsconHash256`. Streaming (`new`/`update`/`update_bytes`/
+  `final_hex`/`final_bytes`) and one-shot helpers are provided.
+  Test coverage matches Bouncy Castle's vectors and extends them to the
+  full RFC 1320/1321 / HAC suites, with multi-part streaming that crosses
+  the 64-byte block boundary and one-shot-vs-split equality checks; the
+  ASCON KATs are pinned to BC's `LWC_HASH_KAT_256` vectors and the
+  Ascon-Hash256 empty-message digest to the published SP 800-232 value
+  (BC's Hash256 KAT resource is absent from the upstream checkout).
+
 ## [0.436.0]
 
 ### Added
