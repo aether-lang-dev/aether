@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`os.spawn_proc` / `os.wait` / `os.wait_any` — cross-platform non-blocking
+  spawn + reap, including Windows.** The fan-out/fan-in pair a native parallel
+  build scheduler needs (spawn up to N ready nodes, wait for whichever finishes
+  first, reap it, unblock dependents). Unlike `os.run_pipe` these create no IPC
+  back-channel pipe and set no `AETHER_IPC_FD` — which is exactly why they work
+  on Windows, where the pipe was the only part that needed the
+  `_open_osfhandle`/std-handle-inheritance work that kept `run_pipe` POSIX-only.
+  On Windows, `win_launch` is split into a non-blocking `win_spawn`
+  (`CreateProcessW`, reusing the existing argv escaping) plus the reap half, with
+  spawned handles held in an int-token→HANDLE table (tokens never recycled, so
+  Windows PID reuse can't misattribute a reap); `wait_any` uses
+  `WaitForMultipleObjects` for a true wait-any. The spawn half of
+  `os.run_pipe`/`os.wait_pid` is now wired on Windows too (pipe fd is `-1`
+  there); `run_pipe_drain_and_wait` stays POSIX-only. `spawn` is the wrapper name
+  everywhere except the reserved actor keyword forced `os.spawn_proc`. Verified
+  on Win11/MSYS2: 4×sleep-2 finishing in ~2s (concurrent), completion-order reap,
+  exit-code fidelity with spawn-failure distinguishable, `C:\…\a b\c.txt` argv
+  round-trip, flat handle count across 300 spawns, and clean coexistence with a
+  `run_supervised` Job Object.
+
 ## [0.441.0]
 
 ### Added
