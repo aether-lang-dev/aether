@@ -48,6 +48,19 @@ hex_to_bytes(hex: string) -> ptr {
     return b
 }
 
+incrementing(n: int) -> ptr {
+    b = bytes.new(n)
+    i = 0
+    while i < n { bytes.set(b, i, i & 255); i = i + 1 }
+    return b
+}
+
+esch_digest(algo: string, b: ptr, n: int) -> string {
+    ctx, _ = sparkle.new(algo)
+    sparkle.update_bytes(ctx, b, n)
+    return sparkle.final_hex(ctx)
+}
+
 main() {
     fails = 0
 
@@ -84,6 +97,48 @@ main() {
     sparkle.update_bytes(ctx4, b_0001, 2)
     res4_0001 = sparkle.final_hex(ctx4)
     fails = fails + check("esch-384 0001", res4_0001, "76a4f5b45a6062de68f974824fcc7de8ce4bd9ce64ce9a8958a3409151b2481d13b5d9c1bdca1a658d31110088c54922")
+
+    // ---- Rate-boundary vectors (BC LWC_HASH_KAT). These guard the bug where
+    // a rate-filling block (16 bytes) was absorbed eagerly with slim steps and
+    // finalize then ran on an empty padded block, hashing one block short.
+    // An input of EXACTLY the 16-byte rate is the critical case. ----
+    inc16 = incrementing(16)   // 0x00..0x0F
+    fails = fails + check("esch-256 16B(0x00..0x0F, exact rate)",
+        esch_digest("esch-256", inc16, 16),
+        "acff841e2a526d83d6e94ab5564d6d64c98f5e8016bb1c2950386ed156c6c174")
+    fails = fails + check("esch-384 16B(0x00..0x0F, exact rate)",
+        esch_digest("esch-384", inc16, 16),
+        "0008f97d6bbb701d5e33fcc178efe3e3d5e77915d4a4daf6e1ae34cd28edb895a053e19d930b50f72837e1a8f5b1f450")
+    bytes.free(inc16)
+
+    // Just under and one over the rate (15 and 17 bytes) — BC vectors.
+    inc15 = incrementing(15)
+    fails = fails + check("esch-256 15B(one under rate)",
+        esch_digest("esch-256", inc15, 15),
+        "5753e34e3fc970881e1752b59c573e89448d08a93eae46da2a5d8ab04790a60c")
+    bytes.free(inc15)
+
+    // 8-byte input (BC count 9) for esch-384.
+    inc8 = incrementing(8)
+    fails = fails + check("esch-384 8B",
+        esch_digest("esch-384", inc8, 8),
+        "571560322d28dc5f8039794b4a3290a17ccdd60fa6c36ee78dcf9c05ce592d64021ef324af69fcac6829fd84aa69f35b")
+
+    // Multi-part streaming across the rate: 16 bytes fed 7+9 must equal the
+    // one-shot 16-byte digest.
+    ctx_sp, _ = sparkle.new("esch-256")
+    inc16b = incrementing(16)
+    sparkle.update_bytes(ctx_sp, inc16b, 7)
+    tail9 = bytes.new(9)
+    k = 7
+    while k < 16 { bytes.set(tail9, k - 7, k); k = k + 1 }
+    sparkle.update_bytes(ctx_sp, tail9, 9)
+    fails = fails + check("esch-256 16B split 7+9",
+        sparkle.final_hex(ctx_sp),
+        "acff841e2a526d83d6e94ab5564d6d64c98f5e8016bb1c2950386ed156c6c174")
+    bytes.free(inc16b)
+    bytes.free(tail9)
+    bytes.free(inc8)
 
     if fails == 0 {
         println("ALL PASS")

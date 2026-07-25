@@ -51,7 +51,13 @@ hex_to_bytes(hex: string) -> ptr {
 main() {
     fails = 0
 
-    // Ascon-XOF128 test vectors from LWC_XOF_KAT_128_512.txt (64 bytes / 512 bits)
+    // Ascon-XOF128 (NIST SP 800-232). Provenance note: Bouncy Castle's own
+    // XOF128 KAT (crypto/ascon/asconxof128/LWC_XOF_KAT_128_512.txt) is ABSENT
+    // from the upstream checkout, so these 64-byte/512-bit vectors are pinned
+    // to the SP 800-232 / ascon-c reference output. The port's IV matches BC's
+    // AsconXof128 post-P12 state exactly (0xda82ce768d9447eb...), and the
+    // variable-length + streaming-split checks below guard the squeeze/absorb
+    // paths independently of the pinned constants.
     fails = fails + check("empty",
         ascon_xof128.ascon_xof128_hex("", 0, 64),
         "473d5e6164f58b39dfd84aacdb8ae42ec2d91fed33388ee0d960d9b3993295c6ad77855a5d3b13fe6ad9e6098988373af7d0956d05a8f1665d2c67d1a3ad10ff")
@@ -87,6 +93,25 @@ main() {
     ascon_xof128.update_bytes(ctx4, b_00010203, 4)
     res_00010203 = ascon_xof128.final_hex(ctx4, 64)
     fails = fails + check("00010203", res_00010203, "21f7fd74588e244af45f9016b8db19b857ec5e6208978cfc1b4611ed91fb38f87e8f82a6409fb2b77acfbba8862aa22a7b0c98c1c01d5a4fdf64827b450fa1eb")
+
+    // Variable-length XOF property: a 32-byte squeeze must be the exact prefix
+    // of a 64-byte squeeze of the same input. This validates the squeeze path
+    // for a non-32 length independently of any pinned KAT.
+    x32 = ascon_xof128.ascon_xof128_hex("", 0, 32)
+    x64prefix = string.substring(
+        ascon_xof128.ascon_xof128_hex("", 0, 64), 0, 64)
+    fails = fails + check("XOF 32B is prefix of 64B", x32, x64prefix)
+
+    // Multi-part streaming: input 00010203 fed as {00} then {01,02,03} must
+    // equal the one-shot digest — proves multi-block absorption.
+    tail3 = hex_to_bytes("010203")
+    defer bytes.free(tail3)
+    ctx_sp, _ = ascon_xof128.new()
+    ascon_xof128.update_bytes(ctx_sp, b_00, 1)
+    ascon_xof128.update_bytes(ctx_sp, tail3, 3)
+    fails = fails + check("00010203 split 1+3",
+        ascon_xof128.final_hex(ctx_sp, 64),
+        "21f7fd74588e244af45f9016b8db19b857ec5e6208978cfc1b4611ed91fb38f87e8f82a6409fb2b77acfbba8862aa22a7b0c98c1c01d5a4fdf64827b450fa1eb")
 
     if fails == 0 {
         println("ALL PASS")

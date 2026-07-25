@@ -88,6 +88,37 @@ main() {
     res_00010203 = photon_beetle.final_hex(ctx4)
     fails = fails + check("00010203", res_00010203, "efab98a1ffeb6f9e832db6fa7fc6bff670895f8a2abe987cd962e93b0127ec3c")
 
+    // Rate-boundary vectors (PHOTON-Beetle absorbs a 16-byte rate). BC
+    // LWC_HASH_KAT counts 9 (8 bytes) and 17 (16 bytes, exact rate).
+    inc8 = bytes.new(8)
+    j = 0
+    while j < 8 { bytes.set(inc8, j, j); j = j + 1 }
+    defer bytes.free(inc8)
+    ctx8, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx8, inc8, 8)
+    fails = fails + check("8B", photon_beetle.final_hex(ctx8),
+        "87947eed1020ec45eec25cc05a135e08e5928fb6dc1f9214e6a69421a3bc30da")
+
+    inc16 = bytes.new(16)
+    j = 0
+    while j < 16 { bytes.set(inc16, j, j); j = j + 1 }
+    defer bytes.free(inc16)
+    ctx16, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx16, inc16, 16)
+    fails = fails + check("16B(exact rate)", photon_beetle.final_hex(ctx16),
+        "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
+
+    // Multi-part streaming across the rate: 16 bytes fed 5+11.
+    ctx_sp, _ = photon_beetle.new()
+    photon_beetle.update_bytes(ctx_sp, inc16, 5)
+    tail11 = bytes.new(11)
+    k = 5
+    while k < 16 { bytes.set(tail11, k - 5, k); k = k + 1 }
+    defer bytes.free(tail11)
+    photon_beetle.update_bytes(ctx_sp, tail11, 11)
+    fails = fails + check("16B split 5+11", photon_beetle.final_hex(ctx_sp),
+        "ab0d1eb0315df8af7f7ae0ac42eaf2f52fb0fdf0904e182dcc796b6cb8d7981a")
+
     if fails == 0 {
         println("ALL PASS")
         return

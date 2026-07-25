@@ -88,6 +88,37 @@ main() {
     res_00010203 = isap.final_hex(ctx4)
     fails = fails + check("00010203", res_00010203, "8013eaaa1951580a7bef7d29bac323377e64f279ea73e6881b8aed69855ef764")
 
+    // Rate-boundary vectors (ISAP absorbs an 8-byte / 64-bit rate). 8 bytes is
+    // exactly one rate block; 16 bytes is two. BC LWC_HASH_KAT counts 9 and 17.
+    inc8 = bytes.new(8)
+    j = 0
+    while j < 8 { bytes.set(inc8, j, j); j = j + 1 }
+    defer bytes.free(inc8)
+    ctx8, _ = isap.new()
+    isap.update_bytes(ctx8, inc8, 8)
+    fails = fails + check("8B(exact rate)", isap.final_hex(ctx8),
+        "f4c6a44b29915d3d57cf928a18ec6226bb8dd6c1136acd24965f7e7780cd69cf")
+
+    inc16 = bytes.new(16)
+    j = 0
+    while j < 16 { bytes.set(inc16, j, j); j = j + 1 }
+    defer bytes.free(inc16)
+    ctx16, _ = isap.new()
+    isap.update_bytes(ctx16, inc16, 16)
+    fails = fails + check("16B(2x rate)", isap.final_hex(ctx16),
+        "d4e56c4841e2a0069d4f07e61b2dca94fd6d3f9c0df78393e6e8292921bc841d")
+
+    // Multi-part streaming across the rate: 8 bytes fed 3+5.
+    ctx_sp, _ = isap.new()
+    isap.update_bytes(ctx_sp, inc8, 3)
+    tail5 = bytes.new(5)
+    k = 3
+    while k < 8 { bytes.set(tail5, k - 3, k); k = k + 1 }
+    defer bytes.free(tail5)
+    isap.update_bytes(ctx_sp, tail5, 5)
+    fails = fails + check("8B split 3+5", isap.final_hex(ctx_sp),
+        "f4c6a44b29915d3d57cf928a18ec6226bb8dd6c1136acd24965f7e7780cd69cf")
+
     if fails == 0 {
         println("ALL PASS")
         return
