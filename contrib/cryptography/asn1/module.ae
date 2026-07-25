@@ -35,15 +35,33 @@ import std.bytes
 import std.bignum
 import std.string
 import std.strbuilder
+import std.list
 
 exports (
+    encode_set, encode_sequence_list, encode_tagged,
     TAG_BOOLEAN, TAG_INTEGER, TAG_BIT_STRING, TAG_OCTET_STRING,
     TAG_NULL, TAG_OID, TAG_SEQUENCE, TAG_SET,
+    TAG_NUMERIC_STRING, TAG_PRINTABLE_STRING, TAG_T61_STRING, TAG_VIDEOTEX_STRING,
+    TAG_IA5_STRING, TAG_UTC_TIME, TAG_GENERALIZED_TIME, TAG_GRAPHIC_STRING,
+    TAG_VISIBLE_STRING, TAG_GENERAL_STRING, TAG_UNIVERSAL_STRING, TAG_BMP_STRING,
+    TAG_UTF8_STRING, TAG_ENUMERATED,
+    TAG_CLASS_UNIVERSAL, TAG_CLASS_APPLICATION, TAG_CLASS_CONTEXT_SPECIFIC, TAG_CLASS_PRIVATE,
+    TAG_PC_PRIMITIVE, TAG_PC_CONSTRUCTED,
     reader_new, reader_free, reader_eof, reader_remaining,
-    read_tlv, last_tag, read_sequence, read_integer, read_oid,
+    read_tlv, last_tag, last_tag_class, last_tag_pc, last_tag_number,
+    read_sequence, read_integer, read_oid,
     read_octet_string, read_bit_string, read_null, read_boolean,
-    encode_integer, encode_oid, encode_octet_string,
+    read_numeric_string, read_printable_string, read_t61_string, read_videotex_string,
+    read_ia5_string, read_utc_time, read_generalized_time, read_graphic_string,
+    read_visible_string, read_general_string, read_universal_string, read_bmp_string,
+    read_utf8_string, read_enumerated,
+    read_tagged_ext,
+    encode_tag, encode_integer, encode_oid, encode_octet_string,
     encode_bit_string, encode_null, encode_boolean, encode_sequence,
+    encode_numeric_string, encode_printable_string, encode_t61_string, encode_videotex_string,
+    encode_ia5_string, encode_utc_time, encode_generalized_time, encode_graphic_string,
+    encode_visible_string, encode_general_string, encode_universal_string, encode_bmp_string,
+    encode_utf8_string, encode_enumerated,
     encode_len
 )
 
@@ -56,6 +74,30 @@ TAG_NULL() -> int { return 0x05 }
 TAG_OID() -> int { return 0x06 }
 TAG_SEQUENCE() -> int { return 0x30 }   // constructed | 0x10
 TAG_SET() -> int { return 0x31 }        // constructed | 0x11
+TAG_NUMERIC_STRING() -> int { return 0x12 }
+TAG_PRINTABLE_STRING() -> int { return 0x13 }
+TAG_T61_STRING() -> int { return 0x14 }
+TAG_VIDEOTEX_STRING() -> int { return 0x15 }
+TAG_IA5_STRING() -> int { return 0x16 }
+TAG_UTC_TIME() -> int { return 0x17 }
+TAG_GENERALIZED_TIME() -> int { return 0x18 }
+TAG_GRAPHIC_STRING() -> int { return 0x19 }
+TAG_VISIBLE_STRING() -> int { return 0x1A }
+TAG_GENERAL_STRING() -> int { return 0x1B }
+TAG_UNIVERSAL_STRING() -> int { return 0x1C }
+TAG_BMP_STRING() -> int { return 0x1E }
+TAG_UTF8_STRING() -> int { return 0x0C }
+TAG_ENUMERATED() -> int { return 0x0A }
+
+// ---- tag classes ----
+TAG_CLASS_UNIVERSAL() -> int { return 0x00 }
+TAG_CLASS_APPLICATION() -> int { return 0x40 }
+TAG_CLASS_CONTEXT_SPECIFIC() -> int { return 0x80 }
+TAG_CLASS_PRIVATE() -> int { return 0xC0 }
+
+// ---- tag pc ----
+TAG_PC_PRIMITIVE() -> int { return 0x00 }
+TAG_PC_CONSTRUCTED() -> int { return 0x20 }
 
 // ---- reader: a (bytes, pos, len) cursor ----
 //
@@ -71,14 +113,20 @@ struct Reader {
     pos: int
     len: int
     last_tag: int // tag of the most recent read_tlv (avoids a 3-tuple return)
+    last_tag_class: int
+    last_tag_pc: int
+    last_tag_number: int
 }
 
 reader_new(b: ptr) -> ptr {
-    r = malloc(32) as *Reader
+    r = malloc(56) as *Reader
     r.buf = b
     r.pos = 0
     r.len = bytes.length(b)
     r.last_tag = -1
+    r.last_tag_class = -1
+    r.last_tag_pc = -1
+    r.last_tag_number = -1
     return r
 }
 
@@ -115,9 +163,35 @@ read_tlv(r: ptr) -> (ptr, string) {
     if rr.pos >= rr.len {
         return null, "asn1: unexpected end of input (tag)"
     }
-    tag = bytes.get(rr.buf, rr.pos) & 0xFF
-    rr.last_tag = tag
+    first_tag_byte = bytes.get(rr.buf, rr.pos) & 0xFF
     rr.pos = rr.pos + 1
+
+    tag_class = first_tag_byte & 0xC0
+    tag_pc = first_tag_byte & 0x20
+    tag_number = first_tag_byte & 0x1F
+
+    if tag_number == 0x1F {
+        // High tag number form (multi-byte)
+        tag_number = 0
+        loop = 1
+        while loop == 1 {
+            if rr.pos >= rr.len {
+                return null, "asn1: unexpected end of input in high tag number"
+            }
+            tb = bytes.get(rr.buf, rr.pos) & 0xFF
+            rr.pos = rr.pos + 1
+            tag_number = (tag_number << 7) | (tb & 0x7F)
+            if (tb & 0x80) == 0 {
+                loop = 0
+            }
+        }
+    }
+
+    rr.last_tag = first_tag_byte
+    rr.last_tag_class = tag_class
+    rr.last_tag_pc = tag_pc
+    rr.last_tag_number = tag_number
+
     // length
     if rr.pos >= rr.len {
         return null, "asn1: unexpected end of input (length)"
@@ -125,26 +199,72 @@ read_tlv(r: ptr) -> (ptr, string) {
     len0 = bytes.get(rr.buf, rr.pos) & 0xFF
     rr.pos = rr.pos + 1
     length = 0
+    is_indefinite = 0
     if len0 < 0x80 {
         length = len0
     } else {
         nbytes = len0 & 0x7F
         if nbytes == 0 {
-            return null, "asn1: indefinite length not allowed in DER"
-        }
-        if nbytes > 4 {
-            return null, "asn1: length too large"
-        }
-        k = 0
-        while k < nbytes {
-            if rr.pos >= rr.len {
-                return null, "asn1: truncated long-form length"
+            is_indefinite = 1
+        } else {
+            if nbytes > 4 {
+                return null, "asn1: length too large"
             }
-            length = (length << 8) | (bytes.get(rr.buf, rr.pos) & 0xFF)
-            rr.pos = rr.pos + 1
-            k = k + 1
+            k = 0
+            while k < nbytes {
+                if rr.pos >= rr.len {
+                    return null, "asn1: truncated long-form length"
+                }
+                length = (length << 8) | (bytes.get(rr.buf, rr.pos) & 0xFF)
+                rr.pos = rr.pos + 1
+                k = k + 1
+            }
         }
     }
+
+    if is_indefinite == 1 {
+        // Read TLVs recursively until we find EOC (00 00)
+        acc = bytes.new(0)
+        acc_len = 0
+        loop = 1
+        while loop == 1 {
+            if rr.pos + 2 <= rr.len {
+                b1 = bytes.get(rr.buf, rr.pos) & 0xFF
+                b2 = bytes.get(rr.buf, rr.pos + 1) & 0xFF
+                if b1 == 0 && b2 == 0 {
+                    rr.pos = rr.pos + 2
+                    loop = 0
+                }
+            }
+            if loop == 1 {
+                if rr.pos >= rr.len {
+                    bytes.free(acc)
+                    return null, "asn1: unexpected end of input in indefinite length"
+                }
+                start_pos = rr.pos
+                sub_content, err = read_tlv(r)
+                if string.equals(err, "") != 1 {
+                    bytes.free(acc)
+                    return null, err
+                }
+                bytes.free(sub_content)
+                end_pos = rr.pos
+                sub_tlv_len = end_pos - start_pos
+
+                // Copy the raw TLV bytes into acc
+                new_acc = bytes.new(acc_len + sub_tlv_len)
+                if acc_len > 0 {
+                    bytes.copy_from_bytes(new_acc, 0, acc, 0, acc_len)
+                }
+                bytes.copy_from_bytes(new_acc, acc_len, rr.buf, start_pos, sub_tlv_len)
+                bytes.free(acc)
+                acc = new_acc
+                acc_len = acc_len + sub_tlv_len
+            }
+        }
+        return acc, ""
+    }
+
     if rr.pos + length > rr.len {
         return null, "asn1: content runs past end of input"
     }
@@ -325,22 +445,96 @@ encode_len(length: int) -> ptr {
 
 // Build a TLV: tag byte + encoded length + content. Consumes (frees)
 // `content`. Returns a fresh std.bytes.
+// ---- tag encoding ----
+//
+// Encodes a tag class, pc, and tag number into a fresh std.bytes.
+encode_tag(tag_class: int, tag_pc: int, tag_number: int) -> ptr {
+    if tag_number < 31 {
+        out = bytes.new(1)
+        bytes.set(out, 0, tag_class | tag_pc | tag_number)
+        return out
+    }
+    // High tag number form (multi-byte)
+    // First byte has 0x1F as the tag number
+    // Subsequent bytes represent the tag number in base 128 (MSB first, high bit = continuation)
+    // We collect 7-bit groups
+    ngroups = 0
+    tmp = tag_number
+    while tmp > 0 {
+        ngroups = ngroups + 1
+        tmp = tmp >> 7
+    }
+    if ngroups == 0 { ngroups = 1 }
+    out = bytes.new(1 + ngroups)
+    bytes.set(out, 0, tag_class | tag_pc | 0x1F)
+    g = ngroups - 1
+    i = 0
+    while g >= 0 {
+        shift = g * 7
+        byteval = (tag_number >> shift) & 0x7F
+        if g != 0 { byteval = byteval | 0x80 }
+        bytes.set(out, 1 + i, byteval)
+        i = i + 1
+        g = g - 1
+    }
+    return out
+}
+
+// Build a TLV: tag byte + encoded length + content. Consumes (frees)
+// `content`. Returns a fresh std.bytes.
 wrap_tlv(tag: int, content: ptr) -> ptr {
+    tag_bytes = encode_tag(tag & 0xC0, tag & 0x20, tag & 0x1F)
+    ntag = bytes.length(tag_bytes)
     clen = bytes.length(content)
     lenbytes = encode_len(clen)
     nlen = bytes.length(lenbytes)
-    out = bytes.new(1 + nlen + clen)
-    bytes.set(out, 0, tag & 0xFF)
+    out = bytes.new(ntag + nlen + clen)
+    i = 0
+    while i < ntag {
+        bytes.set(out, i, bytes.get(tag_bytes, i))
+        i = i + 1
+    }
     i = 0
     while i < nlen {
-        bytes.set(out, 1 + i, bytes.get(lenbytes, i))
+        bytes.set(out, ntag + i, bytes.get(lenbytes, i))
         i = i + 1
     }
     j = 0
     while j < clen {
-        bytes.set(out, 1 + nlen + j, bytes.get(content, j))
+        bytes.set(out, ntag + nlen + j, bytes.get(content, j))
         j = j + 1
     }
+    bytes.free(tag_bytes)
+    bytes.free(lenbytes)
+    bytes.free(content)
+    return out
+}
+
+// Build a TLV from tag class, tag pc, tag number and content.
+// Consumes (frees) `content`. Returns a fresh std.bytes.
+wrap_tlv_ext(tag_class: int, tag_pc: int, tag_number: int, content: ptr) -> ptr {
+    tag_bytes = encode_tag(tag_class, tag_pc, tag_number)
+    ntag = bytes.length(tag_bytes)
+    clen = bytes.length(content)
+    lenbytes = encode_len(clen)
+    nlen = bytes.length(lenbytes)
+    out = bytes.new(ntag + nlen + clen)
+    i = 0
+    while i < ntag {
+        bytes.set(out, i, bytes.get(tag_bytes, i))
+        i = i + 1
+    }
+    i = 0
+    while i < nlen {
+        bytes.set(out, ntag + i, bytes.get(lenbytes, i))
+        i = i + 1
+    }
+    j = 0
+    while j < clen {
+        bytes.set(out, ntag + nlen + j, bytes.get(content, j))
+        j = j + 1
+    }
+    bytes.free(tag_bytes)
     bytes.free(lenbytes)
     bytes.free(content)
     return out
@@ -458,4 +652,488 @@ emit_base128(content: ptr, off: int, v: int) -> int {
 // `body` is consumed (freed).
 encode_sequence(body: ptr) -> ptr {
     return wrap_tlv(0x30, body)
+}
+
+// ---- string encoders and decoders ----
+
+encode_string_type(tag: int, s: string) -> ptr {
+    content = bytes.new(string.length(s))
+    bytes.copy_from_string(content, 0, s, string.length(s))
+    return wrap_tlv(tag, content)
+}
+
+read_string_type(r: ptr, tag: int) -> (string, string) {
+    content, err = read_tagged(r, tag)
+    if string.equals(err, "") != 1 {
+        return "", err
+    }
+    slen = bytes.length(content)
+    s = bytes.finish(content, slen)
+    return s, ""
+}
+
+encode_numeric_string(s: string) -> ptr { return encode_string_type(0x12, s) }
+read_numeric_string(r: ptr) -> (string, string) { return read_string_type(r, 0x12) }
+
+encode_printable_string(s: string) -> ptr { return encode_string_type(0x13, s) }
+read_printable_string(r: ptr) -> (string, string) { return read_string_type(r, 0x13) }
+
+encode_t61_string(s: string) -> ptr { return encode_string_type(0x14, s) }
+read_t61_string(r: ptr) -> (string, string) { return read_string_type(r, 0x14) }
+
+encode_videotex_string(s: string) -> ptr { return encode_string_type(0x15, s) }
+read_videotex_string(r: ptr) -> (string, string) { return read_string_type(r, 0x15) }
+
+encode_ia5_string(s: string) -> ptr { return encode_string_type(0x16, s) }
+read_ia5_string(r: ptr) -> (string, string) { return read_string_type(r, 0x16) }
+
+encode_utc_time(s: string) -> ptr { return encode_string_type(0x17, s) }
+read_utc_time(r: ptr) -> (string, string) { return read_string_type(r, 0x17) }
+
+encode_generalized_time(s: string) -> ptr { return encode_string_type(0x18, s) }
+read_generalized_time(r: ptr) -> (string, string) { return read_string_type(r, 0x18) }
+
+encode_graphic_string(s: string) -> ptr { return encode_string_type(0x19, s) }
+read_graphic_string(r: ptr) -> (string, string) { return read_string_type(r, 0x19) }
+
+encode_visible_string(s: string) -> ptr { return encode_string_type(0x1A, s) }
+read_visible_string(r: ptr) -> (string, string) { return read_string_type(r, 0x1A) }
+
+encode_general_string(s: string) -> ptr { return encode_string_type(0x1B, s) }
+read_general_string(r: ptr) -> (string, string) { return read_string_type(r, 0x1B) }
+
+encode_utf8_string(s: string) -> ptr { return encode_string_type(0x0C, s) }
+read_utf8_string(r: ptr) -> (string, string) { return read_string_type(r, 0x0C) }
+
+encode_bmp_string(s: string) -> ptr {
+    content = encode_bmp_string_bytes(s)
+    return wrap_tlv(0x1E, content)
+}
+
+read_bmp_string(r: ptr) -> (string, string) {
+    content, err = read_tagged(r, 0x1E)
+    if string.equals(err, "") != 1 {
+        return "", err
+    }
+    s = decode_bmp_string_bytes(content)
+    bytes.free(content)
+    return s, ""
+}
+
+encode_universal_string(s: string) -> ptr {
+    content = encode_universal_string_bytes(s)
+    return wrap_tlv(0x1C, content)
+}
+
+read_universal_string(r: ptr) -> (string, string) {
+    content, err = read_tagged(r, 0x1C)
+    if string.equals(err, "") != 1 {
+        return "", err
+    }
+    s = decode_universal_string_bytes(content)
+    bytes.free(content)
+    return s, ""
+}
+
+encode_enumerated(v: int) -> ptr {
+    bn = bignum.from_int(v)
+    content = bignum.to_bytes(bn)
+    bignum.free(bn)
+    return wrap_tlv(0x0A, content)
+}
+
+bignum_to_int(bn: ptr) -> int {
+    if bn == null { return 0 }
+    bytes_buf = bignum.to_bytes(bn)
+    n = bytes.length(bytes_buf)
+    if n == 0 {
+        bytes.free(bytes_buf)
+        return 0
+    }
+    first = bytes.get(bytes_buf, 0)
+    v = 0
+    if (first & 0x80) != 0 {
+        v = -1
+    }
+    i = 0
+    while i < n {
+        v = (v << 8) | (bytes.get(bytes_buf, i) & 0xFF)
+        i = i + 1
+    }
+    bytes.free(bytes_buf)
+    return v
+}
+
+read_enumerated(r: ptr) -> (int, string) {
+    content, err = read_tagged(r, 0x0A)
+    if string.equals(err, "") != 1 {
+        return 0, err
+    }
+    clen = bytes.length(content)
+    bn = bignum.from_bytes(content, clen)
+    bytes.free(content)
+    v = bignum_to_int(bn)
+    bignum.free(bn)
+    return v, ""
+}
+
+// BMPString / UniversalString helpers: UTF-8 <-> UTF-16BE / UTF-32BE
+
+decode_bmp_string_bytes(content: ptr) -> string {
+    clen = bytes.length(content)
+    nchars = clen / 2
+    out = bytes.new(nchars * 3)
+    out_idx = 0
+    i = 0
+    while i < nchars {
+        b1 = bytes.get(content, i * 2) & 0xFF
+        b2 = bytes.get(content, i * 2 + 1) & 0xFF
+        cp = (b1 << 8) | b2
+
+        if cp < 0x80 {
+            bytes.set(out, out_idx, cp)
+            out_idx = out_idx + 1
+        } else {
+            if cp < 0x800 {
+                bytes.set(out, out_idx, 0xC0 | (cp >> 6))
+                bytes.set(out, out_idx + 1, 0x80 | (cp & 0x3F))
+                out_idx = out_idx + 2
+            } else {
+                bytes.set(out, out_idx, 0xE0 | (cp >> 12))
+                bytes.set(out, out_idx + 1, 0x80 | ((cp >> 6) & 0x3F))
+                bytes.set(out, out_idx + 2, 0x80 | (cp & 0x3F))
+                out_idx = out_idx + 3
+            }
+        }
+        i = i + 1
+    }
+    return bytes.finish(out, out_idx)
+}
+
+encode_bmp_string_bytes(s: string) -> ptr {
+    n = string.length(s)
+    out = bytes.new(n * 2)
+    out_idx = 0
+    i = 0
+    while i < n {
+        c1 = string_char_at_n(s, n, i) & 0xFF
+        cp = 0
+        if c1 < 0x80 {
+            cp = c1
+            i = i + 1
+        } else {
+            if (c1 & 0xE0) == 0xC0 {
+                if i + 1 < n {
+                    c2 = string_char_at_n(s, n, i + 1) & 0xFF
+                    cp = ((c1 & 0x1F) << 6) | (c2 & 0x3F)
+                }
+                i = i + 2
+            } else {
+                if (c1 & 0xF0) == 0xE0 {
+                    if i + 2 < n {
+                        c2 = string_char_at_n(s, n, i + 1) & 0xFF
+                        c3 = string_char_at_n(s, n, i + 2) & 0xFF
+                        cp = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F)
+                    }
+                    i = i + 3
+                } else {
+                    cp = 0xFFFD
+                    i = i + 4
+                }
+            }
+        }
+        bytes.set(out, out_idx, (cp >> 8) & 0xFF)
+        bytes.set(out, out_idx + 1, cp & 0xFF)
+        out_idx = out_idx + 2
+    }
+    final_out = bytes.new(out_idx)
+    bytes.copy_from_bytes(final_out, 0, out, 0, out_idx)
+    bytes.free(out)
+    return final_out
+}
+
+// Compare two std.bytes lexicographically.
+compare_bytes(a: ptr, b: ptr) -> int {
+    if a == null { if b == null { return 0 } else { return -1 } }
+    if b == null { return 1 }
+    len_a = bytes.length(a)
+    len_b = bytes.length(b)
+    min_len = len_a
+    if len_b < min_len { min_len = len_b }
+    i = 0
+    while i < min_len {
+        va = bytes.get(a, i) & 0xFF
+        vb = bytes.get(b, i) & 0xFF
+        if va != vb {
+            return va - vb
+        }
+        i = i + 1
+    }
+    return len_a - len_b
+}
+
+// Build a SET: sort elements, concatenate them, and wrap in TAG_SET.
+// `elements` is a `std.list` containing encoded TLV bytes (`ptr`).
+// The list is freed, but the elements in the list are either consumed or freed.
+encode_set(elements_list: ptr) -> ptr {
+    if elements_list == null {
+        return wrap_tlv(0x31, bytes.new(0))
+    }
+    sz = list_size(elements_list)
+    if sz == 0 {
+        list_free(elements_list)
+        return wrap_tlv(0x31, bytes.new(0))
+    }
+
+    // Bubble sort the elements in the list lexicographically
+    i = 0
+    while i < sz {
+        j = 0
+        while j < sz - 1 - i {
+            e1 = list_get_raw(elements_list, j)
+            e2 = list_get_raw(elements_list, j + 1)
+            cmp = compare_bytes(e1, e2)
+            if cmp > 0 {
+                list_set(elements_list, j, e2)
+                list_set(elements_list, j + 1, e1)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Concatenate sorted elements
+    tot_len = 0
+    i = 0
+    while i < sz {
+        el = list_get_raw(elements_list, i)
+        tot_len = tot_len + bytes.length(el)
+        i = i + 1
+    }
+
+    body = bytes.new(tot_len)
+    off = 0
+    i = 0
+    while i < sz {
+        el = list_get_raw(elements_list, i)
+        off = emit_bytes(body, off, el)
+        bytes.free(el)
+        i = i + 1
+    }
+
+    list_free(elements_list)
+    return wrap_tlv(0x31, body)
+}
+
+// Helper to copy bytes.
+emit_bytes(dst: ptr, off: int, src: ptr) -> int {
+    n = bytes.length(src)
+    i = 0
+    while i < n {
+        bytes.set(dst, off + i, bytes.get(src, i))
+        i = i + 1
+    }
+    return off + n
+}
+
+// Build a SEQUENCE from a `std.list` of encoded TLVs (`ptr`).
+// The list is freed, and the elements are consumed.
+encode_sequence_list(elements_list: ptr) -> ptr {
+    if elements_list == null {
+        return wrap_tlv(0x30, bytes.new(0))
+    }
+    sz = list_size(elements_list)
+    if sz == 0 {
+        list_free(elements_list)
+        return wrap_tlv(0x30, bytes.new(0))
+    }
+    tot_len = 0
+    i = 0
+    while i < sz {
+        el = list_get_raw(elements_list, i)
+        tot_len = tot_len + bytes.length(el)
+        i = i + 1
+    }
+    body = bytes.new(tot_len)
+    off = 0
+    i = 0
+    while i < sz {
+        el = list_get_raw(elements_list, i)
+        off = emit_bytes(body, off, el)
+        bytes.free(el)
+        i = i + 1
+    }
+    list_free(elements_list)
+    return wrap_tlv(0x30, body)
+}
+
+// Explicit/Implicit Tagging:
+// - `is_explicit = 1`: wraps `content` in an explicit tag: [tagClass | PC_CONSTRUCTED | tagNo] -> Length -> content (where content is already a full TLV)
+// - `is_explicit = 0`: implicit tag: replaces the outermost tag byte of `content` with the new tag byte.
+// `content` is consumed (freed).
+encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: ptr) -> ptr {
+    if is_explicit == 1 {
+        // Explicit tag is always constructed (PC = 0x20)
+        return wrap_tlv_ext(tag_class, 0x20, tag_number, content)
+    }
+
+    // Implicit tagging replaces the outer tag
+    // Since we now support high tag number form, we must replace the outer tag completely.
+    // To do this, let's find where the outer tag ends and length begins.
+    // Let's create a Reader over the content to see where it ends.
+    // But since `content` is already a full TLV, we can parse its tag to see how many bytes it takes.
+    r = reader_new(content)
+    rr = r as *Reader
+    // Read tag (this advances rr.pos)
+    first_byte = bytes.get(content, rr.pos) & 0xFF
+    rr.pos = rr.pos + 1
+    tag_num = first_byte & 0x1F
+    if tag_num == 0x1F {
+        loop = 1
+        while loop == 1 {
+            tb = bytes.get(content, rr.pos) & 0xFF
+            rr.pos = rr.pos + 1
+            if (tb & 0x80) == 0 { loop = 0 }
+        }
+    }
+
+    // Now rr.pos is the start of the length field
+    header_len = rr.pos
+    reader_free(r)
+
+    // We want to construct a new tag byte or bytes with the same pc as the original,
+    // but with the new class and number.
+    original_pc = first_byte & 0x20
+    new_tag_bytes = encode_tag(tag_class, original_pc, tag_number)
+    ntag = bytes.length(new_tag_bytes)
+
+    // The rest of the content (after the original tag) has length: bytes.length(content) - header_len
+    rest_len = bytes.length(content) - header_len
+    out = bytes.new(ntag + rest_len)
+
+    // Copy new tag bytes
+    i = 0
+    while i < ntag {
+        bytes.set(out, i, bytes.get(new_tag_bytes, i))
+        i = i + 1
+    }
+
+    // Copy the rest of the content
+    i = 0
+    while i < rest_len {
+        bytes.set(out, ntag + i, bytes.get(content, header_len + i))
+        i = i + 1
+    }
+
+    bytes.free(new_tag_bytes)
+    bytes.free(content)
+    return out
+}
+
+// Extensible read_tagged helper. Reads a tagged object.
+// Returns (content_bytes, err). If `is_explicit = 1`, it unwraps the explicit tag, parses its nested TLV, and returns its content.
+// If `is_explicit = 0`, it just parses it as implicit, treating it as having the underlying tag class/number/etc.
+// Wait, for implicit tagging, how can we parser-unwrap?
+// If implicit, we just return the raw contents of the TLV directly.
+read_tagged_ext(r: ptr, is_explicit: int, want_class: int, want_number: int) -> (ptr, string) {
+    rr = r as *Reader
+    content, err = read_tlv(r)
+    if string.equals(err, "") != 1 {
+        return null, err
+    }
+    if rr.last_tag_class != want_class || rr.last_tag_number != want_number {
+        bytes.free(content)
+        return null, "asn1: unexpected tag class or number"
+    }
+    return content, ""
+}
+
+decode_universal_string_bytes(content: ptr) -> string {
+    clen = bytes.length(content)
+    nchars = clen / 4
+    out = bytes.new(nchars * 4)
+    out_idx = 0
+    i = 0
+    while i < nchars {
+        b1 = bytes.get(content, i * 4) & 0xFF
+        b2 = bytes.get(content, i * 4 + 1) & 0xFF
+        b3 = bytes.get(content, i * 4 + 2) & 0xFF
+        b4 = bytes.get(content, i * 4 + 3) & 0xFF
+        cp = (b1 << 24) | (b2 << 16) | (b3 << 8) | b4
+
+        if cp < 0x80 {
+            bytes.set(out, out_idx, cp)
+            out_idx = out_idx + 1
+        } else {
+            if cp < 0x800 {
+                bytes.set(out, out_idx, 0xC0 | (cp >> 6))
+                bytes.set(out, out_idx + 1, 0x80 | (cp & 0x3F))
+                out_idx = out_idx + 2
+            } else {
+                if cp < 0x10000 {
+                    bytes.set(out, out_idx, 0xE0 | (cp >> 12))
+                    bytes.set(out, out_idx + 1, 0x80 | ((cp >> 6) & 0x3F))
+                    bytes.set(out, out_idx + 2, 0x80 | (cp & 0x3F))
+                    out_idx = out_idx + 3
+                } else {
+                    bytes.set(out, out_idx, 0xF0 | (cp >> 18))
+                    bytes.set(out, out_idx + 1, 0x80 | ((cp >> 12) & 0x3F))
+                    bytes.set(out, out_idx + 2, 0x80 | ((cp >> 6) & 0x3F))
+                    bytes.set(out, out_idx + 3, 0x80 | (cp & 0x3F))
+                    out_idx = out_idx + 4
+                }
+            }
+        }
+        i = i + 1
+    }
+    return bytes.finish(out, out_idx)
+}
+
+encode_universal_string_bytes(s: string) -> ptr {
+    n = string.length(s)
+    out = bytes.new(n * 4)
+    out_idx = 0
+    i = 0
+    while i < n {
+        c1 = string_char_at_n(s, n, i) & 0xFF
+        cp = 0
+        if c1 < 0x80 {
+            cp = c1
+            i = i + 1
+        } else {
+            if (c1 & 0xE0) == 0xC0 {
+                if i + 1 < n {
+                    c2 = string_char_at_n(s, n, i + 1) & 0xFF
+                    cp = ((c1 & 0x1F) << 6) | (c2 & 0x3F)
+                }
+                i = i + 2
+            } else {
+                if (c1 & 0xF0) == 0xE0 {
+                    if i + 2 < n {
+                        c2 = string_char_at_n(s, n, i + 1) & 0xFF
+                        c3 = string_char_at_n(s, n, i + 2) & 0xFF
+                        cp = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F)
+                    }
+                    i = i + 3
+                } else {
+                    if i + 3 < n {
+                        c2 = string_char_at_n(s, n, i + 1) & 0xFF
+                        c3 = string_char_at_n(s, n, i + 2) & 0xFF
+                        c4 = string_char_at_n(s, n, i + 3) & 0xFF
+                        cp = ((c1 & 0x07) << 18) | ((c2 & 0x3F) << 12) | ((c3 & 0x3F) << 6) | (c4 & 0x3F)
+                    }
+                    i = i + 4
+                }
+            }
+        }
+        bytes.set(out, out_idx, (cp >> 24) & 0xFF)
+        bytes.set(out, out_idx + 1, (cp >> 16) & 0xFF)
+        bytes.set(out, out_idx + 2, (cp >> 8) & 0xFF)
+        bytes.set(out, out_idx + 3, cp & 0xFF)
+        out_idx = out_idx + 4
+    }
+    final_out = bytes.new(out_idx)
+    bytes.copy_from_bytes(final_out, 0, out, 0, out_idx)
+    bytes.free(out)
+    return final_out
 }
