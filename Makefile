@@ -269,10 +269,16 @@ else
   YAML_LDFLAGS :=
 endif
 ifneq ($(YAML_LDFLAGS),)
+  # libfyaml found (auto/1): compile the real bindings + link it.
   YAML_CFLAGS += -DAETHER_HAS_YAML
 else
-  YAML_LDFLAGS := -lfyaml
-  YAML_CFLAGS += -DAETHER_HAS_YAML
+  # libfyaml absent (or YAML=0): define NOTHING and link NOTHING, so
+  # aether_yaml.c compiles its unavailable-stub path and the build works
+  # everywhere. (The old `else` forced -lfyaml + -DAETHER_HAS_YAML here,
+  # which broke every build without libfyaml — the whole stdlib failed on
+  # `#include <libfyaml.h>: No such file`.)
+  YAML_CFLAGS :=
+  YAML_LDFLAGS :=
 endif
 
 # #959: homebrew's pkg-config .pc files emit versioned

@@ -46,11 +46,13 @@ extern string_concat(a: string, b: string) -> string
 // Parse a YAML string. Returns (document_ptr, "") on success, (null, error) on failure.
 // Caller owns the returned document and must free it using yaml.free.
 parse(yaml_str: string) -> ptr! {
+    ok = ""   // single tracked empty-error binding; a fresh string_concat("","")
+              // per success return leaks 32 bytes/call the caller discards
     doc = yaml_parse_raw(yaml_str)
     if doc == null {
         return null, string_concat(yaml_last_error(), "")
     }
-    return doc, string_concat("", "")
+    return doc, ok
 }
 
 // Free a parsed YAML document.
@@ -71,6 +73,7 @@ type(node: ptr) -> int {
 // Read the scalar string value out of a YAML node.
 // Returns (scalar_str, "") on success, ("", error) if node is not a scalar.
 get_scalar(node: ptr) -> string! {
+    ok = ""
     if type(node) != YAML_SCALAR {
         return string_concat("", ""), string_concat("not a scalar", "")
     }
@@ -78,7 +81,7 @@ get_scalar(node: ptr) -> string! {
     if raw == null {
         return string_concat("", ""), string_concat("not a scalar", "")
     }
-    return string_concat(raw, ""), string_concat("", "")
+    return string_concat(raw, ""), ok
 }
 
 // Get the size of a sequence node. Returns -1 if not a sequence.
@@ -113,18 +116,20 @@ mapping_lookup(node: ptr, key: string) -> ptr {
 
 // Emit a YAML node to a string representation.
 emit_node(node: ptr) -> string! {
+    ok = ""
     raw = yaml_emit_node_raw(node)
     if raw == null {
         return string_concat("", ""), string_concat("emission failed", "")
     }
-    return string_concat(raw, ""), string_concat("", "")
+    return string_concat(raw, ""), ok
 }
 
 // Emit a YAML document to a string representation.
 emit_document(doc: ptr) -> string! {
+    ok = ""
     raw = yaml_emit_document_raw(doc)
     if raw == null {
         return string_concat("", ""), string_concat("emission failed", "")
     }
-    return string_concat(raw, ""), string_concat("", "")
+    return string_concat(raw, ""), ok
 }

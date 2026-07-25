@@ -1,10 +1,20 @@
 // aether_yaml.c — Bindings for std.yaml using libfyaml.
+//
+// libfyaml is an OPTIONAL dependency: the Makefile defines AETHER_HAS_YAML
+// (and links -lfyaml) only when pkg-config finds libfyaml. When it's absent
+// this file must still compile — otherwise std.yaml being in STD_SRC would
+// break the whole stdlib build on any machine without libfyaml. So the
+// libfyaml-backed bodies live under `#ifdef AETHER_HAS_YAML`; the `#else`
+// branch provides stubs that report "unavailable" at runtime, exactly like
+// the OpenSSL/zlib/pcre2 stubs elsewhere in std/.
 
-#include <libfyaml.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#ifdef AETHER_HAS_YAML
+#include <libfyaml.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // Thread-local storage portability shim
@@ -29,6 +39,7 @@ const char* yaml_last_error(void) {
     return g_yaml_err_set ? g_yaml_err_buf : "";
 }
 
+#ifdef AETHER_HAS_YAML
 // ---------------------------------------------------------------------------
 // Emission thread-local buffer to avoid memory leaks
 // ---------------------------------------------------------------------------
@@ -91,7 +102,12 @@ void* yaml_parse_raw(const char* yaml_str) {
         }
     }
 
+    // Clear collected errors then drop our ref. The collected-error entries are
+    // owned by the diag and are NOT reclaimed by fy_diag_unref alone (leaks ~64
+    // bytes per failed parse), so reset them first. Reset is safe on a diag with
+    // no collected errors (the success path), so it runs unconditionally.
     if (diag) {
+        fy_diag_reset_error(diag);
         fy_diag_unref(diag);
     }
 
@@ -172,3 +188,31 @@ const char* yaml_emit_document_raw(void* doc) {
     char* str = fy_emit_document_to_string((struct fy_document*)doc, FYECF_DEFAULT);
     return store_emit_string(str);
 }
+
+#else  /* !AETHER_HAS_YAML — libfyaml not available at build time */
+
+/* Stubs so std.yaml links everywhere; every entry point reports the feature
+ * as unavailable. yaml_parse_raw sets the error so callers' (doc, err) tuple
+ * surfaces a clear message rather than a silent NULL. */
+static void yaml_set_unavailable(void) {
+    snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf),
+             "std.yaml unavailable: this build has no libfyaml "
+             "(install libfyaml + rebuild, or set YAML=1)");
+    g_yaml_err_set = 1;
+}
+
+void* yaml_parse_raw(const char* yaml_str) { (void)yaml_str; yaml_set_unavailable(); return NULL; }
+void  yaml_free_raw(void* doc) { (void)doc; }
+void* yaml_root_raw(void* doc) { (void)doc; return NULL; }
+int   yaml_node_type_raw(void* node) { (void)node; return 0; }
+const char* yaml_node_get_scalar_raw(void* node) { (void)node; return NULL; }
+int   yaml_sequence_size_raw(void* node) { (void)node; return -1; }
+void* yaml_sequence_get_raw(void* node, int index) { (void)node; (void)index; return NULL; }
+int   yaml_mapping_size_raw(void* node) { (void)node; return -1; }
+void* yaml_mapping_get_key_raw(void* node, int index) { (void)node; (void)index; return NULL; }
+void* yaml_mapping_get_value_raw(void* node, int index) { (void)node; (void)index; return NULL; }
+void* yaml_mapping_lookup_raw(void* node, const char* key) { (void)node; (void)key; return NULL; }
+const char* yaml_emit_node_raw(void* node) { (void)node; return NULL; }
+const char* yaml_emit_document_raw(void* doc) { (void)doc; return NULL; }
+
+#endif /* AETHER_HAS_YAML */
