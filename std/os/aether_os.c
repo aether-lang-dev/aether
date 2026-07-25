@@ -2535,7 +2535,10 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
     if (m == 0) { out._2 = "no live tokens"; return out; }
 
     DWORD r = WaitForMultipleObjects((DWORD)m, handles, FALSE, INFINITE);
-    if (r >= WAIT_OBJECT_0 && r < WAIT_OBJECT_0 + (DWORD)m) {
+    /* WAIT_OBJECT_0 is 0, so the lower bound (r >= WAIT_OBJECT_0) is always
+     * true for the unsigned DWORD and -Wtype-limits flags it; only the upper
+     * bound distinguishes a signaled index from WAIT_TIMEOUT/WAIT_FAILED. */
+    if (r < WAIT_OBJECT_0 + (DWORD)m) {
         int idx = (int)(r - WAIT_OBJECT_0);
         _tuple_int_string s = winproc_reap(toks[idx], handles[idx]);
         out._0 = toks[idx];
