@@ -207,7 +207,11 @@ int run_cross_build(const char* c_file, const char* out_file,
      * warn-and-degrade as openssl/nghttp2 on a Tier-B target). Without this, a
      * macos cross-build of ANY program fails compiling aether_audio.c, even one
      * that never touches std.audio (the runtime always compiles it). */
-    char feature_defs[128] = "-DAETHER_HAS_SANDBOX";
+    /* feature_defs grows below when the CROSSBUILD_SYSROOT probe finds a
+     * Tier-2 lib staged: each such lib both LINKS (crossbuild_libs) and
+     * COMPILES REAL (its -DAETHER_HAS_* here). Sized for the base defs plus
+     * every Tier-2 macro. */
+    char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
     if (strstr(ztriple, "macos")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
@@ -324,36 +328,70 @@ int run_cross_build(const char* c_file, const char* out_file,
             size_t p = 0;
             p += (size_t)snprintf(crossbuild_libs + p, sizeof(crossbuild_libs) - p,
                                   "-L%s/lib", xsr);
+            /* The sysroot's headers (openssl/*, zlib.h, pcre2.h, ...) must be on
+             * the COMPILE include path too, else enabling a real path below
+             * (-DAETHER_HAS_OPENSSL etc.) hits `openssl/ssl.h file not found`.
+             * Added once, unconditionally when a CROSSBUILD_SYSROOT is set —
+             * harmless when a probed lib is absent (nothing includes its
+             * header) and required when present. */
+            strncat(feature_defs, " -I",
+                    sizeof(feature_defs) - strlen(feature_defs) - 1);
+            strncat(feature_defs, xsr,
+                    sizeof(feature_defs) - strlen(feature_defs) - 1);
+            strncat(feature_defs, "/include",
+                    sizeof(feature_defs) - strlen(feature_defs) - 1);
             char probe[2600];
-            struct { const char* lib; const char* names; } t2[] = {
-                { "ssl",     "-lssl -lcrypto" },  /* libssl.a present => both */
-                { "nghttp2", "-lnghttp2" },
-                { "z",       "-lz" },
-                { "pcre2-8", "-lpcre2-8" },
+            /* `defines` is the -D that makes the corresponding stdlib source
+             * compile its REAL path instead of the "unavailable" stub. It MUST
+             * accompany the -l: linking libcrypto.a without -DAETHER_HAS_OPENSSL
+             * leaves the stub compiled in (the -l references nothing) — which
+             * is exactly the bug where a cross-built agent's hmac_sha256_hex
+             * returned "" despite a staged sysroot. Empty for libs with no
+             * compile-time guard (contrib veneers link but have no AETHER_HAS_*
+             * macro of their own). */
+            struct { const char* lib; const char* names; const char* defines; } t2[] = {
+                /* libssl.a present => both -l names AND the openssl compile
+                 * macro. HMAC/SHA (std.cryptography) need only libcrypto, but
+                 * the source guard is a single AETHER_HAS_OPENSSL, so staging
+                 * libssl.a (which the sysroot pairs with libcrypto.a) enables
+                 * the real crypto path; TLS (std.http) additionally needs the
+                 * libssl symbols, which the same -lssl provides. */
+                { "ssl",     "-lssl -lcrypto", "-DAETHER_HAS_OPENSSL" },
+                { "nghttp2", "-lnghttp2",      "-DAETHER_HAS_NGHTTP2" },
+                { "z",       "-lz",            "-DAETHER_HAS_ZLIB" },
+                { "pcre2-8", "-lpcre2-8",      "-DAETHER_HAS_PCRE2" },
                 /* contrib.sqlite: the Aether veneer archive
                  * (libaether_sqlite.a, from contrib_build.sh CONTRIB_TARGET
                  * mode) BEFORE the underlying C lib (libsqlite3.a) — ld.lld's
                  * single pass needs the veneer's sqlite3_* references resolved
                  * by the lib that follows. Probed on the VENEER so a program
                  * that doesn't use sqlite links nothing extra. */
-                { "aether_sqlite", "-laether_sqlite -lsqlite3" },
+                { "aether_sqlite", "-laether_sqlite -lsqlite3", "" },
                 /* contrib.host.python: the embedded-Python bridge veneer. NO
                  * -lpython — the bridge dlopen()s the deploy host's libpython
                  * at runtime (AETHER_PYTHON_SONAME), so the .a has no
                  * unresolved CPython symbols and needs no python at link. Just
                  * the veneer archive. Probed on it so a program not embedding
                  * python links nothing extra. */
-                { "aether_host_python", "-laether_host_python" },
+                { "aether_host_python", "-laether_host_python", "" },
                 /* contrib.host.ruby: same dlopen model as python (no -lruby;
                  * the deploy host's libruby is dlopen'd at runtime). Veneer
                  * only. */
-                { "aether_host_ruby", "-laether_host_ruby" },
+                { "aether_host_ruby", "-laether_host_ruby", "" },
             };
             for (size_t i = 0; i < sizeof(t2) / sizeof(t2[0]); i++) {
                 snprintf(probe, sizeof(probe), "%s/lib/lib%s.a", xsr, t2[i].lib);
                 if (path_exists(probe) && p < sizeof(crossbuild_libs)) {
                     p += (size_t)snprintf(crossbuild_libs + p, sizeof(crossbuild_libs) - p,
                                           " %s", t2[i].names);
+                    /* Also compile the matching stdlib source's REAL path, not
+                     * its stub — the fix for the "linked but stubbed" bug. */
+                    if (t2[i].defines[0]) {
+                        strncat(feature_defs, " ",
+                                sizeof(feature_defs) - strlen(feature_defs) - 1);
+                        strncat(feature_defs, t2[i].defines,
+                                sizeof(feature_defs) - strlen(feature_defs) - 1);
+                    }
                 }
             }
         }

@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Cross-built binaries now compute a working `std.cryptography` HMAC (was a
+  silent stub → fail-open).** The string-API `cryptography.hmac_sha256_hex` /
+  `_bytes` were OpenSSL-backed, and on the zig cross path OpenSSL is never
+  compiled in, so they stubbed to an empty digest — which made a wrong (and an
+  empty) auth token compare equal to a correct one on cross-built agents.
+  These now delegate to the **pure-Aether** `std.cryptography.hmac`
+  implementation, which needs no libcrypto and produces a byte-identical
+  digest, so HMAC works on every target with no sysroot required. Verified on
+  a real aarch64 (Raspberry Pi 5) cross build: correct RFC-vector output,
+  no OpenSSL linked.
+- **`CROSSBUILD_SYSROOT` now enables the *real* OpenSSL/zlib/nghttp2/PCRE2 code
+  paths on cross builds, not just links them.** The Tier-2 probe appended
+  `-lssl -lcrypto` etc. when a sysroot staged the libs, but never defined the
+  matching `-DAETHER_HAS_*` macros or added the sysroot's include dir — so the
+  sources still compiled their "unavailable" stub and the `-l` referenced
+  nothing. The probe now also adds `-DAETHER_HAS_OPENSSL/_ZLIB/_NGHTTP2/_PCRE2`
+  (per lib actually staged) and `-I<sysroot>/include`, so e.g. `sha256_hex`
+  returns a real digest on a cross target with a sysroot. Verified on aarch64.
+- **The cross "built without OpenSSL" note is now precise.** It distinguishes
+  the sysroot-present case (features that the sysroot stages link for real)
+  from the no-sysroot case, and no longer implies HMAC is unavailable (it
+  isn't — HMAC is pure-Aether).
+
 ## [0.442.0]
 
 ### Added
