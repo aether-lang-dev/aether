@@ -1,0 +1,118 @@
+// Test std.cryptography.gost3411_2012 against Bouncy Castle test vectors.
+import std.cryptography.gost3411_2012
+import std.bytes
+import std.string
+import std.io
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string_char_at_n(hex, len, i * 2)
+        c_lo = string_char_at_n(hex, len, i * 2 + 1)
+
+        hi = 0
+        if (c_hi >= 48) && (c_hi <= 57) { hi = c_hi - 48 }
+        else if (c_hi >= 97) && (c_hi <= 102) { hi = c_hi - 97 + 10 }
+        else if (c_hi >= 65) && (c_hi <= 70) { hi = c_hi - 65 + 10 }
+
+        lo = 0
+        if (c_lo >= 48) && (c_lo <= 57) { lo = c_lo - 48 }
+        else if (c_lo >= 97) && (c_lo <= 102) { lo = c_lo - 97 + 10 }
+        else if (c_lo >= 65) && (c_lo <= 70) { lo = c_lo - 65 + 10 }
+
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+check(label: string, got: string, want: string) -> int {
+    want_lower = string.to_lower(want)
+    if got == want_lower {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want_lower}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    m1_str = "012345678901234567890123456789012345678901234567890123456789012"
+    m1_len = string.length(m1_str)
+    m2_hex = "d1e520e2e5f2f0e82c20d1f2f0e8e1eee6e820e2edf3f6e82c20e2e5fef2fa20f120eceef0ff20f1f2f0e5ebe0ece820ede020f5f0e0e1f0fbff20efebfaeafb20c8e3eef0e5e2fb"
+    m2_len = string.length(m2_hex) / 2
+
+    m1_bytes = bytes.new(m1_len)
+    i = 0
+    while i < m1_len {
+        bytes.set(m1_bytes, i, string_char_at_n(m1_str, m1_len, i))
+        i = i + 1
+    }
+    m2_bytes = hex_to_bytes(m2_hex)
+
+    // ---- Streebog-256 Tests ----
+    ctx_256_1, _ = gost3411_2012.new("gost3411_2012_256")
+    gost3411_2012.update_bytes(ctx_256_1, m1_bytes, m1_len)
+    res_256_1 = gost3411_2012.final_hex(ctx_256_1)
+    fails = fails + check("Streebog-256 M1", res_256_1, "9d151eefd8590b89daa6ba6cb74af9275dd051026bb149a452fd84e5e57b5500")
+
+    ctx_256_2, _ = gost3411_2012.new("gost3411_2012_256")
+    gost3411_2012.update_bytes(ctx_256_2, m2_bytes, m2_len)
+    res_256_2 = gost3411_2012.final_hex(ctx_256_2)
+    fails = fails + check("Streebog-256 M2", res_256_2, "9dd2fe4e90409e5da87f53976d7405b0c0cac628fc669a741d50063c557e8f50")
+
+
+    // ---- Streebog-512 Tests ----
+    ctx_512_1, _ = gost3411_2012.new("gost3411_2012_512")
+    gost3411_2012.update_bytes(ctx_512_1, m1_bytes, m1_len)
+    res_512_1 = gost3411_2012.final_hex(ctx_512_1)
+    fails = fails + check("Streebog-512 M1", res_512_1, "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48")
+
+    ctx_512_2, _ = gost3411_2012.new("gost3411_2012_512")
+    gost3411_2012.update_bytes(ctx_512_2, m2_bytes, m2_len)
+    res_512_2 = gost3411_2012.final_hex(ctx_512_2)
+    fails = fails + check("Streebog-512 M2", res_512_2, "1e88e62226bfca6f9994f1f2d51569e0daf8475a3b0fe61a5300eee46d961376035fe83549ada2b8620fcd7c496ce5b33f0cb9dddc2b6460143b03dabac9fb28")
+
+    // ---- Empty-message vectors (RFC 6986) ----
+    ctx_256_e, _ = gost3411_2012.new("gost3411_2012_256")
+    res_256_e = gost3411_2012.final_hex(ctx_256_e)
+    fails = fails + check("Streebog-256 empty", res_256_e, "3f539a213e97c802cc229d474c6aa32a825a360b2a933a949fd925208d9ce1bb")
+
+    ctx_512_e, _ = gost3411_2012.new("gost3411_2012_512")
+    res_512_e = gost3411_2012.final_hex(ctx_512_e)
+    fails = fails + check("Streebog-512 empty", res_512_e, "8e945da209aa869f0455928529bcae4679e9873ab707b55315f56ceb98bef0a7362f715528356ee83cda5f2aac4c6ad2ba3a715c1bcd81cb8e9f90bf4c1c1a8a")
+
+    // ---- Multi-part streaming (split M1 across two updates) must equal
+    // the one-shot digest — exercises the 64-byte block-buffering path.
+    ctx_512_split, _ = gost3411_2012.new("gost3411_2012_512")
+    gost3411_2012.update_bytes(ctx_512_split, m1_bytes, 30)
+    m1_tail = bytes.new(m1_len - 30)
+    k = 30
+    while k < m1_len {
+        bytes.set(m1_tail, k - 30, bytes.get(m1_bytes, k))
+        k = k + 1
+    }
+    gost3411_2012.update_bytes(ctx_512_split, m1_tail, m1_len - 30)
+    res_512_split = gost3411_2012.final_hex(ctx_512_split)
+    fails = fails + check("Streebog-512 M1 split-streaming", res_512_split, "1b54d01a4af5b9d5cc3d86d68d285462b19abc2475222f35c085122be4ba1ffa00ad30f8767b3a82384c6574f024c311e2a481332b08ef7f41797891c1646f48")
+    bytes.free(m1_tail)
+
+    bytes.free(m1_bytes)
+    bytes.free(m2_bytes)
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}

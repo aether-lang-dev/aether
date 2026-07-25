@@ -1,0 +1,119 @@
+// Test std.cryptography.xoodyak against Bouncy Castle / LWC KAT test vectors.
+import std.cryptography.xoodyak
+import std.bytes
+import std.string
+import std.io
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string_char_at_n(hex, len, i * 2)
+        c_lo = string_char_at_n(hex, len, i * 2 + 1)
+
+        hi = 0
+        if (c_hi >= 48) && (c_hi <= 57) { hi = c_hi - 48 }
+        else if (c_hi >= 97) && (c_hi <= 102) { hi = c_hi - 97 + 10 }
+        else if (c_hi >= 65) && (c_hi <= 70) { hi = c_hi - 65 + 10 }
+
+        lo = 0
+        if (c_lo >= 48) && (c_lo <= 57) { lo = c_lo - 48 }
+        else if (c_lo >= 97) && (c_lo <= 102) { lo = c_lo - 97 + 10 }
+        else if (c_lo >= 65) && (c_lo <= 70) { lo = c_lo - 65 + 10 }
+
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+check(label: string, got: string, want: string) -> int {
+    want_lower = string.to_lower(want)
+    if got == want_lower {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want_lower}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    // ---- Xoodyak Hash Tests ----
+    // Vector 1 (Empty msg)
+    msg1 = hex_to_bytes("")
+    ctx1, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx1, msg1, 0)
+    res1 = xoodyak.final_hex(ctx1)
+    fails = fails + check("xoodyak empty", res1, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
+    bytes.free(msg1)
+
+    // Vector 2 (00)
+    msg2 = hex_to_bytes("00")
+    ctx2, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx2, msg2, 1)
+    res2 = xoodyak.final_hex(ctx2)
+    fails = fails + check("xoodyak 00", res2, "27921F8DDF392894460B70B3ED6C091E6421B7D2147DCD6031D7EFEBAD3030CC")
+    bytes.free(msg2)
+
+    // Vector 3 (0001)
+    msg3 = hex_to_bytes("0001")
+    ctx3, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx3, msg3, 2)
+    res3 = xoodyak.final_hex(ctx3)
+    fails = fails + check("xoodyak 0001", res3, "DD3F12E89DB41C61D3C05779705FA946A8C69C79EEFDC1B4A966A5F1AB35073D")
+    bytes.free(msg3)
+
+    // Vector 4 (0001020304050607)
+    msg4 = hex_to_bytes("0001020304050607")
+    ctx4, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx4, msg4, 8)
+    res4 = xoodyak.final_hex(ctx4)
+    fails = fails + check("xoodyak 8 bytes", res4, "C826D28C7F5BF948FBA9BB5EA028B4E377F1DE86EC5A2A1511BA4D692968EFD5")
+    bytes.free(msg4)
+
+    // One-shot wrappers check
+    res_one_shot = xoodyak.xoodyak_hex("", 0)
+    fails = fails + check("xoodyak one-shot empty", res_one_shot, "EA152F2B47BCE24EFB66C479D4ADF17BD324D806E85FF75EE369EE50DC8F8BD1")
+
+    // Multi-part streaming across the 16-byte absorb rate: a 20-byte message
+    // (00..13) fed as 7+13 must equal the one-shot digest. The expected value
+    // is the port's own output pinned here; the split-vs-one-shot equality is
+    // what proves multi-block absorption independent of the pinned constant.
+    msg20 = bytes.new(20)
+    q = 0
+    while q < 20 { bytes.set(msg20, q, q); q = q + 1 }
+    ctx20, _ = xoodyak.new()
+    xoodyak.update_bytes(ctx20, msg20, 20)
+    res20 = xoodyak.final_hex(ctx20)
+    fails = fails + check("xoodyak 20B one-shot", res20, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
+
+    ctx_sp2, _ = xoodyak.new()
+    part_a = bytes.new(7)
+    q = 0
+    while q < 7 { bytes.set(part_a, q, q); q = q + 1 }
+    xoodyak.update_bytes(ctx_sp2, part_a, 7)
+    part_b = bytes.new(13)
+    q = 0
+    while q < 13 { bytes.set(part_b, q, 7 + q); q = q + 1 }
+    xoodyak.update_bytes(ctx_sp2, part_b, 13)
+    res_sp = xoodyak.final_hex(ctx_sp2)
+    fails = fails + check("xoodyak 20B split 7+13", res_sp, "9bebe7579ec1d075b6768ae981c54c7d60db82931b074a618b0a68f84cbccfe6")
+    bytes.free(msg20)
+    bytes.free(part_a)
+    bytes.free(part_b)
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}
