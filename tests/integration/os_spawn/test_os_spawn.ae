@@ -1,0 +1,75 @@
+// Validate the cross-platform non-blocking spawn / wait / wait_any trio
+// (std.os). The key property is CONCURRENCY: multiple children in flight
+// at once, reaped in completion order, with exit codes correctly
+// attributed and spawn failures distinguishable from failed children.
+import std.os
+import std.list
+import std.mem
+import std.io
+
+check(label: string, ok: bool) -> int {
+    if ok {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    // ---- spawn + single wait, exit code fidelity ----
+    // `false` exits non-zero; `true` exits zero.
+    at, ae = os.spawn_proc("true", null, null)
+    fails = fails + check("spawn true succeeds", ae == "")
+    ac, aerr = os.wait(at)
+    fails = fails + check("true exits 0", ac == 0 && aerr == "")
+
+    bt, be = os.spawn_proc("false", null, null)
+    fails = fails + check("spawn false succeeds", be == "")
+    bc, berr = os.wait(bt)
+    // A failed child is a non-zero exit with NO error string — distinct
+    // from a spawn/reap failure (which sets err and returns -1).
+    fails = fails + check("false exits non-zero, err empty", bc != 0 && berr == "")
+
+    // ---- spawn failure is distinguishable ----
+    ft, ferr = os.spawn_proc("this_program_does_not_exist_xyz", null, null)
+    // The spawn itself may succeed (fork ok) with the child exec-failing to
+    // 127 on POSIX, OR fail outright on Windows. Either way it must be
+    // distinguishable from a clean exit: reap and confirm non-zero.
+    if ferr == "" {
+        fc, _ = os.wait(ft)
+        fails = fails + check("missing program does not report exit 0", fc != 0)
+    } else {
+        fails = fails + check("missing program reports spawn err", ft == -1)
+    }
+
+    // ---- wait_any returns children in COMPLETION order, not spawn order ----
+    argv_slow = list.new()
+    _ = list.add(argv_slow, "2")
+    argv_fast = list.new()
+    _ = list.add(argv_fast, "1")
+
+    slow, _ = os.spawn_proc("sleep", argv_slow, null)   // spawned first, finishes last
+    fast, _ = os.spawn_proc("sleep", argv_fast, null)   // spawned second, finishes first
+
+    toks = list.new()
+    _ = list.add(toks, mem.long_to_ptr(slow as long))
+    _ = list.add(toks, mem.long_to_ptr(fast as long))
+
+    first_tok, first_code, first_err = os.wait_any(toks)
+    fails = fails + check("wait_any returns the faster child first", first_tok == fast)
+    fails = fails + check("first child exit 0", first_code == 0 && first_err == "")
+
+    second_tok, second_code, _ = os.wait_any(toks)
+    fails = fails + check("wait_any then returns the slower child", second_tok == slow)
+    fails = fails + check("second child exit 0", second_code == 0)
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}
