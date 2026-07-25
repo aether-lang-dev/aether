@@ -384,6 +384,26 @@ IO_POLLER_SRC = runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aet
 
 # Object files
 COMPILER_OBJS = $(COMPILER_SRC:%.c=$(OBJ_DIR)/%.o)
+
+# Tools driver, per-object build (#1221). ae.c was one 8.5k-line TU compiled
+# in a single gcc invocation, so any edit recompiled the whole driver. Each
+# ae_*.c now compiles to its own object with -MMD -MP dependency tracking, so
+# an edit recompiles only the touched object (and, via the .d files, whatever
+# includes a changed ae_internal.h) and relinks. The _LIBS macros are baked in
+# so build_gcc_cmd can construct user-program link lines.
+TOOLS_CFLAGS = -O2 -Itools -MMD -MP \
+    -DAETHER_VERSION=\"$(VERSION)\" \
+    -DAETHER_OPENSSL_LIBS='"$(OPENSSL_LDFLAGS)"' \
+    -DAETHER_ZLIB_LIBS='"$(ZLIB_LDFLAGS)"' \
+    -DAETHER_NGHTTP2_LIBS='"$(NGHTTP2_LDFLAGS)"' \
+    -DAETHER_PCRE2_LIBS='"$(PCRE2_LDFLAGS)"' \
+    -DAETHER_CASPER_LIBS='"$(CASPER_LDFLAGS)"' \
+    -DAETHER_AUDIO_LIBS='"$(AUDIO_LDFLAGS)"' \
+    $(if $(AETHER_ENABLE_LLM),-DAETHER_ENABLE_LLM=1)
+TOOLS_SRC = tools/ae.c tools/ae_help.c tools/ae_fmt.c tools/ae_bindgen.c \
+            tools/ae_cross.c tools/ae_repl.c tools/ae_version.c \
+            tools/ae_cache.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
+TOOLS_OBJS = $(TOOLS_SRC:%.c=$(OBJ_DIR)/%.o)
 COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(OBJ_DIR)/%.o)
 RUNTIME_OBJS = $(RUNTIME_SRC:%.c=$(OBJ_DIR)/%.o)
 IO_POLLER_OBJS = $(IO_POLLER_SRC:%.c=$(OBJ_DIR)/%.o)
@@ -393,7 +413,7 @@ COLLECTIONS_OBJS = $(COLLECTIONS_SRC:%.c=$(OBJ_DIR)/%.o)
 TEST_OBJS = $(TEST_SRC:%.c=$(OBJ_DIR)/%.o)
 
 # Dependency files (include test objects so header changes trigger test recompilation)
-DEPS = $(COMPILER_OBJS:.o=.d) $(RUNTIME_OBJS:.o=.d) $(STD_OBJS:.o=.d) $(COLLECTIONS_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+DEPS = $(COMPILER_OBJS:.o=.d) $(RUNTIME_OBJS:.o=.d) $(STD_OBJS:.o=.d) $(COLLECTIONS_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(TOOLS_OBJS:.o=.d)
 
 # Include dependency files
 -include $(DEPS)
@@ -434,7 +454,7 @@ STANDALONE_TESTS = tests/runtime/test_runtime_manual.c \
 all: compiler ae stdlib
 
 # Create object directories
-$(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime:
+$(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg:
 ifdef WINDOWS_NATIVE
 	@if not exist "$(subst /,\,$@)" mkdir "$(subst /,\,$@)"
 else
@@ -1124,11 +1144,18 @@ apkg:
 	$(CC) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(LDFLAGS) -o build/apkg$(EXE_EXT)
 	@echo "✓ Package Manager built successfully: build/apkg$(EXE_EXT)"
 
-ae: compiler
+# Per-object compile for the tools driver (#1221). Static pattern rule so it
+# wins over the generic $(OBJ_DIR)/%.o rule (which uses CFLAGS, wrong include
+# path and defines for tools). The order-only dir prereqs create the obj tree.
+$(TOOLS_OBJS): $(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg
+	@echo "Compiling $<..."
+	@$(CC) $(TOOLS_CFLAGS) -c $< -o $@
+
+ae: compiler $(TOOLS_OBJS)
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	$(CC) -O2 -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_OPENSSL_LIBS='"$(OPENSSL_LDFLAGS)"' -DAETHER_ZLIB_LIBS='"$(ZLIB_LDFLAGS)"' -DAETHER_NGHTTP2_LIBS='"$(NGHTTP2_LDFLAGS)"' -DAETHER_PCRE2_LIBS='"$(PCRE2_LDFLAGS)"' -DAETHER_CASPER_LIBS='"$(CASPER_LDFLAGS)"' -DAETHER_AUDIO_LIBS='"$(AUDIO_LDFLAGS)"' $(if $(AETHER_ENABLE_LLM),-DAETHER_ENABLE_LLM=1) -Itools tools/ae.c tools/ae_help.c tools/ae_fmt.c tools/ae_bindgen.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c $(LLM_LDFLAGS)) -o build/ae$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(TOOLS_OBJS) -o build/ae$(EXE_EXT) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
 	@echo "✓ Built successfully: build/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
