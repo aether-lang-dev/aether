@@ -1,0 +1,82 @@
+import std.cryptography.dstu7564
+import std.bytes
+import std.string
+import std.io
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("ok   ${label}")
+        return 0
+    }
+    println("FAIL ${label}")
+    println("  got:  ${got}")
+    println("  want: ${want}")
+    return 1
+}
+
+hex_to_bytes(hex: string) -> ptr {
+    len = string.length(hex)
+    n = len / 2
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        c_hi = string.char_at(hex, i * 2)
+        c_lo = string.char_at(hex, i * 2 + 1)
+
+        hi = 0
+        if c_hi >= 48 && c_hi <= 57 {
+            hi = c_hi - 48
+        } else if c_hi >= 97 && c_hi <= 102 {
+            hi = c_hi - 87
+        } else if c_hi >= 65 && c_hi <= 70 {
+            hi = c_hi - 55
+        }
+
+        lo = 0
+        if c_lo >= 48 && c_lo <= 57 {
+            lo = c_lo - 48
+        } else if c_lo >= 97 && c_lo <= 102 {
+            lo = c_lo - 87
+        } else if c_lo >= 65 && c_lo <= 70 {
+            lo = c_lo - 55
+        }
+
+        val = (hi << 4) | lo
+        bytes.set(b, i, val)
+        i = i + 1
+    }
+    return b
+}
+
+main() {
+    fails = 0
+
+    // ---- dstu7564-256 ----
+    fails = fails + check("dstu7564-256 empty",
+        dstu7564.dstu7564_hex("dstu7564-256", "", 0),
+        "cd5101d1ccdf0d1d1f4ada56e888cd724ca1a0838a3521e7131d4fb78d0f5eb6")
+
+    b_ff = hex_to_bytes("ff")
+    defer bytes.free(b_ff)
+    ctx, _ = dstu7564.new("dstu7564-256")
+    dstu7564.update_bytes(ctx, b_ff, 1)
+    res_ff = dstu7564.final_hex(ctx)
+    fails = fails + check("dstu7564-256 ff", res_ff, "ea7677ca4526555680441c117982ea14059ea6d0d7124d6ecdb3deec49e890f4")
+
+    // ---- dstu7564-512 ----
+    fails = fails + check("dstu7564-512 empty",
+        dstu7564.dstu7564_hex("dstu7564-512", "", 0),
+        "656b2f4cd71462388b64a37043ea55dbe445d452aecd46c3298343314ef04019bcfa3f04265a9857f91be91fce197096187ceda78c9c1c021c294a0689198538")
+
+    ctx2, _ = dstu7564.new("dstu7564-512")
+    dstu7564.update_bytes(ctx2, b_ff, 1)
+    res2_ff = dstu7564.final_hex(ctx2)
+    fails = fails + check("dstu7564-512 ff", res2_ff, "871b18cf754b72740307a97b449abeb32b64444cc0d5a4d65830ae5456837a72d8458f12c8f06c98c616abe11897f86263b5cb77c420fb375374bec52b6d0292")
+
+    if fails == 0 {
+        println("ALL PASS")
+        return
+    }
+    println("FAILURES: ${fails}")
+    exit(1)
+}
