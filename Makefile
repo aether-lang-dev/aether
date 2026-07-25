@@ -725,6 +725,12 @@ test-ae: compiler ae stdlib
 	script="$$tmpdir/run_test.sh"; \
 	printf '#!/bin/sh\n'                                                                             > "$$script"; \
 	printf 'f="$$1"; tmpdir="$$2"; root="$$3"\n'                                                    >> "$$script"; \
+	printf '# Portable per-test timeout: GNU coreutils `timeout` on Linux/MSYS2,\n'                 >> "$$script"; \
+	printf '# `gtimeout` on macOS (coreutils via brew); empty when neither exists\n'                >> "$$script"; \
+	printf '# (macOS without coreutils) so the test still runs, just unbounded.\n'                  >> "$$script"; \
+	printf 'if command -v timeout >/dev/null 2>&1; then TO="timeout $${AE_TEST_TIMEOUT:-120}"; \\\n' >> "$$script"; \
+	printf 'elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout $${AE_TEST_TIMEOUT:-120}"; \\\n' >> "$$script"; \
+	printf 'else TO=""; fi\n'                                                                       >> "$$script"; \
 	printf 'name=$$(echo "$$f" | sed "s|tests/||;s|/|_|g;s|\\.ae$$||")\n'                         >> "$$script"; \
 	printf 'dir=$$(dirname "$$f")\n'                                                                >> "$$script"; \
 	printf 'base=$$(basename "$$f")\n'                                                              >> "$$script"; \
@@ -734,10 +740,14 @@ test-ae: compiler ae stdlib
 	printf '  cmd="$$root/build/ae build $$f $${AE_BUILD_FLAGS:-} -o $$root/build/test_$$name"\n'   >> "$$script"; \
 	printf 'fi\n'                                                                                   >> "$$script"; \
 	printf 'if eval "$$cmd" 2>"$$tmpdir/build_$$name.err"; then\n'                                  >> "$$script"; \
-	printf '  "$$root/build/test_$$name" >"$$tmpdir/run_$$name.out" 2>"$$tmpdir/run_$$name.err"\n'  >> "$$script"; \
+	printf '  $$TO "$$root/build/test_$$name" >"$$tmpdir/run_$$name.out" 2>"$$tmpdir/run_$$name.err"\n'  >> "$$script"; \
 	printf '  rc=$$?\n'                                                                             >> "$$script"; \
 	printf '  if [ $$rc -eq 0 ]; then\n'                                                            >> "$$script"; \
 	printf '    echo "  [PASS] $$name"; touch "$$tmpdir/PASS_$$name"\n'                             >> "$$script"; \
+	printf '  elif [ $$rc -eq 124 ]; then\n'                                                        >> "$$script"; \
+	printf '    echo "  [TIMEOUT] $$name (exceeded $${AE_TEST_TIMEOUT:-120}s)"\n'                    >> "$$script"; \
+	printf '    printf timeout > "$$tmpdir/phase_$$name.txt"\n'                                      >> "$$script"; \
+	printf '    touch "$$tmpdir/FAIL_$$name"\n'                                                      >> "$$script"; \
 	printf '  else\n'                                                                               >> "$$script"; \
 	printf '    echo "  [FAIL] $$name (runtime error, exit $$rc)"\n'                                >> "$$script"; \
 	printf '    printf runtime > "$$tmpdir/phase_$$name.txt"\n'                                     >> "$$script"; \
@@ -757,15 +767,23 @@ test-ae: compiler ae stdlib
 	sh_script="$$tmpdir/run_sh_dir.sh"; \
 	printf '#!/bin/sh\n'                                                                                          > "$$sh_script"; \
 	printf 'dir="$$1"; tmpdir="$$2"\n'                                                                            >> "$$sh_script"; \
+	printf 'if command -v timeout >/dev/null 2>&1; then TO="timeout $${AE_SH_TEST_TIMEOUT:-180}"; \\\n'          >> "$$sh_script"; \
+	printf 'elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout $${AE_SH_TEST_TIMEOUT:-180}"; \\\n'      >> "$$sh_script"; \
+	printf 'else TO=""; fi\n'                                                                                     >> "$$sh_script"; \
 	printf 'for sh_test in $$(find "$$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort); do\n'              >> "$$sh_script"; \
 	printf '  name=$$(echo "$$sh_test" | sed "s|tests/||;s|/|_|g;s|\\.sh$$||")\n'                              >> "$$sh_script"; \
-	printf '  if bash "$$sh_test" >"$$tmpdir/run_$$name.out" 2>"$$tmpdir/run_$$name.err"; then\n'                 >> "$$sh_script"; \
+	printf '  $$TO bash "$$sh_test" >"$$tmpdir/run_$$name.out" 2>"$$tmpdir/run_$$name.err"; sh_rc=$$?\n'         >> "$$sh_script"; \
+	printf '  if [ $$sh_rc -eq 0 ]; then\n'                                                                       >> "$$sh_script"; \
 	printf '    if grep -q "\\[SKIP-WIN\\]" "$$tmpdir/run_$$name.out" 2>/dev/null; then\n'                        >> "$$sh_script"; \
 	printf '      reason=$$(grep "\\[SKIP-WIN\\]" "$$tmpdir/run_$$name.out" | head -1 | sed "s/^[[:space:]]*\\[SKIP-WIN\\][[:space:]]*//"); \n' >> "$$sh_script"; \
 	printf '      echo "  [SKIP] $$name — $$reason"; touch "$$tmpdir/PASS_$$name"\n'                              >> "$$sh_script"; \
 	printf '    else\n'                                                                                           >> "$$sh_script"; \
 	printf '      echo "  [PASS] $$name"; touch "$$tmpdir/PASS_$$name"\n'                                         >> "$$sh_script"; \
 	printf '    fi\n'                                                                                             >> "$$sh_script"; \
+	printf '  elif [ $$sh_rc -eq 124 ]; then\n'                                                                   >> "$$sh_script"; \
+	printf '    echo "  [TIMEOUT] $$name (shell test exceeded $${AE_SH_TEST_TIMEOUT:-180}s)"\n'                   >> "$$sh_script"; \
+	printf '    printf timeout > "$$tmpdir/phase_$$name.txt"\n'                                                   >> "$$sh_script"; \
+	printf '    touch "$$tmpdir/FAIL_$$name"\n'                                                                   >> "$$sh_script"; \
 	printf '  else\n'                                                                                             >> "$$sh_script"; \
 	printf '    echo "  [FAIL] $$name (shell test)"\n'                                                            >> "$$sh_script"; \
 	printf '    printf shell > "$$tmpdir/phase_$$name.txt"\n'                                                     >> "$$sh_script"; \
@@ -789,6 +807,7 @@ test-ae: compiler ae stdlib
 				compile) echo "--- $$fname (compile error) ---" ;; \
 				runtime) rc=$$(cat "$$tmpdir/rc_$$fname.txt" 2>/dev/null || echo '?'); \
 				         echo "--- $$fname (runtime error, exit $$rc) ---" ;; \
+				timeout) echo "--- $$fname (TIMED OUT — hung; killed by per-test timeout) ---" ;; \
 				shell)   echo "--- $$fname (shell test) ---" ;; \
 				*)       echo "--- $$fname ---" ;; \
 			esac; \

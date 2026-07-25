@@ -1,0 +1,284 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Regression tests for general-purpose ASN.1 DER/BER features.
+// Exercises high-tag-number encoding/decoding, implicit/explicit tagging,
+// BER indefinite length parsing, SET canonical sorting, UTCTime, GeneralizedTime,
+// ENUMERATED, and full string type zoo (BMPString, UniversalString, etc.).
+
+import contrib.cryptography.asn1
+import std.bytes
+import std.bignum
+import std.string
+import std.list
+
+hv(c: int) -> int {
+    if c >= 48 { if c <= 57 { return c - 48 } }
+    if c >= 97 { if c <= 102 { return c - 87 } }
+    return 0
+}
+hb(h: string) -> ptr {
+    n = string.length(h); b = bytes.new(n / 2); i = 0
+    while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 }
+    return b
+}
+bhex(b: ptr) -> string {
+    d = "0123456789abcdef"; out = ""; n = bytes.length(b); i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        out = string.concat(out, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
+        i = i + 1
+    }
+    return out
+}
+
+main() {
+    print("=== contrib.cryptography.asn1 General Tests ===\n")
+    fails = 0
+
+    // ---- 1. Tag parsing and encoding (high tag numbers) ----
+    // Encode tag class: CONTEXT_SPECIFIC (0x80), PC: constructed (0x20), tag number: 1000
+    tag_bytes = asn1.encode_tag(asn1.TAG_CLASS_CONTEXT_SPECIFIC(), asn1.TAG_PC_CONSTRUCTED(), 1000)
+    if string.equals(bhex(tag_bytes), "bf8768") != 1 {
+        print("FAIL: encode_tag (1000) got ${bhex(tag_bytes)}, want bf8768\n")
+        fails = fails + 1
+    }
+    bytes.free(tag_bytes)
+
+    // Tag number 34
+    tag_bytes = asn1.encode_tag(asn1.TAG_CLASS_CONTEXT_SPECIFIC(), asn1.TAG_PC_CONSTRUCTED(), 34)
+    if string.equals(bhex(tag_bytes), "bf22") != 1 {
+        print("FAIL: encode_tag (34) got ${bhex(tag_bytes)}, want bf22\n")
+        fails = fails + 1
+    }
+    bytes.free(tag_bytes)
+
+    // Tag number 5 (low tag number form)
+    tag_bytes = asn1.encode_tag(asn1.TAG_CLASS_CONTEXT_SPECIFIC(), asn1.TAG_PC_CONSTRUCTED(), 5)
+    if string.equals(bhex(tag_bytes), "a5") != 1 {
+        print("FAIL: encode_tag (5) got ${bhex(tag_bytes)}, want a5\n")
+        fails = fails + 1
+    }
+    bytes.free(tag_bytes)
+
+    // ---- 2. Tagging (implicit and explicit) ----
+    // tagged = new DerTaggedObject(false, 34, new DerTaggedObject(true, 1000, DerInteger.One))
+    // DerInteger.One = 02 01 01
+    one = bignum.from_int(1)
+    one_enc = asn1.encode_integer(one)
+    bignum.free(one)
+
+    // Explicit tag 1000 (Context Specific)
+    exp_inner = asn1.encode_tagged(1, asn1.TAG_CLASS_CONTEXT_SPECIFIC(), 1000, one_enc)
+    if string.equals(bhex(exp_inner), "bf876803020101") != 1 {
+        print("FAIL: explicit inner tag got ${bhex(exp_inner)}, want bf876803020101\n")
+        fails = fails + 1
+    }
+
+    // Create a copy for explicit decoding test before we consume exp_inner in imp_outer
+    // Wait, let's just create exp_test separately using another integer
+    one_2 = bignum.from_int(1)
+    one_enc_2 = asn1.encode_integer(one_2)
+    bignum.free(one_2)
+    exp_test = asn1.encode_tagged(1, asn1.TAG_CLASS_CONTEXT_SPECIFIC(), 1000, one_enc_2)
+
+    // Implicit tag 34 over the explicit tag (consumes exp_inner)
+    imp_outer = asn1.encode_tagged(0, asn1.TAG_CLASS_CONTEXT_SPECIFIC(), 34, exp_inner)
+    if string.equals(bhex(imp_outer), "bf2203020101") != 1 {
+        print("FAIL: implicit outer tag got ${bhex(imp_outer)}, want bf2203020101\n")
+        fails = fails + 1
+    }
+
+    // Decode outer tagged object
+    ro = asn1.reader_new(imp_outer)
+    dec_payload, derr = asn1.read_tagged_ext(ro, 0, asn1.TAG_CLASS_CONTEXT_SPECIFIC(), 34)
+    if string.equals(derr, "") != 1 {
+        print("FAIL: read_tagged_ext outer err: ${derr}\n")
+        fails = fails + 1
+    } else {
+        if string.equals(bhex(dec_payload), "020101") != 1 {
+            print("FAIL: read_tagged_ext outer got ${bhex(dec_payload)}, want 020101\n")
+            fails = fails + 1
+        }
+    }
+    bytes.free(dec_payload)
+    asn1.reader_free(ro)
+    bytes.free(imp_outer)
+
+    // Decode explicit inner tagged object
+    ro_exp = asn1.reader_new(exp_test)
+    dec_exp_payload, experr = asn1.read_tagged_ext(ro_exp, 1, asn1.TAG_CLASS_CONTEXT_SPECIFIC(), 1000)
+    if string.equals(experr, "") != 1 {
+        print("FAIL: read_tagged_ext explicit inner err: ${experr}\n")
+        fails = fails + 1
+    } else {
+        if string.equals(bhex(dec_exp_payload), "020101") != 1 {
+            print("FAIL: read_tagged_ext explicit inner got ${bhex(dec_exp_payload)}, want 020101\n")
+            fails = fails + 1
+        }
+    }
+    bytes.free(dec_exp_payload)
+    asn1.reader_free(ro_exp)
+    bytes.free(exp_test)
+
+    // ---- 3. BER Indefinite-length parsing ----
+    // berSeqData: 30800201000601290000
+    ber_data = hb("30800201000601290000")
+    r_ber = asn1.reader_new(ber_data)
+    ber_content, berr = asn1.read_tlv(r_ber)
+    if string.equals(berr, "") != 1 {
+        print("FAIL: read_tlv indefinite length err: ${berr}\n")
+        fails = fails + 1
+    } else {
+        if string.equals(bhex(ber_content), "020100060129") != 1 {
+            print("FAIL: read_tlv indefinite length content got ${bhex(ber_content)}, want 020100060129\n")
+            fails = fails + 1
+        }
+    }
+    bytes.free(ber_content)
+    asn1.reader_free(r_ber)
+    bytes.free(ber_data)
+
+    // ---- 4. SET element canonical sorting ----
+    // Set sorting test: Boolean (0x01), Integer (0x02), BitString (0x03), OctetString (0x04)
+    // Create elements out of order and check if sorted
+    elements = list_new()
+
+    // 1. OctetString (tag 0x04)
+    oct_bytes = bytes.new(2)
+    bytes.set(oct_bytes, 0, 0xAB)
+    bytes.set(oct_bytes, 1, 0xCD)
+    oct_enc = asn1.encode_octet_string(oct_bytes)
+    bytes.free(oct_bytes)
+    list_add_raw(elements, oct_enc)
+
+    // 2. BitString (tag 0x03)
+    bit_bytes = bytes.new(2)
+    bytes.set(bit_bytes, 0, 0x12)
+    bytes.set(bit_bytes, 1, 0x34)
+    bit_enc = asn1.encode_bit_string(bit_bytes, 0)
+    bytes.free(bit_bytes)
+    list_add_raw(elements, bit_enc)
+
+    // 3. Integer (tag 0x02)
+    val = bignum.from_int(100)
+    int_enc = asn1.encode_integer(val)
+    bignum.free(val)
+    list_add_raw(elements, int_enc)
+
+    // 4. Boolean (tag 0x01)
+    bool_enc = asn1.encode_boolean(1)
+    list_add_raw(elements, bool_enc)
+
+    // Encode set
+    set_enc = asn1.encode_set(elements)
+    // Expected sorted order in SET (tag 0x31):
+    // Boolean: 01 01 FF
+    // Integer: 02 01 64
+    // BitString: 03 03 00 12 34
+    // OctetString: 04 02 AB CD
+    // Body: 0101ff02016403030012340402abcd
+    // Set Header: 31 0F
+    expected_set = "310f0101ff02016403030012340402abcd"
+    if string.equals(bhex(set_enc), expected_set) != 1 {
+        print("FAIL: encode_set got ${bhex(set_enc)}, want ${expected_set}\n")
+        fails = fails + 1
+    }
+    bytes.free(set_enc)
+
+    // ---- 5. Time and String type zoo ----
+    // BMPString encoding/decoding of UTF-8 text (including non-ASCII within BMP)
+    bmp_test_str = "Hello Aether áéíóú ☺"
+    bmp_enc = asn1.encode_bmp_string(bmp_test_str)
+    r_bmp = asn1.reader_new(bmp_enc)
+    bmp_dec, bmperr = asn1.read_bmp_string(r_bmp)
+    if string.equals(bmperr, "") != 1 {
+        print("FAIL: read_bmp_string err: ${bmperr}\n")
+        fails = fails + 1
+    } else {
+        if string.equals(bmp_dec, bmp_test_str) != 1 {
+            print("FAIL: read_bmp_string got '${bmp_dec}', want '${bmp_test_str}'\n")
+            fails = fails + 1
+        }
+    }
+    asn1.reader_free(r_bmp)
+    bytes.free(bmp_enc)
+
+    // UniversalString encoding/decoding (can represent characters outside BMP, like Rocket emoji)
+    uni_test_str = "Hello Aether 🚀"
+    uni_enc = asn1.encode_universal_string(uni_test_str)
+    r_uni = asn1.reader_new(uni_enc)
+    uni_dec, unierr = asn1.read_universal_string(r_uni)
+    if string.equals(unierr, "") != 1 {
+        print("FAIL: read_universal_string err: ${unierr}\n")
+        fails = fails + 1
+    } else {
+        if string.equals(uni_dec, uni_test_str) != 1 {
+            print("FAIL: read_universal_string got '${uni_dec}', want '${uni_test_str}'\n")
+            fails = fails + 1
+        }
+    }
+    asn1.reader_free(r_uni)
+    bytes.free(uni_enc)
+
+    // PrintableString
+    p_enc = asn1.encode_printable_string("Hello World")
+    r_p = asn1.reader_new(p_enc)
+    p_dec, perr = asn1.read_printable_string(r_p)
+    if string.equals(perr, "") != 1 || string.equals(p_dec, "Hello World") != 1 {
+        print("FAIL: PrintableString\n")
+        fails = fails + 1
+    }
+    asn1.reader_free(r_p)
+    bytes.free(p_enc)
+
+    // IA5String
+    ia5_enc = asn1.encode_ia5_string("test@example.com")
+    r_ia5 = asn1.reader_new(ia5_enc)
+    ia5_dec, ia5err = asn1.read_ia5_string(r_ia5)
+    if string.equals(ia5err, "") != 1 || string.equals(ia5_dec, "test@example.com") != 1 {
+        print("FAIL: IA5String\n")
+        fails = fails + 1
+    }
+    asn1.reader_free(r_ia5)
+    bytes.free(ia5_enc)
+
+    // ENUMERATED
+    enum_enc = asn1.encode_enumerated(42)
+    r_enum = asn1.reader_new(enum_enc)
+    enum_dec, enumerr = asn1.read_enumerated(r_enum)
+    if string.equals(enumerr, "") != 1 || enum_dec != 42 {
+        print("FAIL: ENUMERATED got ${enum_dec}, want 42\n")
+        fails = fails + 1
+    }
+    asn1.reader_free(r_enum)
+    bytes.free(enum_enc)
+
+    // UTCTime
+    utc_enc = asn1.encode_utc_time("260321120000Z")
+    r_utc = asn1.reader_new(utc_enc)
+    utc_dec, utcerr = asn1.read_utc_time(r_utc)
+    if string.equals(utcerr, "") != 1 || string.equals(utc_dec, "260321120000Z") != 1 {
+        print("FAIL: UTCTime got '${utc_dec}', want '260321120000Z'\n")
+        fails = fails + 1
+    }
+    asn1.reader_free(r_utc)
+    bytes.free(utc_enc)
+
+    // GeneralizedTime
+    gent_enc = asn1.encode_generalized_time("20260321120000.123Z")
+    r_gent = asn1.reader_new(gent_enc)
+    gent_dec, genterr = asn1.read_generalized_time(r_gent)
+    if string.equals(genterr, "") != 1 || string.equals(gent_dec, "20260321120000.123Z") != 1 {
+        print("FAIL: GeneralizedTime got '${gent_dec}', want '20260321120000.123Z'\n")
+        fails = fails + 1
+    }
+    asn1.reader_free(r_gent)
+    bytes.free(gent_enc)
+
+    if fails == 0 {
+        print("PASS: contrib.cryptography.asn1 general tests\n")
+    } else {
+        print("FAILED: ${fails} test(s)\n")
+        exit(1)
+    }
+}
