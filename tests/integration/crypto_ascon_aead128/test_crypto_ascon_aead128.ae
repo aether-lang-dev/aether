@@ -1,0 +1,142 @@
+// Validate std.cryptography.ascon_aead128 — Ascon-AEAD128 (NIST SP 800-232)
+// — the pure-Aether port of Bouncy Castle's AsconAead128. Vectors are the
+// official SP 800-232 Known-Answer Tests from the ascon/ascon-c reference
+// (crypto_aead/asconaead128/LWC_AEAD_KAT_128_128.txt), chosen to span every
+// block boundary: empty, AAD-only across the 16-byte rate (0/1/8/9/16/17),
+// plaintext across the rate (1/8/9/16/32), and a combined PT+AD case. Each
+// vector's seal must reproduce the KAT ciphertext-with-tag exactly; each is
+// then round-tripped through open, and a tampered tag must be rejected.
+
+import std.cryptography.ascon_aead128
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn to_hex(b: ptr, n: int) -> string {
+    hx = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        hi = (v >> 4) & 15
+        lo = v & 15
+        chi = 48 + hi
+        if hi >= 10 { chi = 87 + hi }
+        clo = 48 + lo
+        if lo >= 10 { clo = 87 + lo }
+        bytes.set(hx, i * 2, chi)
+        bytes.set(hx, i * 2 + 1, clo)
+        i = i + 1
+    }
+    return bytes.finish(hx, n * 2)
+}
+
+extern string_length(s: string) -> int
+
+// A KAT case: pt/ad given as hex, expected ct-with-tag as hex.
+fn kat(label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex: string, want_hex: string) -> int {
+    fails = 0
+    ad = from_hex(ad_hex)
+    pt = from_hex(pt_hex)
+    ad_len = string_length(ad_hex) / 2
+    pt_len = string_length(pt_hex) / 2
+
+    ct = ascon_aead128.aead_seal(key, nonce, ad, ad_len, pt, pt_len)
+    got = to_hex(ct, bytes.length(ct))
+    if got == want_hex {
+        println("ok   seal ${label}")
+    } else {
+        println("FAIL seal ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want_hex}")
+        fails = fails + 1
+    }
+
+    // Round-trip: open must recover the plaintext with no error.
+    op, oerr = ascon_aead128.aead_open(key, nonce, ad, ad_len, ct, bytes.length(ct))
+    if oerr == "" && to_hex(op, pt_len) == pt_hex {
+        println("ok   open ${label}")
+    } else {
+        println("FAIL open ${label}: err='${oerr}' got=${to_hex(op, pt_len)}")
+        fails = fails + 1
+    }
+
+    // Tamper: flip a tag byte, open must reject.
+    tlen = bytes.length(ct)
+    bytes.set(ct, tlen - 1, bytes.get(ct, tlen - 1) ^ 1)
+    tp, terr = ascon_aead128.aead_open(key, nonce, ad, ad_len, ct, tlen)
+    if terr != "" {
+        println("ok   tamper-reject ${label}")
+    } else {
+        println("FAIL tamper NOT rejected ${label}")
+        fails = fails + 1
+    }
+
+    // Free everything this case allocated (open returns a caller-owned buffer
+    // on success; on the tamper path it returns null).
+    if op != null { bytes.free(op) }
+    if tp != null { bytes.free(tp) }
+    bytes.free(ct)
+    bytes.free(ad)
+    bytes.free(pt)
+    string.release(oerr)
+    string.release(terr)
+    return fails
+}
+
+main() {
+    println("=== test_crypto_ascon_aead128 (NIST SP 800-232) ===")
+    fails = 0
+    key = from_hex("000102030405060708090a0b0c0d0e0f")
+    nonce = from_hex("101112131415161718191a1b1c1d1e1f")
+
+    // AAD boundary sweep (empty PT).
+    fails = fails + kat("c1 empty",    key, nonce, "", "", "4f9c278211bec9316bf68f46ee8b2ec6")
+    fails = fails + kat("c2 aad1",     key, nonce, "30", "", "cccb674fe18a09a285d6ab11b35675c0")
+    fails = fails + kat("c9 aad8",     key, nonce, "3031323334353637", "", "865c594093a9edee2c1d6384ccb4939e")
+    fails = fails + kat("c10 aad9",    key, nonce, "303132333435363738", "", "24f13284a0f90f906b18c7e4061c0896")
+    fails = fails + kat("c17 aad16",   key, nonce, "303132333435363738393a3b3c3d3e3f", "", "e4230cdb8330ee9dc0cfd7c7b346e6dc")
+    fails = fails + kat("c18 aad17",   key, nonce, "303132333435363738393a3b3c3d3e3f40", "", "bd8851cd3af9847844839a791dd70e8c")
+
+    // Plaintext boundary sweep (empty AAD).
+    fails = fails + kat("c34 pt1",     key, nonce, "", "20", "e8dd576aba1cd3e6fc704de02aedb79588")
+    fails = fails + kat("c265 pt8",    key, nonce, "", "2021222324252627", "e8c3deee246cc5eae455ef6b33b782a3dd91ed6695373c27")
+    fails = fails + kat("c529 pt16",   key, nonce, "", "202122232425262728292a2b2c2d2e2f", "e8c3deee246cc5eae3e872313897a2bb9eaa915c9dd3245d77048f24d46d27a7")
+    fails = fails + kat("c1057 pt32",  key, nonce, "", "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "e8c3deee246cc5eae3e872313897a2bb6089aa3e15e80307970f2d1f006654c2aaa5fa172cb9f07d07463cefc7440bc1")
+
+    // Combined PT (9 bytes) + AAD (2 bytes).
+    fails = fails + kat("c300 pt9+ad2", key, nonce, "3031", "202122232425262728", "30fcefad28275df1a3cfaeedc161bed25c45cfae2ba5ede064")
+
+    bytes.free(key)
+    bytes.free(nonce)
+
+    if fails != 0 {
+        println("test_crypto_ascon_aead128: ${fails} failure(s)")
+        exit(1)
+    }
+    println("=== test_crypto_ascon_aead128 passed ===")
+}
