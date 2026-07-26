@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Ascon AEAD (authenticated encryption) in `std.cryptography`, pure Aether** —
+  the first pure-Aether AEAD in `std`, completing the Ascon port so a
+  cross-built binary with no OpenSSL (where AES-GCM stubs out) has a real
+  encrypt+authenticate channel. Two modules, both ported from Bouncy Castle
+  (same provenance as the shipped Ascon hashes), no externs to OpenSSL or any
+  C crypto:
+  - `std.cryptography.ascon_aead128` — **Ascon-AEAD128 (NIST SP 800-232**, the
+    finalized standard; little-endian, rate 16). `aead_seal` / `aead_open`.
+  - `std.cryptography.ascon_aead` — **Ascon v1.2 AEAD (Ascon-128 + Ascon-128a**,
+    the NIST LWC winner; big-endian, rate 8/16) for interop with v1.2
+    deployments. `aead_seal(algo, …)` / `aead_open(algo, …)` plus `a128_*` /
+    `a128a_*` variant-pinned wrappers.
+  The seal/open API mirrors `contrib.cryptography.chacha20poly1305`. Both are
+  verified against official Known-Answer Test vectors — SP 800-232 KATs from
+  the `ascon/ascon-c` reference, and the NIST LWC KATs shipped in bc-csharp —
+  spanning every block boundary (empty, partial, full, multi-block AAD), with
+  round-trip and tamper-rejection checks, and are leak-clean.
+
 ## [0.443.0]
 
 ### Added

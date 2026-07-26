@@ -1,0 +1,318 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.ascon_aead128 — Ascon-AEAD128 (NIST SP 800-232) in pure
+// Aether, ported from Bouncy Castle's AsconAead128. Authenticated encryption
+// with associated data (AEAD). NO externs to OpenSSL or any C crypto — the
+// same pure-Aether footing as the shipped Ascon hashes, so it works on the
+// cross-built targets where OpenSSL/AES-GCM stub out.
+//
+// Ascon-AEAD128 is the finalized NIST lightweight-crypto standard (SP 800-232,
+// Aug 2025): little-endian, 128-bit key, 128-bit nonce, 128-bit tag, rate 16,
+// p12 init/finalize and p8 for AAD/data. This is DISTINCT from the earlier v1.2
+// Ascon-128/128a (see std.cryptography.ascon_aead), which is big-endian with a
+// different IV and rate.
+//
+// Import with:  import std.cryptography.ascon_aead128
+//
+// API (mirrors contrib.cryptography.chacha20poly1305):
+//   aead_seal(key16, nonce16, aad, aad_len, pt, pt_len)
+//       -> ptr ciphertext-with-tag (pt_len + 16 bytes; 16-byte tag appended)
+//   aead_open(key16, nonce16, aad, aad_len, ct_with_tag, ct_len)
+//       -> (plaintext_ptr, "") on a valid tag, or (null, error) on failure.
+// key/nonce/aad/pt are std.bytes buffers; returned buffers are std.bytes too.
+
+import std.bits
+import std.bytes
+
+exports (
+    aead_seal, aead_open,
+    KEY_BYTES, NONCE_BYTES, TAG_BYTES
+)
+
+const KEY_BYTES   = 16
+const NONCE_BYTES = 16
+const TAG_BYTES   = 16
+const RATE        = 16
+
+// The 320-bit sponge state, carried explicitly through the one-shot flow.
+struct Aead128St {
+    s0: long
+    s1: long
+    s2: long
+    s3: long
+    s4: long
+}
+
+// One Ascon round (identical S-box + linear layer to the Ascon hashes).
+fn round(st: *Aead128St, rc: long) {
+    sx = st.s2 ^ rc
+    t0 = st.s0 ^ st.s1 ^ sx ^ st.s3 ^ (st.s1 & (st.s0 ^ sx ^ st.s4))
+    t1 = st.s0 ^ sx ^ st.s3 ^ st.s4 ^ ((st.s1 ^ sx) & (st.s1 ^ st.s3))
+    t2 = st.s1 ^ sx ^ st.s4 ^ (st.s3 & st.s4)
+    t3 = st.s0 ^ st.s1 ^ sx ^ ((~st.s0) & (st.s3 ^ st.s4))
+    t4 = st.s1 ^ st.s3 ^ st.s4 ^ ((st.s0 ^ st.s4) & st.s1)
+    st.s0 = t0 ^ bits.rotr64(t0, 19) ^ bits.rotr64(t0, 28)
+    st.s1 = t1 ^ bits.rotr64(t1, 39) ^ bits.rotr64(t1, 61)
+    st.s2 = ~(t2 ^ bits.rotr64(t2, 1) ^ bits.rotr64(t2, 6))
+    st.s3 = t3 ^ bits.rotr64(t3, 10) ^ bits.rotr64(t3, 17)
+    st.s4 = t4 ^ bits.rotr64(t4, 7) ^ bits.rotr64(t4, 41)
+}
+
+fn p12(st: *Aead128St) {
+    round(st, 0xf0)
+    round(st, 0xe1)
+    round(st, 0xd2)
+    round(st, 0xc3)
+    round(st, 0xb4)
+    round(st, 0xa5)
+    round(st, 0x96)
+    round(st, 0x87)
+    round(st, 0x78)
+    round(st, 0x69)
+    round(st, 0x5a)
+    round(st, 0x4b)
+}
+
+fn p8(st: *Aead128St) {
+    round(st, 0xb4)
+    round(st, 0xa5)
+    round(st, 0x96)
+    round(st, 0x87)
+    round(st, 0x78)
+    round(st, 0x69)
+    round(st, 0x5a)
+    round(st, 0x4b)
+}
+
+// Load 8 little-endian bytes from `b` at `off` into a long (zero-extended;
+// callers requesting past-end never do so — bounds are precomputed).
+fn ld64(b: ptr, off: int) -> long {
+    return bytes.get_le64(b, off)
+}
+
+// Load the low `n` (0..7) bytes at `off` as a little-endian long, i.e. byte
+// [off] is the least-significant. Bytes above `n` read as zero.
+fn ld_low(b: ptr, off: int, n: int) -> long {
+    long v = 0
+    i = 0
+    while i < n {
+        long byte_v = bytes.get(b, off + i) & 255
+        v = v | (byte_v << (i << 3))
+        i = i + 1
+    }
+    return v
+}
+
+// Store the low `n` (0..8) bytes of `v` little-endian into `b` at `off`.
+fn st_low(b: ptr, off: int, v: long, n: int) {
+    i = 0
+    while i < n {
+        bytes.set(b, off + i, ((v >> (i << 3)) & 255) as int)
+        i = i + 1
+    }
+}
+
+// Pad(i) = 0x01 << (i*8): the single 1-bit that terminates a partial block.
+fn pad(i: int) -> long {
+    long one = 1
+    return one << (i << 3)
+}
+
+// Initialize the state from key/nonce (SP 800-232 §Init).
+fn init_state(st: *Aead128St, key: ptr, nonce: ptr, k0: long, k1: long) {
+    st.s0 = 0x00001000808c0001
+    st.s1 = k0
+    st.s2 = k1
+    st.s3 = ld64(nonce, 0)
+    st.s4 = ld64(nonce, 8)
+    p12(st)
+    st.s3 = st.s3 ^ k0
+    st.s4 = st.s4 ^ k1
+}
+
+// Absorb all associated data, then apply domain separation. Mirrors BC's
+// ProcessBufferAad (full 16-byte blocks) + FinishAad (partial block padded
+// with 0x01, then S4 ^= 0x8000000000000000).
+fn absorb_aad(st: *Aead128St, aad: ptr, aad_len: int) {
+    off = 0
+    remaining = aad_len
+    // Full rate blocks.
+    while remaining >= RATE {
+        st.s0 = st.s0 ^ ld64(aad, off)
+        st.s1 = st.s1 ^ ld64(aad, off + 8)
+        p8(st)
+        off = off + RATE
+        remaining = remaining - RATE
+    }
+    // Final (possibly empty) partial block — only when AAD is non-empty.
+    if aad_len > 0 {
+        if remaining >= 8 {
+            st.s0 = st.s0 ^ ld64(aad, off)
+            r2 = remaining - 8
+            st.s1 = st.s1 ^ (ld_low(aad, off + 8, r2) ^ pad(r2))
+        } else {
+            st.s0 = st.s0 ^ (ld_low(aad, off, remaining) ^ pad(remaining))
+        }
+        p8(st)
+    }
+    // Domain separation between AAD and message processing.
+    st.s4 = st.s4 ^ 0x8000000000000000
+}
+
+// Mix the key in at the end of message processing (SP 800-232 §Finalize),
+// leaving the 128-bit tag in (S3, S4).
+fn finish_data(st: *Aead128St, k0: long, k1: long) {
+    st.s2 = st.s2 ^ k0
+    st.s3 = st.s3 ^ k1
+    p12(st)
+    st.s3 = st.s3 ^ k0
+    st.s4 = st.s4 ^ k1
+}
+
+// Encrypt `pt_len` bytes of plaintext into `ct` (same length), updating the
+// rate words as it goes. Leaves the tag material in (S3, S4) after
+// finish_data. `ct` must have room for pt_len bytes.
+fn encrypt_body(st: *Aead128St, pt: ptr, pt_len: int, ct: ptr, k0: long, k1: long) {
+    off = 0
+    remaining = pt_len
+    while remaining >= RATE {
+        st.s0 = st.s0 ^ ld64(pt, off)
+        bytes.set_le64(ct, off, st.s0)
+        st.s1 = st.s1 ^ ld64(pt, off + 8)
+        bytes.set_le64(ct, off + 8, st.s1)
+        p8(st)
+        off = off + RATE
+        remaining = remaining - RATE
+    }
+    // Final partial (or empty) block.
+    if remaining >= 8 {
+        st.s0 = st.s0 ^ ld64(pt, off)
+        bytes.set_le64(ct, off, st.s0)
+        r2 = remaining - 8
+        if r2 > 0 {
+            st.s1 = st.s1 ^ ld_low(pt, off + 8, r2)
+            st_low(ct, off + 8, st.s1, r2)
+        }
+        st.s1 = st.s1 ^ pad(r2)
+    } else {
+        if remaining > 0 {
+            st.s0 = st.s0 ^ ld_low(pt, off, remaining)
+            st_low(ct, off, st.s0, remaining)
+        }
+        st.s0 = st.s0 ^ pad(remaining)
+    }
+    finish_data(st, k0, k1)
+}
+
+// Decrypt `ct_len` bytes of ciphertext into `pt` (same length), updating the
+// rate words with the recovered plaintext. Leaves tag material in (S3, S4).
+fn decrypt_body(st: *Aead128St, ct: ptr, ct_len: int, pt: ptr, k0: long, k1: long) {
+    off = 0
+    remaining = ct_len
+    while remaining >= RATE {
+        c0 = ld64(ct, off)
+        bytes.set_le64(pt, off, st.s0 ^ c0)
+        st.s0 = c0
+        c1 = ld64(ct, off + 8)
+        bytes.set_le64(pt, off + 8, st.s1 ^ c1)
+        st.s1 = c1
+        p8(st)
+        off = off + RATE
+        remaining = remaining - RATE
+    }
+    if remaining >= 8 {
+        c0 = ld64(ct, off)
+        bytes.set_le64(pt, off, st.s0 ^ c0)
+        st.s0 = c0
+        r2 = remaining - 8
+        if r2 > 0 {
+            t = ld_low(ct, off + 8, r2)
+            st_low(pt, off + 8, st.s1 ^ t, r2)
+            ones = 0xFFFFFFFFFFFFFFFF
+            st.s1 = st.s1 & (ones << (r2 << 3))
+            st.s1 = st.s1 ^ t
+        }
+        st.s1 = st.s1 ^ pad(r2)
+    } else {
+        if remaining > 0 {
+            t = ld_low(ct, off, remaining)
+            st_low(pt, off, st.s0 ^ t, remaining)
+            ones = 0xFFFFFFFFFFFFFFFF
+            st.s0 = st.s0 & (ones << (remaining << 3))
+            st.s0 = st.s0 ^ t
+        }
+        st.s0 = st.s0 ^ pad(remaining)
+    }
+    finish_data(st, k0, k1)
+}
+
+// Seal: authenticated-encrypt `pt` under `key`/`nonce` with associated data
+// `aad`. Returns a fresh std.bytes buffer of pt_len + 16 bytes: the ciphertext
+// followed by the 16-byte tag. Returns null on a bad key/nonce length.
+aead_seal(key: ptr, nonce: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
+    if key == null || nonce == null { return null }
+    if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null }
+
+    k0 = ld64(key, 0)
+    k1 = ld64(key, 8)
+
+    st = Aead128St { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 }
+    init_state(&st, key, nonce, k0, k1)
+    absorb_aad(&st, aad, aad_len)
+
+    out_len = pt_len + TAG_BYTES
+    out = bytes.new(out_len)
+    // zero-fill so any unwritten tail is defined
+    j = 0
+    while j < out_len {
+        bytes.set(out, j, 0)
+        j = j + 1
+    }
+
+    encrypt_body(&st, pt, pt_len, out, k0, k1)
+
+    // Append the tag (S3, S4) little-endian.
+    bytes.set_le64(out, pt_len, st.s3)
+    bytes.set_le64(out, pt_len + 8, st.s4)
+    return out
+}
+
+// Open: verify + decrypt `ct_with_tag` (ciphertext followed by its 16-byte
+// tag). Returns (plaintext_ptr, "") on success, or (null, error) if the tag is
+// invalid or inputs are malformed. The plaintext buffer is ct_len-16 bytes.
+aead_open(key: ptr, nonce: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> ptr! {
+    ok = ""
+    if key == null || nonce == null || ct_with_tag == null { return null, "null argument" }
+    if bytes.length(key) < KEY_BYTES || bytes.length(nonce) < NONCE_BYTES { return null, "bad key/nonce length" }
+    if ct_len < TAG_BYTES { return null, "ciphertext too short" }
+
+    k0 = ld64(key, 0)
+    k1 = ld64(key, 8)
+
+    st = Aead128St { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 }
+    init_state(&st, key, nonce, k0, k1)
+    absorb_aad(&st, aad, aad_len)
+
+    pt_len = ct_len - TAG_BYTES
+    pt = bytes.new(pt_len)
+    j = 0
+    while j < pt_len {
+        bytes.set(pt, j, 0)
+        j = j + 1
+    }
+
+    decrypt_body(&st, ct_with_tag, pt_len, pt, k0, k1)
+
+    // Constant-time-ish tag check: XOR the computed tag with the received one
+    // and OR the differences — zero iff they match. (The Ascon standard's own
+    // check compares the recomputed (S3,S4) against the received tag words.)
+    r3 = st.s3 ^ ld64(ct_with_tag, pt_len)
+    r4 = st.s4 ^ ld64(ct_with_tag, pt_len + 8)
+    if (r3 | r4) != 0 {
+        bytes.free(pt)
+        return null, "tag verification failed"
+    }
+    return pt, ok
+}

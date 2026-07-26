@@ -1,0 +1,147 @@
+// Validate std.cryptography.ascon_aead — Ascon v1.2 AEAD (Ascon-128 and
+// Ascon-128a) — the pure-Aether port of Bouncy Castle's AsconEngine. Vectors
+// are the NIST LWC Known-Answer Tests shipped in bc-csharp
+// (crypto/test/data/crypto/ascon/LWC_AEAD_KAT_128_128.txt and _a.txt), the
+// same provenance as the shipped Ascon hashes. Coverage spans the block
+// boundaries for both rates (8 for ascon-128, 16 for ascon-128a): AAD-only
+// 0/1/8/9/16/17, plaintext 1/8/16/32, and a combined PT+AAD case with multi-
+// block AAD. Each seal must reproduce the KAT ciphertext-with-tag; each is
+// round-tripped through open; a tampered tag must be rejected.
+
+import std.cryptography.ascon_aead
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn to_hex(b: ptr, n: int) -> string {
+    hx = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        hi = (v >> 4) & 15
+        lo = v & 15
+        chi = 48 + hi
+        if hi >= 10 { chi = 87 + hi }
+        clo = 48 + lo
+        if lo >= 10 { clo = 87 + lo }
+        bytes.set(hx, i * 2, chi)
+        bytes.set(hx, i * 2 + 1, clo)
+        i = i + 1
+    }
+    return bytes.finish(hx, n * 2)
+}
+
+fn kat(algo: string, label: string, key: ptr, nonce: ptr, ad_hex: string, pt_hex: string, want_hex: string) -> int {
+    fails = 0
+    ad = from_hex(ad_hex)
+    pt = from_hex(pt_hex)
+    ad_len = string_length(ad_hex) / 2
+    pt_len = string_length(pt_hex) / 2
+
+    ct = ascon_aead.aead_seal(algo, key, nonce, ad, ad_len, pt, pt_len)
+    got = to_hex(ct, bytes.length(ct))
+    if got == want_hex {
+        println("ok   seal ${algo} ${label}")
+    } else {
+        println("FAIL seal ${algo} ${label}")
+        println("  got:  ${got}")
+        println("  want: ${want_hex}")
+        fails = fails + 1
+    }
+
+    op, oerr = ascon_aead.aead_open(algo, key, nonce, ad, ad_len, ct, bytes.length(ct))
+    if oerr == "" && to_hex(op, pt_len) == pt_hex {
+        println("ok   open ${algo} ${label}")
+    } else {
+        println("FAIL open ${algo} ${label}: err='${oerr}' got=${to_hex(op, pt_len)}")
+        fails = fails + 1
+    }
+
+    tlen = bytes.length(ct)
+    bytes.set(ct, tlen - 1, bytes.get(ct, tlen - 1) ^ 1)
+    tp, terr = ascon_aead.aead_open(algo, key, nonce, ad, ad_len, ct, tlen)
+    if terr != "" {
+        println("ok   tamper-reject ${algo} ${label}")
+    } else {
+        println("FAIL tamper NOT rejected ${algo} ${label}")
+        fails = fails + 1
+    }
+
+    if op != null { bytes.free(op) }
+    if tp != null { bytes.free(tp) }
+    bytes.free(ct)
+    bytes.free(ad)
+    bytes.free(pt)
+    string.release(oerr)
+    string.release(terr)
+    return fails
+}
+
+main() {
+    println("=== test_crypto_ascon_aead (Ascon v1.2 AEAD) ===")
+    fails = 0
+    // v1.2 KATs use key == nonce == 000102...0F.
+    key = from_hex("000102030405060708090a0b0c0d0e0f")
+    nonce = from_hex("000102030405060708090a0b0c0d0e0f")
+
+    // ---- Ascon-128 (rate 8) ----
+    fails = fails + kat("ascon-128", "c1 empty",   key, nonce, "", "", "e355159f292911f794cb1432a0103a8a")
+    fails = fails + kat("ascon-128", "c2 aad1",    key, nonce, "00", "", "944df887cd4901614c5dedbc42fc0da0")
+    fails = fails + kat("ascon-128", "c9 aad8",    key, nonce, "0001020304050607", "", "e3dcf95f869752f61cd7a2db895f918e")
+    fails = fails + kat("ascon-128", "c10 aad9",   key, nonce, "000102030405060708", "", "abcdb317eccfe67a62cf70ae974c3dbe")
+    fails = fails + kat("ascon-128", "c17 aad16",  key, nonce, "000102030405060708090a0b0c0d0e0f", "", "ef5763e75fe32f96d7863410ff0b4786")
+    fails = fails + kat("ascon-128", "c18 aad17",  key, nonce, "000102030405060708090a0b0c0d0e0f10", "", "79ac0fa2bf3859d6962d0c0af45b1d3e")
+    fails = fails + kat("ascon-128", "c34 pt1",    key, nonce, "", "00", "bc18c3f4e39eca7222490d967c79bffc92")
+    fails = fails + kat("ascon-128", "c265 pt8",   key, nonce, "", "0001020304050607", "bc820dbdf7a4631c01a8807a44254b42ac6bb490da1e000a")
+    fails = fails + kat("ascon-128", "c529 pt16",  key, nonce, "", "000102030405060708090a0b0c0d0e0f", "bc820dbdf7a4631c5b29884ad69175c3f58e28436dd71556d58dfa56ac890beb")
+    fails = fails + kat("ascon-128", "c1057 pt32", key, nonce, "", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "bc820dbdf7a4631c5b29884ad69175c3389655ca8135c9e6e8fe7467276f89770d975efab2ebaa41c0f3abeee425e784")
+    fails = fails + kat("ascon-128", "c297 pt8+ad32", key, nonce, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "0001020304050607", "b96c78651b6246b0f4ddfdf86ced08389f0d3a1b58a4882a")
+
+    // ---- Ascon-128a (rate 16) ----
+    fails = fails + kat("ascon-128a", "c1 empty",   key, nonce, "", "", "7a834e6f09210957067b10fd831f0078")
+    fails = fails + kat("ascon-128a", "c2 aad1",    key, nonce, "00", "", "af3031b07b129ec84153373ddcaba528")
+    fails = fails + kat("ascon-128a", "c9 aad8",    key, nonce, "0001020304050607", "", "d60e199ffd3f9b694713dabc6d89f46f")
+    fails = fails + kat("ascon-128a", "c10 aad9",   key, nonce, "000102030405060708", "", "8273ddd267b984a4d0ecfd98c548f63a")
+    fails = fails + kat("ascon-128a", "c17 aad16",  key, nonce, "000102030405060708090a0b0c0d0e0f", "", "56c15eb024de91ca0165362a49b31ebd")
+    fails = fails + kat("ascon-128a", "c18 aad17",  key, nonce, "000102030405060708090a0b0c0d0e0f10", "", "917d530f34157158cf8ca49d01af44f0")
+    fails = fails + kat("ascon-128a", "c34 pt1",    key, nonce, "", "00", "6e652b55bfdc8cad2ec43815b1666b1a3a")
+    fails = fails + kat("ascon-128a", "c265 pt8",   key, nonce, "", "0001020304050607", "6e490cfed5b35467b89c7e12863ce5f76afc808fff786b9e")
+    fails = fails + kat("ascon-128a", "c529 pt16",  key, nonce, "", "000102030405060708090a0b0c0d0e0f", "6e490cfed5b3546767350cd83c4acfbdb10f611b7d79278bd8067fc1bcdf39be")
+    fails = fails + kat("ascon-128a", "c1057 pt32", key, nonce, "", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "6e490cfed5b3546767350cd83c4acfbd4cfb4bd07abf5bc24d4b104645717c1e513abfd1335acfd296c49a35e0d54b73")
+    fails = fails + kat("ascon-128a", "c297 pt8+ad32", key, nonce, "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "0001020304050607", "a55236ac020dbda78e59e325520306254892d585f50a3ef7")
+
+    bytes.free(key)
+    bytes.free(nonce)
+
+    if fails != 0 {
+        println("test_crypto_ascon_aead: ${fails} failure(s)")
+        exit(1)
+    }
+    println("=== test_crypto_ascon_aead passed ===")
+}
