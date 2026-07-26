@@ -71,6 +71,12 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
     _tuple_int_int_string out = { -1, -1, "os.wait_any unavailable" };
     return out;
 }
+typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
+_tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
+    (void)token_list; (void)secs;
+    _tuple_int_int_int_string out = { -1, -1, 0, "os.wait_any_timeout unavailable" };
+    return out;
+}
 int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
 _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
     (void)pid; (void)secs;
@@ -1229,6 +1235,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; const char* _1; } _tuple_int_string;
+typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
  * AETHER_IPC_FD=3 in child's env. Returns (parent_read_fd,
@@ -1361,6 +1368,13 @@ static _tuple_int_string posix_status_to_tuple(int st) {
     _tuple_int_string out = { -1, "" };
     if (WIFEXITED(st)) {
         out._0 = WEXITSTATUS(st);
+    } else if (WIFSIGNALED(st)) {
+        /* Killed by a signal: report 128+signo (the shell convention) with
+         * NO error, so a caller that kills a token (e.g. after a wait_any_
+         * timeout) can reap a distinguishable status — 137 for SIGKILL,
+         * 143 for SIGTERM — rather than an opaque "abnormal" error. Matches
+         * os_wait_pid_timeout_raw's mapping (#1278). */
+        out._0 = 128 + WTERMSIG(st);
     } else {
         out._0 = -1;
         out._1 = "child terminated abnormally";
@@ -1432,6 +1446,55 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
     out._1 = s._0;          /* its exit code */
     out._2 = s._1;          /* err (abnormal-termination note, if any) */
     return out;
+}
+
+/* Bounded wait-any: reap whichever token finishes first, or give up after
+ * `secs`. Returns (token, exit, timed_out, err):
+ *   - timed_out == 1 → no child finished within `secs`; token is -1 and the
+ *     caller decides what to kill. Live children are left running.
+ *   - secs <= 0 → block indefinitely (identical to os_wait_any_raw, with the
+ *     timed_out slot always 0).
+ * As with os_wait_any_raw, on POSIX the token IS the pid and waitpid(-1)
+ * reports which child finished, so the list is not unboxed here. Poll cadence
+ * is 20ms against a CLOCK_MONOTONIC deadline, matching os_wait_pid_timeout. */
+_tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
+    _tuple_int_int_int_string out = { -1, -1, 0, "" };
+    int n = token_list ? list_size(token_list) : 0;
+    if (n <= 0) { out._3 = "no tokens"; return out; }
+
+    int st = 0;
+    if (secs <= 0) {
+        pid_t got;
+        while ((got = waitpid(-1, &st, 0)) < 0) {
+            if (errno != EINTR) { out._3 = "waitpid failed"; return out; }
+        }
+        _tuple_int_string s = posix_status_to_tuple(st);
+        out._0 = (int)got;
+        out._1 = s._0;
+        out._3 = s._1;
+        return out;
+    }
+
+    int64_t deadline = os_now_monotonic_ms_raw() + (int64_t)secs * 1000;
+    for (;;) {
+        pid_t got = waitpid(-1, &st, WNOHANG);
+        if (got > 0) {
+            _tuple_int_string s = posix_status_to_tuple(st);
+            out._0 = (int)got;
+            out._1 = s._0;
+            out._3 = s._1;
+            return out;
+        }
+        if (got < 0) {
+            if (errno == EINTR) continue;
+            out._3 = "waitpid failed";   /* e.g. ECHILD — no children left */
+            return out;
+        }
+        /* got == 0: no child ready yet. */
+        if (os_now_monotonic_ms_raw() >= deadline) { out._2 = 1; return out; }
+        struct timespec ts = { 0, 20 * 1000 * 1000 }; /* 20ms */
+        nanosleep(&ts, NULL);
+    }
 }
 
 /* Convenience: spawn + drain pipe + wait. Reads the back-channel
@@ -2468,6 +2531,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
 
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 typedef struct { int _0; const char* _1; } _tuple_int_string;
+typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
 /* Reap one token: wait on its handle, read exit code, close, free slot.
  * Shared by os_wait_raw and (per-handle) os_wait_any_raw. */
@@ -2550,6 +2614,43 @@ _tuple_int_int_string os_wait_any_raw(void* token_list) {
     return out;
 }
 
+/* Bounded wait-any: like os_wait_any_raw but gives up after `secs`.
+ * Returns (token, exit, timed_out, err). WaitForMultipleObjects already
+ * takes a dwMilliseconds argument, so the timeout is the value we were
+ * passing INFINITE to. secs <= 0 blocks indefinitely. On timeout, token is
+ * -1, timed_out is 1, and no handle is reaped (children left running). */
+_tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
+    _tuple_int_int_int_string out = { -1, -1, 0, "" };
+    int n = token_list ? list_size(token_list) : 0;
+    if (n <= 0) { out._3 = "no tokens"; return out; }
+    if (n > MAXIMUM_WAIT_OBJECTS) { out._3 = "too many tokens for one wait_any"; return out; }
+
+    HANDLE handles[MAXIMUM_WAIT_OBJECTS];
+    int    toks[MAXIMUM_WAIT_OBJECTS];
+    int    m = 0;
+    for (int i = 0; i < n; i++) {
+        void* item = list_get_raw(token_list, i);
+        int tok = (int)(intptr_t)item;
+        HANDLE h = winproc_find(tok);
+        if (h) { handles[m] = h; toks[m] = tok; m++; }
+    }
+    if (m == 0) { out._3 = "no live tokens"; return out; }
+
+    DWORD ms = (secs <= 0) ? INFINITE : (DWORD)secs * 1000;
+    DWORD r = WaitForMultipleObjects((DWORD)m, handles, FALSE, ms);
+    if (r == WAIT_TIMEOUT) { out._2 = 1; return out; }
+    if (r < WAIT_OBJECT_0 + (DWORD)m) {
+        int idx = (int)(r - WAIT_OBJECT_0);
+        _tuple_int_string s = winproc_reap(toks[idx], handles[idx]);
+        out._0 = toks[idx];
+        out._1 = s._0;
+        out._3 = s._1;
+        return out;
+    }
+    out._3 = "wait_any failed";
+    return out;
+}
+
 /* run_pipe on Windows: the SPAWN works (no back-channel pipe — that half
  * needs coordinated _open_osfhandle and stays POSIX-only). Returns a -1
  * pipe fd, the token, and ""; reap the token via os_wait_pid_raw. */
@@ -2595,6 +2696,23 @@ int os_kill_raw(int pid, int sig) {
     if (!aether_sandbox_check("exec", "kill")) return -1;
     /* Negative pid = signal a whole group: no Win32 equivalent. */
     if (pid < 0) return -1;
+
+    /* Resolve a spawn token through the process table first, so kill() takes
+     * the same identity os_spawn_raw / os_wait_* hand out on every platform
+     * (issue #1278). A token is a small table index, NOT an OS pid, so
+     * OpenProcess((DWORD)token) would hit an unrelated process. When the int
+     * is not a live token we fall back to treating it as a real pid, which
+     * keeps kill() working for pids obtained by other means. The table HANDLE
+     * is borrowed (do NOT CloseHandle it here — the owning wait reaps it). */
+    HANDLE tok_h = winproc_find(pid);
+    if (tok_h) {
+        if (sig == 0) {
+            DWORD w = WaitForSingleObject(tok_h, 0);
+            return (w == WAIT_TIMEOUT) ? 0 : -1;   /* still running -> alive */
+        }
+        return TerminateProcess(tok_h, (UINT)(128 + sig)) ? 0 : -1;
+    }
+
     if (sig == 0) {
         /* Existence probe: open + a zero-timeout wait. WAIT_TIMEOUT means
          * the process is still running (alive); WAIT_OBJECT_0 means it has
@@ -2616,6 +2734,27 @@ int os_kill_raw(int pid, int sig) {
 _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
     _tuple_int_int_string out = { -1, 0, "" };
     if (pid <= 0) { out._2 = "invalid pid"; return out; }
+
+    /* Resolve a spawn token through the process table first (issue #1278),
+     * so a bounded wait takes the same identity os_spawn_raw hands out. On a
+     * clean exit we reap the token here (close its handle + free the slot),
+     * just like winproc_reap, so a later os_wait on the same token cleanly
+     * misses rather than double-closing. On timeout the child is left running
+     * and its table slot untouched. */
+    HANDLE tok_h = winproc_find(pid);
+    if (tok_h) {
+        DWORD ms = (secs <= 0) ? INFINITE : (DWORD)secs * 1000;
+        DWORD w = WaitForSingleObject(tok_h, ms);
+        if (w == WAIT_TIMEOUT) { out._1 = 1; return out; }
+        if (w != WAIT_OBJECT_0) { out._2 = "wait failed"; return out; }
+        DWORD code = 0;
+        GetExitCodeProcess(tok_h, &code);
+        CloseHandle(tok_h);
+        winproc_remove(pid);
+        out._0 = (int)code;
+        return out;
+    }
+
     HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
     if (!h) { out._2 = "no such process"; return out; }
     DWORD ms = (secs <= 0) ? INFINITE : (DWORD)secs * 1000;

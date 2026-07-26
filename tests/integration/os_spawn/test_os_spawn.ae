@@ -66,6 +66,39 @@ main() {
     fails = fails + check("wait_any then returns the slower child", second_tok == slow)
     fails = fails + check("second child exit 0", second_code == 0)
 
+    // ---- wait_any_timeout: per-call deadline, not a batch deadline (#1278) ----
+    // One "hung" child (sleep 30) and one short (sleep 1). A 3s wait_any_timeout
+    // must return the short one (timed_out == 0), and a *second* call — with
+    // only the hung child left — must report timed_out == 1 without killing it.
+    argv_hung = list.new()
+    _ = list.add(argv_hung, "30")
+    argv_short = list.new()
+    _ = list.add(argv_short, "1")
+
+    hung, _ = os.spawn_proc("sleep", argv_hung, null)
+    short, _ = os.spawn_proc("sleep", argv_short, null)
+
+    ttoks = list.new()
+    _ = list.add(ttoks, mem.long_to_ptr(hung as long))
+    _ = list.add(ttoks, mem.long_to_ptr(short as long))
+
+    // First call: the short child finishes within 3s.
+    wt1, wc1, to1, we1 = os.wait_any_timeout(ttoks, 3)
+    fails = fails + check("wait_any_timeout reaps the short child", wt1 == short)
+    fails = fails + check("short child not timed out, exit 0", to1 == 0 && wc1 == 0 && we1 == "")
+
+    // Second call: only the hung child remains; a 2s deadline must time out
+    // rather than block for the remaining ~27s. token is -1, timed_out == 1.
+    wt2, _, to2, we2 = os.wait_any_timeout(ttoks, 2)
+    fails = fails + check("wait_any_timeout times out on the hung child", to2 == 1)
+    fails = fails + check("timeout reports no token and no error", wt2 == -1 && we2 == "")
+
+    // The token must still be usable: kill it, then reap a distinguishable
+    // signalled status (POSIX 128+SIGKILL = 137).
+    _k = os.kill(hung, 9)
+    hc, herr = os.wait(hung)
+    fails = fails + check("killed child reaps 137 (128+SIGKILL)", hc == 137 && herr == "")
+
     if fails == 0 {
         println("ALL PASS")
         return

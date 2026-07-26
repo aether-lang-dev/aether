@@ -22,6 +22,7 @@ import std.bytes.cursor
 import std.string
 import std.list
 import std.heap
+import std.mem
 
 exports (
     nil_value, boolean, from_int, num, str, bin, arr, map, ext,
@@ -55,10 +56,41 @@ struct MsgValue {
     map_values: ptr   // list pointer (*std.list.List)
 }
 
-extern aether_msgpack_float_to_bits(val: float) -> int
-extern aether_msgpack_bits_to_float(bits: int) -> float
-extern aether_msgpack_double_to_bits(val: float) -> long
-extern aether_msgpack_bits_to_double(bits: long) -> float
+// Reconstitute an IEEE-754 single-precision float from its 32 raw bits and
+// widen it to a double. Pure Aether over std.mem's double bit-cast — no C
+// binding needed (double<->bits and float64<->bits are already in std.mem).
+fn float32_from_bits(val: long) -> float {
+    sign = (val >> 31) & 1
+    exp = (val >> 23) & 255
+    frac = val & 8388607
+
+    if exp == 0 {
+        if frac == 0 {
+            if sign == 1 { return -0.0 }
+            return 0.0
+        }
+        // subnormal single -> normalized double
+        while (frac & 8388608) == 0 {
+            frac = frac << 1
+            exp = exp - 1
+        }
+        exp = exp + 1
+        frac = frac & 8388607
+        real_exp = exp - 127 + 1023
+        dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
+        return mem.float_from_bits(dbits)
+    }
+    if exp == 255 {
+        if frac == 0 {
+            if sign == 1 { return mem.float_from_bits(-4503599627370496 as long) }
+            return mem.float_from_bits(9218868437227405312 as long)
+        }
+        return mem.float_from_bits(9221120237041090560 as long)
+    }
+    real_exp = exp - 127 + 1023
+    dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
+    return mem.float_from_bits(dbits)
+}
 
 // ---- Internal payload helpers ----
 
@@ -435,7 +467,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         }
     }
     if m.type_id == 3 { // TYPE_FLOAT
-        let bits = aether_msgpack_double_to_bits(m.f_val)
+        let bits = mem.bits_of_float(m.f_val)
         bytes.set(b, offset, 0xcb)
         bytes.set_be64(b, offset + 1, bits)
         return offset + 9
@@ -805,8 +837,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     // 14. Float 32
     if m == 0xca {
         if cursor.remaining(c) < 4 { return null, "EOF reading float 32" }
-        let bits = cursor.read_be_u32(c)
-        let f = aether_msgpack_bits_to_float(bits)
+        let raw = cursor.read_be_u32(c)
+        // Mask to 32 unsigned bits: read_be_u32 returns an int, and widening
+        // an int with bit 31 set to long would sign-extend, corrupting the
+        // float's sign/exponent. float32_from_bits wants the raw 32 bits.
+        let bits: long = (raw as long) & 4294967295
+        let f = float32_from_bits(bits)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_FLOAT
         v.f_val = f
@@ -817,7 +853,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
     if m == 0xcb {
         if cursor.remaining(c) < 8 { return null, "EOF reading float 64" }
         let bits = cursor.read_be_u64(c)
-        let f = aether_msgpack_bits_to_double(bits)
+        let f = mem.float_from_bits(bits)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_FLOAT
         v.f_val = f

@@ -4,7 +4,7 @@
 exports (
     os_system, os_exec_raw, os_run, os_run_capture_raw, os_run_capture_status_raw,
     os_run_pipe_raw, os_wait_pid_raw, os_run_pipe_drain_and_wait_raw,
-    os_spawn_raw, os_wait_raw, os_wait_any_raw,
+    os_spawn_raw, os_wait_raw, os_wait_any_raw, os_wait_any_timeout_raw,
     os_getenv, os_which,
     aether_args_count, aether_args_get, aether_argv0, aether_argv_raw,
     aether_args_seal, aether_args_sealed, args_seal, args_sealed,
@@ -24,7 +24,7 @@ exports (
     platform,
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
-    spawn_proc, wait, wait_any,
+    spawn_proc, wait, wait_any, wait_any_timeout,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
@@ -157,6 +157,21 @@ extern os_wait_raw(token: int) -> (int, string)
 // err): which token completed, its exit code, and an error string. Only
 // tokens still live (not already reaped) are waited on. Scheduler fan-in.
 extern os_wait_any_raw(tokens: ptr) -> (int, int, string)
+
+// Bounded wait-any: reap whichever token finishes first, or give up after
+// `secs`. `tokens` is the same inline-boxed int-token list os_wait_any_raw
+// takes. Returns (token, exit_code, timed_out, err):
+//   - timed_out == 1 → no child finished within `secs`; token is -1 and the
+//     caller decides what to kill. Live children are left running, so this
+//     is a per-CALL deadline, not a batch deadline — call it again to keep
+//     reaping the rest. Distinguishable from a child that exited non-zero
+//     (timed_out == 0, exit_code set), which is the point for a scheduler
+//     that records TIMEOUT vs FAIL differently.
+//   - secs <= 0 → block indefinitely (same as os_wait_any_raw).
+// Cross-platform: on Windows the tokens resolve through the same table as
+// wait/wait_any, so kill() / wait_pid_timeout() on a returned token behave
+// identically on POSIX and Windows.
+extern os_wait_any_timeout_raw(tokens: ptr, secs: int) -> (int, int, int, string)
 
 // Get environment variable, returns string or NULL if not set
 extern os_getenv(name: string) -> string
@@ -333,6 +348,14 @@ wait_any(tokens: ptr) -> {
     return os_wait_any_raw(tokens)
 }
 
+// Bounded wait-any — (token, exit_code, timed_out, err). Reaps whichever
+// token finishes first, or reports timed_out == 1 after `secs` with the
+// live children left running (a per-call deadline, so a scheduler can bound
+// each node). secs <= 0 blocks indefinitely. See os_wait_any_timeout_raw.
+wait_any_timeout(tokens: ptr, secs: int) -> {
+    return os_wait_any_timeout_raw(tokens, secs)
+}
+
 // --- Process-supervision primitives -----------------------------------
 //
 // The floor any build/test orchestrator hits: run a child as its own
@@ -362,6 +385,10 @@ wait_any(tokens: ptr) -> {
 // Windows: `sig == 0` probes via OpenProcess; any other signal maps to
 // a forced TerminateProcess (no catchable SIGTERM); a negative pid
 // (group signalling) returns -1 — there is no pgid-by-negative-pid.
+// Token contract: `pid` may be a spawn_proc token. On Windows a token is a
+// table index (NOT an OS pid), so kill resolves it through the same process
+// table wait/wait_any use before falling back to treating the int as a pid.
+// So `kill(spawn_token, sig)` works identically on POSIX and Windows.
 extern os_kill_raw(pid: int, sig: int) -> int
 
 // Bounded wait for one child. Returns (status, timed_out, err):
@@ -373,8 +400,11 @@ extern os_kill_raw(pid: int, sig: int) -> int
 //                waitpid error / invalid pid.
 // `secs <= 0` blocks indefinitely (like os.wait_pid, timed_out always 0).
 // Lets a supervisor bound a wait without a separate watchdog process.
-// Windows: OpenProcess + WaitForSingleObject(secs); status is the
-// process exit code (no signal concept).
+// Windows: WaitForSingleObject(secs); status is the process exit code (no
+// signal concept). Token contract: `pid` may be a spawn_proc token — on
+// Windows it resolves through the process table (reaping the token on a
+// clean exit) before falling back to an OS pid, so `wait_pid_timeout(
+// spawn_token, secs)` behaves identically on POSIX and Windows.
 extern os_wait_pid_timeout_raw(pid: int, secs: int) -> (int, int, string)
 
 // One-call supervised run — the whole job-control pattern in one

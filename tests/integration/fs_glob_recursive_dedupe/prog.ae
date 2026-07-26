@@ -1,0 +1,21 @@
+// Prints each fs.glob("./**/.*.ae") match on its own line, one per entry,
+// so the shell driver can assert the count and per-path multiplicity. The
+// driver cd's into the fixture directory before running, so the fixed
+// relative pattern resolves against the fixture tree.
+import std.fs (glob, dir_list_count, dir_list_get)
+import std.string
+
+main() {
+    files, err = glob("./**/.*.ae")
+    if string.equals(err, "") != 1 {
+        println("glob error: ${err}")
+        return 1
+    }
+    n = dir_list_count(files)
+    i = 0
+    while i < n {
+        println(dir_list_get(files, i))
+        i = i + 1
+    }
+    return 0
+}
