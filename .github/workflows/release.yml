@@ -256,7 +256,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pin the Linux release build to the OLDEST supported glibc, not
+          # ubuntu-latest. glibc symbol versioning is forward-only: a binary
+          # linked against a newer glibc references versioned symbols (e.g.
+          # GLIBC_2.38) that an older loader cannot satisfy, so it fails at
+          # startup with "version `GLIBC_2.xx' not found". ubuntu-latest tracks
+          # the newest Ubuntu (24.04 = glibc 2.39), which broke the release on
+          # Debian 12 (glibc 2.36) and other still-current distros. 22.04 ships
+          # glibc 2.35 — old enough for Debian 12 / Ubuntu 22.04+ / current
+          # mainstream distros. See docs/release-glibc-portability.md for the
+          # longer-term plan (musl-static) and its trade-offs.
+          - os: ubuntu-22.04
             target: linux-x86_64
             ext: ""
           - os: macos-15-intel
@@ -277,7 +287,7 @@ jobs:
 
     # -- Linux ---
     - name: Setup (Linux)
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-22.04'
       run: sudo apt-get update && sudo apt-get install -y gcc make bc
 
     # -- Windows -- MinGW-w64 via MSYS2 ---
