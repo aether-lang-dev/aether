@@ -1928,6 +1928,31 @@ int is_c_keyword(const char* name) {
     return 0;
 }
 
+/* #1256 follow-up: names the Windows SDK claims at file scope. With module
+ * consts lowered to real C identifiers (static const) instead of #defines,
+ * a const named DOUBLE collides with windef.h's `typedef double DOUBLE` in
+ * any generated TU that includes <windows.h>: "redeclared as a different
+ * kind of symbol". TRUE/FALSE are macros there, which is worse: the
+ * preprocessor rewrites the declaration itself. Mangled on every platform
+ * so programs behave identically on POSIX and Windows. Curated to the
+ * windef.h/winnt.h names plausible as user constants. */
+static int is_winapi_reserved_name(const char* name) {
+    if (!name) return 0;
+    static const char* win[] = {
+        "BOOL", "BOOLEAN", "BYTE", "CHAR", "DOUBLE", "DWORD", "DWORD64",
+        "FLOAT", "HANDLE", "INT", "INT8", "INT16", "INT32", "INT64",
+        "LONG", "LONG64", "LPSTR", "LPCSTR", "LPVOID", "PVOID", "SHORT",
+        "SIZE_T", "SSIZE_T", "UCHAR", "UINT", "UINT8", "UINT16", "UINT32",
+        "UINT64", "ULONG", "ULONG64", "USHORT", "VOID", "WCHAR", "WORD",
+        "TRUE", "FALSE", "NULL", "IGNORE", "INFINITE", "ERROR", "OPTIONAL",
+        NULL
+    };
+    for (int i = 0; win[i]; i++) {
+        if (strcmp(name, win[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 // #976: mangle a value/variable identifier that is a C keyword to a valid C
 // identifier. Non-keywords pass through unchanged, so normal code is emitted
 // verbatim and only the (previously broken) keyword names are rewritten. The
@@ -3808,14 +3833,15 @@ static void mangle_keyword_value_idents(ASTNode* node) {
         case AST_FIELD_INIT:
         case AST_PATTERN_FIELD:
         case AST_MEMBER_ACCESS:
-            if (node->value && is_c_keyword(node->value)) {
-                const char* safe = safe_value_name(node->value);
-                if (safe && safe != node->value) {
-                    char* dup = strdup(safe);
-                    if (dup) {
-                        free(node->value);
-                        node->value = dup;
-                    }
+        case AST_CONST_DECLARATION:
+            if (node->value && (is_c_keyword(node->value) ||
+                                is_winapi_reserved_name(node->value))) {
+                char safe[280];
+                snprintf(safe, sizeof(safe), "ae_%s", node->value);
+                char* dup = strdup(safe);
+                if (dup) {
+                    free(node->value);
+                    node->value = dup;
                 }
             }
             break;
