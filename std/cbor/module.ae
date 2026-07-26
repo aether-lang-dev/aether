@@ -29,11 +29,21 @@ const CBOR_TAG    = 5
 const CBOR_SIMPLE = 6
 const CBOR_FLOAT  = 7
 
+// Memory model: a CborValue tree owns its text/byte-string payloads as an
+// AetherBytes buffer (str_bytes + str_len), NOT a refcounted `string` field.
+// A `string` stored in a heap.new struct field leaks — heap.free reclaims
+// only the struct, and the escape walker won't follow a string into a struct
+// field so it can't be released manually without a double-free. std.bytes is
+// malloc-backed with an explicit bytes.free (leak-clean); free_value reclaims
+// the buffer alongside the struct. get_string/get_bytes mint a fresh
+// caller-owned string on demand via the non-consuming bytes.to_string. This
+// is the same treatment std.msgpack uses for the identical problem.
 struct CborValue {
     type: int
     int_val: long
     float_val: float
-    str_val: string
+    str_bytes: ptr     // owned AetherBytes for text/byte-string payload (null if empty); freed in free_value
+    str_len: int       // payload byte length
     tag_val: long
     tag_child: ptr     // *CborValue
     list_val: ptr      // list pointer (std.list)
@@ -41,10 +51,97 @@ struct CborValue {
     map_values: ptr    // list pointer (std.list)
 }
 
+// ---- str payload helpers (see Memory model above) ----
+
+// Store `len` bytes of `src` (an AetherString) as cv's owned payload.
+// Empty payload records str_bytes = null / str_len = 0 (no allocation).
+fn set_str_payload(cv: *CborValue, src: string, len: int) {
+    if len <= 0 {
+        cv.str_bytes = null
+        cv.str_len = 0
+        return
+    }
+    b = bytes.new(len)
+    _ = bytes.copy_from_string(b, 0, src, len)
+    cv.str_bytes = b
+    cv.str_len = len
+}
+
+// Adopt an already-owned AetherBytes buffer (e.g. an assembled indefinite-
+// string buffer) as cv's payload, transferring ownership. `len` is the
+// logical byte length.
+fn adopt_str_payload(cv: *CborValue, b: ptr, len: int) {
+    if len <= 0 {
+        cv.str_bytes = null
+        cv.str_len = 0
+        bytes.free(b)
+        return
+    }
+    cv.str_bytes = b
+    cv.str_len = len
+}
+
+// Fresh caller-owned string copy of cv's payload; non-consuming.
+fn str_payload_string(cv: *CborValue) -> string {
+    if cv.str_bytes == null || cv.str_len <= 0 {
+        return ""
+    }
+    return bytes.to_string(cv.str_bytes, cv.str_len)
+}
+
+// Byte-for-byte compare of two payloads without minting strings.
+fn str_payload_equal(a: *CborValue, b: *CborValue) -> bool {
+    if a.str_len != b.str_len { return false }
+    if a.str_len == 0 { return true }
+    sa = str_payload_string(a)
+    sb = str_payload_string(b)
+    eq = sa == sb
+    string.release(sa)
+    string.release(sb)
+    return eq
+}
+
+// Compare a payload against a plain string key without escaping a string.
+fn str_payload_equals_key(cv: *CborValue, key: string) -> bool {
+    if cv.str_len != string.length(key) { return false }
+    if cv.str_len == 0 { return true }
+    s = str_payload_string(cv)
+    eq = s == key
+    string.release(s)
+    return eq
+}
+
+// The reader holds an owned std.bytes copy of the input, NOT the caller's
+// string. Borrowing the caller's string into this struct field trips the
+// escape walker, which then suppresses the caller's release of that string
+// (it leaks). Copying into a bytes buffer we own and free ourselves keeps
+// the caller's input fully the caller's to release — the same approach
+// std.msgpack's unpack uses.
 struct Reader {
-    data: string
+    buf: ptr    // owned std.bytes copy of the input
     len: int
     offset: int
+}
+
+// Read the byte at `off` (0..255). Bounds are checked by callers.
+fn rd(reader: *Reader, off: int) -> int {
+    return bytes.get(reader.buf, off) & 255
+}
+
+// Copy `len` bytes from the reader's buffer at its current offset into a
+// fresh owned payload buffer on `cv`, then advance the offset. No
+// intermediate string is minted. Bounds are checked by the caller.
+fn read_str_payload(cv: *CborValue, reader: *Reader, len: int) {
+    if len <= 0 {
+        cv.str_bytes = null
+        cv.str_len = 0
+        return
+    }
+    b = bytes.new(len)
+    _ = bytes.copy_from_bytes(b, 0, reader.buf, reader.offset, len)
+    reader.offset = reader.offset + len
+    cv.str_bytes = b
+    cv.str_len = len
 }
 
 struct Writer {
@@ -139,48 +236,51 @@ float16_to_float32(val: int) -> float {
 // ---- DECODER IMPLEMENTATION ----
 
 read_value(r: ptr, ai: int) -> (long, string) {
+    // Single tracked empty-error binding; a bare "" per success return mints
+    // a fresh 1-byte heap string the caller discards (one leak per call).
+    ok = ""
     reader = r as *Reader
     if ai < 24 {
-        return ai as long, ""
+        return ai as long, ok
     }
     if ai == 24 {
         if reader.offset >= reader.len { return 0, "cbor: unexpected EOF" }
-        v = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+        v = rd(reader, reader.offset)
         reader.offset = reader.offset + 1
-        return v as long, ""
+        return v as long, ok
     }
     if ai == 25 {
         if reader.offset + 2 > reader.len { return 0, "cbor: unexpected EOF" }
-        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+        b0 = rd(reader, reader.offset)
+        b1 = rd(reader, reader.offset + 1)
         reader.offset = reader.offset + 2
         v = (b0 << 8) | b1
-        return v as long, ""
+        return v as long, ok
     }
     if ai == 26 {
         if reader.offset + 4 > reader.len { return 0, "cbor: unexpected EOF" }
-        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
-        b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
-        b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+        b0 = rd(reader, reader.offset)
+        b1 = rd(reader, reader.offset + 1)
+        b2 = rd(reader, reader.offset + 2)
+        b3 = rd(reader, reader.offset + 3)
         reader.offset = reader.offset + 4
         v = ((b0 as long) << 24) | ((b1 as long) << 16) | ((b2 as long) << 8) | (b3 as long)
-        return v, ""
+        return v, ok
     }
     if ai == 27 {
         if reader.offset + 8 > reader.len { return 0, "cbor: unexpected EOF" }
-        b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-        b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
-        b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
-        b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
-        b4 = string.char_at_n(reader.data, reader.len, reader.offset + 4) & 255
-        b5 = string.char_at_n(reader.data, reader.len, reader.offset + 5) & 255
-        b6 = string.char_at_n(reader.data, reader.len, reader.offset + 6) & 255
-        b7 = string.char_at_n(reader.data, reader.len, reader.offset + 7) & 255
+        b0 = rd(reader, reader.offset)
+        b1 = rd(reader, reader.offset + 1)
+        b2 = rd(reader, reader.offset + 2)
+        b3 = rd(reader, reader.offset + 3)
+        b4 = rd(reader, reader.offset + 4)
+        b5 = rd(reader, reader.offset + 5)
+        b6 = rd(reader, reader.offset + 6)
+        b7 = rd(reader, reader.offset + 7)
         reader.offset = reader.offset + 8
         v = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
             ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
-        return v, ""
+        return v, ok
     }
     return 0, "cbor: invalid additional information"
 }
@@ -190,7 +290,7 @@ parse_item(r: ptr) -> (ptr, string) {
     if reader.offset >= reader.len {
         return null, "cbor: unexpected EOF"
     }
-    ib = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+    ib = rd(reader, reader.offset)
     reader.offset = reader.offset + 1
 
     mt = (ib >> 5) & 7
@@ -199,6 +299,7 @@ parse_item(r: ptr) -> (ptr, string) {
     if mt == 0 {
         val, err = read_value(r, ai)
         if err != "" { return null, err }
+        string.release(err)
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
         cv.int_val = val
@@ -207,6 +308,7 @@ parse_item(r: ptr) -> (ptr, string) {
     if mt == 1 {
         val, err = read_value(r, ai)
         if err != "" { return null, err }
+        string.release(err)
         cv = heap.new(CborValue)
         cv.type = CBOR_INT
         cv.int_val = -1 - val
@@ -223,7 +325,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     bytes.free(sb)
                     return null, "cbor: unexpected EOF in indefinite byte string"
                 }
-                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                next_byte = rd(reader, reader.offset)
                 if next_byte == 255 { // break code
                     reader.offset = reader.offset + 1
                     break
@@ -233,30 +335,32 @@ parse_item(r: ptr) -> (ptr, string) {
                     bytes.free(sb)
                     return null, err
                 }
+                string.release(err)
                 child_cv = child as *CborValue
                 if child_cv.type != CBOR_BYTES {
                     bytes.free(sb)
                     free_value(child)
                     return null, "cbor: indefinite byte string contains non-byte-string"
                 }
-                chunk_len = string.length(child_cv.str_val)
-                _ = bytes.copy_from_string(sb, sb_len, child_cv.str_val, chunk_len)
+                chunk_len = child_cv.str_len
+                if chunk_len > 0 {
+                    _ = bytes.copy_from_bytes(sb, sb_len, child_cv.str_bytes, 0, chunk_len)
+                }
                 sb_len = sb_len + chunk_len
                 free_value(child)
             }
             cv = heap.new(CborValue)
             cv.type = CBOR_BYTES
-            cv.str_val = bytes.finish(sb, sb_len)
+            adopt_str_payload(cv as *CborValue, sb, sb_len)
             return cv as ptr, ""
         }
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
+        string.release(err)
         if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
-        sub = string.substring(reader.data, reader.offset, reader.offset + (len_val as int))
-        reader.offset = reader.offset + (len_val as int)
         cv = heap.new(CborValue)
         cv.type = CBOR_BYTES
-        cv.str_val = sub
+        read_str_payload(cv as *CborValue, reader, len_val as int)
         return cv as ptr, ""
     }
     if mt == 3 {
@@ -269,7 +373,7 @@ parse_item(r: ptr) -> (ptr, string) {
                     bytes.free(sb)
                     return null, "cbor: unexpected EOF in indefinite text string"
                 }
-                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                next_byte = rd(reader, reader.offset)
                 if next_byte == 255 {
                     reader.offset = reader.offset + 1
                     break
@@ -279,121 +383,150 @@ parse_item(r: ptr) -> (ptr, string) {
                     bytes.free(sb)
                     return null, err
                 }
+                string.release(err)
                 child_cv = child as *CborValue
                 if child_cv.type != CBOR_TEXT {
                     bytes.free(sb)
                     free_value(child)
                     return null, "cbor: indefinite text string contains non-text-string"
                 }
-                chunk_len = string.length(child_cv.str_val)
-                _ = bytes.copy_from_string(sb, sb_len, child_cv.str_val, chunk_len)
+                chunk_len = child_cv.str_len
+                if chunk_len > 0 {
+                    _ = bytes.copy_from_bytes(sb, sb_len, child_cv.str_bytes, 0, chunk_len)
+                }
                 sb_len = sb_len + chunk_len
                 free_value(child)
             }
             cv = heap.new(CborValue)
             cv.type = CBOR_TEXT
-            cv.str_val = bytes.finish(sb, sb_len)
+            adopt_str_payload(cv as *CborValue, sb, sb_len)
             return cv as ptr, ""
         }
         len_val, err = read_value(r, ai)
         if err != "" { return null, err }
+        string.release(err)
         if reader.offset + (len_val as int) > reader.len { return null, "cbor: unexpected EOF" }
-        sub = string.substring(reader.data, reader.offset, reader.offset + (len_val as int))
-        reader.offset = reader.offset + (len_val as int)
         cv = heap.new(CborValue)
         cv.type = CBOR_TEXT
-        cv.str_val = sub
+        read_str_payload(cv as *CborValue, reader, len_val as int)
         return cv as ptr, ""
     }
     if mt == 4 {
+        // Build the container up front so any error path can free_value(cv)
+        // to reclaim the list and every child already parsed into it.
+        cv = heap.new(CborValue)
+        cv.type = CBOR_ARRAY
+        cv.list_val = list.new()
         if ai == 31 {
-            lst = list.new()
             while true {
-                if reader.offset >= reader.len { return null, "cbor: unexpected EOF in indefinite array" }
-                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if reader.offset >= reader.len {
+                    free_value(cv)
+                    return null, "cbor: unexpected EOF in indefinite array"
+                }
+                next_byte = rd(reader, reader.offset)
                 if next_byte == 255 {
                     reader.offset = reader.offset + 1
                     break
                 }
                 child, err = parse_item(r)
-                if err != "" { return null, err }
-                _ = list.add(lst, child)
+                if err != "" {
+                    free_value(cv)
+                    return null, err
+                }
+                string.release(err)
+                _ = list.add(cv.list_val, child)
             }
-            cv = heap.new(CborValue)
-            cv.type = CBOR_ARRAY
-            cv.list_val = lst
             return cv as ptr, ""
         }
         len_val, err = read_value(r, ai)
-        if err != "" { return null, err }
-        lst = list.new()
+        if err != "" {
+            free_value(cv)
+            return null, err
+        }
+        string.release(err)
         i = 0
         while i < (len_val as int) {
             child, err = parse_item(r)
-            if err != "" { return null, err }
-            _ = list.add(lst, child)
+            if err != "" {
+                free_value(cv)
+                return null, err
+            }
+            string.release(err)
+            _ = list.add(cv.list_val, child)
             i = i + 1
         }
-        cv = heap.new(CborValue)
-        cv.type = CBOR_ARRAY
-        cv.list_val = lst
         return cv as ptr, ""
     }
     if mt == 5 {
+        // Build the container up front so any error path can free_value(cv)
+        // to reclaim both lists and every key/value already parsed.
+        cv = heap.new(CborValue)
+        cv.type = CBOR_MAP
+        cv.map_keys = list.new()
+        cv.map_values = list.new()
         if ai == 31 {
-            keys_lst = list.new()
-            vals_lst = list.new()
             while true {
-                if reader.offset >= reader.len { return null, "cbor: unexpected EOF in indefinite map" }
-                next_byte = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+                if reader.offset >= reader.len {
+                    free_value(cv)
+                    return null, "cbor: unexpected EOF in indefinite map"
+                }
+                next_byte = rd(reader, reader.offset)
                 if next_byte == 255 {
                     reader.offset = reader.offset + 1
                     break
                 }
                 key_cv, err = parse_item(r)
-                if err != "" { return null, err }
+                if err != "" {
+                    free_value(cv)
+                    return null, err
+                }
+                string.release(err)
                 val_cv, err2 = parse_item(r)
                 if err2 != "" {
                     free_value(key_cv)
+                    free_value(cv)
                     return null, err2
                 }
-                _ = list.add(keys_lst, key_cv)
-                _ = list.add(vals_lst, val_cv)
+                string.release(err2)
+                _ = list.add(cv.map_keys, key_cv)
+                _ = list.add(cv.map_values, val_cv)
             }
-            cv = heap.new(CborValue)
-            cv.type = CBOR_MAP
-            cv.map_keys = keys_lst
-            cv.map_values = vals_lst
             return cv as ptr, ""
         }
         len_val, err = read_value(r, ai)
-        if err != "" { return null, err }
-        keys_lst = list.new()
-        vals_lst = list.new()
+        if err != "" {
+            free_value(cv)
+            return null, err
+        }
+        string.release(err)
         i = 0
         while i < (len_val as int) {
             key_cv, err = parse_item(r)
-            if err != "" { return null, err }
+            if err != "" {
+                free_value(cv)
+                return null, err
+            }
+            string.release(err)
             val_cv, err2 = parse_item(r)
             if err2 != "" {
                 free_value(key_cv)
+                free_value(cv)
                 return null, err2
             }
-            _ = list.add(keys_lst, key_cv)
-            _ = list.add(vals_lst, val_cv)
+            string.release(err2)
+            _ = list.add(cv.map_keys, key_cv)
+            _ = list.add(cv.map_values, val_cv)
             i = i + 1
         }
-        cv = heap.new(CborValue)
-        cv.type = CBOR_MAP
-        cv.map_keys = keys_lst
-        cv.map_values = vals_lst
         return cv as ptr, ""
     }
     if mt == 6 {
         tag_val, err = read_value(r, ai)
         if err != "" { return null, err }
+        string.release(err)
         child_cv, err2 = parse_item(r)
         if err2 != "" { return null, err2 }
+        string.release(err2)
         cv = heap.new(CborValue)
         cv.type = CBOR_TAG
         cv.tag_val = tag_val
@@ -427,7 +560,7 @@ parse_item(r: ptr) -> (ptr, string) {
         }
         if ai == 24 {
             if reader.offset >= reader.len { return null, "cbor: unexpected EOF" }
-            v = string.char_at_n(reader.data, reader.len, reader.offset) & 255
+            v = rd(reader, reader.offset)
             reader.offset = reader.offset + 1
             cv = heap.new(CborValue)
             cv.type = CBOR_SIMPLE
@@ -436,8 +569,8 @@ parse_item(r: ptr) -> (ptr, string) {
         }
         if ai == 25 {
             if reader.offset + 2 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
+            b0 = rd(reader, reader.offset)
+            b1 = rd(reader, reader.offset + 1)
             reader.offset = reader.offset + 2
             bits = (b0 << 8) | b1
             f = float16_to_float32(bits)
@@ -448,10 +581,10 @@ parse_item(r: ptr) -> (ptr, string) {
         }
         if ai == 26 {
             if reader.offset + 4 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
-            b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
-            b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
+            b0 = rd(reader, reader.offset)
+            b1 = rd(reader, reader.offset + 1)
+            b2 = rd(reader, reader.offset + 2)
+            b3 = rd(reader, reader.offset + 3)
             reader.offset = reader.offset + 4
             bits = ((b0 as long) << 24) | ((b1 as long) << 16) | ((b2 as long) << 8) | (b3 as long)
             f = float32_from_bits(bits)
@@ -462,14 +595,14 @@ parse_item(r: ptr) -> (ptr, string) {
         }
         if ai == 27 {
             if reader.offset + 8 > reader.len { return null, "cbor: unexpected EOF" }
-            b0 = string.char_at_n(reader.data, reader.len, reader.offset) & 255
-            b1 = string.char_at_n(reader.data, reader.len, reader.offset + 1) & 255
-            b2 = string.char_at_n(reader.data, reader.len, reader.offset + 2) & 255
-            b3 = string.char_at_n(reader.data, reader.len, reader.offset + 3) & 255
-            b4 = string.char_at_n(reader.data, reader.len, reader.offset + 4) & 255
-            b5 = string.char_at_n(reader.data, reader.len, reader.offset + 5) & 255
-            b6 = string.char_at_n(reader.data, reader.len, reader.offset + 6) & 255
-            b7 = string.char_at_n(reader.data, reader.len, reader.offset + 7) & 255
+            b0 = rd(reader, reader.offset)
+            b1 = rd(reader, reader.offset + 1)
+            b2 = rd(reader, reader.offset + 2)
+            b3 = rd(reader, reader.offset + 3)
+            b4 = rd(reader, reader.offset + 4)
+            b5 = rd(reader, reader.offset + 5)
+            b6 = rd(reader, reader.offset + 6)
+            b7 = rd(reader, reader.offset + 7)
             reader.offset = reader.offset + 8
             bits = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
                    ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
@@ -486,16 +619,29 @@ parse_item(r: ptr) -> (ptr, string) {
 // Parse a CBOR binary string. Returns (value_ptr, "") on success, (null, error) on failure.
 // Caller owns the returned value and must free with cbor.free.
 parse(cbor_data: string) -> ptr! {
+    ok = ""
+    dlen = string.length(cbor_data)
+    // Copy the input into an owned bytes buffer. We must NOT store the
+    // caller's string in the Reader struct: doing so escapes it and the
+    // caller's release of `cbor_data` is suppressed (it leaks).
+    buf = bytes.new(dlen)
+    if dlen > 0 {
+        _ = bytes.copy_from_string(buf, 0, cbor_data, dlen)
+    }
     r = heap.new(Reader)
-    r.data = cbor_data
-    r.len = string.length(cbor_data)
+    r.buf = buf
+    r.len = dlen
     r.offset = 0
     res, err = parse_item(r as ptr)
+    bytes.free(r.buf)
     heap.free(r)
     if err != "" {
         return null, err
     }
-    return res, ""
+    // parse_item's success path returns a fresh heap "" in the error slot;
+    // discard it here (we return our own ok) or it leaks one byte per parse.
+    string.release(err)
+    return res, ok
 }
 
 // ---- ENCODER IMPLEMENTATION ----
@@ -568,15 +714,23 @@ encode_item(w: ptr, cv: ptr) -> string {
         return ""
     }
     if cv_val.type == CBOR_BYTES {
-        len = string.length(cv_val.str_val)
+        len = cv_val.str_len
         encode_header(w, 2, len as long)
-        write_string(w, cv_val.str_val, len)
+        if len > 0 {
+            s = str_payload_string(cv_val)
+            write_string(w, s, len)
+            string.release(s)
+        }
         return ""
     }
     if cv_val.type == CBOR_TEXT {
-        len = string.length(cv_val.str_val)
+        len = cv_val.str_len
         encode_header(w, 3, len as long)
-        write_string(w, cv_val.str_val, len)
+        if len > 0 {
+            s = str_payload_string(cv_val)
+            write_string(w, s, len)
+            string.release(s)
+        }
         return ""
     }
     if cv_val.type == CBOR_ARRAY {
@@ -719,7 +873,7 @@ get_string(value: ptr) -> string! {
     if cv.type != CBOR_TEXT {
         return "", "not a string"
     }
-    return string.concat(cv.str_val, ""), ""
+    return str_payload_string(cv), ""
 }
 
 get_bytes(value: ptr) -> string! {
@@ -728,7 +882,7 @@ get_bytes(value: ptr) -> string! {
     if cv.type != CBOR_BYTES {
         return "", "not a byte string"
     }
-    return string.concat(cv.str_val, ""), ""
+    return str_payload_string(cv), ""
 }
 
 get_tag_val(value: ptr) -> long {
@@ -758,7 +912,7 @@ object_get(obj_ptr: ptr, key: string) -> ptr! {
     while i < n {
         k_ptr, _ = list.get(cv.map_keys, i)
         k = k_ptr as *CborValue
-        if k.type == CBOR_TEXT && k.str_val == key {
+        if k.type == CBOR_TEXT && str_payload_equals_key(k, key) {
             val_ptr, _ = list.get(cv.map_values, i)
             return val_ptr, ""
         }
@@ -775,7 +929,7 @@ fn equal_val(a: ptr, b: ptr) -> bool {
     if acv.type != bcv.type { return false }
     if acv.type == CBOR_INT { return acv.int_val == bcv.int_val }
     if acv.type == CBOR_FLOAT { return acv.float_val == bcv.float_val }
-    if acv.type == CBOR_TEXT || acv.type == CBOR_BYTES { return acv.str_val == bcv.str_val }
+    if acv.type == CBOR_TEXT || acv.type == CBOR_BYTES { return str_payload_equal(acv, bcv) }
     if acv.type == CBOR_SIMPLE { return acv.int_val == bcv.int_val }
     if acv.type == CBOR_TAG {
         return acv.tag_val == bcv.tag_val && equal_val(acv.tag_child, bcv.tag_child)
@@ -897,14 +1051,14 @@ arr() -> ptr {
 str(value: string) -> ptr {
     cv = heap.new(CborValue)
     cv.type = CBOR_TEXT
-    cv.str_val = value
+    set_str_payload(cv as *CborValue, value, string.length(value))
     return cv as ptr
 }
 
 bytes(value: string) -> ptr {
     cv = heap.new(CborValue)
     cv.type = CBOR_BYTES
-    cv.str_val = value
+    set_str_payload(cv as *CborValue, value, string.length(value))
     return cv as ptr
 }
 
@@ -984,6 +1138,10 @@ free_value(cv: ptr) {
     } else if cv_val.type == CBOR_TAG {
         free_value(cv_val.tag_child)
     }
+    if cv_val.str_bytes != null {
+        bytes.free(cv_val.str_bytes)
+        cv_val.str_bytes = null
+    }
     heap.free(cv_val)
 }
 
@@ -1047,10 +1205,16 @@ to_diagnose_string(cv: ptr) -> string {
         return format_float_diag(cv_val.float_val)
     }
     if cv_val.type == CBOR_TEXT {
-        return escape_string(cv_val.str_val)
+        s = str_payload_string(cv_val)
+        out = escape_string(s)
+        string.release(s)
+        return out
     }
     if cv_val.type == CBOR_BYTES {
-        return format_bytes_diag(cv_val.str_val)
+        s = str_payload_string(cv_val)
+        out = format_bytes_diag(s)
+        string.release(s)
+        return out
     }
     if cv_val.type == CBOR_SIMPLE {
         if cv_val.int_val == 20 { return "false" }
