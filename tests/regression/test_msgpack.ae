@@ -271,7 +271,7 @@ main() {
     fails = fails + check(msgpack.get_type(e_unpacked) == msgpack.TYPE_EXT, "unpack ext type")
     let ext_node = e_unpacked as *MsgValue
     fails = fails + check(ext_node.ext_type == 5, "unpack ext type id")
-    fails = fails + check(ext_node.s_val == "A", "unpack ext data")
+    fails = fails + check(msgpack.get_bin(e_unpacked) == "A", "unpack ext data")
     msgpack.free(e)
     msgpack.free(e_unpacked)
 
@@ -283,7 +283,7 @@ main() {
     fails = fails + check(err_es == "", "unpack signed ext err")
     let es_node = es_unpacked as *MsgValue
     fails = fails + check(es_node.ext_type == -5, "unpack signed ext type id")
-    fails = fails + check(es_node.s_val == "AB", "unpack signed ext data")
+    fails = fails + check(msgpack.get_bin(es_unpacked) == "AB", "unpack signed ext data")
     msgpack.free(e_signed)
     msgpack.free(es_unpacked)
 

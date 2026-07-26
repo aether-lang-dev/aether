@@ -1,5 +1,21 @@
 // std.msgpack — MessagePack serialization and deserialization library (RFC 9562 equivalent / Portions copyright 3Hren/msgpack-rust).
 // Import with: import std.msgpack
+//
+// Memory model
+// ------------
+// A MsgValue tree owns its string/binary payloads through a std.bytes
+// buffer (s_bytes), NOT through a refcounted AetherString field. Storing
+// an AetherString in a heap.new struct field leaks: heap.free(struct) frees
+// only the struct, never the string, and manually releasing the field
+// double-frees (the escape walker does not follow a string into a struct
+// field). std.bytes is malloc-backed with an explicit bytes.free, which is
+// leak-clean the same way the crypto modules' byte buffers are. So every
+// str/bin/ext payload is an owned AetherBytes; free() reclaims it with
+// bytes.free alongside the structs and lists. get_string / get_bin mint a
+// fresh caller-owned AetherString from those bytes on demand (the caller
+// releases that copy; the tree keeps its buffer). On unpack the cursor's
+// read_slice already returns a freshly-owned AetherBytes, so the payload is
+// adopted directly with no extra copy.
 
 import std.bytes
 import std.bytes.cursor
@@ -31,7 +47,8 @@ struct MsgValue {
     b_val: bool
     i_val: long
     f_val: float
-    s_val: string
+    s_bytes: ptr      // owned AetherBytes for str/bin/ext payload (null if empty); freed in free()
+    s_len: int        // payload byte length
     ext_type: int
     arr_val: ptr      // list pointer (*std.list.List)
     map_keys: ptr     // list pointer (*std.list.List)
@@ -42,6 +59,31 @@ extern aether_msgpack_float_to_bits(val: float) -> int
 extern aether_msgpack_bits_to_float(bits: int) -> float
 extern aether_msgpack_double_to_bits(val: float) -> long
 extern aether_msgpack_bits_to_double(bits: long) -> float
+
+// ---- Internal payload helpers ----
+
+// Store `len` bytes of `src` (an AetherString) as a value's owned payload.
+// A zero-length payload records s_bytes = null / s_len = 0 (no allocation).
+fn set_payload(v: *MsgValue, src: string, len: int) {
+    if len <= 0 {
+        v.s_bytes = null
+        v.s_len = 0
+        return
+    }
+    let b = bytes.new(len)
+    bytes.copy_from_string(b, 0, src, len)
+    v.s_bytes = b
+    v.s_len = len
+}
+
+// Materialize a fresh caller-owned AetherString from a value's payload.
+// Non-consuming: the value keeps owning its AetherBytes buffer.
+fn payload_string(v: *MsgValue) -> string {
+    if v.s_bytes == null || v.s_len <= 0 {
+        return ""
+    }
+    return bytes.to_string(v.s_bytes, v.s_len)
+}
 
 // ---- Builders ----
 
@@ -75,14 +117,14 @@ num(val: float) -> ptr {
 str(val: string) -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_STR
-    v.s_val = string.concat(val, "")
+    set_payload(v as *MsgValue, val, string.length(val))
     return v as ptr
 }
 
 bin(val: string) -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_BIN
-    v.s_val = string.concat(val, "")
+    set_payload(v as *MsgValue, val, string.length(val))
     return v as ptr
 }
 
@@ -105,7 +147,7 @@ ext(type_id: int, data: string) -> ptr {
     let v = heap.new(MsgValue)
     v.type_id = TYPE_EXT
     v.ext_type = type_id
-    v.s_val = string.concat(data, "")
+    set_payload(v as *MsgValue, data, string.length(data))
     return v as ptr
 }
 
@@ -131,14 +173,17 @@ get_float(val: ptr) -> float {
     return (val as *MsgValue).f_val
 }
 
+// Returns a fresh, caller-owned string copy of the payload. Release it
+// like any other string.
 get_string(val: ptr) -> string {
     if val == null { return "" }
-    return (val as *MsgValue).s_val
+    return payload_string(val as *MsgValue)
 }
 
+// Returns a fresh, caller-owned string copy of the binary payload.
 get_bin(val: ptr) -> string {
     if val == null { return "" }
-    return (val as *MsgValue).s_val
+    return payload_string(val as *MsgValue)
 }
 
 array_size(val: ptr) -> int {
@@ -187,6 +232,19 @@ map_get_value(val: ptr, index: int) -> ptr {
     return list.list_get_raw(m.map_values, index)
 }
 
+// Compare a string-typed key node's payload against `key` byte-for-byte.
+// Mints a temporary string for the comparison and releases it, so no
+// AetherString escapes.
+fn key_matches(k: *MsgValue, key: string) -> bool {
+    if k == null || k.type_id != TYPE_STR { return false }
+    if k.s_len != string.length(key) { return false }
+    if k.s_len == 0 { return true }
+    let ks = payload_string(k)
+    let eq = ks == key
+    string.release(ks)
+    return eq
+}
+
 map_get(val: ptr, key: string) -> ptr {
     if val == null { return null }
     let m = val as *MsgValue
@@ -195,7 +253,7 @@ map_get(val: ptr, key: string) -> ptr {
     let i = 0
     while i < sz {
         let k = list.list_get_raw(m.map_keys, i) as *MsgValue
-        if k != null && k.type_id == TYPE_STR && k.s_val == key {
+        if key_matches(k, key) {
             return list.list_get_raw(m.map_values, i)
         }
         i = i + 1
@@ -211,7 +269,7 @@ map_set(val: ptr, key: string, value: ptr) -> int {
     let i = 0
     while i < sz {
         let k = list.list_get_raw(m.map_keys, i) as *MsgValue
-        if k != null && k.type_id == TYPE_STR && k.s_val == key {
+        if key_matches(k, key) {
             let old_val = list.list_get_raw(m.map_values, i)
             if old_val != null { free(old_val) }
             list.list_set(m.map_values, i, value)
@@ -256,6 +314,10 @@ free(val: ptr) {
             list.list_free(m.map_values)
         }
     }
+    if m.s_bytes != null {
+        bytes.free(m.s_bytes)
+        m.s_bytes = null
+    }
     heap.free(m)
 }
 
@@ -269,6 +331,7 @@ pack(val: ptr) -> string {
 }
 
 unpack(bytes_str: string) -> ptr! {
+    let ok = ""
     let len = string.length(bytes_str)
     if len == 0 {
         return null, "empty input"
@@ -287,10 +350,21 @@ unpack(bytes_str: string) -> ptr! {
     if err != "" {
         return null, err
     }
-    return val, ""
+    // unpack_inner's success path returns a fresh heap "" in the error
+    // slot; we discard it here (returning our own ok), so release it or
+    // it leaks one byte per unpack call.
+    string.release(err)
+    return val, ok
 }
 
 // ---- Packing implementation helper ----
+
+// Write a value's str/bin/ext payload bytes into the output buffer.
+fn pack_payload(m: *MsgValue, b: ptr, offset: int) {
+    if m.s_len > 0 && m.s_bytes != null {
+        bytes.copy_from_bytes(b, offset, m.s_bytes, 0, m.s_len)
+    }
+}
 
 fn pack_val(val: ptr, b: ptr, offset: int) -> int {
     if val == null {
@@ -367,7 +441,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         return offset + 9
     }
     if m.type_id == 4 { // TYPE_STR
-        let len = string.length(m.s_val)
+        let len = m.s_len
         let next_off = offset
         if len <= 31 {
             bytes.set(b, offset, 0xa0 | len)
@@ -385,13 +459,11 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
             bytes.set_be32(b, offset + 1, len)
             next_off = offset + 5
         }
-        if len > 0 {
-            bytes.copy_from_string(b, next_off, m.s_val, len)
-        }
+        pack_payload(m, b, next_off)
         return next_off + len
     }
     if m.type_id == 5 { // TYPE_BIN
-        let len = string.length(m.s_val)
+        let len = m.s_len
         let next_off = offset
         if len <= 255 {
             bytes.set(b, offset, 0xc4)
@@ -406,9 +478,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
             bytes.set_be32(b, offset + 1, len)
             next_off = offset + 5
         }
-        if len > 0 {
-            bytes.copy_from_string(b, next_off, m.s_val, len)
-        }
+        pack_payload(m, b, next_off)
         return next_off + len
     }
     if m.type_id == 6 { // TYPE_ARRAY
@@ -460,7 +530,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
         return next_off
     }
     if m.type_id == 8 { // TYPE_EXT
-        let len = string.length(m.s_val)
+        let len = m.s_len
         let next_off = offset
         if len == 1 {
             bytes.set(b, offset, 0xd4)
@@ -498,9 +568,7 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
             bytes.set(b, offset + 5, m.ext_type & 255)
             next_off = offset + 6
         }
-        if len > 0 {
-            bytes.copy_from_string(b, next_off, m.s_val, len)
-        }
+        pack_payload(m, b, next_off)
         return next_off + len
     }
     return offset
@@ -508,7 +576,32 @@ fn pack_val(val: ptr, b: ptr, offset: int) -> int {
 
 // ---- Unpacking implementation helper ----
 
+// Read `len` payload bytes from the cursor and adopt the resulting slice
+// buffer as `v`'s owned payload (read_slice returns a freshly-owned
+// AetherBytes, so no copy is needed). Records an empty payload for len==0.
+// Returns an error string ("" on success); on failure the value's payload
+// is left empty and the caller frees the value.
+fn read_payload(v: *MsgValue, c: ptr, len: int, what: string) -> string {
+    if len <= 0 {
+        v.s_bytes = null
+        v.s_len = 0
+        return ""
+    }
+    let slice = cursor.read_slice(c, len)
+    if slice == null {
+        return what
+    }
+    v.s_bytes = slice
+    v.s_len = len
+    return ""
+}
+
 fn unpack_inner(c: ptr) -> (ptr, string) {
+    // Single tracked empty-error binding reused for every success return.
+    // A bare `""` literal in the error slot mints a fresh 1-byte heap
+    // string per call that the caller discards — leaking one byte per
+    // decoded value (see std.yaml / std.asn1 for the same pattern).
+    let ok = ""
     let m = cursor.read_u8(c)
     if m < 0 {
         return null, "EOF"
@@ -519,7 +612,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = m
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 2. FixMap
@@ -536,17 +629,19 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
+            string.release(err_k)   // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)
                 free(v)
                 return null, err_v
             }
+            string.release(err_v)
             list.list_add_raw(v.map_keys, key)
             list.list_add_raw(v.map_values, val)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 3. FixArray
@@ -562,10 +657,11 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
+            string.release(err)   // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 4. FixStr
@@ -573,24 +669,19 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = m & 0x1f
         let v = heap.new(MsgValue)
         v.type_id = TYPE_STR
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading FixStr data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading FixStr data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 5. Nil
     if m == 0xc0 {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_NIL
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // Reserved
@@ -603,7 +694,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BOOL
         v.b_val = false
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 7. True
@@ -611,7 +702,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BOOL
         v.b_val = true
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 8. Bin 8
@@ -620,17 +711,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_u8(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BIN
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading bin 8 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading bin 8 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 9. Bin 16
@@ -639,17 +725,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_be_u16(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BIN
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading bin 16 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading bin 16 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 10. Bin 32
@@ -658,17 +739,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_be_u32(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_BIN
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading bin 32 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading bin 32 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 11. Ext 8
@@ -682,17 +758,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading ext 8 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading ext 8 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 12. Ext 16
@@ -705,17 +776,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading ext 16 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading ext 16 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 13. Ext 32
@@ -728,17 +794,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading ext 32 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading ext 32 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 14. Float 32
@@ -749,7 +810,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_FLOAT
         v.f_val = f
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 15. Float 64
@@ -760,7 +821,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_FLOAT
         v.f_val = f
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 16. U8
@@ -770,7 +831,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 17. U16
@@ -780,7 +841,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 18. U32
@@ -794,7 +855,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = val
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 19. U64
@@ -804,7 +865,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 20. I8
@@ -815,7 +876,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 21. I16
@@ -826,7 +887,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 22. I32
@@ -838,7 +899,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = val
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 23. I64
@@ -848,7 +909,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 24. FixExt 1
@@ -857,13 +918,15 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
-        let slice = cursor.read_slice(c, 1)
-        if slice == null { return null, "EOF reading fixext 1 data" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        v.s_val = bytes.finish(slice, 1)
-        return v as ptr, ""
+        let perr = read_payload(v as *MsgValue, c, 1, "EOF reading fixext 1 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
+        }
+        return v as ptr, ok
     }
 
     // 25. FixExt 2
@@ -872,13 +935,15 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
-        let slice = cursor.read_slice(c, 2)
-        if slice == null { return null, "EOF reading fixext 2 data" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        v.s_val = bytes.finish(slice, 2)
-        return v as ptr, ""
+        let perr = read_payload(v as *MsgValue, c, 2, "EOF reading fixext 2 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
+        }
+        return v as ptr, ok
     }
 
     // 26. FixExt 4
@@ -887,13 +952,15 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
-        let slice = cursor.read_slice(c, 4)
-        if slice == null { return null, "EOF reading fixext 4 data" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        v.s_val = bytes.finish(slice, 4)
-        return v as ptr, ""
+        let perr = read_payload(v as *MsgValue, c, 4, "EOF reading fixext 4 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
+        }
+        return v as ptr, ok
     }
 
     // 27. FixExt 8
@@ -902,13 +969,15 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
-        let slice = cursor.read_slice(c, 8)
-        if slice == null { return null, "EOF reading fixext 8 data" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        v.s_val = bytes.finish(slice, 8)
-        return v as ptr, ""
+        let perr = read_payload(v as *MsgValue, c, 8, "EOF reading fixext 8 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
+        }
+        return v as ptr, ok
     }
 
     // 28. FixExt 16
@@ -917,13 +986,15 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let et = cursor.read_u8(c)
         let ext_type = et
         if ext_type >= 128 { ext_type = ext_type - 256 }
-        let slice = cursor.read_slice(c, 16)
-        if slice == null { return null, "EOF reading fixext 16 data" }
         let v = heap.new(MsgValue)
         v.type_id = TYPE_EXT
         v.ext_type = ext_type
-        v.s_val = bytes.finish(slice, 16)
-        return v as ptr, ""
+        let perr = read_payload(v as *MsgValue, c, 16, "EOF reading fixext 16 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
+        }
+        return v as ptr, ok
     }
 
     // 29. Str 8
@@ -932,17 +1003,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_u8(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_STR
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading str 8 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading str 8 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 30. Str 16
@@ -951,17 +1017,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_be_u16(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_STR
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading str 16 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading str 16 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 31. Str 32
@@ -970,17 +1031,12 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let len = cursor.read_be_u32(c)
         let v = heap.new(MsgValue)
         v.type_id = TYPE_STR
-        if len > 0 {
-            let slice = cursor.read_slice(c, len)
-            if slice == null {
-                heap.free(v)
-                return null, "EOF reading str 32 data"
-            }
-            v.s_val = bytes.finish(slice, len)
-        } else {
-            v.s_val = ""
+        let perr = read_payload(v as *MsgValue, c, len, "EOF reading str 32 data")
+        if perr != "" {
+            heap.free(v)
+            return null, perr
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 32. Array 16
@@ -997,10 +1053,11 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
+            string.release(err)   // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 33. Array 32
@@ -1017,10 +1074,11 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
+            string.release(err)   // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 34. Map 16
@@ -1038,17 +1096,19 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
+            string.release(err_k)   // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)
                 free(v)
                 return null, err_v
             }
+            string.release(err_v)
             list.list_add_raw(v.map_keys, key)
             list.list_add_raw(v.map_values, val)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 35. Map 32
@@ -1066,17 +1126,19 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
+            string.release(err_k)   // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)
                 free(v)
                 return null, err_v
             }
+            string.release(err_v)
             list.list_add_raw(v.map_keys, key)
             list.list_add_raw(v.map_values, val)
             i = i + 1
         }
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     // 36. Negative FixInt
@@ -1085,7 +1147,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
         let v = heap.new(MsgValue)
         v.type_id = TYPE_INT
         v.i_val = i
-        return v as ptr, ""
+        return v as ptr, ok
     }
 
     return null, "unrecognized marker"
