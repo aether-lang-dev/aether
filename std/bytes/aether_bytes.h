@@ -154,6 +154,14 @@ int aether_bytes_copy_within(AetherBytes* b, int dst, int src, int length);
  * greater. */
 void* aether_bytes_finish(AetherBytes* b, int length);
 
+/* Non-consuming twin of aether_bytes_finish: mint a fresh refcounted
+ * AetherString from the first `length` bytes WITHOUT destroying the
+ * buffer. The caller keeps owning the AetherBytes and may call this
+ * repeatedly. The string copies the data, so it is independent of `b`.
+ * Returns NULL if `b` is NULL or `length` is negative; clamps `length`
+ * to the buffer's logical length. */
+void* aether_bytes_to_string(AetherBytes* b, int length);
+
 /* Discard the buffer without converting to a string. Idempotent on
  * NULL. Use this when the caller decides mid-build that the buffer
  * isn't needed (error path, etc.). */

@@ -29,11 +29,11 @@ exports (
     aether_bytes_set_be64, aether_bytes_get_be64,
     aether_bytes_copy_from_string, aether_bytes_copy_from_bytes,
     aether_bytes_copy_within,
-    aether_bytes_finish, aether_bytes_free,
+    aether_bytes_finish, aether_bytes_to_string, aether_bytes_free,
     new, set, get, length,
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
-    copy_from_string, copy_from_bytes, copy_within, finish, free
+    copy_from_string, copy_from_bytes, copy_within, finish, to_string, free
 )
 
 // ---- Raw externs ----
@@ -69,6 +69,10 @@ extern aether_bytes_copy_within(b: ptr, dst: int, src: int, length: int) -> int
 // slot and any function returning a `bytes.finish` value is itself
 // classified heap-returning. Mirrors `aether_strbuilder_finish`.
 extern aether_bytes_finish(b: ptr, length: int) -> string @heap
+// Non-consuming twin of finish: mint a fresh heap AetherString from the
+// first `length` bytes without destroying the buffer, so the buffer's
+// owner can keep it and mint again. See to_string wrapper below.
+extern aether_bytes_to_string(b: ptr, length: int) -> string @heap
 extern aether_bytes_free(b: ptr)
 
 // ---- Aether-side wrappers ----
@@ -221,6 +225,15 @@ copy_within(b: ptr, dst: int, src: int, length: int) -> int {
 // take the whole buffer).
 finish(b: ptr, length: int) -> string {
     return aether_bytes_finish(b, length)
+}
+
+// Non-consuming counterpart to finish: return a fresh refcounted string
+// copy of the buffer's first `length` bytes WITHOUT destroying the
+// buffer. Use when you want to keep owning the AetherBytes (e.g. a struct
+// field that holds the payload) and read it out as a string on demand.
+// The returned string is independent of `b`; embedded NULs survive.
+to_string(b: ptr, length: int) -> string {
+    return aether_bytes_to_string(b, length)
 }
 
 // Discard the buffer without converting to a string. Idempotent on

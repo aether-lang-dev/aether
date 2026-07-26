@@ -357,6 +357,19 @@ void* aether_bytes_finish(AetherBytes* b, int length) {
     return wrapped;
 }
 
+void* aether_bytes_to_string(AetherBytes* b, int length) {
+    /* Non-consuming twin of aether_bytes_finish: mint a fresh refcounted
+     * AetherString from the first `length` bytes WITHOUT destroying the
+     * buffer, so the caller can keep owning the AetherBytes and call this
+     * repeatedly. string_new_with_length copies, so the returned string is
+     * independent of `b`. Returns NULL if `b` is NULL or `length` is
+     * negative; clamps `length` to the buffer's logical length. */
+    if (!b) return NULL;
+    size_t use_length = (length < 0) ? 0 : (size_t)length;
+    if (use_length > b->length) use_length = b->length;
+    return (void*)string_new_with_length(b->data, use_length);
+}
+
 void aether_bytes_free(AetherBytes* b) {
     if (!b) return;
     /* Cap-aware (#462): credit back the data buffer (b->capacity bytes,

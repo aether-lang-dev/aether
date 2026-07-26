@@ -1,0 +1,72 @@
+// Regression test: bytes.to_string is the non-consuming twin of
+// bytes.finish — it mints a fresh refcounted AetherString from the
+// buffer's first N bytes WITHOUT destroying the buffer, so the owner
+// can keep the AetherBytes and mint again. This is the primitive that
+// lets std.msgpack own a str/bin payload as an AetherBytes field and
+// hand it out as a string on demand without leaking (a string stored in
+// a heap.new struct field cannot be freed cleanly; a bytes buffer can).
+
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+check(cond: bool, msg: string) -> int {
+    if cond {
+        println("  PASS: ${msg}")
+        return 0
+    }
+    println("  FAIL: ${msg}")
+    return 1
+}
+
+main() {
+    println("=== std.bytes to_string ===")
+    fails = 0
+
+    // Build a buffer, read it out as a string twice — the buffer must
+    // survive the first read so the second sees the same bytes.
+    b = bytes.new(8)
+    bytes.copy_from_string(b, 0, "hello", 5)
+
+    s1 = bytes.to_string(b, 5)
+    fails = fails + check(s1 == "hello", "first to_string reads 'hello'")
+
+    s2 = bytes.to_string(b, 5)
+    fails = fails + check(s2 == "hello", "second to_string still reads 'hello' (buffer survived)")
+
+    // Partial length.
+    s3 = bytes.to_string(b, 3)
+    fails = fails + check(s3 == "hel", "partial length reads prefix")
+
+    // The two independent strings can be released without touching each
+    // other or the buffer.
+    string.release(s1)
+    string.release(s2)
+    string.release(s3)
+
+    // Embedded NUL survives (explicit length, not strlen).
+    nb = bytes.new(6)
+    bytes.copy_from_string(nb, 0, "a\x00b", 3)
+    ns = bytes.to_string(nb, 3)
+    fails = fails + check(string.length(ns) == 3, "embedded-NUL length preserved")
+    string.release(ns)
+
+    // Zero length yields empty string, buffer untouched.
+    zs = bytes.to_string(b, 0)
+    fails = fails + check(zs == "", "zero length yields empty string")
+    string.release(zs)
+
+    // The buffer is still ours to finish or free after all the reads.
+    final = bytes.finish(b, 5)
+    fails = fails + check(final == "hello", "buffer still finishable after to_string reads")
+    string.release(final)
+
+    bytes.free(nb)
+
+    if fails != 0 {
+        println("test_bytes_to_string: ${fails} failure(s)")
+        exit(1)
+    }
+    println("=== all test_bytes_to_string cases passed ===")
+}
