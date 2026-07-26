@@ -5866,6 +5866,24 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 // `expr as *Name` value lowers to a width-correct
                 // mem_get_*/set_* at that offset (no C struct is declared).
                 if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "link") == 0) {
+                    /* #1259: @link("-lfoo -lbar") — this module's native
+                     * link dependencies. Carried as an AST_LINK_DIRECTIVE
+                     * whose value is the verbatim flag string; codegen
+                     * unions them across the import closure. */
+                    advance_token(parser);  // consume 'link'
+                    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+                    Token* flags = peek_token(parser);
+                    if (!flags || flags->type != TOKEN_STRING_LITERAL || !flags->value) {
+                        parser_error(parser, "@link expects a string of linker flags, e.g. @link(\"-lsqlite3\")");
+                        return NULL;
+                    }
+                    advance_token(parser);
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+                    return create_ast_node(AST_LINK_DIRECTIVE, flags->value,
+                                           at_tok->line, at_tok->column);
+                }
+                                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
                     strcmp(attr->value, "c_struct") == 0) {
                     advance_token(parser);  // consume 'c_struct'
                     Token* name_tok = expect_token(parser, TOKEN_IDENTIFIER);

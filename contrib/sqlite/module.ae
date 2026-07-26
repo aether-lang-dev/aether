@@ -52,6 +52,12 @@
 //     symbol table is empty (unlikely at runtime — a link failure
 //     stops the build), which covers the CI matrix.
 
+// Native link deps (#1259): the whole-program `// aether-link:` header
+// unions this into the emitted C when contrib.sqlite is in the import
+// closure. -laether_sqlite is the veneer archive `make contrib` builds;
+// order matters for single-pass linkers (veneer before -lsqlite3).
+@link("-laether_sqlite -lsqlite3")
+
 exports (
     SQLITE_OK, SQLITE_ROW, SQLITE_DONE,
     sqlite_open_raw, sqlite_close_raw, sqlite_exec_raw, sqlite_query_raw,

@@ -1928,6 +1928,31 @@ int is_c_keyword(const char* name) {
     return 0;
 }
 
+/* #1256 follow-up: names the Windows SDK claims at file scope. With module
+ * consts lowered to real C identifiers (static const) instead of #defines,
+ * a const named DOUBLE collides with windef.h's `typedef double DOUBLE` in
+ * any generated TU that includes <windows.h>: "redeclared as a different
+ * kind of symbol". TRUE/FALSE are macros there, which is worse: the
+ * preprocessor rewrites the declaration itself. Mangled on every platform
+ * so programs behave identically on POSIX and Windows. Curated to the
+ * windef.h/winnt.h names plausible as user constants. */
+static int is_winapi_reserved_name(const char* name) {
+    if (!name) return 0;
+    static const char* win[] = {
+        "BOOL", "BOOLEAN", "BYTE", "CHAR", "DOUBLE", "DWORD", "DWORD64",
+        "FLOAT", "HANDLE", "INT", "INT8", "INT16", "INT32", "INT64",
+        "LONG", "LONG64", "LPSTR", "LPCSTR", "LPVOID", "PVOID", "SHORT",
+        "SIZE_T", "SSIZE_T", "UCHAR", "UINT", "UINT8", "UINT16", "UINT32",
+        "UINT64", "ULONG", "ULONG64", "USHORT", "VOID", "WCHAR", "WORD",
+        "TRUE", "FALSE", "NULL", "IGNORE", "INFINITE", "ERROR", "OPTIONAL",
+        NULL
+    };
+    for (int i = 0; win[i]; i++) {
+        if (strcmp(name, win[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 // #976: mangle a value/variable identifier that is a C keyword to a valid C
 // identifier. Non-keywords pass through unchanged, so normal code is emitted
 // verbatim and only the (previously broken) keyword names are rewritten. The
@@ -2750,6 +2775,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     int has_exports_list = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
+        if (child && child->type == AST_LINK_DIRECTIVE) {
+            continue;  /* consumed by emit_link_requirements */
+        }
         if (child && child->type == AST_EXPORTS_LIST) {
             has_exports_list = 1;
             export_names = (const char**)malloc(
@@ -3805,14 +3833,15 @@ static void mangle_keyword_value_idents(ASTNode* node) {
         case AST_FIELD_INIT:
         case AST_PATTERN_FIELD:
         case AST_MEMBER_ACCESS:
-            if (node->value && is_c_keyword(node->value)) {
-                const char* safe = safe_value_name(node->value);
-                if (safe && safe != node->value) {
-                    char* dup = strdup(safe);
-                    if (dup) {
-                        free(node->value);
-                        node->value = dup;
-                    }
+        case AST_CONST_DECLARATION:
+            if (node->value && (is_c_keyword(node->value) ||
+                                is_winapi_reserved_name(node->value))) {
+                char safe[280];
+                snprintf(safe, sizeof(safe), "ae_%s", node->value);
+                char* dup = strdup(safe);
+                if (dup) {
+                    free(node->value);
+                    node->value = dup;
                 }
             }
             break;
@@ -3864,7 +3893,9 @@ static const AetherLinkReq g_link_reqs[] = {
     { "std.zlib",             "-lz" },
     { "std.http.middleware",  "-lz" },
     { "std.audio",            "-lpthread -ldl -lm" },
-    { "contrib.sqlite",       "-laether_sqlite -lsqlite3" },
+    /* contrib.sqlite's row moved into contrib/sqlite/module.ae as
+     * `@link(...)` (#1259): the module owns its native deps, the compiler
+     * owns only the union-over-closure mechanism. */
 };
 static const int g_link_req_count = (int)(sizeof(g_link_reqs) / sizeof(g_link_reqs[0]));
 
@@ -3891,29 +3922,56 @@ static int program_imports_module(ASTNode* program, const char* mod) {
 /* Emit `// aether-link: <tokens>` as the first line of the TU when the import
  * closure introduces any native-library dependency. De-dupes tokens across
  * modules (e.g. std.http and std.cryptography both want -lssl -lcrypto). */
+/* Split `flags` on spaces and append each token to toks[] unless already
+ * present. Tokens are heap copies; the caller frees them after printing. */
+static void add_link_tokens(const char* flags, const char** toks, int* ntok, int cap) {
+    const char* s = flags;
+    while (*s) {
+        while (*s == ' ') s++;
+        if (!*s) break;
+        const char* start = s;
+        while (*s && *s != ' ') s++;
+        size_t len = (size_t)(s - start);
+        int dup = 0;
+        for (int k = 0; k < *ntok; k++) {
+            if (strlen(toks[k]) == len && strncmp(toks[k], start, len) == 0) { dup = 1; break; }
+        }
+        if (!dup && *ntok < cap) {
+            char* copy = (char*)malloc(len + 1);
+            if (copy) { memcpy(copy, start, len); copy[len] = '\0'; toks[(*ntok)++] = copy; }
+        }
+    }
+}
+
 static void emit_link_requirements(CodeGenerator* gen, ASTNode* program) {
     /* Accumulate unique tokens in first-seen (table) order. */
     const char* toks[64];
     int ntok = 0;
     for (int r = 0; r < g_link_req_count; r++) {
         if (!program_imports_module(program, g_link_reqs[r].module)) continue;
-        /* Split g_link_reqs[r].libs on spaces, add each token once. */
-        const char* s = g_link_reqs[r].libs;
-        while (*s) {
-            while (*s == ' ') s++;
-            if (!*s) break;
-            const char* start = s;
-            while (*s && *s != ' ') s++;
-            size_t len = (size_t)(s - start);
-            /* dedup against what we already have */
-            int dup = 0;
-            for (int k = 0; k < ntok; k++) {
-                if (strlen(toks[k]) == len && strncmp(toks[k], start, len) == 0) { dup = 1; break; }
-            }
-            if (!dup && ntok < (int)(sizeof(toks) / sizeof(toks[0]))) {
-                /* store a heap copy (start isn't NUL-terminated at the token) */
-                char* copy = (char*)malloc(len + 1);
-                if (copy) { memcpy(copy, start, len); copy[len] = '\0'; toks[ntok++] = copy; }
+        add_link_tokens(g_link_reqs[r].libs, toks, &ntok,
+                        (int)(sizeof(toks) / sizeof(toks[0])));
+    }
+
+    /* #1259: module-declared deps. A module's own `@link("...")` directives
+     * travel in its AST; union them across the resolved import closure (and
+     * the entry program itself), so no module needs a row in the static
+     * table above. Same dedup, same first-seen ordering. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_LINK_DIRECTIVE && c->value)
+            add_link_tokens(c->value, toks, &ntok,
+                            (int)(sizeof(toks) / sizeof(toks[0])));
+    }
+    if (global_module_registry) {
+        for (int m = 0; m < global_module_registry->module_count; m++) {
+            AetherModule* mod = global_module_registry->modules[m];
+            if (!mod || !mod->ast) continue;
+            for (int i = 0; i < mod->ast->child_count; i++) {
+                ASTNode* c = mod->ast->children[i];
+                if (c && c->type == AST_LINK_DIRECTIVE && c->value)
+                    add_link_tokens(c->value, toks, &ntok,
+                                    (int)(sizeof(toks) / sizeof(toks[0])));
             }
         }
     }
@@ -4802,9 +4860,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 generate_expression(gen, cd->children[0]);
                 fprintf(gen->output, ";\n");
             } else {
-                fprintf(gen->output, "#define %s (", cd->value);
+                /* Scoped C, not a #define: a macro has no scope, so a
+                 * function parameter or local spelled like the const was
+                 * textually rewritten into the literal (`int SCALE` became
+                 * `int (99)`), breaking the documented shadowing guarantee
+                 * (#1256, docs/module-system-design.md). A file-scope
+                 * static const participates in C scoping, so inner
+                 * declarations shadow it naturally. */
+                const char* ctype = get_c_type(cd->node_type);
+                /* get_c_type already says `const char*` for strings; avoid
+                 * emitting a duplicate `const const`. */
+                int already_const = strncmp(ctype, "const ", 6) == 0;
+                fprintf(gen->output, "static %s%s %s = (",
+                        already_const ? "" : "const ", ctype, cd->value);
                 generate_expression(gen, cd->children[0]);
-                fprintf(gen->output, ")\n");
+                fprintf(gen->output, ");\n");
             }
         }
     }

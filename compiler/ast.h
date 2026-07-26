@@ -284,7 +284,14 @@ typedef enum {
     // `err == fs.NotFound` compares by content (string `==` is already a
     // strcmp). The qualified name is filled in at module-merge time when the
     // namespace prefix is known (bare name in the main module).
-    AST_FAULT_DEFINITION
+    AST_FAULT_DEFINITION,
+    // #1259: top-level `@link("-lfoo -lbar")` in a module declares the
+    // native libraries that module needs. Codegen unions these across the
+    // resolved import closure into the `// aether-link:` header comment,
+    // replacing hardcoded per-module rows in g_link_reqs. Appended at the
+    // enum END: inserting mid-enum invalidates every compiled .o (see
+    // the enum-insert note in the repo docs).
+    AST_LINK_DIRECTIVE
 } ASTNodeType;
 
 typedef enum {

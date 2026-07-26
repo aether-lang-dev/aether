@@ -452,6 +452,23 @@ After module orchestration, the compiler clones each module's function and const
 
 **Tree-shake of unused merges.** Immediately after merging and before typechecking, `module_prune_unreachable` runs a mark-and-sweep over the program AST. It seeds reachability from `main`, every actor handler, every `export` statement, and every non-imported user function/builder, then closes over `AST_FUNCTION_CALL`, `AST_IDENTIFIER`, and `AST_MEMBER_ACCESS` references, including suffix matches that handle glob-import (`import mymath (*)`) and selective-import (`import mymath [cube]`) shorthands. Imported function and builder definitions outside the closure are dropped from the AST so the typechecker doesn't walk them and the C compiler doesn't emit them. Constants stay (cheap, and pruning them would need a separate pass keyed on identifier references). The whole pass is invisible to user code; programs that *do* call every imported function build identically before and after.
 
+**Native link dependencies (`@link`).** A module that wraps a native
+library declares its own link flags at the top of `module.ae`:
+
+```aether
+@link("-laether_sqlite -lsqlite3")
+```
+
+When the module is in a program's resolved import closure, codegen unions
+every declared flag (first-seen order, deduplicated) into the
+`// aether-link:` comment on the first line of the generated C, which
+downstream C builds read to link without undefined-reference archaeology.
+Declaring is enough; there is no central registry to edit. Token order
+within one `@link` is preserved, which matters for single-pass linkers
+(veneer archive before the library it references). For an ordinary
+`ae build` the consumer still supplies real link flags via `aether.toml`
+(`link_flags = ...`); `@link` feeds only the whole-program comment.
+
 **What's supported:**
 - Functions (with type inference from call sites)
 - Constants (`const NAME = value`), including constants referencing other constants
