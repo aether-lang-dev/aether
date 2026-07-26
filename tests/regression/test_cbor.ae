@@ -1,0 +1,184 @@
+// Regression test for std.cbor
+// Asserts correct encoding and decoding of integers, floats, strings, arrays, maps, and tags.
+
+import std.cbor
+import std.encoding
+import std.string
+
+extern exit(code: int)
+
+fn run_test(hex_data: string, expected_diag: string) -> int {
+    binary_data, err = encoding.hex_decode(hex_data)
+    if err != "" {
+        println("  FAIL: hex decode failed for ${hex_data}: ${err}")
+        return 1
+    }
+
+    cv_ptr, err2 = cbor.parse(binary_data)
+    if err2 != "" {
+        println("  FAIL: cbor parse failed for ${hex_data}: ${err2}")
+        return 1
+    }
+
+    diag, err3 = cbor.diagnose(cv_ptr)
+    if err3 != "" {
+        println("  FAIL: cbor diagnose failed for ${hex_data}: ${err3}")
+        cbor.free(cv_ptr)
+        return 1
+    }
+
+    if diag != expected_diag {
+        println("  FAIL: diag mismatch for ${hex_data}")
+        println("    got:      '${diag}'")
+        println("    expected: '${expected_diag}'")
+        cbor.free(cv_ptr)
+        return 1
+    }
+
+    // Roundtrip encode
+    encoded, err4 = cbor.encode(cv_ptr)
+    if err4 != "" {
+        println("  FAIL: cbor encode failed for ${hex_data}: ${err4}")
+        cbor.free(cv_ptr)
+        return 1
+    }
+
+    // Convert encoded back to hex to compare
+    encoded_len = string.length(encoded)
+    encoded_hex = encoding.hex_encode(encoded, encoded_len)
+
+    // We only assert exact hex match for non-floats and non-indefinite values
+    is_float = string.starts_with(hex_data, "f9") == 1 || string.starts_with(hex_data, "fa") == 1 || string.starts_with(hex_data, "fb") == 1
+    is_indefinite = string.starts_with(hex_data, "9f") == 1 || string.starts_with(hex_data, "bf") == 1 || string.starts_with(hex_data, "5f") == 1 || string.starts_with(hex_data, "7f") == 1
+    if !is_float && !is_indefinite {
+        if encoded_hex != string.to_lower(hex_data) {
+            println("  FAIL: encode hex mismatch for ${hex_data}")
+            println("    got:      '${encoded_hex}'")
+            println("    expected: '${string.to_lower(hex_data)}'")
+            cbor.free(cv_ptr)
+            return 1
+        }
+    }
+
+    cbor.free(cv_ptr)
+    return 0
+}
+
+fn test_builders() -> int {
+    root = cbor.obj()
+    _ = cbor.set(root, "name", cbor.str("aether"))
+    _ = cbor.set(root, "ok", cbor.boolean(1))
+    _ = cbor.set(root, "nil", cbor.null_value())
+    _ = cbor.set(root, "undef", cbor.undefined_value())
+    _ = cbor.set(root, "n", cbor.from_int(12345))
+    _ = cbor.set(root, "f", cbor.num(123.45))
+
+    tags = cbor.arr()
+    _ = cbor.push(tags, cbor.str("lang"))
+    _ = cbor.push(tags, cbor.str("actor"))
+    _ = cbor.set(root, "tags", tags)
+
+    diag, _ = cbor.diagnose(root)
+    expected = "{\"name\": \"aether\", \"ok\": true, \"nil\": null, \"undef\": undefined, \"n\": 12345, \"f\": 123.45, \"tags\": [\"lang\", \"actor\"]}"
+    if diag != expected {
+        println("  FAIL builder: diag mismatch")
+        println("    got:      '${diag}'")
+        println("    expected: '${expected}'")
+        cbor.free(root)
+        return 1
+    }
+
+    encoded, _ = cbor.encode(root)
+    root2, err = cbor.parse(encoded)
+    if err != "" {
+        println("  FAIL builder: parse back failed: ${err}")
+        cbor.free(root)
+        return 1
+    }
+
+    diag2, _ = cbor.diagnose(root2)
+    if diag2 != expected {
+        println("  FAIL builder: roundtrip diag mismatch")
+        println("    got:      '${diag2}'")
+        println("    expected: '${expected}'")
+        cbor.free(root)
+        cbor.free(root2)
+        return 1
+    }
+
+    cbor.free(root)
+    cbor.free(root2)
+    return 0
+}
+
+main() {
+    println("=== test_cbor ===")
+    fails = 0
+
+    // ---- Integers (Major 0 & 1) ----
+    fails = fails + run_test("00", "0")
+    fails = fails + run_test("01", "1")
+    fails = fails + run_test("0a", "10")
+    fails = fails + run_test("17", "23")
+    fails = fails + run_test("1818", "24")
+    fails = fails + run_test("1819", "25")
+    fails = fails + run_test("1864", "100")
+    fails = fails + run_test("1903e8", "1000")
+    fails = fails + run_test("1a000f4240", "1000000")
+    fails = fails + run_test("1b000000e8d4a51000", "1000000000000")
+    fails = fails + run_test("20", "-1")
+    fails = fails + run_test("29", "-10")
+    fails = fails + run_test("3863", "-100")
+    fails = fails + run_test("3903e7", "-1000")
+
+    // ---- Simple Values ----
+    fails = fails + run_test("f4", "false")
+    fails = fails + run_test("f5", "true")
+    fails = fails + run_test("f6", "null")
+    fails = fails + run_test("f7", "undefined")
+
+    // ---- Floats ----
+    fails = fails + run_test("f93c00", "1.0")
+    fails = fails + run_test("f93e00", "1.5")
+    fails = fails + run_test("f9c400", "-4.0")
+    fails = fails + run_test("fa47c35000", "100000.0")
+    fails = fails + run_test("fb3ff199999999999a", "1.1")
+    fails = fails + run_test("f97c00", "Infinity")
+    fails = fails + run_test("f9fc00", "-Infinity")
+    fails = fails + run_test("f97e00", "NaN")
+
+    // ---- Strings & Bytes ----
+    fails = fails + run_test("40", "h''")
+    fails = fails + run_test("4401020304", "h'01020304'")
+    fails = fails + run_test("60", "\"\"")
+    fails = fails + run_test("6161", "\"a\"")
+    fails = fails + run_test("6449455446", "\"IETF\"")
+    fails = fails + run_test("62225c", "\"\\\"\\\\\"")
+
+    // ---- Arrays & Maps (Definite) ----
+    fails = fails + run_test("80", "[]")
+    fails = fails + run_test("83010203", "[1, 2, 3]")
+    fails = fails + run_test("a0", "{}")
+    fails = fails + run_test("a26161016162820203", "{\"a\": 1, \"b\": [2, 3]}")
+
+    // ---- Indefinite Collections ----
+    fails = fails + run_test("9f0102ff", "[1, 2]")
+    fails = fails + run_test("bf616101ff", "{\"a\": 1}")
+    fails = fails + run_test("5f41014102ff", "h'0102'")
+    fails = fails + run_test("7f61616162ff", "\"ab\"")
+
+    // ---- Tags ----
+    fails = fails + run_test("c074323031332d30332d32315432303a30343a30355a", "0(\"2013-03-21T20:04:05Z\")")
+    fails = fails + run_test("c11a514b67b0", "1(1363896240)")
+    fails = fails + run_test("c249010000000000000000", "2(h'010000000000000000')")
+
+    // ---- Builders ----
+    fails = fails + test_builders()
+
+    if fails != 0 {
+        println("CBOR: ${fails} failure(s)")
+        exit(1)
+    }
+    println("PASS: test_cbor")
+    println("=== test_cbor passed ===")
+}

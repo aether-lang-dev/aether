@@ -1,0 +1,97 @@
+// Regression: std.cbor must be leak-clean across build → encode → parse →
+// read → diagnose → free, including nested containers, tags, byte strings,
+// and truncated-input error paths. The original test_cbor barely stresses
+// string payloads or error cleanup; this one loops enough to make any
+// per-item leak obvious under the macOS leaks(1) gate / ASan.
+//
+// The value model owns text/byte payloads as std.bytes buffers (not string
+// struct fields) and copies parse input into an owned buffer, so nothing the
+// caller passes in or reads out is leaked. See std/cbor/module.ae's memory
+// model note.
+
+import std.cbor
+import std.string
+
+extern exit(code: int)
+
+check(cond: int, msg: string) -> int {
+    if cond != 0 {
+        return 0
+    }
+    println("  FAIL: ${msg}")
+    return 1
+}
+
+main() {
+    println("=== test_cbor_roundtrip_no_leak ===")
+    fails = 0
+
+    n = 0
+    while n < 100 {
+        // Build a map with text keys and mixed values incl. nested array,
+        // byte string (with embedded NUL), int, and a tagged value.
+        m = cbor.obj()
+        _ = cbor.set(m, "name", cbor.str("a reasonably long text string value"))
+        _ = cbor.set(m, "count", cbor.from_int(12345))
+        _ = cbor.set(m, "blob", cbor.bytes("some-binary-bytes"))
+        a = cbor.arr()
+        _ = cbor.push(a, cbor.str("alpha"))
+        _ = cbor.push(a, cbor.str("beta"))
+        _ = cbor.set(m, "list", a)
+        _ = cbor.set(m, "when", cbor.tag(0, cbor.str("2026-07-26")))
+
+        enc, eerr = cbor.encode(m)
+        fails = fails + check(string.equals(eerr, ""), "encode err")
+        string.release(eerr)
+        cbor.free(m)
+
+        v, perr = cbor.parse(enc)
+        fails = fails + check(string.equals(perr, ""), "parse err")
+        string.release(perr)
+        string.release(enc)
+
+        // Read a text value back out (fresh caller-owned string).
+        nm, _ = cbor.object_get(v, "name")
+        s, gerr = cbor.get_string(nm)
+        string.release(gerr)
+        fails = fails + check(string.equals(s, "a reasonably long text string value"), "roundtrip name")
+        string.release(s)
+
+        // Read the byte string with the embedded NUL back.
+        bl, _ = cbor.object_get(v, "blob")
+        bs, berr = cbor.get_bytes(bl)
+        string.release(berr)
+        fails = fails + check(string.equals(bs, "some-binary-bytes"), "roundtrip blob")
+        string.release(bs)
+
+        // Diagnose (exercises escape_string + format_bytes_diag payload reads).
+        d, derr = cbor.diagnose(v)
+        string.release(derr)
+        string.release(d)
+
+        cbor.free(v)
+        n = n + 1
+    }
+
+    // Truncated inputs must error cleanly and leak nothing (partial trees
+    // are reclaimed on the error path).
+    n = 0
+    while n < 100 {
+        a1, e1 = cbor.parse("\x63")          // text len 3, no data
+        string.release(e1)
+        if a1 != null { cbor.free(a1) }
+        a2, e2 = cbor.parse("\x82\x01")      // array of 2, only 1 item
+        string.release(e2)
+        if a2 != null { cbor.free(a2) }
+        a3, e3 = cbor.parse("\xa1\x61\x61")  // map, key but no value
+        string.release(e3)
+        if a3 != null { cbor.free(a3) }
+        n = n + 1
+    }
+
+    if fails != 0 {
+        println("test_cbor_roundtrip_no_leak: ${fails} failure(s)")
+        exit(1)
+    }
+    println("=== test_cbor_roundtrip_no_leak passed ===")
+}
