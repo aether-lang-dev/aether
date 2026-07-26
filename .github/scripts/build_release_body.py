@@ -46,17 +46,26 @@ def extract_changelog_section(changelog_path: str, version: str) -> str:
 
 def build_download_table(version: str) -> str:
     targets = [
-        ("Linux",   "x86_64",  f"aether-{version}-linux-x86_64.tar.gz"),
-        ("macOS",   "x86_64",  f"aether-{version}-macos-x86_64.tar.gz"),
-        ("macOS",   "arm64",   f"aether-{version}-macos-arm64.tar.gz"),
-        ("Windows", "x86_64",  f"aether-{version}-windows-x86_64.zip"),
+        ("Linux",   "x86_64",  f"aether-{version}-linux-x86_64.tar.gz", None),
+        ("macOS",   "x86_64",  f"aether-{version}-macos-x86_64.tar.gz", None),
+        ("macOS",   "arm64",   f"aether-{version}-macos-arm64.tar.gz", None),
+        ("Windows", "x86_64",  f"aether-{version}-windows-x86_64.zip", None),
+        # FreeBSD is CROSS-built (no native runner) and best-effort, so it may
+        # be absent from a given release. List it only when the artifact is
+        # actually present in the publish working directory, and flag that it
+        # was not run through the test suite on FreeBSD.
+        ("FreeBSD", "x86_64",  f"aether-{version}-freebsd-x86_64.tar.gz",
+         "cross-built, not tested on FreeBSD"),
     ]
     lines = [
-        "| Platform | Architecture | File |",
-        "|----------|:------------:|------|",
+        "| Platform | Architecture | File | Notes |",
+        "|----------|:------------:|------|-------|",
     ]
-    for platform, arch, filename in targets:
-        lines.append(f"| {platform} | {arch} | `{filename}` |")
+    for platform, arch, filename, note in targets:
+        # Optional (note-bearing) targets are only listed if the file exists.
+        if note is not None and not os.path.exists(filename):
+            continue
+        lines.append(f"| {platform} | {arch} | `{filename}` | {note or ''} |")
     return "\n".join(lines)
 
 
