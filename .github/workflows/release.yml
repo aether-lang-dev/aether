@@ -435,11 +435,123 @@ jobs:
         retention-days: 7
 
   # ================================================================== #
+  # BUILD-FREEBSD -- cross-compile the FreeBSD zip via zig cc           #
+  #                                                                    #
+  # GitHub Actions has no native FreeBSD runner, so the ae/aetherc     #
+  # toolchain is CROSS-built for FreeBSD on the Linux runner with zig  #
+  # cc (Makefile FREEBSD=1 mode), against a FreeBSD base sysroot        #
+  # provisioned from the aether-crossbuild repo.                        #
+  #                                                                    #
+  # continue-on-error: this leg is BEST-EFFORT — a provisioning hiccup  #
+  # (mirror down, upstream base moved) must never block the release of  #
+  # the four first-class platforms. The artifact is also UNTESTED (no   #
+  # FreeBSD to run `make test` on); it is validated only as a correct   #
+  # FreeBSD ELF. If the leg fails or is skipped, publish simply omits   #
+  # the FreeBSD asset.                                                  #
+  # ================================================================== #
+  build-freebsd:
+    name: Build -- freebsd-x86_64 (cross)
+    needs: tag
+    continue-on-error: true
+    if: |
+      always() && (
+        (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
+        startsWith(github.ref, 'refs/tags/')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.tag.outputs.tag || github.ref }}
+        fetch-tags: true
+
+    - name: Setup
+      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+
+    # The cross toolchain (pinned zig) + FreeBSD base sysroot (headers + libc)
+    # live in the sibling aether-crossbuild repo, which encodes the provenance-
+    # clean provisioning (zig from its pinned upstream; FreeBSD base from
+    # FreeBSD's published base.txz — BSD-licensed, freely redistributable).
+    - name: Checkout aether-crossbuild
+      uses: actions/checkout@v4
+      with:
+        repository: aether-lang-org/aether-crossbuild
+        path: crossbuild
+        fetch-depth: 1
+
+    - name: Provision zig + FreeBSD base sysroot
+      id: prov
+      run: |
+        cd crossbuild
+        ./scripts/get-zig.sh
+        ./scripts/fetch-freebsd-base.sh x86_64 15
+        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
+        SR="$PWD/bases/x86_64-freebsd15"
+        test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        test -f "$SR/lib/libc.so.7" || { echo "FreeBSD base sysroot missing libc.so.7"; exit 1; }
+        echo "zig=$ZIG"       >> "$GITHUB_OUTPUT"
+        echo "sysroot=$SR"    >> "$GITHUB_OUTPUT"
+
+    - name: Cross-build (FREEBSD=1)
+      run: |
+        make compiler ae stdlib \
+          FREEBSD=1 \
+          ZIG="${{ steps.prov.outputs.zig }}" \
+          AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}"
+        # Confirm the artifacts really are FreeBSD ELFs before packaging — a
+        # cross-build that silently produced Linux binaries would be worse
+        # than no FreeBSD zip.
+        file build/aetherc build/ae
+        file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
+
+    - name: Strip
+      run: strip build/aetherc build/ae 2>/dev/null || true
+
+    - name: Package
+      run: |
+        VERSION=$(cat VERSION | tr -d '[:space:]')
+        TARGET=freebsd-x86_64
+        mkdir -p release/bin release/lib release/share/aether release/include/aether
+        cp build/aetherc release/bin/
+        cp build/ae      release/bin/
+        chmod 755 release/bin/*
+        if [ -f build/libaether.a ]; then cp build/libaether.a release/lib/; fi
+        for dir in runtime runtime/actors runtime/scheduler runtime/utils \
+                   runtime/memory runtime/config std std/string std/io std/math \
+                   std/net std/collections std/json std/fs std/log std/http \
+                   std/file std/dir std/path std/tcp std/list std/map std/os; do
+          if [ -d "$dir" ]; then
+            mkdir -p "release/include/aether/$dir"
+            cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
+          fi
+        done
+        cp -r runtime release/share/aether/
+        cp -r std     release/share/aether/
+        cp LICENSE README.md VERSION release/
+        # Note the cross-build in the archive so downstream users know it was
+        # not run through the test suite on FreeBSD.
+        echo "Cross-built for FreeBSD with zig cc; not run through the test suite on FreeBSD." \
+          > release/FREEBSD-CROSS-BUILD.txt
+        cd release && tar -czf "../aether-${VERSION}-${TARGET}.tar.gz" *
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: aether-freebsd-x86_64
+        path: aether-*-freebsd-x86_64.tar.gz
+        retention-days: 7
+
+  # ================================================================== #
   # PUBLISH -- create or update the GitHub Release                      #
   # ================================================================== #
   publish:
     name: Publish release
-    needs: [tag, build]
+    # build-freebsd is in `needs` only so publish waits for its artifact to be
+    # available — it is NOT in the `if` gate, so a failed/skipped FreeBSD leg
+    # (continue-on-error) never blocks the release; publish just omits the asset.
+    needs: [tag, build, build-freebsd]
     runs-on: ubuntu-latest
     if: |
       always() && needs.build.result == 'success' && (
