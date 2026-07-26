@@ -355,6 +355,20 @@ workaround, they cover cases a porter often hand-rolls.
   (exclusive); overlaps need `@overlap`; it's strictly nominal (cross to the raw
   word with `as`). Byte order is NOT part of it — compose with `std.mem`'s
   `get_u16_be` / `set_u32_le` etc., so the swap stays visible.
+- **Unsigned data → `uint64`, not `long`, so `>>` and masks behave.** Aether's
+  `long` is signed, so `>>` on it is an *arithmetic* shift: `long ones =
+  0xFFFFFFFFFFFFFFFF; ones >> 8` is `-1` (sign-extends), not `0x00FF…FF`. Declare
+  a variable `uint64` and `>>` is logical (`uint64 ones = 0xFFFF…FF; ones >> 8`
+  == `0x00FF…FF`), matching what crypto/codec code means by a bit pattern. This
+  bit the v1.2 Ascon-AEAD decrypt mask (#1285): the KAT *encrypt* passed but the
+  round-trip *open* failed only on partial blocks, because the tag-reconstruction
+  mask never cleared its top bits — the KAT's encrypt-only assertions couldn't
+  see it. The escape hatch when a value must stay `long` is `bits.lsr64(x, n)`
+  (logical shift). Right-shifts that are immediately `& 0xFF`-masked (byte
+  extraction like `(v >> 4) & 15`) or shift a known-non-negative counter are
+  fine either way; the hazard is specifically a high-bit-set word right-shifted
+  *for its bits* (an all-ones mask, a 64-bit state word). Prefer `uint64` for
+  sponge/state words up front rather than sprinkling `lsr64`.
 - **Function contracts `requires` / `ensures` (issue #348).** Eiffel-style
   pre/postconditions between the return arrow and the body: `add(a: int, b: int)
   -> int requires a >= 0 ensures result >= a { … }`. Each is a boolean
