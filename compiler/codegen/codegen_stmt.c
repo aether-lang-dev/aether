@@ -475,9 +475,11 @@ static void emit_selector_condition(CodeGenerator* gen, ASTNode* sel,
         generate_expression(gen, sel);
         fprintf(gen->output, "))");
     } else {
-        fprintf(gen->output, "(%s == ", val_var);
+        /* No wrapping parens: every caller already parenthesises (the
+         * if-opener or the ALT joiner), and `if ((x == A))` trips clang's
+         * default -Wparentheses-equality on every match a user compiles. */
+        fprintf(gen->output, "%s == ", val_var);
         generate_expression(gen, sel);
-        fprintf(gen->output, ")");
     }
 }
 

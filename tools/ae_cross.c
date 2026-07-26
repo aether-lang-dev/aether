@@ -328,7 +328,7 @@ int run_cross_build(const char* c_file, const char* out_file,
             size_t p = 0;
             p += (size_t)snprintf(crossbuild_libs + p, sizeof(crossbuild_libs) - p,
                                   "-L%s/lib", xsr);
-            /* The sysroot's headers (openssl/*, zlib.h, pcre2.h, ...) must be on
+            /* The sysroot's headers (openssl/, zlib.h, pcre2.h, ...) must be on
              * the COMPILE include path too, else enabling a real path below
              * (-DAETHER_HAS_OPENSSL etc.) hits `openssl/ssl.h file not found`.
              * Added once, unconditionally when a CROSSBUILD_SYSROOT is set —

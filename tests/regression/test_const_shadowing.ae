@@ -1,0 +1,51 @@
+// Regression #1256: module consts lowered to unguarded C #defines, so a
+// function parameter or local spelled like the const was textually
+// rewritten into the literal (`int SCALE` became `int (99)`) and the
+// documented shadowing guarantee (docs/module-system-design.md) failed to
+// compile. Consts now lower to file-scope `static const`, which
+// participates in C scoping.
+
+const SCALE: int = 99
+const BASE: int = 10
+const DOUBLE: int = BASE * 2
+const BIG: long = 9000000000
+const LABEL = "unit"
+const RATIO = 0.5
+
+extern exit(code: int)
+
+// The documented example, verbatim shape: parameter shadows the const.
+check(SCALE: int) -> int { return SCALE }
+
+shadow_local() -> int {
+    BASE = 41
+    return BASE + 1
+}
+
+classify(x: int) -> string {
+    match x {
+        BASE   -> { return "base" }
+        DOUBLE -> { return "double" }
+        _      -> { return "other" }
+    }
+}
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    if check(5) != 5 { fail("parameter must shadow module const") }
+    if SCALE != 99 { fail("module const must keep its value") }
+    if shadow_local() != 42 { fail("local must shadow module const") }
+    if DOUBLE != 20 { fail("const-of-const must fold to 20") }
+    if BIG != 9000000000 { fail("long const past 2^31") }
+    if LABEL != "unit" { fail("string const") }
+    if classify(10) != "base" { fail("match on const pattern (base)") }
+    if classify(20) != "double" { fail("match on const pattern (double)") }
+    if classify(7) != "other" { fail("match wildcard") }
+    r = RATIO * 2.0
+    if r != 1.0 { fail("float const") }
+    println("PASS: consts scope correctly; shadowing, folding, match all hold")
+}

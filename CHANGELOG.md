@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Module consts now respect C scoping** (#1256). A module-level `const`
+  lowered to a bare `#define`, so a function parameter or local spelled
+  like the const was textually rewritten into the literal (`int SCALE`
+  became `int (99)`), and the documented shadowing guarantee failed to
+  compile. Consts now lower to file-scope `static const`, which inner
+  declarations shadow naturally. Const-of-const initializers, 64-bit and
+  string and float consts, match patterns naming consts, and the
+  `--emit=lib` const catalog all verified unchanged. Also removed the
+  redundant parentheses the match if-chain emitted around equality tests,
+  which tripped clang's default -Wparentheses-equality on every match a
+  user compiled.
+
+### Added
+
+- **Modules declare their own native link deps with `@link("...")`**
+  (#1259). Codegen unions declared flags across the resolved import
+  closure into the `// aether-link:` header comment, first-seen order,
+  deduplicated, absent when nothing declares. The hardcoded
+  `contrib.sqlite` row in the compiler's link table moved into
+  `contrib/sqlite/module.ae` itself: the module owns its deps, the
+  compiler owns only the mechanism.
+
 ## [0.448.0]
 
 ### Added
