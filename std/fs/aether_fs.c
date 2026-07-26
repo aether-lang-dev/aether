@@ -2223,25 +2223,11 @@ DirList* fs_glob_raw(const char* pattern) {
         }
         const char* suffix = dstar + 4;  // skip "/**/"
 
-        // Match files directly in the base directory
-        char search[MAX_PATH];
-        snprintf(search, sizeof(search), "%s\\*", dir);
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(search, &fd);
-        if (h != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    if (win_fnmatch(suffix, fd.cFileName)) {
-                        char fullpath[4096];
-                        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir, fd.cFileName);
-                        dirlist_add(result, fullpath);
-                    }
-                }
-            } while (FindNextFileA(h, &fd));
-            FindClose(h);
-        }
-
-        // Recursive walk
+        // `**` matches zero-or-more directories, so files directly in the
+        // base dir must match too. walk_recursive already matches files at
+        // every level it visits — including the top-level `dir` — so a
+        // separate base-dir scan here would re-emit every root-level match
+        // (issue #1279). Rely solely on the walk.
         walk_recursive(dir, suffix, result);
     } else {
         // Simple glob (no **)
@@ -2272,18 +2258,12 @@ DirList* fs_glob_raw(const char* pattern) {
         }
         const char* suffix = dstar + 4;  // skip "/**/"
 
-        // Also match files directly in the base directory
-        char direct[8192];
-        snprintf(direct, sizeof(direct), "%s/%s", dir, suffix);
-        glob_t g;
-        if (glob(direct, 0, NULL, &g) == 0) {
-            for (size_t i = 0; i < g.gl_pathc; i++) {
-                dirlist_add(result, g.gl_pathv[i]);
-            }
-            globfree(&g);
-        }
-
-        // Recursive walk
+        // `**` matches zero-or-more directories, so files directly in the
+        // base dir must match too. walk_recursive already matches files at
+        // every level it visits — including the top-level `dir` — so it
+        // covers the zero-depth case on its own. A separate base-dir glob
+        // here would re-emit every root-level match (issue #1279), so we
+        // rely solely on the walk.
         walk_recursive(dir, suffix, result);
     } else {
         // Simple glob (no **)
