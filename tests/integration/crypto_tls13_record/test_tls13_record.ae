@@ -154,6 +154,40 @@ main() {
     if o1.plaintext != null { bytes.free(o1.plaintext) }
     if o2.plaintext != null { bytes.free(o2.plaintext) }
 
+    // --- AES-128-GCM AEAD selection round-trips (16-byte key) ---
+    akey = bytes.new(16)
+    ai = 0
+    while ai < 16 { bytes.set(akey, ai, (ai * 13 + 5) & 0xFF); ai = ai + 1 }
+    aiv = bytes.new(12)
+    ai2 = 0
+    while ai2 < 12 { bytes.set(aiv, ai2, (ai2 * 3 + 1) & 0xFF); ai2 = ai2 + 1 }
+    asend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, akey, 16, aiv)
+    arecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, akey, 16, aiv)
+    amsg = bytes.new(20)
+    am = 0
+    while am < 20 { bytes.set(amsg, am, 97 + (am % 26)); am = am + 1 }
+    arec = tls13_record.seal_record(asend, tls13_record.CONTENT_APPLICATION_DATA, amsg, 20)
+    ao = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+    aerr = tls13_record.open_record(arecv, arec, bytes.length(arec), &ao)
+    aok = 1
+    if string.equals(aerr, "") != 1 { aok = 0 }
+    else {
+        if ao.content_type != tls13_record.CONTENT_APPLICATION_DATA { aok = 0 }
+        if ao.plaintext_len != 20 { aok = 0 }
+        if aok == 1 {
+            if to_hex(ao.plaintext, 20) != to_hex(amsg, 20) { aok = 0 }
+        }
+    }
+    if aok == 1 {
+        println("ok   AES-128-GCM record round-trips (16-byte key)")
+    } else {
+        println("FAIL AES-128-GCM record round-trip"); total_ok = 0
+    }
+    if ao.plaintext != null { bytes.free(ao.plaintext) }
+    tls13_record.free_ctx(asend)
+    tls13_record.free_ctx(arecv)
+    bytes.free(akey); bytes.free(aiv); bytes.free(amsg); bytes.free(arec)
+
     tls13_record.free_ctx(sender)
     tls13_record.free_ctx(receiver)
     tls13_record.free_ctx(receiver2)

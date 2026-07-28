@@ -77,7 +77,8 @@ main() {
     // --- handshake key derivation (RFC 8448 §3) ---
     ecdhe = from_hex("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d")
     thash = from_hex("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8")
-    k = tls13_client.derive_handshake_keys(ecdhe, 32, thash, 32)
+    // key_len=32 -> the ChaCha20 record key for RFC 8448 §3's s hs traffic secret.
+    k = tls13_client.derive_handshake_keys(ecdhe, 32, thash, 32, 32)
 
     // server_iv matches RFC 8448 §3 exactly (iv is cipher-length-independent)
     siv = tls13_client.hs_server_iv(k)
@@ -96,6 +97,18 @@ main() {
         println("FAIL server_key = ${to_hex(sk, 32)}"); total_ok = 0
     }
     tls13_client.free_hs_keys(k)
+
+    // key_len=16 -> the AES-128 record key. RFC 8448 §3 s hs traffic secret's
+    // AES-128 key is 3fce516009c21727d0f2e4e86ee403bc (the HKDF length label
+    // binds 16, so this is the canonical AES-128-GCM key for the same secret).
+    k16 = tls13_client.derive_handshake_keys(ecdhe, 32, thash, 32, 16)
+    sk16 = tls13_client.hs_server_key(k16)
+    if to_hex(sk16, 16) == "3fce516009c21727d0f2e4e86ee403bc" {
+        println("ok   server_key == AES-128 16B key for RFC 8448 s hs traffic")
+    } else {
+        println("FAIL AES-128 server_key = ${to_hex(sk16, 16)}"); total_ok = 0
+    }
+    tls13_client.free_hs_keys(k16)
     bytes.free(ecdhe); bytes.free(thash)
 
     // --- Finished key (RFC 8446 §4.4.4; RFC 8448 §3 server value) ---
