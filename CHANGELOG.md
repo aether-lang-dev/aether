@@ -25,12 +25,21 @@ next version number before tagging the release.
   pieces (transcript accumulator, key derivation, Finished) are validated
   against the RFC 8448 §3 trace in CI.
 
-  **⚠️ Not yet a secure client:** this first cut does NOT run the server's
-  CertificateVerify signature check and does NO chain / hostname validation —
-  it proves the key exchange and record protection work against a real server,
-  but does not authenticate the peer. Wiring `tls13_cert.verify_cert_verify`
-  plus chain/hostname policy is the next increment; do not use for anything
-  security-sensitive until then.
+  `connect()` also **verifies the server's CertificateVerify signature**
+  (RFC 8446 §4.4.3) against the leaf certificate's public key — extracting the
+  leaf DER from the Certificate message, parsing its SPKI via
+  `tls13_cert.parse_certificate`, and checking the signature over the
+  transcript hash through Certificate. This proves the peer holds the leaf
+  private key and stops a basic key-exchange MITM. The server cert must be
+  ECDSA-P256 (the only CertificateVerify scheme wired so far; others fail
+  closed).
+
+  **⚠️ Partial authentication:** the CertificateVerify signature is checked,
+  but the certificate CHAIN is not validated against a trust store and the
+  HOSTNAME is not checked against the cert SAN — a valid-but-untrusted or
+  wrong-host cert is still accepted. Chain + hostname validation is the next
+  increment; do not rely on this to authenticate a specific server identity
+  until it lands.
 
 ## [0.453.0]
 
