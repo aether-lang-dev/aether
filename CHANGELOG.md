@@ -23,6 +23,17 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.cryptography.tls13_record`** (#1298) — the TLS 1.3 record
+  protection layer (RFC 8446 §5.2): per-record nonce (`write_iv` XOR the
+  right-aligned big-endian sequence number), TLSCiphertext AAD assembly
+  (`0x17 0x0303 len16`), inner content-type append + trailing-zero strip, and
+  a directional `RecordCtx` with an advancing sequence number, over
+  ChaCha20-Poly1305. `seal_record` / `open_record` / `free_ctx`. Validated
+  offline: nonce vectors (seq 0/1/255/256 + a high 64-bit value), a full
+  seal→open round-trip recovering content type + plaintext, tamper
+  rejection, and multi-record sequence advance; leak-clean under valgrind.
+  AES-GCM record support and the socket/transport wiring are later
+  increments.
 - **`std.cryptography.tls13_cert`** (#1298) — TLS 1.3 CertificateVerify
   (RFC 8446 §4.4.3): builds the signed content (`0x20`×64 || context || 0x00
   || transcript-hash) and dispatches the signature check to ECDSA-P256 /
