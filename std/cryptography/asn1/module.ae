@@ -4,7 +4,7 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.asn1 — ASN.1 DER (Distinguished Encoding Rules)
+// std.cryptography.asn1 — ASN.1 DER (Distinguished Encoding Rules)
 // parser and emitter, the byte layer under RSA/DSA keys, X.509, and PKCS.
 //
 // DER is tag-length-value (TLV): one identifier octet, a definite length

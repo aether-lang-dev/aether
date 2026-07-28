@@ -4,11 +4,11 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.pem — PEM (RFC 7468) text <-> DER bytes codec.
+// std.cryptography.pem — PEM (RFC 7468) text <-> DER bytes codec.
 //
 // PEM is the "-----BEGIN <label>-----" / base64 body / "-----END <label>-----"
 // envelope that wraps DER-encoded keys and certificates. This module is the
-// text layer; the DER inside is handled by contrib.cryptography.asn1.
+// text layer; the DER inside is handled by std.cryptography.asn1.
 //
 // Structure follows Bouncy Castle's PemReader / PemWriter
 // (crypto/src/util/io/pem/). The base64 codec is a pure-Aether RFC 4648
@@ -17,7 +17,7 @@
 //
 // Surface:
 //
-//   import contrib.cryptography.pem
+//   import std.cryptography.pem
 //
 //   der, label, err = pem.parse(pem_text)   // first PEM block in the text
 //   text, err       = pem.encode(label, der_bytes)

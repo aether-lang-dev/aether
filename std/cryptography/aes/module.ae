@@ -4,7 +4,7 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.aes — AES (FIPS-197), the block-cipher core that
+// std.cryptography.aes — AES (FIPS-197), the block-cipher core that
 // every symmetric mode drives. This is the "log-jam remover" for issue
 // #739's symmetric surface: CBC / CTR / CFB / OFB / ECB / GCM / CCM / EAX /
 // OCB / AES-key-wrap / AES-CMAC / AES-CTR-DRBG all sit on exactly this

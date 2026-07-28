@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Public-key crypto and ciphers moved from `contrib.cryptography` to
+  `std.cryptography`** (#1298). The elliptic-curve, RSA, cipher, and
+  encoding families — `aes`, `asn1`, `chacha20poly1305`, `des3`, `ed25519`,
+  `ed448`, `p256`, `p384`, `p521`, `pem`, `rsa`, `secp256k1`, `sm4`, `x448`
+  — now live under `std.cryptography.*`. Update imports from
+  `import contrib.cryptography.X` to `import std.cryptography.X`; the APIs
+  are unchanged. These are pure-Aether ports with no OpenSSL dependency.
+
+### Added
+
+- **`std.cryptography.x25519`** (#1298) — a **constant-time** X25519 (RFC
+  7748) Montgomery ladder over a 10-limb GF(2^255-19) field, ported from
+  Bouncy Castle's `X25519` / `X25519Field`. Replaces the previous
+  variable-time `contrib.cryptography.x25519` (which routed field math
+  through the variable-time `std.bignum` and was explicitly not
+  side-channel-hardened). API: `base_point(scalar)`, `scalar_mult(scalar,
+  u)`, `agree(scalar, u)` (with a contributory-behaviour zero-check).
+  Validated against the RFC 7748 §5.2 scalar-mult vectors and §6.1
+  Alice/Bob key-agreement vectors; leak-clean under valgrind. This is the
+  first primitive for the pure-Aether TLS 1.3 subset.
+
 ## [0.450.0]
 
 ### Fixed

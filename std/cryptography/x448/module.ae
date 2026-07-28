@@ -2,7 +2,7 @@
 // Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.x448 — X448 (RFC 7748) in pure Aether, on top of
+// std.cryptography.x448 — X448 (RFC 7748) in pure Aether, on top of
 // std.bignum. NO externs to OpenSSL. X448 is the Diffie-Hellman function on
 // Curve448 (Montgomery form, y^2 = x^3 + 156326 x^2 + x over the field
 // GF(2^448 - 2^224 - 1)) computed with a single x-coordinate Montgomery

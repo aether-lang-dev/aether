@@ -1,5 +1,5 @@
-// Validate contrib.cryptography.ed25519 against RFC 8032 §7.1 (Tests 1-3).
-import contrib.cryptography.ed25519
+// Validate std.cryptography.ed25519 against RFC 8032 §7.1 (Tests 1-3).
+import std.cryptography.ed25519
 import std.bytes
 import std.string
 import std.io

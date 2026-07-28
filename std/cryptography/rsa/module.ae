@@ -4,10 +4,10 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.rsa — RSA, the first consumer of std.bignum.
+// std.cryptography.rsa — RSA, the first consumer of std.bignum.
 //
 // Pure Aether: the modular exponentiation is std.bignum.mod_pow, the key
-// is parsed from PKCS#1 DER via contrib.cryptography.asn1, and PKCS#1 v1.5
+// is parsed from PKCS#1 DER via std.cryptography.asn1, and PKCS#1 v1.5
 // padding is built byte-by-byte. No OpenSSL RSA — only the OS CSPRNG
 // (std.cryptography.random_bytes) for type-2 encryption padding, which is
 // a randomness source, not a reimplemented crypto algorithm.
@@ -34,7 +34,7 @@ import std.bignum
 import std.bytes
 import std.cryptography
 import std.cryptography.sha2
-import contrib.cryptography.asn1
+import std.cryptography.asn1
 
 exports (
     key_from_components, key_from_pkcs1_der, key_free,

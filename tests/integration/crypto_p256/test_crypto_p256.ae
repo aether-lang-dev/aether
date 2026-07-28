@@ -1,6 +1,6 @@
-// Validate contrib.cryptography.p256: known base-point multiples, a NIST
+// Validate std.cryptography.p256: known base-point multiples, a NIST
 // ECDH CAVP vector, and an ECDSA sign/verify round-trip (+ tamper).
-import contrib.cryptography.p256
+import std.cryptography.p256
 import std.bytes
 import std.string
 import std.io

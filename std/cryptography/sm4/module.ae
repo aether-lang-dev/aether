@@ -4,7 +4,7 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.sm4 — SM4 (GB/T 32907-2016), the Chinese national
+// std.cryptography.sm4 — SM4 (GB/T 32907-2016), the Chinese national
 // 128-bit block cipher with a 128-bit key. Part of the Bouncy Castle →
 // Aether symmetric-crypto port (#739). NO externs to OpenSSL.
 //
@@ -22,7 +22,7 @@
 //   out16 = sm4.process_block(ctx, in16)            // single 16-byte block
 //   sm4.free(ctx)
 //
-// Convenience modes (mirroring contrib.cryptography.aes):
+// Convenience modes (mirroring std.cryptography.aes):
 //   sm4.ecb_encrypt / ecb_decrypt  — block-aligned, NO padding
 //   sm4.ctr_xor                    — CTR keystream over arbitrary length
 //   sm4.cbc_encrypt / cbc_decrypt  — block-aligned CBC, NO padding

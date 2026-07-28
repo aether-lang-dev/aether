@@ -1,6 +1,6 @@
-// Validate contrib.cryptography.rsa OAEP + PSS (RFC 8017, SHA-256) against
+// Validate std.cryptography.rsa OAEP + PSS (RFC 8017, SHA-256) against
 // python-generated reference vectors on a fixed RSA-1024 key, plus round-trips.
-import contrib.cryptography.rsa
+import std.cryptography.rsa
 import std.bignum
 import std.bytes
 import std.string

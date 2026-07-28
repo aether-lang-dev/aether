@@ -1,0 +1,891 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.x25519 — X25519 (RFC 7748) Diffie-Hellman on Curve25519 in
+// pure Aether, ported from Bouncy Castle's Math.EC.Rfc7748.X25519 /
+// X25519Field. NO externs to OpenSSL or any C crypto.
+//
+// This is the key-exchange primitive for the pure-Aether TLS 1.3 subset
+// (issue #1298). It is a constant-time Montgomery ladder over GF(2^255-19),
+// with the field represented as ten signed 26/25-bit limbs (the classic
+// "10x25.5" representation from ref10 / Bouncy Castle).
+//
+// Import with:  import std.cryptography.x25519
+//
+// API (all operands are std.bytes, 32 bytes each; results are freshly
+// allocated std.bytes the caller owns):
+//   base_point(scalar32)          -> pubkey32          (scalar * basepoint 9)
+//   scalar_mult(scalar32, u32)    -> (shared32, "")    (scalar * u)
+//   agree(scalar32, u32)          -> (shared32, err)   (rejects all-zero shared)
+//
+// The scalar is clamped internally (RFC 7748 DecodeScalar), so any 32 raw
+// random bytes is a valid private key. `agree` returns a non-empty error when
+// the shared secret is all-zero (a small-order / contributory-behaviour
+// failure); `scalar_mult` returns the raw result without that check.
+//
+// Aether-specific care:
+//   * Limbs are signed `int`; intermediate products are 64-bit. Every
+//     `(long)a * b` in the reference becomes `(a as long) * b` here so the
+//     multiply is 64-bit (a bare `a * b` on two ints multiplies in 32 bits —
+//     see the memory note on unwidened multiply).
+//   * `>>` on `long` is arithmetic in Aether. The reference C# relies on
+//     arithmetic (signed) `>>` for the carry/reduce chains, so plain `>>` is
+//     the CORRECT match here — do NOT substitute a logical shift.
+//   * A field element is a struct of ten named int limbs (l0..l9) mutated
+//     through a `*Fe` pointer, mirroring how the ascon modules carry state;
+//     Aether has no fixed-size inline array fields.
+
+import std.bytes
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+exports (
+    base_point, scalar_mult, agree,
+    SCALAR_BYTES, POINT_BYTES
+)
+
+const SCALAR_BYTES = 32
+const POINT_BYTES  = 32
+
+// 26/25-bit limb masks (M24 = 24 bits, M25 = 25, M26 = 26).
+const M24 = 0x00FFFFFF
+const M25 = 0x01FFFFFF
+const M26 = 0x03FFFFFF
+
+// (486662 + 2) / 4 — the Montgomery curve constant a24.
+const C_A24 = 121666
+
+// A field element: ten signed limbs. Little-endian limb order l0..l9 with
+// alternating 26/25/26/25... bit widths (l0=26, l1=26, l2=25, l3=26, l4=25,
+// l5=26, l6=26, l7=25, l8=26, l9=25 after Carry; l9 holds 24 after Normalize).
+struct Fe {
+    l0: int
+    l1: int
+    l2: int
+    l3: int
+    l4: int
+    l5: int
+    l6: int
+    l7: int
+    l8: int
+    l9: int
+}
+
+fn fe_zero(z: *Fe) {
+    z.l0 = 0
+    z.l1 = 0
+    z.l2 = 0
+    z.l3 = 0
+    z.l4 = 0
+    z.l5 = 0
+    z.l6 = 0
+    z.l7 = 0
+    z.l8 = 0
+    z.l9 = 0
+}
+
+fn fe_copy(src: *Fe, dst: *Fe) {
+    dst.l0 = src.l0
+    dst.l1 = src.l1
+    dst.l2 = src.l2
+    dst.l3 = src.l3
+    dst.l4 = src.l4
+    dst.l5 = src.l5
+    dst.l6 = src.l6
+    dst.l7 = src.l7
+    dst.l8 = src.l8
+    dst.l9 = src.l9
+}
+
+// z = x + y (limbwise, no carry — callers carry as needed downstream).
+fn fe_add(x: *Fe, y: *Fe, z: *Fe) {
+    z.l0 = x.l0 + y.l0
+    z.l1 = x.l1 + y.l1
+    z.l2 = x.l2 + y.l2
+    z.l3 = x.l3 + y.l3
+    z.l4 = x.l4 + y.l4
+    z.l5 = x.l5 + y.l5
+    z.l6 = x.l6 + y.l6
+    z.l7 = x.l7 + y.l7
+    z.l8 = x.l8 + y.l8
+    z.l9 = x.l9 + y.l9
+}
+
+// z = x - y (limbwise).
+fn fe_sub(x: *Fe, y: *Fe, z: *Fe) {
+    z.l0 = x.l0 - y.l0
+    z.l1 = x.l1 - y.l1
+    z.l2 = x.l2 - y.l2
+    z.l3 = x.l3 - y.l3
+    z.l4 = x.l4 - y.l4
+    z.l5 = x.l5 - y.l5
+    z.l6 = x.l6 - y.l6
+    z.l7 = x.l7 - y.l7
+    z.l8 = x.l8 - y.l8
+    z.l9 = x.l9 - y.l9
+}
+
+// (zp, zm) = (x + y, x - y). Both outputs distinct from inputs at call sites.
+fn fe_apm(x: *Fe, y: *Fe, zp: *Fe, zm: *Fe) {
+    // Snapshot into locals so aliasing (e.g. zp == x) is safe.
+    int x0 = x.l0
+    int x1 = x.l1
+    int x2 = x.l2
+    int x3 = x.l3
+    int x4 = x.l4
+    int x5 = x.l5
+    int x6 = x.l6
+    int x7 = x.l7
+    int x8 = x.l8
+    int x9 = x.l9
+    int y0 = y.l0
+    int y1 = y.l1
+    int y2 = y.l2
+    int y3 = y.l3
+    int y4 = y.l4
+    int y5 = y.l5
+    int y6 = y.l6
+    int y7 = y.l7
+    int y8 = y.l8
+    int y9 = y.l9
+    zp.l0 = x0 + y0
+    zp.l1 = x1 + y1
+    zp.l2 = x2 + y2
+    zp.l3 = x3 + y3
+    zp.l4 = x4 + y4
+    zp.l5 = x5 + y5
+    zp.l6 = x6 + y6
+    zp.l7 = x7 + y7
+    zp.l8 = x8 + y8
+    zp.l9 = x9 + y9
+    zm.l0 = x0 - y0
+    zm.l1 = x1 - y1
+    zm.l2 = x2 - y2
+    zm.l3 = x3 - y3
+    zm.l4 = x4 - y4
+    zm.l5 = x5 - y5
+    zm.l6 = x6 - y6
+    zm.l7 = x7 - y7
+    zm.l8 = x8 - y8
+    zm.l9 = x9 - y9
+}
+
+// z = x * y where y is a small (<= 121666) non-negative scalar. Single-pass
+// schoolbook with 2^255-19 folding (X25519Field.Mul(int[], int, int[])).
+fn fe_mul_int(x: *Fe, y: int, z: *Fe) {
+    int x0 = x.l0
+    int x1 = x.l1
+    int x2 = x.l2
+    int x3 = x.l3
+    int x4 = x.l4
+    int x5 = x.l5
+    int x6 = x.l6
+    int x7 = x.l7
+    int x8 = x.l8
+    int x9 = x.l9
+
+    long c0 = (x2 as long) * y
+    x2 = (c0 as int) & M25
+    c0 = c0 >> 25
+    long c1 = (x4 as long) * y
+    x4 = (c1 as int) & M25
+    c1 = c1 >> 25
+    long c2 = (x7 as long) * y
+    x7 = (c2 as int) & M25
+    c2 = c2 >> 25
+    long c3 = (x9 as long) * y
+    x9 = (c3 as int) & M25
+    c3 = c3 >> 25
+    c3 = c3 * 38
+
+    c3 = c3 + (x0 as long) * y
+    z.l0 = (c3 as int) & M26
+    c3 = c3 >> 26
+    c1 = c1 + (x5 as long) * y
+    z.l5 = (c1 as int) & M26
+    c1 = c1 >> 26
+
+    c3 = c3 + (x1 as long) * y
+    z.l1 = (c3 as int) & M26
+    c3 = c3 >> 26
+    c0 = c0 + (x3 as long) * y
+    z.l3 = (c0 as int) & M26
+    c0 = c0 >> 26
+    c1 = c1 + (x6 as long) * y
+    z.l6 = (c1 as int) & M26
+    c1 = c1 >> 26
+    c2 = c2 + (x8 as long) * y
+    z.l8 = (c2 as int) & M26
+    c2 = c2 >> 26
+
+    z.l2 = x2 + (c3 as int)
+    z.l4 = x4 + (c0 as int)
+    z.l7 = x7 + (c1 as int)
+    z.l9 = x9 + (c2 as int)
+}
+
+// z = x * y (full field multiply, X25519Field.Mul(int[], int[], int[])).
+// Karatsuba split into lo (limbs 0..4) and hi (limbs 5..9) halves.
+fn fe_mul(x: *Fe, y: *Fe, z: *Fe) {
+    int x0 = x.l0
+    int y0 = y.l0
+    int x1 = x.l1
+    int y1 = y.l1
+    int x2 = x.l2
+    int y2 = y.l2
+    int x3 = x.l3
+    int y3 = y.l3
+    int x4 = x.l4
+    int y4 = y.l4
+
+    int u0 = x.l5
+    int v0 = y.l5
+    int u1 = x.l6
+    int v1 = y.l6
+    int u2 = x.l7
+    int v2 = y.l7
+    int u3 = x.l8
+    int v3 = y.l8
+    int u4 = x.l9
+    int v4 = y.l9
+
+    long a0 = (x0 as long) * y0
+    long a1 = (x0 as long) * y1 + (x1 as long) * y0
+    long a2 = (x0 as long) * y2 + (x1 as long) * y1 + (x2 as long) * y0
+    long a3 = (x1 as long) * y2 + (x2 as long) * y1
+    a3 = a3 << 1
+    a3 = a3 + (x0 as long) * y3 + (x3 as long) * y0
+    long a4 = (x2 as long) * y2
+    a4 = a4 << 1
+    a4 = a4 + (x0 as long) * y4 + (x1 as long) * y3 + (x3 as long) * y1 + (x4 as long) * y0
+    long a5 = (x1 as long) * y4 + (x2 as long) * y3 + (x3 as long) * y2 + (x4 as long) * y1
+    a5 = a5 << 1
+    long a6 = (x2 as long) * y4 + (x4 as long) * y2
+    a6 = a6 << 1
+    a6 = a6 + (x3 as long) * y3
+    long a7 = (x3 as long) * y4 + (x4 as long) * y3
+    long a8 = (x4 as long) * y4
+    a8 = a8 << 1
+
+    long b0 = (u0 as long) * v0
+    long b1 = (u0 as long) * v1 + (u1 as long) * v0
+    long b2 = (u0 as long) * v2 + (u1 as long) * v1 + (u2 as long) * v0
+    long b3 = (u1 as long) * v2 + (u2 as long) * v1
+    b3 = b3 << 1
+    b3 = b3 + (u0 as long) * v3 + (u3 as long) * v0
+    long b4 = (u2 as long) * v2
+    b4 = b4 << 1
+    b4 = b4 + (u0 as long) * v4 + (u1 as long) * v3 + (u3 as long) * v1 + (u4 as long) * v0
+    long b5 = (u1 as long) * v4 + (u2 as long) * v3 + (u3 as long) * v2 + (u4 as long) * v1
+    long b6 = (u2 as long) * v4 + (u4 as long) * v2
+    b6 = b6 << 1
+    b6 = b6 + (u3 as long) * v3
+    long b7 = (u3 as long) * v4 + (u4 as long) * v3
+    long b8 = (u4 as long) * v4
+
+    a0 = a0 - b5 * 76
+    a1 = a1 - b6 * 38
+    a2 = a2 - b7 * 38
+    a3 = a3 - b8 * 76
+
+    a5 = a5 - b0
+    a6 = a6 - b1
+    a7 = a7 - b2
+    a8 = a8 - b3
+
+    x0 = x0 + u0
+    y0 = y0 + v0
+    x1 = x1 + u1
+    y1 = y1 + v1
+    x2 = x2 + u2
+    y2 = y2 + v2
+    x3 = x3 + u3
+    y3 = y3 + v3
+    x4 = x4 + u4
+    y4 = y4 + v4
+
+    long c0 = (x0 as long) * y0
+    long c1 = (x0 as long) * y1 + (x1 as long) * y0
+    long c2 = (x0 as long) * y2 + (x1 as long) * y1 + (x2 as long) * y0
+    long c3 = (x1 as long) * y2 + (x2 as long) * y1
+    c3 = c3 << 1
+    c3 = c3 + (x0 as long) * y3 + (x3 as long) * y0
+    long c4 = (x2 as long) * y2
+    c4 = c4 << 1
+    c4 = c4 + (x0 as long) * y4 + (x1 as long) * y3 + (x3 as long) * y1 + (x4 as long) * y0
+    long c5 = (x1 as long) * y4 + (x2 as long) * y3 + (x3 as long) * y2 + (x4 as long) * y1
+    c5 = c5 << 1
+    long c6 = (x2 as long) * y4 + (x4 as long) * y2
+    c6 = c6 << 1
+    c6 = c6 + (x3 as long) * y3
+    long c7 = (x3 as long) * y4 + (x4 as long) * y3
+    long c8 = (x4 as long) * y4
+    c8 = c8 << 1
+
+    int z8 = 0
+    int z9 = 0
+    long t = 0
+
+    t = a8 + (c3 - a3)
+    z8 = (t as int) & M26
+    t = t >> 26
+    t = t + (c4 - a4) - b4
+    z9 = (t as int) & M25
+    t = t >> 25
+    t = a0 + (t + c5 - a5) * 38
+    z.l0 = (t as int) & M26
+    t = t >> 26
+    t = t + a1 + (c6 - a6) * 38
+    z.l1 = (t as int) & M26
+    t = t >> 26
+    t = t + a2 + (c7 - a7) * 38
+    z.l2 = (t as int) & M25
+    t = t >> 25
+    t = t + a3 + (c8 - a8) * 38
+    z.l3 = (t as int) & M26
+    t = t >> 26
+    t = t + a4 + b4 * 38
+    z.l4 = (t as int) & M25
+    t = t >> 25
+    t = t + a5 + (c0 - a0)
+    z.l5 = (t as int) & M26
+    t = t >> 26
+    t = t + a6 + (c1 - a1)
+    z.l6 = (t as int) & M26
+    t = t >> 26
+    t = t + a7 + (c2 - a2)
+    z.l7 = (t as int) & M25
+    t = t >> 25
+    t = t + z8
+    z.l8 = (t as int) & M26
+    t = t >> 26
+    z.l9 = z9 + (t as int)
+}
+
+// z = x^2. Squaring specialisation (X25519Field.Sqr(int[], int[])).
+fn fe_sqr(x: *Fe, z: *Fe) {
+    int x0 = x.l0
+    int x1 = x.l1
+    int x2 = x.l2
+    int x3 = x.l3
+    int x4 = x.l4
+
+    int u0 = x.l5
+    int u1 = x.l6
+    int u2 = x.l7
+    int u3 = x.l8
+    int u4 = x.l9
+
+    int x1_2 = x1 * 2
+    int x2_2 = x2 * 2
+    int x3_2 = x3 * 2
+    int x4_2 = x4 * 2
+
+    long a0 = (x0 as long) * x0
+    long a1 = (x0 as long) * x1_2
+    long a2 = (x0 as long) * x2_2 + (x1 as long) * x1
+    long a3 = (x1_2 as long) * x2_2 + (x0 as long) * x3_2
+    long a4 = (x2 as long) * x2_2 + (x0 as long) * x4_2 + (x1 as long) * x3_2
+    long a5 = (x1_2 as long) * x4_2 + (x2_2 as long) * x3_2
+    long a6 = (x2_2 as long) * x4_2 + (x3 as long) * x3
+    long a7 = (x3 as long) * x4_2
+    long a8 = (x4 as long) * x4_2
+
+    int u1_2 = u1 * 2
+    int u2_2 = u2 * 2
+    int u3_2 = u3 * 2
+    int u4_2 = u4 * 2
+
+    long b0 = (u0 as long) * u0
+    long b1 = (u0 as long) * u1_2
+    long b2 = (u0 as long) * u2_2 + (u1 as long) * u1
+    long b3 = (u1_2 as long) * u2_2 + (u0 as long) * u3_2
+    long b4 = (u2 as long) * u2_2 + (u0 as long) * u4_2 + (u1 as long) * u3_2
+    long b5 = (u1_2 as long) * u4_2 + (u2_2 as long) * u3_2
+    long b6 = (u2_2 as long) * u4_2 + (u3 as long) * u3
+    long b7 = (u3 as long) * u4_2
+    long b8 = (u4 as long) * u4_2
+
+    a0 = a0 - b5 * 38
+    a1 = a1 - b6 * 38
+    a2 = a2 - b7 * 38
+    a3 = a3 - b8 * 38
+
+    a5 = a5 - b0
+    a6 = a6 - b1
+    a7 = a7 - b2
+    a8 = a8 - b3
+
+    x0 = x0 + u0
+    x1 = x1 + u1
+    x2 = x2 + u2
+    x3 = x3 + u3
+    x4 = x4 + u4
+
+    x1_2 = x1 * 2
+    x2_2 = x2 * 2
+    x3_2 = x3 * 2
+    x4_2 = x4 * 2
+
+    long c0 = (x0 as long) * x0
+    long c1 = (x0 as long) * x1_2
+    long c2 = (x0 as long) * x2_2 + (x1 as long) * x1
+    long c3 = (x1_2 as long) * x2_2 + (x0 as long) * x3_2
+    long c4 = (x2 as long) * x2_2 + (x0 as long) * x4_2 + (x1 as long) * x3_2
+    long c5 = (x1_2 as long) * x4_2 + (x2_2 as long) * x3_2
+    long c6 = (x2_2 as long) * x4_2 + (x3 as long) * x3
+    long c7 = (x3 as long) * x4_2
+    long c8 = (x4 as long) * x4_2
+
+    int z8 = 0
+    int z9 = 0
+    long t = 0
+
+    t = a8 + (c3 - a3)
+    z8 = (t as int) & M26
+    t = t >> 26
+    t = t + (c4 - a4) - b4
+    z9 = (t as int) & M25
+    t = t >> 25
+    t = a0 + (t + c5 - a5) * 38
+    z.l0 = (t as int) & M26
+    t = t >> 26
+    t = t + a1 + (c6 - a6) * 38
+    z.l1 = (t as int) & M26
+    t = t >> 26
+    t = t + a2 + (c7 - a7) * 38
+    z.l2 = (t as int) & M25
+    t = t >> 25
+    t = t + a3 + (c8 - a8) * 38
+    z.l3 = (t as int) & M26
+    t = t >> 26
+    t = t + a4 + b4 * 38
+    z.l4 = (t as int) & M25
+    t = t >> 25
+    t = t + a5 + (c0 - a0)
+    z.l5 = (t as int) & M26
+    t = t >> 26
+    t = t + a6 + (c1 - a1)
+    z.l6 = (t as int) & M26
+    t = t >> 26
+    t = t + a7 + (c2 - a2)
+    z.l7 = (t as int) & M25
+    t = t >> 25
+    t = t + z8
+    z.l8 = (t as int) & M26
+    t = t >> 26
+    z.l9 = z9 + (t as int)
+}
+
+// z = x^(2^n) — n repeated squarings in place.
+fn fe_sqr_n(x: *Fe, n: int, z: *Fe) {
+    fe_sqr(x, z)
+    int i = n
+    while i > 1 {
+        fe_sqr(z, z)
+        i = i - 1
+    }
+}
+
+// One pass of the final modular reduction (X25519Field.Reduce).
+fn fe_reduce(z: *Fe, x: int) {
+    int t = z.l9
+    int z9 = t & M24
+    t = (t >> 24) + x
+
+    long cc = (t as long) * 19
+    cc = cc + z.l0
+    z.l0 = (cc as int) & M26
+    cc = cc >> 26
+    cc = cc + z.l1
+    z.l1 = (cc as int) & M26
+    cc = cc >> 26
+    cc = cc + z.l2
+    z.l2 = (cc as int) & M25
+    cc = cc >> 25
+    cc = cc + z.l3
+    z.l3 = (cc as int) & M26
+    cc = cc >> 26
+    cc = cc + z.l4
+    z.l4 = (cc as int) & M25
+    cc = cc >> 25
+    cc = cc + z.l5
+    z.l5 = (cc as int) & M26
+    cc = cc >> 26
+    cc = cc + z.l6
+    z.l6 = (cc as int) & M26
+    cc = cc >> 26
+    cc = cc + z.l7
+    z.l7 = (cc as int) & M25
+    cc = cc >> 25
+    cc = cc + z.l8
+    z.l8 = (cc as int) & M26
+    cc = cc >> 26
+    z.l9 = z9 + (cc as int)
+}
+
+// Fully reduce z into canonical [0, p) form (X25519Field.Normalize).
+fn fe_normalize(z: *Fe) {
+    int x = (z.l9 >> 23) & 1
+    fe_reduce(z, x)
+    fe_reduce(z, 0 - x)
+}
+
+// Constant-time conditional swap of a and b when swap == 1 (else no-op).
+fn fe_cswap(swap: int, a: *Fe, b: *Fe) {
+    int mask = 0 - swap
+    int ai = 0
+    int bi = 0
+    int d = 0
+    ai = a.l0
+    bi = b.l0
+    d = mask & (ai ^ bi)
+    a.l0 = ai ^ d
+    b.l0 = bi ^ d
+    ai = a.l1
+    bi = b.l1
+    d = mask & (ai ^ bi)
+    a.l1 = ai ^ d
+    b.l1 = bi ^ d
+    ai = a.l2
+    bi = b.l2
+    d = mask & (ai ^ bi)
+    a.l2 = ai ^ d
+    b.l2 = bi ^ d
+    ai = a.l3
+    bi = b.l3
+    d = mask & (ai ^ bi)
+    a.l3 = ai ^ d
+    b.l3 = bi ^ d
+    ai = a.l4
+    bi = b.l4
+    d = mask & (ai ^ bi)
+    a.l4 = ai ^ d
+    b.l4 = bi ^ d
+    ai = a.l5
+    bi = b.l5
+    d = mask & (ai ^ bi)
+    a.l5 = ai ^ d
+    b.l5 = bi ^ d
+    ai = a.l6
+    bi = b.l6
+    d = mask & (ai ^ bi)
+    a.l6 = ai ^ d
+    b.l6 = bi ^ d
+    ai = a.l7
+    bi = b.l7
+    d = mask & (ai ^ bi)
+    a.l7 = ai ^ d
+    b.l7 = bi ^ d
+    ai = a.l8
+    bi = b.l8
+    d = mask & (ai ^ bi)
+    a.l8 = ai ^ d
+    b.l8 = bi ^ d
+    ai = a.l9
+    bi = b.l9
+    d = mask & (ai ^ bi)
+    a.l9 = ai ^ d
+    b.l9 = bi ^ d
+}
+
+// Little-endian 32-bit load from a std.bytes buffer at byte offset off.
+fn dec32(b: ptr, off: int) -> long {
+    long b0 = (bytes.get(b, off) & 255) as long
+    long b1 = (bytes.get(b, off + 1) & 255) as long
+    long b2 = (bytes.get(b, off + 2) & 255) as long
+    long b3 = (bytes.get(b, off + 3) & 255) as long
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+}
+
+// Decode 128 bits (4 LE words at byte offset off) into 5 limbs written to
+// z.l[base..base+4] (X25519Field.Decode128). base is 0 or 5.
+fn dec128(b: ptr, off: int, z: *Fe, base: int) {
+    long t0 = dec32(b, off)
+    long t1 = dec32(b, off + 4)
+    long t2 = dec32(b, off + 8)
+    long t3 = dec32(b, off + 12)
+
+    int r0 = (t0 as int) & M26
+    int r1 = (((t1 << 6) | (t0 >> 26)) as int) & M26
+    int r2 = (((t2 << 12) | (t1 >> 20)) as int) & M25
+    int r3 = (((t3 << 19) | (t2 >> 13)) as int) & M26
+    int r4 = (t3 >> 7) as int
+
+    if base == 0 {
+        z.l0 = r0
+        z.l1 = r1
+        z.l2 = r2
+        z.l3 = r3
+        z.l4 = r4
+    } else {
+        z.l5 = r0
+        z.l6 = r1
+        z.l7 = r2
+        z.l8 = r3
+        z.l9 = r4
+    }
+}
+
+// Decode a 255-bit little-endian point u into field element z
+// (X25519Field.Decode255): high bit is masked off.
+fn fe_decode(b: ptr, z: *Fe) {
+    dec128(b, 0, z, 0)
+    dec128(b, 16, z, 5)
+    z.l9 = z.l9 & M24
+}
+
+// Encode 5 limbs (l[base..base+4]) as 4 LE 32-bit words into out at byte
+// offset off (X25519Field.Encode128).
+fn enc128(z: *Fe, base: int, out: ptr, off: int) {
+    long x0 = 0
+    long x1 = 0
+    long x2 = 0
+    long x3 = 0
+    long x4 = 0
+    if base == 0 {
+        x0 = (z.l0 as long) & 0xFFFFFFFF
+        x1 = (z.l1 as long) & 0xFFFFFFFF
+        x2 = (z.l2 as long) & 0xFFFFFFFF
+        x3 = (z.l3 as long) & 0xFFFFFFFF
+        x4 = (z.l4 as long) & 0xFFFFFFFF
+    } else {
+        x0 = (z.l5 as long) & 0xFFFFFFFF
+        x1 = (z.l6 as long) & 0xFFFFFFFF
+        x2 = (z.l7 as long) & 0xFFFFFFFF
+        x3 = (z.l8 as long) & 0xFFFFFFFF
+        x4 = (z.l9 as long) & 0xFFFFFFFF
+    }
+    long t0 = x0 | (x1 << 26)
+    long t1 = (x1 >> 6) | (x2 << 20)
+    long t2 = (x2 >> 12) | (x3 << 13)
+    long t3 = (x3 >> 19) | (x4 << 7)
+    enc32(t0, out, off)
+    enc32(t1, out, off + 4)
+    enc32(t2, out, off + 8)
+    enc32(t3, out, off + 12)
+}
+
+// Store the low 32 bits of n as little-endian into out at byte offset off.
+fn enc32(n: long, out: ptr, off: int) {
+    bytes.set(out, off, (n & 255) as int)
+    bytes.set(out, off + 1, ((n >> 8) & 255) as int)
+    bytes.set(out, off + 2, ((n >> 16) & 255) as int)
+    bytes.set(out, off + 3, ((n >> 24) & 255) as int)
+}
+
+// Encode a normalized field element into a 32-byte little-endian buffer.
+fn fe_encode(z: *Fe, out: ptr) {
+    enc128(z, 0, out, 0)
+    enc128(z, 5, out, 16)
+}
+
+// z = 1 / x = x^(p-2) mod (2^255-19). Fermat inverse via the fixed addition
+// chain used by ref10/BC's PowPm5d8, extended to the full p-2 exponent:
+// x^(p-2) = x^(2^255 - 21). We compute x^((p-5)/8)=x^(2^252-3) and adjust.
+// Concretely: t = x^(2^250-1) (250 ones) then finish to p-2. Follows the
+// standard curve25519 inverse addition chain.
+fn fe_inv(x: *Fe, z: *Fe) {
+    z2 = Fe { }
+    z9 = Fe { }
+    z11 = Fe { }
+    z2_5_0 = Fe { }
+    z2_10_0 = Fe { }
+    z2_20_0 = Fe { }
+    z2_50_0 = Fe { }
+    z2_100_0 = Fe { }
+    t0 = Fe { }
+    t1 = Fe { }
+
+    // z2 = x^2
+    fe_sqr(x, &z2)
+    // t1 = x^4
+    fe_sqr(&z2, &t1)
+    // t0 = x^8
+    fe_sqr(&t1, &t0)
+    // z9 = x^9 = x^8 * x
+    fe_mul(&t0, x, &z9)
+    // z11 = x^11 = x^9 * x^2
+    fe_mul(&z9, &z2, &z11)
+    // t0 = x^22 = (x^11)^2
+    fe_sqr(&z11, &t0)
+    // z2_5_0 = x^31 = x^(2^5 - 1) = x^22 * x^9
+    fe_mul(&t0, &z9, &z2_5_0)
+
+    // z2_10_0 = x^(2^10 - 1)
+    fe_sqr_n(&z2_5_0, 5, &t0)
+    fe_mul(&t0, &z2_5_0, &z2_10_0)
+
+    // z2_20_0 = x^(2^20 - 1)
+    fe_sqr_n(&z2_10_0, 10, &t0)
+    fe_mul(&t0, &z2_10_0, &z2_20_0)
+
+    // t0 = x^(2^40 - 1)
+    fe_sqr_n(&z2_20_0, 20, &t1)
+    fe_mul(&t1, &z2_20_0, &t0)
+
+    // z2_50_0 = x^(2^50 - 1)
+    fe_sqr_n(&t0, 10, &t1)
+    fe_mul(&t1, &z2_10_0, &z2_50_0)
+
+    // z2_100_0 = x^(2^100 - 1)
+    fe_sqr_n(&z2_50_0, 50, &t0)
+    fe_mul(&t0, &z2_50_0, &z2_100_0)
+
+    // t1 = x^(2^200 - 1)
+    fe_sqr_n(&z2_100_0, 100, &t1)
+    fe_mul(&t1, &z2_100_0, &t0)
+
+    // t0 = x^(2^250 - 1)
+    fe_sqr_n(&t0, 50, &t1)
+    fe_mul(&t1, &z2_50_0, &t0)
+
+    // z = x^(2^255 - 21) = (x^(2^250-1))^(2^5) * x^11
+    fe_sqr_n(&t0, 5, &t1)
+    fe_mul(&t1, &z11, z)
+}
+
+// Decode a 32-byte scalar into 8 LE 32-bit words with the standard X25519
+// clamp (RFC 7748 DecodeScalar): clear low 3 bits, clear top bit, set bit 254.
+// Returns the clamped scalar as a fresh std.bytes buffer (caller frees).
+fn clamp_scalar(k: ptr) -> ptr {
+    out = bytes.new(SCALAR_BYTES)
+    int i = 0
+    while i < SCALAR_BYTES {
+        bytes.set(out, i, bytes.get(k, i) & 255)
+        i = i + 1
+    }
+    bytes.set(out, 0, bytes.get(out, 0) & 0xF8)
+    bytes.set(out, 31, bytes.get(out, 31) & 0x7F)
+    bytes.set(out, 31, bytes.get(out, 31) | 0x40)
+    return out
+}
+
+// Test bit `bit` (0..254) of the clamped little-endian scalar buffer.
+fn scalar_bit(k: ptr, bit: int) -> int {
+    int byte_i = bit >> 3
+    int shift = bit & 7
+    return (bytes.get(k, byte_i) >> shift) & 1
+}
+
+// x2 <- 2*(x2:z2) — Montgomery point double (X25519.PointDouble), in place.
+fn point_double(x: *Fe, z: *Fe) {
+    a = Fe { }
+    b = Fe { }
+    fe_apm(x, z, &a, &b)
+    fe_sqr(&a, &a)
+    fe_sqr(&b, &b)
+    fe_mul(&a, &b, x)
+    fe_sub(&a, &b, &a)
+    fe_mul_int(&a, C_A24, z)
+    fe_add(z, &b, z)
+    fe_mul(z, &a, z)
+}
+
+// Core scalar multiplication: r = scalar * u, both 32-byte LE buffers, into a
+// fresh 32-byte std.bytes buffer (caller frees). Constant-time Montgomery
+// ladder (X25519.ScalarMult).
+fn ladder(scalar: ptr, u: ptr) -> ptr {
+    k = clamp_scalar(scalar)
+
+    x1 = Fe { }
+    fe_decode(u, &x1)
+
+    x2 = Fe { }
+    fe_copy(&x1, &x2)
+    z2 = Fe { }
+    z2.l0 = 1
+    x3 = Fe { }
+    x3.l0 = 1
+    z3 = Fe { }
+
+    t1 = Fe { }
+    t2 = Fe { }
+
+    int bit = 254
+    int swap = 1
+    while bit >= 3 {
+        fe_apm(&x3, &z3, &t1, &x3)
+        fe_apm(&x2, &z2, &z3, &x2)
+        fe_mul(&t1, &x2, &t1)
+        fe_mul(&x3, &z3, &x3)
+        fe_sqr(&z3, &z3)
+        fe_sqr(&x2, &x2)
+
+        fe_sub(&z3, &x2, &t2)
+        fe_mul_int(&t2, C_A24, &z2)
+        fe_add(&z2, &x2, &z2)
+        fe_mul(&z2, &t2, &z2)
+        fe_mul(&x2, &z3, &x2)
+
+        fe_apm(&t1, &x3, &x3, &z3)
+        fe_sqr(&x3, &x3)
+        fe_sqr(&z3, &z3)
+        fe_mul(&z3, &x1, &z3)
+
+        bit = bit - 1
+
+        int kt = scalar_bit(k, bit)
+        swap = swap ^ kt
+        fe_cswap(swap, &x2, &x3)
+        fe_cswap(swap, &z2, &z3)
+        swap = kt
+    }
+
+    int j = 0
+    while j < 3 {
+        point_double(&x2, &z2)
+        j = j + 1
+    }
+
+    fe_inv(&z2, &z2)
+    fe_mul(&x2, &z2, &x2)
+    fe_normalize(&x2)
+
+    r = bytes.new(POINT_BYTES)
+    fe_encode(&x2, r)
+
+    bytes.free(k)
+    return r
+}
+
+// scalar_mult(scalar32, u32) -> (shared32, ""). Raw X25519: no zero-check.
+scalar_mult(scalar: ptr, u: ptr) -> (ptr, string) {
+    r = ladder(scalar, u)
+    return r, ""
+}
+
+// base_point(scalar32) -> pubkey32. Public key = scalar * basepoint (u = 9).
+base_point(scalar: ptr) -> ptr {
+    u = bytes.new(POINT_BYTES)
+    // bytes.new does NOT zero the buffer — only bytes up to the highest
+    // written index are zero-filled. Force a full zero-fill by writing the
+    // top byte first, THEN set the low byte to 9. Otherwise unwritten bytes
+    // 1..31 are garbage and fe_decode reads a wrong basepoint.
+    bytes.set(u, POINT_BYTES - 1, 0)
+    bytes.set(u, 0, 9)
+    r = ladder(scalar, u)
+    bytes.free(u)
+    return r
+}
+
+// agree(scalar32, u32) -> (shared32, err). Diffie-Hellman with the RFC 7748
+// contributory-behaviour check: an all-zero shared secret (small-order input)
+// is rejected with a non-empty error and a freed result.
+agree(scalar: ptr, u: ptr) -> (ptr, string) {
+    r = ladder(scalar, u)
+    int acc = 0
+    int i = 0
+    while i < POINT_BYTES {
+        acc = acc | (bytes.get(r, i) & 255)
+        i = i + 1
+    }
+    if acc == 0 {
+        bytes.free(r)
+        return null, "x25519: all-zero shared secret (small-order point)"
+    }
+    return r, ""
+}
+

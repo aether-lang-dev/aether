@@ -4,13 +4,13 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// Regression: contrib.cryptography.pem (issue #739). Pure-Aether RFC 4648
+// Regression: std.cryptography.pem (issue #739). Pure-Aether RFC 4648
 // base64 + RFC 7468 PEM envelope. Covers the canonical base64 vectors
 // ("Man"/"TWFu", "Ma"/"TWE=", "M"/"TQ=="), a full encode->parse round-trip
 // over a 256-byte binary payload (exercises 64-col line wrapping and label
 // matching), and a label-mismatch / missing-marker error path.
 
-import contrib.cryptography.pem
+import std.cryptography.pem
 import std.bytes
 import std.string
 
@@ -26,7 +26,7 @@ bascii(b: ptr) -> string {
 }
 
 main() {
-    print("=== contrib.cryptography.pem ===\n")
+    print("=== std.cryptography.pem ===\n")
     fails = 0
 
     // base64 known vectors (RFC 4648 §10)
@@ -68,7 +68,7 @@ main() {
     if string.equals(berr, "") == 1 { print("FAIL missing-END not rejected\n"); fails = fails + 1 }
 
     if fails == 0 {
-        print("PASS: contrib.cryptography.pem\n")
+        print("PASS: std.cryptography.pem\n")
     } else {
         print("FAILED: ${fails}\n")
         exit(1)

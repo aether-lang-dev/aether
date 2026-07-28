@@ -2,7 +2,7 @@
 // Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.ed25519 — Ed25519 (RFC 8032) signatures in pure
+// std.cryptography.ed25519 — Ed25519 (RFC 8032) signatures in pure
 // Aether, on top of std.bignum and std.cryptography.sha2 (SHA-512). NO
 // externs to OpenSSL.
 //

@@ -4,7 +4,7 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.des3 — Triple-DES / TDEA (EDE3) over a 64-bit block,
+// std.cryptography.des3 — Triple-DES / TDEA (EDE3) over a 64-bit block,
 // in pure Aether. Part of the Bouncy Castle → Aether symmetric-crypto port
 // (#739). NO externs to OpenSSL.
 //
@@ -34,7 +34,7 @@
 //
 // 16-byte keys are accepted as 2-key TDEA (K3 = K1).
 //
-// Convenience modes (mirroring contrib.cryptography.aes):
+// Convenience modes (mirroring std.cryptography.aes):
 //   des3.ecb_encrypt / ecb_decrypt  — block-aligned, NO padding
 //   des3.ctr_xor                    — CTR keystream over arbitrary length
 //   des3.cbc_encrypt / cbc_decrypt  — block-aligned CBC, NO padding

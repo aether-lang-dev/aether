@@ -2,7 +2,7 @@
 // Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
 // Portions copyright (c) 2026 Aether Developers.
 //
-// contrib.cryptography.chacha20poly1305 — ChaCha20, Poly1305, and the
+// std.cryptography.chacha20poly1305 — ChaCha20, Poly1305, and the
 // ChaCha20-Poly1305 AEAD (RFC 8439) in pure Aether. NO externs to OpenSSL.
 // The pure-Aether counterpart to AES-GCM: a modern authenticated cipher
 // with no big lookup tables and no block-cipher dependency.

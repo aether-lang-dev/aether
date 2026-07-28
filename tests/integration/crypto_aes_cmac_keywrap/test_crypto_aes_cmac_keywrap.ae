@@ -1,6 +1,6 @@
-// Validate contrib.cryptography.aes CMAC (RFC 4493) and AES Key Wrap
+// Validate std.cryptography.aes CMAC (RFC 4493) and AES Key Wrap
 // (RFC 3394) against the spec test vectors.
-import contrib.cryptography.aes
+import std.cryptography.aes
 import std.bytes
 import std.string
 import std.io

@@ -16,7 +16,7 @@
 //
 // Import with:  import std.cryptography.ascon_aead128
 //
-// API (mirrors contrib.cryptography.chacha20poly1305):
+// API (mirrors std.cryptography.chacha20poly1305):
 //   aead_seal(key16, nonce16, aad, aad_len, pt, pt_len)
 //       -> ptr ciphertext-with-tag (pt_len + 16 bytes; 16-byte tag appended)
 //   aead_open(key16, nonce16, aad, aad_len, ct_with_tag, ct_len)

@@ -1,8 +1,8 @@
-// Validate contrib.cryptography.chacha20poly1305 against RFC 8439 vectors:
+// Validate std.cryptography.chacha20poly1305 against RFC 8439 vectors:
 // the Poly1305 §2.5.2 tag and the ChaCha20-Poly1305 AEAD §2.8.2 example
 // (seal produces the exact spec ciphertext+tag; open round-trips and a
 // tampered tag is rejected).
-import contrib.cryptography.chacha20poly1305
+import std.cryptography.chacha20poly1305
 import std.bytes
 import std.string
 import std.io
