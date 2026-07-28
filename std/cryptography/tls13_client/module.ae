@@ -33,11 +33,16 @@
 // (including a leaf→intermediate→root chain) connects; self-signed, wrong-host,
 // and expired certs are each rejected.
 //
-// The CertificateVerify accepts ECDSA-P256 and RSA-PSS-rsae-SHA256 (the two
-// mainstream server signatures); the record layer negotiates ChaCha20-Poly1305
-// or AES-128-GCM from the ServerHello. Remaining limits: X25519-only key
-// exchange, no HelloRetryRequest, no resumption/0-RTT/mTLS, no revocation
-// (CRL/OCSP).
+// The CertificateVerify accepts ECDSA-P256 and RSA-PSS-rsae-SHA256; the chain
+// signature verify additionally handles RSA-PKCS#1-SHA256 and ECDSA-P384-SHA384
+// (common on modern intermediates/roots). The record layer negotiates
+// ChaCha20-Poly1305 or AES-128-GCM, and the ClientHello sends SNI. Verified
+// end-to-end against a real public HTTPS server (github.com): X25519 handshake,
+// full chain authentication (leaf→intermediate→root, mixed P-256/P-384),
+// hostname + validity, and a decrypted HTTP/1.1 200 response.
+//
+// Remaining limits: X25519-only key exchange, no HelloRetryRequest, no
+// resumption/0-RTT/mTLS, no revocation (CRL/OCSP).
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -306,13 +311,42 @@ fn recio_free(r: *RecordIO) {
 // Pull more bytes from the socket into the buffer. Returns bytes read, or <= 0
 // on close/error.
 fn recio_fill(r: *RecordIO) -> int {
-    chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
-    if string.equals(err, "") != 1 { return -1 }
-    if n <= 0 { return n }
-    bytes.copy_from_string(r.buf, r.len, chunk, n)
-    r.len = r.len + n
-    return n
+    // Retry on a would-block "timeout" (peer idle, not closed); only an orderly
+    // FIN or hard error is a real close. Without this, a server that pauses even
+    // briefly after the handshake (network latency to a real host) is mistaken
+    // for a dropped connection. -1 = closed/error, >0 = bytes buffered.
+    tries = 0
+    filling = 1
+    result = -1
+    while filling == 1 {
+        chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+        if string.equals(err, "") == 1 {
+            if n <= 0 { result = n; filling = 0 } else {
+                bytes.copy_from_string(r.buf, r.len, chunk, n)
+                r.len = r.len + n
+                result = n
+                filling = 0
+            }
+        } else {
+            if string.equals(err, "timeout") == 1 {
+                // Idle read; retry a bounded number of times before giving up.
+                tries = tries + 1
+                if tries >= RECIO_MAX_TIMEOUT_RETRIES {
+                    result = -1
+                    filling = 0
+                }
+            } else {
+                result = -1
+                filling = 0
+            }
+        }
+    }
+    return result
 }
+
+// Bound on consecutive would-block retries in recio_fill. Each underlying recv
+// carries the OS socket timeout, so this caps the total post-handshake wait.
+const RECIO_MAX_TIMEOUT_RETRIES = 50
 
 // Read exactly one complete TLS record. Returns (record_bytes, total_len, "")
 // where record_bytes is a fresh buffer of the whole record (header + payload),
@@ -408,7 +442,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     pub = x25519.base_point(x25519_priv)
     rnd = rand_into(32)
     sid = rand_into(32)
-    ch = tls13_hs.client_hello(rnd, sid, 32, pub)
+    ch = tls13_hs.client_hello_sni(rnd, sid, 32, pub, host)
     ch_len = bytes.length(ch)
     tr = transcript_new()
     transcript_add(tr, ch, ch_len)

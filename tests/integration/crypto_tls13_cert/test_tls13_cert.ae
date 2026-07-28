@@ -312,6 +312,27 @@ main() {
     tls13_cert.free_leaf(&croot); tls13_cert.free_leaf(&cint); tls13_cert.free_leaf(&cleaf)
     bytes.free(cp_root); bytes.free(cp_int); bytes.free(cp_leaf)
 
+    // --- P-384 / SHA-384 chain hop (mirrors real CDN chains, e.g. Cloudflare) ---
+    // P-256 leaf (ecdsa-with-SHA384) <- P-384 intermediate <- P-384 root; the
+    // intermediate->root hop exercises ecdsa-with-SHA384 on a P-384 key.
+    p3_root = from_hex("308201bb30820140a00302010202143b4dd64f182548ee3b4db75b13a8056dcab225b0300a06082a8648ce3d04030330143112301006035504030c095033383420526f6f74301e170d3236303732383233323034375a170d3236303733313233323034375a30143112301006035504030c095033383420526f6f743076301006072a8648ce3d020106052b8104002203620004e8cec1ccdf3617fe9d5ed125213cbc44c59d042296aabd3e8f3ee254720218387186645288ce368b0f85a6de2fb6eb66a3bbc6cd8a7f6d9c69fa146cf2474d106c21371bb12d18140c8f56a9de6a27a175b5ac676f1fac3de0b8df425f123f2ba3533051301d0603551d0e041604143199a441395addd70ef98c40f0f9bb5deb258041301f0603551d230418301680143199a441395addd70ef98c40f0f9bb5deb258041300f0603551d130101ff040530030101ff300a06082a8648ce3d0403030369003066023100d92a730144a13a69cafe4fdb6aac0f11a73720c8c139398ed8b517b86a1745cbf843d7e6cafba79b0a69a35d8532d11a023100f760d19516a65ff3cffca412c3b7eb065dcbba060d5f6fa15d3877d19b5ad3aac4654f8939d8d38dc4ed2e3c0d650250")
+    p3_int  = from_hex("308201bf30820145a00302010202147da90084287b98be35e8d0f8b0560f14551202ef300a06082a8648ce3d04030330143112301006035504030c095033383420526f6f74301e170d3236303732383233323034375a170d3236303733313233323034375a301c311a301806035504030c115033383420496e7465726d6564696174653076301006072a8648ce3d020106052b8104002203620004507484ddb93c1e5669110a6a4553908b10024d6f9815a14163766f345da99794408e172a6f41797d7ffa9932c8ea55045c2214780e4ca693c37cbec98cee36cab06035e40bfb8c7df4367ea24f730cbdeaffef55247d59ebf8b8b85a4065731ea350304e300c0603551d13040530030101ff301d0603551d0e04160414f454ad54fef131117122913fa2a9405e39590bd6301f0603551d230418301680143199a441395addd70ef98c40f0f9bb5deb258041300a06082a8648ce3d04030303680030650231009062c469e647bc1ed74dba16ad9dae64874e2553761f60e9b5ec9ba3d524235832c1e602dc338919ec8eb8e81d8f370b023021eb3efd29f65703132409340757ad5fcf261ea0ffac9f309b5bfc8ca3752a1b04b40d6242d592e070ac585e67af954e")
+    p3_leaf = from_hex("308201ab30820130a0030201020214630cdd4abcb25aefaa8c8ed4fd78f20890c307e0300a06082a8648ce3d040303301c311a301806035504030c115033383420496e7465726d656469617465301e170d3236303732383233323330365a170d3236303733303233323330365a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d030107034200042bd74544c6d2914d7014fdced7ee45c8eae202d5cf49683f507035853d293a7a91c7fbf62c6f775ed813995839e86438fa103a9e64c686b72580dccbc58c525ca358305630140603551d11040d300b82096c6f63616c686f7374301d0603551d0e04160414b794ef309a904f1e3ac5f8d0411edc36eaa2c0fb301f0603551d23041830168014f454ad54fef131117122913fa2a9405e39590bd6300a06082a8648ce3d04030303690030660231009c75af244bd359d8c9ee1ecb8dd109f88e624da9b4946d5895d23f284f7253bb8b8eda49bbd0165de5ee8079a01c456f023100a07599984a4a581989aa81222a33d1a7b7ba3bf8325320d16b087f0df2540229f7e8dc0c4c0d11daef1529d41740f52f")
+    p3r = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    p3i = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    p3l = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    tls13_cert.parse_certificate(p3_root, bytes.length(p3_root), &p3r)
+    tls13_cert.parse_certificate(p3_int,  bytes.length(p3_int),  &p3i)
+    tls13_cert.parse_certificate(p3_leaf, bytes.length(p3_leaf), &p3l)
+    p3anchors = list_new(); list_add_raw(p3anchors, &p3r)
+    p3inters  = list_new(); list_add_raw(p3inters, &p3i)
+    if string.equals(tls13_cert.chain_verify_path(&p3l, p3inters, p3anchors), "") == 1 {
+        println("ok   P-256 leaf <- P-384/SHA-384 intermediate <- P-384 root verified")
+    } else { println("FAIL P-384 chain hop rejected"); total_ok = 0 }
+    list_free(p3anchors); list_free(p3inters)
+    tls13_cert.free_leaf(&p3r); tls13_cert.free_leaf(&p3i); tls13_cert.free_leaf(&p3l)
+    bytes.free(p3_root); bytes.free(p3_int); bytes.free(p3_leaf)
+
     if total_ok == 0 {
         println("tls13_cert: FAILURES")
         exit(1)

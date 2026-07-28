@@ -41,6 +41,7 @@ import std.list
 import std.cryptography.asn1
 import std.cryptography.sha2
 import std.cryptography.p256
+import std.cryptography.p384
 import std.cryptography.ed25519
 import std.os
 
@@ -112,7 +113,7 @@ cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
 // Split a DER ECDSA-Sig-Value  SEQUENCE { r INTEGER, s INTEGER }  into two
 // fixed 32-byte big-endian scalars (left-padded / high-byte-trimmed as
 // needed). Returns (r32, s32, "") or (null, null, err).
-fn split_ecdsa_sig(sig: ptr, sig_len: int) -> (ptr, ptr, string) {
+fn split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
     view = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(view, sig_len - 1, 0) }
     bytes.copy_from_bytes(view, 0, sig, 0, sig_len)
@@ -135,37 +136,37 @@ fn split_ecdsa_sig(sig: ptr, sig_len: int) -> (ptr, ptr, string) {
         asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
         return null, null, serr2
     }
-    r32 = bn_to_fixed32(rint)
-    s32 = bn_to_fixed32(sint)
+    r = bn_to_fixed(rint, coord)
+    s = bn_to_fixed(sint, coord)
     bignum.free(rint)
     bignum.free(sint)
     asn1.reader_free(sub)
     asn1.reader_free(rdr)
     bytes.free(view)
     bytes.free(body)
-    return r32, s32, ""
+    return r, s, ""
 }
 
 // Render a std.bignum into exactly 32 big-endian bytes (left-padded with
 // zeros; high bytes dropped if the value somehow exceeds 32 bytes — it never
 // should for a P-256 scalar).
-fn bn_to_fixed32(v: ptr) -> ptr {
+fn bn_to_fixed(v: ptr, width: int) -> ptr {
     be = bignum.to_bytes_unsigned(v)   // variable-length big-endian magnitude
     n = bytes.length(be)
-    out = bytes.new(32)
+    out = bytes.new(width)
     i = 0
-    while i < 32 {
+    while i < width {
         bytes.set(out, i, 0)
         i = i + 1
     }
-    // Right-align: copy the low min(n,32) bytes into the tail of `out`.
+    // Right-align: copy the low min(n,width) bytes into the tail of `out`.
     copy_n = n
     src_start = 0
-    if n > 32 {
-        copy_n = 32
-        src_start = n - 32
+    if n > width {
+        copy_n = width
+        src_start = n - width
     }
-    dst = 32 - copy_n
+    dst = width - copy_n
     k = 0
     while k < copy_n {
         bytes.set(out, dst + k, bytes.get(be, src_start + k) & 0xFF)
@@ -201,7 +202,7 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
         // NOTE: sha2.sha256_bytes takes a STRING; content is a std.bytes
         // buffer, so we must hash it through the streaming update_bytes path.
         digest = sha256_of_bytes(content, clen)
-        r32, s32, serr = split_ecdsa_sig(sig, sig_len)
+        r32, s32, serr = split_ecdsa_sig(sig, sig_len, 32)
         if string.equals(serr, "") == 1 {
             result = p256.ecdsa_verify(pubx, puby, digest, r32, s32)
             bytes.free(r32)
@@ -788,6 +789,7 @@ check_hostname(c: *LeafCert, host: string) -> string {
 // Supported cert signature algorithms (the two that cover the real world):
 //   sha256WithRSAEncryption  1.2.840.113549.1.1.11  -> RSA PKCS#1 v1.5
 //   ecdsa-with-SHA256        1.2.840.10045.4.3.2    -> ECDSA P-256
+//   ecdsa-with-SHA384        1.2.840.10045.4.3.3    -> ECDSA P-384
 // SPKI key algorithms:
 //   rsaEncryption            1.2.840.113549.1.1.1
 //   id-ecPublicKey           1.2.840.10045.2.1
@@ -879,14 +881,12 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
     if leaf.tbs == null { return 0 }
     if leaf.signature == null { return 0 }
     if issuer.spki_key == null { return 0 }
-    // Hash the tbsCertificate DER (SHA-256; both supported schemes use it).
-    hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
-    if hash == null { return 0 }
 
     result = 0
     if oid_is(leaf.sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
         // sha256WithRSAEncryption. Issuer key must be rsaEncryption.
         if oid_is(issuer.spki_algo_oid, "1.2.840.113549.1.1.1") == 1 {
+            hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
             n, e, perr = parse_rsa_spki(issuer.spki_key, issuer.spki_key_len)
             if string.equals(perr, "") == 1 {
                 k = rsa.key_from_components(n, e, null)
@@ -895,36 +895,68 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
                 bytes.free(di)
                 rsa.key_free(k)   // frees n, e too
             }
+            bytes.free(hash)
         }
     }
     if oid_is(leaf.sig_alg_oid, "1.2.840.10045.4.3.2") == 1 {
-        // ecdsa-with-SHA256. Issuer key must be id-ecPublicKey (P-256 point).
+        // ecdsa-with-SHA256 on a P-256 issuer key (65-byte uncompressed point).
         if oid_is(issuer.spki_algo_oid, "1.2.840.10045.2.1") == 1 {
-            px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len)
-            if string.equals(kerr, "") == 1 {
-                r32, s32, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len)
-                if string.equals(serr, "") == 1 {
-                    result = p256.ecdsa_verify(px, py, hash, r32, s32)
-                    bytes.free(r32); bytes.free(s32)
+            if issuer.spki_key_len == 65 {
+                hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
+                px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len, 32)
+                if string.equals(kerr, "") == 1 {
+                    r32, s32, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len, 32)
+                    if string.equals(serr, "") == 1 {
+                        result = p256.ecdsa_verify(px, py, hash, r32, s32)
+                        bytes.free(r32); bytes.free(s32)
+                    }
+                    bytes.free(px); bytes.free(py)
                 }
-                bytes.free(px); bytes.free(py)
+                bytes.free(hash)
             }
         }
     }
-    bytes.free(hash)
+    if oid_is(leaf.sig_alg_oid, "1.2.840.10045.4.3.3") == 1 {
+        // ecdsa-with-SHA384 on a P-384 issuer key (97-byte uncompressed point).
+        // Common on modern roots/intermediates (e.g. Google Trust Services).
+        if oid_is(issuer.spki_algo_oid, "1.2.840.10045.2.1") == 1 {
+            if issuer.spki_key_len == 97 {
+                hash = sha384_of_bytes(leaf.tbs, leaf.tbs_len)
+                px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len, 48)
+                if string.equals(kerr, "") == 1 {
+                    r48, s48, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len, 48)
+                    if string.equals(serr, "") == 1 {
+                        result = p384.ecdsa_verify(px, py, hash, r48, s48)
+                        bytes.free(r48); bytes.free(s48)
+                    }
+                    bytes.free(px); bytes.free(py)
+                }
+                bytes.free(hash)
+            }
+        }
+    }
     return result
 }
 
-// Split an uncompressed EC point (04 || X32 || Y32) from an SPKI key blob into
-// (X32, Y32, ""). Returns (null,null,err) if it isn't a 65-byte uncompressed
-// point. Caller frees X/Y.
-fn ec_point_from_spki(key: ptr, key_len: int) -> (ptr, ptr, string) {
-    if key_len != 65 { return null, null, "unsupported EC point encoding" }
+// SHA-384 of a std.bytes buffer (streaming path).
+fn sha384_of_bytes(data: ptr, len: int) -> ptr {
+    ctx, err = sha2.new("sha384")
+    if err != "" { return null }
+    sha2.update_bytes(ctx, data, len)
+    return sha2.final_bytes(ctx)
+}
+
+// Split an uncompressed EC point (04 || X || Y, each `coord` bytes) from an SPKI
+// key blob into (X, Y, ""). Returns (null,null,err) if it isn't a
+// (1 + 2*coord)-byte uncompressed point. Caller frees X/Y. coord = 32 for
+// P-256, 48 for P-384.
+fn ec_point_from_spki(key: ptr, key_len: int, coord: int) -> (ptr, ptr, string) {
+    if key_len != 1 + 2 * coord { return null, null, "unsupported EC point encoding" }
     if (bytes.get(key, 0) & 0xFF) != 0x04 { return null, null, "EC point not uncompressed" }
-    x = bytes.new(32); bytes.set(x, 31, 0)
-    y = bytes.new(32); bytes.set(y, 31, 0)
-    bytes.copy_from_bytes(x, 0, key, 1, 32)
-    bytes.copy_from_bytes(y, 0, key, 33, 32)
+    x = bytes.new(coord); bytes.set(x, coord - 1, 0)
+    y = bytes.new(coord); bytes.set(y, coord - 1, 0)
+    bytes.copy_from_bytes(x, 0, key, 1, coord)
+    bytes.copy_from_bytes(y, 0, key, 1 + coord, coord)
     return x, y, ""
 }
 
