@@ -23,6 +23,20 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.cryptography.tls13_ks`** (#1298) — the TLS 1.3 key-schedule
+  *driver* (RFC 8446 §7.1): the full secret chain (Early → Handshake →
+  Master secrets, per-direction traffic secrets, and record `write_key` /
+  `write_iv`) on top of `tls13_kdf`. PSK-less first-cut subset. Validated
+  **byte-for-byte against the canonical RFC 8448 §3 trace** — Early/Handshake
+  secrets, `c hs traffic` / `s hs traffic`, and the server `write_key` /
+  `write_iv` all reproduce the RFC's published values; leak-clean.
+- **`std.cryptography.tls13_hs`** (#1298) — the TLS 1.3 handshake message
+  codec (RFC 8446 §4): encodes the subset ClientHello (supported_versions
+  0x0304, ChaCha20-Poly1305 + AES-128-GCM suites, x25519 supported_groups +
+  key_share, signature_algorithms) and parses ServerHello (version / cipher
+  suite / key_share, with malformed-input rejection). Validated by
+  structural assertions + a full ServerHello round-trip; leak-clean. No
+  socket I/O or record layer yet (that is the transport-wiring brick).
 - **`std.cryptography.tls13_kdf`** (#1298) — the TLS 1.3 key schedule (RFC
   8446 §7.1): `HKDF-Expand-Label` and `Derive-Secret`, pure-Aether on top of
   `std.cryptography.hkdf`. Validated against the canonical RFC 8448 §3 early-
