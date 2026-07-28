@@ -234,7 +234,9 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
 
     // x = u * v^3 * (u v^7)^((p-5)/8)
     v2 = fmul(v, v, p); v3 = fmul(v2, v, p)
-    v7 = fmul(v3, fmul(v3, v, p), p)     // v^7 = v^3 * (v^3 * v)
+    v4 = fmul(v3, v, p)                   // v^4 = v^3 * v
+    v7 = fmul(v3, v4, p)                  // v^7 = v^3 * v^4
+    bignum.free(v4)
     uv7 = fmul(u, v7, p)
     exp = exp_p_minus_5_over_8(p)
     pw = bignum.mod_pow(uv7, exp, p)
