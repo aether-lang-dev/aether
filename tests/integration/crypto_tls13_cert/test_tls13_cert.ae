@@ -268,6 +268,22 @@ main() {
     tls13_cert.free_leaf(&eca); tls13_cert.free_leaf(&elf); tls13_cert.free_leaf(&ess)
     bytes.free(eca_der); bytes.free(elf_der); bytes.free(ess_der)
 
+    // --- RSA-PSS server CertificateVerify (SCHEME_RSA_PSS_RSAE_SHA256) ---
+    // A real RSA-2048 PSS(SHA-256, salt=32) signature over the RFC 8446
+    // §4.4.3 content for a fixed 32-byte transcript hash (0x00..0x1f),
+    // with the leaf RSAPublicKey SEQUENCE{n,e} as the SPKI key blob.
+    rsa_spki = from_hex("3082010a0282010100b2ea251f97391dec908f54e44ddd36bcb95d320a46bc6a39d9f54d14b263ebfd3bad694b68673072c55f717485ef79f7981e336560d3c79adbad07ca3e71969c749f8f9e7a360bc59acf6d502806203b71f6b34d86a6a6c82c86b6bf269e64a1ec1c5e1643ee17250c89ee4c58fc8445b34a1ed1b570ac8f0099001571ceb65122b4b5da8e92a10974a6cc7435a8a29d8abfab1289005aa8bf644fd378b5fb190b4185eb5c6c3fb828f80a06da4adab0f6a4a5e137b1c0093fb985f837a4160c8fc956ed4f46f58400e865d68e0277d925de3f3537e279fcde7d4ee39e13ddef81591f41b7acd9814406af93827b8a169143696dbe975a4129dd04718d8d038b0203010001")
+    rsa_sig  = from_hex("59f2417a31649c0040504c1d58e5629c97ed5e6f790b538584390efb7ff870137e0363d5f5cea5b1aadf0a3935fbcbe56f20838bbb2a5342e46d3f9a4e16b9b53dcf1df588cb9213200a445b46273c1ef03da6ba9401db49bf81c18a7584907744ac625a429d4edfbe5adcf41fc3edfc3e78004d2d39ed52894716571657dee2cbbd3cc9d6ce4e3d8644db5147438f7bdca55cb841716d6294d9e8a76e34788dc39b849af51b6484ed46d350d05127e3611c2f0a1c47137a5d0ea68192ff8079885f5b13a99cce2aa830effbea500deb047bd04a2e250d8a3d5af76b14b59540173080258a57aa2d8f43b034bf0930ee1f3c7b732a5e89f2a8b970dc0da295fe")
+    rsa_th   = from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+    if tls13_cert.verify_cert_verify_rsa_pss(rsa_spki, bytes.length(rsa_spki), rsa_th, 32, rsa_sig, bytes.length(rsa_sig)) == 1 {
+        println("ok   RSA-PSS CertificateVerify accepts valid sig")
+    } else { println("FAIL RSA-PSS rejected valid sig"); total_ok = 0 }
+    bytes.set(rsa_sig, 0, (bytes.get(rsa_sig, 0) ^ 0x01) & 0xFF)
+    if tls13_cert.verify_cert_verify_rsa_pss(rsa_spki, bytes.length(rsa_spki), rsa_th, 32, rsa_sig, bytes.length(rsa_sig)) == 0 {
+        println("ok   RSA-PSS CertificateVerify rejects tampered sig")
+    } else { println("FAIL RSA-PSS accepted tampered sig"); total_ok = 0 }
+    bytes.free(rsa_spki); bytes.free(rsa_sig); bytes.free(rsa_th)
+
     if total_ok == 0 {
         println("tls13_cert: FAILURES")
         exit(1)

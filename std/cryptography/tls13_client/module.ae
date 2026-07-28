@@ -857,10 +857,11 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, host: string, anch
                             if string.equals(err, "") == 1 { err = perr }
                         } else {
                             have_leaf = 1
+                            // Extract the EC point only if the SPKI is one; a
+                            // non-EC (RSA) leaf leaves leaf_px null, which the
+                            // RSA-PSS dispatch handles. Not an error here.
                             px, py, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
-                            if string.equals(sperr, "") != 1 {
-                                if string.equals(err, "") == 1 { err = sperr }
-                            } else {
+                            if string.equals(sperr, "") == 1 {
                                 leaf_px = px
                                 leaf_py = py
                             }
@@ -888,15 +889,27 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, host: string, anch
         }
     }
     if string.equals(err, "") == 1 {
-        if leaf_px == null { err = "server did not send a usable Certificate" }
+        if have_leaf == 0 { err = "server did not send a usable Certificate" }
         else {
             if cv_sig == null { err = "server did not send CertificateVerify" }
             else {
-                if cv_scheme != tls13_cert.SCHEME_ECDSA_P256_SHA256 {
-                    err = "unsupported CertificateVerify scheme (only ECDSA-P256 handled)"
+                // Dispatch the CertificateVerify by SignatureScheme:
+                //   ECDSA-P256 (0x0403) -> EC point from the leaf SPKI
+                //   RSA-PSS rsae SHA-256 (0x0804) -> RSA key from the leaf SPKI
+                if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 {
+                    if leaf_px == null {
+                        err = "ECDSA CertificateVerify but leaf is not an EC cert"
+                    } else {
+                        ok = tls13_cert.verify_cert_verify(cv_scheme, leaf_px, leaf_py, th_thru_cert, 32, cv_sig, cv_sig_len)
+                        if ok != 1 { err = "CertificateVerify signature invalid" }
+                    }
                 } else {
-                    ok = tls13_cert.verify_cert_verify(cv_scheme, leaf_px, leaf_py, th_thru_cert, 32, cv_sig, cv_sig_len)
-                    if ok != 1 { err = "CertificateVerify signature invalid" }
+                    if cv_scheme == tls13_cert.SCHEME_RSA_PSS_RSAE_SHA256 {
+                        ok = tls13_cert.verify_cert_verify_rsa_pss(leaf.spki_key, leaf.spki_key_len, th_thru_cert, 32, cv_sig, cv_sig_len)
+                        if ok != 1 { err = "CertificateVerify signature invalid" }
+                    } else {
+                        err = "unsupported CertificateVerify scheme (only ECDSA-P256 and RSA-PSS-SHA256 handled)"
+                    }
                 }
             }
         }

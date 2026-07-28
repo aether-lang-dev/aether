@@ -48,7 +48,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports (
-    cert_verify_content, verify_cert_verify, parse_certificate, free_leaf,
+    cert_verify_content, verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     LeafCert,
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
     leaf_dns_count, leaf_dns_name,
@@ -215,6 +215,24 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
     }
 
     bytes.free(content)
+    return result
+}
+
+// Verify an RSASSA-PSS (rsae, SHA-256) CertificateVerify — SCHEME_RSA_PSS_
+// RSAE_SHA256 (0x0804), the mainstream RSA server signature. The RSA public key
+// comes from the leaf SPKI (RSAPublicKey SEQUENCE { n, e }). PSS parameters for
+// this scheme are fixed: SHA-256 for both the message hash and MGF1, salt
+// length = hash length = 32. Returns 1 if valid, 0 otherwise.
+verify_cert_verify_rsa_pss(spki_key: ptr, spki_len: int, transcript_hash: ptr, th_len: int, sig: ptr, sig_len: int) -> int {
+    n, e, perr = parse_rsa_spki(spki_key, spki_len)
+    if string.equals(perr, "") != 1 { return 0 }
+    content, clen = cert_verify_content(transcript_hash, th_len)
+    digest = sha256_of_bytes(content, clen)
+    k = rsa.key_from_components(n, e, null)
+    result = rsa.verify_pss(k, digest, sig, 32)
+    rsa.key_free(k)   // frees n, e
+    bytes.free(content)
+    bytes.free(digest)
     return result
 }
 
