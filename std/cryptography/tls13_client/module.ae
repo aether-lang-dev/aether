@@ -17,14 +17,26 @@
 //     so far; others fail closed)
 //   - no resumption / 0-RTT / mTLS / HelloRetryRequest
 //
-// ⚠️ PARTIAL AUTHENTICATION. connect() DOES verify the server's
-// CertificateVerify signature against the leaf certificate's public key —
-// proving the peer holds that key (RFC 8446 §4.4.3), which stops the basic
-// MITM that a bare key-exchange would allow. It does NOT yet validate the
-// certificate CHAIN against a trust store, nor check the HOSTNAME against the
-// cert's SAN. So a valid-but-untrusted or wrong-host cert is still accepted.
-// Chain + hostname validation is the next increment; until it lands, do not
-// rely on this for authenticating a specific server identity.
+// SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
+// hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
+//   1. the server's CertificateVerify signature verifies against the leaf's
+//      public key (the peer proves it holds that key);
+//   2. the leaf is within its validity window (not expired / not-yet-valid);
+//   3. the requested hostname matches a leaf SAN dNSName (exact or a single
+//      leftmost-label wildcard; SAN-only, no CN fallback);
+//   4. the leaf chains to a trusted anchor — its issuer DN equals a trust-
+//      store cert's subject DN and its signature verifies under that CA's key.
+// A self-signed, expired, wrong-host, or untrusted cert is rejected. The trust
+// store is the system CA bundle (SSL_CERT_FILE, else the OS default path); if
+// it cannot be loaded, connect() fails closed rather than proceeding unauthed.
+// Verified end-to-end against openssl s_server: a valid+trusted+matching cert
+// connects; self-signed, wrong-host, and expired certs are each rejected.
+//
+// Remaining subset limits: only ECDSA-P256 CertificateVerify is wired, so an
+// RSA-signed *server* CertificateVerify fails closed (note the cert CHAIN
+// verify handles both RSA-PKCS#1 and ECDSA-P256). Intermediate-CA chains
+// deeper than leaf→root are not yet built (the leaf must chain directly to a
+// trusted anchor); no revocation (CRL/OCSP).
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -53,6 +65,9 @@ import std.cryptography.tls13_cert
 import std.cryptography.tls13_record
 import std.cryptography
 import std.net
+import std.list
+import std.os
+import std.fs
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
@@ -367,11 +382,10 @@ fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
 // The returned ClientConn holds the application-data record contexts for
 // send()/recv().
 //
-// NOTE (subset): the server certificate's CertificateVerify signature is NOT
-// yet checked here (that wiring — extracting the leaf SPKI and running
-// tls13_cert.verify_cert_verify over the transcript — is the next increment);
-// this first cut proves the handshake completes and both sides agree on keys
-// via the Finished MACs. Chain/hostname validation is out of subset.
+// After the flight is read, connect() authenticates the server (see the
+// module header): CertificateVerify signature, validity window, hostname/SAN,
+// and chain to a trusted anchor — failing closed on any of them — before the
+// Finished MACs confirm both sides agree on keys.
 connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     sock = net.tcp_connect_raw(host, port)
     if sock == null { return null, "connect failed" }
@@ -468,8 +482,19 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     result_err = ferr
     if string.equals(ferr, "") == 1 {
         // Authenticate the server: verify its CertificateVerify signature over
-        // the transcript through Certificate (RFC 8446 §4.4.3). Fails closed.
-        auth_err = authenticate_server(fl, fllen, th_through_cert)
+        // the transcript through Certificate (RFC 8446 §4.4.3), then enforce
+        // validity / hostname / chain-to-trusted-anchor. Fails closed. The
+        // trust store is loaded here and freed immediately after.
+        auth_err = ""
+        anchors, tsErr = tls13_cert.trust_store_load(trust_store_path())
+        if anchors == null {
+            // Fail closed: without a trust store we cannot authenticate the
+            // chain, so we must not proceed as if the server were trusted.
+            auth_err = "cannot load system trust store"
+        } else {
+            auth_err = authenticate_server(fl, fllen, th_through_cert, host, anchors)
+            tls13_cert.free_anchors(anchors)
+        }
         if string.equals(auth_err, "") != 1 {
             result_err = auth_err
         } else {
@@ -699,11 +724,12 @@ close_conn(conn: ptr) {
 }
 
 // ============================================================================
-// Server authentication (RFC 8446 §4.4.2 / §4.4.3): extract the leaf cert's
-// public key from the Certificate message and verify the CertificateVerify
-// signature over the transcript hash through Certificate. Proves the peer
-// holds the leaf private key. Chain + hostname validation are a further
-// increment; only ECDSA-P256 is handled in this cut (fails closed otherwise).
+// Server authentication (RFC 8446 §4.4.2 / §4.4.3 + RFC 5280/6125): extract the
+// leaf cert from the Certificate message, verify the CertificateVerify
+// signature over the transcript hash through Certificate (proving the peer
+// holds the leaf private key), then enforce validity, hostname/SAN, and chain-
+// to-a-trusted-anchor. Every step fails closed. Only ECDSA-P256 CertificateVerify
+// is handled (fails closed otherwise); the chain sig-verify handles RSA + ECDSA.
 // ============================================================================
 
 // Extract the leaf certificate DER from a Certificate message body (RFC 8446
@@ -755,7 +781,31 @@ fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
 
 // Authenticate the server: extract the leaf public key from Certificate and
 // verify the CertificateVerify signature over `th_thru_cert`. Fails closed.
-fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
+// Locate the system CA-bundle PEM. Honours SSL_CERT_FILE (the de-facto
+// override that curl/openssl respect), then falls back to the common OS
+// locations. Returns the first path that exists, or the Debian/Ubuntu default
+// (so trust_store_load produces a clear "cannot load" error if nothing is
+// present, rather than us guessing).
+fn trust_store_path() -> string {
+    env = os.os_getenv("SSL_CERT_FILE")
+    if string.equals(env, "") != 1 {
+        return env
+    }
+    debian = "/etc/ssl/certs/ca-certificates.crt"      // Debian/Ubuntu/Alpine
+    if fs.file_exists(debian) == 1 { return debian }
+    fedora = "/etc/pki/tls/certs/ca-bundle.crt"        // Fedora/RHEL/CentOS
+    if fs.file_exists(fedora) == 1 { return fedora }
+    bsd = "/etc/ssl/cert.pem"                          // *BSD / macOS (LibreSSL)
+    if fs.file_exists(bsd) == 1 { return bsd }
+    return debian
+}
+
+fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, host: string, anchors: ptr) -> string {
+    // The full parsed leaf is kept alive for the whole function so that, after
+    // the CertificateVerify signature check, we can run RFC 5280/6125 policy
+    // (validity window, hostname/SAN, chain to a trusted anchor) over it.
+    leaf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    have_leaf = 0
     leaf_px = null
     leaf_py = null
     cv_scheme = 0
@@ -778,11 +828,11 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
                     if string.equals(derr, "") != 1 {
                         if string.equals(err, "") == 1 { err = derr }
                     } else {
-                        leaf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: "", signature: null, signature_len: 0, spki_algo_oid: "", spki_key: null, spki_key_len: 0 }
                         perr = tls13_cert.parse_certificate(der, dlen, &leaf)
                         if string.equals(perr, "") != 1 {
                             if string.equals(err, "") == 1 { err = perr }
                         } else {
+                            have_leaf = 1
                             px, py, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
                             if string.equals(sperr, "") != 1 {
                                 if string.equals(err, "") == 1 { err = sperr }
@@ -791,9 +841,6 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
                                 leaf_py = py
                             }
                         }
-                        if leaf.tbs != null { bytes.free(leaf.tbs) }
-                        if leaf.spki_key != null { bytes.free(leaf.spki_key) }
-                        if leaf.signature != null { bytes.free(leaf.signature) }
                         bytes.free(der)
                     }
                     bytes.free(cbody)
@@ -830,6 +877,30 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
             }
         }
     }
+    // The peer holds the leaf private key (CertificateVerify passed). Now the
+    // RFC 5280/6125 policy that turns "handshake completed" into "server is who
+    // it claims to be", each failing closed:
+    //   1. validity window (reject expired / not-yet-valid)
+    //   2. hostname / SAN match (reject wrong host)
+    //   3. chain to a trusted anchor (reject self-signed / untrusted)
+    // Skipped only when anchors == null: that is the signature-only entry used
+    // by verify_flight_auth's recorded-transcript tests, which have no trust
+    // store. connect() always passes a loaded store, so it always enforces.
+    if string.equals(err, "") == 1 {
+      if anchors != null {
+        verr = tls13_cert.check_validity(&leaf)
+        if string.equals(verr, "") != 1 { err = verr }
+        else {
+            herr = tls13_cert.check_hostname(&leaf, host)
+            if string.equals(herr, "") != 1 { err = herr }
+            else {
+                cerr = tls13_cert.chain_verify(&leaf, anchors)
+                if string.equals(cerr, "") != 1 { err = cerr }
+            }
+        }
+      }
+    }
+    if have_leaf == 1 { tls13_cert.free_leaf(&leaf) }
     if leaf_px != null { bytes.free(leaf_px) }
     if leaf_py != null { bytes.free(leaf_py) }
     if cv_sig != null { bytes.free(cv_sig) }
@@ -843,5 +914,8 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
 // and the transcript hash through Certificate. Used by the client's connect()
 // internally; exposed so tests can drive it with good and tampered flights.
 verify_flight_auth(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
-    return authenticate_server(fl, flen, th_thru_cert)
+    // Signature-only mode (anchors == null): checks Certificate +
+    // CertificateVerify but not the RFC 5280/6125 policy. connect() enforces
+    // the full policy via a loaded trust store.
+    return authenticate_server(fl, flen, th_thru_cert, "", null)
 }
