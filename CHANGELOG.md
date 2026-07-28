@@ -23,6 +23,12 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.cryptography.tls13_kdf`** (#1298) — the TLS 1.3 key schedule (RFC
+  8446 §7.1): `HKDF-Expand-Label` and `Derive-Secret`, pure-Aether on top of
+  `std.cryptography.hkdf`. Validated against the canonical RFC 8448 §3 early-
+  secret chain (`Early Secret` and its `derived` secret) and a non-empty-
+  context expand-label; leak-clean. The second brick of the pure-Aether TLS
+  1.3 subset, after `x25519`.
 - **`std.cryptography.x25519`** (#1298) — a **constant-time** X25519 (RFC
   7748) Montgomery ladder over a 10-limb GF(2^255-19) field, ported from
   Bouncy Castle's `X25519` / `X25519Field`. Replaces the previous

@@ -1,0 +1,108 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_kdf — the TLS 1.3 key schedule (RFC 8446 §7.1) in
+// pure Aether, on top of std.cryptography.hkdf. NO externs to OpenSSL. This
+// is the key-derivation glue for the pure-Aether TLS 1.3 subset (issue #1298).
+//
+// TLS 1.3 derives every traffic/handshake key from a chain of HKDF calls,
+// wrapped in two helpers:
+//
+//   HKDF-Expand-Label(Secret, Label, Context, Length) =
+//       HKDF-Expand(Secret, HkdfLabel, Length)
+//   where HkdfLabel (RFC 8446 §7.1) is the wire struct:
+//       uint16 length
+//       opaque label<7..255>   = "tls13 " || Label
+//       opaque context<0..255> = Context
+//
+//   Derive-Secret(Secret, Label, Messages) =
+//       HKDF-Expand-Label(Secret, Label, Transcript-Hash(Messages), Hash.length)
+//
+// Import with:  import std.cryptography.tls13_kdf
+//
+//   expand_label(algo, secret, sec_len, label, context, ctx_len, out_len) -> ptr
+//   derive_secret(algo, secret, sec_len, label, transcript_hash, th_len) -> ptr
+//
+// `algo` is an hmac/hkdf algorithm ("sha256", "sha384"). `label` is a plain
+// Aether string WITHOUT the "tls13 " prefix (this module prepends it). All
+// byte buffers are std.bytes; results are freshly allocated (caller frees).
+// `derive_secret`'s output length is fixed at Hash.length for `algo`.
+
+import std.bytes
+import std.string
+import std.cryptography.hkdf
+
+extern string_length(s: string) -> int
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports (
+    expand_label, derive_secret
+)
+
+// The fixed "tls13 " prefix (6 bytes: 0x74 0x6c 0x73 0x31 0x33 0x20).
+const TLS13_PREFIX_LEN = 6
+
+// Build the RFC 8446 §7.1 HkdfLabel wire struct into a fresh std.bytes buffer.
+//   uint16 length
+//   uint8  (6 + labelLen) || "tls13 " || label
+//   uint8  ctxLen || context
+// Returns the buffer (caller frees) and its length via the tuple.
+fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> (ptr, int) {
+    label_len = string_length(label)
+    expanded_label_len = TLS13_PREFIX_LEN + label_len   // length of "tls13 "||label
+    total = 2 + (1 + expanded_label_len) + (1 + ctx_len)
+
+    hl = bytes.new(total)
+    // Force full zero-fill before partial writes (bytes.new is uninitialised).
+    bytes.set(hl, total - 1, 0)
+
+    // uint16 length (big-endian)
+    bytes.set(hl, 0, (out_len >> 8) & 255)
+    bytes.set(hl, 1, out_len & 255)
+
+    // uint8 expanded-label length, then "tls13 ", then the label bytes
+    bytes.set(hl, 2, expanded_label_len & 255)
+    bytes.set(hl, 3, 0x74)   // 't'
+    bytes.set(hl, 4, 0x6c)   // 'l'
+    bytes.set(hl, 5, 0x73)   // 's'
+    bytes.set(hl, 6, 0x31)   // '1'
+    bytes.set(hl, 7, 0x33)   // '3'
+    bytes.set(hl, 8, 0x20)   // ' '
+    pos = 9
+    i = 0
+    while i < label_len {
+        bytes.set(hl, pos + i, string_char_at_n(label, label_len, i) & 255)
+        i = i + 1
+    }
+
+    // uint8 context length, then the context bytes
+    ctx_pos = 2 + (1 + expanded_label_len)
+    bytes.set(hl, ctx_pos, ctx_len & 255)
+    j = 0
+    while j < ctx_len {
+        bytes.set(hl, ctx_pos + 1 + j, bytes.get(context, j) & 255)
+        j = j + 1
+    }
+
+    return hl, total
+}
+
+// HKDF-Expand-Label(Secret, Label, Context, Length) (RFC 8446 §7.1).
+// `label` is the bare label (no "tls13 " prefix — added here). `context` may
+// be a zero-length buffer. Returns out_len fresh bytes (caller frees).
+expand_label(algo: string, secret: ptr, sec_len: int, label: string, context: ptr, ctx_len: int, out_len: int) -> ptr {
+    hl, hl_len = build_hkdf_label(label, context, ctx_len, out_len)
+    okm = hkdf.hkdf_expand(algo, secret, sec_len, hl, hl_len, out_len)
+    bytes.free(hl)
+    return okm
+}
+
+// Derive-Secret(Secret, Label, Messages) (RFC 8446 §7.1). The caller passes
+// the ALREADY-COMPUTED Transcript-Hash of Messages (th / th_len) rather than
+// the messages themselves, so this stays hash-agnostic. Output length is
+// fixed at Hash.length for `algo`. Returns fresh bytes (caller frees).
+derive_secret(algo: string, secret: ptr, sec_len: int, label: string, transcript_hash: ptr, th_len: int) -> ptr {
+    out_len = hkdf.hash_len(algo)
+    return expand_label(algo, secret, sec_len, label, transcript_hash, th_len, out_len)
+}
