@@ -54,7 +54,9 @@ exports (
     leaf_dns_count, leaf_dns_name,
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
     SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
-    check_validity, time_to_key, check_hostname
+    check_validity, time_to_key, check_hostname,
+    chain_verify, verify_cert_signature,
+    trust_store_load, free_anchors
 )
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
@@ -756,4 +758,256 @@ check_hostname(c: *LeafCert, host: string) -> string {
         i = i + 1
     }
     return "certificate is not valid for the requested hostname"
+}
+
+// ---- chain building + cert-to-cert signature verification (RFC 5280) ----
+//
+// Nic's third bar: a self-signed leaf (issuer == subject, no trusted anchor)
+// must be REJECTED. chain_verify() rejects any leaf whose issuer DN does not
+// exactly match a trusted anchor's subject DN AND whose tbsCertificate
+// signature does not verify under that anchor's public key.
+//
+// Supported cert signature algorithms (the two that cover the real world):
+//   sha256WithRSAEncryption  1.2.840.113549.1.1.11  -> RSA PKCS#1 v1.5
+//   ecdsa-with-SHA256        1.2.840.10045.4.3.2    -> ECDSA P-256
+// SPKI key algorithms:
+//   rsaEncryption            1.2.840.113549.1.1.1
+//   id-ecPublicKey           1.2.840.10045.2.1
+
+import std.cryptography.rsa
+
+// Compare a bytes-stored OID (ASCII dotted string) against a literal.
+fn oid_is(oid: ptr, want: string) -> int {
+    if oid == null { return 0 }
+    olen = bytes.length(oid)
+    wlen = string.length(want)
+    if olen != wlen { return 0 }
+    i = 0
+    while i < olen {
+        if (bytes.get(oid, i) & 0xFF) != (string_char_at_n(want, wlen, i) & 0xFF) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Byte-for-byte DER Name comparison (issuer DN vs subject DN).
+fn dn_equal(a: ptr, alen: int, b: ptr, blen: int) -> int {
+    if a == null { return 0 }
+    if b == null { return 0 }
+    if alen != blen { return 0 }
+    i = 0
+    while i < alen {
+        if (bytes.get(a, i) & 0xFF) != (bytes.get(b, i) & 0xFF) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Build the DER DigestInfo for a SHA-256 hash (what PKCS#1 v1.5 verify wants):
+//   SEQUENCE { SEQUENCE { OID 2.16.840.1.101.3.4.2.1, NULL }, OCTET STRING hash }
+// The 19-byte fixed prefix for SHA-256 followed by the 32-byte hash.
+fn sha256_digestinfo(hash32: ptr) -> ptr {
+    // 30 31 30 0d 06 09 60 86 48 01 65 03 04 02 01 05 00 04 20 <hash>
+    prefix = bytes.new(19)
+    bytes.set(prefix, 0, 0x30); bytes.set(prefix, 1, 0x31)
+    bytes.set(prefix, 2, 0x30); bytes.set(prefix, 3, 0x0d)
+    bytes.set(prefix, 4, 0x06); bytes.set(prefix, 5, 0x09)
+    bytes.set(prefix, 6, 0x60); bytes.set(prefix, 7, 0x86)
+    bytes.set(prefix, 8, 0x48); bytes.set(prefix, 9, 0x01)
+    bytes.set(prefix, 10, 0x65); bytes.set(prefix, 11, 0x03)
+    bytes.set(prefix, 12, 0x04); bytes.set(prefix, 13, 0x02)
+    bytes.set(prefix, 14, 0x01); bytes.set(prefix, 15, 0x05)
+    bytes.set(prefix, 16, 0x00); bytes.set(prefix, 17, 0x04)
+    bytes.set(prefix, 18, 0x20)
+    di = bytes.new(51)
+    bytes.set(di, 50, 0)
+    bytes.copy_from_bytes(di, 0, prefix, 0, 19)
+    bytes.copy_from_bytes(di, 19, hash32, 0, 32)
+    bytes.free(prefix)
+    return di
+}
+
+// Parse an RSA SPKI key blob (the SubjectPublicKey content, which for RSA is
+// SEQUENCE { INTEGER n, INTEGER e }) into (n, e) bignums. Returns (n,e,"") or
+// (null,null,err). Caller frees the bignums with bignum.free.
+fn parse_rsa_spki(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
+    view = bytes.new(key_len)
+    if key_len > 0 { bytes.set(view, key_len - 1, 0) }
+    bytes.copy_from_bytes(view, 0, spki_key, 0, key_len)
+    r = asn1.reader_new(view)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r); bytes.free(view)
+        return null, null, serr
+    }
+    n, nerr = asn1.read_integer(sub)
+    if string.equals(nerr, "") != 1 {
+        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+        return null, null, nerr
+    }
+    e, eerr = asn1.read_integer(sub)
+    if string.equals(eerr, "") != 1 {
+        bignum.free(n)
+        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+        return null, null, eerr
+    }
+    asn1.reader_free(sub); asn1.reader_free(r); bytes.free(view); bytes.free(body)
+    return n, e, ""
+}
+
+// Verify `leaf`'s tbsCertificate signature under `issuer`'s public key.
+// Dispatches on leaf.sig_alg_oid. Returns 1 if the signature is valid, else 0.
+verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
+    if leaf.tbs == null { return 0 }
+    if leaf.signature == null { return 0 }
+    if issuer.spki_key == null { return 0 }
+    // Hash the tbsCertificate DER (SHA-256; both supported schemes use it).
+    hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
+    if hash == null { return 0 }
+
+    result = 0
+    if oid_is(leaf.sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
+        // sha256WithRSAEncryption. Issuer key must be rsaEncryption.
+        if oid_is(issuer.spki_algo_oid, "1.2.840.113549.1.1.1") == 1 {
+            n, e, perr = parse_rsa_spki(issuer.spki_key, issuer.spki_key_len)
+            if string.equals(perr, "") == 1 {
+                k = rsa.key_from_components(n, e, null)
+                di = sha256_digestinfo(hash)
+                result = rsa.verify_pkcs1(k, di, leaf.signature)
+                bytes.free(di)
+                rsa.key_free(k)   // frees n, e too
+            }
+        }
+    }
+    if oid_is(leaf.sig_alg_oid, "1.2.840.10045.4.3.2") == 1 {
+        // ecdsa-with-SHA256. Issuer key must be id-ecPublicKey (P-256 point).
+        if oid_is(issuer.spki_algo_oid, "1.2.840.10045.2.1") == 1 {
+            px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len)
+            if string.equals(kerr, "") == 1 {
+                r32, s32, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len)
+                if string.equals(serr, "") == 1 {
+                    result = p256.ecdsa_verify(px, py, hash, r32, s32)
+                    bytes.free(r32); bytes.free(s32)
+                }
+                bytes.free(px); bytes.free(py)
+            }
+        }
+    }
+    bytes.free(hash)
+    return result
+}
+
+// Split an uncompressed EC point (04 || X32 || Y32) from an SPKI key blob into
+// (X32, Y32, ""). Returns (null,null,err) if it isn't a 65-byte uncompressed
+// point. Caller frees X/Y.
+fn ec_point_from_spki(key: ptr, key_len: int) -> (ptr, ptr, string) {
+    if key_len != 65 { return null, null, "unsupported EC point encoding" }
+    if (bytes.get(key, 0) & 0xFF) != 0x04 { return null, null, "EC point not uncompressed" }
+    x = bytes.new(32); bytes.set(x, 31, 0)
+    y = bytes.new(32); bytes.set(y, 31, 0)
+    bytes.copy_from_bytes(x, 0, key, 1, 32)
+    bytes.copy_from_bytes(y, 0, key, 33, 32)
+    return x, y, ""
+}
+
+// Verify `leaf` chains to one of the trusted `anchors` (a std.list of
+// *LeafCert). Requires an anchor whose subject DN exactly equals leaf.issuer
+// AND under whose key leaf's signature verifies. Returns "" on success, else
+// an error. A self-signed leaf (no matching anchor) is REJECTED here.
+chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
+    if anchors == null { return "no trust anchors" }
+    n = list_size(anchors)
+    if n == 0 { return "no trust anchors" }
+    i = 0
+    while i < n {
+        a = list_get_raw(anchors, i) as *LeafCert
+        if a != null {
+            if dn_equal(leaf.issuer, leaf.issuer_len, a.subject, a.subject_len) == 1 {
+                if verify_cert_signature(leaf, a) == 1 {
+                    return ""
+                }
+            }
+        }
+        i = i + 1
+    }
+    return "certificate does not chain to a trusted anchor"
+}
+
+// ---- system trust store (PEM bundle) ----
+
+import std.fs
+import std.cryptography.pem
+
+// Load a PEM bundle file (e.g. /etc/ssl/certs/ca-certificates.crt) into a
+// std.list of *LeafCert trust anchors. Each PEM CERTIFICATE block is base64-
+// decoded and structurally parsed; blocks that fail to parse are skipped.
+// Returns (list, "") on success or (null, err) if the file can't be read.
+// Caller frees with free_anchors (frees each LeafCert + the list).
+trust_store_load(path: string) -> (ptr, string) {
+    fh = fs.file_open_raw(path, "r")
+    if fh == null { return null, "cannot open trust store" }
+    text = fs.file_read_all_raw(fh)
+    fs.file_close(fh)
+
+    anchors = list_new()
+    end_marker = "-----END CERTIFICATE-----"
+    tlen = string.length(text)
+    mlen = string.length(end_marker)
+    pos = 0
+    while pos < tlen {
+        e = string.index_of_from(text, end_marker, pos)
+        if e < 0 { break }
+        block_end = e + mlen
+        block = string.substring_n(text, tlen, pos, block_end)
+        der, label, perr = pem.parse(block)
+        if string.equals(perr, "") == 1 {
+            if der != null {
+                // sizeof(LeafCert) = 136 on LP64 (9 ptr @8 + 8 int @4, C-packed;
+                // measured via element-stride of a *LeafCert array).
+                leaf = malloc(136) as *LeafCert
+                init_leaf(leaf)
+                dlen = bytes.length(der)
+                cerr = parse_certificate(der, dlen, leaf)
+                if string.equals(cerr, "") == 1 {
+                    list_add_raw(anchors, leaf)
+                } else {
+                    free_leaf(leaf)
+                    free(leaf)
+                }
+            }
+            bytes.free(der)
+        }
+        pos = block_end
+    }
+    return anchors, ""
+}
+
+// Zero every field of a heap-allocated LeafCert.
+fn init_leaf(l: *LeafCert) {
+    l.tbs = null; l.tbs_len = 0
+    l.sig_alg_oid = null
+    l.signature = null; l.signature_len = 0
+    l.spki_algo_oid = null; l.spki_key = null; l.spki_key_len = 0
+    l.issuer = null; l.issuer_len = 0
+    l.subject = null; l.subject_len = 0
+    l.not_before = null; l.not_before_len = 0
+    l.not_after = null; l.not_after_len = 0
+    l.dns_names = null
+}
+
+// Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,
+// each LeafCert struct, then the list.
+free_anchors(anchors: ptr) {
+    if anchors == null { return }
+    n = list_size(anchors)
+    i = 0
+    while i < n {
+        a = list_get_raw(anchors, i) as *LeafCert
+        if a != null {
+            free_leaf(a)
+            free(a)
+        }
+        i = i + 1
+    }
+    list_free(anchors)
 }
