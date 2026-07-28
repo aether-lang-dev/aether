@@ -14,6 +14,7 @@ import std.cryptography.sha2
 import std.cryptography.asn1
 import std.bytes
 import std.string
+import std.list
 import std.io
 
 extern exit(code: int)
@@ -92,6 +93,31 @@ fn der_ecdsa_sig(r32: ptr, s32: ptr) -> (ptr, int) {
     return tmp, total
 }
 
+// Copy an ASCII string into a fresh bytes buffer of its exact length.
+fn str_to_bytes(s: string) -> ptr {
+    n = string_length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    return b
+}
+
+// A LeafCert carrying only notBefore/notAfter times (for validity tests).
+fn mk_leaf_times(nb: string, na: string) -> tls13_cert.LeafCert {
+    lf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: str_to_bytes(nb), not_before_len: string_length(nb), not_after: str_to_bytes(na), not_after_len: string_length(na), dns_names: null }
+    return lf
+}
+
+// A LeafCert carrying a single SAN dNSName (for hostname tests).
+fn mk_leaf_san(name: string) -> tls13_cert.LeafCert {
+    lf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: list_new() }
+    list_add_raw(lf.dns_names, str_to_bytes(name))
+    return lf
+}
+
 main() {
     total_ok = 1
 
@@ -168,6 +194,47 @@ main() {
     bytes.free(dsig)
     bytes.free(th2)
     bytes.free(th)
+
+    // --- validity-period check (Nic's "expired must fail") ---
+    // notBefore 2020, notAfter 2020 -> expired.
+    exp = mk_leaf_times("200101000000Z", "200102000000Z")
+    if string.equals(tls13_cert.check_validity(&exp), "") != 1 {
+        println("ok   expired cert rejected")
+    } else { println("FAIL expired cert accepted"); total_ok = 0 }
+    tls13_cert.free_leaf(&exp)
+    // notBefore 2030 -> not yet valid.
+    fut = mk_leaf_times("300101000000Z", "310101000000Z")
+    if string.equals(tls13_cert.check_validity(&fut), "") != 1 {
+        println("ok   not-yet-valid cert rejected")
+    } else { println("FAIL not-yet-valid cert accepted"); total_ok = 0 }
+    tls13_cert.free_leaf(&fut)
+    // notBefore 2020, notAfter 2040 -> currently valid.
+    val = mk_leaf_times("200101000000Z", "400101000000Z")
+    if string.equals(tls13_cert.check_validity(&val), "") == 1 {
+        println("ok   currently-valid cert accepted")
+    } else { println("FAIL currently-valid cert rejected"); total_ok = 0 }
+    tls13_cert.free_leaf(&val)
+
+    // --- hostname / SAN matching (Nic's "wrong host must fail") ---
+    hw = mk_leaf_san("*.example.com")
+    if string.equals(tls13_cert.check_hostname(&hw, "foo.example.com"), "") == 1 {
+        println("ok   *.example.com matches foo.example.com")
+    } else { println("FAIL wildcard rejected valid host"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&hw, "example.com"), "") != 1 {
+        println("ok   *.example.com rejects bare example.com")
+    } else { println("FAIL wildcard matched bare domain"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&hw, "a.b.example.com"), "") != 1 {
+        println("ok   *.example.com rejects a.b.example.com")
+    } else { println("FAIL wildcard spanned two labels"); total_ok = 0 }
+    tls13_cert.free_leaf(&hw)
+    he = mk_leaf_san("api.example.com")
+    if string.equals(tls13_cert.check_hostname(&he, "API.example.com"), "") == 1 {
+        println("ok   exact match is case-insensitive")
+    } else { println("FAIL exact match not case-insensitive"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&he, "evil.com"), "") != 1 {
+        println("ok   exact SAN rejects wrong host")
+    } else { println("FAIL exact SAN matched wrong host"); total_ok = 0 }
+    tls13_cert.free_leaf(&he)
 
     if total_ok == 0 {
         println("tls13_cert: FAILURES")

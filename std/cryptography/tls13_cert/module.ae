@@ -37,18 +37,24 @@
 import std.bytes
 import std.string
 import std.bignum
+import std.list
 import std.cryptography.asn1
 import std.cryptography.sha2
 import std.cryptography.p256
 import std.cryptography.ed25519
+import std.os
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports (
-    cert_verify_content, verify_cert_verify, parse_certificate,
+    cert_verify_content, verify_cert_verify, parse_certificate, free_leaf,
     LeafCert,
-    SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256
+    leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
+    leaf_dns_count, leaf_dns_name,
+    leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
+    SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
+    check_validity, time_to_key, check_hostname
 )
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
@@ -212,69 +218,116 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
 
 // ---- X.509 structural parse ----
 
-// Views into a parsed leaf Certificate (RFC 5280). All ptr fields are fresh
+// Views into a parsed Certificate (RFC 5280). All ptr fields are fresh
 // std.bytes the caller must free via free_leaf. `tbs` is the exact DER of
-// tbsCertificate (the signed bytes); `spki_algo_oid` is the SPKI algorithm
-// OID (dotted string); `spki_key` is the subjectPublicKey BIT STRING content
-// (for EC: 0x04 || X || Y uncompressed point; for RSA: the RSAPublicKey DER).
+// tbsCertificate INCLUDING its SEQUENCE tag+length (the bytes the certificate
+// signature is computed over); `spki_algo_oid`/`spki_key` are the subject
+// public key (EC: 0x04||X||Y; RSA: RSAPublicKey DER).
+//
+// For chain building and policy: `issuer`/`subject` hold the raw DER of the
+// issuer/subject Name (for issuer==subject DN matching); `not_before`/
+// `not_after` hold the validity times as their raw ASN.1 time strings
+// (UTCTime "YYMMDDHHMMSSZ" or GeneralizedTime "YYYYMMDDHHMMSSZ"); `dns_names`
+// is a std.list of dNSName strings from the SAN extension.
+// NOTE: fields that are STORED and freed later are std.bytes buffers, not
+// strings. Storing an owned AetherString in a struct field and freeing it in a
+// separate cleanup is a refcount minefield in Aether (leaks or double-frees);
+// bytes buffers free deterministically via bytes.free. So OIDs, validity
+// times, and dNSNames are held as bytes; compare via bytes, or stringify a
+// transient copy when needed.
 struct LeafCert {
-    tbs: ptr
+    tbs: ptr             // full tbsCertificate DER (tag+len+content)
     tbs_len: int
-    sig_alg_oid: string
-    signature: ptr
+    sig_alg_oid: ptr     // outer signatureAlgorithm OID (dotted, as bytes) or null
+    signature: ptr       // outer signatureValue (BIT STRING content)
     signature_len: int
-    spki_algo_oid: string
+    spki_algo_oid: ptr   // SPKI algorithm OID (dotted, as bytes) or null
     spki_key: ptr
     spki_key_len: int
+    issuer: ptr          // raw DER of the issuer Name (fresh bytes) or null
+    issuer_len: int
+    subject: ptr         // raw DER of the subject Name (fresh bytes) or null
+    subject_len: int
+    not_before: ptr      // validity notBefore, raw time bytes or null
+    not_before_len: int
+    not_after: ptr       // validity notAfter, raw time bytes or null
+    not_after_len: int
+    dns_names: ptr        // std.list of dNSName BYTES buffers (SAN), or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
 // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+// Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+// Positionally walks tbsCertificate to extract the full TBS DER, validity,
+// issuer/subject DNs, SAN dNSNames, and the subject public key.
 parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
     out.tbs = null
     out.tbs_len = 0
-    out.sig_alg_oid = ""
+    out.sig_alg_oid = null
     out.signature = null
     out.signature_len = 0
-    out.spki_algo_oid = ""
+    out.spki_algo_oid = null
     out.spki_key = null
     out.spki_key_len = 0
+    out.issuer = null
+    out.issuer_len = 0
+    out.subject = null
+    out.subject_len = 0
+    out.not_before = null
+    out.not_before_len = 0
+    out.not_after = null
+    out.not_after_len = 0
+    out.dns_names = null
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
     bytes.copy_from_bytes(view, 0, der, 0, len)
 
     top = asn1.reader_new(view)
+
+    // Capture the FULL tbsCertificate DER (tag+len+content): bracket the
+    // read with reader_pos so we can slice the exact signed bytes.
+    // Certificate is a SEQUENCE; step into it, then the first element is TBS.
     cert, cert_body, cerr = asn1.read_sequence(top)
     if string.equals(cerr, "") != 1 {
         asn1.reader_free(top); bytes.free(view)
         return cerr
     }
-
-    // tbsCertificate — capture its exact DER bytes (the signed content).
-    tbs, terr = asn1.read_tlv(cert)   // NOTE: content only; we need full TLV
-    // read_tlv returns the CONTENT of the TBS SEQUENCE, not its full DER.
-    // We need the full tbsCertificate DER (tag+len+content) for signature
-    // verification. Re-derive it from cert_body by re-parsing with a length
-    // walk below instead; for THIS brick we expose the TBS content and the
-    // SPKI, which is what the CertificateVerify path consumes (it uses the
-    // leaf's public key, not the chain signature over TBS). Chain-signature
-    // verification lands with the chain-building increment.
+    tbs_start = asn1.reader_pos(cert)
+    tbs_content, terr = asn1.read_tlv(cert)
     if string.equals(terr, "") != 1 {
         asn1.reader_free(cert); asn1.reader_free(top); bytes.free(view); bytes.free(cert_body)
         return terr
     }
-    out.tbs = tbs
-    out.tbs_len = bytes.length(tbs)
+    tbs_end = asn1.reader_pos(cert)
+    // Slice the full TBS DER out of cert_body (cert reads over cert_body).
+    tbs_dlen = tbs_end - tbs_start
+    full_tbs = bytes.new(tbs_dlen)
+    if tbs_dlen > 0 { bytes.set(full_tbs, tbs_dlen - 1, 0) }
+    bytes.copy_from_bytes(full_tbs, 0, cert_body, tbs_start, tbs_dlen)
+    out.tbs = full_tbs
+    out.tbs_len = tbs_dlen
 
-    // Walk tbsCertificate to reach subjectPublicKeyInfo. Fields in order:
-    //   [0] version (optional, explicit), serialNumber INTEGER,
-    //   signature AlgorithmIdentifier, issuer Name, validity, subject Name,
-    //   subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }
-    tbsr = asn1.reader_new(tbs)
-    perr = parse_tbs_to_spki(tbsr, out)
+    // outer signatureAlgorithm (SEQUENCE) then signatureValue (BIT STRING).
+    salg_body, salg_full, saerr = asn1.read_sequence(cert)
+    if string.equals(saerr, "") == 1 {
+        soid, soerr = asn1.read_oid(salg_body)
+        if string.equals(soerr, "") == 1 { out.sig_alg_oid = oid_to_bytes(soid); string.release(soid) }
+        asn1.reader_free(salg_body)
+        bytes.free(salg_full)
+    }
+    sigbits, snbits, sberr = asn1.read_bit_string(cert)
+    if string.equals(sberr, "") == 1 {
+        out.signature = sigbits
+        out.signature_len = bytes.length(sigbits)
+    }
+
+    // Positional walk of the TBS content.
+    tbsr = asn1.reader_new(tbs_content)
+    perr = parse_tbs_fields(tbsr, out)
     asn1.reader_free(tbsr)
 
+    bytes.free(tbs_content)
     asn1.reader_free(cert)
     asn1.reader_free(top)
     bytes.free(view)
@@ -282,60 +335,425 @@ parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
     return perr
 }
 
-// Advance through tbsCertificate to subjectPublicKeyInfo and populate
-// out.spki_algo_oid / out.spki_key. `tbsr` reads the TBS content.
-fn parse_tbs_to_spki(tbsr: ptr, out: *LeafCert) -> string {
-    // Optional [0] version: skip if present (context tag 0xA0).
-    // We peek by reading one TLV and checking last_tag.
-    first, e1 = asn1.read_tlv(tbsr)
-    if string.equals(e1, "") != 1 { return e1 }
-    // If the first element was the explicit [0] version wrapper, the next
-    // element is serialNumber; otherwise `first` WAS serialNumber. Either
-    // way we now skip fields until we've consumed: serialNumber, signature
-    // AlgId, issuer, validity, subject — then the next SEQUENCE is SPKI.
-    bytes.free(first)
-
-    // Skip a fixed number of intervening TLVs then read SPKI. The count
-    // depends on whether [0] version was present. Rather than track that
-    // fragile count, scan for the SPKI: the first SEQUENCE whose first
-    // element is an AlgorithmIdentifier followed by a BIT STRING.
-    return scan_for_spki(tbsr, out)
-}
-
-// Scan remaining TLVs; the SPKI is a SEQUENCE containing an AlgorithmId
-// SEQUENCE then a BIT STRING. We look for a SEQUENCE (tag 0x30) whose body
-// parses as { SEQUENCE(algo), BIT STRING(key) }.
-fn scan_for_spki(tbsr: ptr, out: *LeafCert) -> string {
-    while asn1.reader_eof(tbsr) != 1 {
-        content, e = asn1.read_tlv(tbsr)
-        if string.equals(e, "") != 1 { return e }
-        tag = asn1.last_tag(tbsr)
-        if tag == 0x30 {
-            // Candidate SPKI: try to parse { AlgId SEQUENCE, BIT STRING }.
-            sub = asn1.reader_new(content)
-            algo_body, algo_full, ae = asn1.read_sequence(sub)
-            if string.equals(ae, "") == 1 {
-                // algorithm OID is the first element of the AlgId sequence
-                oid, oerr = asn1.read_oid(algo_body)
-                bitkey, nbits, berr = asn1.read_bit_string(sub)
-                if string.equals(oerr, "") == 1 && string.equals(berr, "") == 1 {
-                    out.spki_algo_oid = oid
-                    out.spki_key = bitkey
-                    out.spki_key_len = bytes.length(bitkey)
-                    asn1.reader_free(algo_body)
-                    asn1.reader_free(sub)
-                    bytes.free(algo_full)
-                    bytes.free(content)
-                    return ""
-                }
-                if string.equals(berr, "") == 1 { bytes.free(bitkey) }
-                asn1.reader_free(algo_body)
-                bytes.free(algo_full)
-            }
-            asn1.reader_free(sub)
-        }
-        bytes.free(content)
+// TBSCertificate ::= SEQUENCE {
+//   [0] version DEFAULT v1, serialNumber, signature AlgId, issuer Name,
+//   validity SEQUENCE { notBefore Time, notAfter Time }, subject Name,
+//   subjectPublicKeyInfo, ... [3] extensions OPTIONAL }
+// `tbsr` reads the TBS *content* (fields in order).
+fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
+    // [0] version (context tag 0xA0) — optional; skip if present.
+    v, verr = asn1.read_tlv(tbsr)
+    if string.equals(verr, "") != 1 { return verr }
+    vtag = asn1.last_tag(tbsr)
+    bytes.free(v)
+    if vtag != 0xA0 {
+        // `v` was actually serialNumber; the field after version is
+        // serialNumber, so if there was no version we've now consumed
+        // serialNumber and should NOT read it again. Track this.
+        // (Handled below by not reading serialNumber when vtag != 0xA0.)
     }
-    return "x509: subjectPublicKeyInfo not found"
+
+    // serialNumber INTEGER — only present-to-read if we consumed [0] above.
+    if vtag == 0xA0 {
+        sn, snerr = asn1.read_tlv(tbsr)
+        if string.equals(snerr, "") != 1 { return snerr }
+        bytes.free(sn)
+    }
+
+    // signature AlgorithmIdentifier (SEQUENCE) — skip.
+    sa, saerr = asn1.read_tlv(tbsr)
+    if string.equals(saerr, "") != 1 { return saerr }
+    bytes.free(sa)
+
+    // issuer Name (SEQUENCE) — capture raw DER (tag+len+content).
+    iss, ierr = read_tlv_full(tbsr)
+    if string.equals(ierr, "") != 1 { return ierr }
+    out.issuer = iss
+    out.issuer_len = bytes.length(iss)
+
+    // validity SEQUENCE { notBefore, notAfter }.
+    val_content, valerr = asn1.read_tlv(tbsr)
+    if string.equals(valerr, "") != 1 { return valerr }
+    vr = asn1.reader_new(val_content)
+    nb, nberr = asn1.read_tlv(vr)
+    if string.equals(nberr, "") == 1 { out.not_before = nb; out.not_before_len = bytes.length(nb) }
+    na, naerr = asn1.read_tlv(vr)
+    if string.equals(naerr, "") == 1 { out.not_after = na; out.not_after_len = bytes.length(na) }
+    asn1.reader_free(vr)
+    bytes.free(val_content)
+
+    // subject Name (SEQUENCE) — capture raw DER.
+    subj, suberr = read_tlv_full(tbsr)
+    if string.equals(suberr, "") != 1 { return suberr }
+    out.subject = subj
+    out.subject_len = bytes.length(subj)
+
+    // subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }.
+    spki_content, spkierr = asn1.read_tlv(tbsr)
+    if string.equals(spkierr, "") != 1 { return spkierr }
+    sr = asn1.reader_new(spki_content)
+    algo_body, algo_full, ae = asn1.read_sequence(sr)
+    if string.equals(ae, "") == 1 {
+        oid, oerr = asn1.read_oid(algo_body)
+        if string.equals(oerr, "") == 1 { out.spki_algo_oid = oid_to_bytes(oid); string.release(oid) }
+        asn1.reader_free(algo_body)
+        bytes.free(algo_full)
+    }
+    bitkey, nbits, berr = asn1.read_bit_string(sr)
+    if string.equals(berr, "") == 1 {
+        out.spki_key = bitkey
+        out.spki_key_len = bytes.length(bitkey)
+    }
+    asn1.reader_free(sr)
+    bytes.free(spki_content)
+
+    // Remaining: optional [1]/[2] unique IDs and [3] extensions. Scan for the
+    // [3] EXPLICIT extensions wrapper (tag 0xA3) and parse SAN out of it.
+    out.dns_names = list_new()
+    while asn1.reader_eof(tbsr) != 1 {
+        ext_content, eerr = asn1.read_tlv(tbsr)
+        if string.equals(eerr, "") != 1 { break }
+        etag = asn1.last_tag(tbsr)
+        if etag == 0xA3 {
+            parse_extensions_for_san(ext_content, out)
+        }
+        bytes.free(ext_content)
+    }
+
+    return ""
 }
 
+// Read a TLV and return its FULL DER (tag+len+content) as fresh bytes.
+fn read_tlv_full(r: ptr) -> (ptr, string) {
+    start = asn1.reader_pos(r)
+    content, err = asn1.read_tlv(r)
+    if string.equals(err, "") != 1 { return null, err }
+    bytes.free(content)
+    end = asn1.reader_pos(r)
+    // The reader's buffer holds the bytes; re-read the span. We need access to
+    // the buffer — read_tlv already advanced it. Reconstruct by re-reading the
+    // span from a fresh reader over the same buffer is not possible without the
+    // buffer handle, so instead compute from the reader's buffer via a helper.
+    return reader_slice(r, start, end), ""
+}
+
+// Slice [start,end) of the reader's underlying buffer into fresh bytes.
+fn reader_slice(r: ptr, start: int, end: int) -> ptr {
+    rr = r as *ReaderView
+    n = end - start
+    out = bytes.new(n)
+    if n > 0 { bytes.set(out, n - 1, 0) }
+    bytes.copy_from_bytes(out, 0, rr.buf, start, n)
+    return out
+}
+
+// Minimal view of asn1's Reader to reach its buffer for slicing (buf is the
+// first field; this mirrors asn1.Reader's layout).
+struct ReaderView {
+    buf: ptr
+    pos: int
+    len: int
+    last_tag: int
+}
+
+// Parse the [3] extensions content: SEQUENCE OF Extension, each
+// { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }. When the
+// OID is subjectAltName (2.5.29.17), decode its dNSNames into out.dns_names.
+fn parse_extensions_for_san(ext_wrapper: ptr, out: *LeafCert) {
+    wr = asn1.reader_new(ext_wrapper)
+    // [3] wraps a single SEQUENCE OF Extension.
+    seq_content, serr = asn1.read_tlv(wr)
+    asn1.reader_free(wr)
+    if string.equals(serr, "") != 1 { return }
+    er = asn1.reader_new(seq_content)
+    while asn1.reader_eof(er) != 1 {
+        one, oerr = asn1.read_tlv(er)   // one Extension SEQUENCE content
+        if string.equals(oerr, "") != 1 { break }
+        xr = asn1.reader_new(one)
+        oid, oiderr = asn1.read_oid(xr)
+        if string.equals(oiderr, "") == 1 {
+            if string.equals(oid, "2.5.29.17") == 1 {
+                // skip optional critical BOOLEAN, then extnValue OCTET STRING
+                nx, nxerr = asn1.read_tlv(xr)
+                ntag = asn1.last_tag(xr)
+                if string.equals(nxerr, "") == 1 {
+                    if ntag == 0x01 {
+                        // was critical BOOLEAN; read the OCTET STRING next
+                        bytes.free(nx)
+                        os2, os2e = asn1.read_tlv(xr)
+                        if string.equals(os2e, "") == 1 {
+                            decode_san_dnsnames(os2, out)
+                            bytes.free(os2)
+                        }
+                    } else {
+                        // nx WAS the OCTET STRING content
+                        decode_san_dnsnames(nx, out)
+                        bytes.free(nx)
+                    }
+                }
+            }
+            string.release(oid)
+        }
+        asn1.reader_free(xr)
+        bytes.free(one)
+    }
+    asn1.reader_free(er)
+    bytes.free(seq_content)
+}
+
+// The SAN extnValue OCTET STRING wraps GeneralNames ::= SEQUENCE OF GeneralName.
+// dNSName is [2] IMPLICIT IA5String (context tag 0x82). Add each to dns_names,
+// rejecting any with an embedded NUL.
+fn decode_san_dnsnames(octet_content: ptr, out: *LeafCert) {
+    or = asn1.reader_new(octet_content)
+    gn_content, gerr = asn1.read_tlv(or)   // the GeneralNames SEQUENCE content
+    asn1.reader_free(or)
+    if string.equals(gerr, "") != 1 { return }
+    gr = asn1.reader_new(gn_content)
+    while asn1.reader_eof(gr) != 1 {
+        name_content, nerr = asn1.read_tlv(gr)
+        if string.equals(nerr, "") != 1 { break }
+        tag = asn1.last_tag(gr)
+        if tag == 0x82 {
+            // dNSName IA5String content
+            nlen = bytes.length(name_content)
+            has_nul = 0
+            i = 0
+            while i < nlen {
+                if (bytes.get(name_content, i) & 0xFF) == 0 { has_nul = 1 }
+                i = i + 1
+            }
+            if has_nul == 0 {
+                nm = bytes.new(nlen)
+                if nlen > 0 { bytes.set(nm, nlen - 1, 0) }
+                bytes.copy_from_bytes(nm, 0, name_content, 0, nlen)
+                list_add_raw(out.dns_names, nm)
+            }
+        }
+        bytes.free(name_content)
+    }
+    asn1.reader_free(gr)
+    bytes.free(gn_content)
+}
+
+
+// ---- LeafCert accessors + cleanup ----
+
+// Copy a transient OID string into an owned bytes buffer (so it can live in a
+// struct field and be freed deterministically).
+fn oid_to_bytes(oid: string) -> ptr {
+    n = string.length(oid)
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(oid, n, i) & 0xFF)
+        i = i + 1
+    }
+    return b
+}
+
+leaf_not_before(c: *LeafCert) -> ptr { return c.not_before }
+leaf_not_before_len(c: *LeafCert) -> int { return c.not_before_len }
+leaf_not_after(c: *LeafCert) -> ptr { return c.not_after }
+leaf_not_after_len(c: *LeafCert) -> int { return c.not_after_len }
+leaf_tbs_len(c: *LeafCert) -> int { return c.tbs_len }
+leaf_subject_len(c: *LeafCert) -> int { return c.subject_len }
+leaf_issuer_len(c: *LeafCert) -> int { return c.issuer_len }
+
+leaf_dns_count(c: *LeafCert) -> int {
+    if c.dns_names == null { return 0 }
+    return list_size(c.dns_names)
+}
+
+// The i-th dNSName as a bytes buffer (borrowed; do not free).
+leaf_dns_name(c: *LeafCert, i: int) -> ptr {
+    if c.dns_names == null { return null }
+    if i < 0 { return null }
+    if i >= list_size(c.dns_names) { return null }
+    return list_get_raw(c.dns_names, i) as ptr
+}
+
+// Free every owned buffer/string in a parsed LeafCert.
+free_leaf(c: *LeafCert) {
+    if c.tbs != null { bytes.free(c.tbs) }
+    if c.signature != null { bytes.free(c.signature) }
+    if c.spki_key != null { bytes.free(c.spki_key) }
+    if c.issuer != null { bytes.free(c.issuer) }
+    if c.subject != null { bytes.free(c.subject) }
+    if c.sig_alg_oid != null { bytes.free(c.sig_alg_oid) }
+    if c.spki_algo_oid != null { bytes.free(c.spki_algo_oid) }
+    if c.not_before != null { bytes.free(c.not_before) }
+    if c.not_after != null { bytes.free(c.not_after) }
+    if c.dns_names != null {
+        n = list_size(c.dns_names)
+        i = 0
+        while i < n {
+            e = list_get_raw(c.dns_names, i) as ptr
+            bytes.free(e)
+            i = i + 1
+        }
+        list_free(c.dns_names)
+    }
+}
+
+// ---- validity-period check (RFC 5280 §4.1.2.5) ----
+
+
+// Normalise an ASN.1 time (as bytes: UTCTime "YYMMDDHHMMSSZ" or
+// GeneralizedTime "YYYYMMDDHHMMSSZ") to a 14-char "YYYYMMDDHHMMSS" key string,
+// so times compare chronologically by plain string order. Returns "" on a
+// malformed/unsupported time. UTCTime year: YY>=50 -> 19YY else 20YY (RFC 5280).
+fn time_to_key(t: ptr, tlen: int) -> string {
+    // Collect the leading digits (drop a trailing 'Z').
+    digits = bytes.new(16)
+    dn = 0
+    i = 0
+    while i < tlen {
+        c = bytes.get(t, i) & 0xFF
+        if c >= 48 && c <= 57 {
+            if dn < 14 { bytes.set(digits, dn, c); dn = dn + 1 }
+        }
+        i = i + 1
+    }
+    if dn == 12 {
+        // UTCTime YYMMDDHHMMSS -> expand the 2-digit year
+        yy = ((bytes.get(digits, 0) - 48) * 10) + (bytes.get(digits, 1) - 48)
+        century = 20
+        if yy >= 50 { century = 19 }
+        out = bytes.new(14)
+        bytes.set(out, 0, 48 + (century / 10))
+        bytes.set(out, 1, 48 + (century - ((century / 10) * 10)))
+        k = 0
+        while k < 12 { bytes.set(out, 2 + k, bytes.get(digits, k)); k = k + 1 }
+        r = bytes.to_string(out, 14)
+        bytes.free(out); bytes.free(digits)
+        return r
+    }
+    if dn == 14 {
+        r = bytes.to_string(digits, 14)
+        bytes.free(digits)
+        return r
+    }
+    bytes.free(digits)
+    return ""
+}
+
+// Current UTC time as the same 14-char "YYYYMMDDHHMMSS" key. Derives it from
+// os.now_utc_iso8601() ("YYYY-MM-DDTHH:MM:SSZ") by keeping the digits.
+fn now_key() -> string {
+    iso = os.now_utc_iso8601()
+    n = string.length(iso)
+    out = bytes.new(14)
+    dn = 0
+    i = 0
+    while i < n {
+        c = string_char_at_n(iso, n, i) & 0xFF
+        if c >= 48 && c <= 57 {
+            if dn < 14 { bytes.set(out, dn, c); dn = dn + 1 }
+        }
+        i = i + 1
+    }
+    r = bytes.to_string(out, 14)
+    bytes.free(out)
+    return r
+}
+
+// Check a leaf's validity window against the current time. Returns "" if
+// notBefore <= now <= notAfter, else an error ("certificate expired" /
+// "certificate not yet valid" / "certificate has no/invalid validity").
+check_validity(c: *LeafCert) -> string {
+    if c.not_before == null { return "certificate has no notBefore" }
+    if c.not_after == null { return "certificate has no notAfter" }
+    nb = time_to_key(c.not_before, c.not_before_len)
+    na = time_to_key(c.not_after, c.not_after_len)
+    if string.equals(nb, "") == 1 { return "certificate has invalid notBefore time" }
+    if string.equals(na, "") == 1 { return "certificate has invalid notAfter time" }
+    now = now_key()
+    // string_compare: <0 if a<b. now < nb -> not yet valid; now > na -> expired.
+    if string_compare(now, nb) < 0 { return "certificate not yet valid" }
+    if string_compare(now, na) > 0 { return "certificate expired" }
+    return ""
+}
+
+// ---- hostname / SAN matching (RFC 6125) ----
+
+// ASCII lower-case a single byte (A-Z -> a-z), leaving others untouched.
+fn ascii_lower(c: int) -> int {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+// Does the presented dNSName (a bytes buffer, `plen` bytes, no NUL) match the
+// reference hostname `host` (a string) under RFC 6125? Case-insensitive ASCII.
+// A single leftmost "*" wildcard label is allowed and matches exactly one
+// label (no dots): "*.a.com" matches "x.a.com" but not "a.com" or "y.x.a.com".
+// A wildcard anywhere but the leftmost label, or a partial-label wildcard
+// ("f*.a.com"), is not accepted here (we only honour a whole-label leading *).
+fn dnsname_matches(pat: ptr, plen: int, host: string, hlen: int) -> int {
+    if plen <= 0 { return 0 }
+    // Wildcard iff the pattern is "*." + rest  (first byte '*', second '.').
+    is_wild = 0
+    if plen >= 2 {
+        if (bytes.get(pat, 0) & 0xFF) == 42 {         // '*'
+            if (bytes.get(pat, 1) & 0xFF) == 46 {     // '.'
+                is_wild = 1
+            }
+        }
+    }
+    if is_wild == 0 {
+        // Exact case-insensitive match over the whole strings.
+        if plen != hlen { return 0 }
+        i = 0
+        while i < plen {
+            pc = ascii_lower(bytes.get(pat, i) & 0xFF)
+            hc = ascii_lower(string_char_at_n(host, hlen, i) & 0xFF)
+            if pc != hc { return 0 }
+            i = i + 1
+        }
+        return 1
+    }
+    // Wildcard: the host's first label is consumed by '*', the remainder
+    // (pattern from index 1, i.e. ".rest") must match the host from its first
+    // dot onward, case-insensitively. The wildcard label must be non-empty and
+    // must not itself contain a dot (exactly one label).
+    // Find host's first dot.
+    hdot = -1
+    j = 0
+    while j < hlen {
+        if (string_char_at_n(host, hlen, j) & 0xFF) == 46 { hdot = j; break }
+        j = j + 1
+    }
+    if hdot <= 0 { return 0 }        // no dot, or empty first label -> no match
+    // The pattern tail is pat[1..plen) == ".rest"; host tail is host[hdot..hlen).
+    tail_len = plen - 1
+    if tail_len != (hlen - hdot) { return 0 }
+    k = 0
+    while k < tail_len {
+        pc = ascii_lower(bytes.get(pat, 1 + k) & 0xFF)
+        hc = ascii_lower(string_char_at_n(host, hlen, hdot + k) & 0xFF)
+        if pc != hc { return 0 }
+        k = k + 1
+    }
+    return 1
+}
+
+// Verify the leaf certificate identifies `host`. Checks every SAN dNSName
+// (RFC 6125; SAN-only, no CN fallback). Returns "" on a match, else an error.
+check_hostname(c: *LeafCert, host: string) -> string {
+    if c.dns_names == null { return "certificate has no subjectAltName dNSNames" }
+    hlen = string.length(host)
+    if hlen == 0 { return "empty hostname" }
+    n = list_size(c.dns_names)
+    if n == 0 { return "certificate has no subjectAltName dNSNames" }
+    i = 0
+    while i < n {
+        nm = list_get_raw(c.dns_names, i) as ptr
+        if nm != null {
+            plen = bytes.length(nm)
+            if dnsname_matches(nm, plen, host, hlen) == 1 { return "" }
+        }
+        i = i + 1
+    }
+    return "certificate is not valid for the requested hostname"
+}
