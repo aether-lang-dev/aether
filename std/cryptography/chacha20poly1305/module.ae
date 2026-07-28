@@ -263,12 +263,21 @@ poly1305_mac(key: ptr, data: ptr, len: int) -> ptr {
     g3 = h3 + c; c = bits.lsr64(g3, 26); g3 = g3 & 0x3ffffff
     g4 = h4 + c - (1 << 26)
 
-    // mask = (g4 >> 63) ? all-ones (h<p, keep h) : 0 (use g)
-    mask = bits.lsr64(g4, 63) & 1
-    // if mask==1 keep h; else use g. Build select.
-    if mask == 0 {
-        h0 = g0; h1 = g1; h2 = g2; h3 = g3; h4 = g4 & 0x3ffffff
-    }
+    // Constant-time select of h vs g = h - p, WITHOUT a secret-dependent
+    // branch (the accumulator depends on the secret Poly1305 key r, so a
+    // data branch here would be a MAC timing side-channel).
+    //
+    // g4's sign bit is set iff the subtract borrowed, i.e. iff h < p (keep
+    // h); clear iff h >= p (use g). Build full-width masks and blend each
+    // limb: keep_h = 0xFFFF... when h < p, keep_g its complement.
+    keep_h = 0 - (bits.lsr64(g4, 63) & 1)   // all-ones if h < p, else 0
+    keep_g = ~keep_h                         // all-ones if h >= p, else 0
+    g4 = g4 & 0x3ffffff
+    h0 = (h0 & keep_h) | (g0 & keep_g)
+    h1 = (h1 & keep_h) | (g1 & keep_g)
+    h2 = (h2 & keep_h) | (g2 & keep_g)
+    h3 = (h3 & keep_h) | (g3 & keep_g)
+    h4 = (h4 & keep_h) | (g4 & keep_g)
 
     // Serialize h (mod 2^128) as 4 little-endian 32-bit words, then add s.
     f0 = (h0 | (h1 << 26)) & 0xFFFFFFFF

@@ -40,6 +40,18 @@ next version number before tagging the release.
   Alice/Bob key-agreement vectors; leak-clean under valgrind. This is the
   first primitive for the pure-Aether TLS 1.3 subset.
 
+### Fixed
+
+- **`std.cryptography.chacha20poly1305` — Poly1305 tag is now computed in
+  constant time** (#1298). The final modular reduction ("freeze") selected
+  between `h` and `h - p` with a secret-dependent `if` branch; since the
+  accumulator depends on the one-time Poly1305 key, that branch was a MAC
+  timing side-channel. Replaced with a branchless masked select. Behaviour
+  is unchanged (all RFC 8439 vectors still pass); added a reduction-edge KAT
+  (`r=2, s=0, msg=16×0xFF` → tag `03…`) that exercises the freeze path. The
+  AEAD tag *comparison* in `aead_open` was already constant-time. Audited as
+  part of qualifying ChaCha20-Poly1305 as the TLS 1.3 record cipher.
+
 ## [0.450.0]
 
 ### Fixed
