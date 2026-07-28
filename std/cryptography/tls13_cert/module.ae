@@ -55,7 +55,7 @@ exports (
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
     SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
-    chain_verify, verify_cert_signature,
+    chain_verify, chain_verify_path, verify_cert_signature,
     trust_store_load, free_anchors
 )
 
@@ -949,6 +949,106 @@ chain_verify(leaf: *LeafCert, anchors: ptr) -> string {
         i = i + 1
     }
     return "certificate does not chain to a trusted anchor"
+}
+
+// Does `cert` chain DIRECTLY to any trusted anchor (issuer DN == anchor subject
+// DN and cert signature verifies under that anchor)? Returns 1 if so.
+fn chains_to_anchor(cert: *LeafCert, anchors: ptr) -> int {
+    n = list_size(anchors)
+    i = 0
+    while i < n {
+        a = list_get_raw(anchors, i) as *LeafCert
+        if a != null {
+            if dn_equal(cert.issuer, cert.issuer_len, a.subject, a.subject_len) == 1 {
+                if verify_cert_signature(cert, a) == 1 {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Verify a certificate PATH: `leaf` may chain through server-sent
+// `intermediates` (a std.list of *LeafCert, possibly empty/null) up to a
+// trusted anchor in `anchors`. At each hop the child's signature must verify
+// under the parent's key and the DNs must match; the path terminates when a
+// cert chains directly to a trusted anchor. A self-signed / untrusted leaf with
+// no such path is REJECTED. Bounded to MAX_CHAIN_DEPTH hops to stop cycles.
+// Returns "" on a valid path, else an error.
+chain_verify_path(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> string {
+    if anchors == null { return "no trust anchors" }
+    if list_size(anchors) == 0 { return "no trust anchors" }
+
+    current = leaf
+    // Track which intermediates we've consumed so a malicious server can't loop
+    // us with a cycle of mutually-signed intermediates.
+    used = list_new()
+    depth = 0
+    result = "certificate does not chain to a trusted anchor"
+    walking = 1
+    while walking == 1 {
+        if chains_to_anchor(current, anchors) == 1 {
+            result = ""
+            walking = 0
+        } else {
+            if depth >= MAX_CHAIN_DEPTH {
+                result = "certificate chain too long"
+                walking = 0
+            } else {
+                if intermediates == null {
+                    walking = 0
+                } else {
+                    idx = find_issuer_unused(current, intermediates, used)
+                    if idx < 0 {
+                        walking = 0
+                    } else {
+                        list_add_raw(used, list_get_raw(intermediates, idx))
+                        current = list_get_raw(intermediates, idx) as *LeafCert
+                        depth = depth + 1
+                    }
+                }
+            }
+        }
+    }
+    list_free(used)
+    return result
+}
+
+const MAX_CHAIN_DEPTH = 8
+
+// Like find_issuer but skips any intermediate already in `used` (pointer
+// identity), preventing a signed-intermediate cycle from looping forever.
+fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
+    n = list_size(intermediates)
+    i = 0
+    while i < n {
+        m = list_get_raw(intermediates, i) as *LeafCert
+        if m != null {
+            if is_in_list(intermediates, i, used) == 0 {
+                if dn_equal(cert.issuer, cert.issuer_len, m.subject, m.subject_len) == 1 {
+                    if verify_cert_signature(cert, m) == 1 {
+                        return i
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Is the intermediate at index `idx` (by stored pointer) already in `used`?
+fn is_in_list(intermediates: ptr, idx: int, used: ptr) -> int {
+    target = list_get_raw(intermediates, idx)
+    un = list_size(used)
+    j = 0
+    while j < un {
+        if list_get_raw(used, j) == target { return 1 }
+        j = j + 1
+    }
+    return 0
 }
 
 // ---- system trust store (PEM bundle) ----

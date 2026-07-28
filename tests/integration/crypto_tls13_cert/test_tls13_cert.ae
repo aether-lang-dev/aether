@@ -284,6 +284,34 @@ main() {
     } else { println("FAIL RSA-PSS accepted tampered sig"); total_ok = 0 }
     bytes.free(rsa_spki); bytes.free(rsa_sig); bytes.free(rsa_th)
 
+    // --- intermediate-CA chain building (chain_verify_path) ---
+    // 3-level ECDSA PKI: leaf <- intermediate <- root. Only root is trusted;
+    // the intermediate is a server-sent CA the path must traverse.
+    cp_root = from_hex("3082017e30820123a00302010202145c702d3cc21d8183652f2cfa02e9b7f6844b8da5300a06082a8648ce3d04030230143112301006035504030c095465737420526f6f74301e170d3236303732383232353133325a170d3236303733313232353133325a30143112301006035504030c095465737420526f6f743059301306072a8648ce3d020106082a8648ce3d030107034200041740254dfbb1c90c7ef083091d0f4c1622a202de87b55cedd2bb0f786b4f244c6bbde1bf3abb3ddb0e1644e8234a1aa3f867de35303edb156664c450800f2801a3533051301d0603551d0e04160414b27999d5d4667a7a87cc5357cb0a866c2236e699301f0603551d23041830168014b27999d5d4667a7a87cc5357cb0a866c2236e699300f0603551d130101ff040530030101ff300a06082a8648ce3d0403020349003046022100ac69c0f3a06e882a53f23af02c53f176ec0f3bafe20e89ec59343a733ccddcc4022100be41ede785a8c707b48917082ffaa0cf3ccc4f99744eb3f83d0bbcd1c4de84a2")
+    cp_int  = from_hex("3082018e30820135a00302010202144dabe3cd6d7512d3897ae34ff552226c0d16125a300a06082a8648ce3d04030230143112301006035504030c095465737420526f6f74301e170d3236303732383232353133335a170d3236303733313232353133335a301c311a301806035504030c115465737420496e7465726d6564696174653059301306072a8648ce3d020106082a8648ce3d030107034200041c75b3de45ad714bcbd377f4fc50a2f94b24e53632fa9478fe0ed1bd1fa4dbb403458519822dca095933ced4a4ec876661a6efa5682b55b8ecba92e15d045755a35d305b300c0603551d13040530030101ff300b0603551d0f040403020204301d0603551d0e041604140a74b333ea0cd034f90333f79cd1127feca903ab301f0603551d23041830168014b27999d5d4667a7a87cc5357cb0a866c2236e699300a06082a8648ce3d040302034700304402206fe0684b0bb4e4d3e85dae7d88267a3768a218c115e262f60ddd477e5535d08902204f1dd369a0e932cef441f6fdd923c4a430315aca27937f2cde1f8031e58be210")
+    cp_leaf = from_hex("3082018b30820130a003020102021402b286e4bdc746e47304f6935a264a8f9606f2d9300a06082a8648ce3d040302301c311a301806035504030c115465737420496e7465726d656469617465301e170d3236303732383232353133335a170d3236303733303232353133335a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d0301070342000410f1edfe0c66ec3ebe94f1689629f901d215e9592104da1e3f1dcfa8af65a8b882c14adb2d0379069c87545c81544b86a37ec3c8bbdd28d5bb799fdcb185ad66a358305630140603551d11040d300b82096c6f63616c686f7374301d0603551d0e04160414ef5c392fa331d2e00730805fc54a1083a45b1531301f0603551d230418301680140a74b333ea0cd034f90333f79cd1127feca903ab300a06082a8648ce3d0403020349003046022100f523de6be6de2fe0849888b1f5275e6ac437f64cbada051ba2c9529c0d66a301022100c86009498ab965939e733219e10175889c9ba1d501ba0febcaef880e96f430d9")
+    croot = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    cint  = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    cleaf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    tls13_cert.parse_certificate(cp_root, bytes.length(cp_root), &croot)
+    tls13_cert.parse_certificate(cp_int,  bytes.length(cp_int),  &cint)
+    tls13_cert.parse_certificate(cp_leaf, bytes.length(cp_leaf), &cleaf)
+    canchors = list_new(); list_add_raw(canchors, &croot)
+    cinters  = list_new(); list_add_raw(cinters, &cint)
+    cempty   = list_new()
+    if string.equals(tls13_cert.chain_verify_path(&cleaf, cinters, canchors), "") == 1 {
+        println("ok   leaf->intermediate->root path verified")
+    } else { println("FAIL intermediate chain rejected"); total_ok = 0 }
+    if string.equals(tls13_cert.chain_verify_path(&cleaf, cempty, canchors), "") != 1 {
+        println("ok   leaf without intermediate rejected")
+    } else { println("FAIL leaf-alone accepted"); total_ok = 0 }
+    if string.equals(tls13_cert.chain_verify_path(&cint, cempty, canchors), "") == 1 {
+        println("ok   intermediate chains directly to root")
+    } else { println("FAIL intermediate->root rejected"); total_ok = 0 }
+    list_free(canchors); list_free(cinters); list_free(cempty)
+    tls13_cert.free_leaf(&croot); tls13_cert.free_leaf(&cint); tls13_cert.free_leaf(&cleaf)
+    bytes.free(cp_root); bytes.free(cp_int); bytes.free(cp_leaf)
+
     if total_ok == 0 {
         println("tls13_cert: FAILURES")
         exit(1)
