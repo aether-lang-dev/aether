@@ -1,0 +1,681 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_client — a pure-Aether TLS 1.3 client (RFC 8446) for
+// the #1298 subset, driving the handshake end-to-end over std.net TCP. NO
+// externs to OpenSSL. This composes the six pure-Aether TLS building blocks:
+//   x25519 (ECDHE), tls13_ks (key schedule), tls13_hs (message codec),
+//   tls13_cert (CertificateVerify), tls13_record (record protection),
+//   and sha2 (transcript hash).
+//
+// Subset (first cut, matches #1298):
+//   - TLS 1.3 only, X25519 key exchange, TLS_CHACHA20_POLY1305_SHA256
+//   - client-side; the handshake completes and both sides prove key
+//     agreement via the Finished MACs
+//   - no resumption / 0-RTT / mTLS / HelloRetryRequest
+//
+// ⚠️ SERVER AUTHENTICATION IS NOT YET DONE. connect() does NOT run the
+// server's CertificateVerify signature check, and does NO certificate-chain
+// or hostname validation. It proves the KEY EXCHANGE works end-to-end against
+// a real server (Finished MACs verify), but it does not authenticate the
+// peer — so this cut is unsafe against an active MITM. Wiring
+// tls13_cert.verify_cert_verify (the leaf SPKI is already parseable) plus
+// chain/hostname policy is the next increment. Do not use for anything
+// security-sensitive until that lands.
+//
+// This module separates the PURE state machine (transcript, key derivation,
+// flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
+// record read/write loop). The socket driver needs a live TLS 1.3 server to
+// exercise; the pure pieces are unit-tested against RFC 8448.
+//
+// Import with:  import std.cryptography.tls13_client
+//
+//   connect(host, port, x25519_priv32) -> (ClientConn, string)
+//       perform the handshake; returns a live connection or an error.
+//   send(conn, data, len) / recv(conn) — application-data records
+//   close(conn)
+//
+// PLUS pure helpers exposed for testing:
+//   transcript_new() / transcript_add(t, msg, len) / transcript_hash(t)
+
+import std.bytes
+import std.string
+import std.cryptography.sha2
+import std.cryptography.hmac
+import std.cryptography.x25519
+import std.cryptography.tls13_kdf
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_hs
+import std.cryptography.tls13_record
+import std.cryptography
+import std.net
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_length(s: string) -> int
+
+exports (
+    transcript_new, transcript_add, transcript_hash, transcript_free,
+    Transcript,
+    derive_handshake_keys, HsKeys, free_hs_keys,
+    hs_client_key, hs_client_iv, hs_server_key, hs_server_iv,
+    finished_key, finished_verify_data,
+    hs_msg_type, hs_msg_len, hs_msg_total,
+    HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
+    connect, close_conn, conn_send, conn_recv
+)
+
+// Handshake message types (RFC 8446 §4) seen in the server's flight.
+const HS_ENCRYPTED_EXTENSIONS = 8
+const HS_CERTIFICATE          = 11
+const HS_CERTIFICATE_VERIFY   = 15
+const HS_FINISHED             = 20
+
+// Record-cipher parameters for the subset's TLS_CHACHA20_POLY1305_SHA256.
+const CHACHA_KEY_LEN = 32
+
+// ---- transcript hash accumulator ----
+//
+// TLS 1.3 keys off the Transcript-Hash of the concatenated handshake messages
+// at several checkpoints (after SH, after Certificate, after Finished). sha2's
+// final_bytes CONSUMES its ctx and there is no ctx-snapshot, so instead of one
+// streaming hash we accumulate the raw handshake bytes in a growable buffer
+// and hash the accumulated prefix on demand. A handshake is a few KB, so the
+// re-hash cost is negligible.
+
+struct Transcript {
+    buf: ptr       // std.bytes, grows via copy_from_bytes
+    len: int       // bytes written so far
+}
+
+transcript_new() -> ptr {
+    t = malloc(16) as *Transcript
+    t.buf = bytes.new(512)
+    // Force the backing buffer to exist; length grows as messages are added.
+    bytes.set(t.buf, 0, 0)
+    t.len = 0
+    return t as ptr
+}
+
+// Append a complete handshake message (including its 4-byte header) to the
+// running transcript.
+transcript_add(t: ptr, msg: ptr, msg_len: int) {
+    tt = t as *Transcript
+    // copy_from_bytes grows the destination as needed.
+    bytes.copy_from_bytes(tt.buf, tt.len, msg, 0, msg_len)
+    tt.len = tt.len + msg_len
+}
+
+// SHA-256 of the accumulated transcript so far (fresh 32-byte buffer; caller
+// frees). Uses the streaming update_bytes path (sha256_bytes takes a string).
+transcript_hash(t: ptr) -> ptr {
+    tt = t as *Transcript
+    ctx, err = sha2.new("sha256")
+    if err != "" { return null }
+    sha2.update_bytes(ctx, tt.buf, tt.len)
+    return sha2.final_bytes(ctx)
+}
+
+transcript_free(t: ptr) {
+    tt = t as *Transcript
+    bytes.free(tt.buf)
+    libc_free(t)
+}
+
+// ---- handshake key derivation ----
+//
+// Given the ECDHE shared secret and the transcript hash at ServerHello, derive
+// the client/server handshake-traffic secrets and their record {key, iv}. This
+// is the RFC 8446 §7.1 key schedule wired through tls13_ks, and is validated
+// byte-for-byte against RFC 8448 §3 in the tests.
+
+struct HsKeys {
+    client_hs_secret: ptr   // 32 bytes
+    server_hs_secret: ptr
+    client_key: ptr         // 32 bytes (ChaCha20-Poly1305)
+    client_iv: ptr          // 12 bytes
+    server_key: ptr
+    server_iv: ptr
+    handshake_secret: ptr   // kept for deriving the master secret later
+}
+
+// derive_handshake_keys(ecdhe32, transcript_hash_ch_sh) -> HsKeys.
+// `ecdhe` is the 32-byte X25519 shared secret; `th` is Transcript-Hash(CH..SH).
+// All output buffers are fresh (freed via free_hs_keys).
+derive_handshake_keys(ecdhe: ptr, ec_len: int, th: ptr, th_len: int) -> ptr {
+    early = tls13_ks.early_secret("sha256")
+    hs = tls13_ks.handshake_secret("sha256", early, ecdhe, ec_len)
+
+    c_hs = tls13_ks.traffic_secret("sha256", hs, "c hs traffic", th, th_len)
+    s_hs = tls13_ks.traffic_secret("sha256", hs, "s hs traffic", th, th_len)
+
+    ck = tls13_ks.write_key("sha256", c_hs, CHACHA_KEY_LEN)
+    civ = tls13_ks.write_iv("sha256", c_hs)
+    sk = tls13_ks.write_key("sha256", s_hs, CHACHA_KEY_LEN)
+    siv = tls13_ks.write_iv("sha256", s_hs)
+
+    k = malloc(56) as *HsKeys
+    k.client_hs_secret = c_hs
+    k.server_hs_secret = s_hs
+    k.client_key = ck
+    k.client_iv = civ
+    k.server_key = sk
+    k.server_iv = siv
+    k.handshake_secret = hs
+
+    bytes.free(early)
+    return k as ptr
+}
+
+// ---- Finished message (RFC 8446 §4.4.4) ----
+//
+//   finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
+//   verify_data  = HMAC(finished_key, Transcript-Hash(handshake up to but
+//                       not including this Finished))
+// BaseKey is the sender's handshake-traffic secret. The client verifies the
+// server's Finished with the server hs secret, and sends its own computed with
+// the client hs secret.
+
+// finished_key(traffic_secret32) -> 32-byte key (caller frees).
+finished_key(secret: ptr) -> ptr {
+    empty = bytes.new(1)
+    bytes.set(empty, 0, 0)
+    fk = tls13_kdf.expand_label("sha256", secret, 32, "finished", empty, 0, 32)
+    bytes.free(empty)
+    return fk
+}
+
+// finished_verify_data(traffic_secret32, transcript_hash32) -> 32-byte MAC.
+finished_verify_data(secret: ptr, th: ptr, th_len: int) -> ptr {
+    fk = finished_key(secret)
+    vd = hmac.hmac_sha256(fk, 32, th, th_len)
+    bytes.free(fk)
+    return vd
+}
+
+// ---- handshake message framing (RFC 8446 §4) ----
+//
+// A handshake message is  msg_type(1) || length(uint24) || body. A decrypted
+// record's fragment may carry one or more concatenated handshake messages;
+// these helpers read the framing so the flight can be split and each message
+// fed to the right parser (and added to the transcript in wire order).
+
+// Message type at offset `off` in a handshake-message buffer.
+hs_msg_type(buf: ptr, off: int) -> int {
+    return bytes.get(buf, off) & 0xFF
+}
+
+// Body length (uint24) of the handshake message at `off`.
+hs_msg_len(buf: ptr, off: int) -> int {
+    return ((bytes.get(buf, off + 1) & 0xFF) << 16) |
+           ((bytes.get(buf, off + 2) & 0xFF) << 8) |
+           (bytes.get(buf, off + 3) & 0xFF)
+}
+
+// Total on-wire size of the handshake message at `off` (4-byte header + body).
+hs_msg_total(buf: ptr, off: int) -> int {
+    return 4 + hs_msg_len(buf, off)
+}
+
+// Accessors (so callers/tests don't cast to the struct type).
+hs_client_key(k: ptr) -> ptr { kk = k as *HsKeys; return kk.client_key }
+hs_client_iv(k: ptr) -> ptr  { kk = k as *HsKeys; return kk.client_iv }
+hs_server_key(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_key }
+hs_server_iv(k: ptr) -> ptr  { kk = k as *HsKeys; return kk.server_iv }
+
+free_hs_keys(k: ptr) {
+    kk = k as *HsKeys
+    bytes.free(kk.client_hs_secret)
+    bytes.free(kk.server_hs_secret)
+    bytes.free(kk.client_key)
+    bytes.free(kk.client_iv)
+    bytes.free(kk.server_key)
+    bytes.free(kk.server_iv)
+    bytes.free(kk.handshake_secret)
+    libc_free(k)
+}
+
+// ============================================================================
+// Socket-driven handshake (RFC 8446). Drives a full TLS 1.3 handshake for the
+// subset over a std.net TCP socket: connect, ClientHello, ServerHello, key
+// derivation, decrypt the server's encrypted flight, verify the server
+// Finished, send the client Finished, then exchange application-data records.
+// ============================================================================
+
+// A record-framing buffer over a raw TCP socket. TCP is a byte stream, so we
+// buffer received bytes and only surface COMPLETE TLS records (5-byte header +
+// declared length). Bytes past a record boundary carry over to the next read.
+struct RecordIO {
+    sock: ptr
+    buf: ptr       // std.bytes accumulator
+    len: int       // valid bytes in buf
+    off: int       // consumed-so-far offset (records already returned)
+}
+
+fn recio_new(sock: ptr) -> *RecordIO {
+    r = malloc(32) as *RecordIO
+    r.sock = sock
+    r.buf = bytes.new(4096)
+    bytes.set(r.buf, 0, 0)
+    r.len = 0
+    r.off = 0
+    return r
+}
+
+fn recio_free(r: *RecordIO) {
+    bytes.free(r.buf)
+    libc_free(r as ptr)
+}
+
+// Pull more bytes from the socket into the buffer. Returns bytes read, or <= 0
+// on close/error.
+fn recio_fill(r: *RecordIO) -> int {
+    chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+    if string.equals(err, "") != 1 { return -1 }
+    if n <= 0 { return n }
+    bytes.copy_from_string(r.buf, r.len, chunk, n)
+    r.len = r.len + n
+    return n
+}
+
+// Read exactly one complete TLS record. Returns (record_bytes, total_len, "")
+// where record_bytes is a fresh buffer of the whole record (header + payload),
+// or (null, 0, err). Blocks (via recio_fill) until a full record is available.
+fn recio_next(r: *RecordIO) -> (ptr, int, string) {
+    loop = 1
+    while loop == 1 {
+        avail = r.len - r.off
+        if avail >= 5 {
+            // We have the 5-byte header; read the declared payload length.
+            plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+            total = 5 + plen
+            if avail >= total {
+                rec = bytes.new(total)
+                bytes.set(rec, total - 1, 0)
+                bytes.copy_from_bytes(rec, 0, r.buf, r.off, total)
+                r.off = r.off + total
+                return rec, total, ""
+            }
+        }
+        // Need more bytes.
+        got = recio_fill(r)
+        if got <= 0 {
+            return null, 0, "record: connection closed before a full record"
+        }
+    }
+    return null, 0, "unreachable"
+}
+
+// A live TLS 1.3 client connection after a completed handshake.
+struct ClientConn {
+    sock: ptr
+    rio: ptr             // *RecordIO
+    // application-data record contexts (client write / server read), keyed
+    // with the application-traffic secrets after the handshake completes.
+    app_send: ptr        // *tls13_record.RecordCtx
+    app_recv: ptr
+}
+
+// Send a plaintext handshake record: type 0x16 (handshake), legacy version
+// 0x0301 for the very first flight (RFC 8446 §5.1 allows 0x0301/0x0303).
+fn send_plaintext_handshake(sock: ptr, msg: ptr, msg_len: int) -> string {
+    total = 5 + msg_len
+    rec = bytes.new(total)
+    bytes.set(rec, total - 1, 0)
+    bytes.set(rec, 0, 0x16)     // handshake
+    bytes.set(rec, 1, 0x03)
+    bytes.set(rec, 2, 0x01)     // legacy_record_version 0x0301
+    bytes.set(rec, 3, (msg_len >> 8) & 0xFF)
+    bytes.set(rec, 4, msg_len & 0xFF)
+    bytes.copy_from_bytes(rec, 5, msg, 0, msg_len)
+    s = bytes.to_string(rec, total)
+    n = net.tcp_send_n_raw(sock, s, total)
+    bytes.free(rec)
+    if n != total { return "failed to send handshake record" }
+    return ""
+}
+
+// Fill a std.bytes buffer of length n with CSPRNG bytes.
+fn rand_into(n: int) -> ptr {
+    s, sn, err = cryptography.random_bytes(n)
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    if string.equals(err, "") == 1 {
+        bytes.copy_from_string(b, 0, s, n)
+    }
+    return b
+}
+
+fn cleanup_hello(pub: ptr, rnd: ptr, sid: ptr, ch: ptr) {
+    bytes.free(pub); bytes.free(rnd); bytes.free(sid); bytes.free(ch)
+}
+
+// ---- full handshake ----
+//
+// connect(host, port, x25519_priv32) -> (ClientConn ptr, "") on a completed,
+// verified handshake, or (null, error). Drives the whole subset handshake:
+//   ClientHello -> ServerHello -> ECDHE + handshake keys
+//   -> decrypt EncryptedExtensions/Certificate/CertificateVerify/Finished
+//   -> verify server Finished MAC
+//   -> master secret + application traffic keys
+//   -> send client Finished (encrypted with client handshake keys)
+// The returned ClientConn holds the application-data record contexts for
+// send()/recv().
+//
+// NOTE (subset): the server certificate's CertificateVerify signature is NOT
+// yet checked here (that wiring — extracting the leaf SPKI and running
+// tls13_cert.verify_cert_verify over the transcript — is the next increment);
+// this first cut proves the handshake completes and both sides agree on keys
+// via the Finished MACs. Chain/hostname validation is out of subset.
+connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
+    sock = net.tcp_connect_raw(host, port)
+    if sock == null { return null, "connect failed" }
+    pub = x25519.base_point(x25519_priv)
+    rnd = rand_into(32)
+    sid = rand_into(32)
+    ch = tls13_hs.client_hello(rnd, sid, 32, pub)
+    ch_len = bytes.length(ch)
+    tr = transcript_new()
+    transcript_add(tr, ch, ch_len)
+    serr = send_plaintext_handshake(sock, ch, ch_len)
+    if string.equals(serr, "") != 1 {
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        return null, serr
+    }
+    rio = recio_new(sock)
+
+    // ServerHello.
+    shrec, shlen, sherr = recio_next(rio)
+    if string.equals(sherr, "") != 1 {
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, sherr
+    }
+    sh_msg_len = shlen - 5
+    sh = bytes.new(sh_msg_len)
+    bytes.set(sh, sh_msg_len - 1, 0)
+    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
+    transcript_add(tr, sh, sh_msg_len)
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    perr = tls13_hs.parse_server_hello(sh, sh_msg_len, &parsed)
+    if string.equals(perr, "") != 1 {
+        bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, perr
+    }
+
+    shared, agerr = x25519.agree(x25519_priv, parsed.key_share)
+    if string.equals(agerr, "") != 1 {
+        if parsed.key_share != null { bytes.free(parsed.key_share) }
+        bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, agerr
+    }
+    th_chsh = transcript_hash(tr)
+    keys = derive_handshake_keys(shared, 32, th_chsh, 32)
+    srv_ctx = tls13_record.new(hs_server_key(keys), CHACHA_KEY_LEN, hs_server_iv(keys))
+
+    // Read + decrypt the server flight, adding each handshake message to the
+    // transcript. Snapshot the transcript hash BEFORE the server Finished (for
+    // its MAC) and capture the server Finished's verify_data.
+    fl = bytes.new(16384)
+    bytes.set(fl, 0, 0)
+    fllen = 0
+    th_before_finished = null
+    server_verify_data = null
+    svd_len = 0
+    done = 0
+    ferr = ""
+    guard = 0
+    while done == 0 {
+        guard = guard + 1
+        if guard > 128 { ferr = "flight too long"; done = 1 }
+        nrec, nlen, nerr = recio_next(rio)
+        if string.equals(nerr, "") != 1 { ferr = nerr; done = 1 }
+        if string.equals(nerr, "") == 1 {
+            ct = bytes.get(nrec, 0) & 0xFF
+            if ct == 0x14 { bytes.free(nrec) } else {
+                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+                oerr = tls13_record.open_record(srv_ctx, nrec, nlen, &opened)
+                if string.equals(oerr, "") != 1 { ferr = oerr; done = 1 } else {
+                    if opened.content_type == 22 {
+                        bytes.copy_from_bytes(fl, fllen, opened.plaintext, 0, opened.plaintext_len)
+                        fllen = fllen + opened.plaintext_len
+                    }
+                }
+                if opened.plaintext != null { bytes.free(opened.plaintext) }
+                bytes.free(nrec)
+                // The flight is complete once a Finished(20) message is fully
+                // present in the accumulated buffer.
+                if flight_complete(fl, fllen) == 1 { done = 1 }
+            }
+        }
+    }
+
+    // Fold the whole flight into the transcript in wire order, capturing the
+    // transcript hash BEFORE the final Finished (for the server Finished MAC).
+    if string.equals(ferr, "") == 1 {
+        th_before_finished = add_flight_capture_prefinished(tr, fl, fllen)
+        server_verify_data, svd_len = extract_server_finished(fl, fllen)
+    }
+
+    result = null
+    result_err = ferr
+    if string.equals(ferr, "") == 1 {
+        // Verify server Finished: HMAC(server_finished_key, th_before_finished).
+        expected = finished_verify_data(hs_server_secret(keys), th_before_finished, 32)
+        if bytes_equal(expected, server_verify_data, 32) != 1 {
+            result_err = "server Finished MAC verification failed"
+        } else {
+            // Handshake authenticated. Derive application keys and send the
+            // client Finished. th_sf = Transcript-Hash(CH..server Finished).
+            th_sf = transcript_hash(tr)
+            ms = tls13_ks.master_secret("sha256", hs_handshake_secret(keys))
+            c_ap = tls13_ks.traffic_secret("sha256", ms, "c ap traffic", th_sf, 32)
+            s_ap = tls13_ks.traffic_secret("sha256", ms, "s ap traffic", th_sf, 32)
+
+            // Client Finished over th_sf, encrypted with the CLIENT handshake keys.
+            cvd = finished_verify_data(hs_client_secret(keys), th_sf, 32)
+            cfin = build_finished_msg(cvd)
+            cli_hs_ctx = tls13_record.new(hs_client_key(keys), CHACHA_KEY_LEN, hs_client_iv(keys))
+            cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
+            cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
+            net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
+
+            // Application record contexts (fresh sequence numbers per key).
+            ck = tls13_ks.write_key("sha256", c_ap, CHACHA_KEY_LEN)
+            civ = tls13_ks.write_iv("sha256", c_ap)
+            sk = tls13_ks.write_key("sha256", s_ap, CHACHA_KEY_LEN)
+            siv = tls13_ks.write_iv("sha256", s_ap)
+
+            conn = malloc(32) as *ClientConn
+            conn.sock = sock
+            conn.rio = rio as ptr
+            conn.app_send = tls13_record.new(ck, CHACHA_KEY_LEN, civ) as ptr
+            conn.app_recv = tls13_record.new(sk, CHACHA_KEY_LEN, siv) as ptr
+            result = conn as ptr
+
+            bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+            bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
+            tls13_record.free_ctx(cli_hs_ctx)
+            bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+        }
+        bytes.free(expected)
+    }
+
+    // cleanup handshake-scoped state
+    if th_before_finished != null { bytes.free(th_before_finished) }
+    if server_verify_data != null { bytes.free(server_verify_data) }
+    bytes.free(fl)
+    tls13_record.free_ctx(srv_ctx)
+    free_hs_keys(keys)
+    bytes.free(th_chsh); bytes.free(shared)
+    if parsed.key_share != null { bytes.free(parsed.key_share) }
+    bytes.free(sh); bytes.free(shrec)
+    cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
+    if result == null {
+        recio_free(rio); net.tcp_close(sock)
+    }
+    return result, result_err
+}
+
+// ---- connect() helpers ----
+
+// Stateless: is a complete Finished(20) handshake message present in the
+// accumulated flight buffer `fl[0..flen]`?
+fn flight_complete(fl: ptr, flen: int) -> int {
+    p = 0
+    cont = 1
+    while cont == 1 {
+        if p + 4 > flen { cont = 0 } else {
+            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            if p + 4 + ml > flen { cont = 0 } else {
+                if (bytes.get(fl, p)&0xFF) == HS_FINISHED { return 1 }
+                p = p + 4 + ml
+            }
+        }
+    }
+    return 0
+}
+
+// Fold every complete handshake message in the flight into the transcript, in
+// wire order, AND return the transcript hash captured just BEFORE the final
+// Finished message (needed for the server Finished MAC). The transcript ends
+// up including the Finished (needed for app keys + client Finished).
+fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int) -> ptr {
+    fin_off = last_msg_offset(fl, flen)
+    th_pre = null
+    p = 0
+    cont = 1
+    while cont == 1 {
+        if p + 4 > flen { cont = 0 } else {
+            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            total = 4 + ml
+            if p + total > flen { cont = 0 } else {
+                // Capture the pre-Finished transcript hash right before adding
+                // the last (Finished) message.
+                if p == fin_off { th_pre = transcript_hash(tr) }
+                sub = bytes.new(total)
+                bytes.set(sub, total-1, 0)
+                bytes.copy_from_bytes(sub, 0, fl, p, total)
+                transcript_add(tr, sub, total)
+                bytes.free(sub)
+                p = p + total
+            }
+        }
+    }
+    return th_pre
+}
+
+// Offset of the last complete handshake message in the flight buffer.
+fn last_msg_offset(fl: ptr, flen: int) -> int {
+    p = 0
+    last = 0
+    cont = 1
+    while cont == 1 {
+        if p + 4 > flen { cont = 0 } else {
+            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            if p + 4 + ml > flen { cont = 0 } else {
+                last = p
+                p = p + 4 + ml
+            }
+        }
+    }
+    return last
+}
+
+// Extract the server Finished's verify_data (the Finished body) from the flight.
+fn extract_server_finished(fl: ptr, flen: int) -> (ptr, int) {
+    off = last_msg_offset(fl, flen)
+    ml = ((bytes.get(fl, off+1)&0xFF)<<16)|((bytes.get(fl, off+2)&0xFF)<<8)|(bytes.get(fl, off+3)&0xFF)
+    vd = bytes.new(ml)
+    if ml > 0 { bytes.set(vd, ml-1, 0) }
+    bytes.copy_from_bytes(vd, 0, fl, off + 4, ml)
+    return vd, ml
+}
+
+// Build a Finished handshake message: type(20) || uint24(len) || verify_data.
+fn build_finished_msg(vd: ptr) -> ptr {
+    vlen = bytes.length(vd)
+    m = bytes.new(4 + vlen)
+    bytes.set(m, 4 + vlen - 1, 0)
+    bytes.set(m, 0, HS_FINISHED)
+    bytes.set(m, 1, (vlen >> 16) & 0xFF)
+    bytes.set(m, 2, (vlen >> 8) & 0xFF)
+    bytes.set(m, 3, vlen & 0xFF)
+    bytes.copy_from_bytes(m, 4, vd, 0, vlen)
+    return m
+}
+
+// Constant-time-ish equality of the first n bytes.
+fn bytes_equal(a: ptr, b: ptr, n: int) -> int {
+    diff = 0
+    i = 0
+    while i < n {
+        diff = diff | ((bytes.get(a, i) ^ bytes.get(b, i)) & 0xFF)
+        i = i + 1
+    }
+    if diff == 0 { return 1 }
+    return 0
+}
+
+// HsKeys secret accessors.
+fn hs_server_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_hs_secret }
+fn hs_client_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.client_hs_secret }
+fn hs_handshake_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.handshake_secret }
+
+// ---- application data over a completed connection ----
+
+// Send application data as one encrypted record.
+conn_send(conn: ptr, data: ptr, len: int) -> string {
+    c = conn as *ClientConn
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data, len)
+    s = bytes.to_string(rec, bytes.length(rec))
+    n = net.tcp_send_n_raw(c.sock, s, bytes.length(rec))
+    tot = bytes.length(rec)
+    bytes.free(rec)
+    if n != tot { return "send failed" }
+    return ""
+}
+
+// Receive the next application-data record's plaintext (fresh bytes; caller
+// frees via bytes.free). Skips post-handshake handshake records (e.g. session
+// tickets, KeyUpdate is not handled in the subset). Returns (plaintext, len, "").
+conn_recv(conn: ptr) -> (ptr, int, string) {
+    c = conn as *ClientConn
+    rio = c.rio as *RecordIO
+    looking = 1
+    out = null
+    outlen = 0
+    rerr = ""
+    while looking == 1 {
+        rec, rlen, e = recio_next(rio)
+        if string.equals(e, "") != 1 { rerr = e; looking = 0 } else {
+            ct = bytes.get(rec, 0) & 0xFF
+            if ct == 0x14 { bytes.free(rec) } else {
+                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+                oerr = tls13_record.open_record(c.app_recv as ptr, rec, rlen, &opened)
+                bytes.free(rec)
+                if string.equals(oerr, "") != 1 { rerr = oerr; looking = 0 } else {
+                    if opened.content_type == tls13_record.CONTENT_APPLICATION_DATA {
+                        out = opened.plaintext
+                        outlen = opened.plaintext_len
+                        looking = 0
+                    } else {
+                        // handshake (session ticket) or alert; skip
+                        if opened.plaintext != null { bytes.free(opened.plaintext) }
+                    }
+                }
+            }
+        }
+    }
+    return out, outlen, rerr
+}
+
+close_conn(conn: ptr) {
+    c = conn as *ClientConn
+    tls13_record.free_ctx(c.app_send as ptr)
+    tls13_record.free_ctx(c.app_recv as ptr)
+    recio_free(c.rio as *RecordIO)
+    net.tcp_close(c.sock)
+    libc_free(conn)
+}

@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.cryptography.tls13_client`** (#1298) — a pure-Aether TLS 1.3 client
+  that drives a full handshake over `std.net` TCP, composing the six TLS
+  building blocks (x25519, tls13_kdf/ks/hs/cert/record). `connect()` performs
+  ClientHello → ServerHello → X25519 ECDHE → the key schedule → decrypting and
+  reassembling the server's encrypted flight → **verifying the server Finished
+  MAC** → sending the client Finished; `conn_send`/`conn_recv`/`close_conn`
+  then exchange encrypted application-data records. Verified end-to-end against
+  a live OpenSSL `s_server` (TLS_CHACHA20_POLY1305_SHA256 / X25519): completes
+  the handshake and decrypts a real `HTTP/1.0 200 ok` response. The offline
+  pieces (transcript accumulator, key derivation, Finished) are validated
+  against the RFC 8448 §3 trace in CI.
+
+  **⚠️ Not yet a secure client:** this first cut does NOT run the server's
+  CertificateVerify signature check and does NO chain / hostname validation —
+  it proves the key exchange and record protection work against a real server,
+  but does not authenticate the peer. Wiring `tls13_cert.verify_cert_verify`
+  plus chain/hostname policy is the next increment; do not use for anything
+  security-sensitive until then.
+
 ## [0.453.0]
 
 ### Changed
