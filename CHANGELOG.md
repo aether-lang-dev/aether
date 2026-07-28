@@ -23,6 +23,15 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.cryptography.tls13_cert`** (#1298) — TLS 1.3 CertificateVerify
+  (RFC 8446 §4.4.3): builds the signed content (`0x20`×64 || context || 0x00
+  || transcript-hash) and dispatches the signature check to ECDSA-P256 /
+  Ed25519 (DER ECDSA sig split into `(r,s)` via `std.bignum`). Plus an X.509
+  leaf structural parse (subjectPublicKeyInfo extraction) over the `asn1`
+  reader. Validated by signing CertificateVerify content with generated
+  p256 + ed25519 keys and confirming accept-valid / reject-tampered /
+  reject-wrong-transcript. Chain building, hostname/SAN matching, validity /
+  EKU policy, and revocation are explicitly out of scope for this brick.
 - **`std.cryptography.tls13_ks`** (#1298) — the TLS 1.3 key-schedule
   *driver* (RFC 8446 §7.1): the full secret chain (Early → Handshake →
   Master secrets, per-direction traffic secrets, and record `write_key` /
@@ -56,6 +65,11 @@ next version number before tagging the release.
 
 ### Fixed
 
+- **Struct-name collision `Pt` between `std.cryptography.p256` and
+  `.ed25519`** (#1298). Both defined an internal `struct Pt`; Aether structs
+  share one global namespace, so importing both modules together (which any
+  real TLS client must, to verify both ECDSA and Ed25519 certs) failed to
+  type-check. Renamed to `EcPt` / `EdPt`. No API change.
 - **`std.cryptography.chacha20poly1305` — Poly1305 tag is now computed in
   constant time** (#1298). The final modular reduction ("freeze") selected
   between `h` and `h - p` with a secret-dependent `if` branch; since the

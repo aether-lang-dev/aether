@@ -130,28 +130,28 @@ to_le32(nn: ptr) -> ptr {
 }
 
 // ---- extended-coordinate point (X:Y:Z:T), each a *BN ----
-struct Pt { x: ptr  y: ptr  z: ptr  t: ptr }
+struct EdPt { x: ptr  y: ptr  z: ptr  t: ptr }
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-pt_new(x: ptr, y: ptr, z: ptr, t: ptr) -> *Pt {
-    q = malloc(32) as *Pt
+pt_new(x: ptr, y: ptr, z: ptr, t: ptr) -> *EdPt {
+    q = malloc(32) as *EdPt
     q.x = x; q.y = y; q.z = z; q.t = t
     return q
 }
-pt_free(q: *Pt) {
+pt_free(q: *EdPt) {
     bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); bignum.free(q.t)
     libc_free(q)
 }
 
 // Neutral element (0, 1, 1, 0).
-pt_identity() -> *Pt {
+pt_identity() -> *EdPt {
     return pt_new(bignum.from_int(0), bignum.from_int(1), bignum.from_int(1), bignum.from_int(0))
 }
 
 // Point addition in extended coords (RFC 8032 / Hisil-Wong-Carter-Dawson),
 // using the precomputed d2 = 2*d.
-pt_add(a: *Pt, b: *Pt, p: ptr, d2: ptr) -> *Pt {
+pt_add(a: *EdPt, b: *EdPt, p: ptr, d2: ptr) -> *EdPt {
     // A = (Y1-X1)*(Y2-X2)
     ym1 = fsub(a.y, a.x, p); ym2 = fsub(b.y, b.x, p)
     A = fmul(ym1, ym2, p)
@@ -174,12 +174,12 @@ pt_add(a: *Pt, b: *Pt, p: ptr, d2: ptr) -> *Pt {
     return pt_new(X3, Y3, Z3, T3)
 }
 
-pt_clone(a: *Pt) -> *Pt {
+pt_clone(a: *EdPt) -> *EdPt {
     return pt_new(bignum.clone(a.x), bignum.clone(a.y), bignum.clone(a.z), bignum.clone(a.t))
 }
 
 // Scalar mult: e * P, double-and-add over the bits of e (a *BN).
-pt_mul(e: ptr, P: *Pt, p: ptr, d2: ptr) -> *Pt {
+pt_mul(e: ptr, P: *EdPt, p: ptr, d2: ptr) -> *EdPt {
     q = pt_identity()
     nbits = bignum.bit_length(e)
     // iterate from MSB to LSB
@@ -211,7 +211,7 @@ bit0(n: ptr) -> int {
 }
 
 // The base point B (from RFC 8032): y = 4/5, x recovered (even).
-base_point(p: ptr, d: ptr) -> *Pt {
+base_point(p: ptr, d: ptr) -> *EdPt {
     four = bignum.from_int(4); five = bignum.from_int(5)
     inv5 = bignum.mod_inverse(five, p)
     y = fmul(four, inv5, p)
@@ -286,7 +286,7 @@ sqrt_m1(p: ptr) -> ptr {
 
 // Encode a point to 32 bytes: little-endian y with the low bit of x in the
 // top bit of the last byte.
-pt_encode(q: *Pt, p: ptr) -> ptr {
+pt_encode(q: *EdPt, p: ptr) -> ptr {
     zinv = finv(q.z, p)
     x = fmul(q.x, zinv, p)
     y = fmul(q.y, zinv, p)
@@ -301,7 +301,7 @@ pt_encode(q: *Pt, p: ptr) -> ptr {
 }
 
 // Decode 32 bytes to a point; returns null on an invalid encoding.
-pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
+pt_decode(b: ptr, p: ptr, d: ptr) -> *EdPt {
     tmp = bytes.new(32)
     bytes.copy_from_bytes(tmp, 0, b, 0, 32)
     sign = (bytes.get(tmp, 31) >> 7) & 1
@@ -311,7 +311,7 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
     // y must be < p
     if bignum.compare(y, p) >= 0 {
         bignum.free(y)
-        return null as *Pt
+        return null as *EdPt
     }
     x = recover_x(y, sign, p, d)
     z = bignum.from_int(1)
@@ -434,8 +434,8 @@ verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
 
     A = pt_decode(public, p, d)
     R = pt_decode(Renc, p, d)
-    if A == null as *Pt { ok = 0 }
-    if R == null as *Pt { ok = 0 }
+    if A == null as *EdPt { ok = 0 }
+    if R == null as *EdPt { ok = 0 }
 
     result = 0
     if ok == 1 {
@@ -463,8 +463,8 @@ verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
     }
 
     bytes.free(Renc); bytes.free(Senc); bignum.free(S)
-    if A != null as *Pt { pt_free(A) }
-    if R != null as *Pt { pt_free(R) }
+    if A != null as *EdPt { pt_free(A) }
+    if R != null as *EdPt { pt_free(R) }
     bignum.free(p); bignum.free(d); bignum.free(d2); bignum.free(L)
     pt_free(B)
     return result

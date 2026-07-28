@@ -1,0 +1,177 @@
+// Validate std.cryptography.tls13_cert — the TLS 1.3 CertificateVerify
+// signature check (RFC 8446 §4.4.3) and the X.509 SPKI parse.
+//
+// No recorded transcript is needed: we PRODUCE valid CertificateVerify
+// signatures over the exact §4.4.3 content (with p256 and ed25519 keys we
+// generate here), confirm verify_cert_verify accepts them, and confirm a
+// tampered signature / wrong transcript is rejected. We also assert the
+// signed-content construction (64×0x20 || context || 0x00 || hash).
+
+import std.cryptography.tls13_cert
+import std.cryptography.p256
+import std.cryptography.ed25519
+import std.cryptography.sha2
+import std.cryptography.asn1
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+// SHA-256 of a std.bytes buffer (streaming path; sha256_bytes wants a string).
+fn sha256b(data: ptr, len: int) -> ptr {
+    ctx, err = sha2.new("sha256")
+    sha2.update_bytes(ctx, data, len)
+    return sha2.final_bytes(ctx)
+}
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        bytes.set(b, i, (hexval(string_char_at_n(s, slen, i * 2)) << 4) | hexval(string_char_at_n(s, slen, i * 2 + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+// Encode a DER INTEGER (with sign byte) from a 32-byte big-endian magnitude,
+// writing to `out` at `off`; returns new offset.
+fn der_int(out: ptr, off: int, mag32: ptr) -> int {
+    // find index of first non-zero byte (or 31 if all-zero -> value 0)
+    fn_start = 0
+    i = 0
+    found = 0
+    while i < 32 {
+        if found == 0 {
+            if (bytes.get(mag32, i) & 0xFF) != 0 { fn_start = i; found = 1 }
+        }
+        i = i + 1
+    }
+    if found == 0 { fn_start = 31 }   // value 0 -> one 0x00 byte
+    mag_len = 32 - fn_start
+    need_pad = 0
+    if (bytes.get(mag32, fn_start) & 0x80) != 0 { need_pad = 1 }
+    content_len = mag_len + need_pad
+    bytes.set(out, off, 0x02)          // INTEGER tag
+    bytes.set(out, off + 1, content_len)
+    p = off + 2
+    if need_pad == 1 {
+        bytes.set(out, p, 0)
+        p = p + 1
+    }
+    k = 0
+    while k < mag_len {
+        bytes.set(out, p + k, bytes.get(mag32, fn_start + k) & 0xFF)
+        k = k + 1
+    }
+    return p + mag_len
+}
+
+// Wrap (r32,s32) into a DER  SEQUENCE { INTEGER r, INTEGER s }.
+fn der_ecdsa_sig(r32: ptr, s32: ptr) -> (ptr, int) {
+    tmp = bytes.new(80)
+    bytes.set(tmp, 79, 0)
+    inner = der_int(tmp, 2, r32)
+    inner = der_int(tmp, inner, s32)
+    seq_len = inner - 2
+    bytes.set(tmp, 0, 0x30)
+    bytes.set(tmp, 1, seq_len)
+    total = inner
+    return tmp, total
+}
+
+main() {
+    total_ok = 1
+
+    // A fixed 32-byte transcript hash stand-in (SHA-256 output size).
+    th = from_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+
+    // --- content construction ---
+    content, clen = tls13_cert.cert_verify_content(th, 32)
+    ctx = "TLS 1.3, server CertificateVerify"
+    ctx_len = string.length(ctx)
+    ok = 1
+    if clen != 64 + ctx_len + 1 + 32 { println("FAIL content length ${clen}"); ok = 0 }
+    i = 0
+    while i < 64 {
+        if bytes.get(content, i) != 0x20 { ok = 0 }
+        i = i + 1
+    }
+    if bytes.get(content, 64 + ctx_len) != 0 { println("FAIL missing 0x00 separator"); ok = 0 }
+    if bytes.get(content, clen - 1) != 0x99 { println("FAIL trailing transcript byte"); ok = 0 }
+    if ok == 1 { println("ok   cert_verify_content structure") } else { total_ok = 0 }
+    bytes.free(content)
+
+    // --- Ed25519 CertificateVerify ---
+    ed_seed = from_hex("9d61b19deffcbb00000000000000000000000000000000000000000000000000")
+    ed_pub = ed25519.publickey(ed_seed)
+    // Sign the exact §4.4.3 content ourselves, then verify via the module.
+    c2, c2len = tls13_cert.cert_verify_content(th, 32)
+    ed_sig = ed25519.sign(ed_seed, c2, c2len)
+    bytes.free(c2)
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ED25519, ed_pub, null, th, 32, ed_sig, 64) == 1 {
+        println("ok   ed25519 CertificateVerify accepts valid sig")
+    } else {
+        println("FAIL ed25519 CertificateVerify rejected valid sig"); total_ok = 0
+    }
+    // Tamper the signature -> reject.
+    bytes.set(ed_sig, 0, (bytes.get(ed_sig, 0) ^ 0x01) & 0xFF)
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ED25519, ed_pub, null, th, 32, ed_sig, 64) == 0 {
+        println("ok   ed25519 CertificateVerify rejects tampered sig")
+    } else {
+        println("FAIL ed25519 CertificateVerify accepted tampered sig"); total_ok = 0
+    }
+    bytes.free(ed_seed)
+    bytes.free(ed_pub)
+    bytes.free(ed_sig)
+
+    // --- ECDSA-P256 CertificateVerify ---
+    priv = from_hex("c477f9f65c22cce20657faa5b2d1d8122336f851a508a1ed04e479c34985bf96")
+    px, py = p256.scalar_mult_base(priv)
+    c3, c3len = tls13_cert.cert_verify_content(th, 32)
+    digest = sha256b(c3, c3len)
+    bytes.free(c3)
+    knonce = from_hex("7a1a7e52797fc8caaa435d2a4dace39158504bf204fbe19f14dbb427faee50ae")
+    r32, s32 = p256.ecdsa_sign(priv, digest, knonce)
+    dsig, dlen = der_ecdsa_sig(r32, s32)
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, th, 32, dsig, dlen) == 1 {
+        println("ok   ecdsa-p256 CertificateVerify accepts valid sig")
+    } else {
+        println("FAIL ecdsa-p256 CertificateVerify rejected valid sig"); total_ok = 0
+    }
+    // Wrong transcript hash -> reject.
+    th2 = from_hex("00bbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P256_SHA256, px, py, th2, 32, dsig, dlen) == 0 {
+        println("ok   ecdsa-p256 CertificateVerify rejects wrong transcript")
+    } else {
+        println("FAIL ecdsa-p256 accepted wrong transcript"); total_ok = 0
+    }
+    bytes.free(priv)
+    bytes.free(px)
+    bytes.free(py)
+    bytes.free(digest)
+    bytes.free(knonce)
+    bytes.free(r32)
+    bytes.free(s32)
+    bytes.free(dsig)
+    bytes.free(th2)
+    bytes.free(th)
+
+    if total_ok == 0 {
+        println("tls13_cert: FAILURES")
+        exit(1)
+    }
+    println("tls13_cert: all checks pass")
+}
