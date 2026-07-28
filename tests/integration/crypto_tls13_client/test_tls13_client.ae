@@ -1,0 +1,124 @@
+// Validate std.cryptography.tls13_client's PURE pieces (transcript hash, key
+// derivation, Finished) against the canonical RFC 8448 §3 trace. The
+// socket-driven handshake (connect/send/recv) is exercised separately against
+// a live TLS 1.3 server, not here.
+
+import std.cryptography.tls13_client
+import std.cryptography.sha2
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        bytes.set(b, i, (hexval(string_char_at_n(s, slen, i * 2)) << 4) | hexval(string_char_at_n(s, slen, i * 2 + 1)))
+        i = i + 1
+    }
+    return b
+}
+fn to_hex(b: ptr, n: int) -> string {
+    hx = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        hi = (v >> 4) & 15
+        lo = v & 15
+        chi = 48 + hi
+        if hi >= 10 { chi = 87 + hi }
+        clo = 48 + lo
+        if lo >= 10 { clo = 87 + lo }
+        bytes.set(hx, i * 2, chi)
+        bytes.set(hx, i * 2 + 1, clo)
+        i = i + 1
+    }
+    return bytes.finish(hx, n * 2)
+}
+fn sha256b(data: ptr, len: int) -> ptr {
+    ctx, err = sha2.new("sha256")
+    sha2.update_bytes(ctx, data, len)
+    return sha2.final_bytes(ctx)
+}
+
+main() {
+    total_ok = 1
+
+    // --- transcript accumulator == SHA-256 of concatenated messages ---
+    m1 = from_hex("41414141")       // "AAAA"
+    m2 = from_hex("424242424242")   // "BBBBBB"
+    t = tls13_client.transcript_new()
+    tls13_client.transcript_add(t, m1, 4)
+    tls13_client.transcript_add(t, m2, 6)
+    got = tls13_client.transcript_hash(t)
+    cat = from_hex("41414141424242424242")
+    want = sha256b(cat, 10)
+    if to_hex(got, 32) == to_hex(want, 32) {
+        println("ok   transcript accumulator == SHA-256(concat)")
+    } else {
+        println("FAIL transcript accumulator"); total_ok = 0
+    }
+    tls13_client.transcript_free(t)
+    bytes.free(m1); bytes.free(m2); bytes.free(got); bytes.free(cat); bytes.free(want)
+
+    // --- handshake key derivation (RFC 8448 §3) ---
+    ecdhe = from_hex("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d")
+    thash = from_hex("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8")
+    k = tls13_client.derive_handshake_keys(ecdhe, 32, thash, 32)
+
+    // server_iv matches RFC 8448 §3 exactly (iv is cipher-length-independent)
+    siv = tls13_client.hs_server_iv(k)
+    if to_hex(siv, 12) == "5d313eb2671276ee13000b30" {
+        println("ok   server_iv == RFC 8448 §3 (5d313eb2...)")
+    } else {
+        println("FAIL server_iv = ${to_hex(siv, 12)}"); total_ok = 0
+    }
+    // server_key is the 32-byte ChaCha20 key (RFC 8448 uses AES-128 16B; the
+    // HKDF length is bound into the label so the values differ — this is the
+    // correct ChaCha20 key for the same s hs traffic secret).
+    sk = tls13_client.hs_server_key(k)
+    if to_hex(sk, 32) == "ac70443f7fe3bdaf568b1dcdb0a7f3fea098bca189c3455ba41fcd9d488348a4" {
+        println("ok   server_key == ChaCha20 32B key for RFC 8448 s hs traffic")
+    } else {
+        println("FAIL server_key = ${to_hex(sk, 32)}"); total_ok = 0
+    }
+    tls13_client.free_hs_keys(k)
+    bytes.free(ecdhe); bytes.free(thash)
+
+    // --- Finished key (RFC 8446 §4.4.4; RFC 8448 §3 server value) ---
+    s_hs = from_hex("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38")
+    fk = tls13_client.finished_key(s_hs)
+    if to_hex(fk, 32) == "008d3b66f816ea559f96b537e885c31fc068bf492c652f01f288a1d8cdc19fc8" {
+        println("ok   server finished_key == RFC 8448 §3")
+    } else {
+        println("FAIL finished_key = ${to_hex(fk, 32)}"); total_ok = 0
+    }
+    // verify_data over a stand-in transcript hash (round-trips through HMAC).
+    dummy_th = from_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+    vd = tls13_client.finished_verify_data(s_hs, dummy_th, 32)
+    if bytes.length(vd) == 32 {
+        println("ok   finished_verify_data is a 32-byte MAC")
+    } else {
+        println("FAIL verify_data length ${bytes.length(vd)}"); total_ok = 0
+    }
+    bytes.free(s_hs); bytes.free(fk); bytes.free(dummy_th); bytes.free(vd)
+
+    if total_ok == 0 {
+        println("tls13_client: FAILURES")
+        exit(1)
+    }
+    println("tls13_client: all pure-piece vectors pass")
+}
