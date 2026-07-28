@@ -1,8 +1,8 @@
-// Validate contrib.cryptography.chacha20poly1305 against RFC 8439 vectors:
+// Validate std.cryptography.chacha20poly1305 against RFC 8439 vectors:
 // the Poly1305 §2.5.2 tag and the ChaCha20-Poly1305 AEAD §2.8.2 example
 // (seal produces the exact spec ciphertext+tag; open round-trips and a
 // tampered tag is rejected).
-import contrib.cryptography.chacha20poly1305
+import std.cryptography.chacha20poly1305
 import std.bytes
 import std.string
 import std.io
@@ -27,6 +27,19 @@ main() {
     fails = fails + check("poly1305 §2.5.2",
         bh(chacha20poly1305.poly1305_mac(pk, msg, bytes.length(msg))),
         "a8061dc1305136c6c22b8baf0c0127a9")
+
+    // Poly1305 reduction edge: r=2, s=0, msg = 16 * 0xFF forces the
+    // accumulator >= p (2^130-5), exercising the constant-time final
+    // conditional-subtract ("freeze") select. (2^128-1)*2 mod (2^130-5) = 3.
+    pk_edge = hb("0200000000000000000000000000000000000000000000000000000000000000")
+    msg_edge = hb("ffffffffffffffffffffffffffffffff")
+    tag_edge = chacha20poly1305.poly1305_mac(pk_edge, msg_edge, bytes.length(msg_edge))
+    fails = fails + check("poly1305 freeze (h>=p) edge",
+        bh(tag_edge),
+        "03000000000000000000000000000000")
+    bytes.free(pk_edge)
+    bytes.free(msg_edge)
+    bytes.free(tag_edge)
 
     // RFC 8439 §2.8.2 AEAD
     key = hb("808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f")

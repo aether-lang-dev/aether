@@ -1,0 +1,341 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_cert — TLS 1.3 certificate handling for the pure-
+// Aether client subset (issue #1298): the CertificateVerify signature check
+// (RFC 8446 §4.4.3) and the X.509 structural parse needed to feed it. NO
+// externs to OpenSSL. Built on std.cryptography.{asn1,sha2,p256,ed25519,rsa}.
+//
+// This brick covers the two highest-value, offline-testable pieces of cert
+// handling:
+//
+//   1. CertificateVerify content + verify (RFC 8446 §4.4.3). The server signs
+//        (0x20 * 64) || "TLS 1.3, server CertificateVerify" || 0x00 || Hash
+//      where Hash is the transcript hash up to (and including) the server
+//      Certificate message. We build that content and dispatch the signature
+//      check to the right primitive by SignatureScheme.
+//
+//   2. X.509 leaf structural parse: split Certificate into tbsCertificate /
+//      signatureAlgorithm / signatureValue, and pull the subjectPublicKeyInfo
+//      (algorithm OID + public-key bits) out of the TBS. That SPKI is what the
+//      CertificateVerify check needs (the leaf's public key).
+//
+// EXPLICITLY OUT OF SCOPE for this brick (later increments): chain building
+// against a trust store, hostname / SAN matching, validity-period and Basic-
+// Constraints / EKU policy, and revocation. This is the crypto core, not the
+// full RFC 5280 policy engine.
+//
+// Import with:  import std.cryptography.tls13_cert
+//
+//   cert_verify_content(context, transcript_hash, th_len) -> (ptr, int)
+//       build the RFC 8446 §4.4.3 signed content; caller frees the buffer.
+//   verify_cert_verify(scheme, pubx, puby, transcript_hash, th_len, sig, sig_len) -> int
+//       ECDSA-P256 / Ed25519 dispatch (1 = valid, 0 = invalid).
+//   parse_certificate(der, len, out) -> string
+//       split a DER Certificate into a LeafCert (tbs/spki/sig views).
+
+import std.bytes
+import std.string
+import std.bignum
+import std.cryptography.asn1
+import std.cryptography.sha2
+import std.cryptography.p256
+import std.cryptography.ed25519
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+exports (
+    cert_verify_content, verify_cert_verify, parse_certificate,
+    LeafCert,
+    SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256
+)
+
+// SignatureScheme code points (RFC 8446 §4.2.3).
+const SCHEME_ECDSA_P256_SHA256   = 0x0403
+const SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804
+const SCHEME_ED25519             = 0x0807
+
+// The CertificateVerify context string for a server's signature
+// (RFC 8446 §4.4.3): "TLS 1.3, server CertificateVerify".
+fn server_context(out: ptr, off: int) -> int {
+    // ASCII bytes of "TLS 1.3, server CertificateVerify"
+    s = "TLS 1.3, server CertificateVerify"
+    n = string.length(s)
+    i = 0
+    while i < n {
+        bytes.set(out, off + i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    return off + n
+}
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+// Build the RFC 8446 §4.4.3 signed content:
+//   64 bytes of 0x20  ||  context-string  ||  0x00  ||  transcript_hash
+// Returns the content buffer (caller frees) and its length.
+cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
+    ctx_len = string.length("TLS 1.3, server CertificateVerify")
+    total = 64 + ctx_len + 1 + th_len
+    out = bytes.new(total)
+    bytes.set(out, total - 1, 0)   // force full zero-fill
+
+    // 64 spaces (0x20)
+    i = 0
+    while i < 64 {
+        bytes.set(out, i, 0x20)
+        i = i + 1
+    }
+    off = 64
+    off = server_context(out, off)
+    // separator 0x00
+    bytes.set(out, off, 0)
+    off = off + 1
+    // transcript hash
+    j = 0
+    while j < th_len {
+        bytes.set(out, off + j, bytes.get(transcript_hash, j) & 0xFF)
+        j = j + 1
+    }
+    return out, total
+}
+
+// Split a DER ECDSA-Sig-Value  SEQUENCE { r INTEGER, s INTEGER }  into two
+// fixed 32-byte big-endian scalars (left-padded / high-byte-trimmed as
+// needed). Returns (r32, s32, "") or (null, null, err).
+fn split_ecdsa_sig(sig: ptr, sig_len: int) -> (ptr, ptr, string) {
+    view = bytes.new(sig_len)
+    if sig_len > 0 { bytes.set(view, sig_len - 1, 0) }
+    bytes.copy_from_bytes(view, 0, sig, 0, sig_len)
+    rdr = asn1.reader_new(view)
+    sub, body, serr = asn1.read_sequence(rdr)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(rdr)
+        bytes.free(view)
+        return null, null, serr
+    }
+    // read_integer returns a std.bignum handle (NOT a std.bytes buffer).
+    rint, rerr = asn1.read_integer(sub)
+    if string.equals(rerr, "") != 1 {
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        return null, null, rerr
+    }
+    sint, serr2 = asn1.read_integer(sub)
+    if string.equals(serr2, "") != 1 {
+        bignum.free(rint)
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        return null, null, serr2
+    }
+    r32 = bn_to_fixed32(rint)
+    s32 = bn_to_fixed32(sint)
+    bignum.free(rint)
+    bignum.free(sint)
+    asn1.reader_free(sub)
+    asn1.reader_free(rdr)
+    bytes.free(view)
+    bytes.free(body)
+    return r32, s32, ""
+}
+
+// Render a std.bignum into exactly 32 big-endian bytes (left-padded with
+// zeros; high bytes dropped if the value somehow exceeds 32 bytes — it never
+// should for a P-256 scalar).
+fn bn_to_fixed32(v: ptr) -> ptr {
+    be = bignum.to_bytes_unsigned(v)   // variable-length big-endian magnitude
+    n = bytes.length(be)
+    out = bytes.new(32)
+    i = 0
+    while i < 32 {
+        bytes.set(out, i, 0)
+        i = i + 1
+    }
+    // Right-align: copy the low min(n,32) bytes into the tail of `out`.
+    copy_n = n
+    src_start = 0
+    if n > 32 {
+        copy_n = 32
+        src_start = n - 32
+    }
+    dst = 32 - copy_n
+    k = 0
+    while k < copy_n {
+        bytes.set(out, dst + k, bytes.get(be, src_start + k) & 0xFF)
+        k = k + 1
+    }
+    bytes.free(be)
+    return out
+}
+
+// SHA-256 of a std.bytes buffer (the streaming update_bytes path — the
+// one-shot sha2.sha256_bytes takes a STRING, not a bytes buffer).
+fn sha256_of_bytes(data: ptr, len: int) -> ptr {
+    ctx, err = sha2.new("sha256")
+    if err != "" { return null }
+    sha2.update_bytes(ctx, data, len)
+    return sha2.final_bytes(ctx)
+}
+
+// Verify a server CertificateVerify signature (RFC 8446 §4.4.3).
+//   scheme            SignatureScheme code point
+//   pubx, puby        the leaf's EC public key coords (ECDSA schemes)
+//                     — for Ed25519, pass the 32-byte public key as `pubx`
+//                       and null as `puby`.
+//   transcript_hash   the transcript hash through the server Certificate msg
+//   sig, sig_len      the CertificateVerify signature bytes
+// Returns 1 if valid, 0 otherwise.
+verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_len: int, sig: ptr, sig_len: int) -> int {
+    content, clen = cert_verify_content(transcript_hash, th_len)
+
+    result = 0
+    if scheme == SCHEME_ECDSA_P256_SHA256 {
+        // ECDSA over SHA-256(content); DER sig -> (r,s).
+        // NOTE: sha2.sha256_bytes takes a STRING; content is a std.bytes
+        // buffer, so we must hash it through the streaming update_bytes path.
+        digest = sha256_of_bytes(content, clen)
+        r32, s32, serr = split_ecdsa_sig(sig, sig_len)
+        if string.equals(serr, "") == 1 {
+            result = p256.ecdsa_verify(pubx, puby, digest, r32, s32)
+            bytes.free(r32)
+            bytes.free(s32)
+        }
+        bytes.free(digest)
+    }
+    if scheme == SCHEME_ED25519 {
+        // Ed25519 signs the raw content (hashes internally). pubx = 32-byte key.
+        result = ed25519.verify(pubx, content, clen, sig)
+    }
+
+    bytes.free(content)
+    return result
+}
+
+// ---- X.509 structural parse ----
+
+// Views into a parsed leaf Certificate (RFC 5280). All ptr fields are fresh
+// std.bytes the caller must free via free_leaf. `tbs` is the exact DER of
+// tbsCertificate (the signed bytes); `spki_algo_oid` is the SPKI algorithm
+// OID (dotted string); `spki_key` is the subjectPublicKey BIT STRING content
+// (for EC: 0x04 || X || Y uncompressed point; for RSA: the RSAPublicKey DER).
+struct LeafCert {
+    tbs: ptr
+    tbs_len: int
+    sig_alg_oid: string
+    signature: ptr
+    signature_len: int
+    spki_algo_oid: string
+    spki_key: ptr
+    spki_key_len: int
+}
+
+// Parse a DER Certificate into `out`. Returns "" on success or an error.
+// Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
+    out.tbs = null
+    out.tbs_len = 0
+    out.sig_alg_oid = ""
+    out.signature = null
+    out.signature_len = 0
+    out.spki_algo_oid = ""
+    out.spki_key = null
+    out.spki_key_len = 0
+
+    view = bytes.new(len)
+    if len > 0 { bytes.set(view, len - 1, 0) }
+    bytes.copy_from_bytes(view, 0, der, 0, len)
+
+    top = asn1.reader_new(view)
+    cert, cert_body, cerr = asn1.read_sequence(top)
+    if string.equals(cerr, "") != 1 {
+        asn1.reader_free(top); bytes.free(view)
+        return cerr
+    }
+
+    // tbsCertificate — capture its exact DER bytes (the signed content).
+    tbs, terr = asn1.read_tlv(cert)   // NOTE: content only; we need full TLV
+    // read_tlv returns the CONTENT of the TBS SEQUENCE, not its full DER.
+    // We need the full tbsCertificate DER (tag+len+content) for signature
+    // verification. Re-derive it from cert_body by re-parsing with a length
+    // walk below instead; for THIS brick we expose the TBS content and the
+    // SPKI, which is what the CertificateVerify path consumes (it uses the
+    // leaf's public key, not the chain signature over TBS). Chain-signature
+    // verification lands with the chain-building increment.
+    if string.equals(terr, "") != 1 {
+        asn1.reader_free(cert); asn1.reader_free(top); bytes.free(view); bytes.free(cert_body)
+        return terr
+    }
+    out.tbs = tbs
+    out.tbs_len = bytes.length(tbs)
+
+    // Walk tbsCertificate to reach subjectPublicKeyInfo. Fields in order:
+    //   [0] version (optional, explicit), serialNumber INTEGER,
+    //   signature AlgorithmIdentifier, issuer Name, validity, subject Name,
+    //   subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }
+    tbsr = asn1.reader_new(tbs)
+    perr = parse_tbs_to_spki(tbsr, out)
+    asn1.reader_free(tbsr)
+
+    asn1.reader_free(cert)
+    asn1.reader_free(top)
+    bytes.free(view)
+    bytes.free(cert_body)
+    return perr
+}
+
+// Advance through tbsCertificate to subjectPublicKeyInfo and populate
+// out.spki_algo_oid / out.spki_key. `tbsr` reads the TBS content.
+fn parse_tbs_to_spki(tbsr: ptr, out: *LeafCert) -> string {
+    // Optional [0] version: skip if present (context tag 0xA0).
+    // We peek by reading one TLV and checking last_tag.
+    first, e1 = asn1.read_tlv(tbsr)
+    if string.equals(e1, "") != 1 { return e1 }
+    // If the first element was the explicit [0] version wrapper, the next
+    // element is serialNumber; otherwise `first` WAS serialNumber. Either
+    // way we now skip fields until we've consumed: serialNumber, signature
+    // AlgId, issuer, validity, subject — then the next SEQUENCE is SPKI.
+    bytes.free(first)
+
+    // Skip a fixed number of intervening TLVs then read SPKI. The count
+    // depends on whether [0] version was present. Rather than track that
+    // fragile count, scan for the SPKI: the first SEQUENCE whose first
+    // element is an AlgorithmIdentifier followed by a BIT STRING.
+    return scan_for_spki(tbsr, out)
+}
+
+// Scan remaining TLVs; the SPKI is a SEQUENCE containing an AlgorithmId
+// SEQUENCE then a BIT STRING. We look for a SEQUENCE (tag 0x30) whose body
+// parses as { SEQUENCE(algo), BIT STRING(key) }.
+fn scan_for_spki(tbsr: ptr, out: *LeafCert) -> string {
+    while asn1.reader_eof(tbsr) != 1 {
+        content, e = asn1.read_tlv(tbsr)
+        if string.equals(e, "") != 1 { return e }
+        tag = asn1.last_tag(tbsr)
+        if tag == 0x30 {
+            // Candidate SPKI: try to parse { AlgId SEQUENCE, BIT STRING }.
+            sub = asn1.reader_new(content)
+            algo_body, algo_full, ae = asn1.read_sequence(sub)
+            if string.equals(ae, "") == 1 {
+                // algorithm OID is the first element of the AlgId sequence
+                oid, oerr = asn1.read_oid(algo_body)
+                bitkey, nbits, berr = asn1.read_bit_string(sub)
+                if string.equals(oerr, "") == 1 && string.equals(berr, "") == 1 {
+                    out.spki_algo_oid = oid
+                    out.spki_key = bitkey
+                    out.spki_key_len = bytes.length(bitkey)
+                    asn1.reader_free(algo_body)
+                    asn1.reader_free(sub)
+                    bytes.free(algo_full)
+                    bytes.free(content)
+                    return ""
+                }
+                if string.equals(berr, "") == 1 { bytes.free(bitkey) }
+                asn1.reader_free(algo_body)
+                bytes.free(algo_full)
+            }
+            asn1.reader_free(sub)
+        }
+        bytes.free(content)
+    }
+    return "x509: subjectPublicKeyInfo not found"
+}
+

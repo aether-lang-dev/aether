@@ -17,7 +17,7 @@
 //
 // Import with:  import std.cryptography.ascon_aead
 //
-// API (mirrors contrib.cryptography.chacha20poly1305):
+// API (mirrors std.cryptography.chacha20poly1305):
 //   aead_seal(algo, key16, nonce16, aad, aad_len, pt, pt_len) -> ptr ct-with-tag
 //   aead_open(algo, key16, nonce16, aad, aad_len, ct_with_tag, ct_len) -> (pt, "")
 // `algo` is "ascon-128" or "ascon-128a". Convenience wrappers a128_* / a128a_*

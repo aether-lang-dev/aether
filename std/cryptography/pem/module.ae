@@ -1,0 +1,214 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+//
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.pem — PEM (RFC 7468) text <-> DER bytes codec.
+//
+// PEM is the "-----BEGIN <label>-----" / base64 body / "-----END <label>-----"
+// envelope that wraps DER-encoded keys and certificates. This module is the
+// text layer; the DER inside is handled by std.cryptography.asn1.
+//
+// Structure follows Bouncy Castle's PemReader / PemWriter
+// (crypto/src/util/io/pem/). The base64 codec is a pure-Aether RFC 4648
+// implementation — NO OpenSSL extern, so PEM stays self-contained and
+// matches the cryptography port's no-externs rule (issue #739).
+//
+// Surface:
+//
+//   import std.cryptography.pem
+//
+//   der, label, err = pem.parse(pem_text)   // first PEM block in the text
+//   text, err       = pem.encode(label, der_bytes)
+//
+//   `der` is a std.bytes (caller frees with bytes.free); `label` is the
+//   block type (e.g. "CERTIFICATE", "RSA PRIVATE KEY"). On failure
+//   parse returns (null, "", err); encode returns ("", err).
+
+import std.string
+import std.bytes
+import std.strbuilder
+
+exports (
+    parse, encode,
+    base64_decode, base64_encode
+)
+
+// ---- pure-Aether base64 (RFC 4648 standard alphabet) ----
+
+b64_alphabet() -> string {
+    return "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+}
+
+// value of a base64 character, or -1 if not a base64 char (incl. '=').
+b64_val(c: int) -> int {
+    if c >= 65 { if c <= 90 { return c - 65 } }        // A-Z -> 0..25
+    if c >= 97 { if c <= 122 { return c - 71 } }       // a-z -> 26..51
+    if c >= 48 { if c <= 57 { return c + 4 } }         // 0-9 -> 52..61
+    if c == 43 { return 62 }                           // '+'
+    if c == 47 { return 63 }                           // '/'
+    return -1
+}
+
+// Decode a base64 string (ignoring whitespace/newlines) into std.bytes.
+// Returns (bytes, err). On malformed input returns (null, err).
+base64_decode(s: string) -> (ptr, string) {
+    n = string.length(s)
+    out = bytes.new(0)
+    outlen = 0
+    acc = 0      // accumulated bits
+    nbits = 0    // number of bits in acc
+    i = 0
+    while i < n {
+        c = string_char_at_n(s, n, i)
+        i = i + 1
+        // skip whitespace
+        if c == 32 { } else {
+        if c == 9 { } else {
+        if c == 10 { } else {
+        if c == 13 { } else {
+        if c == 61 {
+            // '=' padding — stop consuming data bits
+            nbits = 0
+        } else {
+            v = b64_val(c)
+            if v < 0 {
+                bytes.free(out)
+                return null, "pem: invalid base64 character"
+            }
+            acc = (acc << 6) | v
+            nbits = nbits + 6
+            if nbits >= 8 {
+                nbits = nbits - 8
+                byteval = (acc >> nbits) & 0xFF
+                bytes.set(out, outlen, byteval)
+                outlen = outlen + 1
+            }
+        }
+        }}}}
+    }
+    return out, ""
+}
+
+// Encode std.bytes as base64 (standard alphabet, '=' padded). Returns a
+// string with NO line breaks (the PEM writer inserts them at 64 cols).
+base64_encode(b: ptr) -> string {
+    alpha = b64_alphabet()
+    n = bytes.length(b)
+    sb = strbuilder.new(((n + 2) / 3) * 4 + 1)
+    i = 0
+    while i + 3 <= n {
+        b0 = bytes.get(b, i)
+        b1 = bytes.get(b, i + 1)
+        b2 = bytes.get(b, i + 2)
+        trip = (b0 << 16) | (b1 << 8) | b2
+        emit_b64_char(sb, alpha, (trip >> 18) & 0x3F)
+        emit_b64_char(sb, alpha, (trip >> 12) & 0x3F)
+        emit_b64_char(sb, alpha, (trip >> 6) & 0x3F)
+        emit_b64_char(sb, alpha, trip & 0x3F)
+        i = i + 3
+    }
+    rem = n - i
+    if rem == 1 {
+        b0 = bytes.get(b, i)
+        trip = b0 << 16
+        emit_b64_char(sb, alpha, (trip >> 18) & 0x3F)
+        emit_b64_char(sb, alpha, (trip >> 12) & 0x3F)
+        strbuilder.append_byte(sb, 61)   // '='
+        strbuilder.append_byte(sb, 61)   // '='
+    }
+    if rem == 2 {
+        b0 = bytes.get(b, i)
+        b1 = bytes.get(b, i + 1)
+        trip = (b0 << 16) | (b1 << 8)
+        emit_b64_char(sb, alpha, (trip >> 18) & 0x3F)
+        emit_b64_char(sb, alpha, (trip >> 12) & 0x3F)
+        emit_b64_char(sb, alpha, (trip >> 6) & 0x3F)
+        strbuilder.append_byte(sb, 61)   // '='
+    }
+    return strbuilder.finish(sb)
+}
+
+emit_b64_char(sb: ptr, alpha: string, v: int) {
+    strbuilder.append_byte(sb, string_char_at_n(alpha, 64, v))
+}
+
+// ---- PEM parse ----
+
+// Parse the first PEM block in `text`. Returns (der_bytes, label, "") on
+// success, (null, "", err) otherwise. Whitespace before/after is tolerated.
+parse(text: string) -> (ptr, string, string) {
+    n = string.length(text)
+    begin = "-----BEGIN "
+    bidx = string.index_of(text, begin)
+    if bidx < 0 {
+        return null, "", "pem: no BEGIN marker"
+    }
+    // label runs from after "-----BEGIN " to the closing "-----"
+    label_start = bidx + string.length(begin)
+    dashes = "-----"
+    label_end = string.index_of_from(text, dashes, label_start)
+    if label_end < 0 {
+        return null, "", "pem: malformed BEGIN line"
+    }
+    // body starts after the BEGIN line's trailing "-----"
+    body_start = label_end + string.length(dashes)
+    // END marker must match the label. Locate it BEFORE materialising the
+    // returned `label` so the error paths don't strand a heap string (the
+    // Aether tracker doesn't reclaim a heap local that's returned on one
+    // branch but dropped on another). The "-----END " token alone is enough
+    // to find the trailer; we then confirm the label between the markers.
+    end_tok = "-----END "
+    end_tok_idx = string.index_of_from(text, end_tok, body_start)
+    if end_tok_idx < 0 {
+        return null, "", "pem: no matching END marker"
+    }
+    end_label_end = string.index_of_from(text, dashes, end_tok_idx + string.length(end_tok))
+    if end_label_end < 0 {
+        return null, "", "pem: malformed END line"
+    }
+    // confirm BEGIN and END labels match
+    begin_label = string.substring(text, label_start, label_end)
+    end_label = string.substring(text, end_tok_idx + string.length(end_tok), end_label_end)
+    if string.equals(begin_label, end_label) != 1 {
+        return null, "", "pem: BEGIN/END label mismatch"
+    }
+    body = string.substring(text, body_start, end_tok_idx)
+    der, derr = base64_decode(body)
+    if string.equals(derr, "") != 1 {
+        return null, "", derr
+    }
+    return der, begin_label, ""
+}
+
+// ---- PEM encode ----
+
+// Encode DER bytes under `label` into a PEM block (LF line endings, base64
+// wrapped at 64 columns per RFC 7468). Returns (text, "").
+encode(label: string, der: ptr) -> (string, string) {
+    b64 = base64_encode(der)
+    blen = string.length(b64)
+    sb = strbuilder.new(blen + 128)
+    append_str(sb, "-----BEGIN ")
+    append_str(sb, label)
+    append_str(sb, "-----\n")
+    // wrap body at 64 chars (substrings are heap-tracked / auto-freed)
+    i = 0
+    while i < blen {
+        e = i + 64
+        if e > blen { e = blen }
+        line = string.substring(b64, i, e)
+        append_str(sb, line)
+        strbuilder.append_byte(sb, 10)   // '\n'
+        i = e
+    }
+    append_str(sb, "-----END ")
+    append_str(sb, label)
+    append_str(sb, "-----\n")
+    return strbuilder.finish(sb), ""
+}
+
+append_str(sb: ptr, s: string) {
+    strbuilder.append(sb, s)
+}

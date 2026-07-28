@@ -4,14 +4,14 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// Regression: contrib.cryptography.asn1 DER parser + emitter (issue #739).
+// Regression: std.cryptography.asn1 DER parser + emitter (issue #739).
 // The headline case parses a REAL RSA-512 PKCS#1 private key emitted by
 // `openssl rsa -traditional -outform DER`, checks the modulus/exponent
 // against `openssl rsa -text`, then re-encodes all nine INTEGERs back into
 // a SEQUENCE and asserts the result is byte-identical to the original DER.
 // Plus targeted OID / INTEGER / SEQUENCE / length-form encode vectors.
 
-import contrib.cryptography.asn1
+import std.cryptography.asn1
 import std.bytes
 import std.bignum
 import std.string
@@ -47,7 +47,7 @@ RSA512_DER() -> string {
 }
 
 main() {
-    print("=== contrib.cryptography.asn1 DER ===\n")
+    print("=== std.cryptography.asn1 DER ===\n")
     fails = 0
 
     // ---- targeted encode vectors ----
@@ -119,7 +119,7 @@ main() {
     bytes.free(orig); bytes.free(reseq)
 
     if fails == 0 {
-        print("PASS: contrib.cryptography.asn1 DER\n")
+        print("PASS: std.cryptography.asn1 DER\n")
     } else {
         print("FAILED: ${fails}\n")
         exit(1)

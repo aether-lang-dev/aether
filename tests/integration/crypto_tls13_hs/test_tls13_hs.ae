@@ -1,0 +1,173 @@
+// Validate std.cryptography.tls13_hs — the TLS 1.3 handshake message codec.
+// No recorded-transcript bytes are needed: we assert the ClientHello's wire
+// structure, and we build a ServerHello to the RFC 8446 §4.1.3 grammar and
+// round-trip it through the parser, checking every field (including the
+// server key_share echo).
+
+import std.cryptography.tls13_hs
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+
+fn g8(b: ptr, off: int) -> int { return bytes.get(b, off) & 0xFF }
+fn g16(b: ptr, off: int) -> int { return ((bytes.get(b, off) & 0xFF) << 8) | (bytes.get(b, off + 1) & 0xFF) }
+fn g24(b: ptr, off: int) -> int {
+    return ((bytes.get(b, off) & 0xFF) << 16) | ((bytes.get(b, off + 1) & 0xFF) << 8) | (bytes.get(b, off + 2) & 0xFF)
+}
+
+fn put16(b: ptr, off: int, v: int) -> int {
+    bytes.set(b, off, (v >> 8) & 0xFF)
+    bytes.set(b, off + 1, v & 0xFF)
+    return off + 2
+}
+fn put8(b: ptr, off: int, v: int) -> int {
+    bytes.set(b, off, v & 0xFF)
+    return off + 1
+}
+
+// Build a synthetic ServerHello selecting TLS 1.3 / ChaCha20-Poly1305 / an
+// x25519 key_share of 32 bytes (all 0x42). Mirrors the RFC 8446 §4.1.3 wire.
+fn build_server_hello(ks_fill: int) -> (ptr, int) {
+    buf = bytes.new(256)
+    bytes.set(buf, 255, 0)
+    body = 4
+    off = put16(buf, body, 0x0303)         // legacy_version
+    i = 0
+    while i < 32 {                          // random[32]
+        bytes.set(buf, off + i, 0x11)
+        i = i + 1
+    }
+    off = off + 32
+    off = put8(buf, off, 0)                 // legacy_session_id_echo len 0
+    off = put16(buf, off, 0x1303)           // cipher_suite = ChaCha20-Poly1305
+    off = put8(buf, off, 0)                 // compression = null
+
+    ext_len_pos = off
+    off = off + 2
+    ext_start = off
+    // supported_versions (43) = 0x0304
+    off = put16(buf, off, 43)
+    off = put16(buf, off, 2)
+    off = put16(buf, off, 0x0304)
+    // key_share (51): group x25519, key<32>
+    off = put16(buf, off, 51)
+    off = put16(buf, off, 36)               // 2+2+32
+    off = put16(buf, off, 0x001d)
+    off = put16(buf, off, 32)
+    j = 0
+    while j < 32 {
+        bytes.set(buf, off + j, ks_fill)
+        j = j + 1
+    }
+    off = off + 32
+    put16(buf, ext_len_pos, off - ext_start)
+
+    body_len = off - 4
+    bytes.set(buf, 0, 2)                     // HS type = server_hello
+    bytes.set(buf, 1, (body_len >> 16) & 0xFF)
+    bytes.set(buf, 2, (body_len >> 8) & 0xFF)
+    bytes.set(buf, 3, body_len & 0xFF)
+    return buf, off
+}
+
+main() {
+    total_ok = 1
+
+    // --- ClientHello structure ---
+    random = bytes.new(32)
+    bytes.set(random, 31, 0)
+    r = 0
+    while r < 32 { bytes.set(random, r, 0xAB); r = r + 1 }
+    sid = bytes.new(32)
+    bytes.set(sid, 31, 0)
+    s = 0
+    while s < 32 { bytes.set(sid, s, 0xCD); s = s + 1 }
+    pub = bytes.new(32)
+    bytes.set(pub, 31, 0)
+    pp = 0
+    while pp < 32 { bytes.set(pub, pp, 0x42); pp = pp + 1 }
+
+    ch = tls13_hs.client_hello(random, sid, 32, pub)
+
+    if g8(ch, 0) != 1 {
+        println("FAIL CH: msg_type not client_hello (${g8(ch,0)})")
+        total_ok = 0
+    } else { println("ok   CH msg_type = client_hello") }
+
+    // handshake body length matches actual buffer length - 4
+    if g24(ch, 1) != bytes.length(ch) - 4 {
+        println("FAIL CH: body length ${g24(ch,1)} != ${bytes.length(ch) - 4}")
+        total_ok = 0
+    } else { println("ok   CH body length consistent") }
+
+    // legacy_version 0x0303 right after the 4-byte header
+    if g16(ch, 4) != 0x0303 {
+        println("FAIL CH: legacy_version ${g16(ch,4)}")
+        total_ok = 0
+    } else { println("ok   CH legacy_version 0x0303") }
+
+    // our 32-byte random echoes at offset 6
+    if g8(ch, 6) != 0xAB || g8(ch, 6 + 31) != 0xAB {
+        println("FAIL CH: random not embedded")
+        total_ok = 0
+    } else { println("ok   CH random embedded") }
+
+    // --- ServerHello round-trip ---
+    sh, sh_len = build_server_hello(0x42)
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    err = tls13_hs.parse_server_hello(sh, sh_len, &parsed)
+    if err != "" {
+        println("FAIL SH parse error: ${err}")
+        total_ok = 0
+    } else {
+        ok = 1
+        if parsed.version != 0x0304 { println("FAIL SH version ${parsed.version}"); ok = 0 }
+        if parsed.cipher_suite != 0x1303 { println("FAIL SH suite ${parsed.cipher_suite}"); ok = 0 }
+        if parsed.group != 0x001d { println("FAIL SH group ${parsed.group}"); ok = 0 }
+        if parsed.key_share_len != 32 { println("FAIL SH ks_len ${parsed.key_share_len}"); ok = 0 }
+        if parsed.key_share != null {
+            if bytes.get(parsed.key_share, 0) != 0x42 || bytes.get(parsed.key_share, 31) != 0x42 {
+                println("FAIL SH key_share bytes wrong"); ok = 0
+            }
+        } else {
+            println("FAIL SH key_share null"); ok = 0
+        }
+        if ok == 1 {
+            println("ok   SH parse: version/suite/group/key_share all correct")
+        } else {
+            total_ok = 0
+        }
+    }
+    if parsed.key_share != null { bytes.free(parsed.key_share) }
+
+    // --- ServerHello rejection: non-TLS-1.3 (drop supported_versions) ---
+    bad = bytes.new(16)
+    bytes.set(bad, 15, 0)
+    // type=2, len=0 body -> too short / no version -> must error
+    bytes.set(bad, 0, 2)
+    bytes.set(bad, 1, 0)
+    bytes.set(bad, 2, 0)
+    bytes.set(bad, 3, 6)
+    berr = tls13_hs.parse_server_hello(bad, 4, &parsed)
+    if berr == "" {
+        println("FAIL SH: accepted malformed/short server hello")
+        total_ok = 0
+    } else {
+        println("ok   SH rejects malformed (${berr})")
+    }
+
+    bytes.free(random)
+    bytes.free(sid)
+    bytes.free(pub)
+    bytes.free(ch)
+    bytes.free(sh)
+    bytes.free(bad)
+
+    if total_ok == 0 {
+        println("tls13_hs: FAILURES")
+        exit(1)
+    }
+    println("tls13_hs: all codec checks pass")
+}

@@ -1,0 +1,269 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_hs — TLS 1.3 handshake message codec (RFC 8446 §4)
+// for the pure-Aether TLS 1.3 client subset (issue #1298). NO externs to
+// OpenSSL. This encodes the ClientHello we send and parses the ServerHello
+// we receive; it does NOT do the socket I/O or the record layer (that is the
+// transport-wiring brick) and it does NOT drive the key schedule (that is
+// std.cryptography.tls13_ks).
+//
+// Subset encoded/negotiated:
+//   - legacy_version 0x0303, real version via supported_versions = 0x0304
+//   - one cipher suite: TLS_CHACHA20_POLY1305_SHA256 (0x1303)
+//     (AES-128-GCM 0x1301 is offered too so real servers have a common suite)
+//   - supported_groups: x25519 (0x001d)
+//   - key_share: one x25519 KeyShareEntry (our 32-byte public key)
+//   - signature_algorithms: ecdsa_secp256r1_sha256 (0x0403),
+//     rsa_pss_rsae_sha256 (0x0804), ed25519 (0x0807)
+//
+// Import with:  import std.cryptography.tls13_hs
+//
+//   client_hello(random32, session_id, sid_len, x25519_pub32) -> ptr
+//       the full ClientHello handshake message (incl. 4-byte msg header),
+//       ready to hash into the transcript and wrap in a record.
+//   parse_server_hello(msg, len, out) -> string
+//       parse a ServerHello handshake message into a ShParsed struct;
+//       returns "" on success, an error string otherwise.
+//
+// Wire helpers (put8/16/24, opaque vectors) live here too.
+
+import std.bytes
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+exports (
+    client_hello, parse_server_hello,
+    ShParsed,
+    TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256,
+    GROUP_X25519
+)
+
+// Cipher suites (RFC 8446 appendix B.4).
+const TLS_AES_128_GCM_SHA256       = 0x1301
+const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
+
+// Named groups (RFC 8446 §4.2.7).
+const GROUP_X25519 = 0x001d
+
+// Signature schemes (RFC 8446 §4.2.3).
+const SIG_ECDSA_P256_SHA256 = 0x0403
+const SIG_RSA_PSS_RSAE_SHA256 = 0x0804
+const SIG_ED25519 = 0x0807
+
+// Handshake message types (RFC 8446 §4).
+const HS_CLIENT_HELLO = 1
+const HS_SERVER_HELLO = 2
+
+// Result of parsing a ServerHello.
+struct ShParsed {
+    version: int          // negotiated version (from supported_versions ext)
+    cipher_suite: int     // selected cipher suite
+    group: int            // selected key_share group (0 if none)
+    key_share: ptr        // server's key_share public (fresh bytes; caller frees) or null
+    key_share_len: int
+    is_hello_retry: int   // 1 if this was a HelloRetryRequest (special random)
+}
+
+// ---- little growable writer over std.bytes (append at a running offset) ----
+// We size buffers generously up front; the ClientHello for this subset is
+// well under 512 bytes.
+
+fn put8(b: ptr, off: int, v: int) -> int {
+    bytes.set(b, off, v & 0xFF)
+    return off + 1
+}
+
+fn put16(b: ptr, off: int, v: int) -> int {
+    bytes.set(b, off, (v >> 8) & 0xFF)
+    bytes.set(b, off + 1, v & 0xFF)
+    return off + 2
+}
+
+fn put24(b: ptr, off: int, v: int) -> int {
+    bytes.set(b, off, (v >> 16) & 0xFF)
+    bytes.set(b, off + 1, (v >> 8) & 0xFF)
+    bytes.set(b, off + 2, v & 0xFF)
+    return off + 3
+}
+
+fn put_bytes(b: ptr, off: int, src: ptr, src_len: int) -> int {
+    i = 0
+    while i < src_len {
+        bytes.set(b, off + i, bytes.get(src, i) & 0xFF)
+        i = i + 1
+    }
+    return off + src_len
+}
+
+// ---- readers ----
+
+fn get8(b: ptr, off: int) -> int {
+    return bytes.get(b, off) & 0xFF
+}
+
+fn get16(b: ptr, off: int) -> int {
+    return ((bytes.get(b, off) & 0xFF) << 8) | (bytes.get(b, off + 1) & 0xFF)
+}
+
+fn get24(b: ptr, off: int) -> int {
+    return ((bytes.get(b, off) & 0xFF) << 16) | ((bytes.get(b, off + 1) & 0xFF) << 8) | (bytes.get(b, off + 2) & 0xFF)
+}
+
+// Build the ClientHello handshake message (RFC 8446 §4.1.2), including the
+// 4-byte handshake header (msg_type + uint24 length). random must be 32
+// bytes; session_id 0..32 bytes (TLS 1.3 middlebox-compat: usually a 32-byte
+// echo value); x25519_pub is our 32-byte ephemeral public key.
+client_hello(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr) -> ptr {
+    // Generous fixed buffer; this CH is ~200 bytes.
+    buf = bytes.new(1024)
+    bytes.set(buf, 1023, 0)   // force full zero-fill
+
+    // Reserve the 4-byte handshake header; fill length at the end.
+    body = 4
+
+    // legacy_version = 0x0303
+    off = put16(buf, body, 0x0303)
+    // random[32]
+    off = put_bytes(buf, off, random, 32)
+    // legacy_session_id<0..32>
+    off = put8(buf, off, sid_len)
+    off = put_bytes(buf, off, session_id, sid_len)
+
+    // cipher_suites<2..2^16-2>: offer ChaCha20-Poly1305 then AES-128-GCM
+    off = put16(buf, off, 4)                        // 2 suites * 2 bytes
+    off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
+    off = put16(buf, off, TLS_AES_128_GCM_SHA256)
+
+    // legacy_compression_methods<1..2^8-1> = { 0 (null) }
+    off = put8(buf, off, 1)
+    off = put8(buf, off, 0)
+
+    // extensions<8..2^16-1> — remember the length slot, fill after.
+    ext_len_pos = off
+    off = off + 2
+    ext_start = off
+
+    // supported_versions (43): client form = list; { 0x0304 }
+    off = put16(buf, off, 43)
+    off = put16(buf, off, 3)      // ext body len
+    off = put8(buf, off, 2)       // list len
+    off = put16(buf, off, 0x0304) // TLS 1.3
+
+    // supported_groups (10): { x25519 }
+    off = put16(buf, off, 10)
+    off = put16(buf, off, 4)      // ext body len
+    off = put16(buf, off, 2)      // list len
+    off = put16(buf, off, GROUP_X25519)
+
+    // signature_algorithms (13): { ecdsa_p256_sha256, rsa_pss_rsae_sha256, ed25519 }
+    off = put16(buf, off, 13)
+    off = put16(buf, off, 8)      // ext body len
+    off = put16(buf, off, 6)      // list len
+    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
+    off = put16(buf, off, SIG_ED25519)
+
+    // key_share (51): one x25519 KeyShareEntry { group, key<len> }
+    off = put16(buf, off, 51)
+    off = put16(buf, off, 38)     // ext body: 2 (client_shares len) + 2+2+32
+    off = put16(buf, off, 36)     // client_shares len = 2+2+32
+    off = put16(buf, off, GROUP_X25519)
+    off = put16(buf, off, 32)     // key length
+    off = put_bytes(buf, off, x25519_pub, 32)
+
+    // fill extensions length
+    ext_total = off - ext_start
+    put16(buf, ext_len_pos, ext_total)
+
+    // fill handshake header: type + uint24 body length
+    body_len = off - 4
+    put8(buf, 0, HS_CLIENT_HELLO)
+    put24(buf, 1, body_len)
+
+    // Trim to exact length.
+    out = bytes.new(off)
+    if off > 0 { bytes.set(out, off - 1, 0) }
+    put_bytes(out, 0, buf, off)
+    bytes.free(buf)
+    return out
+}
+
+// Parse a ServerHello (RFC 8446 §4.1.3) into `out`. Returns "" on success or
+// an error string. `msg` includes the 4-byte handshake header. On success,
+// out.key_share (if present) is a fresh buffer the caller must free.
+parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
+    out.version = 0
+    out.cipher_suite = 0
+    out.group = 0
+    out.key_share = null
+    out.key_share_len = 0
+    out.is_hello_retry = 0
+
+    if len < 4 { return "server hello: truncated header" }
+    if get8(msg, 0) != HS_SERVER_HELLO { return "server hello: wrong msg type" }
+    body_len = get24(msg, 1)
+    if body_len + 4 > len { return "server hello: length overruns buffer" }
+
+    p = 4
+    // legacy_version (2) — ignored, real version is in supported_versions
+    if p + 2 > len { return "server hello: truncated version" }
+    p = p + 2
+    // random[32]
+    if p + 32 > len { return "server hello: truncated random" }
+    p = p + 32
+    // legacy_session_id_echo<0..32>
+    if p + 1 > len { return "server hello: truncated session id len" }
+    sid_len = get8(msg, p)
+    p = p + 1 + sid_len
+    // cipher_suite (2)
+    if p + 2 > len { return "server hello: truncated cipher suite" }
+    out.cipher_suite = get16(msg, p)
+    p = p + 2
+    // legacy_compression_method (1) — must be 0
+    if p + 1 > len { return "server hello: truncated compression" }
+    if get8(msg, p) != 0 { return "server hello: nonzero compression method" }
+    p = p + 1
+    // extensions<6..2^16-1>
+    if p + 2 > len { return "server hello: truncated extensions length" }
+    ext_total = get16(msg, p)
+    p = p + 2
+    ext_end = p + ext_total
+    if ext_end > len { return "server hello: extensions overrun" }
+
+    while p + 4 <= ext_end {
+        ext_type = get16(msg, p)
+        ext_len = get16(msg, p + 2)
+        p = p + 4
+        if p + ext_len > ext_end { return "server hello: extension overrun" }
+
+        if ext_type == 43 {
+            // supported_versions (server form: single selected version)
+            if ext_len != 2 { return "server hello: bad supported_versions" }
+            out.version = get16(msg, p)
+        }
+        if ext_type == 51 {
+            // key_share (server form: single KeyShareEntry { group, key<len> })
+            if ext_len < 4 { return "server hello: bad key_share" }
+            out.group = get16(msg, p)
+            ks_len = get16(msg, p + 2)
+            if 4 + ks_len > ext_len { return "server hello: key_share overrun" }
+            ks = bytes.new(ks_len)
+            if ks_len > 0 { bytes.set(ks, ks_len - 1, 0) }
+            j = 0
+            while j < ks_len {
+                bytes.set(ks, j, bytes.get(msg, p + 4 + j) & 0xFF)
+                j = j + 1
+            }
+            out.key_share = ks
+            out.key_share_len = ks_len
+        }
+        p = p + ext_len
+    }
+
+    if out.version != 0x0304 {
+        return "server hello: not TLS 1.3 (no supported_versions=0x0304)"
+    }
+    return ""
+}

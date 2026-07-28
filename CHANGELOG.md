@@ -9,6 +9,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Public-key crypto and ciphers moved from `contrib.cryptography` to
+  `std.cryptography`** (#1298). The elliptic-curve, RSA, cipher, and
+  encoding families — `aes`, `asn1`, `chacha20poly1305`, `des3`, `ed25519`,
+  `ed448`, `p256`, `p384`, `p521`, `pem`, `rsa`, `secp256k1`, `sm4`, `x448`
+  — now live under `std.cryptography.*`. Update imports from
+  `import contrib.cryptography.X` to `import std.cryptography.X`; the APIs
+  are unchanged. These are pure-Aether ports with no OpenSSL dependency.
+
+### Added
+
+- **`std.cryptography.tls13_record`** (#1298) — the TLS 1.3 record
+  protection layer (RFC 8446 §5.2): per-record nonce (`write_iv` XOR the
+  right-aligned big-endian sequence number), TLSCiphertext AAD assembly
+  (`0x17 0x0303 len16`), inner content-type append + trailing-zero strip, and
+  a directional `RecordCtx` with an advancing sequence number, over
+  ChaCha20-Poly1305. `seal_record` / `open_record` / `free_ctx`. Validated
+  offline: nonce vectors (seq 0/1/255/256 + a high 64-bit value), a full
+  seal→open round-trip recovering content type + plaintext, tamper
+  rejection, and multi-record sequence advance; leak-clean under valgrind.
+  AES-GCM record support and the socket/transport wiring are later
+  increments.
+- **`std.cryptography.tls13_cert`** (#1298) — TLS 1.3 CertificateVerify
+  (RFC 8446 §4.4.3): builds the signed content (`0x20`×64 || context || 0x00
+  || transcript-hash) and dispatches the signature check to ECDSA-P256 /
+  Ed25519 (DER ECDSA sig split into `(r,s)` via `std.bignum`). Plus an X.509
+  leaf structural parse (subjectPublicKeyInfo extraction) over the `asn1`
+  reader. Validated by signing CertificateVerify content with generated
+  p256 + ed25519 keys and confirming accept-valid / reject-tampered /
+  reject-wrong-transcript. Chain building, hostname/SAN matching, validity /
+  EKU policy, and revocation are explicitly out of scope for this brick.
+- **`std.cryptography.tls13_ks`** (#1298) — the TLS 1.3 key-schedule
+  *driver* (RFC 8446 §7.1): the full secret chain (Early → Handshake →
+  Master secrets, per-direction traffic secrets, and record `write_key` /
+  `write_iv`) on top of `tls13_kdf`. PSK-less first-cut subset. Validated
+  **byte-for-byte against the canonical RFC 8448 §3 trace** — Early/Handshake
+  secrets, `c hs traffic` / `s hs traffic`, and the server `write_key` /
+  `write_iv` all reproduce the RFC's published values; leak-clean.
+- **`std.cryptography.tls13_hs`** (#1298) — the TLS 1.3 handshake message
+  codec (RFC 8446 §4): encodes the subset ClientHello (supported_versions
+  0x0304, ChaCha20-Poly1305 + AES-128-GCM suites, x25519 supported_groups +
+  key_share, signature_algorithms) and parses ServerHello (version / cipher
+  suite / key_share, with malformed-input rejection). Validated by
+  structural assertions + a full ServerHello round-trip; leak-clean. No
+  socket I/O or record layer yet (that is the transport-wiring brick).
+- **`std.cryptography.tls13_kdf`** (#1298) — the TLS 1.3 key schedule (RFC
+  8446 §7.1): `HKDF-Expand-Label` and `Derive-Secret`, pure-Aether on top of
+  `std.cryptography.hkdf`. Validated against the canonical RFC 8448 §3 early-
+  secret chain (`Early Secret` and its `derived` secret) and a non-empty-
+  context expand-label; leak-clean. The second brick of the pure-Aether TLS
+  1.3 subset, after `x25519`.
+- **`std.cryptography.x25519`** (#1298) — a **constant-time** X25519 (RFC
+  7748) Montgomery ladder over a 10-limb GF(2^255-19) field, ported from
+  Bouncy Castle's `X25519` / `X25519Field`. Replaces the previous
+  variable-time `contrib.cryptography.x25519` (which routed field math
+  through the variable-time `std.bignum` and was explicitly not
+  side-channel-hardened). API: `base_point(scalar)`, `scalar_mult(scalar,
+  u)`, `agree(scalar, u)` (with a contributory-behaviour zero-check).
+  Validated against the RFC 7748 §5.2 scalar-mult vectors and §6.1
+  Alice/Bob key-agreement vectors; leak-clean under valgrind. This is the
+  first primitive for the pure-Aether TLS 1.3 subset.
+
+### Fixed
+
+- **Struct-name collision `Pt` between `std.cryptography.p256` and
+  `.ed25519`** (#1298). Both defined an internal `struct Pt`; Aether structs
+  share one global namespace, so importing both modules together (which any
+  real TLS client must, to verify both ECDSA and Ed25519 certs) failed to
+  type-check. Renamed to `EcPt` / `EdPt`. No API change.
+- **`std.cryptography.chacha20poly1305` — Poly1305 tag is now computed in
+  constant time** (#1298). The final modular reduction ("freeze") selected
+  between `h` and `h - p` with a secret-dependent `if` branch; since the
+  accumulator depends on the one-time Poly1305 key, that branch was a MAC
+  timing side-channel. Replaced with a branchless masked select. Behaviour
+  is unchanged (all RFC 8439 vectors still pass); added a reduction-edge KAT
+  (`r=2, s=0, msg=16×0xFF` → tag `03…`) that exercises the freeze path. The
+  AEAD tag *comparison* in `aead_open` was already constant-time. Audited as
+  part of qualifying ChaCha20-Poly1305 as the TLS 1.3 record cipher.
+
 ## [0.450.0]
 
 ### Fixed

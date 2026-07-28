@@ -1,0 +1,1563 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+//
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.aes — AES (FIPS-197), the block-cipher core that
+// every symmetric mode drives. This is the "log-jam remover" for issue
+// #739's symmetric surface: CBC / CTR / CFB / OFB / ECB / GCM / CCM / EAX /
+// OCB / AES-key-wrap / AES-CMAC / AES-CTR-DRBG all sit on exactly this
+// primitive and nothing else.
+//
+// Byte-oriented FIPS-197 reference form (one 256-byte S-box + inverse,
+// GF(2^8) xtime for MixColumns) rather than Bouncy Castle's T-box
+// `AesEngine.cs`. Smaller, obviously correct against the FIPS-197 / NIST KAT
+// vectors, and not cache-timing-leaky the way big T-tables are. A T-box /
+// AES-NI fast path is a later perf slice; the mode layers don't care which
+// sits underneath. Algorithm + S-box from FIPS-197; structure follows
+// Bouncy Castle's AesEngine.
+//
+// Block primitive (what modes call):
+//   ctx   = aes.new_encryptor(key_bytes, key_len)   // key_len = 16/24/32
+//   ctx   = aes.new_decryptor(key_bytes, key_len)
+//   out16 = aes.process_block(ctx, in16)            // single 16-byte block
+//   aes.free(ctx)
+//
+// Convenience modes in this slice:
+//   aes.ecb_encrypt / ecb_decrypt  — block-aligned, NO padding
+//   aes.ctr_xor                    — CTR keystream over arbitrary length
+//   aes.cbc_encrypt / cbc_decrypt  — block-aligned CBC, NO padding
+//   aes.cbc_encrypt_pkcs7 / cbc_decrypt_pkcs7
+//                                  — CBC with PKCS#7 padding (arbitrary length)
+//   aes.pkcs7_pad / pkcs7_unpad    — standalone PKCS#7 helpers
+//
+// All buffers are std.bytes (caller frees results).
+
+import std.bytes
+import std.bits
+import std.intarr
+import std.string
+
+exports (
+    new_encryptor, new_decryptor, process_block, free,
+    block_size, ecb_encrypt, ecb_decrypt, ctr_xor,
+    cbc_encrypt, cbc_decrypt, cbc_encrypt_pkcs7, cbc_decrypt_pkcs7,
+    pkcs7_pad, pkcs7_unpad,
+    cmac, key_wrap, key_unwrap,
+    gcm_seal, gcm_open,
+    ccm_seal, ccm_open,
+    eax_seal, eax_open,
+    ocb_seal, ocb_open
+)
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+
+block_size() -> int { return 16 }
+
+// Round-key schedule (bytes, 16*(rounds+1) slots), round count, direction.
+struct AesCtx {
+    rk: ptr       // intarr of round-key bytes
+    rounds: int
+    encrypt: int  // 1 = encryptor, 0 = decryptor
+}
+
+// ---- S-boxes (FIPS-197) ----
+SBOX_HEX() -> string {
+    return "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b27509832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cfd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdbe0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9ee1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16"
+}
+ISBOX_HEX() -> string {
+    return "52096ad53036a538bf40a39e81f3d7fb7ce339829b2fff87348e4344c4dee9cb547b9432a6c2233dee4c950b42fac34e082ea16628d924b2765ba2496d8bd12572f8f66486689816d4a45ccc5d65b6926c704850fdedb9da5e154657a78d9d8490d8ab008cbcd30af7e45805b8b34506d02c1e8fca3f0f02c1afbd0301138a6b3a9111414f67dcea97f2cfcef0b4e67396ac7422e7ad3585e2f937e81c75df6e47f11a711d29c5896fb7620eaa18be1bfc563e4bc6d279209adbc0fe78cd5af41fdda8338807c731b11210592780ec5f60517fa919b54a0d2de57a9f93c99cefa0e03b4dae2af5b0c8ebbb3c83539961172b047eba77d626e169146355210c7d"
+}
+
+hexval(c: int) -> int {
+    if c >= 48 { if c <= 57 { return c - 48 } }
+    if c >= 97 { if c <= 102 { return c - 87 } }
+    return 0
+}
+// 256-byte table from a 512-char hex string.
+make_box(h: string) -> ptr {
+    t = intarr_new_raw(256)
+    n = string.length(h)
+    i = 0
+    idx = 0
+    while i + 1 < n {
+        hi = hexval(string_char_at_n(h, n, i))
+        lo = hexval(string_char_at_n(h, n, i + 1))
+        intarr_set_raw(t, idx, (hi * 16 + lo) & 0xFF)
+        idx = idx + 1
+        i = i + 2
+    }
+    return t
+}
+
+// ---- GF(2^8) ----
+xtime(x: int) -> int {
+    r = (x << 1) & 0xFF
+    if (x & 0x80) != 0 { r = r ^ 0x1b }
+    return r & 0xFF
+}
+gmul(a: int, b: int) -> int {
+    p = 0
+    aa = a & 0xFF
+    bb = b & 0xFF
+    k = 0
+    while k < 8 {
+        if (bb & 1) != 0 { p = p ^ aa }
+        aa = xtime(aa)
+        bb = bits.lsr32(bb, 1)
+        k = k + 1
+    }
+    return p & 0xFF
+}
+
+// state accessors (state is a 16-slot intarr, column-major: idx = col*4 + row)
+g(s: ptr, i: int) -> int { return intarr_get_raw(s, i) & 0xFF }
+p(s: ptr, i: int, v: int) { intarr_set_raw(s, i, v & 0xFF) }
+
+// ---- key expansion ----
+new_ctx(key: ptr, keylen: int, sbox: ptr, encrypt: int) -> ptr {
+    nk = keylen / 4            // 4 / 6 / 8
+    rounds = nk + 6            // 10 / 12 / 14
+    total_words = 4 * (rounds + 1)
+    w = intarr_new_raw(total_words * 4)
+    i = 0
+    while i < nk * 4 {
+        intarr_set_raw(w, i, bytes.get(key, i) & 0xFF)
+        i = i + 1
+    }
+    rcon = 1
+    wi = nk
+    while wi < total_words {
+        pp = (wi - 1) * 4
+        t0 = intarr_get_raw(w, pp + 0) & 0xFF
+        t1 = intarr_get_raw(w, pp + 1) & 0xFF
+        t2 = intarr_get_raw(w, pp + 2) & 0xFF
+        t3 = intarr_get_raw(w, pp + 3) & 0xFF
+        if (wi % nk) == 0 {
+            r0 = t1; r1 = t2; r2 = t3; r3 = t0
+            t0 = (intarr_get_raw(sbox, r0) & 0xFF) ^ rcon
+            t1 = intarr_get_raw(sbox, r1) & 0xFF
+            t2 = intarr_get_raw(sbox, r2) & 0xFF
+            t3 = intarr_get_raw(sbox, r3) & 0xFF
+            rcon = xtime(rcon)
+        } else {
+            if nk > 6 {
+                if (wi % nk) == 4 {
+                    t0 = intarr_get_raw(sbox, t0) & 0xFF
+                    t1 = intarr_get_raw(sbox, t1) & 0xFF
+                    t2 = intarr_get_raw(sbox, t2) & 0xFF
+                    t3 = intarr_get_raw(sbox, t3) & 0xFF
+                }
+            }
+        }
+        q = (wi - nk) * 4
+        o = wi * 4
+        intarr_set_raw(w, o + 0, (intarr_get_raw(w, q + 0) ^ t0) & 0xFF)
+        intarr_set_raw(w, o + 1, (intarr_get_raw(w, q + 1) ^ t1) & 0xFF)
+        intarr_set_raw(w, o + 2, (intarr_get_raw(w, q + 2) ^ t2) & 0xFF)
+        intarr_set_raw(w, o + 3, (intarr_get_raw(w, q + 3) ^ t3) & 0xFF)
+        wi = wi + 1
+    }
+    c = malloc(24) as *AesCtx
+    c.rk = w
+    c.rounds = rounds
+    c.encrypt = encrypt
+    return c
+}
+
+new_encryptor(key: ptr, keylen: int) -> ptr {
+    sbox = make_box(SBOX_HEX())
+    ctx = new_ctx(key, keylen, sbox, 1)
+    intarr_free(sbox)
+    return ctx
+}
+new_decryptor(key: ptr, keylen: int) -> ptr {
+    sbox = make_box(SBOX_HEX())
+    ctx = new_ctx(key, keylen, sbox, 0)
+    intarr_free(sbox)
+    return ctx
+}
+free(ctx: ptr) {
+    if ctx == null { return }
+    c = ctx as *AesCtx
+    if c.rk != null { intarr_free(c.rk) }
+    libc_free(ctx)
+}
+
+// ---- round transforms ----
+add_round_key(s: ptr, rk: ptr, rnd: int) {
+    base = rnd * 16
+    i = 0
+    while i < 16 {
+        p(s, i, g(s, i) ^ (intarr_get_raw(rk, base + i) & 0xFF))
+        i = i + 1
+    }
+}
+sub_bytes(s: ptr, sbox: ptr) {
+    i = 0
+    while i < 16 { p(s, i, intarr_get_raw(sbox, g(s, i))); i = i + 1 }
+}
+inv_sub_bytes(s: ptr, isbox: ptr) {
+    i = 0
+    while i < 16 { p(s, i, intarr_get_raw(isbox, g(s, i))); i = i + 1 }
+}
+// byte index = col*4 + row; shift row k left by k.
+shift_rows(s: ptr) {
+    t = g(s,1); p(s,1,g(s,5)); p(s,5,g(s,9)); p(s,9,g(s,13)); p(s,13,t)
+    t = g(s,2); u = g(s,6); p(s,2,g(s,10)); p(s,6,g(s,14)); p(s,10,t); p(s,14,u)
+    t = g(s,15); p(s,15,g(s,11)); p(s,11,g(s,7)); p(s,7,g(s,3)); p(s,3,t)
+}
+inv_shift_rows(s: ptr) {
+    t = g(s,13); p(s,13,g(s,9)); p(s,9,g(s,5)); p(s,5,g(s,1)); p(s,1,t)
+    t = g(s,2); u = g(s,6); p(s,2,g(s,10)); p(s,6,g(s,14)); p(s,10,t); p(s,14,u)
+    t = g(s,3); p(s,3,g(s,7)); p(s,7,g(s,11)); p(s,11,g(s,15)); p(s,15,t)
+}
+mix_columns(s: ptr) {
+    c = 0
+    while c < 4 {
+        b = c * 4
+        a0 = g(s,b+0); a1 = g(s,b+1); a2 = g(s,b+2); a3 = g(s,b+3)
+        p(s, b+0, xtime(a0) ^ xtime(a1) ^ a1 ^ a2 ^ a3)
+        p(s, b+1, a0 ^ xtime(a1) ^ xtime(a2) ^ a2 ^ a3)
+        p(s, b+2, a0 ^ a1 ^ xtime(a2) ^ xtime(a3) ^ a3)
+        p(s, b+3, xtime(a0) ^ a0 ^ a1 ^ a2 ^ xtime(a3))
+        c = c + 1
+    }
+}
+inv_mix_columns(s: ptr) {
+    c = 0
+    while c < 4 {
+        b = c * 4
+        a0 = g(s,b+0); a1 = g(s,b+1); a2 = g(s,b+2); a3 = g(s,b+3)
+        p(s, b+0, gmul(a0,14) ^ gmul(a1,11) ^ gmul(a2,13) ^ gmul(a3,9))
+        p(s, b+1, gmul(a0,9) ^ gmul(a1,14) ^ gmul(a2,11) ^ gmul(a3,13))
+        p(s, b+2, gmul(a0,13) ^ gmul(a1,9) ^ gmul(a2,14) ^ gmul(a3,11))
+        p(s, b+3, gmul(a0,11) ^ gmul(a1,13) ^ gmul(a2,9) ^ gmul(a3,14))
+        c = c + 1
+    }
+}
+
+// ---- single block ----
+process_block(ctx: ptr, in16: ptr) -> ptr {
+    c = ctx as *AesCtx
+    out = bytes.new(16)
+    if c.encrypt == 1 { encrypt_block(c, in16, out) } else { decrypt_block(c, in16, out) }
+    return out
+}
+
+encrypt_block(c: *AesCtx, in16: ptr, out: ptr) {
+    sbox = make_box(SBOX_HEX())
+    s = intarr_new_raw(16)
+    i = 0
+    while i < 16 { p(s, i, bytes.get(in16, i)); i = i + 1 }
+    add_round_key(s, c.rk, 0)
+    r = 1
+    while r < c.rounds {
+        sub_bytes(s, sbox); shift_rows(s); mix_columns(s); add_round_key(s, c.rk, r)
+        r = r + 1
+    }
+    sub_bytes(s, sbox); shift_rows(s); add_round_key(s, c.rk, c.rounds)
+    i = 0
+    while i < 16 { bytes.set(out, i, g(s, i)); i = i + 1 }
+    intarr_free(s); intarr_free(sbox)
+}
+
+decrypt_block(c: *AesCtx, in16: ptr, out: ptr) {
+    isbox = make_box(ISBOX_HEX())
+    s = intarr_new_raw(16)
+    i = 0
+    while i < 16 { p(s, i, bytes.get(in16, i)); i = i + 1 }
+    add_round_key(s, c.rk, c.rounds)
+    r = c.rounds - 1
+    while r >= 1 {
+        inv_shift_rows(s); inv_sub_bytes(s, isbox); add_round_key(s, c.rk, r); inv_mix_columns(s)
+        r = r - 1
+    }
+    inv_shift_rows(s); inv_sub_bytes(s, isbox); add_round_key(s, c.rk, 0)
+    i = 0
+    while i < 16 { bytes.set(out, i, g(s, i)); i = i + 1 }
+    intarr_free(s); intarr_free(isbox)
+}
+
+// ---- ECB (block-aligned, NO padding) ----
+ecb_encrypt(ctx: ptr, data: ptr) -> ptr { return ecb_run(ctx, data) }
+ecb_decrypt(ctx: ptr, data: ptr) -> ptr { return ecb_run(ctx, data) }
+ecb_run(ctx: ptr, data: ptr) -> ptr {
+    n = bytes.length(data)
+    out = bytes.new(n)
+    off = 0
+    while off + 16 <= n {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 { bytes.set(blk, j, bytes.get(data, off + j)); j = j + 1 }
+        eb = process_block(ctx, blk)
+        k = 0
+        while k < 16 { bytes.set(out, off + k, bytes.get(eb, k)); k = k + 1 }
+        bytes.free(blk); bytes.free(eb)
+        off = off + 16
+    }
+    return out
+}
+
+// ---- CTR (stream; encrypt == decrypt) ----
+// `ctx` must be an ENCRYPTOR (CTR always runs the cipher forward). `iv` is
+// the initial 16-byte counter block, incremented big-endian per block.
+ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
+    n = bytes.length(data)
+    out = bytes.new(n)
+    ctr = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(ctr, i, bytes.get(iv, i)); i = i + 1 }
+    off = 0
+    while off < n {
+        ks = process_block(ctx, ctr)
+        j = 0
+        while j < 16 {
+            if off + j < n {
+                bytes.set(out, off + j, (bytes.get(data, off + j) ^ bytes.get(ks, j)) & 0xFF)
+            }
+            j = j + 1
+        }
+        bytes.free(ks)
+        ctr_increment(ctr)
+        off = off + 16
+    }
+    bytes.free(ctr)
+    return out
+}
+ctr_increment(ctr: ptr) {
+    i = 15
+    carry = 1
+    while i >= 0 {
+        if carry == 1 {
+            v = (bytes.get(ctr, i) + 1) & 0xFF
+            bytes.set(ctr, i, v)
+            if v != 0 { carry = 0 }
+        }
+        i = i - 1
+    }
+}
+
+// ---- CBC (block-aligned, NO padding) ----
+// `ctx` is an encryptor for cbc_encrypt and a decryptor for cbc_decrypt.
+// `iv` is the 16-byte initialization vector. Input length MUST be a
+// multiple of 16; a non-multiple returns an empty buffer (use the
+// _pkcs7 variants for arbitrary-length data).
+//
+// CBC encrypt: C_i = E(P_i XOR C_{i-1}), with C_{-1} = IV.
+cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
+    n = bytes.length(data)
+    if n % 16 != 0 {
+        return bytes.new(0)
+    }
+    out = bytes.new(n)
+    prev = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(prev, i, bytes.get(iv, i)); i = i + 1 }
+    off = 0
+    while off < n {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 {
+            bytes.set(blk, j, (bytes.get(data, off + j) ^ bytes.get(prev, j)) & 0xFF)
+            j = j + 1
+        }
+        eb = process_block(ctx, blk)
+        k = 0
+        while k < 16 {
+            v = bytes.get(eb, k)
+            bytes.set(out, off + k, v)
+            bytes.set(prev, k, v)   // ciphertext becomes the next XOR mask
+            k = k + 1
+        }
+        bytes.free(blk); bytes.free(eb)
+        off = off + 16
+    }
+    bytes.free(prev)
+    return out
+}
+
+// CBC decrypt: P_i = D(C_i) XOR C_{i-1}, with C_{-1} = IV.
+cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
+    n = bytes.length(data)
+    if n % 16 != 0 {
+        return bytes.new(0)
+    }
+    out = bytes.new(n)
+    prev = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(prev, i, bytes.get(iv, i)); i = i + 1 }
+    off = 0
+    while off < n {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 { bytes.set(blk, j, bytes.get(data, off + j)); j = j + 1 }
+        db = process_block(ctx, blk)
+        k = 0
+        while k < 16 {
+            bytes.set(out, off + k, (bytes.get(db, k) ^ bytes.get(prev, k)) & 0xFF)
+            bytes.set(prev, k, bytes.get(blk, k))   // this ciphertext block
+            k = k + 1
+        }
+        bytes.free(blk); bytes.free(db)
+        off = off + 16
+    }
+    bytes.free(prev)
+    return out
+}
+
+// ---- PKCS#7 padding ----
+// Append (16 - n mod 16) bytes, each equal to that count. A full extra
+// block is added when the input is already a multiple of 16, so the
+// padding is always present and unambiguous (RFC 5652 §6.3).
+pkcs7_pad(data: ptr) -> ptr {
+    n = bytes.length(data)
+    pad = 16 - (n % 16)        // 1..16
+    out = bytes.new(n + pad)
+    i = 0
+    while i < n { bytes.set(out, i, bytes.get(data, i)); i = i + 1 }
+    j = 0
+    while j < pad { bytes.set(out, n + j, pad); j = j + 1 }
+    return out
+}
+
+// Strip PKCS#7 padding. Returns (plaintext, "") on success or
+// (empty-buffer, error) if the padding is malformed (bad length, pad byte
+// out of range, or trailing bytes that don't all match the count). The
+// check walks all `pad` trailing bytes regardless of an early mismatch so
+// the work is independent of where the first bad byte is.
+pkcs7_unpad(data: ptr) -> {
+    n = bytes.length(data)
+    if n == 0 {
+        return bytes.new(0), "empty input"
+    }
+    if n % 16 != 0 {
+        return bytes.new(0), "length not a multiple of 16"
+    }
+    pad = bytes.get(data, n - 1) & 0xFF
+    if pad < 1 {
+        return bytes.new(0), "bad padding"
+    }
+    if pad > 16 {
+        return bytes.new(0), "bad padding"
+    }
+    bad = 0
+    i = 0
+    while i < pad {
+        if (bytes.get(data, n - 1 - i) & 0xFF) != pad {
+            bad = 1
+        }
+        i = i + 1
+    }
+    if bad == 1 {
+        return bytes.new(0), "bad padding"
+    }
+    outlen = n - pad
+    out = bytes.new(outlen)
+    j = 0
+    while j < outlen { bytes.set(out, j, bytes.get(data, j)); j = j + 1 }
+    return out, ""
+}
+
+// ---- CBC + PKCS#7 (arbitrary length) ----
+// Pads then CBC-encrypts; ciphertext length is always a multiple of 16 and
+// strictly greater than the plaintext. `ctx` is an encryptor.
+cbc_encrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> ptr {
+    padded = pkcs7_pad(data)
+    out = cbc_encrypt(ctx, iv, padded)
+    bytes.free(padded)
+    return out
+}
+
+// CBC-decrypts then strips PKCS#7. `ctx` is a decryptor. Returns
+// (plaintext, "") or (empty, error) for a bad length / bad padding.
+cbc_decrypt_pkcs7(ctx: ptr, iv: ptr, data: ptr) -> {
+    n = bytes.length(data)
+    if n == 0 {
+        return bytes.new(0), "empty input"
+    }
+    if n % 16 != 0 {
+        return bytes.new(0), "length not a multiple of 16"
+    }
+    raw = cbc_decrypt(ctx, iv, data)
+    out, err = pkcs7_unpad(raw)
+    bytes.free(raw)
+    return out, err
+}
+
+// ---- AES-CMAC (RFC 4493) ----
+// One-shot CMAC over `data` (len bytes) with AES key `key`/`keylen`.
+// Returns a fresh 16-byte tag. `key` is the raw AES key (16/24/32).
+//
+// Subkeys: L = AES-Enc(0^128); K1 = dbl(L); K2 = dbl(K1), where dbl(x) is
+// a left shift by 1 with a conditional XOR of Rb=0x87 when the high bit
+// was set (GF(2^128) doubling). The MAC is CBC-MAC with the final block
+// XOR'd by K1 (when the message is a non-empty multiple of 16) or, after
+// 10*..0 padding, by K2.
+cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
+    enc = new_encryptor(key, keylen)
+
+    // L = E(0^128)
+    zero = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    L = process_block(enc, zero)
+    bytes.free(zero)
+
+    k1 = cmac_dbl(L)
+    k2 = cmac_dbl(k1)
+    bytes.free(L)
+
+    // Number of 16-byte blocks; whether the last is complete.
+    n = (len + 15) / 16
+    complete = 0
+    if len > 0 { if (len % 16) == 0 { complete = 1 } }
+    if n == 0 { n = 1 }   // empty message → one padded block
+
+    // Build the last block M_last.
+    last = bytes.new(16)
+    if complete == 1 {
+        // last full block XOR K1
+        base = (n - 1) * 16
+        j = 0
+        while j < 16 {
+            bytes.set(last, j, (bytes.get(data, base + j) ^ bytes.get(k1, j)) & 0xFF)
+            j = j + 1
+        }
+    } else {
+        // copy remaining bytes, append 0x80, zero-pad, XOR K2
+        base = (n - 1) * 16
+        rem = len - base
+        j = 0
+        while j < 16 {
+            b = 0
+            if j < rem {
+                b = bytes.get(data, base + j)
+            } else if j == rem {
+                b = 0x80
+            }
+            bytes.set(last, j, (b ^ bytes.get(k2, j)) & 0xFF)
+            j = j + 1
+        }
+    }
+    bytes.free(k1)
+    bytes.free(k2)
+
+    // CBC-MAC: X = 0; for each block except the last, X = E(X XOR M_i);
+    // then tag = E(X XOR M_last).
+    x = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(x, z, 0); z = z + 1 }
+
+    i = 0
+    while i < n - 1 {
+        blk = bytes.new(16)
+        base = i * 16
+        j = 0
+        while j < 16 {
+            bytes.set(blk, j, (bytes.get(x, j) ^ bytes.get(data, base + j)) & 0xFF)
+            j = j + 1
+        }
+        eb = process_block(enc, blk)
+        bytes.free(blk)
+        bytes.free(x)
+        x = eb
+        i = i + 1
+    }
+
+    // Final block.
+    fin = bytes.new(16)
+    j = 0
+    while j < 16 {
+        bytes.set(fin, j, (bytes.get(x, j) ^ bytes.get(last, j)) & 0xFF)
+        j = j + 1
+    }
+    bytes.free(x)
+    bytes.free(last)
+    tag = process_block(enc, fin)
+    bytes.free(fin)
+    free(enc)
+    return tag
+}
+
+// GF(2^128) doubling of a 16-byte big-endian value (RFC 4493 dbl).
+cmac_dbl(inp: ptr) -> ptr {
+    out = bytes.new(16)
+    carry = 0
+    i = 15
+    while i >= 0 {
+        v = bytes.get(inp, i) & 0xFF
+        nv = ((v << 1) | carry) & 0xFF
+        carry = (v >> 7) & 1
+        bytes.set(out, i, nv)
+        i = i - 1
+    }
+    // If the original high bit was set, XOR the low byte with Rb=0x87.
+    if (bytes.get(inp, 0) & 0x80) != 0 {
+        bytes.set(out, 15, (bytes.get(out, 15) ^ 0x87) & 0xFF)
+    }
+    return out
+}
+
+// ---- AES Key Wrap (RFC 3394) ----
+// Wrap `data` (len bytes, must be a multiple of 8 and >= 16) with the KEK
+// `key`/`keylen`. Returns ciphertext of len+8 bytes, or null on bad input.
+// The default IV A6A6A6A6A6A6A6A6 is used.
+key_wrap(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
+    if len < 16 { return null }
+    if (len % 8) != 0 { return null }
+    nblk = len / 8                 // number of 64-bit blocks
+
+    enc = new_encryptor(key, keylen)
+
+    // A = IV; R[1..n] = plaintext blocks.
+    a = bytes.new(8)
+    i = 0
+    while i < 8 { bytes.set(a, i, 0xA6); i = i + 1 }
+    r = bytes.new(len)
+    bytes.copy_from_bytes(r, 0, data, 0, len)
+
+    blk = bytes.new(16)
+    j = 0
+    while j < 6 {
+        i = 0
+        while i < nblk {
+            // B = AES-Enc(A | R[i])
+            k = 0
+            while k < 8 { bytes.set(blk, k, bytes.get(a, k)); k = k + 1 }
+            k = 0
+            while k < 8 { bytes.set(blk, 8 + k, bytes.get(r, i * 8 + k)); k = k + 1 }
+            b = process_block(enc, blk)
+            // A = MSB64(B) XOR t, where t = (n*j)+(i+1)
+            t = nblk * j + (i + 1)
+            k = 0
+            while k < 8 { bytes.set(a, k, bytes.get(b, k)); k = k + 1 }
+            // XOR t into A big-endian (t fits well within 64 bits)
+            bytes.set(a, 7, (bytes.get(a, 7) ^ (t & 0xFF)) & 0xFF)
+            bytes.set(a, 6, (bytes.get(a, 6) ^ ((t >> 8) & 0xFF)) & 0xFF)
+            bytes.set(a, 5, (bytes.get(a, 5) ^ ((t >> 16) & 0xFF)) & 0xFF)
+            bytes.set(a, 4, (bytes.get(a, 4) ^ ((t >> 24) & 0xFF)) & 0xFF)
+            // R[i] = LSB64(B)
+            k = 0
+            while k < 8 { bytes.set(r, i * 8 + k, bytes.get(b, 8 + k)); k = k + 1 }
+            bytes.free(b)
+            i = i + 1
+        }
+        j = j + 1
+    }
+    bytes.free(blk)
+
+    out = bytes.new(len + 8)
+    bytes.copy_from_bytes(out, 0, a, 0, 8)
+    bytes.copy_from_bytes(out, 8, r, 0, len)
+    bytes.free(a)
+    bytes.free(r)
+    free(enc)
+    return out
+}
+
+// Unwrap RFC 3394 ciphertext (`data`/`len`, len multiple of 8 and >= 24)
+// with KEK `key`/`keylen`. Returns (plaintext, "") on a valid integrity
+// check, or (null, error) if the unwrapped IV != A6A6A6A6A6A6A6A6.
+key_unwrap(key: ptr, keylen: int, data: ptr, len: int) -> {
+    if len < 24 { return null, "ciphertext too short" }
+    if (len % 8) != 0 { return null, "length not a multiple of 8" }
+    nblk = (len / 8) - 1           // number of plaintext blocks
+
+    dec = new_decryptor(key, keylen)
+
+    a = bytes.new(8)
+    bytes.copy_from_bytes(a, 0, data, 0, 8)
+    r = bytes.new(nblk * 8)
+    bytes.copy_from_bytes(r, 0, data, 8, nblk * 8)
+
+    blk = bytes.new(16)
+    j = 5
+    while j >= 0 {
+        i = nblk - 1
+        while i >= 0 {
+            // B = AES-Dec((A XOR t) | R[i]),  t = (n*j)+(i+1)
+            t = nblk * j + (i + 1)
+            k = 0
+            while k < 8 { bytes.set(blk, k, bytes.get(a, k)); k = k + 1 }
+            bytes.set(blk, 7, (bytes.get(blk, 7) ^ (t & 0xFF)) & 0xFF)
+            bytes.set(blk, 6, (bytes.get(blk, 6) ^ ((t >> 8) & 0xFF)) & 0xFF)
+            bytes.set(blk, 5, (bytes.get(blk, 5) ^ ((t >> 16) & 0xFF)) & 0xFF)
+            bytes.set(blk, 4, (bytes.get(blk, 4) ^ ((t >> 24) & 0xFF)) & 0xFF)
+            k = 0
+            while k < 8 { bytes.set(blk, 8 + k, bytes.get(r, i * 8 + k)); k = k + 1 }
+            b = process_block(dec, blk)
+            // A = MSB64(B); R[i] = LSB64(B)
+            k = 0
+            while k < 8 { bytes.set(a, k, bytes.get(b, k)); k = k + 1 }
+            k = 0
+            while k < 8 { bytes.set(r, i * 8 + k, bytes.get(b, 8 + k)); k = k + 1 }
+            bytes.free(b)
+            i = i - 1
+        }
+        j = j - 1
+    }
+    bytes.free(blk)
+    free(dec)
+
+    // Integrity: A must equal the default IV A6A6A6A6A6A6A6A6.
+    ok = 1
+    k = 0
+    while k < 8 {
+        if (bytes.get(a, k) & 0xFF) != 0xA6 { ok = 0 }
+        k = k + 1
+    }
+    bytes.free(a)
+    if ok == 0 {
+        bytes.free(r)
+        return null, "integrity check failed"
+    }
+    return r, ""
+}
+
+// ---- AES-GCM (NIST SP800-38D) ----
+// Authenticated encryption. `iv` is the nonce (any length, but 12 bytes is
+// the standard/fast path and the only length handled here). `aad` is the
+// additional authenticated data (may be empty). gcm_seal returns the
+// ciphertext with the 16-byte tag appended (pt_len + 16). gcm_open verifies
+// the trailing tag (constant-time) before returning (plaintext, "") or
+// (null, error). `ctx` is an AES ENCRYPTOR (GCM only runs the cipher forward).
+//
+// GHASH multiplies in GF(2^128) with the GCM reducing polynomial; H = E(0).
+
+// GF(2^128) multiply (x * y) in GCM's bit-reflected basis. x,y,out are
+// 16-byte buffers (big-endian block order, MSB-first bit numbering).
+gf_mul(x: ptr, y: ptr) -> ptr {
+    z = bytes.new(16)
+    v = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(z, i, 0); bytes.set(v, i, bytes.get(y, i)); i = i + 1 }
+    // For each bit of x from MSB (bit 0 of byte 0) to LSB:
+    bit = 0
+    while bit < 128 {
+        byte_i = bit / 8
+        bit_i = 7 - (bit % 8)
+        if ((bytes.get(x, byte_i) >> bit_i) & 1) == 1 {
+            k = 0
+            while k < 16 { bytes.set(z, k, (bytes.get(z, k) ^ bytes.get(v, k)) & 0xFF); k = k + 1 }
+        }
+        // v = (v >> 1); if LSB of v was set, v ^= R (R = 0xe1 || 0...0)
+        lsb = bytes.get(v, 15) & 1
+        gf_shr1(v)
+        if lsb == 1 {
+            bytes.set(v, 0, (bytes.get(v, 0) ^ 0xe1) & 0xFF)
+        }
+        bit = bit + 1
+    }
+    bytes.free(v)
+    return z
+}
+// Right-shift a 16-byte big-endian value by 1 bit, in place.
+gf_shr1(v: ptr) {
+    i = 0
+    carry = 0
+    while i < 16 {
+        cur = bytes.get(v, i) & 0xFF
+        nv = ((cur >> 1) | (carry << 7)) & 0xFF
+        carry = cur & 1
+        bytes.set(v, i, nv)
+        i = i + 1
+    }
+}
+
+// GHASH: fold `data` (len bytes, processed in 16-byte blocks, zero-padded)
+// into the running hash `acc` (16 bytes) under subkey H. Returns a fresh acc.
+ghash_update(acc: ptr, h: ptr, data: ptr, len: int) -> ptr {
+    cur = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(cur, i, bytes.get(acc, i)); i = i + 1 }
+    off = 0
+    while off < len {
+        // XOR next (zero-padded) block into cur
+        j = 0
+        while j < 16 {
+            b = 0
+            if off + j < len { b = bytes.get(data, off + j) }
+            bytes.set(cur, j, (bytes.get(cur, j) ^ b) & 0xFF)
+            j = j + 1
+        }
+        nxt = gf_mul(cur, h)
+        bytes.free(cur)
+        cur = nxt
+        off = off + 16
+    }
+    return cur
+}
+
+// Increment the low 32 bits (last 4 bytes) of a 16-byte counter, big-endian.
+gctr_inc32(ctr: ptr) {
+    i = 15
+    carry = 1
+    while i >= 12 {
+        if carry == 1 {
+            v = (bytes.get(ctr, i) + 1) & 0xFF
+            bytes.set(ctr, i, v)
+            if v != 0 { carry = 0 }
+        }
+        i = i - 1
+    }
+}
+
+// CTR-mode encrypt/decrypt `data` starting from counter block `ctr0`
+// (incremented before the first block per GCM). Returns a fresh buffer.
+gctr(ctx: ptr, ctr0: ptr, data: ptr, len: int) -> ptr {
+    out = bytes.new(len)
+    ctr = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(ctr, i, bytes.get(ctr0, i)); i = i + 1 }
+    off = 0
+    while off < len {
+        gctr_inc32(ctr)
+        ks = process_block(ctx, ctr)
+        j = 0
+        while j < 16 {
+            if off + j < len {
+                bytes.set(out, off + j, (bytes.get(data, off + j) ^ bytes.get(ks, j)) & 0xFF)
+            }
+            j = j + 1
+        }
+        bytes.free(ks)
+        off = off + 16
+    }
+    bytes.free(ctr)
+    return out
+}
+
+// Compute the GCM tag for ciphertext `ct`/`ct_len` and `aad`/`aad_len`
+// under subkey H and pre-counter J0. Returns the 16-byte tag.
+gcm_tag(ctx: ptr, h: ptr, j0: ptr, aad: ptr, aad_len: int, ct: ptr, ct_len: int) -> ptr {
+    acc = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(acc, z, 0); z = z + 1 }
+    a1 = ghash_update(acc, h, aad, aad_len)
+    bytes.free(acc)
+    a2 = ghash_update(a1, h, ct, ct_len)
+    bytes.free(a1)
+    // length block: [len(AAD) in bits | len(C) in bits], each 64-bit BE
+    lb = bytes.new(16)
+    set_be64_bits(lb, 0, aad_len)
+    set_be64_bits(lb, 8, ct_len)
+    a3 = ghash_update(a2, h, lb, 16)
+    bytes.free(a2); bytes.free(lb)
+    // S = E(J0); tag = a3 XOR S
+    s = process_block(ctx, j0)
+    tag = bytes.new(16)
+    k = 0
+    while k < 16 { bytes.set(tag, k, (bytes.get(a3, k) ^ bytes.get(s, k)) & 0xFF); k = k + 1 }
+    bytes.free(a3); bytes.free(s)
+    return tag
+}
+// Write (byte_len * 8) as a 64-bit big-endian value at offset off.
+set_be64_bits(b: ptr, off: int, byte_len: int) {
+    long bits_len = byte_len * 8
+    i = 7
+    while i >= 0 {
+        bytes.set(b, off + i, bits_len & 0xFF)
+        bits_len = bits.lsr64(bits_len, 8)
+        i = i - 1
+    }
+}
+
+// Build J0 for a 12-byte IV: IV || 0x00000001.
+gcm_j0(iv: ptr) -> ptr {
+    j0 = bytes.new(16)
+    i = 0
+    while i < 12 { bytes.set(j0, i, bytes.get(iv, i)); i = i + 1 }
+    bytes.set(j0, 12, 0); bytes.set(j0, 13, 0); bytes.set(j0, 14, 0); bytes.set(j0, 15, 1)
+    return j0
+}
+
+// Seal: returns ciphertext (pt_len bytes) with the 16-byte tag appended.
+// `ctx` is an encryptor; `iv` must be 12 bytes.
+gcm_seal(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, pt: ptr, pt_len: int) -> ptr {
+    // H = E(0^128)
+    zero = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    h = process_block(ctx, zero)
+    bytes.free(zero)
+
+    j0 = gcm_j0(iv)
+    ct = gctr(ctx, j0, pt, pt_len)
+    tag = gcm_tag(ctx, h, j0, aad, aad_len, ct, pt_len)
+
+    out = bytes.new(pt_len + 16)
+    bytes.copy_from_bytes(out, 0, ct, 0, pt_len)
+    bytes.copy_from_bytes(out, pt_len, tag, 0, 16)
+    bytes.free(h); bytes.free(j0); bytes.free(ct); bytes.free(tag)
+    return out
+}
+
+// Open: verifies the trailing 16-byte tag (constant-time) then decrypts.
+// `ctx` is an encryptor; `iv` must be 12 bytes. Returns (plaintext, "") or
+// (null, error).
+gcm_open(ctx: ptr, iv: ptr, aad: ptr, aad_len: int, ct_with_tag: ptr, ct_len: int) -> {
+    if ct_len < 16 {
+        return null, "ciphertext too short"
+    }
+    body_len = ct_len - 16
+    zero = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    h = process_block(ctx, zero)
+    bytes.free(zero)
+    j0 = gcm_j0(iv)
+
+    want = gcm_tag(ctx, h, j0, aad, aad_len, ct_with_tag, body_len)
+    // constant-time compare against the supplied tag
+    diff = 0
+    i = 0
+    while i < 16 {
+        diff = diff | ((bytes.get(want, i) ^ bytes.get(ct_with_tag, body_len + i)) & 0xFF)
+        i = i + 1
+    }
+    bytes.free(want)
+    if diff != 0 {
+        bytes.free(h); bytes.free(j0)
+        return null, "authentication failed"
+    }
+    pt = gctr(ctx, j0, ct_with_tag, body_len)
+    bytes.free(h); bytes.free(j0)
+    return pt, ""
+}
+
+// ===========================================================================
+// AES-CCM (NIST SP800-38C)
+// ===========================================================================
+// Counter with CBC-MAC. CTR encryption of the plaintext plus a CBC-MAC over a
+// formatted stream B0 ‖ [AAD-len ‖ AAD (zero-padded)] ‖ plaintext (zero-padded).
+// The MAC is then CTR-encrypted with counter block S0 and the (truncated) tag
+// is appended to the ciphertext.
+//
+//   ccm_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
+//   ccm_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
+//
+// nonce length must be 7..13; taglen must be one of {4,6,8,10,12,14,16}.
+
+// Build the CCM CTR counter block: flags = (15 - nlen) - 1 in the low 3 bits,
+// nonce at offset 1, the trailing q bytes (the block counter) zeroed.
+ccm_ctr0(nonce: ptr, nlen: int) -> ptr {
+    ctr = bytes.new(16)
+    q = 15 - nlen
+    bytes.set(ctr, 0, (q - 1) & 0x7)
+    i = 0
+    while i < nlen { bytes.set(ctr, 1 + i, bytes.get(nonce, i)); i = i + 1 }
+    i = 1 + nlen
+    while i < 16 { bytes.set(ctr, i, 0); i = i + 1 }
+    return ctr
+}
+
+// CBC-MAC over the formatted CCM stream; returns the raw 16-byte MAC block
+// (caller truncates to taglen). `enc` is an AES encryptor.
+ccm_cbc_mac(enc: ptr, nonce: ptr, nlen: int, aad: ptr, aadlen: int, data: ptr, dlen: int, taglen: int) -> ptr {
+    // B0
+    b0 = bytes.new(16)
+    flags = 0
+    if aadlen > 0 { flags = flags | 0x40 }
+    flags = flags | ((((taglen - 2) / 2) & 0x7) << 3)
+    flags = flags | (((15 - nlen) - 1) & 0x7)
+    bytes.set(b0, 0, flags & 0xFF)
+    i = 0
+    while i < nlen { bytes.set(b0, 1 + i, bytes.get(nonce, i)); i = i + 1 }
+    // message length q encoded big-endian in the trailing bytes
+    long qv = dlen
+    count = 1
+    while qv > 0 {
+        bytes.set(b0, 16 - count, qv & 0xFF)
+        qv = bits.lsr64(qv, 8)
+        count = count + 1
+    }
+
+    x = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(x, z, 0); z = z + 1 }
+    x = ccm_mac_block(enc, x, b0)
+    bytes.free(b0)
+
+    // AAD: length-prefix then AAD bytes, zero-padded to a block boundary.
+    if aadlen > 0 {
+        hdr_extra = 0
+        prefix = bytes.new(0)
+        if aadlen < ((1 << 16) - (1 << 8)) {
+            prefix = bytes.new(2)
+            bytes.set(prefix, 0, bits.lsr64(aadlen, 8) & 0xFF)
+            bytes.set(prefix, 1, aadlen & 0xFF)
+            hdr_extra = 2
+        } else {
+            prefix = bytes.new(6)
+            bytes.set(prefix, 0, 0xFF)
+            bytes.set(prefix, 1, 0xFE)
+            bytes.set(prefix, 2, bits.lsr64(aadlen, 24) & 0xFF)
+            bytes.set(prefix, 3, bits.lsr64(aadlen, 16) & 0xFF)
+            bytes.set(prefix, 4, bits.lsr64(aadlen, 8) & 0xFF)
+            bytes.set(prefix, 5, aadlen & 0xFF)
+            hdr_extra = 6
+        }
+        total = hdr_extra + aadlen
+        padded = ((total + 15) / 16) * 16
+        ablk = bytes.new(padded)
+        k = 0
+        while k < hdr_extra { bytes.set(ablk, k, bytes.get(prefix, k)); k = k + 1 }
+        k = 0
+        while k < aadlen { bytes.set(ablk, hdr_extra + k, bytes.get(aad, k)); k = k + 1 }
+        k = total
+        while k < padded { bytes.set(ablk, k, 0); k = k + 1 }
+        bytes.free(prefix)
+        off = 0
+        while off < padded {
+            blk = bytes.new(16)
+            j = 0
+            while j < 16 { bytes.set(blk, j, bytes.get(ablk, off + j)); j = j + 1 }
+            nx = ccm_mac_block(enc, x, blk)
+            bytes.free(x); bytes.free(blk)
+            x = nx
+            off = off + 16
+        }
+        bytes.free(ablk)
+    }
+
+    // plaintext, zero-padded to a block boundary.
+    off = 0
+    while off < dlen {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 {
+            b = 0
+            if off + j < dlen { b = bytes.get(data, off + j) }
+            bytes.set(blk, j, b)
+            j = j + 1
+        }
+        nx = ccm_mac_block(enc, x, blk)
+        bytes.free(x); bytes.free(blk)
+        x = nx
+        off = off + 16
+    }
+    return x
+}
+// One CBC-MAC step: X = E(X XOR blk). Returns a fresh block; caller frees X.
+ccm_mac_block(enc: ptr, x: ptr, blk: ptr) -> ptr {
+    t = bytes.new(16)
+    j = 0
+    while j < 16 { bytes.set(t, j, (bytes.get(x, j) ^ bytes.get(blk, j)) & 0xFF); j = j + 1 }
+    eb = process_block(enc, t)
+    bytes.free(t)
+    return eb
+}
+
+ccm_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
+    enc = new_encryptor(key, keylen)
+    mac = ccm_cbc_mac(enc, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+
+    ctr0 = ccm_ctr0(nonce, nlen)
+    // S0 = E(ctr0) encrypts the MAC -> tag
+    s0 = process_block(enc, ctr0)
+    tag = bytes.new(taglen)
+    i = 0
+    while i < taglen { bytes.set(tag, i, (bytes.get(mac, i) ^ bytes.get(s0, i)) & 0xFF); i = i + 1 }
+    bytes.free(s0); bytes.free(mac)
+
+    // S1.. encrypt the plaintext (ctr0 incremented before first data block).
+    ct = bytes.new(ptlen)
+    ctr = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(ctr, i, bytes.get(ctr0, i)); i = i + 1 }
+    bytes.free(ctr0)
+    off = 0
+    while off < ptlen {
+        ctr_increment(ctr)
+        ks = process_block(enc, ctr)
+        j = 0
+        while j < 16 {
+            if off + j < ptlen {
+                bytes.set(ct, off + j, (bytes.get(pt, off + j) ^ bytes.get(ks, j)) & 0xFF)
+            }
+            j = j + 1
+        }
+        bytes.free(ks)
+        off = off + 16
+    }
+    bytes.free(ctr)
+    free(enc)
+
+    out = bytes.new(ptlen + taglen)
+    bytes.copy_from_bytes(out, 0, ct, 0, ptlen)
+    bytes.copy_from_bytes(out, ptlen, tag, 0, taglen)
+    bytes.free(ct); bytes.free(tag)
+    return out, ptlen + taglen
+}
+
+ccm_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+    if ctlen < taglen { return null, -1 }
+    ptlen = ctlen - taglen
+    enc = new_encryptor(key, keylen)
+
+    ctr0 = ccm_ctr0(nonce, nlen)
+    // recover plaintext via CTR (S1..), then recompute & verify the MAC.
+    pt = bytes.new(ptlen)
+    ctr = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(ctr, i, bytes.get(ctr0, i)); i = i + 1 }
+    off = 0
+    while off < ptlen {
+        ctr_increment(ctr)
+        ks = process_block(enc, ctr)
+        j = 0
+        while j < 16 {
+            if off + j < ptlen {
+                bytes.set(pt, off + j, (bytes.get(ct, off + j) ^ bytes.get(ks, j)) & 0xFF)
+            }
+            j = j + 1
+        }
+        bytes.free(ks)
+        off = off + 16
+    }
+    bytes.free(ctr)
+
+    mac = ccm_cbc_mac(enc, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+    s0 = process_block(enc, ctr0)
+    bytes.free(ctr0)
+    // expected tag = (mac XOR S0) truncated; compare const-time to supplied.
+    diff = 0
+    i = 0
+    while i < taglen {
+        want = (bytes.get(mac, i) ^ bytes.get(s0, i)) & 0xFF
+        diff = diff | (want ^ (bytes.get(ct, ptlen + i) & 0xFF))
+        i = i + 1
+    }
+    bytes.free(mac); bytes.free(s0)
+    free(enc)
+    if diff != 0 {
+        bytes.free(pt)
+        return null, -1
+    }
+    return pt, ptlen
+}
+
+// ===========================================================================
+// AES-EAX (Bellare/Rogaway/Wagner)
+// ===========================================================================
+// OMAC1 (= CMAC) over three tweaked streams keyed by a leading tag block:
+//   N_mac = OMAC_0(nonce), H_mac = OMAC_1(aad), C_mac = OMAC_2(ciphertext)
+// CTR keystream is seeded by N_mac; tag = N_mac ^ H_mac ^ C_mac (truncated).
+//
+//   eax_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
+//   eax_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
+
+// OMAC_t(data) = CMAC(key, [0^15 ‖ t] ‖ data). Returns a fresh 16-byte tag.
+eax_omac(key: ptr, keylen: int, t: int, data: ptr, dlen: int) -> ptr {
+    buf = bytes.new(16 + dlen)
+    i = 0
+    while i < 15 { bytes.set(buf, i, 0); i = i + 1 }
+    bytes.set(buf, 15, t & 0xFF)
+    i = 0
+    while i < dlen { bytes.set(buf, 16 + i, bytes.get(data, i)); i = i + 1 }
+    tag = cmac(key, keylen, buf, 16 + dlen)
+    bytes.free(buf)
+    return tag
+}
+
+eax_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
+    n_mac = eax_omac(key, keylen, 0, nonce, nlen)
+    h_mac = eax_omac(key, keylen, 1, aad, aadlen)
+
+    // CTR encrypt seeded by N_mac (counter used directly, then incremented).
+    enc = new_encryptor(key, keylen)
+    ct = ctr_xor(enc, n_mac, pt)   // ctr_xor allocates ptlen-byte output
+    free(enc)
+
+    c_mac = eax_omac(key, keylen, 2, ct, ptlen)
+
+    out = bytes.new(ptlen + taglen)
+    bytes.copy_from_bytes(out, 0, ct, 0, ptlen)
+    i = 0
+    while i < taglen {
+        v = (bytes.get(n_mac, i) ^ bytes.get(h_mac, i) ^ bytes.get(c_mac, i)) & 0xFF
+        bytes.set(out, ptlen + i, v)
+        i = i + 1
+    }
+    bytes.free(n_mac); bytes.free(h_mac); bytes.free(c_mac); bytes.free(ct)
+    return out, ptlen + taglen
+}
+
+eax_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+    if ctlen < taglen { return null, -1 }
+    ptlen = ctlen - taglen
+
+    n_mac = eax_omac(key, keylen, 0, nonce, nlen)
+    h_mac = eax_omac(key, keylen, 1, aad, aadlen)
+
+    // C_mac is computed over the ciphertext body only (excludes the tag).
+    body = bytes.new(ptlen)
+    bytes.copy_from_bytes(body, 0, ct, 0, ptlen)
+    c_mac = eax_omac(key, keylen, 2, body, ptlen)
+
+    diff = 0
+    i = 0
+    while i < taglen {
+        want = (bytes.get(n_mac, i) ^ bytes.get(h_mac, i) ^ bytes.get(c_mac, i)) & 0xFF
+        diff = diff | (want ^ (bytes.get(ct, ptlen + i) & 0xFF))
+        i = i + 1
+    }
+    bytes.free(h_mac); bytes.free(c_mac)
+    if diff != 0 {
+        bytes.free(n_mac); bytes.free(body)
+        return null, -1
+    }
+
+    enc = new_encryptor(key, keylen)
+    pt = ctr_xor(enc, n_mac, body)
+    free(enc)
+    bytes.free(n_mac); bytes.free(body)
+    return pt, ptlen
+}
+
+// ===========================================================================
+// AES-OCB (RFC 7253)
+// ===========================================================================
+// Offset-based AEAD. L_* = E(0), L_$ = double(L_*), L_0 = double(L_$); the
+// per-block offset advances by L[ntz(i)] (1-based block index). PMAC-style AAD
+// authentication folds into `Sum`; a running `Checksum` over plaintext, plus
+// the final offset, yields the tag.
+//
+//   ocb_seal(key, keylen, nonce, nlen, aad, aadlen, pt, ptlen, taglen)
+//       -> (ct_ptr, ct_len)        ct = ciphertext ‖ tag (ptlen + taglen)
+//   ocb_open(key, keylen, nonce, nlen, aad, aadlen, ct, ctlen, taglen)
+//       -> (pt_ptr, pt_len)        pt_len = -1, pt_ptr = null on tag mismatch
+//
+// nonce length must be <= 15.
+
+// GF(2^128) doubling: left shift by 1, conditional XOR of 0x87 on carry-out.
+ocb_double(inp: ptr) -> ptr {
+    out = bytes.new(16)
+    long carry = 0
+    i = 15
+    while i >= 0 {
+        long b = bytes.get(inp, i) & 0xFF
+        long nv = ((b << 1) | carry) & 0xFF
+        carry = bits.lsr64(b, 7) & 1
+        bytes.set(out, i, nv & 0xFF)
+        i = i - 1
+    }
+    if carry == 1 {
+        bytes.set(out, 15, (bytes.get(out, 15) ^ 0x87) & 0xFF)
+    }
+    return out
+}
+
+// XOR `val` (16 bytes) into `dst` (16 bytes) in place.
+ocb_xor(dst: ptr, val: ptr) {
+    i = 0
+    while i < 16 { bytes.set(dst, i, (bytes.get(dst, i) ^ bytes.get(val, i)) & 0xFF); i = i + 1 }
+}
+
+// Number of trailing zero bits of a (1-based) positive block index.
+ocb_ntz(x: int) -> int {
+    n = 0
+    long v = x
+    while (v & 1) == 0 {
+        n = n + 1
+        v = bits.lsr64(v, 1)
+    }
+    return n
+}
+
+// L table: a flat (entries*16)-byte buffer with L[0]=l0 and each subsequent
+// entry = double(previous). 33 entries covers up to 2^32 blocks of data.
+// Avoids storing pointers in an int-typed array (which would truncate them).
+OCB_L_ENTRIES() -> int { return 33 }
+ocb_build_l(l0: ptr) -> ptr {
+    entries = OCB_L_ENTRIES()
+    tab = bytes.new(entries * 16)
+    bytes.copy_from_bytes(tab, 0, l0, 0, 16)
+    n = 1
+    while n < entries {
+        d = ocb_double_at(tab, (n - 1) * 16)
+        bytes.copy_from_bytes(tab, n * 16, d, 0, 16)
+        bytes.free(d)
+        n = n + 1
+    }
+    return tab
+}
+// XOR L[n] (16 bytes at offset n*16 in `tab`) into `dst`.
+ocb_xor_l(dst: ptr, tab: ptr, n: int) {
+    base = n * 16
+    i = 0
+    while i < 16 { bytes.set(dst, i, (bytes.get(dst, i) ^ bytes.get(tab, base + i)) & 0xFF); i = i + 1 }
+}
+// double() of the 16-byte value at offset `off` in `src`; returns a fresh buffer.
+ocb_double_at(src: ptr, off: int) -> ptr {
+    out = bytes.new(16)
+    long carry = 0
+    i = 15
+    while i >= 0 {
+        long b = bytes.get(src, off + i) & 0xFF
+        long nv = ((b << 1) | carry) & 0xFF
+        carry = bits.lsr64(b, 7) & 1
+        bytes.set(out, i, nv & 0xFF)
+        i = i - 1
+    }
+    if carry == 1 {
+        bytes.set(out, 15, (bytes.get(out, 15) ^ 0x87) & 0xFF)
+    }
+    return out
+}
+
+// Compute the initial offset (OffsetMAIN_0) and Sum-over-AAD for a nonce.
+// Returns the 16-byte initial offset; Sum is written into `sum_out`.
+ocb_init_offset(enc: ptr, nonce: ptr, nlen: int, taglen: int) -> ptr {
+    // nonce block: [taglen*8 mod 256 << ... ] per RFC: top byte = macSize<<4
+    nb = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(nb, i, 0); i = i + 1 }
+    i = 0
+    while i < nlen { bytes.set(nb, 16 - nlen + i, bytes.get(nonce, i)); i = i + 1 }
+    bytes.set(nb, 0, (taglen << 4) & 0xFF)
+    bytes.set(nb, 15 - nlen, (bytes.get(nb, 15 - nlen) | 1) & 0xFF)
+
+    bottom = bytes.get(nb, 15) & 0x3F
+    bytes.set(nb, 15, bytes.get(nb, 15) & 0xC0)
+
+    ktop = process_block(enc, nb)
+    bytes.free(nb)
+
+    // Stretch = Ktop ‖ (Ktop[0..7] XOR Ktop[1..8])  (24 bytes)
+    stretch = bytes.new(24)
+    i = 0
+    while i < 16 { bytes.set(stretch, i, bytes.get(ktop, i)); i = i + 1 }
+    i = 0
+    while i < 8 {
+        bytes.set(stretch, 16 + i, (bytes.get(ktop, i) ^ bytes.get(ktop, i + 1)) & 0xFF)
+        i = i + 1
+    }
+    bytes.free(ktop)
+
+    // OffsetMAIN_0 = (Stretch << bottom)[0..15]  (bit shift)
+    bits_sh = bottom % 8
+    bytes_sh = bottom / 8
+    off = bytes.new(16)
+    if bits_sh == 0 {
+        i = 0
+        while i < 16 { bytes.set(off, i, bytes.get(stretch, bytes_sh + i)); i = i + 1 }
+    } else {
+        i = 0
+        while i < 16 {
+            long b1 = bytes.get(stretch, bytes_sh + i) & 0xFF
+            long b2 = bytes.get(stretch, bytes_sh + i + 1) & 0xFF
+            long v = ((b1 << bits_sh) | bits.lsr64(b2, 8 - bits_sh)) & 0xFF
+            bytes.set(off, i, v & 0xFF)
+            i = i + 1
+        }
+    }
+    bytes.free(stretch)
+    return off
+}
+
+// Hash the AAD into a 16-byte Sum (PMAC-style). Returns a fresh Sum buffer.
+ocb_hash_aad(enc: ptr, ltab: ptr, l_star: ptr, aad: ptr, aadlen: int) -> ptr {
+    sum = bytes.new(16)
+    offh = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(sum, i, 0); bytes.set(offh, i, 0); i = i + 1 }
+
+    nblk = aadlen / 16
+    blkidx = 1
+    off = 0
+    while blkidx <= nblk {
+        ocb_xor_l(offh, ltab, ocb_ntz(blkidx))
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 { bytes.set(blk, j, (bytes.get(aad, off + j) ^ bytes.get(offh, j)) & 0xFF); j = j + 1 }
+        eb = process_block(enc, blk)
+        ocb_xor(sum, eb)
+        bytes.free(blk); bytes.free(eb)
+        blkidx = blkidx + 1
+        off = off + 16
+    }
+    // final partial block
+    rem = aadlen - nblk * 16
+    if rem > 0 {
+        ocb_xor(offh, l_star)
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 {
+            b = 0
+            if j < rem { b = bytes.get(aad, off + j) }
+            else if j == rem { b = 0x80 }
+            bytes.set(blk, j, (b ^ bytes.get(offh, j)) & 0xFF)
+            j = j + 1
+        }
+        eb = process_block(enc, blk)
+        ocb_xor(sum, eb)
+        bytes.free(blk); bytes.free(eb)
+    }
+    bytes.free(offh)
+    return sum
+}
+
+ocb_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt: ptr, ptlen: int, taglen: int) -> {
+    enc = new_encryptor(key, keylen)
+    zero = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    l_star = process_block(enc, zero)
+    bytes.free(zero)
+    l_dollar = ocb_double(l_star)
+    l0 = ocb_double(l_dollar)
+    ltab = ocb_build_l(l0)
+    bytes.free(l0)
+
+    sum = ocb_hash_aad(enc, ltab, l_star, aad, aadlen)
+    offm = ocb_init_offset(enc, nonce, nlen, taglen)
+    checksum = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(checksum, i, 0); i = i + 1 }
+
+    ct = bytes.new(ptlen)
+    nblk = ptlen / 16
+    blkidx = 1
+    off = 0
+    while blkidx <= nblk {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 { bytes.set(blk, j, bytes.get(pt, off + j)); j = j + 1 }
+        ocb_xor(checksum, blk)
+        ocb_xor_l(offm, ltab, ocb_ntz(blkidx))
+        ocb_xor(blk, offm)
+        eb = process_block(enc, blk)
+        ocb_xor(eb, offm)
+        j = 0
+        while j < 16 { bytes.set(ct, off + j, bytes.get(eb, j)); j = j + 1 }
+        bytes.free(blk); bytes.free(eb)
+        blkidx = blkidx + 1
+        off = off + 16
+    }
+    // final partial block
+    rem = ptlen - nblk * 16
+    if rem > 0 {
+        pad_in = bytes.new(16)
+        j = 0
+        while j < 16 {
+            b = 0
+            if j < rem { b = bytes.get(pt, off + j) }
+            else if j == rem { b = 0x80 }
+            bytes.set(pad_in, j, b)
+            j = j + 1
+        }
+        ocb_xor(checksum, pad_in)
+        bytes.free(pad_in)
+        ocb_xor(offm, l_star)
+        pad = process_block(enc, offm)
+        j = 0
+        while j < rem { bytes.set(ct, off + j, (bytes.get(pt, off + j) ^ bytes.get(pad, j)) & 0xFF); j = j + 1 }
+        bytes.free(pad)
+    }
+
+    // tag = E(Checksum XOR OffsetMAIN XOR L_$) XOR Sum
+    ocb_xor(checksum, offm)
+    ocb_xor(checksum, l_dollar)
+    tagfull = process_block(enc, checksum)
+    ocb_xor(tagfull, sum)
+
+    out = bytes.new(ptlen + taglen)
+    bytes.copy_from_bytes(out, 0, ct, 0, ptlen)
+    i = 0
+    while i < taglen { bytes.set(out, ptlen + i, bytes.get(tagfull, i)); i = i + 1 }
+
+    bytes.free(ct); bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)
+    bytes.free(offm); bytes.free(l_star); bytes.free(l_dollar); bytes.free(ltab)
+    free(enc)
+    return out, ptlen + taglen
+}
+
+ocb_open(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, ct: ptr, ctlen: int, taglen: int) -> {
+    if ctlen < taglen { return null, -1 }
+    ptlen = ctlen - taglen
+    enc = new_encryptor(key, keylen)
+    dec = new_decryptor(key, keylen)
+
+    zero = bytes.new(16)
+    z = 0
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    l_star = process_block(enc, zero)
+    bytes.free(zero)
+    l_dollar = ocb_double(l_star)
+    l0 = ocb_double(l_dollar)
+    ltab = ocb_build_l(l0)
+    bytes.free(l0)
+
+    sum = ocb_hash_aad(enc, ltab, l_star, aad, aadlen)
+    offm = ocb_init_offset(enc, nonce, nlen, taglen)
+    checksum = bytes.new(16)
+    i = 0
+    while i < 16 { bytes.set(checksum, i, 0); i = i + 1 }
+
+    pt = bytes.new(ptlen)
+    nblk = ptlen / 16
+    blkidx = 1
+    off = 0
+    while blkidx <= nblk {
+        blk = bytes.new(16)
+        j = 0
+        while j < 16 { bytes.set(blk, j, bytes.get(ct, off + j)); j = j + 1 }
+        ocb_xor_l(offm, ltab, ocb_ntz(blkidx))
+        ocb_xor(blk, offm)
+        db = process_block(dec, blk)
+        ocb_xor(db, offm)
+        ocb_xor(checksum, db)
+        j = 0
+        while j < 16 { bytes.set(pt, off + j, bytes.get(db, j)); j = j + 1 }
+        bytes.free(blk); bytes.free(db)
+        blkidx = blkidx + 1
+        off = off + 16
+    }
+    // final partial block: decrypt via the forward cipher pad (like encrypt)
+    rem = ptlen - nblk * 16
+    if rem > 0 {
+        ocb_xor(offm, l_star)
+        pad = process_block(enc, offm)
+        recovered = bytes.new(16)
+        j = 0
+        while j < 16 {
+            b = 0
+            if j < rem { b = (bytes.get(ct, off + j) ^ bytes.get(pad, j)) & 0xFF }
+            else if j == rem { b = 0x80 }
+            bytes.set(recovered, j, b)
+            j = j + 1
+        }
+        ocb_xor(checksum, recovered)
+        j = 0
+        while j < rem { bytes.set(pt, off + j, bytes.get(recovered, j)); j = j + 1 }
+        bytes.free(pad); bytes.free(recovered)
+    }
+
+    ocb_xor(checksum, offm)
+    ocb_xor(checksum, l_dollar)
+    tagfull = process_block(enc, checksum)
+    ocb_xor(tagfull, sum)
+
+    diff = 0
+    i = 0
+    while i < taglen {
+        diff = diff | ((bytes.get(tagfull, i) ^ bytes.get(ct, ptlen + i)) & 0xFF)
+        i = i + 1
+    }
+    bytes.free(tagfull); bytes.free(checksum); bytes.free(sum)
+    bytes.free(offm); bytes.free(l_star); bytes.free(l_dollar); bytes.free(ltab)
+    free(enc); free(dec)
+    if diff != 0 {
+        bytes.free(pt)
+        return null, -1
+    }
+    return pt, ptlen
+}

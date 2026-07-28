@@ -1,0 +1,519 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.ed448 — Ed448 (RFC 8032) signatures in pure Aether,
+// on top of std.bignum and std.cryptography.sha3 (SHAKE256). NO externs to
+// OpenSSL.
+//
+// Ed448 is EdDSA over the UNTWISTED Edwards curve
+//   x^2 + y^2 = 1 + d x^2 y^2   over GF(2^448 - 2^224 - 1),  d = -39081,
+// cofactor 4, group order L = 2^446 - 138180668...  (see order_L below).
+//
+//   publickey(seed57)             -> public57
+//   sign(seed57, msg, msg_len)    -> sig114
+//   verify(public57, msg, msg_len, sig114) -> int   (1 = valid, 0 = invalid)
+//
+// 57-byte keys, 114-byte signatures, all little-endian per RFC 8032. The hash
+// is SHAKE256 with a 114-byte (= 2b/8) output, prefixed with dom4 =
+// "SigEd448" || phflag(0) || octet(ctxlen=0) for the pure (non-prehash,
+// empty-context) variant. Point arithmetic uses projective coordinates
+// (X:Y:Z) on the untwisted Edwards curve.
+//
+// NOTE: correctness-first port over the variable-time std.bignum — not
+// constant-time/side-channel-hardened. Validated against the RFC 8032 §7.4
+// "Blank" test vector.
+
+import std.bytes
+import std.bignum
+import std.cryptography.sha3
+
+exports (
+    publickey, sign, verify
+)
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern strlen(s: string) -> int
+
+// ---- constants ----
+// p = 2^448 - 2^224 - 1  (big-endian: byte[27] = 0xFE, all others 0xFF)
+field_p() -> ptr {
+    b = bytes.new(56)
+    i = 0
+    while i < 56 { bytes.set(b, i, 0xFF); i = i + 1 }
+    bytes.set(b, 27, 0xFE)
+    p = bignum.from_bytes_unsigned(b, 56)
+    bytes.free(b)
+    return p
+}
+// L = 2^446 - 13818066809895115352007386748515426880336692474882178609894547503885
+order_L() -> ptr {
+    h = "3fffffffffffffffffffffffffffffffffffffffffffffffffffffff7cca23e9c44edb49aed63690216cc2728dc58f552378c292ab5844f3"
+    return bn_from_hex(h)
+}
+// d = -39081 mod p
+curve_d(p: ptr) -> ptr {
+    n39081 = bignum.from_int(39081)
+    d = bignum.subtract(p, n39081)   // p - 39081 = -39081 mod p
+    bignum.free(n39081)
+    return d
+}
+
+bn_from_hex(h: string) -> ptr {
+    n = strlen(h)
+    b = bytes.new(n / 2)
+    i = 0
+    while i < n {
+        hi = hexv(string_char_at_n(h, n, i))
+        lo = hexv(string_char_at_n(h, n, i + 1))
+        bytes.set(b, i / 2, hi * 16 + lo)
+        i = i + 2
+    }
+    r = bignum.from_bytes_unsigned(b, n / 2)
+    bytes.free(b)
+    return r
+}
+hexv(c: int) -> int {
+    if c >= 48 { if c <= 57 { return c - 48 } }
+    if c >= 97 { if c <= 102 { return c - 87 } }
+    if c >= 65 { if c <= 70 { return c - 55 } }
+    return 0
+}
+
+// ---- field ops mod p ----
+fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = bignum.mod(s, p); bignum.free(s); return r }
+fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(d, p); bignum.free(d); return r }
+fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
+finv(a: ptr, p: ptr) -> ptr {
+    two = bignum.from_int(2)
+    e = bignum.subtract(p, two)            // p - 2
+    r = bignum.mod_pow(a, e, p)
+    bignum.free(two); bignum.free(e)
+    return r
+}
+
+// ---- little-endian <-> *BN ----
+from_le(b: ptr, n: int) -> ptr {
+    be = bytes.new(n)
+    i = 0
+    while i < n { bytes.set(be, i, bytes.get(b, n - 1 - i)); i = i + 1 }
+    r = bignum.from_bytes_unsigned(be, n)
+    bytes.free(be)
+    return r
+}
+// Encode a *BN as a 56-byte little-endian buffer (the y-coordinate body).
+to_le56(nn: ptr) -> ptr {
+    be = bignum.to_bytes_unsigned(nn)
+    blen = bytes.length(be)
+    out = bytes.new(56)
+    i = 0
+    while i < 56 { bytes.set(out, i, 0); i = i + 1 }
+    i = 0
+    while i < blen { if i < 56 { bytes.set(out, i, bytes.get(be, blen - 1 - i)) } i = i + 1 }
+    bytes.free(be)
+    return out
+}
+// Encode a *BN (a scalar mod L) as a 57-byte little-endian buffer.
+to_le57(nn: ptr) -> ptr {
+    be = bignum.to_bytes_unsigned(nn)
+    blen = bytes.length(be)
+    out = bytes.new(57)
+    i = 0
+    while i < 57 { bytes.set(out, i, 0); i = i + 1 }
+    i = 0
+    while i < blen { if i < 57 { bytes.set(out, i, bytes.get(be, blen - 1 - i)) } i = i + 1 }
+    bytes.free(be)
+    return out
+}
+
+// ---- projective-coordinate point (X:Y:Z), each a *BN. affine = (X/Z, Y/Z) ----
+struct Pt { x: ptr  y: ptr  z: ptr }
+pt_new(x: ptr, y: ptr, z: ptr) -> *Pt {
+    q = malloc(24) as *Pt
+    q.x = x; q.y = y; q.z = z
+    return q
+}
+pt_free(q: *Pt) {
+    bignum.free(q.x); bignum.free(q.y); bignum.free(q.z)
+    libc_free(q)
+}
+
+// Neutral element (0, 1, 1).
+pt_identity() -> *Pt {
+    return pt_new(bignum.from_int(0), bignum.from_int(1), bignum.from_int(1))
+}
+
+// Projective point addition on the untwisted Edwards curve (a = 1), using the
+// "add-2008-bbjlp" complete addition formula (RFC 8032 §5.2 reference code).
+//   A = Z1*Z2
+//   B = A^2
+//   C = X1*X2
+//   D = Y1*Y2
+//   E = d*C*D
+//   F = B - E
+//   G = B + E
+//   H = (X1+Y1)*(X2+Y2)
+//   X3 = A*F*(H - C - D)
+//   Y3 = A*G*(D - C)
+//   Z3 = F*G
+pt_add(a: *Pt, b: *Pt, p: ptr, d: ptr) -> *Pt {
+    A = fmul(a.z, b.z, p)
+    B = fmul(A, A, p)
+    C = fmul(a.x, b.x, p)
+    D = fmul(a.y, b.y, p)
+    dC = fmul(d, C, p)
+    E = fmul(dC, D, p)
+    F = fsub(B, E, p)
+    G = fadd(B, E, p)
+    xy1 = fadd(a.x, a.y, p)
+    xy2 = fadd(b.x, b.y, p)
+    H = fmul(xy1, xy2, p)
+    // X3 = A*F*(H - C - D)
+    hc = fsub(H, C, p)
+    hcd = fsub(hc, D, p)
+    af = fmul(A, F, p)
+    X3 = fmul(af, hcd, p)
+    // Y3 = A*G*(D - C)
+    dc = fsub(D, C, p)
+    ag = fmul(A, G, p)
+    Y3 = fmul(ag, dc, p)
+    // Z3 = F*G
+    Z3 = fmul(F, G, p)
+
+    bignum.free(A); bignum.free(B); bignum.free(C); bignum.free(D)
+    bignum.free(dC); bignum.free(E); bignum.free(F); bignum.free(G)
+    bignum.free(xy1); bignum.free(xy2); bignum.free(H)
+    bignum.free(hc); bignum.free(hcd); bignum.free(af)
+    bignum.free(dc); bignum.free(ag)
+    return pt_new(X3, Y3, Z3)
+}
+
+// Scalar mult: e * P, double-and-add over the bits of e (a *BN).
+pt_mul(e: ptr, P: *Pt, p: ptr, d: ptr) -> *Pt {
+    q = pt_identity()
+    nbits = bignum.bit_length(e)
+    i = nbits - 1
+    while i >= 0 {
+        dbl = pt_add(q, q, p, d)
+        pt_free(q)
+        q = dbl
+        ei = bignum.shift_right(e, i)
+        if bit0(ei) == 1 {
+            sum = pt_add(q, P, p, d)
+            pt_free(q)
+            q = sum
+        }
+        bignum.free(ei)
+        i = i - 1
+    }
+    return q
+}
+
+bit0(n: ptr) -> int {
+    if bignum.is_zero(n) == 1 { return 0 }
+    two = bignum.from_int(2)
+    r = bignum.mod(n, two)
+    b = 0
+    if bignum.is_zero(r) != 1 { b = 1 }
+    bignum.free(two); bignum.free(r)
+    return b
+}
+
+// The base point B (RFC 8032 §5.2 generator), Z = 1.
+base_point() -> *Pt {
+    xh = "4f1970c66bed0ded221d15a622bf36da9e146570470f1767ea6de324a3d3a46412ae1af72ab66511433b80e18b00938e2626a82bc70cc05e"
+    yh = "693f46716eb6bc248876203756c9c7624bea73736ca3984087789c1e05a0c2d73ad3ff1ce67c39c4fdbd132c4ed7c8ad9808795bf230fa14"
+    return pt_new(bn_from_hex(xh), bn_from_hex(yh), bignum.from_int(1))
+}
+
+// Recover x from y and the sign bit. Untwisted Edwards: x^2+y^2 = 1+d x^2 y^2
+//   => x^2 = (y^2 - 1) / (d y^2 - 1) mod p.
+// p ≡ 3 (mod 4), so the square root is candidate^((p+1)/4); validate, and
+// fix the sign so x's low bit equals `sign`. Returns null on non-square.
+recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
+    one = bignum.from_int(1)
+    y2 = fmul(y, y, p)
+    u = fsub(y2, one, p)                 // y^2 - 1
+    dy2 = fmul(d, y2, p)
+    v = fsub(dy2, one, p)                // d y^2 - 1
+    vinv = finv(v, p)
+    x2 = fmul(u, vinv, p)                // candidate x^2
+
+    if bignum.is_zero(x2) == 1 {
+        bignum.free(one); bignum.free(y2); bignum.free(u); bignum.free(dy2)
+        bignum.free(v); bignum.free(vinv)
+        if sign == 1 {
+            // x = 0 but sign demands odd -> invalid
+            bignum.free(x2)
+            return null
+        }
+        return x2   // x = 0
+    }
+
+    // x = x2 ^ ((p+1)/4)
+    exp = exp_p_plus_1_over_4(p)
+    x = bignum.mod_pow(x2, exp, p)
+    bignum.free(exp)
+
+    // verify x^2 == x2
+    xx = fmul(x, x, p)
+    chk = fsub(xx, x2, p)
+    bignum.free(xx)
+    if bignum.is_zero(chk) != 1 {
+        bignum.free(chk)
+        bignum.free(one); bignum.free(y2); bignum.free(u); bignum.free(dy2)
+        bignum.free(v); bignum.free(vinv); bignum.free(x2); bignum.free(x)
+        return null
+    }
+    bignum.free(chk)
+
+    if bit0(x) != sign {
+        nx = fsub(p, x, p)               // -x mod p
+        bignum.free(x); x = nx
+    }
+
+    bignum.free(one); bignum.free(y2); bignum.free(u); bignum.free(dy2)
+    bignum.free(v); bignum.free(vinv); bignum.free(x2)
+    return x
+}
+
+// (p + 1) / 4
+exp_p_plus_1_over_4(p: ptr) -> ptr {
+    one = bignum.from_int(1)
+    four = bignum.from_int(4)
+    pp1 = bignum.add(p, one)
+    r = bignum.divide(pp1, four)
+    bignum.free(one); bignum.free(four); bignum.free(pp1)
+    return r
+}
+
+// Encode a point to 57 bytes: little-endian y (56 bytes) with the low bit of x
+// placed in bit 7 of byte 56.
+pt_encode(q: *Pt, p: ptr) -> ptr {
+    zinv = finv(q.z, p)
+    x = fmul(q.x, zinv, p)
+    y = fmul(q.y, zinv, p)
+    out = bytes.new(57)
+    ybytes = to_le56(y)
+    bytes.copy_from_bytes(out, 0, ybytes, 0, 56)
+    bytes.set(out, 56, 0)
+    if bit0(x) == 1 {
+        bytes.set(out, 56, 0x80)
+    }
+    bignum.free(zinv); bignum.free(x); bignum.free(y)
+    bytes.free(ybytes)
+    return out
+}
+
+// Decode 57 bytes to a point; returns null on an invalid encoding.
+pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
+    // sign bit lives in bit 7 of byte 56; the rest of byte 56 must be 0.
+    last = bytes.get(b, 56)
+    if (last & 0x7F) != 0 {
+        return null as *Pt
+    }
+    sign = (last >> 7) & 1
+    ybody = bytes.new(56)
+    bytes.copy_from_bytes(ybody, 0, b, 0, 56)
+    y = from_le(ybody, 56)
+    bytes.free(ybody)
+    if bignum.compare(y, p) >= 0 {
+        bignum.free(y)
+        return null as *Pt
+    }
+    x = recover_x(y, sign, p, d)
+    if x == null {
+        bignum.free(y)
+        return null as *Pt
+    }
+    z = bignum.from_int(1)
+    return pt_new(x, y, z)
+}
+
+// ---- hashing helpers ----
+// SHAKE256(data, out_len) over a bytes buffer -> out_len-byte bytes.
+// NOTE: sha3.final_bytes already frees the context internally, so we must NOT
+// also call free_ctx (that would double-free and segfault).
+shake(b: ptr, len: int, out_len: int) -> ptr {
+    ctx, err = sha3.new("shake256")
+    sha3.update_bytes(ctx, b, len)
+    out = sha3.final_bytes(ctx, out_len)
+    return out
+}
+
+// dom4 prefix for pure Ed448 (phflag = 0, empty context):
+//   "SigEd448" || 0x00 || 0x00   (10 bytes)
+write_dom4(buf: ptr, off: int) -> int {
+    // "SigEd448" = 53 69 67 45 64 34 34 38
+    bytes.set(buf, off + 0, 0x53)
+    bytes.set(buf, off + 1, 0x69)
+    bytes.set(buf, off + 2, 0x67)
+    bytes.set(buf, off + 3, 0x45)
+    bytes.set(buf, off + 4, 0x64)
+    bytes.set(buf, off + 5, 0x34)
+    bytes.set(buf, off + 6, 0x34)
+    bytes.set(buf, off + 7, 0x38)
+    bytes.set(buf, off + 8, 0x00)   // phflag = 0 (pure)
+    bytes.set(buf, off + 9, 0x00)   // context length = 0
+    return 10
+}
+
+// reduce a little-endian byte buffer mod L -> *BN
+reduce_mod_L(b: ptr, len: int) -> ptr {
+    n = from_le(b, len)
+    L = order_L()
+    r = bignum.mod(n, L)
+    bignum.free(n); bignum.free(L)
+    return r
+}
+
+// Derive (s, prefix) from a 57-byte seed: h = SHAKE256(seed, 114); s from the
+// first 57 bytes, pruned; prefix = h[57..114]. Returns the secret scalar *BN
+// and writes the 57-byte prefix into `prefix_out`.
+derive_secret(seed: ptr, prefix_out: ptr) -> ptr {
+    h = shake(seed, 57, 114)
+    s_le = bytes.new(57)
+    bytes.copy_from_bytes(s_le, 0, h, 0, 57)
+    // prune: clear low 2 bits of byte 0; clear byte 56; set bit 7 of byte 55.
+    bytes.set(s_le, 0, bytes.get(s_le, 0) & 252)
+    bytes.set(s_le, 56, 0)
+    bytes.set(s_le, 55, bytes.get(s_le, 55) | 128)
+    s = from_le(s_le, 57)
+    bytes.copy_from_bytes(prefix_out, 0, h, 57, 57)
+    bytes.free(h); bytes.free(s_le)
+    return s
+}
+
+// ---- public API ----
+
+// Derive the 57-byte public key from a 57-byte seed.
+publickey(seed: ptr) -> ptr {
+    p = field_p(); d = curve_d(p)
+    B = base_point()
+
+    prefix = bytes.new(57)
+    s = derive_secret(seed, prefix)
+    A = pt_mul(s, B, p, d)
+    pub = pt_encode(A, p)
+
+    bytes.free(prefix); bignum.free(s)
+    pt_free(A); pt_free(B); bignum.free(p); bignum.free(d)
+    return pub
+}
+
+// Sign msg with the 57-byte seed; returns a 114-byte signature.
+sign(seed: ptr, msg: ptr, msg_len: int) -> ptr {
+    p = field_p(); d = curve_d(p)
+    B = base_point()
+    L = order_L()
+
+    prefix = bytes.new(57)
+    s = derive_secret(seed, prefix)
+    A = pt_mul(s, B, p, d)
+    Aenc = pt_encode(A, p)
+
+    // r = SHAKE256(dom4 || prefix || M, 114) mod L
+    rin_len = 10 + 57 + msg_len
+    rin = bytes.new(rin_len)
+    off = write_dom4(rin, 0)
+    bytes.copy_from_bytes(rin, off, prefix, 0, 57)
+    if msg_len > 0 { bytes.copy_from_bytes(rin, off + 57, msg, 0, msg_len) }
+    rh = shake(rin, rin_len, 114)
+    r = reduce_mod_L(rh, 114)
+
+    // R = r*B
+    R = pt_mul(r, B, p, d)
+    Renc = pt_encode(R, p)
+
+    // k = SHAKE256(dom4 || Renc || Aenc || M, 114) mod L
+    kin_len = 10 + 57 + 57 + msg_len
+    kin = bytes.new(kin_len)
+    off2 = write_dom4(kin, 0)
+    bytes.copy_from_bytes(kin, off2, Renc, 0, 57)
+    bytes.copy_from_bytes(kin, off2 + 57, Aenc, 0, 57)
+    if msg_len > 0 { bytes.copy_from_bytes(kin, off2 + 114, msg, 0, msg_len) }
+    kh = shake(kin, kin_len, 114)
+    k = reduce_mod_L(kh, 114)
+
+    // S = (r + k*s) mod L
+    ks = bignum.multiply(k, s)
+    rks = bignum.add(r, ks)
+    S = bignum.mod(rks, L)
+    Senc = to_le57(S)
+
+    sig = bytes.new(114)
+    bytes.copy_from_bytes(sig, 0, Renc, 0, 57)
+    bytes.copy_from_bytes(sig, 57, Senc, 0, 57)
+
+    bytes.free(prefix); bytes.free(Aenc); bytes.free(rin); bytes.free(rh)
+    bytes.free(Renc); bytes.free(kin); bytes.free(kh); bytes.free(Senc)
+    bignum.free(s); bignum.free(r); bignum.free(k); bignum.free(ks); bignum.free(rks); bignum.free(S)
+    pt_free(A); pt_free(R); pt_free(B)
+    bignum.free(p); bignum.free(d); bignum.free(L)
+    return sig
+}
+
+// Verify a 114-byte signature over msg with the 57-byte public key.
+// Returns 1 if valid, 0 otherwise.
+verify(public: ptr, msg: ptr, msg_len: int, sig: ptr) -> int {
+    p = field_p(); d = curve_d(p)
+    B = base_point()
+    L = order_L()
+
+    Renc = bytes.new(57); bytes.copy_from_bytes(Renc, 0, sig, 0, 57)
+    Senc = bytes.new(57); bytes.copy_from_bytes(Senc, 0, sig, 57, 57)
+    S = from_le(Senc, 57)
+
+    ok = 1
+    if bignum.compare(S, L) >= 0 { ok = 0 }
+
+    A = pt_decode(public, p, d)
+    R = pt_decode(Renc, p, d)
+    if A == null as *Pt { ok = 0 }
+    if R == null as *Pt { ok = 0 }
+
+    result = 0
+    if ok == 1 {
+        // k = SHAKE256(dom4 || Renc || public || M, 114) mod L
+        kin_len = 10 + 57 + 57 + msg_len
+        kin = bytes.new(kin_len)
+        off = write_dom4(kin, 0)
+        bytes.copy_from_bytes(kin, off, Renc, 0, 57)
+        bytes.copy_from_bytes(kin, off + 57, public, 0, 57)
+        if msg_len > 0 { bytes.copy_from_bytes(kin, off + 114, msg, 0, msg_len) }
+        kh = shake(kin, kin_len, 114)
+        k = reduce_mod_L(kh, 114)
+
+        // check: S*B == R + k*A
+        sB = pt_mul(S, B, p, d)
+        kA = pt_mul(k, A, p, d)
+        rhs = pt_add(R, kA, p, d)
+
+        lenc = pt_encode(sB, p)
+        renc = pt_encode(rhs, p)
+        if bytes_eq(lenc, renc) == 1 { result = 1 }
+
+        bytes.free(kin); bytes.free(kh); bignum.free(k)
+        pt_free(sB); pt_free(kA); pt_free(rhs)
+        bytes.free(lenc); bytes.free(renc)
+    }
+
+    bytes.free(Renc); bytes.free(Senc); bignum.free(S)
+    if A != null as *Pt { pt_free(A) }
+    if R != null as *Pt { pt_free(R) }
+    bignum.free(p); bignum.free(d); bignum.free(L)
+    pt_free(B)
+    return result
+}
+
+bytes_eq(a: ptr, b: ptr) -> int {
+    if bytes.length(a) != bytes.length(b) { return 0 }
+    i = 0
+    while i < bytes.length(a) {
+        if bytes.get(a, i) != bytes.get(b, i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}

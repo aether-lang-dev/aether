@@ -1,0 +1,252 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_record — the TLS 1.3 record protection layer
+// (RFC 8446 §5.2) in pure Aether. NO externs to OpenSSL. This wraps the
+// negotiated record AEAD (ChaCha20-Poly1305 for the subset) with the exact
+// TLS 1.3 record framing: per-record nonce, TLSCiphertext AAD, inner
+// content-type append, and padding strip. It does NOT do socket I/O (that is
+// the transport-wiring layer above it) — it turns (plaintext, content_type)
+// into a wire record and back.
+//
+// Record protection (RFC 8446 §5.2):
+//   nonce = write_iv XOR (seq as 12-byte big-endian, right-aligned)
+//   TLSInnerPlaintext = content || content_type(1) || zeros(padding)
+//   AAD = opaque_type(0x17) || legacy_record_version(0x0303) || length(uint16)
+//         where length is the AEAD ciphertext length (incl. the 16-byte tag)
+//   TLSCiphertext.encrypted_record = AEAD-Seal(key, nonce, AAD, TLSInnerPlaintext)
+//
+// The outer opaque_type is ALWAYS 0x17 (application_data) for protected
+// records; the real content type is the last non-zero byte of the decrypted
+// inner plaintext.
+//
+// Import with:  import std.cryptography.tls13_record
+//
+//   ctx = new(key, key_len, iv12)          // a directional record context
+//   seal_record(ctx, content_type, plaintext, pt_len) -> ptr full_record
+//       builds a complete TLSCiphertext record (5-byte header + encrypted
+//       record). Advances the sequence number.
+//   open_record(ctx, record, rec_len, out) -> string
+//       decrypts a TLSCiphertext record into out (plaintext + content_type),
+//       verifying the tag. Advances the sequence number. "" on success.
+//   free_ctx(ctx)
+//   nonce_for(iv12, seq) -> ptr            // exposed for testing
+//
+// AEAD is ChaCha20-Poly1305 (16-byte tag). AES-GCM support is a later add.
+
+import std.bytes
+import std.string
+import std.bits
+import std.cryptography.chacha20poly1305
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+
+exports (
+    new, free_ctx, seal_record, open_record, nonce_for,
+    RecordCtx, OpenedRecord,
+    CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
+    TAG_LEN, RECORD_HEADER_LEN
+)
+
+const CONTENT_ALERT            = 21
+const CONTENT_HANDSHAKE        = 22
+const CONTENT_APPLICATION_DATA = 23
+
+const TAG_LEN           = 16    // ChaCha20-Poly1305 / AES-GCM tag
+const RECORD_HEADER_LEN = 5     // opaque_type(1) + version(2) + length(2)
+const NONCE_LEN         = 12
+const OPAQUE_APPLICATION_DATA = 0x17
+
+// A directional record context: the AEAD key, base iv, and a 64-bit sequence
+// number (the record sequence resets to 0 per key, per RFC 8446 §5.3).
+struct RecordCtx {
+    key: ptr
+    key_len: int
+    iv: ptr        // 12-byte base write_iv
+    seq: long      // record sequence number (starts at 0)
+}
+
+// Create a record context from an AEAD key and a 12-byte base iv. Both are
+// copied (the ctx owns its copies). key_len is 32 for ChaCha20-Poly1305.
+new(key: ptr, key_len: int, iv12: ptr) -> ptr {
+    ctx = malloc(32) as *RecordCtx
+    k = bytes.new(key_len)
+    if key_len > 0 { bytes.set(k, key_len - 1, 0) }
+    bytes.copy_from_bytes(k, 0, key, 0, key_len)
+    iv = bytes.new(NONCE_LEN)
+    bytes.set(iv, NONCE_LEN - 1, 0)
+    bytes.copy_from_bytes(iv, 0, iv12, 0, NONCE_LEN)
+    ctx.key = k
+    ctx.key_len = key_len
+    ctx.iv = iv
+    ctx.seq = 0
+    return ctx as ptr
+}
+
+free_ctx(ctx: ptr) {
+    c = ctx as *RecordCtx
+    bytes.free(c.key)
+    bytes.free(c.iv)
+    libc_free(ctx)
+}
+
+// Per-record nonce = iv XOR (seq as 12-byte big-endian, right-aligned)
+// (RFC 8446 §5.3). Returns a fresh 12-byte buffer (caller frees).
+nonce_for(iv12: ptr, seq: long) -> ptr {
+    n = bytes.new(NONCE_LEN)
+    bytes.set(n, NONCE_LEN - 1, 0)
+    // The sequence number occupies the low 8 bytes of the 12-byte field;
+    // the high 4 bytes of the field are just the iv (seq contributes 0).
+    i = 0
+    while i < NONCE_LEN {
+        int seq_byte = 0
+        // byte position from the right (0 = least significant)
+        from_right = (NONCE_LEN - 1) - i
+        if from_right < 8 {
+            shift = from_right << 3
+            // Logical (not arithmetic) right shift: high sequence bytes must
+            // not sign-extend. std.bits.lsr64 is the logical-shift primitive.
+            seq_byte = bits.lsr64(seq, shift) & 0xFF
+        }
+        bytes.set(n, i, (bytes.get(iv12, i) ^ seq_byte) & 0xFF)
+        i = i + 1
+    }
+    return n
+}
+
+// Build the TLSCiphertext AAD (RFC 8446 §5.2):
+//   opaque_type(0x17) || legacy_record_version(0x0303) || length(uint16)
+// where `ct_len` is the AEAD ciphertext length (inner plaintext + tag).
+fn build_aad(ct_len: int) -> ptr {
+    aad = bytes.new(5)
+    bytes.set(aad, 0, OPAQUE_APPLICATION_DATA)
+    bytes.set(aad, 1, 0x03)
+    bytes.set(aad, 2, 0x03)
+    bytes.set(aad, 3, (ct_len >> 8) & 0xFF)
+    bytes.set(aad, 4, ct_len & 0xFF)
+    return aad
+}
+
+// Seal `plaintext` of `content_type` into a complete TLSCiphertext record
+// (5-byte header + encrypted_record). No extra padding is added (the inner
+// plaintext is content || content_type). Advances ctx.seq. Caller frees.
+seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
+    c = ctx as *RecordCtx
+
+    // TLSInnerPlaintext = content || content_type (no padding in this cut).
+    inner_len = pt_len + 1
+    inner = bytes.new(inner_len)
+    bytes.set(inner, inner_len - 1, 0)
+    bytes.copy_from_bytes(inner, 0, plaintext, 0, pt_len)
+    bytes.set(inner, pt_len, content_type & 0xFF)
+
+    // ciphertext length = inner_len + tag
+    ct_len = inner_len + TAG_LEN
+    aad = build_aad(ct_len)
+    nonce = nonce_for(c.iv, c.seq)
+
+    enc = chacha20poly1305.aead_seal(c.key, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+    // enc is inner_len + 16 bytes (ciphertext-with-tag) == ct_len
+
+    // Full record: header (0x17 0x0303 len16) || enc
+    rec = bytes.new(RECORD_HEADER_LEN + ct_len)
+    bytes.set(rec, RECORD_HEADER_LEN + ct_len - 1, 0)
+    bytes.set(rec, 0, OPAQUE_APPLICATION_DATA)
+    bytes.set(rec, 1, 0x03)
+    bytes.set(rec, 2, 0x03)
+    bytes.set(rec, 3, (ct_len >> 8) & 0xFF)
+    bytes.set(rec, 4, ct_len & 0xFF)
+    bytes.copy_from_bytes(rec, RECORD_HEADER_LEN, enc, 0, ct_len)
+
+    bytes.free(inner)
+    bytes.free(aad)
+    bytes.free(nonce)
+    bytes.free(enc)
+    c.seq = c.seq + 1
+    return rec
+}
+
+// Parsed result of opening a record.
+struct OpenedRecord {
+    content_type: int
+    plaintext: ptr    // fresh bytes (caller frees) — the inner content
+    plaintext_len: int
+}
+
+// Open a TLSCiphertext record (5-byte header + encrypted_record) into `out`.
+// Verifies the AEAD tag, strips trailing zero padding, and reads the real
+// content type from the last non-zero inner byte. Advances ctx.seq. Returns
+// "" on success or an error string. On success out.plaintext is fresh bytes.
+open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
+    out.content_type = 0
+    out.plaintext = null
+    out.plaintext_len = 0
+
+    c = ctx as *RecordCtx
+    if rec_len < RECORD_HEADER_LEN + TAG_LEN {
+        return "record: too short"
+    }
+    // header: opaque_type must be 0x17 for a protected record
+    if (bytes.get(record, 0) & 0xFF) != OPAQUE_APPLICATION_DATA {
+        return "record: unexpected opaque_type"
+    }
+    ct_len = ((bytes.get(record, 3) & 0xFF) << 8) | (bytes.get(record, 4) & 0xFF)
+    if RECORD_HEADER_LEN + ct_len > rec_len {
+        return "record: length overruns buffer"
+    }
+
+    // AAD is the 5-byte header exactly as received.
+    aad = bytes.new(RECORD_HEADER_LEN)
+    bytes.copy_from_bytes(aad, 0, record, 0, RECORD_HEADER_LEN)
+
+    // ciphertext-with-tag = the ct_len bytes after the header.
+    ctbuf = bytes.new(ct_len)
+    if ct_len > 0 { bytes.set(ctbuf, ct_len - 1, 0) }
+    bytes.copy_from_bytes(ctbuf, 0, record, RECORD_HEADER_LEN, ct_len)
+
+    nonce = nonce_for(c.iv, c.seq)
+    inner, err = chacha20poly1305.aead_open(c.key, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
+
+    bytes.free(aad)
+    bytes.free(ctbuf)
+    bytes.free(nonce)
+
+    if string.equals(err, "") != 1 {
+        return err
+    }
+
+    // inner = TLSInnerPlaintext = content || content_type || zeros(padding).
+    // Scan from the end for the last non-zero byte: that is content_type;
+    // everything before it is the content.
+    inner_len = bytes.length(inner)
+    ct_idx = -1
+    scan = inner_len - 1
+    while scan >= 0 {
+        if ct_idx < 0 {
+            if (bytes.get(inner, scan) & 0xFF) != 0 {
+                ct_idx = scan
+            }
+        }
+        scan = scan - 1
+    }
+    if ct_idx < 0 {
+        // all-zero inner plaintext: no content type -> illegal
+        bytes.free(inner)
+        c.seq = c.seq + 1
+        return "record: no content type (all-zero inner plaintext)"
+    }
+    out.content_type = bytes.get(inner, ct_idx) & 0xFF
+    content_len = ct_idx
+    pt = bytes.new(content_len)
+    if content_len > 0 {
+        bytes.set(pt, content_len - 1, 0)
+        bytes.copy_from_bytes(pt, 0, inner, 0, content_len)
+    }
+    out.plaintext = pt
+    out.plaintext_len = content_len
+
+    bytes.free(inner)
+    c.seq = c.seq + 1
+    return ""
+}

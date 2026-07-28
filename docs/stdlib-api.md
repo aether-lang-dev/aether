@@ -583,7 +583,7 @@ main() {
 
 ### What's not in `std.cryptography`
 
-Public-key crypto (RSA, ECDSA, Ed25519, X25519), symmetric ciphers (AES, ChaCha20-Poly1305), key derivation (KDFs), URL-safe Base64 (RFC 4648 §5), and constant-time comparison are out of scope, the public-key and cipher families live in `contrib/cryptography/`. See [stdlib-reference.md](stdlib-reference.md) §"What `std.cryptography` doesn't do" for the rationale.
+The public-key and cipher families (RSA, ECDSA, Ed25519, X25519, AES, ChaCha20-Poly1305, …) live under `std.cryptography` as explicitly-imported sub-modules (`std.cryptography.rsa`, `std.cryptography.x25519`, …) — pure-Aether, no OpenSSL. URL-safe Base64 (RFC 4648 §5) and constant-time comparison remain out of the top-level module. See [stdlib-reference.md](stdlib-reference.md) §"What `std.cryptography` doesn't do" for the rationale.
 
 ---
 

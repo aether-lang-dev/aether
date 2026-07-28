@@ -4,13 +4,13 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// Regression: contrib.cryptography.aes (FIPS-197), issue #739 — the
+// Regression: std.cryptography.aes (FIPS-197), issue #739 — the
 // block-cipher core every symmetric mode drives. Block KATs are the
 // canonical FIPS-197 Appendix B/C vectors (AES-128/192/256); CTR is the
 // NIST SP800-38A F.5 vector, also reproduced via `openssl enc -aes-128-ctr`.
 // Covers encrypt + decrypt block, ECB, and CTR (symmetric round-trip).
 
-import contrib.cryptography.aes
+import std.cryptography.aes
 import std.bytes
 import std.string
 
@@ -20,7 +20,7 @@ bh(b: ptr) -> string { d="0123456789abcdef"; o=""; n=bytes.length(b); i=0; while
 beq(a: ptr, b: ptr) -> int { if bytes.length(a)!=bytes.length(b) { return 0 } i=0; while i<bytes.length(a) { if bytes.get(a,i)!=bytes.get(b,i) { return 0 } i=i+1 } return 1 }
 
 main() {
-    print("=== contrib.cryptography.aes ===\n")
+    print("=== std.cryptography.aes ===\n")
     fails = 0
     pt = hb("00112233445566778899aabbccddeeff")
 
@@ -116,5 +116,5 @@ main() {
     bytes.free(bad)
 
     bytes.free(pt)
-    if fails == 0 { print("PASS: contrib.cryptography.aes\n") } else { print("FAILED: ${fails}\n"); exit(1) }
+    if fails == 0 { print("PASS: std.cryptography.aes\n") } else { print("FAILED: ${fails}\n"); exit(1) }
 }

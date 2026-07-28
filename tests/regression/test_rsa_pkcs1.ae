@@ -4,7 +4,7 @@
 //
 // Portions copyright (c) 2026 Aether Developers.
 //
-// Regression: contrib.cryptography.rsa raw + PKCS#1 v1.5 (issue #739), the
+// Regression: std.cryptography.rsa raw + PKCS#1 v1.5 (issue #739), the
 // first end-to-end consumer of std.bignum. All fixtures are produced by
 // OpenSSL against a real RSA-512 key, so this cross-validates the whole
 // stack (bignum.mod_pow -> ASN.1 key parse -> PKCS#1 padding) against the
@@ -17,7 +17,7 @@
 //
 // RSA-512 is used so the test runs fast in CI; the code path is size-agnostic.
 
-import contrib.cryptography.rsa
+import std.cryptography.rsa
 import std.bytes
 import std.string
 
@@ -54,7 +54,7 @@ DIGEST_INFO() -> string { return "3031300d06096086480165030402010500042012dca153
 PLAINTEXT() -> string { return "696e7465726f7021" }     // "interop!" that OSSL_CT decrypts to
 
 main() {
-    print("=== contrib.cryptography.rsa PKCS#1 ===\n")
+    print("=== std.cryptography.rsa PKCS#1 ===\n")
     fails = 0
 
     der = hb(KEY_DER())
@@ -101,7 +101,7 @@ main() {
     rsa.key_free(k)
 
     if fails == 0 {
-        print("PASS: contrib.cryptography.rsa PKCS#1\n")
+        print("PASS: std.cryptography.rsa PKCS#1\n")
     } else {
         print("FAILED: ${fails}\n")
         exit(1)

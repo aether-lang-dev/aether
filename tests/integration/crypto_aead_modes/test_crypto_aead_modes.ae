@@ -1,7 +1,7 @@
-// Validate contrib.cryptography.aes CCM / EAX / OCB AEAD modes:
+// Validate std.cryptography.aes CCM / EAX / OCB AEAD modes:
 // NIST SP800-38C (CCM Example 1), RFC 7253 Appendix A (OCB), an EAX
 // vector, plus seal->open round-trip and tamper rejection.
-import contrib.cryptography.aes
+import std.cryptography.aes
 import std.bytes
 import std.string
 import std.io

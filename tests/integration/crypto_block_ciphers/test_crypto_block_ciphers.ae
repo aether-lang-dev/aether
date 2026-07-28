@@ -1,7 +1,7 @@
-// Validate contrib.cryptography.sm4 (GB/T 32907) and des3 (3DES/TDEA)
+// Validate std.cryptography.sm4 (GB/T 32907) and des3 (3DES/TDEA)
 // single-block KATs plus encrypt->decrypt and CBC round-trips.
-import contrib.cryptography.sm4
-import contrib.cryptography.des3
+import std.cryptography.sm4
+import std.cryptography.des3
 import std.bytes
 import std.string
 import std.io

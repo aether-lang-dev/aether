@@ -1,0 +1,181 @@
+// Validate std.cryptography.x25519 — X25519 (RFC 7748) on Curve25519, the
+// pure-Aether port of Bouncy Castle's Math.EC.Rfc7748.X25519 / X25519Field.
+// Vectors:
+//   - RFC 7748 §5.2: two fixed scalar * u -> output known-answer tests.
+//   - RFC 7748 §6.1: Alice/Bob key generation (scalar * basepoint) and the
+//     shared-secret Diffie-Hellman agreement (K).
+// Plus a self-consistency check that base_point(k) == scalar_mult(k, 9).
+
+import std.cryptography.x25519
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn to_hex(b: ptr, n: int) -> string {
+    hx = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        hi = (v >> 4) & 15
+        lo = v & 15
+        chi = 48 + hi
+        if hi >= 10 { chi = 87 + hi }
+        clo = 48 + lo
+        if lo >= 10 { clo = 87 + lo }
+        bytes.set(hx, i * 2, chi)
+        bytes.set(hx, i * 2 + 1, clo)
+        i = i + 1
+    }
+    return bytes.finish(hx, n * 2)
+}
+
+// scalar_mult KAT: scalar * u must equal want.
+fn kat_mult(label: string, k_hex: string, u_hex: string, want_hex: string) -> int {
+    k = from_hex(k_hex)
+    u = from_hex(u_hex)
+    r, err = x25519.scalar_mult(k, u)
+    got = to_hex(r, 32)
+    ok = 1
+    if err != "" {
+        println("FAIL ${label}: unexpected error ${err}")
+        ok = 0
+    }
+    if got != want_hex {
+        println("FAIL ${label}: got ${got} want ${want_hex}")
+        ok = 0
+    }
+    if ok == 1 { println("ok   ${label}") }
+    bytes.free(k)
+    bytes.free(u)
+    bytes.free(r)
+    return ok
+}
+
+// base_point KAT: scalar * basepoint(9) must equal want.
+fn kat_base(label: string, k_hex: string, want_hex: string) -> int {
+    k = from_hex(k_hex)
+    r = x25519.base_point(k)
+    got = to_hex(r, 32)
+    ok = 1
+    if got != want_hex {
+        println("FAIL ${label}: got ${got} want ${want_hex}")
+        ok = 0
+    }
+    if ok == 1 { println("ok   ${label}") }
+    bytes.free(k)
+    bytes.free(r)
+    return ok
+}
+
+main() {
+    total_ok = 1
+
+    // --- RFC 7748 §5.2 fixed scalar-mult vectors ---
+    r1 = kat_mult("rfc7748 §5.2 vector 1",
+        "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+        "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+        "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552")
+    if r1 == 0 { total_ok = 0 }
+
+    r2 = kat_mult("rfc7748 §5.2 vector 2",
+        "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+        "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+        "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957")
+    if r2 == 0 { total_ok = 0 }
+
+    // --- RFC 7748 §6.1 Alice/Bob public keys (scalar * basepoint) ---
+    a_priv = "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    a_pub  = "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+    b_priv = "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb"
+    b_pub  = "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
+    shared = "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+
+    ra = kat_base("rfc7748 §6.1 Alice pubkey", a_priv, a_pub)
+    if ra == 0 { total_ok = 0 }
+    rb = kat_base("rfc7748 §6.1 Bob pubkey", b_priv, b_pub)
+    if rb == 0 { total_ok = 0 }
+
+    // --- §6.1 shared-secret agreement (both directions) ---
+    ak = from_hex(a_priv)
+    bk = from_hex(b_priv)
+    apub = from_hex(a_pub)
+    bpub = from_hex(b_pub)
+
+    sa, ea = x25519.agree(ak, bpub)   // Alice: a_priv * b_pub
+    sb, eb = x25519.agree(bk, apub)   // Bob:   b_priv * a_pub
+    ha = to_hex(sa, 32)
+    hb = to_hex(sb, 32)
+    if ea != "" || ha != shared {
+        println("FAIL agree Alice: got ${ha} want ${shared} err='${ea}'")
+        total_ok = 0
+    } else {
+        println("ok   rfc7748 §6.1 Alice shared secret")
+    }
+    if eb != "" || hb != shared {
+        println("FAIL agree Bob: got ${hb} want ${shared} err='${eb}'")
+        total_ok = 0
+    } else {
+        println("ok   rfc7748 §6.1 Bob shared secret")
+    }
+    if ha != hb {
+        println("FAIL agree: Alice and Bob disagree")
+        total_ok = 0
+    }
+
+    bytes.free(ak)
+    bytes.free(bk)
+    bytes.free(apub)
+    bytes.free(bpub)
+    bytes.free(sa)
+    bytes.free(sb)
+
+    // --- self-consistency: base_point(k) == scalar_mult(k, basepoint 9) ---
+    k = from_hex(a_priv)
+    u9 = bytes.new(32)
+    bytes.set(u9, 31, 0)
+    bytes.set(u9, 0, 9)
+    rbase = x25519.base_point(k)
+    rmult, _ = x25519.scalar_mult(k, u9)
+    if to_hex(rbase, 32) != to_hex(rmult, 32) {
+        println("FAIL consistency: base_point != scalar_mult(.,9)")
+        total_ok = 0
+    } else {
+        println("ok   consistency base_point == scalar_mult(.,9)")
+    }
+    bytes.free(k)
+    bytes.free(u9)
+    bytes.free(rbase)
+    bytes.free(rmult)
+
+    if total_ok == 0 {
+        println("X25519: FAILURES")
+        exit(1)
+    }
+    println("X25519: all vectors pass")
+}

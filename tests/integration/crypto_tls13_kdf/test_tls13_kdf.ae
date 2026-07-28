@@ -1,0 +1,114 @@
+// Validate std.cryptography.tls13_kdf — the TLS 1.3 key schedule (RFC 8446
+// §7.1: HKDF-Expand-Label + Derive-Secret) in pure Aether.
+//
+// Vectors: the canonical RFC 8448 §3 "early secret" chain (SHA-256, no PSK):
+//   Early Secret = HKDF-Extract(0^32, 0^32)
+//                = 33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a
+//   derived      = Derive-Secret(Early Secret, "derived", "")
+//                = 6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba
+// plus a plain HKDF-Expand-Label with a non-empty context, cross-checked
+// against an independent HKDF implementation.
+
+import std.cryptography.tls13_kdf
+import std.cryptography.hkdf
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn to_hex(b: ptr, n: int) -> string {
+    hx = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        hi = (v >> 4) & 15
+        lo = v & 15
+        chi = 48 + hi
+        if hi >= 10 { chi = 87 + hi }
+        clo = 48 + lo
+        if lo >= 10 { clo = 87 + lo }
+        bytes.set(hx, i * 2, chi)
+        bytes.set(hx, i * 2 + 1, clo)
+        i = i + 1
+    }
+    return bytes.finish(hx, n * 2)
+}
+
+main() {
+    total_ok = 1
+
+    // --- Early Secret = HKDF-Extract(0^32, 0^32) (built via hkdf directly) ---
+    salt = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+    ikm  = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+    early = hkdf.hkdf_extract("sha256", salt, 32, ikm, 32)
+    early_hex = to_hex(early, 32)
+    if early_hex != "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a" {
+        println("FAIL early_secret: got ${early_hex}")
+        total_ok = 0
+    } else {
+        println("ok   rfc8448 early_secret")
+    }
+
+    // --- derived = Derive-Secret(Early Secret, "derived", "") ---
+    // Transcript-Hash("") = SHA-256("") = e3b0c442...  (32-byte context)
+    empty_th = from_hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    derived = tls13_kdf.derive_secret("sha256", early, 32, "derived", empty_th, 32)
+    derived_hex = to_hex(derived, 32)
+    if derived_hex != "6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba" {
+        println("FAIL derived: got ${derived_hex}")
+        total_ok = 0
+    } else {
+        println("ok   rfc8448 derive_secret(\"derived\", \"\")")
+    }
+
+    // --- plain HKDF-Expand-Label with a non-empty context ---
+    // expand_label(early, "test", ctx=0x0102, 16)  (cross-checked vs reference)
+    ctx = from_hex("0102")
+    el = tls13_kdf.expand_label("sha256", early, 32, "test", ctx, 2, 16)
+    el_hex = to_hex(el, 16)
+    if el_hex != "bcbf95977ae9cd67a7c27403629eb67b" {
+        println("FAIL expand_label: got ${el_hex}")
+        total_ok = 0
+    } else {
+        println("ok   expand_label(\"test\", ctx=0102, 16)")
+    }
+
+    bytes.free(salt)
+    bytes.free(ikm)
+    bytes.free(early)
+    bytes.free(empty_th)
+    bytes.free(derived)
+    bytes.free(ctx)
+    bytes.free(el)
+
+    if total_ok == 0 {
+        println("tls13_kdf: FAILURES")
+        exit(1)
+    }
+    println("tls13_kdf: all vectors pass")
+}

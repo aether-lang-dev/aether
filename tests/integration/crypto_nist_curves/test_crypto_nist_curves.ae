@@ -1,8 +1,8 @@
-// Validate contrib.cryptography.p384 + p521 (NIST P-384 / P-521 ECDH+ECDSA)
+// Validate std.cryptography.p384 + p521 (NIST P-384 / P-521 ECDH+ECDSA)
 // against the published 2*G doubling vectors plus an ECDSA sign/verify
 // round-trip with tamper rejection.
-import contrib.cryptography.p384
-import contrib.cryptography.p521
+import std.cryptography.p384
+import std.cryptography.p521
 import std.bytes
 import std.string
 import std.io

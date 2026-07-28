@@ -1,0 +1,377 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.p384 — NIST P-384 (secp384r1) in pure Aether, on top of
+// std.bignum. NO externs to OpenSSL.
+//
+// Short-Weierstrass curve  y^2 = x^3 - 3x + b  over GF(p). Point arithmetic
+// is in Jacobian coordinates (X:Y:Z) with affine (x,y) = (X/Z^2, Y/Z^3).
+//
+//   scalar_mult_base(k48)            -> (x48, y48)     k*G (public key point)
+//   scalar_mult(k48, px48, py48)     -> (x48, y48)     k*P
+//   ecdh(priv48, pubx48, puby48)     -> shared_x48     priv * pub, x only
+//   ecdsa_sign(priv48, hash48, k48)  -> (r48, s48)     k = per-message nonce
+//   ecdsa_verify(pubx, puby, hash48, r48, s48) -> int  1 = valid
+//
+// 48-byte big-endian scalars / coordinates (the SEC1 / NIST wire order).
+//
+// NOTE: correctness-first port over the variable-time std.bignum — not
+// constant-time/side-channel-hardened, and ecdsa_sign takes the nonce `k`
+// as a parameter (caller supplies a CSPRNG value or an RFC 6979 derivation).
+// Validated against the priv=2 -> 2G generator vector and an ECDSA
+// sign/verify round-trip.
+
+import std.bytes
+import std.bignum
+
+exports (
+    scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify
+)
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern strlen(s: string) -> int
+
+// ---- curve parameters ----
+P_HEX() -> string { return "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff" }
+B_HEX() -> string { return "b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef" }
+N_HEX() -> string { return "ffffffffffffffffffffffffffffffffffffffffffffffffc7634d81f4372ddf581a0db248b0a77aecec196accc52973" }
+GX_HEX() -> string { return "aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7" }
+GY_HEX() -> string { return "3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f" }
+
+hexv(c: int) -> int {
+    if c >= 48 { if c <= 57 { return c - 48 } }
+    if c >= 97 { if c <= 102 { return c - 87 } }
+    if c >= 65 { if c <= 70 { return c - 55 } }
+    return 0
+}
+bn_hex(h: string) -> ptr {
+    n = strlen(h)
+    b = bytes.new(n / 2)
+    i = 0
+    while i < n {
+        hi = hexv(string_char_at_n(h, n, i))
+        lo = hexv(string_char_at_n(h, n, i + 1))
+        bytes.set(b, i / 2, hi * 16 + lo)
+        i = i + 2
+    }
+    r = bignum.from_bytes_unsigned(b, n / 2)
+    bytes.free(b)
+    return r
+}
+
+// ---- field ops mod p ----
+fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = bignum.mod(s, p); bignum.free(s); return r }
+fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(d, p); bignum.free(d); return r }
+fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
+finv(a: ptr, p: ptr) -> ptr {
+    two = bignum.from_int(2)
+    e = bignum.subtract(p, two)
+    r = bignum.mod_pow(a, e, p)
+    bignum.free(two); bignum.free(e)
+    return r
+}
+
+// 48-byte big-endian encode / decode.
+to_be48(nn: ptr) -> ptr {
+    be = bignum.to_bytes_unsigned(nn)
+    blen = bytes.length(be)
+    out = bytes.new(48)
+    i = 0
+    while i < 48 { bytes.set(out, i, 0); i = i + 1 }
+    // right-align big-endian bytes
+    i = 0
+    while i < blen {
+        idx = 48 - blen + i
+        if idx >= 0 { bytes.set(out, idx, bytes.get(be, i)) }
+        i = i + 1
+    }
+    bytes.free(be)
+    return out
+}
+from_be48(b: ptr) -> ptr {
+    return bignum.from_bytes_unsigned(b, 48)
+}
+
+// ---- Jacobian point (X:Y:Z) ----
+struct Pt { x: ptr  y: ptr  z: ptr }
+pt_new(x: ptr, y: ptr, z: ptr) -> *Pt { q = malloc(24) as *Pt; q.x = x; q.y = y; q.z = z; return q }
+pt_free(q: *Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
+
+// Point at infinity: Z = 0.
+pt_infinity() -> *Pt { return pt_new(bignum.from_int(1), bignum.from_int(1), bignum.from_int(0)) }
+is_infinity(q: *Pt) -> int { return bignum.is_zero(q.z) }
+
+// Affine -> Jacobian (Z = 1).
+affine_to_jac(x: ptr, y: ptr) -> *Pt { return pt_new(bignum.clone(x), bignum.clone(y), bignum.from_int(1)) }
+
+// Point doubling (Jacobian), a = -3:  standard "dbl-2009-l" with a=-3 form.
+pt_double(q: *Pt, p: ptr) -> *Pt {
+    if is_infinity(q) == 1 { return pt_infinity() }
+    // delta = Z^2; gamma = Y^2; beta = X*gamma
+    delta = fmul(q.z, q.z, p)
+    gamma = fmul(q.y, q.y, p)
+    beta = fmul(q.x, gamma, p)
+    // alpha = 3*(X-delta)*(X+delta)   (uses a=-3)
+    xmd = fsub(q.x, delta, p)
+    xpd = fadd(q.x, delta, p)
+    prod = fmul(xmd, xpd, p)
+    three = bignum.from_int(3)
+    alpha = fmul(three, prod, p)
+    // X3 = alpha^2 - 8*beta
+    a2 = fmul(alpha, alpha, p)
+    eight = bignum.from_int(8)
+    eb = fmul(eight, beta, p)
+    X3 = fsub(a2, eb, p)
+    // Z3 = (Y+Z)^2 - gamma - delta
+    ypz = fadd(q.y, q.z, p)
+    ypz2 = fmul(ypz, ypz, p)
+    t1 = fsub(ypz2, gamma, p)
+    Z3 = fsub(t1, delta, p)
+    // Y3 = alpha*(4*beta - X3) - 8*gamma^2
+    four = bignum.from_int(4)
+    fb = fmul(four, beta, p)
+    fbx = fsub(fb, X3, p)
+    ay = fmul(alpha, fbx, p)
+    g2 = fmul(gamma, gamma, p)
+    eg2 = fmul(eight, g2, p)
+    Y3 = fsub(ay, eg2, p)
+
+    bignum.free(delta); bignum.free(gamma); bignum.free(beta)
+    bignum.free(xmd); bignum.free(xpd); bignum.free(prod); bignum.free(three); bignum.free(alpha)
+    bignum.free(a2); bignum.free(eight); bignum.free(eb)
+    bignum.free(ypz); bignum.free(ypz2); bignum.free(t1)
+    bignum.free(four); bignum.free(fb); bignum.free(fbx); bignum.free(ay); bignum.free(g2); bignum.free(eg2)
+    return pt_new(X3, Y3, Z3)
+}
+
+// Point addition (Jacobian), "add-2007-bl". Handles infinity operands and the
+// doubling case (falls back to pt_double).
+pt_add(a: *Pt, b: *Pt, p: ptr) -> *Pt {
+    if is_infinity(a) == 1 { return pt_new(bignum.clone(b.x), bignum.clone(b.y), bignum.clone(b.z)) }
+    if is_infinity(b) == 1 { return pt_new(bignum.clone(a.x), bignum.clone(a.y), bignum.clone(a.z)) }
+    // U1 = X1*Z2^2; U2 = X2*Z1^2
+    z1z1 = fmul(a.z, a.z, p)
+    z2z2 = fmul(b.z, b.z, p)
+    U1 = fmul(a.x, z2z2, p)
+    U2 = fmul(b.x, z1z1, p)
+    // S1 = Y1*Z2^3; S2 = Y2*Z1^3
+    z2z2z2 = fmul(z2z2, b.z, p)
+    z1z1z1 = fmul(z1z1, a.z, p)
+    S1 = fmul(a.y, z2z2z2, p)
+    S2 = fmul(b.y, z1z1z1, p)
+
+    H = fsub(U2, U1, p)
+    rr = fsub(S2, S1, p)
+
+    if bignum.is_zero(H) == 1 {
+        if bignum.is_zero(rr) == 1 {
+            // a == b: double
+            bignum.free(z1z1); bignum.free(z2z2); bignum.free(U1); bignum.free(U2)
+            bignum.free(z2z2z2); bignum.free(z1z1z1); bignum.free(S1); bignum.free(S2)
+            bignum.free(H); bignum.free(rr)
+            return pt_double(a, p)
+        }
+        // a == -b: infinity
+        bignum.free(z1z1); bignum.free(z2z2); bignum.free(U1); bignum.free(U2)
+        bignum.free(z2z2z2); bignum.free(z1z1z1); bignum.free(S1); bignum.free(S2)
+        bignum.free(H); bignum.free(rr)
+        return pt_infinity()
+    }
+
+    // HH = H^2; HHH = H*HH; V = U1*HH
+    HH = fmul(H, H, p)
+    HHH = fmul(H, HH, p)
+    V = fmul(U1, HH, p)
+    // X3 = r^2 - HHH - 2*V
+    r2 = fmul(rr, rr, p)
+    two = bignum.from_int(2)
+    twoV = fmul(two, V, p)
+    t = fsub(r2, HHH, p)
+    X3 = fsub(t, twoV, p)
+    // Y3 = r*(V - X3) - S1*HHH
+    vmx = fsub(V, X3, p)
+    rvmx = fmul(rr, vmx, p)
+    s1h = fmul(S1, HHH, p)
+    Y3 = fsub(rvmx, s1h, p)
+    // Z3 = Z1*Z2*H
+    z1z2 = fmul(a.z, b.z, p)
+    Z3 = fmul(z1z2, H, p)
+
+    bignum.free(z1z1); bignum.free(z2z2); bignum.free(U1); bignum.free(U2)
+    bignum.free(z2z2z2); bignum.free(z1z1z1); bignum.free(S1); bignum.free(S2)
+    bignum.free(H); bignum.free(rr); bignum.free(HH); bignum.free(HHH); bignum.free(V)
+    bignum.free(r2); bignum.free(two); bignum.free(twoV); bignum.free(t)
+    bignum.free(vmx); bignum.free(rvmx); bignum.free(s1h); bignum.free(z1z2)
+    return pt_new(X3, Y3, Z3)
+}
+
+// k * P (double-and-add over bits of the scalar k, a *BN).
+jac_mul(k: ptr, P: *Pt, p: ptr) -> *Pt {
+    q = pt_infinity()
+    nbits = bignum.bit_length(k)
+    i = nbits - 1
+    while i >= 0 {
+        dbl = pt_double(q, p)
+        pt_free(q)
+        q = dbl
+        ki = bignum.shift_right(k, i)
+        if bit0(ki) == 1 {
+            sum = pt_add(q, P, p)
+            pt_free(q)
+            q = sum
+        }
+        bignum.free(ki)
+        i = i - 1
+    }
+    return q
+}
+
+bit0(n: ptr) -> int {
+    if bignum.is_zero(n) == 1 { return 0 }
+    two = bignum.from_int(2)
+    r = bignum.mod(n, two)
+    b = 0
+    if bignum.is_zero(r) != 1 { b = 1 }
+    bignum.free(two); bignum.free(r)
+    return b
+}
+
+// Jacobian -> affine (x, y) as two *BN. Returns (null, null) for infinity.
+jac_to_affine(q: *Pt, p: ptr) -> (ptr, ptr) {
+    if is_infinity(q) == 1 {
+        return null, null
+    }
+    zinv = finv(q.z, p)
+    zinv2 = fmul(zinv, zinv, p)
+    zinv3 = fmul(zinv2, zinv, p)
+    x = fmul(q.x, zinv2, p)
+    y = fmul(q.y, zinv3, p)
+    bignum.free(zinv); bignum.free(zinv2); bignum.free(zinv3)
+    return x, y
+}
+
+base_point() -> *Pt { return affine_to_jac_hex(GX_HEX(), GY_HEX()) }
+affine_to_jac_hex(xh: string, yh: string) -> *Pt {
+    x = bn_hex(xh); y = bn_hex(yh)
+    q = pt_new(x, y, bignum.from_int(1))
+    return q
+}
+
+// ---- public API ----
+
+// k * G as affine (x, y) 48-byte big-endian pair.
+scalar_mult_base(k: ptr) -> (ptr, ptr) {
+    p = bn_hex(P_HEX())
+    G = base_point()
+    kn = from_be48(k)
+    Q = jac_mul(kn, G, p)
+    x, y = jac_to_affine(Q, p)
+    ox = to_be48(x); oy = to_be48(y)
+    bignum.free(x); bignum.free(y)
+    pt_free(Q); pt_free(G); bignum.free(kn); bignum.free(p)
+    return ox, oy
+}
+
+// k * (px, py) as affine (x, y) 48-byte big-endian pair.
+scalar_mult(k: ptr, px: ptr, py: ptr) -> (ptr, ptr) {
+    p = bn_hex(P_HEX())
+    bx = from_be48(px); by = from_be48(py)
+    P = pt_new(bx, by, bignum.from_int(1))
+    kn = from_be48(k)
+    Q = jac_mul(kn, P, p)
+    x, y = jac_to_affine(Q, p)
+    ox = to_be48(x); oy = to_be48(y)
+    bignum.free(x); bignum.free(y)
+    pt_free(Q); pt_free(P); bignum.free(kn); bignum.free(p)
+    return ox, oy
+}
+
+// ECDH: priv * pub, returns the shared x-coordinate (48 bytes BE).
+ecdh(priv: ptr, pubx: ptr, puby: ptr) -> ptr {
+    sx, sy = scalar_mult(priv, pubx, puby)
+    bytes.free(sy)
+    return sx
+}
+
+// ECDSA sign: r = (k*G).x mod n; s = k^-1 (z + r*d) mod n. `hash` is the
+// 48-byte message hash, `d`=priv, `k`=per-message nonce (both 48 BE).
+// Returns (r, s) 48-byte BE.
+ecdsa_sign(priv: ptr, hash: ptr, k: ptr) -> (ptr, ptr) {
+    p = bn_hex(P_HEX())
+    n = bn_hex(N_HEX())
+    G = base_point()
+
+    kn = from_be48(k)
+    Q = jac_mul(kn, G, p)
+    qx, qy = jac_to_affine(Q, p)
+    r = bignum.mod(qx, n)
+
+    d = from_be48(priv)
+    z = from_be48(hash)
+    zmod = bignum.mod(z, n)
+
+    kinv = bignum.mod_inverse(kn, n)
+    rd = bignum.multiply(r, d)
+    zrd = bignum.add(zmod, rd)
+    ks = bignum.multiply(kinv, zrd)
+    s = bignum.mod(ks, n)
+
+    or = to_be48(r); os = to_be48(s)
+
+    bignum.free(qx); bignum.free(qy); bignum.free(r); bignum.free(d)
+    bignum.free(z); bignum.free(zmod); bignum.free(kinv); bignum.free(rd)
+    bignum.free(zrd); bignum.free(ks); bignum.free(s); bignum.free(kn)
+    pt_free(Q); pt_free(G); bignum.free(p); bignum.free(n)
+    return or, os
+}
+
+// ECDSA verify: returns 1 if (r,s) is a valid signature of `hash` under
+// public key (pubx, puby), else 0.
+ecdsa_verify(pubx: ptr, puby: ptr, hash: ptr, r: ptr, s: ptr) -> int {
+    p = bn_hex(P_HEX())
+    n = bn_hex(N_HEX())
+    G = base_point()
+
+    rn = from_be48(r)
+    sn = from_be48(s)
+    zero = bignum.from_int(0)
+
+    ok = 1
+    // 1 <= r,s <= n-1
+    if bignum.compare(rn, zero) <= 0 { ok = 0 }
+    if bignum.compare(sn, zero) <= 0 { ok = 0 }
+    if bignum.compare(rn, n) >= 0 { ok = 0 }
+    if bignum.compare(sn, n) >= 0 { ok = 0 }
+
+    result = 0
+    if ok == 1 {
+        z = from_be48(hash)
+        zmod = bignum.mod(z, n)
+        sinv = bignum.mod_inverse(sn, n)
+        // u1 = z*sinv mod n; u2 = r*sinv mod n
+        u1m = bignum.multiply(zmod, sinv); u1 = bignum.mod(u1m, n)
+        u2m = bignum.multiply(rn, sinv); u2 = bignum.mod(u2m, n)
+
+        Pub = pt_new(from_be48(pubx), from_be48(puby), bignum.from_int(1))
+        A = jac_mul(u1, G, p)
+        Bp = jac_mul(u2, Pub, p)
+        R = pt_add(A, Bp, p)
+        rx, ry = jac_to_affine(R, p)
+        if rx != null {
+            v = bignum.mod(rx, n)
+            if bignum.compare(v, rn) == 0 { result = 1 }
+            bignum.free(v); bignum.free(rx); bignum.free(ry)
+        }
+
+        bignum.free(z); bignum.free(zmod); bignum.free(sinv)
+        bignum.free(u1m); bignum.free(u1); bignum.free(u2m); bignum.free(u2)
+        pt_free(Pub); pt_free(A); pt_free(Bp); pt_free(R)
+    }
+
+    bignum.free(rn); bignum.free(sn); bignum.free(zero)
+    pt_free(G); bignum.free(p); bignum.free(n)
+    return result
+}

@@ -1,0 +1,196 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_ks — the TLS 1.3 key-schedule *driver* (RFC 8446
+// §7.1) in pure Aether, on top of std.cryptography.tls13_kdf. NO externs to
+// OpenSSL. This turns the raw Expand-Label/Derive-Secret helpers into the
+// actual secret chain a handshake walks:
+//
+//   Early Secret     = HKDF-Extract(0, PSK|0)
+//   (empty)          Derive-Secret(., "derived", "")
+//   Handshake Secret = HKDF-Extract(derived, ECDHE)
+//     c hs traffic   = Derive-Secret(HS, "c hs traffic", CH..SH)
+//     s hs traffic   = Derive-Secret(HS, "s hs traffic", CH..SH)
+//   (empty)          Derive-Secret(HS, "derived", "")
+//   Master Secret    = HKDF-Extract(derived, 0)
+//     c ap traffic   = Derive-Secret(MS, "c ap traffic", CH..SF)
+//     s ap traffic   = Derive-Secret(MS, "s ap traffic", CH..SF)
+//
+// and, from any traffic secret, the record protection key + iv:
+//   write_key = HKDF-Expand-Label(secret, "key", "", key_len)
+//   write_iv  = HKDF-Expand-Label(secret, "iv",  "", 12)
+//
+// This module is PSK-less (no resumption / 0-RTT) — the first-cut subset.
+// It is hash-agnostic on `algo` ("sha256" for the subset's
+// TLS_CHACHA20_POLY1305_SHA256 / TLS_AES_128_GCM_SHA256 suites, "sha384"
+// for the SHA-384 suites). Transcript hashes are supplied by the caller
+// (already computed), so this stays a pure key-schedule with no message
+// parsing.
+//
+// Import with:  import std.cryptography.tls13_ks
+//
+//   early_secret(algo)                              -> ptr (Hash.len)
+//   handshake_secret(algo, early, ecdhe, ec_len)    -> ptr
+//   master_secret(algo, handshake)                  -> ptr
+//   traffic_secret(algo, secret, label, th, th_len) -> ptr   (Derive-Secret)
+//   write_key(algo, traffic_secret, key_len)        -> ptr
+//   write_iv(algo, traffic_secret)                  -> ptr   (12 bytes)
+//
+// All results are freshly allocated std.bytes (caller frees).
+
+import std.bytes
+import std.cryptography.hkdf
+import std.cryptography.tls13_kdf
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+
+exports (
+    early_secret, handshake_secret, master_secret,
+    traffic_secret, write_key, write_iv,
+    IV_LEN
+)
+
+const IV_LEN = 12
+
+// A zero buffer of `n` bytes (fully zero-filled — bytes.new alone is not).
+fn zeros(n: int) -> ptr {
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        bytes.set(b, i, 0)
+        i = i + 1
+    }
+    return b
+}
+
+// SHA-256("")/SHA-384("") length helper via hkdf.hash_len.
+fn hlen(algo: string) -> int {
+    return hkdf.hash_len(algo)
+}
+
+// Early Secret = HKDF-Extract(salt=0, IKM = PSK or Hash.len zero bytes).
+// PSK-less: IKM is Hash.len zero bytes; salt is Hash.len zero bytes.
+early_secret(algo: string) -> ptr {
+    hl = hlen(algo)
+    salt = zeros(hl)
+    ikm = zeros(hl)
+    prk = hkdf.hkdf_extract(algo, salt, hl, ikm, hl)
+    bytes.free(salt)
+    bytes.free(ikm)
+    return prk
+}
+
+// Handshake Secret = HKDF-Extract(salt = Derive-Secret(Early, "derived", ""),
+//                                 IKM = ECDHE shared secret).
+// The empty-string transcript hash for "derived" is Hash(""), which
+// tls13_kdf.derive_secret expects the caller to pass. We compute it here as
+// the hash of the empty message via hkdf's underlying hash — but to stay
+// hash-agnostic without a direct hash dependency, the caller-facing contract
+// is: pass the ECDHE secret; we derive the "derived" salt internally using
+// the standard empty-transcript hash, which the caller provides implicitly
+// through the algo. We inline the empty-hash constants for the two subset
+// hashes.
+handshake_secret(algo: string, early: ptr, ecdhe: ptr, ec_len: int) -> ptr {
+    hl = hlen(algo)
+    empty_th = empty_transcript_hash(algo)
+    // salt = Derive-Secret(Early, "derived", Hash(""))
+    salt = tls13_kdf.derive_secret(algo, early, hl, "derived", empty_th, hl)
+    prk = hkdf.hkdf_extract(algo, salt, hl, ecdhe, ec_len)
+    bytes.free(empty_th)
+    bytes.free(salt)
+    return prk
+}
+
+// Master Secret = HKDF-Extract(salt = Derive-Secret(HS, "derived", ""),
+//                              IKM = Hash.len zero bytes).
+master_secret(algo: string, handshake: ptr) -> ptr {
+    hl = hlen(algo)
+    empty_th = empty_transcript_hash(algo)
+    salt = tls13_kdf.derive_secret(algo, handshake, hl, "derived", empty_th, hl)
+    ikm = zeros(hl)
+    prk = hkdf.hkdf_extract(algo, salt, hl, ikm, hl)
+    bytes.free(empty_th)
+    bytes.free(salt)
+    bytes.free(ikm)
+    return prk
+}
+
+// A named traffic secret = Derive-Secret(secret, label, transcript_hash).
+// `label` is e.g. "c hs traffic" / "s hs traffic" / "c ap traffic" /
+// "s ap traffic". `th`/`th_len` is the running transcript hash at that point.
+traffic_secret(algo: string, secret: ptr, label: string, th: ptr, th_len: int) -> ptr {
+    hl = hlen(algo)
+    return tls13_kdf.derive_secret(algo, secret, hl, label, th, th_len)
+}
+
+// Record write key = HKDF-Expand-Label(traffic_secret, "key", "", key_len).
+// key_len is 16 for AES-128-GCM, 32 for ChaCha20-Poly1305 / AES-256-GCM.
+write_key(algo: string, secret: ptr, key_len: int) -> ptr {
+    hl = hlen(algo)
+    empty = zeros(0)
+    k = tls13_kdf.expand_label(algo, secret, hl, "key", empty, 0, key_len)
+    bytes.free(empty)
+    return k
+}
+
+// Record write iv = HKDF-Expand-Label(traffic_secret, "iv", "", 12).
+write_iv(algo: string, secret: ptr) -> ptr {
+    hl = hlen(algo)
+    empty = zeros(0)
+    iv = tls13_kdf.expand_label(algo, secret, hl, "iv", empty, 0, IV_LEN)
+    bytes.free(empty)
+    return iv
+}
+
+// The transcript hash of the empty message, Hash(""), for the two subset
+// hashes. These are fixed constants (the well-known empty-input digests):
+//   SHA-256("") = e3b0c442...  SHA-384("") = 38b060a7...
+// Returned as a fresh std.bytes buffer (caller frees).
+fn empty_transcript_hash(algo: string) -> ptr {
+    if algo == "sha384" {
+        return hex32plus(algo)
+    }
+    // default sha256
+    h = bytes.new(32)
+    set_hex32(h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+    return h
+}
+
+// SHA-384 empty hash (48 bytes).
+fn hex32plus(algo: string) -> ptr {
+    h = bytes.new(48)
+    set_hexn(h, 48, "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b")
+    return h
+}
+
+// Fill a 32-byte buffer from a 64-char hex string.
+fn set_hex32(b: ptr, s: string) {
+    set_hexn(b, 32, s)
+}
+
+fn set_hexn(b: ptr, n: int, s: string) {
+    i = 0
+    while i < n {
+        hi = hexval(char_at(s, i * 2))
+        lo = hexval(char_at(s, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+}
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn char_at(s: string, i: int) -> int {
+    return string_char_at_n(s, string_length(s), i)
+}
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}

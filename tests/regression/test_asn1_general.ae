@@ -5,7 +5,7 @@
 // BER indefinite length parsing, SET canonical sorting, UTCTime, GeneralizedTime,
 // ENUMERATED, and full string type zoo (BMPString, UniversalString, etc.).
 
-import contrib.cryptography.asn1
+import std.cryptography.asn1
 import std.bytes
 import std.bignum
 import std.string
@@ -32,7 +32,7 @@ bhex(b: ptr) -> string {
 }
 
 main() {
-    print("=== contrib.cryptography.asn1 General Tests ===\n")
+    print("=== std.cryptography.asn1 General Tests ===\n")
     fails = 0
 
     // ---- 1. Tag parsing and encoding (high tag numbers) ----
@@ -276,7 +276,7 @@ main() {
     bytes.free(gent_enc)
 
     if fails == 0 {
-        print("PASS: contrib.cryptography.asn1 general tests\n")
+        print("PASS: std.cryptography.asn1 general tests\n")
     } else {
         print("FAILED: ${fails} test(s)\n")
         exit(1)

@@ -1,8 +1,8 @@
-// Validate contrib.cryptography.secp256k1 (ECDSA/ECDH), x448 (RFC 7748),
+// Validate std.cryptography.secp256k1 (ECDSA/ECDH), x448 (RFC 7748),
 // and ed448 (RFC 8032) against published test vectors.
-import contrib.cryptography.secp256k1
-import contrib.cryptography.x448
-import contrib.cryptography.ed448
+import std.cryptography.secp256k1
+import std.cryptography.x448
+import std.cryptography.ed448
 import std.bytes
 import std.string
 import std.io

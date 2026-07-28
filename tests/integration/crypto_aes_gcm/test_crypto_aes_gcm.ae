@@ -1,6 +1,6 @@
-// Validate contrib.cryptography.aes AES-GCM against NIST SP800-38D vectors
+// Validate std.cryptography.aes AES-GCM against NIST SP800-38D vectors
 // (test cases 1, 2, 4) plus open round-trip + tamper rejection.
-import contrib.cryptography.aes
+import std.cryptography.aes
 import std.bytes
 import std.string
 import std.io
