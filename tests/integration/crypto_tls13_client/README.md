@@ -32,9 +32,35 @@ A P-256 server cert is required (`-newkey ec -pkeyopt
 ec_paramgen_curve:prime256v1`), because the client verifies the server's
 CertificateVerify signature and only the ECDSA-P256 scheme is wired so far.
 
-**Caveat (partial authentication):** `connect()` verifies the server's
-CertificateVerify signature against the leaf certificate's public key (this
-stops a basic key-exchange MITM), but it does NOT yet validate the certificate
-chain against a trust store, nor check the hostname against the cert SAN. So a
-valid-but-untrusted or wrong-host cert is still accepted. Chain + hostname
-validation is the next increment. See the module header.
+## Server authentication (Nic's bar)
+
+`connect()` now fails closed unless the server cert passes all of: the
+CertificateVerify signature check, the validity window, hostname/SAN match, and
+a chain to a trusted anchor (the system CA bundle via `SSL_CERT_FILE` or the OS
+default). This was verified end-to-end against `openssl s_server`:
+
+| Case | Server cert | Result |
+|------|-------------|--------|
+| valid + trusted + `SAN=localhost` | CA-signed, CA in trust store | **CONNECTED** |
+| untrusted | CA-signed, CA **not** in trust store | rejected — does not chain to a trusted anchor |
+| self-signed | self-signed, `SAN=localhost` | rejected — does not chain to a trusted anchor |
+| wrong host | CA-signed, `SAN=example.com`, connect as `localhost` | rejected — not valid for the requested hostname |
+| expired | CA-signed, `notAfter=2020` | rejected — certificate expired |
+
+Reproduce a rejection, e.g. self-signed:
+
+```sh
+openssl ecparam -name prime256v1 -genkey -noout -out ss.key
+openssl req -x509 -new -key ss.key -out ss.crt -days 2 -sha256 \
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
+openssl s_server -accept 4433 -tls1_3 \
+  -ciphersuites TLS_CHACHA20_POLY1305_SHA256 -groups X25519 \
+  -cert ss.crt -key ss.key -www -quiet &
+# a client program that calls connect("localhost", 4433, priv) prints the
+# rejection: "certificate does not chain to a trusted anchor"
+```
+
+**Remaining limits:** only ECDSA-P256 CertificateVerify is wired (an RSA server
+CertificateVerify fails closed; the cert *chain* verify handles RSA + ECDSA);
+the leaf must chain directly to a trusted anchor (no intermediate-CA path
+building yet); no revocation (CRL/OCSP). See the module header.

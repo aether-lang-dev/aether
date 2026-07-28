@@ -14,6 +14,7 @@ import std.cryptography.sha2
 import std.cryptography.asn1
 import std.bytes
 import std.string
+import std.list
 import std.io
 
 extern exit(code: int)
@@ -92,6 +93,31 @@ fn der_ecdsa_sig(r32: ptr, s32: ptr) -> (ptr, int) {
     return tmp, total
 }
 
+// Copy an ASCII string into a fresh bytes buffer of its exact length.
+fn str_to_bytes(s: string) -> ptr {
+    n = string_length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    return b
+}
+
+// A LeafCert carrying only notBefore/notAfter times (for validity tests).
+fn mk_leaf_times(nb: string, na: string) -> tls13_cert.LeafCert {
+    lf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: str_to_bytes(nb), not_before_len: string_length(nb), not_after: str_to_bytes(na), not_after_len: string_length(na), dns_names: null }
+    return lf
+}
+
+// A LeafCert carrying a single SAN dNSName (for hostname tests).
+fn mk_leaf_san(name: string) -> tls13_cert.LeafCert {
+    lf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: list_new() }
+    list_add_raw(lf.dns_names, str_to_bytes(name))
+    return lf
+}
+
 main() {
     total_ok = 1
 
@@ -168,6 +194,79 @@ main() {
     bytes.free(dsig)
     bytes.free(th2)
     bytes.free(th)
+
+    // --- validity-period check (Nic's "expired must fail") ---
+    // notBefore 2020, notAfter 2020 -> expired.
+    exp = mk_leaf_times("200101000000Z", "200102000000Z")
+    if string.equals(tls13_cert.check_validity(&exp), "") != 1 {
+        println("ok   expired cert rejected")
+    } else { println("FAIL expired cert accepted"); total_ok = 0 }
+    tls13_cert.free_leaf(&exp)
+    // notBefore 2030 -> not yet valid.
+    fut = mk_leaf_times("300101000000Z", "310101000000Z")
+    if string.equals(tls13_cert.check_validity(&fut), "") != 1 {
+        println("ok   not-yet-valid cert rejected")
+    } else { println("FAIL not-yet-valid cert accepted"); total_ok = 0 }
+    tls13_cert.free_leaf(&fut)
+    // notBefore 2020, notAfter 2040 -> currently valid.
+    val = mk_leaf_times("200101000000Z", "400101000000Z")
+    if string.equals(tls13_cert.check_validity(&val), "") == 1 {
+        println("ok   currently-valid cert accepted")
+    } else { println("FAIL currently-valid cert rejected"); total_ok = 0 }
+    tls13_cert.free_leaf(&val)
+
+    // --- hostname / SAN matching (Nic's "wrong host must fail") ---
+    hw = mk_leaf_san("*.example.com")
+    if string.equals(tls13_cert.check_hostname(&hw, "foo.example.com"), "") == 1 {
+        println("ok   *.example.com matches foo.example.com")
+    } else { println("FAIL wildcard rejected valid host"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&hw, "example.com"), "") != 1 {
+        println("ok   *.example.com rejects bare example.com")
+    } else { println("FAIL wildcard matched bare domain"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&hw, "a.b.example.com"), "") != 1 {
+        println("ok   *.example.com rejects a.b.example.com")
+    } else { println("FAIL wildcard spanned two labels"); total_ok = 0 }
+    tls13_cert.free_leaf(&hw)
+    he = mk_leaf_san("api.example.com")
+    if string.equals(tls13_cert.check_hostname(&he, "API.example.com"), "") == 1 {
+        println("ok   exact match is case-insensitive")
+    } else { println("FAIL exact match not case-insensitive"); total_ok = 0 }
+    if string.equals(tls13_cert.check_hostname(&he, "evil.com"), "") != 1 {
+        println("ok   exact SAN rejects wrong host")
+    } else { println("FAIL exact SAN matched wrong host"); total_ok = 0 }
+    tls13_cert.free_leaf(&he)
+
+    // --- chain building + self-signed rejection (Nic's "self-signed must fail") ---
+    // A small ECDSA-P256 PKI generated offline: eca signs eleaf; ess is a
+    // separate self-signed cert (issuer == subject, NOT signed by eca).
+    eca_der = from_hex("308201ac30820153a00302010202147adbec3ab8d2659db358913dcb52b94381dd1235300a06082a8648ce3d040302302c3115301306035504030c0c4543205465737420526f6f7431133011060355040a0c0a41657468657254657374301e170d3236303732383231333633325a170d3336303732353231333633325a302c3115301306035504030c0c4543205465737420526f6f7431133011060355040a0c0a416574686572546573743059301306072a8648ce3d020106082a8648ce3d03010703420004884a91e1b1ff9aade000eb19175b2222364773c348e3b926f6bafdd2aff0000645e7ad368930fd9241fca9c470f0bc2179543c0081e31e8fe099d8c0f43b6e33a3533051301d0603551d0e041604140096d04dcc2db8b08fb4a70f34d2431d03fe10b9301f0603551d230418301680140096d04dcc2db8b08fb4a70f34d2431d03fe10b9300f0603551d130101ff040530030101ff300a06082a8648ce3d0403020347003044022019711a6e00867ff4bd34a8b9f49db4e20a449394a896f33b37222b7f9fdefe0b02203491f3dbdca8b042101f427cdb4a6bdf8304bd1853f46e429b44b05444293f49")
+    elf_der = from_hex("308201af30820155a0030201020214795024acd1f59d13ea26ee4bba4c458593d6f63b300a06082a8648ce3d040302302c3115301306035504030c0c4543205465737420526f6f7431133011060355040a0c0a41657468657254657374301e170d3236303732383231333633325a170d3237303732383231333633325a30293112301006035504030c096c6f63616c686f737431133011060355040a0c0a416574686572546573743059301306072a8648ce3d020106082a8648ce3d030107034200042b3e0fe701f9228fee88ca310d6b4ccde616ad50d7be20f226738027d49f9b691db45e3360408187f8d4e117773919fbc4821ebe52298e8144057d2dda935cc5a358305630140603551d11040d300b82096c6f63616c686f7374301d0603551d0e041604149d72e1349a900b4c8b972c2f2699c448425be1d2301f0603551d230418301680140096d04dcc2db8b08fb4a70f34d2431d03fe10b9300a06082a8648ce3d0403020348003045022100c3ed2bce214ebe239a7f3728b4d527751fb6e727a24ae305777c1ea66fbc7fbe022066eabc2c915a2de69eb7fe673beeb4875bd2c579299178fe8c1cd8b1a40e5d8a")
+    ess_der = from_hex("308201b230820157a00302010202140ecd8a7952500bc62290c557787f5e076f13d8ab300a06082a8648ce3d04030230233112301006035504030c096c6f63616c686f7374310d300b060355040a0c044576696c301e170d3236303732383231343034335a170d3237303732383231343034335a30233112301006035504030c096c6f63616c686f7374310d300b060355040a0c044576696c3059301306072a8648ce3d020106082a8648ce3d03010703420004831376b41fd5c5f61f2309e38372184e7c4e6a574b5ba139f3bbf283a88bb1ef3a42af8b407fe9db34a8883b7690646169a183f7ea2b00808dbaa5e1ed8fbddca3693067301d0603551d0e041604149b9ba9b9b18dcc35984a55192fa4d5a9ed8b6c75301f0603551d230418301680149b9ba9b9b18dcc35984a55192fa4d5a9ed8b6c75300f0603551d130101ff040530030101ff30140603551d11040d300b82096c6f63616c686f7374300a06082a8648ce3d0403020349003046022100eed78b2a101f6712826acb3726f2a10710b146d90b792bcc39a2f4ea1c8e9025022100f0289c5029f09f47b2355fe24d3da04fc6c98362f28984f93869a9aeb3eb2f26")
+    eca = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    elf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    ess = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    tls13_cert.parse_certificate(eca_der, 432, &eca)
+    tls13_cert.parse_certificate(elf_der, 435, &elf)
+    tls13_cert.parse_certificate(ess_der, 438, &ess)
+    trust = list_new()
+    list_add_raw(trust, &eca)
+    // Legit leaf chains to its CA.
+    if string.equals(tls13_cert.chain_verify(&elf, trust), "") == 1 {
+        println("ok   CA-signed leaf chains to anchor")
+    } else { println("FAIL legit leaf rejected by chain_verify"); total_ok = 0 }
+    // Self-signed cert does NOT chain to any anchor -> rejected.
+    if string.equals(tls13_cert.chain_verify(&ess, trust), "") != 1 {
+        println("ok   self-signed cert rejected (no trusted anchor)")
+    } else { println("FAIL self-signed cert accepted"); total_ok = 0 }
+    // Empty trust store rejects even the legit leaf.
+    empty = list_new()
+    if string.equals(tls13_cert.chain_verify(&elf, empty), "") != 1 {
+        println("ok   empty trust store rejects everything")
+    } else { println("FAIL empty trust store accepted a cert"); total_ok = 0 }
+    list_free(empty)
+    list_free(trust)
+    tls13_cert.free_leaf(&eca); tls13_cert.free_leaf(&elf); tls13_cert.free_leaf(&ess)
+    bytes.free(eca_der); bytes.free(elf_der); bytes.free(ess_der)
 
     if total_ok == 0 {
         println("tls13_cert: FAILURES")

@@ -51,7 +51,7 @@ exports (
     TAG_UTF8_STRING, TAG_ENUMERATED,
     TAG_CLASS_UNIVERSAL, TAG_CLASS_APPLICATION, TAG_CLASS_CONTEXT_SPECIFIC, TAG_CLASS_PRIVATE,
     TAG_PC_PRIMITIVE, TAG_PC_CONSTRUCTED,
-    reader_new, reader_free, reader_eof, reader_remaining,
+    reader_new, reader_free, reader_eof, reader_remaining, reader_pos,
     read_tlv, last_tag, last_tag_class, last_tag_pc, last_tag_number,
     read_sequence, read_integer, read_oid,
     read_octet_string, read_bit_string, read_null, read_boolean,
@@ -296,6 +296,15 @@ read_tlv(r: ptr) -> (ptr, string) {
 last_tag(r: ptr) -> int {
     rr = r as *Reader
     return rr.last_tag
+}
+
+// Current read offset into the underlying buffer. Bracketing a read_tlv with
+// two reader_pos() calls yields the exact byte span (header+content) of that
+// TLV — needed to recover the precise DER of, e.g., tbsCertificate for
+// signature verification.
+reader_pos(r: ptr) -> int {
+    rr = r as *Reader
+    return rr.pos
 }
 
 // Read a TLV and assert its tag. Returns (content_bytes, "") or (null, err).
