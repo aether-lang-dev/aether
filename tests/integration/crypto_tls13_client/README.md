@@ -28,7 +28,13 @@ openssl s_server -accept 4433 -tls1_3 \
 A successful run: `connect()` completes with the server Finished MAC verified,
 and `conn_recv` returns the decrypted HTTP response.
 
-**Caveat:** this cut does NOT authenticate the server — no CertificateVerify
-signature check, no chain/hostname validation. It proves the key exchange and
-record protection work end-to-end against a real server; it is not yet safe
-against an active MITM. See the module header.
+A P-256 server cert is required (`-newkey ec -pkeyopt
+ec_paramgen_curve:prime256v1`), because the client verifies the server's
+CertificateVerify signature and only the ECDSA-P256 scheme is wired so far.
+
+**Caveat (partial authentication):** `connect()` verifies the server's
+CertificateVerify signature against the leaf certificate's public key (this
+stops a basic key-exchange MITM), but it does NOT yet validate the certificate
+chain against a trust store, nor check the hostname against the cert SAN. So a
+valid-but-untrusted or wrong-host cert is still accepted. Chain + hostname
+validation is the next increment. See the module header.

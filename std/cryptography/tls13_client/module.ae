@@ -10,18 +10,21 @@
 //
 // Subset (first cut, matches #1298):
 //   - TLS 1.3 only, X25519 key exchange, TLS_CHACHA20_POLY1305_SHA256
-//   - client-side; the handshake completes and both sides prove key
-//     agreement via the Finished MACs
+//   - client-side; the handshake completes, the server's CertificateVerify
+//     signature is checked, and both sides prove key agreement via the
+//     Finished MACs
+//   - server cert must be ECDSA-P256 (the only CertificateVerify scheme wired
+//     so far; others fail closed)
 //   - no resumption / 0-RTT / mTLS / HelloRetryRequest
 //
-// ⚠️ SERVER AUTHENTICATION IS NOT YET DONE. connect() does NOT run the
-// server's CertificateVerify signature check, and does NO certificate-chain
-// or hostname validation. It proves the KEY EXCHANGE works end-to-end against
-// a real server (Finished MACs verify), but it does not authenticate the
-// peer — so this cut is unsafe against an active MITM. Wiring
-// tls13_cert.verify_cert_verify (the leaf SPKI is already parseable) plus
-// chain/hostname policy is the next increment. Do not use for anything
-// security-sensitive until that lands.
+// ⚠️ PARTIAL AUTHENTICATION. connect() DOES verify the server's
+// CertificateVerify signature against the leaf certificate's public key —
+// proving the peer holds that key (RFC 8446 §4.4.3), which stops the basic
+// MITM that a bare key-exchange would allow. It does NOT yet validate the
+// certificate CHAIN against a trust store, nor check the HOSTNAME against the
+// cert's SAN. So a valid-but-untrusted or wrong-host cert is still accepted.
+// Chain + hostname validation is the next increment; until it lands, do not
+// rely on this for authenticating a specific server identity.
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -46,6 +49,7 @@ import std.cryptography.x25519
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_ks
 import std.cryptography.tls13_hs
+import std.cryptography.tls13_cert
 import std.cryptography.tls13_record
 import std.cryptography
 import std.net
@@ -62,7 +66,8 @@ exports (
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, close_conn, conn_send, conn_recv
+    connect, close_conn, conn_send, conn_recv,
+    verify_flight_auth
 )
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
@@ -421,6 +426,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     bytes.set(fl, 0, 0)
     fllen = 0
     th_before_finished = null
+    th_through_cert = null
     server_verify_data = null
     svd_len = 0
     done = 0
@@ -454,13 +460,19 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     // Fold the whole flight into the transcript in wire order, capturing the
     // transcript hash BEFORE the final Finished (for the server Finished MAC).
     if string.equals(ferr, "") == 1 {
-        th_before_finished = add_flight_capture_prefinished(tr, fl, fllen)
+        th_before_finished, th_through_cert = add_flight_capture_prefinished(tr, fl, fllen)
         server_verify_data, svd_len = extract_server_finished(fl, fllen)
     }
 
     result = null
     result_err = ferr
     if string.equals(ferr, "") == 1 {
+        // Authenticate the server: verify its CertificateVerify signature over
+        // the transcript through Certificate (RFC 8446 §4.4.3). Fails closed.
+        auth_err = authenticate_server(fl, fllen, th_through_cert)
+        if string.equals(auth_err, "") != 1 {
+            result_err = auth_err
+        } else {
         // Verify server Finished: HMAC(server_finished_key, th_before_finished).
         expected = finished_verify_data(hs_server_secret(keys), th_before_finished, 32)
         if bytes_equal(expected, server_verify_data, 32) != 1 {
@@ -500,9 +512,11 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
         }
         bytes.free(expected)
+        }
     }
 
     // cleanup handshake-scoped state
+    if th_through_cert != null { bytes.free(th_through_cert) }
     if th_before_finished != null { bytes.free(th_before_finished) }
     if server_verify_data != null { bytes.free(server_verify_data) }
     bytes.free(fl)
@@ -541,13 +555,15 @@ fn flight_complete(fl: ptr, flen: int) -> int {
 // wire order, AND return the transcript hash captured just BEFORE the final
 // Finished message (needed for the server Finished MAC). The transcript ends
 // up including the Finished (needed for app keys + client Finished).
-fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int) -> ptr {
+fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int) -> (ptr, ptr) {
     fin_off = last_msg_offset(fl, flen)
     th_pre = null
+    th_cert = null
     p = 0
     cont = 1
     while cont == 1 {
         if p + 4 > flen { cont = 0 } else {
+            mt = bytes.get(fl, p) & 0xFF
             ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
             total = 4 + ml
             if p + total > flen { cont = 0 } else {
@@ -559,11 +575,13 @@ fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int) -> ptr {
                 bytes.copy_from_bytes(sub, 0, fl, p, total)
                 transcript_add(tr, sub, total)
                 bytes.free(sub)
+                // Snapshot the hash THROUGH Certificate (used by CertificateVerify).
+                if mt == HS_CERTIFICATE { th_cert = transcript_hash(tr) }
                 p = p + total
             }
         }
     }
-    return th_pre
+    return th_pre, th_cert
 }
 
 // Offset of the last complete handshake message in the flight buffer.
@@ -678,4 +696,152 @@ close_conn(conn: ptr) {
     recio_free(c.rio as *RecordIO)
     net.tcp_close(c.sock)
     libc_free(conn)
+}
+
+// ============================================================================
+// Server authentication (RFC 8446 §4.4.2 / §4.4.3): extract the leaf cert's
+// public key from the Certificate message and verify the CertificateVerify
+// signature over the transcript hash through Certificate. Proves the peer
+// holds the leaf private key. Chain + hostname validation are a further
+// increment; only ECDSA-P256 is handled in this cut (fails closed otherwise).
+// ============================================================================
+
+// Extract the leaf certificate DER from a Certificate message body (RFC 8446
+// §4.4.2): cert_request_context<1> + certificate_list<3>, first entry's
+// cert_data<3> is the leaf DER. Returns (der, der_len, "") or (null,0,err).
+fn extract_leaf_der(body: ptr, body_len: int) -> (ptr, int, string) {
+    if body_len < 1 { return null, 0, "certificate: truncated context" }
+    ctx_len = bytes.get(body, 0) & 0xFF
+    p = 1 + ctx_len
+    if p + 3 > body_len { return null, 0, "certificate: truncated list length" }
+    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3
+    if p + list_len > body_len { return null, 0, "certificate: list overruns" }
+    if list_len < 3 { return null, 0, "certificate: empty list" }
+    cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3
+    if p + cert_len > body_len { return null, 0, "certificate: cert_data overruns" }
+    der = bytes.new(cert_len)
+    if cert_len > 0 { bytes.set(der, cert_len - 1, 0) }
+    bytes.copy_from_bytes(der, 0, body, p, cert_len)
+    return der, cert_len, ""
+}
+
+// Parse a CertificateVerify body (RFC 8446 §4.4.3): algorithm(uint16) +
+// signature<2>. Returns (scheme, sig, sig_len, "").
+fn parse_cert_verify(body: ptr, body_len: int) -> (int, ptr, int, string) {
+    if body_len < 4 { return 0, null, 0, "certverify: truncated" }
+    scheme = ((bytes.get(body, 0)&0xFF)<<8)|(bytes.get(body, 1)&0xFF)
+    sig_len = ((bytes.get(body, 2)&0xFF)<<8)|(bytes.get(body, 3)&0xFF)
+    if 4 + sig_len > body_len { return 0, null, 0, "certverify: signature overruns" }
+    sig = bytes.new(sig_len)
+    if sig_len > 0 { bytes.set(sig, sig_len - 1, 0) }
+    bytes.copy_from_bytes(sig, 0, body, 4, sig_len)
+    return scheme, sig, sig_len, ""
+}
+
+// Split an uncompressed EC point (0x04 || X(32) || Y(32)) into pubx/puby.
+fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
+    if key_len != 65 { return null, null, "spki: not a 65-byte uncompressed EC point" }
+    if (bytes.get(spki_key, 0)&0xFF) != 0x04 { return null, null, "spki: not uncompressed (0x04)" }
+    px = bytes.new(32)
+    py = bytes.new(32)
+    bytes.set(px, 31, 0)
+    bytes.set(py, 31, 0)
+    bytes.copy_from_bytes(px, 0, spki_key, 1, 32)
+    bytes.copy_from_bytes(py, 0, spki_key, 33, 32)
+    return px, py, ""
+}
+
+// Authenticate the server: extract the leaf public key from Certificate and
+// verify the CertificateVerify signature over `th_thru_cert`. Fails closed.
+fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
+    leaf_px = null
+    leaf_py = null
+    cv_scheme = 0
+    cv_sig = null
+    cv_sig_len = 0
+    err = ""
+    p = 0
+    cont = 1
+    while cont == 1 {
+        if p + 4 > flen { cont = 0 } else {
+            mt = bytes.get(fl, p) & 0xFF
+            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            total = 4 + ml
+            if p + total > flen { cont = 0 } else {
+                if mt == HS_CERTIFICATE {
+                    cbody = bytes.new(ml)
+                    if ml > 0 { bytes.set(cbody, ml-1, 0) }
+                    bytes.copy_from_bytes(cbody, 0, fl, p+4, ml)
+                    der, dlen, derr = extract_leaf_der(cbody, ml)
+                    if string.equals(derr, "") != 1 {
+                        if string.equals(err, "") == 1 { err = derr }
+                    } else {
+                        leaf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: "", signature: null, signature_len: 0, spki_algo_oid: "", spki_key: null, spki_key_len: 0 }
+                        perr = tls13_cert.parse_certificate(der, dlen, &leaf)
+                        if string.equals(perr, "") != 1 {
+                            if string.equals(err, "") == 1 { err = perr }
+                        } else {
+                            px, py, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
+                            if string.equals(sperr, "") != 1 {
+                                if string.equals(err, "") == 1 { err = sperr }
+                            } else {
+                                leaf_px = px
+                                leaf_py = py
+                            }
+                        }
+                        if leaf.tbs != null { bytes.free(leaf.tbs) }
+                        if leaf.spki_key != null { bytes.free(leaf.spki_key) }
+                        if leaf.signature != null { bytes.free(leaf.signature) }
+                        bytes.free(der)
+                    }
+                    bytes.free(cbody)
+                }
+                if mt == HS_CERTIFICATE_VERIFY {
+                    vbody = bytes.new(ml)
+                    if ml > 0 { bytes.set(vbody, ml-1, 0) }
+                    bytes.copy_from_bytes(vbody, 0, fl, p+4, ml)
+                    sc, sig, slen, cverr = parse_cert_verify(vbody, ml)
+                    if string.equals(cverr, "") != 1 {
+                        if string.equals(err, "") == 1 { err = cverr }
+                    } else {
+                        cv_scheme = sc
+                        cv_sig = sig
+                        cv_sig_len = slen
+                    }
+                    bytes.free(vbody)
+                }
+                p = p + total
+            }
+        }
+    }
+    if string.equals(err, "") == 1 {
+        if leaf_px == null { err = "server did not send a usable Certificate" }
+        else {
+            if cv_sig == null { err = "server did not send CertificateVerify" }
+            else {
+                if cv_scheme != tls13_cert.SCHEME_ECDSA_P256_SHA256 {
+                    err = "unsupported CertificateVerify scheme (only ECDSA-P256 handled)"
+                } else {
+                    ok = tls13_cert.verify_cert_verify(cv_scheme, leaf_px, leaf_py, th_thru_cert, 32, cv_sig, cv_sig_len)
+                    if ok != 1 { err = "CertificateVerify signature invalid" }
+                }
+            }
+        }
+    }
+    if leaf_px != null { bytes.free(leaf_px) }
+    if leaf_py != null { bytes.free(leaf_py) }
+    if cv_sig != null { bytes.free(cv_sig) }
+    return err
+}
+
+// verify_flight_auth(flight, flight_len, th_thru_cert) -> "" | error.
+// Testable entry to the server-authentication path: runs the Certificate +
+// CertificateVerify extraction and signature check over a raw handshake flight
+// buffer (the concatenated EE/Certificate/CertificateVerify/Finished messages)
+// and the transcript hash through Certificate. Used by the client's connect()
+// internally; exposed so tests can drive it with good and tampered flights.
+verify_flight_auth(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
+    return authenticate_server(fl, flen, th_thru_cert)
 }
