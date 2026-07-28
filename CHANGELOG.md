@@ -13,6 +13,27 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.clapae`** — a command-line argument parser for Aether modelled on
+  Rust's clap, as a builder-style DSL:
+  `command("app") { about(...) arg("count") { long_("count"); int_arg() }
+  arg("debug") { short(100); flag() } arg("input") { positional(); required() }
+  subcommand("run") { ... } }`.
+  Key clap-grain features:
+  - **Typed arguments** — `flag()` / `string_arg()` / `int_arg()` / `positional()`
+    describe an argument's kind (replacing an ad-hoc takes_value/is_flag pair).
+  - **Validation at the boundary** — an `int_arg` value is parsed and checked
+    during `parse()`, so a non-numeric value is a parse *error* up front, not a
+    surprise when read. Typed getters: `get_string`, `get_int` (returns
+    `(int, error)`), `get_flag`.
+  - **Caller-owned control flow** — `parse` returns
+    `(RESULT_OK | RESULT_HELP | RESULT_ERROR, matches, error)`; `-h`/`--help`
+    yields `RESULT_HELP` rather than the library calling `exit()`.
+  Also: long/short options, inline `-cvalue` and `--opt value`, compound short
+  flags (`-dv`), subcommands, required-arg enforcement, and generated `--help`.
+  `parse` reads the process argv; `parse_list` parses an explicit list. Pure
+  Aether over `std.list`/`std.map`/`std.string`; leak-clean under valgrind.
+  Regression test in `tests/regression/test_clapae.ae`.
+
 - **`std.cryptography.tls13_client`** (#1298) — a pure-Aether TLS 1.3 client
   that drives a full handshake over `std.net` TCP, composing the six TLS
   building blocks (x25519, tls13_kdf/ks/hs/cert/record). `connect()` performs

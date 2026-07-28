@@ -1,0 +1,677 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Copyright (c) 2026 Aether Programming Language Contributors.
+//
+// The API design is modelled on Rust's clap (https://github.com/clap-rs/clap,
+// © the clap contributors, dual-licensed MIT OR Apache-2.0). clap's source was
+// studied for its builder API, option/subcommand handling, and help-text UX,
+// and its *design* reimplemented from scratch in idiomatic Aether — no Rust
+// code was copied or ported. The implementation is entirely Aether (Aether's
+// closures / trailing blocks / _ctx context, over std.list/std.map/std.string).
+// Credit to the clap contributors for the design.  (clap is MIT-licensed among
+// its options, so this MIT header would in any case cover any adaptation.)
+//
+// std.clapae — a command-line argument parser for Aether, modelled on the
+// design of Rust's clap: a builder DSL, typed arguments validated at the
+// boundary, subcommands, and generated help. Pure Aether, no C.
+//
+// Import with:  import std.clapae
+//
+// Shape (block-style builder DSL — Aether config objects are filled by setter
+// calls inside a trailing block):
+//
+//   cmd = command("myapp") {
+//       about("My CLI app")
+//       arg("config") { long_("config"); short(99); string_arg(); help("config file") }
+//       arg("count")  { long_("count");  int_arg();  help("how many") }
+//       arg("debug")  { long_("debug");  short(100); flag() }
+//       arg("input")  { positional(); required() }          // positional
+//       subcommand("run") { arg("fast") { long_("fast"); flag() } }
+//   }
+//   res, matches, err = parse(cmd)          // reads process argv
+//   // res is RESULT_OK | RESULT_HELP | RESULT_ERROR; the caller decides
+//   // whether to print_help(cmd) and exit — the library never exits for you.
+//   if res == RESULT_HELP { print_help(cmd); exit(0) }
+//   if res == RESULT_ERROR { eprintln(err); exit(2) }
+//
+//   cfg      = get_string(matches, "config")     // "" if absent
+//   n, nerr  = get_int(matches, "count")         // validated: (int, error)
+//   on       = get_flag(matches, "debug")        // 1 if present, else 0
+//   sub      = subcommand_name(matches)          // "" if none
+//
+// An argument's KIND replaces the old takes_value/is_flag pair:
+//   flag()        — a boolean switch, no value  (KIND_FLAG)
+//   string_arg()  — takes a string value        (KIND_STRING)  [default]
+//   int_arg()     — takes an integer, validated at parse time (KIND_INT)
+//   positional()  — consumed by position, not by -x/--x
+// int arguments are parsed and validated during parse(), so a non-numeric
+// value is a parse ERROR at the boundary, not a surprise when you read it.
+
+import std.list
+import std.map
+import std.string (*)
+import std.os (*)
+
+exports (
+    command, arg, subcommand,
+    about, short, long_, help, required,
+    flag, string_arg, int_arg, positional, kind,
+    parse, parse_list,
+    get_string, get_int, get_flag, subcommand_name, subcommand_matches,
+    print_help,
+    free_command, free_matches,
+    Command, Arg, ArgMatches,
+    KIND_FLAG, KIND_STRING, KIND_INT,
+    RESULT_OK, RESULT_HELP, RESULT_ERROR
+)
+
+// ---- argument kinds ----
+const KIND_FLAG   = 0    // boolean switch, no value
+const KIND_STRING = 1    // takes a string value (default)
+const KIND_INT    = 2    // takes an integer value, validated at parse time
+
+// ---- parse result status ----
+const RESULT_OK    = 0   // parsed successfully
+const RESULT_HELP  = 1   // -h/--help seen; caller should print help + exit
+const RESULT_ERROR = 2   // a parse error occurred (see the error string)
+
+struct Arg {
+    name: string
+    short_char: int
+    long_name: string
+    help_text: string
+    kind: int          // KIND_FLAG / KIND_STRING / KIND_INT
+    required: int      // 1 if required
+    is_positional: int // 1 if consumed by position rather than -x/--x
+}
+
+struct Command {
+    name: string
+    about_text: string
+    args: ptr          // std.list of *Arg
+    subcommands: ptr   // std.list of *Command
+}
+
+struct ArgMatches {
+    command_name: string
+    values: ptr             // std.map of string -> string (raw string values)
+    flags: ptr              // std.map of string -> int (present flags)
+    subcommand: ptr         // *ArgMatches of matched subcommand, or null
+}
+
+arg_new() -> *Arg {
+    a = heap.new(Arg)
+    a.name = ""
+    a.short_char = 0
+    a.long_name = ""
+    a.help_text = ""
+    a.kind = KIND_STRING     // default: a string-valued option
+    a.required = 0
+    a.is_positional = 0
+    return a
+}
+
+command_new() -> *Command {
+    c = heap.new(Command)
+    c.name = ""
+    c.about_text = ""
+    c.args = list_new()
+    c.subcommands = list_new()
+    return c
+}
+
+arg_matches_new(cmd_name: string) -> *ArgMatches {
+    m = heap.new(ArgMatches)
+    m.command_name = cmd_name
+    m.values = map_new()
+    m.flags = map_new()
+    m.subcommand = null
+    return m
+}
+
+// --- Builder DSL ---
+
+builder command(name: string): *Command with command_new {
+    if _builder != null {
+        c = _builder as *Command
+        c.name = name
+    }
+    return _builder as *Command
+}
+
+builder arg(name: string): *Arg with arg_new {
+    if _builder != null {
+        a = _builder as *Arg
+        a.name = name
+        parent = builder_context()
+        if parent != null {
+            parent_cmd = parent as *Command
+            list_add_raw(parent_cmd.args, a)
+        }
+    }
+    return _builder as *Arg
+}
+
+builder subcommand(name: string): *Command with command_new {
+    if _builder != null {
+        c = _builder as *Command
+        c.name = name
+        parent = builder_context()
+        if parent != null {
+            parent_cmd = parent as *Command
+            list_add_raw(parent_cmd.subcommands, c)
+        }
+    }
+    return _builder as *Command
+}
+
+// --- setters (called inside a builder block) ---
+
+about(_ctx: ptr, text: string) {
+    if _ctx != null {
+        c = _ctx as *Command
+        c.about_text = text
+    }
+}
+
+short(_ctx: ptr, c: int) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.short_char = c
+    }
+}
+
+long_(_ctx: ptr, name: string) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.long_name = name
+    }
+}
+
+help(_ctx: ptr, text: string) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.help_text = text
+    }
+}
+
+required(_ctx: ptr) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.required = 1
+    }
+}
+
+// Argument kind setters (replace the old takes_value/is_flag toggles).
+flag(_ctx: ptr) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.kind = KIND_FLAG
+    }
+}
+
+string_arg(_ctx: ptr) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.kind = KIND_STRING
+    }
+}
+
+int_arg(_ctx: ptr) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.kind = KIND_INT
+    }
+}
+
+// Explicit kind, for callers that hold a KIND_* constant.
+kind(_ctx: ptr, k: int) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.kind = k
+    }
+}
+
+positional(_ctx: ptr) {
+    if _ctx != null {
+        a = _ctx as *Arg
+        a.is_positional = 1
+    }
+}
+
+// --- cleanup ---
+
+free_command(c: *Command) {
+    if c == null { return }
+    if c.args != null {
+        n = list_size(c.args)
+        for (i = 0; i < n; i++) {
+            a = list_get_raw(c.args, i) as *Arg
+            if a != null {
+                heap.free(a)
+            }
+        }
+        list_free(c.args)
+    }
+    if c.subcommands != null {
+        n = list_size(c.subcommands)
+        for (i = 0; i < n; i++) {
+            sub = list_get_raw(c.subcommands, i) as *Command
+            free_command(sub)
+        }
+        list_free(c.subcommands)
+    }
+    heap.free(c)
+}
+
+free_matches(m: *ArgMatches) {
+    if m == null { return }
+    if m.values != null {
+        map_free(m.values)
+    }
+    if m.flags != null {
+        map_free(m.flags)
+    }
+    if m.subcommand != null {
+        free_matches(m.subcommand as *ArgMatches)
+    }
+    heap.free(m)
+}
+
+// --- lookup helpers ---
+
+// An option is anything that isn't positional (has a short and/or long name
+// used as -x / --x). Positionals are matched by position.
+fn is_option(a: *Arg) -> int {
+    if a.is_positional == 1 { return 0 }
+    return 1
+}
+
+find_arg_by_long(cmd: *Command, name: string) -> *Arg {
+    n = list_size(cmd.args)
+    for (i = 0; i < n; i++) {
+        a = list_get_raw(cmd.args, i) as *Arg
+        if is_option(a) == 1 && string_equals(a.long_name, name) == 1 {
+            return a
+        }
+    }
+    return null
+}
+
+find_arg_by_short(cmd: *Command, sh_char: int) -> *Arg {
+    n = list_size(cmd.args)
+    for (i = 0; i < n; i++) {
+        a = list_get_raw(cmd.args, i) as *Arg
+        if is_option(a) == 1 && a.short_char == sh_char {
+            return a
+        }
+    }
+    return null
+}
+
+find_positional_arg(cmd: *Command, idx: int) -> *Arg {
+    pos_count = 0
+    n = list_size(cmd.args)
+    for (i = 0; i < n; i++) {
+        a = list_get_raw(cmd.args, i) as *Arg
+        if a.is_positional == 1 {
+            if pos_count == idx {
+                return a
+            }
+            pos_count = pos_count + 1
+        }
+    }
+    return null
+}
+
+find_subcommand(cmd: *Command, name: string) -> *Command {
+    n = list_size(cmd.subcommands)
+    for (i = 0; i < n; i++) {
+        sub = list_get_raw(cmd.subcommands, i) as *Command
+        if string_equals(sub.name, name) == 1 {
+            return sub
+        }
+    }
+    return null
+}
+
+// --- generated help (single source of truth: the command spec) ---
+
+print_help(cmd: *Command) {
+    print("Usage: ")
+    print(cmd.name)
+
+    has_options = 0
+    n_args = list_size(cmd.args)
+    for (i = 0; i < n_args; i++) {
+        a = list_get_raw(cmd.args, i) as *Arg
+        if is_option(a) == 1 { has_options = 1 }
+    }
+    if has_options == 1 { print(" [OPTIONS]") }
+
+    for (i = 0; i < n_args; i++) {
+        a = list_get_raw(cmd.args, i) as *Arg
+        if a.is_positional == 1 {
+            if a.required == 1 {
+                print(" <"); print(a.name); print(">")
+            } else {
+                print(" ["); print(a.name); print("]")
+            }
+        }
+    }
+    if list_size(cmd.subcommands) > 0 { print(" [COMMAND]") }
+    print("\n\n")
+
+    if string_equals(cmd.about_text, "") != 1 {
+        println(cmd.about_text)
+        println("")
+    }
+
+    if has_options == 1 {
+        println("Options:")
+        for (i = 0; i < n_args; i++) {
+            a = list_get_raw(cmd.args, i) as *Arg
+            if is_option(a) == 1 {
+                print("  ")
+                if a.short_char != 0 {
+                    print("-")
+                    sc = string_from_char(a.short_char)
+                    print(sc)
+                    string_release(sc)
+                } else {
+                    print("  ")
+                }
+                if string_equals(a.long_name, "") != 1 {
+                    if a.short_char != 0 { print(", ") }
+                    print("--"); print(a.long_name)
+                }
+                if a.kind == KIND_STRING { print(" <VALUE>") }
+                if a.kind == KIND_INT { print(" <N>") }
+                print("\t")
+                println(a.help_text)
+            }
+        }
+        println("  -h, --help\tPrint help")
+        println("")
+    }
+
+    n_subs = list_size(cmd.subcommands)
+    if n_subs > 0 {
+        println("Commands:")
+        for (i = 0; i < n_subs; i++) {
+            sub = list_get_raw(cmd.subcommands, i) as *Command
+            print("  "); print(sub.name)
+            if string_equals(sub.about_text, "") != 1 {
+                print("\t"); print(sub.about_text)
+            }
+            print("\n")
+        }
+        println("")
+    }
+}
+
+// --- parsing ---
+//
+// parse() returns (result_status, matches, error):
+//   RESULT_OK    -> matches is valid, error is ""
+//   RESULT_HELP  -> -h/--help was seen; matches is null; caller prints help
+//   RESULT_ERROR -> a parse error; matches is null; error describes it
+// The library never calls exit(): the caller owns the process's control flow.
+
+parse(cmd: *Command) -> (int, ptr, string) {
+    argv = list_new()
+    cnt = args_count()
+    for (i = 1; i < cnt; i++) {
+        list_add_raw(argv, args_get(i))
+    }
+    res, matches, err = parse_list(cmd, argv)
+    list_free(argv)
+    return res, matches, err
+}
+
+parse_list(cmd: *Command, argv: ptr) -> (int, ptr, string) {
+    return parse_list_internal(cmd, argv)
+}
+
+// Validate an argument's value against its kind. Returns "" if ok, else an
+// error message. (String values always validate; int values must parse.)
+// Returns "" if `val` is valid for `a`'s kind, else an owned error message.
+// The caller must treat a non-"" result as owned (it flows into the parse
+// result's error slot); a "" result is the shared empty literal.
+// Returns 1 if `val` is valid for `a`'s kind, else 0. Allocates nothing on the
+// common (valid) path — the error message is built by int_error_msg only when
+// a value is rejected.
+fn value_ok(a: *Arg, val: string) -> int {
+    if a.kind == KIND_INT {
+        _, terr = to_int(val)
+        bad = terr != ""
+        string_release(terr)     // to_int's error/"" is ours to drop
+        if bad { return 0 }
+    }
+    return 1
+}
+
+// Build the (owned) error message for a value that failed value_ok. Only
+// KIND_INT rejects, so this reports an integer-parse error.
+fn int_error_msg(a: *Arg, val: string) -> string {
+    p1 = string_concat("invalid integer for '", a.name)
+    p2 = string_concat(p1, "': ")
+    msg = string_concat(p2, val)
+    string_release(p1)
+    string_release(p2)
+    return msg
+}
+
+parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
+    // Single tracked empty-error binding for the success returns (a bare ""
+    // literal in the error slot mints a fresh 1-byte heap string per call).
+    ok = ""
+    m = arg_matches_new(cmd.name)
+    pos_idx = 0
+    n_argv = list_size(argv)
+
+    i = 0
+    while i < n_argv {
+        arg_str = list_get_raw(argv, i)
+
+        if string_equals(arg_str, "-h") == 1 || string_equals(arg_str, "--help") == 1 {
+            // Do NOT exit here — report that help was requested and let the
+            // caller decide (print_help + exit, or handle otherwise).
+            free_matches(m)
+            return RESULT_HELP, null, ok
+        }
+
+        if string_starts_with(arg_str, "--") == 1 {
+            eq_idx = string_index_of(arg_str, "=")
+            if eq_idx != -1 {
+                long_name = string_substring(arg_str, 2, eq_idx)
+                val = string_substring(arg_str, eq_idx + 1, string_length(arg_str))
+                a = find_arg_by_long(cmd, long_name)
+                if a == null {
+                    free_matches(m)
+                    return RESULT_ERROR, null, string_concat("unknown option: --", long_name)
+                }
+                if value_ok(a, val) == 0 {
+                    free_matches(m)
+                    return RESULT_ERROR, null, int_error_msg(a, val)
+                }
+                map_put(m.values, a.name, copy(val))
+            } else {
+                long_name = string_substring(arg_str, 2, string_length(arg_str))
+                a = find_arg_by_long(cmd, long_name)
+                if a == null {
+                    free_matches(m)
+                    return RESULT_ERROR, null, string_concat("unknown option: --", long_name)
+                }
+                if a.kind == KIND_FLAG {
+                    map_put(m.flags, a.name, a)
+                } else {
+                    if i + 1 < n_argv {
+                        val = list_get_raw(argv, i + 1)
+                        if value_ok(a, val) == 0 {
+                            free_matches(m)
+                            return RESULT_ERROR, null, int_error_msg(a, val)
+                        }
+                        map_put(m.values, a.name, copy(val))
+                        i = i + 1
+                    } else {
+                        free_matches(m)
+                        return RESULT_ERROR, null, string_concat("option requires value: --", long_name)
+                    }
+                }
+            }
+        } else if string_starts_with(arg_str, "-") == 1 && string_equals(arg_str, "-") != 1 {
+            if string_length(arg_str) == 2 {
+                sh_char = string_char_at(arg_str, 1)
+                a = find_arg_by_short(cmd, sh_char)
+                if a == null {
+                    free_matches(m)
+                    return RESULT_ERROR, null, string_concat("unknown option: -", string_from_char(sh_char))
+                }
+                if a.kind == KIND_FLAG {
+                    map_put(m.flags, a.name, a)
+                } else {
+                    if i + 1 < n_argv {
+                        val = list_get_raw(argv, i + 1)
+                        if value_ok(a, val) == 0 {
+                            free_matches(m)
+                            return RESULT_ERROR, null, int_error_msg(a, val)
+                        }
+                        map_put(m.values, a.name, copy(val))
+                        i = i + 1
+                    } else {
+                        free_matches(m)
+                        return RESULT_ERROR, null, string_concat("option requires value: -", string_from_char(sh_char))
+                    }
+                }
+            } else {
+                // -cVALUE inline value, or -abc compound flags
+                sh_char = string_char_at(arg_str, 1)
+                a = find_arg_by_short(cmd, sh_char)
+                if a == null {
+                    free_matches(m)
+                    return RESULT_ERROR, null, string_concat("unknown option: -", string_from_char(sh_char))
+                }
+                if a.kind != KIND_FLAG {
+                    val = string_substring(arg_str, 2, string_length(arg_str))
+                    if value_ok(a, val) == 0 {
+                        free_matches(m)
+                        return RESULT_ERROR, null, int_error_msg(a, val)
+                    }
+                    map_put(m.values, a.name, copy(val))
+                } else {
+                    len = string_length(arg_str)
+                    for (j = 1; j < len; j++) {
+                        ch = string_char_at(arg_str, j)
+                        flag_arg = find_arg_by_short(cmd, ch)
+                        if flag_arg == null {
+                            free_matches(m)
+                            return RESULT_ERROR, null, string_concat("unknown short option: -", string_from_char(ch))
+                        }
+                        map_put(m.flags, flag_arg.name, flag_arg)
+                    }
+                }
+            }
+        } else {
+            // positional or subcommand
+            sub = find_subcommand(cmd, arg_str)
+            if sub != null {
+                sub_argv = list_new()
+                for (k = i + 1; k < n_argv; k++) {
+                    list_add_raw(sub_argv, list_get_raw(argv, k))
+                }
+                sub_res, sub_matches, sub_err = parse_list_internal(sub, sub_argv)
+                list_free(sub_argv)
+                if sub_res != RESULT_OK {
+                    free_matches(m)
+                    return sub_res, null, sub_err
+                }
+                // discard the child's tracked empty error (else it leaks)
+                string_release(sub_err)
+                m.subcommand = sub_matches as ptr
+                break
+            } else {
+                a = find_positional_arg(cmd, pos_idx)
+                if a == null {
+                    free_matches(m)
+                    return RESULT_ERROR, null, string_concat("unexpected positional argument: ", arg_str)
+                }
+                if value_ok(a, arg_str) == 0 {
+                    free_matches(m)
+                    return RESULT_ERROR, null, int_error_msg(a, arg_str)
+                }
+                map_put(m.values, a.name, copy(arg_str))
+                pos_idx = pos_idx + 1
+            }
+        }
+        i = i + 1
+    }
+
+    // required-argument enforcement
+    n_args = list_size(cmd.args)
+    for (k = 0; k < n_args; k++) {
+        a = list_get_raw(cmd.args, k) as *Arg
+        if a.required == 1 {
+            has_val = map_has(m.values, a.name)
+            has_flag = map_has(m.flags, a.name)
+            if has_val == 0 && has_flag == 0 {
+                free_matches(m)
+                return RESULT_ERROR, null, string_concat("required argument missing: ", a.name)
+            }
+        }
+    }
+
+    return RESULT_OK, m as ptr, ok
+}
+
+// --- typed value extraction ---
+
+// get_string(matches, name) -> the raw string value, or "" if absent.
+get_string(m: ptr, name: string) -> string {
+    if m == null { return "" }
+    matches = m as *ArgMatches
+    v = map_get_raw(matches.values, name)
+    if v == null { return "" }
+    return v
+}
+
+// get_int(matches, name) -> (value, error). error is non-empty if the argument
+// is absent or (defensively) non-numeric. Because int arguments are validated
+// during parse(), a present int argument always parses here.
+get_int(m: ptr, name: string) -> (int, string) {
+    if m == null { return 0, "no matches" }
+    matches = m as *ArgMatches
+    v = map_get_raw(matches.values, name)
+    if v == null {
+        return 0, string_concat("argument not provided: ", name)
+    }
+    return to_int(v)
+}
+
+// get_flag(matches, name) -> 1 if the flag was present, else 0.
+get_flag(m: ptr, name: string) -> int {
+    if m == null { return 0 }
+    matches = m as *ArgMatches
+    if map_has(matches.flags, name) == 1 {
+        return 1
+    }
+    return 0
+}
+
+subcommand_name(m: ptr) -> string {
+    if m == null { return "" }
+    matches = m as *ArgMatches
+    if matches.subcommand == null { return "" }
+    sub = matches.subcommand as *ArgMatches
+    return sub.command_name
+}
+
+subcommand_matches(m: ptr, name: string) -> *ArgMatches {
+    if m == null { return null }
+    matches = m as *ArgMatches
+    if matches.subcommand == null { return null }
+    sub = matches.subcommand as *ArgMatches
+    if string_equals(sub.command_name, name) == 1 {
+        return sub
+    }
+    return null
+}
