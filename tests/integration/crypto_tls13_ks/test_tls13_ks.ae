@@ -115,6 +115,25 @@ main() {
     bytes.free(sk)
     bytes.free(siv)
 
+    // --- resumption PSK derivation (RFC 8448 §4) ---
+    // PSK = HKDF-Expand-Label(resumption_master_secret, "resumption",
+    //                         ticket_nonce, Hash.len). RFC 8448 §4 values:
+    //   resumption_master_secret = 7df235f2031d2a05...
+    //   ticket_nonce = 0000  ->  PSK = 4ecd0eb6ec3b4d87...
+    res_master = from_hex("7df235f2031d2a051287d02b0241b0bfdaf86cc856231f2d5aba46c434ec196c")
+    nonce = from_hex("0000")
+    psk = tls13_ks.psk_from_resumption("sha256", res_master, 32, nonce, 2)
+    if check("resumption PSK", to_hex(psk, 32),
+             "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3") == 0 { total_ok = 0 }
+    // early_secret_psk + binder_key must produce Hash.len outputs (chain sanity).
+    esp = tls13_ks.early_secret_psk("sha256", psk, 32)
+    bk = tls13_ks.binder_key("sha256", esp)
+    if bytes.length(bk) == 32 {
+        println("ok   binder_key derived (32 bytes)")
+    } else { println("FAIL binder_key length ${bytes.length(bk)}"); total_ok = 0 }
+    bytes.free(res_master); bytes.free(nonce); bytes.free(psk)
+    bytes.free(esp); bytes.free(bk)
+
     if total_ok == 0 {
         println("tls13_ks: FAILURES")
         exit(1)
