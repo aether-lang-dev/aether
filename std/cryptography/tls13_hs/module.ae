@@ -281,7 +281,7 @@ struct PskCh {
     truncated_len: int   // length of CH bytes the binder is computed over
 }
 
-client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string, ticket: ptr, ticket_len: int, obf_age: int, binder_len: int, out_ch: *PskCh) {
+client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string, ticket: ptr, ticket_len: int, obf_age: int, binder_len: int, with_early_data: int, out_ch: *PskCh) {
     buf = bytes.new(2048)
     bytes.set(buf, 2047, 0)
     body = 4
@@ -343,6 +343,12 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, 32)
     off = put_bytes(buf, off, x25519_pub, 32)
+    // early_data (42): an EMPTY extension in the ClientHello signals intent to
+    // send 0-RTT data (RFC 8446 §4.2.10). Emitted only when with_early_data.
+    if with_early_data == 1 {
+        off = put16(buf, off, 42)
+        off = put16(buf, off, 0)   // empty body
+    }
     // psk_key_exchange_modes (45): { psk_dhe_ke (1) }
     off = put16(buf, off, 45)
     off = put16(buf, off, 2)    // ext body len

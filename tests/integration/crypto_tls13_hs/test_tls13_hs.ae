@@ -222,7 +222,7 @@ main() {
     tkt_i = 0
     while tkt_i < 16 { bytes.set(tkt, tkt_i, 0xAB); tkt_i = tkt_i + 1 }
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt, 16, 0, 32, &pch)
+    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt, 16, 0, 32, 0, &pch)
     pok = 1
     if g8(pch.buf, 0) != 1 { pok = 0 }                       // client_hello type
     if pch.binder_off <= 0 { pok = 0 }
@@ -240,6 +240,23 @@ main() {
     } else { println("FAIL PSK CH structure"); total_ok = 0 }
     bytes.free(tkt)
     bytes.free(pch.buf)
+
+    // --- 0-RTT: PSK CH with early_data (42) extension is longer + still valid ---
+    tkt2 = bytes.new(16)
+    tk2i = 0
+    while tk2i < 16 { bytes.set(tkt2, tk2i, 0xCD); tk2i = tk2i + 1 }
+    pch_no = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    pch_ed = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt2, 16, 0, 32, 0, &pch_no)
+    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt2, 16, 0, 32, 1, &pch_ed)
+    // The early_data extension is 4 bytes (type 42 + zero length), so the
+    // 0-RTT CH is exactly 4 bytes longer and still begins with client_hello.
+    if g8(pch_ed.buf, 0) == 1 && pch_ed.buf_len == pch_no.buf_len + 4 {
+        println("ok   0-RTT CH adds early_data ext (+4 bytes)")
+    } else { println("FAIL 0-RTT CH len ${pch_ed.buf_len} vs ${pch_no.buf_len}"); total_ok = 0 }
+    bytes.free(tkt2)
+    bytes.free(pch_no.buf)
+    bytes.free(pch_ed.buf)
 
     bytes.free(random)
     bytes.free(sid)

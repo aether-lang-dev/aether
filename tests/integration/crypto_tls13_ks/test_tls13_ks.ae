@@ -131,8 +131,14 @@ main() {
     if bytes.length(bk) == 32 {
         println("ok   binder_key derived (32 bytes)")
     } else { println("FAIL binder_key length ${bytes.length(bk)}"); total_ok = 0 }
+    // 0-RTT: client_early_traffic_secret is a Hash.len secret over CH-hash.
+    ch_hash = from_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+    ets = tls13_ks.early_traffic_secret("sha256", esp, ch_hash, 32)
+    if bytes.length(ets) == 32 {
+        println("ok   early_traffic_secret derived (32 bytes)")
+    } else { println("FAIL early_traffic_secret length ${bytes.length(ets)}"); total_ok = 0 }
     bytes.free(res_master); bytes.free(nonce); bytes.free(psk)
-    bytes.free(esp); bytes.free(bk)
+    bytes.free(esp); bytes.free(bk); bytes.free(ch_hash); bytes.free(ets)
 
     if total_ok == 0 {
         println("tls13_ks: FAILURES")
