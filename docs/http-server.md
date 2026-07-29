@@ -49,6 +49,35 @@ Path parameters (`:id`) are extracted and reachable via
 
 ---
 
+## Static files
+
+```aether
+http.server_get(server, "/report", handle_report, 0)
+
+handle_report(req: ptr, res: ptr, ud: ptr) {
+    http.serve_file(res, "/srv/reports/latest.pdf")
+}
+
+// Or serve a whole directory:
+handle_assets(req: ptr, res: ptr, ud: ptr) {
+    http.serve_static(req, res, "/srv/www")
+}
+```
+
+`http.serve_file(res, filepath)` streams one file with `Content-Type`
+resolved via `http.mime_type(filepath)`. Under HTTP/1.1 cleartext on
+Linux/macOS it takes a zero-copy `sendfile(2)` fast path (the body
+never touches the heap; `TCP_CORK`/`TCP_NOPUSH` coalesces headers and
+body into one segment). TLS, HTTP/2, Range requests, and Windows fall
+back to a buffered read.
+
+`http.serve_static(req, res, base_dir)` dispatches the request path
+against a directory. Path traversal (`..`, `%2e` encodings) is
+rejected with 403, missing files return 404, and `Range` headers are
+honoured for partial content.
+
+---
+
 ## TLS termination
 
 ```aether

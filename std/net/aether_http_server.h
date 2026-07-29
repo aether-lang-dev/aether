@@ -235,8 +235,8 @@ typedef struct HttpServer {
     void* handler_actor;            // Legacy single actor (NULL = use C handlers)
     // Fire-and-forget: spawn one actor per request
     void (*send_fn)(void*, void*, size_t);      // aether_send_message (avoids link dep)
-    void* (*spawn_fn)(int, void (*)(void*), size_t);  // scheduler_spawn_pooled
-    void (*release_fn)(void*);                  // scheduler_release_pooled
+    void* (*spawn_fn)(int, void (*)(void*), size_t);  // scheduler_spawn_actor
+    void (*release_fn)(void*);                  // scheduler_release_actor
     void (*step_fn)(void*);                     // User-provided step function for per-request actors
 
     // Configuration
@@ -455,8 +455,8 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
 // Actor dispatch mode (fire-and-forget, one actor per request)
 // step_fn: actor step function that handles MSG_HTTP_REQUEST messages
 // send_fn: pass aether_send_message
-// spawn_fn: pass scheduler_spawn_pooled
-// release_fn: pass scheduler_release_pooled
+// spawn_fn: pass scheduler_spawn_actor
+// release_fn: pass scheduler_release_actor
 void http_server_set_actor_handler(HttpServer* server, void (*step_fn)(void*),
                                     void (*send_fn)(void*, void*, size_t),
                                     void* (*spawn_fn)(int, void (*)(void*), size_t),

@@ -4,6 +4,13 @@
 
 The Aether runtime implements several performance optimizations targeting message-passing overhead, synchronization primitives, and memory access patterns. Each optimization is integrated into the scheduler and message delivery paths.
 
+The optimizations are tiered by how they activate:
+
+- **Tier 0, platform capabilities (compile-time):** `AETHER_HAS_THREADS`, `AETHER_HAS_ATOMICS`, `AETHER_HAS_FILESYSTEM`, `AETHER_HAS_NETWORKING`, `AETHER_HAS_SIMD`, `AETHER_HAS_NUMA`, `AETHER_HAS_AFFINITY`. Auto-detected from the target; any flag can be forced off with `-DAETHER_NO_<FEATURE>` (e.g. `-DAETHER_NO_THREADING`). See [Platform Detection](architecture.md#platform-detection-tier-0).
+- **Tier 1, always on:** the Active Optimizations below (direct send, adaptive batching, message coalescing, thread-local pools).
+- **Tier 2, auto-detected at startup:** SIMD batch processing (AVX2/NEON), MWAIT idle (x86 MONITOR/MWAIT), CPU core pinning (OS-dependent).
+- **Tier 3, opt-in:** lock-free mailboxes and message deduplication, see [Opt-In Features](#opt-in-features).
+
 ## Active Optimizations
 
 ### Main Thread Actor Mode
@@ -179,7 +186,7 @@ Cache line padding on `head` and `tail` prevents false sharing between producer 
 
 **Implementation:** `runtime/actors/aether_spsc_queue.h`
 
-`auto_process` actors get a dedicated SPSC (single-producer, single-consumer) queue for receiving messages. The queue is lazy-allocated by `ensure_spsc_queue` on the first enqueue; `scheduler_spawn_pooled` initializes `actor->spsc_queue` to `NULL`, so regular actors never allocate one and receive through their mailbox instead. This separates the auto-process delivery path from ordinary mailbox delivery.
+`auto_process` actors get a dedicated SPSC (single-producer, single-consumer) queue for receiving messages. The queue is lazy-allocated by `ensure_spsc_queue` on the first enqueue; `scheduler_spawn_actor` initializes `actor->spsc_queue` to `NULL`, so regular actors never allocate one and receive through their mailbox instead. This separates the auto-process delivery path from ordinary mailbox delivery.
 
 ### Direct Mailbox Delivery
 

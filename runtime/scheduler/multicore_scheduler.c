@@ -37,7 +37,7 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms);
 
 // Forward declaration: TLS guard set by aether_send_message_sync while an
 // actor's step() is executing synchronously on the main thread.  Used to
-// defer main_thread_only=0 in scheduler_spawn_pooled and prevent a scheduler
+// defer main_thread_only=0 in scheduler_spawn_actor and prevent a scheduler
 // thread from entering the same step() concurrently.
 extern AETHER_TLS ActorBase* g_sync_step_actor;
 
@@ -926,7 +926,7 @@ void scheduler_init(int cores) {
 
     // Reset main-thread-mode and actor count between scheduler lifecycles.
     // Tests call scheduler_init/cleanup in sequence; a prior run may have left
-    // main_thread_mode=true (via scheduler_spawn_pooled), causing scheduler_start()
+    // main_thread_mode=true (via scheduler_spawn_actor), causing scheduler_start()
     // and scheduler_wait() to skip creating/joining threads on the next run.
     // Only reset if the user hasn't force-enabled inline mode via AETHER_INLINE.
     if (!atomic_load_explicit(&g_aether_config.inline_mode_forced, memory_order_relaxed)) {
@@ -976,11 +976,6 @@ void scheduler_init(int cores) {
         schedulers[i].messages_sent = 0;
         schedulers[i].messages_processed = 0;
 
-        // TIER 1 ALWAYS ON: Initialize actor pool with NUMA-aware allocation
-        schedulers[i].actor_pool = aether_numa_alloc(sizeof(ActorPool), numa_node);
-        if (schedulers[i].actor_pool) {
-            actor_pool_init(schedulers[i].actor_pool);
-        }
         // TIER 1 ALWAYS ON: Initialize adaptive batching
         adaptive_batch_init(&schedulers[i].batch_state);
 
@@ -1243,11 +1238,6 @@ void scheduler_cleanup() {
             aether_numa_free(schedulers[i].actors, MAX_ACTORS_PER_CORE * sizeof(ActorBase*));
             schedulers[i].actors = NULL;
         }
-        if (schedulers[i].actor_pool != NULL) {
-            aether_numa_free(schedulers[i].actor_pool, sizeof(ActorPool));
-            schedulers[i].actor_pool = NULL;
-        }
-
         // Clean up I/O event loop
         aether_io_poller_destroy(&schedulers[i].io_poller);
         free(schedulers[i].io_map);
@@ -1811,7 +1801,7 @@ void scheduler_send_batch_flush(void) {
 
 // Spawn actor with NUMA-aware allocation.  actor_size must be >= sizeof(ActorBase)
 // and cover the full derived-actor struct (e.g. sizeof(PingActor)).
-ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_t actor_size) {
+ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     if (preferred_core < 0 || preferred_core >= num_cores) {
         // Spawn on caller's core so parent→child messaging stays local.
         // Main thread (current_core_id == -1) defaults to core 0.
@@ -1828,7 +1818,8 @@ ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_
         mailbox_init(&actor->mailbox);
         AETHER_STAT_INC(actors_malloced);
     }
-    
+
+    actor->alloc_size = actor_size;
     actor->id = atomic_fetch_add(&next_actor_id, 1);
     actor->step = step;
     atomic_init(&actor->active, 0);  // inactive until first message send
@@ -1883,50 +1874,24 @@ ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_
     return actor;
 }
 
-// TIER 1 ALWAYS ON: Release actor back to pool
-void scheduler_release_pooled(ActorBase* actor) {
+void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
     // Track actor count for inline mode auto-detection
     aether_on_actor_terminate();
 
     // Reclaim the lazily-allocated same-core SPSC queue (owned solely by this
-    // actor, calloc'd by ensure_spsc_queue / send_buffer_flush). Neither
-    // teardown path below frees it, so without this every actor that ever
-    // flushed a same-core batch leaks its multi-KB queue. A pooled slot that is
-    // reused re-allocates lazily, since both allocators re-check for NULL.
+    // actor, calloc'd by ensure_spsc_queue / send_buffer_flush). numa_free
+    // below only releases the actor struct itself, so without this every actor
+    // that ever flushed a same-core batch leaks its multi-KB queue.
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
     }
 
-    int core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
-    if (core >= 0 && core < num_cores && schedulers[core].actor_pool) {
-        PooledActor* pooled = (PooledActor*)actor;
-        if (pooled->pool_index >= 0 && pooled->pool_index < ACTOR_POOL_SIZE) {
-            actor_pool_release(schedulers[core].actor_pool, pooled);
-            return;
-        }
-    }
-    
-    // Not from pool, free with NUMA-aware deallocation
-    aether_numa_free(actor, sizeof(ActorBase));
+    aether_numa_free(actor, actor->alloc_size);
 }
 
-// Legacy API - now controls only TIER 3 opt-in features
-void scheduler_enable_features(int use_pool, int use_lockfree, int use_adaptive, int use_direct) {
-    // TIER 1 features are always on - these parameters are ignored
-    (void)use_pool;      // Actor pooling is always on
-    (void)use_adaptive;  // Adaptive batching is always on
-    (void)use_direct;    // Direct send is always on
-
-    // TIER 3 opt-in: Lock-free mailbox
-    if (use_lockfree) {
-        aether_enable_opt(AETHER_OPT_LOCKFREE_MAILBOX);
-    } else {
-        aether_disable_opt(AETHER_OPT_LOCKFREE_MAILBOX);
-    }
-}
 
 // ============================================================================
 // Ask/Reply support

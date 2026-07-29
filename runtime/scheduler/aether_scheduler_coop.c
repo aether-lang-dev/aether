@@ -119,7 +119,7 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     return 0;
 }
 
-ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_t actor_size) {
+ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size) {
     (void)preferred_core;
     if (actor_size < sizeof(ActorBase)) actor_size = sizeof(ActorBase);
 
@@ -129,6 +129,7 @@ ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_
     mailbox_init(&actor->mailbox);
     AETHER_STAT_INC(actors_malloced);
 
+    actor->alloc_size = actor_size;
     actor->id = atomic_fetch_add(&next_actor_id, 1);
     actor->step = step;
     atomic_store_explicit(&actor->active, 0, memory_order_relaxed);
@@ -157,7 +158,7 @@ ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_
     return actor;
 }
 
-void scheduler_release_pooled(ActorBase* actor) {
+void scheduler_release_actor(ActorBase* actor) {
     if (!actor) return;
 
     // Remove from scheduler's actor list
@@ -270,14 +271,6 @@ int aether_scheduler_poll(int max_per_actor) {
     }
 
     return total;
-}
-
-// ============================================================================
-// Legacy / opt-in features — no-ops in cooperative mode
-// ============================================================================
-
-void scheduler_enable_features(int use_pool, int use_lockfree, int use_adaptive, int use_direct) {
-    (void)use_pool; (void)use_lockfree; (void)use_adaptive; (void)use_direct;
 }
 
 // ============================================================================

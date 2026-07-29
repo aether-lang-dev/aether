@@ -24,8 +24,6 @@ AetherRuntimeConfig g_aether_config = {
     .preempt_threshold_ns = 1000000, // 1ms default
     .profile = AETHER_PROFILE_MEDIUM,
     .msg_pool_size = AETHER_PROFILE_MEDIUM_MSG_POOL,
-    .actor_pool_size = AETHER_PROFILE_MEDIUM_ACTOR_POOL,
-    .actors_pooled = 0,
     .actors_malloced = 0,
     .direct_sends = 0,
     .queue_sends = 0,
@@ -122,17 +120,12 @@ void aether_init_from_env(void) {
     // Profile from env or default
     g_aether_config.profile = aether_profile_from_env();
 
-    // Pool sizes: env override > profile default
+    // Pool size: env override > profile default
     int env_msg = aether_env_int("AETHER_MSG_POOL_SIZE", 0);
-    int env_actor = aether_env_int("AETHER_ACTOR_POOL_SIZE", 0);
 
     g_aether_config.msg_pool_size = env_msg > 0
         ? env_msg
         : aether_profile_msg_pool_size(g_aether_config.profile);
-
-    g_aether_config.actor_pool_size = env_actor > 0
-        ? env_actor
-        : aether_profile_actor_pool_size(g_aether_config.profile);
 
     // Check verbose mode
     if (getenv("AETHER_VERBOSE")) {
@@ -151,7 +144,6 @@ void aether_init_from_env(void) {
     // No getenv: use defaults
     g_aether_config.profile = AETHER_PROFILE_MEDIUM;
     g_aether_config.msg_pool_size = aether_profile_msg_pool_size(AETHER_PROFILE_MEDIUM);
-    g_aether_config.actor_pool_size = aether_profile_actor_pool_size(AETHER_PROFILE_MEDIUM);
 #endif
 }
 
@@ -180,10 +172,9 @@ void aether_print_config(void) {
     printf("  getenv:     %s\n", AETHER_HAS_GETENV     ? "YES" : "NO");
     printf("  malloc:     %s\n\n", AETHER_HAS_MALLOC   ? "YES" : "NO");
 
-    printf("PROFILE: %s (msg_pool=%d, actor_pool=%d)\n",
+    printf("PROFILE: %s (msg_pool=%d)\n",
            aether_profile_name(g_aether_config.profile),
-           g_aether_config.msg_pool_size,
-           g_aether_config.actor_pool_size);
+           g_aether_config.msg_pool_size);
 
     const char* inline_status = "auto";
     if (atomic_load(&g_aether_config.inline_mode_forced)) inline_status = "forced ON (AETHER_INLINE)";
@@ -193,7 +184,6 @@ void aether_print_config(void) {
            atomic_load(&g_aether_config.inline_mode_active) ? "active" : "inactive");
 
     printf("TIER 1 - ALWAYS ON:\n");
-    printf("  [ON] Actor Pooling        - Reuses actor structs, avoids malloc churn\n");
     printf("  [ON] Direct Send          - Same-core bypass\n");
     printf("  [ON] Adaptive Batching    - Dynamic 4-64 batch size\n");
     printf("  [ON] Message Coalescing   - Amortises atomics across bursts\n");

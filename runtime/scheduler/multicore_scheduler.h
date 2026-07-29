@@ -5,7 +5,6 @@
 #include "../utils/aether_thread.h"
 #include <stdatomic.h>
 #include "../actors/actor_state_machine.h"
-#include "../actors/aether_actor_pool.h"
 #include "../actors/lockfree_mailbox.h"
 #include "../actors/aether_adaptive_batch.h"
 #include "../actors/aether_message_dedup.h"
@@ -108,6 +107,10 @@ typedef struct {
     // or a caught signal. Dead actors are skipped by the scheduler and incoming
     // messages are dropped. One-way transition; never un-set.
     atomic_int dead;
+    // Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps
+    // exactly [ptr, ptr+size), so freeing a derived actor with sizeof(ActorBase)
+    // would leak the derived-struct tail on every destroy under libnuma.
+    size_t alloc_size;
 } ActorBase;
 
 typedef struct {
@@ -140,8 +143,6 @@ typedef struct {
         int count;
     } coalesce_buffer;
 
-    // Integrated optimizations (pointers to avoid bloating struct)
-    ActorPool* actor_pool;            // Actor pooling (reuse retired actor structs)
     AdaptiveBatchState batch_state;   // Adaptive batching (small, embedded)
 
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
@@ -178,12 +179,9 @@ void scheduler_send_batch_start(void);
 void scheduler_send_batch_add(ActorBase* actor, Message msg);
 void scheduler_send_batch_flush(void);
 
-// Optimized APIs using integrated features (TIER 1 - always on)
-ActorBase* scheduler_spawn_pooled(int preferred_core, void (*step)(void*), size_t actor_size);
-void scheduler_release_pooled(ActorBase* actor);
-
-// Legacy API - now controls only TIER 3 opt-in features
-void scheduler_enable_features(int use_pool, int use_lockfree, int use_adaptive, int use_direct);
+// NUMA-aware actor lifetime (TIER 1 - always on)
+ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t actor_size);
+void scheduler_release_actor(ActorBase* actor);
 
 // Ask/reply: send a message and block until a reply arrives or timeout.
 // Returns malloc'd reply payload on success (caller must free), NULL on timeout.

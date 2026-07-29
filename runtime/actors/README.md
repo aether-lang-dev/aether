@@ -15,18 +15,7 @@ Base actor implementation with lightweight message passing.
 
 ### Performance Optimizations
 
-#### 1. Actor Pooling (aether_actor_pool.h)
-Reuses actor instances instead of repeated allocation/deallocation.
-
-**Implementation:**
-- Pool of 256 pre-allocated actors per type
-- Lock-free acquisition using atomic CAS
-- Custom reset callbacks for state cleanup
-- Falls back to malloc when pool exhausted
-
-**Use Case:** High actor churn workloads where actors are frequently created and destroyed.
-
-#### 2. Direct Actor Bypass (aether_direct_send.h)
+#### 1. Direct Actor Bypass (aether_direct_send.h)
 Skips mailbox for same-core actors by directly invoking message handlers.
 
 **Implementation:**
@@ -39,7 +28,7 @@ Skips mailbox for same-core actors by directly invoking message handlers.
 
 **Expected Improvement:** Eliminates mailbox latency for intra-core communication.
 
-#### 3. Message Deduplication (aether_message_dedup.h)
+#### 2. Message Deduplication (aether_message_dedup.h)
 Detects and skips redundant messages using a rolling window.
 
 **Implementation:**
@@ -52,20 +41,7 @@ Detects and skips redundant messages using a rolling window.
 
 **Expected Improvement:** Reduces processing overhead for duplicate-heavy patterns.
 
-#### 4. Compile-Time Message Specialization (aether_message_specialize.h)
-Generates optimized send/receive functions for specific message types.
-
-**Implementation:**
-- Macro-based code generation per message type
-- Eliminates generic message construction overhead
-- Type-safe at compile time
-- Zero-overhead abstraction
-
-**Use Case:** Performance-critical message types with known structure.
-
-**Expected Improvement:** Eliminates branching and unused field initialization.
-
-#### 5. Adaptive Batch Processing (aether_adaptive_batch.h)
+#### 3. Adaptive Batch Processing (aether_adaptive_batch.h)
 Dynamically adjusts batch size based on message queue utilization.
 
 **Implementation:**
@@ -79,27 +55,6 @@ Dynamically adjusts batch size based on message queue utilization.
 **Expected Improvement:** Balances throughput and latency based on load.
 
 ## Usage
-
-### Basic Actor Pooling
-
-```c
-#include "aether_actor_pool.h"
-
-ActorPool pool;
-actor_pool_init(&pool);
-
-// Acquire from pool
-PooledActor* actor = actor_pool_acquire(&pool);
-if (!actor) {
-    // Pool exhausted, allocate manually
-    actor = malloc(sizeof(PooledActor));
-}
-
-// Use actor...
-
-// Return to pool
-actor_pool_release(&pool, actor);
-```
 
 ### Direct Send Optimization
 
@@ -130,18 +85,6 @@ if (!is_duplicate(&window, &msg)) {
 }
 ```
 
-### Specialized Messages
-
-```c
-#include "aether_message_specialize.h"
-
-// Define specialized message type
-DEFINE_SPECIALIZED_SEND(MSG_INCREMENT, increment)
-
-// Use specialized send
-send_increment(&actor->mailbox, sender_id);
-```
-
 ### Adaptive Batching
 
 ```c
@@ -155,28 +98,12 @@ Message msgs[64];
 int count = adaptive_batch_receive(&state, &mbox, msgs, 64);
 ```
 
-## Benchmarking
-
-Run baseline benchmark:
-```bash
-cd benchmarks/optimizations
-gcc -O3 bench_actor_baseline.c -o bench_baseline
-./bench_baseline
-```
-
-Run optimized benchmark:
-```bash
-gcc -O3 bench_actor_optimized.c -o bench_optimized
-./bench_optimized
-```
-
 ## Testing
 
-Run unit tests:
+The runtime C test suite covers these components:
+
 ```bash
-cd tests/runtime
-gcc -O2 test_actor_optimizations.c -o test_optimizations
-./test_optimizations
+make test
 ```
 
 ## Performance Notes
@@ -186,9 +113,6 @@ gcc -O2 test_actor_optimizations.c -o test_optimizations
 - Some optimizations benefit specific workload patterns more than others
 - Profiling recommended to identify which optimizations apply to your use case
 
-## Implementation Status
-
-- All optimizations are header-only for easy integration
-- No external dependencies beyond standard C library
-- Thread-safe where applicable (noted in documentation)
-- Tested on x86-64, cross-platform compatible
+See [Runtime Optimizations](../../docs/runtime-optimizations.md) for the
+full optimization catalog and [Actor Concurrency](../../docs/actor-concurrency.md)
+for the scheduler design.
