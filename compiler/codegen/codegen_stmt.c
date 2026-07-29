@@ -1081,6 +1081,9 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
  * Skips nested function / closure scopes (their assignments are in
  * a different lexical frame). Stops at the first heap-source
  * assignment to `var_name`. */
+static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
+                                         int position);
+
 int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
                                const char* var_name) {
     if (!node || !var_name) return 0;
@@ -1094,6 +1097,42 @@ int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
         node->child_count > 0 && node->children[0] &&
         is_heap_string_expr(gen, node->children[0])) {
         return 1;
+    }
+    /* `var_name` bound by a tuple destructure — `a, err = g(...)`. It is heap
+     * iff g's tuple position for `var_name` is heap-classified. Without this,
+     * an error slot fed from a callee's heap tracked-empty (e.g. asn1.read_oid
+     * returning `strbuilder.finish(sb), err` where `err` came from
+     * `read_tagged`'s heap `""`) is seen as non-heap, so the destructure site
+     * sets `_heap_<err> = 0` and the byte leaks at every nested read_* call
+     * (issue #1311). Children layout: last is the RHS call, the rest are the
+     * target var nodes at their tuple positions. */
+    if (node->type == AST_TUPLE_DESTRUCTURE && node->child_count >= 2) {
+        int vc = node->child_count - 1;
+        ASTNode* rhs = node->children[node->child_count - 1];
+        for (int j = 0; j < vc; j++) {
+            ASTNode* tgt = node->children[j];
+            if (tgt && tgt->value && strcmp(tgt->value, var_name) == 0) {
+                if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value &&
+                    gen && gen->program) {
+                    char fn_norm[256];
+                    const char* fn = codegen_normalise_callee(rhs->value,
+                                                              fn_norm,
+                                                              sizeof(fn_norm));
+                    ASTNode* callee = find_function_definition_by_name(gen->program, fn);
+                    if (callee) {
+                        if (function_def_returns_heap_at(gen, callee, j)) return 1;
+                    } else {
+                        ASTNode* ext = find_extern_declaration_by_name(gen->program, fn);
+                        if (ext && ext->node_type &&
+                            ext->node_type->tuple_heap_flags &&
+                            j < ext->node_type->tuple_count &&
+                            ext->node_type->tuple_heap_flags[j]) {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
     }
     for (int i = 0; i < node->child_count; i++) {
         if (body_assigns_var_from_heap(gen, node->children[i], var_name)) return 1;

@@ -19,9 +19,9 @@ test_cryptography_hmac_md4_md5 122
 # test_rsa_pkcs1 uses std.cryptography.random_bytes (OpenSSL RAND) for
 # PKCS#1 v1.5 type-2 padding, so it inherits the same OPENSSL_cleanup
 # atexit false-positive as the entry above (memory returned to the OS at
-# exit; leaks(1) --atExit samples before atexit handlers run). The small
-# remainder is the Aether heap-string-tracker's empty-string ("") quirk on
-# cross-module (ptr, string) success returns — 1 byte each, exit-only,
-# documented in feedback_aether_heap_string_no_manual_free; tracked for a
-# compiler fix. Cap covers both with no headroom for a real regression.
+# exit; leaks(1) --atExit samples before atexit handlers run). The
+# heap-string-tracker's empty-string ("") quirk on cross-module (ptr, string)
+# success returns (issue #1311, 1 byte per nested asn1 read_*) is now FIXED in
+# codegen (nested tuple-destructure error slots are heap-classified), so the
+# remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
 test_rsa_pkcs1 130
