@@ -9,7 +9,8 @@
 //   and sha2 (transcript hash).
 //
 // Subset (matches #1298):
-//   - TLS 1.3 only; x25519 + secp256r1 key exchange
+//   - TLS 1.3 only; x25519 + secp256r1 key exchange, plus post-quantum
+//     X25519MLKEM768 via connect_pq()
 //   - cipher suites: TLS_CHACHA20_POLY1305_SHA256 and TLS_AES_128_GCM_SHA256
 //     (negotiated from the ServerHello)
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
@@ -81,6 +82,7 @@ import std.string
 import std.cryptography.sha2
 import std.cryptography.hmac
 import std.cryptography.x25519
+import std.cryptography.mlkem
 import std.cryptography.p256
 import std.cryptography.tls13_kdf
 import std.cryptography.tls13_ks
@@ -105,7 +107,7 @@ exports (
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    connect, connect_pq, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
     verify_flight_auth
@@ -747,13 +749,156 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
         return null, suite_err
     }
 
+    // Derive keys from the (classical) 32-byte ECDHE secret and run the shared
+    // post-ServerHello handshake tail (flight read, auth, Finished).
+    result, result_err = run_handshake_tail(sock, rio, tr, host, shared, 32,
+        parsed.cipher_suite)
+
+    bytes.free(shared)
+    if parsed.key_share != null { bytes.free(parsed.key_share) }
+    bytes.free(sh); bytes.free(shrec)
+    cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
+    if own_priv == 1 { bytes.free(cur_priv) }   // P-256 retry scalar (HRR path)
+    bytes.free(p256_priv)                       // the pre-offered P-256 ephemeral
+    if result == null {
+        recio_free(rio); net.tcp_close(sock)
+    }
+    return result, result_err
+}
+
+// Post-quantum connect: offer the X25519MLKEM768 hybrid group (RFC-draft
+// X25519+ML-KEM-768, the group Chrome/Cloudflare default to), with x25519 as a
+// classical fallback share. Generates its own ephemerals (the hybrid private is
+// a pair: an X25519 scalar + a 2400-byte ML-KEM decapsulation key). On the
+// server's ServerHello it either does the hybrid key exchange (ML-KEM decaps ||
+// X25519 agree -> 64-byte shared secret) or, if the server fell back to x25519,
+// the classical exchange. Same authentication + Finished as connect() via the
+// shared tail. Returns a live ClientConn or (null, error).
+connect_pq(host: string, port: int) -> (ptr, string) {
+    sock = net.tcp_connect_raw(host, port)
+    if sock == null { return null, "connect failed" }
+
+    // Ephemerals: an ML-KEM-768 keypair (keep dk to decapsulate) and an X25519
+    // scalar (keep to agree). Seeds from the CSPRNG.
+    d = rand_into(32)
+    z = rand_into(32)
+    ek, dk = mlkem.mlkem768_keygen(d, z)
+    bytes.free(d); bytes.free(z)
+    xpriv = rand_into(32)
+    xpub = x25519.base_point(xpriv)
+
+    // Client hybrid share = ML-KEM ek(1184) || X25519 pub(32) = 1216 bytes.
+    ek_len = bytes.length(ek)
+    hybrid = bytes.new(ek_len + 32)
+    bytes.set(hybrid, ek_len + 32 - 1, 0)
+    bytes.copy_from_bytes(hybrid, 0, ek, 0, ek_len)
+    bytes.copy_from_bytes(hybrid, ek_len, xpub, 0, 32)
+
+    rnd = rand_into(32)
+    sid = rand_into(32)
+    ch = tls13_hs.client_hello_pq(rnd, sid, 32, hybrid, ek_len + 32, xpub, host)
+    ch_len = bytes.length(ch)
+    tr = transcript_new()
+    transcript_add(tr, ch, ch_len)
+    serr = send_plaintext_handshake(sock, ch, ch_len)
+    if string.equals(serr, "") != 1 {
+        bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
+        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        return null, serr
+    }
+    rio = recio_new(sock)
+
+    shrec, shlen, sherr = recio_next_hs(rio)
+    if string.equals(sherr, "") != 1 {
+        bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
+        cleanup_hello(null, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, sherr
+    }
+    sh_msg_len = shlen - 5
+    sh = bytes.new(sh_msg_len)
+    bytes.set(sh, sh_msg_len - 1, 0)
+    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
+    transcript_add(tr, sh, sh_msg_len)
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
+    perr = tls13_hs.parse_server_hello(sh, sh_msg_len, &parsed)
+
+    result = null
+    result_err = perr
+    if string.equals(perr, "") == 1 {
+        // Compute the shared secret from the group the server selected.
+        shared = null
+        shared_len = 0
+        sherr2 = ""
+        if parsed.group == tls13_hs.GROUP_X25519MLKEM768 {
+            // Server share = ML-KEM ct(1088) || X25519 pub(32) = 1120 bytes.
+            if parsed.key_share_len != 1120 {
+                sherr2 = "X25519MLKEM768 server share wrong size"
+            } else {
+                ct = bytes.new(1088); bytes.set(ct, 1087, 0)
+                bytes.copy_from_bytes(ct, 0, parsed.key_share, 0, 1088)
+                sxpub = bytes.new(32); bytes.set(sxpub, 31, 0)
+                bytes.copy_from_bytes(sxpub, 0, parsed.key_share, 1088, 32)
+                mlk_ss = mlkem.mlkem768_decaps(dk, ct)
+                x_ss, xerr = x25519.agree(xpriv, sxpub)
+                if string.equals(xerr, "") != 1 {
+                    sherr2 = xerr
+                } else {
+                    // Hybrid shared secret = ML-KEM ss(32) || X25519 ss(32).
+                    shared = bytes.new(64); bytes.set(shared, 63, 0)
+                    bytes.copy_from_bytes(shared, 0, mlk_ss, 0, 32)
+                    bytes.copy_from_bytes(shared, 32, x_ss, 0, 32)
+                    shared_len = 64
+                }
+                bytes.free(ct); bytes.free(sxpub); bytes.free(mlk_ss)
+                if x_ss != null { bytes.free(x_ss) }
+            }
+        } else {
+            if parsed.group == tls13_hs.GROUP_X25519 {
+                // Server fell back to classical x25519.
+                shared, sherr2 = x25519.agree(xpriv, parsed.key_share)
+                shared_len = 32
+            } else {
+                sherr2 = "server chose an unoffered group"
+            }
+        }
+
+        if string.equals(sherr2, "") != 1 || shared == null {
+            result_err = sherr2
+            if string.equals(sherr2, "") == 1 { result_err = "PQ key exchange failed" }
+        } else {
+            result, result_err = run_handshake_tail(sock, rio, tr, host, shared, shared_len, parsed.cipher_suite)
+            bytes.free(shared)
+        }
+    }
+
+    bytes.free(ek); bytes.free(dk); bytes.free(xpriv); bytes.free(xpub); bytes.free(hybrid)
+    if parsed.key_share != null { bytes.free(parsed.key_share) }
+    bytes.free(sh); bytes.free(shrec)
+    cleanup_hello(null, rnd, sid, ch); transcript_free(tr)
+    if result == null {
+        recio_free(rio); net.tcp_close(sock)
+    }
+    return result, result_err
+}
+
+// The shared post-ServerHello handshake tail: derive handshake keys from the
+// ECDHE/hybrid `shared` secret (`shared_len` = 32 classical, 64 for the PQ
+// hybrid), read + authenticate the server flight (Certificate / CertificateVerify
+// / Finished — failing closed with a fatal alert on any policy failure), verify
+// the server Finished, send the client Finished, and return a live ClientConn.
+// The caller owns and frees sock/rio/tr on the null-result path via its own
+// cleanup; on success ownership of sock+rio moves into the returned conn.
+// Returns (conn, "") or (null, err). Does NOT free `shared`, `tr`, sh/shrec,
+// or the ClientHello — the caller does.
+fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
+                      shared: ptr, shared_len: int, cipher_suite: int) -> (ptr, string) {
+    rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
+    if string.equals(suite_err, "") != 1 { return null, suite_err }
+
     th_chsh = transcript_hash_algo(tr, hash_algo)
-    keys = derive_handshake_keys_algo(shared, 32, th_chsh, hash_len, rec_key_len, hash_algo)
+    keys = derive_handshake_keys_algo(shared, shared_len, th_chsh, hash_len, rec_key_len, hash_algo)
     srv_ctx = tls13_record.new_aead(rec_aead, hs_server_key(keys), rec_key_len, hs_server_iv(keys))
 
-    // Read + decrypt the server flight, adding each handshake message to the
-    // transcript. Snapshot the transcript hash BEFORE the server Finished (for
-    // its MAC) and capture the server Finished's verify_data.
     fl = bytes.new(16384)
     bytes.set(fl, 0, 0)
     fllen = 0
@@ -782,15 +927,11 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
                 }
                 if opened.plaintext != null { bytes.free(opened.plaintext) }
                 bytes.free(nrec)
-                // The flight is complete once a Finished(20) message is fully
-                // present in the accumulated buffer.
                 if flight_complete(fl, fllen) == 1 { done = 1 }
             }
         }
     }
 
-    // Fold the whole flight into the transcript in wire order, capturing the
-    // transcript hash BEFORE the final Finished (for the server Finished MAC).
     if string.equals(ferr, "") == 1 {
         th_before_finished, th_through_cert = add_flight_capture_prefinished(tr, fl, fllen, hash_algo)
         server_verify_data, svd_len = extract_server_finished(fl, fllen)
@@ -799,15 +940,9 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     result = null
     result_err = ferr
     if string.equals(ferr, "") == 1 {
-        // Authenticate the server: verify its CertificateVerify signature over
-        // the transcript through Certificate (RFC 8446 §4.4.3), then enforce
-        // validity / hostname / chain-to-trusted-anchor. Fails closed. The
-        // trust store is loaded here and freed immediately after.
         auth_err = ""
         anchors, tsErr = tls13_cert.trust_store_load(trust_store_path())
         if anchors == null {
-            // Fail closed: without a trust store we cannot authenticate the
-            // chain, so we must not proceed as if the server were trusted.
             auth_err = "cannot load system trust store"
         } else {
             auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors)
@@ -815,13 +950,10 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
         }
         if string.equals(auth_err, "") != 1 {
             result_err = auth_err
-            // Tell the server WHY we're bailing: a fatal alert over the client
-            // handshake keys (RFC 8446 §6.2), instead of a silent RST.
             alert_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
             send_alert_hs(sock, alert_ctx, ALERT_LEVEL_FATAL, alert_for_auth_error(auth_err))
             tls13_record.free_ctx(alert_ctx)
         } else {
-        // Verify server Finished: HMAC(server_finished_key, th_before_finished).
         expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
         if bytes_equal(expected, server_verify_data, hash_len) != 1 {
             result_err = "server Finished MAC verification failed"
@@ -829,34 +961,24 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             send_alert_hs(sock, fctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
             tls13_record.free_ctx(fctx)
         } else {
-            // Handshake authenticated. Derive application keys and send the
-            // client Finished. th_sf = Transcript-Hash(CH..server Finished).
             th_sf = transcript_hash_algo(tr, hash_algo)
             ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
             c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
             s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
-
-            // Client Finished over th_sf, encrypted with the CLIENT handshake keys.
             cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
             cfin = build_finished_msg(cvd)
             cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
             cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
             cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
             net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
-
-            // Add the client Finished to the transcript and derive the
-            // resumption_master_secret over CH..client-Finished (RFC 8446 §7.1).
             transcript_add(tr, cfin, bytes.length(cfin))
             th_cf = transcript_hash_algo(tr, hash_algo)
             res_master = tls13_kdf.derive_secret(hash_algo, ms, hash_len, "res master", th_cf, hash_len)
             bytes.free(th_cf)
-
-            // Application record contexts (fresh sequence numbers per key).
             ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
             civ = tls13_ks.write_iv(hash_algo, c_ap)
             sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
             siv = tls13_ks.write_iv(hash_algo, s_ap)
-
             conn = malloc(56) as *ClientConn
             conn.sock = sock
             conn.rio = rio as ptr
@@ -866,7 +988,6 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             conn.res_hash_algo = str_to_bytes_local(hash_algo)
             conn.res_hash_len = hash_len
             result = conn as ptr
-
             bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
             bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
             tls13_record.free_ctx(cli_hs_ctx)
@@ -876,22 +997,13 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
         }
     }
 
-    // cleanup handshake-scoped state
     if th_through_cert != null { bytes.free(th_through_cert) }
     if th_before_finished != null { bytes.free(th_before_finished) }
     if server_verify_data != null { bytes.free(server_verify_data) }
     bytes.free(fl)
     tls13_record.free_ctx(srv_ctx)
     free_hs_keys(keys)
-    bytes.free(th_chsh); bytes.free(shared)
-    if parsed.key_share != null { bytes.free(parsed.key_share) }
-    bytes.free(sh); bytes.free(shrec)
-    cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
-    if own_priv == 1 { bytes.free(cur_priv) }   // P-256 retry scalar (HRR path)
-    bytes.free(p256_priv)                       // the pre-offered P-256 ephemeral
-    if result == null {
-        recio_free(rio); net.tcp_close(sock)
-    }
+    bytes.free(th_chsh)
     return result, result_err
 }
 
