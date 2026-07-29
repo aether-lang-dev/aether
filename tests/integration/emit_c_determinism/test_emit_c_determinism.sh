@@ -44,9 +44,14 @@ for src in $CORPUS; do
         tail -5 "$TMPDIR/log$i.b"
         exit 1
     fi
-    if ! cmp -s "$TMPDIR/a$i.c" "$TMPDIR/b$i.c"; then
+    # Byte-compare via cksum (coreutils): CRC + byte count. cmp/diff
+    # live in diffutils, which the Windows MSYS2 CI shell does not
+    # install, and a missing binary's exit 127 would read as "differs".
+    sum_a=$(cksum < "$TMPDIR/a$i.c")
+    sum_b=$(cksum < "$TMPDIR/b$i.c")
+    if [ "$sum_a" != "$sum_b" ]; then
         echo "  [FAIL] emit_c_determinism: $src emitted different C across two runs"
-        diff "$TMPDIR/a$i.c" "$TMPDIR/b$i.c" | head -10
+        echo "    run1: $sum_a  run2: $sum_b (cksum: crc bytes)"
         exit 1
     fi
     # Volatile metadata guard: a same-second recompile cannot catch baked
