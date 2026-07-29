@@ -14,7 +14,8 @@
 //     (negotiated from the ServerHello)
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
-//   - session resumption (PSK); no 0-RTT / mTLS
+//   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
+//     revocation check; no mTLS
 //
 // SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
 // hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
@@ -47,11 +48,18 @@
 // P-256-preferring server completes without a round-trip; HelloRetryRequest is
 // handled as a fallback).
 //
-// RESUMPTION (RFC 8446 §2.2): after a full handshake, conn_get_ticket captures
-// a NewSessionTicket; connect_resume(host, port, priv, ticket) then performs an
-// abbreviated PSK handshake (psk_dhe_ke, with a binder) — no Certificate, keyed
-// off the resumption PSK. Falls back to the caller's connect() if the server
-// rejects the PSK. Remaining limits: no 0-RTT/mTLS, no revocation (CRL/OCSP).
+// RESUMPTION (RFC 8446 §2.2): conn_get_ticket captures a NewSessionTicket;
+// connect_resume performs an abbreviated PSK handshake. connect_resume_0rtt
+// additionally sends 0-RTT early data in the first flight (RFC 8446 §2.3),
+// degrading to a plain resume if the ticket forbids it and completing 1-RTT if
+// the server rejects 0-RTT.
+//
+// ALERTS (RFC 8446 §6): connect() sends a fatal alert naming the reason on an
+// auth failure (not a silent RST); close_conn sends close_notify; conn_recv
+// surfaces inbound alerts as typed errors. REVOCATION: a stapled OCSP response
+// (RFC 6960) saying revoked fails the handshake closed (status parsed, not
+// responder-signature-verified). Remaining limits: no mTLS; OCSP is
+// stapling-only (no CRL / no OCSP fetch); no responder-sig verification.
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -1663,6 +1671,53 @@ fn extract_leaf_der(body: ptr, body_len: int) -> (ptr, int, string) {
     return der, cert_len, ""
 }
 
+// Extract a stapled OCSP response from the LEAF CertificateEntry's extensions
+// (RFC 8446 §4.4.2.1: the certificate_list entry after cert_data<3> is
+// extensions<2>; a status_request (type 5) extension holds a
+// CertificateStatus { status_type = ocsp(1), OCSPResponse<3> }). Returns the
+// OCSP response DER (fresh bytes; caller frees) + its length, or (null, 0) if
+// none is stapled. Best-effort — a parse hiccup just means "no staple".
+fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
+    if body_len < 1 { return null, 0 }
+    ctx_len = bytes.get(body, 0) & 0xFF
+    p = 1 + ctx_len
+    if p + 3 > body_len { return null, 0 }
+    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3
+    // First CertificateEntry: cert_data<3>, then extensions<2>.
+    if p + 3 > body_len { return null, 0 }
+    cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3 + cert_len
+    if p + 2 > body_len { return null, 0 }
+    ext_total = ((bytes.get(body, p)&0xFF)<<8)|(bytes.get(body, p+1)&0xFF)
+    p = p + 2
+    ext_end = p + ext_total
+    if ext_end > body_len { return null, 0 }
+    while p + 4 <= ext_end {
+        et = ((bytes.get(body,p)&0xFF)<<8)|(bytes.get(body,p+1)&0xFF)
+        el = ((bytes.get(body,p+2)&0xFF)<<8)|(bytes.get(body,p+3)&0xFF)
+        q = p + 4
+        if et == 5 {
+            // status_request ext body = CertificateStatus:
+            //   status_type(1) || OCSPResponse<3>
+            if el >= 4 {
+                stype = bytes.get(body, q) & 0xFF
+                if stype == 1 {
+                    olen = ((bytes.get(body,q+1)&0xFF)<<16)|((bytes.get(body,q+2)&0xFF)<<8)|(bytes.get(body,q+3)&0xFF)
+                    ostart = q + 4
+                    if ostart + olen <= ext_end {
+                        ob = bytes.new(olen)
+                        if olen > 0 { bytes.set(ob, olen - 1, 0); bytes.copy_from_bytes(ob, 0, body, ostart, olen) }
+                        return ob, olen
+                    }
+                }
+            }
+        }
+        p = q + el
+    }
+    return null, 0
+}
+
 // Parse a CertificateVerify body (RFC 8446 §4.4.3): algorithm(uint16) +
 // signature<2>. Returns (scheme, sig, sig_len, "").
 fn parse_cert_verify(body: ptr, body_len: int) -> (int, ptr, int, string) {
@@ -1759,6 +1814,17 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         bytes.free(der)
                         // Parse the remaining certs into `intermediates`.
                         parse_intermediates(cbody, ml, intermediates)
+                        // Revocation: if the server stapled an OCSP response for
+                        // the leaf and it says REVOKED, fail closed (RFC 6960).
+                        // Absence/soft-error is not treated as revoked.
+                        ocsp, ocsp_len = extract_stapled_ocsp(cbody, ml)
+                        if ocsp != null {
+                            status = tls13_cert.parse_ocsp_status(ocsp, ocsp_len)
+                            if status == tls13_cert.OCSP_REVOKED {
+                                if string.equals(err, "") == 1 { err = "certificate revoked (OCSP)" }
+                            }
+                            bytes.free(ocsp)
+                        }
                     }
                     bytes.free(cbody)
                 }

@@ -216,6 +216,16 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
 
+    // status_request (5): request OCSP stapling (RFC 6066 §8). Body =
+    // CertificateStatusRequest { status_type=ocsp(1), responder_id_list<2>=empty,
+    // request_extensions<2>=empty }. Lets a server staple its OCSP response so
+    // the client can check revocation without a separate OCSP fetch.
+    off = put16(buf, off, 5)
+    off = put16(buf, off, 5)      // ext body len
+    off = put8(buf, off, 1)       // status_type = ocsp
+    off = put16(buf, off, 0)      // responder_id_list<2> empty
+    off = put16(buf, off, 0)      // request_extensions<2> empty
+
     // application_layer_protocol_negotiation (16): offer "http/1.1"
     // (RFC 7301). Many CDNs reset a bare connection that omits ALPN or that
     // doesn't offer a protocol they serve; http/1.1 is the safe common one.
