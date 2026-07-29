@@ -38,12 +38,13 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 exports (
     client_hello, client_hello_sni, parse_server_hello,
     ShParsed,
-    TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256,
+    TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
     GROUP_X25519
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
 const TLS_AES_128_GCM_SHA256       = 0x1301
+const TLS_AES_256_GCM_SHA384       = 0x1302
 const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 
 // Named groups (RFC 8446 §4.2.7).
@@ -99,6 +100,17 @@ fn put_bytes(b: ptr, off: int, src: ptr, src_len: int) -> int {
     return off + src_len
 }
 
+// Append the ASCII bytes of a string; returns the new offset.
+fn put_ascii(b: ptr, off: int, s: string) -> int {
+    n = string_length(s)
+    i = 0
+    while i < n {
+        bytes.set(b, off + i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    return off + n
+}
+
 // ---- readers ----
 
 fn get8(b: ptr, off: int) -> int {
@@ -140,10 +152,11 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put8(buf, off, sid_len)
     off = put_bytes(buf, off, session_id, sid_len)
 
-    // cipher_suites<2..2^16-2>: offer ChaCha20-Poly1305 then AES-128-GCM
-    off = put16(buf, off, 4)                        // 2 suites * 2 bytes
+    // cipher_suites<2..2^16-2>: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM
+    off = put16(buf, off, 6)                        // 3 suites * 2 bytes
     off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
     off = put16(buf, off, TLS_AES_128_GCM_SHA256)
+    off = put16(buf, off, TLS_AES_256_GCM_SHA384)
 
     // legacy_compression_methods<1..2^8-1> = { 0 (null) }
     off = put8(buf, off, 1)
@@ -189,6 +202,16 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put16(buf, off, SIG_ECDSA_P256_SHA256)
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
+
+    // application_layer_protocol_negotiation (16): offer "http/1.1"
+    // (RFC 7301). Many CDNs reset a bare connection that omits ALPN or that
+    // doesn't offer a protocol they serve; http/1.1 is the safe common one.
+    // ext body = ProtocolNameList<2> ; entry = len<1> || name.
+    off = put16(buf, off, 16)         // extension_type = ALPN
+    off = put16(buf, off, 11)         // ext body len = 2 + 1 + 8
+    off = put16(buf, off, 9)          // ProtocolNameList length = 1 + 8
+    off = put8(buf, off, 8)           // ProtocolName length
+    off = put_ascii(buf, off, "http/1.1")
 
     // key_share (51): one x25519 KeyShareEntry { group, key<len> }
     off = put16(buf, off, 51)

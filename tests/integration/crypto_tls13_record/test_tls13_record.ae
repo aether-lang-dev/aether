@@ -183,6 +183,39 @@ main() {
     } else {
         println("FAIL AES-128-GCM record round-trip"); total_ok = 0
     }
+
+    // --- AES-256-GCM AEAD selection round-trips (32-byte key) ---
+    a2key = bytes.new(32)
+    a2i = 0
+    while a2i < 32 { bytes.set(a2key, a2i, (a2i * 9 + 1) & 0xFF); a2i = a2i + 1 }
+    a2iv = bytes.new(12)
+    a2j = 0
+    while a2j < 12 { bytes.set(a2iv, a2j, (a2j * 5 + 2) & 0xFF); a2j = a2j + 1 }
+    a2send = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, a2key, 32, a2iv)
+    a2recv = tls13_record.new_aead(tls13_record.AEAD_AES_256_GCM, a2key, 32, a2iv)
+    a2msg = bytes.new(40)
+    a2m = 0
+    while a2m < 40 { bytes.set(a2msg, a2m, 65 + (a2m % 26)); a2m = a2m + 1 }
+    a2rec = tls13_record.seal_record(a2send, tls13_record.CONTENT_APPLICATION_DATA, a2msg, 40)
+    a2o = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+    a2err = tls13_record.open_record(a2recv, a2rec, bytes.length(a2rec), &a2o)
+    a2ok = 1
+    if string.equals(a2err, "") != 1 { a2ok = 0 }
+    else {
+        if a2o.plaintext_len != 40 { a2ok = 0 }
+        if a2ok == 1 {
+            if to_hex(a2o.plaintext, 40) != to_hex(a2msg, 40) { a2ok = 0 }
+        }
+    }
+    if a2ok == 1 {
+        println("ok   AES-256-GCM record round-trips (32-byte key)")
+    } else {
+        println("FAIL AES-256-GCM record round-trip"); total_ok = 0
+    }
+    if a2o.plaintext != null { bytes.free(a2o.plaintext) }
+    tls13_record.free_ctx(a2send)
+    tls13_record.free_ctx(a2recv)
+    bytes.free(a2key); bytes.free(a2iv); bytes.free(a2msg); bytes.free(a2rec)
     if ao.plaintext != null { bytes.free(ao.plaintext) }
     tls13_record.free_ctx(asend)
     tls13_record.free_ctx(arecv)
