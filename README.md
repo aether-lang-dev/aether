@@ -99,13 +99,25 @@ See [Performance Benchmarks](docs/performance-benchmarks.md) for methodology and
 
 ### Install
 
-**Linux / macOS, remote one-liner (no clone):**
+**Linux / macOS / FreeBSD, prebuilt binary (no toolchain, no build):**
+
+Every [release](https://github.com/aether-lang-org/aether/releases/latest) ships a ready-to-run tarball (`ae` + `aetherc` + stdlib) named `aether-<version>-<platform>.tar.gz`, where `<platform>` is one of `linux-x86_64`, `macos-arm64`, `macos-x86_64`, `freebsd-x86_64`. Grab the URL for your platform from the [latest release](https://github.com/aether-lang-org/aether/releases/latest), then extract and add its `bin/` to your `PATH`:
+
+```bash
+# Example (substitute the current version + your platform from the Releases page):
+VER=0.458.0; PLATFORM=linux-x86_64
+curl -fsSL "https://github.com/aether-lang-org/aether/releases/download/v${VER}/aether-${VER}-${PLATFORM}.tar.gz" | tar xz -C ~/.local
+export PATH="$HOME/.local/bin:$PATH"     # add to ~/.bashrc / ~/.zshrc to persist
+ae version
+```
+
+**Linux / macOS, build from source (remote one-liner, no clone):**
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh | sh
 ```
 
-Fetches a pinned source tarball, builds the toolchain (Aether compiles to C, so the only prerequisites are a C compiler + GNU make, no tests run), and installs to `~/.local` (sudo-free). Pin a version with `AETHER_REF=v0.185.0`, or change the prefix with `PREFIX=/usr/local` (system-wide; needs sudo). Add `~/.local/bin` to your `PATH` if it isn't already.
+Fetches a pinned source tarball, builds the toolchain (Aether compiles to C, so the only prerequisites are a C compiler + GNU make, no tests run), and installs to `~/.local` (sudo-free). Pin a version with `AETHER_REF=<tag>` (see the [releases page](https://github.com/aether-lang-org/aether/releases) for tags), or change the prefix with `PREFIX=/usr/local` (system-wide; needs sudo). Add `~/.local/bin` to your `PATH` if it isn't already.
 
 **Linux / macOS, full clone install** (editor extension, `ae version` management, shell-PATH setup, `~/.aether` layout):
 
@@ -130,11 +142,13 @@ GCC is downloaded automatically the first time you run a program (~80 MB, one-ti
 **All platforms, install, upgrade, and switch versions:**
 
 ```bash
+ae version list              # see all available releases (newest first)
 ae upgrade                   # install the latest release and switch to it
-ae install v0.25.0           # install a specific release (latest if omitted)
-ae use v0.25.0               # switch to an installed version
-ae version list              # see all available releases
+ae install                   # install the latest release (or `ae install <tag>` for a specific one)
+ae use <tag>                 # switch to an already-installed version
 ```
+
+Run `ae version list` (or check the [latest release](https://github.com/aether-lang-org/aether/releases/latest)) to find the current tag; there's no need to hard-code one.
 
 (The longer `ae version install <v>` / `ae version use <v>` forms still
 work and are equivalent to `ae install` / `ae use`.)
