@@ -22,7 +22,8 @@
 //
 // EXPLICITLY OUT OF SCOPE for this brick (later increments): chain building
 // against a trust store, hostname / SAN matching, validity-period and Basic-
-// Constraints / EKU policy, and revocation. This is the crypto core, not the
+// Constraints / EKU policy. (OCSP-staple revocation status IS parsed — see
+// parse_ocsp_status.) This is the crypto core, not the
 // full RFC 5280 policy engine.
 //
 // Import with:  import std.cryptography.tls13_cert
@@ -57,7 +58,8 @@ exports (
     SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature,
-    trust_store_load, free_anchors
+    trust_store_load, free_anchors,
+    parse_ocsp_status, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
@@ -777,6 +779,113 @@ check_hostname(c: *LeafCert, host: string) -> string {
         i = i + 1
     }
     return "certificate is not valid for the requested hostname"
+}
+
+// ---- OCSP stapling: certificate revocation status (RFC 6960 + RFC 6066 §8) ----
+//
+// A server may staple a signed OCSP response in the leaf CertificateEntry's
+// status_request extension. parse_ocsp_status walks the response to the first
+// SingleResponse's certStatus and reports good / revoked / unknown, so the
+// client can fail closed on a REVOKED certificate. This checks the *status*
+// only; it does NOT verify the OCSP responder's signature (that needs the
+// responder's cert chain) — so it is a positive revocation signal, not a
+// substitute for a full RFC 6960 validator. A missing/soft-fail staple is not
+// treated as revoked (fail-open on absence, fail-closed on an explicit revoked).
+
+const OCSP_GOOD    = 0
+const OCSP_REVOKED = 1
+const OCSP_UNKNOWN = 2
+const OCSP_ERROR   = 3    // malformed / unsuccessful responseStatus
+
+// Read a DER TLV header at buf[p]: returns (tag, content_offset, content_len,
+// next_offset) or (-1,...) on truncation. Handles short + long-form lengths.
+fn der_tlv(buf: ptr, p: int, end: int) -> (int, int, int, int) {
+    if p + 2 > end { return -1, 0, 0, 0 }
+    tag = bytes.get(buf, p) & 0xFF
+    lb = bytes.get(buf, p + 1) & 0xFF
+    q = p + 2
+    clen = 0
+    if lb < 0x80 {
+        clen = lb
+    } else {
+        nbytes = lb & 0x7F
+        if q + nbytes > end { return -1, 0, 0, 0 }
+        i = 0
+        while i < nbytes { clen = (clen * 256) + (bytes.get(buf, q) & 0xFF); q = q + 1; i = i + 1 }
+    }
+    if q + clen > end { return -1, 0, 0, 0 }
+    return tag, q, clen, q + clen
+}
+
+// Parse a stapled OCSP response (DER) and return the first SingleResponse's
+// certStatus: OCSP_GOOD / OCSP_REVOKED / OCSP_UNKNOWN, or OCSP_ERROR on a
+// malformed / unsuccessful response.
+parse_ocsp_status(der: ptr, len: int) -> int {
+    // OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED, responseBytes [0] }
+    t0, c0, l0, n0 = der_tlv(der, 0, len)
+    if t0 != 0x30 { return OCSP_ERROR }
+    end0 = c0 + l0
+    // responseStatus ENUMERATED — must be 0 (successful).
+    ts, cs, ls, ns = der_tlv(der, c0, end0)
+    if ts != 0x0A { return OCSP_ERROR }
+    if ls < 1 { return OCSP_ERROR }
+    if (bytes.get(der, cs) & 0xFF) != 0 { return OCSP_ERROR }
+    // responseBytes [0] EXPLICIT SEQUENCE { responseType OID, response OCTET STRING }
+    tb, cb, lb2, nb = der_tlv(der, ns, end0)
+    if tb != 0xA0 { return OCSP_ERROR }
+    endb = cb + lb2
+    trb, crb, lrb, nrb = der_tlv(der, cb, endb)   // inner SEQUENCE
+    if trb != 0x30 { return OCSP_ERROR }
+    endrb = crb + lrb
+    toid, coid, loid, noid = der_tlv(der, crb, endrb)  // responseType OID (skip)
+    if toid != 0x06 { return OCSP_ERROR }
+    toct, coct, loct, noct = der_tlv(der, noid, endrb) // response OCTET STRING
+    if toct != 0x04 { return OCSP_ERROR }
+    // The OCTET STRING content is the DER of BasicOCSPResponse.
+    return parse_basic_ocsp(der, coct, coct + loct)
+}
+
+// BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm,
+//                                  signature, certs [0] }
+// We only need tbsResponseData -> responses -> [0].certStatus.
+fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
+    tb, cb, lb, nb = der_tlv(buf, start, end)
+    if tb != 0x30 { return OCSP_ERROR }
+    endb = cb + lb
+    // tbsResponseData ::= SEQUENCE { version? [0], responderID, producedAt,
+    //                                responses SEQUENCE OF SingleResponse, ... }
+    tt, ct, lt, nt = der_tlv(buf, cb, endb)
+    if tt != 0x30 { return OCSP_ERROR }
+    endt = ct + lt
+    // Walk tbsResponseData's fields to the first SEQUENCE OF (the `responses`).
+    // responderID is [1] or [2]; producedAt is GeneralizedTime (0x18); the
+    // responses is the first plain SEQUENCE (0x30) at this level.
+    p = ct
+    resp_seq = -1
+    resp_end = -1
+    while p < endt {
+        ti, ci, li, ni = der_tlv(buf, p, endt)
+        if ti < 0 { p = endt } else {
+            if ti == 0x30 { resp_seq = ci; resp_end = ci + li; p = endt }
+            else { p = ni }
+        }
+    }
+    if resp_seq < 0 { return OCSP_ERROR }
+    // First SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, ... }
+    ts1, cs1, ls1, ns1 = der_tlv(buf, resp_seq, resp_end)
+    if ts1 != 0x30 { return OCSP_ERROR }
+    end_sr = cs1 + ls1
+    // certID ::= SEQUENCE (skip it); certStatus is the NEXT element.
+    tcid, ccid, lcid, ncid = der_tlv(buf, cs1, end_sr)
+    if tcid != 0x30 { return OCSP_ERROR }
+    tcs, ccs, lcs, ncs = der_tlv(buf, ncid, end_sr)
+    if tcs < 0 { return OCSP_ERROR }
+    // certStatus CHOICE: good [0] IMPLICIT NULL (0x80), revoked [1] (0xA1),
+    // unknown [2] IMPLICIT NULL (0x82).
+    if tcs == 0x80 { return OCSP_GOOD }
+    if tcs == 0xA1 { return OCSP_REVOKED }
+    if tcs == 0x82 { return OCSP_UNKNOWN }
+    return OCSP_ERROR
 }
 
 // ---- chain building + cert-to-cert signature verification (RFC 5280) ----

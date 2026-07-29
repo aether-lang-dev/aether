@@ -216,6 +216,41 @@ main() {
     tls13_record.free_ctx(a2send)
     tls13_record.free_ctx(a2recv)
     bytes.free(a2key); bytes.free(a2iv); bytes.free(a2msg); bytes.free(a2rec)
+
+    // --- alert record round-trip: seal a 2-byte alert, open it back ---
+    alkey = bytes.new(16)
+    alk = 0
+    while alk < 16 { bytes.set(alkey, alk, (alk * 7 + 3) & 0xFF); alk = alk + 1 }
+    aliv = bytes.new(12)
+    alj = 0
+    while alj < 12 { bytes.set(aliv, alj, (alj * 2 + 1) & 0xFF); alj = alj + 1 }
+    alsend = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, alkey, 16, aliv)
+    alrecv = tls13_record.new_aead(tls13_record.AEAD_AES_128_GCM, alkey, 16, aliv)
+    almsg = bytes.new(2)
+    bytes.set(almsg, 0, 2)    // fatal
+    bytes.set(almsg, 1, 42)   // bad_certificate
+    alrec = tls13_record.seal_record(alsend, tls13_record.CONTENT_ALERT, almsg, 2)
+    alo = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+    alerr = tls13_record.open_record(alrecv, alrec, bytes.length(alrec), &alo)
+    alok = 1
+    if string.equals(alerr, "") != 1 { alok = 0 }
+    else {
+        if alo.content_type != tls13_record.CONTENT_ALERT { alok = 0 }
+        if alo.plaintext_len != 2 { alok = 0 }
+        if alok == 1 {
+            if (bytes.get(alo.plaintext, 0) & 0xFF) != 2 { alok = 0 }
+            if (bytes.get(alo.plaintext, 1) & 0xFF) != 42 { alok = 0 }
+        }
+    }
+    if alok == 1 {
+        println("ok   alert record seals/opens (content_type=21, level+desc)")
+    } else {
+        println("FAIL alert record round-trip"); total_ok = 0
+    }
+    if alo.plaintext != null { bytes.free(alo.plaintext) }
+    tls13_record.free_ctx(alsend)
+    tls13_record.free_ctx(alrecv)
+    bytes.free(alkey); bytes.free(aliv); bytes.free(almsg); bytes.free(alrec)
     if ao.plaintext != null { bytes.free(ao.plaintext) }
     tls13_record.free_ctx(asend)
     tls13_record.free_ctx(arecv)

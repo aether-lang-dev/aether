@@ -14,7 +14,8 @@
 //     (negotiated from the ServerHello)
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
-//   - session resumption (PSK); no 0-RTT / mTLS
+//   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
+//     revocation check; no mTLS
 //
 // SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
 // hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
@@ -47,11 +48,18 @@
 // P-256-preferring server completes without a round-trip; HelloRetryRequest is
 // handled as a fallback).
 //
-// RESUMPTION (RFC 8446 §2.2): after a full handshake, conn_get_ticket captures
-// a NewSessionTicket; connect_resume(host, port, priv, ticket) then performs an
-// abbreviated PSK handshake (psk_dhe_ke, with a binder) — no Certificate, keyed
-// off the resumption PSK. Falls back to the caller's connect() if the server
-// rejects the PSK. Remaining limits: no 0-RTT/mTLS, no revocation (CRL/OCSP).
+// RESUMPTION (RFC 8446 §2.2): conn_get_ticket captures a NewSessionTicket;
+// connect_resume performs an abbreviated PSK handshake. connect_resume_0rtt
+// additionally sends 0-RTT early data in the first flight (RFC 8446 §2.3),
+// degrading to a plain resume if the ticket forbids it and completing 1-RTT if
+// the server rejects 0-RTT.
+//
+// ALERTS (RFC 8446 §6): connect() sends a fatal alert naming the reason on an
+// auth failure (not a silent RST); close_conn sends close_notify; conn_recv
+// surfaces inbound alerts as typed errors. REVOCATION: a stapled OCSP response
+// (RFC 6960) saying revoked fails the handshake closed (status parsed, not
+// responder-signature-verified). Remaining limits: no mTLS; OCSP is
+// stapling-only (no CRL / no OCSP fetch); no responder-sig verification.
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -97,9 +105,9 @@ exports (
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, connect_resume, close_conn, conn_send, conn_recv,
+    connect, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_get_ticket, free_ticket, SessionTicket,
-    ticket_len, ticket_nonce_len, ticket_lifetime,
+    ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
     verify_flight_auth
 )
 
@@ -807,11 +815,19 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
         }
         if string.equals(auth_err, "") != 1 {
             result_err = auth_err
+            // Tell the server WHY we're bailing: a fatal alert over the client
+            // handshake keys (RFC 8446 §6.2), instead of a silent RST.
+            alert_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+            send_alert_hs(sock, alert_ctx, ALERT_LEVEL_FATAL, alert_for_auth_error(auth_err))
+            tls13_record.free_ctx(alert_ctx)
         } else {
         // Verify server Finished: HMAC(server_finished_key, th_before_finished).
         expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
         if bytes_equal(expected, server_verify_data, hash_len) != 1 {
             result_err = "server Finished MAC verification failed"
+            fctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+            send_alert_hs(sock, fctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
+            tls13_record.free_ctx(fctx)
         } else {
             // Handshake authenticated. Derive application keys and send the
             // client Finished. th_sf = Transcript-Hash(CH..server Finished).
@@ -959,6 +975,46 @@ fn extract_server_finished(fl: ptr, flen: int) -> (ptr, int) {
 }
 
 // Build a Finished handshake message: type(20) || uint24(len) || verify_data.
+// EndOfEarlyData handshake message (RFC 8446 §4.5): type 5, empty body.
+fn build_end_of_early_data() -> ptr {
+    m = bytes.new(4)
+    bytes.set(m, 0, 5)   // end_of_early_data
+    bytes.set(m, 1, 0)
+    bytes.set(m, 2, 0)
+    bytes.set(m, 3, 0)
+    return m
+}
+
+// Scan a decrypted handshake flight for an EncryptedExtensions (type 8) message
+// carrying an early_data extension (42) — the server's 0-RTT acceptance signal.
+// Returns 1 if present.
+fn flight_has_early_data_ext(fl: ptr, flen: int) -> int {
+    p = 0
+    while p + 4 <= flen {
+        mt = bytes.get(fl, p) & 0xFF
+        ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+        if p + 4 + ml > flen { return 0 }
+        if mt == HS_ENCRYPTED_EXTENSIONS {
+            // EE body = extensions<2>.
+            q = p + 4
+            if q + 2 <= flen {
+                ext_total = ((bytes.get(fl,q)&0xFF)<<8)|(bytes.get(fl,q+1)&0xFF)
+                q = q + 2
+                ee_end = q + ext_total
+                if ee_end > flen { ee_end = flen }
+                while q + 4 <= ee_end {
+                    et = ((bytes.get(fl,q)&0xFF)<<8)|(bytes.get(fl,q+1)&0xFF)
+                    el = ((bytes.get(fl,q+2)&0xFF)<<8)|(bytes.get(fl,q+3)&0xFF)
+                    if et == 42 { return 1 }
+                    q = q + 4 + el
+                }
+            }
+        }
+        p = p + 4 + ml
+    }
+    return 0
+}
+
 fn build_finished_msg(vd: ptr) -> ptr {
     vlen = bytes.length(vd)
     m = bytes.new(4 + vlen)
@@ -1002,6 +1058,89 @@ conn_send(conn: ptr, data: ptr, len: int) -> string {
     return ""
 }
 
+// ---- TLS alerts (RFC 8446 §6) ----
+//
+// An Alert is a 2-byte body { AlertLevel level, AlertDescription description }.
+// In TLS 1.3 every alert is fatal EXCEPT close_notify and user_canceled, but
+// the level byte is still sent (1 = warning, 2 = fatal) for compatibility.
+
+const ALERT_LEVEL_WARNING = 1
+const ALERT_LEVEL_FATAL   = 2
+
+const ALERT_CLOSE_NOTIFY        = 0
+const ALERT_UNEXPECTED_MESSAGE  = 10
+const ALERT_BAD_RECORD_MAC      = 20
+const ALERT_HANDSHAKE_FAILURE   = 40
+const ALERT_BAD_CERTIFICATE     = 42
+const ALERT_CERTIFICATE_EXPIRED = 45
+const ALERT_CERTIFICATE_UNKNOWN = 46
+const ALERT_ILLEGAL_PARAMETER   = 47
+const ALERT_DECODE_ERROR        = 50
+const ALERT_DECRYPT_ERROR       = 51
+const ALERT_PROTOCOL_VERSION    = 70
+const ALERT_INTERNAL_ERROR      = 80
+const ALERT_NO_APPLICATION_PROTOCOL = 120
+
+// Seal + send an encrypted TLS alert on an established connection (uses the
+// client's application write context). Best-effort: a send failure is ignored
+// (we're usually tearing down anyway). Returns "" on success.
+fn send_alert_conn(c: *ClientConn, level: int, desc: int) -> string {
+    body = bytes.new(2)
+    bytes.set(body, 0, level & 0xFF)
+    bytes.set(body, 1, desc & 0xFF)
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_ALERT, body, 2)
+    s = bytes.to_string(rec, bytes.length(rec))
+    net.tcp_send_n_raw(c.sock, s, bytes.length(rec))
+    bytes.free(body)
+    bytes.free(rec)
+    return ""
+}
+
+// Send a fatal alert during the HANDSHAKE (before app keys exist), using the
+// given handshake write context. Same wire shape; best-effort.
+fn send_alert_hs(sock: ptr, hs_ctx: ptr, level: int, desc: int) {
+    body = bytes.new(2)
+    bytes.set(body, 0, level & 0xFF)
+    bytes.set(body, 1, desc & 0xFF)
+    rec = tls13_record.seal_record(hs_ctx, tls13_record.CONTENT_ALERT, body, 2)
+    s = bytes.to_string(rec, bytes.length(rec))
+    net.tcp_send_n_raw(sock, s, bytes.length(rec))
+    bytes.free(body)
+    bytes.free(rec)
+}
+
+// Choose the fatal AlertDescription that best fits a server-authentication
+// error (RFC 8446 §6.2 / §4.4.2.4). Certificate policy failures → the specific
+// certificate_* / bad_certificate; anything else → handshake_failure.
+fn alert_for_auth_error(err: string) -> int {
+    if string.contains(err, "expired") == 1 { return ALERT_CERTIFICATE_EXPIRED }
+    if string.contains(err, "not yet valid") == 1 { return ALERT_CERTIFICATE_EXPIRED }
+    if string.contains(err, "hostname") == 1 { return ALERT_BAD_CERTIFICATE }
+    if string.contains(err, "not valid for the requested") == 1 { return ALERT_BAD_CERTIFICATE }
+    if string.contains(err, "trusted anchor") == 1 { return ALERT_CERTIFICATE_UNKNOWN }
+    if string.contains(err, "chain") == 1 { return ALERT_CERTIFICATE_UNKNOWN }
+    if string.contains(err, "CertificateVerify") == 1 { return ALERT_DECRYPT_ERROR }
+    return ALERT_HANDSHAKE_FAILURE
+}
+
+// Map an AlertDescription byte to a short human-readable name (for errors).
+fn alert_name(desc: int) -> string {
+    if desc == ALERT_CLOSE_NOTIFY { return "close_notify" }
+    if desc == ALERT_UNEXPECTED_MESSAGE { return "unexpected_message" }
+    if desc == ALERT_BAD_RECORD_MAC { return "bad_record_mac" }
+    if desc == ALERT_HANDSHAKE_FAILURE { return "handshake_failure" }
+    if desc == ALERT_BAD_CERTIFICATE { return "bad_certificate" }
+    if desc == ALERT_CERTIFICATE_EXPIRED { return "certificate_expired" }
+    if desc == ALERT_CERTIFICATE_UNKNOWN { return "certificate_unknown" }
+    if desc == ALERT_ILLEGAL_PARAMETER { return "illegal_parameter" }
+    if desc == ALERT_DECODE_ERROR { return "decode_error" }
+    if desc == ALERT_DECRYPT_ERROR { return "decrypt_error" }
+    if desc == ALERT_PROTOCOL_VERSION { return "protocol_version" }
+    if desc == ALERT_INTERNAL_ERROR { return "internal_error" }
+    if desc == ALERT_NO_APPLICATION_PROTOCOL { return "no_application_protocol" }
+    return "unknown_alert"
+}
+
 // Receive the next application-data record's plaintext (fresh bytes; caller
 // frees via bytes.free). Skips post-handshake handshake records (e.g. session
 // tickets, KeyUpdate is not handled in the subset). Returns (plaintext, len, "").
@@ -1026,7 +1165,19 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
                         outlen = opened.plaintext_len
                         looking = 0
                     } else {
-                        // handshake (session ticket) or alert; skip
+                        if opened.content_type == tls13_record.CONTENT_ALERT {
+                            // An inbound alert: surface it as a typed result. A
+                            // clean close_notify is EOF (rerr stays ""); any
+                            // other alert is an error naming the description.
+                            desc = 0
+                            if opened.plaintext_len >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
+                            if desc != ALERT_CLOSE_NOTIFY {
+                                rerr = string.concat("tls alert: ", alert_name(desc))
+                            }
+                            looking = 0
+                        }
+                        // else: post-handshake handshake msg (e.g. session
+                        // ticket) — skip and keep reading.
                         if opened.plaintext != null { bytes.free(opened.plaintext) }
                     }
                 }
@@ -1038,6 +1189,9 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
 
 close_conn(conn: ptr) {
     c = conn as *ClientConn
+    // Graceful close: send an encrypted close_notify so the peer sees an
+    // orderly shutdown rather than a bare TCP RST (RFC 8446 §6.1).
+    send_alert_conn(c, ALERT_LEVEL_WARNING, ALERT_CLOSE_NOTIFY)
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
     if c.res_master != null { bytes.free(c.res_master) }
@@ -1059,6 +1213,7 @@ struct SessionTicket {
     res_master: ptr      // copy of the resumption_master_secret
     hash_algo: ptr       // hash name bytes ("sha256"/"sha384")
     hash_len: int
+    max_early_data: int  // early_data ext's max_early_data_size (0 = no 0-RTT)
 }
 
 // Read post-handshake records until a NewSessionTicket (RFC 8446 §4.6.1)
@@ -1133,9 +1288,28 @@ fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
     if p + tk_len > end { bytes.free(nonce); return null }
     ticket = bytes.new(tk_len)
     if tk_len > 0 { bytes.set(ticket, tk_len - 1, 0); bytes.copy_from_bytes(ticket, 0, buf, p, tk_len) }
-    // (extensions ignored — early_data etc. are out of scope)
+    p = p + tk_len
+    // extensions<2>: scan for early_data (42) -> max_early_data_size (uint32).
+    max_early = 0
+    if p + 2 <= end {
+        ext_total = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
+        p = p + 2
+        ext_end = p + ext_total
+        if ext_end > end { ext_end = end }
+        while p + 4 <= ext_end {
+            et = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
+            el = ((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+            p = p + 4
+            if et == 42 {
+                if el >= 4 && p + 4 <= ext_end {
+                    max_early = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+                }
+            }
+            p = p + el
+        }
+    }
 
-    st = malloc(72) as *SessionTicket
+    st = malloc(80) as *SessionTicket
     st.ticket = ticket
     st.ticket_len = tk_len
     st.nonce = nonce
@@ -1152,8 +1326,13 @@ fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
     if ha_len > 0 { bytes.set(ha, ha_len - 1, 0); bytes.copy_from_bytes(ha, 0, c.res_hash_algo, 0, ha_len) }
     st.hash_algo = ha
     st.hash_len = hl
+    st.max_early_data = max_early
     return st as ptr
 }
+
+// Does this ticket permit 0-RTT early data (server advertised early_data in the
+// NewSessionTicket)? Returns the max_early_data_size (0 = not allowed).
+ticket_max_early_data(t: ptr) -> int { st = t as *SessionTicket; return st.max_early_data }
 
 // Accessors so callers/tests don't cast to the qualified struct type.
 ticket_len(t: ptr) -> int { st = t as *SessionTicket; return st.ticket_len }
@@ -1168,10 +1347,37 @@ ticket_lifetime(t: ptr) -> int { st = t as *SessionTicket; return st.lifetime }
 // fails with an error (full-handshake fallback is the caller's choice: retry
 // with connect()). host is used for SNI only (no cert to check on resume).
 connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, string) {
+    return connect_resume_ed(host, port, x25519_priv, ticket, null, 0)
+}
+
+// Resume + send 0-RTT early data (RFC 8446 §2.3). `early_data`/`early_len` is
+// application data sent in the FIRST flight, encrypted under the PSK-derived
+// client_early_traffic_secret, before the handshake completes. Only attempted
+// if the ticket permits it (ticket_max_early_data > 0) and the data fits; else
+// it degrades to a normal resume (the early data is NOT sent — caller should
+// send it post-handshake). If the server REJECTS 0-RTT (doesn't echo early_data
+// in EncryptedExtensions), the handshake still completes 1-RTT and the caller
+// must resend the early data over the returned connection (it was not
+// delivered). Returns (conn, "") — check nothing extra; on 0-RTT-reject the
+// data simply wasn't accepted, which is normal and safe for idempotent requests.
+connect_resume_0rtt(host: string, port: int, x25519_priv: ptr, ticket: ptr, early_data: ptr, early_len: int) -> (ptr, string) {
+    st = ticket as *SessionTicket
+    if st.max_early_data <= 0 || early_len > st.max_early_data {
+        // Ticket forbids 0-RTT (or data too large): fall back to plain resume.
+        return connect_resume_ed(host, port, x25519_priv, ticket, null, 0)
+    }
+    return connect_resume_ed(host, port, x25519_priv, ticket, early_data, early_len)
+}
+
+// Core resume, optionally with 0-RTT early data (early_data == null / len 0 for
+// a plain resume).
+fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, early_data: ptr, early_len: int) -> (ptr, string) {
     st = ticket as *SessionTicket
     // Hash context comes from the ticket (the suite that issued it).
     algo = bytes.to_string(st.hash_algo, bytes.length(st.hash_algo))
     hl = st.hash_len
+    want_0rtt = 0
+    if early_data != null && early_len > 0 { want_0rtt = 1 }
 
     // PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
     psk = tls13_ks.psk_from_resumption(algo, st.res_master, hl, st.nonce, st.nonce_len)
@@ -1182,12 +1388,13 @@ connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, 
     rnd = rand_into(32)
     sid = rand_into(32)
 
-    // Build the PSK ClientHello with a zero binder placeholder.
+    // Build the PSK ClientHello with a zero binder placeholder (+ early_data ext
+    // when sending 0-RTT).
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     // obfuscated_ticket_age = 0 is accepted by openssl (it doesn't enforce age
     // for its own tickets in the common config); real freshness needs the
     // elapsed ms + age_add, which we don't track without a clock hook here.
-    tls13_hs.client_hello_psk(rnd, sid, 32, pub, host, st.ticket, st.ticket_len, 0, hl, &pch)
+    tls13_hs.client_hello_psk(rnd, sid, 32, pub, host, st.ticket, st.ticket_len, 0, hl, want_0rtt, &pch)
     ch = pch.buf
     ch_len = pch.buf_len
 
@@ -1200,15 +1407,35 @@ connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, 
     binder = hmac.hmac_bytes(algo, bfk, hl, trunc_hash, hl)
     bp = 0
     while bp < hl { bytes.set(ch, pch.binder_off + bp, bytes.get(binder, bp) & 0xFF); bp = bp + 1 }
-    bytes.free(early); bytes.free(bkey); bytes.free(bfk); bytes.free(trunc_hash); bytes.free(binder)
+    bytes.free(bkey); bytes.free(bfk); bytes.free(trunc_hash); bytes.free(binder)
 
     tr = transcript_new()
     transcript_add(tr, ch, ch_len)
     serr = send_plaintext_handshake(sock, ch, ch_len)
     if string.equals(serr, "") != 1 {
-        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        bytes.free(early); bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
         return null, serr
     }
+
+    // 0-RTT: immediately send the early data as application_data records under
+    // the client_early_traffic_secret = Derive-Secret(early, "c e traffic",
+    // Transcript-Hash(ClientHello)). We need the record AEAD/key-len for the
+    // ticket's suite; both 0-RTT suites here use the ticket's hash.
+    ed_aead, ed_key_len = early_aead_params(algo)
+    if want_0rtt == 1 {
+        ch_hash = hash_bytes_algo(ch, ch_len, algo)
+        ets = tls13_ks.early_traffic_secret(algo, early, ch_hash, hl)
+        ek = tls13_ks.write_key(algo, ets, ed_key_len)
+        eiv = tls13_ks.write_iv(algo, ets)
+        ed_ctx = tls13_record.new_aead(ed_aead, ek, ed_key_len, eiv)
+        ed_rec = tls13_record.seal_record(ed_ctx, tls13_record.CONTENT_APPLICATION_DATA, early_data, early_len)
+        eds = bytes.to_string(ed_rec, bytes.length(ed_rec))
+        net.tcp_send_n_raw(sock, eds, bytes.length(ed_rec))
+        bytes.free(ch_hash); bytes.free(ets); bytes.free(ek); bytes.free(eiv)
+        tls13_record.free_ctx(ed_ctx); bytes.free(ed_rec)
+    }
+    bytes.free(early)
+
     rio = recio_new(sock)
 
     shrec, shlen, sherr = recio_next_hs(rio)
@@ -1286,6 +1513,14 @@ connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, 
         }
     }
 
+    // Did the server ACCEPT 0-RTT? It echoes early_data (ext 42) in its
+    // EncryptedExtensions. On accept we must send end_of_early_data before our
+    // Finished; on reject the early data was dropped (caller resends it).
+    zero_rtt_accepted = 0
+    if want_0rtt == 1 && string.equals(ferr, "") == 1 {
+        zero_rtt_accepted = flight_has_early_data_ext(fl, fllen)
+    }
+
     result = null
     result_err = ferr
     if string.equals(ferr, "") == 1 {
@@ -1300,9 +1535,26 @@ connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, 
             ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
             c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
             s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
+            cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+            // If 0-RTT was accepted, signal the end of early data (RFC 8446 §4.5)
+            // encrypted under the client handshake keys, and fold it into the
+            // transcript before computing our Finished.
+            if zero_rtt_accepted == 1 {
+                eoed = build_end_of_early_data()
+                eoed_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, eoed, bytes.length(eoed))
+                eoeds = bytes.to_string(eoed_rec, bytes.length(eoed_rec))
+                net.tcp_send_n_raw(sock, eoeds, bytes.length(eoed_rec))
+                transcript_add(tr, eoed, bytes.length(eoed))
+                bytes.free(eoed); bytes.free(eoed_rec)
+                // recompute th_sf now that end_of_early_data is in the transcript
+                bytes.free(th_sf)
+                th_sf = transcript_hash_algo(tr, hash_algo)
+                bytes.free(c_ap); bytes.free(s_ap)
+                c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
+                s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
+            }
             cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
             cfin = build_finished_msg(cvd)
-            cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
             cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
             cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
             net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
@@ -1345,6 +1597,15 @@ connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, 
         recio_free(rio); net.tcp_close(sock)
     }
     return result, result_err
+}
+
+// The record AEAD id + key length for the 0-RTT early-data cipher, inferred
+// from the ticket's hash (SHA-384 => AES-256-GCM; SHA-256 => AES-128-GCM, the
+// common openssl default). This must match the suite the server will pick;
+// openssl reuses the ticket's suite for 0-RTT.
+fn early_aead_params(algo: string) -> (int, int) {
+    if algo == "sha384" { return tls13_record.AEAD_AES_256_GCM, 32 }
+    return tls13_record.AEAD_AES_128_GCM, 16
 }
 
 // SHA-256/384 of a bytes buffer prefix (fresh Hash.len buffer).
@@ -1408,6 +1669,53 @@ fn extract_leaf_der(body: ptr, body_len: int) -> (ptr, int, string) {
     if cert_len > 0 { bytes.set(der, cert_len - 1, 0) }
     bytes.copy_from_bytes(der, 0, body, p, cert_len)
     return der, cert_len, ""
+}
+
+// Extract a stapled OCSP response from the LEAF CertificateEntry's extensions
+// (RFC 8446 §4.4.2.1: the certificate_list entry after cert_data<3> is
+// extensions<2>; a status_request (type 5) extension holds a
+// CertificateStatus { status_type = ocsp(1), OCSPResponse<3> }). Returns the
+// OCSP response DER (fresh bytes; caller frees) + its length, or (null, 0) if
+// none is stapled. Best-effort — a parse hiccup just means "no staple".
+fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
+    if body_len < 1 { return null, 0 }
+    ctx_len = bytes.get(body, 0) & 0xFF
+    p = 1 + ctx_len
+    if p + 3 > body_len { return null, 0 }
+    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3
+    // First CertificateEntry: cert_data<3>, then extensions<2>.
+    if p + 3 > body_len { return null, 0 }
+    cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    p = p + 3 + cert_len
+    if p + 2 > body_len { return null, 0 }
+    ext_total = ((bytes.get(body, p)&0xFF)<<8)|(bytes.get(body, p+1)&0xFF)
+    p = p + 2
+    ext_end = p + ext_total
+    if ext_end > body_len { return null, 0 }
+    while p + 4 <= ext_end {
+        et = ((bytes.get(body,p)&0xFF)<<8)|(bytes.get(body,p+1)&0xFF)
+        el = ((bytes.get(body,p+2)&0xFF)<<8)|(bytes.get(body,p+3)&0xFF)
+        q = p + 4
+        if et == 5 {
+            // status_request ext body = CertificateStatus:
+            //   status_type(1) || OCSPResponse<3>
+            if el >= 4 {
+                stype = bytes.get(body, q) & 0xFF
+                if stype == 1 {
+                    olen = ((bytes.get(body,q+1)&0xFF)<<16)|((bytes.get(body,q+2)&0xFF)<<8)|(bytes.get(body,q+3)&0xFF)
+                    ostart = q + 4
+                    if ostart + olen <= ext_end {
+                        ob = bytes.new(olen)
+                        if olen > 0 { bytes.set(ob, olen - 1, 0); bytes.copy_from_bytes(ob, 0, body, ostart, olen) }
+                        return ob, olen
+                    }
+                }
+            }
+        }
+        p = q + el
+    }
+    return null, 0
 }
 
 // Parse a CertificateVerify body (RFC 8446 §4.4.3): algorithm(uint16) +
@@ -1506,6 +1814,17 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         bytes.free(der)
                         // Parse the remaining certs into `intermediates`.
                         parse_intermediates(cbody, ml, intermediates)
+                        // Revocation: if the server stapled an OCSP response for
+                        // the leaf and it says REVOKED, fail closed (RFC 6960).
+                        // Absence/soft-error is not treated as revoked.
+                        ocsp, ocsp_len = extract_stapled_ocsp(cbody, ml)
+                        if ocsp != null {
+                            status = tls13_cert.parse_ocsp_status(ocsp, ocsp_len)
+                            if status == tls13_cert.OCSP_REVOKED {
+                                if string.equals(err, "") == 1 { err = "certificate revoked (OCSP)" }
+                            }
+                            bytes.free(ocsp)
+                        }
                     }
                     bytes.free(cbody)
                 }

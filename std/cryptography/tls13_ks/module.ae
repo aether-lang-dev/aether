@@ -48,7 +48,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports (
-    early_secret, early_secret_psk, psk_from_resumption, binder_key,
+    early_secret, early_secret_psk, psk_from_resumption, binder_key, early_traffic_secret,
     handshake_secret, master_secret,
     traffic_secret, write_key, write_iv,
     IV_LEN
@@ -111,6 +111,15 @@ binder_key(algo: string, early: ptr) -> ptr {
     bk = tls13_kdf.derive_secret(algo, early, hl, "res binder", empty_th, hl)
     bytes.free(empty_th)
     return bk
+}
+
+// The client_early_traffic_secret = Derive-Secret(EarlySecret_psk, "c e traffic",
+// ClientHello) (RFC 8446 §7.1). This keys the 0-RTT early-data records the
+// client sends in its first flight. `early` is early_secret_psk(...); `th` is
+// Transcript-Hash(ClientHello) (the full CH incl. its binder).
+early_traffic_secret(algo: string, early: ptr, th: ptr, th_len: int) -> ptr {
+    hl = hlen(algo)
+    return tls13_kdf.derive_secret(algo, early, hl, "c e traffic", th, th_len)
 }
 
 // Handshake Secret = HKDF-Extract(salt = Derive-Secret(Early, "derived", ""),
