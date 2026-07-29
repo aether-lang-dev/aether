@@ -21,7 +21,8 @@
 //   write_key = HKDF-Expand-Label(secret, "key", "", key_len)
 //   write_iv  = HKDF-Expand-Label(secret, "iv",  "", 12)
 //
-// This module is PSK-less (no resumption / 0-RTT) — the first-cut subset.
+// Supports PSK resumption (early_secret_psk / psk_from_resumption / binder_key)
+// alongside the PSK-less full handshake. 0-RTT early data is out of scope.
 // It is hash-agnostic on `algo` ("sha256" for the subset's
 // TLS_CHACHA20_POLY1305_SHA256 / TLS_AES_128_GCM_SHA256 suites, "sha384"
 // for the SHA-384 suites). Transcript hashes are supplied by the caller
@@ -47,7 +48,8 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports (
-    early_secret, handshake_secret, master_secret,
+    early_secret, early_secret_psk, psk_from_resumption, binder_key,
+    handshake_secret, master_secret,
     traffic_secret, write_key, write_iv,
     IV_LEN
 )
@@ -81,6 +83,34 @@ early_secret(algo: string) -> ptr {
     bytes.free(salt)
     bytes.free(ikm)
     return prk
+}
+
+// Early Secret for RESUMPTION = HKDF-Extract(salt=0, IKM = PSK). Same as
+// early_secret but keyed by the resumption PSK instead of zeros (RFC 8446 §7.1).
+early_secret_psk(algo: string, psk: ptr, psk_len: int) -> ptr {
+    hl = hlen(algo)
+    salt = zeros(hl)
+    prk = hkdf.hkdf_extract(algo, salt, hl, psk, psk_len)
+    bytes.free(salt)
+    return prk
+}
+
+// PSK from a resumption_master_secret + ticket_nonce (RFC 8446 §4.6.1):
+//   PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
+psk_from_resumption(algo: string, res_master: ptr, rm_len: int, nonce: ptr, nonce_len: int) -> ptr {
+    hl = hlen(algo)
+    return tls13_kdf.expand_label(algo, res_master, rm_len, "resumption", nonce, nonce_len, hl)
+}
+
+// The PSK binder key = Derive-Secret(EarlySecret_psk, "res binder", "")
+// (RFC 8446 §7.1). Used to key the binder Finished MAC over the truncated
+// ClientHello. `early` is early_secret_psk(...).
+binder_key(algo: string, early: ptr) -> ptr {
+    hl = hlen(algo)
+    empty_th = empty_transcript_hash(algo)
+    bk = tls13_kdf.derive_secret(algo, early, hl, "res binder", empty_th, hl)
+    bytes.free(empty_th)
+    return bk
 }
 
 // Handshake Secret = HKDF-Extract(salt = Derive-Secret(Early, "derived", ""),

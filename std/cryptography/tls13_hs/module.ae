@@ -35,7 +35,7 @@ extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports (
-    client_hello, client_hello_sni, client_hello_full, parse_server_hello,
+    client_hello, client_hello_sni, client_hello_full, client_hello_psk, PskCh, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
     GROUP_X25519, GROUP_SECP256R1
@@ -67,6 +67,7 @@ struct ShParsed {
     key_share: ptr        // server's key_share public (fresh bytes; caller frees) or null
     key_share_len: int
     is_hello_retry: int   // 1 if this was a HelloRetryRequest (special random)
+    psk_accepted: int     // 1 if the SH echoed pre_shared_key (resumption accepted)
 }
 
 // ---- little growable writer over std.bytes (append at a running offset) ----
@@ -260,6 +261,134 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     return out
 }
 
+// A ClientHello for RESUMPTION (RFC 8446 §4.2.11): the same offered
+// suites/groups/x25519 key_share as client_hello_full, PLUS a
+// psk_key_exchange_modes (45) extension (psk_dhe_ke) and a pre_shared_key (41)
+// extension carrying one identity (the ticket + obfuscated_ticket_age) and one
+// binder placeholder of `binder_len` zero bytes. pre_shared_key MUST be the
+// last extension. The binder is computed by the caller over the "truncated
+// ClientHello" (everything through the PskIdentities, excluding the binders)
+// and patched into the returned buffer.
+//
+// Returns the CH via `out_ch` (a PskCh struct): the buffer, the byte offset of
+// the (zero) binder content, and the truncated length (the transcript bytes the
+// binder MACs — the handshake header + body up to and including the binders'
+// 2-byte length prefix). Caller frees out_ch.buf.
+struct PskCh {
+    buf: ptr
+    buf_len: int
+    binder_off: int      // offset of the binder value (after its 1-byte length)
+    truncated_len: int   // length of CH bytes the binder is computed over
+}
+
+client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string, ticket: ptr, ticket_len: int, obf_age: int, binder_len: int, out_ch: *PskCh) {
+    buf = bytes.new(2048)
+    bytes.set(buf, 2047, 0)
+    body = 4
+    off = put16(buf, body, 0x0303)
+    off = put_bytes(buf, off, random, 32)
+    off = put8(buf, off, sid_len)
+    off = put_bytes(buf, off, session_id, sid_len)
+    // cipher_suites
+    off = put16(buf, off, 6)
+    off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
+    off = put16(buf, off, TLS_AES_128_GCM_SHA256)
+    off = put16(buf, off, TLS_AES_256_GCM_SHA384)
+    // compression
+    off = put8(buf, off, 1)
+    off = put8(buf, off, 0)
+    // extensions length slot
+    ext_len_pos = off
+    off = off + 2
+    ext_start = off
+    // SNI
+    host_len = string_length(host)
+    if host_len > 0 {
+        off = put16(buf, off, 0)
+        off = put16(buf, off, host_len + 5)
+        off = put16(buf, off, host_len + 3)
+        off = put8(buf, off, 0)
+        off = put16(buf, off, host_len)
+        off = put_ascii(buf, off, host)
+    }
+    // supported_versions
+    off = put16(buf, off, 43)
+    off = put16(buf, off, 3)
+    off = put8(buf, off, 2)
+    off = put16(buf, off, 0x0304)
+    // supported_groups { x25519, secp256r1 }
+    off = put16(buf, off, 10)
+    off = put16(buf, off, 6)
+    off = put16(buf, off, 4)
+    off = put16(buf, off, GROUP_X25519)
+    off = put16(buf, off, GROUP_SECP256R1)
+    // signature_algorithms
+    off = put16(buf, off, 13)
+    off = put16(buf, off, 8)
+    off = put16(buf, off, 6)
+    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
+    off = put16(buf, off, SIG_ED25519)
+    // ALPN http/1.1
+    off = put16(buf, off, 16)
+    off = put16(buf, off, 11)
+    off = put16(buf, off, 9)
+    off = put8(buf, off, 8)
+    off = put_ascii(buf, off, "http/1.1")
+    // key_share (x25519 only for the resume path)
+    entry1 = 2 + 2 + 32
+    off = put16(buf, off, 51)
+    off = put16(buf, off, 2 + entry1)
+    off = put16(buf, off, entry1)
+    off = put16(buf, off, GROUP_X25519)
+    off = put16(buf, off, 32)
+    off = put_bytes(buf, off, x25519_pub, 32)
+    // psk_key_exchange_modes (45): { psk_dhe_ke (1) }
+    off = put16(buf, off, 45)
+    off = put16(buf, off, 2)    // ext body len
+    off = put8(buf, off, 1)     // modes list len
+    off = put8(buf, off, 1)     // psk_dhe_ke
+    // pre_shared_key (41) — MUST be last. Layout:
+    //   identities<2>: each = identity<2> || obfuscated_ticket_age(4)
+    //   binders<2>:    each = binder<1-len byte prefix> (length = binder_len)
+    identities_len = 2 + ticket_len + 4          // identity<2> + ticket + age(4)
+    binders_len = 1 + binder_len                 // one binder: len byte + value
+    psk_body_len = 2 + identities_len + 2 + binders_len
+    off = put16(buf, off, 41)
+    off = put16(buf, off, psk_body_len)
+    off = put16(buf, off, identities_len)        // PskIdentities length
+    off = put16(buf, off, ticket_len)            // identity length
+    off = put_bytes(buf, off, ticket, ticket_len)
+    off = put16(buf, off, (obf_age >> 16) & 0xFFFF)  // obfuscated_ticket_age hi
+    off = put16(buf, off, obf_age & 0xFFFF)          // ...lo (uint32 total)
+    // The binder MAC covers the ClientHello TRUNCATED to remove the binders
+    // opaque vector entirely — i.e. everything up to (but NOT including) the
+    // binders<2> length prefix (RFC 8446 §4.2.11.2, "Truncate(ClientHello)").
+    truncated_len = off                          // bytes hashed for the binder
+    off = put16(buf, off, binders_len)           // PskBinderEntries length
+    off = put8(buf, off, binder_len)             // this binder's length
+    binder_off = off
+    bi = 0
+    while bi < binder_len { bytes.set(buf, off + bi, 0); bi = bi + 1 }  // zero placeholder
+    off = off + binder_len
+
+    // fill extensions length + handshake header
+    ext_total = off - ext_start
+    put16(buf, ext_len_pos, ext_total)
+    body_len = off - 4
+    put8(buf, 0, HS_CLIENT_HELLO)
+    put24(buf, 1, body_len)
+
+    out = bytes.new(off)
+    if off > 0 { bytes.set(out, off - 1, 0) }
+    put_bytes(out, 0, buf, off)
+    bytes.free(buf)
+    out_ch.buf = out
+    out_ch.buf_len = off
+    out_ch.binder_off = binder_off
+    out_ch.truncated_len = truncated_len
+}
+
 // Parse a ServerHello (RFC 8446 §4.1.3) into `out`. Returns "" on success or
 // an error string. `msg` includes the 4-byte handshake header. On success,
 // out.key_share (if present) is a fresh buffer the caller must free.
@@ -270,6 +399,7 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
     out.key_share = null
     out.key_share_len = 0
     out.is_hello_retry = 0
+    out.psk_accepted = 0
 
     if len < 4 { return "server hello: truncated header" }
     if get8(msg, 0) != HS_SERVER_HELLO { return "server hello: wrong msg type" }
@@ -337,6 +467,11 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
                 out.key_share = ks
                 out.key_share_len = ks_len
             }
+        }
+        if ext_type == 41 {
+            // pre_shared_key (server form: selected_identity uint16). Its
+            // presence means the server accepted our PSK — resumption is on.
+            out.psk_accepted = 1
         }
         p = p + ext_len
     }

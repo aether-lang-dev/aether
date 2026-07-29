@@ -14,7 +14,7 @@
 //     (negotiated from the ServerHello)
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
-//   - no resumption / 0-RTT / mTLS
+//   - session resumption (PSK); no 0-RTT / mTLS
 //
 // SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
 // hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
@@ -45,8 +45,13 @@
 //
 // Key exchange: x25519 and secp256r1 (both key_shares pre-offered, so a
 // P-256-preferring server completes without a round-trip; HelloRetryRequest is
-// handled as a fallback). Remaining limits: no resumption/0-RTT/mTLS, no
-// revocation (CRL/OCSP).
+// handled as a fallback).
+//
+// RESUMPTION (RFC 8446 §2.2): after a full handshake, conn_get_ticket captures
+// a NewSessionTicket; connect_resume(host, port, priv, ticket) then performs an
+// abbreviated PSK handshake (psk_dhe_ke, with a binder) — no Certificate, keyed
+// off the resumption PSK. Falls back to the caller's connect() if the server
+// rejects the PSK. Remaining limits: no 0-RTT/mTLS, no revocation (CRL/OCSP).
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -92,7 +97,9 @@ exports (
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, close_conn, conn_send, conn_recv,
+    connect, connect_resume, close_conn, conn_send, conn_recv,
+    conn_get_ticket, free_ticket, SessionTicket,
+    ticket_len, ticket_nonce_len, ticket_lifetime,
     verify_flight_auth
 )
 
@@ -208,6 +215,33 @@ derive_handshake_keys(ecdhe: ptr, ec_len: int, th: ptr, th_len: int, key_len: in
 // suite. derive_handshake_keys keeps the sha256 default for the pure tests.
 derive_handshake_keys_algo(ecdhe: ptr, ec_len: int, th: ptr, th_len: int, key_len: int, hash_algo: string) -> ptr {
     early = tls13_ks.early_secret(hash_algo)
+    hs = tls13_ks.handshake_secret(hash_algo, early, ecdhe, ec_len)
+
+    c_hs = tls13_ks.traffic_secret(hash_algo, hs, "c hs traffic", th, th_len)
+    s_hs = tls13_ks.traffic_secret(hash_algo, hs, "s hs traffic", th, th_len)
+
+    ck = tls13_ks.write_key(hash_algo, c_hs, key_len)
+    civ = tls13_ks.write_iv(hash_algo, c_hs)
+    sk = tls13_ks.write_key(hash_algo, s_hs, key_len)
+    siv = tls13_ks.write_iv(hash_algo, s_hs)
+
+    k = malloc(56) as *HsKeys
+    k.client_hs_secret = c_hs
+    k.server_hs_secret = s_hs
+    k.client_key = ck
+    k.client_iv = civ
+    k.server_key = sk
+    k.server_iv = siv
+    k.handshake_secret = hs
+
+    bytes.free(early)
+    return k as ptr
+}
+
+// Handshake keys for RESUMPTION: identical to derive_handshake_keys_algo but the
+// Early Secret is HKDF-Extract(0, PSK) instead of HKDF-Extract(0, 0).
+fn derive_handshake_keys_psk(psk: ptr, psk_len: int, ecdhe: ptr, ec_len: int, th: ptr, th_len: int, key_len: int, hash_algo: string) -> ptr {
+    early = tls13_ks.early_secret_psk(hash_algo, psk, psk_len)
     hs = tls13_ks.handshake_secret(hash_algo, early, ecdhe, ec_len)
 
     c_hs = tls13_ks.traffic_secret(hash_algo, hs, "c hs traffic", th, th_len)
@@ -437,6 +471,11 @@ struct ClientConn {
     // with the application-traffic secrets after the handshake completes.
     app_send: ptr        // *tls13_record.RecordCtx
     app_recv: ptr
+    // Resumption state (RFC 8446 §4.6.1): the resumption_master_secret and the
+    // negotiated hash, so a NewSessionTicket can be turned into a PSK later.
+    res_master: ptr      // resumption_master_secret (Hash.len) or null
+    res_hash_algo: ptr   // hash name as bytes ("sha256"/"sha384") or null
+    res_hash_len: int
 }
 
 // Send a plaintext handshake record: type 0x16 (handshake), legacy version
@@ -596,7 +635,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     sh = bytes.new(sh_msg_len)
     bytes.set(sh, sh_msg_len - 1, 0)
     bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
-    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     perr = tls13_hs.parse_server_hello(sh, sh_msg_len, &parsed)
     if string.equals(perr, "") != 1 {
         bytes.free(sh); bytes.free(shrec)
@@ -789,17 +828,27 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
             net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
 
+            // Add the client Finished to the transcript and derive the
+            // resumption_master_secret over CH..client-Finished (RFC 8446 §7.1).
+            transcript_add(tr, cfin, bytes.length(cfin))
+            th_cf = transcript_hash_algo(tr, hash_algo)
+            res_master = tls13_kdf.derive_secret(hash_algo, ms, hash_len, "res master", th_cf, hash_len)
+            bytes.free(th_cf)
+
             // Application record contexts (fresh sequence numbers per key).
             ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
             civ = tls13_ks.write_iv(hash_algo, c_ap)
             sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
             siv = tls13_ks.write_iv(hash_algo, s_ap)
 
-            conn = malloc(32) as *ClientConn
+            conn = malloc(56) as *ClientConn
             conn.sock = sock
             conn.rio = rio as ptr
             conn.app_send = tls13_record.new_aead(rec_aead, ck, rec_key_len, civ) as ptr
             conn.app_recv = tls13_record.new_aead(rec_aead, sk, rec_key_len, siv) as ptr
+            conn.res_master = res_master
+            conn.res_hash_algo = str_to_bytes_local(hash_algo)
+            conn.res_hash_len = hash_len
             result = conn as ptr
 
             bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
@@ -991,10 +1040,345 @@ close_conn(conn: ptr) {
     c = conn as *ClientConn
     tls13_record.free_ctx(c.app_send as ptr)
     tls13_record.free_ctx(c.app_recv as ptr)
+    if c.res_master != null { bytes.free(c.res_master) }
+    if c.res_hash_algo != null { bytes.free(c.res_hash_algo) }
     recio_free(c.rio as *RecordIO)
     net.tcp_close(c.sock)
     libc_free(conn)
 }
+
+// A parsed NewSessionTicket + the connection's resumption context, everything
+// needed to resume later. All buffers are owned; free with free_ticket.
+struct SessionTicket {
+    ticket: ptr          // the opaque ticket (identity) bytes
+    ticket_len: int
+    nonce: ptr           // ticket_nonce bytes
+    nonce_len: int
+    age_add: int         // ticket_age_add (obfuscation)
+    lifetime: int        // ticket_lifetime seconds
+    res_master: ptr      // copy of the resumption_master_secret
+    hash_algo: ptr       // hash name bytes ("sha256"/"sha384")
+    hash_len: int
+}
+
+// Read post-handshake records until a NewSessionTicket (RFC 8446 §4.6.1)
+// arrives, and parse it into a SessionTicket carrying this connection's
+// resumption secret. Returns (ticket, "") or (null, err). The caller frees the
+// ticket with free_ticket. Servers send tickets right after the handshake, so
+// call this before the first conn_send if you want to capture one.
+conn_get_ticket(conn: ptr) -> (ptr, string) {
+    c = conn as *ClientConn
+    rio = c.rio as *RecordIO
+    looking = 1
+    out = null
+    err = ""
+    while looking == 1 {
+        rec, rlen, e = recio_next(rio)
+        if string.equals(e, "") != 1 { err = e; looking = 0 } else {
+            ct = bytes.get(rec, 0) & 0xFF
+            if ct == 0x14 { bytes.free(rec) } else {
+                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+                oerr = tls13_record.open_record(c.app_recv as ptr, rec, rlen, &opened)
+                bytes.free(rec)
+                if string.equals(oerr, "") != 1 { err = oerr; looking = 0 } else {
+                    if opened.content_type == tls13_record.CONTENT_HANDSHAKE {
+                        // May contain one or more handshake messages; find a NST (type 4).
+                        t = find_and_parse_nst(opened.plaintext, opened.plaintext_len, c)
+                        if t != null { out = t; looking = 0 }
+                    }
+                    if opened.plaintext != null { bytes.free(opened.plaintext) }
+                }
+            }
+        }
+    }
+    return out, err
+}
+
+// Scan a decrypted handshake fragment for a NewSessionTicket (msg type 4) and
+// parse the first one into a SessionTicket. Returns null if none present.
+fn find_and_parse_nst(buf: ptr, len: int, c: *ClientConn) -> ptr {
+    p = 0
+    while p + 4 <= len {
+        mt = bytes.get(buf, p) & 0xFF
+        ml = ((bytes.get(buf, p+1)&0xFF)<<16)|((bytes.get(buf, p+2)&0xFF)<<8)|(bytes.get(buf, p+3)&0xFF)
+        if p + 4 + ml > len { return null }
+        if mt == 4 {
+            return parse_nst_body(buf, p + 4, ml, c)
+        }
+        p = p + 4 + ml
+    }
+    return null
+}
+
+// Parse a NewSessionTicket body (RFC 8446 §4.6.1):
+//   ticket_lifetime(4) ticket_age_add(4) ticket_nonce<1> ticket<2> extensions<2>
+fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
+    p = off
+    end = off + body_len
+    if p + 8 > end { return null }
+    lifetime = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+    p = p + 4
+    age_add = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+    p = p + 4
+    if p + 1 > end { return null }
+    nonce_len = bytes.get(buf, p) & 0xFF
+    p = p + 1
+    if p + nonce_len > end { return null }
+    nonce = bytes.new(nonce_len)
+    if nonce_len > 0 { bytes.set(nonce, nonce_len - 1, 0); bytes.copy_from_bytes(nonce, 0, buf, p, nonce_len) }
+    p = p + nonce_len
+    if p + 2 > end { return null }
+    tk_len = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
+    p = p + 2
+    if p + tk_len > end { bytes.free(nonce); return null }
+    ticket = bytes.new(tk_len)
+    if tk_len > 0 { bytes.set(ticket, tk_len - 1, 0); bytes.copy_from_bytes(ticket, 0, buf, p, tk_len) }
+    // (extensions ignored — early_data etc. are out of scope)
+
+    st = malloc(72) as *SessionTicket
+    st.ticket = ticket
+    st.ticket_len = tk_len
+    st.nonce = nonce
+    st.nonce_len = nonce_len
+    st.age_add = age_add
+    st.lifetime = lifetime
+    // Copy the connection's resumption secret + hash context into the ticket.
+    hl = c.res_hash_len
+    rm = bytes.new(hl)
+    if hl > 0 { bytes.set(rm, hl - 1, 0); bytes.copy_from_bytes(rm, 0, c.res_master, 0, hl) }
+    st.res_master = rm
+    ha_len = bytes.length(c.res_hash_algo)
+    ha = bytes.new(ha_len)
+    if ha_len > 0 { bytes.set(ha, ha_len - 1, 0); bytes.copy_from_bytes(ha, 0, c.res_hash_algo, 0, ha_len) }
+    st.hash_algo = ha
+    st.hash_len = hl
+    return st as ptr
+}
+
+// Accessors so callers/tests don't cast to the qualified struct type.
+ticket_len(t: ptr) -> int { st = t as *SessionTicket; return st.ticket_len }
+ticket_nonce_len(t: ptr) -> int { st = t as *SessionTicket; return st.nonce_len }
+ticket_lifetime(t: ptr) -> int { st = t as *SessionTicket; return st.lifetime }
+
+// Resume a TLS 1.3 session with a previously captured NewSessionTicket
+// (RFC 8446 §2.2). Sends a ClientHello carrying the PSK (from the ticket) with
+// a psk_dhe_ke binder, and — if the server accepts the PSK — completes an
+// abbreviated handshake (no Certificate/CertificateVerify) keyed off the PSK.
+// Returns a live ClientConn or (null, error). If the server rejects the PSK,
+// fails with an error (full-handshake fallback is the caller's choice: retry
+// with connect()). host is used for SNI only (no cert to check on resume).
+connect_resume(host: string, port: int, x25519_priv: ptr, ticket: ptr) -> (ptr, string) {
+    st = ticket as *SessionTicket
+    // Hash context comes from the ticket (the suite that issued it).
+    algo = bytes.to_string(st.hash_algo, bytes.length(st.hash_algo))
+    hl = st.hash_len
+
+    // PSK = HKDF-Expand-Label(res_master, "resumption", ticket_nonce, Hash.len)
+    psk = tls13_ks.psk_from_resumption(algo, st.res_master, hl, st.nonce, st.nonce_len)
+
+    sock = net.tcp_connect_raw(host, port)
+    if sock == null { bytes.free(psk); return null, "connect failed" }
+    pub = x25519.base_point(x25519_priv)
+    rnd = rand_into(32)
+    sid = rand_into(32)
+
+    // Build the PSK ClientHello with a zero binder placeholder.
+    pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    // obfuscated_ticket_age = 0 is accepted by openssl (it doesn't enforce age
+    // for its own tickets in the common config); real freshness needs the
+    // elapsed ms + age_add, which we don't track without a clock hook here.
+    tls13_hs.client_hello_psk(rnd, sid, 32, pub, host, st.ticket, st.ticket_len, 0, hl, &pch)
+    ch = pch.buf
+    ch_len = pch.buf_len
+
+    // Compute the PSK binder over the truncated ClientHello and patch it in.
+    // binder = HMAC(binder_finished_key, Transcript-Hash(truncated CH)).
+    early = tls13_ks.early_secret_psk(algo, psk, hl)
+    bkey = tls13_ks.binder_key(algo, early)
+    bfk = finished_key_algo(bkey, algo, hl)
+    trunc_hash = hash_bytes_algo(ch, pch.truncated_len, algo)
+    binder = hmac.hmac_bytes(algo, bfk, hl, trunc_hash, hl)
+    bp = 0
+    while bp < hl { bytes.set(ch, pch.binder_off + bp, bytes.get(binder, bp) & 0xFF); bp = bp + 1 }
+    bytes.free(early); bytes.free(bkey); bytes.free(bfk); bytes.free(trunc_hash); bytes.free(binder)
+
+    tr = transcript_new()
+    transcript_add(tr, ch, ch_len)
+    serr = send_plaintext_handshake(sock, ch, ch_len)
+    if string.equals(serr, "") != 1 {
+        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); net.tcp_close(sock)
+        return null, serr
+    }
+    rio = recio_new(sock)
+
+    shrec, shlen, sherr = recio_next_hs(rio)
+    if string.equals(sherr, "") != 1 {
+        bytes.free(psk); cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, sherr
+    }
+    sh_msg_len = shlen - 5
+    sh = bytes.new(sh_msg_len)
+    bytes.set(sh, sh_msg_len - 1, 0)
+    bytes.copy_from_bytes(sh, 0, shrec, 5, sh_msg_len)
+    transcript_add(tr, sh, sh_msg_len)
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
+    perr = tls13_hs.parse_server_hello(sh, sh_msg_len, &parsed)
+    if string.equals(perr, "") != 1 {
+        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, perr
+    }
+    if parsed.psk_accepted != 1 {
+        if parsed.key_share != null { bytes.free(parsed.key_share) }
+        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, "server rejected the PSK (no resumption)"
+    }
+
+    // ECDHE (psk_dhe_ke): the server still sent a key_share.
+    shared, agerr = ecdhe_shared(tls13_hs.GROUP_X25519, x25519_priv, parsed.key_share, parsed.key_share_len)
+    if string.equals(agerr, "") != 1 {
+        if parsed.key_share != null { bytes.free(parsed.key_share) }
+        bytes.free(psk); bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, agerr
+    }
+    rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(parsed.cipher_suite)
+    if string.equals(suite_err, "") != 1 {
+        if parsed.key_share != null { bytes.free(parsed.key_share) }
+        bytes.free(psk); bytes.free(shared); bytes.free(sh); bytes.free(shrec)
+        cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
+        return null, suite_err
+    }
+
+    // Handshake keys keyed off the PSK early secret (RFC 8446 §7.1 resumption).
+    th_chsh = transcript_hash_algo(tr, hash_algo)
+    keys = derive_handshake_keys_psk(psk, hl, shared, 32, th_chsh, hash_len, rec_key_len, hash_algo)
+    srv_ctx = tls13_record.new_aead(rec_aead, hs_server_key(keys), rec_key_len, hs_server_iv(keys))
+
+    // Read the abbreviated flight (EncryptedExtensions + Finished; NO cert).
+    fl = bytes.new(16384)
+    bytes.set(fl, 0, 0)
+    fllen = 0
+    done = 0
+    ferr = ""
+    guard = 0
+    while done == 0 {
+        guard = guard + 1
+        if guard > 64 { ferr = "resume: flight too long"; done = 1 } else {
+            nrec, nlen, nerr = recio_next(rio)
+            if string.equals(nerr, "") != 1 { ferr = nerr; done = 1 } else {
+                ct2 = bytes.get(nrec, 0) & 0xFF
+                if ct2 == 0x14 { bytes.free(nrec) } else {
+                    op = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+                    oe = tls13_record.open_record(srv_ctx, nrec, nlen, &op)
+                    bytes.free(nrec)
+                    if string.equals(oe, "") != 1 { ferr = oe; done = 1 } else {
+                        if op.content_type == tls13_record.CONTENT_HANDSHAKE {
+                            bytes.copy_from_bytes(fl, fllen, op.plaintext, 0, op.plaintext_len)
+                            fllen = fllen + op.plaintext_len
+                            if flight_complete(fl, fllen) == 1 { done = 1 }
+                        }
+                        if op.plaintext != null { bytes.free(op.plaintext) }
+                    }
+                }
+            }
+        }
+    }
+
+    result = null
+    result_err = ferr
+    if string.equals(ferr, "") == 1 {
+        th_before_finished, th_through_cert = add_flight_capture_prefinished(tr, fl, fllen, hash_algo)
+        server_verify_data, svd_len = extract_server_finished(fl, fllen)
+        // Verify server Finished (no cert auth on resume — the PSK binds identity).
+        expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
+        if bytes_equal(expected, server_verify_data, hash_len) != 1 {
+            result_err = "resume: server Finished MAC verification failed"
+        } else {
+            th_sf = transcript_hash_algo(tr, hash_algo)
+            ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
+            c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
+            s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
+            cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
+            cfin = build_finished_msg(cvd)
+            cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+            cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
+            cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
+            net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
+            transcript_add(tr, cfin, bytes.length(cfin))
+            th_cf = transcript_hash_algo(tr, hash_algo)
+            res_master2 = tls13_kdf.derive_secret(hash_algo, ms, hash_len, "res master", th_cf, hash_len)
+            bytes.free(th_cf)
+            ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
+            civ = tls13_ks.write_iv(hash_algo, c_ap)
+            sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
+            siv = tls13_ks.write_iv(hash_algo, s_ap)
+            conn = malloc(56) as *ClientConn
+            conn.sock = sock
+            conn.rio = rio as ptr
+            conn.app_send = tls13_record.new_aead(rec_aead, ck, rec_key_len, civ) as ptr
+            conn.app_recv = tls13_record.new_aead(rec_aead, sk, rec_key_len, siv) as ptr
+            conn.res_master = res_master2
+            conn.res_hash_algo = str_to_bytes_local(hash_algo)
+            conn.res_hash_len = hash_len
+            result = conn as ptr
+            bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+            bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
+            tls13_record.free_ctx(cli_hs_ctx)
+            bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+        }
+        bytes.free(expected)
+        if th_through_cert != null { bytes.free(th_through_cert) }
+        if th_before_finished != null { bytes.free(th_before_finished) }
+        if server_verify_data != null { bytes.free(server_verify_data) }
+    }
+
+    bytes.free(fl)
+    tls13_record.free_ctx(srv_ctx)
+    free_hs_keys(keys)
+    bytes.free(th_chsh); bytes.free(shared); bytes.free(psk)
+    if parsed.key_share != null { bytes.free(parsed.key_share) }
+    bytes.free(sh); bytes.free(shrec)
+    cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
+    if result == null {
+        recio_free(rio); net.tcp_close(sock)
+    }
+    return result, result_err
+}
+
+// SHA-256/384 of a bytes buffer prefix (fresh Hash.len buffer).
+fn hash_bytes_algo(data: ptr, len: int, algo: string) -> ptr {
+    ctx, err = sha2.new(algo)
+    if err != "" { return null }
+    sha2.update_bytes(ctx, data, len)
+    return sha2.final_bytes(ctx)
+}
+
+free_ticket(t: ptr) {
+    if t == null { return }
+    st = t as *SessionTicket
+    if st.ticket != null { bytes.free(st.ticket) }
+    if st.nonce != null { bytes.free(st.nonce) }
+    if st.res_master != null { bytes.free(st.res_master) }
+    if st.hash_algo != null { bytes.free(st.hash_algo) }
+    libc_free(t)
+}
+
+// Copy a string into a fresh bytes buffer (used to stash the hash-algo name in
+// the connection for later resumption).
+fn str_to_bytes_local(s: string) -> ptr {
+    n = string_length(s)
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(s, n, i) & 0xFF)
+        i = i + 1
+    }
+    return b
+}
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 // ============================================================================
 // Server authentication (RFC 8446 §4.4.2 / §4.4.3 + RFC 5280/6125): extract the

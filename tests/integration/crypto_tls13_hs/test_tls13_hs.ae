@@ -139,7 +139,7 @@ main() {
 
     // --- ServerHello round-trip ---
     sh, sh_len = build_server_hello(0x42)
-    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    parsed = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     err = tls13_hs.parse_server_hello(sh, sh_len, &parsed)
     if err != "" {
         println("FAIL SH parse error: ${err}")
@@ -186,7 +186,7 @@ main() {
     // empty sid + cipher 1301 + comp 00 + exts{ supported_versions, key_share=
     // secp256r1(0x0017) }.
     hrr = from_hex("020000340303cf21ad74e59a6111be1dfa3a06b44e8c845c7630048b15d5a00d203a15d5b26e00130100000c002b00020304003300020017")
-    hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     herr = tls13_hs.parse_server_hello(hrr, bytes.length(hrr), &hp)
     if string.equals(herr, "") == 1 {
         if hp.is_hello_retry == 1 {
@@ -212,6 +212,34 @@ main() {
     } else { println("FAIL dual CH msg_type ${g8(dual, 0)}"); total_ok = 0 }
     bytes.free(p256pt)
     bytes.free(dual)
+
+    // --- PSK resumption ClientHello (client_hello_psk) ---
+    // A 16-byte ticket + a 32-byte (SHA-256) binder placeholder. The builder
+    // must place pre_shared_key (41) LAST and report a binder offset inside the
+    // buffer whose placeholder bytes are zero, and a truncated length < the
+    // binder offset (the binder MACs the CH up to the binders length prefix).
+    tkt = bytes.new(16)
+    tkt_i = 0
+    while tkt_i < 16 { bytes.set(tkt, tkt_i, 0xAB); tkt_i = tkt_i + 1 }
+    pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
+    tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt, 16, 0, 32, &pch)
+    pok = 1
+    if g8(pch.buf, 0) != 1 { pok = 0 }                       // client_hello type
+    if pch.binder_off <= 0 { pok = 0 }
+    if pch.truncated_len <= 0 { pok = 0 }
+    if pch.truncated_len >= pch.binder_off { pok = 0 }       // truncation precedes binder
+    // binder placeholder must be zero
+    z = 0
+    zi = 0
+    while zi < 32 { if bytes.get(pch.buf, pch.binder_off + zi) != 0 { z = 1 } zi = zi + 1 }
+    if z != 0 { pok = 0 }
+    // last extension must be pre_shared_key (0x0029): the final 32+1 bytes are
+    // the binder; before them the 2-byte binders length; the ext ends the CH.
+    if pok == 1 {
+        println("ok   PSK-resumption CH builds (pre_shared_key last, binder_off=${pch.binder_off}, trunc=${pch.truncated_len})")
+    } else { println("FAIL PSK CH structure"); total_ok = 0 }
+    bytes.free(tkt)
+    bytes.free(pch.buf)
 
     bytes.free(random)
     bytes.free(sid)
