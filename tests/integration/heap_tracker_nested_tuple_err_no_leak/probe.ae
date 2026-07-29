@@ -1,0 +1,84 @@
+// Regression: #1311. A std (value, error) tuple whose error slot is
+// the tracked success-empty leaked 1 allocation per call when the
+// tuple was destructured inside a helper function (anywhere but main)
+// and the error dropped.
+//
+// Root cause: the return-heap classifiers took bare-identifier
+// evidence from `gen->heap_string_vars`, the tracker table of
+// whichever function happened to be EMITTING when the callee's memo
+// was first computed. User helpers emit before merged std module
+// functions, so `oid, oerr = asn1.read_oid(r)` inside a helper
+// classified read_oid's error slot with the helper's (wrong) tracker
+// table, memoised non-heap, and the chain minted heap empties that
+// no one freed. Identifier evidence is now resolved structurally
+// against the analysed function's own body, so classification is
+// order-independent and the whole chain agrees.
+//
+// What this test exercises: 50000 iterations of a helper that
+// destructures asn1.read_oid and drops the error. Pre-fix each call
+// leaked one tracked-empty allocation (~16 bytes with allocator
+// bucket) → ~800 KB growth; post-fix the error path is a shared
+// literal and RSS stays flat. Bound mirrors the sibling
+// heap_tracker_return_escape_no_leak probe (current RSS, 256 KB
+// headroom).
+
+import std.cryptography.asn1
+import std.bytes
+import std.string
+
+extern getrusage_max_rss_kb() -> int
+extern exit(code: int)
+
+read_one_oid(der: ptr) -> int {
+    r = asn1.reader_new(der)
+    oid, oerr = asn1.read_oid(r)
+    n = string.length(oid)
+    string.release(oid)
+    asn1.reader_free(r)
+    return n
+}
+
+main() {
+    println("=== heap_tracker_nested_tuple_err_no_leak ===")
+    der = asn1.encode_oid("2.5.29.17")
+
+    // Warm-up so allocator pools and module init don't count as growth.
+    i = 0
+    while i < 1000 {
+        n = read_one_oid(der)
+        if n != 9 {
+            println("FAIL: wrong OID length ${n}")
+            exit(1)
+        }
+        i = i + 1
+    }
+
+    before = getrusage_max_rss_kb()
+    i = 0
+    while i < 50000 {
+        n = read_one_oid(der)
+        if n != 9 {
+            println("FAIL: wrong OID length ${n}")
+            exit(1)
+        }
+        i = i + 1
+    }
+    after = getrusage_max_rss_kb()
+    bytes.free(der)
+
+    // Windows MinGW has no getrusage; the shim returns -1 there and
+    // the run still proves correctness (no UAF, no crash).
+    if before < 0 {
+        println("(rss probe unavailable; correctness-only run)")
+        println("=== all cases passed ===")
+        return
+    }
+
+    growth = after - before
+    println("rss growth: ${growth} KB")
+    if growth > 256 {
+        println("FAIL: rss grew ${growth} KB across 50000 nested tuple-err drops")
+        exit(1)
+    }
+    println("=== all cases passed ===")
+}

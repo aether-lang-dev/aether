@@ -236,11 +236,6 @@ typedef enum {
 #define AETHER_PROFILE_MEDIUM_MSG_POOL  4096
 #define AETHER_PROFILE_LARGE_MSG_POOL   16384
 
-#define AETHER_PROFILE_MICRO_ACTOR_POOL  16
-#define AETHER_PROFILE_SMALL_ACTOR_POOL  64
-#define AETHER_PROFILE_MEDIUM_ACTOR_POOL 256
-#define AETHER_PROFILE_LARGE_ACTOR_POOL  1024
-
 // Get pool sizes for a profile
 static inline int aether_profile_msg_pool_size(AetherProfile p) {
     switch (p) {
@@ -248,15 +243,6 @@ static inline int aether_profile_msg_pool_size(AetherProfile p) {
         case AETHER_PROFILE_SMALL:  return AETHER_PROFILE_SMALL_MSG_POOL;
         case AETHER_PROFILE_LARGE:  return AETHER_PROFILE_LARGE_MSG_POOL;
         default:                    return AETHER_PROFILE_MEDIUM_MSG_POOL;
-    }
-}
-
-static inline int aether_profile_actor_pool_size(AetherProfile p) {
-    switch (p) {
-        case AETHER_PROFILE_MICRO:  return AETHER_PROFILE_MICRO_ACTOR_POOL;
-        case AETHER_PROFILE_SMALL:  return AETHER_PROFILE_SMALL_ACTOR_POOL;
-        case AETHER_PROFILE_LARGE:  return AETHER_PROFILE_LARGE_ACTOR_POOL;
-        default:                    return AETHER_PROFILE_MEDIUM_ACTOR_POOL;
     }
 }
 
@@ -306,7 +292,6 @@ static inline bool aether_env_bool(const char* name) {
 // These provide consistent wins with no downsides
 // ============================================================================
 
-#define AETHER_ACTOR_POOLING_ENABLED    1   // Always use pooled allocation
 #define AETHER_DIRECT_SEND_ENABLED      1   // Always bypass queue for same-core
 #define AETHER_ADAPTIVE_BATCH_ENABLED   1   // Always adjust batch size dynamically
 #define AETHER_COALESCING_ENABLED       1   // Always coalesce messages
@@ -380,7 +365,6 @@ typedef struct {
     // Memory profile (auto-detected or env override)
     AetherProfile profile;
     int msg_pool_size;    // Actual pool size (env override or from profile)
-    int actor_pool_size;  // Actual pool size (env override or from profile)
 
     // Cooperative preemption (opt-in, zero cost when disabled)
     // Scheduler-side: break out of drain loop if handler exceeds threshold
@@ -388,7 +372,6 @@ typedef struct {
     uint64_t preempt_threshold_ns;       // Default 1ms (1000000 ns)
 
     // Statistics
-    atomic_uint_fast64_t actors_pooled;
     atomic_uint_fast64_t actors_malloced;
     atomic_uint_fast64_t direct_sends;
     atomic_uint_fast64_t queue_sends;

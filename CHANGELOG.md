@@ -9,6 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Heap tracker: tracked-empty error string leaked when dropped outside `main`**
+  (#1311). The return-heap classifiers took bare-identifier evidence from the
+  tracker table of whichever function happened to be emitting when a callee's
+  memo was first computed, so a std `(value, error)` tuple destructured inside a
+  helper function classified its error slot non-heap and leaked one allocation
+  per call (1 byte per asn1 `read_*`). Identifier evidence now resolves
+  structurally against the analysed function's own body, classification is
+  order-independent, and the asn1 error chain settles on the non-allocating
+  literal path. Regression probe:
+  `tests/integration/heap_tracker_nested_tuple_err_no_leak/`.
+- **Actor destroy under libnuma freed with the wrong size.** Release freed every
+  actor with `sizeof(ActorBase)` while spawn allocated the full derived-struct
+  size; `numa_free` unmaps exactly the given range, so each destroy leaked the
+  derived tail on NUMA builds. The allocation size is now stored on the actor
+  and used at release.
+- **Latent wrong-allocator free in actor teardown.** The release path
+  reinterpreted every `ActorBase*` as a pool struct and, when the overlaid bytes
+  landed in range, routed NUMA-allocated memory to plain `free()`. The
+  never-wired pool machinery is removed (below); teardown frees through
+  `aether_numa_free` unconditionally.
+
+### Removed
+
+- **Inert actor-pool machinery.** Per-core `ActorPool`s were allocated and
+  initialized on every core, but `actor_pool_acquire` had zero call sites, so
+  actor pooling never existed at runtime; the pools cost memory and the
+  release-path cast was the corruption hazard above. Removed both pool headers
+  (one was a duplicate included nowhere), the dead `AETHER_ACTOR_POOL_SIZE` env
+  knob and its profile constants, the never-incremented `actors_pooled` counter,
+  the false "Actor Pooling [ON]" config print, and the isolated unit tests that
+  exercised the unused data structure. `scheduler_spawn_pooled` /
+  `scheduler_release_pooled` are renamed `scheduler_spawn_actor` /
+  `scheduler_release_actor` (nothing pools); all docs updated.
+- **Dead message-tracing TU.** `runtime/utils/aether_tracing.c` compiled into
+  every build and generated C included its header, but no code path ever called
+  it; the README advertised message tracing that did not exist. Removed the TU,
+  the `#include` emission, the manifest rows, and six orphaned generated-C
+  snapshots under `tests/integration/` that nothing compiled.
+- **`scheduler_enable_features`.** Zero callers; its only live effect duplicated
+  `aether_enable_opt(AETHER_OPT_LOCKFREE_MAILBOX)`.
+
+### Added
+
+- **Emitted-C determinism gate and documented guarantee** (#1299). The
+  byte-identical-output property (same source + same compiler build) is now
+  stated in `docs/architecture.md` with its invariants and scope boundary, and
+  enforced by `tests/integration/emit_c_determinism/`, which compiles a
+  seven-program corpus twice, byte-compares, and rejects timestamp macros.
+- **`docs/http-server.md` static-file section**: `http.serve_file` (zero-copy
+  `sendfile(2)` fast path) and `http.serve_static` (traversal-rejecting,
+  Range-aware).
+
+### Changed
+
+- **README repositioned** (#475): leads with the capability sandbox,
+  config-IS-code, and polyglot hosting instead of "another compiled language";
+  the duplicated Runtime Features and Optimization Tiers walls are gone, every
+  removed detail now lives in the doc it belongs to (tiers in
+  `docs/runtime-optimizations.md`, embed flags in `docs/c-embedding.md`,
+  sendfile in `docs/http-server.md`), and Core Features is seven one-line
+  pillars with links. GitHub repo description updated to match.
+
 ## [0.454.0]
 
 ### Added

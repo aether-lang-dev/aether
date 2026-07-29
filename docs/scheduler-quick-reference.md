@@ -104,7 +104,7 @@ scheduler_shutdown();
 
 ```c
 // NUMA-aware allocation with correct derived-struct size
-ActorBase* actor = scheduler_spawn_pooled(preferred_core, step_fn, sizeof(MyActor));
+ActorBase* actor = scheduler_spawn_actor(preferred_core, step_fn, sizeof(MyActor));
 if (!actor) {
     // Fallback to manual allocation
     actor = aligned_alloc(64, sizeof(MyActor));

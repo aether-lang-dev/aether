@@ -336,7 +336,7 @@ int main(int argc, char** argv) {
 
     workers = malloc(worker_count * sizeof(ActorBase*));
     for (int i = 0; i < worker_count; i++) {
-        workers[i] = scheduler_spawn_pooled(i % num_cores, step_fn, 0);
+        workers[i] = scheduler_spawn_actor(i % num_cores, step_fn, 0);
         if (!workers[i]) {
             fprintf(stderr, "Failed to spawn worker %d\n", i);
             return 1;

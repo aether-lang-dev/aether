@@ -1140,6 +1140,83 @@ int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
     return 0;
 }
 
+static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
+                                         int position);
+
+/* Does the analysed body bind `var_name` at a heap-classified tuple
+ * position of some destructure (`..., x, ... = g(...)`)?
+ *
+ * INVARIANT: this resolution must stay context-free. The return-heap
+ * classifiers memoise per callee AST node, and the first classification
+ * of a callee can run while ANY function is being emitted (a caller's
+ * destructure site), so evidence taken from generation-time state
+ * (`gen->heap_string_vars` via is_heap_string_expr on identifiers)
+ * poisons the memo with the wrong function's tracker table. That was
+ * #1311: a std tuple fn first classified at a user helper's site lost
+ * its heap error slot and leaked the tracked-empty on every call. */
+static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
+                                             const char* var_name) {
+    if (!node || !var_name || !gen || !gen->program) return 0;
+    if (node->type == AST_FUNCTION_DEFINITION ||
+        node->type == AST_BUILDER_FUNCTION ||
+        node->type == AST_CLOSURE) {
+        return 0;
+    }
+    if (node->type == AST_TUPLE_DESTRUCTURE && node->child_count >= 2) {
+        int var_count = node->child_count - 1;
+        ASTNode* rhs = node->children[var_count];
+        for (int j = 0; j < var_count; j++) {
+            ASTNode* v = node->children[j];
+            if (!v || !v->value || strcmp(v->value, var_name) != 0) {
+                continue;
+            }
+            if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value) {
+                char fn_norm[256];
+                const char* fn = codegen_normalise_callee(rhs->value, fn_norm,
+                                                          sizeof(fn_norm));
+                ASTNode* callee = find_function_definition_by_name(gen->program, fn);
+                if (callee && function_def_returns_heap_at(gen, callee, j)) {
+                    return 1;
+                }
+                if (!callee) {
+                    ASTNode* ext = find_extern_declaration_by_name(gen->program, fn);
+                    if (ext && ext->node_type &&
+                        ext->node_type->kind == TYPE_TUPLE &&
+                        j < ext->node_type->tuple_count &&
+                        ext->node_type->tuple_heap_flags &&
+                        ext->node_type->tuple_heap_flags[j]) {
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (body_tuple_destructure_binds_heap(gen, node->children[i], var_name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Heap evidence for a return-site expression inside the classifiers.
+ * Bare identifiers MUST resolve structurally against the analysed
+ * function's own body (see the INVARIANT above): is_heap_string_expr
+ * consults the currently-emitting function's tracker table for
+ * identifiers, which is the wrong function whenever classification is
+ * triggered from a caller's destructure site. */
+static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
+                               ASTNode* fn_body_root) {
+    if (!expr) return 0;
+    if (expr->type == AST_IDENTIFIER) {
+        return expr->value && fn_body_root &&
+               (body_assigns_var_from_heap(gen, fn_body_root, expr->value) ||
+                body_tuple_destructure_binds_heap(gen, fn_body_root,
+                                                  expr->value));
+    }
+    return is_heap_string_expr(gen, expr);
+}
+
 static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
                                          const char* fn_being_analyzed,
                                          ASTNode* fn_body_root,
@@ -1182,37 +1259,18 @@ static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
                  * free — see the walk_join trace in the v0.149
                  * lucky-UAF write-up. */
                 is_heap = 1;
-            } else if (is_heap_string_expr(gen, ret)) {
-                is_heap = 1;
-            } else if (ret->type == AST_IDENTIFIER && ret->value &&
-                       fn_body_root &&
-                       body_assigns_var_from_heap(gen, fn_body_root, ret->value)) {
-                /* Bare-identifier return of a heap-tracked local —
-                 * e.g. `body = ""; ...accumulate...; return body`.
-                 * The function's value IS heap at runtime when the
-                 * heap-tracker flag for `body` is 1; the uniform-
-                 * heap shim emitted at the return statement (case
-                 * `_heap_<name>` runtime branch in
-                 * `emit_uniform_heap_return_expr`) ensures the
-                 * caller receives a heap-allocated buffer regardless
-                 * of which assignment path set the flag last. Without
-                 * this clause, accumulator-return functions (avn's
-                 * `rebuild_dir` shape: cross-fn + recursive chain
-                 * culminating in `return body`) get classifier-flagged
-                 * non-heap, the caller's wrapper sets _heap_<lhs> = 0,
-                 * and the buffer leaks per call → O(N²) bench growth.
-                 *
-                 * Context safety: this check queries
-                 * `gen->heap_string_vars` for `ret->value`. The walk
-                 * is driven by `function_def_returns_heap_string`
-                 * which memoises per function-def AST node, so the
-                 * walk only ever runs DURING the function's own
-                 * emission — when `gen->heap_string_vars` is in that
-                 * function's context and the lookup is correct.
-                 * Subsequent caller-site invocations hit the memoised
-                 * "heap_yes" / "heap_no" verdict and don't re-walk.
-                 * The cross-function context bug avn surfaced for
-                 * the 0.150 piece-2 implementation cannot recur here. */
+            } else if (return_expr_is_heap(gen, ret, fn_body_root)) {
+                /* Heap evidence for the return expression. Bare
+                 * identifiers resolve STRUCTURALLY against the
+                 * analysed function's own body (declaration-from-heap
+                 * or destructure-from-heap-position), never through
+                 * `gen->heap_string_vars`: the memoised walk can be
+                 * triggered from a caller's site during ANY function's
+                 * emission, where the tracker table belongs to the
+                 * wrong function (#1311). Covers the accumulator
+                 * shape (`body = ""; ...; return body`, avn's
+                 * `rebuild_dir` O(N²) leak) and the destructure shape
+                 * (`v, e = g(...); return v`). */
                 is_heap = 1;
             }
         }
@@ -1542,9 +1600,6 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
 // path to decide whether to emit `_heap_<lhs> = 1;` at the
 // destructure site, and by `emit_tuple_return_position` to decide
 // whether to wrap the return value.
-static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
-                                         int position);
-
 static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
                                      int position, ASTNode* fn_body_root,
                                      int* found, int* any_heap, int* vetoed) {
@@ -1611,7 +1666,7 @@ static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
                 child && child->node_type &&
                 child->node_type->kind == TYPE_TUPLE;
             if (position == 0 && !child_is_tuple &&
-                is_heap_string_expr(gen, child)) {
+                return_expr_is_heap(gen, child, fn_body_root)) {
                 *any_heap = 1;
                 return;
             }
@@ -1641,21 +1696,17 @@ static void walk_returns_for_heap_at(CodeGenerator* gen, ASTNode* node,
         // produce a value at `position`" → contributes no heap evidence.
         if (position < 0 || position >= node->child_count) return;
         ASTNode* pos_expr = node->children[position];
-        if (is_heap_string_expr(gen, pos_expr)) { *any_heap = 1; return; }
-        /* Bare-identifier tuple position — `owned = string_new_with_
-         * length(...); return owned, n, ""`. `is_heap_string_expr`
-         * can't see the identifier as heap from the destructure
-         * site's (caller's) context, so resolve it structurally
-         * against the analysed function's own body: it is heap iff
-         * some assignment in that body sets it from a heap source.
-         * Mirrors the single-value walker's `body_assigns_var_from_
-         * heap` clause in `walk_returns_for_heap_check` — the tuple
-         * walker simply never had it, so accumulator-into-tuple
-         * shapes (zlib/cryptography/lzf decode results) classified
-         * non-heap and leaked at every caller. */
-        if (pos_expr && pos_expr->type == AST_IDENTIFIER && pos_expr->value &&
-            fn_body_root &&
-            body_assigns_var_from_heap(gen, fn_body_root, pos_expr->value)) {
+        /* Heap evidence for the position expression. Bare identifiers
+         * resolve structurally against the analysed function's own
+         * body (`return_expr_is_heap`): declaration-from-heap covers
+         * the accumulator-into-tuple shape (`owned = string_new_with_
+         * length(...); return owned, n, ""`, zlib/cryptography/lzf
+         * decode results), destructure-from-heap-position covers the
+         * error-forwarding shape (`v, err = g(...); return "", err`,
+         * the asn1 chain in #1311). Never through
+         * `gen->heap_string_vars`, which belongs to whichever function
+         * happens to be emitting when the memo is first computed. */
+        if (return_expr_is_heap(gen, pos_expr, fn_body_root)) {
             *any_heap = 1;
         }
         return;

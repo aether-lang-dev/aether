@@ -66,9 +66,8 @@ Modified `runtime/scheduler/multicore_scheduler.c`:
 
 1. **Scheduler Init**: Detects NUMA topology
 2. **Actor Arrays**: Allocated on core's NUMA node
-3. **Actor Pools**: Allocated on core's NUMA node  
-4. **Actor Instances**: Allocated on core's NUMA node
-5. **Dynamic Growth**: NUMA-aware reallocation
+3. **Actor Instances**: Allocated on core's NUMA node
+4. **Dynamic Growth**: NUMA-aware reallocation
 
 ## Performance Impact
 

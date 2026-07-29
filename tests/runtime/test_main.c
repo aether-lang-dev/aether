@@ -5,7 +5,6 @@
 void register_scheduler_tests(void);
 void register_stress_tests(void);
 void register_zerocopy_tests(void);
-void register_actor_pool_tests(void);
 void register_lockfree_mailbox_tests(void);
 void register_memory_arena_tests(void);
 void register_memory_pool_tests(void);
@@ -81,7 +80,6 @@ int main(int argc, char** argv) {
     register_scheduler_tests();
     register_stress_tests();
     register_zerocopy_tests();
-    register_actor_pool_tests();
     register_lockfree_mailbox_tests();
     register_memory_arena_tests();
     register_memory_pool_tests();

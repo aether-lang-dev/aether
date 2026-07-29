@@ -5,87 +5,27 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM%20%7C%20Embedded-lightgrey)]()
 
-A compiled, actor-based programming language with type inference, built for concurrent systems. Aether compiles to readable C, so it runs at native speed and links against existing C libraries directly.
+Erlang-style actors, Rust-grade capability discipline, and Go-flavored ergonomics, compiled to readable C.
 
 ## Overview
 
-Aether brings actor-based concurrency to systems programming. The compiler emits C, not bytecode, not a VM, which keeps the runtime dependency-free, portable anywhere a C toolchain reaches, and callable from (and into) existing C code.
+Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve`. The mix is Pony's object capabilities, Java's removed SecurityManager, and a fraction of gVisor; see [Containment Sandbox](docs/containment-sandbox.md) for the threat model and known bypass surface.
+
+Concurrency is actor-shaped: Erlang-style `actor` / `receive` / `!` with automatic multi-core scheduling, lock-free mailboxes, and migration that converges chatty actors onto one core. The compiler emits readable C, not bytecode and not a VM, which is an implementation choice rather than the pitch: it buys native speed, direct linking against existing C libraries, and a runtime that ports anywhere a C toolchain reaches.
 
 **Where it sits on the OO ↔ FP spectrum:** structs are plain data, behaviour is free functions, closures + trailing blocks are first-class, Aether leans **closer to functional than OO**, sitting near Go and Rust in the hybrid middle of the paradigm spectrum. There are no classes, no inheritance, no method dispatch; the one piece of OO machinery present is the actor (stateful, encapsulated behind a message boundary, no polymorphism). See [Language Reference § Paradigm placement](docs/language-reference.md#paradigm-placement).
 
-**Core Features:**
-- **Actor-based concurrency**, automatic multi-core scheduling, lock-free message passing, and adaptive batching/migration. See [Actor Concurrency](docs/actor-concurrency.md).
-- **Type inference** with optional annotations, plus Go-style multi-value returns, `a, err = func()` with `_` discard.
-- **Compiles to readable C**, native performance and direct C-library interop, no FFI glue. See [Architecture](docs/architecture.md).
-- **Three-layer capability sandbox**, `--emit=lib` gates the stdlib at compile time, `hide`/`seal except` gate lexical scopes, and an `LD_PRELOAD` shim gates libc. See [Containment Sandbox](docs/containment-sandbox.md).
-- **Embeds in (and hosts) other languages**, `--emit=lib` emits a `.so` + typed SDK and a `.rodata` symbol catalog read by `ae lib-info`; the same grant list runs Lua / Python / Perl / Ruby / Tcl / JS in-process. See [Embedding & emit=lib](docs/emit-lib.md).
-- **Per-guest resource caps**, embedders set a process memory ceiling and per-thread wall-clock deadline; the codegen tripwires every loop head under `--emit=lib` (zero overhead on `--emit=exe`).
-- **Production HTTP server** in the stdlib, TLS, HTTP/1.1 keep-alive, HTTP/2 (h2 + h2c), WebSocket, Server-Sent Events, zero-copy `sendfile(2)`, and a stack of composable middleware. See [HTTP Server](docs/http-server.md).
-- **nginx-class reverse proxy** in the stdlib, five load-balancing algorithms, active health checks, an LRU response cache, per-upstream circuit breaker, idempotent retries, and rate limiting. See [Reverse Proxy](docs/http-reverse-proxy.md).
-- **Automatic string-ownership tracking**, heap strings are freed on reassignment and at scope exit with no manual `defer`; `@retain` marks parameters that store the pointer. See [String memory model](docs/memory-management.md#string-memory-model-heap-string-tracker).
-- **Runtime contracts**, `requires` / `ensures` pre- and postconditions on any function; `--no-contracts` compiles them out at zero per-call cost. See [Function contracts](docs/language-reference.md#function-contracts-requires--ensures-issue-348).
-- **`@derive(eq)` on structs**, synthesize a field-by-field equality helper automatically.
-- **PATH-style module search**, `--lib ./lib:./vendor` layers project, vendored, and shared module roots left-to-right; `ae lib-path` shows the resolved chain. See [Module System](docs/module-system-design.md).
-- **Package management**, `ae add host/user/repo[@version]` from GitHub, GitLab, Bitbucket, or any git host.
-- **Offline config-script diagnostics**, `ae help <script>` suggests fixes for closure-DSL config errors with no network access and no code execution. See [Config-IS-Code Diagnostics](docs/cic-help.md).
+The load-bearing features, one line each:
 
-## Runtime Features
+- **Actor concurrency**, scheduled across cores for you: lock-free messaging, locality-aware spawning, work stealing. See [Actor Concurrency](docs/actor-concurrency.md).
+- **Config IS code**: library APIs double as typed, sandboxable configuration DSLs via trailing-block closures, so operators run real Aether instead of YAML. See [Config IS Code](docs/config-is-code.md).
+- **Polyglot host, both directions**: run Lua / Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
+- **Production networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus an nginx-class reverse proxy. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
+- **A deliberate memory model**: manual-first with `defer`, automatic string-ownership tracking, and `requires`/`ensures` contracts that compile out at zero cost. See [Memory Management](docs/memory-management.md).
+- **Go-flavored ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)`, and a single `ae` command for build / run / test / fmt / packages. See [Language Reference](docs/language-reference.md).
+- **Portability as a feature**: Linux, macOS, Windows, FreeBSD, WebAssembly, and embedded targets; cross-compile with `ae build --target=<triple>`. See [Architecture](docs/architecture.md).
 
-The Aether runtime implements a native actor system with optimized message passing:
-
-### Concurrency Model
-- **Multi-core partitioned scheduler** with locality-aware actor placement
-- **Locality-aware spawning**, actors placed on the caller's core for efficient parent-child messaging
-- **Message-driven migration**, communicating actors automatically converge onto the same core
-- **Work-stealing fallback** for idle core balancing
-- **Lock-free SPSC queues** for same-core messaging
-- **Cross-core messaging** with lock-free mailboxes
-
-### Memory Management
-- **Manual by default**, use `defer` for cleanup. All allocations cleaned up explicitly.
-- **Automatic string-ownership tracking**, heap-allocated strings auto-freed on reassignment, tuple destructure, and function exit; opt-in `@retain` extern annotation for parameters that store the pointer beyond the call. See [String memory model](docs/memory-management.md#string-memory-model-heap-string-tracker).
-- **Arena allocators** for actor lifetimes
-- **Memory pools** with thread-local allocation
-- **Actor pooling** reducing allocation overhead
-- **Zero-copy message delivery** in single-actor main-thread mode (caller stack passed directly)
-
-### Message Optimization
-- **Sender-side batching** for reduced overhead
-- **Message coalescing** for higher throughput
-- **Adaptive batching** dynamically adjusts batch sizes
-- **Direct send** for same-core actors bypasses queues
-
-### Capabilities & Sandboxing
-
-Aether is compiled, but comes with a capability system normally associated with interpreted / VM-hosted languages. Three enforcement layers:
-
-- **Compile-time module gate**, `--emit=lib` rejects `std.fs` / `std.net` / `std.os` imports by default; the host opts each in with `--with=fs,net,os`.
-- **Compile-time scope gate**, `hide <names>` and `seal except <allowlist>` on any lexical block (closure, trailing-block DSL, actor handler) block ambient names from leaking into contained code.
-- **Runtime process gate**, `libaether_sandbox.so` (LD_PRELOAD) intercepts libc (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against a builder-DSL grant list; inherited across `execve` to child processes.
-
-The same grant list + LD_PRELOAD also contains embedded interpreters, an Aether `main()` can host Lua, Python, Perl, Ruby, Tcl, and JavaScript in-process (`contrib.host.<lang>.run_sandboxed(perms, code)`) with the same permission model that scopes Aether's own libc calls. In the reverse direction, `--emit=lib` + `ae build --namespace` produce a `.so` plus a typed SDK (Python ctypes, Java Panama, Ruby Fiddle) so host-language apps can embed Aether without writing FFI by hand.
-
-Mashup of Pony object capabilities, Java's removed SecurityManager, and a fraction of gVisor, see [Containment Sandbox](docs/containment-sandbox.md) for the full comparison, threat model, and known bypass surface.
-
-### Platform Portability
-- **Compile-time platform detection** via `AETHER_HAS_*` flags (threads, atomics, filesystem, networking, NUMA, SIMD, affinity)
-- **Cooperative scheduler** for single-threaded platforms (WebAssembly, embedded, bare-metal)
-- **Graceful degradation**, stdlib stubs return errors when features are unavailable
-- **`ae build --target wasm`** compiles to WebAssembly via Emscripten
-- **`PLATFORM=wasm|embedded`** Makefile targets for cross-compilation
-- **Docker CI images** for Emscripten (WASM) and ARM (embedded) verification
-
-### Advanced Features
-- **Actor timeouts**, `receive { ... } after N -> { ... }` fires handler if no message arrives within N ms
-- **Cooperative preemption** (opt-in), `AETHER_PREEMPT=1` breaks long handlers, `--preempt` yields at loop back-edges
-- **Reactor-pattern async I/O**, `net.await_io(fd)` suspends an actor on a file descriptor without blocking any scheduler thread; the runtime's per-core I/O poller (epoll/kqueue/poll) delivers an `IoReady { fd, events }` message when the fd becomes readable
-- **SIMD batch processing** with AVX2 support
-- **NUMA-aware allocation** for multi-socket systems
-- **CPU feature detection** for runtime optimization selection
-- **Performance profiling** with per-core cycle counting
-- **Message tracing** for debugging
-
-### Benchmarks
+## Benchmarks
 
 Cross-language benchmark suite based on the [Savina Actor Benchmark Suite](https://dl.acm.org/doi/10.1145/2687357.2687368), 11 languages × 5 patterns (ping-pong, counting, thread ring, fork-join, skynet). Both the benchmark runner and the visualization server are written in Aether, dogfooding the stdlib.
 
@@ -272,7 +212,7 @@ aether/
 │   ├── config/        # Platform detection, optimization tiers, runtime config
 │   ├── memory/        # Arena allocators, memory pools, batch allocation
 │   ├── scheduler/     # Multi-core scheduler + cooperative single-threaded backend
-│   └── utils/         # CPU detection, SIMD, tracing, thread portability
+│   └── utils/         # CPU detection, SIMD, thread portability
 ├── std/                # Standard library
 │   ├── string/         # String operations
 │   ├── file/           # File operations (open, read, write, delete)
@@ -411,64 +351,6 @@ main() {
 
 Same file is config, validation, conditional logic, and the entry point. No second parser, no second type system, no template language. Sandboxing (`--emit=lib --with=...`, `hide`, `seal except`) keeps it safe to accept untrusted configs as the embedded-DSL case demands. See [Config IS Code](docs/config-is-code.md) for the full progression (YAML → HCL → Pulumi → here) and library-author recipe.
 
-## Runtime Configuration
-
-When embedding the Aether runtime in a C application, configure optimizations at startup:
-
-```c
-#include "runtime/aether_runtime.h"
-
-int main() {
-    // Auto-detect CPU features and enable optimizations
-    aether_runtime_init(4, AETHER_FLAG_AUTO_DETECT);
-
-    // Or manually configure
-    aether_runtime_init(4,
-        AETHER_FLAG_LOCKFREE_MAILBOX |
-        AETHER_FLAG_ENABLE_SIMD |
-        AETHER_FLAG_ENABLE_MWAIT
-    );
-
-    // Your actor system runs here
-
-    return 0;
-}
-```
-
-Available flags:
-- `AETHER_FLAG_AUTO_DETECT` - Detect CPU features and enable optimizations
-- `AETHER_FLAG_LOCKFREE_MAILBOX` - Use lock-free SPSC mailboxes
-- `AETHER_FLAG_ENABLE_SIMD` - AVX2 vectorization for batch operations
-- `AETHER_FLAG_ENABLE_MWAIT` - MWAIT-based idle (x86 only)
-- `AETHER_FLAG_VERBOSE` - Print runtime configuration
-
-## Optimization Tiers
-
-The runtime employs a tiered optimization strategy:
-
-**TIER 0 - Platform Capabilities (compile-time):**
-- `AETHER_HAS_THREADS` pthreads/Win32 threads (auto-detected; disabled on WASM/embedded)
-- `AETHER_HAS_ATOMICS` C11 stdatomic (fallback: volatile for single-threaded)
-- `AETHER_HAS_FILESYSTEM` / `AETHER_HAS_NETWORKING` stdlib feature gates
-- `AETHER_HAS_SIMD` / `AETHER_HAS_NUMA` / `AETHER_HAS_AFFINITY` hardware feature gates
-- Override any flag with `-DAETHER_NO_<FEATURE>` (e.g. `-DAETHER_NO_THREADING`)
-
-**TIER 1 - Always Enabled:**
-- Actor pooling (reduces allocation overhead)
-- Direct send for same-core actors (bypasses queues)
-- Adaptive batching (adjusts batch size dynamically)
-- Message coalescing (combines small messages)
-- Thread-local message pools
-
-**TIER 2 - Auto-Detected:**
-- SIMD batch processing (requires AVX2/NEON)
-- MWAIT idle (requires x86 MONITOR/MWAIT)
-- CPU core pinning (OS-dependent)
-
-**TIER 3 - Opt-In:**
-- Lock-free mailbox (better under contention)
-- Message deduplication (prevents duplicate processing)
-
 ## Documentation
 
 - [Getting Started Guide](docs/getting-started.md) - Installation and first steps
@@ -484,6 +366,9 @@ The runtime employs a tiered optimization strategy:
 - [Module System](docs/module-system-design.md) - `import`/`exports`, PATH-style `--lib` search chain, selective imports, package layout
 - [Config-IS-Code Diagnostics (`ae help`)](docs/cic-help.md) - Offline heuristic diagnostics for closure-DSL config scripts (Levenshtein, YAML→call form, missing-import suggestions, `--fix`, `--json`, optional `--llm`)
 - [C Interoperability](docs/c-interop.md) - Using C libraries and the `extern` keyword
+- [Embedding Aether in C](docs/c-embedding.md) - Actors inside a C host: runtime init flags, spawn/send from C
+- [Embedding & emit=lib](docs/emit-lib.md) - Shared-library artifacts, typed SDKs, capability gating, resource caps
+- [Runtime Configuration](docs/runtime-config.md) - Environment variables, profiles, opt-in runtime flags
 - [Architecture Overview](docs/architecture.md) - Runtime and compiler design
 - **Design & rationale** (why Aether is built the way it is): [closure model](docs/design/closure-lineage-and-runtime-tradeoffs.md), [parse, don't validate](docs/design/parse-dont-validate-review.md), [Aether through Chlipala's lens](docs/design/chlipala-lens.md), [DSL as a rules engine](docs/design/aether-dsl-as-a-rules-engine.md), and concurrency patterns ([sharded actor map](docs/design/sharded-actor-map.md), [snapshot cell](docs/design/snapshot-cell.md), [cache benchmark](docs/design/concurrent-cache-benchmark.md))
 - [Language comparisons](docs/cross-references/) (design history): surveys of Fir, Flint, Zym, and GoogleCloudPlatform/Aether

@@ -4479,7 +4479,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#include \"multicore_scheduler.h\"");
         print_line(gen, "#include \"aether_cpu_detect.h\"");
         print_line(gen, "#include \"aether_optimization_config.h\"");
-        print_line(gen, "#include \"aether_tracing.h\"");
         print_line(gen, "#include \"aether_bounds_check.h\"");
         print_line(gen, "#include \"aether_runtime_types.h\"");
         print_line(gen, "#include \"aether_compiler.h\"");

@@ -150,7 +150,7 @@ int main() {
     // Pre-spawn worker actors distributed across cores
     workers = malloc(worker_count * sizeof(ActorBase*));
     for (int i = 0; i < worker_count; i++) {
-        workers[i] = scheduler_spawn_pooled(i % num_cores, worker_step, 0);
+        workers[i] = scheduler_spawn_actor(i % num_cores, worker_step, 0);
         if (!workers[i]) {
             fprintf(stderr, "Failed to spawn worker %d\n", i);
             return 1;

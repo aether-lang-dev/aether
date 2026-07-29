@@ -157,7 +157,7 @@ int main() {
     scheduler_start();
 
     // Spawn actor using pool
-    MyCounter* actor = (MyCounter*)scheduler_spawn_pooled(
+    MyCounter* actor = (MyCounter*)scheduler_spawn_actor(
         0,                    // Preferred core
         my_counter_step,      // Step function
         sizeof(MyCounter)     // Size
@@ -222,14 +222,14 @@ void scheduler_cleanup(void);
 ```c
 // Spawn actor from pool (recommended)
 // Returns actor pointer, NULL on failure
-ActorBase* scheduler_spawn_pooled(
+ActorBase* scheduler_spawn_actor(
     int preferred_core,      // Core hint, -1 for caller's core (main thread defaults to core 0)
     void (*step)(void*),     // Message handler function
     size_t actor_size        // sizeof(YourActorType)
 );
 
 // Return actor to pool when done
-void scheduler_release_pooled(ActorBase* actor);
+void scheduler_release_actor(ActorBase* actor);
 
 // Register existing actor (alternative to pooled)
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
@@ -369,7 +369,7 @@ The C host and the Aether runtime share a process but have distinct ownership ru
 
 1. **State is message-only.** Actor state is owned by the actor; the host reads and writes it exclusively through messages. Reach-in access bypasses message-ordering guarantees and races with the scheduler.
 2. **Sends are fire-and-forget.** There's no synchronous reply from `aether_send_message()`. When you need a value back, either (a) have the actor send a response message to a host-registered event handler, or (b) have the actor write into shared atomic state the host polls.
-3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. If you spawned from the pool, return it with `scheduler_release_pooled()` when done.
+3. **References are manually lifetime-managed.** The host holds the raw `ActorBase*` (or the generated `Counter*`) returned by spawn; there's no handle type or automatic refcount across the FFI boundary. Keep the pointer as long as you intend to send to the actor. Release it with `scheduler_release_actor()` when done.
 4. **One runtime per process.** `aether_runtime_init()` initializes process-global scheduler state. Calling it twice from the same process is not supported; use separate processes if you need isolated runtimes.
 
 ## Header Generation

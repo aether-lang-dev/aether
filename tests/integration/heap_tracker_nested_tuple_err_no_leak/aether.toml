@@ -1,0 +1,4 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+extra_sources = ["../heap_tracker_return_escape_no_leak/shim.c"]

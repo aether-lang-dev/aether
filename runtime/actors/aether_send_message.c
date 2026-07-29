@@ -124,7 +124,7 @@ AETHER_TLS int g_skip_free = 0;
 
 // TLS pointer: the actor whose step() is currently being executed synchronously
 // on the main thread (non-NULL only inside aether_send_message_sync).
-// scheduler_spawn_pooled checks this to defer main_thread_only=0 if the second
+// scheduler_spawn_actor checks this to defer main_thread_only=0 if the second
 // actor is spawned while the first actor's step() is still on the call stack.
 // Without the deferral a scheduler thread can enter the same actor's step()
 // concurrently with the main thread → data race / crash.
@@ -172,7 +172,7 @@ static inline void AETHER_HOT aether_send_message_sync(ActorBase* actor, void* m
     // in aether_send_message), so they can be freed normally.
     g_skip_free = 1;
 #endif
-    // Guard: scheduler_spawn_pooled defers main_thread_only=0 while this is set
+    // Guard: scheduler_spawn_actor defers main_thread_only=0 while this is set
     g_sync_step_actor = actor;
     actor->step(actor);
     // If step() triggered a self-send transition (which starts scheduler
@@ -193,7 +193,7 @@ static inline void AETHER_HOT aether_send_message_sync(ActorBase* actor, void* m
     g_sync_step_actor = NULL;
 
     // Deferred main_thread_only disable: if the second actor was spawned during
-    // step() above, scheduler_spawn_pooled skipped clearing main_thread_only to
+    // step() above, scheduler_spawn_actor skipped clearing main_thread_only to
     // avoid a concurrent-step race.  Now that step() has returned it is safe.
     if (!aether_main_thread_mode_active() &&
         atomic_load_explicit(&actor->main_thread_only, memory_order_relaxed)) {

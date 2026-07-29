@@ -160,7 +160,7 @@ IDENTIFIER("x") EQUALS NUMBER(42) PLUS IDENTIFIER("y")
 - Computed goto dispatch for message handlers
 - Inline single-int message encoding (bypasses pool allocation)
 - `scheduler_send_local` / `scheduler_send_remote` routing based on `current_core_id`
-- Locality-aware actor placement via `scheduler_spawn_pooled` (caller's core, or core 0 for main thread)
+- Locality-aware actor placement via `scheduler_spawn_actor` (caller's core, or core 0 for main thread)
 - NUMA-aware actor allocation with derived-struct size
 
 **Key Files:**
@@ -170,6 +170,30 @@ IDENTIFIER("x") EQUALS NUMBER(42) PLUS IDENTIFIER("y")
 - `compiler/codegen/codegen_actor.c` - Actor dispatch tables
 - `compiler/codegen/codegen_func.c` - Function definitions
 - `compiler/codegen/codegen.h` - API
+
+**Deterministic output:**
+
+The same compiler build given the same source emits byte-identical C,
+every time. Two invariants make this true, and both are load-bearing:
+
+1. **Emission order tracks AST/source order.** No codegen pass (or
+   analysis pass that feeds codegen) iterates a hash-keyed container to
+   emit declarations, helpers, string literals, or dedup tables. If a
+   future pass needs keyed lookup, it must still emit in source order.
+2. **No volatile metadata reaches emitted text.** The compiler bakes no
+   timestamps, hostnames, or absolute build paths into generated C. The
+   version string flows through the build-generated
+   `runtime/aether_version.h` (numeric components only), not through
+   codegen.
+
+Scope boundary: the guarantee is per compiler build. A different
+`aetherc` build (new version, different optimization passes) may emit
+different C; the downstream C compiler's binary output is out of scope.
+
+The property is enforced in CI by
+`tests/integration/emit_c_determinism/test_emit_c_determinism.sh`,
+which compiles a corpus twice and byte-compares the results, and
+rejects timestamp macros outright.
 
 ## Runtime Architecture
 
@@ -338,7 +362,7 @@ When `AETHER_HAS_ATOMICS == 0`, `<stdatomic.h>` is replaced with fallback typede
 - `aether_free_message` returns buffers to the pool or calls `free`
 
 **Actor Allocation:**
-- `scheduler_spawn_pooled` allocates via `aether_numa_alloc` with the full derived-struct size
+- `scheduler_spawn_actor` allocates via `aether_numa_alloc` with the full derived-struct size
 - NUMA-aware placement on the local node of the assigned core
 - Falls back to standard allocation on non-NUMA systems
 

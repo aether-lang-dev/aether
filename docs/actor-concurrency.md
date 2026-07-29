@@ -311,7 +311,7 @@ During operation, cross-core message senders set a `migrate_to` hint on the targ
 
 ## Memory Management
 
-Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc`) at spawn time. The `scheduler_spawn_pooled` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
+Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc`) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
 
 Message payloads are managed by thread-local pools. Payloads are returned to the pool on free via `aether_free_message`, which checks whether the pointer falls within the pool range before falling back to `free`.
 
