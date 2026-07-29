@@ -1,0 +1,91 @@
+import std.http1
+import std.bytes
+import std.string
+import std.io
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+extern string_concat(a: string, b: string) -> string
+// Build a bytes buffer from a string (CRLF written as \r\n literally).
+fn sb(s: string) -> ptr { n=string_length(s); b=bytes.new(n); if n>0{bytes.set(b,n-1,0)} i=0
+  while i<n { bytes.set(b,i,string_char_at_n(s,n,i)&0xFF); i=i+1 } return b }
+fn body_str(r: ptr) -> string {
+  bp = http1.body_ptr(r); bl = http1.body_len(r)
+  if bp == null { return "<null>" }
+  return bytes.to_string(bp, bl)
+}
+main() {
+  ok = 1
+
+  // 1. Content-Length body, all in one feed.
+  r1 = http1.response_new()
+  msg1 = sb("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello")
+  e1 = http1.feed(r1, msg1, bytes.length(msg1), 0)
+  if string.equals(e1,"")==1 && http1.status_code(r1)==200 && string.equals(body_str(r1),"hello")==1 {
+    ct = http1.header(r1, "Content-Type")
+    if string.equals(ct, "text/plain")==1 { println("ok   content-length + header lookup") } else { println("FAIL header ct='${ct}'"); ok=0 }
+    string.free(ct)
+  } else { println("FAIL content-length: status=${http1.status_code(r1)} body='${body_str(r1)}' err='${e1}'"); ok=0 }
+  http1.response_free(r1)
+  bytes.free(msg1)
+
+  // 2. Content-Length split across TWO feeds (boundary mid-body).
+  r2 = http1.response_new()
+  a = sb("HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\nhel")
+  b = sb("lo world")
+  http1.feed(r2, a, bytes.length(a), 0)          // incomplete
+  e2 = http1.feed(r2, b, bytes.length(b), 0)
+  if string.equals(e2,"")==1 && string.equals(body_str(r2),"hello world")==1 { println("ok   content-length split across feeds") } else { println("FAIL split body='${body_str(r2)}' err='${e2}'"); ok=0 }
+  http1.response_free(r2)
+  bytes.free(a); bytes.free(b)
+
+  // 3. Chunked body.
+  r3 = http1.response_new()
+  // "Wiki" + "pedia " + "in chunks." classic example
+  ch = sb("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n6\r\npedia \r\nE\r\nin \r\n\r\nchunks.\r\n0\r\n\r\n")
+  e3 = http1.feed(r3, ch, bytes.length(ch), 0)
+  // decoded = "Wiki"+"pedia "+"in \r\n\r\nchunks." = 24 bytes (chunk data may itself contain CRLF)
+  bp3 = http1.body_ptr(r3)
+  chunk_ok = 1
+  if string.equals(e3,"")!=1 { chunk_ok=0 }
+  if http1.body_len(r3) != 24 { chunk_ok=0 }
+  if bp3 != null {
+    if bytes.get(bp3,0)!=87 { chunk_ok=0 }    // 'W'
+    if bytes.get(bp3,23)!=46 { chunk_ok=0 }   // '.'
+  } else { chunk_ok=0 }
+  if chunk_ok==1 { println("ok   chunked decode (24 bytes, data with embedded CRLF)") } else { println("FAIL chunked len=${http1.body_len(r3)} err='${e3}'"); ok=0 }
+  http1.response_free(r3)
+  bytes.free(ch)
+
+  // 4. Close-delimited (no length): completes only on EOF.
+  r4 = http1.response_new()
+  c1 = sb("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nbody-until-")
+  c2 = sb("close")
+  http1.feed(r4, c1, bytes.length(c1), 0)                    // incomplete (no eof)
+  e4 = http1.feed(r4, c2, bytes.length(c2), 1)               // eof=1 -> complete
+  if string.equals(e4,"")==1 && string.equals(body_str(r4),"body-until-close")==1 { println("ok   close-delimited body") } else { println("FAIL close body='${body_str(r4)}' err='${e4}'"); ok=0 }
+  http1.response_free(r4)
+  bytes.free(c1); bytes.free(c2)
+
+  // 5. Headers split from body across feeds (boundary inside headers).
+  r5 = http1.response_new()
+  h1 = sb("HTTP/1.1 404 Not Found\r\nContent-Len")
+  h2 = sb("gth: 3\r\n\r\n404")
+  http1.feed(r5, h1, bytes.length(h1), 0)
+  e5 = http1.feed(r5, h2, bytes.length(h2), 0)
+  if string.equals(e5,"")==1 && http1.status_code(r5)==404 && string.equals(body_str(r5),"404")==1 { println("ok   header boundary split across feeds") } else { println("FAIL split-header status=${http1.status_code(r5)} body='${body_str(r5)}'"); ok=0 }
+  http1.response_free(r5)
+  bytes.free(h1); bytes.free(h2)
+
+  // 6. Chunked incomplete then completed.
+  r6 = http1.response_new()
+  p1 = sb("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel")
+  i6 = http1.feed(r6, p1, bytes.length(p1), 0)
+  p2 = sb("lo\r\n0\r\n\r\n")
+  e6 = http1.feed(r6, p2, bytes.length(p2), 0)
+  if string.equals(i6,"incomplete")==1 && string.equals(e6,"")==1 && string.equals(body_str(r6),"hello")==1 { println("ok   chunked resumes across feeds") } else { println("FAIL chunked-resume i='${i6}' e='${e6}' body='${body_str(r6)}'"); ok=0 }
+  http1.response_free(r6)
+  bytes.free(p1); bytes.free(p2)
+
+  if ok==1 { println("http1: all checks pass") } else { println("http1: FAILURES"); exit(1) }
+}
+extern exit(code: int)

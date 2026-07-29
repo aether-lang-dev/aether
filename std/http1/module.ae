@@ -1,0 +1,530 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.http1 — a pure-Aether HTTP/1.1 response reader (RFC 9112), built to sit
+// on top of an already-established byte transport (e.g. the pure-Aether TLS
+// client's conn_recv, or a plain TCP socket). NO externs to OpenSSL / curl.
+//
+// The problem this solves: a transport gives you an arbitrary stream of bytes
+// in record-sized chunks. Turning that into a complete HTTP/1.1 response means
+// framing it: find the end of headers, parse the status line + headers, then
+// read the body delimited by ONE of Content-Length, chunked transfer-encoding,
+// or connection-close. A header/body boundary or a chunk boundary can land
+// anywhere in a chunk, so everything is done over a growable accumulator.
+//
+// Two layers, so the framing logic is unit-testable WITHOUT a live server:
+//   1. parse_response(buf, len, is_eof) -> HttpResponse : a pure parser over a
+//      complete (or partial) byte buffer. Returns a fully-framed response, or
+//      signals "need more bytes".
+//   2. read_response(recv_fn, recv_ctx) : loops a caller-supplied "read more"
+//      function into an accumulator and parses once a full message is present.
+//
+// Import with:  import std.http1
+//
+//   resp = http1.response_new()
+//   err  = http1.read_response(resp, recv_next, conn)   // recv_next: see below
+//   http1.status_code(resp) / http1.header(resp, "content-type") /
+//   http1.body_ptr(resp) / http1.body_len(resp)
+//   http1.response_free(resp)
+
+import std.bytes
+import std.string
+import std.list
+import std.cryptography.tls13_client
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+exports (
+    HttpResponse,
+    response_new, response_free,
+    parse_status_line, parse_headers,
+    feed, read_response_conn,
+    status_code, status_reason, header, header_count,
+    body_ptr, body_len,
+    // internals exposed for tests
+    decode_chunked, find_header_end
+)
+
+// A parsed HTTP/1.1 response. `buf` accumulates the raw wire bytes; `body` is a
+// fresh buffer holding the decoded body (dechunked if needed). Headers are two
+// parallel std.lists of owned lower-cased-name / raw-value strings.
+struct HttpResponse {
+    buf: ptr            // growable accumulator (raw bytes from the transport)
+    buf_len: int        // valid bytes in buf
+    status: int         // e.g. 200
+    reason: ptr         // reason phrase bytes (e.g. "OK") or null
+    reason_len: int
+    header_names: ptr   // std.list of owned lower-case name strings
+    header_values: ptr  // std.list of owned value strings (parallel)
+    body: ptr           // decoded body bytes or null
+    body_len_v: int
+    headers_done: int   // 1 once the status line + headers are parsed
+    header_end: int     // byte offset in buf just past the "\r\n\r\n"
+}
+
+response_new() -> ptr {
+    r = malloc(88) as *HttpResponse
+    r.buf = bytes.new(4096)
+    bytes.set(r.buf, 0, 0)
+    r.buf_len = 0
+    r.status = 0
+    r.reason = null
+    r.reason_len = 0
+    r.header_names = list_new()
+    r.header_values = list_new()
+    r.body = null
+    r.body_len_v = 0
+    r.headers_done = 0
+    r.header_end = 0
+    return r as ptr
+}
+
+response_free(rp: ptr) {
+    if rp == null { return }
+    r = rp as *HttpResponse
+    if r.buf != null { bytes.free(r.buf) }
+    if r.reason != null { bytes.free(r.reason) }
+    if r.body != null { bytes.free(r.body) }
+    free_str_list(r.header_names)
+    free_str_list(r.header_values)
+    libc_free(rp)
+}
+
+// Header names/values are stored as std.bytes buffers (not strings) — bytes are
+// native ptrs, sidestepping the string/ptr cast boundary and the refcount
+// pitfalls of stashing owned strings in a list.
+fn free_str_list(lst: ptr) {
+    if lst == null { return }
+    n = list_size(lst)
+    i = 0
+    while i < n {
+        b = list_get_raw(lst, i)
+        if b != null { bytes.free(b) }
+        i = i + 1
+    }
+    list_free(lst)
+}
+
+// ASCII-lower-case a byte.
+fn lc(c: int) -> int {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+// Compare a stored header-name bytes buffer (already lower-cased) against a
+// lower-case ASCII literal `name`. Returns 1 if equal.
+fn name_is(nb: ptr, name: string) -> int {
+    nlen = bytes.length(nb)
+    wlen = string_length(name)
+    if nlen != wlen { return 0 }
+    i = 0
+    while i < nlen {
+        if (bytes.get(nb, i) & 0xFF) != (lc(string_char_at_n(name, wlen, i)) & 0xFF) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// Does a stored header-value bytes buffer contain the ASCII substring `needle`
+// (case-insensitive)? Used for Transfer-Encoding: chunked.
+fn value_contains_ci(vb: ptr, needle: string) -> int {
+    vlen = bytes.length(vb)
+    nlen = string_length(needle)
+    if nlen == 0 { return 1 }
+    i = 0
+    while i + nlen <= vlen {
+        j = 0
+        ok = 1
+        while j < nlen {
+            if lc(bytes.get(vb, i + j) & 0xFF) != lc(string_char_at_n(needle, nlen, j) & 0xFF) { ok = 0; j = nlen } else { j = j + 1 }
+        }
+        if ok == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// ---- accessors ----
+
+status_code(rp: ptr) -> int { r = rp as *HttpResponse; return r.status }
+status_reason(rp: ptr) -> ptr { r = rp as *HttpResponse; return r.reason }
+header_count(rp: ptr) -> int { r = rp as *HttpResponse; return list_size(r.header_names) }
+body_ptr(rp: ptr) -> ptr { r = rp as *HttpResponse; return r.body }
+body_len(rp: ptr) -> int { r = rp as *HttpResponse; return r.body_len_v }
+
+// Case-insensitive header lookup. Returns a FRESH value string (caller frees
+// with string.free) or "" if the header is absent.
+header(rp: ptr, name: string) -> string {
+    r = rp as *HttpResponse
+    n = list_size(r.header_names)
+    i = 0
+    result = ""
+    while i < n {
+        nb = list_get_raw(r.header_names, i)
+        if name_is(nb, name) == 1 {
+            vb = list_get_raw(r.header_values, i)
+            result = bytes.to_string(vb, bytes.length(vb))
+            i = n
+        } else {
+            i = i + 1
+        }
+    }
+    return result
+}
+
+// Return the value bytes buffer for a header (borrowed; do not free), or null.
+fn header_bytes(r: *HttpResponse, name: string) -> ptr {
+    n = list_size(r.header_names)
+    i = 0
+    while i < n {
+        nb = list_get_raw(r.header_names, i)
+        if name_is(nb, name) == 1 { return list_get_raw(r.header_values, i) }
+        i = i + 1
+    }
+    return null
+}
+
+// ---- byte scanning ----
+
+// Find the end of the header block: the byte offset just past the first
+// CRLFCRLF ("\r\n\r\n") in buf[0..len). Returns -1 if not present yet.
+find_header_end(buf: ptr, len: int) -> int {
+    i = 0
+    while i + 3 < len {
+        if (bytes.get(buf, i) & 0xFF) == 13 {
+            if (bytes.get(buf, i+1) & 0xFF) == 10 {
+                if (bytes.get(buf, i+2) & 0xFF) == 13 {
+                    if (bytes.get(buf, i+3) & 0xFF) == 10 {
+                        return i + 4
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Find the next CRLF at or after `off` in buf[0..len). Returns its offset or -1.
+fn find_crlf(buf: ptr, len: int, off: int) -> int {
+    i = off
+    while i + 1 < len {
+        if (bytes.get(buf, i) & 0xFF) == 13 {
+            if (bytes.get(buf, i+1) & 0xFF) == 10 { return i }
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Slice buf[from..to) into a fresh owned string.
+fn slice_str(buf: ptr, from: int, to: int) -> string {
+    n = to - from
+    if n < 0 { n = 0 }
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    if n > 0 { bytes.copy_from_bytes(b, 0, buf, from, n) }
+    s = bytes.to_string(b, n)
+    bytes.free(b)
+    return s
+}
+
+// Slice buf[from..to) into a fresh owned bytes buffer.
+fn slice_bytes(buf: ptr, from: int, to: int) -> ptr {
+    n = to - from
+    if n < 0 { n = 0 }
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0); bytes.copy_from_bytes(b, 0, buf, from, n) }
+    return b
+}
+
+// Slice buf[from..to) into a fresh owned bytes buffer, ASCII-lower-cased.
+fn slice_bytes_lc(buf: ptr, from: int, to: int) -> ptr {
+    n = to - from
+    if n < 0 { n = 0 }
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        bytes.set(b, i, lc(bytes.get(buf, from + i) & 0xFF))
+        i = i + 1
+    }
+    return b
+}
+
+// ---- status line + header parsing ----
+
+// Parse the status line at buf[0..): "HTTP/1.x SP code SP reason CRLF".
+// Sets r.status and r.reason. Returns the offset just past the CRLF, or -1 on
+// a malformed line.
+parse_status_line(r: *HttpResponse, buf: ptr, len: int) -> int {
+    eol = find_crlf(buf, len, 0)
+    if eol < 0 { return -1 }
+    // Find the two spaces.
+    sp1 = -1
+    sp2 = -1
+    i = 0
+    while i < eol {
+        if (bytes.get(buf, i) & 0xFF) == 32 {
+            if sp1 < 0 { sp1 = i } else { if sp2 < 0 { sp2 = i; i = eol } }
+        }
+        i = i + 1
+    }
+    if sp1 < 0 { return -1 }
+    // status code is buf[sp1+1 .. sp2) (or to eol if no reason).
+    code_end = sp2
+    if code_end < 0 { code_end = eol }
+    code_str = slice_str(buf, sp1 + 1, code_end)
+    r.status = parse_uint(code_str)
+    string.free(code_str)
+    // reason phrase (optional): buf[sp2+1 .. eol)
+    if sp2 >= 0 {
+        rn = eol - (sp2 + 1)
+        if rn < 0 { rn = 0 }
+        rb = bytes.new(rn)
+        if rn > 0 { bytes.set(rb, rn - 1, 0); bytes.copy_from_bytes(rb, 0, buf, sp2 + 1, rn) }
+        r.reason = rb
+        r.reason_len = rn
+    }
+    return eol + 2
+}
+
+// Parse header lines from `start` up to the blank line at header_end-2.
+// Each line is "Name: value CRLF"; folds leading/trailing OWS on the value and
+// lower-cases the name for case-insensitive lookup.
+parse_headers(r: *HttpResponse, buf: ptr, header_end: int, start: int) {
+    p = start
+    // header block ends at the empty line (header_end-2 points at its CRLF).
+    while p < header_end - 2 {
+        eol = find_crlf(buf, header_end, p)
+        if eol < 0 { p = header_end } else {
+            // find the colon
+            colon = -1
+            i = p
+            while i < eol {
+                if (bytes.get(buf, i) & 0xFF) == 58 { colon = i; i = eol } else { i = i + 1 }
+            }
+            if colon > p {
+                // name (lower-cased, as bytes)
+                lname = slice_bytes_lc(buf, p, colon)
+                // value: skip leading OWS (space/tab) after the colon
+                vstart = colon + 1
+                while vstart < eol {
+                    c = bytes.get(buf, vstart) & 0xFF
+                    if c == 32 || c == 9 { vstart = vstart + 1 } else { break }
+                }
+                // trim trailing OWS
+                vend = eol
+                while vend > vstart {
+                    c3 = bytes.get(buf, vend - 1) & 0xFF
+                    if c3 == 32 || c3 == 9 { vend = vend - 1 } else { break }
+                }
+                value = slice_bytes(buf, vstart, vend)
+                list_add_raw(r.header_names, lname)
+                list_add_raw(r.header_values, value)
+            }
+            p = eol + 2
+        }
+    }
+}
+
+// ---- body framing ----
+
+// Decode a chunked body from buf[start..len). Returns (decoded_body, "") on a
+// complete body, or (null, "incomplete") if the terminating 0-chunk hasn't
+// arrived yet, or (null, err) on a malformed chunk. Caller frees the body.
+decode_chunked(buf: ptr, len: int, start: int) -> (ptr, string) {
+    out = bytes.new(4096)
+    if len - start > 0 { bytes.set(out, 0, 0) }
+    outn = 0
+    p = start
+    done = 0
+    err = ""
+    while done == 0 {
+        // chunk-size line: hex digits up to CRLF (ignore any ;ext).
+        eol = find_crlf(buf, len, p)
+        if eol < 0 { err = "incomplete"; done = 1 } else {
+            sz = parse_hex_prefix(buf, p, eol)
+            if sz < 0 { err = "bad chunk size"; done = 1 } else {
+                data_start = eol + 2
+                if sz == 0 {
+                    // last chunk; a trailing CRLF (and optional trailers) follow.
+                    // Require the final CRLF to be present.
+                    if data_start + 1 < len + 1 { done = 1 } else { err = "incomplete"; done = 1 }
+                } else {
+                    if data_start + sz + 2 > len { err = "incomplete"; done = 1 } else {
+                        bytes.copy_from_bytes(out, outn, buf, data_start, sz)
+                        outn = outn + sz
+                        p = data_start + sz + 2   // skip the chunk's trailing CRLF
+                    }
+                }
+            }
+        }
+    }
+    if string.equals(err, "") != 1 { bytes.free(out); return null, err }
+    // Trim to exact length.
+    body = bytes.new(outn)
+    if outn > 0 { bytes.set(body, outn - 1, 0); bytes.copy_from_bytes(body, 0, out, 0, outn) }
+    bytes.free(out)
+    return body, ""
+}
+
+// Parse a run of hex digits at buf[from..to) (stopping at ';' or CRLF/space)
+// into an int. Returns -1 if there are no hex digits.
+fn parse_hex_prefix(buf: ptr, from: int, to: int) -> int {
+    v = 0
+    seen = 0
+    i = from
+    while i < to {
+        c = bytes.get(buf, i) & 0xFF
+        d = hex_digit(c)
+        if d < 0 { i = to } else { v = (v * 16) + d; seen = 1; i = i + 1 }
+    }
+    if seen == 0 { return -1 }
+    return v
+}
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+// Parse a decimal uint from a string, ignoring surrounding whitespace. Returns
+// 0 on empty / non-numeric.
+fn parse_uint(s: string) -> int {
+    n = string_length(s)
+    v = 0
+    i = 0
+    while i < n {
+        c = string_char_at_n(s, n, i) & 0xFF
+        if c >= 48 && c <= 57 { v = (v * 10) + (c - 48) }
+        i = i + 1
+    }
+    return v
+}
+
+// ---- top-level: parse a (possibly complete) response buffer ----
+//
+// Given the accumulator buf[0..len), attempt to fully frame the response into
+// `r`. `is_eof` = 1 if the transport has closed (so a close-delimited body is
+// complete). Returns:
+//   ""             -> response fully parsed (headers + body present)
+//   "incomplete"   -> need more bytes; call again after reading more
+//   <other>        -> a parse error
+parse_response(r: *HttpResponse, buf: ptr, len: int, is_eof: int) -> string {
+    if r.headers_done == 0 {
+        he = find_header_end(buf, len)
+        if he < 0 { return "incomplete" }
+        sl_end = parse_status_line(r, buf, len)
+        if sl_end < 0 { return "malformed status line" }
+        parse_headers(r, buf, he, sl_end)
+        r.header_end = he
+        r.headers_done = 1
+    }
+
+    // Body framing: chunked > content-length > close-delimited.
+    te = header_bytes(r, "transfer-encoding")
+    cl = header_bytes(r, "content-length")
+    body_start = r.header_end
+
+    is_chunked = 0
+    if te != null { is_chunked = value_contains_ci(te, "chunked") }
+    if is_chunked == 1 {
+        b, berr = decode_chunked(buf, len, body_start)
+        if string.equals(berr, "") == 1 {
+            r.body = b
+            r.body_len_v = bytes.length(b)
+            return ""
+        }
+        if string.equals(berr, "incomplete") == 1 { return "incomplete" }
+        return berr
+    }
+    if cl != null {
+        want = parse_uint_bytes(cl)
+        have = len - body_start
+        if have < want { return "incomplete" }
+        r.body = slice_body(buf, body_start, want)
+        r.body_len_v = want
+        return ""
+    }
+    // No length signal: body runs to connection close.
+    if is_eof == 1 {
+        have2 = len - body_start
+        r.body = slice_body(buf, body_start, have2)
+        r.body_len_v = have2
+        return ""
+    }
+    return "incomplete"
+}
+
+fn slice_body(buf: ptr, from: int, n: int) -> ptr {
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0); bytes.copy_from_bytes(b, 0, buf, from, n) }
+    return b
+}
+
+// Parse a decimal uint from a bytes buffer (Content-Length value).
+fn parse_uint_bytes(b: ptr) -> int {
+    n = bytes.length(b)
+    v = 0
+    i = 0
+    while i < n {
+        c = bytes.get(b, i) & 0xFF
+        if c >= 48 && c <= 57 { v = (v * 10) + (c - 48) }
+        i = i + 1
+    }
+    return v
+}
+
+// ---- streaming driver over a tls13_client connection ----
+//
+// Read a complete HTTP/1.1 response into `r` from a live tls13_client
+// connection `conn`, by repeatedly calling conn_recv to append the decrypted
+// application-data bytes to r.buf and re-parsing after each read. Returns "" on
+// a complete response, or an error. conn_recv returning ("", 0, "") — an
+// orderly close — is treated as EOF (completes a close-delimited body).
+read_response_conn(rp: ptr, conn: ptr) -> string {
+    r = rp as *HttpResponse
+    looping = 1
+    result = "incomplete"
+    guard = 0
+    while looping == 1 {
+        guard = guard + 1
+        if guard > 100000 { result = "http1: too many reads"; looping = 0 } else {
+            data, dlen, rerr = tls13_client.conn_recv(conn)
+            eof = 0
+            if string.equals(rerr, "") != 1 {
+                // A "connection closed" style error after we have some bytes is
+                // an EOF for close-delimited bodies; otherwise it's a real error.
+                if r.buf_len > 0 { eof = 1 } else { result = rerr; looping = 0 }
+            } else {
+                if dlen <= 0 { eof = 1 } else {
+                    bytes.copy_from_bytes(r.buf, r.buf_len, data, 0, dlen)
+                    r.buf_len = r.buf_len + dlen
+                }
+            }
+            if data != null { bytes.free(data) }
+            if looping == 1 {
+                pr = parse_response(r, r.buf, r.buf_len, eof)
+                if string.equals(pr, "incomplete") != 1 { result = pr; looping = 0 }
+                else { if eof == 1 { result = "http1: connection closed before a complete response"; looping = 0 } }
+            }
+        }
+    }
+    return result
+}
+
+// Feed a chunk of raw bytes into the accumulator and try to parse (for callers
+// that already have bytes in hand, e.g. tests or a caller that owns the recv
+// loop). Returns the parse_response result.
+feed(rp: ptr, chunk: ptr, chunk_len: int, is_eof: int) -> string {
+    r = rp as *HttpResponse
+    bytes.copy_from_bytes(r.buf, r.buf_len, chunk, 0, chunk_len)
+    r.buf_len = r.buf_len + chunk_len
+    return parse_response(r, r.buf, r.buf_len, is_eof)
+}
