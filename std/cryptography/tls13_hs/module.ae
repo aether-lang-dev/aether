@@ -10,10 +10,9 @@
 //
 // Subset encoded/negotiated:
 //   - legacy_version 0x0303, real version via supported_versions = 0x0304
-//   - one cipher suite: TLS_CHACHA20_POLY1305_SHA256 (0x1303)
-//     (AES-128-GCM 0x1301 is offered too so real servers have a common suite)
-//   - supported_groups: x25519 (0x001d)
-//   - key_share: one x25519 KeyShareEntry (our 32-byte public key)
+//   - cipher suites: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM-SHA384
+//   - supported_groups: x25519 (0x001d), secp256r1 (0x0017)
+//   - key_share: x25519 and/or secp256r1 KeyShareEntry(s); SNI + ALPN http/1.1
 //   - signature_algorithms: ecdsa_secp256r1_sha256 (0x0403),
 //     rsa_pss_rsae_sha256 (0x0804), ed25519 (0x0807)
 //
@@ -36,10 +35,10 @@ extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports (
-    client_hello, client_hello_sni, parse_server_hello,
+    client_hello, client_hello_sni, client_hello_full, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-    GROUP_X25519
+    GROUP_X25519, GROUP_SECP256R1
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -48,7 +47,8 @@ const TLS_AES_256_GCM_SHA384       = 0x1302
 const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 
 // Named groups (RFC 8446 §4.2.7).
-const GROUP_X25519 = 0x001d
+const GROUP_X25519    = 0x001d
+const GROUP_SECP256R1 = 0x0017
 
 // Signature schemes (RFC 8446 §4.2.3).
 const SIG_ECDSA_P256_SHA256 = 0x0403
@@ -137,7 +137,17 @@ client_hello(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr) -> ptr
 // (RFC 6066 §3). CDNs require SNI to select the right certificate. An empty
 // host omits the extension (identical to the bare client_hello).
 client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string) -> ptr {
-    // Generous fixed buffer; this CH is ~200 bytes + the hostname.
+    return client_hello_full(random, session_id, sid_len, GROUP_X25519, x25519_pub, 32, 0, null, 0, host)
+}
+
+// Build a ClientHello offering both x25519 and secp256r1 in supported_groups,
+// carrying a key_share for `group` (its `pubkey`/`pubkey_len`) and optionally a
+// second key_share for `group2` (pass group2=0 to omit). Offering both shares
+// lets a server that prefers the other group complete without a
+// HelloRetryRequest. x25519 share = 32-byte public; secp256r1 share = 65-byte
+// uncompressed point (0x04 || X || Y). The HRR retry path uses a single share.
+client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey: ptr, pubkey_len: int, group2: int, pubkey2: ptr, pubkey2_len: int, host: string) -> ptr {
+    // Generous fixed buffer; this CH is ~230 bytes + the hostname.
     buf = bytes.new(1024)
     bytes.set(buf, 1023, 0)   // force full zero-fill
 
@@ -189,11 +199,13 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put8(buf, off, 2)       // list len
     off = put16(buf, off, 0x0304) // TLS 1.3
 
-    // supported_groups (10): { x25519 }
+    // supported_groups (10): { x25519, secp256r1 } — offer both so a server
+    // that won't do x25519 can HelloRetryRequest secp256r1.
     off = put16(buf, off, 10)
-    off = put16(buf, off, 4)      // ext body len
-    off = put16(buf, off, 2)      // list len
+    off = put16(buf, off, 6)      // ext body len = 2 (list len) + 2*2
+    off = put16(buf, off, 4)      // list len
     off = put16(buf, off, GROUP_X25519)
+    off = put16(buf, off, GROUP_SECP256R1)
 
     // signature_algorithms (13): { ecdsa_p256_sha256, rsa_pss_rsae_sha256, ed25519 }
     off = put16(buf, off, 13)
@@ -213,13 +225,23 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put8(buf, off, 8)           // ProtocolName length
     off = put_ascii(buf, off, "http/1.1")
 
-    // key_share (51): one x25519 KeyShareEntry { group, key<len> }
+    // key_share (51): a KeyShareEntry {group, key<len>} for `group`, plus an
+    // optional second entry (group2/pubkey2) so we can pre-offer both x25519 and
+    // secp256r1 and let the server pick without a HelloRetryRequest round-trip.
+    entry1 = 2 + 2 + pubkey_len
+    shares_len = entry1
+    if group2 != 0 { shares_len = shares_len + 2 + 2 + pubkey2_len }
     off = put16(buf, off, 51)
-    off = put16(buf, off, 38)     // ext body: 2 (client_shares len) + 2+2+32
-    off = put16(buf, off, 36)     // client_shares len = 2+2+32
-    off = put16(buf, off, GROUP_X25519)
-    off = put16(buf, off, 32)     // key length
-    off = put_bytes(buf, off, x25519_pub, 32)
+    off = put16(buf, off, 2 + shares_len)  // ext body: client_shares<2> + entries
+    off = put16(buf, off, shares_len)      // client_shares length
+    off = put16(buf, off, group)
+    off = put16(buf, off, pubkey_len)
+    off = put_bytes(buf, off, pubkey, pubkey_len)
+    if group2 != 0 {
+        off = put16(buf, off, group2)
+        off = put16(buf, off, pubkey2_len)
+        off = put_bytes(buf, off, pubkey2, pubkey2_len)
+    }
 
     // fill extensions length
     ext_total = off - ext_start
@@ -258,8 +280,10 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
     // legacy_version (2) — ignored, real version is in supported_versions
     if p + 2 > len { return "server hello: truncated version" }
     p = p + 2
-    // random[32]
+    // random[32] — a HelloRetryRequest is a ServerHello whose random equals the
+    // special SHA-256("HelloRetryRequest") sentinel (RFC 8446 §4.1.3).
     if p + 32 > len { return "server hello: truncated random" }
+    if is_hrr_random(msg, p) == 1 { out.is_hello_retry = 1 }
     p = p + 32
     // legacy_session_id_echo<0..32>
     if p + 1 > len { return "server hello: truncated session id len" }
@@ -292,20 +316,27 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
             out.version = get16(msg, p)
         }
         if ext_type == 51 {
-            // key_share (server form: single KeyShareEntry { group, key<len> })
-            if ext_len < 4 { return "server hello: bad key_share" }
-            out.group = get16(msg, p)
-            ks_len = get16(msg, p + 2)
-            if 4 + ks_len > ext_len { return "server hello: key_share overrun" }
-            ks = bytes.new(ks_len)
-            if ks_len > 0 { bytes.set(ks, ks_len - 1, 0) }
-            j = 0
-            while j < ks_len {
-                bytes.set(ks, j, bytes.get(msg, p + 4 + j) & 0xFF)
-                j = j + 1
+            if out.is_hello_retry == 1 {
+                // HRR key_share carries only the selected group (2 bytes),
+                // no key — it tells the client which group to retry with.
+                if ext_len < 2 { return "server hello: bad HRR key_share" }
+                out.group = get16(msg, p)
+            } else {
+                // key_share (server form: single KeyShareEntry {group, key<len>})
+                if ext_len < 4 { return "server hello: bad key_share" }
+                out.group = get16(msg, p)
+                ks_len = get16(msg, p + 2)
+                if 4 + ks_len > ext_len { return "server hello: key_share overrun" }
+                ks = bytes.new(ks_len)
+                if ks_len > 0 { bytes.set(ks, ks_len - 1, 0) }
+                j = 0
+                while j < ks_len {
+                    bytes.set(ks, j, bytes.get(msg, p + 4 + j) & 0xFF)
+                    j = j + 1
+                }
+                out.key_share = ks
+                out.key_share_len = ks_len
             }
-            out.key_share = ks
-            out.key_share_len = ks_len
         }
         p = p + ext_len
     }
@@ -314,4 +345,30 @@ parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
         return "server hello: not TLS 1.3 (no supported_versions=0x0304)"
     }
     return ""
+}
+
+// The HelloRetryRequest sentinel random = SHA-256("HelloRetryRequest")
+// (RFC 8446 §4.1.3). Returns 1 if the 32 bytes at msg[off..off+32) match.
+fn is_hrr_random(msg: ptr, off: int) -> int {
+    // RFC 8446 §4.1.3 HelloRetryRequest special Random =
+    // SHA-256("HelloRetryRequest"):
+    // CF 21 AD 74 E5 9A 61 11 BE 1D FA 3A 06 B4 4E 8C
+    // 84 5C 76 30 04 8B 15 D5 A0 0D 20 3A 15 D5 B2 6E
+    hrr = bytes.new(32)
+    bytes.set(hrr, 0, 0xCF); bytes.set(hrr, 1, 0x21); bytes.set(hrr, 2, 0xAD); bytes.set(hrr, 3, 0x74)
+    bytes.set(hrr, 4, 0xE5); bytes.set(hrr, 5, 0x9A); bytes.set(hrr, 6, 0x61); bytes.set(hrr, 7, 0x11)
+    bytes.set(hrr, 8, 0xBE); bytes.set(hrr, 9, 0x1D); bytes.set(hrr, 10, 0xFA); bytes.set(hrr, 11, 0x3A)
+    bytes.set(hrr, 12, 0x06); bytes.set(hrr, 13, 0xB4); bytes.set(hrr, 14, 0x4E); bytes.set(hrr, 15, 0x8C)
+    bytes.set(hrr, 16, 0x84); bytes.set(hrr, 17, 0x5C); bytes.set(hrr, 18, 0x76); bytes.set(hrr, 19, 0x30)
+    bytes.set(hrr, 20, 0x04); bytes.set(hrr, 21, 0x8B); bytes.set(hrr, 22, 0x15); bytes.set(hrr, 23, 0xD5)
+    bytes.set(hrr, 24, 0xA0); bytes.set(hrr, 25, 0x0D); bytes.set(hrr, 26, 0x20); bytes.set(hrr, 27, 0x3A)
+    bytes.set(hrr, 28, 0x15); bytes.set(hrr, 29, 0xD5); bytes.set(hrr, 30, 0xB2); bytes.set(hrr, 31, 0x6E)
+    same = 1
+    i = 0
+    while i < 32 {
+        if (bytes.get(msg, off + i) & 0xFF) != (bytes.get(hrr, i) & 0xFF) { same = 0 }
+        i = i + 1
+    }
+    bytes.free(hrr)
+    return same
 }

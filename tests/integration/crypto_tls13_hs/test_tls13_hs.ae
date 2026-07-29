@@ -10,6 +10,29 @@ import std.string
 import std.io
 
 extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+fn from_hex(s: string) -> ptr {
+    sl = string_length(s)
+    n = sl / 2
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    i = 0
+    while i < n {
+        b_hi = hexval(string_char_at_n(s, sl, i * 2))
+        b_lo = hexval(string_char_at_n(s, sl, i * 2 + 1))
+        bytes.set(b, i, (b_hi << 4) | b_lo)
+        i = i + 1
+    }
+    return b
+}
 
 fn g8(b: ptr, off: int) -> int { return bytes.get(b, off) & 0xFF }
 fn g16(b: ptr, off: int) -> int { return ((bytes.get(b, off) & 0xFF) << 8) | (bytes.get(b, off + 1) & 0xFF) }
@@ -157,6 +180,38 @@ main() {
     } else {
         println("ok   SH rejects malformed (${berr})")
     }
+
+    // --- HelloRetryRequest detection (RFC 8446 §4.1.3 special random) ---
+    // A minimal HRR: version 0303 + the SHA-256("HelloRetryRequest") random +
+    // empty sid + cipher 1301 + comp 00 + exts{ supported_versions, key_share=
+    // secp256r1(0x0017) }.
+    hrr = from_hex("020000340303cf21ad74e59a6111be1dfa3a06b44e8c845c7630048b15d5a00d203a15d5b26e00130100000c002b00020304003300020017")
+    hp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0 }
+    herr = tls13_hs.parse_server_hello(hrr, bytes.length(hrr), &hp)
+    if string.equals(herr, "") == 1 {
+        if hp.is_hello_retry == 1 {
+            if hp.group == tls13_hs.GROUP_SECP256R1 {
+                println("ok   HelloRetryRequest detected, group = secp256r1")
+            } else { println("FAIL HRR group ${hp.group}"); total_ok = 0 }
+        } else { println("FAIL HRR not detected as retry"); total_ok = 0 }
+    } else { println("FAIL HRR parse: ${herr}"); total_ok = 0 }
+    if hp.key_share != null { bytes.free(hp.key_share) }
+    bytes.free(hrr)
+
+    // --- dual-keyshare ClientHello offers both x25519 and secp256r1 ---
+    // A secp256r1 65-byte uncompressed point placeholder (0x04 || 64 bytes).
+    p256pt = bytes.new(65)
+    p256pt_i = 0
+    while p256pt_i < 65 { bytes.set(p256pt, p256pt_i, 0x11); p256pt_i = p256pt_i + 1 }
+    bytes.set(p256pt, 0, 0x04)
+    dual = tls13_hs.client_hello_full(random, sid, 32, tls13_hs.GROUP_X25519, pub, 32, tls13_hs.GROUP_SECP256R1, p256pt, 65, "example.com")
+    // The CH must be a valid handshake message and larger than a single-share
+    // CH (it carries an extra 4 + 65 = 69-byte key_share entry + SNI).
+    if g8(dual, 0) == 1 {
+        println("ok   dual-keyshare CH builds (msg_type = client_hello, ${bytes.length(dual)} bytes)")
+    } else { println("FAIL dual CH msg_type ${g8(dual, 0)}"); total_ok = 0 }
+    bytes.free(p256pt)
+    bytes.free(dual)
 
     bytes.free(random)
     bytes.free(sid)
