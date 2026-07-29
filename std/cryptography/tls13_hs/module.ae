@@ -35,10 +35,10 @@ extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports (
-    client_hello, client_hello_sni, client_hello_full, client_hello_psk, PskCh, parse_server_hello,
+    client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-    GROUP_X25519, GROUP_SECP256R1
+    GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -49,6 +49,10 @@ const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 // Named groups (RFC 8446 §4.2.7).
 const GROUP_X25519    = 0x001d
 const GROUP_SECP256R1 = 0x0017
+// Post-quantum hybrid: X25519 + ML-KEM-768 (draft-kwiatkowski-tls-ecdhe-mlkem;
+// the group Chrome/Cloudflare default to). Client share = ML-KEM ek(1184) ||
+// X25519 pub(32); server share = ML-KEM ct(1088) || X25519 pub(32).
+const GROUP_X25519MLKEM768 = 0x11EC
 
 // Signature schemes (RFC 8446 §4.2.3).
 const SIG_ECDSA_P256_SHA256 = 0x0403
@@ -264,6 +268,90 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     put24(buf, 1, body_len)
 
     // Trim to exact length.
+    out = bytes.new(off)
+    if off > 0 { bytes.set(out, off - 1, 0) }
+    put_bytes(out, 0, buf, off)
+    bytes.free(buf)
+    return out
+}
+
+// A ClientHello offering the post-quantum X25519MLKEM768 hybrid group as the
+// primary key_share, with x25519 as a classical fallback share. `hybrid_share`
+// is the 1216-byte client share = ML-KEM-768 ek(1184) || X25519 pub(32); the
+// caller also passes the plain x25519 pub for the fallback entry. The server
+// picks one group and returns the matching share (PQ: ct||xpub, or classical
+// x25519 pub). supported_groups lists { X25519MLKEM768, x25519 }.
+client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, hybrid_len: int, x25519_pub: ptr, host: string) -> ptr {
+    buf = bytes.new(2048)     // hybrid key_share alone is ~1216 bytes
+    bytes.set(buf, 2047, 0)
+    body = 4
+    off = put16(buf, body, 0x0303)
+    off = put_bytes(buf, off, random, 32)
+    off = put8(buf, off, sid_len)
+    off = put_bytes(buf, off, session_id, sid_len)
+    // cipher_suites
+    off = put16(buf, off, 6)
+    off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
+    off = put16(buf, off, TLS_AES_128_GCM_SHA256)
+    off = put16(buf, off, TLS_AES_256_GCM_SHA384)
+    off = put8(buf, off, 1)
+    off = put8(buf, off, 0)
+    ext_len_pos = off
+    off = off + 2
+    ext_start = off
+    // SNI
+    host_len = string_length(host)
+    if host_len > 0 {
+        off = put16(buf, off, 0)
+        off = put16(buf, off, host_len + 5)
+        off = put16(buf, off, host_len + 3)
+        off = put8(buf, off, 0)
+        off = put16(buf, off, host_len)
+        off = put_ascii(buf, off, host)
+    }
+    // supported_versions
+    off = put16(buf, off, 43)
+    off = put16(buf, off, 3)
+    off = put8(buf, off, 2)
+    off = put16(buf, off, 0x0304)
+    // supported_groups { X25519MLKEM768, x25519 }
+    off = put16(buf, off, 10)
+    off = put16(buf, off, 6)
+    off = put16(buf, off, 4)
+    off = put16(buf, off, GROUP_X25519MLKEM768)
+    off = put16(buf, off, GROUP_X25519)
+    // signature_algorithms
+    off = put16(buf, off, 13)
+    off = put16(buf, off, 8)
+    off = put16(buf, off, 6)
+    off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
+    off = put16(buf, off, SIG_ED25519)
+    // ALPN http/1.1
+    off = put16(buf, off, 16)
+    off = put16(buf, off, 11)
+    off = put16(buf, off, 9)
+    off = put8(buf, off, 8)
+    off = put_ascii(buf, off, "http/1.1")
+    // key_share: { X25519MLKEM768: hybrid_share, x25519: x25519_pub }
+    entry_pq = 2 + 2 + hybrid_len
+    entry_x = 2 + 2 + 32
+    shares_len = entry_pq + entry_x
+    off = put16(buf, off, 51)
+    off = put16(buf, off, 2 + shares_len)
+    off = put16(buf, off, shares_len)
+    off = put16(buf, off, GROUP_X25519MLKEM768)
+    off = put16(buf, off, hybrid_len)
+    off = put_bytes(buf, off, hybrid_share, hybrid_len)
+    off = put16(buf, off, GROUP_X25519)
+    off = put16(buf, off, 32)
+    off = put_bytes(buf, off, x25519_pub, 32)
+
+    ext_total = off - ext_start
+    put16(buf, ext_len_pos, ext_total)
+    body_len = off - 4
+    put8(buf, 0, HS_CLIENT_HELLO)
+    put24(buf, 1, body_len)
     out = bytes.new(off)
     if off > 0 { bytes.set(out, off - 1, 0) }
     put_bytes(out, 0, buf, off)

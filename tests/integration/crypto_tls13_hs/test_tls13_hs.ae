@@ -258,6 +258,34 @@ main() {
     bytes.free(pch_no.buf)
     bytes.free(pch_ed.buf)
 
+    // --- post-quantum X25519MLKEM768 ClientHello (client_hello_pq) ---
+    // Fake 1216-byte hybrid share (ML-KEM ek 1184 || x25519 pub 32).
+    hy = bytes.new(1216)
+    hyi = 0
+    while hyi < 1216 { bytes.set(hy, hyi, (hyi * 3 + 1) & 0xFF); hyi = hyi + 1 }
+    pqch = tls13_hs.client_hello_pq(random, sid, 32, hy, 1216, pub, "example.com")
+    // Must be a valid client_hello carrying the big hybrid key_share (so the CH
+    // is well over 1200 bytes) and advertise GROUP_X25519MLKEM768 (0x11EC).
+    pqok = 1
+    if g8(pqch, 0) != 1 { pqok = 0 }
+    if bytes.length(pqch) < 1250 { pqok = 0 }   // hybrid share alone is 1216
+    // The group id 0x11EC (0x11, 0xEC) must appear in the buffer (supported_
+    // groups + key_share both name it).
+    found_pq = 0
+    scan = 0
+    while scan + 1 < bytes.length(pqch) {
+        if (bytes.get(pqch, scan) & 0xFF) == 0x11 {
+            if (bytes.get(pqch, scan + 1) & 0xFF) == 0xEC { found_pq = 1 }
+        }
+        scan = scan + 1
+    }
+    if found_pq != 1 { pqok = 0 }
+    if pqok == 1 {
+        println("ok   PQ ClientHello builds (X25519MLKEM768, ${bytes.length(pqch)} bytes)")
+    } else { println("FAIL PQ CH structure (len ${bytes.length(pqch)})"); total_ok = 0 }
+    bytes.free(hy)
+    bytes.free(pqch)
+
     bytes.free(random)
     bytes.free(sid)
     bytes.free(pub)
