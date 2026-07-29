@@ -32,9 +32,11 @@ import std.bytes
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
+extern string_length(s: string) -> int
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports (
-    client_hello, parse_server_hello,
+    client_hello, client_hello_sni, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256,
     GROUP_X25519
@@ -116,7 +118,14 @@ fn get24(b: ptr, off: int) -> int {
 // bytes; session_id 0..32 bytes (TLS 1.3 middlebox-compat: usually a 32-byte
 // echo value); x25519_pub is our 32-byte ephemeral public key.
 client_hello(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr) -> ptr {
-    // Generous fixed buffer; this CH is ~200 bytes.
+    return client_hello_sni(random, session_id, sid_len, x25519_pub, "")
+}
+
+// Like client_hello but includes a server_name (SNI) extension for `host`
+// (RFC 6066 §3). CDNs require SNI to select the right certificate. An empty
+// host omits the extension (identical to the bare client_hello).
+client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string) -> ptr {
+    // Generous fixed buffer; this CH is ~200 bytes + the hostname.
     buf = bytes.new(1024)
     bytes.set(buf, 1023, 0)   // force full zero-fill
 
@@ -144,6 +153,22 @@ client_hello(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr) -> ptr
     ext_len_pos = off
     off = off + 2
     ext_start = off
+
+    // server_name (0): a single host_name entry (RFC 6066). Omitted if empty.
+    host_len = string_length(host)
+    if host_len > 0 {
+        off = put16(buf, off, 0)              // extension_type = server_name
+        off = put16(buf, off, host_len + 5)   // ext body = list(2) + type(1) + namelen(2) + name
+        off = put16(buf, off, host_len + 3)   // ServerNameList length
+        off = put8(buf, off, 0)               // name_type = host_name(0)
+        off = put16(buf, off, host_len)       // HostName length
+        hi = 0
+        while hi < host_len {
+            bytes.set(buf, off + hi, string_char_at_n(host, host_len, hi) & 0xFF)
+            hi = hi + 1
+        }
+        off = off + host_len
+    }
 
     // supported_versions (43): client form = list; { 0x0304 }
     off = put16(buf, off, 43)

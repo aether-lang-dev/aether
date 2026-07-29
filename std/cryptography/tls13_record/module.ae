@@ -38,16 +38,25 @@ import std.bytes
 import std.string
 import std.bits
 import std.cryptography.chacha20poly1305
+import std.cryptography.aes
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 exports (
-    new, free_ctx, seal_record, open_record, nonce_for,
+    new, new_aead, free_ctx, seal_record, open_record, nonce_for,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
-    TAG_LEN, RECORD_HEADER_LEN
+    TAG_LEN, RECORD_HEADER_LEN,
+    AEAD_CHACHA20_POLY1305, AEAD_AES_128_GCM
 )
+
+// Which AEAD a record context uses. TLS 1.3's two mainstream suites:
+//   TLS_CHACHA20_POLY1305_SHA256 -> ChaCha20-Poly1305 (32-byte key)
+//   TLS_AES_128_GCM_SHA256       -> AES-128-GCM        (16-byte key)
+// Both use a 12-byte nonce and a 16-byte tag, so only the cipher differs.
+const AEAD_CHACHA20_POLY1305 = 0
+const AEAD_AES_128_GCM       = 1
 
 const CONTENT_ALERT            = 21
 const CONTENT_HANDSHAKE        = 22
@@ -65,12 +74,21 @@ struct RecordCtx {
     key_len: int
     iv: ptr        // 12-byte base write_iv
     seq: long      // record sequence number (starts at 0)
+    aead: int      // AEAD_CHACHA20_POLY1305 | AEAD_AES_128_GCM
+    aes_ctx: ptr   // pre-built AES encryptor (AES-GCM only), else null
 }
 
-// Create a record context from an AEAD key and a 12-byte base iv. Both are
-// copied (the ctx owns its copies). key_len is 32 for ChaCha20-Poly1305.
+// Create a ChaCha20-Poly1305 record context (the default AEAD). key_len is 32.
+// Kept as the back-compat entry; new_aead selects the cipher explicitly.
 new(key: ptr, key_len: int, iv12: ptr) -> ptr {
-    ctx = malloc(32) as *RecordCtx
+    return new_aead(AEAD_CHACHA20_POLY1305, key, key_len, iv12)
+}
+
+// Create a record context for a specific AEAD. Both key and iv are copied (the
+// ctx owns its copies). For AES-128-GCM the key_len is 16 and an AES encryptor
+// is built once here (GCM only runs the cipher forward, for seal AND open).
+new_aead(aead_id: int, key: ptr, key_len: int, iv12: ptr) -> ptr {
+    ctx = malloc(48) as *RecordCtx
     k = bytes.new(key_len)
     if key_len > 0 { bytes.set(k, key_len - 1, 0) }
     bytes.copy_from_bytes(k, 0, key, 0, key_len)
@@ -81,6 +99,11 @@ new(key: ptr, key_len: int, iv12: ptr) -> ptr {
     ctx.key_len = key_len
     ctx.iv = iv
     ctx.seq = 0
+    ctx.aead = aead_id
+    ctx.aes_ctx = null
+    if aead_id == AEAD_AES_128_GCM {
+        ctx.aes_ctx = aes.new_encryptor(k, key_len)
+    }
     return ctx as ptr
 }
 
@@ -88,6 +111,7 @@ free_ctx(ctx: ptr) {
     c = ctx as *RecordCtx
     bytes.free(c.key)
     bytes.free(c.iv)
+    if c.aes_ctx != null { aes.free(c.aes_ctx) }
     libc_free(ctx)
 }
 
@@ -146,7 +170,12 @@ seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
     aad = build_aad(ct_len)
     nonce = nonce_for(c.iv, c.seq)
 
-    enc = chacha20poly1305.aead_seal(c.key, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+    enc = null
+    if c.aead == AEAD_AES_128_GCM {
+        enc = aes.gcm_seal(c.aes_ctx, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+    } else {
+        enc = chacha20poly1305.aead_seal(c.key, nonce, aad, RECORD_HEADER_LEN, inner, inner_len)
+    }
     // enc is inner_len + 16 bytes (ciphertext-with-tag) == ct_len
 
     // Full record: header (0x17 0x0303 len16) || enc
@@ -172,6 +201,15 @@ struct OpenedRecord {
     content_type: int
     plaintext: ptr    // fresh bytes (caller frees) — the inner content
     plaintext_len: int
+}
+
+// Dispatch AEAD-Open to the negotiated cipher. Returns (inner_plaintext, "")
+// or (null, err) exactly like the underlying aead_open primitives.
+fn aead_open_dispatch(c: *RecordCtx, nonce: ptr, aad: ptr, ctbuf: ptr, ct_len: int) -> (ptr, string) {
+    if c.aead == AEAD_AES_128_GCM {
+        return aes.gcm_open(c.aes_ctx, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
+    }
+    return chacha20poly1305.aead_open(c.key, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
 }
 
 // Open a TLSCiphertext record (5-byte header + encrypted_record) into `out`.
@@ -206,7 +244,7 @@ open_record(ctx: ptr, record: ptr, rec_len: int, out: *OpenedRecord) -> string {
     bytes.copy_from_bytes(ctbuf, 0, record, RECORD_HEADER_LEN, ct_len)
 
     nonce = nonce_for(c.iv, c.seq)
-    inner, err = chacha20poly1305.aead_open(c.key, nonce, aad, RECORD_HEADER_LEN, ctbuf, ct_len)
+    inner, err = aead_open_dispatch(c, nonce, aad, ctbuf, ct_len)
 
     bytes.free(aad)
     bytes.free(ctbuf)
