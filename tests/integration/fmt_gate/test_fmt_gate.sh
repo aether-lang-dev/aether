@@ -30,6 +30,19 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# Print the first differing lines of two files with line numbers.
+# awk-based because the Windows MSYS2 CI shell ships no diff/cmp
+# (diffutils is not installed there).
+fmt_gate_dump_diff() {
+    awk 'NR==FNR { a[FNR] = $0; n = FNR; next }
+         FNR<=n && $0 != a[FNR] && shown < 12 {
+             printf "    line %d\n      A: %s\n      B: %s\n", FNR, a[FNR], $0
+             shown++
+         }
+         END { if (FNR != n) printf "    (line counts differ: %d vs %d)\n", n, FNR }' \
+        "$1" "$2"
+}
+
 cd "$ROOT" || exit 1
 
 # Tier 1: canonical formatting.
@@ -73,22 +86,40 @@ while IFS= read -r f; do
     sibling="$(dirname "$f")/._fmt_gate_tmp_$$.ae"
     cp "$f" "$sibling"
     if "$AETHERC" "$sibling" "$base.orig.c" >/dev/null 2>&1; then
+        # Compile the UNFORMATTED sibling a second time first: if two
+        # compiles of identical input already differ, that is an
+        # emission-determinism failure, not a formatter one, and must
+        # be reported as such (first seen on Windows CI, where only
+        # this attribution shows which invariant actually broke).
+        "$AETHERC" "$sibling" "$base.orig2.c" >/dev/null 2>&1
+        sum_o=$(grep -v '^#line' "$base.orig.c" | cksum)
+        sum_o2=$(grep -v '^#line' "$base.orig2.c" | cksum)
+        if [ "$sum_o" != "$sum_o2" ]; then
+            rm -f "$sibling"
+            echo "  [FAIL] fmt_gate: two compiles of UNFORMATTED $f differ (emission nondeterminism, not a formatter fault)"
+            fmt_gate_dump_diff "$base.orig.c" "$base.orig2.c"
+            exit 1
+        fi
         "$AE" fmt "$sibling" >/dev/null 2>&1
         if ! "$AETHERC" "$sibling" "$base.fmt.c" >/dev/null 2>&1; then
             rm -f "$sibling"
             echo "  [FAIL] fmt_gate: $f compiles but its formatted copy does not"
             exit 1
         fi
-        sum_o=$(grep -v '^#line' "$base.orig.c" | cksum)
         sum_f=$(grep -v '^#line' "$base.fmt.c" | cksum)
         if [ "$sum_o" != "$sum_f" ]; then
+            if cmp -s "$f" "$sibling" 2>/dev/null; then
+                echo "  [FAIL] fmt_gate: formatting left $f byte-identical yet its C differs (emission instability)"
+            else
+                echo "  [FAIL] fmt_gate: formatting $f changed the emitted C"
+            fi
+            fmt_gate_dump_diff "$base.orig.c" "$base.fmt.c"
             rm -f "$sibling"
-            echo "  [FAIL] fmt_gate: formatting $f changed the emitted C"
             exit 1
         fi
         IR_CHECKED=$((IR_CHECKED + 1))
     fi
-    rm -f "$sibling" "$base.once.ae" "$base.twice.ae" "$base.orig.c" "$base.fmt.c"
+    rm -f "$sibling" "$base.once.ae" "$base.twice.ae" "$base.orig.c" "$base.orig2.c" "$base.fmt.c"
 done < "$TMPDIR/sample.txt"
 
 echo "  [PASS] fmt_gate: tree canonical; idempotent on $TOTAL sampled files; IR-preserving on $IR_CHECKED"
