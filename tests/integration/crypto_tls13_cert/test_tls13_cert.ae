@@ -81,6 +81,31 @@ fn der_int(out: ptr, off: int, mag32: ptr) -> int {
 }
 
 // Wrap (r32,s32) into a DER  SEQUENCE { INTEGER r, INTEGER s }.
+// Parse a DER ECDSA-Sig-Value SEQUENCE { INTEGER r, INTEGER s } into two
+// fresh 32-byte big-endian buffers (right-aligned, sign byte stripped).
+fn read_der_int_at(sig: ptr, off: int) -> (ptr, int) {
+    // sig[off] == 0x02 (INTEGER), sig[off+1] == length
+    ilen = bytes.get(sig, off + 1) & 0xFF
+    istart = off + 2
+    // strip a leading 0x00 sign byte
+    if ilen > 0 {
+        if (bytes.get(sig, istart) & 0xFF) == 0 { istart = istart + 1; ilen = ilen - 1 }
+    }
+    out = bytes.new(32)
+    z = 0
+    while z < 32 { bytes.set(out, z, 0); z = z + 1 }
+    dst = 32 - ilen
+    k = 0
+    while k < ilen { bytes.set(out, dst + k, bytes.get(sig, istart + k) & 0xFF); k = k + 1 }
+    return out, off + 2 + (bytes.get(sig, off + 1) & 0xFF)
+}
+fn split_der_ecdsa(sig: ptr) -> (ptr, ptr) {
+    // sig[0]=0x30 (SEQUENCE), sig[1]=seq_len, then INTEGER r, INTEGER s.
+    r, next = read_der_int_at(sig, 2)
+    s, _ = read_der_int_at(sig, next)
+    return r, s
+}
+
 fn der_ecdsa_sig(r32: ptr, s32: ptr) -> (ptr, int) {
     tmp = bytes.new(80)
     bytes.set(tmp, 79, 0)
@@ -184,6 +209,25 @@ main() {
     } else {
         println("FAIL ecdsa-p256 accepted wrong transcript"); total_ok = 0
     }
+
+    // --- mTLS: CLIENT CertificateVerify sign round-trip (RFC 8446 §4.4.3) ---
+    // Sign the client content with the client key, then verify the DER sig is a
+    // valid ECDSA-P256 signature over SHA-256(client content).
+    ccv_sig = tls13_cert.sign_client_cert_verify_ecdsa_p256(priv, th, 32, knonce)
+    ccv_content, ccv_clen = tls13_cert.client_cert_verify_content(th, 32)
+    ccv_digest = sha256b(ccv_content, ccv_clen)
+    // The client content differs from the server content (context string), so a
+    // sig over the CLIENT content must verify with the client digest...
+    crr, css = split_der_ecdsa(ccv_sig)
+    if p256.ecdsa_verify(px, py, ccv_digest, crr, css) == 1 {
+        println("ok   client CertificateVerify signs + verifies")
+    } else { println("FAIL client CertificateVerify sig"); total_ok = 0 }
+    // ...and must NOT verify against the SERVER content (different context).
+    if p256.ecdsa_verify(px, py, digest, crr, css) == 0 {
+        println("ok   client sig does not verify under server context")
+    } else { println("FAIL client sig verified under server context"); total_ok = 0 }
+    bytes.free(ccv_sig); bytes.free(ccv_content); bytes.free(ccv_digest)
+    bytes.free(crr); bytes.free(css)
     bytes.free(priv)
     bytes.free(px)
     bytes.free(py)

@@ -46,6 +46,8 @@ default). This was verified end-to-end against `openssl s_server`:
 | self-signed | self-signed, `SAN=localhost` | rejected — does not chain to a trusted anchor |
 | wrong host | CA-signed, `SAN=example.com`, connect as `localhost` | rejected — not valid for the requested hostname |
 | expired | CA-signed, `notAfter=2020` | rejected — certificate expired |
+| mTLS optional (`s_server -verify 1`) | server requests a client cert | **CONNECTED** — client sends an empty Certificate (declines), server proceeds |
+| mTLS required (`s_server -Verify 1`) | server *requires* a client cert | rejected — server alerts "peer did not return a certificate"; client surfaces it as `tls alert` |
 
 Reproduce a rejection, e.g. self-signed:
 
