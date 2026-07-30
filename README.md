@@ -4,8 +4,11 @@
 [![Windows](https://github.com/aether-lang-org/aether/actions/workflows/windows.yml/badge.svg)](https://github.com/aether-lang-org/aether/actions/workflows/windows.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM%20%7C%20Embedded-lightgrey)]()
+[![Website](https://img.shields.io/badge/website-aether--lang.dev-8A2BE2)](https://aether-lang.dev/)
 
 Erlang-style actors, Rust-grade capability discipline, and Go-flavored ergonomics, compiled to readable C.
+
+**Website: [aether-lang.dev](https://aether-lang.dev/)**
 
 ## Overview
 
