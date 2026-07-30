@@ -1,0 +1,57 @@
+// Regression: #1301. A caught panic leaked every allocation made since
+// the try: 50000 iterations of an alloc-then-panic block grew RSS
+// unboundedly before the allocation journal (~50000 string buffers,
+// several MB); post-fix the drain frees them and RSS stays flat.
+// Bound mirrors the heap_tracker sibling probes (current RSS, 256 KB
+// headroom).
+
+import std.string
+
+extern getrusage_max_rss_kb() -> int
+extern exit(code: int)
+
+alloc_then_panic() {
+    s = string.concat("journal-payload-", "0123456789abcdef")
+    if string.length(s) > 4 {
+        panic("drain me")
+    }
+}
+
+main() {
+    println("=== panic_unwind_no_leak ===")
+
+    // Warm-up: allocator pools, panic machinery, journal capacity.
+    i = 0
+    while i < 1000 {
+        try {
+            alloc_then_panic()
+        } catch e {
+            i = i + 1
+        }
+    }
+
+    before = getrusage_max_rss_kb()
+    i = 0
+    while i < 50000 {
+        try {
+            alloc_then_panic()
+        } catch e {
+            i = i + 1
+        }
+    }
+    after = getrusage_max_rss_kb()
+
+    if before < 0 {
+        println("(rss probe unavailable; correctness-only run)")
+        println("=== all cases passed ===")
+        return
+    }
+
+    growth = after -before
+    println("rss growth: ${growth} KB")
+    if growth > 256 {
+        println("FAIL: rss grew ${growth} KB across 50000 caught panics")
+        exit(1)
+    }
+    println("=== all cases passed ===")
+}

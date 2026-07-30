@@ -133,6 +133,42 @@ void aether_set_on_actor_death(AetherDeathHook fn);
 // the hook).
 void aether_fire_death_hook(int actor_id, const char* reason);
 
+// ---------------------------------------------------------------------------
+// Allocation journal (#1301): deterministic heap cleanup on unwind.
+//
+// While at least one panic frame is live, generated code journals every
+// heap allocation whose deferred scope-exit free is armed, and forgets
+// the entry when that free runs or when ownership escapes (return,
+// container/actor adoption). aether_panic() drains the innermost
+// frame's still-live entries before longjmp, freeing exactly the
+// deferred frees the jump would have skipped.
+//
+// INVARIANT the codegen emission must preserve: journal contents ==
+// the set of armed-but-unfired deferred frees. Track without a
+// matching forget on every ownership-transfer path turns the drain
+// into a use-after-free; forget without track is always safe (the
+// entry just is not there). When in doubt, forget.
+//
+// Entries carry their free function so the runtime never needs to know
+// allocation shapes (raw malloc vs refcounted AetherString today;
+// typed destructor thunks later). Tracking the same pointer again
+// updates the existing entry instead of duplicating it, so a
+// caller re-tracking a returned value cannot arm a double free.
+//
+// All three calls are branch-cheap no-ops while no frame is live; the
+// per-step scheduler barrier's cost discipline (see the _setjmp note
+// above) applies here too.
+// ---------------------------------------------------------------------------
+typedef void (*AetherUnwindFree)(const void* p);
+void aether_unwind_track(const void* p, AetherUnwindFree free_fn);
+void aether_unwind_track_if(const void* p, int owned, AetherUnwindFree free_fn);
+void aether_unwind_forget(const void* p);
+// Number of live journal entries on this thread. Exposed for tests.
+int aether_unwind_journal_size(void);
+// Release the journal's TLS backing storage. Call at thread exit
+// (scheduler threads); process exit reclaims the main thread's.
+void aether_unwind_thread_cleanup(void);
+
 // TLS: 1 while executing inside a scheduler-wrapped step, 0 otherwise.
 // Signal handlers check this before deciding whether to recover or let
 // the signal propagate with SIG_DFL.

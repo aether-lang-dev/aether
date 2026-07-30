@@ -216,6 +216,8 @@ main() {
 - `file.close(handle)` - Close a file handle
 - `file.size(path)` → `(int, string)` - Get file size in bytes
 - `fs.statvfs(path)` → `(total, free, avail, err)` - Filesystem byte counts (POSIX `statvfs`) for the fs containing `path`. `avail` is space usable by a non-root process (`f_bavail`) — use it for "how much can I actually write" (`end = avail / file_size`). Portable Linux/macOS/BSD; Windows returns the error branch.
+- `fs.mounts()` → `(count, err)` - Load the mount table (#1118): Linux `/proc/self/mountinfo` (octal escapes decoded), macOS/BSD `getmntinfo(3)`, Windows drive letters. Read entries with `fs.mount_source(i)` / `fs.mount_point(i)` / `fs.mount_fstype(i)` / `fs.mount_options(i)` (strings borrowed from a thread-local table, valid until the next `mounts()` or `fs.fs_release_mounts()`). Out-of-range indexes return `""`.
+- `fs.block_info(dev)` → `(size_bytes, removable, transport, err)` - Block-device facts (#1118), Linux sysfs backend. `dev` accepts `/dev/sda`, `sda`, or a partition (`nvme0n1p2`; the removable flag resolves through the parent disk). `removable` is 1/0 or -1 when unknown; `transport` is `usb`/`nvme`/`sata`/`virtio`/`mmc` or `""`. Non-Linux platforms return the error branch, never a fabricated answer.
 - `file.delete(path)` → `string` - Delete a file, return error string
 - `file.exists(path)` → `int` - 1 if exists, 0 otherwise (infallible predicate)
 

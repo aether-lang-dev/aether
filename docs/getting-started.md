@@ -7,7 +7,7 @@ This guide covers installation and basic usage of the Aether programming languag
 ### Quick Install (recommended)
 
 ```bash
-git clone https://github.com/nicolasmd87/aether.git
+git clone https://github.com/aether-lang-org/aether.git
 cd aether
 ./install.sh
 ```
@@ -64,7 +64,7 @@ apk add build-base
 
 The easiest way is to download the pre-built release binary, no MSYS2, no manual toolchain required:
 
-1. Download `aether-*-windows-x86_64.zip` from [GitHub Releases](https://github.com/nicolasmd87/aether/releases)
+1. Download `aether-*-windows-x86_64.zip` from [GitHub Releases](https://github.com/aether-lang-org/aether/releases)
 2. Extract to any folder, e.g. `C:\aether`
 3. Add `C:\aether\bin` to your PATH (System Settings → Environment Variables → Path)
 4. **Restart your terminal** (so PATH takes effect)

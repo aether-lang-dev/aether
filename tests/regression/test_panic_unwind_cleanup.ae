@@ -1,0 +1,107 @@
+// Regression: #1301 deterministic heap cleanup on panic unwind.
+//
+// Before the allocation journal, a panic caught by try/catch leaked
+// every heap allocation made since the try (the longjmp skipped the
+// deferred scope-exit frees). The journal mirrors the armed defers:
+// aether_panic() drains exactly the frees the jump would have skipped.
+//
+// What this test guards (the issue's verification matrix):
+//   1. Allocations dropped by a panic are freed by the drain
+//      (asserted by CI's LeakSanitizer jobs over this test binary)
+//   2. A value that ESCAPED the guarded block before the panic is not
+//      freed by the drain: reading it after the catch must be intact
+//   3. A value freed normally before the panic is not double-freed
+//   4. Nested try: an inner panic drains only the inner frame; the
+//      outer frame's allocations stay intact
+//   5. The catch binds the panic reason as usual
+
+import std.string
+import std.map
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+leaky_panic(n: int) {
+    i = 0
+    while i < n {
+        s = string.concat("payload-", string.from_int(i))
+        if string.length(s) > 8 {
+            panic("boom")
+        }
+        i = i + 1
+    }
+}
+
+freed_then_panic() {
+    s = string.concat("gone-", "already")
+    string.release(s)
+    panic("after free")
+}
+
+escape_then_panic(m: ptr) {
+    v = string.concat("kept-", "value")
+    map.put(m, "k", v)
+    panic("after escape")
+}
+
+nested() -> int {
+    outer = string.concat("outer-", "value")
+    try {
+        inner = string.concat("inner-", "value")
+        if string.length(inner) > 0 {
+            panic("inner boom")
+        }
+    } catch e {
+        if string.equals(e, "inner boom") != 1 {
+            fail("wrong inner reason")
+        }
+    }
+    return string.length(outer)
+}
+
+main() {
+    m = map.new()
+    caught = 0
+    i = 0
+    while i < 100 {
+        try {
+            leaky_panic(3)
+        } catch e {
+            if string.equals(e, "boom") != 1 {
+                fail("wrong reason for alloc-then-panic")
+            }
+            caught = caught + 1
+        }
+        try {
+            freed_then_panic()
+        } catch e {
+            caught = caught + 1
+        }
+        try {
+            escape_then_panic(m)
+        } catch e {
+            kept, gerr = map.get(m, "k")
+            if string.equals(kept, "kept-value") != 1 {
+                fail("escaped value freed by the unwind drain")
+            }
+            caught = caught + 1
+        }
+        if nested() != 11 {
+            fail("outer allocation damaged by inner drain")
+        }
+        i = i + 1
+    }
+    if caught != 300 {
+        fail("expected 300 catches, got ${caught}")
+    }
+    println("PASS 1: panic-dropped allocations drained (LeakSanitizer-verified in CI)")
+    println("PASS 2: escaped value untouched by drain")
+    println("PASS 3: freed-before-panic not double-freed")
+    println("PASS 4: nested drain stays frame-local")
+    println("PASS 5: reasons bound correctly across 300 catches")
+    println("=== All cases passed ===")
+}

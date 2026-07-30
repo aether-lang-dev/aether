@@ -32,6 +32,11 @@ exports(
     fs_try_stat, fs_get_stat_kind, fs_get_stat_size, fs_get_stat_mtime,
     fs_try_statvfs, fs_get_statvfs_total, fs_get_statvfs_free, fs_get_statvfs_avail,
     statvfs,
+    fs_try_mounts, fs_get_mount_count, fs_get_mount_source, fs_get_mount_point,
+    fs_get_mount_fstype, fs_get_mount_options, fs_release_mounts,
+    mounts, mount_source, mount_point, mount_fstype, mount_options,
+    fs_try_block_info, fs_get_block_size_bytes, fs_get_block_removable,
+    fs_get_block_transport, block_info,
     fs_try_read_binary, fs_get_read_binary, fs_get_read_binary_length,
     fs_release_read_binary, fs_read_binary_tuple,
     dir_list_count, dir_list_get, dir_list_kind, dir_list_free,
@@ -170,6 +175,31 @@ extern fs_try_statvfs(path: string) -> int
 extern fs_get_statvfs_total() -> long
 extern fs_get_statvfs_free() -> long
 extern fs_get_statvfs_avail() -> long
+
+// Mount enumeration (#1118). fs_try_mounts loads a thread-local mount
+// table and returns the entry count (-1 on failure); the per-entry
+// getters return strings BORROWED from that table, valid until the
+// next fs_try_mounts / fs_release_mounts on the same thread. Backends:
+// Linux /proc/self/mountinfo (octal escapes decoded), macOS and the
+// BSDs getmntinfo(3), Windows drive letters. Prefer the mounts()
+// wrapper below.
+extern fs_try_mounts() -> int
+extern fs_get_mount_count() -> int
+extern fs_get_mount_source(i: int) -> string
+extern fs_get_mount_point(i: int) -> string
+extern fs_get_mount_fstype(i: int) -> string
+extern fs_get_mount_options(i: int) -> string
+extern fs_release_mounts()
+
+// Block-device info (#1118), Linux sysfs backend. Accepts "/dev/sda",
+// "sda", or a partition ("sda1", "nvme0n1p2"; the removable flag
+// resolves through the parent disk). Other platforms report
+// unsupported through the block_info() wrapper's error slot, never a
+// fabricated answer.
+extern fs_try_block_info(dev: string) -> int
+extern fs_get_block_size_bytes() -> long
+extern fs_get_block_removable() -> int
+extern fs_get_block_transport() -> string
 
 // Split-accessor binary read: fs_try_read_binary reads the file into
 // a TLS-owned buffer; fs_get_read_binary / fs_get_read_binary_length
@@ -651,6 +681,49 @@ statvfs(path: string) -> {
         return total, free, avail, ""
     }
     return 0, 0, 0, "cannot statvfs path"
+}
+
+// Load the mount table. Returns (count, "") on success or
+// (0, "cannot enumerate mounts"). Read entries with mount_source /
+// mount_point / mount_fstype / mount_options; free early with
+// fs_release_mounts (otherwise the next mounts() call reuses the slot).
+mounts() -> {
+    n = fs_try_mounts()
+    if n >= 0 {
+        return n, ""
+    }
+    return 0, "cannot enumerate mounts"
+}
+
+mount_source(i: int) -> string {
+    return fs_get_mount_source(i)
+}
+
+mount_point(i: int) -> string {
+    return fs_get_mount_point(i)
+}
+
+mount_fstype(i: int) -> string {
+    return fs_get_mount_fstype(i)
+}
+
+mount_options(i: int) -> string {
+    return fs_get_mount_options(i)
+}
+
+// Block-device facts. Returns (size_bytes, removable, transport, "")
+// on success; removable is 1/0 or -1 when the kernel does not say.
+// On platforms without a backend (everything but Linux today) returns
+// (0, -1, "", "block info unavailable on this platform").
+block_info(dev: string) -> {
+    ok = fs_try_block_info(dev)
+    size = fs_get_block_size_bytes()
+    removable = fs_get_block_removable()
+    transport = fs_get_block_transport()
+    if ok != 0 {
+        return size, removable, transport, ""
+    }
+    return 0, 0 - 1, "", "block info unavailable on this platform"
 }
 
 // Binary-safe file read. Preserves embedded NULs and reports the

@@ -231,6 +231,38 @@ To suppress the trace block entirely (useful for tests that diff stderr line-for
 
 Available on glibc-Linux and macOS today (uses `<execinfo.h>` `backtrace()` from libc proper, no extra link dependency). On musl, Windows, Emscripten, and freestanding targets the trace block is skipped, `panic`/`try`/`catch` themselves still work.
 
+### Heap cleanup on unwind (#1301)
+
+A caught panic does not leak the allocations made since the `try`. While
+any panic frame is live (a `try`/`catch` block, or the scheduler's
+per-step barrier), generated code journals every heap allocation whose
+deferred scope-exit free is armed; `aether_panic()` drains the innermost
+frame's still-live entries before the jump, freeing exactly the deferred
+frees the `longjmp` would have skipped. The journal mirrors the deferred
+frees one-for-one:
+
+- A value freed normally (explicit `string.release`, reassignment, scope
+  exit) leaves the journal at the same moment, so the drain never
+  double-frees.
+- A value that escaped the guarded block (returned, stored in a map,
+  list, actor state, or message) is never journaled or is forgotten at
+  the handoff, so the drain never frees something another owner holds.
+- Nested `try` drains only the inner frame's entries; the outer frame's
+  allocations survive to their normal frees.
+
+For actor handlers this means a panicking actor's step-scoped
+allocations are reclaimed before the actor is marked dead. The journal
+is scoped to guarded regions: outside any frame the hooks are a
+TLS-load-and-return, and the no-panic hot path shows no measurable cost
+on the ping-pong messaging benchmark. Regression coverage:
+`tests/regression/test_panic_unwind_cleanup.ae` (the full matrix),
+`tests/integration/panic_unwind_no_leak/` (50000 caught panics, RSS
+flat), `tests/integration/panic_actor_step_drain/` (scheduler barrier).
+
+Main-thread inline mode (single-actor programs) has no step barrier by
+design, so a handler panic there still reaches the no-frame fallback
+(reason + trace + abort), unchanged.
+
 ## Cooperative Preemption
 
 By default, message handlers run to completion. A tight compute loop inside a handler will block that core's scheduler thread. For programs where this is a concern, cooperative preemption can be enabled:

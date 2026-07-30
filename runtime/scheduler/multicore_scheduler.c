@@ -896,6 +896,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
 
+    aether_unwind_thread_cleanup();
+
     return NULL;
 }
 
