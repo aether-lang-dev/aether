@@ -58,9 +58,9 @@ exports(
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
     SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
-    chain_verify, chain_verify_path, verify_cert_signature,
+    chain_verify, chain_verify_path, verify_cert_signature, find_issuer_cert,
     trust_store_load, free_anchors,
-    parse_ocsp_status, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
+    parse_ocsp_status, verify_ocsp_signature, verify_ocsp_signature_at, OCSP_GOOD, OCSP_REVOKED, OCSP_UNKNOWN, OCSP_ERROR
 )
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
@@ -422,7 +422,6 @@ parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
 fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     // [0] version (context tag 0xA0) — optional; skip if present.
     v, verr = asn1.read_tlv(tbsr)
-    if string.equals(verr, "") != 1 { return verr }
     vtag = asn1.last_tag(tbsr)
     bytes.free(v)
     if vtag != 0xA0 {
@@ -441,18 +440,15 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
 
     // signature AlgorithmIdentifier (SEQUENCE) — skip.
     sa, saerr = asn1.read_tlv(tbsr)
-    if string.equals(saerr, "") != 1 { return saerr }
     bytes.free(sa)
 
     // issuer Name (SEQUENCE) — capture raw DER (tag+len+content).
     iss, ierr = read_tlv_full(tbsr)
-    if string.equals(ierr, "") != 1 { return ierr }
     out.issuer = iss
     out.issuer_len = bytes.length(iss)
 
     // validity SEQUENCE { notBefore, notAfter }.
     val_content, valerr = asn1.read_tlv(tbsr)
-    if string.equals(valerr, "") != 1 { return valerr }
     vr = asn1.reader_new(val_content)
     nb, nberr = asn1.read_tlv(vr)
     if string.equals(nberr, "") == 1 { out.not_before = nb; out.not_before_len = bytes.length(nb) }
@@ -463,13 +459,11 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
 
     // subject Name (SEQUENCE) — capture raw DER.
     subj, suberr = read_tlv_full(tbsr)
-    if string.equals(suberr, "") != 1 { return suberr }
     out.subject = subj
     out.subject_len = bytes.length(subj)
 
     // subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }.
     spki_content, spkierr = asn1.read_tlv(tbsr)
-    if string.equals(spkierr, "") != 1 { return spkierr }
     sr = asn1.reader_new(spki_content)
     algo_body, algo_full, ae = asn1.read_sequence(sr)
     if string.equals(ae, "") == 1 {
@@ -942,6 +936,258 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
     return OCSP_ERROR
 }
 
+// Walk an OCSPResponse (DER) down to the BasicOCSPResponse SEQUENCE, returning
+// (content_start, content_end) of that SEQUENCE's body or (-1,-1) on a
+// malformed / non-successful response. Mirrors parse_ocsp_status's descent.
+fn ocsp_basic_bounds(der: ptr, len: int) -> (int, int) {
+    t0, c0, l0, n0 = der_tlv(der, 0, len)
+    if t0 != 0x30 { return -1, -1 }
+    end0 = c0 + l0
+    ts, cs, ls, ns = der_tlv(der, c0, end0)
+    if ts != 0x0A { return -1, -1 }
+    if ls < 1 { return -1, -1 }
+    if (bytes.get(der, cs) & 0xFF) != 0 { return -1, -1 }
+    tb, cb, lb2, nb = der_tlv(der, ns, end0)
+    if tb != 0xA0 { return -1, -1 }
+    endb = cb + lb2
+    trb, crb, lrb, nrb = der_tlv(der, cb, endb)
+    if trb != 0x30 { return -1, -1 }
+    endrb = crb + lrb
+    toid, coid, loid, noid = der_tlv(der, crb, endrb)
+    if toid != 0x06 { return -1, -1 }
+    toct, coct, loct, noct = der_tlv(der, noid, endrb)
+    if toct != 0x04 { return -1, -1 }
+    // OCTET STRING content == DER of BasicOCSPResponse SEQUENCE.
+    tbr, cbr, lbr, nbr = der_tlv(der, coct, coct + loct)
+    if tbr != 0x30 { return -1, -1 }
+    return cbr, cbr + lbr
+}
+
+// Verify the responder signature on a stapled OCSP response (RFC 6960
+// §4.2.2.2). Returns 1 iff the BasicOCSPResponse signature verifies AND the
+// signer is authorized to answer for the cert whose `issuer` is passed:
+//   - the issuer signed the response directly (its own key), OR
+//   - a delegated responder cert is stapled in BasicOCSPResponse.certs[0],
+//     itself signed by `issuer` and bearing the id-kp-OCSPSigning EKU
+//     (1.3.6.1.5.5.7.3.9), and that cert's key signed the response.
+// Returns 0 on any failure (bad sig, unauthorized/absent responder key,
+// unsupported algorithm, malformed DER). This is a positive "the staple is
+// authentic" signal; the CALLER decides policy on a 0 (today: fail-open on an
+// unverifiable staple, fail-closed only on a verified REVOKED).
+//
+// Both RFC 6960 §4.2.2.2 responder-authorization shapes are handled and were
+// verified end-to-end against real staples: direct-issuer (the cert's issuer
+// signs, e.g. DigiCert) and delegated (a responder cert in certs[0], issuer-
+// signed and OCSPSigning-EKU-bearing, e.g. GoDaddy). Signature algorithms:
+// RSA-PKCS#1-SHA256, ECDSA-P256-SHA256, ECDSA-P384-SHA384.
+// ptr-typed convenience for callers holding an issuer as a bare pointer (e.g.
+// find_issuer_cert's return), where the qualified `as *mod.LeafCert` cast at
+// the call site doesn't parse. Casts internally and delegates.
+verify_ocsp_signature_at(der: ptr, len: int, issuer: ptr) -> int {
+    return verify_ocsp_signature(der, len, issuer as *LeafCert)
+}
+
+verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
+    if issuer == null { return 0 }
+    bstart, bend = ocsp_basic_bounds(der, len)
+    if bstart < 0 { return 0 }
+
+    // BasicOCSPResponse ::= SEQUENCE { tbsResponseData, signatureAlgorithm,
+    //                                  signature BIT STRING, [0] certs OPTIONAL }
+    // tbsResponseData: capture the FULL DER (tag+len+content) — that is the
+    // signed message.
+    tt, ct, lt, nt = der_tlv(der, bstart, bend)
+    if tt != 0x30 { return 0 }
+    tbs_full_len = nt - bstart
+    tbs = bytes.new(tbs_full_len)
+    if tbs_full_len > 0 { bytes.set(tbs, tbs_full_len - 1, 0) }
+    bytes.copy_from_bytes(tbs, 0, der, bstart, tbs_full_len)
+
+    // signatureAlgorithm ::= SEQUENCE { algorithm OID, ... }
+    ta, ca, la, na = der_tlv(der, nt, bend)
+    if ta != 0x30 { bytes.free(tbs); return 0 }
+    toi, coi, loi, noi = der_tlv(der, ca, ca + la)
+    if toi != 0x06 { bytes.free(tbs); return 0 }
+    sig_alg_oid = oid_der_to_dotted_bytes(der, coi, loi)
+
+    // signature BIT STRING — strip the leading "unused bits" octet (0x00).
+    tsg, csg, lsg, nsg = der_tlv(der, na, bend)
+    if tsg != 0x03 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
+    if lsg < 1 { bytes.free(tbs); bytes.free(sig_alg_oid); return 0 }
+    sig_len = lsg - 1
+    sig = bytes.new(sig_len)
+    if sig_len > 0 { bytes.set(sig, sig_len - 1, 0) }
+    bytes.copy_from_bytes(sig, 0, der, csg + 1, sig_len)
+
+    // Optional certs [0] EXPLICIT SEQUENCE OF Certificate — a delegated responder.
+    responder = issuer
+    delegated = null as *LeafCert
+    have_delegated = 0
+    if nsg < bend {
+        tc, cc, lc, nc = der_tlv(der, nsg, bend)
+        if tc == 0xA0 {
+            // certs [0] EXPLICIT wraps a SEQUENCE OF Certificate; step INTO that
+            // SEQUENCE OF, then read the first Certificate SEQUENCE inside it.
+            tso, cso, lso, nso = der_tlv(der, cc, cc + lc)
+            tcs2 = 0
+            ccs2 = 0
+            lcs2 = 0
+            ncs2 = 0
+            if tso == 0x30 {
+                tcs2, ccs2, lcs2, ncs2 = der_tlv(der, cso, cso + lso)
+            }
+            if tcs2 == 0x30 {
+                cert_der_len = ncs2 - cso
+                cert_der = bytes.new(cert_der_len)
+                if cert_der_len > 0 { bytes.set(cert_der, cert_der_len - 1, 0) }
+                bytes.copy_from_bytes(cert_der, 0, der, cso, cert_der_len)
+                d = malloc(136) as *LeafCert // sizeof(LeafCert), per trust_store_load
+                init_leaf(d)
+                perr = parse_certificate(cert_der, cert_der_len, d)
+                bytes.free(cert_der)
+                if string.equals(perr, "") == 1 {
+                    // The delegated responder cert must be signed by `issuer`
+                    // and carry the OCSPSigning EKU. If either fails, the staple
+                    // is not authentic under this cert.
+                    vcs = verify_cert_signature(d, issuer)
+                    eku = cert_has_ocsp_signing_eku(d)
+                    if vcs == 1 {
+                        if eku == 1 {
+                            responder = d
+                            delegated = d
+                            have_delegated = 1
+                        }
+                    }
+                }
+                if have_delegated == 0 {
+                    free_leaf(d)
+                    free(d)
+                }
+            }
+        }
+    }
+
+    result = 0
+    if have_delegated == 1 || responder == issuer {
+        result = verify_sig_over_bytes(tbs, tbs_full_len, sig_alg_oid, sig, sig_len,
+            responder.spki_algo_oid, responder.spki_key, responder.spki_key_len)
+    }
+
+    if have_delegated == 1 {
+        free_leaf(delegated)
+        free(delegated)
+    }
+    bytes.free(tbs)
+    bytes.free(sig_alg_oid)
+    bytes.free(sig)
+    return result
+}
+
+// Decode a DER OID's content octets (`buf[coff..coff+clen)`) into a dotted
+// ASCII string stored as bytes — the same representation oid_is() compares.
+// Rebuilds the `06 <len> <content>` TLV and reuses asn1.read_oid so the
+// base-128 decode matches the rest of the parser exactly.
+fn oid_der_to_dotted_bytes(buf: ptr, coff: int, clen: int) -> ptr {
+    lenoct = asn1.encode_len(clen)
+    ll = bytes.length(lenoct)
+    tlv = bytes.new(1 + ll + clen)
+    if bytes.length(tlv) > 0 { bytes.set(tlv, bytes.length(tlv) - 1, 0) }
+    bytes.set(tlv, 0, 0x06)
+    bytes.copy_from_bytes(tlv, 1, lenoct, 0, ll)
+    bytes.copy_from_bytes(tlv, 1 + ll, buf, coff, clen)
+    bytes.free(lenoct)
+    r = asn1.reader_new(tlv)
+    dotted, oerr = asn1.read_oid(r)
+    asn1.reader_free(r)
+    bytes.free(tlv)
+    if string.equals(oerr, "") != 1 { return bytes.new(0) }
+    out = oid_to_bytes(dotted)
+    string.release(dotted)
+    return out
+}
+
+// Does a parsed cert's extendedKeyUsage include id-kp-OCSPSigning
+// (1.3.6.1.5.5.7.3.9)? RFC 6960 §4.2.2.2 requires it on a delegated responder.
+// Walks the cert's TBS extensions for the EKU extension (2.5.29.37) and scans
+// its ExtKeyUsageSyntax (SEQUENCE OF KeyPurposeId) for the OCSPSigning OID.
+// `c.tbs` holds the full tbsCertificate DER (tag+len+content).
+fn cert_has_ocsp_signing_eku(c: *LeafCert) -> int {
+    if c.tbs == null { return 0 }
+    buf = c.tbs
+    end = c.tbs_len
+    // tbsCertificate ::= SEQUENCE { ... extensions [3] EXPLICIT SEQUENCE OF Extension }
+    tt, ct, lt, nt = der_tlv(buf, 0, end)
+    if tt != 0x30 { return 0 }
+    endt = ct + lt
+    // Find the [3] context tag (0xA3) holding the extensions.
+    p = ct
+    ext_seq = -1
+    ext_end = -1
+    while p < endt {
+        ti, ci, li, ni = der_tlv(buf, p, endt)
+        if ti < 0 { p = endt } else {
+            if ti == 0xA3 {
+                // [3] EXPLICIT wraps a SEQUENCE OF Extension.
+                ts, cs, ls, ns = der_tlv(buf, ci, ci + li)
+                if ts == 0x30 { ext_seq = cs; ext_end = cs + ls }
+                p = endt
+            } else { p = ni }
+        }
+    }
+    if ext_seq < 0 { return 0 }
+    // Each Extension ::= SEQUENCE { extnID OID, critical? BOOL, extnValue OCTET STRING }
+    q = ext_seq
+    while q < ext_end {
+        te, ce, le, ne = der_tlv(buf, q, ext_end)
+        if te < 0 { q = ext_end } else {
+            if te == 0x30 {
+                ext_inner_end = ce + le
+                toid, coid, loid, noid = der_tlv(buf, ce, ext_inner_end)
+                if toid == 0x06 {
+                    oid_b = oid_der_to_dotted_bytes(buf, coid, loid)
+                    is_eku = oid_is(oid_b, "2.5.29.37")
+                    bytes.free(oid_b)
+                    if is_eku == 1 {
+                        // Skip optional critical BOOL, reach extnValue OCTET STRING.
+                        tv, cv, lv, nv = der_tlv(buf, noid, ext_inner_end)
+                        // If a BOOL precedes the OCTET STRING, step once more.
+                        if tv == 0x01 { tv, cv, lv, nv = der_tlv(buf, nv, ext_inner_end) }
+                        if tv == 0x04 {
+                            // extnValue content is DER of SEQUENCE OF KeyPurposeId.
+                            if eku_octets_have_ocsp_signing(buf, cv, cv + lv) == 1 { return 1 }
+                        }
+                        return 0
+                    }
+                }
+            }
+            q = ne
+        }
+    }
+    return 0
+}
+
+// Scan a DER ExtKeyUsageSyntax (SEQUENCE OF KeyPurposeId OID) in
+// buf[start..end) for id-kp-OCSPSigning (1.3.6.1.5.5.7.3.9). Returns 1 if found.
+fn eku_octets_have_ocsp_signing(buf: ptr, start: int, end: int) -> int {
+    ts, cs, ls, ns = der_tlv(buf, start, end)
+    if ts != 0x30 { return 0 }
+    p = cs
+    seq_end = cs + ls
+    while p < seq_end {
+        to, co, lo, no = der_tlv(buf, p, seq_end)
+        if to < 0 { p = seq_end } else {
+            if to == 0x06 {
+                oid_b = oid_der_to_dotted_bytes(buf, co, lo)
+                hit = oid_is(oid_b, "1.3.6.1.5.5.7.3.9")
+                bytes.free(oid_b)
+                if hit == 1 { return 1 }
+            }
+            p = no
+        }
+    }
+    return 0
+}
+
 // ---- chain building + cert-to-cert signature verification (RFC 5280) ----
 //
 // Nic's third bar: a self-signed leaf (issuer == subject, no trusted anchor)
@@ -1043,32 +1289,50 @@ fn parse_rsa_spki(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
 verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
     if leaf.tbs == null { return 0 }
     if leaf.signature == null { return 0 }
-    if issuer.spki_key == null { return 0 }
+    return verify_sig_over_bytes(leaf.tbs, leaf.tbs_len, leaf.sig_alg_oid,
+        leaf.signature, leaf.signature_len,
+        issuer.spki_algo_oid, issuer.spki_key, issuer.spki_key_len)
+}
+
+// Verify `sig` over the raw bytes `msg[0..msg_len)` under the signature
+// algorithm named by `sig_alg_oid` (dotted-OID bytes), using the signer's SPKI
+// (`key_algo_oid` + `key`/`key_len`). Returns 1 if valid, else 0. The three
+// algorithms cover the real world for both X.509 cert signatures and OCSP
+// responder signatures (RFC 6960 §4.2.2.2 uses the same AlgorithmIdentifier /
+// key shapes as certificates):
+//   sha256WithRSAEncryption  1.2.840.113549.1.1.11  -> RSA PKCS#1 v1.5 / SHA-256
+//   ecdsa-with-SHA256        1.2.840.10045.4.3.2    -> ECDSA P-256 / SHA-256
+//   ecdsa-with-SHA384        1.2.840.10045.4.3.3    -> ECDSA P-384 / SHA-384
+fn verify_sig_over_bytes(msg: ptr, msg_len: int, sig_alg_oid: ptr, sig: ptr, sig_len: int,
+    key_algo_oid: ptr, key: ptr, key_len: int) -> int {
+    if msg == null { return 0 }
+    if sig == null { return 0 }
+    if key == null { return 0 }
 
     result = 0
-    if oid_is(leaf.sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
-        // sha256WithRSAEncryption. Issuer key must be rsaEncryption.
-        if oid_is(issuer.spki_algo_oid, "1.2.840.113549.1.1.1") == 1 {
-            hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
-            n, e, perr = parse_rsa_spki(issuer.spki_key, issuer.spki_key_len)
+    if oid_is(sig_alg_oid, "1.2.840.113549.1.1.11") == 1 {
+        // sha256WithRSAEncryption. Signer key must be rsaEncryption.
+        if oid_is(key_algo_oid, "1.2.840.113549.1.1.1") == 1 {
+            hash = sha256_of_bytes(msg, msg_len)
+            n, e, perr = parse_rsa_spki(key, key_len)
             if string.equals(perr, "") == 1 {
                 k = rsa.key_from_components(n, e, null)
                 di = sha256_digestinfo(hash)
-                result = rsa.verify_pkcs1(k, di, leaf.signature)
+                result = rsa.verify_pkcs1(k, di, sig)
                 bytes.free(di)
                 rsa.key_free(k) // frees n, e too
             }
             bytes.free(hash)
         }
     }
-    if oid_is(leaf.sig_alg_oid, "1.2.840.10045.4.3.2") == 1 {
-        // ecdsa-with-SHA256 on a P-256 issuer key (65-byte uncompressed point).
-        if oid_is(issuer.spki_algo_oid, "1.2.840.10045.2.1") == 1 {
-            if issuer.spki_key_len == 65 {
-                hash = sha256_of_bytes(leaf.tbs, leaf.tbs_len)
-                px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len, 32)
+    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.2") == 1 {
+        // ecdsa-with-SHA256 on a P-256 signer key (65-byte uncompressed point).
+        if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
+            if key_len == 65 {
+                hash = sha256_of_bytes(msg, msg_len)
+                px, py, kerr = ec_point_from_spki(key, key_len, 32)
                 if string.equals(kerr, "") == 1 {
-                    r32, s32, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len, 32)
+                    r32, s32, serr = split_ecdsa_sig(sig, sig_len, 32)
                     if string.equals(serr, "") == 1 {
                         result = p256.ecdsa_verify(px, py, hash, r32, s32)
                         bytes.free(r32); bytes.free(s32)
@@ -1079,15 +1343,15 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
             }
         }
     }
-    if oid_is(leaf.sig_alg_oid, "1.2.840.10045.4.3.3") == 1 {
-        // ecdsa-with-SHA384 on a P-384 issuer key (97-byte uncompressed point).
+    if oid_is(sig_alg_oid, "1.2.840.10045.4.3.3") == 1 {
+        // ecdsa-with-SHA384 on a P-384 signer key (97-byte uncompressed point).
         // Common on modern roots/intermediates (e.g. Google Trust Services).
-        if oid_is(issuer.spki_algo_oid, "1.2.840.10045.2.1") == 1 {
-            if issuer.spki_key_len == 97 {
-                hash = sha384_of_bytes(leaf.tbs, leaf.tbs_len)
-                px, py, kerr = ec_point_from_spki(issuer.spki_key, issuer.spki_key_len, 48)
+        if oid_is(key_algo_oid, "1.2.840.10045.2.1") == 1 {
+            if key_len == 97 {
+                hash = sha384_of_bytes(msg, msg_len)
+                px, py, kerr = ec_point_from_spki(key, key_len, 48)
                 if string.equals(kerr, "") == 1 {
-                    r48, s48, serr = split_ecdsa_sig(leaf.signature, leaf.signature_len, 48)
+                    r48, s48, serr = split_ecdsa_sig(sig, sig_len, 48)
                     if string.equals(serr, "") == 1 {
                         result = p384.ecdsa_verify(px, py, hash, r48, s48)
                         bytes.free(r48); bytes.free(s48)
@@ -1232,6 +1496,40 @@ fn find_issuer_unused(cert: *LeafCert, intermediates: ptr, used: ptr) -> int {
         i = i + 1
     }
     return -1
+}
+
+// Find the certificate that issued `leaf` — search `intermediates` then
+// `anchors` for one whose subject DN equals leaf.issuer AND whose key verifies
+// leaf's signature. Returns the issuer *LeafCert as ptr, or null if none.
+// Used by OCSP: the responder is authorized relative to the cert's issuer.
+find_issuer_cert(leaf: *LeafCert, intermediates: ptr, anchors: ptr) -> ptr {
+    if intermediates != null {
+        n = list_size(intermediates)
+        i = 0
+        while i < n {
+            m = list_get_raw(intermediates, i) as *LeafCert
+            if m != null {
+                if dn_equal(leaf.issuer, leaf.issuer_len, m.subject, m.subject_len) == 1 {
+                    if verify_cert_signature(leaf, m) == 1 { return m as ptr }
+                }
+            }
+            i = i + 1
+        }
+    }
+    if anchors != null {
+        an = list_size(anchors)
+        j = 0
+        while j < an {
+            a = list_get_raw(anchors, j) as *LeafCert
+            if a != null {
+                if dn_equal(leaf.issuer, leaf.issuer_len, a.subject, a.subject_len) == 1 {
+                    if verify_cert_signature(leaf, a) == 1 { return a as ptr }
+                }
+            }
+            j = j + 1
+        }
+    }
+    return null
 }
 
 // Is the intermediate at index `idx` (by stored pointer) already in `used`?
