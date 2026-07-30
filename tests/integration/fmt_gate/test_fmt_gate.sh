@@ -91,13 +91,19 @@ while IFS= read -r f; do
         # emission-determinism failure, not a formatter one, and must
         # be reported as such (first seen on Windows CI, where only
         # this attribution shows which invariant actually broke).
-        "$AETHERC" "$sibling" "$base.orig2.c" >/dev/null 2>&1
+        if ! "$AETHERC" "$sibling" "$base.orig2.c" >"$base.c2.log" 2>&1; then
+            echo "  [FAIL] fmt_gate: SECOND compile of unformatted $f failed (first succeeded)"
+            sed 's/^/    /' "$base.c2.log" | head -10
+            rm -f "$sibling"
+            exit 1
+        fi
         sum_o=$(grep -v '^#line' "$base.orig.c" | cksum)
         sum_o2=$(grep -v '^#line' "$base.orig2.c" | cksum)
         if [ "$sum_o" != "$sum_o2" ]; then
-            rm -f "$sibling"
             echo "  [FAIL] fmt_gate: two compiles of UNFORMATTED $f differ (emission nondeterminism, not a formatter fault)"
+            echo "    sizes: $(wc -c < "$base.orig.c") vs $(wc -c < "$base.orig2.c") bytes"
             fmt_gate_dump_diff "$base.orig.c" "$base.orig2.c"
+            rm -f "$sibling"
             exit 1
         fi
         "$AE" fmt "$sibling" >/dev/null 2>&1
