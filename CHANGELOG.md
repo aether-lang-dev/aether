@@ -29,6 +29,17 @@ next version number before tagging the release.
   freed its temporaries; the direct-argument form never did, for every heap
   producer. Both forms now route through owned-print helpers that print and
   free in one step; bound identifiers keep their scope-exit free.
+- **String-literal emission: hex-escape maximal munch corrupted bytes, and
+  binary bytes made the generated C a binary file.** A C hex escape has no
+  length limit, so an emitted `"\x01a"` re-lexed as the single byte 0x1A
+  whenever a hex-escaped byte preceded a hex-digit character; and bytes above
+  0x7F (decoded `\x` escapes, e.g. CBOR/MsgPack test vectors) were written
+  raw, producing invalid-UTF-8 output that text tools mishandle
+  platform-dependently (surfaced as phantom checksum mismatches on Windows
+  CI). The emitter now writes zero-padded octal (`\001`, munch-proof by
+  construction) and keeps only valid UTF-8 sequences raw, so generated C is
+  always valid text. Regression:
+  `tests/regression/test_string_escape_bytes.ae`.
 
 ### Added
 
