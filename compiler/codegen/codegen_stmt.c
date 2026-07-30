@@ -892,6 +892,12 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
             strcmp(fn, "string_concat_wrapped") == 0 ||
             strcmp(fn, "string_substring") == 0 ||
             strcmp(fn, "string_substring_n") == 0 ||
+            /* string_replace / string_replace_all (#1331) always return
+             * a fresh managed string via string_new_with_length /
+             * string_adopt_caps_buffer, even on the no-match path
+             * (which returns a COPY, never the borrowed input). */
+            strcmp(fn, "string_replace") == 0 ||
+            strcmp(fn, "string_replace_all") == 0 ||
             /* string.copy returns `string_concat(s, "")` — always a
              * fresh owned heap buffer (never a borrowed/literal pointer),
              * the same shape as its sibling string_concat already on this
@@ -7099,10 +7105,25 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
                     } else if (arg_type->kind == TYPE_STRING) {
-                        // NULL-safe via helper (no double-evaluation)
-                        fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, "));\n");
+                        /* A heap-producing CALL in bare argument position
+                         * (`print(string.concat(a, b))`) is a temporary
+                         * nothing else owns: print-and-free via the owned
+                         * helper or it leaks per call. Bare identifiers
+                         * stay unwrapped, their scope-exit defer owns the
+                         * free (wrapping them would double-free). The
+                         * interpolation path already handles its own
+                         * temporaries; this closes the direct-arg form. */
+                        if (first_arg->type == AST_FUNCTION_CALL &&
+                            is_heap_string_expr(gen, first_arg)) {
+                            fprintf(gen->output, "_aether_print_owned(");
+                            generate_expression(gen, first_arg);
+                            fprintf(gen->output, ");\n");
+                        } else {
+                            // NULL-safe via helper (no double-evaluation)
+                            fprintf(gen->output, "printf(\"%%s\", _aether_safe_str(");
+                            generate_expression(gen, first_arg);
+                            fprintf(gen->output, "));\n");
+                        }
                     } else if (arg_type->kind == TYPE_BOOL) {
                         fprintf(gen->output, "printf(\"%%s\", ");
                         generate_expression(gen, first_arg);
@@ -7326,7 +7347,50 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "scheduler_reply((ActorBase*)self, &_reply, sizeof(%s)); }\n",
                                 reply_expr->value);
                     } else {
-                        print_line(gen, "/* ERROR: unknown reply message type %s */", reply_expr->value);
+                        fprintf(stderr,
+                                "aetherc: line %d: reply references unknown message type '%s'\n",
+                                stmt->line, reply_expr->value);
+                        exit(1);
+                    }
+                } else {
+                    /* Expression reply (#1324): `reply count`. Deliver a
+                     * typed copy through the same scheduler_reply slot the
+                     * message form uses; the asker derefs the buffer as
+                     * this type (see the AST_SEND_ASK scalar branch, which
+                     * MUST stay in sync with this switch). */
+                    TypeKind k = (reply_expr->node_type)
+                        ? reply_expr->node_type->kind : TYPE_INT;
+                    print_indent(gen);
+                    if (k == TYPE_STRING) {
+                        /* Deep-copy so the asker's read outlives the
+                         * handler's defer-free, same contract as
+                         * message-field string replies (#466). */
+                        fprintf(gen->output, "{ const char* _reply_val = ");
+                        generate_expression(gen, reply_expr);
+                        fprintf(gen->output,
+                                "; if (_reply_val) { "
+                                "size_t _ml = aether_string_length(_reply_val); "
+                                "_reply_val = (const char*)string_new_with_length("
+                                "aether_string_data(_reply_val), (int)_ml); } "
+                                "scheduler_reply((ActorBase*)self, &_reply_val, "
+                                "sizeof(const char*)); }\n");
+                    } else {
+                        const char* c_type = "int";
+                        switch (k) {
+                            case TYPE_FLOAT:      c_type = "double"; break;
+                            case TYPE_LONGDOUBLE: c_type = "long double"; break;
+                            case TYPE_BOOL:       c_type = "int"; break;
+                            case TYPE_INT64:      c_type = "int64_t"; break;
+                            case TYPE_UINT64:     c_type = "uint64_t"; break;
+                            case TYPE_DURATION:   c_type = "int64_t"; break;
+                            case TYPE_PTR:        c_type = "void*"; break;
+                            default:              c_type = "int"; break;
+                        }
+                        fprintf(gen->output, "{ %s _reply_val = (%s)(", c_type, c_type);
+                        generate_expression(gen, reply_expr);
+                        fprintf(gen->output,
+                                "); scheduler_reply((ActorBase*)self, &_reply_val, "
+                                "sizeof(_reply_val)); }\n");
                     }
                 }
             }

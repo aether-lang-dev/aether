@@ -3412,6 +3412,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "puts(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
+                            } else if (arg->type == AST_FUNCTION_CALL &&
+                                       is_heap_string_expr(gen, arg)) {
+                                /* Heap-producing call in bare argument
+                                 * position: the temporary is owned by no
+                                 * binding, print-and-free via the owned
+                                 * helper or it leaks per call (#1331
+                                 * review). Identifiers stay on the plain
+                                 * path; scope exit owns their free. */
+                                fprintf(gen->output, "_aether_println_owned(");
+                                generate_expression(gen, arg);
+                                fprintf(gen->output, ")");
                             } else {
                                 // Runtime string — could be NULL
                                 fprintf(gen->output, "printf(\"%%s\\n\", _aether_safe_str(");
@@ -5228,11 +5239,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR) {
                     MessageDef* msg_def = lookup_message(gen->message_registry, message->value);
                     if (msg_def) {
-                        // Look up the reply message type from the pre-built map
+                        // Look up the reply shape from the pre-built map:
+                        // a reply message name, or the scalar TypeKind of
+                        // an expression reply (#1324).
                         const char* reply_msg_name = NULL;
+                        int reply_scalar_kind = TYPE_UNKNOWN;
                         for (int r = 0; r < gen->reply_type_count; r++) {
                             if (strcmp(gen->reply_type_map[r].request_msg, message->value) == 0) {
                                 reply_msg_name = gen->reply_type_map[r].reply_msg;
+                                reply_scalar_kind = gen->reply_type_map[r].scalar_kind;
                                 break;
                             }
                         }
@@ -5313,9 +5328,35 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "%s _ask_val = _ask_r ? ((%s*)_ask_r)->%s : %s; ",
                                     c_type, reply_msg_name, reply_field, c_zero);
                             fprintf(gen->output, "free(_ask_r); _ask_val; })");
+                        } else if (reply_scalar_kind != TYPE_UNKNOWN) {
+                            /* Expression reply (#1324): the handler sent a
+                             * typed copy; deref the buffer as that type.
+                             * Keep this switch in sync with the
+                             * AST_REPLY_STATEMENT scalar emission. */
+                            const char* c_type = "int";
+                            const char* c_zero = "0";
+                            switch (reply_scalar_kind) {
+                                case TYPE_FLOAT:      c_type = "double"; c_zero = "0.0"; break;
+                                case TYPE_LONGDOUBLE: c_type = "long double"; c_zero = "0.0L"; break;
+                                case TYPE_BOOL:       c_type = "int"; c_zero = "0"; break;
+                                case TYPE_INT64:      c_type = "int64_t"; c_zero = "0"; break;
+                                case TYPE_UINT64:     c_type = "uint64_t"; c_zero = "0"; break;
+                                case TYPE_DURATION:   c_type = "int64_t"; c_zero = "0"; break;
+                                case TYPE_PTR:        c_type = "void*"; c_zero = "NULL"; break;
+                                case TYPE_STRING:     c_type = "const char*"; c_zero = "NULL"; break;
+                                default:              c_type = "int"; c_zero = "0"; break;
+                            }
+                            fprintf(gen->output, "%s _ask_val = _ask_r ? *(%s*)_ask_r : %s; ",
+                                    c_type, c_type, c_zero);
+                            fprintf(gen->output, "free(_ask_r); _ask_val; })");
                         } else {
-                            // Fallback: return raw pointer as intptr_t
-                            fprintf(gen->output, "intptr_t _ask_val = (intptr_t)(uintptr_t)_ask_r; _ask_val; })");
+                            /* No reply statement found in the target's
+                             * handler: any reply that still arrives (e.g.
+                             * via a helper function the scan cannot see)
+                             * is deref'd as int, mirroring the MSVC
+                             * _aether_ask_helper semantics; a timeout
+                             * yields 0. */
+                            fprintf(gen->output, "int _ask_val = _ask_r ? *(int*)_ask_r : 0; free(_ask_r); _ask_val; })");
                         }
 
                         fprintf(gen->output, "\n#else\n");
@@ -5350,8 +5391,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 default:           fprintf(gen->output, "int"); break;
                             }
                             fprintf(gen->output, "))");
+                        } else if (reply_scalar_kind != TYPE_UNKNOWN) {
+                            fprintf(gen->output, "0, sizeof(");
+                            switch (reply_scalar_kind) {
+                                case TYPE_FLOAT:      fprintf(gen->output, "double"); break;
+                                case TYPE_LONGDOUBLE: fprintf(gen->output, "long double"); break;
+                                case TYPE_INT64:      fprintf(gen->output, "int64_t"); break;
+                                case TYPE_UINT64:     fprintf(gen->output, "uint64_t"); break;
+                                case TYPE_DURATION:   fprintf(gen->output, "int64_t"); break;
+                                case TYPE_PTR:        fprintf(gen->output, "void*"); break;
+                                case TYPE_STRING:     fprintf(gen->output, "const char*"); break;
+                                default:              fprintf(gen->output, "int"); break;
+                            }
+                            fprintf(gen->output, "))");
                         } else {
-                            fprintf(gen->output, "0, sizeof(intptr_t))");
+                            fprintf(gen->output, "0, sizeof(int))");
                         }
                         fprintf(gen->output, "\n#endif\n");
                     } else {

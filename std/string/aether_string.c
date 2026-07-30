@@ -305,6 +305,75 @@ AetherString* string_substring(const void* str, int start, int end) {
     return string_adopt_caps_buffer(result, len, len + 1);
 }
 
+/* Shared engine for string_replace / string_replace_all. Replaces up
+ * to `max_hits` non-overlapping, left-to-right occurrences of
+ * `old_sub` with `new_sub` (max_hits < 0 = unlimited). Binary-aware
+ * on all three inputs (AetherString* or char*). Always returns a
+ * fresh managed string, so caller-side lifetimes match
+ * string_substring: the input is never aliased or mutated.
+ *
+ * An empty `old_sub` returns a copy of `str` unchanged — matching
+ * Go's strings.Replace guard — because "match the empty string at
+ * every position" either infinite-loops or interleaves `new_sub`
+ * between every byte; neither is what a caller ever wants.
+ *
+ * Two passes: count hits, then fill an exact-size buffer. No
+ * realloc churn, one allocation regardless of hit count. */
+static AetherString* string_replace_impl(const void* str, const void* old_sub,
+                                         const void* new_sub, long max_hits) {
+    if (!str) return NULL;
+    size_t slen = str_len(str);
+    const char* sdata = str_data(str);
+    size_t old_len = old_sub ? str_len(old_sub) : 0;
+    const char* old_data = old_sub ? str_data(old_sub) : NULL;
+    size_t new_len = new_sub ? str_len(new_sub) : 0;
+    const char* new_data = new_sub ? str_data(new_sub) : NULL;
+
+    long hits = 0;
+    if (old_len > 0 && old_len <= slen && max_hits != 0) {
+        for (size_t i = 0; i + old_len <= slen; ) {
+            if (memcmp(sdata + i, old_data, old_len) == 0) {
+                hits++;
+                i += old_len;
+                if (max_hits > 0 && hits >= max_hits) break;
+            } else {
+                i++;
+            }
+        }
+    }
+    if (hits == 0) {
+        return string_new_with_length(sdata, slen);
+    }
+
+    size_t out_len = slen + (size_t)hits * new_len - (size_t)hits * old_len;
+    char* result = (char*)aether_caps_malloc(out_len + 1);
+    if (!result) return NULL;
+
+    size_t w = 0;
+    long done = 0;
+    for (size_t i = 0; i < slen; ) {
+        if (done < hits && i + old_len <= slen &&
+            memcmp(sdata + i, old_data, old_len) == 0) {
+            memcpy(result + w, new_data, new_len);
+            w += new_len;
+            i += old_len;
+            done++;
+        } else {
+            result[w++] = sdata[i++];
+        }
+    }
+    result[out_len] = '\0';
+    return string_adopt_caps_buffer(result, out_len, out_len + 1);
+}
+
+AetherString* string_replace(const void* str, const void* old_sub, const void* new_sub) {
+    return string_replace_impl(str, old_sub, new_sub, 1);
+}
+
+AetherString* string_replace_all(const void* str, const void* old_sub, const void* new_sub) {
+    return string_replace_impl(str, old_sub, new_sub, -1);
+}
+
 /* Length-aware sibling of string_substring — caller supplies the
  * source length explicitly. Reach for this when `str` arrives as a
  * `string` parameter at a function boundary (where #297's auto-

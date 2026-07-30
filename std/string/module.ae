@@ -1,7 +1,7 @@
 // std.string - String Module
 // Import with: import std.string
 
-exports (
+exports(
     string_new, string_from_cstr, string_from_literal,
     string_new_with_length, string_empty,
     string_retain, string_release, string_free,
@@ -9,6 +9,7 @@ exports (
     string_equals, string_compare,
     string_starts_with, string_ends_with, string_contains,
     string_index_of, string_index_of_from, string_substring,
+    string_replace, string_replace_all,
     string_substring_n, string_length_n,
     string_char_at_n, string_index_of_from_n,
     string_from_char, string_to_upper, string_to_lower, string_trim,
@@ -87,6 +88,15 @@ extern string_index_of(str: string, substring: string) -> int
 // Saves the substring+index_of allocation dance in hot loops that
 // scan a packed string record-by-record.
 extern string_index_of_from(str: string, substring: string, start: int) -> int
+// Replace the first occurrence of `old` with `new`. Returns a new
+// managed string; `str` is untouched. An empty `old` returns a copy
+// of `str` unchanged (no infinite empty-match expansion). Matches
+// are byte-exact and binary-safe (embedded NULs preserved).
+extern string_replace(str: string, old: string, new: string) -> string
+// Replace every non-overlapping occurrence of `old` with `new`,
+// scanned left to right. Same lifetimes and empty-`old` guard as
+// string_replace. `new` may be empty (deletion) or longer than `old`.
+extern string_replace_all(str: string, old: string, new: string) -> string
 extern string_substring(str: string, start: int, end: int) -> string
 
 // Length-aware sibling — caller supplies the source length explicitly.
@@ -128,7 +138,7 @@ extern string_char_at_n(str: string, known_length: int, index: int) -> int
 // `start` clamped to [0, known_length]; needle longer than the
 // searchable range returns -1.
 extern string_index_of_from_n(str: string, known_length: int,
-                              substring: string, start: int) -> int
+    substring: string, start: int) -> int
 
 // Construct a 1-byte string from a byte code (0..255). Typical use
 // is emitting known single-byte separators (\x01, \x02) into packed

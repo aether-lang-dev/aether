@@ -457,11 +457,14 @@ typedef struct {
     char** escaped_opt_str_vars;
     int escaped_opt_str_var_count;
 
-    // Ask/reply type map: request message name -> reply message name.
+    // Ask/reply type map: request message name -> reply shape.
     // Built by scanning actor receive handlers for reply statements.
     struct ReplyTypeEntry {
         char* request_msg;   // e.g. "Add"
-        char* reply_msg;     // e.g. "Result"
+        char* reply_msg;     // e.g. "Result"; NULL for expression replies
+        int scalar_kind;     // TypeKind of a bare-expression reply
+                             // (`reply count`, #1324); TYPE_UNKNOWN for
+                             // message-constructor replies
     }* reply_type_map;
     int reply_type_count;
     int reply_type_capacity;

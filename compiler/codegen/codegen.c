@@ -3791,6 +3791,32 @@ static const char* find_first_reply_msg(ASTNode* node) {
     return NULL;
 }
 
+/* Expression-reply sibling of find_first_reply_msg (#1324): the first
+ * `reply <expr>` in the arm body, where <expr> is anything but a
+ * message constructor. The asker derefs the reply buffer as this
+ * expression's scalar type. */
+static ASTNode* find_first_reply_expr(ASTNode* node) {
+    if (!node) return NULL;
+    if (node->type == AST_REPLY_STATEMENT) {
+        if (node->child_count > 0 && node->children[0] &&
+            node->children[0]->type != AST_MESSAGE_CONSTRUCTOR) {
+            return node->children[0];
+        }
+        return NULL;
+    }
+    if (node->type == AST_FUNCTION_DEFINITION ||
+        node->type == AST_ACTOR_DEFINITION ||
+        node->type == AST_BUILDER_FUNCTION ||
+        node->type == AST_CLOSURE) {
+        return NULL;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* r = find_first_reply_expr(node->children[i]);
+        if (r) return r;
+    }
+    return NULL;
+}
+
 // #976: a value identifier that is a C reserved keyword (`short`, `int`,
 // `char`, `default`, …) is a valid Aether identifier but an invalid C one, so
 // emitting it verbatim breaks the C compile even though `ae check` passed.
@@ -4317,6 +4343,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
     print_line(gen, "    if (!s) return \"(null)\";");
     print_line(gen, "    return aether_string_data(s);");
+    print_line(gen, "}");
+    /* Owned-print helpers: a heap-producing CALL in bare print/println
+     * argument position (`println(string.concat(a, b))`) is a temporary
+     * nothing else owns; these print it and free it in one composable
+     * expression. Bare identifiers never route here, their scope-exit
+     * defer owns the free. */
+    print_line(gen, "static inline int _aether_println_owned(const char* s) {");
+    print_line(gen, "    int _n = printf(\"%%s\\n\", _aether_safe_str(s));");
+    print_line(gen, "    aether_heap_str_free((void*)s);");
+    print_line(gen, "    return _n;");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_print_owned(const char* s) {");
+    print_line(gen, "    int _n = printf(\"%%s\", _aether_safe_str(s));");
+    print_line(gen, "    aether_heap_str_free((void*)s);");
+    print_line(gen, "    return _n;");
     print_line(gen, "}");
     /* #927: multiple ${duration} interpolations can be live in a SINGLE
      * printf/snprintf call (all args evaluate before the format runs), so a
@@ -5090,14 +5131,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                  * `reply` must still map the request to its reply type
                  * (#736). */
                 const char* reply_msg = find_first_reply_msg(body);
-                if (reply_msg) {
+                ASTNode* reply_expr = reply_msg ? NULL : find_first_reply_expr(body);
+                if (reply_msg || reply_expr) {
                     if (gen->reply_type_count >= gen->reply_type_capacity) {
                         gen->reply_type_capacity = gen->reply_type_capacity ? gen->reply_type_capacity * 2 : 16;
                         gen->reply_type_map = aether_xrealloc(gen->reply_type_map,
                             gen->reply_type_capacity * sizeof(*gen->reply_type_map));
                     }
                     gen->reply_type_map[gen->reply_type_count].request_msg = strdup(req_msg);
-                    gen->reply_type_map[gen->reply_type_count].reply_msg = strdup(reply_msg);
+                    gen->reply_type_map[gen->reply_type_count].reply_msg =
+                        reply_msg ? strdup(reply_msg) : NULL;
+                    gen->reply_type_map[gen->reply_type_count].scalar_kind =
+                        reply_expr
+                            ? (reply_expr->node_type ? (int)reply_expr->node_type->kind
+                                                     : (int)TYPE_INT)
+                            : (int)TYPE_UNKNOWN;
                     gen->reply_type_count++;
                 }
             }

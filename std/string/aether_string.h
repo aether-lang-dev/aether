@@ -89,6 +89,8 @@ int string_index_of(const void* str, const void* substring);
 // needle is strlen-based.
 int string_index_of_from(const void* str, const void* substring, int start);
 AetherString* string_substring(const void* str, int start, int end);
+AetherString* string_replace(const void* str, const void* old_sub, const void* new_sub);
+AetherString* string_replace_all(const void* str, const void* old_sub, const void* new_sub);
 
 /* Length-aware sibling — caller supplies the source length explicitly.
  * Use when `str` arrives as a `string`-typed parameter at a function

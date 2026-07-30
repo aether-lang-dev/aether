@@ -1,0 +1,69 @@
+// Regression test for string.replace / string.replace_all (#1331).
+//
+// What this test guards:
+//   1. replace substitutes only the first occurrence
+//   2. replace_all substitutes every non-overlapping occurrence,
+//      scanned left to right
+//   3. `new` may be empty (deletion)
+//   4. `new` may be longer than `old` (growth), and replacement is
+//      non-overlapping: replacing "a" with "aaa" in "aaa" gives 9
+//      a's, not infinite expansion
+//   5. Empty `old` returns the input unchanged (Go strings.Replace
+//      guard; no infinite empty-match loop)
+//   6. No match returns the input content unchanged
+//   7. The input string is left untouched (fresh managed result)
+//   8. Adjacent matches all replace ("abab" spans)
+
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+expect(got: string, want: string, label: string) {
+    if string.equals(got, want) != 1 {
+        fail("${label}: expected '${want}', got '${got}'")
+    }
+}
+
+main() {
+    s = "the cat sat on the mat"
+
+    expect(string.replace(s, "the", "a"), "a cat sat on the mat",
+        "replace first only")
+    println("PASS 1: replace substitutes only the first occurrence")
+
+    expect(string.replace_all(s, "the", "a"), "a cat sat on a mat",
+        "replace_all every occurrence")
+    println("PASS 2: replace_all substitutes every occurrence")
+
+    expect(string.replace_all(s, "at", ""), "the c s on the m",
+        "deletion")
+    println("PASS 3: empty new deletes matches")
+
+    expect(string.replace_all("aaa", "a", "aaa"), "aaaaaaaaa",
+        "growth non-overlapping")
+    println("PASS 4: growth stays non-overlapping (3 -> 9)")
+
+    expect(string.replace_all(s, "", "X"), s, "empty old guard")
+    expect(string.replace(s, "", "X"), s, "empty old guard (first)")
+    println("PASS 5: empty old returns input unchanged")
+
+    expect(string.replace(s, "zebra", "y"), s, "no match")
+    println("PASS 6: no match returns content unchanged")
+
+    original = "immutable input"
+    copy = string.replace_all(original, "input", "output")
+    expect(original, "immutable input", "input untouched")
+    expect(copy, "immutable output", "copy replaced")
+    println("PASS 7: input string left untouched")
+
+    expect(string.replace_all("abababab", "ab", "c"), "cccc",
+        "adjacent matches")
+    println("PASS 8: adjacent matches all replace")
+
+    println("=== All cases passed ===")
+}

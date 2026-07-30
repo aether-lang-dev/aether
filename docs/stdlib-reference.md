@@ -535,6 +535,8 @@ main() {
 - `string.index_of(str, sub)` - Find position of substring (returns -1 if not found)
 
 **Transformation:**
+- `string.replace(str, old, new)` - Replace the first occurrence of `old` with `new`. Returns a new managed string; `str` is untouched. Empty `old` returns a copy of `str` unchanged (no infinite empty-match expansion). Binary-safe.
+- `string.replace_all(str, old, new)` - Replace every non-overlapping occurrence of `old` with `new`, scanned left to right. `new` may be empty (deletion) or longer than `old`. Same lifetimes and empty-`old` guard as `replace`. Single exact-size allocation regardless of match count.
 - `string.substring(str, start, end)` - Extract substring
 - `string.substring_n(str, str_len_bytes, start, end)` - Length-aware sibling. Caller threads the source length through; `str_len(s)` is not consulted internally. Reach for this when `str` arrived as a `string`-typed parameter at a function boundary AND the content may contain embedded NULs, see [c-interop.md § Passing string values into C externs (auto-unwrap)](c-interop.md#passing-string-values-into-c-externs-auto-unwrap). Without it, the auto-unwrap (#297) strips the AetherString header at the call site, `str_len` falls through to `strlen`, and binary content gets truncated at the first NUL.
 - `string.length_n(str, known_length)` - Identity helper that documents intent. In code that receives a `string` parameter plus an explicit length, the explicit length IS the truth, don't consult the AetherString header. `n = string.length_n(s, n)` reads as "yes I know my length" instead of looking like a forgotten `string.length(s)` that would have truncated at NUL.

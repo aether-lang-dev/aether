@@ -1,0 +1,61 @@
+// Regression: #1324. `reply <expression>` (a bare scalar, not a message
+// constructor) was silently dropped by codegen: the handler compiled to
+// an empty function with an ERROR comment, the ask timed out after 5s,
+// and the asker read 0. The ask site's fallback also cast the reply
+// POINTER to intptr_t, emitting a -Wformat warning and garbage
+// semantics.
+//
+// What this test guards:
+//   1. Prior fire-and-forget sends are processed before the ask replies
+//      (the issue's exact repro: two Inc then Get answers 42)
+//   2. `reply <expr>` supports arithmetic expressions, not just idents
+//   3. The reply arrives immediately (no 5s timeout path); a hung ask
+//      would trip the suite's per-test timeout
+//   4. Asks can be repeated and observe state mutated between them
+
+message Inc { n: int }
+message Get {}
+message GetDoubled {}
+
+actor Counter {
+    state count = 0
+    receive {
+        Inc(n) -> { count = count + n }
+        Get() -> { reply count }
+        GetDoubled() -> { reply count * 2 }
+    }
+}
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Inc { n: 41 }
+    c ! Inc { n: 1 }
+
+    got = c ? Get {}
+    if got != 42 {
+        fail("expected 42 after two Inc sends, got ${got}")
+    }
+    println("PASS 1: prior ! sends visible to ? ask (42)")
+
+    doubled = c ? GetDoubled {}
+    if doubled != 84 {
+        fail("expected 84 from expression reply, got ${doubled}")
+    }
+    println("PASS 2: reply <expr> supports arithmetic (84)")
+
+    c ! Inc { n: 8 }
+    again = c ? Get {}
+    if again != 50 {
+        fail("expected 50 after third Inc, got ${again}")
+    }
+    println("PASS 3: repeated asks observe mutated state (50)")
+
+    println("=== All cases passed ===")
+}

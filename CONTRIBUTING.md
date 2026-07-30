@@ -234,6 +234,13 @@ no status checks, so a maintainer merges it on review alone.
 
 ### Before Submitting
 
+Keep checked-in Aether source canonically formatted; CI enforces this
+(`tests/integration/fmt_gate/`, #1302):
+
+```bash
+./build/ae fmt std examples tests
+```
+
 Run the full CI suite locally, this is the same suite that GitHub Actions runs:
 
 ```bash
