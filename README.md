@@ -481,9 +481,9 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 
 Aether is free and open source, built and maintained in personal time. CI runners, cross-platform testing infrastructure, and future project hosting cost real money.
 
-If Aether is useful to you, consider [sponsoring the project on GitHub](https://github.com/sponsors/nicolasmd87). Every contribution goes directly into development and infrastructure.
+If Aether is useful to you, consider [sponsoring the project on GitHub](https://github.com/sponsors/nicolas-maman). Every contribution goes directly into development and infrastructure.
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-Aether-blue?logo=github-sponsors)](https://github.com/sponsors/nicolasmd87)
+[![Sponsor](https://img.shields.io/badge/Sponsor-Aether-blue?logo=github-sponsors)](https://github.com/sponsors/nicolas-maman)
 
 ## Acknowledgments
 
