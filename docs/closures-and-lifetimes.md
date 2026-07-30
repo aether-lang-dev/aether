@@ -195,8 +195,7 @@ L1–L3 are ergonomic patterns with known workarounds you can apply today.
 L4 is a compile-time rejection, previously silent wrong answers, now
 surfaced at compile time with a clear error. L5 is a memory-handling
 contract around reassignment. Each has a near-term workaround; the
-"proper fix" notes describe the larger language work each leans on. See
-[`docs/next-steps.md`](next-steps.md) for scheduling.
+"proper fix" notes describe the larger language work each leans on.
 
 ### L1. `call(x)` where `x` comes from a list
 

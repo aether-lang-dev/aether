@@ -210,7 +210,7 @@ emit + a per-return-rewrite pass + a compile-time const-fold rejector.
 Test surface: `tests/regression/test_requires_ensures.ae`,
 `tests/integration/contract_violation_at_runtime/`.
 
-**Where this lands in `docs/next-steps.md`:** new P2 entry, ahead
+**Where this lands:** a new P2 backlog entry, ahead
 of the speculative fs.realpath etc. The reason it ranks: every
 downstream user writes asserts; this is a strict ergonomic
 improvement to a thing they already do. The svn-aether port
@@ -328,7 +328,7 @@ message when the cap is hit. It also pairs with `--emit=lib`: a host
 embedding Aether-as-DSL wants to cap untrusted scripts.
 
 **Verdict on this sub-feature, attractive enough to file as a P3
-in `next-steps.md`.** Not P1: Aether lacks the runtime tracking
+on the backlog.** Not P1: Aether lacks the runtime tracking
 infrastructure (no per-fd accounting, no memory accounting outside
 the arena). It's the kind of thing that wants the LD_PRELOAD
 sandbox first as the substrate, then `@max_open_fds` is a thin
@@ -434,7 +434,7 @@ What doesn't work:
 effort to retrofit codes onto existing diagnostics (background work,
 opportunistic).
 
-**Where this lands:** new P2 entry in `next-steps.md`, paired with
+**Where this lands:** a new P2 backlog entry, paired with
 the contract feature since both want stable codes for the new
 diagnostics they introduce.
 
@@ -497,7 +497,7 @@ at math.ae:15`."
 
 **Effort estimate:** 2-3 days for POSIX; another day for Windows.
 
-**Where this lands:** P1 in `next-steps.md`, alongside contracts
+**Where this lands:** P1 on the backlog, alongside contracts
 (2.3) since the panic from a contract violation is the place the
 trace earns its keep.
 
@@ -611,7 +611,7 @@ on top is a layer of indirection without a payoff.
 
 ## 3. Things GA has that are worth genuine consideration, summary table
 
-| # | Feature | Verdict | Effort | Where in next-steps.md |
+| # | Feature | Verdict | Effort | Backlog placement |
 |---|---|---|---|---|
 | 2.2 | `@intent("…")` attribute (no verification) | Adopt | 0.5 day | P3 |
 | 2.3 | `requires` / `ensures` runtime-checked contracts | **Adopt, strong fit** | 3-5 days | **P2** |
@@ -655,7 +655,7 @@ that's nice to have but not load-bearing.
 
 ---
 
-## 6. Concrete proposed next-steps.md additions
+## 6. Concrete proposed backlog additions
 
 ```diff
 + ## P1, runtime panic stack traces

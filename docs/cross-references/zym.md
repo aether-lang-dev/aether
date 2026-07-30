@@ -254,7 +254,7 @@ aether_status aether_resume(struct aether_vm*);
 
 This is roughly the work Lua does with `lua_yield` / `lua_resume`. The
 actor model handles the script-internal case; this handles the
-script-to-host case. Worth a roadmap entry in `docs/next-steps.md`,
+script-to-host case. Worth a roadmap entry,
 probably P3, gated on someone needing it. The CHANGELOG has no record
 of this being requested yet.
 
@@ -610,7 +610,7 @@ aetherc foo.ae --emit=preproc -o foo.preproc.ae
 aetherc foo.ae --emit=combined          # post-import-resolution
 ```
 
-Mention it in `docs/next-steps.md` as a P3 ergonomics item.
+Worth noting on the backlog as a P3 ergonomics item.
 
 ---
 
@@ -654,7 +654,7 @@ guarantees.
 If you only have time for one: **§3 (nested-VM-as-script-value)**.
 That's the genuine novelty.
 
-Full ranked priority for the Aether roadmap (`docs/next-steps.md`):
+Full ranked priority for the Aether roadmap:
 
 | Pri | Item                                            | Effort | Gating signal                                             |
 | --- | ----------------------------------------------- | ------ | --------------------------------------------------------- |

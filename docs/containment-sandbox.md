@@ -750,8 +750,8 @@ functions, but the kernel offers many alternative paths to the same
 operations.** A determined attacker who knows Linux internals can
 use paths we don't intercept. The tables below enumerate the surface
 so you can reason about it explicitly rather than assume coverage.
-See `docs/next-steps.md` → *Interception surface expansion* for the
-in-flight work to widen the LD_PRELOAD surface.
+Widening the LD_PRELOAD interception surface is tracked on the
+issue backlog.
 
 #### Filesystem, not intercepted
 
@@ -1617,8 +1617,7 @@ directions (guest + host) behind one permissions model.
 
 ### Cross-cutting gaps (contributor surface)
 
-Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md)
-and [`next-steps.md`](next-steps.md) → *Host Language Bridges*:
+Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 - Capturing stdout/stderr from hosted scripts, pipe rewire vs.
   shared-map key vs. pass-through, design undecided.
