@@ -66,6 +66,16 @@ fmt_gate_dump_diff() {
     rm -f "${1}.hex" "${2}.hex"
 }
 
+# Checksum of a generated-C file with #line directives stripped.
+# awk writes a temp then cksum reads by redirect: no pipe reading a
+# freshly-written file, and callers can recompute for the settle
+# recheck above.
+fmt_gate_ir_sum() {
+    awk '!/^#line/' "$1" > "$1.strip"
+    cksum < "$1.strip"
+    rm -f "$1.strip"
+}
+
 cd "$ROOT" || exit 1
 
 # Tier 1: canonical formatting.
@@ -120,8 +130,19 @@ while IFS= read -r f; do
             rm -f "$sibling"
             exit 1
         fi
-        sum_o=$(grep -v '^#line' "$base.orig.c" | cksum)
-        sum_o2=$(grep -v '^#line' "$base.orig2.c" | cksum)
+        sum_o=$(fmt_gate_ir_sum "$base.orig.c")
+        sum_o2=$(fmt_gate_ir_sum "$base.orig2.c")
+        if [ "$sum_o" != "$sum_o2" ]; then
+            # Recheck after a settle: on the Windows CI runners a
+            # checksum pipeline reading a JUST-written file can see a
+            # stale/short read through the MSYS2 layer while a later
+            # read sees the full content (proven by od showing the
+            # "differing" files byte-identical). A real emission
+            # difference still differs on the second read.
+            sleep 1
+            sum_o=$(fmt_gate_ir_sum "$base.orig.c")
+            sum_o2=$(fmt_gate_ir_sum "$base.orig2.c")
+        fi
         if [ "$sum_o" != "$sum_o2" ]; then
             echo "  [FAIL] fmt_gate: two compiles of UNFORMATTED $f differ (emission nondeterminism, not a formatter fault)"
             echo "    sizes: $(wc -c < "$base.orig.c") vs $(wc -c < "$base.orig2.c") bytes"
@@ -135,7 +156,12 @@ while IFS= read -r f; do
             echo "  [FAIL] fmt_gate: $f compiles but its formatted copy does not"
             exit 1
         fi
-        sum_f=$(grep -v '^#line' "$base.fmt.c" | cksum)
+        sum_f=$(fmt_gate_ir_sum "$base.fmt.c")
+        if [ "$sum_o" != "$sum_f" ]; then
+            sleep 1
+            sum_o=$(fmt_gate_ir_sum "$base.orig.c")
+            sum_f=$(fmt_gate_ir_sum "$base.fmt.c")
+        fi
         if [ "$sum_o" != "$sum_f" ]; then
             if cmp -s "$f" "$sibling" 2>/dev/null; then
                 echo "  [FAIL] fmt_gate: formatting left $f byte-identical yet its C differs (emission instability)"
