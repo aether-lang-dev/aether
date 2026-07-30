@@ -1,5 +1,13 @@
 // std.string - String Module
 // Import with: import std.string
+//
+// Building strings incrementally? Do NOT loop `d = "${d}${piece}"` /
+// `string.concat(d, piece)` — each iteration re-copies the whole prefix, so the
+// loop is O(n²) in total bytes (issue #1346). Use one of the linear-cost tools:
+//   - `string.join(seq, sep)` (below) when the pieces are already a *StringSeq.
+//   - `std.strbuilder` (`strbuilder.new` / `append` / `finish`) for a growing
+//     accumulator — amortized-O(1) append via a 2×-doubling buffer, the
+//     Java-StringBuilder / Go-strings.Builder shape.
 
 exports(
     string_new, string_from_cstr, string_from_literal,
@@ -14,7 +22,7 @@ exports(
     string_char_at_n, string_index_of_from_n,
     string_from_char, string_to_upper, string_to_lower, string_trim,
     string_split, string_array_size, string_array_get, string_array_free,
-    string_split_to_seq,
+    string_split_to_seq, string_join,
     string_seq_empty, string_seq_cons, string_seq_head, string_seq_tail,
     string_seq_is_empty, string_seq_length, string_seq_retain, string_seq_free,
     string_seq_from_array, string_seq_to_array,
@@ -238,6 +246,18 @@ extern string_array_free(arr: ptr)
 // with "", delimiter longer than input → single-cell list with the
 // whole input, trailing/leading delimiters produce empty pieces.
 extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq
+
+// Join a sequence into one string with `sep` between elements — the
+// linear-cost complement to string_split (issue #1346). O(total bytes):
+// one pass to size the result, one allocation, one pass to copy. Empty
+// sequence → "". The natural pair for `string_split` / `string_split_to_seq`:
+//   parts = string.split_to_seq("a,b,c", ",")
+//   whole = string.join(parts, "-")          // "a-b-c"
+// Prefer this over a `d = "${d}${piece}"` accumulation loop, which re-copies
+// the whole prefix every iteration (O(n²)). For incremental building where the
+// pieces aren't already a sequence, reach for std.strbuilder (amortized append).
+// Result is @heap (caller-owned, reclaimed at scope exit).
+extern string_join(seq: *StringSeq, sep: string) -> string @heap
 
 // Cons-cell construction + destructuring. Names mirror the C
 // runtime symbols; users call them via dot-notation `string.seq_X(...)`

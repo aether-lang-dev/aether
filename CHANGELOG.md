@@ -34,6 +34,14 @@ next version number before tagging the release.
 
 ### Added
 
+- **`std.string.join(seq, sep)`** — linear-cost join of a `*StringSeq` with a
+  separator, the complement to `string.split` / `split_to_seq` (issue #1346).
+  One pass to size, one allocation, one pass to copy — the guaranteed-O(n)
+  escape from the `d = "${d}${piece}"` accumulation trap (which re-copies the
+  whole prefix every iteration, O(n²)). For incremental building where the
+  pieces aren't already a sequence, `std.strbuilder` (amortized-O(1) append)
+  covers the builder half of #1346; `std.string` now points at both up front.
+  Regression: `tests/regression/test_string_join.ae`.
 - **`fs.mounts()` and `fs.block_info(dev)`** (#1118). Mount enumeration
   with per-entry source/point/fstype/options accessors: Linux
   `/proc/self/mountinfo` (octal escapes decoded), macOS and the BSDs
