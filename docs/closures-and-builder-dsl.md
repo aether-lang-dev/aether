@@ -45,7 +45,7 @@ It's a function-side contract that any of the three trailing-block forms can att
 
 - **Builder context stack** (`_ctx: ptr` auto-injection, `builder_context()`, `_aether_ctx_push/pop`)
   wires parents to children automatically inside Immediate trailing blocks.
-- **Block-receiver scoping**, `receiver.method(...) { body }` falls back through `<receiver>_<name>` for bare-name calls inside `body` (issue #333).
+- **Block-receiver scoping**, `receiver.method(...) { body }` falls back through `<receiver>_<name>` for bare-name calls inside `body`.
 - **Ref cells** (`ref(v)` / `ref_get` / `ref_set`), shared mutable state for closures (which otherwise capture by value).
 - **Boxed closures** (`box_closure` / `unbox_closure`), heap-allocate a closure so it can be stored in `std.list` / struct fields.
 - **`fn` type**, the parameter type for "this function takes a closure"; invoked with `call(fn_var, args...)`.
@@ -53,7 +53,7 @@ It's a function-side contract that any of the three trailing-block forms can att
 **Same-line rule** (line 100+): a trailing block is attached to a call only when `{`
 appears on the same line as the call's closing `)`. A `{` on the next line is an
 independent block. This is what stops `result = build()\n{ ... }` from greedily
-consuming the bare block as `build`'s closure (issue #286).
+consuming the bare block as `build`'s closure.
 
 **Separate axis, fluent method chaining (UFCS):** the two axes above are the
 *block* DSL (a trailing block fills structure). The *value-chain* primitive is
@@ -185,7 +185,7 @@ because it was never folded into `read_blob`'s argument list. Without
 the same-line rule, the parser greedily consumed any `{` that followed
 a call as a trailing closure (whether the call was an assignment RHS
 or a statement), and the block body could not see the variable being
-declared by the enclosing assignment. See issue #286.
+declared by the enclosing assignment.
 
 When a `{` on a later line follows a call directly, the compiler emits
 a warning suggesting the user move the `{` to the call's line if they
@@ -240,7 +240,7 @@ store(action) callback |a: int, b: int| { return a + b }
 store(action) callback |x: int| -> x * 2
 ```
 
-## DSL Block Receiver Scoping (#333)
+## DSL Block Receiver Scoping
 
 When a trailing closure is bound to a member-access call,
 `receiver.method(args) { body }` bare-name function references

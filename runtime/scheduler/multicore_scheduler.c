@@ -79,6 +79,12 @@ static inline void aether_sched_yield(void) { sched_yield(); }
 // for per-core death-drain accounting.
 extern AETHER_TLS int current_core_id;
 
+// Dropped-message cleanup dependencies, needed from aether_step_safe's
+// death drain onward: the payload free lives in aether_send_message.c,
+// the slot decref with the ask/reply machinery below.
+extern void aether_free_message(void* msg_data);
+static void reply_slot_decref(ActorReplySlot* slot);
+
 // --------------------------------------------------------------------------
 // aether_step_safe — call actor->step() inside a sigsetjmp barrier.
 //
@@ -128,6 +134,9 @@ static inline void aether_step_safe(ActorBase* actor) {
     int drained = 0;
     Message _discard;
     while (mailbox_receive(&actor->mailbox, &_discard)) {
+        if (_discard.payload_ptr) aether_free_message(_discard.payload_ptr);
+        if (_discard.zerocopy.owned && _discard.zerocopy.data) free(_discard.zerocopy.data);
+        if (_discard._reply_slot) reply_slot_decref((ActorReplySlot*)_discard._reply_slot);
         drained++;
     }
     if (drained > 0) {
@@ -430,6 +439,19 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 }
 
 // Partitioned scheduler thread with work-stealing fallback for idle cores
+/* A message dropped instead of delivered (its target died mid-flight)
+ * still owns its payload and, for asks, a handler-side reply-slot
+ * reference. Free both and credit the processed counter: the send was
+ * already counted, so without the credit a stream of in-flight
+ * messages to a panicking actor leaves sent > processed forever and
+ * parks wait_for_idle. */
+static void scheduler_drop_dead_message(Scheduler* sched, Message* msg) {
+    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
+    if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
+    if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+    atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_relaxed);
+}
+
 void* AETHER_HOT scheduler_thread(void* arg) {
     Scheduler* sched = (Scheduler*)arg;
     current_core_id = sched->core_id;
@@ -487,6 +509,15 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         for (int i = 0; i < sched->coalesce_buffer.count; i++) {
             ActorBase* actor = (ActorBase*)sched->coalesce_buffer.actors[i];
             Message msg = sched->coalesce_buffer.messages[i];
+
+            // Target died after this message was enqueued: drop it with
+            // payload/slot cleanup and a processed credit, or the
+            // sent/processed balance never converges (#1301 drain test).
+            if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+                scheduler_drop_dead_message(sched, &msg);
+                work_done = 1;
+                continue;
+            }
 
             // Actor may have been migrated to another core after this message
             // was enqueued.  Forward to the actor's current core rather than
@@ -895,6 +926,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     // empty here.  But under extreme contention a late overflow_append could
     // slip in — flush it so no messages are lost.
     overflow_flush(sched->core_id);
+
+    aether_unwind_thread_cleanup();
 
     return NULL;
 }
@@ -1471,8 +1504,13 @@ static AETHER_TLS int inline_depth = 0;
 
 void scheduler_send_local(ActorBase* actor, Message msg) {
     // Drop messages to dead actors — they can't process them and we don't
-    // want to grow their mailbox or fire their step().
+    // want to grow their mailbox or fire their step(). The payload and any
+    // reply-slot reference still belong to this message; release them
+    // (no processed credit: the send is not counted yet on this path).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
+        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
         return;
     }
 
@@ -1551,6 +1589,9 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
+        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
         return;
     }
     // INLINE MODE: For single-actor programs, process synchronously on the main thread.

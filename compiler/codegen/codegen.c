@@ -4248,14 +4248,34 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * signature the extern-registry pass also uses, so the duplicate
      * declaration is tolerated by C. */
     print_line(gen, "extern void string_release(const char*);");
+    /* #1301 allocation journal: while a panic frame is live, every armed
+     * deferred free is journaled so aether_panic() can run the frees a
+     * longjmp would skip. This helper is the single free choke point,
+     * so forgetting here keeps the journal free of already-freed
+     * entries (the invariant that makes the unwind drain a leak-fix,
+     * never a use-after-free). */
+    print_line(gen, "typedef void (*AetherUnwindFree)(const void*);");
+    print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
+    print_line(gen, "extern void aether_unwind_track_if(const void*, int, AetherUnwindFree);");
+    print_line(gen, "extern void aether_unwind_forget(const void*);");
     print_line(gen, "static inline void aether_heap_str_free(const char* s) {");
     print_line(gen, "    if (!s) return;");
+    print_line(gen, "    aether_unwind_forget(s);");
     print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
     print_line(gen, "    if (_hp[0] == 0xDE && _hp[1] == 0xC0 && _hp[2] == 0x57 && _hp[3] == 0xAE) {");
     print_line(gen, "        string_release(s);");
     print_line(gen, "    } else {");
     print_line(gen, "        free((void*)s);");
     print_line(gen, "    }");
+    print_line(gen, "}");
+    print_line(gen, "static void aether_unwind_free_str(const void* p) {");
+    print_line(gen, "    aether_heap_str_free((const char*)p);");
+    print_line(gen, "}");
+    print_line(gen, "static inline void aether_unwind_track_str(const char* s) {");
+    print_line(gen, "    aether_unwind_track(s, aether_unwind_free_str);");
+    print_line(gen, "}");
+    print_line(gen, "static inline void aether_unwind_track_str_if(const char* s, int owned) {");
+    print_line(gen, "    if (owned) aether_unwind_track(s, aether_unwind_free_str);");
     print_line(gen, "}");
     /* Closure-env string capture: a closure env must OWN its captured
      * strings — the enclosing scope releases its own reference on

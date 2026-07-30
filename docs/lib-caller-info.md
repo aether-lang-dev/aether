@@ -1,6 +1,6 @@
 # `--emit=lib` caller-info channel
 
-Issue #344. A thread-local channel between the host process and an
+A thread-local channel between the host process and an
 Aether `--emit=lib` `.so` for **per-call advisory context**: the
 host stamps `(identity, attributes, deadline_ms)` before invoking
 an `aether_<name>` export; the loaded module reads it via
@@ -53,7 +53,7 @@ may then be NULL.
 `deadline_ms` is opaque to the runtime, whatever convention the
 host wants (milliseconds since epoch, absolute monotonic-clock
 milliseconds). Pair with the per-call deadline tripwire from
-issue #343 to enforce.
+the resource-caps machinery to enforce.
 
 ## Aether-side accessors
 
@@ -106,8 +106,8 @@ thread.
 | `--with=fs`/`--with=net` build flags | per-build | compile | existing |
 | `hide` / `seal except` lexical denial | per-scope | compile | existing |
 | `libaether_sandbox.so` LD_PRELOAD libc gate | per-process | runtime | existing |
-| **caller-info channel** | **per-call** | **runtime** | **#344 (this)** |
-| Resource caps (memory + deadline) | per-call | runtime | #343 |
+| **caller-info channel** | **per-call** | **runtime** | **this document** |
+| Resource caps (memory + deadline) | per-call | runtime | resource caps |
 
 Each layer answers a different question. The build flags answer
 "what is this binary allowed to do." The lexical layer answers

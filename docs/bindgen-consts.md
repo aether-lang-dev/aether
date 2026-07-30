@@ -3,7 +3,7 @@
 Ports of C codebases hand-copy flag macros, log levels, error codes and
 size constants into `.ae` files, and every copied value drifts silently
 when the C header changes. `ae bindgen consts` generates that file from
-the header instead (#1245).
+the header instead.
 
 ```sh
 ae bindgen consts sentinel.h -o lib/sentinel/module.ae

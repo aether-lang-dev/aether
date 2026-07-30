@@ -175,7 +175,7 @@ Not urgent: the C hashmap already has an internal hash.
   are intentionally not the surface. **SKIP.**
 - **Generics-heavy modules** (`anylist`, `object`, `interfacelist`,
   `list_common`, `result`, `maybe`) — these lean on C3's generics and `any`.
-  Aether's equivalents are `T?` (#340) and `T!` (the error-unification arc),
+  Aether's equivalents are `T?` and `T!` (the error-unification arc),
   already shipped and idiomatic. **COVERED** by different, better-fitting
   machinery.
 

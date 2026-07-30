@@ -13,7 +13,7 @@ Import with:
 import std.snapshot
 ```
 
-Issue [#840](https://github.com/aether-lang/aether/issues/840).
+[Design discussion on the issue tracker](https://github.com/aether-lang-org/aether/issues/840).
 
 ---
 

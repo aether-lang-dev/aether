@@ -375,7 +375,7 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.
 
-## Per-function effect tags (#481)
+## Per-function effect tags
 
 The sandbox and `--with=fs,net,os` gate the *whole program*. Effect tags add a
 **finer, per-function** capability axis, checked statically at compile time
@@ -727,7 +727,7 @@ child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.
 
-This closes issue #668. The complementary gap, `connect()` and
+The complementary gap, `connect()` and
 `execve()` issued by statically-linked binaries or raw asm, remains.
 Those callers can still skip the LD_PRELOAD layer for network reach
 and exec, since the seccomp filter here targets only the
@@ -750,8 +750,8 @@ functions, but the kernel offers many alternative paths to the same
 operations.** A determined attacker who knows Linux internals can
 use paths we don't intercept. The tables below enumerate the surface
 so you can reason about it explicitly rather than assume coverage.
-See `docs/next-steps.md` → *Interception surface expansion* for the
-in-flight work to widen the LD_PRELOAD surface.
+Widening the LD_PRELOAD interception surface is tracked on the
+issue backlog.
 
 #### Filesystem, not intercepted
 
@@ -1617,8 +1617,7 @@ directions (guest + host) behind one permissions model.
 
 ### Cross-cutting gaps (contributor surface)
 
-Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md)
-and [`next-steps.md`](next-steps.md) → *Host Language Bridges*:
+Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 - Capturing stdout/stderr from hosted scripts, pipe rewire vs.
   shared-map key vs. pass-through, design undecided.

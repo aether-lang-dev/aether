@@ -201,7 +201,7 @@ main() {
 Any struct of scalar/pointer fields works this way; the field ORDER in the
 tuple is the layout contract.
 
-### Tuple parameters — by-value struct arguments (#1033)
+### Tuple parameters — by-value struct arguments
 
 The parameter-position mirror: an extern parameter typed as a tuple lowers
 to the same synthesized struct typedef, passed **by value**. This is most
@@ -227,7 +227,7 @@ ints to `unsigned char` without warnings, and no hand-written flat-scalar
 C shim (or its extra call frame) is needed.
 
 A call site may also pass a **tuple-typed value** whose type matches the
-parameter, not only a literal (#1062): a variable holding a tuple, or the
+parameter, not only a literal: a variable holding a tuple, or the
 result of a tuple-returning extern passed straight through. The value already
 *is* the matching `_tuple_*` struct, so it crosses by value with no
 destructure, which is what makes pass-through FFI chains compose:
@@ -397,7 +397,7 @@ link_flags = ["-lsqlite3"]
 
 1. **Prefer Aether's standard library** for common operations when available (e.g. `import std.list` rather than hand-rolling a linked list in C)
 2. **Use `extern` for any C function** you want to call, including standard library functions like `abs`, `atoi`, `puts`, etc.
-3. **Do not redeclare stdlib symbols via `extern`** as a workaround. If you find yourself writing `extern list_add_raw(list: ptr, item: ptr) -> int` (or similar mirrors of `std.list` / `std.map` / `std.string` raw functions) in your own code, stop and use `import std.list` (etc.) instead. Older Aether had link-time issues with shared modules importing stdlib (Issue #309-era) which made the manual-extern shape look attractive as a workaround; those bugs are closed. The import-then-namespace shape (`list.add(out, x)`) is the only supported path today, it gives compile-time type checking against the stdlib's declared signatures, automatic API tracking when stdlib evolves, and consistency with every other Aether codebase. Manual externs of stdlib symbols are fragile (signature drift bites at runtime), bypass type-safety, and grow into per-feature maintenance debt.
+3. **Do not redeclare stdlib symbols via `extern`** as a workaround. If you find yourself writing `extern list_add_raw(list: ptr, item: ptr) -> int` (or similar mirrors of `std.list` / `std.map` / `std.string` raw functions) in your own code, stop and use `import std.list` (etc.) instead. Older Aether had link-time issues with shared modules importing stdlib which made the manual-extern shape look attractive as a workaround; those bugs are closed. The import-then-namespace shape (`list.add(out, x)`) is the only supported path today, it gives compile-time type checking against the stdlib's declared signatures, automatic API tracking when stdlib evolves, and consistency with every other Aether codebase. Manual externs of stdlib symbols are fragile (signature drift bites at runtime), bypass type-safety, and grow into per-feature maintenance debt.
 4. **Document your C dependencies** in your project's README
 5. **Handle errors** - C functions often return error codes
 6. **Memory management** - Be careful with C memory; use Aether's memory management where possible
@@ -514,7 +514,7 @@ main() {
 
 …the codegen emits `probe_consume(aether_string_data(raw), raw_len)` rather than passing `raw` straight through. `aether_string_data` dispatches on the AetherString magic header: returns `s->data` for wrapped strings, the bare pointer for plain `char*` values (string literals). Idempotent and safe on either shape.
 
-This means C shim authors don't have to remember to unwrap on the receiving side; the C function can `memcpy(...)` or `strlen(...)` on the `const char*` parameter and get the payload bytes regardless of what the Aether caller passed. Closes #297.
+This means C shim authors don't have to remember to unwrap on the receiving side; the C function can `memcpy(...)` or `strlen(...)` on the `const char*` parameter and get the payload bytes regardless of what the Aether caller passed.
 
 **Stdlib exception:** C functions whose names start with `string_` or `aether_string_` are treated as "string-aware" and are *not* unwrapped at the call site. They use `str_data` / `str_len` internally and need the AetherString header to recover the stored length on binary content. If a downstream user-defined function happens to match those name prefixes, rename it (or expose it via a different namespace).
 
@@ -575,12 +575,12 @@ The `@aether` annotation is a sibling to the `: ptr` escape hatch above. Both op
 | `s: @aether string` | `foo(s)` | AetherString pointer with header, dispatches via `str_len` |
 | `s: ptr` | `foo(s)` | `void*` caller dispatches manually with `aether_string_data` / `aether_string_length` |
 
-Closes #351. The regression range was v0.97.0 → v0.98.0 (commit 718d13d added the blanket auto-unwrap to fix #297); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
+The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 
 **Length-clamp hazard for binary content.** Once the auto-unwrap has fired, a C shim that receives a `string`-typed parameter has only payload bytes, no header, no stored length. A common defensive pattern is fatal here:
 
 ```c
-// HAZARD post-#297. `s` is auto-unwrapped payload; aether_string_length
+// HAZARD once auto-unwrap is in play. `s` is auto-unwrapped payload; aether_string_length
 // falls through to strlen() on binary content and truncates at NUL.
 int shim(const char* s, int caller_len) {
     int n = aether_string_length(s);   // falls through to strlen!
@@ -589,7 +589,7 @@ int shim(const char* s, int caller_len) {
 }
 ```
 
-Pre-#297 the AetherString header leaked through into the shim, and the dispatch inside `aether_string_length` correctly returned the stored length. Post-#297 the header is stripped at the call site, the dispatch falls through to `strlen`, and binary content gets truncated at the first embedded NUL, silently producing corrupted output on disk / in messages / etc.
+Before the auto-unwrap, the AetherString header leaked through into the shim, and the dispatch inside `aether_string_length` correctly returned the stored length. After it, the header is stripped at the call site, the dispatch falls through to `strlen`, and binary content gets truncated at the first embedded NUL, silently producing corrupted output on disk / in messages / etc.
 
 **Rule:** when a C shim takes a `string` parameter from Aether AND an explicit length, **trust the length**. Don't re-derive via `aether_string_length(s)` that path is now unreachable for header-bearing values (auto-unwrap stripped the header), and the strlen fallback corrupts binary content. The Aether-side caller knows the length; pass it across the boundary.
 
@@ -789,7 +789,7 @@ s.max_deleted.ms = s.last_id.ms   // nested: offsets add (40+0, 24+0)
 
 - **The width is derived from the field type**, `uint8`/`byte`→1, `uint16`→2,
   `uint32`/`int`→4, `int64`/`uint64`→8, `float64`→8, `ptr`→pointer-width. The
-  `--audit-mem` (#868) class of bug is gone for overlay-declared structs: you
+  `--audit-mem` class of bug is gone for overlay-declared structs: you
   never hand-pick the accessor.
 - **The offsets stay explicit**, Aether can't see the C headers, so you probe
   them (as before). But they live in one declaration, not a scattered `const`
@@ -909,13 +909,13 @@ Every Aether-side primitive that builds a string returns an `AetherString*` a re
 
 These all mint their result through `string_adopt_caps_buffer`, which sets the magic header and stores the byte length. Aether's `string` type is `void*`-shaped at the C level, and the runtime helpers (`str_data`, `str_len`) dispatch on the AetherString magic header, so `string.length(value)` on any of these results reads the stored length, not `strlen()`, and does not truncate at an embedded NUL.
 
-`string_concat_wrapped` is retained as an explicit alias for `string_concat`: both return an `AetherString*` with the same contract. The truncation hazard only appears when a value has been reduced to a bare `char*` for example a string literal, or a `string` argument whose AetherString header was stripped by the #297 auto-unwrap at an extern call boundary (see "Aether-emitted receivers" above). On such a bare pointer, `str_len` falls through to `strlen()` and truncates at the first embedded NUL.
+`string_concat_wrapped` is retained as an explicit alias for `string_concat`: both return an `AetherString*` with the same contract. The truncation hazard only appears when a value has been reduced to a bare `char*` for example a string literal, or a `string` argument whose AetherString header was stripped by the auto-unwrap at an extern call boundary (see "Aether-emitted receivers" above). On such a bare pointer, `str_len` falls through to `strlen()` and truncates at the first embedded NUL.
 
-> **Historical note (#270):** `string_concat` originally returned a plain `char*`, so downstream `string.length(string.concat(a, b))` patterns truncated binary content at the first NUL. `string_concat` now returns an `AetherString*` (via `string_adopt_caps_buffer`), and `string_concat_wrapped` is kept as an alias for the same contract. Existing call sites don't need to change.
+> **Historical note:** `string_concat` originally returned a plain `char*`, so downstream `string.length(string.concat(a, b))` patterns truncated binary content at the first NUL. `string_concat` now returns an `AetherString*` (via `string_adopt_caps_buffer`), and `string_concat_wrapped` is kept as an alias for the same contract. Existing call sites don't need to change.
 
 ### Heap-string ownership across the FFI boundary
 
-When an Aether function takes the result of a C extern `-> string` call and assigns it to a variable, the same heap-string-tracker machinery (issue #405) decides whether the buffer is freed on later reassignment:
+When an Aether function takes the result of a C extern `-> string` call and assigns it to a variable, the same heap-string-tracker machinery decides whether the buffer is freed on later reassignment:
 
 - **Hardcoded heap-returning stdlib calls** (`string.concat`, `string.substring`, `string.{to_upper, to_lower, trim}`) and **string interpolation** are always treated as heap.
 - **A user-defined Aether `-> string` function** is heap-returning iff the codegen's recursive structural-escape-analysis pass can prove every return statement yields a heap-string-expression (chain into another heap-returning function counts).
@@ -953,7 +953,7 @@ collide with libc's own `bind(2)`, `listen(2)`, etc., and the linker
 silently picks the wrong symbol, your `bind` either never runs, or
 runs when libc's was expected.
 
-Mitigation (issue #436 facet B): the codegen keeps a curated list of
+Mitigation: the codegen keeps a curated list of
 libc / POSIX symbol names (see `compiler/codegen/codegen.c`'s
 `is_c_reserved_word` for the full set, it covers C keywords, the
 entire BSD/POSIX network sockets API, POSIX I/O, process control,

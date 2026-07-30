@@ -1,19 +1,19 @@
 # Unifying `T?` and `(value, err)` — costed design
 
 > **Status: IMPLEMENTED.** The whole arc has shipped:
-> - **P0** — `or {}` value-block miscompile fix (PR #1145, v0.398.0).
-> - **P1** — migrate the 14 two-slot fallible signatures to `T!` (PR #1155).
+> - **P0** — `or {}` value-block miscompile fix (v0.398.0).
+> - **P1** — migrate the 14 two-slot fallible signatures to `T!`.
 > - **P1.5** — reject the ABI-incompatible tuple-payload `(A, B)!`, pinning
 >   `T!` as single-payload; the 4 three-slot functions stay raw tuples by
->   design (PR #1156).
-> - **P2** — a dropped `T!` result is a compile error (PR #1161).
+>   design.
+> - **P2** — a dropped `T!` result is a compile error.
 > - **P3** — declared `fault`s: interned string-valued identities with
->   namespace-qualified cross-module identity via `==` (PR #1162).
+>   namespace-qualified cross-module identity via `==`.
 > - **P1.3** — `??` accepts a fallible `T!` left side, one default operator
->   across both axes (PR #1163).
+>   across both axes.
 >
 > Plus two `or {}` heap-leak fixes surfaced while implementing: the discarded
-> error slot (PR #1159) and the yielded value slot (PR #1160).
+> error slot and the yielded value slot.
 >
 > Costed against the compiler as of v0.397.0; every claim below was verified
 > against the tree (`file:line`) at design time, not recalled. Origin:
@@ -31,12 +31,11 @@ findings that reshape the design:
 1. **Both mechanisms are lopsided in opposite directions.** `(value, err)`
    carries *all* real traffic: 279 error-return sites across `std/`, 119
    distinct error strings. `T?` carries *none*: zero optional returns, zero
-   `??`, zero `?.` anywhere in `std/` — the entire optional surface (#340,
-   narrowing #1068) is exercised only by tests. So "unification" is not
+   `??`, zero `?.` anywhere in `std/` — the entire optional surface (including
+   flow narrowing) is exercised only by tests. So "unification" is not
    merging two live systems; it is deciding which of two half-used systems
    becomes the fallible spine.
-2. **`T!` already exists and is ABI-identical to the convention.** `T!`
-   (#913) IS a `(T, string)` tuple with one flag set (`Type.is_result`,
+2. **`T!` already exists and is ABI-identical to the convention.** `T!` IS a `(T, string)` tuple with one flag set (`Type.is_result`,
    `ast.h:414`; `create_result_type`, `ast.c:91-95`). The flag gates exactly
    three behaviours: bare `return v` auto-wraps to `(v, "")`
    (`codegen_stmt.c:3344-3353`), `expr!` propagates instead of panicking
@@ -48,7 +47,7 @@ findings that reshape the design:
    calls nearby are owning-copies of the *value* slot). No caller anywhere
    compares error *content* — only `err != ""` presence tests. And errors
    do not cross the FFI at all: `--emit=lib` refuses to export
-   tuple-returning functions (`codegen.c:2229-2240`, #277). The three
+   tuple-returning functions (`codegen.c:2229-2240`). The three
    scariest §4 costs — payload loss, comparison migration, ABI break — have
    nothing to break *today*. That is the window argument.
 4. **A live miscompile sits in the foundations.** The value-producing block
@@ -83,9 +82,9 @@ Verified against the tree; this is the load-bearing section.
 | Tuple lowering `{T0 _0; ...; const char* _N}` by-value | `ensure_tuple_typedef`, `codegen.c:3237-3259` | The error is always the **last** slot |
 | The presence convention `e && e[0]` | five sites: `codegen.c:1156` (conditional defers), `codegen_expr.c:2101` (`or`), `:2194` (`expr!` propagate), `:2217` (`expr!` panic), `codegen_stmt.c:5903-5910` (multi-value return guard) | The single convention every consumer shares |
 | `T!` = `(T, string)` + `is_result` | `ast.h:414`, `ast.c:91-95`, parsed `parser.c:283-285` | Auto-wrap, propagation, `or` typing — nothing else |
-| `expr!` propagation (drains defers since #1137/#1140) | `codegen_expr.c:2122-2223` | Statically-known error exit (`DEFER_EXIT_ERROR`) |
+| `expr!` propagation (drains defers) | `codegen_expr.c:2122-2223` | Statically-known error exit (`DEFER_EXIT_ERROR`) |
 | `or <expr>` default | `parser.c:1625-1653`, `codegen_expr.c:2078-2119` | Works; block form broken (§2) |
-| `defer try` / `defer catch` | #1140; fires on tuple **shape**, not `is_result` (`function_can_fail`, `typechecker.c:540-545`) | Already treats tuples and `T!` uniformly |
+| `defer try` / `defer catch` | Fires on tuple **shape**, not `is_result` (`function_can_fail`, `typechecker.c:540-545`) | Already treats tuples and `T!` uniformly |
 | Error creation in `std/` | 279 `return …, "literal"` sites; 119 distinct strings; **zero dynamic** | The "payload" is unexercised |
 | Error comparison in the tree | **zero content comparisons**; presence-only | Identity is currently unexpressible, and nobody works around it |
 | FFI | tuple-returning functions **not exported** (`codegen.c:2229-2240`) | No external ABI to preserve |
@@ -101,7 +100,7 @@ Verified against the tree; this is the load-bearing section.
 | `??` default (optional-only; rejects `T!` with a clean message) | `codegen_expr.c:2239-2253` | Vocabulary split with `or` is arbitrary today |
 | `?.` chain read + documented no-op write | `codegen_expr.c:2255-2275`, `codegen_stmt.c:3401-3427` | |
 | `match m { none / some(v) }` | `codegen_stmt.c:5306-5366` | |
-| **Flow-sensitive narrowing** (#1068): `if x != none { … }` reads become `x.val`, zero runtime cost | `typechecker.c:4498-4582, 5121-5145`; `codegen_expr.c:2368-2377` | C3's §4.3 narrowing **already exists** on this side |
+| **Flow-sensitive narrowing**: `if x != none { … }` reads become `x.val`, zero runtime cost | `typechecker.c:4498-4582, 5121-5145`; `codegen_expr.c:2368-2377` | C3's §4.3 narrowing **already exists** on this side |
 | Usage in `std/` | **zero** | Polished shelf-ware |
 
 ### 1.3 The compilation model (this decides the fault mechanism)
@@ -126,7 +125,7 @@ Verified against the tree; this is the load-bearing section.
 Like `defer catch` (which surfaced the `expr!` defer leak, fixed first in
 its own PR), scoping §4 found live defects in the foundations:
 
-1. **`or { … }` value-block miscompile — ✅ FIXED, PR #1145 (v0.398.0).**
+1. **`or { … }` value-block miscompile — ✅ FIXED (v0.398.0).**
    `x = f() or { -1 }` compiled and, on the error path, yielded an
    **uninitialized local**: the block's last expression was emitted as a
    discarded statement and the result slot never assigned
@@ -217,7 +216,7 @@ Three phases, each independently shippable, each leaving the tree green.
 ### Phase 1 — repair and converge (no new semantics)
 
 1. **Fix the `or {}` value-block bug** (§2.1 — its own PR, first).
-   *Shipped: PR #1145 (v0.398.0).*
+   *Shipped in v0.398.0.*
 2. **Migrate `std/` signatures** from `-> (T, string)` to `-> T!`.
    ABI-invariant (§0.2): callers' `v, e = f()` destructuring, `e != ""`
    tests, `defer catch`, everything continues byte-identically. ~17
@@ -226,7 +225,7 @@ Three phases, each independently shippable, each leaving the tree green.
    return sites — mechanical, reviewable module-by-module (fs, io, os,
    json, regex first).
 
-   **Boundary found during migration (PR #1155 / #1.5): `T!` is
+   **Boundary found during migration: `T!` is
    single-payload only.** `create_result_type(inner)` wraps its argument,
    so a tuple payload `(A, B)!` lowers to the *nested* tuple
    `((A, B), string)` — C layout `{ _tuple_A_B _0; const char* _1; }` —
@@ -238,13 +237,13 @@ Three phases, each independently shippable, each leaving the tree green.
    `json.object_entry`, `regex.find`, `regex.find_lit`) **stay raw
    tuples** — Phase 2 enforcement keys on `is_result`, so they are simply
    not-yet-enforced (gradualism is structural). `(A, B)!` is now a parse
-   error with guidance pointing at the raw-tuple form (PR #1.5).
+   error with guidance pointing at the raw-tuple form (migration piece 1.5).
 3. **Vocabulary convergence, minimal:** make `??` accept a `T!` left side
    (same lowering as bare-expression `or`; today it cleanly rejects). One
    default operator across both worlds; `or` remains for block handlers.
    Optional — costs ~40 lines, drop if contentious.
 
-   *Related bug found (PR #1155): the `or {}` lowering does not free a
+   *Related bug found: the `or {}` lowering does not free a
    heap error slot it discards on the error path — `x = json.parse(s) or
    {…}` leaks the error string when the parse fails. Pre-existing, orthogonal
    to migration; tracked separately.*
@@ -334,7 +333,7 @@ typed mechanism nobody uses plus an untyped convention everybody uses.
   ignore): `!` already means propagate-or-panic; overloading it to "ignore"
   would invert its meaning. Explicit `_, _ =` is the discard.
 - **Narrowing for `T!`** (`if e == "" { use v unchecked }`): real value,
-  real cost (the #1068 machinery generalized). Not needed for phases 1–3;
+  real cost (the narrowing machinery generalized). Not needed for phases 1–3;
   natural fourth phase if wanted.
 
 ## 8. Costing

@@ -68,6 +68,7 @@ AetherJmpFrame* aether_try_push(void) {
     }
     AetherJmpFrame* f = &tls_stack.frames[tls_stack.depth++];
     f->reason = NULL;
+    aether_unwind_enter_frame();
     return f;
 }
 
@@ -77,6 +78,7 @@ void aether_try_pop(void) {
         fprintf(stderr, "aether: aether_try_pop on empty stack\n");
         abort();
     }
+    aether_unwind_exit_frame();
     tls_stack.depth--;
 }
 
@@ -419,6 +421,9 @@ void aether_panic(const char* reason) {
     AetherJmpFrame* f = aether_current_frame();
     if (f) {
         f->reason = reason;
+        // Free the innermost frame's still-live journaled allocations
+        // before the jump skips their deferred frees (aether_unwind.c).
+        aether_unwind_drain_current();
         AETHER_SIGLONGJMP(f->buf, 1);
         // unreachable
     }
@@ -442,7 +447,8 @@ void aether_panic(const char* reason) {
 // Signal handlers (opt-in via AETHER_CATCH_SIGNALS=1)
 // ---------------------------------------------------------------------------
 //
-// Caveats documented in panic-recover.md: converting a native fault into a
+// Caveats documented in docs/actor-concurrency.md ("Panic and Stack
+// Traces"): converting a native fault into a
 // panic is best-effort. A SIGSEGV mid-enqueue may leave queue state
 // inconsistent. This path exists so the process survives *some* native
 // faults during development and testing, not as a production replacement

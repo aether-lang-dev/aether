@@ -7,13 +7,12 @@ Many CLI tools and servers need a per-process key/value: parse it once at startu
 - `--data-dir /var/lib/myapp` baked in at startup, used by every filesystem op.
 - API keys, tenant IDs, current-user identity stashed by an auth middleware.
 
-In C this is a `static int g_thing = …;` plus `set_thing(n)` / `get_thing(void)` helpers. Aether transcribes this shape directly with a **module-level `var`** (added in [#701]): `var` at module scope lowers to a file-scope C `static`, and same-module functions read and write it as a plain identifier, a real lvalue, so a setter genuinely updates it and every reader sees the new value. That's the simplest answer for scalar per-process config (a log-level enum, a numeric limit, a feature flag, a pointer handle).
+In C this is a `static int g_thing = …;` plus `set_thing(n)` / `get_thing(void)` helpers. Aether transcribes this shape directly with a **module-level `var`** : `var` at module scope lowers to a file-scope C `static`, and same-module functions read and write it as a plain identifier, a real lvalue, so a setter genuinely updates it and every reader sees the new value. That's the simplest answer for scalar per-process config (a log-level enum, a numeric limit, a feature flag, a pointer handle).
 
 For state that must be shared **across actors / threads**, or that owns a resource it should free, the **actor-as-singleton** is the better tool: spawn one actor at startup, set values via messages, read via messages, the mailbox serialises access for you. Both patterns are below; pick by whether the value is process-local scalar config (`var`) or concurrently-shared/owned state (actor).
 
 This page is the worked example. It's a doc, not a stdlib feature, there's nothing to import beyond the language primitives.
 
-[#701]: https://github.com/aether-lang-org/aether/issues/701
 
 ## The simple case: a module-level `var`
 

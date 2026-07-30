@@ -21,7 +21,7 @@ $PREFIX/
 │   └── std/
 │
 └── share/aether/
-    ├── MANIFEST                  # authoritative list of link-suitable .c files (#329)
+    ├── MANIFEST                  # authoritative list of link-suitable .c files
     ├── runtime/                  # runtime C sources (the actor scheduler, memory,
     │                              # panic/try-catch, sandbox, etc.)
     ├── std/                      # stdlib sources + module.ae descriptors
@@ -61,7 +61,7 @@ Two consumption shapes, in priority order:
    `ae build` is tolerant of a package that ships the archive **flat** at
    `<prefix>/lib/libaether.a` instead: it tries the canonical nested path
    first and falls back to the flat one before resorting to the
-   compile-from-source path below (#959). The nested layout is still the
+   compile-from-source path below. The nested layout is still the
    canonical one `install.sh` and `make install` produce.
 
 2. **Compile from source**, falling through to the `.c` files in
@@ -178,7 +178,7 @@ build.
 
 ## Option C alternative (status quo + docs)
 
-Issue #329 considered three options for cleaning up the install
+Three options were considered for cleaning up the install
 layout:
 
 - **(A) Drop runtime/std sources entirely.** Header-only

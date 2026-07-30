@@ -46,6 +46,17 @@ int fs_try_statvfs(const char* p) { (void)p; return 0; }
 int64_t fs_get_statvfs_total(void) { return 0; }
 int64_t fs_get_statvfs_free(void)  { return 0; }
 int64_t fs_get_statvfs_avail(void) { return 0; }
+int fs_try_mounts(void) { return -1; }
+int fs_get_mount_count(void) { return 0; }
+const char* fs_get_mount_source(int i)  { (void)i; return ""; }
+const char* fs_get_mount_point(int i)   { (void)i; return ""; }
+const char* fs_get_mount_fstype(int i)  { (void)i; return ""; }
+const char* fs_get_mount_options(int i) { (void)i; return ""; }
+void fs_release_mounts(void) {}
+int fs_try_block_info(const char* d) { (void)d; return 0; }
+int64_t fs_get_block_size_bytes(void) { return 0; }
+int fs_get_block_removable(void) { return -1; }
+const char* fs_get_block_transport(void) { return ""; }
 char* fs_read_binary_raw(const char* p, int* n) {
     (void)p; if (n) *n = 0; return NULL;
 }
@@ -118,6 +129,12 @@ void fs_watch_close(void* w) { (void)w; }
 #ifndef _WIN32
 #include <unistd.h>
 #include <sys/statvfs.h>     // statvfs() for fs_try_statvfs (#1117)
+#endif
+#include <stddef.h>           // offsetof for the mount-table getters (#1118)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <sys/param.h>
+#include <sys/ucred.h>
+#include <sys/mount.h>        // getmntinfo() for fs_try_mounts (#1118)
 #endif
 
 #ifdef _WIN32
@@ -1004,6 +1021,250 @@ int fs_try_statvfs(const char* path) {
 int64_t fs_get_statvfs_total(void) { return s_vfs_total; }
 int64_t fs_get_statvfs_free(void)  { return s_vfs_free;  }
 int64_t fs_get_statvfs_avail(void) { return s_vfs_avail; }
+
+/* Mount enumeration (#1118): fs_try_mounts loads a thread-local table
+ * (freeing the previous one), returns the entry count, -1 on failure.
+ * The per-entry getters return pointers BORROWED from that table,
+ * valid until the next fs_try_mounts / fs_release_mounts on the same
+ * thread. Backends: Linux /proc/self/mountinfo (octal escapes
+ * decoded), macOS + BSDs getmntinfo(3), Windows drive letters via
+ * GetLogicalDriveStrings + GetVolumeInformation. */
+
+typedef struct {
+    char* source;
+    char* point;
+    char* fstype;
+    char* options;
+} AetherMountEntry;
+
+static AETHER_FS_TLS AetherMountEntry* s_mounts = NULL;
+static AETHER_FS_TLS int s_mount_count = 0;
+
+void fs_release_mounts(void) {
+    for (int i = 0; i < s_mount_count; i++) {
+        free(s_mounts[i].source);
+        free(s_mounts[i].point);
+        free(s_mounts[i].fstype);
+        free(s_mounts[i].options);
+    }
+    free(s_mounts);
+    s_mounts = NULL;
+    s_mount_count = 0;
+}
+
+static int fs_mounts_append(const char* src, const char* pt,
+                            const char* ty, const char* op) {
+    AetherMountEntry* grown = (AetherMountEntry*)realloc(
+        s_mounts, (size_t)(s_mount_count + 1) * sizeof(AetherMountEntry));
+    if (!grown) return 0;
+    s_mounts = grown;
+    s_mounts[s_mount_count].source  = strdup(src ? src : "");
+    s_mounts[s_mount_count].point   = strdup(pt  ? pt  : "");
+    s_mounts[s_mount_count].fstype  = strdup(ty  ? ty  : "");
+    s_mounts[s_mount_count].options = strdup(op  ? op  : "");
+    if (!s_mounts[s_mount_count].source || !s_mounts[s_mount_count].point ||
+        !s_mounts[s_mount_count].fstype || !s_mounts[s_mount_count].options) {
+        free(s_mounts[s_mount_count].source);
+        free(s_mounts[s_mount_count].point);
+        free(s_mounts[s_mount_count].fstype);
+        free(s_mounts[s_mount_count].options);
+        return 0;
+    }
+    s_mount_count++;
+    return 1;
+}
+
+#if defined(__linux__)
+/* mountinfo escapes space/tab/newline/backslash as \040-style octal;
+ * decode in place so mountpoints with spaces round-trip. */
+static void fs_mountinfo_unescape(char* s) {
+    char* w = s;
+    for (char* r = s; *r; ) {
+        if (r[0] == '\\' && r[1] >= '0' && r[1] <= '7' &&
+            r[2] >= '0' && r[2] <= '7' && r[3] >= '0' && r[3] <= '7') {
+            *w++ = (char)(((r[1] - '0') << 6) | ((r[2] - '0') << 3) | (r[3] - '0'));
+            r += 4;
+        } else {
+            *w++ = *r++;
+        }
+    }
+    *w = '\0';
+}
+#endif
+
+int fs_try_mounts(void) {
+    fs_release_mounts();
+#if defined(__linux__)
+    if (!aether_sandbox_check("fs_read", "/proc/self/mountinfo")) return -1;
+    FILE* fp = fopen("/proc/self/mountinfo", "r");
+    if (!fp) return -1;
+    char line[4096];
+    while (fgets(line, sizeof(line), fp)) {
+        /* Format: ID PARENT MAJ:MIN ROOT MOUNTPOINT OPTIONS [optional...]
+         *         - FSTYPE SOURCE SUPEROPTIONS                          */
+        char* fields[8] = {0};
+        int nf = 0;
+        char* save = NULL;
+        char* sep = strstr(line, " - ");
+        if (!sep) continue;
+        *sep = '\0';
+        for (char* tok = strtok_r(line, " ", &save);
+             tok && nf < 8; tok = strtok_r(NULL, " ", &save)) {
+            fields[nf++] = tok;
+        }
+        if (nf < 6) continue;
+        char* tail = sep + 3;
+        char* tsave = NULL;
+        char* fstype = strtok_r(tail, " ", &tsave);
+        char* source = strtok_r(NULL, " ", &tsave);
+        if (!fstype || !source) continue;
+        char* nl = strchr(source, '\n');
+        if (nl) *nl = '\0';
+        fs_mountinfo_unescape(fields[4]);
+        fs_mountinfo_unescape(source);
+        if (!fs_mounts_append(source, fields[4], fstype, fields[5])) {
+            fclose(fp);
+            fs_release_mounts();
+            return -1;
+        }
+    }
+    fclose(fp);
+    return s_mount_count;
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    struct statfs* mntbuf = NULL;
+    int n = getmntinfo(&mntbuf, MNT_NOWAIT);
+    if (n <= 0) return -1;
+    for (int i = 0; i < n; i++) {
+        char opts[128];
+        snprintf(opts, sizeof(opts), "%s%s%s%s",
+                 (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw",
+                 (mntbuf[i].f_flags & MNT_NOSUID) ? ",nosuid" : "",
+                 (mntbuf[i].f_flags & MNT_NODEV)  ? ",nodev"  : "",
+                 (mntbuf[i].f_flags & MNT_NOEXEC) ? ",noexec" : "");
+        if (!fs_mounts_append(mntbuf[i].f_mntfromname, mntbuf[i].f_mntonname,
+                              mntbuf[i].f_fstypename, opts)) {
+            fs_release_mounts();
+            return -1;
+        }
+    }
+    return s_mount_count;
+#elif defined(_WIN32)
+    char drives[512];
+    DWORD len = GetLogicalDriveStringsA(sizeof(drives), drives);
+    if (len == 0 || len >= sizeof(drives)) return -1;
+    for (char* d = drives; *d; d += strlen(d) + 1) {
+        UINT type = GetDriveTypeA(d);
+        if (type == DRIVE_NO_ROOT_DIR || type == DRIVE_UNKNOWN) continue;
+        char fsname[64] = "";
+        GetVolumeInformationA(d, NULL, 0, NULL, NULL, NULL,
+                              fsname, sizeof(fsname));
+        const char* opts =
+            (type == DRIVE_CDROM) ? "ro" :
+            (type == DRIVE_REMOVABLE) ? "rw,removable" : "rw";
+        if (!fs_mounts_append(d, d, fsname, opts)) {
+            fs_release_mounts();
+            return -1;
+        }
+    }
+    return s_mount_count;
+#else
+    return -1;
+#endif
+}
+
+int fs_get_mount_count(void) { return s_mount_count; }
+
+static const char* fs_mount_field(int i, size_t off) {
+    if (i < 0 || i >= s_mount_count) return "";
+    const char* p = *(char**)((char*)&s_mounts[i] + off);
+    return p ? p : "";
+}
+
+const char* fs_get_mount_source(int i)  { return fs_mount_field(i, offsetof(AetherMountEntry, source)); }
+const char* fs_get_mount_point(int i)   { return fs_mount_field(i, offsetof(AetherMountEntry, point)); }
+const char* fs_get_mount_fstype(int i)  { return fs_mount_field(i, offsetof(AetherMountEntry, fstype)); }
+const char* fs_get_mount_options(int i) { return fs_mount_field(i, offsetof(AetherMountEntry, options)); }
+
+/* Block-device info (#1118): Linux sysfs backend. fs_try_block_info
+ * accepts "/dev/sda", "sda", or a partition ("sda1", "nvme0n1p2",
+ * resolved to its parent disk for the removable flag). Other
+ * platforms return 0: per the stdlib's graceful-degradation
+ * convention the caller gets an error, never a fabricated answer. */
+
+static AETHER_FS_TLS int64_t s_blk_size = 0;
+static AETHER_FS_TLS int     s_blk_removable = -1;
+static AETHER_FS_TLS char    s_blk_transport[16] = "";
+
+#if defined(__linux__)
+static int fs_read_sysfs_line(const char* path, char* out, size_t cap) {
+    FILE* fp = fopen(path, "r");
+    if (!fp) return 0;
+    int ok = fgets(out, (int)cap, fp) != NULL;
+    fclose(fp);
+    if (!ok) return 0;
+    char* nl = strchr(out, '\n');
+    if (nl) *nl = '\0';
+    return 1;
+}
+#endif
+
+int fs_try_block_info(const char* dev) {
+    s_blk_size = 0;
+    s_blk_removable = -1;
+    s_blk_transport[0] = '\0';
+    if (!dev || !*dev) return 0;
+#if defined(__linux__)
+    const char* name = dev;
+    if (strncmp(name, "/dev/", 5) == 0) name = dev + 5;
+    for (const char* c = name; *c; c++) {
+        if (!(((*c >= 'a') && (*c <= 'z')) || ((*c >= 'A') && (*c <= 'Z')) ||
+              ((*c >= '0') && (*c <= '9')) || *c == '_' || *c == '-')) {
+            return 0;
+        }
+    }
+    char path[512];
+    char buf[128];
+    snprintf(path, sizeof(path), "/sys/class/block/%s/size", name);
+    if (!fs_read_sysfs_line(path, buf, sizeof(buf))) return 0;
+    s_blk_size = (int64_t)strtoll(buf, NULL, 10) * 512;
+
+    /* removable lives on the whole disk; a partition ("sda1",
+     * "nvme0n1p2") resolves to its parent via the sysfs symlink
+     * (.../block/<disk>/<part>). */
+    char parent[128];
+    snprintf(parent, sizeof(parent), "%s", name);
+    snprintf(path, sizeof(path), "/sys/class/block/%s", name);
+    char real[512];
+    if (realpath(path, real)) {
+        char* blk = strstr(real, "/block/");
+        if (blk) {
+            blk += 7;
+            char* slash = strchr(blk, '/');
+            size_t plen = slash ? (size_t)(slash - blk) : strlen(blk);
+            if (plen > 0 && plen < sizeof(parent)) {
+                memcpy(parent, blk, plen);
+                parent[plen] = '\0';
+            }
+        }
+        if (strstr(real, "/usb"))         snprintf(s_blk_transport, sizeof(s_blk_transport), "usb");
+        else if (strstr(real, "/nvme"))   snprintf(s_blk_transport, sizeof(s_blk_transport), "nvme");
+        else if (strstr(real, "/virtio")) snprintf(s_blk_transport, sizeof(s_blk_transport), "virtio");
+        else if (strstr(real, "/mmc"))    snprintf(s_blk_transport, sizeof(s_blk_transport), "mmc");
+        else if (strstr(real, "/ata"))    snprintf(s_blk_transport, sizeof(s_blk_transport), "sata");
+    }
+    snprintf(path, sizeof(path), "/sys/class/block/%s/removable", parent);
+    if (fs_read_sysfs_line(path, buf, sizeof(buf))) {
+        s_blk_removable = (buf[0] == '1') ? 1 : 0;
+    }
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+int64_t     fs_get_block_size_bytes(void) { return s_blk_size; }
+int         fs_get_block_removable(void)  { return s_blk_removable; }
+const char* fs_get_block_transport(void)  { return s_blk_transport; }
 
 char* fs_read_binary_raw(const char* path, int* out_len) {
     if (out_len) *out_len = 0;

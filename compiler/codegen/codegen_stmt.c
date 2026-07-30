@@ -128,6 +128,29 @@ static void collect_returned_closures(CodeGenerator* gen, ASTNode* expr,
 
 #define MAX_SERIES_ACCUMULATORS 16
 
+/* #1301 allocation journal: emit the unwind-track call for a heap-
+ * tracked LOCAL right after its `_heap_<name>` flag is armed. Uses the
+ * SAME skip set as the function-exit defer push (escaped, return-
+ * escaped, closure-env, promoted): the journal must mirror armed
+ * deferred frees exactly. A var whose defer is never emitted must
+ * never be journaled, or the panic drain frees a pointer someone else
+ * owns. Emits ` aether_unwind_track_str_if(name, _heap_name);` with a
+ * leading space and no newline so it composes inside `{ ... }`
+ * wrapper emissions and after statement-level flag sets alike. */
+static void emit_unwind_track_local(CodeGenerator* gen, const char* name) {
+    if (!gen || !name) return;
+    if (is_escaped_string_var(gen, name)) return;
+    if (is_return_escaped_string_var(gen, name)) return;
+    if (is_promoted_capture(gen, name)) return;
+    for (int e = 0; e < gen->current_env_capture_count; e++) {
+        if (gen->current_env_captures[e] &&
+            strcmp(gen->current_env_captures[e], name) == 0) {
+            return;
+        }
+    }
+    fprintf(gen->output, " aether_unwind_track_str_if(%s, _heap_%s);", name, name);
+}
+
 // Returns 1 if the expression tree references the named variable.
 static int expr_references_var(ASTNode* node, const char* var_name) {
     if (!node || !var_name) return 0;
@@ -4126,11 +4149,13 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                 "{ const char* _tmp_old = %s; "
                                 "%s = _tup%d._%d; "
                                 "if (_heap_%s) aether_heap_str_free(_tmp_old); "
-                                "_heap_%s = %d; }\n",
+                                "_heap_%s = %d;",
                                 var->value,
                                 var->value, tmp_id, j,
                                 var->value,
                                 var->value, new_heap);
+                            emit_unwind_track_local(gen, var->value);
+                            fprintf(gen->output, " }\n");
                         }
                         continue;
                     }
@@ -4146,7 +4171,9 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                     if (pos_is_string && var->value &&
                         is_heap_string_var(gen, var->value) && pos_is_heap) {
                         print_indent(gen);
-                        fprintf(gen->output, "_heap_%s = 1;\n", var->value);
+                        fprintf(gen->output, "_heap_%s = 1;", var->value);
+                        emit_unwind_track_local(gen, var->value);
+                        fprintf(gen->output, "\n");
                     }
                     /* #752: a struct-typed tuple position transfers
                      * ownership of its heap-string fields to this LHS —
@@ -4659,10 +4686,12 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                 "{ %s = ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
                             fprintf(gen->output,
-                                "; _heap_%s = _heap_%s; _heap_%s = 0; }\n",
+                                "; _heap_%s = _heap_%s; _heap_%s = 0;",
                                 stmt->value,
                                 rhs_for_escape->value,
                                 rhs_for_escape->value);
+                            emit_unwind_track_local(gen, stmt->value);
+                            fprintf(gen->output, " }\n");
                         } else {
                             fprintf(gen->output, "%s = ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
@@ -4733,15 +4762,17 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old);",
                                 stmt->value);
                         if (rhs_alias_copy) {
-                            fprintf(gen->output, " _heap_%s = 1; }\n", stmt->value);
+                            fprintf(gen->output, " _heap_%s = 1;", stmt->value);
                         } else if (rhs_is_alias_to_heap_var) {
                             fprintf(gen->output,
-                                    " _heap_%s = _heap_%s; _heap_%s = 0; }\n",
+                                    " _heap_%s = _heap_%s; _heap_%s = 0;",
                                     stmt->value, rhs->value, rhs->value);
                         } else {
-                            fprintf(gen->output, " _heap_%s = %d; }\n",
+                            fprintf(gen->output, " _heap_%s = %d;",
                                     stmt->value, rhs_is_heap ? 1 : 0);
                         }
+                        emit_unwind_track_local(gen, stmt->value);
+                        fprintf(gen->output, " }\n");
                     } else if (rhs_is_heap && var_escaped) {
                         /* Non-string-typed escaped var reassigned to
                          * a heap string. Same gate — skip the free. */
@@ -4763,7 +4794,9 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, stmt->children[0]);
                         fprintf(gen->output, "; if (_heap_%s) aether_heap_str_free(_tmp_old);",
                                 stmt->value);
-                        fprintf(gen->output, " _heap_%s = 1; }\n", stmt->value);
+                        fprintf(gen->output, " _heap_%s = 1;", stmt->value);
+                        emit_unwind_track_local(gen, stmt->value);
+                        fprintf(gen->output, " }\n");
                     } else {
                         // Plain non-string assignment.
                         /* Struct-reassignment heap cleanup (#465).
@@ -5133,31 +5166,33 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                                 alias_source_must_copy(gen, alias_init->value));
                             if (is_heap_string_var(gen, stmt->value)) {
                                 if (alias_copied) {
-                                    fprintf(gen->output, "_heap_%s = 1;\n", stmt->value);
+                                    fprintf(gen->output, "_heap_%s = 1;", stmt->value);
                                 } else if (init_is_alias_to_heap_var) {
                                     fprintf(gen->output,
-                                            "_heap_%s = _heap_%s; _heap_%s = 0;\n",
+                                            "_heap_%s = _heap_%s; _heap_%s = 0;",
                                             stmt->value, alias_init->value, alias_init->value);
                                 } else {
-                                    fprintf(gen->output, "_heap_%s = %d;\n",
+                                    fprintf(gen->output, "_heap_%s = %d;",
                                             stmt->value, init_heap ? 1 : 0);
                                 }
                             } else {
                                 if (alias_copied) {
                                     fprintf(gen->output,
-                                            "int _heap_%s = 1; (void)_heap_%s;\n",
+                                            "int _heap_%s = 1; (void)_heap_%s;",
                                             stmt->value, stmt->value);
                                 } else if (init_is_alias_to_heap_var) {
                                     fprintf(gen->output,
-                                            "int _heap_%s = _heap_%s; (void)_heap_%s; _heap_%s = 0;\n",
+                                            "int _heap_%s = _heap_%s; (void)_heap_%s; _heap_%s = 0;",
                                             stmt->value, alias_init->value,
                                             stmt->value, alias_init->value);
                                 } else {
-                                    fprintf(gen->output, "int _heap_%s = %d; (void)_heap_%s;\n",
+                                    fprintf(gen->output, "int _heap_%s = %d; (void)_heap_%s;",
                                             stmt->value, init_heap ? 1 : 0, stmt->value);
                                 }
                                 mark_heap_string_var(gen, stmt->value);
                             }
+                            emit_unwind_track_local(gen, stmt->value);
+                            fprintf(gen->output, "\n");
                         }
                     }
                     // Record variable→closure mapping for closure invocation.

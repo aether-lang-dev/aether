@@ -99,7 +99,7 @@ OpenSSL"`.
 
 ## HTTP/2 (h2 + h2c)
 
-`std.http` speaks HTTP/2 server-side via libnghttp2 (issue #260
+`std.http` speaks HTTP/2 server-side via libnghttp2 (server-side HTTP/2
 Tier 2). Enable with one call alongside the existing TLS / keep-
 alive setup:
 

@@ -650,7 +650,7 @@ children.
 *before* `main()` runs, or accept that path access is gone. Wiring the
 grant list into pre-opened, `cap_rights_limit()`'d fds handed to the
 child is the remaining refinement. Its prerequisite landed with issue
-#1003: the stdlib handle types now expose their descriptors —
+The stdlib handle types now expose their descriptors,
 `file.fd(handle)` / `fs.fd(handle)` for files, `tcp.fd(sock)` /
 `tcp.server_fd(server)` for sockets — so a program can open through
 the stdlib and narrow each descriptor with `capsicum.rights_limit()`

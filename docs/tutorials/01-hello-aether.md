@@ -20,7 +20,7 @@ Aether is a programming language that combines:
 If you haven't installed Aether yet, follow the installation guide:
 
 ```bash
-git clone https://github.com/nicolasmd87/aether.git
+git clone https://github.com/aether-lang-org/aether.git
 cd aether
 
 # Build the ae CLI tool (includes compiler)

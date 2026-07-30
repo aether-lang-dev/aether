@@ -1,0 +1,70 @@
+// Regression test for fs.mounts / fs.block_info (#1118).
+//
+// What this test guards:
+//   1. mounts() returns a positive count and empty error on every
+//      supported platform (Linux mountinfo, macOS/BSD getmntinfo,
+//      Windows drive letters)
+//   2. Every entry has a non-empty mount point; sources and fstypes
+//      are readable strings
+//   3. Out-of-range accessors return "" rather than crashing
+//   4. fs_release_mounts + reload keeps working (TLS table lifecycle)
+//   5. block_info honours its contract: either success with a
+//      non-negative size, or the documented unsupported error;
+//      never a fabricated answer
+
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    n, err = fs.mounts()
+    if string.equals(err, "") != 1 {
+        fail("mounts() errored: ${err}")
+    }
+    if n < 1 {
+        fail("expected at least one mount, got ${n}")
+    }
+    println("PASS 1: mounts() enumerated ${n} entries")
+
+    i = 0
+    while i < n {
+        pt = fs.mount_point(i)
+        if string.length(pt) < 1 {
+            fail("entry ${i} has an empty mount point")
+        }
+        i = i + 1
+    }
+    println("PASS 2: every entry has a mount point")
+
+    if string.length(fs.mount_point(n + 5)) != 0 {
+        fail("out-of-range mount_point should be empty")
+    }
+    if string.length(fs.mount_source(0 - 1)) != 0 {
+        fail("negative-index mount_source should be empty")
+    }
+    println("PASS 3: out-of-range accessors return empty")
+
+    fs.fs_release_mounts()
+    n2, err2 = fs.mounts()
+    if string.equals(err2, "") != 1 {
+        fail("reload after release errored: ${err2}")
+    }
+    if n2 < 1 {
+        fail("reload after release returned no mounts")
+    }
+    println("PASS 4: release + reload keeps working")
+
+    size, removable, transport, berr = fs.block_info("no-such-device-zz9")
+    if string.equals(berr, "") == 1 {
+        fail("nonexistent device should not report success")
+    }
+    println("PASS 5: block_info honours its error contract (${berr})")
+
+    println("=== All cases passed ===")
+}

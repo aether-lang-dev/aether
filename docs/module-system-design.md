@@ -139,7 +139,7 @@ collecting every `export`-tagged name into one `exports (…)` line at
 the top, then removing the per-function keywords. Mixing both forms in
 one module is a hard error.
 
-## Selective-import shadow rejection (#436 facet A)
+## Selective-import shadow rejection
 
 A module (or main program) that selectively imports a name AND defines a local function with the same name silently shadowed the import:
 
@@ -152,7 +152,7 @@ length(s: string) -> int {
 }
 ```
 
-Pre-fix, the merger renamed the body's bare `length(s)` to `mod_length(s)` (matching the local def's namespaced name post-merge), turning the wrapper into self-recursion, a runtime stack overflow with no compile-time signal. As of #436 facet A, the orchestrator rejects this pattern with `error[E1000]` before merging:
+Pre-fix, the merger renamed the body's bare `length(s)` to `mod_length(s)` (matching the local def's namespaced name post-merge), turning the wrapper into self-recursion, a runtime stack overflow with no compile-time signal. The orchestrator rejects this pattern with `error[E1000]` before merging:
 
 ```
 error[E1000]: module 'mod' (mod/module.ae) defines local function
@@ -171,7 +171,7 @@ error[E1000]: module 'mod' (mod/module.ae) defines local function
 
 The same check applies to entry-point `main.ae` files when the shadow lives there directly (not inside a module). Both `AST_FUNCTION_DEFINITION` and `export <fn>` shapes are caught.
 
-## Qualified surface survives a selective import after merge (#870)
+## Qualified surface survives a selective import after merge
 
 The two `import std.X` forms each light up a different call syntax: a bare
 `import std.X` enables the qualified `X.fn()` surface; a selective
@@ -189,7 +189,7 @@ from an imported module that bare-imports `std.string` was rejected with
 The merge now injects a **synthetic bare import** for each merged module's own
 bare imports. A synthetic import marks the namespace non-selective for the unit
 (re-opening `string.X`) but is kept out of the user-explicit registry, so
-sealed-scope isolation (#243) is preserved: user code still cannot call into a
+sealed-scope isolation is preserved: user code still cannot call into a
 namespace it never imported. This mirrors how transitive dependencies already
 get synthetic imports during merge.
 
@@ -368,7 +368,7 @@ For nested modules like `import mypackage.utils`:
 
 Packages installed with `ae add` are searched after local paths. The package name is the first component of the import path.
 
-#### Lib search path (#413)
+#### Lib search path
 
 `<lib-path-entry>` in steps 1 and 2 is a list of directories, PATH-style, `:` on POSIX and `;` on Windows. The list is searched left-to-right; the first hit wins. Three forms compose:
 
@@ -477,7 +477,7 @@ within one `@link` is preserved, which matters for single-pass linkers
 - Multiple module imports in the same program
 - Mixing pure modules with stdlib imports
 - Parameter/local variable shadowing of module constants
-- Actors and their message types (#1006): `spawn` an `actor` and send a `message` declared in an imported module. Both enter the program under their bare name (like structs), so `spawn(Worker())` and `w ! Ping { ... }` resolve; the actor's handlers still have their intra-module function/constant references rewritten, and the per-program message registry assigns runtime type ids across the merge.
+- Actors and their message types: `spawn` an `actor` and send a `message` declared in an imported module. Both enter the program under their bare name (like structs), so `spawn(Worker())` and `w ! Ping { ... }` resolve; the actor's handlers still have their intra-module function/constant references rewritten, and the per-program message registry assigns runtime type ids across the merge.
 
 **On the module-system roadmap (language-level):**
 - Module-level mutable state

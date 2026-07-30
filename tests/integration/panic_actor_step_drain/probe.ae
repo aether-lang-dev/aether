@@ -1,0 +1,34 @@
+// Regression: #1301, scheduler-barrier half. The per-step panic
+// barrier uses the same frame machinery as try/catch, so a panicking
+// actor's step-scoped allocations drain through the same journal
+// before the actor is marked dead. Run with AETHER_NO_INLINE=1 (the
+// driver sets it): main-thread inline mode has no step barrier by
+// design, so the drain only exists on the scheduler-thread path.
+
+import std.string
+
+message Work { n: int }
+
+actor Grinder {
+    state seen = 0
+    receive {
+        Work(n) -> {
+            seen = seen + 1
+            chunk = string.concat("chunk-", string.from_int(n))
+            if string.length(chunk) > 3 {
+                panic("step boom")
+            }
+        }
+    }
+}
+
+main() {
+    g = spawn(Grinder())
+    i = 0
+    while i < 300 {
+        g ! Work { n: i }
+        i = i + 1
+    }
+    wait_for_idle()
+    println("panicking actor drained; survivors kept running")
+}

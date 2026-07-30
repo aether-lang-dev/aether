@@ -1,4 +1,4 @@
-# `Isolated[T]`: move-only actor message payloads (#479)
+# `Isolated[T]`: move-only actor message payloads
 
 Aether's actor model type-checks message shapes, but declared types alone do
 not stop a sender from keeping a reference to a heap-bearing value it just
@@ -27,13 +27,13 @@ main() {
 }
 ```
 
-## The four design questions (from #479)
+## The four design questions
 
 **1. Built-in type, or a stdlib type with a compiler pragma?**
 Built-in. `Isolated[T]` is a compiler-known type (`TYPE_ISOLATED`) whose single
 type parameter is the wrapped `T`. It is nominal (never implicitly convertible
 to or from a bare `T`) and lowers to `T`'s C type, exactly like a `distinct`
-type (#480). A stdlib struct would have forced a runtime box and lost the
+type. A stdlib struct would have forced a runtime box and lost the
 zero-cost property; a built-in keeps the whole feature in the type checker.
 
 **2. How does `isolate(...)` establish that nothing else aliases the value?**
@@ -103,7 +103,7 @@ Working and covered by tests
 - Zero-cost lowering: `Isolated[T]` is `T` in the emitted C; `isolate` and
   `consume` are the identity.
 
-Deliberate follow-ups (each a natural next implementation phase, per #479):
+Deliberate follow-ups (each a natural next implementation phase):
 
 - **Actor mailbox payloads.** Isolating a `message` *constructor*
   (`isolate(Task{...})`) and flowing it through the actor mailbox with

@@ -36,8 +36,8 @@ those workarounds approximate are first-class here:
 
 | What the technique needs | What Aether gives you |
 |--------------------------|------------------------|
-| A type distinct from its base that can't be forged | **`type X = distinct Base`**, a real, zero-cost newtype (#480) |
-| A checked smart constructor | a normal function returning that type, optionally **`where`-guarded** (#525) or returning **`(value, err)`** |
+| A type distinct from its base that can't be forged | **`type X = distinct Base`**, a real, zero-cost newtype |
+| A checked smart constructor | a normal function returning that type, optionally **`where`-guarded** or returning **`(value, err)`** |
 | A wall between "outside data" and "trusted data" | the compiler refuses to cross a `distinct` boundary without an explicit `as` |
 
 So in Aether the slogan reads concretely: **parse a `string`/`int`/`ptr` from the

@@ -187,10 +187,10 @@ pointer walk with a single `seq_retain` at the end.
 
 ## Closure-bearing combinators
 
-These take an Aether closure as the per-element callback (issue #421,
+These take an Aether closure as the per-element callback (the
 multi-sequence iteration primitives). Every one is a single **iterative
 spine walk, O(n) time, O(1) auxiliary stack** (no recursion; that's
-the O(n²)→O(n) point of the issue):
+the O(n²)→O(n) point of the design):
 
 | Combinator | Callback | Returns |
 |---|---|---|

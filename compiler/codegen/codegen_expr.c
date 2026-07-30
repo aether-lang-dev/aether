@@ -5148,8 +5148,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * `if (_heap_<v>)` free is a no-op (ownership now in the
                  * struct). Then yield the built struct. */
                 fprintf(gen->output, ";");
+                /* #1301: the struct literal now owns each moved buffer;
+                 * the moved-from var's defer is disarmed by the flag
+                 * clear, so the unwind journal must drop it too or a
+                 * panic drain would free the struct's field. */
                 for (int m = 0; m < moved_count; m++)
-                    fprintf(gen->output, " _heap_%s = 0;", moved_vars[m]);
+                    fprintf(gen->output,
+                            " _heap_%s = 0; aether_unwind_forget(%s);",
+                            moved_vars[m], moved_vars[m]);
                 fprintf(gen->output, " _ae_slit; })");
             }
             break;

@@ -171,5 +171,5 @@ main() {
 }
 ```
 
-Tracked under "Type inference propagation through `select()`" in
-[`docs/next-steps.md`](next-steps.md).
+Tracked on the issue backlog as type-inference propagation through
+`select()`.

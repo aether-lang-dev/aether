@@ -92,7 +92,7 @@ is not an error, the caller asked if X exists. Only return a non-empty
 error string when something actually went wrong (null receiver, wrong
 type, allocation failure).
 
-### Structured errors (pilot, issue #392)
+### Structured errors (pilot)
 
 A small set of newer wrappers extends the (value, err) shape with a
 **third element**: an integer "kind" that lets callers

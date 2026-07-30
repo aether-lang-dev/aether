@@ -7,7 +7,7 @@ literal (`const PI = 3.14`) that is exactly right. For an arbitrary call
 re-run the call, re-allocating / re-side-effecting. The typechecker
 therefore rejects non-constant const initializers.
 
-Phase-1 (issue #482) extends the set of initializers the compiler can
+Phase-1 extends the set of initializers the compiler can
 evaluate *at compile time*, folding them to a plain literal before
 codegen so they inline correctly and run once, not per use. It is a
 **hard-whitelisted folder, not an interpreter**.
@@ -88,7 +88,7 @@ existing closed-form loop passes, and no evaluation of user functions. Any
 broadening of the whitelist must preserve the capability-gate invariant
 above: only pure, I/O-free value conversions are ever eligible.
 
-## Purity introspection: `__pure(fn)` (#522)
+## Purity introspection: `__pure(fn)`
 
 A separate whole-program analysis assigns every function a **purity** bit, and
 the compile-time builtin `__pure(funcName)` folds to a `true`/`false` constant

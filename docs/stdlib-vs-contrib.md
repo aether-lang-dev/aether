@@ -71,7 +71,7 @@ of the rubric, when both client- and server-side became too large
 for one flat module, the split landed as `std.http.client`,
 `std.http.middleware`, `std.http.server.*` sub-namespaces, all
 under the same stability bar. The HTTP/2 surface (`std.http.server.h2`,
-issue #260) is built on libnghttp2 with `AETHER_HAS_NGHTTP2`
+server-side HTTP/2) is built on libnghttp2 with `AETHER_HAS_NGHTTP2`
 auto-detection, same mechanism `cryptography` uses for OpenSSL
 and `zlib` uses for libz.
 

@@ -7,7 +7,7 @@ This guide covers installation and basic usage of the Aether programming languag
 ### Quick Install (recommended)
 
 ```bash
-git clone https://github.com/nicolasmd87/aether.git
+git clone https://github.com/aether-lang-org/aether.git
 cd aether
 ./install.sh
 ```
@@ -64,7 +64,7 @@ apk add build-base
 
 The easiest way is to download the pre-built release binary, no MSYS2, no manual toolchain required:
 
-1. Download `aether-*-windows-x86_64.zip` from [GitHub Releases](https://github.com/nicolasmd87/aether/releases)
+1. Download `aether-*-windows-x86_64.zip` from [GitHub Releases](https://github.com/aether-lang-org/aether/releases)
 2. Extract to any folder, e.g. `C:\aether`
 3. Add `C:\aether\bin` to your PATH (System Settings → Environment Variables → Path)
 4. **Restart your terminal** (so PATH takes effect)
@@ -221,7 +221,7 @@ safe_div(a: int, b: int) -> int
 - Multiple clauses, freely interleaved, each is checked independently so the panic message names the specific failed predicate.
 - `aetherc --no-contracts` (analog of `-DNDEBUG`) drops every check at codegen for release builds.
 
-See [Function contracts](language-reference.md#function-contracts-requires--ensures-issue-348) for the full semantics, the const-fold elision rules, and v1 limitations.
+See [Function contracts](language-reference.md#function-contracts-requires--ensures) for the full semantics, the const-fold elision rules, and v1 limitations.
 
 ## Interactive REPL
 
@@ -590,7 +590,7 @@ AETHER_LIB_DIR="lib:vendor" ae run main.ae
 ae lib-path --lib "lib:vendor"
 ```
 
-Left-most entry wins on a name collision; each `import` walks the chain independently. See [`examples/packages/lib-path-layering/`](../examples/packages/lib-path-layering/) for a runnable demo and [Module System](module-system-design.md#lib-search-path-413) for the design.
+Left-most entry wins on a name collision; each `import` walks the chain independently. See [`examples/packages/lib-path-layering/`](../examples/packages/lib-path-layering/) for a runnable demo and [Module System](module-system-design.md#lib-search-path) for the design.
 
 ## Next Steps
 

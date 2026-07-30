@@ -892,7 +892,7 @@ biggest gap in Aether's type system as it stands.
 
 ## TL;DR for triage
 
-The full doc above is a survey of Flint, the [flint-lang/flintc](https://github.com/flint-lang/flintc) project on GitHub; not to be confused with the older static-analyzer Flint. Like the Flux (#335) and Fir (#337) comparisons, it's written to let Aether decide deliberately what to absorb.
+The full doc above is a survey of Flint, the [flint-lang/flintc](https://github.com/flint-lang/flintc) project on GitHub; not to be confused with the older static-analyzer Flint. Like the Flux and Fir comparisons, it's written to let Aether decide deliberately what to absorb.
 
 Flint is a Python-ish (indentation + `;`) systems language compiling to LLVM IR with embedded `lld`. Distinguishers vs Aether: first-class optionals (`T?`), variant/tagged-union types, FIP (auto-generated C bindings from headers), built-in test syntax, SIMD primitives, and DCMP (entity composition).
 
@@ -910,14 +910,14 @@ Flint is a Python-ish (indentation + `;`) systems language compiling to LLVM IR 
 
 **The single most attractive landing per the doc:** Optionals + Variants together (§1 + §3). They cooperate (`?(T)` extract returns an optional), share tagged-union codegen, and address the biggest gap in Aether's type system. Optionals is filed as a focused issue; Variants would be a natural follow-up issue once Optionals lands.
 
-## Note on overlap with Flux (#335) and Fir (#337) comparisons
+## Note on overlap with Flux and Fir comparisons
 
 The three comparison docs converge on a few themes:
 
 - **Sum types / variants**: Fir (row-typed open variants), Flint (tagged), Flux (deferred). All three flag the gap; the question is which shape.
 - **Pattern matching exhaustiveness**: Fir and Flint both flag this; Flux doesn't.
 - **String interpolation type coverage**: Flint and Flux both have this; Fir uses backticks. Aether already has interpolation; the question is whether to broaden the auto-formatted type set.
-- **Bit-precise types vs. SIMD**: Flux pulls hard on `data{N}` (#336); Flint pulls on `i32x4`/`f32x8`. Both target hot-path / binary-format code but at different abstraction levels.
+- **Bit-precise types vs. SIMD**: Flux pulls hard on `data{N}`; Flint pulls on `i32x4`/`f32x8`. Both target hot-path / binary-format code but at different abstraction levels.
 
 The biggest divergence: **Flint's FIP** has no analogue in the other comparisons. Auto-generating Aether `extern` decls + matching `data` types from a C header would replace a category of friction (split-accessor TLS pattern, length-aware `_get_*_length` accessors, hand-rolled bindings for vendored C libs). That's potentially worth its own focused issue separate from this umbrella.
 
@@ -934,5 +934,5 @@ The biggest divergence: **Flint's FIP** has no analogue in the other comparisons
 - Variants (§3): not filed, flag for separate issue if/when Optionals lands (they share codegen)
 - FIP (§2): not filed, flag for separate issue if you want it pursued separately from this umbrella
 - Source project: Flint's repo: [flint-lang/flintc](https://github.com/flint-lang/flintc).
-- Sister surveys: #335 (Flux), #337 (Fir)
-- Concrete `extern` boilerplate FIP would target: any of the `*_raw` + `*_get_*` + `*_get_*_length` + `*_release_*` quartets in std/* (e.g. `fs_try_read_binary` family pre-#271)
+- Sister surveys: Flux, Fir
+- Concrete `extern` boilerplate FIP would target: any of the `*_raw` + `*_get_*` + `*_get_*_length` + `*_release_*` quartets in std/* (e.g. `fs_try_read_binary` family before the tuple unification)

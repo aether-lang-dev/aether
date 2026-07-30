@@ -1,6 +1,6 @@
 # Multi-Value Return Type Inference
 
-> Post-mortem of bugs fixed in commit `bc42939` and PR #249 (commit
+> Post-mortem of bugs fixed in commit `bc42939` and its follow-up (commit
 > `937b029`). The per-bug **Cause** sections describe pre-fix code that
 > no longer exists; the **Fix** sections describe what landed. Read the
 > "Putting it together" invariant and the litmus test as the durable

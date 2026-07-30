@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A caught panic leaked every allocation made since the `try`** (#1301).
+  `longjmp` skipped the deferred scope-exit frees, so guarded blocks (and
+  every scheduler-wrapped actor step) leaked whatever they had allocated
+  before panicking. A thread-local allocation journal now mirrors the armed
+  deferred frees one-for-one: generated code journals a tracked local when
+  its flag is armed, the single free choke point forgets on every normal
+  free, ownership handoffs (return, container/actor/message adoption)
+  forget at the transfer, and `aether_panic()` drains the innermost frame's
+  still-live entries before the jump, freeing exactly the frees the jump
+  would have skipped. Escaped values are never journaled, so the drain is a
+  leak-fix by construction, never a use-after-free. Nested `try` drains
+  stay frame-local; a panicking actor's step-scoped allocations are
+  reclaimed before the actor is marked dead; the no-panic hot path shows no
+  measurable cost on the ping-pong benchmark. Verified 405 leaks to 0 on
+  the issue's alloc-then-panic matrix. Regressions:
+  `tests/regression/test_panic_unwind_cleanup.ae`,
+  `tests/integration/panic_unwind_no_leak/` (50000 caught panics, RSS
+  flat), `tests/integration/panic_actor_step_drain/`.
+
+### Added
+
+- **`fs.mounts()` and `fs.block_info(dev)`** (#1118). Mount enumeration
+  with per-entry source/point/fstype/options accessors: Linux
+  `/proc/self/mountinfo` (octal escapes decoded), macOS and the BSDs
+  `getmntinfo(3)`, Windows drive letters. Block-device size/removable/
+  transport via the Linux sysfs backend (partitions resolve the removable
+  flag through their parent disk); other platforms report unsupported
+  through the error slot rather than fabricating an answer. Regression:
+  `tests/regression/test_std_fs_mounts.ae`.
+
 ## [0.463.0]
 
 ### Added

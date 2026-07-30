@@ -133,6 +133,9 @@ void aether_set_on_actor_death(AetherDeathHook fn);
 // the hook).
 void aether_fire_death_hook(int actor_id, const char* reason);
 
+// Allocation journal for panic-unwind heap cleanup: see aether_unwind.h.
+#include "aether_unwind.h"
+
 // TLS: 1 while executing inside a scheduler-wrapped step, 0 otherwise.
 // Signal handlers check this before deciding whether to recover or let
 // the signal propagate with SIG_DFL.

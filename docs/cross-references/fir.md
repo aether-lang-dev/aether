@@ -800,7 +800,7 @@ Everything else is a "yes if you have the bandwidth" rather than a
 
 ## TL;DR for triage
 
-The full doc above is a survey of Fir, an indentation-sensitive, ML-family typed functional language with row-typed records/variants and an effect system. Like the Flux comparison (issue #335) it's written to let Aether decide deliberately what to absorb.
+The full doc above is a survey of Fir, an indentation-sensitive, ML-family typed functional language with row-typed records/variants and an effect system. Like the Flux comparison it's written to let Aether decide deliberately what to absorb.
 
 **The doc's own recommended adoption sequence (Section 5):**
 
@@ -818,14 +818,14 @@ The full doc above is a survey of Fir, an indentation-sensitive, ML-family typed
 
 **The single thing the doc pushes hardest:** open variant errors (§3.1). "It composes perfectly with Aether's existing capability discipline (compile-time-known sets of things you can do/throw/touch), addresses a real ergonomics ceiling in the current (value, err) convention, and is the entry point that makes the rest of the row machinery cheap."
 
-## Note on overlap with Flux comparison (#335)
+## Note on overlap with Flux comparison
 
 Several items overlap with the Flux survey:
 - **Pattern matching exhaustiveness**: Fir flags this stronger than Flux did.
 - **Sum types / variants**: Both languages have them; Fir's row-typed variants are the more ambitious form.
 - **Stringify / interp**: Fir has it via backticks; Flux has `$ident`; Aether already has interpolation.
 
-The biggest divergence between the two surveys: **Flux pulled hard on bit-precise types (`data{N}`, `from`-cast, issue #336)**. Fir pulls hard on **type-system ergonomics (rows, traits, deriving)**. They're complementary rather than competing recommendations, different parts of the language.
+The biggest divergence between the two surveys: **Flux pulled hard on bit-precise types (`data{N}`, `from`-cast)**. Fir pulls hard on **type-system ergonomics (rows, traits, deriving)**. They're complementary rather than competing recommendations, different parts of the language.
 
 ## What this issue is NOT asking
 
@@ -838,4 +838,4 @@ The biggest divergence between the two surveys: **Flux pulled hard on bit-precis
 - `#[derive(...)]` (§3.5): filed as separate issue (small, low-cost, high-leverage)
 - Open variant errors (§3.1): noted as the doc's headline recommendation; flag for separate issue if/when you greenlight it (it's bigger work and depends on anonymous records §3.3 landing first)
 - Source project: Fir, https://github.com/fir-lang/fir.
-- Sister survey: #335 (Flux comparison, complementary recommendations)
+- Sister survey: the Flux comparison (complementary recommendations)
