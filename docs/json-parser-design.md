@@ -334,7 +334,7 @@ otherwise. The fast string loop calls `p_advance` in every iteration
 (not just on the escape branch), which costs a little throughput but
 keeps error messages like "expected `:` at 3:17" correct.
 
-### Structured-error pilot (issue #392)
+### Structured-error pilot
 
 The base parser surfaces errors via `err_set` (human string) plus the
 `g_json_err_buf` thread-local. The structured-error pilot adds a

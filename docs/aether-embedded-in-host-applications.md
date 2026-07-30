@@ -7,7 +7,7 @@ applications (Java, Go, etc.).
 > **Status (2026-04-18):** the **foundation is built and v2 is shipped**.
 > `aetherc --emit=lib` produces a `.so`/`.dylib` with stable C-ABI entry
 > points (see **[`emit-lib.md`](emit-lib.md)**), and the **v2 embedded-namespace
-> layer** (PR #172) generates idiomatic per-language SDKs (Python ctypes,
+> layer** generates idiomatic per-language SDKs (Python ctypes,
 > Java Panama, Ruby Fiddle) on top, see
 > **[`embedded-namespaces-and-host-bindings.md`](embedded-namespaces-and-host-bindings.md)**
 > for the typed-SDK story.

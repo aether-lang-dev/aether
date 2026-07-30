@@ -53,7 +53,7 @@ for half their callers.
 
 ### The two we're building
 
-**Supervision trees (#2)** solve the "who's responsible when a child dies"
+**Supervision trees** solve the "who's responsible when a child dies"
 problem. They're a library-level pattern on top of primitives the runtime
 *doesn't yet expose but easily could*: actor failure notification.
 Parents register interest in a child; if the child dies, the parent gets
@@ -61,7 +61,7 @@ a `Down { ref, reason }` message. Everything else, restart strategies,
 escalation, graceful shutdown, is ordinary actor code on top of that
 one primitive.
 
-**Capability-scoped concurrency (#6)** solves the "who can reach whom"
+**Capability-scoped concurrency** solves the "who can reach whom"
 problem. Aether already has `hide` and `seal except` for compile-time
 capability denial on *variable* references. Extending that enforcement
 to *actor* references means a sealed block cannot `spawn` a type it
@@ -183,15 +183,15 @@ crypto-miner actor because it cannot name one.
 
 ## What's not in scope
 
-- **Fork-join / `parallel_for` (#5)**, useful for data parallelism,
+- **Fork-join / `parallel_for`**, useful for data parallelism,
   does not solve the lifecycle or reachability problem. Can be added
   later as a narrow stdlib feature layered on the existing
   work-stealing scheduler. Not part of this design.
-- **Nurseries (#1)**, would require a second concurrency primitive
+- **Nurseries**, would require a second concurrency primitive
   (lightweight tasks distinct from actors). High cost for small
   marginal benefit given the actor model already exists. Revisit only
   if users ask for it after Phases 1 and 2 ship.
-- **Channels (#4)**, actors already cover this. No plan.
+- **Channels**, actors already cover this. No plan.
 
 ## Order of work
 

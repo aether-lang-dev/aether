@@ -63,7 +63,7 @@ This is verified, not just asserted: formatting every program in `examples/` and
 `tests/` produces byte-identical generated C (modulo `#line` directives), and
 formatting is idempotent (`fmt(fmt(x)) == fmt(x)`) across the whole corpus.
 
-Since #1302 both properties are enforced in CI, not just described:
+Both properties are enforced in CI, not just described:
 `tests/integration/fmt_gate/test_fmt_gate.sh` fails the build if any
 checked-in `.ae` file under `std/`, `examples/`, or `tests/` is not
 canonically formatted (`ae fmt --check`), if formatting stops being

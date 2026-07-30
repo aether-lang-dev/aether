@@ -7,7 +7,7 @@ writes JNI, never writes SWIG `.i` files, never registers callback
 function pointers by hand.
 
 > **Status (2026-04-18):** **shipped.** Landed on `feature/embedded-namespaces`
-> (PR #172). Worked example at `examples/embedded-java/trading/`,
+>. Worked example at `examples/embedded-java/trading/`,
 > integration tests at `tests/integration/namespace_{python,ruby,java}/` and
 > `tests/integration/embedded_java_trading_e2e/`.
 >

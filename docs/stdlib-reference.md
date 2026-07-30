@@ -114,7 +114,7 @@ Plain string literals pass through unchanged, `string_retain` is a no-op on valu
 - `string_list_sort_lex(list)` - Stable ascending lexicographic (byte-wise) sort, in place
 - `string_list_sort(list, cmp)` - Stable in-place sort by a comparator closure `|a: string, b: string| { ... }` returning negative / 0 / positive (like `strcmp`)
 
-Both sorts reorder the backing slots only, no element is copied or freed, so they sidestep the get/set aliasing trap of a hand-rolled swap (`string_list_get` returns the slot's internal pointer; a naive adjacent swap would free a slot another borrowed pointer still aliases). Issue #967.
+Both sorts reorder the backing slots only, no element is copied or freed, so they sidestep the get/set aliasing trap of a hand-rolled swap (`string_list_get` returns the slot's internal pointer; a naive adjacent swap would free a slot another borrowed pointer still aliases).
 
 ```aether
 names = string_list_new()
@@ -129,7 +129,7 @@ string_list_sort(names, |a: string, b: string| {
 })
 ```
 
-For a similar `string_map`, file an issue, same pattern would apply. Issue #274.
+For a similar `string_map`, file an issue, same pattern would apply.
 
 ### Map (`std.map`)
 
@@ -391,7 +391,7 @@ out = bytes.finish(b, 6)                  // "ABABAB"
 - `bytes.finish(b, length)` → `string` - Hand off to refcounted AetherString; buffer is consumed
 - `bytes.free(b)` - Discard without finishing (idempotent on null)
 
-**Streaming binary reads without a per-block copy (#1102).** A fixed-size block reader (walking 512-byte sectors of a device, say) can read straight into a reused `std.bytes` buffer instead of allocating a fresh string per block: `fs.pread_into(file, buf, len, offset)` reads up to `len` bytes at `offset` directly into `buf` (clamped to its capacity), sets `buf`'s length to the count read, and returns `(n, err)` with the same EOF (`n == 0`) / short-read (`0 < n < len`) / I/O-error (`err != ""`) distinction as `fs.pread`. The packed integers are then read in place with `bytes.get_le64` etc., or walked with a cursor. `std.bytes.cursor` offers both byte orders, `read_be_u16/32/64` and `read_le_u16/32/64` (each returns `-1` and leaves the cursor unchanged at end-of-buffer), so little-endian on-disk formats stream as cleanly as big-endian wire formats.
+**Streaming binary reads without a per-block copy.** A fixed-size block reader (walking 512-byte sectors of a device, say) can read straight into a reused `std.bytes` buffer instead of allocating a fresh string per block: `fs.pread_into(file, buf, len, offset)` reads up to `len` bytes at `offset` directly into `buf` (clamped to its capacity), sets `buf`'s length to the count read, and returns `(n, err)` with the same EOF (`n == 0`) / short-read (`0 < n < len`) / I/O-error (`err != ""`) distinction as `fs.pread`. The packed integers are then read in place with `bytes.get_le64` etc., or walked with a cursor. `std.bytes.cursor` offers both byte orders, `read_be_u16/32/64` and `read_le_u16/32/64` (each returns `-1` and leaves the cursor unchanged at end-of-buffer), so little-endian on-disk formats stream as cleanly as big-endian wire formats.
 
 The build-then-walk pattern needed by binary-codec encoders (svndiff and similar) is what `bytes.get` / `bytes.{set,get}_le32` are for, accumulate packed-int ops into the same buffer via `set_le32` at known offsets, then walk and read each back at finish time:
 
@@ -538,7 +538,7 @@ main() {
 - `string.replace(str, old, new)` - Replace the first occurrence of `old` with `new`. Returns a new managed string; `str` is untouched. Empty `old` returns a copy of `str` unchanged (no infinite empty-match expansion). Binary-safe.
 - `string.replace_all(str, old, new)` - Replace every non-overlapping occurrence of `old` with `new`, scanned left to right. `new` may be empty (deletion) or longer than `old`. Same lifetimes and empty-`old` guard as `replace`. Single exact-size allocation regardless of match count.
 - `string.substring(str, start, end)` - Extract substring
-- `string.substring_n(str, str_len_bytes, start, end)` - Length-aware sibling. Caller threads the source length through; `str_len(s)` is not consulted internally. Reach for this when `str` arrived as a `string`-typed parameter at a function boundary AND the content may contain embedded NULs, see [c-interop.md § Passing string values into C externs (auto-unwrap)](c-interop.md#passing-string-values-into-c-externs-auto-unwrap). Without it, the auto-unwrap (#297) strips the AetherString header at the call site, `str_len` falls through to `strlen`, and binary content gets truncated at the first NUL.
+- `string.substring_n(str, str_len_bytes, start, end)` - Length-aware sibling. Caller threads the source length through; `str_len(s)` is not consulted internally. Reach for this when `str` arrived as a `string`-typed parameter at a function boundary AND the content may contain embedded NULs, see [c-interop.md § Passing string values into C externs (auto-unwrap)](c-interop.md#passing-string-values-into-c-externs-auto-unwrap). Without it, the auto-unwrap strips the AetherString header at the call site, `str_len` falls through to `strlen`, and binary content gets truncated at the first NUL.
 - `string.length_n(str, known_length)` - Identity helper that documents intent. In code that receives a `string` parameter plus an explicit length, the explicit length IS the truth, don't consult the AetherString header. `n = string.length_n(s, n)` reads as "yes I know my length" instead of looking like a forgotten `string.length(s)` that would have truncated at NUL.
 - `string.to_upper(str)` - Convert to uppercase (returns new string)
 - `string.to_lower(str)` - Convert to lowercase (returns new string)
@@ -614,7 +614,7 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
 
-### String ownership and the heap-string tracker (issue #405)
+### String ownership and the heap-string tracker
 
 Strings reassigned to a variable are reclaimed automatically by a compiler-emitted wrapper, you do **not** write `defer string.free(s)` for in-Aether assignments. For every string variable in a function, the compiler emits a companion `_heap_<name>` tracker at function-entry scope that flips between 0 (current value is a literal) and 1 (current value is heap-allocated) as you reassign. On every reassignment, the wrapper `if (_heap_<name>) free(<old>)` decides whether to release the previous buffer.
 
@@ -635,7 +635,7 @@ while i < 1000000 {
 }
 ```
 
-A function returning a string literal, or a function whose returns mix heap and literal sources, is NOT recognised, and the wrapper won't try to free its result. This is the structural escape analysis added to close issue #405.
+A function returning a string literal, or a function whose returns mix heap and literal sources, is NOT recognised, and the wrapper won't try to free its result. This is the heap-string tracker's structural escape analysis.
 
 The function-entry hoist closes the cross-block visibility gap that previously kept the simpler `node_type == TYPE_STRING` recognition unsafe: the tracker is now visible at every nesting depth, so a variable first-assigned in an if-then and reassigned in an else-if (or in a deeply nested loop) sees the same `_heap_<name>` cell and follows the same free/no-free rules.
 
@@ -729,7 +729,7 @@ main() {
 - `dir.list(path)` → `(ptr, string)` - List contents (caller must `dir.list_free`)
 - `dir.list_count(list)` → `int` - Number of entries
 - `dir.list_get(list, index)` → `string` - Entry name at `index`
-- `dir.list_kind(list, index)` → `int` - Entry's file kind from readdir's `d_type`, avoiding a `stat(2)` per entry: 1 = file, 2 = directory, 3 = symlink (target not followed), 4 = other; 0 = unknown (the filesystem didn't report a type, stat that entry to resolve it). Same encoding as `file_stat`'s kind. Issue #966.
+- `dir.list_kind(list, index)` → `int` - Entry's file kind from readdir's `d_type`, avoiding a `stat(2)` per entry: 1 = file, 2 = directory, 3 = symlink (target not followed), 4 = other; 0 = unknown (the filesystem didn't report a type, stat that entry to resolve it). Same encoding as `file_stat`'s kind.
 - `dir.exists(path)` - 1 if a **directory** is at `path`, 0 otherwise. Returns 0 for regular files, even if they exist, see `fs.exists` for the path-agnostic check.
 - `dir.list_free(list)` - Free directory listing
 
@@ -737,7 +737,7 @@ Raw externs: `dir_create_raw`, `dir_delete_raw`, `dir_list_raw`, `dir_list_count
 
 ### Recursive walk and change notification (`fs.walk`, `fs.watch_*`)
 
-The building blocks beyond one-level listing (issue #977): visit a whole tree, and learn when a directory changes underneath you.
+The building blocks beyond one-level listing: visit a whole tree, and learn when a directory changes underneath you.
 
 ```aether
 import std.fs
@@ -759,7 +759,7 @@ fs.watch_close(w)
 ```
 
 **Functions:**
-- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type` (#966), one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is borrowed, copy it to keep it. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
+- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type`, one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is borrowed, copy it to keep it. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
 - `fs.watch_open(path)` → `(ptr, string)` - Watch one directory (or file), non-recursive, over the platform primitive: kqueue `EVFILT_VNODE` (macOS/BSD), inotify (Linux), `FindFirstChangeNotification` (Windows). The handle is single-threaded.
 - `fs.watch_wait(watch, timeout_ms)` → `int` - Block up to `timeout_ms` (negative = forever): 1 = something changed (create/delete/modify/rename inside the watched directory), 0 = timeout, -1 = error. Changes made **between** `watch_open` and `watch_wait` are queued, not lost, and a burst of changes reports once (pending events are drained).
 - `fs.watch_close(watch)` - Release the handle. Safe on null.
@@ -828,7 +828,7 @@ main() {
 - `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed.
 - `fs.read_binary(path)` → `(content, length, err)` - Length-aware read preserving embedded NULs.
 
-### Structured-error pilot (issue #392)
+### Structured-error pilot
 
 The four wrappers below return a three-element tuple `(value, kind: int, message: string)` instead of the usual `(value, err)` shape. `kind` is one of the `KIND_*` constants exported from `std.fs`; switch on it to discriminate failure modes programmatically without parsing English. `kind == fs.KIND_OK` (the integer `0`) means success; the message stays empty.
 
@@ -881,7 +881,7 @@ if kind == fs.KIND_OK {
 
 ## In-process script gateway (`std.http.script_gateway`)
 
-CGI-style ergonomics, one `.ae` script file per route, without paying the per-request fork/exec cost. The script is pre-compiled with `aetherc --emit=lib --with=net script.ae -o script.so` to a shared library; the host server `dlopen()`s it once at mount time and dispatches matched requests via a direct indirect call. Empirically ~50× faster than the equivalent subprocess-spawn dispatch (issue #384).
+CGI-style ergonomics, one `.ae` script file per route, without paying the per-request fork/exec cost. The script is pre-compiled with `aetherc --emit=lib --with=net script.ae -o script.so` to a shared library; the host server `dlopen()`s it once at mount time and dispatches matched requests via a direct indirect call. Empirically ~50× faster than the equivalent subprocess-spawn dispatch.
 
 ### Script shape
 
@@ -1024,7 +1024,7 @@ main() {
 
 **Parsing / Serialization:**
 - `json.parse(json_str)` → `(ptr, string)` - Parse JSON, returns `(value, err)` tuple
-- `json.parse_strict(json_str)` → `(ptr, int, string)` - Structured-error variant of `parse` (issue #392): returns `(value, KIND_OK, "")` on success or `(null, KIND_*, "<reason> at <line>:<col>")` on failure. `kind` discriminates between syntax errors (`KIND_PARSE_ERROR`), out-of-memory (`KIND_OUT_OF_MEMORY`), and invalid input (`KIND_INVALID_INPUT`) without parsing the human message. KIND values match `std.fs`'s pilot so callers can mix the two surfaces in a single switch.
+- `json.parse_strict(json_str)` → `(ptr, int, string)` - Structured-error variant of `parse`: returns `(value, KIND_OK, "")` on success or `(null, KIND_*, "<reason> at <line>:<col>")` on failure. `kind` discriminates between syntax errors (`KIND_PARSE_ERROR`), out-of-memory (`KIND_OUT_OF_MEMORY`), and invalid input (`KIND_INVALID_INPUT`) without parsing the human message. KIND values match `std.fs`'s pilot so callers can mix the two surfaces in a single switch.
 - `json.last_error_kind()` / `last_error_line()` / `last_error_col()` → `int` - Programmatic accessors for the most recent parse failure on this thread. Read AFTER a `parse` / `parse_strict` returned a failure; undefined after a successful parse. Line/column are 1-based and match the values embedded in the error message.
 - `json.stringify(value)` → `(string, string)` - Serialize to JSON string; `(output, err)` tuple (`("", "stringify failed")` on failure)
 - `json.free(value)` - Free a JSON value tree
@@ -1060,7 +1060,7 @@ main() {
 }
 ```
 
-The `parse_strict` shape is the std.fs pilot from issue #392 extended to a second module, same tuple, same KIND_* convention.
+The `parse_strict` shape is the std.fs structured-error pilot extended to a second module, same tuple, same KIND_* convention.
 
 **Type Checking:**
 - `json.type(value)` - Get type constant (0-5)
@@ -1091,7 +1091,7 @@ The `parse_strict` shape is the std.fs pilot from issue #392 extended to a secon
 - `json.create_null()`, `json.create_bool(value)`, `json.create_number(value)`
 - `json.create_string(value)`, `json.create_array()`, `json.create_object()`
 
-**Terse builder / encoder** (issue #628), thin aliases over the above for
+**Terse builder / encoder**, thin aliases over the above for
 assembling a value tree and serializing it without hand-concatenating
 strings (escaping is handled by the encoder):
 - `json.obj()` / `json.arr()` new empty object / array
@@ -1148,7 +1148,7 @@ This isn't a hidden roadmap, these are absent because no downstream user has dri
 
 ## XML (`std.xml`)
 
-A deliberately small XML surface (issue #627): a **pull/SAX reader** and an
+A deliberately small XML surface: a **pull/SAX reader** and an
 **escaping builder**. Enough for S3 / SOAP-ish / config XML. **Not** in
 scope: XSD, XPath, namespaces, DTD validation, or custom entity
 definitions, the five predefined entities (`&amp; &lt; &gt; &quot;
@@ -1398,7 +1398,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_host`.
 
 **Static file serving:**
-- `http.serve_file(res, filepath)` - Serve a single file. Issue #383 zero-copy: under HTTP/1.1 cleartext on Linux/macOS, takes the `sendfile(2)` fast path (zero heap allocation for the body); falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. `Content-Type` resolved via `http.mime_type(filepath)`.
+- `http.serve_file(res, filepath)` - Serve a single file. Zero-copy: under HTTP/1.1 cleartext on Linux/macOS, takes the `sendfile(2)` fast path (zero heap allocation for the body); falls back to a buffered read for TLS / HTTP/2 / Range requests / Windows. `Content-Type` resolved via `http.mime_type(filepath)`.
 - `http.serve_static(req, res, base_dir)` - Wildcard-route static-file dispatcher. Path traversal (`..`, `%2e`, etc.) is rejected with 403; missing files return 404.
 
 **Server Routing:**
@@ -1421,10 +1421,10 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_h
 **Request Accessors:**
 - `http.request_method(req)` → `string` - HTTP method (`GET`, `POST`, `PUT`, …); empty if `req` is null.
 - `http.request_path(req)` → `string` - URL path (no query string); empty if `req` is null.
-- `http.request_body(req)` → `string` - Request body as a C-string. **Truncates at the first embedded NUL** when read via `string.length(...)`; pair with `http.request_body_length` for binary-safe access. On a large (streaming) request the first call materializes the body, it drains the remaining wire bytes into one buffer, preserving the v1 whole-body contract at the O(Content-Length) cost the caller asked for. Don't mix it with `request_body_read` on the same request (the consumed prefix is gone; the mixed call returns `""`). Issue #644.
+- `http.request_body(req)` → `string` - Request body as a C-string. **Truncates at the first embedded NUL** when read via `string.length(...)`; pair with `http.request_body_length` for binary-safe access. On a large (streaming) request the first call materializes the body, it drains the remaining wire bytes into one buffer, preserving the v1 whole-body contract at the O(Content-Length) cost the caller asked for. Don't mix it with `request_body_read` on the same request (the consumed prefix is gone; the mixed call returns `""`).
 - `http.request_body_length(req)` → `int` - Byte count of the request body. Returns 0 if `req` is null or has no body. Reach for this whenever the body may contain NUL bytes (svn PUT, image uploads, gzipped JSON), the length-aware companion to `http.request_body`. On a streaming request this is the declared `Content-Length` until the body is materialized, then the actual received count.
-- `http.request_body_read(req, offset, max)` → `(bytes, n, err)` - Chunked body read. Bodies ≤ 16 KiB are pre-buffered (random-access offsets); larger bodies are **streamed**, the handler is dispatched at headers-complete and each read pulls the next window straight off the socket (sequential offsets only), so peak server RAM per upload is one window, not the object. Backpressure is TCP flow control itself: the server doesn't `recv` until the handler asks. Issues #626/#644.
-- `http.request_body_complete(req)` → `int` - 1 once every declared body byte has arrived (streaming: pulled off the wire; buffered: always 1). The natural chunked-loop terminator. `Transfer-Encoding: chunked` request bodies remain unsupported (no `Content-Length` → length 0, no body), the deliberate v1 semantics decision of #644.
+- `http.request_body_read(req, offset, max)` → `(bytes, n, err)` - Chunked body read. Bodies ≤ 16 KiB are pre-buffered (random-access offsets); larger bodies are **streamed**, the handler is dispatched at headers-complete and each read pulls the next window straight off the socket (sequential offsets only), so peak server RAM per upload is one window, not the object. Backpressure is TCP flow control itself: the server doesn't `recv` until the handler asks.
+- `http.request_body_complete(req)` → `int` - 1 once every declared body byte has arrived (streaming: pulled off the wire; buffered: always 1). The natural chunked-loop terminator. `Transfer-Encoding: chunked` request bodies remain unsupported (no `Content-Length` → length 0, no body), a deliberate v1 semantics decision.
 - `http.request_query(req)` → `string` - Raw query string; empty if absent.
 - `http.get_header(req, name)` - Get request header
 - `http.get_query_param(req, name)` - Get query parameter
@@ -1595,7 +1595,7 @@ main() {
 - `client.set_timeout(req, timeout)` → `string` - `Duration` per-request timeout (`0ns` = block forever)
 - `client.set_follow_redirects(req, max_hops)` → `string` - Follow up to `max_hops` redirects (`0` = don't follow, the default)
 - `client.send_request(req)` → `(ptr, string)` - Fire the request; returns `(resp, "")` on transport success or `(null, err)` on failure
-- `client.set_stream(req, on)` → `string` - Enable streaming of the response body for this request (#1004); `send_stream` is the convenience form
+- `client.set_stream(req, on)` → `string` - Enable streaming of the response body for this request; `send_stream` is the convenience form
 - `client.send_stream(req)` → `(ptr, string)` - Like `send_request`, but the response body is streamed rather than buffered (see below)
 - `client.request_free(req)` - Free the request handle
 
@@ -1625,7 +1625,7 @@ in. These knobs relax that per request; precedence for proxy is
 - `client.post_json(url, value)` → `(ptr, string)` - Marshal a JSON value (`std.json`), set `Content-Type` + `Accept` to `application/json`, send
 - `client.response_body_json(resp)` → `(ptr, string)` - Wrap `response_body` + `json.parse`; returns `(value, "")` on success or `(null, parse_error)` on malformed JSON
 
-**Streaming large response bodies (#1004):** `send_request` materialises the whole body into one `AetherString`, fine for JSON APIs, but for a multi-megabyte download that is O(Content-Length) memory. `send_stream` instead reads only the header block, keeps the connection open, and hands back a response you drain window-by-window with `response_read`, so peak memory is one window regardless of body size. `Content-Length` and `Transfer-Encoding: chunked` bodies are both decoded transparently (you always see payload bytes, never chunk framing). Redirects are still followed if enabled; only the final hop streams. Always `response_free` the response when done (it closes the connection), even if you stop reading early.
+**Streaming large response bodies:** `send_request` materialises the whole body into one `AetherString`, fine for JSON APIs, but for a multi-megabyte download that is O(Content-Length) memory. `send_stream` instead reads only the header block, keeps the connection open, and hands back a response you drain window-by-window with `response_read`, so peak memory is one window regardless of body size. `Content-Length` and `Transfer-Encoding: chunked` bodies are both decoded transparently (you always see payload bytes, never chunk framing). Redirects are still followed if enabled; only the final hop streams. Always `response_free` the response when done (it closes the connection), even if you stop reading early.
 
 ```aether
 import std.http
@@ -1655,7 +1655,7 @@ main() {
 }
 ```
 
-Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, so 404/403/401 are distinguishable rather than collapsed to `"http error"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging (tracked by #233). `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
+Design choices: `method` is an arbitrary string, not a `{GET,POST,PUT,DELETE}` enum, so WebDAV / DeltaV / PATCH / project-specific verbs ride through without a stdlib release (the native client sends the method verbatim on the request line). A non-2xx status is not an error: `send_request` returns the response cleanly and the caller drives status interpretation, so 404/403/401 are distinguishable rather than collapsed to `"http error"`. The builder is named `send_request` rather than `send` because `send` is reserved for actor messaging. `tests/integration/test_http_client_v2.ae` is the runnable example for the buffered API; `tests/integration/http_client_stream/` and `http_client_stream_chunked/` cover streaming.
 
 ### HTTP record/replay (VCR), moved out of the stdlib
 
@@ -1773,7 +1773,7 @@ arm.
   fd before the `IoReady` fires, behavior depends on the backend
   (epoll reports EPOLLHUP; kqueue silently drops the one-shot).
 
-**Performance:** PR #140 (C-level benchmark) demonstrated the raw
+**Performance:** a C-level benchmark demonstrated the raw
 reactor pattern delivering substantially higher HTTP throughput than
 the blocking keep-alive worker it replaced. `await_io` is the
 Aether-language surface over the same runtime machinery, rerun the

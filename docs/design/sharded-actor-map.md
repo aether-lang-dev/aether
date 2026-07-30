@@ -10,7 +10,7 @@ readers and writers without collapsing onto a single core.
 > `hash(key) % N`, and operations on different keys land on different
 > mailboxes. Contention drops roughly `N×`.
 
-Issue [#839](https://github.com/aether-lang-org/aether/issues/839).
+[Design discussion on the issue tracker](https://github.com/aether-lang-org/aether/issues/839).
 
 See the runnable example at
 [`examples/actors/sharded-map.ae`](../../examples/actors/sharded-map.ae) and
@@ -170,7 +170,7 @@ If your access pattern is **read-mostly and hot-key-skewed** (a config
 blob, a routing table, feature flags hammered on every request),
 **sharding is the wrong tool**, point those reads at the **copy-on-write
 snapshot cell** instead: [`std.snapshot` / `docs/design/snapshot-cell.md`](snapshot-cell.md)
-(issue [#840](https://github.com/aether-lang-org/aether/issues/840)). There a
+(see the [snapshot-cell design](snapshot-cell.md)). There a
 read is a single lock-free atomic load, so a thousand readers of the same
 hot key never contend at all. Sharding is for **write-heavy, well-spread**
 key spaces; the snapshot cell is for **read-heavy** ones.

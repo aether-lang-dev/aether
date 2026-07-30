@@ -751,7 +751,7 @@ choices are coherent; Aether's has shipping users.
 
 The full doc above compares Aether against [GoogleCloudPlatform/Aether](https://github.com/GoogleCloudPlatform/Aether) ("GA" or "GCP-Aether" in the doc), a stalled exploration repo from Google that happens to share this project's name. GA appeared later than Aether. License Apache-2.0, not a supported Google product, design-doc-heavy with much of the headline functionality unimplemented per GA's own `unimplemented_features.md`.
 
-This survey is the fifth in a series (sister umbrellas: #335 Flux, #337 Fir, #339 Flint, #341 Zym). It differs from the others in shape: GCP-Aether's design center is **"LLMs as authors"** vs Aether's **"humans with LLM assist"**. That asymmetry means most of GA's distinctive features (extreme S-expression syntax, intent verification, generation hints, pattern templates, partial-compilation envelopes) don't translate. The pieces worth lifting are the ones useful **regardless of authorship model**, contracts, stack traces, error codes, attributes.
+This survey is the fifth in a series (sister umbrellas: Flux, Fir, Flint, Zym). It differs from the others in shape: GCP-Aether's design center is **"LLMs as authors"** vs Aether's **"humans with LLM assist"**. That asymmetry means most of GA's distinctive features (extreme S-expression syntax, intent verification, generation hints, pattern templates, partial-compilation envelopes) don't translate. The pieces worth lifting are the ones useful **regardless of authorship model**, contracts, stack traces, error codes, attributes.
 
 **Tone note**: the comparison doc is deliberately kind, GCP-Aether "explored an interesting design corner that Aether has largely ignored." Should Aether's maintainers ever approach GA's maintainers about the name collision (Aether came first, GA is stalled), the framing should stay collaborative rather than competitive.
 
@@ -789,13 +789,13 @@ This survey is the fifth in a series (sister umbrellas: #335 Flux, #337 Fir, #33
 
 The five comparison docs each emphasise a different design axis:
 
-- **Flux** (#335 / #336): bit-precise types (`data{N}`), binary protocol parsing
-- **Fir** (#337 / #338): row-typed errors, `#[derive(...)]`, anonymous records, type-system ergonomics
-- **Flint** (#339 / #340): optionals, variants, FIP C-bindings, runtime-shape ergonomics
-- **Zym** (#341): nested-VM sandboxing, embedder-shape extensions
+- **Flux**: bit-precise types (`data{N}`), binary protocol parsing
+- **Fir**: row-typed errors, `#[derive(...)]`, anonymous records, type-system ergonomics
+- **Flint**: optionals, variants, FIP C-bindings, runtime-shape ergonomics
+- **Zym**: nested-VM sandboxing, embedder-shape extensions
 - **GCP-Aether** (this survey): contracts, stack traces, attributes, debuggability + LLM-target metadata
 
-The closest overlap is with the Pollen `--emit=lib` issues (#343 resource caps, #344 caller info), GCP-Aether's runtime-budget proposal (§2.5) is a similar shape to Pollen's resource caps but at the function-attribute layer rather than the host-side setter. Worth considering them together if/when the runtime accounting infrastructure lands.
+The closest overlap is with the Pollen `--emit=lib` issues (resource caps, caller info), GCP-Aether's runtime-budget proposal (§2.5) is a similar shape to Pollen's resource caps but at the function-attribute layer rather than the host-side setter. Worth considering them together if/when the runtime accounting infrastructure lands.
 
 ## What this survey is NOT asking
 
@@ -807,6 +807,6 @@ The closest overlap is with the Pollen `--emit=lib` issues (#343 resource caps, 
 ## Cross-refs
 
 - Source project: [GoogleCloudPlatform/Aether](https://github.com/GoogleCloudPlatform/Aether); the survey material is captured above for permanence.
-- Sister surveys: #335 (Flux), #337 (Fir), #339 (Flint), #341 (Zym)
-- Sibling `--emit=lib` work: #343 (Pollen resource caps), #344 (Pollen caller-info)
+- Sister surveys: Flux, Fir, Flint, Zym
+- Sibling `--emit=lib` work: Pollen resource caps and caller-info
 - Filed as focused issues: P1 panic stack traces (separate), P2 contracts (separate)

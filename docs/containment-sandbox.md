@@ -375,7 +375,7 @@ direct calls to the raw extern (`tcp_connect_raw`) are enforced.
 Nested sandboxes are intersected, an inner sandbox cannot escalate
 beyond what the outer sandbox grants.
 
-## Per-function effect tags (#481)
+## Per-function effect tags
 
 The sandbox and `--with=fs,net,os` gate the *whole program*. Effect tags add a
 **finer, per-function** capability axis, checked statically at compile time
@@ -727,7 +727,7 @@ child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.
 
-This closes issue #668. The complementary gap, `connect()` and
+The complementary gap, `connect()` and
 `execve()` issued by statically-linked binaries or raw asm, remains.
 Those callers can still skip the LD_PRELOAD layer for network reach
 and exec, since the seccomp filter here targets only the

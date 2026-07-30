@@ -275,7 +275,7 @@ box; a field last assigned a literal is borrowed and is never freed. This lets
 a handler/server context own its config strings for its lifetime without
 dropping back to a raw `malloc(...) as *T`.
 
-### `@scoped` bindings, checked non-escape (#521)
+### `@scoped` bindings, checked non-escape
 
 A `let`/`var` declaration can be annotated `@scoped` to declare that its value
 **must not outlive the lexical block** that introduced it. This is opt-in
@@ -331,7 +331,7 @@ module declares the extern, so a `-> ptr` declaration of one of them can't
 silently reintroduce a leak. The set is grown by audit: every runtime
 function that mints a fresh owned buffer belongs here.
 
-### User-defined `-> string` functions (issue #405)
+### User-defined `-> string` functions
 
 A user-defined function that returns `string` is treated as heap-returning **iff *any* return statement in its body yields a heap-string-expression** (recursively considering other heap-returning user functions), an OR-fold across the return sites. A function whose returns are *all* string literals or forwarded borrowed parameters is NOT heap-returning, and the wrapper won't try to free its results. A function that *mixes* the two (one branch `return string.concat(...)`, another `return "constant"`) *is* heap-returning: its literal branches are malloc-duplicated through the uniform-heap return wrap (see [Return-ownership contract](#return-ownership-contract-uniform-heap-return-escape) below) so the caller can free every branch identically.
 
@@ -351,7 +351,7 @@ s = format_msg()                       // free(prev); _heap_s = 0, literal prese
 
 The recursive walk has cycle detection (mutual recursion through `-> string` user functions returns "not heap" conservatively, which is the safe answer when the structural analysis can't decide).
 
-### Cross-block reassignment (the architectural piece of #405)
+### Cross-block reassignment (the architectural piece)
 
 `_heap_<name>` trackers are emitted at **function-entry scope**, not at the C scope where the variable is first assigned. This means a string variable first-assigned in one if-branch and reassigned in another, or first-assigned at the top of a function and reassigned inside a deeply-nested loop, has a tracker visible at every reassignment site:
 
@@ -368,7 +368,7 @@ if cond1 {
 
 Pre-fix, the second branch couldn't see the first branch's tracker (it was C-scoped to the first `if` body) and the build failed with `'_heap_result' undeclared`. The function-entry hoist closes that scope mismatch.
 
-### Tuple destructures (issue #420)
+### Tuple destructures
 
 The same wrapper fires when a heap string is unpacked from a tuple. For user-defined tuple-returning functions the compiler runs a **per-position structural escape analysis** that mirrors the single-value case. It walks every `return e0, e1, …` statement and **OR-folds** the heap-classification of each expression, per position: position `j` is heap-returning if *any* return-site's `j`-th expression is heap. Each heap-classified position is then routed through the same `aether_uniform_heap_str` wrap as a single-value return, so a position that is a fresh allocation on one branch and a borrowed literal on another (`return owned, n, ""` on success vs `return "", 0, "err"` on the error path, the shape of every `zlib` / `cryptography` / `lzf` decode function) still hands the caller a freeable pointer on *every* branch.
 
@@ -407,7 +407,7 @@ extern decode_b64(b64: string) -> (string @heap, int, string)
 //                                 (auto-free)        (no auto-free)
 ```
 
-Default for unannotated string positions is `@borrow` preserves the silent pre-#420 behaviour for existing tuple-returning externs. Adding `@heap` to a position is a behaviour change: the wrapper starts auto-freeing previous values on reassignment, so any caller currently doing manual `string.release` against the returned pointer must drop that call when adopting the annotation.
+Default for unannotated string positions is `@borrow` preserves the previous silent behaviour for existing tuple-returning externs. Adding `@heap` to a position is a behaviour change: the wrapper starts auto-freeing previous values on reassignment, so any caller currently doing manual `string.release` against the returned pointer must drop that call when adopting the annotation.
 
 Mix-and-match is allowed; trailing positions default to borrow:
 

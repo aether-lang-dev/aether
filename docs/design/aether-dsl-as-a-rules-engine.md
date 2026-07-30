@@ -7,7 +7,7 @@ alongside, but deployed independently of, the application binary.
 > **Status (2026-04-18):** the **embedding foundation is built and v2
 > namespaces have shipped**. `aetherc --emit=lib` produces a `.so`/`.dylib`
 > with stable C-ABI exports (see [`emit-lib.md`](../emit-lib.md)), and
-> `ae build --namespace <dir>` (PR #172) generates idiomatic per-language
+> `ae build --namespace <dir>` generates idiomatic per-language
 > SDKs (Python ctypes, Java Panama, Ruby Fiddle) plus `notify(event, id)`
 > for script → host event signaling, see
 > [`embedded-namespaces-and-host-bindings.md`](../embedded-namespaces-and-host-bindings.md)

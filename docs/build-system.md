@@ -93,7 +93,7 @@ Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The 
 - The `aetherc` binary's mtime (recompile invalidates everything)
 - `libaether.a`'s mtime (stdlib rebuild invalidates everything)
 - Every `--extra` C file's *content* (editing an FFI shim invalidates the cache, not just touching it)
-- Every imported lib module's *content*: the `.ae`/`.c`/`.h` files under each lib-search directory, walked recursively. This covers both an explicit `--lib`/`$AETHER_LIB_DIR` directory and the **default `lib/`** the compiler searches when neither is set (the `src/main.ae` + `lib/<name>/module.ae` package layout). Because entries are content-hashed rather than keyed on mtime+size, a same-second, same-size edit (a one-character constant flip in an editor-save loop) still invalidates the cache, and a bare `touch` does not (#1025, building on #413/#623). This lib-dir walk is POSIX-only; on Windows the key covers the entry file and `--extra` content but not lib-module edits, so a lib-module change there still needs `ae cache clear` until the walk is wired for Windows.
+- Every imported lib module's *content*: the `.ae`/`.c`/`.h` files under each lib-search directory, walked recursively. This covers both an explicit `--lib`/`$AETHER_LIB_DIR` directory and the **default `lib/`** the compiler searches when neither is set (the `src/main.ae` + `lib/<name>/module.ae` package layout). Because entries are content-hashed rather than keyed on mtime+size, a same-second, same-size edit (a one-character constant flip in an editor-save loop) still invalidates the cache, and a bare `touch` does not. This lib-dir walk is POSIX-only; on Windows the key covers the entry file and `--extra` content but not lib-module edits, so a lib-module change there still needs `ae cache clear` until the walk is wired for Windows.
 - The optimisation level (`-O0` for `ae run` and `ae build --quick`, `-O2` for default `ae build`)
 
 `ae run` and `ae build` use separate cache slots so toggling between them doesn't churn one entry back and forth.
@@ -219,7 +219,7 @@ make ci-portability        # All: native coop + WASM + embedded
 
 ### RISC-V 64-bit (`ci-riscv64`)
 
-Cross-compile + run-under-qemu portability check (issue #397):
+Cross-compile + run-under-qemu portability check:
 
 ```bash
 # Install host toolchain (Ubuntu 22.04+):
@@ -330,7 +330,7 @@ HARDEN=1 make compiler ae stdlib
 HARDEN=1 make ci
 ```
 
-Flags enabled (issue #396):
+Flags enabled:
 
 | Flag | Purpose |
 |------|---------|
@@ -343,7 +343,7 @@ The flags are added to `CFLAGS` only when `HARDEN=1` is set; the default build p
 ## LLM diagnostics (`AETHER_ENABLE_LLM=1`)
 
 `ae help <script> --llm <weights.gguf>` is an opt-in offline local-LLM escalation
-path for the [config-IS-code diagnostic flow](cic-help.md) (issue #415). Default
+path for the [config-IS-code diagnostic flow](cic-help.md). Default
 builds omit the LLM module entirely so the binary stays small and the link line
 stays dependency-light; embedders enable it explicitly at build time.
 

@@ -62,14 +62,14 @@ part. The inventory:
 
 | Piece | Where | State |
 | --- | --- | --- |
-| Contract syntax: `requires` / `ensures` / `param: T where cond` | parsed to `AST_REQUIRES_CLAUSE` / `AST_ENSURES_CLAUSE` on the function (`parser.c:4655` for `where`; #348, #525) | ✅ shipped |
+| Contract syntax: `requires` / `ensures` / `param: T where cond` | parsed to `AST_REQUIRES_CLAUSE` / `AST_ENSURES_CLAUSE` on the function (`parser.c:4655` for `where`) | ✅ shipped |
 | Runtime checks: `if (!(pred)) aether_panic("… violation: <text> in <fn>")` | `emit_contract_check`, `codegen_stmt.c:3126+`; suppressed by `--no-contracts` | ✅ shipped |
 | Constant-**true** elision | `try_fold_predicate` + `emit_contract_check` (`codegen_stmt.c:3086,3140`) | ✅ shipped |
 | Predicate-to-text renderer (for messages) | `sprint_expr_text`, static in `codegen_stmt.c` | ✅ shipped, but codegen-private |
 | Const-ness *classifier* (not evaluator) | `is_const_expression`, `typechecker.c:884` | ✅ shipped |
 | Compile-time bool evaluator (narrow: `target.os/arch`, string/bool/num literals) | `when_eval_condition`, `optimizer.c:407` | ✅ shipped, `when`-specific |
-| Call-argument boundary walk (where the #480 distinct and #1132 bitstruct checks live) | `typechecker.c:7622` area | ✅ shipped — **this is Tier 2's hook** |
-| Enum member values known at compile time | `resolve_enum_types` rewrites `E.M` to a constant identifier before typecheck (`typechecker.c` #1044 machinery) | ✅ shipped |
+| Call-argument boundary walk (where the distinct-type and bitstruct checks live) | `typechecker.c:7622` area | ✅ shipped — **this is Tier 2's hook** |
+| Enum member values known at compile time | `resolve_enum_types` rewrites `E.M` to a constant identifier before typecheck (`typechecker.c` enum machinery) | ✅ shipped |
 | **Const evaluator with an environment** (param → argument, const idents) | — | ❌ **the missing piece** |
 | **Any compile-time contract *diagnostic*** (vs elision) | — | ❌ missing |
 
@@ -195,8 +195,8 @@ Domain rules, each load-bearing:
 
 ### 4.3 The hook
 
-`typechecker.c:7622` — the existing call-argument walk where the #480
-distinct-type and #1132 bitstruct boundary checks live. It already iterates
+`typechecker.c:7622` — the existing call-argument walk where the
+distinct-type and bitstruct boundary checks live. It already iterates
 params against argument slots. Additions: build the env while walking; after
 the walk, fetch the callee's clauses (the callee's `ASTNode` is reachable the
 same way the distinct check finds param types) and evaluate each. Diagnostics
@@ -253,7 +253,7 @@ Three mitigations, in decreasing strength:
   the flag-day free. Structured so the verdict is one switch: flipping to
   warning is a one-line change if the field disagrees.
 - **(B) Warning for one release, then error.** Matches the "gradual
-  contracts" branding (#525), costs one release of latency, and risks the
+  contracts" branding, costs one release of latency, and risks the
   warning being ignored precisely where it matters.
 
 The implementation is identical either way; only the final `type_error` vs
@@ -289,7 +289,7 @@ it also fixes the double-precision wobble in the elision path for free.
 | Piece | Est. lines | Risk | Notes |
 | --- | --- | --- | --- |
 | `contract_eval` + env + int64/double value | 250–320 | **the risk concentrate**: precision, short-circuit, const-ident recursion (depth cap) | pure function; property-testable in isolation |
-| Tier 2 hook in the call-arg walk | 80–120 | low — pattern established by #480/#1132 checks at `typechecker.c:7622` | env built during the existing iteration |
+| Tier 2 hook in the call-arg walk | 80–120 | low — pattern established by the distinct/bitstruct checks at `typechecker.c:7622` | env built during the existing iteration |
 | Tier 1 definition-site walk | 40–60 | low | empty-env reuse of the same evaluator |
 | Move `sprint_expr_text` to shared TU + diagnostics | 60–100 | low | message format mirrors the runtime panic text, so the two read as the same violation |
 | Unify `emit_contract_check` onto the shared evaluator, delete `try_fold_predicate` | −60 net | low | keeps `test_contract_const_fold.ae` green as the guard |
@@ -326,5 +326,5 @@ the feature's size: at 32 contract clauses in the entire tree, the
 compile-time-vs-runtime semantics of contracts can still be changed for
 free. Every release that adds contract-using code makes the flag-day more
 expensive. The C3 survey called this "a small change with real payoff"; the
-tree says it is even smaller than that — half of it shipped with #348, and
+tree says it is even smaller than that — half of it shipped with the contracts work, and
 what remains is one carefully-tested pure function and its wiring.

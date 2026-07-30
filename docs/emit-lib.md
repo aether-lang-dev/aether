@@ -60,7 +60,7 @@ int main(void) {
 | `--emit=both` | Produces both an executable AND a shared library from one source. `ae build --emit=both foo.ae -o foo` writes `foo` (the exe) and `foo.dylib` / `foo.so` (the lib) side by side. With no `-o`, defaults are `<base>` (exe) and `lib<base>.<ext>` (lib). Internally dispatches `cmd_build` twice (once per emit mode); the lib pass appends the platform lib extension to the user's `-o` so the second pass doesn't overwrite the first. |
 | `--emit=csrc` | Emits the **portable generated C source** (`foo.c`), a **catalog header** (`foo.h`, the `aether_<name>()` prototypes), and a **machine-readable catalog** (`foo.catalog.json`), and stops. No `gcc`, no native artifact. Same catalog codegen as `--emit=lib`; the difference is you get *source* plus a describable ABI surface, not a host `.so`. |
 
-## `--emit=csrc`: distribute source, not N native libs (#996)
+## `--emit=csrc`: distribute source, not N native libs
 
 A single **native** lib can't be universal across OSes — ELF vs Mach-O vs
 PE/COFF are different loader formats. But the **pre-native** artifact can be:
@@ -83,7 +83,7 @@ The `.h` is a normal C header (include guard + `extern "C"`); a consumer
 `#include`s it and calls `aether_add(...)` / `aether_greet(...)` directly. This
 is the enabling primitive for compile-on-install bindings (Python C-extension /
 Ruby-gem style) and a "source registry" story where every binding compiles the
-same hash-pinned source in its own toolchain. Follow-ups noted in #996:
+same hash-pinned source in its own toolchain. Deliberate follow-ups:
 single-file amalgamation and expressing the required runtime `.c` set for a
 fully standalone external compile.
 
@@ -356,7 +356,7 @@ etc. Users see idiomatic API calls; the opaque pointer is hidden.
 
 See `tests/integration/emit_lib_swig/` for a worked Python round-trip.
 
-## Per-call resource caps (#343)
+## Per-call resource caps
 
 Hosts loading untrusted Aether scripts bound the script's
 resource use via two TLS-backed knobs in `include/libaether.h`:
@@ -483,7 +483,7 @@ releasing the struct's memory, so a use-after-free probe via
 rather than a stale match on the freed-but-still-readable original
 value.
 
-## Reflection: the symbol catalog (`aether_lib_meta`), #403
+## Reflection: the symbol catalog (`aether_lib_meta`)
 
 Every `--emit=lib` artifact exports a single reflection entry point:
 

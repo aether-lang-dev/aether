@@ -231,7 +231,7 @@ To suppress the trace block entirely (useful for tests that diff stderr line-for
 
 Available on glibc-Linux and macOS today (uses `<execinfo.h>` `backtrace()` from libc proper, no extra link dependency). On musl, Windows, Emscripten, and freestanding targets the trace block is skipped, `panic`/`try`/`catch` themselves still work.
 
-### Heap cleanup on unwind (#1301)
+### Heap cleanup on unwind
 
 A caught panic does not leak the allocations made since the `try`. While
 any panic frame is live (a `try`/`catch` block, or the scheduler's

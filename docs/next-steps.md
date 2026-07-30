@@ -33,7 +33,7 @@ tool-style Aether programs. Ordered by impact.
 
 ### ~~P1~~, `os.run` / `os.run_capture` (argv-based process execution), **SHIPPED**
 
-> **Status: shipped (PR #148, exit-code tuple in #289).** See
+> **Status: shipped.** See
 > [Process spawn (argv-based, no shell)](stdlib-api.md#process-spawn-argv-based-no-shell)
 > in the stdlib reference for current signatures and a worked example.
 > Section retained below for the original rationale; rationale-as-roadmap
@@ -111,14 +111,14 @@ shell out are now in `std.fs`:
 
 `fs.copy`, `fs.move`, `fs.realpath`, `fs.chmod` are the pilot
 adopters of the structured-error tuple shape `(value, kind, message)`
-introduced for issue #392, see `docs/stdlib-reference.md` and
+introduced with the structured-error pilot, see `docs/stdlib-reference.md` and
 `docs/stdlib-module-pattern.md` for the full surface.
 
 **Note on existing functions:** `path.join`, `path.normalize`,
 `path.dirname`, `path.basename`, `path.is_absolute` are already
 implemented and don't need to be re-done. They live in `std/fs/aether_fs.c`.
 
-### Post-migration audit (still TODO)
+### Post-migration audit (open)
 
 Walk the `tools/*.ae` files (especially anything under `aetherBuild`)
 and migrate call sites from `os.system`/`os.exec` + manual quoting to
@@ -158,7 +158,7 @@ All I/O in Aether is currently blocking. `http.get()`, `file.read()`, `tcp.conne
 - **HTTP server thread pool**, Bounded worker pool (8 threads) replaces unbounded thread-per-connection. Poll-based accept with timeout for graceful shutdown.
 - **Platform poller**, `runtime/io/aether_poller.h` provides epoll (Linux), kqueue (macOS/BSD), and poll() (portable) backends behind a unified API.
 
-**Next: actor-integrated HTTP ([PR #71](https://github.com/aether-lang-org/aether/pull/71))**
+**Next: actor-integrated HTTP**
 
 Ariel's PR proposes dispatching incoming HTTP connections as file descriptors directly to pre-spawned worker actors via mailbox delivery, replacing the thread pool with actor-based dispatch. Bench-measured throughput improvement vs. the thread-pool baseline was substantial; rerun benchmarks against current main before relying on historical figures. The PR needs:
 - Rebase from v0.23.0 to current (0.344.0+)
@@ -257,7 +257,7 @@ adversarial kernel-level bypasses.
 
 ## ~~HTTP server, Apache-class umbrella~~, **SHIPPED**
 
-> **Status: shipped (issue #260 closed).** Tier 0 (TLS, keep-alive,
+> **Status: shipped.** Tier 0 (TLS, keep-alive,
 > per-connection actor dispatch), Tier 1 middleware (cors,
 > basic_auth, **bearer_auth**, **session_auth**, rate_limit,
 > vhost, gzip, static_files, rewrite, error_pages, **real_ip**),
@@ -283,7 +283,7 @@ issue when scheduled):
   uses `NGHTTP2_NV_FLAG_NONE`, leaving the choice to nghttp2 per
   RFC 7541 §5.2). Confirm the same path on the Windows-MinGW
   build; revisit if the wire-size profile differs.
-- **HTTP/3 / QUIC.** Out of scope for #260; would be its own issue.
+- **HTTP/3 / QUIC.** Out of scope here; would be its own effort.
 
 ## VCR recorder, delivered first cut
 

@@ -327,7 +327,7 @@ What this means in practice:
 - **Errors come from the regular typechecker.** A typo inside `panel { ... }`
   surfaces as "undefined `buton`" at the line you wrote it, with the same
   diagnostic quality as any other call site. The receiver-scoping rules
-  ([`closures-and-builder-dsl.md` §DSL Block Receiver Scoping](closures-and-builder-dsl.md#dsl-block-receiver-scoping-333))
+  ([`closures-and-builder-dsl.md` §DSL Block Receiver Scoping](closures-and-builder-dsl.md#dsl-block-receiver-scoping))
   even let bare-name calls inside a `bash.test(b) { ... }` block fall back
   through `bash_<name>` without a companion `import bash (script, jobs)`
   line.

@@ -235,7 +235,7 @@ no status checks, so a maintainer merges it on review alone.
 ### Before Submitting
 
 Keep checked-in Aether source canonically formatted; CI enforces this
-(`tests/integration/fmt_gate/`, #1302):
+(`tests/integration/fmt_gate/`):
 
 ```bash
 ./build/ae fmt std examples tests

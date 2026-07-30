@@ -216,8 +216,8 @@ main() {
 - `file.close(handle)` - Close a file handle
 - `file.size(path)` → `(int, string)` - Get file size in bytes
 - `fs.statvfs(path)` → `(total, free, avail, err)` - Filesystem byte counts (POSIX `statvfs`) for the fs containing `path`. `avail` is space usable by a non-root process (`f_bavail`) — use it for "how much can I actually write" (`end = avail / file_size`). Portable Linux/macOS/BSD; Windows returns the error branch.
-- `fs.mounts()` → `(count, err)` - Load the mount table (#1118): Linux `/proc/self/mountinfo` (octal escapes decoded), macOS/BSD `getmntinfo(3)`, Windows drive letters. Read entries with `fs.mount_source(i)` / `fs.mount_point(i)` / `fs.mount_fstype(i)` / `fs.mount_options(i)` (strings borrowed from a thread-local table, valid until the next `mounts()` or `fs.fs_release_mounts()`). Out-of-range indexes return `""`.
-- `fs.block_info(dev)` → `(size_bytes, removable, transport, err)` - Block-device facts (#1118), Linux sysfs backend. `dev` accepts `/dev/sda`, `sda`, or a partition (`nvme0n1p2`; the removable flag resolves through the parent disk). `removable` is 1/0 or -1 when unknown; `transport` is `usb`/`nvme`/`sata`/`virtio`/`mmc` or `""`. Non-Linux platforms return the error branch, never a fabricated answer.
+- `fs.mounts()` → `(count, err)` - Load the mount table: Linux `/proc/self/mountinfo` (octal escapes decoded), macOS/BSD `getmntinfo(3)`, Windows drive letters. Read entries with `fs.mount_source(i)` / `fs.mount_point(i)` / `fs.mount_fstype(i)` / `fs.mount_options(i)` (strings borrowed from a thread-local table, valid until the next `mounts()` or `fs.fs_release_mounts()`). Out-of-range indexes return `""`.
+- `fs.block_info(dev)` → `(size_bytes, removable, transport, err)` - Block-device facts, Linux sysfs backend. `dev` accepts `/dev/sda`, `sda`, or a partition (`nvme0n1p2`; the removable flag resolves through the parent disk). `removable` is 1/0 or -1 when unknown; `transport` is `usb`/`nvme`/`sata`/`virtio`/`mmc` or `""`. Non-Linux platforms return the error branch, never a fabricated answer.
 - `file.delete(path)` → `string` - Delete a file, return error string
 - `file.exists(path)` → `int` - 1 if exists, 0 otherwise (infallible predicate)
 
@@ -346,10 +346,10 @@ main() {
 - `aether_args_get(index)` → `string` Get the i-th argument; returns null if out of range
 - `aether_argv0()` → `string` Path the OS launched the current process with (argv[0]); returns null before `aether_args_init` has run
 - `os.argv0()` → `string` Convenience wrapper around `aether_argv0()` that returns `""` instead of null
-- `os.args_count()` → `int` Ergonomic alias for `aether_args_count()` (#1035)
+- `os.args_count()` → `int` Ergonomic alias for `aether_args_count()`
 - `os.args_get(index)` → `string` Ergonomic wrapper: owned copy of argv[index], `""` when out of range / sealed (never null)
 
-All four raw `aether_args_*` names also resolve qualified (`os.aether_args_count()` — the form the language reference shows) since #1035.
+All four raw `aether_args_*` names also resolve qualified (`os.aether_args_count()` — the form the language reference shows).
 
 Typical use: a tool that needs to find its own binary (to locate sibling helpers next to itself, re-exec with different flags, or print a self-path in a diagnostic) can call `os.argv0()` and skip the argv-index bookkeeping.
 
@@ -528,7 +528,7 @@ Coming from Go's `json.Unmarshal`, Java's Jackson, Python's `json.load` + datacl
 
 ### Other structured-data formats
 
-Beyond JSON, XML is the other format with a stdlib module: `std.xml` (issue #627) provides a pull/SAX reader (`xml.parser`, `xml.next`, `xml.name`, `xml.text`, `xml.attr`, driven by the `EVENT_START`/`END`/`TEXT`/`EOF`/`ERROR` constants) and an escaping element builder (`xml.writer`, `xml.start`, `xml.element`, `xml.finish`). Enough for S3 / SOAP-ish / config XML; not in scope are XSD, XPath, namespaces, and DTD validation. There is no DOM tree, so you drive events yourself. The rest have no stdlib parser or codec:
+Beyond JSON, XML is the other format with a stdlib module: `std.xml` provides a pull/SAX reader (`xml.parser`, `xml.next`, `xml.name`, `xml.text`, `xml.attr`, driven by the `EVENT_START`/`END`/`TEXT`/`EOF`/`ERROR` constants) and an escaping element builder (`xml.writer`, `xml.start`, `xml.element`, `xml.finish`). Enough for S3 / SOAP-ish / config XML; not in scope are XSD, XPath, namespaces, and DTD validation. There is no DOM tree, so you drive events yourself. The rest have no stdlib parser or codec:
 
 - YAML, INI, and Java-style `.properties` have no parser. INI and `.properties` are trivial to build on `string.split`; for YAML, the runtime is single-language, so Aether projects configure via TOML or hand-rolled formats.
 - TOML has a parser at `tools/apkg/toml_parser.c`, used internally by the `ae` CLI to read `aether.toml` project files. It isn't exposed as `std.toml`. A project needing TOML can copy that parser or shell out to a host-language tool.
@@ -752,7 +752,7 @@ main() {
 - `client.post_json(url, value)` → `(ptr, string)` - Marshal value via `std.json`, set Content-Type + Accept
 - `client.response_body_json(resp)` → `(ptr, string)` - `response_body` + `json.parse` round-trip
 
-See `tests/integration/test_http_client_v2.ae` for ten worked examples (header round-trip, status discrimination, binary body, timeout, transport failure, JSON sugar, malformed-JSON parse failure); the [Standard Library Reference](stdlib-reference.md) covers the design choices (arbitrary-string method, non-2xx-is-not-an-error, `send_request` naming). Streaming response bodies for large downloads are tracked in #1004.
+See `tests/integration/test_http_client_v2.ae` for ten worked examples (header round-trip, status discrimination, binary body, timeout, transport failure, JSON sugar, malformed-JSON parse failure); the [Standard Library Reference](stdlib-reference.md) covers the design choices (arbitrary-string method, non-2xx-is-not-an-error, `send_request` naming). Streaming response bodies for large downloads are not supported yet.
 
 ### HTTP Reverse Proxy (`std.http.proxy`)
 
@@ -825,7 +825,7 @@ It is no longer part of the Aether stdlib. See [`docs/http-vcr.md`](http-vcr.md)
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-> **Timeout vs. close (#1092).** A quiet-but-alive peer (recv-timeout /
+> **Timeout vs. close.** A quiet-but-alive peer (recv-timeout /
 > would-block) is *not* a close: `tcp.read_n` returns the distinct
 > `"timeout"` error and leaves the socket connected so you can retry or
 > `tcp.poll` it. Only an orderly FIN or a hard error returns `"connection
@@ -883,7 +883,7 @@ Functions:
   for the message. Rare; the one-shot policy makes this unnecessary
   in most flows.
 
-Performance note: PR #140 demonstrated the raw reactor pattern
+Performance note: a C-level benchmark demonstrated the raw reactor pattern
 delivering substantially higher HTTP throughput than a blocking
 keep-alive worker. `await_io` is the Aether-language surface over
 that same machinery, rerun the HTTP benchmark on your target host

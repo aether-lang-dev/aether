@@ -104,13 +104,13 @@ changes.
 
 ## Why this matters
 
-Before #633 was explicitly documented, port authors concluded the
+Before this contract was explicitly documented, port authors concluded the
 `user_data` slot was unusable from Aether and reached for a C shim of
 process statics to hold things like a DB handle. The slot was always
 wired, what was missing was the worked example. That's what this doc
 and the test at `tests/integration/http_handler_user_data/` provide.
 (Module-level mutable `var` is now also available for app-wide state,
-per #701/#937, but the per-route `user_data` slot remains the right
+but the per-route `user_data` slot remains the right
 tool when state is scoped to a route rather than the whole process.)
 
 ## See also

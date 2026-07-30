@@ -1,4 +1,4 @@
-<!-- Source: GitHub issue #341, Cross-reference: Zym vs. Aether comparison (full menu of features to consider/skip) -->
+<!-- Cross-reference: Zym vs. Aether comparison (full menu of features to consider/skip) -->
 <!-- Lifted from issue body so the comparison lives next to the code, discoverable for future contributors. -->
 
 # Aether vs Zym, comparison and lift candidates
@@ -725,7 +725,7 @@ matters for any preemption or yield work.
 
 ## TL;DR for triage
 
-The full doc above is a survey of [Zym](https://github.com/zym-lang/zym), a bytecode-compiled embeddable scripting language (Lua/Wren niche, not a systems language). Like the Flux (#335), Fir (#337), and Flint (#339) comparisons, it's written to let Aether decide deliberately what to absorb.
+The full doc above is a survey of [Zym](https://github.com/zym-lang/zym), a bytecode-compiled embeddable scripting language (Lua/Wren niche, not a systems language). Like the Flux, Fir, and Flint comparisons, it's written to let Aether decide deliberately what to absorb.
 
 **Key shape difference from the prior surveys**: Zym is a different niche (embed-a-script-VM-in-host, not compile-to-native). Most of its features either don't apply (single-binary trailer, bytecode portability) or are already covered better by Aether (capability discipline, actor concurrency). The doc is more selective in what it recommends.
 
@@ -753,7 +753,7 @@ This would give Aether **in-process aether-in-aether sandboxing**, currently the
 
 ## Note on overlap with prior surveys
 
-The four comparison docs (#335 Flux, #337 Fir, #339 Flint, #341 Zym) each pull on different parts of the design space:
+The four comparison docs (Flux, Fir, Flint, Zym) each pull on different parts of the design space:
 
 - **Flux**: bit-precise types (`data{N}`), `from`-cast, binary protocol parsing
 - **Fir**: row-typed errors, `#[derive(...)]`, anonymous records, type-system ergonomics
@@ -771,6 +771,6 @@ Zym is the most distant from Aether's identity (different compilation model). It
 ## Cross-refs
 
 - Zym source: [zym-lang/zym](https://github.com/zym-lang/zym).
-- Sister surveys: #335 (Flux), #337 (Fir), #339 (Flint)
+- Sister surveys: Flux, Fir, Flint
 - §3 nested-VM proposal: not filed as focused issue, gated on real use case
 - §8 `--emit=preproc`: small standalone ergonomics; could be its own focused issue if you want to greenlight it independently of the rest of the survey

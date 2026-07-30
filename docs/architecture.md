@@ -366,7 +366,7 @@ When `AETHER_HAS_ATOMICS == 0`, `<stdatomic.h>` is replaced with fallback typede
 - NUMA-aware placement on the local node of the assigned core
 - Falls back to standard allocation on non-NUMA systems
 
-**String Ownership (heap-string tracker, issue #405):**
+**String Ownership (heap-string tracker):**
 - Every string variable carries a compiler-emitted `_heap_<name>` companion that flips between 0 (literal) and 1 (heap-allocated) on each reassignment
 - Trackers are emitted at function-entry scope by a dedicated codegen pre-pass (`hoist_heap_string_trackers` in `compiler/codegen/codegen_stmt.c`), making cross-block reassignment safe
 - Reassignment goes through a unified wrapper handling all four heap/literal transitions: `{ const char* _tmp_old = s; s = <rhs>; if (_heap_s) free(_tmp_old); _heap_s = <rhs_is_heap>; }`

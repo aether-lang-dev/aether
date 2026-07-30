@@ -33,7 +33,7 @@ The placement is deliberate, Aether picks the pieces of each tradition that comp
 
 - **Actors** with state and message-receive handlers are the one piece of OO-shape machinery present, encapsulated state behind a message boundary. This is the Erlang / Pony actor model rather than Smalltalk-OO: no polymorphism, no inheritance, no method overriding. An actor is a stateful object reachable only through messages.
 - **The `_ctx` / builder-context stack DSL** lets you write code that *reads* like a fluent OO method chain (`panel("Settings") { button("OK") }`), but the underlying mechanism is closure scope + an implicit context argument, not method dispatch. The compiler injects `_ctx` automatically; no receiver is involved.
-- **Receiver-namespace fallback** for trailing blocks (`bash.test(b) { script("...") }` resolves `script` as `bash_script` issue #333) makes free-function calls look OO at the call site, but it's a name-resolution rule, not method dispatch.
+- **Receiver-namespace fallback** for trailing blocks (`bash.test(b) { script("...") }` resolves `script` as `bash_script`) makes free-function calls look OO at the call site, but it's a name-resolution rule, not method dispatch.
 - **Struct-field assignment and member access** (`h.cb = c`, `c.r`) are present, but they're data-oriented (record reads/writes), the same shape Go and C have without claiming OO.
 
 ### Where Aether is neither, it's just systems-pragmatic
@@ -244,7 +244,7 @@ Aether has **no general-purpose cast operator**. The `as` keyword is reserved fo
 - `expr as fn(T1, T2, ...) -> R` function-pointer cast (call a stored pointer with type checking; see [§ Function-pointer parameters](#function-pointer-parameters-fnt1-t2---r) below)
 - `expr as T[]` typed-array view cast (reinterpret a raw pointer as a `T[]`)
 
-After `as` the parser also accepts a primitive **value cast** (#480): `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
+After `as` the parser also accepts a primitive **value cast**: `n as int` and other numeric casts compile and run, and a cast between a distinct type and its base type is allowed too. Casts the type system can't justify (for example `buf as string` or `p as ptr`) still parse, but are rejected at type-check with `E0200`, use a named helper for those. The `*StructName`, `fn(...) -> R`, and `T[]` forms remain available. Other primitive conversions:
 
 | From → To | How |
 |---|---|
@@ -390,7 +390,7 @@ main() {
 }
 ```
 
-`os.argv0()` returns argv[0] as a string (empty if uninitialised). `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. Shorter ergonomic spellings exist since #1035: `os.args_count()` and `os.args_get(i)` (the latter returns an owned copy, `""` when out of range). See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
+`os.argv0()` returns argv[0] as a string (empty if uninitialised). `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. Shorter ergonomic spellings exist: `os.args_count()` and `os.args_get(i)` (the latter returns an owned copy, `""` when out of range). See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
 
 ### Default arguments
 
@@ -1063,7 +1063,7 @@ checked_op(x: int) -> {
 }
 ```
 
-#### The `T!` result type and `or` / `!` sugar (issue #913)
+#### The `T!` result type and `or` / `!` sugar
 
 `-> T!` is shorthand for the `(T, string)` result tuple above, it *names* the
 convention and unlocks ergonomic sugar for the three things you do with a
@@ -1120,7 +1120,7 @@ Used outside a `T!` function, `expr!` is *unwrap-or-trap*: it panics on a
 non-empty error slot (catchable with `try`/`catch`). Both `!` and `or` accept
 any `(value, err)` tuple, not just `T!` returns.
 
-### Function contracts: `requires` / `ensures` (issue #348)
+### Function contracts: `requires` / `ensures`
 
 Eiffel-style runtime-checked preconditions and postconditions. Clauses appear after the typed return arrow and before the body; each is a single boolean expression, panic on violation.
 
@@ -1201,7 +1201,7 @@ outcomes:
   helper function is not tracked (that would be dataflow analysis).
 - The `--emit=lib` `aether_describe()` metadata doesn't yet surface contracts to FFI consumers; that's the next layer.
 
-See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable demos. Closes issue #348.
+See [examples/basics/contracts.ae](../examples/basics/contracts.ae) for runnable demos.
 
 ---
 
@@ -1237,7 +1237,7 @@ banner(name: string) -> string {
 
 If you want every return from your `-> string` function to be heap (so the wrapper reclaims it), box any literals: `return string.concat("", "guest")` makes the literal return a heap-string-expression and pushes the function into the heap-returning set.
 
-See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration. Closes issue #405.
+See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae) for a runnable demonstration.
 
 ---
 
@@ -1801,7 +1801,7 @@ main() {
 
 The cast is a view, not an allocation, the operand pointer's lifetime is the caller's problem (the same contract as raw `extern` interaction). Reach for this only when the storage is C-allocated and Aether wants to manipulate fields. For Aether-owned data, use the normal struct-literal form (`Point { x: 1, y: 2 }`) so refcounting and lifetime tracking apply.
 
-**`as` accepts a primitive value cast (#480), a struct overlay (`*StructName`), a function-pointer cast (`fn(...) -> R`), or a typed-array view (`T[]`).** A value cast like `n as int` (numeric to numeric, or between a distinct type and its base) compiles and runs. Non-numeric casts such as `buf as string` or `raw as ptr` parse but are rejected at type-check with `E0200`. For converting between primitive types, see the [Casting between types](#casting-between-types) table above, most conversions are either implicit (Aether's type system inserts the necessary cast in the generated C) or use a named helper (`string.from_int`, `string.from_long`, …).
+**`as` accepts a primitive value cast, a struct overlay (`*StructName`), a function-pointer cast (`fn(...) -> R`), or a typed-array view (`T[]`).** A value cast like `n as int` (numeric to numeric, or between a distinct type and its base) compiles and runs. Non-numeric casts such as `buf as string` or `raw as ptr` parse but are rejected at type-check with `E0200`. For converting between primitive types, see the [Casting between types](#casting-between-types) table above, most conversions are either implicit (Aether's type system inserts the necessary cast in the generated C) or use a named helper (`string.from_int`, `string.from_long`, …).
 
 The `as` keyword is the same token used for `import x as y` aliasing; the two parses don't collide because import-aliasing is recognised only inside `import` statements. Full semantics (operand type rules, error cases, the shared-token interaction) are in [c-interop.md § Struct overlay on raw pointers](c-interop.md#struct-overlay-on-raw-pointers-structname-and-expr-as-structname).
 
@@ -2451,7 +2451,6 @@ Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, 
 
 `@derive(format)` / `clone` / `hash` and nested-struct fields surface a precise compile-time diagnostic, they're explicitly out of v1 scope and tracked for follow-up commits.
 
-Issue #338.
 
 ---
 

@@ -1,6 +1,6 @@
 # Distinct Types
 
-> **Status:** implemented (#480). The first cut below is live; the rest of this
+> **Status:** implemented. The first cut below is live; the rest of this
 > document keeps the original design rationale and the remaining **TBD** items
 > for future refinement.
 
@@ -72,7 +72,7 @@ Four pulls, in order of how directly the language design touches each:
    point, where an `int` becomes a `GrantedFD` the obvious place
    to validate the grant.
 
-2. **Composes with `Isolated[T]`** (sibling issue #479). An
+2. **Composes with `Isolated[T]`**. An
    `Isolated[GrantedFD]` is a non-aliasable one-shot capability
    token. The two features stack cleanly.
 
@@ -123,7 +123,7 @@ across `--emit=lib` exposes the underlying C type (the consumer in
 C / Python / Java sees `const char*`, not an opaque `Path`).
 
 This matches Aether's "compiles to C" mandate and matches the
-`Duration` lowering precedent (issue #524: `Duration` lowers to
+`Duration` lowering precedent (`Duration` lowers to
 `int64_t` ns; the nominal `Duration` distinction is type-checker-
 only). Distinct types are the generalisation: the same trick
 without the unit-conversion machinery.
@@ -171,12 +171,12 @@ If `Port = distinct int`, does `port1 + port2` typecheck? Does
 
 | Option | Semantics |
 |---|---|
-| **A. No operator inheritance by default** | `Port + Port` is a type error. Each operator must be explicitly opted into per distinct type. Strictest; matches Aether's stance on tagged-int parameter passing (issue #586) where a bare int passed to a Duration param errors. |
+| **A. No operator inheritance by default** | `Port + Port` is a type error. Each operator must be explicitly opted into per distinct type. Strictest; matches Aether's stance on tagged-int parameter passing where a bare int passed to a Duration param errors. |
 | **B. All operators inherited by default** | `Port + Port` works, gives `Port`. `Port + int` errors. Matches users' intuition; matches what `Duration + Duration` already does today. |
 | **C. Nim's `borrow` opt-in** | No operators by default; opt in with `type Port = distinct int with borrow(+, -, <, ==)`. Per-type fine-grained control. |
 | **D. All-or-nothing per declaration** | `type Port = distinct int with borrow` borrows everything; bare `distinct int` borrows nothing. Half-step between B and C. |
 
-**Maintainer call.** The Duration precedent (issue #524) chose option
+**Maintainer call.** The Duration precedent chose option
 **B** behaviour (`Duration + Duration` → `Duration`, `Duration *
 scalar` → `Duration`, mixed comparisons rejected). Consistency
 suggests this is the default to extend; the question is whether to
@@ -260,11 +260,10 @@ Each phase gets its own follow-up issue.
 
 ## References
 
-- Issue #480, this design's umbrella issue.
-- Sibling issue #479, `Isolated[T]`, composes with distinct types.
-- Issue #524, `Duration`, the first tagged-int type in Aether;
+- `Isolated[T]` composes with distinct types.
+- `Duration`, the first tagged-int type in Aether;
   serves as the operator-inheritance precedent (see TBD-2).
-- Issue #586, bare-int → Duration at parameter-passing rejected;
+- Bare-int → Duration at parameter passing is rejected;
   the strictness precedent for distinct types at call sites.
 - `LLM.md` § "Runtime sequence of strings → `*StringSeq`, not
   `string[]`", exactly the class of mistake distinct types diagnose.
