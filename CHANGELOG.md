@@ -11,6 +11,25 @@ next version number before tagging the release.
 
 ## [0.463.0]
 
+### Added
+
+- **TLS 1.3 client: OCSP stapling now verifies the responder signature**
+  (`std.cryptography.tls13_cert.verify_ocsp_signature`, RFC 6960 §4.2.2.2). A
+  stapled OCSP response is authenticated against the leaf's issuer (direct
+  signing) or a stapled delegate certificate that is itself issuer-signed and
+  carries the `id-kp-OCSPSigning` EKU. `connect()` fails the handshake closed
+  only on an *authentic* REVOKED; a staple whose signature does not verify is
+  ignored (fail-open), so a forged REVOKED cannot DoS the handshake. Supports
+  RSA-PKCS#1-SHA256 and ECDSA-P256/P-384 responder signatures. Verified against
+  real DigiCert (direct) and GoDaddy (delegated) staples;
+  `tests/integration/crypto_tls13_ocsp/`.
+- **TLS 1.3 client: ECDSA-P384-SHA384 server CertificateVerify** (SignatureScheme
+  `0x0503`), unblocking P-384-leaf sites (e.g. Wikipedia). Advertised in the
+  ClientHello signature_algorithms; `tests/integration/crypto_tls13_cert_p384/`.
+- **TLS 1.3 client: mutual TLS** — `connect_mtls()` presents an ECDSA-P256 client
+  certificate + CertificateVerify on a server CertificateRequest; `connect()`
+  otherwise declines with an empty Certificate.
+
 ### Fixed
 
 - **Actor `?` ask answered 0 and leaked a 5s timeout when the handler used

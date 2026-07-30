@@ -59,10 +59,13 @@
 // ALERTS (RFC 8446 §6): connect() sends a fatal alert naming the reason on an
 // auth failure (not a silent RST); close_conn sends close_notify; conn_recv
 // surfaces inbound alerts as typed errors. REVOCATION: a stapled OCSP response
-// (RFC 6960) saying revoked fails the handshake closed (status parsed, not
-// responder-signature-verified). Remaining limits: mTLS presents an ECDSA-P256 client cert only (no RSA/Ed25519
-// client key yet, single-cert chain); OCSP is
-// stapling-only (no CRL / no OCSP fetch); no responder-sig verification.
+// (RFC 6960) is verified — the responder signature is checked against the leaf's
+// issuer (direct) or a stapled OCSPSigning-EKU delegate (RFC 6960 §4.2.2.2), and
+// an authentic REVOKED fails the handshake closed. A staple whose signature does
+// not verify is ignored (fail-open), so a forged REVOKED can't DoS the
+// handshake. Remaining limits: mTLS presents an ECDSA-P256 client cert only (no
+// RSA/Ed25519 client key yet, single-cert chain); OCSP is stapling-only (no CRL
+// / no OCSP fetch); no thisUpdate/nextUpdate freshness enforcement.
 //
 // This module separates the PURE state machine (transcript, key derivation,
 // flight assembly — offline-testable) from the SOCKET DRIVER (connect + the
@@ -2047,6 +2050,11 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     cv_scheme = 0
     cv_sig = null
     cv_sig_len = 0
+    // Stapled OCSP response, kept until after chain-building so we can resolve
+    // the leaf's issuer and verify the responder signature (RFC 6960 §4.2.2.2).
+    ocsp_staple = null
+    ocsp_staple_len = 0
+    ocsp_status = tls13_cert.OCSP_ERROR
     err = ""
     p = 0
     cont = 1
@@ -2082,16 +2090,19 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         bytes.free(der)
                         // Parse the remaining certs into `intermediates`.
                         parse_intermediates(cbody, ml, intermediates)
-                        // Revocation: if the server stapled an OCSP response for
-                        // the leaf and it says REVOKED, fail closed (RFC 6960).
-                        // Absence/soft-error is not treated as revoked.
+                        // Revocation: stash any stapled OCSP response for the
+                        // leaf. Status + responder-signature check happen AFTER
+                        // chain-building (below), where the leaf's issuer — the
+                        // key that authorizes the responder — is known.
                         ocsp, ocsp_len = extract_stapled_ocsp(cbody, ml)
                         if ocsp != null {
-                            status = tls13_cert.parse_ocsp_status(ocsp, ocsp_len)
-                            if status == tls13_cert.OCSP_REVOKED {
-                                if string.equals(err, "") == 1 { err = "certificate revoked (OCSP)" }
+                            if ocsp_staple == null {
+                                ocsp_staple = ocsp
+                                ocsp_staple_len = ocsp_len
+                                ocsp_status = tls13_cert.parse_ocsp_status(ocsp, ocsp_len)
+                            } else {
+                                bytes.free(ocsp)
                             }
-                            bytes.free(ocsp)
                         }
                     }
                     bytes.free(cbody)
@@ -2163,10 +2174,31 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                 else {
                     cerr = tls13_cert.chain_verify_path(&leaf, intermediates, anchors)
                     if string.equals(cerr, "") != 1 { err = cerr }
+                    else {
+                        // Revocation (RFC 6960): now that the chain is trusted,
+                        // resolve the leaf's issuer and — if a staple is present
+                        // — verify the responder signature against it. A REVOKED
+                        // status only fails closed when the staple is authentic
+                        // (a forged REVOKED can't DoS the handshake); an
+                        // unverifiable staple is fail-open (status advisory only).
+                        if ocsp_staple != null {
+                            issuer_p = tls13_cert.find_issuer_cert(&leaf, intermediates, anchors)
+                            authentic = 0
+                            if issuer_p != null {
+                                authentic = tls13_cert.verify_ocsp_signature_at(ocsp_staple, ocsp_staple_len, issuer_p)
+                            }
+                            if authentic == 1 {
+                                if ocsp_status == tls13_cert.OCSP_REVOKED {
+                                    err = "certificate revoked (OCSP)"
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
     }
+    if ocsp_staple != null { bytes.free(ocsp_staple) }
     if have_leaf == 1 { tls13_cert.free_leaf(&leaf) }
     free_intermediates(intermediates)
     if leaf_px != null { bytes.free(leaf_px) }
