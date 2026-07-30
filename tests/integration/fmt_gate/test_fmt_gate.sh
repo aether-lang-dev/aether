@@ -40,7 +40,10 @@ if ! "$AE" fmt --check std examples tests > "$TMPDIR/check.txt" 2>&1; then
 fi
 
 # Deterministic sample for tiers 2 and 3: every 12th program file.
-find examples tests -name '*.ae' -type f 2>/dev/null | sort | \
+# LC_ALL=C pins collation so every platform samples the SAME files;
+# locale-dependent sort orders gave Windows a different sample than
+# Linux on the first CI round.
+find examples tests -name '*.ae' -type f 2>/dev/null | LC_ALL=C sort | \
     awk 'NR % 12 == 1' > "$TMPDIR/sample.txt"
 
 TOTAL=0
@@ -59,29 +62,33 @@ while IFS= read -r f; do
         exit 1
     fi
 
-    # Tier 3: IR preservation. Deliberate-reject fixtures don't
+    # Tier 3: IR preservation. Compile a sibling copy, format IT in
+    # place, compile again, compare: both compiles use the SAME file
+    # name, so path-derived emission differences cancel and the diff
+    # isolates exactly what formatting changed. The sibling must sit
+    # NEXT TO the original: imports resolve relative to the source
+    # file's directory, so a copy in $TMPDIR would fail cross-module
+    # fixtures for the wrong reason. Deliberate-reject fixtures don't
     # compile; skip them for this tier (they still passed tiers 1+2).
-    # The formatted copy must sit NEXT TO the original: imports
-    # resolve relative to the source file's directory, so a copy in
-    # $TMPDIR would fail cross-module fixtures for the wrong reason.
-    if "$AETHERC" "$f" "$base.orig.c" >/dev/null 2>&1; then
-        sibling="$(dirname "$f")/._fmt_gate_tmp_$$.ae"
-        cp "$base.once.ae" "$sibling"
+    sibling="$(dirname "$f")/._fmt_gate_tmp_$$.ae"
+    cp "$f" "$sibling"
+    if "$AETHERC" "$sibling" "$base.orig.c" >/dev/null 2>&1; then
+        "$AE" fmt "$sibling" >/dev/null 2>&1
         if ! "$AETHERC" "$sibling" "$base.fmt.c" >/dev/null 2>&1; then
             rm -f "$sibling"
             echo "  [FAIL] fmt_gate: $f compiles but its formatted copy does not"
             exit 1
         fi
-        rm -f "$sibling"
         sum_o=$(grep -v '^#line' "$base.orig.c" | cksum)
         sum_f=$(grep -v '^#line' "$base.fmt.c" | cksum)
         if [ "$sum_o" != "$sum_f" ]; then
+            rm -f "$sibling"
             echo "  [FAIL] fmt_gate: formatting $f changed the emitted C"
             exit 1
         fi
         IR_CHECKED=$((IR_CHECKED + 1))
     fi
-    rm -f "$base.once.ae" "$base.twice.ae" "$base.orig.c" "$base.fmt.c"
+    rm -f "$sibling" "$base.once.ae" "$base.twice.ae" "$base.orig.c" "$base.fmt.c"
 done < "$TMPDIR/sample.txt"
 
 echo "  [PASS] fmt_gate: tree canonical; idempotent on $TOTAL sampled files; IR-preserving on $IR_CHECKED"
