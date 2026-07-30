@@ -1999,6 +1999,24 @@ static ASTNode* current_fn_body_block(CodeGenerator* gen) {
     return NULL;
 }
 
+/* Length of the valid UTF-8 sequence starting at `s`, or 1 if the
+ * bytes do not form one (lone continuation byte, truncated sequence,
+ * overlong-agnostic on purpose: structural validity is enough here).
+ * Used by the string-literal emitter to keep human text readable in
+ * generated C while byte-escaping everything that is not valid text. */
+static int utf8_sequence_length(const char* s) {
+    unsigned char c0 = (unsigned char)s[0];
+    int len;
+    if ((c0 & 0xE0) == 0xC0) len = 2;
+    else if ((c0 & 0xF0) == 0xE0) len = 3;
+    else if ((c0 & 0xF8) == 0xF0) len = 4;
+    else return 1;
+    for (int i = 1; i < len; i++) {
+        if (((unsigned char)s[i] & 0xC0) != 0x80) return 1;
+    }
+    return len;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
@@ -2034,7 +2052,31 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         case '"': fprintf(gen->output, "\\\""); break;
                         default:
                             if (ch < 0x20 || ch == 0x7F) {
-                                fprintf(gen->output, "\\x%02x", ch);
+                                /* Zero-padded OCTAL, never \x: a C hex
+                                 * escape has no length limit, so
+                                 * "\x01a" re-lexes as byte 0x1A (silent
+                                 * corruption when the next char is a
+                                 * hex digit). \001 is exactly three
+                                 * digits and cannot munch. */
+                                fprintf(gen->output, "\\%03o", ch);
+                            } else if (ch >= 0x80) {
+                                /* Bytes above ASCII: emit a VALID UTF-8
+                                 * sequence raw so human text stays
+                                 * readable in the generated C; escape
+                                 * anything else (decoded \x binary,
+                                 * e.g. CBOR/MsgPack test vectors) so
+                                 * the output stays valid text and every
+                                 * downstream tool (grep/awk/editors)
+                                 * treats it uniformly on all platforms. */
+                                int seq = utf8_sequence_length(str);
+                                if (seq > 1) {
+                                    for (int b = 0; b < seq; b++) {
+                                        fprintf(gen->output, "%c", str[b]);
+                                    }
+                                    str += seq - 1;
+                                } else {
+                                    fprintf(gen->output, "\\%03o", ch);
+                                }
                             } else {
                                 fprintf(gen->output, "%c", *str);
                             }
@@ -4874,7 +4916,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             s++; hd++; \
                                         } \
                                         s--; \
-                                        if (hd > 0) fprintf(gen->output, "\\x%02x", hval & 0xFF); \
+                                        if (hd > 0) fprintf(gen->output, "\\%03o", hval & 0xFF); \
                                         else        fprintf(gen->output, "\\\\x"); \
                                     } else if (esc >= '0' && esc <= '7') { \
                                         s++; \
@@ -4882,7 +4924,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                         while (od < 3 && *(s+1) >= '0' && *(s+1) <= '7') { \
                                             s++; oval = oval * 8 + (*s - '0'); od++; \
                                         } \
-                                        fprintf(gen->output, "\\x%02x", oval & 0xFF); \
+                                        fprintf(gen->output, "\\%03o", oval & 0xFF); \
                                     } else { \
                                         fprintf(gen->output, "\\\\"); \
                                     } \
@@ -4890,7 +4932,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 } \
                                 default: \
                                     if ((unsigned char)*s < 0x20 || *s == 0x7F) \
-                                        fprintf(gen->output, "\\x%02x", (unsigned char)*s); \
+                                        fprintf(gen->output, "\\%03o", (unsigned char)*s); \
                                     else \
                                         fputc(*s, gen->output); \
                                     break; \
