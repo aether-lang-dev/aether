@@ -14,7 +14,8 @@
 //   - supported_groups: x25519 (0x001d), secp256r1 (0x0017)
 //   - key_share: x25519 and/or secp256r1 KeyShareEntry(s); SNI + ALPN http/1.1
 //   - signature_algorithms: ecdsa_secp256r1_sha256 (0x0403),
-//     rsa_pss_rsae_sha256 (0x0804), ed25519 (0x0807)
+//     ecdsa_secp384r1_sha384 (0x0503), rsa_pss_rsae_sha256 (0x0804),
+//     ed25519 (0x0807)
 //
 // Import with:  import std.cryptography.tls13_hs
 //
@@ -56,6 +57,7 @@ const GROUP_X25519MLKEM768 = 0x11EC
 
 // Signature schemes (RFC 8446 §4.2.3).
 const SIG_ECDSA_P256_SHA256 = 0x0403
+const SIG_ECDSA_P384_SHA384 = 0x0503
 const SIG_RSA_PSS_RSAE_SHA256 = 0x0804
 const SIG_ED25519 = 0x0807
 
@@ -212,11 +214,13 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, GROUP_SECP256R1)
 
-    // signature_algorithms (13): { ecdsa_p256_sha256, rsa_pss_rsae_sha256, ed25519 }
+    // signature_algorithms (13):
+    //   { ecdsa_p256_sha256, ecdsa_p384_sha384, rsa_pss_rsae_sha256, ed25519 }
     off = put16(buf, off, 13)
-    off = put16(buf, off, 8) // ext body len
-    off = put16(buf, off, 6) // list len
+    off = put16(buf, off, 10) // ext body len
+    off = put16(buf, off, 8) // list len
     off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
 
@@ -322,9 +326,10 @@ client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, h
     off = put16(buf, off, GROUP_X25519)
     // signature_algorithms
     off = put16(buf, off, 13)
+    off = put16(buf, off, 10)
     off = put16(buf, off, 8)
-    off = put16(buf, off, 6)
     off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
     // ALPN http/1.1
@@ -422,9 +427,10 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     off = put16(buf, off, GROUP_SECP256R1)
     // signature_algorithms
     off = put16(buf, off, 13)
+    off = put16(buf, off, 10)
     off = put16(buf, off, 8)
-    off = put16(buf, off, 6)
     off = put16(buf, off, SIG_ECDSA_P256_SHA256)
+    off = put16(buf, off, SIG_ECDSA_P384_SHA384)
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
     // ALPN http/1.1

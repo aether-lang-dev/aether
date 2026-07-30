@@ -13,7 +13,7 @@
 //     X25519MLKEM768 via connect_pq()
 //   - cipher suites: TLS_CHACHA20_POLY1305_SHA256 and TLS_AES_128_GCM_SHA256
 //     (negotiated from the ServerHello)
-//   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
+//   - server CertificateVerify: ECDSA-P256, ECDSA-P384, or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
 //   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
 //     revocation check; mTLS via connect_mtls (presents an ECDSA-P256 client
@@ -1994,16 +1994,22 @@ fn parse_cert_verify(body: ptr, body_len: int) -> (int, ptr, int, string) {
 }
 
 // Split an uncompressed EC point (0x04 || X(32) || Y(32)) into pubx/puby.
-fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
-    if key_len != 65 { return null, null, "spki: not a 65-byte uncompressed EC point" }
-    if (bytes.get(spki_key, 0) & 0xFF) != 0x04 { return null, null, "spki: not uncompressed (0x04)" }
-    px = bytes.new(32)
-    py = bytes.new(32)
-    bytes.set(px, 31, 0)
-    bytes.set(py, 31, 0)
-    bytes.copy_from_bytes(px, 0, spki_key, 1, 32)
-    bytes.copy_from_bytes(py, 0, spki_key, 33, 32)
-    return px, py, ""
+// Split an uncompressed EC point (0x04 || X || Y) from a leaf SPKI into its
+// affine coordinates. Handles P-256 (65-byte, 32-byte coords) and P-384
+// (97-byte, 48-byte coords). Returns (X, Y, coord_width, "") or (null,null,0,err).
+fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, int, string) {
+    coord = 0
+    if key_len == 65 { coord = 32 }
+    if key_len == 97 { coord = 48 }
+    if coord == 0 { return null, null, 0, "spki: not a P-256/P-384 uncompressed EC point" }
+    if (bytes.get(spki_key, 0) & 0xFF) != 0x04 { return null, null, 0, "spki: not uncompressed (0x04)" }
+    px = bytes.new(coord)
+    py = bytes.new(coord)
+    bytes.set(px, coord - 1, 0)
+    bytes.set(py, coord - 1, 0)
+    bytes.copy_from_bytes(px, 0, spki_key, 1, coord)
+    bytes.copy_from_bytes(py, 0, spki_key, 1 + coord, coord)
+    return px, py, coord, ""
 }
 
 // Authenticate the server: extract the leaf public key from Certificate and
@@ -2067,7 +2073,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                             // Extract the EC point only if the SPKI is one; a
                             // non-EC (RSA) leaf leaves leaf_px null, which the
                             // RSA-PSS dispatch handles. Not an error here.
-                            px, py, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
+                            px, py, coordw, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
                             if string.equals(sperr, "") == 1 {
                                 leaf_px = px
                                 leaf_py = py
@@ -2114,9 +2120,13 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
             if cv_sig == null { err = "server did not send CertificateVerify" }
             else {
                 // Dispatch the CertificateVerify by SignatureScheme:
-                //   ECDSA-P256 (0x0403) -> EC point from the leaf SPKI
+                //   ECDSA-P256 (0x0403) / ECDSA-P384 (0x0503) -> EC point from
+                //     the leaf SPKI (verify_cert_verify picks the curve/hash)
                 //   RSA-PSS rsae SHA-256 (0x0804) -> RSA key from the leaf SPKI
-                if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 {
+                is_ecdsa = 0
+                if cv_scheme == tls13_cert.SCHEME_ECDSA_P256_SHA256 { is_ecdsa = 1 }
+                if cv_scheme == tls13_cert.SCHEME_ECDSA_P384_SHA384 { is_ecdsa = 1 }
+                if is_ecdsa == 1 {
                     if leaf_px == null {
                         err = "ECDSA CertificateVerify but leaf is not an EC cert"
                     } else {
@@ -2128,7 +2138,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                         ok = tls13_cert.verify_cert_verify_rsa_pss(leaf.spki_key, leaf.spki_key_len, th_thru_cert, th_len, cv_sig, cv_sig_len)
                         if ok != 1 { err = "CertificateVerify signature invalid" }
                     } else {
-                        err = "unsupported CertificateVerify scheme (only ECDSA-P256 and RSA-PSS-SHA256 handled)"
+                        err = "unsupported CertificateVerify scheme (ECDSA-P256/P384 and RSA-PSS-SHA256 handled)"
                     }
                 }
             }

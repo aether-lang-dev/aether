@@ -1,0 +1,118 @@
+// Validate the ECDSA-P384-SHA384 (SignatureScheme 0x0503) server
+// CertificateVerify path in std.cryptography.tls13_cert.
+//
+// This lives in its OWN test file (separate from test_tls13_cert) on purpose: a
+// pure-Aether P-384 ECDSA verify is ~12s, and folding it into the already-~90s
+// main cert test pushed the combined run over the CI gate's per-test 120s
+// budget on the slower Windows/MSYS2 runner. Split out, each file stays well
+// under budget. Coverage is unchanged — verify_cert_verify's negative /
+// wrong-transcript dispatch is exercised by the P-256 cases in test_tls13_cert.
+//
+// We do NOT keygen/sign at runtime (scalar_mult_base + ecdsa_sign are the two
+// slowest primitives in the suite). Instead we use a PRECOMPUTED (pubkey, r, s)
+// vector generated once by this module's own p384 over the `th` below, and do a
+// single verify.
+
+import std.cryptography.tls13_cert
+import std.bytes
+import std.string
+import std.io
+
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        bytes.set(b, i, (hexval(string_char_at_n(s, slen, i * 2)) << 4) | hexval(string_char_at_n(s, slen, i * 2 + 1)))
+        i = i + 1
+    }
+    return b
+}
+
+// DER INTEGER from a `width`-byte big-endian magnitude, written at `off`.
+fn der_int_w(out: ptr, off: int, mag: ptr, width: int) -> int {
+    start = 0
+    i = 0
+    found = 0
+    while i < width {
+        if found == 0 {
+            if (bytes.get(mag, i) & 0xFF) != 0 { start = i; found = 1 }
+        }
+        i = i + 1
+    }
+    if found == 0 { start = width - 1 }
+    mag_len = width - start
+    need_pad = 0
+    if (bytes.get(mag, start) & 0x80) != 0 { need_pad = 1 }
+    content_len = mag_len + need_pad
+    bytes.set(out, off, 0x02)
+    bytes.set(out, off + 1, content_len)
+    p = off + 2
+    if need_pad == 1 {
+        bytes.set(out, p, 0)
+        p = p + 1
+    }
+    k = 0
+    while k < mag_len {
+        bytes.set(out, p + k, bytes.get(mag, start + k) & 0xFF)
+        k = k + 1
+    }
+    return p + mag_len
+}
+
+// SEQUENCE { INTEGER r, INTEGER s } for `width`-byte coords (48 = P-384).
+fn der_ecdsa_sig_w(r: ptr, s: ptr, width: int) -> (ptr, int) {
+    tmp = bytes.new(2 + 2 * (width + 3))
+    bytes.set(tmp, bytes.length(tmp) - 1, 0)
+    inner = der_int_w(tmp, 2, r, width)
+    inner = der_int_w(tmp, inner, s, width)
+    bytes.set(tmp, 0, 0x30)
+    bytes.set(tmp, 1, inner - 2)
+    return tmp, inner
+}
+
+main() {
+    total_ok = 1
+
+    // Same 32-byte transcript-hash stand-in as test_tls13_cert.
+    th = from_hex("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899")
+
+    // Precomputed P-384 vector: pubkey (p3x,p3y) and (r48,s48) = ECDSA-P384 sig
+    // over SHA-384(cert_verify_content(th)), produced by std.cryptography.p384.
+    p3x = from_hex("5461c944236d030a7365d5c779fde1e2fdfae4c6287ff947ab3859cad927cad408061497c270fe5e8cd3c95d754269bb")
+    p3y = from_hex("b5a95eff1709511ed269b9b01ea837c12fafa7c6a9a9c2894112508da491129d149ca66f58d9614bc4c5687a2bb2629d")
+    r48 = from_hex("ad21172766f237a9af95a256bb4b3169d01e7f0484520aef477c2952bb6165cc558067af0ff28e4c20cc1aa96401312a")
+    s48 = from_hex("71a6ca3d5744810c83e4cabffe10d0459bfd01c69704521c299e9224e711930e5c422425586302214badb09110751924")
+    dsig, dlen = der_ecdsa_sig_w(r48, s48, 48)
+
+    if tls13_cert.verify_cert_verify(tls13_cert.SCHEME_ECDSA_P384_SHA384, p3x, p3y, th, 32, dsig, dlen) == 1 {
+        println("ok   ecdsa-p384 CertificateVerify accepts valid sig")
+    } else {
+        println("FAIL ecdsa-p384 CertificateVerify rejected valid sig"); total_ok = 0
+    }
+
+    bytes.free(p3x)
+    bytes.free(p3y)
+    bytes.free(r48)
+    bytes.free(s48)
+    bytes.free(dsig)
+    bytes.free(th)
+
+    if total_ok == 1 {
+        println("tls13_cert_p384: all checks pass")
+    } else {
+        println("tls13_cert_p384: FAILURES")
+    }
+}
