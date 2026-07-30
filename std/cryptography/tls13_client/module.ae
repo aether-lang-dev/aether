@@ -1110,12 +1110,12 @@ fn flight_has_cert_request(fl: ptr, flen: int) -> int {
 fn build_empty_certificate() -> ptr {
     m = bytes.new(8)
     bytes.set(m, 7, 0)
-    bytes.set(m, 0, HS_CERTIFICATE)   // msg type 11
-    bytes.set(m, 1, 0)                // uint24 length = 4
+    bytes.set(m, 0, HS_CERTIFICATE) // msg type 11
+    bytes.set(m, 1, 0) // uint24 length = 4
     bytes.set(m, 2, 0)
     bytes.set(m, 3, 4)
-    bytes.set(m, 4, 0)                // certificate_request_context<1> = empty
-    bytes.set(m, 5, 0)                // certificate_list<3> = empty (len 0)
+    bytes.set(m, 4, 0) // certificate_request_context<1> = empty
+    bytes.set(m, 5, 0) // certificate_list<3> = empty (len 0)
     bytes.set(m, 6, 0)
     bytes.set(m, 7, 0)
     return m
@@ -1240,19 +1240,19 @@ fn build_client_certificate(cert_der: ptr, cert_len: int) -> ptr {
     bytes.set(m, 2, (body_len >> 8) & 0xFF)
     bytes.set(m, 3, body_len & 0xFF)
     p = 4
-    bytes.set(m, p, 0)                              // certificate_request_context<1> empty
+    bytes.set(m, p, 0) // certificate_request_context<1> empty
     p = p + 1
-    bytes.set(m, p, (entry_len >> 16) & 0xFF)       // certificate_list<3> length
+    bytes.set(m, p, (entry_len >> 16) & 0xFF) // certificate_list<3> length
     bytes.set(m, p + 1, (entry_len >> 8) & 0xFF)
     bytes.set(m, p + 2, entry_len & 0xFF)
     p = p + 3
-    bytes.set(m, p, (cert_len >> 16) & 0xFF)        // cert_data<3> length
+    bytes.set(m, p, (cert_len >> 16) & 0xFF) // cert_data<3> length
     bytes.set(m, p + 1, (cert_len >> 8) & 0xFF)
     bytes.set(m, p + 2, cert_len & 0xFF)
     p = p + 3
     bytes.copy_from_bytes(m, p, cert_der, 0, cert_len)
     p = p + cert_len
-    bytes.set(m, p, 0)                              // extensions<2> empty
+    bytes.set(m, p, 0) // extensions<2> empty
     bytes.set(m, p + 1, 0)
     return m
 }
