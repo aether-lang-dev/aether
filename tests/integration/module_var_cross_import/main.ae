@@ -5,10 +5,10 @@ main() {
     ambient.init(10)
     ambient.bump()
     ambient.bump()
-    println("${ambient.current()}")        // 12
+    println("${ambient.current()}") // 12
 
     // Local stays local; global write reaches the shared cell.
     s = ambient.scratch(5)
-    println("${s}")                        // tmp=50, cur=50 -> 100
-    println("${ambient.current()}")        // 50 (the global was updated)
+    println("${s}") // tmp=50, cur=50 -> 100
+    println("${ambient.current()}") // 50 (the global was updated)
 }

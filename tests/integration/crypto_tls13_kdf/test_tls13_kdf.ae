@@ -64,7 +64,7 @@ main() {
 
     // --- Early Secret = HKDF-Extract(0^32, 0^32) (built via hkdf directly) ---
     salt = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
-    ikm  = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
+    ikm = from_hex("0000000000000000000000000000000000000000000000000000000000000000")
     early = hkdf.hkdf_extract("sha256", salt, 32, ikm, 32)
     early_hex = to_hex(early, 32)
     if early_hex != "33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a" {

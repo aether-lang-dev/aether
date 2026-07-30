@@ -24,9 +24,9 @@ add_perm(target: ptr, cat: string, pat: string) {
     list.add(target, pat)
 }
 
-grant_fs_read(_ctx: ptr, path: string)    { add_perm(_ctx, "fs_read", path) }
-grant_exec(_ctx: ptr, cmd: string)        { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string)    { add_perm(_ctx, "env", var_name) }
+grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
+grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
+grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
 
 sandbox(name: string) {
     perms = list.new()

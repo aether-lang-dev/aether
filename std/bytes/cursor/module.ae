@@ -17,7 +17,7 @@
 
 import std.bytes
 
-exports (
+exports(
     bytes_cursor_new,
     bytes_cursor_read_u8,
     bytes_cursor_read_be_u16, bytes_cursor_read_be_u32, bytes_cursor_read_be_u64,

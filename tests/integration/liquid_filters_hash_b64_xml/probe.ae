@@ -46,64 +46,64 @@ render_with(src: string, key: string, val: string) -> string {
 main() {
     // (1) escape_xml: every special.
     expect_eq(render_with("{{ s | escape_xml }}",
-                          "s", "<a href=\"x\">'b'&c</a>"),
-              "&lt;a href=&quot;x&quot;&gt;&apos;b&apos;&amp;c&lt;/a&gt;",
-              "1 escape_xml full set")
+            "s", "<a href=\"x\">'b'&c</a>"),
+        "&lt;a href=&quot;x&quot;&gt;&apos;b&apos;&amp;c&lt;/a&gt;",
+        "1 escape_xml full set")
 
     // (2) `'` differs from escape: apostrophe is &apos;, not &#39;.
     expect_eq(render_with("{{ s | escape_xml }}", "s", "it's"),
-              "it&apos;s", "2 apos vs #39")
+        "it&apos;s", "2 apos vs #39")
 
     // (3) json_escape: backslash, quote.
     expect_eq(render_with("{{ s | json_escape }}", "s", "a\"b\\c"),
-              "a\\\"b\\\\c", "3 json backslash + quote")
+        "a\\\"b\\\\c", "3 json backslash + quote")
 
     // (4) json_escape control bytes.
     expect_eq(render_with("{{ s | json_escape }}", "s", "a\nb\tc\rd"),
-              "a\\nb\\tc\\rd", "4 json common controls")
+        "a\\nb\\tc\\rd", "4 json common controls")
 
     // (5) json_escape on a low control byte (\x01) emits .
     expect_eq(render_with("{{ s | json_escape }}", "s", "xy"),
-              "x\\u0001y", "5 json arbitrary control")
+        "x\\u0001y", "5 json arbitrary control")
 
     // (6) base64 "hello" padded.
     expect_eq(render_with("{{ s | base64_encode }}", "s", "hello"),
-              "aGVsbG8=", "6 base64 hello padded")
+        "aGVsbG8=", "6 base64 hello padded")
 
     // (7) base64 "hi" padded.
     expect_eq(render_with("{{ s | base64_encode }}", "s", "hi"),
-              "aGk=", "7 base64 hi")
+        "aGk=", "7 base64 hi")
 
     // (8) base64 round-trip.
     expect_eq(render_with("{{ s | base64_decode }}", "s", "aGVsbG8="),
-              "hello", "8 base64_decode round-trip")
+        "hello", "8 base64_decode round-trip")
 
     // (9) base64 of empty.
     expect_eq(render_with("{{ s | base64_encode }}", "s", ""),
-              "", "9 base64 empty")
+        "", "9 base64 empty")
 
     // (10) md5("hello")
     expect_eq(render_with("{{ s | md5 }}", "s", "hello"),
-              "5d41402abc4b2a76b9719d911017c592", "10 md5 hello")
+        "5d41402abc4b2a76b9719d911017c592", "10 md5 hello")
 
     // (11) sha1("hello")
     expect_eq(render_with("{{ s | sha1 }}", "s", "hello"),
-              "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", "11 sha1 hello")
+        "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", "11 sha1 hello")
 
     // (12) sha256("hello")
     expect_eq(render_with("{{ s | sha256 }}", "s", "hello"),
-              "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
-              "12 sha256 hello")
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "12 sha256 hello")
 
     // (13) Chain that changes hash — sha256("HELLO").
     expect_eq(render_with("{{ s | upcase | sha256 }}", "s", "hello"),
-              "3733cd977ff8eb18b987357e22ced99f46097f31ecb239e878ae63760e83e4d5",
-              "13 chain upcase | sha256")
+        "3733cd977ff8eb18b987357e22ced99f46097f31ecb239e878ae63760e83e4d5",
+        "13 chain upcase | sha256")
 
     // (14) Round-trip via filter chain.
     expect_eq(render_with("{{ s | base64_encode | base64_decode }}",
-                          "s", "round-trip"),
-              "round-trip", "14 chain b64 encode|decode")
+            "s", "round-trip"),
+        "round-trip", "14 chain b64 encode|decode")
 
     // (15) Unknown filter passes through unchanged (Shopify behaviour).
     t15, _ = liquid.parse_string("{{ s | nosuchfilter }}")

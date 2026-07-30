@@ -33,7 +33,7 @@ fn ck(cond: bool, msg: string) -> int {
 
 main() {
     fails = 0
-    t = bytes.new(4)          // shared tally buffer
+    t = bytes.new(4) // shared tally buffer
     _ = bytes.set(t, 0, 0)
     _ = bytes.set(t, 1, 0)
     _ = bytes.set(t, 2, 0)
@@ -44,24 +44,24 @@ main() {
     // captures it, reads it off-thread, and returns a bytes payload derived
     // from it. done reads the payload AND re-reads the capture — both must be
     // intact across the thread hop.
-    tag = string.concat("song-", "4242")     // "song-4242" = len 9
+    tag = string.concat("song-", "4242") // "song-4242" = len 9
     ok = worker.run(
         || {
             // WORKER thread — blocking is fine here.
             p = bytes.new(4)
-            bytes.set(p, 0, string.length(tag))   // read captured heap string
-            bytes.set(p, 1, 100)                  // arbitrary marker
+            bytes.set(p, 0, string.length(tag)) // read captured heap string
+            bytes.set(p, 1, 100) // arbitrary marker
             // Re-derive from the capture to prove it is still valid off-thread.
             joined = string.concat(tag, "-x")
-            bytes.set(p, 2, string.length(joined))  // "song-4242-x" = len 11
+            bytes.set(p, 2, string.length(joined)) // "song-4242-x" = len 11
             return p
         },
-        |res: ptr| {
+        | res: ptr | {
             // LOOP thread (this thread, via drain).
-            bytes.set(t, 1, bytes.get(res, 0))     // captured length
-            bytes.set(t, 2, bytes.get(res, 1))     // marker
+            bytes.set(t, 1, bytes.get(res, 0)) // captured length
+            bytes.set(t, 2, bytes.get(res, 1)) // marker
             if bytes.get(res, 2) == 11 { bytes.set(t, 3, 1) }
-            bytes.set(t, 0, bytes.get(t, 0) + 1)   // completion count
+            bytes.set(t, 0, bytes.get(t, 0) + 1) // completion count
             bytes.free(res)
         }
     )
@@ -81,17 +81,17 @@ main() {
     fails = fails + ck(worker.pending() == 0, "pending back to 0")
 
     // ---- many concurrent workers: each returns its own index ----
-    _ = bytes.set(t, 0, 0)     // reset completion count
+    _ = bytes.set(t, 0, 0) // reset completion count
     n = 0
     while n < 16 {
         idx = n
         _ = worker.run(
             || {
                 p = bytes.new(1)
-                bytes.set(p, 0, idx)    // capture idx by value
+                bytes.set(p, 0, idx) // capture idx by value
                 return p
             },
-            |res: ptr| {
+            | res: ptr | {
                 bytes.set(t, 0, bytes.get(t, 0) + 1)
                 bytes.free(res)
             }
@@ -110,7 +110,7 @@ main() {
         || {
             p = bytes.new(1)
             bytes.set(p, 0, 7)
-            bytes.free(p)      // detached owns its own result; free it here
+            bytes.free(p) // detached owns its own result; free it here
             return null
         }
     )

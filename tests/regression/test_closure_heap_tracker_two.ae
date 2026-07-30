@@ -25,7 +25,7 @@ main() {
 
     run() callback {
         out, _, _ = multi()
-        trimmed = string.trim(out)      // heap local
+        trimmed = string.trim(out) // heap local
         if trimmed != "x" {
             println("  FAIL: closure 1 trimmed=${trimmed}")
             exit(1)
@@ -33,7 +33,7 @@ main() {
     }
     run() callback {
         out, _, _ = multi()
-        trimmed = string.trim(out)      // same name, second closure
+        trimmed = string.trim(out) // same name, second closure
         if trimmed != "x" {
             println("  FAIL: closure 2 trimmed=${trimmed}")
             exit(1)

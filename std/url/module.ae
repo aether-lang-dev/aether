@@ -28,7 +28,7 @@ import std.string
 import std.bytes
 import std.collections
 
-exports (
+exports(
     encode, encode_path, encode_strict, decode,
     parse_query, query_get, query_get_all
 )
@@ -39,7 +39,7 @@ fn hex_char(nibble: int) -> int {
     if nibble < 10 {
         return 48 + nibble
     }
-    return 55 + nibble  // 'A' + (nibble - 10)
+    return 55 + nibble // 'A' + (nibble - 10)
 }
 
 // True for [A-Za-z0-9-._~] — the RFC 3986 "unreserved" set.
@@ -92,7 +92,7 @@ fn encode_mode(s: string, mode: int) -> string {
             bytes.set(buf, out, 43)
             out = out + 1
         } else {
-            bytes.set(buf, out, 37)        // '%'
+            bytes.set(buf, out, 37) // '%'
             bytes.set(buf, out + 1, hex_char((c >> 4) & 15))
             bytes.set(buf, out + 2, hex_char(c & 15))
             out = out + 3

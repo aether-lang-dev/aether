@@ -26,15 +26,15 @@
 import std.bits
 import std.bytes
 
-exports (
+exports(
     aead_seal, aead_open,
     a128_seal, a128_open, a128a_seal, a128a_open,
     KEY_BYTES, NONCE_BYTES, TAG_BYTES
 )
 
-const KEY_BYTES   = 16
+const KEY_BYTES = 16
 const NONCE_BYTES = 16
-const TAG_BYTES   = 16
+const TAG_BYTES = 16
 
 struct Aead12St {
     s0: long
@@ -42,8 +42,8 @@ struct Aead12St {
     s2: long
     s3: long
     s4: long
-    rate: int      // 8 (ascon-128) or 16 (ascon-128a)
-    nr: int        // 6 (ascon-128) or 8 (ascon-128a) for AAD/data rounds
+    rate: int // 8 (ascon-128) or 16 (ascon-128a)
+    nr: int // 6 (ascon-128) or 8 (ascon-128a) for AAD/data rounds
     iv: long
 }
 

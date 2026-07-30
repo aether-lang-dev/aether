@@ -29,7 +29,7 @@ main() {
     // Case 1: append_long.
     b1 = strbuilder.new(16)
     strbuilder.append_long(b1, 5000000000)
-    strbuilder.append_byte(b1, 124)            // '|'
+    strbuilder.append_byte(b1, 124) // '|'
     strbuilder.append_long(b1, -5000000000)
     strbuilder.append_byte(b1, 124)
     strbuilder.append_long(b1, 9223372036854775807)
@@ -42,11 +42,11 @@ main() {
 
     // Case 2: append_hex — width 0 (natural), 8 (zero-pad), 2 (grows).
     b2 = strbuilder.new(16)
-    strbuilder.append_hex(b2, 255, 0)          // "ff"
-    strbuilder.append_byte(b2, 32)             // ' '
-    strbuilder.append_hex(b2, 255, 8)          // "000000ff"
+    strbuilder.append_hex(b2, 255, 0) // "ff"
+    strbuilder.append_byte(b2, 32) // ' '
+    strbuilder.append_hex(b2, 255, 8) // "000000ff"
     strbuilder.append_byte(b2, 32)
-    strbuilder.append_hex(b2, 74565, 2)        // 0x12345 — wider than 2
+    strbuilder.append_hex(b2, 74565, 2) // 0x12345 — wider than 2
     out2 = strbuilder.finish(b2)
     if out2 != "ff 000000ff 12345" {
         println("  FAIL 2: got '${out2}'")
@@ -56,12 +56,12 @@ main() {
 
     // Case 3: append_codepoint — 1/2/3/4-byte encodings + rejection.
     b3 = strbuilder.new(16)
-    r_ascii = strbuilder.append_codepoint(b3, 65)        // 'A'   → 1 byte
-    r_2byte = strbuilder.append_codepoint(b3, 0x00F7)    // '÷'   → 2 bytes
-    r_3byte = strbuilder.append_codepoint(b3, 0x20AC)    // '€'   → 3 bytes
-    r_4byte = strbuilder.append_codepoint(b3, 0x1F600)   // emoji → 4 bytes
-    r_surrogate = strbuilder.append_codepoint(b3, 0xD800)   // invalid
-    r_toobig    = strbuilder.append_codepoint(b3, 0x110000) // invalid
+    r_ascii = strbuilder.append_codepoint(b3, 65) // 'A'   → 1 byte
+    r_2byte = strbuilder.append_codepoint(b3, 0x00F7) // '÷'   → 2 bytes
+    r_3byte = strbuilder.append_codepoint(b3, 0x20AC) // '€'   → 3 bytes
+    r_4byte = strbuilder.append_codepoint(b3, 0x1F600) // emoji → 4 bytes
+    r_surrogate = strbuilder.append_codepoint(b3, 0xD800) // invalid
+    r_toobig = strbuilder.append_codepoint(b3, 0x110000) // invalid
     if r_ascii != 1 || r_2byte != 1 || r_3byte != 1 || r_4byte != 1 {
         println("  FAIL 3: valid codepoint rejected")
         exit(1)
@@ -96,12 +96,12 @@ main() {
         exit(1)
     }
     if mem.get_byte(d3, 3) != 0xE2 || mem.get_byte(d3, 4) != 0x82 ||
-       mem.get_byte(d3, 5) != 0xAC {
+    mem.get_byte(d3, 5) != 0xAC {
         println("  FAIL 3: euro UTF-8 bytes wrong")
         exit(1)
     }
     if mem.get_byte(d3, 6) != 0xF0 || mem.get_byte(d3, 7) != 0x9F ||
-       mem.get_byte(d3, 8) != 0x98 || mem.get_byte(d3, 9) != 0x80 {
+    mem.get_byte(d3, 8) != 0x98 || mem.get_byte(d3, 9) != 0x80 {
         println("  FAIL 3: emoji UTF-8 bytes wrong")
         exit(1)
     }
@@ -134,17 +134,17 @@ main() {
 
     // Case 5: finish_with_length — binary content with an embedded NUL.
     b5 = strbuilder.new(16)
-    strbuilder.append_byte(b5, 65)   // 'A'
-    strbuilder.append_byte(b5, 0)    // NUL — content, not terminator
-    strbuilder.append_byte(b5, 66)   // 'B'
+    strbuilder.append_byte(b5, 65) // 'A'
+    strbuilder.append_byte(b5, 0) // NUL — content, not terminator
+    strbuilder.append_byte(b5, 66) // 'B'
     data5, len5 = strbuilder.finish_with_length(b5)
     if len5 != 3 {
         println("  FAIL 5: length=${len5}, expected 3")
         exit(1)
     }
     if mem.get_byte(data5, 0) != 65 ||
-       mem.get_byte(data5, 1) != 0 ||
-       mem.get_byte(data5, 2) != 66 {
+    mem.get_byte(data5, 1) != 0 ||
+    mem.get_byte(data5, 2) != 66 {
         println("  FAIL 5: binary bytes wrong")
         exit(1)
     }
@@ -183,13 +183,13 @@ main() {
 
     // Case 8: truncate — shrink, reject out-of-range, append-after.
     b8 = strbuilder.new(16)
-    strbuilder.append(b8, "hello world")        // length 11
-    t_ok = strbuilder.truncate(b8, 5)           // back to "hello"
+    strbuilder.append(b8, "hello world") // length 11
+    t_ok = strbuilder.truncate(b8, 5) // back to "hello"
     if t_ok != 1 || strbuilder.length(b8) != 5 {
         println("  FAIL 8: truncate(5) length=${strbuilder.length(b8)}")
         exit(1)
     }
-    t_bad = strbuilder.truncate(b8, 999)        // past length — rejected
+    t_bad = strbuilder.truncate(b8, 999) // past length — rejected
     if t_bad != 0 || strbuilder.length(b8) != 5 {
         println("  FAIL 8: out-of-range truncate not rejected")
         exit(1)

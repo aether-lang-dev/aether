@@ -6,6 +6,6 @@
 import std.string
 
 main() {
-    string.to_long("42")   // dropped `long!` — must be consumed
+    string.to_long("42") // dropped `long!` — must be consumed
     println("unreachable")
 }

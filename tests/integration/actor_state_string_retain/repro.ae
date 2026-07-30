@@ -21,9 +21,9 @@ actor A {
     state n = ""
     state c = ""
     receive {
-        SetN(in_n) -> { n = in_n }                       // direct retain
-        SetC(in_c) -> { c = string.concat(in_c, "!") }   // defensive copy
-        Show       -> { println("n=${n} c=${c}") }
+        SetN(in_n) -> { n = in_n } // direct retain
+        SetC(in_c) -> { c = string.concat(in_c, "!") } // defensive copy
+        Show -> { println("n=${n} c=${c}") }
     }
 }
 
@@ -32,11 +32,11 @@ main() {
     a ! SetN { in_n: "aeo-db" }
     a ! SetC { in_c: "cfg" }
     sleep(60)
-    a ! Show {}                                          // expect: n=aeo-db c=cfg!
+    a ! Show {} // expect: n=aeo-db c=cfg!
     sleep(60)
-    a ! SetN { in_n: "second-longer-value" }             // reassign → free first
+    a ! SetN { in_n: "second-longer-value" } // reassign → free first
     sleep(60)
-    a ! Show {}                                          // expect: n=second-longer-value c=cfg!
+    a ! Show {} // expect: n=second-longer-value c=cfg!
     sleep(60)
     wait_for_idle()
 }

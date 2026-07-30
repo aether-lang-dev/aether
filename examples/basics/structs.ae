@@ -20,8 +20,8 @@ calculate_damage(base, defense) {
 
 main() {
     // Struct creation with inferred field types
-    origin = Point{ x: 0, y: 0 };
-    target = Point{ x: 3, y: 4 };
+    origin = Point { x: 0, y: 0 };
+    target = Point { x: 3, y: 4 };
 
     // Compute distance squared inline
     dx = target.x - origin.x;
@@ -32,8 +32,8 @@ main() {
     print("\n");
 
     // Player structs
-    p1 = Player{ health: 100, score: 0, level: 1 };
-    p2 = Player{ health: 80, score: 50, level: 3 };
+    p1 = Player { health: 100, score: 0, level: 1 };
+    p2 = Player { health: 80, score: 50, level: 3 };
 
     print("Player 1 HP: ");
     print(p1.health);

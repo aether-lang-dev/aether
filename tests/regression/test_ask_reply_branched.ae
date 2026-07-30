@@ -45,12 +45,12 @@ main() {
     s = spawn(Svc())
 
     check("nested-if high branch", s ? Q { x: 50 }, 999)
-    check("nested-if low branch",  s ? Q { x: 4 },  8)
-    check("else branch",           s ? Q { x: 0 },  0 - 1)
+    check("nested-if low branch", s ? Q { x: 4 }, 8)
+    check("else branch", s ? Q { x: 0 }, 0 - 1)
 
     // Repeat to confirm the reply slot is per-message, not stale across asks.
     check("repeat high", s ? Q { x: 20 }, 999)
-    check("repeat low",  s ? Q { x: 1 },  2)
+    check("repeat low", s ? Q { x: 1 }, 2)
 
     println("PASS: branched ask/reply returns each branch's value (#736)")
 }

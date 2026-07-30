@@ -9,6 +9,6 @@ raw_pair(x: int) -> (int, string) {
 }
 
 main() {
-    raw_pair(5)   // raw tuple, is_result unset — allowed to drop
+    raw_pair(5) // raw tuple, is_result unset — allowed to drop
     println("ok")
 }

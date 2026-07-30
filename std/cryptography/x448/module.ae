@@ -24,7 +24,7 @@
 import std.bytes
 import std.bignum
 
-exports (
+exports(
     x448, base_mult
 )
 
@@ -38,7 +38,7 @@ field_p() -> ptr {
     b = bytes.new(56)
     i = 0
     while i < 56 { bytes.set(b, i, 0xFF); i = i + 1 }
-    bytes.set(b, 27, 0xFE)   // big-endian index 27 = the 2^224 bit position
+    bytes.set(b, 27, 0xFE) // big-endian index 27 = the 2^224 bit position
     p = bignum.from_bytes_unsigned(b, 56)
     bytes.free(b)
     return p

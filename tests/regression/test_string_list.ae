@@ -28,7 +28,7 @@ extern exit(code: int)
 
 build_with_local() -> ptr {
     L = string_list_new()
-    s = string.copy("ephemeral")  // wrapped AetherString*
+    s = string.copy("ephemeral") // wrapped AetherString*
     string_list_add(L, s)
     // `s` goes out of scope on return — the list's retain is what
     // keeps the bytes alive.

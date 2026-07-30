@@ -29,7 +29,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     ripemd128_hex, ripemd128_bytes
 )
@@ -39,11 +39,11 @@ struct Rmd128Ctx {
     h1: long
     h2: long
     h3: long
-    block: ptr        // std.bytes buffer, 64 bytes
+    block: ptr // std.bytes buffer, 64 bytes
     block_len: int
     count_lo: long
     count_hi: long
-    x: ptr            // intarr(16) loaded message words
+    x: ptr // intarr(16) loaded message words
 }
 
 m32(x: long) -> long {
@@ -73,30 +73,30 @@ xg(ctx: *Rmd128Ctx, i: int) -> long {
 
 // Left-line step functions: a = RL(a + Fi(b,c,d) + x + K, s)
 sf1(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f1(b,c,d) + x), s)
+    return rl(m32(a + f1(b, c, d) + x), s)
 }
 sf2(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f2(b,c,d) + x + 0x5a827999), s)
+    return rl(m32(a + f2(b, c, d) + x + 0x5a827999), s)
 }
 sf3(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f3(b,c,d) + x + 0x6ed9eba1), s)
+    return rl(m32(a + f3(b, c, d) + x + 0x6ed9eba1), s)
 }
 sf4(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f4(b,c,d) + x + 0x8f1bbcdc), s)
+    return rl(m32(a + f4(b, c, d) + x + 0x8f1bbcdc), s)
 }
 // Right-line step functions (parallel rounds): swapped function order and
 // distinct constants per BC RipeMD128Digest.
 sff1(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f1(b,c,d) + x), s)
+    return rl(m32(a + f1(b, c, d) + x), s)
 }
 sff2(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f2(b,c,d) + x + 0x6d703ef3), s)
+    return rl(m32(a + f2(b, c, d) + x + 0x6d703ef3), s)
 }
 sff3(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f3(b,c,d) + x + 0x5c4dd124), s)
+    return rl(m32(a + f3(b, c, d) + x + 0x5c4dd124), s)
 }
 sff4(a: long, b: long, c: long, d: long, x: long, s: int) -> long {
-    return rl(m32(a + f4(b,c,d) + x + 0x50a28be6), s)
+    return rl(m32(a + f4(b, c, d) + x + 0x50a28be6), s)
 }
 
 process_block(ctx: *Rmd128Ctx) {
@@ -114,144 +114,144 @@ process_block(ctx: *Rmd128Ctx) {
     d = sf1(d, a, b, c, xg(ctx, 1), 14)
     c = sf1(c, d, a, b, xg(ctx, 2), 15)
     b = sf1(b, c, d, a, xg(ctx, 3), 12)
-    a = sf1(a, b, c, d, xg(ctx, 4),  5)
-    d = sf1(d, a, b, c, xg(ctx, 5),  8)
-    c = sf1(c, d, a, b, xg(ctx, 6),  7)
-    b = sf1(b, c, d, a, xg(ctx, 7),  9)
+    a = sf1(a, b, c, d, xg(ctx, 4), 5)
+    d = sf1(d, a, b, c, xg(ctx, 5), 8)
+    c = sf1(c, d, a, b, xg(ctx, 6), 7)
+    b = sf1(b, c, d, a, xg(ctx, 7), 9)
     a = sf1(a, b, c, d, xg(ctx, 8), 11)
     d = sf1(d, a, b, c, xg(ctx, 9), 13)
-    c = sf1(c, d, a, b, xg(ctx,10), 14)
-    b = sf1(b, c, d, a, xg(ctx,11), 15)
-    a = sf1(a, b, c, d, xg(ctx,12),  6)
-    d = sf1(d, a, b, c, xg(ctx,13),  7)
-    c = sf1(c, d, a, b, xg(ctx,14),  9)
-    b = sf1(b, c, d, a, xg(ctx,15),  8)
+    c = sf1(c, d, a, b, xg(ctx, 10), 14)
+    b = sf1(b, c, d, a, xg(ctx, 11), 15)
+    a = sf1(a, b, c, d, xg(ctx, 12), 6)
+    d = sf1(d, a, b, c, xg(ctx, 13), 7)
+    c = sf1(c, d, a, b, xg(ctx, 14), 9)
+    b = sf1(b, c, d, a, xg(ctx, 15), 8)
 
     // ---- Round 2 (left) ----
-    a = sf2(a, b, c, d, xg(ctx, 7),  7)
-    d = sf2(d, a, b, c, xg(ctx, 4),  6)
-    c = sf2(c, d, a, b, xg(ctx,13),  8)
+    a = sf2(a, b, c, d, xg(ctx, 7), 7)
+    d = sf2(d, a, b, c, xg(ctx, 4), 6)
+    c = sf2(c, d, a, b, xg(ctx, 13), 8)
     b = sf2(b, c, d, a, xg(ctx, 1), 13)
-    a = sf2(a, b, c, d, xg(ctx,10), 11)
-    d = sf2(d, a, b, c, xg(ctx, 6),  9)
-    c = sf2(c, d, a, b, xg(ctx,15),  7)
+    a = sf2(a, b, c, d, xg(ctx, 10), 11)
+    d = sf2(d, a, b, c, xg(ctx, 6), 9)
+    c = sf2(c, d, a, b, xg(ctx, 15), 7)
     b = sf2(b, c, d, a, xg(ctx, 3), 15)
-    a = sf2(a, b, c, d, xg(ctx,12),  7)
+    a = sf2(a, b, c, d, xg(ctx, 12), 7)
     d = sf2(d, a, b, c, xg(ctx, 0), 12)
     c = sf2(c, d, a, b, xg(ctx, 9), 15)
-    b = sf2(b, c, d, a, xg(ctx, 5),  9)
+    b = sf2(b, c, d, a, xg(ctx, 5), 9)
     a = sf2(a, b, c, d, xg(ctx, 2), 11)
-    d = sf2(d, a, b, c, xg(ctx,14),  7)
-    c = sf2(c, d, a, b, xg(ctx,11), 13)
+    d = sf2(d, a, b, c, xg(ctx, 14), 7)
+    c = sf2(c, d, a, b, xg(ctx, 11), 13)
     b = sf2(b, c, d, a, xg(ctx, 8), 12)
 
     // ---- Round 3 (left) ----
     a = sf3(a, b, c, d, xg(ctx, 3), 11)
-    d = sf3(d, a, b, c, xg(ctx,10), 13)
-    c = sf3(c, d, a, b, xg(ctx,14),  6)
-    b = sf3(b, c, d, a, xg(ctx, 4),  7)
+    d = sf3(d, a, b, c, xg(ctx, 10), 13)
+    c = sf3(c, d, a, b, xg(ctx, 14), 6)
+    b = sf3(b, c, d, a, xg(ctx, 4), 7)
     a = sf3(a, b, c, d, xg(ctx, 9), 14)
-    d = sf3(d, a, b, c, xg(ctx,15),  9)
+    d = sf3(d, a, b, c, xg(ctx, 15), 9)
     c = sf3(c, d, a, b, xg(ctx, 8), 13)
     b = sf3(b, c, d, a, xg(ctx, 1), 15)
     a = sf3(a, b, c, d, xg(ctx, 2), 14)
-    d = sf3(d, a, b, c, xg(ctx, 7),  8)
+    d = sf3(d, a, b, c, xg(ctx, 7), 8)
     c = sf3(c, d, a, b, xg(ctx, 0), 13)
-    b = sf3(b, c, d, a, xg(ctx, 6),  6)
-    a = sf3(a, b, c, d, xg(ctx,13),  5)
-    d = sf3(d, a, b, c, xg(ctx,11), 12)
-    c = sf3(c, d, a, b, xg(ctx, 5),  7)
-    b = sf3(b, c, d, a, xg(ctx,12),  5)
+    b = sf3(b, c, d, a, xg(ctx, 6), 6)
+    a = sf3(a, b, c, d, xg(ctx, 13), 5)
+    d = sf3(d, a, b, c, xg(ctx, 11), 12)
+    c = sf3(c, d, a, b, xg(ctx, 5), 7)
+    b = sf3(b, c, d, a, xg(ctx, 12), 5)
 
     // ---- Round 4 (left) ----
     a = sf4(a, b, c, d, xg(ctx, 1), 11)
     d = sf4(d, a, b, c, xg(ctx, 9), 12)
-    c = sf4(c, d, a, b, xg(ctx,11), 14)
-    b = sf4(b, c, d, a, xg(ctx,10), 15)
+    c = sf4(c, d, a, b, xg(ctx, 11), 14)
+    b = sf4(b, c, d, a, xg(ctx, 10), 15)
     a = sf4(a, b, c, d, xg(ctx, 0), 14)
     d = sf4(d, a, b, c, xg(ctx, 8), 15)
-    c = sf4(c, d, a, b, xg(ctx,12),  9)
-    b = sf4(b, c, d, a, xg(ctx, 4),  8)
-    a = sf4(a, b, c, d, xg(ctx,13),  9)
+    c = sf4(c, d, a, b, xg(ctx, 12), 9)
+    b = sf4(b, c, d, a, xg(ctx, 4), 8)
+    a = sf4(a, b, c, d, xg(ctx, 13), 9)
     d = sf4(d, a, b, c, xg(ctx, 3), 14)
-    c = sf4(c, d, a, b, xg(ctx, 7),  5)
-    b = sf4(b, c, d, a, xg(ctx,15),  6)
-    a = sf4(a, b, c, d, xg(ctx,14),  8)
-    d = sf4(d, a, b, c, xg(ctx, 5),  6)
-    c = sf4(c, d, a, b, xg(ctx, 6),  5)
+    c = sf4(c, d, a, b, xg(ctx, 7), 5)
+    b = sf4(b, c, d, a, xg(ctx, 15), 6)
+    a = sf4(a, b, c, d, xg(ctx, 14), 8)
+    d = sf4(d, a, b, c, xg(ctx, 5), 6)
+    c = sf4(c, d, a, b, xg(ctx, 6), 5)
     b = sf4(b, c, d, a, xg(ctx, 2), 12)
 
     // ---- Parallel round 1 (right, uses FF4) ----
-    aa = sff4(aa, bb, cc, dd, xg(ctx, 5),  8)
-    dd = sff4(dd, aa, bb, cc, xg(ctx,14),  9)
-    cc = sff4(cc, dd, aa, bb, xg(ctx, 7),  9)
+    aa = sff4(aa, bb, cc, dd, xg(ctx, 5), 8)
+    dd = sff4(dd, aa, bb, cc, xg(ctx, 14), 9)
+    cc = sff4(cc, dd, aa, bb, xg(ctx, 7), 9)
     bb = sff4(bb, cc, dd, aa, xg(ctx, 0), 11)
     aa = sff4(aa, bb, cc, dd, xg(ctx, 9), 13)
     dd = sff4(dd, aa, bb, cc, xg(ctx, 2), 15)
-    cc = sff4(cc, dd, aa, bb, xg(ctx,11), 15)
-    bb = sff4(bb, cc, dd, aa, xg(ctx, 4),  5)
-    aa = sff4(aa, bb, cc, dd, xg(ctx,13),  7)
-    dd = sff4(dd, aa, bb, cc, xg(ctx, 6),  7)
-    cc = sff4(cc, dd, aa, bb, xg(ctx,15),  8)
+    cc = sff4(cc, dd, aa, bb, xg(ctx, 11), 15)
+    bb = sff4(bb, cc, dd, aa, xg(ctx, 4), 5)
+    aa = sff4(aa, bb, cc, dd, xg(ctx, 13), 7)
+    dd = sff4(dd, aa, bb, cc, xg(ctx, 6), 7)
+    cc = sff4(cc, dd, aa, bb, xg(ctx, 15), 8)
     bb = sff4(bb, cc, dd, aa, xg(ctx, 8), 11)
     aa = sff4(aa, bb, cc, dd, xg(ctx, 1), 14)
-    dd = sff4(dd, aa, bb, cc, xg(ctx,10), 14)
+    dd = sff4(dd, aa, bb, cc, xg(ctx, 10), 14)
     cc = sff4(cc, dd, aa, bb, xg(ctx, 3), 12)
-    bb = sff4(bb, cc, dd, aa, xg(ctx,12),  6)
+    bb = sff4(bb, cc, dd, aa, xg(ctx, 12), 6)
 
     // ---- Parallel round 2 (right, uses FF3) ----
-    aa = sff3(aa, bb, cc, dd, xg(ctx, 6),  9)
-    dd = sff3(dd, aa, bb, cc, xg(ctx,11), 13)
+    aa = sff3(aa, bb, cc, dd, xg(ctx, 6), 9)
+    dd = sff3(dd, aa, bb, cc, xg(ctx, 11), 13)
     cc = sff3(cc, dd, aa, bb, xg(ctx, 3), 15)
-    bb = sff3(bb, cc, dd, aa, xg(ctx, 7),  7)
+    bb = sff3(bb, cc, dd, aa, xg(ctx, 7), 7)
     aa = sff3(aa, bb, cc, dd, xg(ctx, 0), 12)
-    dd = sff3(dd, aa, bb, cc, xg(ctx,13),  8)
-    cc = sff3(cc, dd, aa, bb, xg(ctx, 5),  9)
-    bb = sff3(bb, cc, dd, aa, xg(ctx,10), 11)
-    aa = sff3(aa, bb, cc, dd, xg(ctx,14),  7)
-    dd = sff3(dd, aa, bb, cc, xg(ctx,15),  7)
+    dd = sff3(dd, aa, bb, cc, xg(ctx, 13), 8)
+    cc = sff3(cc, dd, aa, bb, xg(ctx, 5), 9)
+    bb = sff3(bb, cc, dd, aa, xg(ctx, 10), 11)
+    aa = sff3(aa, bb, cc, dd, xg(ctx, 14), 7)
+    dd = sff3(dd, aa, bb, cc, xg(ctx, 15), 7)
     cc = sff3(cc, dd, aa, bb, xg(ctx, 8), 12)
-    bb = sff3(bb, cc, dd, aa, xg(ctx,12),  7)
-    aa = sff3(aa, bb, cc, dd, xg(ctx, 4),  6)
+    bb = sff3(bb, cc, dd, aa, xg(ctx, 12), 7)
+    aa = sff3(aa, bb, cc, dd, xg(ctx, 4), 6)
     dd = sff3(dd, aa, bb, cc, xg(ctx, 9), 15)
     cc = sff3(cc, dd, aa, bb, xg(ctx, 1), 13)
     bb = sff3(bb, cc, dd, aa, xg(ctx, 2), 11)
 
     // ---- Parallel round 3 (right, uses FF2) ----
-    aa = sff2(aa, bb, cc, dd, xg(ctx,15),  9)
-    dd = sff2(dd, aa, bb, cc, xg(ctx, 5),  7)
+    aa = sff2(aa, bb, cc, dd, xg(ctx, 15), 9)
+    dd = sff2(dd, aa, bb, cc, xg(ctx, 5), 7)
     cc = sff2(cc, dd, aa, bb, xg(ctx, 1), 15)
     bb = sff2(bb, cc, dd, aa, xg(ctx, 3), 11)
-    aa = sff2(aa, bb, cc, dd, xg(ctx, 7),  8)
-    dd = sff2(dd, aa, bb, cc, xg(ctx,14),  6)
-    cc = sff2(cc, dd, aa, bb, xg(ctx, 6),  6)
+    aa = sff2(aa, bb, cc, dd, xg(ctx, 7), 8)
+    dd = sff2(dd, aa, bb, cc, xg(ctx, 14), 6)
+    cc = sff2(cc, dd, aa, bb, xg(ctx, 6), 6)
     bb = sff2(bb, cc, dd, aa, xg(ctx, 9), 14)
-    aa = sff2(aa, bb, cc, dd, xg(ctx,11), 12)
+    aa = sff2(aa, bb, cc, dd, xg(ctx, 11), 12)
     dd = sff2(dd, aa, bb, cc, xg(ctx, 8), 13)
-    cc = sff2(cc, dd, aa, bb, xg(ctx,12),  5)
+    cc = sff2(cc, dd, aa, bb, xg(ctx, 12), 5)
     bb = sff2(bb, cc, dd, aa, xg(ctx, 2), 14)
-    aa = sff2(aa, bb, cc, dd, xg(ctx,10), 13)
+    aa = sff2(aa, bb, cc, dd, xg(ctx, 10), 13)
     dd = sff2(dd, aa, bb, cc, xg(ctx, 0), 13)
-    cc = sff2(cc, dd, aa, bb, xg(ctx, 4),  7)
-    bb = sff2(bb, cc, dd, aa, xg(ctx,13),  5)
+    cc = sff2(cc, dd, aa, bb, xg(ctx, 4), 7)
+    bb = sff2(bb, cc, dd, aa, xg(ctx, 13), 5)
 
     // ---- Parallel round 4 (right, uses FF1) ----
     aa = sff1(aa, bb, cc, dd, xg(ctx, 8), 15)
-    dd = sff1(dd, aa, bb, cc, xg(ctx, 6),  5)
-    cc = sff1(cc, dd, aa, bb, xg(ctx, 4),  8)
+    dd = sff1(dd, aa, bb, cc, xg(ctx, 6), 5)
+    cc = sff1(cc, dd, aa, bb, xg(ctx, 4), 8)
     bb = sff1(bb, cc, dd, aa, xg(ctx, 1), 11)
     aa = sff1(aa, bb, cc, dd, xg(ctx, 3), 14)
-    dd = sff1(dd, aa, bb, cc, xg(ctx,11), 14)
-    cc = sff1(cc, dd, aa, bb, xg(ctx,15),  6)
+    dd = sff1(dd, aa, bb, cc, xg(ctx, 11), 14)
+    cc = sff1(cc, dd, aa, bb, xg(ctx, 15), 6)
     bb = sff1(bb, cc, dd, aa, xg(ctx, 0), 14)
-    aa = sff1(aa, bb, cc, dd, xg(ctx, 5),  6)
-    dd = sff1(dd, aa, bb, cc, xg(ctx,12),  9)
+    aa = sff1(aa, bb, cc, dd, xg(ctx, 5), 6)
+    dd = sff1(dd, aa, bb, cc, xg(ctx, 12), 9)
     cc = sff1(cc, dd, aa, bb, xg(ctx, 2), 12)
-    bb = sff1(bb, cc, dd, aa, xg(ctx,13),  9)
+    bb = sff1(bb, cc, dd, aa, xg(ctx, 13), 9)
     aa = sff1(aa, bb, cc, dd, xg(ctx, 9), 12)
-    dd = sff1(dd, aa, bb, cc, xg(ctx, 7),  5)
-    cc = sff1(cc, dd, aa, bb, xg(ctx,10), 15)
-    bb = sff1(bb, cc, dd, aa, xg(ctx,14),  8)
+    dd = sff1(dd, aa, bb, cc, xg(ctx, 7), 5)
+    cc = sff1(cc, dd, aa, bb, xg(ctx, 10), 15)
+    bb = sff1(bb, cc, dd, aa, xg(ctx, 14), 8)
 
     // Combine the two lines.
     t = m32(ctx.h1 + c + dd)
@@ -370,7 +370,7 @@ finalize_to_bytes(c: *Rmd128Ctx) -> ptr {
 }
 
 emit_le32(out: ptr, off: int, v: long) {
-    bytes.set(out, off,     v & 255)
+    bytes.set(out, off, v & 255)
     bytes.set(out, off + 1, bits.lsr64(v, 8) & 255)
     bytes.set(out, off + 2, bits.lsr64(v, 16) & 255)
     bytes.set(out, off + 3, bits.lsr64(v, 24) & 255)

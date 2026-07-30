@@ -64,9 +64,9 @@ main() {
     println("  PASS 4: empty path → 0")
 
     // Case 5: file.exists vs dir.exists vs fs.exists partition.
-    fe_dir  = file.exists(tmpdir)
+    fe_dir = file.exists(tmpdir)
     fe_file = file.exists(tmpfile)
-    de_dir  = dir.exists(tmpdir)
+    de_dir = dir.exists(tmpdir)
     de_file = dir.exists(tmpfile)
 
     // file.exists: 0 on dir, 1 on regular file

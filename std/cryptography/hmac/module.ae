@@ -30,7 +30,7 @@ import std.cryptography.sha2
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     new, update, final_bytes, final_hex, free_ctx,
     hmac_bytes, hmac_hex,
     hmac_sha256, hmac_sha256_hex,
@@ -43,11 +43,11 @@ exports (
 // opad block (K0 ^ 0x5c) so finalization can run the outer hash. The
 // algo string lets the outer/inner hashes pick the same core.
 struct HmacCtx {
-    inner: ptr        // sha2 ctx, already fed (K0 ^ ipad)
-    opad: ptr         // std.bytes buffer, B bytes: K0 ^ 0x5c
-    block_size: int   // B
-    digest_len: int   // hash output length
-    algo: string      // sha2 algo name
+    inner: ptr // sha2 ctx, already fed (K0 ^ ipad)
+    opad: ptr // std.bytes buffer, B bytes: K0 ^ 0x5c
+    block_size: int // B
+    digest_len: int // hash output length
+    algo: string // sha2 algo name
 }
 
 // Block size B for a given algo. Returns 0 for an unknown algo.

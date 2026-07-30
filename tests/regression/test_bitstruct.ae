@@ -20,32 +20,32 @@ extern exit(code: int)
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-bitstruct Flags : uint8_t {
+bitstruct Flags: uint8_t {
     text: bool 0
-    kind: int  1..=3      // inclusive spelling
-    top:  int  5..<8      // exclusive spelling — the SAME three bits (5,6,7)
+    kind: int 1..=3 // inclusive spelling
+    top: int 5..<8 // exclusive spelling — the SAME three bits (5,6,7)
 }
 
 // 16-bit, DNS-header-shaped: the load-bearing wire-format case.
-bitstruct DnsFlags : uint16_t {
-    qr:     bool 15
-    opcode: int  11..=14
-    aa:     bool 10
-    rcode:  int  0..=3
+bitstruct DnsFlags: uint16_t {
+    qr: bool 15
+    opcode: int 11..=14
+    aa: bool 10
+    rcode: int 0..=3
 }
 
 // Overlapping views of the same bits are allowed only with @overlap.
-bitstruct Overlapped : uint8_t @overlap {
+bitstruct Overlapped: uint8_t @overlap {
     whole: int 0..=7
-    lo:    int 0..=3
-    hi:    int 4..=7
+    lo: int 0..=3
+    hi: int 4..=7
 }
 
 // A bitstruct nested as an ordinary struct field: it is just its backing
 // integer, so it stores like any other scalar.
 struct Packet {
     flags: Flags
-    seq:   int
+    seq: int
 }
 
 check(got: int, want: int, lbl: string) -> int {
@@ -88,7 +88,7 @@ main() {
     f.kind = 0
     if f.text != true { println("FAIL: text survives a neighbour write"); fails = fails + 1 }
     fails = fails + check(f.top, 7, "top survives a neighbour write")
-    fails = fails + check(f as uint8_t, 225, "word after clearing kind")   // 1 + 224
+    fails = fails + check(f as uint8_t, 225, "word after clearing kind") // 1 + 224
 
     // An over-wide value truncates to its own field, it does not bleed.
     f.kind = 0xFF
@@ -97,8 +97,8 @@ main() {
 
     // ---- both range spellings agree ----------------------------------------
     a = 0 as Flags
-    a.top = 5            // declared 5..<8
-    fails = fails + check(a as uint8_t, 160, "exclusive range lands at bit 5")   // 5 << 5
+    a.top = 5 // declared 5..<8
+    fails = fails + check(a as uint8_t, 160, "exclusive range lands at bit 5") // 5 << 5
 
     // ---- 16-bit wire format, composed with byte order ----------------------
     // The bitstruct owns WHICH BITS; std.mem owns WHICH BYTE ORDER. Keeping the
@@ -109,7 +109,7 @@ main() {
     d.aa = true
     d.rcode = 3
     w = d as uint16_t
-    fails = fails + check(w, 0x9403, "dns flags word")   // 0x8000|0x1000|0x400|0x3
+    fails = fails + check(w, 0x9403, "dns flags word") // 0x8000|0x1000|0x400|0x3
 
     p = malloc(4)
     mem.set_u16_be(p, 0, w)

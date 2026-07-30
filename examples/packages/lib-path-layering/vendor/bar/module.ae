@@ -1,7 +1,7 @@
 // Vendored `bar`. Only exists in vendor/ — proves that a chain
 // resolves each module independently (it doesn't stop at the first
 // directory; each `import` walks the chain).
-exports (bar_origin)
+exports(bar_origin)
 
 bar_origin() -> string {
     return "vendor/ (only here)"

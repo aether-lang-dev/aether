@@ -34,7 +34,7 @@ builder run_command(name: string) with list_new {
     }
     println("run: ${name} flags=${count}")
     i = 0
-    for (i = 0; i < count; i++) {
+    for (i = 0; i < count; i ++) {
         f, _ = list.get(_builder, i)
         println("  flag: ${f}")
     }

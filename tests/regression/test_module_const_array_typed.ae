@@ -15,8 +15,8 @@ extern exit(code: int)
 
 // A real table-driven shape: CRC16 high-byte table slice (uint16).
 const CRC16TAB: uint16[8] = [0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7]
-const BYTETAB:  uint8[4]  = [1, 2, 3, 255]
-const LONGTAB:  long[3]   = [1000000, 2000000, 3000000]
+const BYTETAB: uint8[4] = [1, 2, 3, 255]
+const LONGTAB: long[3] = [1000000, 2000000, 3000000]
 
 // Shared across calls (not re-initialised each call): a function reads it.
 lookup(i: int) -> int {
@@ -28,9 +28,9 @@ main() {
 
     if CRC16TAB[3] != 0x3063 { println("FAIL: CRC16TAB[3]"); exit(1) }
     if CRC16TAB[5] != 0x50a5 { println("FAIL: CRC16TAB[5]"); exit(1) }
-    if lookup(6) != 0x60c6   { println("FAIL: lookup(6)");   exit(1) }
-    if BYTETAB[3] != 255     { println("FAIL: BYTETAB[3]");  exit(1) }
-    if LONGTAB[2] != 3000000 { println("FAIL: LONGTAB[2]");  exit(1) }
+    if lookup(6) != 0x60c6 { println("FAIL: lookup(6)"); exit(1) }
+    if BYTETAB[3] != 255 { println("FAIL: BYTETAB[3]"); exit(1) }
+    if LONGTAB[2] != 3000000 { println("FAIL: LONGTAB[2]"); exit(1) }
 
     println("  PASS: typed module const arrays index correctly")
     println("OK")

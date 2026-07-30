@@ -1,5 +1,5 @@
 // An imported module that does NOT compile: `@ 1` is an invalid statement
 // annotation (only `@scoped` is accepted on a binding). `ae check` reports
 // this; `ae build` must too (#953).
-exports ( f )
-f(x: int) -> int { return x @ 1 }
+exports(f)
+f(x: int) -> int { return x @1 }

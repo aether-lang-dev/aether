@@ -21,21 +21,21 @@ extern http_server_start_raw(server: ptr) -> int
 extern exit(code: int)
 
 const UPSTREAM_PORT = 19001
-const PROXY_PORT    = 19000
+const PROXY_PORT = 19000
 
 // Upstream handlers ---------------------------------------------
 
 handle_upstream_echo(req: ptr, res: ptr, ud: ptr) {
-    xff   = http.get_header(req, "X-Forwarded-For")
-    xfp   = http.get_header(req, "X-Forwarded-Proto")
-    xfh   = http.get_header(req, "X-Forwarded-Host")
-    via   = http.get_header(req, "Via")
-    host  = http.get_header(req, "Host")
+    xff = http.get_header(req, "X-Forwarded-For")
+    xfp = http.get_header(req, "X-Forwarded-Proto")
+    xfh = http.get_header(req, "X-Forwarded-Host")
+    via = http.get_header(req, "Via")
+    host = http.get_header(req, "Host")
     hopby = http.get_header(req, "X-Hopby-Custom")
-    if xff  == null { xff  = "<none>" }
-    if xfp  == null { xfp  = "<none>" }
-    if xfh  == null { xfh  = "<none>" }
-    if via  == null { via  = "<none>" }
+    if xff == null { xff = "<none>" }
+    if xfp == null { xfp = "<none>" }
+    if xfh == null { xfh = "<none>" }
+    if via == null { via = "<none>" }
     if host == null { host = "<none>" }
     if hopby == null { hopby = "<none>" }
 
@@ -66,7 +66,7 @@ handle_upstream_echo_post(req: ptr, res: ptr, ud: ptr) {
 }
 
 handle_upstream_slow(req: ptr, res: ptr, ud: ptr) {
-    sleep(3000)  // 3s — exceeds the 1s proxy timeout
+    sleep(3000) // 3s — exceeds the 1s proxy timeout
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, "slow-ok\n")
@@ -104,9 +104,9 @@ run_upstream() {
     http.server_set_host(up, "127.0.0.1")
     ka = http.server_set_keepalive(up, 1, 0, 5000ms)
     if ka != "" { println("FAIL: keepalive: ${ka}"); exit(1) }
-    http.server_get(up,  "/echo", handle_upstream_echo,      0)
+    http.server_get(up, "/echo", handle_upstream_echo, 0)
     http.server_post(up, "/echo", handle_upstream_echo_post, 0)
-    http.server_get(up,  "/slow", handle_upstream_slow,      0)
+    http.server_get(up, "/slow", handle_upstream_slow, 0)
     println("READY")
     run_server(up)
 }

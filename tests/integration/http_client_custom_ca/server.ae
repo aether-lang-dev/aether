@@ -33,7 +33,7 @@ actor SchedHelper {
 
 main() {
     cert_path = os_getenv("CERT_PATH")
-    key_path  = os_getenv("KEY_PATH")
+    key_path = os_getenv("KEY_PATH")
     if cert_path == 0 || key_path == 0 {
         println("FAIL: CERT_PATH / KEY_PATH must be set")
         exit(1)

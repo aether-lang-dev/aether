@@ -50,7 +50,7 @@ first_entry_name(body: string) -> string {
 }
 
 rebuild_dir_impl(repo: string, base_dir_sha: string,
-                  prefix: string) -> string {
+    prefix: string) -> string {
     rl = ""
     if string.length(base_dir_sha) > 0 {
         base_body = read_blob(repo, base_dir_sha)

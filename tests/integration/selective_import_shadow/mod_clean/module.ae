@@ -12,4 +12,4 @@ my_length(s: string) -> int {
     return string.length(s)
 }
 
-exports (my_length)
+exports(my_length)

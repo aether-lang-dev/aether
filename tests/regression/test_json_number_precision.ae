@@ -25,7 +25,7 @@ round_trip(n: string) -> string {
             json.free(v)
             match (serr) {
                 "" -> { return s }
-                _  -> { return "<stringify-err>" }
+                _ -> { return "<stringify-err>" }
             }
         }
         _ -> { return "<parse-err>" }
@@ -101,14 +101,14 @@ main() {
     v16, p16 = json.parse("1.234567890123456")
     match (p16) {
         "" -> { println("  PASS 16-digit parses via strtod fallback"); json.free(v16) }
-        _  -> { println("  FAIL 16-digit: ${p16}"); fails = fails + 1 }
+        _ -> { println("  FAIL 16-digit: ${p16}"); fails = fails + 1 }
     }
 
     // 17 digits — well into fallback territory
     v17, p17 = json.parse("12345678901234567")
     match (p17) {
         "" -> { println("  PASS 17-digit parses"); json.free(v17) }
-        _  -> { println("  FAIL 17-digit: ${p17}"); fails = fails + 1 }
+        _ -> { println("  FAIL 17-digit: ${p17}"); fails = fails + 1 }
     }
 
     // --- near-max / near-min double magnitudes ---
@@ -117,12 +117,12 @@ main() {
     v_big, p_big = json.parse("1.7976931348623157e308")
     match (p_big) {
         "" -> { println("  PASS near-max double parses"); json.free(v_big) }
-        _  -> { println("  FAIL near-max: ${p_big}"); fails = fails + 1 }
+        _ -> { println("  FAIL near-max: ${p_big}"); fails = fails + 1 }
     }
     v_sub, p_sub = json.parse("2.2250738585072014e-308")
     match (p_sub) {
         "" -> { println("  PASS near-min-normal double parses"); json.free(v_sub) }
-        _  -> { println("  FAIL near-min-normal: ${p_sub}"); fails = fails + 1 }
+        _ -> { println("  FAIL near-min-normal: ${p_sub}"); fails = fails + 1 }
     }
 
     // --- strict RFC rejections still apply ---

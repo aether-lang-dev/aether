@@ -5,7 +5,7 @@
 // private — callable from inside this module's own functions, but
 // blocked at qualified-call sites from outside.
 
-exports (MULTIPLIER, double_value, triple_value, quadruple_value)
+exports(MULTIPLIER, double_value, triple_value, quadruple_value)
 
 const MULTIPLIER = 2
 

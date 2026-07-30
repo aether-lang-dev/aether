@@ -39,7 +39,7 @@ import std.bits
 import std.intarr
 import std.string
 
-exports (
+exports(
     new_encryptor, new_decryptor, process_block, free,
     block_size, ecb_encrypt, ecb_decrypt, ctr_xor,
     cbc_encrypt, cbc_decrypt, cbc_encrypt_pkcs7, cbc_decrypt_pkcs7,
@@ -58,9 +58,9 @@ block_size() -> int { return 16 }
 
 // Round-key schedule (bytes, 16*(rounds+1) slots), round count, direction.
 struct AesCtx {
-    rk: ptr       // intarr of round-key bytes
+    rk: ptr // intarr of round-key bytes
     rounds: int
-    encrypt: int  // 1 = encryptor, 0 = decryptor
+    encrypt: int // 1 = encryptor, 0 = decryptor
 }
 
 // ---- S-boxes (FIPS-197) ----
@@ -118,8 +118,8 @@ p(s: ptr, i: int, v: int) { intarr_set_raw(s, i, v & 0xFF) }
 
 // ---- key expansion ----
 new_ctx(key: ptr, keylen: int, sbox: ptr, encrypt: int) -> ptr {
-    nk = keylen / 4            // 4 / 6 / 8
-    rounds = nk + 6            // 10 / 12 / 14
+    nk = keylen / 4 // 4 / 6 / 8
+    rounds = nk + 6 // 10 / 12 / 14
     total_words = 4 * (rounds + 1)
     w = intarr_new_raw(total_words * 4)
     i = 0
@@ -205,24 +205,24 @@ inv_sub_bytes(s: ptr, isbox: ptr) {
 }
 // byte index = col*4 + row; shift row k left by k.
 shift_rows(s: ptr) {
-    t = g(s,1); p(s,1,g(s,5)); p(s,5,g(s,9)); p(s,9,g(s,13)); p(s,13,t)
-    t = g(s,2); u = g(s,6); p(s,2,g(s,10)); p(s,6,g(s,14)); p(s,10,t); p(s,14,u)
-    t = g(s,15); p(s,15,g(s,11)); p(s,11,g(s,7)); p(s,7,g(s,3)); p(s,3,t)
+    t = g(s, 1); p(s, 1, g(s, 5)); p(s, 5, g(s, 9)); p(s, 9, g(s, 13)); p(s, 13, t)
+    t = g(s, 2); u = g(s, 6); p(s, 2, g(s, 10)); p(s, 6, g(s, 14)); p(s, 10, t); p(s, 14, u)
+    t = g(s, 15); p(s, 15, g(s, 11)); p(s, 11, g(s, 7)); p(s, 7, g(s, 3)); p(s, 3, t)
 }
 inv_shift_rows(s: ptr) {
-    t = g(s,13); p(s,13,g(s,9)); p(s,9,g(s,5)); p(s,5,g(s,1)); p(s,1,t)
-    t = g(s,2); u = g(s,6); p(s,2,g(s,10)); p(s,6,g(s,14)); p(s,10,t); p(s,14,u)
-    t = g(s,3); p(s,3,g(s,7)); p(s,7,g(s,11)); p(s,11,g(s,15)); p(s,15,t)
+    t = g(s, 13); p(s, 13, g(s, 9)); p(s, 9, g(s, 5)); p(s, 5, g(s, 1)); p(s, 1, t)
+    t = g(s, 2); u = g(s, 6); p(s, 2, g(s, 10)); p(s, 6, g(s, 14)); p(s, 10, t); p(s, 14, u)
+    t = g(s, 3); p(s, 3, g(s, 7)); p(s, 7, g(s, 11)); p(s, 11, g(s, 15)); p(s, 15, t)
 }
 mix_columns(s: ptr) {
     c = 0
     while c < 4 {
         b = c * 4
-        a0 = g(s,b+0); a1 = g(s,b+1); a2 = g(s,b+2); a3 = g(s,b+3)
-        p(s, b+0, xtime(a0) ^ xtime(a1) ^ a1 ^ a2 ^ a3)
-        p(s, b+1, a0 ^ xtime(a1) ^ xtime(a2) ^ a2 ^ a3)
-        p(s, b+2, a0 ^ a1 ^ xtime(a2) ^ xtime(a3) ^ a3)
-        p(s, b+3, xtime(a0) ^ a0 ^ a1 ^ a2 ^ xtime(a3))
+        a0 = g(s, b + 0); a1 = g(s, b + 1); a2 = g(s, b + 2); a3 = g(s, b + 3)
+        p(s, b + 0, xtime(a0) ^ xtime(a1) ^ a1 ^ a2 ^ a3)
+        p(s, b + 1, a0 ^ xtime(a1) ^ xtime(a2) ^ a2 ^ a3)
+        p(s, b + 2, a0 ^ a1 ^ xtime(a2) ^ xtime(a3) ^ a3)
+        p(s, b + 3, xtime(a0) ^ a0 ^ a1 ^ a2 ^ xtime(a3))
         c = c + 1
     }
 }
@@ -230,11 +230,11 @@ inv_mix_columns(s: ptr) {
     c = 0
     while c < 4 {
         b = c * 4
-        a0 = g(s,b+0); a1 = g(s,b+1); a2 = g(s,b+2); a3 = g(s,b+3)
-        p(s, b+0, gmul(a0,14) ^ gmul(a1,11) ^ gmul(a2,13) ^ gmul(a3,9))
-        p(s, b+1, gmul(a0,9) ^ gmul(a1,14) ^ gmul(a2,11) ^ gmul(a3,13))
-        p(s, b+2, gmul(a0,13) ^ gmul(a1,9) ^ gmul(a2,14) ^ gmul(a3,11))
-        p(s, b+3, gmul(a0,11) ^ gmul(a1,13) ^ gmul(a2,9) ^ gmul(a3,14))
+        a0 = g(s, b + 0); a1 = g(s, b + 1); a2 = g(s, b + 2); a3 = g(s, b + 3)
+        p(s, b + 0, gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9))
+        p(s, b + 1, gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13))
+        p(s, b + 2, gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11))
+        p(s, b + 3, gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14))
         c = c + 1
     }
 }
@@ -369,7 +369,7 @@ cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
         while k < 16 {
             v = bytes.get(eb, k)
             bytes.set(out, off + k, v)
-            bytes.set(prev, k, v)   // ciphertext becomes the next XOR mask
+            bytes.set(prev, k, v) // ciphertext becomes the next XOR mask
             k = k + 1
         }
         bytes.free(blk); bytes.free(eb)
@@ -398,7 +398,7 @@ cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
         k = 0
         while k < 16 {
             bytes.set(out, off + k, (bytes.get(db, k) ^ bytes.get(prev, k)) & 0xFF)
-            bytes.set(prev, k, bytes.get(blk, k))   // this ciphertext block
+            bytes.set(prev, k, bytes.get(blk, k)) // this ciphertext block
             k = k + 1
         }
         bytes.free(blk); bytes.free(db)
@@ -414,7 +414,7 @@ cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
 // padding is always present and unambiguous (RFC 5652 §6.3).
 pkcs7_pad(data: ptr) -> ptr {
     n = bytes.length(data)
-    pad = 16 - (n % 16)        // 1..16
+    pad = 16 - (n % 16) // 1..16
     out = bytes.new(n + pad)
     i = 0
     while i < n { bytes.set(out, i, bytes.get(data, i)); i = i + 1 }
@@ -514,7 +514,7 @@ cmac(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
     n = (len + 15) / 16
     complete = 0
     if len > 0 { if (len % 16) == 0 { complete = 1 } }
-    if n == 0 { n = 1 }   // empty message → one padded block
+    if n == 0 { n = 1 } // empty message → one padded block
 
     // Build the last block M_last.
     last = bytes.new(16)
@@ -608,7 +608,7 @@ cmac_dbl(inp: ptr) -> ptr {
 key_wrap(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
     if len < 16 { return null }
     if (len % 8) != 0 { return null }
-    nblk = len / 8                 // number of 64-bit blocks
+    nblk = len / 8 // number of 64-bit blocks
 
     enc = new_encryptor(key, keylen)
 
@@ -664,7 +664,7 @@ key_wrap(key: ptr, keylen: int, data: ptr, len: int) -> ptr {
 key_unwrap(key: ptr, keylen: int, data: ptr, len: int) -> {
     if len < 24 { return null, "ciphertext too short" }
     if (len % 8) != 0 { return null, "length not a multiple of 8" }
-    nblk = (len / 8) - 1           // number of plaintext blocks
+    nblk = (len / 8) - 1 // number of plaintext blocks
 
     dec = new_decryptor(key, keylen)
 
@@ -1173,7 +1173,7 @@ eax_seal(key: ptr, keylen: int, nonce: ptr, nlen: int, aad: ptr, aadlen: int, pt
 
     // CTR encrypt seeded by N_mac (counter used directly, then incremented).
     enc = new_encryptor(key, keylen)
-    ct = ctr_xor(enc, n_mac, pt)   // ctr_xor allocates ptlen-byte output
+    ct = ctr_xor(enc, n_mac, pt) // ctr_xor allocates ptlen-byte output
     free(enc)
 
     c_mac = eax_omac(key, keylen, 2, ct, ptlen)

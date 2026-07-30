@@ -25,8 +25,8 @@ main() {
     s = string.seq_cons("beta", s)
     s = string.seq_cons("alpha", s)
 
-    println("length=${string.seq_length(s)}")          // 3 (O(1) cached)
-    println("first=${string.seq_head(s)}")              // alpha
+    println("length=${string.seq_length(s)}") // 3 (O(1) cached)
+    println("first=${string.seq_head(s)}") // alpha
 
     // ---- Pattern-match walk. [] / [h|t] arms dispatch on the cell. ----
     walk(s)
@@ -52,7 +52,7 @@ walk(s: *StringSeq) {
     // `h: string = cell->head` and `t: *StringSeq = cell->tail`.
     // Recursive walks compose because tail is properly typed.
     match s {
-        []      -> { /* end of list */ }
+        [] -> { /* end of list */ }
         [h | t] -> {
             println("  ${h}")
             walk(t)

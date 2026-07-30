@@ -2,6 +2,6 @@
 // comparator / predicate shape). The bare top-level function passed from
 // the consumer must get its env-ignoring adapter emitted in the consumer's
 // TU — the #940 gap.
-exports ( runit, apply2 )
+exports(runit, apply2)
 runit(f: fn) -> int { return call(f) }
 apply2(f: fn, a: int, b: int) -> int { return call(f, a, b) }

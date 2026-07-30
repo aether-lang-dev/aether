@@ -28,7 +28,7 @@ main() {
     // generalised path catches it.)
     p = malloc(32)
     q = (p as *Pt)
-    *Pt c = q
+    * Pt c = q
     if mem.ptr_to_long(c) != mem.ptr_to_long(p) {
         println("FAIL case 1: typed-pointer decl didn't round-trip")
         return
@@ -64,7 +64,7 @@ main() {
     b = 20
     // Pre-fix, this parsed as `a = 10 - b` because the newline-led
     // `-` folded into the previous assignment expression.
-    -b
+    - b
     if a != 10 {
         println("FAIL case 3: line-led unary statement folded into previous expr; got ${a}, want 10")
         return
@@ -74,7 +74,7 @@ main() {
     // Multiline expressions still work when the operator appears
     // before the newline.
     sum = a +
-        b
+    b
     if sum != 30 {
         println("FAIL case 4: trailing-operator continuation got ${sum}, want 30")
         return

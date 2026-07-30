@@ -41,13 +41,13 @@ import std.bytes
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     base_point, scalar_mult, agree,
     SCALAR_BYTES, POINT_BYTES
 )
 
 const SCALAR_BYTES = 32
-const POINT_BYTES  = 32
+const POINT_BYTES = 32
 
 // 26/25-bit limb masks (M24 = 24 bits, M25 = 25, M26 = 26).
 const M24 = 0x00FFFFFF
@@ -688,16 +688,16 @@ fn fe_encode(z: *Fe, out: ptr) {
 // Concretely: t = x^(2^250-1) (250 ones) then finish to p-2. Follows the
 // standard curve25519 inverse addition chain.
 fn fe_inv(x: *Fe, z: *Fe) {
-    z2 = Fe { }
-    z9 = Fe { }
-    z11 = Fe { }
-    z2_5_0 = Fe { }
-    z2_10_0 = Fe { }
-    z2_20_0 = Fe { }
-    z2_50_0 = Fe { }
-    z2_100_0 = Fe { }
-    t0 = Fe { }
-    t1 = Fe { }
+    z2 = Fe {}
+    z9 = Fe {}
+    z11 = Fe {}
+    z2_5_0 = Fe {}
+    z2_10_0 = Fe {}
+    z2_20_0 = Fe {}
+    z2_50_0 = Fe {}
+    z2_100_0 = Fe {}
+    t0 = Fe {}
+    t1 = Fe {}
 
     // z2 = x^2
     fe_sqr(x, &z2)
@@ -772,8 +772,8 @@ fn scalar_bit(k: ptr, bit: int) -> int {
 
 // x2 <- 2*(x2:z2) — Montgomery point double (X25519.PointDouble), in place.
 fn point_double(x: *Fe, z: *Fe) {
-    a = Fe { }
-    b = Fe { }
+    a = Fe {}
+    b = Fe {}
     fe_apm(x, z, &a, &b)
     fe_sqr(&a, &a)
     fe_sqr(&b, &b)
@@ -790,19 +790,19 @@ fn point_double(x: *Fe, z: *Fe) {
 fn ladder(scalar: ptr, u: ptr) -> ptr {
     k = clamp_scalar(scalar)
 
-    x1 = Fe { }
+    x1 = Fe {}
     fe_decode(u, &x1)
 
-    x2 = Fe { }
+    x2 = Fe {}
     fe_copy(&x1, &x2)
-    z2 = Fe { }
+    z2 = Fe {}
     z2.l0 = 1
-    x3 = Fe { }
+    x3 = Fe {}
     x3.l0 = 1
-    z3 = Fe { }
+    z3 = Fe {}
 
-    t1 = Fe { }
-    t2 = Fe { }
+    t1 = Fe {}
+    t2 = Fe {}
 
     int bit = 254
     int swap = 1
@@ -888,4 +888,3 @@ agree(scalar: ptr, u: ptr) -> (ptr, string) {
     }
     return r, ""
 }
-

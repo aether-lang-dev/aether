@@ -46,4 +46,3 @@ main() {
 
     println("PASS security strings")
 }
-

@@ -23,11 +23,11 @@
 // program both links and runs to completion. Pre-fix it failed at
 // gcc link time.
 
-import smod ( win )
+import smod(win)
 
 extern exit(code: int)
 
-child(_ctx: ptr, n: int) { }
+child(_ctx: ptr, n: int) {}
 
 main() {
     println("=== builder...with factory cross-module ===")

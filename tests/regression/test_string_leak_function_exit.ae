@@ -156,8 +156,8 @@ main() {
 
 build_list_with_retained_heap() -> ptr {
     L = string_list_new()
-    s = string.copy("ephemeral-retained")  // heap AetherString*
-    string_list_add(L, s)                   // @retain — list owns reference
+    s = string.copy("ephemeral-retained") // heap AetherString*
+    string_list_add(L, s) // @retain — list owns reference
     // s goes out of scope on return; the list's retain keeps the
     // bytes alive. With the old behaviour (no function-exit free)
     // s would just leak. With my fix and NO @retain it would
@@ -168,7 +168,7 @@ build_list_with_retained_heap() -> ptr {
 
 build_map_with_retained_key() -> ptr {
     m = map_new()
-    k = string.concat("computed-", "key")  // heap-allocated key
-    map_put_raw(m, k, m)                    // @retain on key
+    k = string.concat("computed-", "key") // heap-allocated key
+    map_put_raw(m, k, m) // @retain on key
     return m
 }

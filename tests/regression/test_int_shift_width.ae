@@ -22,22 +22,22 @@ main() {
     b1 = 0x21
     b2 = 0x43
     b3 = 0x65
-    b4 = 0x86            // >= 0x80 — the sign-bit trap
+    b4 = 0x86 // >= 0x80 — the sign-bit trap
     uint64 u = 0
     u = u | b1
     u = u | (b2 << 8)
     u = u | (b3 << 16)
     u = u | (b4 << 24)
-    if u != 2254783265 {        // 0x86654321
+    if u != 2254783265 { // 0x86654321
         println("  FAIL: assembled u=${u} want 2254783265 (0x86654321)")
         exit(1)
     }
 
     // Shift count >= 32 (UB as an int shift): byte landed at the wrong bit.
-    b5 = 0xC8                    // 200
+    b5 = 0xC8 // 200
     uint64 hi = 0
     hi = hi | (b5 << 48)
-    if hi != 56294995342131200 {  // 0xC8 << 48
+    if hi != 56294995342131200 { // 0xC8 << 48
         println("  FAIL: high shift hi=${hi} want 56294995342131200")
         exit(1)
     }
@@ -45,7 +45,7 @@ main() {
     // A single shift directly assigned to a uint64 local (declaration).
     bv = 0x80
     uint64 single = bv << 24
-    if single != 2147483648 {   // 0x80000000 — must NOT sign-extend
+    if single != 2147483648 { // 0x80000000 — must NOT sign-extend
         println("  FAIL: single=${single} want 2147483648")
         exit(1)
     }

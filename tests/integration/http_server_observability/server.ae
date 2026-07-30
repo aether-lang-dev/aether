@@ -52,7 +52,7 @@ main() {
 
     println("READY")
 
-    http.server_get(raw, "/api/data",  handle_data,  0)
+    http.server_get(raw, "/api/data", handle_data, 0)
     http.server_get(raw, "/api/error", handle_error, 0)
 
     spawn(SchedHelper())

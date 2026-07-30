@@ -33,7 +33,7 @@
 //
 //     err = proxy.mount(server, "/api", pool, opts)
 
-exports (
+exports(
     upstream_pool_new, upstream_pool_free,
     upstream_add, upstream_remove,
     upstream_drain, upstream_undrain,
@@ -54,9 +54,9 @@ exports (
 
 extern aether_proxy_lb_algo_from_string(name: string) -> int
 extern aether_proxy_pool_new(algo: int,
-                             request_timeout_sec: int,
-                             dial_timeout_ms: int,
-                             max_inflight_per_up: int) -> ptr
+    request_timeout_sec: int,
+    dial_timeout_ms: int,
+    max_inflight_per_up: int) -> ptr
 extern aether_proxy_pool_free(pool: ptr)
 extern aether_proxy_upstream_add(pool: ptr, base_url: string, weight: int) -> string
 extern aether_proxy_upstream_remove(pool: ptr, base_url: string) -> string
@@ -67,23 +67,23 @@ extern aether_proxy_pool_set_cookie_name(pool: ptr, cookie_name: string) -> stri
 extern aether_proxy_pool_metrics_text(pool: ptr) -> string
 
 extern aether_proxy_health_checks_enable(pool: ptr,
-                                         probe_path: string,
-                                         expect_status: int,
-                                         interval_ms: int,
-                                         timeout_ms: int,
-                                         healthy_threshold: int,
-                                         unhealthy_threshold: int) -> string
+    probe_path: string,
+    expect_status: int,
+    interval_ms: int,
+    timeout_ms: int,
+    healthy_threshold: int,
+    unhealthy_threshold: int) -> string
 
 extern aether_proxy_breaker_configure(pool: ptr,
-                                      failure_threshold: int,
-                                      open_duration_ms: int,
-                                      half_open_max: int) -> string
+    failure_threshold: int,
+    open_duration_ms: int,
+    half_open_max: int) -> string
 
 extern aether_proxy_cache_key_strategy_from_string(name: string) -> int
 extern aether_proxy_cache_new(max_entries: int,
-                              max_body_bytes: int,
-                              default_ttl_sec: int,
-                              key_strategy: int) -> ptr
+    max_body_bytes: int,
+    default_ttl_sec: int,
+    key_strategy: int) -> ptr
 extern aether_proxy_cache_free(cache: ptr)
 
 extern aether_proxy_opts_new() -> ptr
@@ -97,23 +97,23 @@ extern aether_proxy_opts_set_retry_policy(opts: ptr, max_retries: int, backoff_b
 extern aether_proxy_opts_set_trace_inject(opts: ptr, inject: int) -> string
 
 extern aether_proxy_use_reverse_proxy(server: ptr,
-                                      path_prefix: string,
-                                      pool: ptr,
-                                      opts: ptr) -> string
+    path_prefix: string,
+    pool: ptr,
+    opts: ptr) -> string
 extern aether_proxy_use_reverse_proxy_methods(server: ptr,
-                                              path_prefix: string,
-                                              pool: ptr,
-                                              opts: ptr,
-                                              methods_csv: string) -> string
+    path_prefix: string,
+    pool: ptr,
+    opts: ptr,
+    methods_csv: string) -> string
 extern aether_proxy_use_reverse_proxy_match(server: ptr,
-                                            path_pattern: string,
-                                            pool: ptr,
-                                            opts: ptr,
-                                            methods_csv: string) -> string
+    path_pattern: string,
+    pool: ptr,
+    opts: ptr,
+    methods_csv: string) -> string
 extern aether_proxy_use_simple_proxy(server: ptr,
-                                     path_prefix: string,
-                                     upstream_url: string,
-                                     request_timeout_sec: int) -> string
+    path_prefix: string,
+    upstream_url: string,
+    request_timeout_sec: int) -> string
 
 // ---- Aether-facing wrappers ----
 
@@ -127,15 +127,15 @@ extern aether_proxy_use_simple_proxy(server: ptr,
 //
 // Returns null on bad inputs (unknown algo, negative timeouts) or OOM.
 upstream_pool_new(lb_algo: string,
-                  request_timeout_sec: int,
-                  dial_timeout_ms: int,
-                  max_inflight_per_up: int) -> ptr {
+    request_timeout_sec: int,
+    dial_timeout_ms: int,
+    max_inflight_per_up: int) -> ptr {
     algo = aether_proxy_lb_algo_from_string(lb_algo)
     if algo < 0 {
         return 0
     }
     return aether_proxy_pool_new(algo, request_timeout_sec, dial_timeout_ms,
-                                  max_inflight_per_up)
+        max_inflight_per_up)
 }
 
 // Decrement pool refcount; free + join the health-check thread on
@@ -217,15 +217,15 @@ pool_metrics_text(pool: ptr) -> string {
 // failure. Calling twice on the same pool stops the prior thread
 // and starts a new one with the new config.
 health_checks_enable(pool: ptr,
-                     probe_path: string,
-                     expect_status: int,
-                     interval_ms: int,
-                     timeout_ms: int,
-                     healthy_threshold: int,
-                     unhealthy_threshold: int) -> string {
+    probe_path: string,
+    expect_status: int,
+    interval_ms: int,
+    timeout_ms: int,
+    healthy_threshold: int,
+    unhealthy_threshold: int) -> string {
     return aether_proxy_health_checks_enable(pool, probe_path, expect_status,
-                                              interval_ms, timeout_ms,
-                                              healthy_threshold, unhealthy_threshold)
+        interval_ms, timeout_ms,
+        healthy_threshold, unhealthy_threshold)
 }
 
 // Configure the per-upstream circuit breaker on a pool.
@@ -234,11 +234,11 @@ health_checks_enable(pool: ptr,
 //   open_duration_ms:  time in OPEN before HALF_OPEN
 //   half_open_max:     concurrent test requests admitted in HALF_OPEN
 breaker_configure(pool: ptr,
-                  failure_threshold: int,
-                  open_duration_ms: int,
-                  half_open_max: int) -> string {
+    failure_threshold: int,
+    open_duration_ms: int,
+    half_open_max: int) -> string {
     return aether_proxy_breaker_configure(pool, failure_threshold,
-                                           open_duration_ms, half_open_max)
+        open_duration_ms, half_open_max)
 }
 
 // Allocate a response cache.
@@ -250,15 +250,15 @@ breaker_configure(pool: ptr,
 //
 // Returns null on bad inputs or OOM.
 cache_new(max_entries: int,
-          max_body_bytes: int,
-          default_ttl_sec: int,
-          key_strategy: string) -> ptr {
+    max_body_bytes: int,
+    default_ttl_sec: int,
+    key_strategy: string) -> ptr {
     strat = aether_proxy_cache_key_strategy_from_string(key_strategy)
     if strat < 0 {
         return 0
     }
     return aether_proxy_cache_new(max_entries, max_body_bytes,
-                                   default_ttl_sec, strat)
+        default_ttl_sec, strat)
 }
 
 cache_free(cache: ptr) {
@@ -336,9 +336,9 @@ opts_set_trace_inject(opts: ptr, inject: int) -> string {
 // "/api" forwards just the /api subtree. Pool refcount is bumped
 // (and decremented on opts_free).
 mount(server: ptr,
-      path_prefix: string,
-      pool: ptr,
-      opts: ptr) -> string {
+    path_prefix: string,
+    pool: ptr,
+    opts: ptr) -> string {
     return aether_proxy_use_reverse_proxy(server, path_prefix, pool, opts)
 }
 
@@ -346,33 +346,33 @@ mount(server: ptr,
 // comma/space-separated, e.g. "GET,HEAD" or "POST, PUT, DELETE".
 // Non-matching methods pass through to later middleware/routes.
 mount_methods(server: ptr,
-              path_prefix: string,
-              pool: ptr,
-              opts: ptr,
-              methods_csv: string) -> string {
+    path_prefix: string,
+    pool: ptr,
+    opts: ptr,
+    methods_csv: string) -> string {
     return aether_proxy_use_reverse_proxy_methods(server, path_prefix, pool,
-                                                  opts, methods_csv)
+        opts, methods_csv)
 }
 
 // Mount the proxy for a route pattern + method set. `path_pattern`
 // uses std.http route syntax (`/repos/:repo/info`, `/assets/*`).
 // Register narrower carve-outs first; middleware order is first-match-wins.
 mount_match(server: ptr,
-            path_pattern: string,
-            pool: ptr,
-            opts: ptr,
-            methods_csv: string) -> string {
+    path_pattern: string,
+    pool: ptr,
+    opts: ptr,
+    methods_csv: string) -> string {
     return aether_proxy_use_reverse_proxy_match(server, path_pattern, pool,
-                                                opts, methods_csv)
+        opts, methods_csv)
 }
 
 // One-upstream convenience: builds a pool with one upstream + RR +
 // default opts, mounts the middleware, and returns "". The pool is
 // owned by the middleware and freed alongside the server.
 mount_simple(server: ptr,
-             path_prefix: string,
-             upstream_url: string,
-             request_timeout_sec: int) -> string {
+    path_prefix: string,
+    upstream_url: string,
+    request_timeout_sec: int) -> string {
     return aether_proxy_use_simple_proxy(server, path_prefix, upstream_url,
-                                          request_timeout_sec)
+        request_timeout_sec)
 }

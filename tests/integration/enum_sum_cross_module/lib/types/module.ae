@@ -17,9 +17,9 @@ default_color() -> Color { return Color.Green }
 
 color_code(c: Color) -> int {
     match c {
-        Color.Red   -> { return 0 }
+        Color.Red -> { return 0 }
         Color.Green -> { return 1 }
-        Color.Blue  -> { return 2 }
+        Color.Blue -> { return 2 }
     }
 }
 
@@ -28,7 +28,7 @@ a_rect() -> Shape { return Rect { w: 3, h: 4 } }
 shape_kind(s: Shape) -> int {
     match s {
         Circle -> { return 1 }
-        Rect   -> { return 2 }
+        Rect -> { return 2 }
     }
     return 0
 }

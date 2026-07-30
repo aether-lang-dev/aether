@@ -18,7 +18,7 @@
 import std.string
 import std.bits
 
-exports (
+exports(
     fnv32, fnv64, murmur3_32, siphash24
 )
 
@@ -174,7 +174,7 @@ siphash24(data: string, length: int, k0: long, k1: long) -> long {
     while b < nblocks {
         m = le64(data, length, b * 8, 8)
         v3 = v3 ^ m
-        v0, v1, v2, v3 = sipround(v0, v1, v2, v3)   // c = 2
+        v0, v1, v2, v3 = sipround(v0, v1, v2, v3) // c = 2
         v0, v1, v2, v3 = sipround(v0, v1, v2, v3)
         v0 = v0 ^ m
         b = b + 1

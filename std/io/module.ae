@@ -6,7 +6,7 @@
 
 import std.string
 
-exports (
+exports(
     io_print, io_print_line, io_print_int, io_print_float,
     io_read_file_raw, io_write_file_raw, io_append_file_raw, io_file_exists,
     io_delete_file_raw, io_file_info_raw, io_file_info_free,
@@ -68,7 +68,7 @@ extern io_errno_message_raw() -> string
 // fd_read_line       → reads until '\n', stripping trailing CR/LF;
 //                      ("", "") on clean EOF before any byte; partial
 //                      line returned on EOF mid-line
-extern io_fd_open_read_tuple(path: string)  -> (int, string)
+extern io_fd_open_read_tuple(path: string) -> (int, string)
 extern io_fd_open_write_tuple(path: string) -> (int, string)
 extern io_fd_close_raw(fd: int) -> string
 extern io_fd_write_n(fd: int, data: string, length: int) -> int

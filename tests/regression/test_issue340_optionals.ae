@@ -17,7 +17,7 @@
 // The harness checks exit status only, so each assertion routes through
 // `check`, which panics (non-zero exit) on the first failure.
 
-struct Vec2 { x: int  y: int }
+struct Vec2 { x: int y: int }
 
 check(cond: bool, label: string) {
     if cond {

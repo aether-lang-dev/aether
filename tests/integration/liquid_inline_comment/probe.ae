@@ -47,18 +47,18 @@ main() {
 
     // (4) Multi-line inline comment.
     expect_eq(render_empty("a{%# this\nspans\nmany\nlines %}b"),
-              "ab", "4 multi-line inline comment")
+        "ab", "4 multi-line inline comment")
 
     // (5) Whitespace control around inline comment.
     //   The dash sits BEFORE the `#` (the leading dash is the WS
     //   modifier on `{%`, and the `#` is what marks this as an inline
     //   comment): `{%-# ... -%}`.
     expect_eq(render_empty("a   {%-# gone -%}   b"),
-              "ab", "5 ws-control inline comment")
+        "ab", "5 ws-control inline comment")
 
     // (6) Pre-existing `{% comment %}` block form still works.
     expect_eq(render_empty("a{% comment %}old form{% endcomment %}b"),
-              "ab", "6 block comment unaffected")
+        "ab", "6 block comment unaffected")
 
     println("All PASS")
 }

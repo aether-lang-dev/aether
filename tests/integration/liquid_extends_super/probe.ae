@@ -54,8 +54,8 @@ main() {
     liquid.context_set_include_root(ctx2, root)
     out2, _ = liquid.render(t2, ctx2)
     expect_eq(out2,
-              "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
-              "2 extends multiple blocks")
+        "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
+        "2 extends multiple blocks")
 
     // (3) extends missing parent name -> error.
     src3 = "{% extends %}"
@@ -107,8 +107,8 @@ main() {
     liquid.context_set_include_root(ctx8, root)
     out8, _ = liquid.render(t8, ctx8)
     expect_eq(out8,
-              "<html>\n<head><title>DEFAULT TITLE-X</title></head>\n<body>\nDEFAULT CONTENT-Y\n</body>\n</html>\n",
-              "8 two blocks both call super")
+        "<html>\n<head><title>DEFAULT TITLE-X</title></head>\n<body>\nDEFAULT CONTENT-Y\n</body>\n</html>\n",
+        "8 two blocks both call super")
 
     // (9) block.super through a filter.
     src9 = "{% layout 'wrap' %}{% block body %}{{ block.super | upcase }}{% endblock %}"
@@ -127,8 +127,8 @@ main() {
     liquid.context_set_include_root(ctx10, root)
     out10, _ = liquid.render(t10, ctx10)
     expect_eq(out10,
-              "<html>\n<head><title>DEFAULT TITLE</title></head>\n<body>\nDEFAULT CONTENT\n</body>\n</html>\n",
-              "10 super in one block, default fallthrough in other")
+        "<html>\n<head><title>DEFAULT TITLE</title></head>\n<body>\nDEFAULT CONTENT\n</body>\n</html>\n",
+        "10 super in one block, default fallthrough in other")
 
     println("All PASS")
 }

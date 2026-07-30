@@ -51,48 +51,48 @@ render_with(src: string, key: string, val: string) -> string {
 main() {
     // (1) Basic single-row.
     expect_eq(render_empty("{% tablerow i in (1..3) %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td><td class=\"col3\">3</td></tr>\n",
-              "1 basic single row")
+        "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td><td class=\"col3\">3</td></tr>\n",
+        "1 basic single row")
 
     // (2) cols:2 over 4.
     expect_eq(render_empty("{% tablerow i in (1..4) cols:2 %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n",
-              "2 cols:2 over 4")
+        "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n",
+        "2 cols:2 over 4")
 
     // (3) cols:2 over 3 -> uneven last row.
     expect_eq(render_empty("{% tablerow i in (1..3) cols:2 %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
-              "3 uneven last row")
+        "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
+        "3 uneven last row")
 
     // (4) Empty range still emits row1.
     expect_eq(render_empty("{% tablerow i in (5..1) %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n</tr>\n",
-              "4 empty range emits row1")
+        "<tr class=\"row1\">\n</tr>\n",
+        "4 empty range emits row1")
 
     // (5) Body interpolates.
     expect_eq(render_empty("{% tablerow i in (1..2) %}[{{ i }}]{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">[1]</td><td class=\"col2\">[2]</td></tr>\n",
-              "5 body interpolates")
+        "<tr class=\"row1\">\n<td class=\"col1\">[1]</td><td class=\"col2\">[2]</td></tr>\n",
+        "5 body interpolates")
 
     // (6) forloop.first / forloop.last visible.
     expect_eq(render_empty("{% tablerow i in (1..3) %}{{ forloop.first }}/{{ forloop.last }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">true/false</td><td class=\"col2\">false/false</td><td class=\"col3\">false/true</td></tr>\n",
-              "6 forloop.first/last")
+        "<tr class=\"row1\">\n<td class=\"col1\">true/false</td><td class=\"col2\">false/false</td><td class=\"col3\">false/true</td></tr>\n",
+        "6 forloop.first/last")
 
     // (7) limit + cols.
     expect_eq(render_empty("{% tablerow i in (1..10) limit:3 cols:2 %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
-              "7 limit+cols")
+        "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
+        "7 limit+cols")
 
     // (8) offset + cols.
     expect_eq(render_empty("{% tablerow i in (1..5) offset:2 cols:2 %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">5</td></tr>\n",
-              "8 offset+cols")
+        "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">5</td></tr>\n",
+        "8 offset+cols")
 
     // (9) reversed + cols.
     expect_eq(render_empty("{% tablerow i in (1..3) reversed cols:2 %}{{ i }}{% endtablerow %}"),
-              "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">1</td></tr>\n",
-              "9 reversed+cols")
+        "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">1</td></tr>\n",
+        "9 reversed+cols")
 
     // (10) LO/HI from variables.
     t10, _ = liquid.parse_string("{% tablerow i in (lo..hi) cols:2 %}{{ i }}{% endtablerow %}")
@@ -101,14 +101,14 @@ main() {
     liquid.context_put_string(ctx10, "hi", "12")
     out10, _ = liquid.render(t10, ctx10)
     expect_eq(out10,
-              "<tr class=\"row1\">\n<td class=\"col1\">10</td><td class=\"col2\">11</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">12</td></tr>\n",
-              "10 vars as bounds")
+        "<tr class=\"row1\">\n<td class=\"col1\">10</td><td class=\"col2\">11</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">12</td></tr>\n",
+        "10 vars as bounds")
 
     // (11) Loop var restored.
     expect_eq(render_with("[{{ i }}]{% tablerow i in (1..2) %}{{ i }}{% endtablerow %}[{{ i }}]",
-                          "i", "PRE"),
-              "[PRE]<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n[PRE]",
-              "11 var restored")
+            "i", "PRE"),
+        "[PRE]<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n[PRE]",
+        "11 var restored")
 
     // (12) Non-range iterable.
     t12, _ = liquid.parse_string("{% tablerow x in mylist %}{{ x }}{% endtablerow %}")

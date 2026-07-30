@@ -5,7 +5,7 @@ main() {
     factor = 3
 
     // Closure capturing 'base' and 'factor'
-    compute = |x: int| -> base + x * factor
+    compute = | x: int | -> base + x * factor
 
     println("closure with captures ok")
 }

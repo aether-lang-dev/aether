@@ -29,7 +29,7 @@ main() {
 
     // Case 1: set + get round-trip.
     b1 = bytes.new(4)
-    bytes.set(b1, 0, 200)  // 0xC8
+    bytes.set(b1, 0, 200) // 0xC8
     bytes.set(b1, 1, 7)
     if bytes.get(b1, 0) != 200 {
         println("  FAIL 1: get(0) = ${bytes.get(b1, 0)}, expected 200")
@@ -73,7 +73,7 @@ main() {
 
     // Case 4: set_le32 + get_le32 small value round-trip.
     b4 = bytes.new(0)
-    bytes.set_le32(b4, 0, 305419896)  // 0x12345678
+    bytes.set_le32(b4, 0, 305419896) // 0x12345678
     if bytes.get_le32(b4, 0) != 305419896 {
         println("  FAIL 4: get_le32 = ${bytes.get_le32(b4, 0)}, expected 305419896")
         exit(1)
@@ -92,7 +92,7 @@ main() {
 
     // Case 5: set_le16 + get_le16 round-trip.
     b5 = bytes.new(0)
-    bytes.set_le16(b5, 0, 4660)  // 0x1234
+    bytes.set_le16(b5, 0, 4660) // 0x1234
     if bytes.get_le16(b5, 0) != 4660 {
         println("  FAIL 5: get_le16 = ${bytes.get_le16(b5, 0)}, expected 4660")
         exit(1)
@@ -122,12 +122,12 @@ main() {
 
     // Case 7: encoder pattern — 3 ops, walked back.
     b7 = bytes.new(0)
-    bytes.set_le32(b7, 0, 0)         // op0.action = 0
-    bytes.set_le32(b7, 4, 7)         // op0.length = 7
-    bytes.set_le32(b7, 8, 12345)     // op0.offset = 12345
-    bytes.set_le32(b7, 12, 1)        // op1.action = 1
-    bytes.set_le32(b7, 16, 1024)     // op1.length = 1024
-    bytes.set_le32(b7, 20, 0)        // op1.offset = 0
+    bytes.set_le32(b7, 0, 0) // op0.action = 0
+    bytes.set_le32(b7, 4, 7) // op0.length = 7
+    bytes.set_le32(b7, 8, 12345) // op0.offset = 12345
+    bytes.set_le32(b7, 12, 1) // op1.action = 1
+    bytes.set_le32(b7, 16, 1024) // op1.length = 1024
+    bytes.set_le32(b7, 20, 0) // op1.offset = 0
     if bytes.length(b7) != 24 {
         println("  FAIL 7: length=${bytes.length(b7)}, expected 24")
         exit(1)

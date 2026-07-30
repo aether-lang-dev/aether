@@ -1,6 +1,6 @@
 // Test: timeout is cancelled when messages arrive
 
-message Ping { }
+message Ping {}
 
 actor Waiter {
     state count = 0

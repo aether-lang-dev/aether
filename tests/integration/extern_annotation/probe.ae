@@ -12,8 +12,8 @@
 @extern("probe_const") ae_probe_const() -> int
 
 main() {
-    a = ae_probe_compute(1)        // probe_v2(1) -> 42
-    b = ae_probe_const()           // probe_const() -> 7
+    a = ae_probe_compute(1) // probe_v2(1) -> 42
+    b = ae_probe_const() // probe_const() -> 7
     if a != 42 {
         println("FAIL: ae_probe_compute returned wrong value")
         exit(1)

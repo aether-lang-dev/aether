@@ -23,7 +23,7 @@ each(items: ptr, action: fn) {
 }
 
 sum_with(base: int, x: int) -> int {
-    adder = |y: int| -> y + base
+    adder = | y: int | -> y + base
     return call(adder, x)
 }
 

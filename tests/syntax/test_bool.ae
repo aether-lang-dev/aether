@@ -3,23 +3,22 @@
 main() {
     x = true
     y = false
-    
+
     if (x) {
         print("x is true\n")
     }
-    
+
     if (!y) {
         print("y is false\n")
     }
-    
+
     z = x && y
     if (!z) {
         print("x AND y is false\n")
     }
-    
+
     w = x || y
     if (w) {
         print("x OR y is true\n")
     }
 }
-

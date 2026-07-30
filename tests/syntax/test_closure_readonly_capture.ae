@@ -5,7 +5,7 @@ extern exit(code: int)
 
 main() {
     base = 10
-    add5  = || { return base + 5 }
+    add5 = || { return base + 5 }
     add10 = || { return base + 10 }
     a = call(add5)
     if a != 15 { println("FAIL: add5 first"); exit(1) }

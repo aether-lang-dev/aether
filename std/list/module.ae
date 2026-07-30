@@ -6,7 +6,7 @@
 //   - Aether-native wrappers (below) use Go-style `(value, err)` / `err`
 //     returns.
 
-exports (
+exports(
     list_new, list_new_in, list_add_raw, list_add_string_owned, list_get_raw, list_set, list_size,
     list_remove, list_clear, list_free,
     add, get

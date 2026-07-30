@@ -3839,9 +3839,29 @@ ASTNode* parse_message_pattern(Parser* parser) {
 
 // Parse reply statement
 // Syntax: reply MessageName { field1: expr1, field2: expr2 }
+//     or: reply <expression>            (typed scalar reply, #1324)
 ASTNode* parse_reply_statement(Parser* parser) {
     Token* reply_token = peek_token(parser);
     advance_token(parser); // consume 'reply'
+
+    // Two-token lookahead: only `IDENT {` is the message-constructor
+    // form. Anything else (`reply count`, `reply n * 2`, `reply f()`)
+    // is an expression reply delivered to the asker as a typed scalar.
+    Token* head = peek_token(parser);
+    Token* brace = peek_ahead(parser, 1);
+    if (!(head && head->type == TOKEN_IDENTIFIER &&
+          brace && brace->type == TOKEN_LEFT_BRACE)) {
+        ASTNode* reply_stmt = create_ast_node(AST_REPLY_STATEMENT, NULL,
+                                              reply_token->line, reply_token->column);
+        ASTNode* value_expr = parse_expression(parser);
+        if (!value_expr) {
+            parser_message(parser, "Error: expected expression after 'reply'");
+            return NULL;
+        }
+        add_child(reply_stmt, value_expr);
+        match_token(parser, TOKEN_SEMICOLON);
+        return reply_stmt;
+    }
 
     Token* msg_name = expect_token(parser, TOKEN_IDENTIFIER);
     if (!msg_name) return NULL;

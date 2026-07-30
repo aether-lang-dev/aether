@@ -6,7 +6,7 @@
 //   - Aether-native wrappers (below) use Go-style `(value, err)` / `err`
 //     returns.
 
-exports (
+exports(
     map_new, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
     map_size, map_clear, map_free, map_keys_raw, map_keys_free,
     put, get, keys

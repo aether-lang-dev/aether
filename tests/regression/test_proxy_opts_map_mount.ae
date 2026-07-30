@@ -46,8 +46,8 @@ build_pool(opts: ptr, key: string, url_key: string, algo: string, url: string) -
         println("  FAIL: upstream_add('${url}'): ${e}")
         exit(1)
     }
-    _pe = map.put(opts, key, p)        // pool ptr -> map_put_raw (non-owning)
-    _ue = map.put(opts, url_key, url)  // borrowed URL -> map_put_raw (non-owning)
+    _pe = map.put(opts, key, p) // pool ptr -> map_put_raw (non-owning)
+    _ue = map.put(opts, url_key, url) // borrowed URL -> map_put_raw (non-owning)
     return p
 }
 
@@ -80,8 +80,8 @@ main() {
     // Mount sequence mirroring avnproxy: a route-pattern carve-out
     // (mount_match) ahead of the general method-filtered mounts. Fresh
     // opts per mount (avnproxy's shape).
-    opts_info  = proxy.opts_new()
-    opts_read  = proxy.opts_new()
+    opts_info = proxy.opts_new()
+    opts_read = proxy.opts_new()
     opts_write = proxy.opts_new()
 
     e1 = proxy.mount_match(server, "/repos/:repo/info", primary_pool, opts_info, "GET")

@@ -116,7 +116,7 @@ main() {
     // Pin the int64 side too: a value clearly past 2^32 must round-
     // trip exactly (no truncation in either direction).
 
-    big = 1099511627776  // 2^40
+    big = 1099511627776 // 2^40
     s2 = string.from_long(big)
     v2, err2 = string.to_long(s2)
     if eq(err2, "") != 1 { fail("to_long round-trip: err=${err2}") }

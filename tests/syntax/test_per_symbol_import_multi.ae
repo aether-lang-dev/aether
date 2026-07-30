@@ -3,7 +3,7 @@
 // Aether-level wrappers (to_int, to_long, etc.) whose bare-name
 // exposure is gated by the parenthesised list.
 
-import std.string (to_int, to_long)
+import std.string(to_int, to_long)
 
 extern exit(code: int)
 

@@ -1,6 +1,6 @@
 // std.tracking (#1049): leak-detecting allocator wrapper. See docs/allocators.md.
 
-exports (
+exports(
     wrap, count, bytes, report, destroy
 )
 

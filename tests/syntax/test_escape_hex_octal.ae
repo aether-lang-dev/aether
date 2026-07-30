@@ -6,11 +6,11 @@ main() {
 
     // Test 1: Single hex digit
     print("Test 1: ")
-    println("\x41")  // A
+    println("\x41") // A
 
     // Test 2: Lowercase hex digits
     print("Test 2: ")
-    println("\x61\x62\x63")  // abc
+    println("\x61\x62\x63") // abc
 
     // Test 3: Hex zero byte doesn't crash (string terminates)
     print("Test 3: ")
@@ -19,51 +19,51 @@ main() {
 
     // Test 4: Hex escape followed by regular text
     print("Test 4: ")
-    println("\x48ello")  // Hello
+    println("\x48ello") // Hello
 
     // Test 5: Octal followed by non-octal digit
     print("Test 5: ")
-    println("\1018")  // A followed by 8
+    println("\1018") // A followed by 8
 
     // Test 6: Multiple escapes adjacent
     print("Test 6: ")
-    println("\x48\x49")  // HI
+    println("\x48\x49") // HI
 
     // Test 7: Hex in middle of string
     print("Test 7: ")
-    println("say \x48\x49 now")  // say HI now
+    println("say \x48\x49 now") // say HI now
 
     // Test 8: Octal for common chars
     print("Test 8: ")
-    println("\110\145\154\154\157")  // Hello
+    println("\110\145\154\154\157") // Hello
 
     // Test 9: Mix hex, octal, and regular escapes
     print("Test 9: ")
-    print("\x41\n\102\n")  // A\nB\n
+    print("\x41\n\102\n") // A\nB\n
 
     // Test 10: Tab via hex and octal
     print("Test 10: ")
-    print("X\x09Y\011Z\n")  // X<tab>Y<tab>Z
+    print("X\x09Y\011Z\n") // X<tab>Y<tab>Z
 
     // Test 11: Hex in interpolated string with expression
     print("Test 11: ")
     n = 5
-    println("\x48ello ${n}")  // Hello 5
+    println("\x48ello ${n}") // Hello 5
 
     // Test 12: Octal in interpolated string with expression
     print("Test 12: ")
     m = 10
-    println("\110i ${m}")  // Hi 10
+    println("\110i ${m}") // Hi 10
 
     // Test 13: Multiple interpolations with hex escapes
     print("Test 13: ")
     a = 1
     b = 2
-    println("\x41=${a} \x42=${b}")  // A=1 B=2
+    println("\x41=${a} \x42=${b}") // A=1 B=2
 
     // Test 14: Newline via hex and octal in interpolated string
     v = 42
-    print("Test 14: ${v}\x0a")  // 42 followed by newline
+    print("Test 14: ${v}\x0a") // 42 followed by newline
 
     println("=== All Hex/Octal Edge Case Tests Done ===")
 }

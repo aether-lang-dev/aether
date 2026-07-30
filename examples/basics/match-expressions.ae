@@ -101,7 +101,7 @@ main() {
     nums_len = 5;
     match (nums) {
         [] -> { print("  [1,2,3,4,5]: empty\n"); }
-        [h|t] -> {
+        [h | t] -> {
             print("  [1,2,3,4,5]: head = ");
             print(h);
             print(", tail has rest\n");
@@ -132,7 +132,7 @@ main() {
     data_len = 4;
     match (data) {
         [] -> { print("  No data to process\n"); }
-        [first|rest] -> {
+        [first | rest] -> {
             print("  First element (special): ");
             print(first);
             print("\n");

@@ -43,7 +43,6 @@ walk_join(s: *StringSeq, acc: string) -> string {
 
 main() {
     // ---- reverse ----------------------------------------------------
-
     // Empty input
     e = string.seq_reverse(string.seq_empty())
     if string.seq_is_empty(e) != 1 {

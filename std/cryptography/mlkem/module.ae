@@ -46,7 +46,7 @@ import std.cryptography.sha3
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-exports (
+exports(
     mlkem512_keygen, mlkem512_encaps, mlkem512_decaps,
     mlkem768_keygen, mlkem768_encaps, mlkem768_decaps,
     mlkem1024_keygen, mlkem1024_encaps, mlkem1024_decaps,
@@ -58,8 +58,8 @@ exports (
 const Q: int = 3329
 const QINV: int = 62209
 const N: int = 256
-const SYM: int = 32          // SymBytes
-const POLY_BYTES: int = 384  // 12-bit packed NTT poly = 256*12/8
+const SYM: int = 32 // SymBytes
+const POLY_BYTES: int = 384 // 12-bit packed NTT poly = 256*12/8
 
 // NTT zeta tables (Montgomery domain), Kyber-r3 layout as used by BC.
 const ZETAS: int[128] = [
@@ -93,14 +93,14 @@ const ZETAS_INV: int[128] = [
 struct Params {
     k: int
     eta1: int
-    poly_compressed: int       // dv bytes per poly  (128 for dv=4, 160 for dv=5)
-    polyvec_compressed: int    // du bytes for whole vector (k*320 du=10, k*352 du=11)
-    polyvec_bytes: int         // k * 384
-    indcpa_pk: int             // polyvec_bytes + 32
-    indcpa_sk: int             // polyvec_bytes
-    ek_bytes: int              // = indcpa_pk
-    dk_bytes: int              // indcpa_sk + indcpa_pk + 2*32
-    ct_bytes: int              // polyvec_compressed + poly_compressed
+    poly_compressed: int // dv bytes per poly  (128 for dv=4, 160 for dv=5)
+    polyvec_compressed: int // du bytes for whole vector (k*320 du=10, k*352 du=11)
+    polyvec_bytes: int // k * 384
+    indcpa_pk: int // polyvec_bytes + 32
+    indcpa_sk: int // polyvec_bytes
+    ek_bytes: int // = indcpa_pk
+    dk_bytes: int // indcpa_sk + indcpa_pk + 2*32
+    ct_bytes: int // polyvec_compressed + poly_compressed
 }
 
 // Allocate + populate a Params on the heap. Caller frees with free_params.
@@ -177,7 +177,7 @@ mont_reduce(a: int) -> int {
     u = s16(a * QINV)
     t = u * Q
     t = a - t
-    t = t >> 16          // arithmetic shift matches C# signed >>
+    t = t >> 16 // arithmetic shift matches C# signed >>
     return s16(t)
 }
 
@@ -423,14 +423,14 @@ polyvec_from_bytes(pv: ptr, k: int, src: ptr, off: int) {
 
 poly_from_msg(pv: ptr, j: int, msg: ptr, off: int) {
     base = j * N
-    half = (Q + 1) / 2     // 1665
+    half = (Q + 1) / 2 // 1665
     i = 0
     while i < 32 {
         mi = bytes.get(msg, off + i) & 0xFF
         b = 0
         while b < 8 {
             bit = (bits.lsr32(mi, b)) & 1
-            mask = 0 - bit       // 0 or -1
+            mask = 0 - bit // 0 or -1
             intarr_set_unchecked(pv, base + 8 * i + b, s16(mask & half))
             b = b + 1
         }
@@ -440,8 +440,8 @@ poly_from_msg(pv: ptr, j: int, msg: ptr, off: int) {
 
 poly_to_msg(pv: ptr, j: int, msg: ptr, off: int) {
     base = j * N
-    lower = Q >> 2          // 832
-    upper = Q - lower       // 2497
+    lower = Q >> 2 // 832
+    upper = Q - lower // 2497
     // cond_sub_q first
     i = 0
     while i < 256 {
@@ -478,7 +478,7 @@ compress_poly_128(pv: ptr, j: int, out: ptr, off: int) {
     }
     pos = off
     i = 0
-    while i < 32 {       // N/8
+    while i < 32 { // N/8
         t0 = compress4(intarr_get_unchecked(pv, base + 8 * i + 0))
         t1 = compress4(intarr_get_unchecked(pv, base + 8 * i + 1))
         t2 = compress4(intarr_get_unchecked(pv, base + 8 * i + 2))
@@ -503,7 +503,7 @@ decompress_poly_128(pv: ptr, j: int, src: ptr, off: int) {
     base = j * N
     pos = off
     i = 0
-    while i < 128 {       // N/2
+    while i < 128 { // N/2
         byte_v = bytes.get(src, pos) & 0xFF
         intarr_set_unchecked(pv, base + 2 * i + 0, s16((((byte_v & 15) * Q) + 8) >> 4))
         intarr_set_unchecked(pv, base + 2 * i + 1, s16(((bits.lsr32(byte_v, 4) * Q) + 8) >> 4))
@@ -548,7 +548,7 @@ decompress_poly_160(pv: ptr, j: int, src: ptr, off: int) {
     base = j * N
     pos = off
     i = 0
-    while i < 32 {       // N/8
+    while i < 32 { // N/8
         c0 = bytes.get(src, pos + 0) & 0xFF
         c1 = bytes.get(src, pos + 1) & 0xFF
         c2 = bytes.get(src, pos + 2) & 0xFF
@@ -593,7 +593,7 @@ compress_polyvec_320(pv: ptr, k: int, out: ptr, off: int) {
     j = 0
     while j < k {
         i = 0
-        while i < 64 {     // N/4
+        while i < 64 { // N/4
             t0 = compress10(vg(pv, j, 4 * i + 0))
             t1 = compress10(vg(pv, j, 4 * i + 1))
             t2 = compress10(vg(pv, j, 4 * i + 2))
@@ -659,7 +659,7 @@ compress_polyvec_352(pv: ptr, k: int, out: ptr, off: int) {
     j = 0
     while j < k {
         i = 0
-        while i < 32 {     // N/8
+        while i < 32 { // N/8
             t0 = compress11(vg(pv, j, 8 * i + 0))
             t1 = compress11(vg(pv, j, 8 * i + 1))
             t2 = compress11(vg(pv, j, 8 * i + 2))
@@ -738,7 +738,7 @@ decompress_polyvec_352(pv: ptr, k: int, src: ptr, off: int) {
 cbd_eta2(pv: ptr, j: int, buf: ptr) {
     base = j * N
     i = 0
-    while i < 32 {       // N/8
+    while i < 32 { // N/8
         t = bytes.get_le32(buf, 4 * i) & 0xFFFFFFFF
         d = t & 0x55555555
         d = d + (bits.lsr32(t, 1) & 0x55555555)
@@ -756,7 +756,7 @@ cbd_eta2(pv: ptr, j: int, buf: ptr) {
 cbd_eta3(pv: ptr, j: int, buf: ptr) {
     base = j * N
     i = 0
-    while i < 64 {       // N/4
+    while i < 64 { // N/4
         // LE 24-bit load
         b0 = bytes.get(buf, 3 * i + 0) & 0xFF
         b1 = bytes.get(buf, 3 * i + 1) & 0xFF
@@ -885,7 +885,7 @@ indcpa_keygen(p: *Params, d: ptr, kp: ptr) {
     }
     bytes.set(g_in, SYM, k & 0xFF)
     g_str = bytes.finish(g_in, SYM + 1)
-    gbuf = sha3.sha3_512_bytes(g_str, SYM + 1)   // 64 bytes; frees own ctx
+    gbuf = sha3.sha3_512_bytes(g_str, SYM + 1) // 64 bytes; frees own ctx
 
     // rho = gbuf[0..32], sigma = gbuf[32..64]
     rho = bytes.new(SYM)
@@ -1003,7 +1003,7 @@ indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: 
         i = i + 1
     }
 
-    kp_pv = polyvec_new(1)        // message poly (single-poly polyvec slot)
+    kp_pv = polyvec_new(1) // message poly (single-poly polyvec slot)
     poly_from_msg(kp_pv, 0, msg, msg_off)
 
     // Matrix A transposed
@@ -1012,7 +1012,7 @@ indcpa_encrypt(p: *Params, pk: ptr, pk_off: int, msg: ptr, msg_off: int, coins: 
 
     sp = polyvec_new(k)
     ep = polyvec_new(k)
-    epp_pv = polyvec_new(1)       // single error poly e''
+    epp_pv = polyvec_new(1) // single error poly e''
     scratch = poly_new()
 
     nonce = 0
@@ -1197,7 +1197,7 @@ mlkem_encaps(p: *Params, ek: ptr, m: ptr) -> {
 
     // (K, r) = G(buf)
     buf_str = bytes_to_string(buf, 2 * SYM)
-    kr = sha3.sha3_512_bytes(buf_str, 2 * SYM)   // 64 bytes
+    kr = sha3.sha3_512_bytes(buf_str, 2 * SYM) // 64 bytes
     // r = kr[32..64]
     coins = bytes.new(SYM)
     i = 0
@@ -1264,8 +1264,8 @@ mlkem_decaps(p: *Params, dk: ptr, ct: ptr) -> ptr {
     // fail = 0 if equal, -1 if differ
     diff = diff | bits.lsr32(diff, 16)
     diff = diff & 0xFFFF
-    eq = (diff - 1) >> 31            // -1 if equal, 0 if differ
-    fail = ~eq                       // 0 if equal, -1 if differ
+    eq = (diff - 1) >> 31 // -1 if equal, 0 if differ
+    fail = ~eq // 0 if equal, -1 if differ
 
     // J(z || c): implicit rejection key
     zoff = p.dk_bytes - SYM

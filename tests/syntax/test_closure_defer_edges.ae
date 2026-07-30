@@ -17,7 +17,7 @@ set_option(_ctx: ptr, key: string, value: string) {
 add_item(_ctx: ptr, value: string) {
     if map_has(_ctx, "item0") == 0 { map_put(_ctx, "item0", value) }
     else { if map_has(_ctx, "item1") == 0 { map_put(_ctx, "item1", value) }
-    else { map_put(_ctx, "item2", value) } }
+        else { map_put(_ctx, "item2", value) } }
 }
 
 // --- 1. Builder with no explicit parameters (only hidden _builder) ---

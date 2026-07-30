@@ -64,7 +64,7 @@
 // a sandboxed host can't bring in arbitrary native code via
 // untrusted `.so` paths.
 
-exports (
+exports(
     script_gateway_mount_so_raw, mount,
     KIND_OK, KIND_NOT_FOUND, KIND_INVALID, KIND_IO, KIND_UNAVAILABLE
 )
@@ -73,11 +73,11 @@ exports (
 // aether_script_gateway.h. Subset of the full std.fs KIND_* enum;
 // the values here intentionally match std.fs's so callers writing
 // switch logic that mixes the two surfaces don't have to remap.
-const KIND_OK            = 0
-const KIND_NOT_FOUND     = 1   // .so file missing
-const KIND_INVALID       = 6   // bad args / missing entrypoint
-const KIND_IO            = 5   // dlopen / mount failure
-const KIND_UNAVAILABLE   = 99  // platform stub (Windows pending follow-up)
+const KIND_OK = 0
+const KIND_NOT_FOUND = 1 // .so file missing
+const KIND_INVALID = 6 // bad args / missing entrypoint
+const KIND_IO = 5 // dlopen / mount failure
+const KIND_UNAVAILABLE = 99 // platform stub (Windows pending follow-up)
 
 // Raw extern: returns the canonical (value, kind, message) tuple.
 // `value` is 1 on successful mount or 0 on failure.

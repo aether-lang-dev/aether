@@ -14,13 +14,13 @@ main() {
 
     // bitwise-OR directly on a call result
     a = strlen("ab") | 0x80
-    if a != 130 { print("FAIL bitor: ${a}\n"); fails = fails + 1 }   // 2 | 128
+    if a != 130 { print("FAIL bitor: ${a}\n"); fails = fails + 1 } // 2 | 128
 
     // bitwise-AND / XOR on a call result (same parser path)
     b = strlen("abcd") & 3
-    if b != 0 { print("FAIL bitand: ${b}\n"); fails = fails + 1 }    // 4 & 3
+    if b != 0 { print("FAIL bitand: ${b}\n"); fails = fails + 1 } // 4 & 3
     c = strlen("ab") ^ 1
-    if c != 3 { print("FAIL bitxor: ${c}\n"); fails = fails + 1 }    // 2 ^ 1
+    if c != 3 { print("FAIL bitxor: ${c}\n"); fails = fails + 1 } // 2 ^ 1
 
     // logical-OR on call results (the `||` form)
     d = 0
@@ -29,7 +29,7 @@ main() {
 
     // chained: call | call | num
     e = strlen("a") | strlen("bb") | 0x10
-    if e != 0x13 { print("FAIL chain: ${e}\n"); fails = fails + 1 }  // 1 | 2 | 16
+    if e != 0x13 { print("FAIL chain: ${e}\n"); fails = fails + 1 } // 1 | 2 | 16
 
     if fails == 0 { print("PASS: pipe after call\n") } else { print("FAILED: ${fails}\n"); exit(1) }
 }

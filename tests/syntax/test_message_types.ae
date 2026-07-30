@@ -20,7 +20,7 @@ actor Printer1 {
 
 // --- Test 2: Actor ref via ptr field ---
 message Notify { sender: ptr }
-message Ack { }
+message Ack {}
 
 actor Responder {
     receive {
@@ -43,7 +43,7 @@ actor Waiter {
 
 // --- Test 3: Mixed field types with ptr ---
 message Task3 { job_id: int, worker: ptr, label: string }
-message Done3 { }
+message Done3 {}
 
 actor Manager3 {
     state completed = 0

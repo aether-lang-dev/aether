@@ -17,7 +17,7 @@ import std.string
 
 extern exit(code: int)
 
-struct R { n: int  s: string }
+struct R { n: int s: string }
 
 // Tuple-wrapped return of a struct with a heap-string field.
 mk_tuple(x: int, txt: string) -> {

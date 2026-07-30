@@ -2,7 +2,7 @@
 // MUST compile with no warning.
 f(fail: bool) -> (int, string) {
     defer catch println("rollback")
-    defer try   println("commit")
+    defer try println("commit")
     if fail { return 0, "boom" }
     return 1, ""
 }

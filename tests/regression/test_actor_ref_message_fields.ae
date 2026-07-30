@@ -4,7 +4,7 @@
 // This test exercises actor spawning and message passing with actor refs.
 
 message Ping { sender: ptr }
-message Pong { }
+message Pong {}
 message Report { count: int }
 
 actor PingActor {

@@ -163,8 +163,8 @@ main() {
     if mem.get_u64_le(b, 0) != val64 { println("  FAIL: get_u64_le"); exit(1) }
 
     mem.set_u64_be(b, 8, val64)
-    if mem.get_byte(b, 8)  != 0x01 { println("  FAIL: u64_be[0]"); exit(1) }
-    if mem.get_byte(b, 9)  != 0x23 { println("  FAIL: u64_be[1]"); exit(1) }
+    if mem.get_byte(b, 8) != 0x01 { println("  FAIL: u64_be[0]"); exit(1) }
+    if mem.get_byte(b, 9) != 0x23 { println("  FAIL: u64_be[1]"); exit(1) }
     if mem.get_byte(b, 10) != 0x45 { println("  FAIL: u64_be[2]"); exit(1) }
     if mem.get_byte(b, 11) != 0x67 { println("  FAIL: u64_be[3]"); exit(1) }
     if mem.get_byte(b, 12) != 0x89 { println("  FAIL: u64_be[4]"); exit(1) }

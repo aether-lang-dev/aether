@@ -1,2 +1,2 @@
 type USD = distinct float
-main() { USD x = 3.0  println("should not compile") }
+main() { USD x = 3.0 println("should not compile") }

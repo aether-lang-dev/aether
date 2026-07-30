@@ -81,7 +81,7 @@ main() {
 
 walk_join(s: *StringSeq, acc: string) -> string {
     match s {
-        []      -> {
+        [] -> {
             return acc
         }
         [h | t] -> {

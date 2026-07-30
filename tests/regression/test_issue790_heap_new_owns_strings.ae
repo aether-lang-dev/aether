@@ -17,7 +17,7 @@ struct AppCtx {
 }
 
 main() {
-    ctx = heap.new(AppCtx)            // calloc — fields zero/NULL, trackers 0
+    ctx = heap.new(AppCtx) // calloc — fields zero/NULL, trackers 0
     ctx.data_dir = string.concat("/var/", "data")
     if ctx.data_dir != "/var/data" {
         println("FAIL #790: string field store")
@@ -33,6 +33,6 @@ main() {
     // A borrowed literal is stored without being marked owned, so heap.free
     // must not try to free it.
     ctx.data_dir = "borrowed-literal"
-    heap.free(ctx)                    // releases owned fields, frees the box
+    heap.free(ctx) // releases owned fields, frees the box
     println("PASS: #790 heap.new owns and frees struct string fields")
 }

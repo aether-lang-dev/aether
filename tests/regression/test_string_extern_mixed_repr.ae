@@ -35,35 +35,35 @@ main() {
     println("=== test_string_extern_mixed_repr ===")
 
     h_main = string.substring("xxmainxx", 2, 6)
-    h_abc  = string.substring("xxabcxx", 2, 5)
-    h_xyz  = string.substring("xxxyzxx", 2, 5)
-    h_dot  = string.substring("xxx.cxx", 2, 5)
+    h_abc = string.substring("xxabcxx", 2, 5)
+    h_xyz = string.substring("xxxyzxx", 2, 5)
+    h_dot = string.substring("xxx.cxx", 2, 5)
     h_glob = string.substring("xxm*nxx", 2, 5)
 
     // glob_match — the originally-reported case.
-    _check("glob lit/lit",   string.glob_match("main", "main"),  1)
-    _check("glob heap/lit",  string.glob_match(h_main, "main"),  1)
-    _check("glob lit/heap",  string.glob_match("main", h_main),  1)
-    _check("glob heap/heap", string.glob_match(h_main, h_main),  1)
-    _check("glob lit*/heap", string.glob_match("m*n",   h_main), 1)
-    _check("glob heap*/lit", string.glob_match(h_glob,  "main"), 1)
+    _check("glob lit/lit", string.glob_match("main", "main"), 1)
+    _check("glob heap/lit", string.glob_match(h_main, "main"), 1)
+    _check("glob lit/heap", string.glob_match("main", h_main), 1)
+    _check("glob heap/heap", string.glob_match(h_main, h_main), 1)
+    _check("glob lit*/heap", string.glob_match("m*n", h_main), 1)
+    _check("glob heap*/lit", string.glob_match(h_glob, "main"), 1)
     _check("glob nomatch heap/lit", string.glob_match(h_xyz, "main"), 0)
 
     // glob_match_pathname — same dispatch path, different flags arg.
-    _check("path lit/heap",  string.glob_match_pathname("*.c", h_dot), 1)
+    _check("path lit/heap", string.glob_match_pathname("*.c", h_dot), 1)
 
     // starts_with — two-string extern where the second arg also went
     // through the raw-`const char*` reader (strlen on the prefix).
-    _check("sw  lit/lit",   string.starts_with("abcdef", "abc"), 1)
-    _check("sw  heap/lit",  string.starts_with(h_abc, "abc"),    1)
-    _check("sw  lit/heap",  string.starts_with("abcdef", h_abc), 1)
-    _check("sw  heap/heap", string.starts_with(h_abc, h_abc),    1)
+    _check("sw  lit/lit", string.starts_with("abcdef", "abc"), 1)
+    _check("sw  heap/lit", string.starts_with(h_abc, "abc"), 1)
+    _check("sw  lit/heap", string.starts_with("abcdef", h_abc), 1)
+    _check("sw  heap/heap", string.starts_with(h_abc, h_abc), 1)
     _check("sw  nomatch lit/heap", string.starts_with("zzzdef", h_abc), 0)
 
     // ends_with — symmetric to starts_with.
-    _check("ew  lit/lit",   string.ends_with("xxabc", "abc"), 1)
-    _check("ew  lit/heap",  string.ends_with("xxabc", h_abc), 1)
-    _check("ew  heap/lit",  string.ends_with(string.concat("xx", h_abc), "abc"), 1)
+    _check("ew  lit/lit", string.ends_with("xxabc", "abc"), 1)
+    _check("ew  lit/heap", string.ends_with("xxabc", h_abc), 1)
+    _check("ew  heap/lit", string.ends_with(string.concat("xx", h_abc), "abc"), 1)
 
     // equals / contains / index_of already routed both args through
     // str_data (verified in their pre-fix bodies), but lock them in

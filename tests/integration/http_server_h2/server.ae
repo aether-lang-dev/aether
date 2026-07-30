@@ -64,7 +64,7 @@ handle_big(req: ptr, res: ptr, ud: ptr) {
     chunk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     big = chunk
     i = 0
-    while i < 1599 {  // 1600 * 64 = 102400
+    while i < 1599 { // 1600 * 64 = 102400
         big = "${big}${chunk}"
         i = i + 1
     }
@@ -120,11 +120,11 @@ main() {
         println("READY")
     }
 
-    http.server_get(raw, "/",     handle_root, 0)
+    http.server_get(raw, "/", handle_root, 0)
     http.server_post(raw, "/echo", handle_echo, 0)
     http.server_get(raw, "/head", handle_head, 0)
-    http.server_get(raw, "/big",  handle_big,  0)
-    http.server_get(raw, "/n",    handle_n,    0)
+    http.server_get(raw, "/big", handle_big, 0)
+    http.server_get(raw, "/n", handle_n, 0)
 
     spawn(SchedHelper())
     a = spawn(SrvActor())

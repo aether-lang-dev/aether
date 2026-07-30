@@ -36,7 +36,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     skein512_hex, skein512_bytes,
     skein512_n_hex, skein512_n_bytes
@@ -47,15 +47,15 @@ const SKEIN_ROT: long[32] = [
     46, 36, 19, 37,
     33, 27, 14, 42,
     17, 49, 36, 39,
-    44,  9, 54, 56,
+    44, 9, 54, 56,
     39, 30, 34, 24,
     13, 50, 10, 17,
     25, 29, 39, 43,
-     8, 35, 56, 22
+    8, 35, 56, 22
 ]
 
 // Threefish-512 word permutation pi.
-const SKEIN_PERM: long[8] = [ 2, 1, 4, 7, 6, 5, 0, 3 ]
+const SKEIN_PERM: long[8] = [2, 1, 4, 7, 6, 5, 0, 3]
 
 // Key schedule parity constant.
 const SKEIN_C240: long = 0x1BD11BDAA9FC1A22
@@ -65,22 +65,22 @@ const PARAM_TYPE_CONFIG: int = 4
 const PARAM_TYPE_MESSAGE: int = 48
 const PARAM_TYPE_OUTPUT: int = 63
 
-const NW: int = 8        // state words for Skein-512
-const NBYTES: int = 64   // block size in bytes
+const NW: int = 8 // state words for Skein-512
+const NBYTES: int = 64 // block size in bytes
 
 struct SkeinCtx {
-    chain: ptr        // longarr(8), current chaining value
-    initial: ptr      // longarr(8), saved initial state (post-config)
-    msg: ptr          // longarr(8), scratch message words
-    tf_out: ptr       // longarr(8), threefish output
-    ks: ptr           // longarr(9), extended key words
-    tw: ptr           // longarr(3), extended tweak words (t0,t1,t2)
-    block: ptr        // bytes(64), current UBI block buffer
+    chain: ptr // longarr(8), current chaining value
+    initial: ptr // longarr(8), saved initial state (post-config)
+    msg: ptr // longarr(8), scratch message words
+    tf_out: ptr // longarr(8), threefish output
+    ks: ptr // longarr(9), extended key words
+    tw: ptr // longarr(3), extended tweak words (t0,t1,t2)
+    block: ptr // bytes(64), current UBI block buffer
     block_off: int
     out_bytes: int
     // tweak (128-bit) maintained as two longs + position
-    t0: long          // bits 0..63 = position low
-    t1: long          // bits 64..127 = type/first/final/position-high
+    t0: long // bits 0..63 = position low
+    t1: long // bits 64..127 = type/first/final/position-high
 }
 
 // ---- Threefish-512 encrypt: msg words -> out words, using chain as key ----
@@ -182,7 +182,7 @@ ubi_reset(c: *SkeinCtx, type: int) {
     // type in bits 120..125, first bit = 126
     long tv = type & 0x3F
     long first_bit = 0x4000000000000000
-    c.t1 = (tv << 56) | first_bit   // set First (bit 62)
+    c.t1 = (tv << 56) | first_bit // set First (bit 62)
     c.block_off = 0
 }
 

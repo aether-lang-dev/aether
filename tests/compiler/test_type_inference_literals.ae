@@ -3,20 +3,19 @@
 
 main() {
     // Integer literal
-    x = 42;  // Inferred: int
-    
+    x = 42; // Inferred: int
+
     // Float literal
-    pi = 3.14;  // Inferred: float
-    
+    pi = 3.14; // Inferred: float
+
     // String literal
-    greeting = "Hello";  // Inferred: string
-    
+    greeting = "Hello"; // Inferred: string
+
     // Boolean
-    flag = true;  // Inferred: bool
-    
+    flag = true; // Inferred: bool
+
     // Array literal
-    nums = [1, 2, 3];  // Inferred: int[]
-    
+    nums = [1, 2, 3]; // Inferred: int[]
+
     print(x);
 }
-

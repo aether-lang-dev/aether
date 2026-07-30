@@ -36,7 +36,7 @@ main() {
 
     a = User { id: 1, name: "alice", active: true }
     b = User { id: 1, name: "alice", active: true }
-    c = User { id: 1, name: "bob",   active: true }
+    c = User { id: 1, name: "bob", active: true }
 
     if User_eq(a, b) == 1 {
         println("a == b")

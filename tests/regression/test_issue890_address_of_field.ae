@@ -8,8 +8,8 @@
 import std.mem
 extern exit(code: int)
 
-struct Pair { a: long  b: long }
-extern struct JSObject { proto: long  tab: long }   // tab at byte offset 8
+struct Pair { a: long b: long }
+extern struct JSObject { proto: long tab: long } // tab at byte offset 8
 
 // A C-style helper that writes a long THROUGH a pointer to a field.
 fill_long(dst: ptr, v: long) { mem.set_long(dst, 0, v) }
@@ -29,7 +29,7 @@ main() {
     // &(p as *T).field on a typed overlay over a raw buffer.
     byte[16] buf
     mem.set_long(buf, 0, 7)
-    poke_tab(buf)                 // buf decays to ptr at the call site
+    poke_tab(buf) // buf decays to ptr at the call site
     if mem.get_long(buf, 8) != 42 {
         println("FAIL #890: &(p as *T).field did not write through")
         exit(1)

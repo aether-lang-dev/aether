@@ -130,10 +130,10 @@ main() {
             v2 = mem.get_byte(p, 2)
             v3 = mem.get_byte(p, 3)
             ok = 1
-            if v0 != 0   { println("  [5] FAIL: 256 → low 8 bits should be 0, got ${v0}");   ok = 0 }
+            if v0 != 0 { println("  [5] FAIL: 256 → low 8 bits should be 0, got ${v0}"); ok = 0 }
             if v1 != 255 { println("  [5] FAIL: 0x1ff → low 8 bits should be 255, got ${v1}"); ok = 0 }
-            if v2 != 0   { println("  [5] FAIL: 0 → 0, got ${v2}");                          ok = 0 }
-            if v3 != 255 { println("  [5] FAIL: 255 → 255, got ${v3}");                      ok = 0 }
+            if v2 != 0 { println("  [5] FAIL: 0 → 0, got ${v2}"); ok = 0 }
+            if v3 != 255 { println("  [5] FAIL: 255 → 255, got ${v3}"); ok = 0 }
             if ok == 1 {
                 println("  [5] PASS low-8-bit masking (256→0, 0x1ff→255, etc)")
                 passed = passed + 1
@@ -149,7 +149,7 @@ main() {
     // read it back. Models the FFI out-parameter pattern (`T** out`)
     // used by ported C functions like mquickjs's strstart.
     {
-        slot = malloc(16)  // pointer-aligned, ample for a void*
+        slot = malloc(16) // pointer-aligned, ample for a void*
         val = malloc(32)
         if slot == null {
             println("  [6] FAIL: malloc(slot) returned null")
@@ -241,8 +241,8 @@ main() {
         v = mem.get_long(null, 0)
         rc = mem.set_long(null, 0, 42)
         ok = 1
-        if v != 0   { println("  [10] FAIL: get_long(null) should return 0, got ${v}");  ok = 0 }
-        if rc != 0  { println("  [10] FAIL: set_long(null) should return 0, got ${rc}"); ok = 0 }
+        if v != 0 { println("  [10] FAIL: get_long(null) should return 0, got ${v}"); ok = 0 }
+        if rc != 0 { println("  [10] FAIL: set_long(null) should return 0, got ${rc}"); ok = 0 }
         if ok == 1 {
             println("  [10] PASS get_long/set_long null defence")
             passed = passed + 1
@@ -274,7 +274,7 @@ main() {
     // bit set; +0.0 is all zero. Bitwise reinterpret must
     // distinguish them even though `-0.0 == 0.0` is true.
     {
-        long bits_neg_zero = 0x8000000000000000  // sign bit only
+        long bits_neg_zero = 0x8000000000000000 // sign bit only
         v = mem.float_from_bits(bits_neg_zero)
         bits_back = mem.bits_of_float(v)
         if bits_back != bits_neg_zero {
@@ -318,7 +318,7 @@ main() {
         v = mem.get_int(null, 0)
         rc = mem.set_int(null, 0, 42)
         ok = 1
-        if v != 0  { println("  [14] FAIL: get_int(null) should return 0, got ${v}");  ok = 0 }
+        if v != 0 { println("  [14] FAIL: get_int(null) should return 0, got ${v}"); ok = 0 }
         if rc != 0 { println("  [14] FAIL: set_int(null) should return 0, got ${rc}"); ok = 0 }
         if ok == 1 {
             println("  [14] PASS get_int/set_int null defence")
@@ -331,9 +331,9 @@ main() {
     // Case 15: clz32 — count leading zeros in 32-bit values.
     {
         ok = 1
-        if mem.clz32(1) != 31         { println("  [15] FAIL: clz32(1) = ${mem.clz32(1)}, expected 31"); ok = 0 }
-        if mem.clz32(2) != 30         { println("  [15] FAIL: clz32(2) = ${mem.clz32(2)}, expected 30"); ok = 0 }
-        if mem.clz32(0xff) != 24      { println("  [15] FAIL: clz32(0xff) = ${mem.clz32(0xff)}, expected 24"); ok = 0 }
+        if mem.clz32(1) != 31 { println("  [15] FAIL: clz32(1) = ${mem.clz32(1)}, expected 31"); ok = 0 }
+        if mem.clz32(2) != 30 { println("  [15] FAIL: clz32(2) = ${mem.clz32(2)}, expected 30"); ok = 0 }
+        if mem.clz32(0xff) != 24 { println("  [15] FAIL: clz32(0xff) = ${mem.clz32(0xff)}, expected 24"); ok = 0 }
         if mem.clz32(0x80000000) != 0 { println("  [15] FAIL: clz32(2^31) != 0"); ok = 0 }
         if ok == 1 {
             println("  [15] PASS clz32 boundary values")
@@ -346,10 +346,10 @@ main() {
     // Case 16: clz64 — count leading zeros in 64-bit values.
     {
         ok = 1
-        if mem.clz64(1) != 63                 { println("  [16] FAIL: clz64(1) != 63"); ok = 0 }
-        if mem.clz64(0xff) != 56              { println("  [16] FAIL: clz64(0xff) != 56"); ok = 0 }
-        long high = 4611686018427387904  // 2^62
-        if mem.clz64(high) != 1               { println("  [16] FAIL: clz64(2^62) != 1, got ${mem.clz64(high)}"); ok = 0 }
+        if mem.clz64(1) != 63 { println("  [16] FAIL: clz64(1) != 63"); ok = 0 }
+        if mem.clz64(0xff) != 56 { println("  [16] FAIL: clz64(0xff) != 56"); ok = 0 }
+        long high = 4611686018427387904 // 2^62
+        if mem.clz64(high) != 1 { println("  [16] FAIL: clz64(2^62) != 1, got ${mem.clz64(high)}"); ok = 0 }
         if ok == 1 {
             println("  [16] PASS clz64 boundary values")
             passed = passed + 1
@@ -371,7 +371,7 @@ main() {
             q = mem.udiv64_32(100, 7, slot)
             r = mem.get_int(slot, 0)
             if q != 14 { println("  [17] FAIL: 100/7 quotient = ${q}, expected 14"); ok = 0 }
-            if r != 2  { println("  [17] FAIL: 100/7 remainder = ${r}, expected 2"); ok = 0 }
+            if r != 2 { println("  [17] FAIL: 100/7 remainder = ${r}, expected 2"); ok = 0 }
 
             // High-bit case: dividend has bit 63 set.
             // 0xFFFFFFFFFFFFFFFF / 1 = same. signed long would give -1.
@@ -381,7 +381,7 @@ main() {
             // Expected: quotient 0xFFFFFFFFFFFFFFFF / 1 = 0xFFFFFFFFFFFFFFFF, low 32 = 0xFFFFFFFF = -1 as int32.
             // Remainder = 0.
             if q != -1 { println("  [17] FAIL: 0xFFFF...FFFF/1 q = ${q}, expected -1 (0xFFFFFFFF)"); ok = 0 }
-            if r != 0  { println("  [17] FAIL: 0xFFFF...FFFF/1 r = ${r}, expected 0"); ok = 0 }
+            if r != 0 { println("  [17] FAIL: 0xFFFF...FFFF/1 r = ${r}, expected 0"); ok = 0 }
 
             // Real dtoa case: (remainder << 32) | next_limb / b
             // E.g. (0xABCDEF00 << 32 | 0x12345678) / 1000000 = ?
@@ -389,7 +389,7 @@ main() {
             q = mem.udiv64_32(0x100000000, 256, slot)
             r = mem.get_int(slot, 0)
             if q != 0x1000000 { println("  [17] FAIL: 2^32 / 256 q = ${q}"); ok = 0 }
-            if r != 0         { println("  [17] FAIL: 2^32 / 256 r = ${r}"); ok = 0 }
+            if r != 0 { println("  [17] FAIL: 2^32 / 256 r = ${r}"); ok = 0 }
 
             free(slot)
         }
@@ -404,9 +404,9 @@ main() {
     // Case 18: udiv64_32 NULL defence.
     {
         q = mem.udiv64_32(100, 7, null)
-        rc = mem.udiv64_32(100, 0, null)  // also div-by-zero
+        rc = mem.udiv64_32(100, 0, null) // also div-by-zero
         ok = 1
-        if q != 0  { println("  [18] FAIL: udiv64_32(_, _, null) returned ${q}, expected 0"); ok = 0 }
+        if q != 0 { println("  [18] FAIL: udiv64_32(_, _, null) returned ${q}, expected 0"); ok = 0 }
         if rc != 0 { println("  [18] FAIL: udiv64_32(_, 0, _) returned ${rc}, expected 0"); ok = 0 }
         if ok == 1 {
             println("  [18] PASS udiv64_32 null + div-by-zero defence")
@@ -425,7 +425,7 @@ main() {
             println("  [19] FAIL: malloc failed")
             failed = failed + 1
         } else {
-            mem.set_int8(p, 0, -1)         // stores 0xff
+            mem.set_int8(p, 0, -1) // stores 0xff
             mem.set_int8(p, 1, 127)
             mem.set_int8(p, 2, -128)
             mem.set_uint8(p, 3, 200)
@@ -436,12 +436,12 @@ main() {
             v2s = mem.get_int8(p, 2)
             v3u = mem.get_uint8(p, 3)
             v3s = mem.get_int8(p, 3)
-            if v0s != -1   { println("  [19] FAIL: int8(-1) sign-extend got ${v0s}");      ok = 0 }
-            if v0u != 255  { println("  [19] FAIL: uint8 of same byte got ${v0u}");        ok = 0 }
-            if v1s != 127  { println("  [19] FAIL: int8(127) round-trip got ${v1s}");       ok = 0 }
-            if v2s != -128 { println("  [19] FAIL: int8(-128) round-trip got ${v2s}");      ok = 0 }
-            if v3u != 200  { println("  [19] FAIL: uint8(200) got ${v3u}");                 ok = 0 }
-            if v3s != -56  { println("  [19] FAIL: int8 of same byte (200) got ${v3s}");    ok = 0 }
+            if v0s != -1 { println("  [19] FAIL: int8(-1) sign-extend got ${v0s}"); ok = 0 }
+            if v0u != 255 { println("  [19] FAIL: uint8 of same byte got ${v0u}"); ok = 0 }
+            if v1s != 127 { println("  [19] FAIL: int8(127) round-trip got ${v1s}"); ok = 0 }
+            if v2s != -128 { println("  [19] FAIL: int8(-128) round-trip got ${v2s}"); ok = 0 }
+            if v3u != 200 { println("  [19] FAIL: uint8(200) got ${v3u}"); ok = 0 }
+            if v3s != -56 { println("  [19] FAIL: int8 of same byte (200) got ${v3s}"); ok = 0 }
             if ok == 1 {
                 println("  [19] PASS int8/uint8 sign-extend & round-trip")
                 passed = passed + 1
@@ -459,20 +459,20 @@ main() {
             println("  [20] FAIL: malloc failed")
             failed = failed + 1
         } else {
-            mem.set_int16(p, 0, -32768)    // smallest int16
-            mem.set_int16(p, 2, 32767)     // largest int16
-            mem.set_uint16(p, 4, 65535)    // largest uint16
-            mem.set_int16(p, 6, -1)        // sign-extends to 0xffff
+            mem.set_int16(p, 0, -32768) // smallest int16
+            mem.set_int16(p, 2, 32767) // largest int16
+            mem.set_uint16(p, 4, 65535) // largest uint16
+            mem.set_int16(p, 6, -1) // sign-extends to 0xffff
             ok = 1
             v0 = mem.get_int16(p, 0)
             v1 = mem.get_int16(p, 2)
             v2 = mem.get_uint16(p, 4)
             v3s = mem.get_int16(p, 6)
             v3u = mem.get_uint16(p, 6)
-            if v0 != -32768 { println("  [20] FAIL: int16 -32768 got ${v0}");  ok = 0 }
-            if v1 != 32767  { println("  [20] FAIL: int16 32767 got ${v1}");   ok = 0 }
-            if v2 != 65535  { println("  [20] FAIL: uint16 65535 got ${v2}");  ok = 0 }
-            if v3s != -1    { println("  [20] FAIL: int16(-1) sign-extend got ${v3s}"); ok = 0 }
+            if v0 != -32768 { println("  [20] FAIL: int16 -32768 got ${v0}"); ok = 0 }
+            if v1 != 32767 { println("  [20] FAIL: int16 32767 got ${v1}"); ok = 0 }
+            if v2 != 65535 { println("  [20] FAIL: uint16 65535 got ${v2}"); ok = 0 }
+            if v3s != -1 { println("  [20] FAIL: int16(-1) sign-extend got ${v3s}"); ok = 0 }
             if v3u != 65535 { println("  [20] FAIL: uint16 of -1 byte got ${v3u}"); ok = 0 }
             if ok == 1 {
                 println("  [20] PASS int16/uint16 round-trip & sign extension")
@@ -505,7 +505,7 @@ main() {
             v1 = mem.get_uint32(p, 4)
             // -2147483648 == int32 of 0x80000000.
             if v0 != -2147483648 { println("  [21] FAIL: uint32 0x80000000 got ${v0}"); ok = 0 }
-            if v1 != -1          { println("  [21] FAIL: uint32 0xffffffff got ${v1}"); ok = 0 }
+            if v1 != -1 { println("  [21] FAIL: uint32 0xffffffff got ${v1}"); ok = 0 }
             // Cross-check via long-widened read: 0xffffffff as long is
             // 4294967295 (positive), proving the underlying bit pattern is
             // unsigned-correct even though int32 representation is negative.
@@ -543,8 +543,8 @@ main() {
             ok = 1
             v0 = mem.get_float32(p, 0)
             v1 = mem.get_float32(p, 4)
-            if v0 != 1.5   { println("  [22] FAIL: float32 1.5 got ${v0}");    ok = 0 }
-            if v1 != -3.25 { println("  [22] FAIL: float32 -3.25 got ${v1}");  ok = 0 }
+            if v0 != 1.5 { println("  [22] FAIL: float32 1.5 got ${v0}"); ok = 0 }
+            if v1 != -3.25 { println("  [22] FAIL: float32 -3.25 got ${v1}"); ok = 0 }
             if ok == 1 {
                 println("  [22] PASS float32 round-trip (exact values)")
                 passed = passed + 1
@@ -580,18 +580,18 @@ main() {
     // Case 24: NULL defence on every new sized accessor.
     {
         ok = 1
-        if mem.get_int8(null, 0)    != 0 { println("  [24] FAIL: get_int8(null)"); ok = 0 }
-        if mem.get_uint8(null, 0)   != 0 { println("  [24] FAIL: get_uint8(null)"); ok = 0 }
-        if mem.get_int16(null, 0)   != 0 { println("  [24] FAIL: get_int16(null)"); ok = 0 }
-        if mem.get_uint16(null, 0)  != 0 { println("  [24] FAIL: get_uint16(null)"); ok = 0 }
-        if mem.get_uint32(null, 0)  != 0 { println("  [24] FAIL: get_uint32(null)"); ok = 0 }
+        if mem.get_int8(null, 0) != 0 { println("  [24] FAIL: get_int8(null)"); ok = 0 }
+        if mem.get_uint8(null, 0) != 0 { println("  [24] FAIL: get_uint8(null)"); ok = 0 }
+        if mem.get_int16(null, 0) != 0 { println("  [24] FAIL: get_int16(null)"); ok = 0 }
+        if mem.get_uint16(null, 0) != 0 { println("  [24] FAIL: get_uint16(null)"); ok = 0 }
+        if mem.get_uint32(null, 0) != 0 { println("  [24] FAIL: get_uint32(null)"); ok = 0 }
         if mem.get_float32(null, 0) != 0.0 { println("  [24] FAIL: get_float32(null)"); ok = 0 }
         if mem.get_float64(null, 0) != 0.0 { println("  [24] FAIL: get_float64(null)"); ok = 0 }
-        if mem.set_int8(null, 0, 1)    != 0 { println("  [24] FAIL: set_int8(null)"); ok = 0 }
-        if mem.set_uint8(null, 0, 1)   != 0 { println("  [24] FAIL: set_uint8(null)"); ok = 0 }
-        if mem.set_int16(null, 0, 1)   != 0 { println("  [24] FAIL: set_int16(null)"); ok = 0 }
-        if mem.set_uint16(null, 0, 1)  != 0 { println("  [24] FAIL: set_uint16(null)"); ok = 0 }
-        if mem.set_uint32(null, 0, 1)  != 0 { println("  [24] FAIL: set_uint32(null)"); ok = 0 }
+        if mem.set_int8(null, 0, 1) != 0 { println("  [24] FAIL: set_int8(null)"); ok = 0 }
+        if mem.set_uint8(null, 0, 1) != 0 { println("  [24] FAIL: set_uint8(null)"); ok = 0 }
+        if mem.set_int16(null, 0, 1) != 0 { println("  [24] FAIL: set_int16(null)"); ok = 0 }
+        if mem.set_uint16(null, 0, 1) != 0 { println("  [24] FAIL: set_uint16(null)"); ok = 0 }
+        if mem.set_uint32(null, 0, 1) != 0 { println("  [24] FAIL: set_uint32(null)"); ok = 0 }
         if mem.set_float32(null, 0, 1.0) != 0 { println("  [24] FAIL: set_float32(null)"); ok = 0 }
         if mem.set_float64(null, 0, 1.0) != 0 { println("  [24] FAIL: set_float64(null)"); ok = 0 }
         if ok == 1 {
@@ -614,14 +614,14 @@ main() {
         } else {
             // Write a known little-endian 64-bit pattern via set_byte.
             // 0x0123456789abcdef on little-endian: ef cd ab 89 67 45 23 01
-            mem.set_byte(p,  0, 0xef)
-            mem.set_byte(p,  1, 0xcd)
-            mem.set_byte(p,  2, 0xab)
-            mem.set_byte(p,  3, 0x89)
-            mem.set_byte(p,  4, 0x67)
-            mem.set_byte(p,  5, 0x45)
-            mem.set_byte(p,  6, 0x23)
-            mem.set_byte(p,  7, 0x01)
+            mem.set_byte(p, 0, 0xef)
+            mem.set_byte(p, 1, 0xcd)
+            mem.set_byte(p, 2, 0xab)
+            mem.set_byte(p, 3, 0x89)
+            mem.set_byte(p, 4, 0x67)
+            mem.set_byte(p, 5, 0x45)
+            mem.set_byte(p, 6, 0x23)
+            mem.set_byte(p, 7, 0x01)
 
             // Re-read same bytes through each sized window.
             ok = 1

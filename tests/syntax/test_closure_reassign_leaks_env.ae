@@ -20,24 +20,24 @@ main() {
     // Reassign N times with captures, ensure the program doesn't crash
     // and each call uses the currently-stored closure.
     base = 10
-    op = |x: int| { return x + base }
+    op = | x: int | { return x + base }
 
     r1 = call(op, 5)
     if r1 != 15 { println("FAIL: op v1"); exit(1) }
 
     // Reassign op — old env (captures base as int*) leaks.
-    op = |x: int| { return x * base }
+    op = | x: int | { return x * base }
     r2 = call(op, 5)
     if r2 != 50 { println("FAIL: op v2"); exit(1) }
 
     // Reassign again — both previous envs leak.
-    op = |x: int| { return x - base }
+    op = | x: int | { return x - base }
     r3 = call(op, 5)
     if r3 != -5 { println("FAIL: op v3"); exit(1) }
 
     // Reassign 100 more times to ensure no accumulating harm.
-    for (i = 0; i < 100; i++) {
-        op = |x: int| { return x + i }
+    for (i = 0; i < 100; i ++) {
+        op = | x: int | { return x + i }
     }
     r4 = call(op, 1)
     // Last iteration set op to a closure that returns x + 100 (i was

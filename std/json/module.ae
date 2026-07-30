@@ -13,7 +13,7 @@
 //   JSON_NULL = 0, JSON_BOOL = 1, JSON_NUMBER = 2,
 //   JSON_STRING = 3, JSON_ARRAY = 4, JSON_OBJECT = 5
 
-exports (
+exports(
     json_parse_raw, json_last_error, json_stringify_raw, json_free,
     json_type, json_is_null,
     json_get_bool, json_get_number, json_get_int, json_get_long, json_get_string_raw,
@@ -39,10 +39,10 @@ exports (
 // reason without parsing English use `parse_strict`. Kinds match
 // std.fs's where applicable so callers can mix the two surfaces in
 // the same switch.
-const KIND_OK            = 0
-const KIND_PARSE_ERROR   = 1   // any malformed JSON (with line:col in message)
-const KIND_OUT_OF_MEMORY = 2   // arena allocation failed during parse
-const KIND_INVALID_INPUT = 3   // NULL / empty input handed to json_parse_raw
+const KIND_OK = 0
+const KIND_PARSE_ERROR = 1 // any malformed JSON (with line:col in message)
+const KIND_OUT_OF_MEMORY = 2 // arena allocation failed during parse
+const KIND_INVALID_INPUT = 3 // NULL / empty input handed to json_parse_raw
 
 // ---- parsing and serialization (raw externs) ----
 extern json_parse_raw(json_str: string) -> ptr
@@ -134,7 +134,7 @@ parse_strict(json_str: string) -> (ptr, int, string) {
     value = json_parse_raw(json_str)
     if value == null {
         return null, json_last_error_kind(),
-               string_concat(json_last_error(), "")
+        string_concat(json_last_error(), "")
     }
     return value, KIND_OK, string_concat("", "")
 }
@@ -146,7 +146,7 @@ parse_strict(json_str: string) -> (ptr, int, string) {
 // the error message.
 last_error_kind() -> int { return json_last_error_kind() }
 last_error_line() -> int { return json_last_error_line() }
-last_error_col()  -> int { return json_last_error_col()  }
+last_error_col() -> int { return json_last_error_col() }
 
 // Serialize a JSON value to a compact string. Returns (string, "") on
 // success, ("", error) on failure. The returned string is a refcounted
@@ -247,8 +247,8 @@ object_entry(obj: ptr, i: int) -> (string, ptr, string) {
         return string_concat("", ""), null, string_concat("index out of range", "")
     }
     return string_concat(json_object_key_at(obj, i), ""),
-           json_object_value_at(obj, i),
-           string_concat("", "")
+    json_object_value_at(obj, i),
+    string_concat("", "")
 }
 
 // Index into a JSON array.
@@ -312,7 +312,7 @@ arr() -> ptr { return json_create_array() }
 // / totals where the consumer expects a plain integer. `boolean` takes
 // 0/1; `null_value` is JSON null.
 str(value: string) -> ptr { return json_create_string(value) }
-num(value: float) -> ptr  { return json_create_number(value) }
+num(value: float) -> ptr { return json_create_number(value) }
 from_int(value: long) -> ptr { return json_create_int(value) }
 boolean(value: int) -> ptr { return json_create_bool(value) }
 null_value() -> ptr { return json_create_null() }

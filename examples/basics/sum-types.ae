@@ -5,8 +5,8 @@
 
 // Each variant is a plain struct.
 struct Circle { r: float }
-struct Rect   { w: float  h: float }
-struct Empty  {}
+struct Rect { w: float h: float }
+struct Empty {}
 
 // A Shape is a Circle OR a Rect OR an Empty.
 type Shape = Circle | Rect | Empty
@@ -17,8 +17,8 @@ type Shape = Circle | Rect | Empty
 area(s: Shape) -> float {
     let a: float = match s {
         Circle -> 3.14159265 * s.r * s.r
-        Rect   -> s.w * s.h
-        Empty  -> 0.0
+        Rect -> s.w * s.h
+        Empty -> 0.0
     }
     return a
 }
@@ -26,8 +26,8 @@ area(s: Shape) -> float {
 name(s: Shape) -> string {
     match s {
         Circle -> { return "circle" }
-        Rect   -> { return "rect" }
-        Empty  -> { return "empty" }
+        Rect -> { return "rect" }
+        Empty -> { return "empty" }
     }
     return "?"
 }
@@ -43,9 +43,9 @@ main() {
     let r: Shape = Rect { w: 3.0, h: 4.0 }
     let e: Shape = Empty {}
 
-    describe(c)   // circle: area 12.566...
-    describe(r)   // rect: area 12
-    describe(e)   // empty: area 0
+    describe(c) // circle: area 12.566...
+    describe(r) // rect: area 12
+    describe(e) // empty: area 0
 
     // Argument-position wrap: pass a variant literal directly.
     describe(Circle { r: 1.0 })

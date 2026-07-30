@@ -9,7 +9,7 @@ struct Subject {
 }
 
 expect(v: int) -> Subject {
-    return Subject{ val: v, neg: 0 }
+    return Subject { val: v, neg: 0 }
 }
 
 // Returns the receiver so calls chain (fluent-interface shape).
@@ -23,7 +23,7 @@ to_equal(s: Subject, want: int) -> Subject {
 }
 
 inc(s: Subject) -> Subject {
-    return Subject{ val: s.val + 1, neg: s.neg }
+    return Subject { val: s.val + 1, neg: s.neg }
 }
 
 // Pointer receiver — in-place mutation through `*T`.

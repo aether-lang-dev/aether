@@ -73,7 +73,7 @@ main() {
     // treats indices past the trusted bound as out-of-range — even
     // though those bytes are valid in the underlying buffer.
     short_len = 5
-    if string.char_at_n(s, short_len, 4) != 111 {  // 'o'
+    if string.char_at_n(s, short_len, 4) != 111 { // 'o'
         println("  FAIL 3: char_at_n(s, 5, 4) should be 'o' (111)")
         exit(1)
     }

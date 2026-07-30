@@ -21,8 +21,8 @@ run(cb: fn) { cb() }
 main() {
     println("=== test_closure_captures_ptr_and_string ===")
 
-    srv = make_ptr()       // ptr capture
-    msg = "ok"             // string capture
+    srv = make_ptr() // ptr capture
+    msg = "ok" // string capture
 
     run() callback {
         if srv != 0 {
@@ -33,7 +33,7 @@ main() {
             println("  FAIL: captured string corrupted")
             exit(1)
         }
-        combined = string.concat(msg, "-tail")   // heap op on captured string
+        combined = string.concat(msg, "-tail") // heap op on captured string
         if string.equals(combined, "ok-tail") != 1 {
             println("  FAIL: concat on captured string=${combined}")
             exit(1)

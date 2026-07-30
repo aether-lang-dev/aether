@@ -34,7 +34,7 @@ extern exit(code: int)
 // before the divide so we never hit C's UB on integer division by
 // zero.
 safe_div(a: int, b: int) -> int
-    requires b != 0
+requires b != 0
 {
     return a / b
 }
@@ -44,9 +44,9 @@ safe_div(a: int, b: int) -> int
 // went out of range surfaces as a panic, not silently-wrong output
 // flowing into the next stage.
 clamp(x: int, lo: int, hi: int) -> int
-    requires lo <= hi
-    ensures result >= lo
-    ensures result <= hi
+requires lo <= hi
+ensures result >= lo
+ensures result <= hi
 {
     if x < lo {
         return lo
@@ -62,8 +62,8 @@ clamp(x: int, lo: int, hi: int) -> int
 // implementation went rogue and returned a negative the
 // postcondition trips. Either way you get a precise diagnostic.
 abs_int(x: int) -> int
-    requires x >= 0 - 100000
-    ensures result >= 0
+requires x >= 0 - 100000
+ensures result >= 0
 {
     if x < 0 {
         return 0 - x

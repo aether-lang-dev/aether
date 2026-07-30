@@ -1,6 +1,6 @@
 // Test: actor timeout fires when no messages arrive
 
-message Ping { }
+message Ping {}
 
 actor Waiter {
     state _count = 0

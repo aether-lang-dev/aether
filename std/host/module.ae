@@ -10,7 +10,7 @@
 // calls back into the script through normal typed downcalls (the
 // aether_<name>() exports the script declares as top-level functions).
 
-exports (
+exports(
     notify, describe, input, event, bindings,
     java, python, ruby, go,
     manifest_get, manifest_clear,

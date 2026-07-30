@@ -1,6 +1,6 @@
 // Test: two actors with different timeouts
 
-message Ping { }
+message Ping {}
 
 actor FastWaiter {
     state _count = 0

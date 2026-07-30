@@ -1,9 +1,9 @@
 // #1045 + #1049: allocator convention (system, arena) + tracking allocator.
 
-import std.io (println)
-import std.alloc (system, raw, resize, release, of_arena, arena_free)
-import std.tracking (wrap, count, bytes, report, destroy)
-import std.list (list_new_in, list_add_raw, add, list_size, list_free)
+import std.io(println)
+import std.alloc(system, raw, resize, release, of_arena, arena_free)
+import std.tracking(wrap, count, bytes, report, destroy)
+import std.list(list_new_in, list_add_raw, add, list_size, list_free)
 import std.arena
 
 extern exit(code: int)

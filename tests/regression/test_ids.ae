@@ -27,7 +27,7 @@ main() {
         exit(1)
     }
     ver4 = string.char_at_n(v4, 36, 14)
-    if ver4 != 52 {  // '4' = 52
+    if ver4 != 52 { // '4' = 52
         print("FAIL: v4 version nibble=${ver4}\n")
         exit(1)
     }
@@ -46,7 +46,7 @@ main() {
         exit(1)
     }
     ver7 = string.char_at_n(v7, 36, 14)
-    if ver7 != 55 {  // '7' = 55
+    if ver7 != 55 { // '7' = 55
         print("FAIL: v7 version nibble=${ver7}\n")
         exit(1)
     }

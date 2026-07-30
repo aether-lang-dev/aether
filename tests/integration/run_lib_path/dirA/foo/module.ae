@@ -1,5 +1,5 @@
 // Module `foo` shipped from dirA. Issue #413 fixture.
-exports (foo_origin)
+exports(foo_origin)
 
 foo_origin() -> string {
     return "A"

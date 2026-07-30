@@ -45,7 +45,7 @@ do_get(cafile: string) -> {
 
 main() {
     good_ca = os_getenv("GOOD_CA")
-    bad_ca  = os_getenv("BAD_CA")
+    bad_ca = os_getenv("BAD_CA")
     if good_ca == 0 || bad_ca == 0 {
         fail("GOOD_CA / BAD_CA must be set")
     }

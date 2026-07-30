@@ -38,7 +38,7 @@ import std.bytes
 import std.bits
 import std.intarr
 
-exports (
+exports(
     new_encryptor, new_decryptor, process_block, free,
     block_size, ecb_encrypt, ecb_decrypt, ctr_xor,
     cbc_encrypt, cbc_decrypt, cbc_encrypt_pkcs7, cbc_decrypt_pkcs7,
@@ -91,8 +91,8 @@ MASK32() -> int { return 0xFFFFFFFF }
 
 // 32 round keys.
 struct Sm4Ctx {
-    rk: ptr       // intarr(32) of 32-bit round keys
-    encrypt: int  // 1 = encryptor, 0 = decryptor (only differs in rk order)
+    rk: ptr // intarr(32) of 32-bit round keys
+    encrypt: int // 1 = encryptor, 0 = decryptor (only differs in rk order)
 }
 
 // Nonlinear substitution τ: S-box each of the four bytes of A.

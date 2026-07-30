@@ -30,7 +30,7 @@ main() {
 
     a = User { id: 1, name: "alice", active: true }
     b = User { id: 1, name: "alice", active: true }
-    c = User { id: 1, name: "bob",   active: true }
+    c = User { id: 1, name: "bob", active: true }
     d = User { id: 1, name: "alice", active: false }
     if User_eq(a, b) != 1 { println("FAIL: User a==b"); exit(1) }
     if User_eq(a, c) != 0 { println("FAIL: User a!=c (string)"); exit(1) }

@@ -16,10 +16,10 @@ extern exit(code: int)
 main() {
     println("=== qualified struct literal ===")
 
-    c = shapes.Circle{cx: 1.0, cy: 2.0, r: 3.0}
+    c = shapes.Circle { cx: 1.0, cy: 2.0, r: 3.0 }
     if c.r != 3.0 { println("FAIL: c.r = ${c.r}"); exit(1) }
 
-    r = shapes.Rect{x: 10, y: 20, w: 100, h: 50}
+    r = shapes.Rect { x: 10, y: 20, w: 100, h: 50 }
     if r.w != 100 { println("FAIL: r.w = ${r.w}"); exit(1) }
     if r.h != 50 { println("FAIL: r.h = ${r.h}"); exit(1) }
 

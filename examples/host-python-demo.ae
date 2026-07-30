@@ -24,9 +24,9 @@ add_perm(target: ptr, cat: string, pat: string) {
     list.add(target, pat)
 }
 
-grant_fs_read(_ctx: ptr, path: string)    { add_perm(_ctx, "fs_read", path) }
-grant_exec(_ctx: ptr, cmd: string)        { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string)    { add_perm(_ctx, "env", var_name) }
+grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
+grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
+grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
 
 sandbox(name: string) {
     perms = list.new()
@@ -58,7 +58,7 @@ libc.getenv.argtypes = [ctypes.c_char_p]
 v = libc.getenv(b'HOME')
 print('  HOME=' + (v.decode() if v else '<denied>'))
 SCRIPT
-)
+    )
 
     rc = python.run_sandboxed(worker,
         "print('  /etc/hostname=' + open('/etc/hostname').read().strip())")
@@ -79,7 +79,7 @@ libc.getenv.argtypes = [ctypes.c_char_p]
 v = libc.getenv(b'TERM')
 print('  TERM=' + (v.decode() if v else '<denied>'))
 SCRIPT
-)
+    )
 
     python.run_sandboxed(minimal, <<SCRIPT
 import ctypes
@@ -89,7 +89,7 @@ libc.getenv.argtypes = [ctypes.c_char_p]
 v = libc.getenv(b'HOME')
 print('  HOME=' + (v.decode() if v else '<denied, expected>'))
 SCRIPT
-)
+    )
 
     rc = python.run_sandboxed(minimal,
         "print(open('/etc/hostname').read())")

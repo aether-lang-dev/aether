@@ -2,7 +2,7 @@
 // so the shell driver can assert the count and per-path multiplicity. The
 // driver cd's into the fixture directory before running, so the fixed
 // relative pattern resolves against the fixture tree.
-import std.fs (glob, dir_list_count, dir_list_get)
+import std.fs(glob, dir_list_count, dir_list_get)
 import std.string
 
 main() {

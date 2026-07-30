@@ -3,13 +3,13 @@ main() {
     // UFCS dot on an imported fn, stored-value receiver (#934 core repro).
     a = assert.expect_int(7)
     b = a.bump()
-    println("${b.v}")            // 8
+    println("${b.v}") // 8
 
     // Chained UFCS across the import boundary, call-result receiver.
     pass = assert.expect_int(5).to_equal(5).to_be_gt(0)
-    println("${pass.ok}")        // 1
+    println("${pass.ok}") // 1
 
     // A failing chain still resolves (and reports the failure).
     fail = assert.expect_int(5).to_equal(4)
-    println("${fail.ok}")        // 0
+    println("${fail.ok}") // 0
 }

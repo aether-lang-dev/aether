@@ -16,7 +16,7 @@
 
 extern exit(code: int)
 
-struct Pair { a: long  b: long }
+struct Pair { a: long b: long }
 
 // Stack-struct local + field writes + by-value return.
 make_pair(x: long) -> Pair {

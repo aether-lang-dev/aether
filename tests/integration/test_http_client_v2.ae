@@ -102,7 +102,7 @@ handle_slow(req: ptr, res: ptr, ud: ptr) {
 // response_body_json's parse-failure path.
 handle_json_echo(req: ptr, res: ptr, ud: ptr) {
     ctype = http.get_header(req, "Content-Type")
-    body  = http.request_body(req)
+    body = http.request_body(req)
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "application/json")
     // Synthesise a small object that proves the round-trip preserved
@@ -132,7 +132,7 @@ handle_head_target(req: ptr, res: ptr, ud: ptr) {
 
 handle_patch_echo(req: ptr, res: ptr, ud: ptr) {
     method = http.request_method(req)
-    body   = http.request_body(req)
+    body = http.request_body(req)
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
     http.response_set_body(res, "method=${method} body=${body}")
@@ -240,23 +240,23 @@ main() {
         exit(1)
     }
 
-    http.server_get (raw, "/echo-header/X-Test-Foo", handle_echo_header,  0)
-    http.server_get (raw, "/sets-header",            handle_sets_header,  0)
-    http.server_get (raw, "/ok",                     handle_ok,           0)
-    http.server_get (raw, "/notfound",               handle_notfound,     0)
-    http.server_get (raw, "/forbidden",              handle_forbidden,    0)
-    http.server_get (raw, "/broken",                 handle_broken,       0)
-    http.server_post(raw, "/echo-length",            handle_echo_length,  0)
-    http.server_get (raw, "/slow",                   handle_slow,         0)
-    http.server_post(raw, "/json-echo",              handle_json_echo,    0)
-    http.server_get (raw, "/json-broken",            handle_json_broken,  0)
-    http.server_add_route(raw, "HEAD",  "/head-target", handle_head_target, 0)
-    http.server_add_route(raw, "PATCH", "/patch-echo",  handle_patch_echo,  0)
+    http.server_get(raw, "/echo-header/X-Test-Foo", handle_echo_header, 0)
+    http.server_get(raw, "/sets-header", handle_sets_header, 0)
+    http.server_get(raw, "/ok", handle_ok, 0)
+    http.server_get(raw, "/notfound", handle_notfound, 0)
+    http.server_get(raw, "/forbidden", handle_forbidden, 0)
+    http.server_get(raw, "/broken", handle_broken, 0)
+    http.server_post(raw, "/echo-length", handle_echo_length, 0)
+    http.server_get(raw, "/slow", handle_slow, 0)
+    http.server_post(raw, "/json-echo", handle_json_echo, 0)
+    http.server_get(raw, "/json-broken", handle_json_broken, 0)
+    http.server_add_route(raw, "HEAD", "/head-target", handle_head_target, 0)
+    http.server_add_route(raw, "PATCH", "/patch-echo", handle_patch_echo, 0)
     // Redirect chain endpoints (issue #239 cases 8-10).
-    http.server_get(raw, "/redirect-3",        handle_redirect_3,        0)
-    http.server_get(raw, "/redirect-2",        handle_redirect_2,        0)
-    http.server_get(raw, "/redirect-1",        handle_redirect_1,        0)
-    http.server_get(raw, "/redirect-self",     handle_redirect_self,     0)
+    http.server_get(raw, "/redirect-3", handle_redirect_3, 0)
+    http.server_get(raw, "/redirect-2", handle_redirect_2, 0)
+    http.server_get(raw, "/redirect-1", handle_redirect_1, 0)
+    http.server_get(raw, "/redirect-self", handle_redirect_self, 0)
     http.server_get(raw, "/redirect-absolute", handle_redirect_absolute, 0)
 
     // Hand the server to an actor that calls server_start (blocking).
@@ -322,7 +322,7 @@ main() {
     resp2, err2 = client.send_request(req2)
     client.request_free(req2)
     if err2 != "" { println("  FAIL transport: ${err2}"); exit(1) }
-    tag = client.response_header(resp2, "x-server-tag")  // wrong case on purpose
+    tag = client.response_header(resp2, "x-server-tag") // wrong case on purpose
     if string.equals(tag, "alpha") != 1 {
         println("  FAIL: header lookup mismatched; got '${tag}', want 'alpha'")
         exit(1)
@@ -360,13 +360,13 @@ main() {
 
     // ---- Test 3: status discrimination — 200 / 404 / 403 / 500 ----
     print("\nTest 3: status discrimination\n")
-    s_200 = check_status("/ok",        200)
+    s_200 = check_status("/ok", 200)
     if s_200 != "" { println("  FAIL ${s_200}"); exit(1) }
-    s_404 = check_status("/notfound",  404)
+    s_404 = check_status("/notfound", 404)
     if s_404 != "" { println("  FAIL ${s_404}"); exit(1) }
     s_403 = check_status("/forbidden", 403)
     if s_403 != "" { println("  FAIL ${s_403}"); exit(1) }
-    s_500 = check_status("/broken",    500)
+    s_500 = check_status("/broken", 500)
     if s_500 != "" { println("  FAIL ${s_500}"); exit(1) }
     print("  PASS: 200, 404, 403, 500 each distinguished\n")
 
@@ -407,7 +407,7 @@ main() {
 
     // ---- Test 6: transport failure on refused connection ----
     print("\nTest 6: refused connection on a closed port\n")
-    req6 = client.request("GET", "http://127.0.0.1:1/nope")  // port 1 = ICMP, will refuse
+    req6 = client.request("GET", "http://127.0.0.1:1/nope") // port 1 = ICMP, will refuse
     client.set_timeout(req6, 3s)
     _, err6 = client.send_request(req6)
     client.request_free(req6)
@@ -436,10 +436,10 @@ main() {
     // as (value, err) tuples per std.json's idiom.
     print("\nTest 8: post_json round-trip\n")
     name_val = json_create_string("alice")
-    age_val  = json_create_number(30.0)
-    payload  = json_create_object()
+    age_val = json_create_number(30.0)
+    payload = json_create_object()
     json_object_set_raw(payload, "name", name_val)
-    json_object_set_raw(payload, "age",  age_val)
+    json_object_set_raw(payload, "age", age_val)
     resp8, err8 = client.post_json("${base_url()}/json-echo", payload)
     if err8 != "" { println("  FAIL post_json: ${err8}"); exit(1) }
     if client.response_status(resp8) != 200 {
@@ -520,7 +520,7 @@ main() {
     // Issue #241. /patch-echo echoes "method=PATCH body=...".
     print("\nTest 12: patch() shorthand\n")
     p_resp, p_err = client.patch("${base_url()}/patch-echo",
-                                 "patch-payload", "text/plain")
+        "patch-payload", "text/plain")
     if p_err != "" { println("  FAIL transport: ${p_err}"); exit(1) }
     p_body = client.response_body(p_resp)
     p_status = client.response_status(p_resp)
@@ -576,7 +576,7 @@ main() {
     // error string flags hop-limit exhaustion.
     print("\nTest 14: redirect hop limit exceeded\n")
     req14 = client.request("GET", "${base_url()}/redirect-3")
-    client.set_follow_redirects(req14, 2)  // intentionally too low
+    client.set_follow_redirects(req14, 2) // intentionally too low
     client.set_timeout(req14, 5s)
     resp14, err14 = client.send_request(req14)
     client.request_free(req14)
@@ -600,7 +600,7 @@ main() {
     // max_hops is exhausted.
     print("\nTest 15: redirect loop detection\n")
     req15 = client.request("GET", "${base_url()}/redirect-self")
-    client.set_follow_redirects(req15, 10)  // generous; detector should fire well before
+    client.set_follow_redirects(req15, 10) // generous; detector should fire well before
     client.set_timeout(req15, 5s)
     resp15, err15 = client.send_request(req15)
     client.request_free(req15)

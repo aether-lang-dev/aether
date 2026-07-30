@@ -21,7 +21,7 @@
 import std.string
 import std.bytes
 
-exports (
+exports(
     hex_encode, hex_decode,
     base64_encode, base64_encode_padded, base64_decode,
     base32_encode, base32_decode,
@@ -34,16 +34,16 @@ exports (
 
 // Lowercase nibble -> ASCII hex digit. 0..9 -> '0'..'9', 10..15 -> 'a'..'f'.
 fn hex_digit(nibble: int) -> int {
-    if nibble < 10 { return 48 + nibble }   // '0'
-    return 87 + nibble                       // 'a' + (nibble - 10)
+    if nibble < 10 { return 48 + nibble } // '0'
+    return 87 + nibble // 'a' + (nibble - 10)
 }
 
 // ASCII hex digit -> nibble value, or -1 if not a hex digit. Accepts both
 // upper- and lower-case (RFC 4648 §8 permits either on decode).
 fn hex_value(c: int) -> int {
-    if c >= 48 && c <= 57 { return c - 48 }   // '0'..'9'
-    if c >= 65 && c <= 70 { return c - 55 }   // 'A'..'F'
-    if c >= 97 && c <= 102 { return c - 87 }  // 'a'..'f'
+    if c >= 48 && c <= 57 { return c - 48 } // '0'..'9'
+    if c >= 65 && c <= 70 { return c - 55 } // 'A'..'F'
+    if c >= 97 && c <= 102 { return c - 87 } // 'a'..'f'
     return -1
 }
 
@@ -139,16 +139,16 @@ base64_decode(b64: string) -> string! {
 // Standard base32 alphabet index (0..31) -> ASCII. A..Z map to 0..25,
 // 2..7 map to 26..31. (RFC 4648 §6.)
 fn b32_digit(v: int) -> int {
-    if v < 26 { return 65 + v }        // 'A' + v
-    return 24 + v                       // '2' + (v - 26) == 50 + v - 26
+    if v < 26 { return 65 + v } // 'A' + v
+    return 24 + v // '2' + (v - 26) == 50 + v - 26
 }
 
 // ASCII base32 char -> value 0..31, or -1 if not in the alphabet.
 // Case-insensitive on the A..Z portion.
 fn b32_value(c: int) -> int {
-    if c >= 65 && c <= 90 { return c - 65 }   // 'A'..'Z'
-    if c >= 97 && c <= 122 { return c - 97 }  // 'a'..'z' (accepted)
-    if c >= 50 && c <= 55 { return c - 24 }   // '2'..'7' -> 26..31
+    if c >= 65 && c <= 90 { return c - 65 } // 'A'..'Z'
+    if c >= 97 && c <= 122 { return c - 97 } // 'a'..'z' (accepted)
+    if c >= 50 && c <= 55 { return c - 24 } // '2'..'7' -> 26..31
     return -1
 }
 

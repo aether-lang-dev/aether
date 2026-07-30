@@ -1,7 +1,7 @@
 // #1204: json.get_long reads the full int64 range exactly; json.get_int
 // clamps instead of silently corrupting; large integers round-trip exactly.
 
-import std.io (println)
+import std.io(println)
 import std.json
 
 extern exit(code: int)

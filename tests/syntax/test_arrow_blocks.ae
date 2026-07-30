@@ -24,7 +24,7 @@ clamp(x, lo, hi) -> {
 // Multi-statement arrow with loop
 sum_to(n) -> {
     total = 0
-    for (i = 1; i <= n; i++) {
+    for (i = 1; i <= n; i ++) {
         total += i
     }
     total
@@ -39,12 +39,12 @@ abs_val(x) -> {
 }
 
 main() {
-    println(twice(5))             // expect: 10
-    println(sum_squares(3, 4))    // expect: 25
-    println(clamp(15, 0, 10))     // expect: 10
-    println(clamp(-5, 0, 10))     // expect: 0
-    println(clamp(5, 0, 10))      // expect: 5
-    println(sum_to(10))           // expect: 55
-    println(abs_val(-7))          // expect: 7
-    println(abs_val(3))           // expect: 3
+    println(twice(5)) // expect: 10
+    println(sum_squares(3, 4)) // expect: 25
+    println(clamp(15, 0, 10)) // expect: 10
+    println(clamp(-5, 0, 10)) // expect: 0
+    println(clamp(5, 0, 10)) // expect: 5
+    println(sum_to(10)) // expect: 55
+    println(abs_val(-7)) // expect: 7
+    println(abs_val(3)) // expect: 3
 }

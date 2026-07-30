@@ -14,7 +14,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     ascon256_hex, ascon256_bytes
 )
@@ -25,7 +25,7 @@ struct Ascon256Ctx {
     v2: long
     v3: long
     v4: long
-    block: ptr        // std.bytes buffer, 8 bytes
+    block: ptr // std.bytes buffer, 8 bytes
     block_len: int
 }
 

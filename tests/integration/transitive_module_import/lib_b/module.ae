@@ -1,4 +1,4 @@
-exports (shout)
+exports(shout)
 
 shout(s: string) -> string {
     return s

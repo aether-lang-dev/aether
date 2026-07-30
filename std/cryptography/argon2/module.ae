@@ -45,7 +45,7 @@ import std.cryptography.blake2
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-exports (
+exports(
     argon2, argon2d, argon2i, argon2id,
     argon2_hex, argon2d_hex, argon2i_hex, argon2id_hex
 )
@@ -55,7 +55,7 @@ const ARGON2_D: int = 0
 const ARGON2_I: int = 1
 const ARGON2_ID: int = 2
 
-const QWORDS: int = 128       // uint64 lanes per 1024-byte block
+const QWORDS: int = 128 // uint64 lanes per 1024-byte block
 const SYNC_POINTS: int = 4
 const VERSION: int = 0x13
 
@@ -318,7 +318,7 @@ argon2(atype: int, pass: ptr, pass_len: int, salt: ptr, salt_len: int, secret: p
     add_byte_string(ctx, secret, secret_len)
     add_byte_string(ctx, ad, ad_len)
 
-    h0 = blake2.final_bytes(ctx)   // 64 bytes
+    h0 = blake2.final_bytes(ctx) // 64 bytes
 
     // ---- Fill first two blocks of each lane ----
     // seed = H0 (64) || LE32(block 0/1) || LE32(lane i)  -> 72 bytes

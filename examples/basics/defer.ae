@@ -60,7 +60,7 @@ conditional_defer(should_defer) {
 // Example: simulate file-like resource
 open_resource() {
     print("  -> Resource OPENED\n");
-    return 42;  // resource handle
+    return 42; // resource handle
 }
 
 close_resource(handle) {

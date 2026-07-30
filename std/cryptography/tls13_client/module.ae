@@ -99,7 +99,7 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 extern string_length(s: string) -> int
 
-exports (
+exports(
     transcript_new, transcript_add, transcript_hash, transcript_free,
     Transcript,
     derive_handshake_keys, HsKeys, free_hs_keys,
@@ -115,12 +115,12 @@ exports (
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
 const HS_ENCRYPTED_EXTENSIONS = 8
-const HS_CERTIFICATE          = 11
-const HS_CERTIFICATE_VERIFY   = 15
-const HS_FINISHED             = 20
+const HS_CERTIFICATE = 11
+const HS_CERTIFICATE_VERIFY = 15
+const HS_FINISHED = 20
 
 // Record-cipher key lengths for the negotiable suites.
-const CHACHA_KEY_LEN  = 32
+const CHACHA_KEY_LEN = 32
 const AES_128_KEY_LEN = 16
 const AES_256_KEY_LEN = 32
 
@@ -152,8 +152,8 @@ fn suite_params(cipher_suite: int) -> (int, int, string, int, string) {
 // re-hash cost is negligible.
 
 struct Transcript {
-    buf: ptr       // std.bytes, grows via copy_from_bytes
-    len: int       // bytes written so far
+    buf: ptr // std.bytes, grows via copy_from_bytes
+    len: int // bytes written so far
 }
 
 transcript_new() -> ptr {
@@ -205,13 +205,13 @@ transcript_free(t: ptr) {
 // byte-for-byte against RFC 8448 §3 in the tests.
 
 struct HsKeys {
-    client_hs_secret: ptr   // 32 bytes
+    client_hs_secret: ptr // 32 bytes
     server_hs_secret: ptr
-    client_key: ptr         // 32 bytes (ChaCha20-Poly1305)
-    client_iv: ptr          // 12 bytes
+    client_key: ptr // 32 bytes (ChaCha20-Poly1305)
+    client_iv: ptr // 12 bytes
     server_key: ptr
     server_iv: ptr
-    handshake_secret: ptr   // kept for deriving the master secret later
+    handshake_secret: ptr // kept for deriving the master secret later
 }
 
 // derive_handshake_keys(ecdhe32, transcript_hash_ch_sh) -> HsKeys.
@@ -325,8 +325,8 @@ hs_msg_type(buf: ptr, off: int) -> int {
 // Body length (uint24) of the handshake message at `off`.
 hs_msg_len(buf: ptr, off: int) -> int {
     return ((bytes.get(buf, off + 1) & 0xFF) << 16) |
-           ((bytes.get(buf, off + 2) & 0xFF) << 8) |
-           (bytes.get(buf, off + 3) & 0xFF)
+    ((bytes.get(buf, off + 2) & 0xFF) << 8) |
+    (bytes.get(buf, off + 3) & 0xFF)
 }
 
 // Total on-wire size of the handshake message at `off` (4-byte header + body).
@@ -336,9 +336,9 @@ hs_msg_total(buf: ptr, off: int) -> int {
 
 // Accessors (so callers/tests don't cast to the struct type).
 hs_client_key(k: ptr) -> ptr { kk = k as *HsKeys; return kk.client_key }
-hs_client_iv(k: ptr) -> ptr  { kk = k as *HsKeys; return kk.client_iv }
+hs_client_iv(k: ptr) -> ptr { kk = k as *HsKeys; return kk.client_iv }
 hs_server_key(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_key }
-hs_server_iv(k: ptr) -> ptr  { kk = k as *HsKeys; return kk.server_iv }
+hs_server_iv(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_iv }
 
 free_hs_keys(k: ptr) {
     kk = k as *HsKeys
@@ -364,9 +364,9 @@ free_hs_keys(k: ptr) {
 // declared length). Bytes past a record boundary carry over to the next read.
 struct RecordIO {
     sock: ptr
-    buf: ptr       // std.bytes accumulator
-    len: int       // valid bytes in buf
-    off: int       // consumed-so-far offset (records already returned)
+    buf: ptr // std.bytes accumulator
+    len: int // valid bytes in buf
+    off: int // consumed-so-far offset (records already returned)
 }
 
 fn recio_new(sock: ptr) -> *RecordIO {
@@ -438,7 +438,7 @@ fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
         rec, rlen, err = recio_next(r)
         if string.equals(err, "") != 1 { looking = 0 } else {
             if (bytes.get(rec, 0) & 0xFF) == 0x14 {
-                bytes.free(rec)   // skip CCS
+                bytes.free(rec) // skip CCS
             } else {
                 looking = 0
             }
@@ -476,15 +476,15 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
 // A live TLS 1.3 client connection after a completed handshake.
 struct ClientConn {
     sock: ptr
-    rio: ptr             // *RecordIO
+    rio: ptr // *RecordIO
     // application-data record contexts (client write / server read), keyed
     // with the application-traffic secrets after the handshake completes.
-    app_send: ptr        // *tls13_record.RecordCtx
+    app_send: ptr // *tls13_record.RecordCtx
     app_recv: ptr
     // Resumption state (RFC 8446 §4.6.1): the resumption_master_secret and the
     // negotiated hash, so a NewSessionTicket can be turned into a PSK later.
-    res_master: ptr      // resumption_master_secret (Hash.len) or null
-    res_hash_algo: ptr   // hash name as bytes ("sha256"/"sha384") or null
+    res_master: ptr // resumption_master_secret (Hash.len) or null
+    res_hash_algo: ptr // hash name as bytes ("sha256"/"sha384") or null
     res_hash_len: int
 }
 
@@ -494,9 +494,9 @@ fn send_plaintext_handshake(sock: ptr, msg: ptr, msg_len: int) -> string {
     total = 5 + msg_len
     rec = bytes.new(total)
     bytes.set(rec, total - 1, 0)
-    bytes.set(rec, 0, 0x16)     // handshake
+    bytes.set(rec, 0, 0x16) // handshake
     bytes.set(rec, 1, 0x03)
-    bytes.set(rec, 2, 0x01)     // legacy_record_version 0x0301
+    bytes.set(rec, 2, 0x01) // legacy_record_version 0x0301
     bytes.set(rec, 3, (msg_len >> 8) & 0xFF)
     bytes.set(rec, 4, msg_len & 0xFF)
     bytes.copy_from_bytes(rec, 5, msg, 0, msg_len)
@@ -534,11 +534,11 @@ fn hash_algo_for_suite(cipher_suite: int) -> string {
 // of CH1:  0xFE || 0x00 0x00 || Hash.len || Hash(CH1). The transcript currently
 // holds exactly CH1; reset it to that synthetic message.
 fn rewrite_transcript_for_hrr(tr: ptr, ch1: ptr, ch1_len: int, hash_algo: string) {
-    ch1_hash = transcript_hash_algo(tr, hash_algo)   // Hash(CH1) — tr holds CH1 only
+    ch1_hash = transcript_hash_algo(tr, hash_algo) // Hash(CH1) — tr holds CH1 only
     hlen = bytes.length(ch1_hash)
     synthetic = bytes.new(4 + hlen)
     bytes.set(synthetic, 4 + hlen - 1, 0)
-    bytes.set(synthetic, 0, 0xFE)     // handshake type: message_hash
+    bytes.set(synthetic, 0, 0xFE) // handshake type: message_hash
     bytes.set(synthetic, 1, 0)
     bytes.set(synthetic, 2, 0)
     bytes.set(synthetic, 3, hlen & 0xFF)
@@ -611,20 +611,20 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     // Initial key exchange group is x25519, using the caller's private scalar.
     // On a HelloRetryRequest we may switch to secp256r1 with a fresh scalar.
     cur_group = tls13_hs.GROUP_X25519
-    cur_priv = x25519_priv        // NOT owned here (caller's); P-256 retry owns its own
-    own_priv = 0                  // 1 once we allocate a retry scalar we must free
+    cur_priv = x25519_priv // NOT owned here (caller's); P-256 retry owns its own
+    own_priv = 0 // 1 once we allocate a retry scalar we must free
     // Offer BOTH an x25519 and a secp256r1 key_share up front, so a server that
     // prefers P-256 completes without a HelloRetryRequest round-trip. We keep
     // the P-256 ephemeral private in case the server selects secp256r1.
     p256_priv = rand_into(32)
     x_pub, x_pub_len = keyshare_for_group(tls13_hs.GROUP_X25519, x25519_priv)
     p_pub, p_pub_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
-    pub = x_pub                   // primary keyshare (x25519); cleanup frees this
+    pub = x_pub // primary keyshare (x25519); cleanup frees this
     pub_len = x_pub_len
     rnd = rand_into(32)
     sid = rand_into(32)
     ch = tls13_hs.client_hello_full(rnd, sid, 32, tls13_hs.GROUP_X25519, x_pub, x_pub_len, tls13_hs.GROUP_SECP256R1, p_pub, p_pub_len, host)
-    bytes.free(p_pub)             // copied into the CH; keep only p256_priv
+    bytes.free(p_pub) // copied into the CH; keep only p256_priv
     ch_len = bytes.length(ch)
     tr = transcript_new()
     transcript_add(tr, ch, ch_len)
@@ -670,7 +670,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             cleanup_hello(pub, rnd, sid, ch); transcript_free(tr); recio_free(rio); net.tcp_close(sock)
             return null, "HelloRetryRequest asked for an unsupported group"
         }
-        cleanup_hello(pub, rnd, sid, ch)      // free CH1 + its keyshare/nonces
+        cleanup_hello(pub, rnd, sid, ch) // free CH1 + its keyshare/nonces
         bytes.free(sh); bytes.free(shrec)
 
         cur_group = retry_group
@@ -688,7 +688,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
             transcript_free(tr); recio_free(rio); net.tcp_close(sock)
             return null, serr2
         }
-        pub = pub2   // so later cleanup frees the right keyshare
+        pub = pub2 // so later cleanup frees the right keyshare
 
         // Read the real ServerHello.
         shrec, shlen, sherr = recio_next_hs(rio)
@@ -758,8 +758,8 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
     if parsed.key_share != null { bytes.free(parsed.key_share) }
     bytes.free(sh); bytes.free(shrec)
     cleanup_hello(pub, rnd, sid, ch); transcript_free(tr)
-    if own_priv == 1 { bytes.free(cur_priv) }   // P-256 retry scalar (HRR path)
-    bytes.free(p256_priv)                       // the pre-offered P-256 ephemeral
+    if own_priv == 1 { bytes.free(cur_priv) } // P-256 retry scalar (HRR path)
+    bytes.free(p256_priv) // the pre-offered P-256 ephemeral
     if result == null {
         recio_free(rio); net.tcp_close(sock)
     }
@@ -891,7 +891,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // Returns (conn, "") or (null, err). Does NOT free `shared`, `tr`, sh/shrec,
 // or the ClientHello — the caller does.
 fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
-                      shared: ptr, shared_len: int, cipher_suite: int) -> (ptr, string) {
+    shared: ptr, shared_len: int, cipher_suite: int) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 
@@ -954,46 +954,46 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
             send_alert_hs(sock, alert_ctx, ALERT_LEVEL_FATAL, alert_for_auth_error(auth_err))
             tls13_record.free_ctx(alert_ctx)
         } else {
-        expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
-        if bytes_equal(expected, server_verify_data, hash_len) != 1 {
-            result_err = "server Finished MAC verification failed"
-            fctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
-            send_alert_hs(sock, fctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
-            tls13_record.free_ctx(fctx)
-        } else {
-            th_sf = transcript_hash_algo(tr, hash_algo)
-            ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
-            c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
-            s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
-            cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
-            cfin = build_finished_msg(cvd)
-            cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
-            cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
-            cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
-            net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
-            transcript_add(tr, cfin, bytes.length(cfin))
-            th_cf = transcript_hash_algo(tr, hash_algo)
-            res_master = tls13_kdf.derive_secret(hash_algo, ms, hash_len, "res master", th_cf, hash_len)
-            bytes.free(th_cf)
-            ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
-            civ = tls13_ks.write_iv(hash_algo, c_ap)
-            sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
-            siv = tls13_ks.write_iv(hash_algo, s_ap)
-            conn = malloc(56) as *ClientConn
-            conn.sock = sock
-            conn.rio = rio as ptr
-            conn.app_send = tls13_record.new_aead(rec_aead, ck, rec_key_len, civ) as ptr
-            conn.app_recv = tls13_record.new_aead(rec_aead, sk, rec_key_len, siv) as ptr
-            conn.res_master = res_master
-            conn.res_hash_algo = str_to_bytes_local(hash_algo)
-            conn.res_hash_len = hash_len
-            result = conn as ptr
-            bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
-            bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
-            tls13_record.free_ctx(cli_hs_ctx)
-            bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
-        }
-        bytes.free(expected)
+            expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
+            if bytes_equal(expected, server_verify_data, hash_len) != 1 {
+                result_err = "server Finished MAC verification failed"
+                fctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+                send_alert_hs(sock, fctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
+                tls13_record.free_ctx(fctx)
+            } else {
+                th_sf = transcript_hash_algo(tr, hash_algo)
+                ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
+                c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
+                s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
+                cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
+                cfin = build_finished_msg(cvd)
+                cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+                cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
+                cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
+                net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
+                transcript_add(tr, cfin, bytes.length(cfin))
+                th_cf = transcript_hash_algo(tr, hash_algo)
+                res_master = tls13_kdf.derive_secret(hash_algo, ms, hash_len, "res master", th_cf, hash_len)
+                bytes.free(th_cf)
+                ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
+                civ = tls13_ks.write_iv(hash_algo, c_ap)
+                sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
+                siv = tls13_ks.write_iv(hash_algo, s_ap)
+                conn = malloc(56) as *ClientConn
+                conn.sock = sock
+                conn.rio = rio as ptr
+                conn.app_send = tls13_record.new_aead(rec_aead, ck, rec_key_len, civ) as ptr
+                conn.app_recv = tls13_record.new_aead(rec_aead, sk, rec_key_len, siv) as ptr
+                conn.res_master = res_master
+                conn.res_hash_algo = str_to_bytes_local(hash_algo)
+                conn.res_hash_len = hash_len
+                result = conn as ptr
+                bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+                bytes.free(cvd); bytes.free(cfin); bytes.free(cfin_rec)
+                tls13_record.free_ctx(cli_hs_ctx)
+                bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+            }
+            bytes.free(expected)
         }
     }
 
@@ -1016,9 +1016,9 @@ fn flight_complete(fl: ptr, flen: int) -> int {
     cont = 1
     while cont == 1 {
         if p + 4 > flen { cont = 0 } else {
-            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
             if p + 4 + ml > flen { cont = 0 } else {
-                if (bytes.get(fl, p)&0xFF) == HS_FINISHED { return 1 }
+                if (bytes.get(fl, p) & 0xFF) == HS_FINISHED { return 1 }
                 p = p + 4 + ml
             }
         }
@@ -1039,14 +1039,14 @@ fn add_flight_capture_prefinished(tr: ptr, fl: ptr, flen: int, hash_algo: string
     while cont == 1 {
         if p + 4 > flen { cont = 0 } else {
             mt = bytes.get(fl, p) & 0xFF
-            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
             total = 4 + ml
             if p + total > flen { cont = 0 } else {
                 // Capture the pre-Finished transcript hash right before adding
                 // the last (Finished) message.
                 if p == fin_off { th_pre = transcript_hash_algo(tr, hash_algo) }
                 sub = bytes.new(total)
-                bytes.set(sub, total-1, 0)
+                bytes.set(sub, total - 1, 0)
                 bytes.copy_from_bytes(sub, 0, fl, p, total)
                 transcript_add(tr, sub, total)
                 bytes.free(sub)
@@ -1066,7 +1066,7 @@ fn last_msg_offset(fl: ptr, flen: int) -> int {
     cont = 1
     while cont == 1 {
         if p + 4 > flen { cont = 0 } else {
-            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
             if p + 4 + ml > flen { cont = 0 } else {
                 last = p
                 p = p + 4 + ml
@@ -1079,9 +1079,9 @@ fn last_msg_offset(fl: ptr, flen: int) -> int {
 // Extract the server Finished's verify_data (the Finished body) from the flight.
 fn extract_server_finished(fl: ptr, flen: int) -> (ptr, int) {
     off = last_msg_offset(fl, flen)
-    ml = ((bytes.get(fl, off+1)&0xFF)<<16)|((bytes.get(fl, off+2)&0xFF)<<8)|(bytes.get(fl, off+3)&0xFF)
+    ml = ((bytes.get(fl, off + 1) & 0xFF) << 16) | ((bytes.get(fl, off + 2) & 0xFF) << 8) | (bytes.get(fl, off + 3) & 0xFF)
     vd = bytes.new(ml)
-    if ml > 0 { bytes.set(vd, ml-1, 0) }
+    if ml > 0 { bytes.set(vd, ml - 1, 0) }
     bytes.copy_from_bytes(vd, 0, fl, off + 4, ml)
     return vd, ml
 }
@@ -1090,7 +1090,7 @@ fn extract_server_finished(fl: ptr, flen: int) -> (ptr, int) {
 // EndOfEarlyData handshake message (RFC 8446 §4.5): type 5, empty body.
 fn build_end_of_early_data() -> ptr {
     m = bytes.new(4)
-    bytes.set(m, 0, 5)   // end_of_early_data
+    bytes.set(m, 0, 5) // end_of_early_data
     bytes.set(m, 1, 0)
     bytes.set(m, 2, 0)
     bytes.set(m, 3, 0)
@@ -1104,19 +1104,19 @@ fn flight_has_early_data_ext(fl: ptr, flen: int) -> int {
     p = 0
     while p + 4 <= flen {
         mt = bytes.get(fl, p) & 0xFF
-        ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+        ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
         if p + 4 + ml > flen { return 0 }
         if mt == HS_ENCRYPTED_EXTENSIONS {
             // EE body = extensions<2>.
             q = p + 4
             if q + 2 <= flen {
-                ext_total = ((bytes.get(fl,q)&0xFF)<<8)|(bytes.get(fl,q+1)&0xFF)
+                ext_total = ((bytes.get(fl, q) & 0xFF) << 8) | (bytes.get(fl, q + 1) & 0xFF)
                 q = q + 2
                 ee_end = q + ext_total
                 if ee_end > flen { ee_end = flen }
                 while q + 4 <= ee_end {
-                    et = ((bytes.get(fl,q)&0xFF)<<8)|(bytes.get(fl,q+1)&0xFF)
-                    el = ((bytes.get(fl,q+2)&0xFF)<<8)|(bytes.get(fl,q+3)&0xFF)
+                    et = ((bytes.get(fl, q) & 0xFF) << 8) | (bytes.get(fl, q + 1) & 0xFF)
+                    el = ((bytes.get(fl, q + 2) & 0xFF) << 8) | (bytes.get(fl, q + 3) & 0xFF)
                     if et == 42 { return 1 }
                     q = q + 4 + el
                 }
@@ -1177,20 +1177,20 @@ conn_send(conn: ptr, data: ptr, len: int) -> string {
 // the level byte is still sent (1 = warning, 2 = fatal) for compatibility.
 
 const ALERT_LEVEL_WARNING = 1
-const ALERT_LEVEL_FATAL   = 2
+const ALERT_LEVEL_FATAL = 2
 
-const ALERT_CLOSE_NOTIFY        = 0
-const ALERT_UNEXPECTED_MESSAGE  = 10
-const ALERT_BAD_RECORD_MAC      = 20
-const ALERT_HANDSHAKE_FAILURE   = 40
-const ALERT_BAD_CERTIFICATE     = 42
+const ALERT_CLOSE_NOTIFY = 0
+const ALERT_UNEXPECTED_MESSAGE = 10
+const ALERT_BAD_RECORD_MAC = 20
+const ALERT_HANDSHAKE_FAILURE = 40
+const ALERT_BAD_CERTIFICATE = 42
 const ALERT_CERTIFICATE_EXPIRED = 45
 const ALERT_CERTIFICATE_UNKNOWN = 46
-const ALERT_ILLEGAL_PARAMETER   = 47
-const ALERT_DECODE_ERROR        = 50
-const ALERT_DECRYPT_ERROR       = 51
-const ALERT_PROTOCOL_VERSION    = 70
-const ALERT_INTERNAL_ERROR      = 80
+const ALERT_ILLEGAL_PARAMETER = 47
+const ALERT_DECODE_ERROR = 50
+const ALERT_DECRYPT_ERROR = 51
+const ALERT_PROTOCOL_VERSION = 70
+const ALERT_INTERNAL_ERROR = 80
 const ALERT_NO_APPLICATION_PROTOCOL = 120
 
 // Seal + send an encrypted TLS alert on an established connection (uses the
@@ -1316,16 +1316,16 @@ close_conn(conn: ptr) {
 // A parsed NewSessionTicket + the connection's resumption context, everything
 // needed to resume later. All buffers are owned; free with free_ticket.
 struct SessionTicket {
-    ticket: ptr          // the opaque ticket (identity) bytes
+    ticket: ptr // the opaque ticket (identity) bytes
     ticket_len: int
-    nonce: ptr           // ticket_nonce bytes
+    nonce: ptr // ticket_nonce bytes
     nonce_len: int
-    age_add: int         // ticket_age_add (obfuscation)
-    lifetime: int        // ticket_lifetime seconds
-    res_master: ptr      // copy of the resumption_master_secret
-    hash_algo: ptr       // hash name bytes ("sha256"/"sha384")
+    age_add: int // ticket_age_add (obfuscation)
+    lifetime: int // ticket_lifetime seconds
+    res_master: ptr // copy of the resumption_master_secret
+    hash_algo: ptr // hash name bytes ("sha256"/"sha384")
     hash_len: int
-    max_early_data: int  // early_data ext's max_early_data_size (0 = no 0-RTT)
+    max_early_data: int // early_data ext's max_early_data_size (0 = no 0-RTT)
 }
 
 // Read post-handshake records until a NewSessionTicket (RFC 8446 §4.6.1)
@@ -1367,7 +1367,7 @@ fn find_and_parse_nst(buf: ptr, len: int, c: *ClientConn) -> ptr {
     p = 0
     while p + 4 <= len {
         mt = bytes.get(buf, p) & 0xFF
-        ml = ((bytes.get(buf, p+1)&0xFF)<<16)|((bytes.get(buf, p+2)&0xFF)<<8)|(bytes.get(buf, p+3)&0xFF)
+        ml = ((bytes.get(buf, p + 1) & 0xFF) << 16) | ((bytes.get(buf, p + 2) & 0xFF) << 8) | (bytes.get(buf, p + 3) & 0xFF)
         if p + 4 + ml > len { return null }
         if mt == 4 {
             return parse_nst_body(buf, p + 4, ml, c)
@@ -1383,9 +1383,9 @@ fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
     p = off
     end = off + body_len
     if p + 8 > end { return null }
-    lifetime = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+    lifetime = ((bytes.get(buf, p) & 0xFF) << 24) | ((bytes.get(buf, p + 1) & 0xFF) << 16) | ((bytes.get(buf, p + 2) & 0xFF) << 8) | (bytes.get(buf, p + 3) & 0xFF)
     p = p + 4
-    age_add = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+    age_add = ((bytes.get(buf, p) & 0xFF) << 24) | ((bytes.get(buf, p + 1) & 0xFF) << 16) | ((bytes.get(buf, p + 2) & 0xFF) << 8) | (bytes.get(buf, p + 3) & 0xFF)
     p = p + 4
     if p + 1 > end { return null }
     nonce_len = bytes.get(buf, p) & 0xFF
@@ -1395,7 +1395,7 @@ fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
     if nonce_len > 0 { bytes.set(nonce, nonce_len - 1, 0); bytes.copy_from_bytes(nonce, 0, buf, p, nonce_len) }
     p = p + nonce_len
     if p + 2 > end { return null }
-    tk_len = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
+    tk_len = ((bytes.get(buf, p) & 0xFF) << 8) | (bytes.get(buf, p + 1) & 0xFF)
     p = p + 2
     if p + tk_len > end { bytes.free(nonce); return null }
     ticket = bytes.new(tk_len)
@@ -1404,17 +1404,17 @@ fn parse_nst_body(buf: ptr, off: int, body_len: int, c: *ClientConn) -> ptr {
     // extensions<2>: scan for early_data (42) -> max_early_data_size (uint32).
     max_early = 0
     if p + 2 <= end {
-        ext_total = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
+        ext_total = ((bytes.get(buf, p) & 0xFF) << 8) | (bytes.get(buf, p + 1) & 0xFF)
         p = p + 2
         ext_end = p + ext_total
         if ext_end > end { ext_end = end }
         while p + 4 <= ext_end {
-            et = ((bytes.get(buf,p)&0xFF)<<8)|(bytes.get(buf,p+1)&0xFF)
-            el = ((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+            et = ((bytes.get(buf, p) & 0xFF) << 8) | (bytes.get(buf, p + 1) & 0xFF)
+            el = ((bytes.get(buf, p + 2) & 0xFF) << 8) | (bytes.get(buf, p + 3) & 0xFF)
             p = p + 4
             if et == 42 {
                 if el >= 4 && p + 4 <= ext_end {
-                    max_early = ((bytes.get(buf,p)&0xFF)<<24)|((bytes.get(buf,p+1)&0xFF)<<16)|((bytes.get(buf,p+2)&0xFF)<<8)|(bytes.get(buf,p+3)&0xFF)
+                    max_early = ((bytes.get(buf, p) & 0xFF) << 24) | ((bytes.get(buf, p + 1) & 0xFF) << 16) | ((bytes.get(buf, p + 2) & 0xFF) << 8) | (bytes.get(buf, p + 3) & 0xFF)
                 }
             }
             p = p + el
@@ -1770,11 +1770,11 @@ fn extract_leaf_der(body: ptr, body_len: int) -> (ptr, int, string) {
     ctx_len = bytes.get(body, 0) & 0xFF
     p = 1 + ctx_len
     if p + 3 > body_len { return null, 0, "certificate: truncated list length" }
-    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    list_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3
     if p + list_len > body_len { return null, 0, "certificate: list overruns" }
     if list_len < 3 { return null, 0, "certificate: empty list" }
-    cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    cert_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3
     if p + cert_len > body_len { return null, 0, "certificate: cert_data overruns" }
     der = bytes.new(cert_len)
@@ -1794,20 +1794,20 @@ fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
     ctx_len = bytes.get(body, 0) & 0xFF
     p = 1 + ctx_len
     if p + 3 > body_len { return null, 0 }
-    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    list_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3
     // First CertificateEntry: cert_data<3>, then extensions<2>.
     if p + 3 > body_len { return null, 0 }
-    cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    cert_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3 + cert_len
     if p + 2 > body_len { return null, 0 }
-    ext_total = ((bytes.get(body, p)&0xFF)<<8)|(bytes.get(body, p+1)&0xFF)
+    ext_total = ((bytes.get(body, p) & 0xFF) << 8) | (bytes.get(body, p + 1) & 0xFF)
     p = p + 2
     ext_end = p + ext_total
     if ext_end > body_len { return null, 0 }
     while p + 4 <= ext_end {
-        et = ((bytes.get(body,p)&0xFF)<<8)|(bytes.get(body,p+1)&0xFF)
-        el = ((bytes.get(body,p+2)&0xFF)<<8)|(bytes.get(body,p+3)&0xFF)
+        et = ((bytes.get(body, p) & 0xFF) << 8) | (bytes.get(body, p + 1) & 0xFF)
+        el = ((bytes.get(body, p + 2) & 0xFF) << 8) | (bytes.get(body, p + 3) & 0xFF)
         q = p + 4
         if et == 5 {
             // status_request ext body = CertificateStatus:
@@ -1815,7 +1815,7 @@ fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
             if el >= 4 {
                 stype = bytes.get(body, q) & 0xFF
                 if stype == 1 {
-                    olen = ((bytes.get(body,q+1)&0xFF)<<16)|((bytes.get(body,q+2)&0xFF)<<8)|(bytes.get(body,q+3)&0xFF)
+                    olen = ((bytes.get(body, q + 1) & 0xFF) << 16) | ((bytes.get(body, q + 2) & 0xFF) << 8) | (bytes.get(body, q + 3) & 0xFF)
                     ostart = q + 4
                     if ostart + olen <= ext_end {
                         ob = bytes.new(olen)
@@ -1834,8 +1834,8 @@ fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
 // signature<2>. Returns (scheme, sig, sig_len, "").
 fn parse_cert_verify(body: ptr, body_len: int) -> (int, ptr, int, string) {
     if body_len < 4 { return 0, null, 0, "certverify: truncated" }
-    scheme = ((bytes.get(body, 0)&0xFF)<<8)|(bytes.get(body, 1)&0xFF)
-    sig_len = ((bytes.get(body, 2)&0xFF)<<8)|(bytes.get(body, 3)&0xFF)
+    scheme = ((bytes.get(body, 0) & 0xFF) << 8) | (bytes.get(body, 1) & 0xFF)
+    sig_len = ((bytes.get(body, 2) & 0xFF) << 8) | (bytes.get(body, 3) & 0xFF)
     if 4 + sig_len > body_len { return 0, null, 0, "certverify: signature overruns" }
     sig = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(sig, sig_len - 1, 0) }
@@ -1846,7 +1846,7 @@ fn parse_cert_verify(body: ptr, body_len: int) -> (int, ptr, int, string) {
 // Split an uncompressed EC point (0x04 || X(32) || Y(32)) into pubx/puby.
 fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, string) {
     if key_len != 65 { return null, null, "spki: not a 65-byte uncompressed EC point" }
-    if (bytes.get(spki_key, 0)&0xFF) != 0x04 { return null, null, "spki: not uncompressed (0x04)" }
+    if (bytes.get(spki_key, 0) & 0xFF) != 0x04 { return null, null, "spki: not uncompressed (0x04)" }
     px = bytes.new(32)
     py = bytes.new(32)
     bytes.set(px, 31, 0)
@@ -1868,11 +1868,11 @@ fn trust_store_path() -> string {
     if string.equals(env, "") != 1 {
         return env
     }
-    debian = "/etc/ssl/certs/ca-certificates.crt"      // Debian/Ubuntu/Alpine
+    debian = "/etc/ssl/certs/ca-certificates.crt" // Debian/Ubuntu/Alpine
     if fs.file_exists(debian) == 1 { return debian }
-    fedora = "/etc/pki/tls/certs/ca-bundle.crt"        // Fedora/RHEL/CentOS
+    fedora = "/etc/pki/tls/certs/ca-bundle.crt" // Fedora/RHEL/CentOS
     if fs.file_exists(fedora) == 1 { return fedora }
-    bsd = "/etc/ssl/cert.pem"                          // *BSD / macOS (LibreSSL)
+    bsd = "/etc/ssl/cert.pem" // *BSD / macOS (LibreSSL)
     if fs.file_exists(bsd) == 1 { return bsd }
     return debian
 }
@@ -1897,13 +1897,13 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     while cont == 1 {
         if p + 4 > flen { cont = 0 } else {
             mt = bytes.get(fl, p) & 0xFF
-            ml = ((bytes.get(fl, p+1)&0xFF)<<16)|((bytes.get(fl, p+2)&0xFF)<<8)|(bytes.get(fl, p+3)&0xFF)
+            ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
             total = 4 + ml
             if p + total > flen { cont = 0 } else {
                 if mt == HS_CERTIFICATE {
                     cbody = bytes.new(ml)
-                    if ml > 0 { bytes.set(cbody, ml-1, 0) }
-                    bytes.copy_from_bytes(cbody, 0, fl, p+4, ml)
+                    if ml > 0 { bytes.set(cbody, ml - 1, 0) }
+                    bytes.copy_from_bytes(cbody, 0, fl, p + 4, ml)
                     // First entry is the leaf; the rest are intermediates.
                     der, dlen, derr = extract_leaf_der(cbody, ml)
                     if string.equals(derr, "") != 1 {
@@ -1942,8 +1942,8 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                 }
                 if mt == HS_CERTIFICATE_VERIFY {
                     vbody = bytes.new(ml)
-                    if ml > 0 { bytes.set(vbody, ml-1, 0) }
-                    bytes.copy_from_bytes(vbody, 0, fl, p+4, ml)
+                    if ml > 0 { bytes.set(vbody, ml - 1, 0) }
+                    bytes.copy_from_bytes(vbody, 0, fl, p + 4, ml)
                     sc, sig, slen, cverr = parse_cert_verify(vbody, ml)
                     if string.equals(cverr, "") != 1 {
                         if string.equals(err, "") == 1 { err = cverr }
@@ -1994,18 +1994,18 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
     // by verify_flight_auth's recorded-transcript tests, which have no trust
     // store. connect() always passes a loaded store, so it always enforces.
     if string.equals(err, "") == 1 {
-      if anchors != null {
-        verr = tls13_cert.check_validity(&leaf)
-        if string.equals(verr, "") != 1 { err = verr }
-        else {
-            herr = tls13_cert.check_hostname(&leaf, host)
-            if string.equals(herr, "") != 1 { err = herr }
+        if anchors != null {
+            verr = tls13_cert.check_validity(&leaf)
+            if string.equals(verr, "") != 1 { err = verr }
             else {
-                cerr = tls13_cert.chain_verify_path(&leaf, intermediates, anchors)
-                if string.equals(cerr, "") != 1 { err = cerr }
+                herr = tls13_cert.check_hostname(&leaf, host)
+                if string.equals(herr, "") != 1 { err = herr }
+                else {
+                    cerr = tls13_cert.chain_verify_path(&leaf, intermediates, anchors)
+                    if string.equals(cerr, "") != 1 { err = cerr }
+                }
             }
         }
-      }
     }
     if have_leaf == 1 { tls13_cert.free_leaf(&leaf) }
     free_intermediates(intermediates)
@@ -2025,13 +2025,13 @@ fn parse_intermediates(body: ptr, body_len: int, out: ptr) {
     ctx_len = bytes.get(body, 0) & 0xFF
     p = 1 + ctx_len
     if p + 3 > body_len { return }
-    list_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+    list_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3
     list_end = p + list_len
     if list_end > body_len { list_end = body_len }
     idx = 0
     while p + 3 <= list_end {
-        cert_len = ((bytes.get(body, p)&0xFF)<<16)|((bytes.get(body, p+1)&0xFF)<<8)|(bytes.get(body, p+2)&0xFF)
+        cert_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
         p = p + 3
         if p + cert_len > list_end { p = list_end } else {
             if idx > 0 {
@@ -2053,7 +2053,7 @@ fn parse_intermediates(body: ptr, body_len: int, out: ptr) {
             p = p + cert_len
             // Skip the entry's extensions<2>.
             if p + 2 <= list_end {
-                ext_len = ((bytes.get(body, p)&0xFF)<<8)|(bytes.get(body, p+1)&0xFF)
+                ext_len = ((bytes.get(body, p) & 0xFF) << 8) | (bytes.get(body, p + 1) & 0xFF)
                 p = p + 2 + ext_len
             } else {
                 p = list_end

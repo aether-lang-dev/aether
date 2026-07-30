@@ -7,58 +7,58 @@ main() {
 
     // Test 1: Print uppercase letters
     print("Test 1: ")
-    print_char(65)  // A
-    print_char(66)  // B
-    print_char(67)  // C
-    print_char(10)  // newline
+    print_char(65) // A
+    print_char(66) // B
+    print_char(67) // C
+    print_char(10) // newline
 
     // Test 2: Print lowercase letters
     print("Test 2: ")
-    print_char(97)   // a
-    print_char(98)   // b
-    print_char(99)   // c
+    print_char(97) // a
+    print_char(98) // b
+    print_char(99) // c
     print_char(10)
 
     // Test 3: Print digits
     print("Test 3: ")
-    print_char(48)   // '0'
-    print_char(49)   // '1'
-    print_char(50)   // '2'
+    print_char(48) // '0'
+    print_char(49) // '1'
+    print_char(50) // '2'
     print_char(10)
 
     // Test 4: Print space and punctuation
     print("Test 4: ")
-    print_char(72)   // H
-    print_char(105)  // i
-    print_char(33)   // !
+    print_char(72) // H
+    print_char(105) // i
+    print_char(33) // !
     print_char(10)
 
     // Test 5: Tab character
     print("Test 5: ")
-    print_char(65)   // A
-    print_char(9)    // tab
-    print_char(66)   // B
+    print_char(65) // A
+    print_char(9) // tab
+    print_char(66) // B
     print_char(10)
 
     // Test 6: print_char in a loop
     print("Test 6: ")
     for (i = 0; i < 10; i = i + 1) {
-        print_char(48 + i)  // '0' through '9'
+        print_char(48 + i) // '0' through '9'
     }
     print_char(10)
 
     // Test 7: print_char with expression
     print("Test 7: ")
     base = 65
-    print_char(base)      // A
-    print_char(base + 1)  // B
-    print_char(base + 2)  // C
+    print_char(base) // A
+    print_char(base + 1) // B
+    print_char(base + 2) // C
     print_char(10)
 
     // Test 8: Printable ASCII range boundaries
     print("Test 8: ")
-    print_char(32)   // space (first printable)
-    print_char(126)  // ~ (last printable)
+    print_char(32) // space (first printable)
+    print_char(126) // ~ (last printable)
     print_char(10)
 
     println("\n=== All print_char Tests Done ===")

@@ -5,7 +5,7 @@
 // applies to them, and definition and call site must agree.
 
 struct rioMethods {
-    read:  fn(ptr, ptr, long) -> long
+    read: fn(ptr, ptr, long) -> long
     write: fn(ptr, ptr, long) -> long
 }
 
@@ -16,7 +16,7 @@ extern exit(code: int)
 
 main() {
     t = rioMethods {
-        read:  my_read as fn(ptr, ptr, long) -> long,
+        read: my_read as fn(ptr, ptr, long) -> long,
         write: my_write as fn(ptr, ptr, long) -> long
     }
     n = t.read(null, null, 7)

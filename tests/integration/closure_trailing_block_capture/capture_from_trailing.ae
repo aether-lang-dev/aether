@@ -27,9 +27,9 @@ main() {
     actions = list.new()
     defer list.free(actions)
     root = grid(actions) {
-        c = 42                  // declared in an outer trailing block
-        row(actions) {           // nested trailing block
-            btn_do(actions, || { return c })   // inner closure reads c
+        c = 42 // declared in an outer trailing block
+        row(actions) { // nested trailing block
+            btn_do(actions, || { return c }) // inner closure reads c
         }
     }
     // Retrieve and invoke the closure to verify c's value was captured.

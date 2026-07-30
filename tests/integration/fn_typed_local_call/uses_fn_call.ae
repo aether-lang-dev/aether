@@ -16,26 +16,26 @@ apply2(handler: fn, x: int, y: int) -> int {
 main() {
     // Case 1: closure built via the builder DSL, assigned to a
     // local, called directly via the local's name.
-    adder = store_fn() callback |a: int, b: int| {
+    adder = store_fn() callback | a: int, b: int | {
         return a + b
     }
-    println(adder(3, 4))      // expect 7
-    println(adder(10, 20))    // expect 30 — same closure called again
+    println(adder(3, 4)) // expect 7
+    println(adder(10, 20)) // expect 30 — same closure called again
 
     // Case 2: pass a closure into a function as a fn-typed param,
     // and have the callee invoke it directly via the param name.
-    println(apply2(adder, 100, 23))   // expect 123
+    println(apply2(adder, 100, 23)) // expect 123
 
     // Case 3: closure that captures a local via the builder DSL.
     factor = 5
-    times_factor = store_fn() callback |x: int| {
+    times_factor = store_fn() callback | x: int | {
         return x * factor
     }
-    println(times_factor(7))  // expect 35
+    println(times_factor(7)) // expect 35
 
     // Case 4: invoke directly inside another callback's body.
-    chain = store_fn() callback |x: int| {
+    chain = store_fn() callback | x: int | {
         return adder(x, 1)
     }
-    println(chain(41))        // expect 42
+    println(chain(41)) // expect 42
 }

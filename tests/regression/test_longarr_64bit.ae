@@ -27,10 +27,10 @@ main() {
     a, _ = longarr.new_filled(4, 0)
 
     // Values that exceed the 32-bit range must survive set -> get.
-    longarr.set(a, 0, 9000000000)          // ~2^33
-    longarr.set(a, 1, 30000000000)         // ~2^34
-    longarr.set(a, 2, 1099511627776)       // 2^40
-    longarr.set(a, 3, -9000000000)         // negative, |v| > 2^31
+    longarr.set(a, 0, 9000000000) // ~2^33
+    longarr.set(a, 1, 30000000000) // ~2^34
+    longarr.set(a, 2, 1099511627776) // 2^40
+    longarr.set(a, 3, -9000000000) // negative, |v| > 2^31
 
     v0, e0 = longarr.get(a, 0)
     fails = fails + ck(e0 == "" && v0 == 9000000000, "9e9 round-trips (was 410065408)")

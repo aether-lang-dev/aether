@@ -32,7 +32,7 @@ main() {
     result = build() {
         configure("a", "1")
         configure("b", "2")
-        call(bumper)                     // inside trailing block
+        call(bumper) // inside trailing block
         configure("c", "3")
         call(bumper)
     }

@@ -56,7 +56,7 @@ main() {
     rss_before = getrusage_max_rss_kb()
     j = 0
     while j < 8000 {
-        piece  = slice(big, n, 1, n)              // via wrapper
+        piece = slice(big, n, 1, n) // via wrapper
         direct = string.substring_n(big, n, 1, n) // direct local
         if string.length(piece) <= 0 { println("  FAIL: empty piece"); exit(1) }
         if string.length(direct) <= 0 { println("  FAIL: empty direct"); exit(1) }

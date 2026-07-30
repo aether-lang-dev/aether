@@ -14,23 +14,22 @@ main() {
     // Test 1: String operations (type inferred: string)
     greeting = "Hello, World!";
     print(greeting);
-    
+
     // Test 2: Type inference in struct
-    p = Player{ 
-        name: "Alice", 
+    p = Player {
+        name: "Alice",
         health: 100,
         score: 0
     };
     print(p.name);
     print(p.health);
-    
+
     // Test 3: Math operations (types inferred: int)
     damage = calculate_damage(50, 10);
-    print(damage);  // Should print 40
-    
+    print(damage); // Should print 40
+
     // Test 4: Arrays with inference (type: int[])
     nums = [1, 2, 3, 4, 5];
     sum = nums[0] + nums[1];
-    print(sum);  // Should print 3
+    print(sum); // Should print 3
 }
-

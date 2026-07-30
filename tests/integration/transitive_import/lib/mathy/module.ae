@@ -5,7 +5,7 @@
 // that selectively importing `cube` brings both helpers into the
 // merged AST, even though neither was named in the import list.
 
-exports (cube)
+exports(cube)
 
 _double_it(n: int) -> int {
     return n + n

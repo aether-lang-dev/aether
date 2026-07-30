@@ -14,7 +14,7 @@ main() {
     base = 1
     // Closure that adds `base` to its argument. `base` is outer-scope
     // and written below — so promoted.
-    adder = |x: int| { return x + base }
+    adder = | x: int | { return x + base }
 
     r = apply_twice(10, adder)
     // adder(10) = 10 + 1 = 11; adder(11) = 11 + 1 = 12
@@ -22,7 +22,7 @@ main() {
 
     // Mutate base through a writer closure. adder captured a pointer to
     // base's cell, so the next invocation sees the new value.
-    set_base = |v: int| { base = v }
+    set_base = | v: int | { base = v }
     call(set_base, 100)
 
     r2 = apply_twice(10, adder)

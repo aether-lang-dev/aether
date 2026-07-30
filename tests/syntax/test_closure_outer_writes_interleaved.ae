@@ -21,10 +21,10 @@ main() {
     if n != 105 { println("FAIL: n=105 expected, got:"); println(n); exit(1) }
 
     // Closure call, then outer read, then outer write, then closure call.
-    call(inc_by_5)            // 110
+    call(inc_by_5) // 110
     if n != 110 { println("FAIL: n=110 expected, got:"); println(n); exit(1) }
-    n = n * 2                  // 220 (read + write on the same line)
-    call(inc_by_5)            // 225
+    n = n * 2 // 220 (read + write on the same line)
+    call(inc_by_5) // 225
     if n != 225 { println("FAIL: n=225 expected, got:"); println(n); exit(1) }
 
     println("ok")

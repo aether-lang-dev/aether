@@ -5,7 +5,7 @@
 // in the selection list) still resolves. Previously the qualified form of a
 // non-selected name was rejected.
 
-import std.math (sqrt)
+import std.math(sqrt)
 
 extern exit(code: int)
 

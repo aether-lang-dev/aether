@@ -37,7 +37,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     tiger_hex, tiger_bytes
 )
@@ -310,14 +310,13 @@ const TIGER_T4: long[256] = [
     0xcd56d9430ea8280e, 0xc12591d7535f5065, 0xc83223f1720aef96, 0xc3a0396f7363a51f
 ]
 
-
 struct TigerCtx {
     a: long
     b: long
     c: long
-    x: ptr            // longarr(8), the message words
+    x: ptr // longarr(8), the message words
     x_off: int
-    buf: ptr          // bytes(8), partial-word buffer
+    buf: ptr // bytes(8), partial-word buffer
     b_off: int
     byte_count: long
 }

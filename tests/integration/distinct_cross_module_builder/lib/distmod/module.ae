@@ -1,6 +1,6 @@
 import std.list
 import std.string
-exports (doc, child, num, unwrap)
+exports(doc, child, num, unwrap)
 type Num = distinct int
 num(value: int) -> Num { return value as Num }
 unwrap(value: Num) -> int { return value as int }

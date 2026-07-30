@@ -1,5 +1,5 @@
 // Pure module used alongside stdlib imports.
-exports (square, sum_of_squares)
+exports(square, sum_of_squares)
 
 square(x) {
     return x * x

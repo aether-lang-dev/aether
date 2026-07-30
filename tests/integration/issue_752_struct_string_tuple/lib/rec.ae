@@ -4,7 +4,7 @@
 // defer freed the string after the tuple literal had already memcpy'd
 // the pointer into the returned tuple.
 import std.string
-exports (R, mk, mk_multi)
+exports(R, mk, mk_multi)
 
 struct R {
     n: int
@@ -19,8 +19,8 @@ mk(x: int, txt: string) -> {
 // Multiple heap-string fields plus an int field, to prove the
 // ownership-transfer fix iterates every heap field.
 struct M {
-    id:    int
-    name:  string
+    id: int
+    name: string
     label: string
 }
 

@@ -34,7 +34,7 @@ main() {
     if ins == null { print("  FAIL prepare insert returned null\n"); exit(1) }
 
     e1 = sqlite.bind_text(ins, 1, "alpha"); if e1 != "" { println("  FAIL bind_text: ${e1}"); exit(1) }
-    e2 = sqlite.bind_int (ins, 2, 42);      if e2 != "" { println("  FAIL bind_int: ${e2}"); exit(1) }
+    e2 = sqlite.bind_int(ins, 2, 42); if e2 != "" { println("  FAIL bind_int: ${e2}"); exit(1) }
     rc1, serr1 = sqlite.step(ins, db)
     if serr1 != "" { println("  FAIL step: ${serr1}"); exit(1) }
     if rc1 != sqlite.SQLITE_DONE { println("  FAIL step rc ${rc1}, want SQLITE_DONE"); exit(1) }

@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Actor `?` ask answered 0 and leaked a 5s timeout when the handler used
+  `reply <expression>`** (#1324). `reply count` parsed but codegen silently
+  dropped it (an ERROR comment in the generated C), so the ask waited out its
+  timeout and read 0; the fallback also cast the reply pointer to `intptr_t`,
+  emitting a `-Wformat` warning. `reply <expression>` is now a first-class
+  scalar reply: the handler sends a typed copy through the reply slot, the ask
+  site derefs it as that type (int, long, float, bool, ptr, string), and the
+  GCC statement-expression path now matches the MSVC helper's deref semantics.
+  An unknown message name in `reply Name { ... }` is a compile error instead of
+  silently generated nothing. Regression:
+  `tests/regression/test_ask_scalar_reply.ae`.
+- **Heap-producing calls in bare `print`/`println` argument position leaked
+  per call** (`println(string.concat(a, b))`). The interpolation form already
+  freed its temporaries; the direct-argument form never did, for every heap
+  producer. Both forms now route through owned-print helpers that print and
+  free in one step; bound identifiers keep their scope-exit free.
+
+### Added
+
+- **`string.replace(s, old, new)` and `string.replace_all(s, old, new)`**
+  (#1331). Non-overlapping left-to-right matches, byte-exact and binary-safe;
+  `new` may be empty (deletion) or longer than `old`; empty `old` returns a
+  copy unchanged (Go's `strings.Replace` guard). Single exact-size allocation
+  regardless of match count; results are heap-tracked like `substring`.
+  Regression: `tests/regression/test_std_string_replace.ae`.
+- **`ae fmt` CI gate** (#1302). `tests/integration/fmt_gate/` enforces the
+  formatter's documented safety properties on every CI run: all checked-in
+  `.ae` sources under `std/`, `examples/`, and `tests/` are canonically
+  formatted (`ae fmt --check`), formatting is idempotent, and a formatted
+  file's generated C is byte-identical to the original's (modulo `#line`).
+  The whole tree was formatted in this change (595 files, whitespace-only);
+  the IR-preservation property was verified on all 443 compiling program
+  files before and after: zero differences.
+
 ## [0.462.0]
 
 ### Fixed

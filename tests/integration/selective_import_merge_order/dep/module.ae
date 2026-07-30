@@ -7,7 +7,7 @@
 // (the synthetic bare-import re-injection landed past the frozen merge-loop
 // bound), so `os.now_monotonic_ns` came back Undefined. Mirrors aeocha, which
 // lists std.os 7th of 10 imports.
-exports (dep_now)
+exports(dep_now)
 
 import std.string
 import std.os

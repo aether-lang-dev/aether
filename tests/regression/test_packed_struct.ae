@@ -15,35 +15,35 @@ import std.mem
 extern exit(code: int)
 extern malloc(n: long) -> ptr
 
-extern struct sdshdr16   @packed { len: uint16  alloc: uint16  flags: byte }
-extern struct unpacked16          { len: uint16  alloc: uint16  flags: byte }
+extern struct sdshdr16 @packed { len: uint16 alloc: uint16 flags: byte }
+extern struct unpacked16 { len: uint16 alloc: uint16 flags: byte }
 
 // A wider variant: packed keeps the 8-bit flags adjacent to the 64-bit
 // fields (offset 16, size 17) where unpacked would pad to 24.
-extern struct sdshdr64   @packed { len: uint64  alloc: uint64  flags: byte }
+extern struct sdshdr64 @packed { len: uint64 alloc: uint64 flags: byte }
 
 main() {
     println("=== test_packed_struct ===")
 
     // Packed removes the trailing/inter-field padding.
-    if sizeof(sdshdr16) != 5            { println("FAIL: sizeof packed16 = ${sizeof(sdshdr16)} (want 5)"); exit(1) }
-    if sizeof(unpacked16) == 5          { println("FAIL: unpacked16 should be padded, not 5"); exit(1) }
-    if offsetof(sdshdr16, len) != 0     { println("FAIL: off(len)"); exit(1) }
-    if offsetof(sdshdr16, alloc) != 2   { println("FAIL: off(alloc)"); exit(1) }
-    if offsetof(sdshdr16, flags) != 4   { println("FAIL: off(flags) = ${offsetof(sdshdr16, flags)} (want 4)"); exit(1) }
+    if sizeof(sdshdr16) != 5 { println("FAIL: sizeof packed16 = ${sizeof(sdshdr16)} (want 5)"); exit(1) }
+    if sizeof(unpacked16) == 5 { println("FAIL: unpacked16 should be padded, not 5"); exit(1) }
+    if offsetof(sdshdr16, len) != 0 { println("FAIL: off(len)"); exit(1) }
+    if offsetof(sdshdr16, alloc) != 2 { println("FAIL: off(alloc)"); exit(1) }
+    if offsetof(sdshdr16, flags) != 4 { println("FAIL: off(flags) = ${offsetof(sdshdr16, flags)} (want 4)"); exit(1) }
 
-    if sizeof(sdshdr64) != 17           { println("FAIL: sizeof packed64 = ${sizeof(sdshdr64)} (want 17)"); exit(1) }
-    if offsetof(sdshdr64, flags) != 16  { println("FAIL: off64(flags) = ${offsetof(sdshdr64, flags)} (want 16)"); exit(1) }
+    if sizeof(sdshdr64) != 17 { println("FAIL: sizeof packed64 = ${sizeof(sdshdr64)} (want 17)"); exit(1) }
+    if offsetof(sdshdr64, flags) != 16 { println("FAIL: off64(flags) = ${offsetof(sdshdr64, flags)} (want 16)"); exit(1) }
 
     // Round-trip a field through a *sdshdr16 overlay on a raw buffer —
     // proves the packed layout is real, not just a sizeof number.
-    *sdshdr16 h = malloc(8) as *sdshdr16
+    * sdshdr16 h = malloc(8) as *sdshdr16
     h.len = 300
     h.alloc = 512
     h.flags = 7
-    if h.len != 300    { println("FAIL: overlay len round-trip"); exit(1) }
-    if h.alloc != 512  { println("FAIL: overlay alloc round-trip"); exit(1) }
-    if h.flags != 7    { println("FAIL: overlay flags round-trip"); exit(1) }
+    if h.len != 300 { println("FAIL: overlay len round-trip"); exit(1) }
+    if h.alloc != 512 { println("FAIL: overlay alloc round-trip"); exit(1) }
+    if h.flags != 7 { println("FAIL: overlay flags round-trip"); exit(1) }
 
     println("  PASS: @packed struct layout (sizeof/offsetof + overlay round-trip)")
     println("OK")

@@ -65,8 +65,8 @@ main() {
         }
     }
     expect_eq(out5,
-              "<ul><li>alpha</li><li>beta</li><li>&lt;gamma&gt;</li></ul>",
-              "5 for loop inside tag block")
+        "<ul><li>alpha</li><li>beta</li><li>&lt;gamma&gt;</li></ul>",
+        "5 for loop inside tag block")
 
     // (6) Aether ${...} interpolation: a captured user value with HTML
     //     metas, interpolated into a literal, then handed to text() —
@@ -77,7 +77,7 @@ main() {
         native.tag("p") { native.text("Hello ${user_name}") }
     }
     expect_eq(out6, "<p>Hello Alice &lt;script&gt;</p>",
-              "6 interp escapes captured user value")
+        "6 interp escapes captured user value")
 
     println("All PASS")
 }

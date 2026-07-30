@@ -57,52 +57,52 @@ main() {
 
     // (2) Sequence: two increments -> "01".
     expect_eq(render_empty("{% increment x %}{% increment x %}"),
-              "01", "2 two increments")
+        "01", "2 two increments")
 
     // (3) Three increments -> "012".
     expect_eq(render_empty("{% increment x %}-{% increment x %}-{% increment x %}"),
-              "0-1-2", "3 three increments")
+        "0-1-2", "3 three increments")
 
     // (4) First decrement emits "-1".
     expect_eq(render_empty("{% decrement x %}"), "-1", "4 first decrement")
 
     // (5) Two decrements -> "-1-2".
     expect_eq(render_empty("{% decrement x %}/{% decrement x %}"),
-              "-1/-2", "5 two decrements")
+        "-1/-2", "5 two decrements")
 
     // (6) Increment then decrement on same name.
     //   First increment: emit 0, store 1
     //   Then decrement:  store 0, emit 0
     expect_eq(render_empty("{% increment x %}/{% decrement x %}"),
-              "0/0", "6 inc then dec same name")
+        "0/0", "6 inc then dec same name")
 
     // (7) assign and increment are independent.
     //   {% assign x = "hi" %} does NOT seed the counter for x.
     expect_eq(render_empty("{% assign x = \"hi\" %}|{% increment x %}|{{ x }}"),
-              "|0|hi", "7 assign x and increment x independent")
+        "|0|hi", "7 assign x and increment x independent")
 
     // (8) Two counters advance independently.
     expect_eq(render_empty("{% increment a %}{% increment b %}{% increment a %}{% increment a %}"),
-              "0012", "8 two counters")
+        "0012", "8 two counters")
 
     // (9) Cycle 3 args, called 3 times.
     expect_eq(render_empty("{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}"),
-              "a-b-c", "9 cycle abc")
+        "a-b-c", "9 cycle abc")
 
     // (10) Wrap: 2 args, 4 calls.
     expect_eq(render_empty("{% cycle 'a','b' %}{% cycle 'a','b' %}{% cycle 'a','b' %}{% cycle 'a','b' %}"),
-              "abab", "10 cycle wrap")
+        "abab", "10 cycle wrap")
 
     // (11) Two identical cycles share state (lockstep).
     //   Calling the SAME cycle args twice advances once per call from the
     //   shared position. So the four calls below emit a,b,a,b — even
     //   though they're textually identical tags.
     expect_eq(render_empty("[{% cycle 'a','b' %}][{% cycle 'a','b' %}][{% cycle 'a','b' %}][{% cycle 'a','b' %}]"),
-              "[a][b][a][b]", "11 lockstep cycles")
+        "[a][b][a][b]", "11 lockstep cycles")
 
     // (12) Named cycles advance independently.
     expect_eq(render_empty("{% cycle 'g1': 'a','b' %}{% cycle 'g2': 'X','Y' %}{% cycle 'g1': 'a','b' %}{% cycle 'g2': 'X','Y' %}"),
-              "aXbY", "12 named cycles independent")
+        "aXbY", "12 named cycles independent")
 
     // (13) Missing name on increment.
     t13, _ = liquid.parse_string("{% increment %}")

@@ -1,4 +1,4 @@
 // Control: a valid imported module. Must still build cleanly — the #953
 // gate keys on the global error count, so a clean import never trips it.
-exports ( g )
+exports(g)
 g(x: int) -> int { return x + 1 }

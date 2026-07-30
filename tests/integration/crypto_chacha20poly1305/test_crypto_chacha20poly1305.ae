@@ -7,11 +7,11 @@ import std.bytes
 import std.string
 import std.io
 
-hv(c: int) -> int { if c>=48 { if c<=57 { return c-48 } } if c>=97 { if c<=102 { return c-87 } } return 0 }
-hb(h: string) -> ptr { n=string.length(h); b=bytes.new(n/2); i=0; while i<n { bytes.set(b,i/2,hv(string_char_at_n(h,n,i))*16+hv(string_char_at_n(h,n,i+1))); i=i+2 } return b }
-bh(b: ptr) -> string { d="0123456789abcdef"; o=""; n=bytes.length(b); i=0; while i<n { v=bytes.get(b,i); o=string.concat(o,string.concat(string.substring(d,(v/16)&15,((v/16)&15)+1),string.substring(d,v&15,(v&15)+1))); i=i+1 } return o }
-sb(s: string) -> ptr { n=string.length(s); b=bytes.new(n); i=0; while i<n { bytes.set(b,i,string_char_at_n(s,n,i)&0xFF); i=i+1 } return b }
-beq(a: ptr, b: ptr) -> int { if bytes.length(a)!=bytes.length(b) { return 0 } i=0; while i<bytes.length(a) { if bytes.get(a,i)!=bytes.get(b,i) { return 0 } i=i+1 } return 1 }
+hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } return 0 }
+hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
+bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
+sb(s: string) -> ptr { n = string.length(s); b = bytes.new(n); i = 0; while i < n { bytes.set(b, i, string_char_at_n(s, n, i) & 0xFF); i = i + 1 } return b }
+beq(a: ptr, b: ptr) -> int { if bytes.length(a) != bytes.length(b) { return 0 } i = 0; while i < bytes.length(a) { if bytes.get(a, i) != bytes.get(b, i) { return 0 } i = i + 1 } return 1 }
 
 check(label: string, got: string, want: string) -> int {
     if got == want { println("ok   ${label}"); return 0 }
@@ -48,7 +48,7 @@ main() {
     pt = sb("Ladies and Gentlemen of the class of '99: If I could offer you only one tip for the future, sunscreen would be it.")
     sealed = chacha20poly1305.aead_seal(key, nonce, aad, bytes.length(aad), pt, bytes.length(pt))
     want = string.concat("d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d63dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b3692ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc3ff4def08e4b7a9de576d26586cec64b6116",
-                         "1ae10b594f09e26a7e902ecbd0600691")
+        "1ae10b594f09e26a7e902ecbd0600691")
     fails = fails + check("aead §2.8.2 seal", bh(sealed), want)
 
     op, err = chacha20poly1305.aead_open(key, nonce, aad, bytes.length(aad), sealed, bytes.length(sealed))

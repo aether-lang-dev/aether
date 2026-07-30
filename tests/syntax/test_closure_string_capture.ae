@@ -4,7 +4,7 @@ main() {
     prefix = "Hello"
 
     // Closure that captures a string
-    greeter = |name: string| {
+    greeter = | name: string | {
         println(prefix)
         println(name)
     }

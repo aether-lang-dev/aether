@@ -1,3 +1,3 @@
 // A bool occupies exactly one bit; anything else is a mistake worth hearing about.
-bitstruct B : uint8_t { a: bool 0..=2 }
+bitstruct B: uint8_t { a: bool 0..=2 }
 main() { println("unreachable") }

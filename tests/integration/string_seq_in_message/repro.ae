@@ -37,7 +37,7 @@ actor SiteWorker {
 
 walk(s: *StringSeq) {
     match s {
-        []      -> { /* end of list */ }
+        [] -> { /* end of list */ }
         [h | t] -> {
             println(h)
             walk(t)

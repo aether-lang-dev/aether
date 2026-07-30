@@ -54,7 +54,7 @@ main() {
     // Go-style wrapper error shapes
     nn, e_neg = longarr.new(-1)
     if string.equals(e_neg, "") == 1 { print("FAIL negative-size should error\n"); fails = fails + 1 }
-    z, _ = longarr.new(0)            // empty array is legal
+    z, _ = longarr.new(0) // empty array is legal
     if longarr_size(z) != 0 { print("FAIL empty size\n"); fails = fails + 1 }
     longarr_free(z)
 

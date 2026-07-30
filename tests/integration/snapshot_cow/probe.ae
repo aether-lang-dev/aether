@@ -157,7 +157,7 @@ main() {
     // writer-actor makes.
     {
         cell = snapshot.new(make_value(0))
-        prev = null            // snapshot N-1, freed when we publish N+1
+        prev = null // snapshot N-1, freed when we publish N+1
         ok_all = 1
         gen = 1
         while gen <= 5 {

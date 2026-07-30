@@ -62,7 +62,7 @@ main() {
     //     This is the load-bearing shape for a list/repeater UI: the per-item
     //     render closure attaches a handler that closes over that item.
     rows = ""
-    render = take() callback |item: ptr, idx: int| {
+    render = take() callback | item: ptr, idx: int | {
         e = item as *Item
         nm = e.name
         row = take() callback {

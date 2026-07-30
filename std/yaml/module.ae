@@ -10,7 +10,7 @@
 // YAML node type constants:
 //   YAML_SCALAR = 1, YAML_SEQUENCE = 2, YAML_MAPPING = 3
 
-exports (
+exports(
     parse, free, root, type, get_scalar,
     sequence_size, sequence_get,
     mapping_size, mapping_get_key, mapping_get_value, mapping_lookup,
@@ -18,9 +18,9 @@ exports (
     YAML_SCALAR, YAML_SEQUENCE, YAML_MAPPING
 )
 
-const YAML_SCALAR   = 1
+const YAML_SCALAR = 1
 const YAML_SEQUENCE = 2
-const YAML_MAPPING  = 3
+const YAML_MAPPING = 3
 
 // ---- Raw C Bindings Externs ----
 extern yaml_parse_raw(yaml_str: string) -> ptr
@@ -46,8 +46,8 @@ extern string_concat(a: string, b: string) -> string
 // Parse a YAML string. Returns (document_ptr, "") on success, (null, error) on failure.
 // Caller owns the returned document and must free it using yaml.free.
 parse(yaml_str: string) -> ptr! {
-    ok = ""   // single tracked empty-error binding; a fresh string_concat("","")
-              // per success return leaks 32 bytes/call the caller discards
+    ok = "" // single tracked empty-error binding; a fresh string_concat("","")
+    // per success return leaks 32 bytes/call the caller discards
     doc = yaml_parse_raw(yaml_str)
     if doc == null {
         return null, string_concat(yaml_last_error(), "")

@@ -4,7 +4,7 @@ main() {
     multiplier = 3
 
     // Closure that captures 'multiplier'
-    scale = |x: int| -> x * multiplier
+    scale = | x: int | -> x * multiplier
 
     println("capture closure parsed ok")
 }

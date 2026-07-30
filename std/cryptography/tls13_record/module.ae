@@ -43,7 +43,7 @@ import std.cryptography.aes
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-exports (
+exports(
     new, new_aead, free_ctx, seal_record, open_record, nonce_for,
     RecordCtx, OpenedRecord,
     CONTENT_HANDSHAKE, CONTENT_APPLICATION_DATA, CONTENT_ALERT,
@@ -56,16 +56,16 @@ exports (
 //   TLS_AES_128_GCM_SHA256       -> AES-128-GCM        (16-byte key)
 // Both use a 12-byte nonce and a 16-byte tag, so only the cipher differs.
 const AEAD_CHACHA20_POLY1305 = 0
-const AEAD_AES_128_GCM       = 1
-const AEAD_AES_256_GCM       = 2
+const AEAD_AES_128_GCM = 1
+const AEAD_AES_256_GCM = 2
 
-const CONTENT_ALERT            = 21
-const CONTENT_HANDSHAKE        = 22
+const CONTENT_ALERT = 21
+const CONTENT_HANDSHAKE = 22
 const CONTENT_APPLICATION_DATA = 23
 
-const TAG_LEN           = 16    // ChaCha20-Poly1305 / AES-GCM tag
-const RECORD_HEADER_LEN = 5     // opaque_type(1) + version(2) + length(2)
-const NONCE_LEN         = 12
+const TAG_LEN = 16 // ChaCha20-Poly1305 / AES-GCM tag
+const RECORD_HEADER_LEN = 5 // opaque_type(1) + version(2) + length(2)
+const NONCE_LEN = 12
 const OPAQUE_APPLICATION_DATA = 0x17
 
 // A directional record context: the AEAD key, base iv, and a 64-bit sequence
@@ -73,10 +73,10 @@ const OPAQUE_APPLICATION_DATA = 0x17
 struct RecordCtx {
     key: ptr
     key_len: int
-    iv: ptr        // 12-byte base write_iv
-    seq: long      // record sequence number (starts at 0)
-    aead: int      // AEAD_CHACHA20_POLY1305 | AEAD_AES_128_GCM
-    aes_ctx: ptr   // pre-built AES encryptor (AES-GCM only), else null
+    iv: ptr // 12-byte base write_iv
+    seq: long // record sequence number (starts at 0)
+    aead: int // AEAD_CHACHA20_POLY1305 | AEAD_AES_128_GCM
+    aes_ctx: ptr // pre-built AES encryptor (AES-GCM only), else null
 }
 
 // Create a ChaCha20-Poly1305 record context (the default AEAD). key_len is 32.
@@ -200,7 +200,7 @@ seal_record(ctx: ptr, content_type: int, plaintext: ptr, pt_len: int) -> ptr {
 // Parsed result of opening a record.
 struct OpenedRecord {
     content_type: int
-    plaintext: ptr    // fresh bytes (caller frees) — the inner content
+    plaintext: ptr // fresh bytes (caller frees) — the inner content
     plaintext_len: int
 }
 

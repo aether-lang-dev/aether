@@ -49,7 +49,7 @@ main() {
     print("\nTest 6: 9_999_999_999_999_999 (close to int64 max)\n")
     long near_max = 9999999999999999
     check("from_long(9999999999999999)", string.from_long(near_max),
-          "9999999999999999")
+        "9999999999999999")
 
     print("\n=== All string.from_long tests passed ===\n")
 }

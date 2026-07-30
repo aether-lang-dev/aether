@@ -1,6 +1,6 @@
 // A bitstruct is strictly nominal: it never IMPLICITLY becomes its backing
 // integer. Crossing the boundary is an explicit `as`.
-bitstruct B : uint8_t { a: bool 0 }
+bitstruct B: uint8_t { a: bool 0 }
 take(n: uint8_t) -> int { return 1 }
 main() {
     b = 0 as B

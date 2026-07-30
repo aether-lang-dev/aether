@@ -62,7 +62,7 @@ main() {
     println("\nTest 4: rename moves a file")
     src = "${tmp}/aether_fs_rename_src.txt"
     dst = "${tmp}/aether_fs_rename_dst.txt"
-    fs.delete(dst)  // ensure no leftover
+    fs.delete(dst) // ensure no leftover
     fs.write(src, "payload")
     err3 = fs.rename(src, dst)
     if err3 != "" {
@@ -93,7 +93,7 @@ main() {
     // ---- Test 6: file_stat on a regular file --------------------
     println("\nTest 6: file_stat on a regular file")
     path_s = "${tmp}/aether_fs_stat_file.txt"
-    fs.write(path_s, "twelve bytes")  // 12 bytes
+    fs.write(path_s, "twelve bytes") // 12 bytes
     kind, size, mtime, err5 = fs.file_stat(path_s)
     if err5 != "" {
         println("  FAIL: stat errored: ${err5}")

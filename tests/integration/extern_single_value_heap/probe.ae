@@ -70,7 +70,7 @@ main() {
     // per-assignment classifier verdict is per-RHS, not sticky on the
     // variable.
     m = make_owned("mix", 1)
-    m = make_borrowed()  // reassignment: was-heap → now-borrow
+    m = make_borrowed() // reassignment: was-heap → now-borrow
     m = make_owned("mix", 2)
     if string.length(m) != 4 {
         println("FAIL: mixed-mode final string wrong length: ${string.length(m)}")

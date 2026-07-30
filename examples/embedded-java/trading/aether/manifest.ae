@@ -8,7 +8,6 @@ import std.host
 
 abi() {
     describe("trading") {
-
         // Inputs the host supplies before the script runs. v1 stores them
         // on the SDK instance; a future host_call() will surface them as
         // ambient values inside the script body.
@@ -16,9 +15,9 @@ abi() {
 
         // Events the script emits via notify(name, id). The host registers
         // typed handlers via on<EventName>(handler).
-        event("OrderPlaced",   "int64")
+        event("OrderPlaced", "int64")
         event("OrderRejected", "int64")
-        event("TradeKilled",   "int64")
+        event("TradeKilled", "int64")
         event("UnknownTicker", "int64")
 
         // Per-language SDK targets.

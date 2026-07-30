@@ -119,7 +119,7 @@ main() {
             print("  Single: ")
             println(x)
         }
-        [h|t] -> {
+        [h | t] -> {
             print("  Head: ")
             print(h)
             println(", plus more")

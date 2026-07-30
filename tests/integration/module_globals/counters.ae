@@ -5,19 +5,19 @@ import std.string
 
 extern exit(code: int)
 
-var hits = 0                 // inferred int (no annotation)
-var total: long = 0          // explicitly typed 64-bit accumulator
+var hits = 0 // inferred int (no annotation)
+var total: long = 0 // explicitly typed 64-bit accumulator
 
 record(n: long) {
-    hits = hits + 1          // read + write of an inferred-int global
-    total = total + n        // read + write of a typed global
+    hits = hits + 1 // read + write of an inferred-int global
+    total = total + n // read + write of a typed global
 }
 
 average() -> long {
     if hits == 0 {
         return 0
     }
-    return total / hits      // both globals read inside one expression
+    return total / hits // both globals read inside one expression
 }
 
 main() {

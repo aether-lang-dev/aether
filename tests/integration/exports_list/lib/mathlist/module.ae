@@ -7,16 +7,16 @@
 // from outside the module — the existing is_export_blocked() check
 // works the same way as for the legacy per-function `export` form.
 
-exports (square, cube, PI)
+exports(square, cube, PI)
 
-const PI = 3        // listed → public
+const PI = 3 // listed → public
 
 square(n: int) {
-    return n * n   // listed → public
+    return n * n // listed → public
 }
 
 cube(n: int) {
-    return n * square(n)   // listed → public; calls private helper internally
+    return n * square(n) // listed → public; calls private helper internally
 }
 
 // _internal_helper isn't in the list and starts with _ — both signals

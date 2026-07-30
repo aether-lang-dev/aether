@@ -10,7 +10,7 @@
 // `import innerlib`), so it fired E0301 on every call site inside
 // the imported bodies.
 
-import innerlib (helper, other_helper)
+import innerlib(helper, other_helper)
 
 do_thing(x: int) -> int {
     return helper(x)

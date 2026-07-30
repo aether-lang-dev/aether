@@ -37,39 +37,39 @@ main() {
     // (2) Nested elements get indented.
     out2 = native.pretty_print_html("<ul><li>a</li><li>b</li></ul>", 2)
     expect_eq(out2,
-              "<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>",
-              "2 nested list")
+        "<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>",
+        "2 nested list")
 
     // (3) <pre> carve-out — internal whitespace preserved verbatim,
     //     no indent added inside.
     out3 = native.pretty_print_html("<div><pre>line1\nline2</pre></div>", 2)
     expect_eq(out3,
-              "<div>\n  <pre>line1\nline2</pre>\n</div>",
-              "3 pre carve-out")
+        "<div>\n  <pre>line1\nline2</pre>\n</div>",
+        "3 pre carve-out")
 
     // (4) <script> also carved out (same whitelist).
     out4 = native.pretty_print_html("<head><script>var x = 1;\nvar y = 2;</script></head>", 2)
     expect_eq(out4,
-              "<head>\n  <script>var x = 1;\nvar y = 2;</script>\n</head>",
-              "4 script carve-out")
+        "<head>\n  <script>var x = 1;\nvar y = 2;</script>\n</head>",
+        "4 script carve-out")
 
     // (5) pretty_print_xml on nested elements.
     out5 = native.pretty_print_xml("<rss><channel><title>Hi</title></channel></rss>", 2)
     expect_eq(out5,
-              "<rss>\n  <channel>\n    <title>Hi</title>\n  </channel>\n</rss>",
-              "5 nested XML")
+        "<rss>\n  <channel>\n    <title>Hi</title>\n  </channel>\n</rss>",
+        "5 nested XML")
 
     // (6) Prolog on its own line; root on the next.
     out6 = native.pretty_print_xml("<?xml version=\"1.0\" encoding=\"UTF-8\"?><doc><a>hi</a></doc>", 2)
     expect_eq(out6,
-              "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<doc>\n  <a>hi</a>\n</doc>",
-              "6 XML prolog newline")
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<doc>\n  <a>hi</a>\n</doc>",
+        "6 XML prolog newline")
 
     // (7) Self-close in XML.
     out7 = native.pretty_print_xml("<doc><a/><b><c/></b></doc>", 2)
     expect_eq(out7,
-              "<doc>\n  <a/>\n  <b>\n    <c/>\n  </b>\n</doc>",
-              "7 self-close")
+        "<doc>\n  <a/>\n  <b>\n    <c/>\n  </b>\n</doc>",
+        "7 self-close")
 
     // (8) Indent size 4 honoured; 0 (out of range) falls back to 2.
     out8a = native.pretty_print_xml("<a><b>x</b></a>", 4)
@@ -88,8 +88,8 @@ main() {
     }
     pretty = native.pretty_print_html(tight, 2)
     expect_eq(pretty,
-              "<ul>\n  <li>alpha</li>\n  <li>beta</li>\n  <li>&lt;gamma&gt;</li>\n</ul>",
-              "9 end-to-end DSL → pretty")
+        "<ul>\n  <li>alpha</li>\n  <li>beta</li>\n  <li>&lt;gamma&gt;</li>\n</ul>",
+        "9 end-to-end DSL → pretty")
 
     println("All PASS")
 }

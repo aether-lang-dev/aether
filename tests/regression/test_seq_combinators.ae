@@ -44,11 +44,11 @@ main() {
 
     count = ref(0)
     sb_each = strbuilder.new(0)
-    string.seq_each(src, |x: string| {
-        ref_set(count, ref_get(count) + 1)
-        strbuilder.append(sb_each, x)
-        strbuilder.append(sb_each, ";")
-    })
+    string.seq_each(src, | x: string | {
+            ref_set(count, ref_get(count) + 1)
+            strbuilder.append(sb_each, x)
+            strbuilder.append(sb_each, ";")
+        })
     if ref_get(count) != 4 {
         println("FAIL 1a: each visited ${ref_get(count)} elems, want 4")
         exit(1)
@@ -64,9 +64,9 @@ main() {
     //
     // Uppercase each element. The result is a fresh, independently-owned
     // spine; freeing it must not disturb `src`.
-    upper = string.seq_map(src, |x: string| {
-        return string.to_upper(x)
-    })
+    upper = string.seq_map(src, | x: string | {
+            return string.to_upper(x)
+        })
     if string.seq_length(upper) != 4 {
         println("FAIL 2a: map length=${string.seq_length(upper)}, want 4")
         exit(1)
@@ -89,12 +89,12 @@ main() {
     // Keep elements whose length is exactly 5 ("alpha", "gamma",
     // "delta"); drop "beta" (4). Capturing closure not needed here —
     // a non-capturing predicate exercises the env == NULL path.
-    keep = string.seq_filter(src, |x: string| {
-        if string.length(x) == 5 {
-            return 1
-        }
-        return 0
-    })
+    keep = string.seq_filter(src, | x: string | {
+            if string.length(x) == 5 {
+                return 1
+            }
+            return 0
+        })
     if string.seq_length(keep) != 3 {
         println("FAIL 3a: filter length=${string.seq_length(keep)}, want 3")
         exit(1)
@@ -107,9 +107,9 @@ main() {
     string.seq_free(keep)
 
     // Predicate that rejects everything yields the empty seq.
-    empty_seq = string.seq_filter(src, |x: string| {
-        return 0
-    })
+    empty_seq = string.seq_filter(src, | x: string | {
+            return 0
+        })
     if string.seq_is_empty(empty_seq) != 1 {
         println("FAIL 3c: filter(always-false) should be empty")
         exit(1)
@@ -127,10 +127,10 @@ main() {
     // type unambiguous to inference and allocates no intermediates.
     // Total = 5 + 4 + 5 + 5 = 19.
     acc_cell = ref(0)
-    total = string.seq_reduce(src, acc_cell, |acc: ptr, x: string| {
-        ref_set(acc_cell, ref_get(acc_cell) + string.length(x))
-        return acc_cell
-    })
+    total = string.seq_reduce(src, acc_cell, | acc: ptr, x: string | {
+            ref_set(acc_cell, ref_get(acc_cell) + string.length(x))
+            return acc_cell
+        })
     if ref_get(total) != 19 {
         println("FAIL 4a: reduce total=${ref_get(total)}, want 19")
         exit(1)
@@ -139,10 +139,10 @@ main() {
     // reduce over the empty seq returns init unchanged (the closure is
     // never invoked, so init flows straight through).
     init0 = ref(42)
-    same = string.seq_reduce(string.seq_empty(), init0, |acc: ptr, x: string| {
-        ref_set(init0, ref_get(init0) + 1)
-        return init0
-    })
+    same = string.seq_reduce(string.seq_empty(), init0, | acc: ptr, x: string | {
+            ref_set(init0, ref_get(init0) + 1)
+            return init0
+        })
     if ref_get(same) != 42 {
         println("FAIL 4b: reduce(empty, init) changed init to ${ref_get(same)}")
         exit(1)
@@ -157,13 +157,13 @@ main() {
     vals = string.split_to_seq("1,2,3,4,5", ",")
     pairs = ref(0)
     sb_zip = strbuilder.new(0)
-    string.seq_zip_each(keys, vals, |k: string, v: string| {
-        ref_set(pairs, ref_get(pairs) + 1)
-        strbuilder.append(sb_zip, k)
-        strbuilder.append(sb_zip, "=")
-        strbuilder.append(sb_zip, v)
-        strbuilder.append(sb_zip, ";")
-    })
+    string.seq_zip_each(keys, vals, | k: string, v: string | {
+            ref_set(pairs, ref_get(pairs) + 1)
+            strbuilder.append(sb_zip, k)
+            strbuilder.append(sb_zip, "=")
+            strbuilder.append(sb_zip, v)
+            strbuilder.append(sb_zip, ";")
+        })
     if ref_get(pairs) != 3 {
         println("FAIL 5a: zip_each made ${ref_get(pairs)} pairs, want 3 (shorter seq)")
         exit(1)

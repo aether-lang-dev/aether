@@ -13,47 +13,47 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     photon_beetle_hex, photon_beetle_bytes
 )
 
 const RC_PB: int[96] = [
-     1,  0,  2,  6, 14, 15, 13,  9,
-     3,  2,  0,  4, 12, 13, 15, 11,
-     7,  6,  4,  0,  8,  9, 11, 15,
-    14, 15, 13,  9,  1,  0,  2,  6,
-    13, 12, 14, 10,  2,  3,  1,  5,
-    11, 10,  8, 12,  4,  5,  7,  3,
-     6,  7,  5,  1,  9,  8, 10, 14,
-    12, 13, 15, 11,  3,  2,  0,  4,
-     9,  8, 10, 14,  6,  7,  5,  1,
-     2,  3,  1,  5, 13, 12, 14, 10,
-     5,  4,  6,  2, 10, 11,  9, 13,
-    10, 11,  9, 13,  5,  4,  6,  2
+    1, 0, 2, 6, 14, 15, 13, 9,
+    3, 2, 0, 4, 12, 13, 15, 11,
+    7, 6, 4, 0, 8, 9, 11, 15,
+    14, 15, 13, 9, 1, 0, 2, 6,
+    13, 12, 14, 10, 2, 3, 1, 5,
+    11, 10, 8, 12, 4, 5, 7, 3,
+    6, 7, 5, 1, 9, 8, 10, 14,
+    12, 13, 15, 11, 3, 2, 0, 4,
+    9, 8, 10, 14, 6, 7, 5, 1,
+    2, 3, 1, 5, 13, 12, 14, 10,
+    5, 4, 6, 2, 10, 11, 9, 13,
+    10, 11, 9, 13, 5, 4, 6, 2
 ]
 
 const MixColMatrix: int[64] = [
-     2,  4,  2, 11,  2,  8,  5,  6,
-    12,  9,  8, 13,  7,  7,  5,  2,
-     4,  4, 13, 13,  9,  4, 13,  9,
-     1,  6,  5,  1, 12, 13, 15, 14,
-    15, 12,  9, 13, 14,  5, 14, 13,
-     9, 14,  5, 15,  4, 12,  9,  6,
-    12,  2,  2, 10,  3,  1,  1, 14,
-    15,  1, 13, 10,  5, 10,  2,  3
+    2, 4, 2, 11, 2, 8, 5, 6,
+    12, 9, 8, 13, 7, 7, 5, 2,
+    4, 4, 13, 13, 9, 4, 13, 9,
+    1, 6, 5, 1, 12, 13, 15, 14,
+    15, 12, 9, 13, 14, 5, 14, 13,
+    9, 14, 5, 15, 4, 12, 9, 6,
+    12, 2, 2, 10, 3, 1, 1, 14,
+    15, 1, 13, 10, 5, 10, 2, 3
 ]
 
-const SBOX_PB: int[16] = [ 12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2 ]
+const SBOX_PB: int[16] = [12, 5, 6, 11, 9, 0, 10, 13, 3, 14, 15, 8, 4, 7, 1, 2]
 
 struct PhotonBeetleCtx {
-    state: ptr        // std.bytes, 32 bytes
-    state_2d: ptr     // std.bytes, 64 bytes (8x8)
-    block: ptr        // std.bytes, 16 bytes
+    state: ptr // std.bytes, 32 bytes
+    state_2d: ptr // std.bytes, 64 bytes (8x8)
+    block: ptr // std.bytes, 16 bytes
     block_len: int
     phase: int
-    temp_row: ptr     // std.bytes, 8 bytes
-    temp_mix: ptr     // std.bytes, 8 bytes
+    temp_row: ptr // std.bytes, 8 bytes
+    temp_mix: ptr // std.bytes, 8 bytes
 }
 
 new() -> {

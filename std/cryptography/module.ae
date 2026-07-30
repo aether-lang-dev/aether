@@ -20,7 +20,7 @@ import std.bytes
 import std.encoding
 import std.cryptography.hmac
 
-exports (
+exports(
     cryptography_sha1_hex_raw, cryptography_sha256_hex_raw,
     cryptography_hash_hex_raw, cryptography_hash_supported,
     cryptography_md4_hex_raw, cryptography_md5_hex_raw,
@@ -51,9 +51,9 @@ extern cryptography_hash_supported(algo: string) -> int
 extern cryptography_md4_hex_raw(data: string, length: int) -> string
 extern cryptography_md5_hex_raw(data: string, length: int) -> string
 extern cryptography_hmac_sha256_hex_raw(key: string, key_len: int,
-                                       msg: string, msg_len: int) -> string
+    msg: string, msg_len: int) -> string
 extern cryptography_hmac_sha256_bytes_raw(key: string, key_len: int,
-                                         msg: string, msg_len: int) -> int
+    msg: string, msg_len: int) -> int
 extern cryptography_md4_bytes_raw(data: string, length: int) -> int
 extern cryptography_md5_bytes_raw(data: string, length: int) -> int
 extern cryptography_sha1_bytes_raw(data: string, length: int) -> int
@@ -230,7 +230,7 @@ md4_bytes(data: string, length: int) -> {
         return "", 0, "md4 unavailable"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""
@@ -242,7 +242,7 @@ md5_bytes(data: string, length: int) -> {
         return "", 0, "openssl unavailable"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""
@@ -254,7 +254,7 @@ sha1_bytes(data: string, length: int) -> {
         return "", 0, "openssl unavailable"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""
@@ -266,7 +266,7 @@ sha256_bytes(data: string, length: int) -> {
         return "", 0, "openssl unavailable"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""
@@ -287,7 +287,7 @@ hash_bytes(algo: string, data: string, length: int) -> {
         return "", 0, "openssl unavailable"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""
@@ -441,7 +441,7 @@ digest_final_bytes(ctx: ptr) -> {
         return "", 0, "digest finalize failed"
     }
     raw = cryptography_get_binary_digest()
-    n   = cryptography_get_binary_digest_length()
+    n = cryptography_get_binary_digest_length()
     owned = string_new_with_length(raw, n)
     cryptography_release_binary_digest()
     return owned, n, ""

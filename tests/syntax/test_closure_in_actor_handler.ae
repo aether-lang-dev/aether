@@ -12,7 +12,7 @@ actor Worker {
     receive {
         Go() -> {
             total = 0
-            add  = |n: int| { total = total + n }
+            add = | n: int | { total = total + n }
             call(add, 10)
             call(add, 20)
             call(add, 5)

@@ -68,85 +68,85 @@ render_with(src: string, key: string, val: string) -> string {
 main() {
     // (1) Bare range 1..3
     expect_eq(render_empty("{% for i in (1..3) %}{{ i }}{% endfor %}"),
-              "123", "1 bare range 1..3")
+        "123", "1 bare range 1..3")
 
     // (2) Text between iterations.
     expect_eq(render_empty("[{% for i in (1..3) %}{{ i }};{% endfor %}]"),
-              "[1;2;3;]", "2 range with separator")
+        "[1;2;3;]", "2 range with separator")
 
     // (3) HI < LO is empty.
     expect_eq(render_empty("[{% for i in (5..1) %}{{ i }}{% endfor %}]"),
-              "[]", "3 empty range")
+        "[]", "3 empty range")
 
     // (4) LO == HI is single element.
     expect_eq(render_empty("{% for i in (4..4) %}{{ i }}{% endfor %}"),
-              "4", "4 single-element range")
+        "4", "4 single-element range")
 
     // (5) forloop.index (1-based).
     expect_eq(render_empty("{% for i in (10..12) %}{{ forloop.index }};{% endfor %}"),
-              "1;2;3;", "5 forloop.index")
+        "1;2;3;", "5 forloop.index")
 
     // (6) forloop.index0 (0-based).
     expect_eq(render_empty("{% for i in (10..12) %}{{ forloop.index0 }};{% endfor %}"),
-              "0;1;2;", "6 forloop.index0")
+        "0;1;2;", "6 forloop.index0")
 
     // (7) forloop.first.
     expect_eq(render_empty("{% for i in (1..3) %}{{ forloop.first }};{% endfor %}"),
-              "true;false;false;", "7 forloop.first")
+        "true;false;false;", "7 forloop.first")
 
     // (8) forloop.last.
     expect_eq(render_empty("{% for i in (1..3) %}{{ forloop.last }};{% endfor %}"),
-              "false;false;true;", "8 forloop.last")
+        "false;false;true;", "8 forloop.last")
 
     // (9) forloop.length.
     expect_eq(render_empty("{% for i in (1..3) %}{{ forloop.length }};{% endfor %}"),
-              "3;3;3;", "9 forloop.length")
+        "3;3;3;", "9 forloop.length")
 
     // (10) forloop.rindex / rindex0.
     expect_eq(render_empty("{% for i in (1..3) %}{{ forloop.rindex }}/{{ forloop.rindex0 }};{% endfor %}"),
-              "3/2;2/1;1/0;", "10 forloop.rindex/rindex0")
+        "3/2;2/1;1/0;", "10 forloop.rindex/rindex0")
 
     // (11) Nested loops.
     expect_eq(render_empty("{% for i in (1..2) %}{% for j in (1..2) %}({{ i }},{{ j }}){% endfor %}{% endfor %}"),
-              "(1,1)(1,2)(2,1)(2,2)", "11 nested for")
+        "(1,1)(1,2)(2,1)(2,2)", "11 nested for")
 
     // (12) Inner forloop.first scoped to inner only.
     expect_eq(render_empty("{% for i in (1..2) %}{% for j in (1..2) %}{{ forloop.first }};{% endfor %}|{% endfor %}"),
-              "true;false;|true;false;|", "12 inner forloop.first")
+        "true;false;|true;false;|", "12 inner forloop.first")
 
     // (13) Loop var restored after loop.
     expect_eq(render_with("[{{ i }}]{% for i in (1..2) %}{% endfor %}[{{ i }}]",
-                          "i", "PRE"),
-              "[PRE][PRE]", "13 loop var restored")
+            "i", "PRE"),
+        "[PRE][PRE]", "13 loop var restored")
 
     // (14) limit:N.
     expect_eq(render_empty("{% for i in (1..10) limit:3 %}{{ i }};{% endfor %}"),
-              "1;2;3;", "14 limit caps")
+        "1;2;3;", "14 limit caps")
 
     // (15) offset:N.
     expect_eq(render_empty("{% for i in (1..5) offset:2 %}{{ i }};{% endfor %}"),
-              "3;4;5;", "15 offset skips front")
+        "3;4;5;", "15 offset skips front")
 
     // (16) limit + offset.
     expect_eq(render_empty("{% for i in (1..10) offset:2 limit:3 %}{{ i }};{% endfor %}"),
-              "3;4;5;", "16 limit+offset")
+        "3;4;5;", "16 limit+offset")
 
     // (17) reversed flips.
     expect_eq(render_empty("{% for i in (1..3) reversed %}{{ i }};{% endfor %}"),
-              "3;2;1;", "17 reversed")
+        "3;2;1;", "17 reversed")
 
     // (18) reversed + limit: limit applied first, then reverse the window.
     //   (1..10) limit:3 -> [1,2,3]; reversed -> [3,2,1]
     expect_eq(render_empty("{% for i in (1..10) limit:3 reversed %}{{ i }};{% endfor %}"),
-              "3;2;1;", "18 reversed + limit")
+        "3;2;1;", "18 reversed + limit")
 
     // (19) break exits loop.
     expect_eq(render_empty("{% for i in (1..5) %}{% if i == \"3\" %}{% break %}{% endif %}{{ i }};{% endfor %}"),
-              "1;2;", "19 break")
+        "1;2;", "19 break")
 
     // (20) continue skips rest of iteration.
     expect_eq(render_empty("{% for i in (1..5) %}{% if i == \"3\" %}{% continue %}{% endif %}{{ i }};{% endfor %}"),
-              "1;2;4;5;", "20 continue")
+        "1;2;4;5;", "20 continue")
 
     // (21) break outside a for is an error.
     t21, _ = liquid.parse_string("plain {% break %} text")
@@ -159,15 +159,15 @@ main() {
 
     // (22) Conditional in body.
     expect_eq(render_empty("{% for i in (1..4) %}{% if i == \"2\" or i == \"4\" %}{{ i }};{% endif %}{% endfor %}"),
-              "2;4;", "22 if inside for")
+        "2;4;", "22 if inside for")
 
     // (23) Comma between items via forloop.first.
     expect_eq(render_empty("{% for i in (1..3) %}{% unless forloop.first %},{% endunless %}{{ i }}{% endfor %}"),
-              "1,2,3", "23 comma via forloop.first")
+        "1,2,3", "23 comma via forloop.first")
 
     // (24) Capture inside the body — last iteration's value wins.
     expect_eq(render_empty("{% for i in (1..3) %}{% capture last %}I{{ i }}{% endcapture %}{% endfor %}[{{ last }}]"),
-              "[I3]", "24 capture inside body, last wins")
+        "[I3]", "24 capture inside body, last wins")
 
     // (25) LO and HI from variables.
     t25, _ = liquid.parse_string("{% for i in (lo..hi) %}{{ i }};{% endfor %}")
@@ -179,7 +179,7 @@ main() {
 
     // (26) Whitespace control.
     expect_eq(render_empty("a   {%- for i in (1..2) -%}   {{ i }}   {%- endfor -%}   b"),
-              "a12b", "26 whitespace control around for")
+        "a12b", "26 whitespace control around for")
 
     // (27) Unmatched for.
     t27, _ = liquid.parse_string("{% for i in (1..3) %}body never closed")
@@ -210,7 +210,7 @@ main() {
 
     // (30) break in nested only exits inner.
     expect_eq(render_empty("{% for i in (1..3) %}[{% for j in (1..5) %}{% if j == \"3\" %}{% break %}{% endif %}{{ j }}{% endfor %}]{% endfor %}"),
-              "[12][12][12]", "30 break in inner only")
+        "[12][12][12]", "30 break in inner only")
 
     println("All PASS")
 }

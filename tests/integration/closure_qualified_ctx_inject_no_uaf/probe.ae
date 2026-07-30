@@ -14,7 +14,7 @@ extern fire_btn()
 
 main() {
     msg = "ok"
-    inner = |d: int| { println(msg) }
+    inner = | d: int | { println(msg) }
     // Qualified-call form: uikit.register_btn, the shape aether-ui uses.
     uikit.register_btn("=") callback { call(inner, 7) }
     fire_btn()

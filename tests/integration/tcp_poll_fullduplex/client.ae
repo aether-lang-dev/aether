@@ -85,7 +85,7 @@ main() {
     b1 = string.char_at_n(echo, n, 1)
     b2 = string.char_at_n(echo, n, 2)
     if b0 != 97 { fail("echo[0]: got ${b0}, expected 97") }
-    if b1 != 0  { fail("echo[1]: got ${b1}, expected 0 (NUL)") }
+    if b1 != 0 { fail("echo[1]: got ${b1}, expected 0 (NUL)") }
     if b2 != 98 { fail("echo[2]: got ${b2}, expected 98") }
 
     tcp.close(idle)

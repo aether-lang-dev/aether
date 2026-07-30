@@ -9,8 +9,8 @@ extern exit(code: int)
 
 main() {
     n = 0
-    bumper = || { n = n + 1 }    // captures and mutates outer n
-    shadow = |n: int| { return n * 2 }   // local n — parameter wins
+    bumper = || { n = n + 1 } // captures and mutates outer n
+    shadow = | n: int | { return n * 2 } // local n — parameter wins
 
     call(bumper)
     call(bumper)

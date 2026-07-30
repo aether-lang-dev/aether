@@ -3,18 +3,18 @@
 //   Name.Member qualified access; use as a type / param; comparison; match.
 // Enums lower to a C `typedef enum` (zero runtime cost) and interconvert with
 // integers, so member values are asserted against int literals.
-enum Direction { North, East, South, West }        // 0, 1, 2, 3
-enum Errno { Ok = 0, NotFound = 2, Perm = 13, Again }   // Again = 14 (13 + 1)
+enum Direction { North, East, South, West } // 0, 1, 2, 3
+enum Errno { Ok = 0, NotFound = 2, Perm = 13, Again } // Again = 14 (13 + 1)
 
 import std.io
 
 label(d: Direction) -> string {
     l = match d {
         Direction.North -> "N"
-        Direction.East  -> "E"
+        Direction.East -> "E"
         Direction.South -> "S"
-        Direction.West  -> "W"
-        _               -> "?"
+        Direction.West -> "W"
+        _ -> "?"
     }
     return l
 }
@@ -44,8 +44,8 @@ main() {
 
     // comparison (nominal enum == enum)
     d = Direction.East
-    if d == Direction.East { } else { println("FAIL eq"); fails = fails + 1 }
-    if d != Direction.North { } else { println("FAIL neq"); fails = fails + 1 }
+    if d == Direction.East {} else { println("FAIL eq"); fails = fails + 1 }
+    if d != Direction.North {} else { println("FAIL neq"); fails = fails + 1 }
 
     // enum-typed parameter + match on the enum
     fails = fails + check_str(label(Direction.South), "S", "label South")

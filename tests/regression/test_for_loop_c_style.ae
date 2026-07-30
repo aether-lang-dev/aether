@@ -56,9 +56,9 @@ main() {
     //    walk it with `p = p + 4` as the step.
     // ----------------------------------------------------------
     buf = malloc(16)
-    mem.set_int(buf, 0,  10)
-    mem.set_int(buf, 4,  20)
-    mem.set_int(buf, 8,  30)
+    mem.set_int(buf, 0, 10)
+    mem.set_int(buf, 4, 20)
+    mem.set_int(buf, 8, 30)
     mem.set_int(buf, 12, 40)
     int walk_sum = 0
     for (p = buf; p < buf + 16; p = p + 4) {

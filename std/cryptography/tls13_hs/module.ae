@@ -34,7 +34,7 @@ extern free(p: ptr)
 extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
@@ -42,12 +42,12 @@ exports (
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
-const TLS_AES_128_GCM_SHA256       = 0x1301
-const TLS_AES_256_GCM_SHA384       = 0x1302
+const TLS_AES_128_GCM_SHA256 = 0x1301
+const TLS_AES_256_GCM_SHA384 = 0x1302
 const TLS_CHACHA20_POLY1305_SHA256 = 0x1303
 
 // Named groups (RFC 8446 §4.2.7).
-const GROUP_X25519    = 0x001d
+const GROUP_X25519 = 0x001d
 const GROUP_SECP256R1 = 0x0017
 // Post-quantum hybrid: X25519 + ML-KEM-768 (draft-kwiatkowski-tls-ecdhe-mlkem;
 // the group Chrome/Cloudflare default to). Client share = ML-KEM ek(1184) ||
@@ -65,13 +65,13 @@ const HS_SERVER_HELLO = 2
 
 // Result of parsing a ServerHello.
 struct ShParsed {
-    version: int          // negotiated version (from supported_versions ext)
-    cipher_suite: int     // selected cipher suite
-    group: int            // selected key_share group (0 if none)
-    key_share: ptr        // server's key_share public (fresh bytes; caller frees) or null
+    version: int // negotiated version (from supported_versions ext)
+    cipher_suite: int // selected cipher suite
+    group: int // selected key_share group (0 if none)
+    key_share: ptr // server's key_share public (fresh bytes; caller frees) or null
     key_share_len: int
-    is_hello_retry: int   // 1 if this was a HelloRetryRequest (special random)
-    psk_accepted: int     // 1 if the SH echoed pre_shared_key (resumption accepted)
+    is_hello_retry: int // 1 if this was a HelloRetryRequest (special random)
+    psk_accepted: int // 1 if the SH echoed pre_shared_key (resumption accepted)
 }
 
 // ---- little growable writer over std.bytes (append at a running offset) ----
@@ -154,7 +154,7 @@ client_hello_sni(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey: ptr, pubkey_len: int, group2: int, pubkey2: ptr, pubkey2_len: int, host: string) -> ptr {
     // Generous fixed buffer; this CH is ~230 bytes + the hostname.
     buf = bytes.new(1024)
-    bytes.set(buf, 1023, 0)   // force full zero-fill
+    bytes.set(buf, 1023, 0) // force full zero-fill
 
     // Reserve the 4-byte handshake header; fill length at the end.
     body = 4
@@ -168,7 +168,7 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     off = put_bytes(buf, off, session_id, sid_len)
 
     // cipher_suites<2..2^16-2>: ChaCha20-Poly1305, AES-128-GCM, AES-256-GCM
-    off = put16(buf, off, 6)                        // 3 suites * 2 bytes
+    off = put16(buf, off, 6) // 3 suites * 2 bytes
     off = put16(buf, off, TLS_CHACHA20_POLY1305_SHA256)
     off = put16(buf, off, TLS_AES_128_GCM_SHA256)
     off = put16(buf, off, TLS_AES_256_GCM_SHA384)
@@ -185,11 +185,11 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     // server_name (0): a single host_name entry (RFC 6066). Omitted if empty.
     host_len = string_length(host)
     if host_len > 0 {
-        off = put16(buf, off, 0)              // extension_type = server_name
-        off = put16(buf, off, host_len + 5)   // ext body = list(2) + type(1) + namelen(2) + name
-        off = put16(buf, off, host_len + 3)   // ServerNameList length
-        off = put8(buf, off, 0)               // name_type = host_name(0)
-        off = put16(buf, off, host_len)       // HostName length
+        off = put16(buf, off, 0) // extension_type = server_name
+        off = put16(buf, off, host_len + 5) // ext body = list(2) + type(1) + namelen(2) + name
+        off = put16(buf, off, host_len + 3) // ServerNameList length
+        off = put8(buf, off, 0) // name_type = host_name(0)
+        off = put16(buf, off, host_len) // HostName length
         hi = 0
         while hi < host_len {
             bytes.set(buf, off + hi, string_char_at_n(host, host_len, hi) & 0xFF)
@@ -200,22 +200,22 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
 
     // supported_versions (43): client form = list; { 0x0304 }
     off = put16(buf, off, 43)
-    off = put16(buf, off, 3)      // ext body len
-    off = put8(buf, off, 2)       // list len
+    off = put16(buf, off, 3) // ext body len
+    off = put8(buf, off, 2) // list len
     off = put16(buf, off, 0x0304) // TLS 1.3
 
     // supported_groups (10): { x25519, secp256r1 } — offer both so a server
     // that won't do x25519 can HelloRetryRequest secp256r1.
     off = put16(buf, off, 10)
-    off = put16(buf, off, 6)      // ext body len = 2 (list len) + 2*2
-    off = put16(buf, off, 4)      // list len
+    off = put16(buf, off, 6) // ext body len = 2 (list len) + 2*2
+    off = put16(buf, off, 4) // list len
     off = put16(buf, off, GROUP_X25519)
     off = put16(buf, off, GROUP_SECP256R1)
 
     // signature_algorithms (13): { ecdsa_p256_sha256, rsa_pss_rsae_sha256, ed25519 }
     off = put16(buf, off, 13)
-    off = put16(buf, off, 8)      // ext body len
-    off = put16(buf, off, 6)      // list len
+    off = put16(buf, off, 8) // ext body len
+    off = put16(buf, off, 6) // list len
     off = put16(buf, off, SIG_ECDSA_P256_SHA256)
     off = put16(buf, off, SIG_RSA_PSS_RSAE_SHA256)
     off = put16(buf, off, SIG_ED25519)
@@ -225,19 +225,19 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     // request_extensions<2>=empty }. Lets a server staple its OCSP response so
     // the client can check revocation without a separate OCSP fetch.
     off = put16(buf, off, 5)
-    off = put16(buf, off, 5)      // ext body len
-    off = put8(buf, off, 1)       // status_type = ocsp
-    off = put16(buf, off, 0)      // responder_id_list<2> empty
-    off = put16(buf, off, 0)      // request_extensions<2> empty
+    off = put16(buf, off, 5) // ext body len
+    off = put8(buf, off, 1) // status_type = ocsp
+    off = put16(buf, off, 0) // responder_id_list<2> empty
+    off = put16(buf, off, 0) // request_extensions<2> empty
 
     // application_layer_protocol_negotiation (16): offer "http/1.1"
     // (RFC 7301). Many CDNs reset a bare connection that omits ALPN or that
     // doesn't offer a protocol they serve; http/1.1 is the safe common one.
     // ext body = ProtocolNameList<2> ; entry = len<1> || name.
-    off = put16(buf, off, 16)         // extension_type = ALPN
-    off = put16(buf, off, 11)         // ext body len = 2 + 1 + 8
-    off = put16(buf, off, 9)          // ProtocolNameList length = 1 + 8
-    off = put8(buf, off, 8)           // ProtocolName length
+    off = put16(buf, off, 16) // extension_type = ALPN
+    off = put16(buf, off, 11) // ext body len = 2 + 1 + 8
+    off = put16(buf, off, 9) // ProtocolNameList length = 1 + 8
+    off = put8(buf, off, 8) // ProtocolName length
     off = put_ascii(buf, off, "http/1.1")
 
     // key_share (51): a KeyShareEntry {group, key<len>} for `group`, plus an
@@ -247,8 +247,8 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
     shares_len = entry1
     if group2 != 0 { shares_len = shares_len + 2 + 2 + pubkey2_len }
     off = put16(buf, off, 51)
-    off = put16(buf, off, 2 + shares_len)  // ext body: client_shares<2> + entries
-    off = put16(buf, off, shares_len)      // client_shares length
+    off = put16(buf, off, 2 + shares_len) // ext body: client_shares<2> + entries
+    off = put16(buf, off, shares_len) // client_shares length
     off = put16(buf, off, group)
     off = put16(buf, off, pubkey_len)
     off = put_bytes(buf, off, pubkey, pubkey_len)
@@ -282,7 +282,7 @@ client_hello_full(random: ptr, session_id: ptr, sid_len: int, group: int, pubkey
 // picks one group and returns the matching share (PQ: ct||xpub, or classical
 // x25519 pub). supported_groups lists { X25519MLKEM768, x25519 }.
 client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, hybrid_len: int, x25519_pub: ptr, host: string) -> ptr {
-    buf = bytes.new(2048)     // hybrid key_share alone is ~1216 bytes
+    buf = bytes.new(2048) // hybrid key_share alone is ~1216 bytes
     bytes.set(buf, 2047, 0)
     body = 4
     off = put16(buf, body, 0x0303)
@@ -375,8 +375,8 @@ client_hello_pq(random: ptr, session_id: ptr, sid_len: int, hybrid_share: ptr, h
 struct PskCh {
     buf: ptr
     buf_len: int
-    binder_off: int      // offset of the binder value (after its 1-byte length)
-    truncated_len: int   // length of CH bytes the binder is computed over
+    binder_off: int // offset of the binder value (after its 1-byte length)
+    truncated_len: int // length of CH bytes the binder is computed over
 }
 
 client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, host: string, ticket: ptr, ticket_len: int, obf_age: int, binder_len: int, with_early_data: int, out_ch: *PskCh) {
@@ -445,35 +445,35 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
     // send 0-RTT data (RFC 8446 §4.2.10). Emitted only when with_early_data.
     if with_early_data == 1 {
         off = put16(buf, off, 42)
-        off = put16(buf, off, 0)   // empty body
+        off = put16(buf, off, 0) // empty body
     }
     // psk_key_exchange_modes (45): { psk_dhe_ke (1) }
     off = put16(buf, off, 45)
-    off = put16(buf, off, 2)    // ext body len
-    off = put8(buf, off, 1)     // modes list len
-    off = put8(buf, off, 1)     // psk_dhe_ke
+    off = put16(buf, off, 2) // ext body len
+    off = put8(buf, off, 1) // modes list len
+    off = put8(buf, off, 1) // psk_dhe_ke
     // pre_shared_key (41) — MUST be last. Layout:
     //   identities<2>: each = identity<2> || obfuscated_ticket_age(4)
     //   binders<2>:    each = binder<1-len byte prefix> (length = binder_len)
-    identities_len = 2 + ticket_len + 4          // identity<2> + ticket + age(4)
-    binders_len = 1 + binder_len                 // one binder: len byte + value
+    identities_len = 2 + ticket_len + 4 // identity<2> + ticket + age(4)
+    binders_len = 1 + binder_len // one binder: len byte + value
     psk_body_len = 2 + identities_len + 2 + binders_len
     off = put16(buf, off, 41)
     off = put16(buf, off, psk_body_len)
-    off = put16(buf, off, identities_len)        // PskIdentities length
-    off = put16(buf, off, ticket_len)            // identity length
+    off = put16(buf, off, identities_len) // PskIdentities length
+    off = put16(buf, off, ticket_len) // identity length
     off = put_bytes(buf, off, ticket, ticket_len)
-    off = put16(buf, off, (obf_age >> 16) & 0xFFFF)  // obfuscated_ticket_age hi
-    off = put16(buf, off, obf_age & 0xFFFF)          // ...lo (uint32 total)
+    off = put16(buf, off, (obf_age >> 16) & 0xFFFF) // obfuscated_ticket_age hi
+    off = put16(buf, off, obf_age & 0xFFFF) // ...lo (uint32 total)
     // The binder MAC covers the ClientHello TRUNCATED to remove the binders
     // opaque vector entirely — i.e. everything up to (but NOT including) the
     // binders<2> length prefix (RFC 8446 §4.2.11.2, "Truncate(ClientHello)").
-    truncated_len = off                          // bytes hashed for the binder
-    off = put16(buf, off, binders_len)           // PskBinderEntries length
-    off = put8(buf, off, binder_len)             // this binder's length
+    truncated_len = off // bytes hashed for the binder
+    off = put16(buf, off, binders_len) // PskBinderEntries length
+    off = put8(buf, off, binder_len) // this binder's length
     binder_off = off
     bi = 0
-    while bi < binder_len { bytes.set(buf, off + bi, 0); bi = bi + 1 }  // zero placeholder
+    while bi < binder_len { bytes.set(buf, off + bi, 0); bi = bi + 1 } // zero placeholder
     off = off + binder_len
 
     // fill extensions length + handshake header

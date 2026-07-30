@@ -26,16 +26,16 @@ main() {
     // ---- hex decode (case-insensitive; even length) ----
     d1, e1 = encoding.hex_decode("68656c6c6f")
     fails = fails + check(e1 == "" && d1 == "hello", "hex decode lower")
-    d2, e2 = encoding.hex_decode("E3A1")   // upper-case accepted
+    d2, e2 = encoding.hex_decode("E3A1") // upper-case accepted
     fails = fails + check(e2 == "" && string.length(d2) == 2, "hex decode upper len")
     // round-trip: upper and lower decode to the same bytes
     dl, _ = encoding.hex_decode("e3a1")
     fails = fails + check(dl == d2, "hex decode case-insensitive")
 
     // ---- hex decode errors ----
-    _, oe = encoding.hex_decode("abc")     // odd length
+    _, oe = encoding.hex_decode("abc") // odd length
     fails = fails + check(oe != "", "hex odd-length rejected")
-    _, ce = encoding.hex_decode("zz")      // non-hex chars
+    _, ce = encoding.hex_decode("zz") // non-hex chars
     fails = fails + check(ce != "", "hex invalid-char rejected")
 
     // ---- base64 encode (unpadded, from c3 base64.c3 encode_nopadding) ----

@@ -16,7 +16,7 @@ extern exit(code: int)
 main() {
     count = 99
     reset = || {
-        count = 0       // mutates the outer `count` — capture-and-promote
+        count = 0 // mutates the outer `count` — capture-and-promote
     }
     call(reset)
     if count != 0 { println("FAIL: outer not mutated after reset"); exit(1) }

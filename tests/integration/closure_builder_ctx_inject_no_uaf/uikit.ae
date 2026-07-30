@@ -6,7 +6,7 @@
 // index before consulting the escape walk; without that mapping the
 // walk checks the wrong parameter (provably non-escaping `label`),
 // gives a false-non-escape verdict, and the env-drain misfires.
-exports (register_btn)
+exports(register_btn)
 
 extern aether_ui_button_create(label: string, boxed: ptr) -> int
 

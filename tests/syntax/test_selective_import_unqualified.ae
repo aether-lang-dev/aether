@@ -2,7 +2,7 @@
 // When using import module (func1, func2), the selected functions
 // can be called without the module prefix.
 
-import std.math (abs_int, sqrt)
+import std.math(abs_int, sqrt)
 
 main() {
     // Unqualified calls - should resolve to math.abs_int, math.sqrt

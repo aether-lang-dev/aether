@@ -61,15 +61,15 @@ main() {
     item0, _ = list.get(out, 0)
     item1, _ = list.get(out, 1)
     item2, _ = list.get(out, 2)
-    if string.length(item0) != 5 || string.char_at(item0, 0) != 97 {  // 'a'
+    if string.length(item0) != 5 || string.char_at(item0, 0) != 97 { // 'a'
         println("FAIL 1: item[0] = '${item0}', expected 'alpha'")
         exit(1)
     }
-    if string.length(item1) != 4 || string.char_at(item1, 0) != 98 {  // 'b'
+    if string.length(item1) != 4 || string.char_at(item1, 0) != 98 { // 'b'
         println("FAIL 1: item[1] = '${item1}', expected 'beta'")
         exit(1)
     }
-    if string.length(item2) != 5 || string.char_at(item2, 0) != 103 {  // 'g'
+    if string.length(item2) != 5 || string.char_at(item2, 0) != 103 { // 'g'
         println("FAIL 1: item[2] = '${item2}', expected 'gamma'")
         exit(1)
     }
@@ -102,7 +102,7 @@ main() {
     list.add(expected_lens, 2)
     list.add(expected_lens, 3)
     list.add(expected_lens, 4)
-    list.add(expected_lens, 4)  // "last"
+    list.add(expected_lens, 4) // "last"
     j = 0
     while j < 5 {
         got, _ = list.get(out2, j)

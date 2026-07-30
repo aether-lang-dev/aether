@@ -9,7 +9,7 @@
 
 import std.list
 
-build_list(n) : ptr {
+build_list(n): ptr {
     result = list.new();
     i = 0;
     while i < n {

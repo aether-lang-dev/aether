@@ -24,9 +24,9 @@ shadow_local() -> int {
 
 classify(x: int) -> string {
     match x {
-        BASE   -> { return "base" }
+        BASE -> { return "base" }
         DOUBLE -> { return "double" }
-        _      -> { return "other" }
+        _ -> { return "other" }
     }
 }
 

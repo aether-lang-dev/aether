@@ -2,7 +2,7 @@
 
 main() {
     // Arrow closure with return value
-    doubler = |x: int| -> x * 2
+    doubler = | x: int | -> x * 2
 
     // Invoke the closure
     result = call(doubler, 21)
@@ -10,7 +10,7 @@ main() {
 
     // Closure with capture
     base = 100
-    adder = |x: int| -> x + base
+    adder = | x: int | -> x + base
 
     sum = call(adder, 42)
     println(sum)

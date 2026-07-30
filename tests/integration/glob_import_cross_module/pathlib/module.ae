@@ -2,10 +2,10 @@
 // glob-brought symbol (`clean`) from one of its own exported functions.
 // Issue #896: this must resolve when `pathlib` is imported by another module,
 // not only when pathlib is the compilation entry point.
-import std.fs (*)
+import std.fs(*)
 
-exports (do_clean)
+exports(do_clean)
 
 do_clean(p: string) -> string {
-    return clean(p)        // `clean` comes from the `import std.fs (*)` glob
+    return clean(p) // `clean` comes from the `import std.fs (*)` glob
 }

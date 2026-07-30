@@ -72,7 +72,7 @@ main() {
     // the reassignment alias path, not just first-declaration.
     base = string.concat("HELLO-", "WORLD")
     view = string.concat("seed", "")
-    view = base                     // reassign-alias to a live source
+    view = base // reassign-alias to a live source
     view = string.substring(view, 0, 5)
     if string.length(base) != 11 {
         println("FAIL: base corrupted by reassign-alias — length = ${string.length(base)}, expected 11")

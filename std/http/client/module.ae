@@ -53,7 +53,7 @@
 import std.json
 import std.string
 
-exports (
+exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
     set_cafile, set_stream, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
     send_request, send_stream,
@@ -283,7 +283,7 @@ send_stream(req: ptr) -> {
 // stay inside the client namespace once they have a response. Same
 // underlying functions the v1 wrappers use.
 response_status(resp: ptr) -> int { return http_response_status(resp) }
-response_body  (resp: ptr) -> string { return http_response_body(resp) }
+response_body(resp: ptr) -> string { return http_response_body(resp) }
 
 // Byte length of the response body. Binary-safe partner to
 // `response_body` for callers that may receive payloads with
@@ -304,7 +304,7 @@ response_body_length(resp: ptr) -> int {
 response_is_stream(resp: ptr) -> int { return http_response_is_stream_raw(resp) }
 response_read(resp: ptr, max: int) -> string { return http_response_read_chunk_raw(resp, max) }
 
-response_error (resp: ptr) -> string { return http_response_error(resp) }
+response_error(resp: ptr) -> string { return http_response_error(resp) }
 
 // Redirect-class error string. Set when a request opted into automatic
 // redirect-following (set_follow_redirects(req, N>0)) and the chain
@@ -392,7 +392,7 @@ get_with_headers(url: string, header_pairs: ptr) -> {
     request_free(req)
     if err != "" { return "", 0, err }
 
-    body   = response_body(resp)
+    body = response_body(resp)
     status = response_status(resp)
     body_copy = string_concat(body, "")
     response_free(resp)
@@ -411,7 +411,7 @@ post_with_status(url: string, body: string, content_type: string) -> {
     resp, err = send_request(req)
     request_free(req)
     if err != "" { return "", 0, err }
-    rbody  = response_body(resp)
+    rbody = response_body(resp)
     status = response_status(resp)
     rbody_copy = string_concat(rbody, "")
     response_free(resp)
@@ -465,7 +465,7 @@ post_json(url: string, value: ptr) -> {
 
     set_timeout(req, 30s)
     set_header(req, "Content-Type", "application/json")
-    set_header(req, "Accept",       "application/json")
+    set_header(req, "Accept", "application/json")
     body_len = string_length(body_str)
     set_body(req, body_str, body_len, "application/json")
 

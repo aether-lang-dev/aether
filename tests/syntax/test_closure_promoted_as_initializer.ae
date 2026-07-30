@@ -11,7 +11,7 @@ main() {
     call(inc)
 
     // n is 2 now. Use it as an initializer.
-    m = n           // reads *n through the promotion path
+    m = n // reads *n through the promotion path
     if m != 2 { println("FAIL: m = n, expected 2, got:"); println(m); exit(1) }
 
     // Use n in arithmetic, comparison, as a function argument.

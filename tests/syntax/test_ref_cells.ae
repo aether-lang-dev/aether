@@ -6,8 +6,8 @@ main() {
     defer ref_free(count)
 
     // Closure captures the ref pointer (by value), mutates through it
-    inc = |r: ptr| { ref_set(r, ref_get(r) + 1) }
-    add = |r: ptr, n: int| { ref_set(r, ref_get(r) + n) }
+    inc = | r: ptr | { ref_set(r, ref_get(r) + 1) }
+    add = | r: ptr, n: int | { ref_set(r, ref_get(r) + n) }
 
     call(inc, count)
     call(inc, count)
@@ -20,7 +20,7 @@ main() {
     a = ref(100)
     defer ref_free(a)
 
-    double_it = |r: ptr| { ref_set(r, ref_get(r) * 2) }
+    double_it = | r: ptr | { ref_set(r, ref_get(r) * 2) }
     call(double_it, a)
     println(ref_get(a))
 

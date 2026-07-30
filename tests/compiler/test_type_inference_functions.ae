@@ -3,7 +3,7 @@
 
 // Function with inferred parameter and return types
 add(a, b) {
-    return a + b;  // Parameters and return type inferred from usage
+    return a + b; // Parameters and return type inferred from usage
 }
 
 multiply(x, y) {
@@ -11,10 +11,9 @@ multiply(x, y) {
 }
 
 main() {
-    result1 = add(10, 20);      // result1 inferred: int
-    result2 = multiply(5, 6);   // result2 inferred: int
-    
+    result1 = add(10, 20); // result1 inferred: int
+    result2 = multiply(5, 6); // result2 inferred: int
+
     print(result1);
     print(result2);
 }
-

@@ -36,7 +36,7 @@ import std.cryptography.hkdf
 extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     expand_label, derive_secret
 )
 
@@ -50,7 +50,7 @@ const TLS13_PREFIX_LEN = 6
 // Returns the buffer (caller frees) and its length via the tuple.
 fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> (ptr, int) {
     label_len = string_length(label)
-    expanded_label_len = TLS13_PREFIX_LEN + label_len   // length of "tls13 "||label
+    expanded_label_len = TLS13_PREFIX_LEN + label_len // length of "tls13 "||label
     total = 2 + (1 + expanded_label_len) + (1 + ctx_len)
 
     hl = bytes.new(total)
@@ -63,12 +63,12 @@ fn build_hkdf_label(label: string, context: ptr, ctx_len: int, out_len: int) -> 
 
     // uint8 expanded-label length, then "tls13 ", then the label bytes
     bytes.set(hl, 2, expanded_label_len & 255)
-    bytes.set(hl, 3, 0x74)   // 't'
-    bytes.set(hl, 4, 0x6c)   // 'l'
-    bytes.set(hl, 5, 0x73)   // 's'
-    bytes.set(hl, 6, 0x31)   // '1'
-    bytes.set(hl, 7, 0x33)   // '3'
-    bytes.set(hl, 8, 0x20)   // ' '
+    bytes.set(hl, 3, 0x74) // 't'
+    bytes.set(hl, 4, 0x6c) // 'l'
+    bytes.set(hl, 5, 0x73) // 's'
+    bytes.set(hl, 6, 0x31) // '1'
+    bytes.set(hl, 7, 0x33) // '3'
+    bytes.set(hl, 8, 0x20) // ' '
     pos = 9
     i = 0
     while i < label_len {

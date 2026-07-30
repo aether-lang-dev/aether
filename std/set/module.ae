@@ -22,7 +22,7 @@
 //   - Aether-native wrappers (below) return bools and Go-style
 //     `(value, err)` tuples.
 
-exports (
+exports(
     aether_set_new, aether_set_add, aether_set_has, aether_set_remove, aether_set_size, aether_set_clear, aether_set_free,
     aether_set_items_raw, aether_set_items_free,
     new, add, contains, remove, size, clear, free, items, items_free

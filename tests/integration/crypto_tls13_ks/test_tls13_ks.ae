@@ -124,7 +124,7 @@ main() {
     nonce = from_hex("0000")
     psk = tls13_ks.psk_from_resumption("sha256", res_master, 32, nonce, 2)
     if check("resumption PSK", to_hex(psk, 32),
-             "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3") == 0 { total_ok = 0 }
+        "4ecd0eb6ec3b4d87f5d6028f922ca4c5851a277fd41311c9e62d2c9492e1c4f3") == 0 { total_ok = 0 }
     // early_secret_psk + binder_key must produce Hash.len outputs (chain sanity).
     esp = tls13_ks.early_secret_psk("sha256", psk, 32)
     bk = tls13_ks.binder_key("sha256", esp)

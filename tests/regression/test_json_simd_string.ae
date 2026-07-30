@@ -23,7 +23,7 @@ parse_str(json_str: string) -> string {
             json.free(v)
             match (gerr) {
                 "" -> { return got }
-                _  -> { return "<get-err>" }
+                _ -> { return "<get-err>" }
             }
         }
         _ -> { return "<parse-err>" }
@@ -56,14 +56,14 @@ main() {
     // match the content verbatim.
 
     print("Length boundaries (pure ASCII, no escapes):\n")
-    fails = fails + check("\"\"",                               "",       "len 0")
-    fails = fails + check("\"a\"",                              "a",      "len 1")
-    fails = fails + check("\"abcdefghijklmno\"",                "abcdefghijklmno",     "len 15 (one-less-than-SIMD)")
-    fails = fails + check("\"abcdefghijklmnop\"",               "abcdefghijklmnop",    "len 16 (one SIMD block)")
-    fails = fails + check("\"abcdefghijklmnopq\"",              "abcdefghijklmnopq",   "len 17 (SIMD + 1 scalar)")
-    fails = fails + check("\"abcdefghijklmnopabcdefghijklmno\"","abcdefghijklmnopabcdefghijklmno", "len 31 (two blocks minus 1)")
-    fails = fails + check("\"abcdefghijklmnopabcdefghijklmnop\"","abcdefghijklmnopabcdefghijklmnop","len 32 (two SIMD blocks)")
-    fails = fails + check("\"abcdefghijklmnopabcdefghijklmnopq\"","abcdefghijklmnopabcdefghijklmnopq","len 33 (two blocks + 1)")
+    fails = fails + check("\"\"", "", "len 0")
+    fails = fails + check("\"a\"", "a", "len 1")
+    fails = fails + check("\"abcdefghijklmno\"", "abcdefghijklmno", "len 15 (one-less-than-SIMD)")
+    fails = fails + check("\"abcdefghijklmnop\"", "abcdefghijklmnop", "len 16 (one SIMD block)")
+    fails = fails + check("\"abcdefghijklmnopq\"", "abcdefghijklmnopq", "len 17 (SIMD + 1 scalar)")
+    fails = fails + check("\"abcdefghijklmnopabcdefghijklmno\"", "abcdefghijklmnopabcdefghijklmno", "len 31 (two blocks minus 1)")
+    fails = fails + check("\"abcdefghijklmnopabcdefghijklmnop\"", "abcdefghijklmnopabcdefghijklmnop", "len 32 (two SIMD blocks)")
+    fails = fails + check("\"abcdefghijklmnopabcdefghijklmnopq\"", "abcdefghijklmnopabcdefghijklmnopq", "len 33 (two blocks + 1)")
 
     // --- escape at various positions ---
     // The SIMD loop must exit as soon as it sees a backslash anywhere in
@@ -71,7 +71,7 @@ main() {
 
     print("\nEscape at boundaries:\n")
     // Escape as first byte in string
-    fails = fails + check("\"\\\"abc\"",        "\"abc",      "escape at pos 0")
+    fails = fails + check("\"\\\"abc\"", "\"abc", "escape at pos 0")
     // Escape just before position 15 (last byte of first SIMD block)
     fails = fails + check("\"aaaaaaaaaaaaa\\\"\"", "aaaaaaaaaaaaa\"", "escape at pos 14 (end of 1st block)")
     // Escape right at position 16 (second block's first byte)

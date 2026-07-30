@@ -11,10 +11,10 @@
 
 extern exit(code: int)
 
-struct Acc { total: longdouble  count: int }
+struct Acc { total: longdouble count: int }
 
-widen(n: int) -> longdouble { return n }        // int -> long double
-from_f(f: float) -> longdouble { return f }     // double -> long double
+widen(n: int) -> longdouble { return n } // int -> long double
+from_f(f: float) -> longdouble { return f } // double -> long double
 ld_add(a: longdouble, b: longdouble) -> longdouble { return a + b }
 
 // longdouble -> int narrowing on return (C conversion).
@@ -25,17 +25,17 @@ main() {
 
     x = widen(10)
     y = from_f(2.5)
-    sum = ld_add(x, y)              // 12.5
-    scaled = x * 3                  // long double * int -> 30.0
+    sum = ld_add(x, y) // 12.5
+    scaled = x * 3 // long double * int -> 30.0
 
-    if trunc_to_int(sum) != 12      { println("FAIL: sum (got ${sum})"); exit(1) }
-    if trunc_to_int(scaled) != 30   { println("FAIL: scaled (got ${scaled})"); exit(1) }
-    if (sum > x) == false           { println("FAIL: comparison sum>x"); exit(1) }
-    if (x > sum) == true            { println("FAIL: comparison x>sum"); exit(1) }
+    if trunc_to_int(sum) != 12 { println("FAIL: sum (got ${sum})"); exit(1) }
+    if trunc_to_int(scaled) != 30 { println("FAIL: scaled (got ${scaled})"); exit(1) }
+    if (sum > x) == false { println("FAIL: comparison sum>x"); exit(1) }
+    if (x > sum) == true { println("FAIL: comparison x>sum"); exit(1) }
 
     a = Acc { total: sum, count: 2 }
-    if trunc_to_int(a.total) != 12  { println("FAIL: struct field"); exit(1) }
-    if a.count != 2                 { println("FAIL: struct sibling field"); exit(1) }
+    if trunc_to_int(a.total) != 12 { println("FAIL: struct field"); exit(1) }
+    if a.count != 2 { println("FAIL: struct sibling field"); exit(1) }
 
     println("  sum=${sum} scaled=${scaled} field=${a.total}")
     println("  PASS: longdouble arithmetic / widening / struct field")

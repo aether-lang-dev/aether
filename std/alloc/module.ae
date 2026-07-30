@@ -1,6 +1,6 @@
 // std.alloc (#1045): swappable allocator convention. See docs/allocators.md.
 
-exports (
+exports(
     system, of_arena, arena_free,
     raw, resize, release
 )

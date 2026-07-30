@@ -3,7 +3,7 @@ val() -> int { return 42 }
 add(x: int, y: int) -> int { return x + y }
 main() {
     // bare zero-arg fn across the import boundary
-    println("${runner.runit(val)}")        // 42
+    println("${runner.runit(val)}") // 42
     // bare fn with params + return across the boundary
     println("${runner.apply2(add, 3, 4)}") // 7
 }

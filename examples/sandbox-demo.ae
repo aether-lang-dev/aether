@@ -15,12 +15,12 @@ add_perm(target: ptr, cat: string, pat: string) {
     list.add(target, pat)
 }
 
-grant_all(_ctx: ptr)                       { add_perm(_ctx, "*", "*") }
-grant_tcp(_ctx: ptr, host: string)         { add_perm(_ctx, "tcp", host) }
-grant_fs_read(_ctx: ptr, path: string)     { add_perm(_ctx, "fs_read", path) }
-grant_fs_write(_ctx: ptr, path: string)    { add_perm(_ctx, "fs_write", path) }
-grant_exec(_ctx: ptr, cmd: string)         { add_perm(_ctx, "exec", cmd) }
-grant_env(_ctx: ptr, var_name: string)     { add_perm(_ctx, "env", var_name) }
+grant_all(_ctx: ptr) { add_perm(_ctx, "*", "*") }
+grant_tcp(_ctx: ptr, host: string) { add_perm(_ctx, "tcp", host) }
+grant_fs_read(_ctx: ptr, path: string) { add_perm(_ctx, "fs_read", path) }
+grant_fs_write(_ctx: ptr, path: string) { add_perm(_ctx, "fs_write", path) }
+grant_exec(_ctx: ptr, cmd: string) { add_perm(_ctx, "exec", cmd) }
+grant_env(_ctx: ptr, var_name: string) { add_perm(_ctx, "env", var_name) }
 
 sandbox(name: string) {
     perms = list.new()
@@ -79,15 +79,15 @@ main() {
     worker = sandbox("db-worker") {
         grant_env("HOME")
         grant_env("USER")
-        grant_tcp("*.internal")           // suffix: any *.internal host
-        grant_fs_read("/etc/*")           // prefix: any file in /etc/
-        grant_fs_write("/tmp/worker/*")   // prefix: write only under /tmp/worker/
-        grant_exec("echo *")             // prefix: echo anything
+        grant_tcp("*.internal") // suffix: any *.internal host
+        grant_fs_read("/etc/*") // prefix: any file in /etc/
+        grant_fs_write("/tmp/worker/*") // prefix: write only under /tmp/worker/
+        grant_exec("echo *") // prefix: echo anything
     }
 
     plugin = sandbox("untrusted-plugin") {
         grant_env("TERM")
-        grant_tcp("api.example.com")      // exact: one host only
+        grant_tcp("api.example.com") // exact: one host only
     }
 
     app = sandbox("app") {
@@ -96,27 +96,27 @@ main() {
 
     // Run contained code — closures use normal stdlib functions
     println("\n\x1b[1m--- db-worker (glob patterns) ---\x1b[0m")
-    run_sandboxed(worker) |ctx: ptr| {
+    run_sandboxed(worker) | ctx: ptr | {
         try_env("HOME")
         try_env("AWS_SECRET_KEY")
-        try_read("/etc/hostname")         // /etc/* — allowed
-        try_read("/etc/passwd")           // /etc/* — allowed (sandbox permits, file exists)
-        try_read("/usr/bin/env")          // not under /etc/* — sandbox hides it
-        try_exec("echo hello")            // echo * — allowed
-        try_exec("rm -rf /")              // not echo — denied
+        try_read("/etc/hostname") // /etc/* — allowed
+        try_read("/etc/passwd") // /etc/* — allowed (sandbox permits, file exists)
+        try_read("/usr/bin/env") // not under /etc/* — sandbox hides it
+        try_exec("echo hello") // echo * — allowed
+        try_exec("rm -rf /") // not echo — denied
     }
 
     println("\n\x1b[1m--- untrusted-plugin (restricted) ---\x1b[0m")
-    run_sandboxed(plugin) |ctx: ptr| {
+    run_sandboxed(plugin) | ctx: ptr | {
         try_env("TERM")
         try_env("HOME")
-        try_read("/etc/hostname")         // no fs_read grant — hidden
-        try_read("/etc/passwd")           // no fs_read grant — hidden
-        try_exec("echo hello")            // no exec grant — denied
+        try_read("/etc/hostname") // no fs_read grant — hidden
+        try_read("/etc/passwd") // no fs_read grant — hidden
+        try_exec("echo hello") // no exec grant — denied
     }
 
     println("\n\x1b[1m--- app (grant_all) ---\x1b[0m")
-    run_sandboxed(app) |ctx: ptr| {
+    run_sandboxed(app) | ctx: ptr | {
         try_env("HOME")
         try_exec("echo hello")
         try_read("/etc/hostname")

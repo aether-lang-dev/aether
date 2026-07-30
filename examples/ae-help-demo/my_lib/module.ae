@@ -25,7 +25,7 @@
 // in `docs/closures-and-builder-dsl.md` so they auto-receive the
 // builder context when called inside the trailing block.
 
-exports (serve, port, host, superuser_token, repo)
+exports(serve, port, host, superuser_token, repo)
 
 // Required by the `builder` keyword's codegen — emits a `map_new()`
 // behind the scenes to hold the builder context that setters

@@ -32,7 +32,7 @@ handle_echo(req: ptr, res: ptr, ud: ptr) {
     i = 0
     while i < n {
         name = http.request_header_name(req, i)
-        val  = http.request_header_value(req, i)
+        val = http.request_header_value(req, i)
         seq = string.concat(seq, "${name}=${val};")
         i = i + 1
     }

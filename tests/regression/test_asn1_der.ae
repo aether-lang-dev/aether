@@ -51,7 +51,7 @@ main() {
     fails = 0
 
     // ---- targeted encode vectors ----
-    oidt = asn1.encode_oid("1.2.840.113549.1.1.1")   // rsaEncryption
+    oidt = asn1.encode_oid("1.2.840.113549.1.1.1") // rsaEncryption
     if string.equals(bhex(oidt), "06092a864886f70d010101") != 1 { print("FAIL oid encode\n"); fails = fails + 1 }
     ro = asn1.reader_new(oidt)
     od, oerr = asn1.read_oid(ro)

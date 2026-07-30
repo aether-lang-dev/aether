@@ -28,7 +28,7 @@ import std.bytes
 import std.bignum
 import std.cryptography.sha3
 
-exports (
+exports(
     publickey, sign, verify
 )
 
@@ -56,7 +56,7 @@ order_L() -> ptr {
 // d = -39081 mod p
 curve_d(p: ptr) -> ptr {
     n39081 = bignum.from_int(39081)
-    d = bignum.subtract(p, n39081)   // p - 39081 = -39081 mod p
+    d = bignum.subtract(p, n39081) // p - 39081 = -39081 mod p
     bignum.free(n39081)
     return d
 }
@@ -88,7 +88,7 @@ fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(
 fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
 finv(a: ptr, p: ptr) -> ptr {
     two = bignum.from_int(2)
-    e = bignum.subtract(p, two)            // p - 2
+    e = bignum.subtract(p, two) // p - 2
     r = bignum.mod_pow(a, e, p)
     bignum.free(two); bignum.free(e)
     return r
@@ -129,7 +129,7 @@ to_le57(nn: ptr) -> ptr {
 }
 
 // ---- projective-coordinate point (X:Y:Z), each a *BN. affine = (X/Z, Y/Z) ----
-struct Pt { x: ptr  y: ptr  z: ptr }
+struct Pt { x: ptr y: ptr z: ptr }
 pt_new(x: ptr, y: ptr, z: ptr) -> *Pt {
     q = malloc(24) as *Pt
     q.x = x; q.y = y; q.z = z
@@ -235,11 +235,11 @@ base_point() -> *Pt {
 recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
     one = bignum.from_int(1)
     y2 = fmul(y, y, p)
-    u = fsub(y2, one, p)                 // y^2 - 1
+    u = fsub(y2, one, p) // y^2 - 1
     dy2 = fmul(d, y2, p)
-    v = fsub(dy2, one, p)                // d y^2 - 1
+    v = fsub(dy2, one, p) // d y^2 - 1
     vinv = finv(v, p)
-    x2 = fmul(u, vinv, p)                // candidate x^2
+    x2 = fmul(u, vinv, p) // candidate x^2
 
     if bignum.is_zero(x2) == 1 {
         bignum.free(one); bignum.free(y2); bignum.free(u); bignum.free(dy2)
@@ -249,7 +249,7 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
             bignum.free(x2)
             return null
         }
-        return x2   // x = 0
+        return x2 // x = 0
     }
 
     // x = x2 ^ ((p+1)/4)
@@ -270,7 +270,7 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
     bignum.free(chk)
 
     if bit0(x) != sign {
-        nx = fsub(p, x, p)               // -x mod p
+        nx = fsub(p, x, p) // -x mod p
         bignum.free(x); x = nx
     }
 
@@ -355,8 +355,8 @@ write_dom4(buf: ptr, off: int) -> int {
     bytes.set(buf, off + 5, 0x34)
     bytes.set(buf, off + 6, 0x34)
     bytes.set(buf, off + 7, 0x38)
-    bytes.set(buf, off + 8, 0x00)   // phflag = 0 (pure)
-    bytes.set(buf, off + 9, 0x00)   // context length = 0
+    bytes.set(buf, off + 8, 0x00) // phflag = 0 (pure)
+    bytes.set(buf, off + 9, 0x00) // context length = 0
     return 10
 }
 

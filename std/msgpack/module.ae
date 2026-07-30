@@ -24,7 +24,7 @@ import std.list
 import std.heap
 import std.mem
 
-exports (
+exports(
     nil_value, boolean, from_int, num, str, bin, arr, map, ext,
     get_type, get_bool, get_int, get_float, get_string, get_bin,
     array_size, array_get, array_add,
@@ -33,27 +33,27 @@ exports (
     TYPE_NIL, TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STR, TYPE_BIN, TYPE_ARRAY, TYPE_MAP, TYPE_EXT
 )
 
-const TYPE_NIL      = 0
-const TYPE_BOOL     = 1
-const TYPE_INT      = 2
-const TYPE_FLOAT    = 3
-const TYPE_STR      = 4
-const TYPE_BIN      = 5
-const TYPE_ARRAY    = 6
-const TYPE_MAP      = 7
-const TYPE_EXT      = 8
+const TYPE_NIL = 0
+const TYPE_BOOL = 1
+const TYPE_INT = 2
+const TYPE_FLOAT = 3
+const TYPE_STR = 4
+const TYPE_BIN = 5
+const TYPE_ARRAY = 6
+const TYPE_MAP = 7
+const TYPE_EXT = 8
 
 struct MsgValue {
     type_id: int
     b_val: bool
     i_val: long
     f_val: float
-    s_bytes: ptr      // owned AetherBytes for str/bin/ext payload (null if empty); freed in free()
-    s_len: int        // payload byte length
+    s_bytes: ptr // owned AetherBytes for str/bin/ext payload (null if empty); freed in free()
+    s_len: int // payload byte length
     ext_type: int
-    arr_val: ptr      // list pointer (*std.list.List)
-    map_keys: ptr     // list pointer (*std.list.List)
-    map_values: ptr   // list pointer (*std.list.List)
+    arr_val: ptr // list pointer (*std.list.List)
+    map_keys: ptr // list pointer (*std.list.List)
+    map_values: ptr // list pointer (*std.list.List)
 }
 
 // Reconstitute an IEEE-754 single-precision float from its 32 raw bits and
@@ -661,7 +661,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
-            string.release(err_k)   // success-path heap "" from the child; discard
+            string.release(err_k) // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)
@@ -689,7 +689,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
-            string.release(err)   // success-path heap "" from the child; discard
+            string.release(err) // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
@@ -1089,7 +1089,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
-            string.release(err)   // success-path heap "" from the child; discard
+            string.release(err) // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
@@ -1110,7 +1110,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err
             }
-            string.release(err)   // success-path heap "" from the child; discard
+            string.release(err) // success-path heap "" from the child; discard
             list.list_add_raw(v.arr_val, item)
             i = i + 1
         }
@@ -1132,7 +1132,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
-            string.release(err_k)   // success-path heap "" from the child; discard
+            string.release(err_k) // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)
@@ -1162,7 +1162,7 @@ fn unpack_inner(c: ptr) -> (ptr, string) {
                 free(v)
                 return null, err_k
             }
-            string.release(err_k)   // success-path heap "" from the child; discard
+            string.release(err_k) // success-path heap "" from the child; discard
             let val, err_v = unpack_inner(c)
             if err_v != "" {
                 free(key)

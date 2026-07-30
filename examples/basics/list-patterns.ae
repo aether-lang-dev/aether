@@ -43,7 +43,7 @@ main() {
     print("\nMatching [1,2,3,4,5] with cons pattern:\n");
     match (nums) {
         [] -> { print("  empty\n"); }
-        [h|t] -> {
+        [h | t] -> {
             print("  Head: ");
             print(h);
             print("\n");

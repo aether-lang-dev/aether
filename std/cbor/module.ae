@@ -11,7 +11,7 @@ import std.heap
 import std.mem
 import std.encoding
 
-exports (
+exports(
     CBOR_INT, CBOR_BYTES, CBOR_TEXT, CBOR_ARRAY, CBOR_MAP, CBOR_TAG, CBOR_SIMPLE, CBOR_FLOAT,
     parse, encode, stringify, type, is_null, is_undefined,
     get_bool, get_int, get_long, get_float, get_string, get_bytes, get_tag_val, get_tag_child,
@@ -20,14 +20,14 @@ exports (
     set, push, map_push, free, diagnose
 )
 
-const CBOR_INT    = 0
-const CBOR_BYTES  = 1
-const CBOR_TEXT   = 2
-const CBOR_ARRAY  = 3
-const CBOR_MAP    = 4
-const CBOR_TAG    = 5
+const CBOR_INT = 0
+const CBOR_BYTES = 1
+const CBOR_TEXT = 2
+const CBOR_ARRAY = 3
+const CBOR_MAP = 4
+const CBOR_TAG = 5
 const CBOR_SIMPLE = 6
-const CBOR_FLOAT  = 7
+const CBOR_FLOAT = 7
 
 // Memory model: a CborValue tree owns its text/byte-string payloads as an
 // AetherBytes buffer (str_bytes + str_len), NOT a refcounted `string` field.
@@ -42,13 +42,13 @@ struct CborValue {
     type: int
     int_val: long
     float_val: float
-    str_bytes: ptr     // owned AetherBytes for text/byte-string payload (null if empty); freed in free_value
-    str_len: int       // payload byte length
+    str_bytes: ptr // owned AetherBytes for text/byte-string payload (null if empty); freed in free_value
+    str_len: int // payload byte length
     tag_val: long
-    tag_child: ptr     // *CborValue
-    list_val: ptr      // list pointer (std.list)
-    map_keys: ptr      // list pointer (std.list)
-    map_values: ptr    // list pointer (std.list)
+    tag_child: ptr // *CborValue
+    list_val: ptr // list pointer (std.list)
+    map_keys: ptr // list pointer (std.list)
+    map_values: ptr // list pointer (std.list)
 }
 
 // ---- str payload helpers (see Memory model above) ----
@@ -118,7 +118,7 @@ fn str_payload_equals_key(cv: *CborValue, key: string) -> bool {
 // the caller's input fully the caller's to release — the same approach
 // std.msgpack's unpack uses.
 struct Reader {
-    buf: ptr    // owned std.bytes copy of the input
+    buf: ptr // owned std.bytes copy of the input
     len: int
     offset: int
 }
@@ -279,7 +279,7 @@ read_value(r: ptr, ai: int) -> (long, string) {
         b7 = rd(reader, reader.offset + 7)
         reader.offset = reader.offset + 8
         v = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
-            ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
+        ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
         return v, ok
     }
     return 0, "cbor: invalid additional information"
@@ -605,7 +605,7 @@ parse_item(r: ptr) -> (ptr, string) {
             b7 = rd(reader, reader.offset + 7)
             reader.offset = reader.offset + 8
             bits = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
-                   ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
+            ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
             f = mem.float_from_bits(bits)
             cv = heap.new(CborValue)
             cv.type = CBOR_FLOAT

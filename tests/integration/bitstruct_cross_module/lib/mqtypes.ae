@@ -10,7 +10,7 @@
 // compile: `unknown type name 'PropertyFlags'`.
 import std.mem
 
-bitstruct PropertyFlags : uint32_t {
+bitstruct PropertyFlags: uint32_t {
     hash_next: int 0..<30
     prop_type: int 30..<32
 }

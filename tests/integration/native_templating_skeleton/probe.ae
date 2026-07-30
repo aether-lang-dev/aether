@@ -34,8 +34,8 @@ main() {
     sb2 = strbuilder.new(64)
     native.html_text(sb2, "<a href=\"x\">'&'</a>")
     expect_eq(strbuilder.finish(sb2),
-              "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;",
-              "2 text escapes")
+        "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;",
+        "2 text escapes")
 
     // (3) html_raw bypasses escaping.
     sb3 = strbuilder.new(16)
@@ -55,8 +55,8 @@ main() {
     native.html_tag_close(sb5, "span")
     native.html_tag_close(sb5, "div")
     expect_eq(strbuilder.finish(sb5),
-              "<div><span>deep</span></div>",
-              "5 nested tags via open/close")
+        "<div><span>deep</span></div>",
+        "5 nested tags via open/close")
 
     // (6) Captured user value with HTML metas: interpolation produces
     //     a string, html_text escapes it. Template author did NOT
@@ -65,8 +65,8 @@ main() {
     sb6 = strbuilder.new(64)
     native.html_text(sb6, "Hello ${user_name}")
     expect_eq(strbuilder.finish(sb6),
-              "Hello Alice &lt;script&gt;",
-              "6 interp escapes captured user value")
+        "Hello Alice &lt;script&gt;",
+        "6 interp escapes captured user value")
 
     println("All PASS")
 }

@@ -37,10 +37,10 @@ main() {
     audit.clear()
 
     // Contained code: three env reads — one granted, two not.
-    worker = |_ctx: ptr| {
-        os_getenv("HOME")            // granted   -> allowed
-        os_getenv("AWS_SECRET_KEY")  // not granted -> denied
-        os_getenv("DATABASE_URL")    // not granted -> denied
+    worker = | _ctx: ptr | {
+        os_getenv("HOME") // granted   -> allowed
+        os_getenv("AWS_SECRET_KEY") // not granted -> denied
+        os_getenv("DATABASE_URL") // not granted -> denied
     }
     run_sandboxed(perms, worker)
 

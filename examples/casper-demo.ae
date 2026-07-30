@@ -36,7 +36,7 @@ main() {
     }
     net = casper.service(c, "system.net")
     sysctl_ch = casper.service(c, "system.sysctl")
-    casper.close(c)              // parent handle no longer needed
+    casper.close(c) // parent handle no longer needed
     if net == null {
         println("  could not open system.net")
         return

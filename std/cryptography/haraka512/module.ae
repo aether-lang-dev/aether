@@ -16,7 +16,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     haraka512_hex, haraka512_bytes
 )
@@ -86,7 +86,7 @@ const HARAKA_RC: int[640] = [
 struct Haraka512Ctx {
     buf: ptr
     buf_pos: int
-    total_fed: int    // total bytes fed; Haraka-512 requires EXACTLY 64 (BC throws otherwise)
+    total_fed: int // total bytes fed; Haraka-512 requires EXACTLY 64 (BC throws otherwise)
     s_scratch: ptr
     t_scratch: ptr
     s1_0: ptr

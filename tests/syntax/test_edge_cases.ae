@@ -49,7 +49,7 @@ main() {
     h = 8
     ii = 9
     jj = 10
-    sum = a+b+c+d+e+f+g+h+ii+jj
+    sum = a + b + c + d + e + f + g + h + ii + jj
     if sum == 55 {
         println("PASS: 10 vars sum=55")
     }

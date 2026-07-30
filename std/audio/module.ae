@@ -21,7 +21,7 @@
 
 import std.string
 
-exports (
+exports(
     open, close, is_null_backend,
     load_wav, last_error,
     play, pause, stop, is_playing,

@@ -57,66 +57,66 @@ render_with_name(src: string, key: string, val: string) -> string {
 main() {
     // (1) truncate default ellipsis.
     expect_eq(render_with_name("{{ s | truncate:\"10\" }}", "s", "abcdefghijklmnop"),
-              "abcdefg...", "1 truncate default ellipsis")
+        "abcdefg...", "1 truncate default ellipsis")
 
     // (2) Custom unicode ellipsis (3-byte UTF-8 char "…").
     // cap=10 bytes, ellipsis="…" (3 bytes) → 7 body bytes + "…" = 10 bytes.
     expect_eq(render_with_name("{{ s | truncate:\"10\",\"…\" }}", "s", "abcdefghijklmnop"),
-              "abcdefg…", "2 truncate unicode ellipsis")
+        "abcdefg…", "2 truncate unicode ellipsis")
 
     // (3) Short string, custom 1-char ellipsis.
     // "abcdefghij" length 10 > cap 5; ellipsis 1 byte → 4 body + "-" = 5.
     expect_eq(render_with_name("{{ s | truncate:\"5\",\"-\" }}", "s", "abcdefghij"),
-              "abcd-", "3 truncate custom 1-char ellipsis")
+        "abcd-", "3 truncate custom 1-char ellipsis")
 
     // (4) cap equals ellipsis length → ellipsis cut.
     // cap=3, ellipsis="...", so cap <= eln → substring(s, 0, 3).
     expect_eq(render_with_name("{{ s | truncate:\"3\",\"...\" }}", "s", "abcdefghij"),
-              "abc", "4 cap equals ellipsis length")
+        "abc", "4 cap equals ellipsis length")
 
     // (5) cap one larger than ellipsis length.
     // cap=4, ellipsis="...", so body=cap-eln=1, returns "a..."
     expect_eq(render_with_name("{{ s | truncate:\"4\",\"...\" }}", "s", "abcdefghij"),
-              "a...", "5 cap one bigger than ellipsis")
+        "a...", "5 cap one bigger than ellipsis")
 
     // (6) Empty ellipsis = plain hard cut.
     expect_eq(render_with_name("{{ s | truncate:\"7\",\"\" }}", "s", "abcdefghij"),
-              "abcdefg", "6 empty ellipsis hard cut")
+        "abcdefg", "6 empty ellipsis hard cut")
 
     // (7) default:"alt" with empty value.
     expect_eq(render_with_name("{{ s | default:\"alt\" }}", "s", ""),
-              "alt", "7 default fires on empty")
+        "alt", "7 default fires on empty")
 
     // (8) default:"alt" with "false" string — does NOT fire (no allow_false).
     expect_eq(render_with_name("{{ s | default:\"alt\" }}", "s", "false"),
-              "false", "8 default skips false without allow_false")
+        "false", "8 default skips false without allow_false")
 
     // (9) default:"alt", allow_false:"true" with "false" — fires.
     expect_eq(render_with_name("{{ s | default:\"alt\",\"true\" }}", "s", "false"),
-              "alt", "9a default fires on false with allow_false")
+        "alt", "9a default fires on false with allow_false")
     // Same with explicit allow_false: prefix.
     expect_eq(render_with_name("{{ s | default:\"alt\",allow_false:\"true\" }}", "s", "false"),
-              "alt", "9b default fires on false with allow_false: prefix")
+        "alt", "9b default fires on false with allow_false: prefix")
 
     // (10) allow_false with "nil".
     expect_eq(render_with_name("{{ s | default:\"alt\",\"true\" }}", "s", "nil"),
-              "alt", "10 default fires on nil with allow_false")
+        "alt", "10 default fires on nil with allow_false")
 
     // (11) allow_false with "null".
     expect_eq(render_with_name("{{ s | default:\"alt\",\"true\" }}", "s", "null"),
-              "alt", "11 default fires on null with allow_false")
+        "alt", "11 default fires on null with allow_false")
 
     // (12) allow_false with real value — does NOT fire.
     expect_eq(render_with_name("{{ s | default:\"alt\",\"true\" }}", "s", "real"),
-              "real", "12 default skips real value with allow_false")
+        "real", "12 default skips real value with allow_false")
 
     // (13) allow_false explicitly off — "false" passes through.
     expect_eq(render_with_name("{{ s | default:\"alt\",\"false\" }}", "s", "false"),
-              "false", "13 default skips false with allow_false=false")
+        "false", "13 default skips false with allow_false=false")
 
     // (14) `allow_false:"true"` long-form recognised (same as case 9b).
     expect_eq(render_with_name("{{ s | default:\"alt\",allow_false:\"true\" }}", "s", "nil"),
-              "alt", "14 allow_false: prefix recognised")
+        "alt", "14 allow_false: prefix recognised")
 
     println("All PASS")
 }

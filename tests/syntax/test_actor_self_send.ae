@@ -3,9 +3,9 @@
 // the main-thread-mode → scheduler transition correctly.
 
 // --- Test 1: Basic self-send (finite loop) ---
-message Go1 { }
-message Step1 { }
-message Check1 { }
+message Go1 {}
+message Step1 {}
+message Check1 {}
 
 actor Counter1 {
     state count = 0
@@ -29,10 +29,10 @@ actor Counter1 {
 }
 
 // --- Test 2: Multiple self-sends from one handler ---
-message Go2 { }
-message A2 { }
-message B2 { }
-message C2 { }
+message Go2 {}
+message A2 {}
+message B2 {}
+message C2 {}
 
 actor Multi2 {
     state got = 0
@@ -59,9 +59,9 @@ actor Multi2 {
 }
 
 // --- Test 3: Self-send with external stop (animation pattern) ---
-message Start3 { }
-message Tick3 { }
-message Stop3 { }
+message Start3 {}
+message Tick3 {}
+message Stop3 {}
 
 actor Animator3 {
     state running = 0
@@ -88,8 +88,8 @@ actor Animator3 {
 }
 
 // --- Test 4: Self-send with immediate exit (no sleep after send) ---
-message Go4 { }
-message Done4 { }
+message Go4 {}
+message Done4 {}
 
 actor Quick4 {
     receive {

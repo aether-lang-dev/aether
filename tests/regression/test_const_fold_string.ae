@@ -11,24 +11,24 @@
 
 import std.string
 
-const ID    = string.from_int(42)              // -> "42"
-const BIG   = string.from_long(9999999999)     // -> "9999999999"  (64-bit width)
-const VER   = string.concat("v", "1")          // -> "v1"
-const LABEL = string.concat("id-", string.from_int(7))  // nested fold -> "id-7"
+const ID = string.from_int(42) // -> "42"
+const BIG = string.from_long(9999999999) // -> "9999999999"  (64-bit width)
+const VER = string.concat("v", "1") // -> "v1"
+const LABEL = string.concat("id-", string.from_int(7)) // nested fold -> "id-7"
 
 main() {
     fails = 0
 
-    if ID != "42"           { print("FAIL from_int\n");   fails = fails + 1 }
-    if BIG != "9999999999"  { print("FAIL from_long\n");  fails = fails + 1 }
-    if VER != "v1"          { print("FAIL concat\n");     fails = fails + 1 }
-    if LABEL != "id-7"      { print("FAIL nested concat\n"); fails = fails + 1 }
+    if ID != "42" { print("FAIL from_int\n"); fails = fails + 1 }
+    if BIG != "9999999999" { print("FAIL from_long\n"); fails = fails + 1 }
+    if VER != "v1" { print("FAIL concat\n"); fails = fails + 1 }
+    if LABEL != "id-7" { print("FAIL nested concat\n"); fails = fails + 1 }
 
     // Const inlines at each use — printing twice yields the same literal,
     // and there is no per-use re-allocation (the value is a static literal).
-    println(ID)     // expect: 42
-    println(VER)    // expect: v1
-    println(LABEL)  // expect: id-7
+    println(ID) // expect: 42
+    println(VER) // expect: v1
+    println(LABEL) // expect: id-7
 
     if fails == 0 {
         print("PASS: const fold string\n")

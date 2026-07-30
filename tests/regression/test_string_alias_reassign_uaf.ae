@@ -40,18 +40,18 @@ main() {
 
     // Case 1: alias + reassign-source-to-empty
     name1 = "hello-world"
-    rest1 = string.substring(name1, 6, 11)   // "world", heap
-    word1 = rest1                            // alias — must transfer ownership
-    rest1 = ""                               // pre-fix: frees word1's buffer
+    rest1 = string.substring(name1, 6, 11) // "world", heap
+    word1 = rest1 // alias — must transfer ownership
+    rest1 = "" // pre-fix: frees word1's buffer
     if string.length(word1) != 5 {
         println("FAIL 1: length(word1) = ${string.length(word1)}, expected 5")
         exit(1)
     }
-    if string.char_at(word1, 0) != 119 {  // 'w'
+    if string.char_at(word1, 0) != 119 { // 'w'
         println("FAIL 1: word1[0] = ${string.char_at(word1, 0)}, expected 119 ('w')")
         exit(1)
     }
-    if string.char_at(word1, 4) != 100 {  // 'd'
+    if string.char_at(word1, 4) != 100 { // 'd'
         println("FAIL 1: word1[4] = ${string.char_at(word1, 4)}, expected 100 ('d')")
         exit(1)
     }
@@ -61,7 +61,7 @@ main() {
     name2 = "hello-world"
     rest2 = string.substring(name2, 6, 11)
     word2 = rest2
-    rest2 = "XYZ"                            // reassign to non-empty literal
+    rest2 = "XYZ" // reassign to non-empty literal
     if string.length(word2) != 5 {
         println("FAIL 2: length(word2) = ${string.length(word2)}, expected 5")
         exit(1)
@@ -88,10 +88,10 @@ main() {
 
     // Case 4: chained alias (alias-of-alias).
     rest4 = string.substring("hello-world", 6, 11)
-    mid4 = rest4         // mid4 takes ownership
-    word4 = mid4         // word4 takes ownership from mid4
-    rest4 = ""           // no buffer to free (rest4 lost ownership)
-    mid4 = ""            // no buffer to free (mid4 lost ownership)
+    mid4 = rest4 // mid4 takes ownership
+    word4 = mid4 // word4 takes ownership from mid4
+    rest4 = "" // no buffer to free (rest4 lost ownership)
+    mid4 = "" // no buffer to free (mid4 lost ownership)
     if string.length(word4) != 5 {
         println("FAIL 4: length(word4) = ${string.length(word4)}, expected 5")
         exit(1)
@@ -114,7 +114,7 @@ main() {
         dash = string.index_of(rest5, "-")
         word5 = string.substring(rest5, 0, dash)
         if i == 0 {
-            saved_first = word5    // alias the first iteration's slice
+            saved_first = word5 // alias the first iteration's slice
         }
         rest5 = string.substring(rest5, dash + 1, string.length(rest5))
         i = i + 1
@@ -123,7 +123,7 @@ main() {
         println("FAIL 5: length(saved_first) = ${string.length(saved_first)}, expected 1")
         exit(1)
     }
-    if string.char_at(saved_first, 0) != 97 {  // 'a'
+    if string.char_at(saved_first, 0) != 97 { // 'a'
         println("FAIL 5: saved_first[0] = ${string.char_at(saved_first, 0)}, expected 97 ('a')")
         exit(1)
     }

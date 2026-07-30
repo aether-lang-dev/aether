@@ -12,20 +12,20 @@
 extern exit(code: int)
 
 main() {
-    op = |a: int, b: int| { return a + b }
+    op = | a: int, b: int | { return a + b }
     r1 = call(op, 2, 3)
     if r1 != 5 { println("FAIL: first call (expected 5, got:"); println(r1); exit(1) }
 
     // Reassign op to a different closure. The codegen must notice that
     // op no longer has a single static closure identity and dispatch
     // through the function pointer stored in op at call time.
-    op = |a: int, b: int| { return a * b }
+    op = | a: int, b: int | { return a * b }
     r2 = call(op, 4, 5)
     if r2 != 20 { println("FAIL: reassigned call (expected 20, got:"); println(r2); exit(1) }
 
     // And once more, to a closure with a different shape (still 2 ints
     // in / 1 int out, but a different body).
-    op = |a: int, b: int| { if a > b { return a } return b }
+    op = | a: int, b: int | { if a > b { return a } return b }
     r3 = call(op, 7, 3)
     if r3 != 7 { println("FAIL: max closure (expected 7, got:"); println(r3); exit(1) }
 

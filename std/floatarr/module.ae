@@ -13,7 +13,7 @@
 //   - Go-style wrappers (`new`, `get`, `set`) return tuples/errors
 //     for callers that want to distinguish "absent" from "stored zero".
 
-exports (
+exports(
     new, new_filled, get, set,
     floatarr_new_raw, floatarr_new_filled_raw,
     floatarr_size, floatarr_get_raw, floatarr_set_raw,

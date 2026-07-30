@@ -39,7 +39,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     sha3_224_hex, sha3_224_bytes,
     sha3_256_hex, sha3_256_bytes,
@@ -61,23 +61,23 @@ const RC_K: long[24] = [
 
 // Rho rotation offsets, indexed [x + 5*y].
 const RHO: long[25] = [
-    0,  1,  62, 28, 27,
-    36, 44, 6,  55, 20,
-    3,  10, 43, 25, 39,
+    0, 1, 62, 28, 27,
+    36, 44, 6, 55, 20,
+    3, 10, 43, 25, 39,
     41, 45, 15, 21, 8,
-    18, 2,  61, 56, 14
+    18, 2, 61, 56, 14
 ]
 
 struct Sha3Ctx {
-    s: ptr            // longarr(25), 5x5 lane state, lane[x+5y]
-    bb: ptr           // longarr(25), scratch for rho/pi (B)
-    cc: ptr           // longarr(5),  scratch column parities
-    dd: ptr           // longarr(5),  scratch theta D
-    buf: ptr          // std.bytes rate buffer (max 168 bytes)
-    buf_len: int      // bytes currently in buf
-    rate: int         // rate in bytes (block size)
-    out_len: int      // fixed digest length in bytes (0 for shake)
-    pad: int          // domain/padding byte (0x06 fixed, 0x1f shake)
+    s: ptr // longarr(25), 5x5 lane state, lane[x+5y]
+    bb: ptr // longarr(25), scratch for rho/pi (B)
+    cc: ptr // longarr(5),  scratch column parities
+    dd: ptr // longarr(5),  scratch theta D
+    buf: ptr // std.bytes rate buffer (max 168 bytes)
+    buf_len: int // bytes currently in buf
+    rate: int // rate in bytes (block size)
+    out_len: int // fixed digest length in bytes (0 for shake)
+    pad: int // domain/padding byte (0x06 fixed, 0x1f shake)
     is_shake: int
 }
 
@@ -95,10 +95,10 @@ keccak_f(c: *Sha3Ctx) {
         x = 0
         while x < 5 {
             v = longarr_get_unchecked(s, x) ^
-                longarr_get_unchecked(s, x + 5) ^
-                longarr_get_unchecked(s, x + 10) ^
-                longarr_get_unchecked(s, x + 15) ^
-                longarr_get_unchecked(s, x + 20)
+            longarr_get_unchecked(s, x + 5) ^
+            longarr_get_unchecked(s, x + 10) ^
+            longarr_get_unchecked(s, x + 15) ^
+            longarr_get_unchecked(s, x + 20)
             longarr_set_unchecked(col, x, v)
             x = x + 1
         }
@@ -107,7 +107,7 @@ keccak_f(c: *Sha3Ctx) {
             xm1 = (x + 4) % 5
             xp1 = (x + 1) % 5
             d = longarr_get_unchecked(col, xm1) ^
-                bits.rotl64(longarr_get_unchecked(col, xp1), 1)
+            bits.rotl64(longarr_get_unchecked(col, xp1), 1)
             longarr_set_unchecked(dee, x, d)
             x = x + 1
         }

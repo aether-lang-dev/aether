@@ -11,7 +11,7 @@ actor Counter {
 
     receive {
         Go() -> {
-            inc = || { count = count + 1 }   // mutates state — rejected
+            inc = || { count = count + 1 } // mutates state — rejected
             call(inc)
         }
     }

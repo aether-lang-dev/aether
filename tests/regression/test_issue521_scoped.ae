@@ -12,19 +12,19 @@ extern exit(code: int)
 // not. This is the headline allowed pattern.
 checksum_len(seed: string) -> int {
     @scoped buf = string.concat(seed, "-scratch")
-    return string.length(buf)        // ok: the int escapes, not `buf`
+    return string.length(buf) // ok: the int escapes, not `buf`
 }
 
 // A @scoped value consumed entirely within the block (read-only use).
 local_only() -> int {
     @scoped tmp = string.concat("x", "y")
     n = string.length(tmp)
-    println(tmp)                     // ok: read-only, does not retain
+    println(tmp) // ok: read-only, does not retain
     return n
 }
 
 main() {
-    if checksum_len("abc") != 11 {   // "abc-scratch" = 11 chars
+    if checksum_len("abc") != 11 { // "abc-scratch" = 11 chars
         println("FAIL #521: derived scalar escape")
         exit(1)
     }

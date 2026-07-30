@@ -29,7 +29,7 @@ main() {
 
     // Measure multiple iterations for stability
     println("\nBenchmark: 10 rounds of 100K additions")
-    long best_ns = 0    // nanosecond durations need 64 bits (int32 overflows at ~2.1s)
+    long best_ns = 0 // nanosecond durations need 64 bits (int32 overflows at ~2.1s)
     round = 0
     while round < 10 {
         t1 = clock_ns()

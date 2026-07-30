@@ -46,7 +46,7 @@ actor PollWorker {
 // in the match-as-expression position.
 run_batch(s: *StringSeq, count: int) -> int {
     match s {
-        []      -> {
+        [] -> {
             return count
         }
         [h | t] -> {

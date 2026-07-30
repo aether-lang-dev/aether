@@ -17,7 +17,7 @@
 //   - memory leak safety is ensured because we free all allocated nodes
 
 import std.msgpack
-import std.msgpack (MsgValue)
+import std.msgpack(MsgValue)
 import std.encoding
 import std.string
 import std.list

@@ -18,11 +18,11 @@ const NAMES[] = ["alice", "bob", "carol"]
 main() {
     fails = 0
 
-    if TRIPLE[0] != 1  { print("FAIL TRIPLE[0]\n"); fails = fails + 1 }
-    if TRIPLE[2] != 3  { print("FAIL TRIPLE[2]\n"); fails = fails + 1 }
+    if TRIPLE[0] != 1 { print("FAIL TRIPLE[0]\n"); fails = fails + 1 }
+    if TRIPLE[2] != 3 { print("FAIL TRIPLE[2]\n"); fails = fails + 1 }
 
-    if SIZES[0] != 4   { print("FAIL SIZES[0]\n"); fails = fails + 1 }
-    if SIZES[4] != 64  { print("FAIL SIZES[4]\n"); fails = fails + 1 }
+    if SIZES[0] != 4 { print("FAIL SIZES[0]\n"); fails = fails + 1 }
+    if SIZES[4] != 64 { print("FAIL SIZES[4]\n"); fails = fails + 1 }
 
     // Sum the int array in a loop (indexes the static const table).
     sum = 0
@@ -34,8 +34,8 @@ main() {
     if NAMES[0] != "alice" { print("FAIL NAMES[0]\n"); fails = fails + 1 }
     if NAMES[2] != "carol" { print("FAIL NAMES[2]\n"); fails = fails + 1 }
 
-    println(TRIPLE[1])  // expect: 2
-    println(NAMES[1])   // expect: bob
+    println(TRIPLE[1]) // expect: 2
+    println(NAMES[1]) // expect: bob
 
     if fails == 0 {
         print("PASS: const fold array\n")

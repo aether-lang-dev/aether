@@ -1,3 +1,3 @@
 import leaf
-exports (mid_base, leaf_double, LEAF_C)
+exports(mid_base, leaf_double, LEAF_C)
 mid_base() -> int { return 100 }

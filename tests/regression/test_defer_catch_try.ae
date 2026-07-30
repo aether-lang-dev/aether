@@ -30,8 +30,8 @@ const ITERATIONS = 32
 // mutable module globals, so a byte buffer threaded through as a `ptr` is the
 // simplest way to observe side effects across a function boundary.)
 mark(buf: ptr, slot: int, ch: int) {
-    n = mem.get_byte(buf, 0)         // byte 0 = how many marks so far
-    mem.set_byte(buf, n + 1, ch)     // bytes 1.. = the marks, in order
+    n = mem.get_byte(buf, 0) // byte 0 = how many marks so far
+    mem.set_byte(buf, n + 1, ch) // bytes 1.. = the marks, in order
     mem.set_byte(buf, 0, n + 1)
 }
 
@@ -44,9 +44,9 @@ mark_at(buf: ptr, i: int) -> int { return mem.get_byte(buf, i + 1) }
 // ones must interleave with the unconditional one by registration order — they
 // must not be hoisted into separate groups.
 traced(buf: ptr, fail: bool) -> (int, string) {
-    defer       mark(buf, 0, 65)   // 'A' — always
-    defer catch mark(buf, 0, 67)   // 'C' — catch
-    defer try   mark(buf, 0, 84)   // 'T' — try
+    defer mark(buf, 0, 65) // 'A' — always
+    defer catch mark(buf, 0, 67) // 'C' — catch
+    defer try mark(buf, 0, 84) // 'T' — try
     if fail { return 0, "boom" }
     return 1, ""
 }
@@ -59,11 +59,11 @@ inner(fail: bool) -> int! {
 }
 
 traced_bang(buf: ptr, fail: bool) -> int! {
-    defer       mark(buf, 0, 65)   // 'A'
-    defer catch mark(buf, 0, 67)   // 'C'
-    defer try   mark(buf, 0, 84)   // 'T'
-    v = inner(fail)!               // propagates: a statically-known ERROR exit
-    return v                       // a statically-known SUCCESS exit
+    defer mark(buf, 0, 65) // 'A'
+    defer catch mark(buf, 0, 67) // 'C'
+    defer try mark(buf, 0, 84) // 'T'
+    v = inner(fail)! // propagates: a statically-known ERROR exit
+    return v // a statically-known SUCCESS exit
 }
 
 // ---- the transaction shape, which is the point of the feature ---------------
@@ -71,12 +71,12 @@ traced_bang(buf: ptr, fail: bool) -> int! {
 // The failing path must not leak, and the success path must not double-free.
 acquire(fail: bool) -> (ptr, string) {
     p = malloc(ALLOC_BYTES)
-    mem.set_byte(p, 0, 7)          // touch it: an untouched malloc/free pair is
-                                   // something GCC may elide entirely, which
-                                   // would hide a leak from the sanitiser gates
-    defer catch free(p)            // bail => release it here
+    mem.set_byte(p, 0, 7) // touch it: an untouched malloc/free pair is
+    // something GCC may elide entirely, which
+    // would hide a leak from the sanitiser gates
+    defer catch free(p) // bail => release it here
     if fail { return null, "nope" }
-    return p, ""                   // success => the caller owns it
+    return p, "" // success => the caller owns it
 }
 
 check(got: int, want: int, lbl: string) -> int {
@@ -131,11 +131,11 @@ main() {
     //     ASan / Valgrind CI gates cannot miss.
     i = 0
     while i < ITERATIONS {
-        _, fe = acquire(true)                     // bails: `defer catch` frees it
+        _, fe = acquire(true) // bails: `defer catch` frees it
         if fe == "" { println("FAIL: acquire(true) should fail"); fails = fails + 1 }
-        p, se = acquire(false)                    // succeeds: we own it
+        p, se = acquire(false) // succeeds: we own it
         if se != "" { println("FAIL: acquire(false) should succeed"); fails = fails + 1 }
-        free(p)                                   // ...so we free it exactly once
+        free(p) // ...so we free it exactly once
         i = i + 1
     }
 

@@ -40,8 +40,8 @@ inner(fail: bool) -> int! {
 // The shape under test: a resource held across an `expr!` that may propagate.
 outer(fail: bool) -> int! {
     p = malloc(ALLOC_BYTES)
-    mem.set_byte(p, 0, 42)      // see (1) above — defeats malloc/free elision
-    defer free(p)               // MUST run on the `expr!` propagation path too
+    mem.set_byte(p, 0, 42) // see (1) above — defeats malloc/free elision
+    defer free(p) // MUST run on the `expr!` propagation path too
     v = inner(fail)!
     return v
 }
@@ -65,8 +65,8 @@ outer2(fail: bool) -> int! {
 // fix they were skipped on the propagation path too, so a `T!` function leaked
 // its heap strings without the author having written a single `defer`.
 outer_heapstr(fail: bool) -> int! {
-    s = string.concat("heap-", "string")   // heap-allocated; compiler-tracked
-    v = inner(fail)!                       // propagates — `s` must still be freed
+    s = string.concat("heap-", "string") // heap-allocated; compiler-tracked
+    v = inner(fail)! // propagates — `s` must still be freed
     return v + string.length(s)
 }
 
@@ -124,7 +124,7 @@ main() {
     while i < ITERATIONS {
         _, _ = outer(true)
         _, _ = outer2(true)
-        _, _ = outer_heapstr(true)          // synthetic (compiler-pushed) cleanup
+        _, _ = outer_heapstr(true) // synthetic (compiler-pushed) cleanup
         _, _ = outer_two_bangs(true, false)
         _, _ = outer_two_bangs(false, true)
         _, _ = outer_two_bangs(false, false)

@@ -12,7 +12,7 @@
 // short-name alias for every public symbol (no leading underscore).
 // Private names stay invisible.
 
-import greeter (*)
+import greeter(*)
 
 extern exit(code: int)
 

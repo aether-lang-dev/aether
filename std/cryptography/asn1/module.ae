@@ -41,7 +41,7 @@ import std.string
 import std.strbuilder
 import std.list
 
-exports (
+exports(
     encode_set, encode_sequence_list, encode_tagged,
     TAG_BOOLEAN, TAG_INTEGER, TAG_BIT_STRING, TAG_OCTET_STRING,
     TAG_NULL, TAG_OID, TAG_SEQUENCE, TAG_SET,
@@ -76,8 +76,8 @@ TAG_BIT_STRING() -> int { return 0x03 }
 TAG_OCTET_STRING() -> int { return 0x04 }
 TAG_NULL() -> int { return 0x05 }
 TAG_OID() -> int { return 0x06 }
-TAG_SEQUENCE() -> int { return 0x30 }   // constructed | 0x10
-TAG_SET() -> int { return 0x31 }        // constructed | 0x11
+TAG_SEQUENCE() -> int { return 0x30 } // constructed | 0x10
+TAG_SET() -> int { return 0x31 } // constructed | 0x11
 TAG_NUMERIC_STRING() -> int { return 0x12 }
 TAG_PRINTABLE_STRING() -> int { return 0x13 }
 TAG_T61_STRING() -> int { return 0x14 }
@@ -113,7 +113,7 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 struct Reader {
-    buf: ptr      // std.bytes (NOT owned — caller frees)
+    buf: ptr // std.bytes (NOT owned — caller frees)
     pos: int
     len: int
     last_tag: int // tag of the most recent read_tlv (avoids a 3-tuple return)
@@ -420,7 +420,7 @@ read_oid(r: ptr) -> (string, string) {
     y = first - (x * 40)
     if x > 2 { x = 2; y = first - 80 }
     strbuilder.append_int(sb, x)
-    strbuilder.append_byte(sb, 46)   // '.'
+    strbuilder.append_byte(sb, 46) // '.'
     strbuilder.append_int(sb, y)
     // remaining: base-128 groups, high bit = continuation
     acc = 0
@@ -429,7 +429,7 @@ read_oid(r: ptr) -> (string, string) {
         b = bytes.get(content, i) & 0xFF
         acc = (acc << 7) | (b & 0x7F)
         if (b & 0x80) == 0 {
-            strbuilder.append_byte(sb, 46)   // '.'
+            strbuilder.append_byte(sb, 46) // '.'
             strbuilder.append_int(sb, acc)
             acc = 0
         }
@@ -617,7 +617,7 @@ encode_oid(dotted: string) -> ptr {
         ch = 0
         if i < n { ch = string_char_at_n(dotted, n, i) }
         if i == n {
-            ch = 46   // force flush of last arc
+            ch = 46 // force flush of last arc
         }
         if ch == 46 {
             if arccount == 0 {
@@ -662,7 +662,7 @@ emit_base128(content: ptr, off: int, v: int) -> int {
     while g >= 0 {
         shift = g * 7
         byteval = (v >> shift) & 0x7F
-        if g != 0 { byteval = byteval | 0x80 }   // continuation on all but last
+        if g != 0 { byteval = byteval | 0x80 } // continuation on all but last
         bytes.set(content, off, byteval)
         off = off + 1
         g = g - 1
@@ -743,7 +743,7 @@ read_bmp_string(r: ptr) -> (string, string) {
     }
     s = decode_bmp_string_bytes(content)
     bytes.free(content)
-    return s, err   // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
+    return s, err // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
 encode_universal_string(s: string) -> ptr {
@@ -758,7 +758,7 @@ read_universal_string(r: ptr) -> (string, string) {
     }
     s = decode_universal_string_bytes(content)
     bytes.free(content)
-    return s, err   // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
+    return s, err // reuse tracked (empty) err, not a fresh "" (avoids 1-byte leak)
 }
 
 encode_enumerated(v: int) -> ptr {

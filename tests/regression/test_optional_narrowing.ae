@@ -21,7 +21,7 @@ main() {
     let a: int? = 5
     var av = -1
     if a != none {
-        av = a + 10          // a narrowed to int
+        av = a + 10 // a narrowed to int
     }
     fails = fails + check_int(av, 15, "then-branch value")
 
@@ -31,7 +31,7 @@ main() {
     if b == none {
         bv = 0
     } else {
-        bv = b * 2           // b narrowed in the else
+        bv = b * 2 // b narrowed in the else
     }
     fails = fails + check_int(bv, 14, "else-branch value")
 
@@ -39,7 +39,7 @@ main() {
     let c: int? = none
     var entered = 0
     if c != none {
-        entered = 1          // not reached
+        entered = 1 // not reached
     }
     fails = fails + check_int(entered, 0, "none gates block")
 
@@ -48,8 +48,8 @@ main() {
     var sum = -1
     var viafn = -1
     if op != none {
-        sum = op.x + op.y    // op.x -> op.val.x
-        viafn = dist(op)     // op -> op.val (by value)
+        sum = op.x + op.y // op.x -> op.val.x
+        viafn = dist(op) // op -> op.val (by value)
     }
     fails = fails + check_int(sum, 7, "struct field narrowed")
     fails = fails + check_int(viafn, 7, "struct arg narrowed")
@@ -59,7 +59,7 @@ main() {
     var dv = -1
     if d != none {
         if d != none {
-            dv = d + 0       // narrowed int
+            dv = d + 0 // narrowed int
         }
     }
     fails = fails + check_int(dv, 9, "nested guard")
@@ -68,7 +68,7 @@ main() {
     let e: int? = 3
     var ev = 0
     if e != none {
-        if e > 2 {           // e narrowed to int for the comparison
+        if e > 2 { // e narrowed to int for the comparison
             ev = 1
         }
     }

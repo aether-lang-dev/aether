@@ -30,7 +30,7 @@ import std.string
 import std.bytes
 import std.strbuilder
 
-exports (
+exports(
     parse, encode,
     base64_decode, base64_encode
 )
@@ -43,11 +43,11 @@ b64_alphabet() -> string {
 
 // value of a base64 character, or -1 if not a base64 char (incl. '=').
 b64_val(c: int) -> int {
-    if c >= 65 { if c <= 90 { return c - 65 } }        // A-Z -> 0..25
-    if c >= 97 { if c <= 122 { return c - 71 } }       // a-z -> 26..51
-    if c >= 48 { if c <= 57 { return c + 4 } }         // 0-9 -> 52..61
-    if c == 43 { return 62 }                           // '+'
-    if c == 47 { return 63 }                           // '/'
+    if c >= 65 { if c <= 90 { return c - 65 } } // A-Z -> 0..25
+    if c >= 97 { if c <= 122 { return c - 71 } } // a-z -> 26..51
+    if c >= 48 { if c <= 57 { return c + 4 } } // 0-9 -> 52..61
+    if c == 43 { return 62 } // '+'
+    if c == 47 { return 63 } // '/'
     return -1
 }
 
@@ -57,36 +57,36 @@ base64_decode(s: string) -> (ptr, string) {
     n = string.length(s)
     out = bytes.new(0)
     outlen = 0
-    acc = 0      // accumulated bits
-    nbits = 0    // number of bits in acc
+    acc = 0 // accumulated bits
+    nbits = 0 // number of bits in acc
     i = 0
     while i < n {
         c = string_char_at_n(s, n, i)
         i = i + 1
         // skip whitespace
-        if c == 32 { } else {
-        if c == 9 { } else {
-        if c == 10 { } else {
-        if c == 13 { } else {
-        if c == 61 {
-            // '=' padding — stop consuming data bits
-            nbits = 0
-        } else {
-            v = b64_val(c)
-            if v < 0 {
-                bytes.free(out)
-                return null, "pem: invalid base64 character"
-            }
-            acc = (acc << 6) | v
-            nbits = nbits + 6
-            if nbits >= 8 {
-                nbits = nbits - 8
-                byteval = (acc >> nbits) & 0xFF
-                bytes.set(out, outlen, byteval)
-                outlen = outlen + 1
-            }
-        }
-        }}}}
+        if c == 32 {} else {
+            if c == 9 {} else {
+                if c == 10 {} else {
+                    if c == 13 {} else {
+                        if c == 61 {
+                            // '=' padding — stop consuming data bits
+                            nbits = 0
+                        } else {
+                            v = b64_val(c)
+                            if v < 0 {
+                                bytes.free(out)
+                                return null, "pem: invalid base64 character"
+                            }
+                            acc = (acc << 6) | v
+                            nbits = nbits + 6
+                            if nbits >= 8 {
+                                nbits = nbits - 8
+                                byteval = (acc >> nbits) & 0xFF
+                                bytes.set(out, outlen, byteval)
+                                outlen = outlen + 1
+                            }
+                        }
+                    } } } }
     }
     return out, ""
 }
@@ -115,8 +115,8 @@ base64_encode(b: ptr) -> string {
         trip = b0 << 16
         emit_b64_char(sb, alpha, (trip >> 18) & 0x3F)
         emit_b64_char(sb, alpha, (trip >> 12) & 0x3F)
-        strbuilder.append_byte(sb, 61)   // '='
-        strbuilder.append_byte(sb, 61)   // '='
+        strbuilder.append_byte(sb, 61) // '='
+        strbuilder.append_byte(sb, 61) // '='
     }
     if rem == 2 {
         b0 = bytes.get(b, i)
@@ -125,7 +125,7 @@ base64_encode(b: ptr) -> string {
         emit_b64_char(sb, alpha, (trip >> 18) & 0x3F)
         emit_b64_char(sb, alpha, (trip >> 12) & 0x3F)
         emit_b64_char(sb, alpha, (trip >> 6) & 0x3F)
-        strbuilder.append_byte(sb, 61)   // '='
+        strbuilder.append_byte(sb, 61) // '='
     }
     return strbuilder.finish(sb)
 }
@@ -200,7 +200,7 @@ encode(label: string, der: ptr) -> (string, string) {
         if e > blen { e = blen }
         line = string.substring(b64, i, e)
         append_str(sb, line)
-        strbuilder.append_byte(sb, 10)   // '\n'
+        strbuilder.append_byte(sb, 10) // '\n'
         i = e
     }
     append_str(sb, "-----END ")

@@ -115,18 +115,18 @@ main() {
     nonce = from_hex("101112131415161718191a1b1c1d1e1f")
 
     // AAD boundary sweep (empty PT).
-    fails = fails + kat("c1 empty",    key, nonce, "", "", "4f9c278211bec9316bf68f46ee8b2ec6")
-    fails = fails + kat("c2 aad1",     key, nonce, "30", "", "cccb674fe18a09a285d6ab11b35675c0")
-    fails = fails + kat("c9 aad8",     key, nonce, "3031323334353637", "", "865c594093a9edee2c1d6384ccb4939e")
-    fails = fails + kat("c10 aad9",    key, nonce, "303132333435363738", "", "24f13284a0f90f906b18c7e4061c0896")
-    fails = fails + kat("c17 aad16",   key, nonce, "303132333435363738393a3b3c3d3e3f", "", "e4230cdb8330ee9dc0cfd7c7b346e6dc")
-    fails = fails + kat("c18 aad17",   key, nonce, "303132333435363738393a3b3c3d3e3f40", "", "bd8851cd3af9847844839a791dd70e8c")
+    fails = fails + kat("c1 empty", key, nonce, "", "", "4f9c278211bec9316bf68f46ee8b2ec6")
+    fails = fails + kat("c2 aad1", key, nonce, "30", "", "cccb674fe18a09a285d6ab11b35675c0")
+    fails = fails + kat("c9 aad8", key, nonce, "3031323334353637", "", "865c594093a9edee2c1d6384ccb4939e")
+    fails = fails + kat("c10 aad9", key, nonce, "303132333435363738", "", "24f13284a0f90f906b18c7e4061c0896")
+    fails = fails + kat("c17 aad16", key, nonce, "303132333435363738393a3b3c3d3e3f", "", "e4230cdb8330ee9dc0cfd7c7b346e6dc")
+    fails = fails + kat("c18 aad17", key, nonce, "303132333435363738393a3b3c3d3e3f40", "", "bd8851cd3af9847844839a791dd70e8c")
 
     // Plaintext boundary sweep (empty AAD).
-    fails = fails + kat("c34 pt1",     key, nonce, "", "20", "e8dd576aba1cd3e6fc704de02aedb79588")
-    fails = fails + kat("c265 pt8",    key, nonce, "", "2021222324252627", "e8c3deee246cc5eae455ef6b33b782a3dd91ed6695373c27")
-    fails = fails + kat("c529 pt16",   key, nonce, "", "202122232425262728292a2b2c2d2e2f", "e8c3deee246cc5eae3e872313897a2bb9eaa915c9dd3245d77048f24d46d27a7")
-    fails = fails + kat("c1057 pt32",  key, nonce, "", "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "e8c3deee246cc5eae3e872313897a2bb6089aa3e15e80307970f2d1f006654c2aaa5fa172cb9f07d07463cefc7440bc1")
+    fails = fails + kat("c34 pt1", key, nonce, "", "20", "e8dd576aba1cd3e6fc704de02aedb79588")
+    fails = fails + kat("c265 pt8", key, nonce, "", "2021222324252627", "e8c3deee246cc5eae455ef6b33b782a3dd91ed6695373c27")
+    fails = fails + kat("c529 pt16", key, nonce, "", "202122232425262728292a2b2c2d2e2f", "e8c3deee246cc5eae3e872313897a2bb9eaa915c9dd3245d77048f24d46d27a7")
+    fails = fails + kat("c1057 pt32", key, nonce, "", "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f", "e8c3deee246cc5eae3e872313897a2bb6089aa3e15e80307970f2d1f006654c2aaa5fa172cb9f07d07463cefc7440bc1")
 
     // Combined PT (9 bytes) + AAD (2 bytes).
     fails = fails + kat("c300 pt9+ad2", key, nonce, "3031", "202122232425262728", "30fcefad28275df1a3cfaeedc161bed25c45cfae2ba5ede064")

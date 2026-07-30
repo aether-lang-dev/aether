@@ -30,7 +30,7 @@ render(v: ptr) -> string {
             num_s, num_err = json.stringify(v)
             match (num_err) {
                 "" -> { return num_s }
-                _  -> { return "<number?>" }
+                _ -> { return "<number?>" }
             }
         }
         3 -> {
@@ -69,9 +69,9 @@ main() {
     // ---- Building an object and serialising it.
 
     obj = json.create_object()
-    _ = json.object_set(obj, "name",    json.create_string("Aether"))
+    _ = json.object_set(obj, "name", json.create_string("Aether"))
     _ = json.object_set(obj, "version", json.create_number(0.21))
-    _ = json.object_set(obj, "ready",   json.create_bool(1))
+    _ = json.object_set(obj, "ready", json.create_bool(1))
 
     has_name = json.object_has(obj, "name")
     println("\nBuilt object, has 'name': ${has_name}")

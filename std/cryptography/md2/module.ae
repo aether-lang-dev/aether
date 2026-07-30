@@ -23,16 +23,16 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     md2_hex, md2_bytes
 )
 
 struct Md2Ctx {
-    state: ptr        // std.bytes buffer, 16 bytes
-    checksum: ptr     // std.bytes buffer, 16 bytes
-    buffer: ptr       // std.bytes buffer, 16 bytes
-    count: int        // number of bytes currently in buffer (0..15)
+    state: ptr // std.bytes buffer, 16 bytes
+    checksum: ptr // std.bytes buffer, 16 bytes
+    buffer: ptr // std.bytes buffer, 16 bytes
+    count: int // number of bytes currently in buffer (0..15)
 }
 
 const PI_SUBST: int[256] = [

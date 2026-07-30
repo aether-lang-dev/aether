@@ -5,49 +5,49 @@ main() {
     // Arithmetic compound assignments
     a = 10
     a += 5
-    println(a)    // expect: 15
+    println(a) // expect: 15
 
     b = 20
     b -= 7
-    println(b)    // expect: 13
+    println(b) // expect: 13
 
     c = 4
     c *= 3
-    println(c)    // expect: 12
+    println(c) // expect: 12
 
     d = 15
     d /= 3
-    println(d)    // expect: 5
+    println(d) // expect: 5
 
     e = 17
     e %= 5
-    println(e)    // expect: 2
+    println(e) // expect: 2
 
     // Bitwise compound assignments
     f = 255
     f &= 15
-    println(f)    // expect: 15
+    println(f) // expect: 15
 
     g = 10
     g |= 5
-    println(g)    // expect: 15
+    println(g) // expect: 15
 
     h = 255
     h ^= 15
-    println(h)    // expect: 240
+    println(h) // expect: 240
 
     i = 1
     i <<= 4
-    println(i)    // expect: 16
+    println(i) // expect: 16
 
     j = 64
     j >>= 2
-    println(j)    // expect: 16
+    println(j) // expect: 16
 
     // Compound assignment in a loop
     sum = 0
-    for (k = 1; k <= 10; k++) {
+    for (k = 1; k <= 10; k ++) {
         sum += k
     }
-    println(sum)  // expect: 55
+    println(sum) // expect: 55
 }

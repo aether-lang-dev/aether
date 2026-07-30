@@ -53,7 +53,7 @@ main() {
 
     // Cors with a wildcard origin so the test is hermetic.
     use_err = middleware.use_cors(raw, "*", "GET, POST", "Content-Type",
-                                  0, 600)
+        0, 600)
     if use_err != "" {
         println("FAIL: cors install: ${use_err}")
         exit(1)

@@ -6,7 +6,7 @@
 
 main() {
     outer = || {
-        inner = |x: int| { return x * 2 }
+        inner = | x: int | { return x * 2 }
         call(inner, 3)
     }
     call(outer)

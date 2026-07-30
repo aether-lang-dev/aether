@@ -30,13 +30,13 @@ label_for(x: int) -> int {
     int r = 0
     switch x {
         case 0:
-            r = 100
+        r = 100
         case 1:
-            r = 200
+        r = 200
         case 2:
-            r = 300
+        r = 300
         default:
-            r = 999
+        r = 999
     }
     return r
 }
@@ -48,7 +48,7 @@ dispatch(x: int) -> int {
         case 3: return 30
         default: return -1
     }
-    return -2   // unreachable; pins that no fallthrough leaks past return.
+    return -2 // unreachable; pins that no fallthrough leaks past return.
 }
 
 main() {

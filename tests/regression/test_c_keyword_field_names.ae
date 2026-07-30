@@ -12,9 +12,9 @@ import std.string
 
 extern exit(code: int)
 
-struct Point { register: int  signed: int }
+struct Point { register: int signed: int }
 
-message Bump { volatile: int  static: int }
+message Bump { volatile: int static: int }
 message Done {}
 
 actor Counter {
@@ -24,7 +24,7 @@ actor Counter {
             total = total + volatile + static
         }
         Done -> {
-            println(total)          // 3+4 + 10+20 = 37
+            println(total) // 3+4 + 10+20 = 37
         }
     }
 }

@@ -42,9 +42,9 @@ main() {
     opts = map.new()
     map.put(opts, "include", "monorepo.*")
     pkg_name = "monorepo"
-    pkg_include = "${pkg_name}*"          // heap (interp result)
+    pkg_include = "${pkg_name}*" // heap (interp result)
     pkg_include, _ = map.get(opts, "include")
-    if string.length(pkg_include) != 10 {  // "monorepo.*"
+    if string.length(pkg_include) != 10 { // "monorepo.*"
         println("FAIL 1: length = ${string.length(pkg_include)}, expected 10")
         exit(1)
     }
@@ -56,7 +56,7 @@ main() {
     // just AST_STRING_INTERP.
     opts2 = map.new()
     map.put(opts2, "k", "value-from-map")
-    held = string.concat("prefix-", "old")  // heap
+    held = string.concat("prefix-", "old") // heap
     held, _ = map.get(opts2, "k")
     if string.length(held) != 14 {
         println("FAIL 2: length = ${string.length(held)}, expected 14")
@@ -72,8 +72,8 @@ main() {
     opts3 = map.new()
     map.put(opts3, "x", "ex")
     map.put(opts3, "y", "why")
-    name3 = "starter-name"      // bare literal (not heap)
-    name3 = string.concat("n=", name3)  // heap
+    name3 = "starter-name" // bare literal (not heap)
+    name3 = string.concat("n=", name3) // heap
     name3, _ = map.get(opts3, "x")
     if string.length(name3) != 2 {
         println("FAIL 3: length = ${string.length(name3)}, expected 2")

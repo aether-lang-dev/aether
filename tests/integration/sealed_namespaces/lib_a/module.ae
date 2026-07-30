@@ -1,4 +1,4 @@
-exports (greet)
+exports(greet)
 
 import lib_b
 

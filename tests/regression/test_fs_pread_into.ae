@@ -26,11 +26,11 @@ main() {
     // binary-safe path is exercised.
     src = bytes.new(40)
     bytes.set_le64(src, 0, 1)
-    bytes.set_le64(src, 8, 256)                   // 0x0100: low byte 0x00 then 0x01
-    bytes.set_le64(src, 16, 72057594037927936)    // 2^56: seven 0x00 bytes then 0x01
-    bytes.set_le64(src, 24, -1)                    // all 0xFF
-    bytes.set_le64(src, 32, 305419896)             // 0x12345678
-    data = bytes.finish(src, 40)                   // consumes src
+    bytes.set_le64(src, 8, 256) // 0x0100: low byte 0x00 then 0x01
+    bytes.set_le64(src, 16, 72057594037927936) // 2^56: seven 0x00 bytes then 0x01
+    bytes.set_le64(src, 24, -1) // all 0xFF
+    bytes.set_le64(src, 32, 305419896) // 0x12345678
+    data = bytes.finish(src, 40) // consumes src
     werr = fs.write_binary(path, data, 40)
     if werr != "" { print("FAIL write_binary: ${werr}\n"); exit(1) }
 
@@ -92,8 +92,8 @@ main() {
 
     // LE cursor 16/32-bit readers over a hand-built buffer.
     small = bytes.new(6)
-    bytes.set_le16(small, 0, 4660)          // 0x1234
-    bytes.set_le32(small, 2, 287454020)     // 0x11223344
+    bytes.set_le16(small, 0, 4660) // 0x1234
+    bytes.set_le32(small, 2, 287454020) // 0x11223344
     sc, scerr = cursor.new(small)
     if scerr != "" { print("FAIL small cursor.new\n"); exit(1) }
     if cursor.read_le_u16(sc) != 4660 { print("FAIL le16\n"); exit(1) }

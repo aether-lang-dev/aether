@@ -43,7 +43,7 @@
 
 import std.net
 
-exports (
+exports(
     ipc_parent_channel_raw,
     parent_channel, write, write_close
 )
