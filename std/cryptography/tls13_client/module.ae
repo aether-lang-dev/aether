@@ -16,7 +16,8 @@
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
 //   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
-//     revocation check; no mTLS
+//     revocation check; mTLS: sends an empty Certificate on CertificateRequest
+//     (correct decline; presenting a client cert is a follow-up)
 //
 // SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
 // hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
@@ -59,7 +60,8 @@
 // auth failure (not a silent RST); close_conn sends close_notify; conn_recv
 // surfaces inbound alerts as typed errors. REVOCATION: a stapled OCSP response
 // (RFC 6960) saying revoked fails the handshake closed (status parsed, not
-// responder-signature-verified). Remaining limits: no mTLS; OCSP is
+// responder-signature-verified). Remaining limits: mTLS declines (empty Certificate) but does not yet PRESENT a
+// client cert + CertificateVerify; OCSP is
 // stapling-only (no CRL / no OCSP fetch); no responder-sig verification.
 //
 // This module separates the PURE state machine (transcript, key derivation,
@@ -116,6 +118,7 @@ exports(
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
 const HS_ENCRYPTED_EXTENSIONS = 8
 const HS_CERTIFICATE = 11
+const HS_CERTIFICATE_REQUEST = 13
 const HS_CERTIFICATE_VERIFY = 15
 const HS_FINISHED = 20
 
@@ -961,13 +964,37 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
                 send_alert_hs(sock, fctx, ALERT_LEVEL_FATAL, ALERT_DECRYPT_ERROR)
                 tls13_record.free_ctx(fctx)
             } else {
+                cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+                // Application-traffic secrets are derived over the transcript
+                // through the SERVER Finished (RFC 8446 §7.1), i.e. BEFORE any
+                // client message. Capture th_sf first so the app keys match the
+                // server's regardless of a client Certificate that follows.
                 th_sf = transcript_hash_algo(tr, hash_algo)
                 ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
                 c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
                 s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
-                cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
+
+                // Mutual TLS: if the server sent a CertificateRequest, the client
+                // MUST send its own Certificate before Finished (RFC 8446 §4.4.2).
+                // With no client cert configured we send an EMPTY Certificate (the
+                // correct decline). It is folded into the transcript so the client
+                // Finished MAC (computed next, over th_cvd) covers it — but AFTER
+                // th_sf, so it does not disturb the app-traffic keys.
+                // (Presenting a real client cert + CertificateVerify is next.)
+                if flight_has_cert_request(fl, fllen) == 1 {
+                    ccert = build_empty_certificate()
+                    ccert_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ccert, bytes.length(ccert))
+                    ccert_s = bytes.to_string(ccert_rec, bytes.length(ccert_rec))
+                    net.tcp_send_n_raw(sock, ccert_s, bytes.length(ccert_rec))
+                    transcript_add(tr, ccert, bytes.length(ccert))
+                    bytes.free(ccert); bytes.free(ccert_rec)
+                }
+                // Client Finished MAC is over the transcript through the client
+                // Certificate (if any) — RFC 8446 §4.4.4.
+                th_cvd = transcript_hash_algo(tr, hash_algo)
+                cvd = finished_verify_data_algo(hs_client_secret(keys), th_cvd, hash_len, hash_algo, hash_len)
+                bytes.free(th_cvd)
                 cfin = build_finished_msg(cvd)
-                cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
                 cfin_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cfin, bytes.length(cfin))
                 cfs = bytes.to_string(cfin_rec, bytes.length(cfin_rec))
                 net.tcp_send_n_raw(sock, cfs, bytes.length(cfin_rec))
@@ -1024,6 +1051,39 @@ fn flight_complete(fl: ptr, flen: int) -> int {
         }
     }
     return 0
+}
+
+// Did the server send a CertificateRequest (type 13) in this flight? That is
+// the mutual-TLS ask — the client must then send its own Certificate (empty if
+// it has none) before its Finished (RFC 8446 §4.3.2 / §4.4.2).
+fn flight_has_cert_request(fl: ptr, flen: int) -> int {
+    p = 0
+    while p + 4 <= flen {
+        mt = bytes.get(fl, p) & 0xFF
+        ml = ((bytes.get(fl, p + 1) & 0xFF) << 16) | ((bytes.get(fl, p + 2) & 0xFF) << 8) | (bytes.get(fl, p + 3) & 0xFF)
+        if p + 4 + ml > flen { return 0 }
+        if mt == HS_CERTIFICATE_REQUEST { return 1 }
+        p = p + 4 + ml
+    }
+    return 0
+}
+
+// An empty client Certificate message (RFC 8446 §4.4.2): handshake type 11,
+// body = certificate_request_context<1> (empty) || certificate_list<3> (empty).
+// Sent when the server sent a CertificateRequest but we have no client cert —
+// the correct decline, letting the server decide whether to proceed.
+fn build_empty_certificate() -> ptr {
+    m = bytes.new(8)
+    bytes.set(m, 7, 0)
+    bytes.set(m, 0, HS_CERTIFICATE)   // msg type 11
+    bytes.set(m, 1, 0)                // uint24 length = 4
+    bytes.set(m, 2, 0)
+    bytes.set(m, 3, 4)
+    bytes.set(m, 4, 0)                // certificate_request_context<1> = empty
+    bytes.set(m, 5, 0)                // certificate_list<3> = empty (len 0)
+    bytes.set(m, 6, 0)
+    bytes.set(m, 7, 0)
+    return m
 }
 
 // Fold every complete handshake message in the flight into the transcript, in
