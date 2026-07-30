@@ -16,8 +16,8 @@
 //   - server CertificateVerify: ECDSA-P256 or RSA-PSS-rsae-SHA256
 //   - full chain validation (see SERVER AUTHENTICATION below)
 //   - session resumption (PSK) + 0-RTT early data; TLS alerts; OCSP-staple
-//     revocation check; mTLS: sends an empty Certificate on CertificateRequest
-//     (correct decline; presenting a client cert is a follow-up)
+//     revocation check; mTLS via connect_mtls (presents an ECDSA-P256 client
+//     cert + CertificateVerify) or an empty-cert decline on connect()
 //
 // SERVER AUTHENTICATION. connect() fails closed unless ALL of the following
 // hold, in order (RFC 8446 §4.4.3 + RFC 5280/6125):
@@ -60,8 +60,8 @@
 // auth failure (not a silent RST); close_conn sends close_notify; conn_recv
 // surfaces inbound alerts as typed errors. REVOCATION: a stapled OCSP response
 // (RFC 6960) saying revoked fails the handshake closed (status parsed, not
-// responder-signature-verified). Remaining limits: mTLS declines (empty Certificate) but does not yet PRESENT a
-// client cert + CertificateVerify; OCSP is
+// responder-signature-verified). Remaining limits: mTLS presents an ECDSA-P256 client cert only (no RSA/Ed25519
+// client key yet, single-cert chain); OCSP is
 // stapling-only (no CRL / no OCSP fetch); no responder-sig verification.
 //
 // This module separates the PURE state machine (transcript, key derivation,
@@ -109,7 +109,7 @@ exports(
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, connect_pq, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    connect, connect_mtls, connect_pq, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data,
     verify_flight_auth
@@ -609,6 +609,20 @@ fn ecdhe_shared(group: int, priv: ptr, server_ks: ptr, server_ks_len: int) -> (p
 // and chain to a trusted anchor — failing closed on any of them — before the
 // Finished MACs confirm both sides agree on keys.
 connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
+    return connect_ex(host, port, x25519_priv, null, 0, null)
+}
+
+// Mutual-TLS connect: like connect(), but when the server sends a
+// CertificateRequest the client presents `client_cert` (leaf DER) + a
+// CertificateVerify signed with `client_key` (a 32-byte ECDSA-P256 scalar;
+// SignatureScheme ecdsa_secp256r1_sha256). All the same server authentication
+// applies. If the server does NOT request a client cert, behaves exactly like
+// connect() (the cert/key are simply unused).
+connect_mtls(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
+    return connect_ex(host, port, x25519_priv, client_cert, client_cert_len, client_key)
+}
+
+fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
     sock = net.tcp_connect_raw(host, port)
     if sock == null { return null, "connect failed" }
     // Initial key exchange group is x25519, using the caller's private scalar.
@@ -754,8 +768,7 @@ connect(host: string, port: int, x25519_priv: ptr) -> (ptr, string) {
 
     // Derive keys from the (classical) 32-byte ECDHE secret and run the shared
     // post-ServerHello handshake tail (flight read, auth, Finished).
-    result, result_err = run_handshake_tail(sock, rio, tr, host, shared, 32,
-        parsed.cipher_suite)
+    result, result_err = run_handshake_tail(sock, rio, tr, host, shared, 32, parsed.cipher_suite, client_cert, client_cert_len, client_key)
 
     bytes.free(shared)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
@@ -869,7 +882,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
             result_err = sherr2
             if string.equals(sherr2, "") == 1 { result_err = "PQ key exchange failed" }
         } else {
-            result, result_err = run_handshake_tail(sock, rio, tr, host, shared, shared_len, parsed.cipher_suite)
+            result, result_err = run_handshake_tail(sock, rio, tr, host, shared, shared_len, parsed.cipher_suite, null, 0, null)
             bytes.free(shared)
         }
     }
@@ -894,7 +907,8 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // Returns (conn, "") or (null, err). Does NOT free `shared`, `tr`, sh/shrec,
 // or the ClientHello — the caller does.
 fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
-    shared: ptr, shared_len: int, cipher_suite: int) -> (ptr, string) {
+    shared: ptr, shared_len: int, cipher_suite: int,
+    client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 
@@ -975,19 +989,40 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
                 s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
 
                 // Mutual TLS: if the server sent a CertificateRequest, the client
-                // MUST send its own Certificate before Finished (RFC 8446 §4.4.2).
-                // With no client cert configured we send an EMPTY Certificate (the
-                // correct decline). It is folded into the transcript so the client
-                // Finished MAC (computed next, over th_cvd) covers it — but AFTER
-                // th_sf, so it does not disturb the app-traffic keys.
-                // (Presenting a real client cert + CertificateVerify is next.)
+                // MUST send its own Certificate before Finished (RFC 8446 §4.4.2),
+                // folded into the transcript AFTER th_sf (so it doesn't disturb
+                // the app-traffic keys). Two cases:
+                //   - client_cert + client_key given: present the cert, then a
+                //     CertificateVerify signing the transcript through the client
+                //     Certificate with the client key (§4.4.3, "client" context).
+                //   - otherwise: send an EMPTY Certificate (the correct decline).
                 if flight_has_cert_request(fl, fllen) == 1 {
-                    ccert = build_empty_certificate()
-                    ccert_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ccert, bytes.length(ccert))
-                    ccert_s = bytes.to_string(ccert_rec, bytes.length(ccert_rec))
-                    net.tcp_send_n_raw(sock, ccert_s, bytes.length(ccert_rec))
-                    transcript_add(tr, ccert, bytes.length(ccert))
-                    bytes.free(ccert); bytes.free(ccert_rec)
+                    if client_cert != null && client_key != null {
+                        ccert = build_client_certificate(client_cert, client_cert_len)
+                        ccert_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ccert, bytes.length(ccert))
+                        ccert_s = bytes.to_string(ccert_rec, bytes.length(ccert_rec))
+                        net.tcp_send_n_raw(sock, ccert_s, bytes.length(ccert_rec))
+                        transcript_add(tr, ccert, bytes.length(ccert))
+                        // CertificateVerify: sign the transcript-through-client-
+                        // Certificate. ECDSA-P256 only in this cut.
+                        th_ccv = transcript_hash_algo(tr, hash_algo)
+                        knonce = rand_into(32)
+                        cvsig = tls13_cert.sign_client_cert_verify_ecdsa_p256(client_key, th_ccv, hash_len, knonce)
+                        ccv = build_cert_verify_msg(0x0403, cvsig, bytes.length(cvsig))
+                        ccv_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ccv, bytes.length(ccv))
+                        ccv_s = bytes.to_string(ccv_rec, bytes.length(ccv_rec))
+                        net.tcp_send_n_raw(sock, ccv_s, bytes.length(ccv_rec))
+                        transcript_add(tr, ccv, bytes.length(ccv))
+                        bytes.free(th_ccv); bytes.free(knonce); bytes.free(cvsig)
+                        bytes.free(ccert); bytes.free(ccert_rec); bytes.free(ccv); bytes.free(ccv_rec)
+                    } else {
+                        ccert = build_empty_certificate()
+                        ccert_rec = tls13_record.seal_record(cli_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ccert, bytes.length(ccert))
+                        ccert_s = bytes.to_string(ccert_rec, bytes.length(ccert_rec))
+                        net.tcp_send_n_raw(sock, ccert_s, bytes.length(ccert_rec))
+                        transcript_add(tr, ccert, bytes.length(ccert))
+                        bytes.free(ccert); bytes.free(ccert_rec)
+                    }
                 }
                 // Client Finished MAC is over the transcript through the client
                 // Certificate (if any) — RFC 8446 §4.4.4.
@@ -1185,6 +1220,61 @@ fn flight_has_early_data_ext(fl: ptr, flen: int) -> int {
         p = p + 4 + ml
     }
     return 0
+}
+
+// A client Certificate message (RFC 8446 §4.4.2) carrying ONE certificate:
+// type 11, body = context<1>(empty) || certificate_list<3> where the single
+// CertificateEntry is cert_data<3> || extensions<2>(empty). `cert_der` is the
+// client's leaf certificate DER. (Single-cert chain; intermediates would append
+// more entries — out of scope for the first cut.)
+fn build_client_certificate(cert_der: ptr, cert_len: int) -> ptr {
+    // entry = cert_data<3>(cert) + extensions<2>(0) = 3 + cert_len + 2
+    entry_len = 3 + cert_len + 2
+    // body = context<1>(0) + certificate_list<3>(entry) = 1 + 3 + entry_len
+    body_len = 1 + 3 + entry_len
+    total = 4 + body_len
+    m = bytes.new(total)
+    bytes.set(m, total - 1, 0)
+    bytes.set(m, 0, HS_CERTIFICATE)
+    bytes.set(m, 1, (body_len >> 16) & 0xFF)
+    bytes.set(m, 2, (body_len >> 8) & 0xFF)
+    bytes.set(m, 3, body_len & 0xFF)
+    p = 4
+    bytes.set(m, p, 0)                              // certificate_request_context<1> empty
+    p = p + 1
+    bytes.set(m, p, (entry_len >> 16) & 0xFF)       // certificate_list<3> length
+    bytes.set(m, p + 1, (entry_len >> 8) & 0xFF)
+    bytes.set(m, p + 2, entry_len & 0xFF)
+    p = p + 3
+    bytes.set(m, p, (cert_len >> 16) & 0xFF)        // cert_data<3> length
+    bytes.set(m, p + 1, (cert_len >> 8) & 0xFF)
+    bytes.set(m, p + 2, cert_len & 0xFF)
+    p = p + 3
+    bytes.copy_from_bytes(m, p, cert_der, 0, cert_len)
+    p = p + cert_len
+    bytes.set(m, p, 0)                              // extensions<2> empty
+    bytes.set(m, p + 1, 0)
+    return m
+}
+
+// A client CertificateVerify message (RFC 8446 §4.4.3): type 15, body =
+// SignatureScheme(2) || signature<2>. `scheme` is the code point (e.g. 0x0403);
+// `sig`/`sig_len` is the DER signature.
+fn build_cert_verify_msg(scheme: int, sig: ptr, sig_len: int) -> ptr {
+    body_len = 2 + 2 + sig_len
+    total = 4 + body_len
+    m = bytes.new(total)
+    bytes.set(m, total - 1, 0)
+    bytes.set(m, 0, HS_CERTIFICATE_VERIFY)
+    bytes.set(m, 1, (body_len >> 16) & 0xFF)
+    bytes.set(m, 2, (body_len >> 8) & 0xFF)
+    bytes.set(m, 3, body_len & 0xFF)
+    bytes.set(m, 4, (scheme >> 8) & 0xFF)
+    bytes.set(m, 5, scheme & 0xFF)
+    bytes.set(m, 6, (sig_len >> 8) & 0xFF)
+    bytes.set(m, 7, sig_len & 0xFF)
+    bytes.copy_from_bytes(m, 8, sig, 0, sig_len)
+    return m
 }
 
 fn build_finished_msg(vd: ptr) -> ptr {
