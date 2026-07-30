@@ -30,9 +30,12 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# Print the first differing lines of two files with line numbers.
-# awk-based because the Windows MSYS2 CI shell ships no diff/cmp
-# (diffutils is not installed there).
+# Print the first differing lines of two files with line numbers,
+# then a byte-level hex first-difference. awk/od-based because the
+# Windows MSYS2 CI shell ships no diff/cmp (diffutils not installed).
+# The hex pass exists because a text compare can read two files as
+# equal while their bytes differ (embedded NUL truncates awk's line
+# strings); od gives ground truth.
 fmt_gate_dump_diff() {
     awk 'NR==FNR { a[FNR] = $0; n = FNR; next }
          FNR<=n && $0 != a[FNR] && shown < 12 {
@@ -41,6 +44,26 @@ fmt_gate_dump_diff() {
          }
          END { if (FNR != n) printf "    (line counts differ: %d vs %d)\n", n, FNR }' \
         "$1" "$2"
+    od -An -v -tx1 "$1" | tr -s ' ' '\n' | grep -v '^$' > "${1}.hex"
+    od -An -v -tx1 "$2" | tr -s ' ' '\n' | grep -v '^$' > "${2}.hex"
+    awk 'NR==FNR { a[FNR] = $0; n = FNR; next }
+         FNR<=n && $0 != a[FNR] && !hit {
+             hit = FNR
+             printf "    first byte difference at offset %d: %s vs %s\n", FNR - 1, a[FNR], $0
+         }
+         END {
+             if (!hit && FNR != n) printf "    (byte counts differ: %d vs %d)\n", n, FNR
+             else if (!hit) printf "    (byte streams identical: %d bytes)\n", n
+         }' "${1}.hex" "${2}.hex"
+    # Context: 32 bytes around the first difference from each file.
+    off=$(awk 'NR==FNR { a[FNR] = $0; n = FNR; next }
+               FNR<=n && $0 != a[FNR] { print FNR - 1; exit }' "${1}.hex" "${2}.hex")
+    if [ -n "$off" ]; then
+        start=$((off > 16 ? off - 16 : 0))
+        echo "    A context:"; od -An -c -j "$start" -N 48 "$1" | sed 's/^/      /'
+        echo "    B context:"; od -An -c -j "$start" -N 48 "$2" | sed 's/^/      /'
+    fi
+    rm -f "${1}.hex" "${2}.hex"
 }
 
 cd "$ROOT" || exit 1
