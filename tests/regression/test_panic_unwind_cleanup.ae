@@ -98,6 +98,9 @@ main() {
     if caught != 300 {
         fail("expected 300 catches, got ${caught}")
     }
+    // The macOS leaks(1) CI gate demands a fully clean exit: release the
+    // map (and the escaped value it owns) before the final report.
+    map.free(m)
     println("PASS 1: panic-dropped allocations drained (LeakSanitizer-verified in CI)")
     println("PASS 2: escaped value untouched by drain")
     println("PASS 3: freed-before-panic not double-freed")

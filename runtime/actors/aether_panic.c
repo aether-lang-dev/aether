@@ -60,115 +60,6 @@ AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
 
 static AetherDeathHook death_hook = NULL;
 
-// ---------------------------------------------------------------------------
-// Allocation journal (#1301). Entries tag the frame depth at track time;
-// a panic drains the innermost depth's entries, a normal pop re-tags them
-// to the parent frame (they are still owned by live C locals whose
-// deferred frees will run later). At depth 0 nothing can unwind past an
-// allocation, so the journal empties instead of re-tagging.
-// ---------------------------------------------------------------------------
-
-typedef struct {
-    const void* ptr;
-    AetherUnwindFree free_fn;
-    int depth;
-} AetherUnwindEntry;
-
-typedef struct {
-    AetherUnwindEntry* items;
-    int count;
-    int capacity;
-} AetherUnwindJournal;
-
-static AETHER_TLS_SHARED AetherUnwindJournal tls_journal = { NULL, 0, 0 };
-
-void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
-    if (tls_stack.depth == 0 || !p || !free_fn) return;
-    // Re-tracking an already-journaled pointer updates in place: the
-    // ownership handoff shapes (callee returns, caller re-arms its own
-    // defer) must never accumulate two entries for one allocation.
-    for (int i = tls_journal.count - 1; i >= 0; i--) {
-        if (tls_journal.items[i].ptr == p) {
-            tls_journal.items[i].free_fn = free_fn;
-            tls_journal.items[i].depth = tls_stack.depth;
-            return;
-        }
-    }
-    if (tls_journal.count == tls_journal.capacity) {
-        int cap = tls_journal.capacity ? tls_journal.capacity * 2 : 32;
-        AetherUnwindEntry* grown =
-            (AetherUnwindEntry*)realloc(tls_journal.items,
-                                        (size_t)cap * sizeof(AetherUnwindEntry));
-        if (!grown) return;  // OOM: skip journaling; worst case is the old leak
-        tls_journal.items = grown;
-        tls_journal.capacity = cap;
-    }
-    tls_journal.items[tls_journal.count].ptr = p;
-    tls_journal.items[tls_journal.count].free_fn = free_fn;
-    tls_journal.items[tls_journal.count].depth = tls_stack.depth;
-    tls_journal.count++;
-}
-
-void aether_unwind_track_if(const void* p, int owned, AetherUnwindFree free_fn) {
-    if (owned) aether_unwind_track(p, free_fn);
-}
-
-void aether_unwind_forget(const void* p) {
-    if (tls_journal.count == 0 || !p) return;
-    // Scan newest-first: frees are overwhelmingly LIFO.
-    for (int i = tls_journal.count - 1; i >= 0; i--) {
-        if (tls_journal.items[i].ptr == p) {
-            tls_journal.items[i] = tls_journal.items[tls_journal.count - 1];
-            tls_journal.count--;
-            return;
-        }
-    }
-}
-
-int aether_unwind_journal_size(void) {
-    return tls_journal.count;
-}
-
-void aether_unwind_thread_cleanup(void) {
-    free(tls_journal.items);
-    tls_journal.items = NULL;
-    tls_journal.count = 0;
-    tls_journal.capacity = 0;
-}
-
-// Free every entry tagged at `depth` or deeper and remove it. Runs in
-// aether_panic() before the longjmp, while the allocations' owning
-// stack frames are still intact (the entries themselves are TLS, so
-// intactness only matters for the free functions, which take the raw
-// pointer and touch nothing else).
-static void aether_unwind_drain(int depth) {
-    int w = 0;
-    for (int i = 0; i < tls_journal.count; i++) {
-        if (tls_journal.items[i].depth >= depth) {
-            tls_journal.items[i].free_fn(tls_journal.items[i].ptr);
-        } else {
-            tls_journal.items[w++] = tls_journal.items[i];
-        }
-    }
-    tls_journal.count = w;
-}
-
-// Normal frame exit: surviving entries of the popped depth are owned by
-// C locals that are still live, so they move under the parent frame's
-// protection. With no parent frame nothing can unwind past them; their
-// deferred frees run normally, so the entries just leave the journal.
-static void aether_unwind_retag(int popped_depth) {
-    if (popped_depth <= 1) {
-        tls_journal.count = 0;
-        return;
-    }
-    for (int i = 0; i < tls_journal.count; i++) {
-        if (tls_journal.items[i].depth >= popped_depth) {
-            tls_journal.items[i].depth = popped_depth - 1;
-        }
-    }
-}
-
 AetherJmpFrame* aether_try_push(void) {
     if (tls_stack.depth >= AETHER_PANIC_MAX_DEPTH) {
         fprintf(stderr, "aether: try/catch nesting exceeded %d — aborting\n",
@@ -177,6 +68,7 @@ AetherJmpFrame* aether_try_push(void) {
     }
     AetherJmpFrame* f = &tls_stack.frames[tls_stack.depth++];
     f->reason = NULL;
+    aether_unwind_enter_frame();
     return f;
 }
 
@@ -186,7 +78,7 @@ void aether_try_pop(void) {
         fprintf(stderr, "aether: aether_try_pop on empty stack\n");
         abort();
     }
-    aether_unwind_retag(tls_stack.depth);
+    aether_unwind_exit_frame();
     tls_stack.depth--;
 }
 
@@ -529,9 +421,9 @@ void aether_panic(const char* reason) {
     AetherJmpFrame* f = aether_current_frame();
     if (f) {
         f->reason = reason;
-        // #1301: free the innermost frame's still-live journaled
-        // allocations before the jump skips their deferred frees.
-        aether_unwind_drain(tls_stack.depth);
+        // Free the innermost frame's still-live journaled allocations
+        // before the jump skips their deferred frees (aether_unwind.c).
+        aether_unwind_drain_current();
         AETHER_SIGLONGJMP(f->buf, 1);
         // unreachable
     }

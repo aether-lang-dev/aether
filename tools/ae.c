@@ -1155,6 +1155,7 @@ found_root:
                 "%s/runtime/actors/aether_send_message.c "
                 "%s/runtime/actors/aether_actor_thread.c "
                 "%s/runtime/actors/aether_panic.c "
+                "%s/runtime/actors/aether_unwind.c "
                 "%s/std/string/aether_string.c "
                 "%s/std/math/aether_math.c "
                 "%s/std/net/aether_http.c "
@@ -1183,7 +1184,8 @@ found_root:
                 tc.root, tc.root, tc.root, tc.root, tc.root,
                 tc.root, tc.root, tc.root, tc.root, tc.root,
                 tc.root, tc.root, tc.root, tc.root, tc.root,
-                tc.root, tc.root, tc.root, tc.root, tc.root);
+                tc.root, tc.root, tc.root, tc.root, tc.root,
+                tc.root);
         }
     } else {
         // Installed layout: headers in include/aether/, source in
@@ -1236,6 +1238,7 @@ found_root:
                 "%s/runtime/actors/aether_send_message.c "
                 "%s/runtime/actors/aether_actor_thread.c "
                 "%s/runtime/actors/aether_panic.c "
+                "%s/runtime/actors/aether_unwind.c "
                 "%s/std/string/aether_string.c "
                 "%s/std/math/aether_math.c "
                 "%s/std/net/aether_http.c "
@@ -1264,7 +1267,8 @@ found_root:
                 src, src, src, src, src,
                 src, src, src, src, src,
                 src, src, src, src, src,
-                src, src, src, src, src);
+                src, src, src, src, src,
+                src);
         }
     }
 }
@@ -2194,6 +2198,7 @@ static int build_wasm_cmd(char* cmd, size_t size,
         "runtime/actors/aether_send_message.c",
         "runtime/actors/aether_actor_thread.c",
         "runtime/actors/aether_panic.c",
+        "runtime/actors/aether_unwind.c",
         "std/string/aether_string.c",
         "std/math/aether_math.c",
         "std/net/aether_http.c",
