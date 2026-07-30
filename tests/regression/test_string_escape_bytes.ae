@@ -1,0 +1,72 @@
+// Regression: the C string-literal emitter wrote \x hex escapes, and a
+// C hex escape has no length limit, so "\x01a" re-lexed as the single
+// byte 0x1A instead of 0x01 then 'a' (silent data corruption whenever a
+// hex-escaped byte preceded a hex-digit character). Bytes above ASCII
+// were also emitted raw, making the generated C a binary file that
+// text tools mishandle platform-dependently. The emitter now writes
+// zero-padded octal (munch-proof by construction) and keeps only valid
+// UTF-8 sequences raw.
+//
+// What this test guards:
+//   1. A hex escape followed by a hex-digit char stays two bytes
+//   2. High bytes (>0x7F) round-trip exactly
+//   3. Control bytes round-trip exactly
+//   4. Escapes inside interpolation segments behave the same
+
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+expect_byte(s: string, idx: int, want: int, label: string) {
+    // char_at returns a signed char; mask to compare as a raw byte.
+    got = string.char_at(s, idx) & 0xFF
+    if got != want {
+        fail("${label}: byte[${idx}] expected ${want}, got ${got}")
+    }
+}
+
+main() {
+    munch = "\x01a"
+    if string.length(munch) != 2 {
+        n = string.length(munch)
+        fail("munch guard: expected 2 bytes, got ${n}")
+    }
+    expect_byte(munch, 0, 1, "munch guard")
+    expect_byte(munch, 1, 97, "munch guard")
+    println("PASS 1: hex escape before a hex digit stays two bytes")
+
+    high = "\x82\x01"
+    if string.length(high) != 2 {
+        fail("high bytes: expected 2 bytes")
+    }
+    expect_byte(high, 0, 130, "high byte")
+    expect_byte(high, 1, 1, "high byte")
+    println("PASS 2: bytes above 0x7F round-trip exactly")
+
+    // NUL stays out: a literal is a C string, so an embedded \x00
+    // truncates strlen-based length by design (string.from_char /
+    // string.new_with_length are the NUL-carrying constructors).
+    ctl = "\x01\x1f\x7f"
+    if string.length(ctl) != 3 {
+        fail("control bytes: expected 3 bytes")
+    }
+    expect_byte(ctl, 1, 31, "control byte")
+    expect_byte(ctl, 2, 127, "control byte")
+    println("PASS 3: control bytes round-trip exactly")
+
+    tail = "fee"
+    combo = "\x0d${tail}"
+    if string.length(combo) != 4 {
+        fail("interp: expected 4 bytes")
+    }
+    expect_byte(combo, 0, 13, "interp escape")
+    expect_byte(combo, 1, 102, "interp escape")
+    println("PASS 4: escapes in interpolation segments unchanged")
+
+    println("=== All cases passed ===")
+}
