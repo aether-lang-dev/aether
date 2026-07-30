@@ -1,7 +1,7 @@
 // Module `foo` shipped from dirB — same module name as dirA's,
 // different return value. Used to prove precedence (left-most
 // wins in --lib chain). Issue #413 fixture.
-exports (foo_origin)
+exports(foo_origin)
 
 foo_origin() -> string {
     return "B"

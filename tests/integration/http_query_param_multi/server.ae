@@ -63,8 +63,8 @@ main() {
         exit(1)
     }
 
-    http.server_get(raw, "/multi",   handle,         0)
-    http.server_get(raw, "/single",  handle_single,  0)
+    http.server_get(raw, "/multi", handle, 0)
+    http.server_get(raw, "/single", handle_single, 0)
     http.server_get(raw, "/missing", handle_missing, 0)
 
     println("READY")

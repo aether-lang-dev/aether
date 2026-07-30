@@ -9,9 +9,9 @@ extern str_eq(a: string, b: string) -> int
 
 build_pair() {
     label = "world"
-    inner   = || { return label }         // inner.env holds label
-    wrapped = || { return call(inner) }   // wrapped.env holds inner
-    return wrapped                         // both envs must survive
+    inner = || { return label } // inner.env holds label
+    wrapped = || { return call(inner) } // wrapped.env holds inner
+    return wrapped // both envs must survive
 }
 
 main() {

@@ -19,7 +19,7 @@ import std.cryptography
 import std.string
 import std.bytes
 
-exports (generate, generate_n)
+exports(generate, generate_n)
 
 const ALPHA = "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 

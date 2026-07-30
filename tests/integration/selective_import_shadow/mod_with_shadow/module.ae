@@ -4,10 +4,10 @@
 // `mod_with_shadow_length(s)` — the body became infinite self-
 // recursion. Post-fix, the orchestrator rejects this module with a
 // precise diagnostic naming both the import and the local def.
-import std.string (length)
+import std.string(length)
 
 length(s: string) -> int {
     return length(s)
 }
 
-exports (length)
+exports(length)

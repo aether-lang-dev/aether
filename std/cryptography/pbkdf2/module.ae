@@ -23,7 +23,7 @@
 import std.bytes
 import std.cryptography.hmac
 
-exports (
+exports(
     pbkdf2, hash_len
 )
 

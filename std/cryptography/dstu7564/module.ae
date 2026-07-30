@@ -15,7 +15,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     dstu7564_hex, dstu7564_bytes
 )
@@ -100,13 +100,13 @@ struct DstuCtx {
     block_size: int
     columns: int
     rounds: int
-    state: ptr         // longarr(16)
-    temp_state1: ptr   // longarr(16)
-    temp_state2: ptr   // longarr(16)
+    state: ptr // longarr(16)
+    temp_state1: ptr // longarr(16)
+    temp_state2: ptr // longarr(16)
     input_blocks: long
     buf_off: int
-    buf: ptr           // std.bytes (128 bytes)
-    algo: string       // "dstu7564-256", "dstu7564-384", "dstu7564-512"
+    buf: ptr // std.bytes (128 bytes)
+    algo: string // "dstu7564-256", "dstu7564-384", "dstu7564-512"
 }
 
 rotate(n: int, x: long) -> long {

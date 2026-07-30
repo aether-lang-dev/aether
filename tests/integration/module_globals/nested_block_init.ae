@@ -40,7 +40,7 @@ ensure_loop() {
 
 bump() {
     if hits == 0 {
-        hits = 100        // first write inside a nested block
+        hits = 100 // first write inside a nested block
     }
     hits = hits + 1
 }

@@ -2,25 +2,25 @@
 
 main() {
     // Arrow closure with int return
-    doubler = |x: int| -> x * 2
+    doubler = | x: int | -> x * 2
     result = call(doubler, 21)
     println(result)
 
     // Closure with string param
-    greeter = |name: string| {
+    greeter = | name: string | {
         println(name)
     }
     call(greeter, "Alice")
 
     // Closure capturing and computing
     offset = 1000
-    shifter = |x: int| -> x + offset
+    shifter = | x: int | -> x + offset
     shifted = call(shifter, 42)
     println(shifted)
 
     // Multiple closures
-    add_ten = |x: int| -> x + 10
-    mul_three = |x: int| -> x * 3
+    add_ten = | x: int | -> x + 10
+    mul_three = | x: int | -> x * 3
 
     a = call(add_ten, 5)
     b = call(mul_three, a)

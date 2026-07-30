@@ -1,7 +1,7 @@
 // Module side: a builder whose `with` factory is a same-module helper.
 // Factory returns a ptr (a real context handle that children attach to).
 
-exports ( win, mkfac )
+exports(win, mkfac)
 
 mkfac() -> ptr { return null }
 

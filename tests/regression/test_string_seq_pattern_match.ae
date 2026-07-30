@@ -21,7 +21,7 @@ extern exit(code: int)
 // both [] and [h|t] arms with both bindings used.
 walk_join(s: *StringSeq, acc: string) -> string {
     match s {
-        []      -> {
+        [] -> {
             return acc
         }
         [h | t] -> {
@@ -39,7 +39,7 @@ walk_join(s: *StringSeq, acc: string) -> string {
 // referenced; head is not — exercises the unused-head optimisation.
 count_cells(s: *StringSeq, acc: int) -> int {
     match s {
-        []      -> {
+        [] -> {
             return acc
         }
         [h | t] -> {

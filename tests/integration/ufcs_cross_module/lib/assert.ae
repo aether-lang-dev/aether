@@ -1,6 +1,6 @@
 // A fluent assertion facade — the methods live in the library; the
 // consumer chains them. This is the #934 motivating shape (Aeocha).
-exports ( Subject, expect_int, to_equal, to_be_gt, bump )
+exports(Subject, expect_int, to_equal, to_be_gt, bump)
 struct Subject { v: int, ok: int }
 expect_int(n: int) -> Subject { return Subject { v: n, ok: 1 } }
 to_equal(s: Subject, want: int) -> Subject {

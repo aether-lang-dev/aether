@@ -68,9 +68,9 @@ main() {
     }
 
     // Sort by descending name length via a comparator closure.
-    string_list_sort(names, |a: string, b: string| {
-        return string.length(b) - string.length(a)
-    })
+    string_list_sort(names, | a: string, b: string | {
+            return string.length(b) - string.length(a)
+        })
     println("")
     println("Longest name: ${string_list_get(names, 0)}")
 

@@ -23,7 +23,7 @@ addReply(`reply`: int, `after`: int) -> int {
 
 main() {
     r = Robj { `reply`: 10, `message`: 20 }
-    sum = addReply(r.`reply`, r.`message`)   // 10 + 20
+    sum = addReply(r.`reply`, r.`message`) // 10 + 20
     if sum != 30 {
         println("FAIL #867: raw-identifier param/field round-trip")
         exit(1)

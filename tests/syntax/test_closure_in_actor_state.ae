@@ -21,16 +21,16 @@ message Fire {}
 message Finish {}
 
 actor Dispatcher {
-    state handler = |x: int| { return x }   // identity default
+    state handler = | x: int | { return x } // identity default
     state last_result = 0
 
     receive {
         SetHandlerA() -> {
             // Fresh closure with no captures — body returns x*10
-            handler = |x: int| { return x * 10 }
+            handler = | x: int | { return x * 10 }
         }
         SetHandlerB() -> {
-            handler = |x: int| { return x + 100 }
+            handler = | x: int | { return x + 100 }
         }
         Fire() -> {
             last_result = call(handler, 5)
@@ -50,9 +50,9 @@ actor Dispatcher {
 main() {
     d = spawn(Dispatcher())
     d ! SetHandlerA {}
-    d ! Fire {}            // last_result = 50 (A: 5*10)
+    d ! Fire {} // last_result = 50 (A: 5*10)
     d ! SetHandlerB {}
-    d ! Fire {}            // last_result = 105 (B: 5+100)
+    d ! Fire {} // last_result = 105 (B: 5+100)
     d ! Finish {}
     wait_for_idle()
 }

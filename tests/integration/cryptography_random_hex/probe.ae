@@ -38,8 +38,8 @@ main() {
     while i < 32 {
         ch = string.char_at_n(h1, 32, i)
         ok = 0
-        if ch >= 48 && ch <= 57 { ok = 1 }    // '0'..'9'
-        if ch >= 97 && ch <= 102 { ok = 1 }   // 'a'..'f'
+        if ch >= 48 && ch <= 57 { ok = 1 } // '0'..'9'
+        if ch >= 97 && ch <= 102 { ok = 1 } // 'a'..'f'
         if ok == 0 {
             println("  FAIL: non-hex char at ${i}: ${ch}  (full='${h1}')")
             exit(1)
@@ -76,10 +76,10 @@ main() {
     while j < 24 {
         c2 = string.char_at_n(b64a, 24, j)
         ok2 = 0
-        if c2 >= 48 && c2 <= 57 { ok2 = 1 }    // '0'..'9'
-        if c2 >= 65 && c2 <= 90 { ok2 = 1 }    // 'A'..'Z'
-        if c2 >= 97 && c2 <= 122 { ok2 = 1 }   // 'a'..'z'
-        if c2 == 43 || c2 == 47 { ok2 = 1 }    // '+' '/'
+        if c2 >= 48 && c2 <= 57 { ok2 = 1 } // '0'..'9'
+        if c2 >= 65 && c2 <= 90 { ok2 = 1 } // 'A'..'Z'
+        if c2 >= 97 && c2 <= 122 { ok2 = 1 } // 'a'..'z'
+        if c2 == 43 || c2 == 47 { ok2 = 1 } // '+' '/'
         if ok2 == 0 {
             println("  FAIL: non-b64 char at ${j}: ${c2}  (full='${b64a}')")
             exit(1)
@@ -118,7 +118,7 @@ main() {
     // length — proving the wrapper drew exactly n bytes and didn't
     // truncate or double-up.
     print("\nTest 6: hex length tracks 2 × bytes length\n")
-    n = 7  // odd, non-multiple-of-3
+    n = 7 // odd, non-multiple-of-3
     rb, rb_n, _ = cryptography.random_bytes(n)
     hh, _ = cryptography.random_hex(n)
     if rb_n != n {

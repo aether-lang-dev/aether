@@ -36,7 +36,7 @@ import std.cryptography
 import std.cryptography.sha2
 import std.cryptography.asn1
 
-exports (
+exports(
     key_from_components, key_from_pkcs1_der, key_free,
     modulus_bytes, modulus_bits,
     raw_encrypt, raw_decrypt,
@@ -52,9 +52,9 @@ extern malloc(size: int) -> ptr
 // An RSA key owns its component bignums (n, e, d). For a public-only key
 // `d` is null; raw_decrypt / sign require a private key.
 struct RsaKey {
-    n: ptr    // modulus (bignum)
-    e: ptr    // public exponent (bignum)
-    d: ptr    // private exponent (bignum) or null
+    n: ptr // modulus (bignum)
+    e: ptr // public exponent (bignum)
+    d: ptr // private exponent (bignum) or null
 }
 
 // Build a key from already-parsed bignums. The key TAKES OWNERSHIP of n,
@@ -227,7 +227,7 @@ decrypt_pkcs1(k: ptr, ct: ptr) -> (ptr, string) {
         }
     }
     if sep < 0 { ok = 0 }
-    if ok == 1 { if sep < 10 { ok = 0 } }   // 2 prefix + >=8 PS
+    if ok == 1 { if sep < 10 { ok = 0 } } // 2 prefix + >=8 PS
     if ok != 1 {
         bytes.free(block)
         return null, "rsa: PKCS#1 v1.5 decryption error"
@@ -258,7 +258,7 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
         return null, "rsa: DigestInfo too long for modulus"
     }
     block = build_emsa(di, klen)
-    s = raw_decrypt(k, block)   // signing = private-key op (c^d mod n)
+    s = raw_decrypt(k, block) // signing = private-key op (c^d mod n)
     bytes.free(block)
     return s, ""
 }
@@ -267,7 +267,7 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
 // from `di`, compare byte-for-byte. Returns 1 (valid) / 0 (invalid).
 verify_pkcs1(k: ptr, di: ptr, sig: ptr) -> int {
     klen = modulus_bytes(k)
-    recovered = raw_encrypt(k, sig)   // s^e mod n
+    recovered = raw_encrypt(k, sig) // s^e mod n
     expected = build_emsa(di, klen)
     ok = 1
     if bytes.length(recovered) != bytes.length(expected) { ok = 0 }
@@ -369,7 +369,7 @@ encrypt_oaep(k: ptr, msg: ptr, mlen: int, seed: ptr) -> ptr {
     z = 0
     while z < dblen { bytes.set(db, z, 0); z = z + 1 }
     bytes.copy_from_bytes(db, 0, lhash, 0, hlen)
-    ps_end = dblen - mlen - 1            // index of the 0x01 separator
+    ps_end = dblen - mlen - 1 // index of the 0x01 separator
     bytes.set(db, ps_end, 0x01)
     if mlen > 0 { bytes.copy_from_bytes(db, ps_end + 1, msg, 0, mlen) }
     bytes.free(lhash)
@@ -416,7 +416,7 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
     bytes.free(empty)
 
     bad = 0
-    if (bytes.get(em, 0) & 0xFF) != 0 { bad = 1 }   // leading byte must be 0x00
+    if (bytes.get(em, 0) & 0xFF) != 0 { bad = 1 } // leading byte must be 0x00
 
     // split: maskedSeed = em[1..1+hLen], maskedDB = em[1+hLen..k]
     dblen = klen - hlen - 1
@@ -451,7 +451,7 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
             if bv == 0x01 {
                 sep = j
             } else if bv != 0x00 {
-                bad = 1     // non-zero byte before the separator
+                bad = 1 // non-zero byte before the separator
             }
         }
         j = j + 1

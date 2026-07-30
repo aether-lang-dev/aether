@@ -5,7 +5,7 @@ import std.list
 // each: iterate a list, calling fn for each element
 each(l: ptr, f: fn) {
     n = list.size(l)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         val, _ = list.get(l, i)
         call(f, val)
     }
@@ -15,7 +15,7 @@ each(l: ptr, f: fn) {
 map(l: ptr, f: fn) {
     result = list.new()
     n = list.size(l)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         val, _ = list.get(l, i)
         mapped = call(f, val)
         list.add(result, mapped)
@@ -27,7 +27,7 @@ map(l: ptr, f: fn) {
 filter(l: ptr, f: fn) {
     result = list.new()
     n = list.size(l)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         val, _ = list.get(l, i)
         keep = call(f, val)
         if keep != 0 {
@@ -49,27 +49,27 @@ main() {
 
     // each: print all elements
     print("each: ")
-    each(nums) |x: int| {
+    each(nums) | x: int | {
         print(x)
         print(" ")
     }
     print("\n")
 
     // map: double each element
-    doubled = map(nums) |x: int| -> x * 2
+    doubled = map(nums) | x: int | -> x * 2
     defer list.free(doubled)
     print("map: ")
-    each(doubled) |x: int| {
+    each(doubled) | x: int | {
         print(x)
         print(" ")
     }
     print("\n")
 
     // filter: keep only elements > 2
-    big = filter(nums) |x: int| -> x > 2
+    big = filter(nums) | x: int | -> x > 2
     defer list.free(big)
     print("filter: ")
-    each(big) |x: int| {
+    each(big) | x: int | {
         print(x)
         print(" ")
     }

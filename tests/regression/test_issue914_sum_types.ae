@@ -17,13 +17,13 @@
 // here, so the program is leak-free.
 
 struct Circle { r: float }
-struct Rect   { w: float  h: float }
-struct Empty  {}
+struct Rect { w: float h: float }
+struct Empty {}
 type Shape = Circle | Rect | Empty
 
 // recursive sum via explicit pointer fields
 struct Leaf { v: int }
-struct Pair { left: *Tree  right: *Tree }
+struct Pair { left: *Tree right: *Tree }
 type Tree = Leaf | Pair
 
 check(cond: bool, label: string) {
@@ -38,8 +38,8 @@ check(cond: bool, label: string) {
 area(s: Shape) -> float {
     let a: float = match s {
         Circle -> 3.14159 * s.r * s.r
-        Rect   -> s.w * s.h
-        Empty  -> 0.0
+        Rect -> s.w * s.h
+        Empty -> 0.0
     }
     return a
 }
@@ -48,7 +48,7 @@ area(s: Shape) -> float {
 rank(s: Shape) -> int {
     match s {
         Rect -> { return 2 }
-        _    -> { return 1 }
+        _ -> { return 1 }
     }
     return -1
 }

@@ -48,10 +48,10 @@
 
 import std.list
 import std.map
-import std.string (*)
-import std.os (*)
+import std.string(*)
+import std.os(*)
 
-exports (
+exports(
     command, arg, subcommand,
     about, short, long_, help, required,
     flag, string_arg, int_arg, positional, kind,
@@ -65,37 +65,37 @@ exports (
 )
 
 // ---- argument kinds ----
-const KIND_FLAG   = 0    // boolean switch, no value
-const KIND_STRING = 1    // takes a string value (default)
-const KIND_INT    = 2    // takes an integer value, validated at parse time
+const KIND_FLAG = 0 // boolean switch, no value
+const KIND_STRING = 1 // takes a string value (default)
+const KIND_INT = 2 // takes an integer value, validated at parse time
 
 // ---- parse result status ----
-const RESULT_OK    = 0   // parsed successfully
-const RESULT_HELP  = 1   // -h/--help seen; caller should print help + exit
-const RESULT_ERROR = 2   // a parse error occurred (see the error string)
+const RESULT_OK = 0 // parsed successfully
+const RESULT_HELP = 1 // -h/--help seen; caller should print help + exit
+const RESULT_ERROR = 2 // a parse error occurred (see the error string)
 
 struct Arg {
     name: string
     short_char: int
     long_name: string
     help_text: string
-    kind: int          // KIND_FLAG / KIND_STRING / KIND_INT
-    required: int      // 1 if required
+    kind: int // KIND_FLAG / KIND_STRING / KIND_INT
+    required: int // 1 if required
     is_positional: int // 1 if consumed by position rather than -x/--x
 }
 
 struct Command {
     name: string
     about_text: string
-    args: ptr          // std.list of *Arg
-    subcommands: ptr   // std.list of *Command
+    args: ptr // std.list of *Arg
+    subcommands: ptr // std.list of *Command
 }
 
 struct ArgMatches {
     command_name: string
-    values: ptr             // std.map of string -> string (raw string values)
-    flags: ptr              // std.map of string -> int (present flags)
-    subcommand: ptr         // *ArgMatches of matched subcommand, or null
+    values: ptr // std.map of string -> string (raw string values)
+    flags: ptr // std.map of string -> int (present flags)
+    subcommand: ptr // *ArgMatches of matched subcommand, or null
 }
 
 arg_new() -> *Arg {
@@ -104,7 +104,7 @@ arg_new() -> *Arg {
     a.short_char = 0
     a.long_name = ""
     a.help_text = ""
-    a.kind = KIND_STRING     // default: a string-valued option
+    a.kind = KIND_STRING // default: a string-valued option
     a.required = 0
     a.is_positional = 0
     return a
@@ -244,7 +244,7 @@ free_command(c: *Command) {
     if c == null { return }
     if c.args != null {
         n = list_size(c.args)
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n; i ++) {
             a = list_get_raw(c.args, i) as *Arg
             if a != null {
                 heap.free(a)
@@ -254,7 +254,7 @@ free_command(c: *Command) {
     }
     if c.subcommands != null {
         n = list_size(c.subcommands)
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n; i ++) {
             sub = list_get_raw(c.subcommands, i) as *Command
             free_command(sub)
         }
@@ -288,7 +288,7 @@ fn is_option(a: *Arg) -> int {
 
 find_arg_by_long(cmd: *Command, name: string) -> *Arg {
     n = list_size(cmd.args)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         a = list_get_raw(cmd.args, i) as *Arg
         if is_option(a) == 1 && string_equals(a.long_name, name) == 1 {
             return a
@@ -299,7 +299,7 @@ find_arg_by_long(cmd: *Command, name: string) -> *Arg {
 
 find_arg_by_short(cmd: *Command, sh_char: int) -> *Arg {
     n = list_size(cmd.args)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         a = list_get_raw(cmd.args, i) as *Arg
         if is_option(a) == 1 && a.short_char == sh_char {
             return a
@@ -311,7 +311,7 @@ find_arg_by_short(cmd: *Command, sh_char: int) -> *Arg {
 find_positional_arg(cmd: *Command, idx: int) -> *Arg {
     pos_count = 0
     n = list_size(cmd.args)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         a = list_get_raw(cmd.args, i) as *Arg
         if a.is_positional == 1 {
             if pos_count == idx {
@@ -325,7 +325,7 @@ find_positional_arg(cmd: *Command, idx: int) -> *Arg {
 
 find_subcommand(cmd: *Command, name: string) -> *Command {
     n = list_size(cmd.subcommands)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         sub = list_get_raw(cmd.subcommands, i) as *Command
         if string_equals(sub.name, name) == 1 {
             return sub
@@ -342,13 +342,13 @@ print_help(cmd: *Command) {
 
     has_options = 0
     n_args = list_size(cmd.args)
-    for (i = 0; i < n_args; i++) {
+    for (i = 0; i < n_args; i ++) {
         a = list_get_raw(cmd.args, i) as *Arg
         if is_option(a) == 1 { has_options = 1 }
     }
     if has_options == 1 { print(" [OPTIONS]") }
 
-    for (i = 0; i < n_args; i++) {
+    for (i = 0; i < n_args; i ++) {
         a = list_get_raw(cmd.args, i) as *Arg
         if a.is_positional == 1 {
             if a.required == 1 {
@@ -368,7 +368,7 @@ print_help(cmd: *Command) {
 
     if has_options == 1 {
         println("Options:")
-        for (i = 0; i < n_args; i++) {
+        for (i = 0; i < n_args; i ++) {
             a = list_get_raw(cmd.args, i) as *Arg
             if is_option(a) == 1 {
                 print("  ")
@@ -397,7 +397,7 @@ print_help(cmd: *Command) {
     n_subs = list_size(cmd.subcommands)
     if n_subs > 0 {
         println("Commands:")
-        for (i = 0; i < n_subs; i++) {
+        for (i = 0; i < n_subs; i ++) {
             sub = list_get_raw(cmd.subcommands, i) as *Command
             print("  "); print(sub.name)
             if string_equals(sub.about_text, "") != 1 {
@@ -420,7 +420,7 @@ print_help(cmd: *Command) {
 parse(cmd: *Command) -> (int, ptr, string) {
     argv = list_new()
     cnt = args_count()
-    for (i = 1; i < cnt; i++) {
+    for (i = 1; i < cnt; i ++) {
         list_add_raw(argv, args_get(i))
     }
     res, matches, err = parse_list(cmd, argv)
@@ -444,7 +444,7 @@ fn value_ok(a: *Arg, val: string) -> int {
     if a.kind == KIND_INT {
         _, terr = to_int(val)
         bad = terr != ""
-        string_release(terr)     // to_int's error/"" is ours to drop
+        string_release(terr) // to_int's error/"" is ours to drop
         if bad { return 0 }
     }
     return 1
@@ -560,7 +560,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
                     map_put(m.values, a.name, copy(val))
                 } else {
                     len = string_length(arg_str)
-                    for (j = 1; j < len; j++) {
+                    for (j = 1; j < len; j ++) {
                         ch = string_char_at(arg_str, j)
                         flag_arg = find_arg_by_short(cmd, ch)
                         if flag_arg == null {
@@ -576,7 +576,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
             sub = find_subcommand(cmd, arg_str)
             if sub != null {
                 sub_argv = list_new()
-                for (k = i + 1; k < n_argv; k++) {
+                for (k = i + 1; k < n_argv; k ++) {
                     list_add_raw(sub_argv, list_get_raw(argv, k))
                 }
                 sub_res, sub_matches, sub_err = parse_list_internal(sub, sub_argv)
@@ -608,7 +608,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
 
     // required-argument enforcement
     n_args = list_size(cmd.args)
-    for (k = 0; k < n_args; k++) {
+    for (k = 0; k < n_args; k ++) {
         a = list_get_raw(cmd.args, k) as *Arg
         if a.required == 1 {
             has_val = map_has(m.values, a.name)

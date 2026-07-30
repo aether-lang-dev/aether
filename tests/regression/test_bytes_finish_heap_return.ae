@@ -77,9 +77,9 @@ main() {
     // so a NUL in the middle is content. Build "A\0B" and confirm the
     // length-aware path keeps all three bytes.
     nb = bytes.new(4)
-    bytes.set(nb, 0, 65)   // 'A'
-    bytes.set(nb, 1, 0)    // NUL
-    bytes.set(nb, 2, 66)   // 'B'
+    bytes.set(nb, 0, 65) // 'A'
+    bytes.set(nb, 1, 0) // NUL
+    bytes.set(nb, 2, 66) // 'B'
     blob = bytes.finish(nb, 3)
     if string.length(blob) != 3 {
         println("  FAIL: embedded-NUL length=${string.length(blob)}, expected 3")

@@ -20,7 +20,7 @@
 // undefined), the wrappers return ("", 0, "zlib unavailable")
 // rather than crashing.
 
-exports (
+exports(
     zlib_backend_available,
     zlib_try_deflate, zlib_get_deflate_bytes, zlib_get_deflate_length,
     zlib_release_deflate,

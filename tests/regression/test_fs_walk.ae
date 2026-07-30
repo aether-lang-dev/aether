@@ -52,10 +52,10 @@ main() {
 
     // 1. Full walk: exact listing (sorted), correct kinds and depths.
     L = string_list_new()
-    n, err = fs.walk(base, |path: string, kind: int, depth: int| {
-        _sa1 = string_list_add(L, "${depth}|${kind}|${path}")
-        return 0
-    })
+    n, err = fs.walk(base, | path: string, kind: int, depth: int | {
+            _sa1 = string_list_add(L, "${depth}|${kind}|${path}")
+            return 0
+        })
     if err != "" {
         println("FAIL walk: ${err}")
         exit(1)
@@ -103,13 +103,13 @@ main() {
 
     // 2. Prune: returning 1 on `sub` skips its whole subtree.
     P = string_list_new()
-    np, perr = fs.walk(base, |path: string, kind: int, depth: int| {
-        _sa15 = string_list_add(P, path)
-        if string.equals(path, "${base}/sub") == 1 {
-            return 1
-        }
-        return 0
-    })
+    np, perr = fs.walk(base, | path: string, kind: int, depth: int | {
+            _sa15 = string_list_add(P, path)
+            if string.equals(path, "${base}/sub") == 1 {
+                return 1
+            }
+            return 0
+        })
     if perr != "" {
         println("FAIL prune walk: ${perr}")
         exit(1)
@@ -123,9 +123,9 @@ main() {
         }
         j = j + 1
     }
-    expected_pruned = 4      // root, a.txt, sub, link
+    expected_pruned = 4 // root, a.txt, sub, link
     if have_symlink == 0 {
-        expected_pruned = 3  // root, a.txt, sub
+        expected_pruned = 3 // root, a.txt, sub
     }
     if np != expected_pruned {
         println("FAIL prune count: ${np}, expected ${expected_pruned}")
@@ -134,9 +134,9 @@ main() {
     string_list_free(P)
 
     // 3. Stop: returning 2 on the root ends the walk after one visit.
-    ns, serr = fs.walk(base, |path: string, kind: int, depth: int| {
-        return 2
-    })
+    ns, serr = fs.walk(base, | path: string, kind: int, depth: int | {
+            return 2
+        })
     if serr != "" {
         println("FAIL stop walk: ${serr}")
         exit(1)
@@ -147,9 +147,9 @@ main() {
     }
 
     // 4. Missing path reports an error.
-    _, merr = fs.walk("/no/such/path/for/walk", |path: string, kind: int, depth: int| {
-        return 0
-    })
+    _, merr = fs.walk("/no/such/path/for/walk", | path: string, kind: int, depth: int | {
+            return 0
+        })
     if merr == "" {
         println("FAIL: walk of a missing path did not error")
         exit(1)

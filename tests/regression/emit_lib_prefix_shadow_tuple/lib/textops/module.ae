@@ -25,7 +25,7 @@ merge_run_diff_(op: string, bp: string, tp: string) -> (string, int) {
 }
 
 merge(base: string, base_len: int,
-      ours: string, ours_len: int,
-      theirs: string, theirs_len: int) -> (string, int) {
+    ours: string, ours_len: int,
+    theirs: string, theirs_len: int) -> (string, int) {
     return ours, 1
 }

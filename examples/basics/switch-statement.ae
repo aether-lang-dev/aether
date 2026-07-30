@@ -33,7 +33,7 @@ get_days_in_month(month) {
 
     switch (month) {
         case 1: days = 31;
-        case 2: days = 28;  // Non-leap year
+        case 2: days = 28; // Non-leap year
         case 3: days = 31;
         case 4: days = 30;
         case 5: days = 31;

@@ -9,7 +9,7 @@
 //   3. The list intersects correctly with the existing selective and
 //      glob import forms.
 
-import mathlist (*)
+import mathlist(*)
 
 extern exit(code: int)
 

@@ -212,29 +212,29 @@ main() {
 
     // KIND values must be distinct integers. Hand-roll the uniqueness
     // check (no set type yet); 13 constants, 78 unique pairs.
-    kinds_ok        = fs.KIND_OK
+    kinds_ok = fs.KIND_OK
     kinds_not_found = fs.KIND_NOT_FOUND
-    kinds_perm      = fs.KIND_PERMISSION_DENIED
-    kinds_exists    = fs.KIND_EXISTS
-    kinds_xdev      = fs.KIND_CROSS_DEVICE
-    kinds_io        = fs.KIND_IO
-    kinds_inval     = fs.KIND_INVALID
-    kinds_loop      = fs.KIND_LOOP
-    kinds_long      = fs.KIND_NAME_TOO_LONG
-    kinds_nospc     = fs.KIND_NO_SPACE
-    kinds_isdir     = fs.KIND_IS_DIR
-    kinds_notdir    = fs.KIND_NOT_DIR
-    kinds_unavail   = fs.KIND_UNAVAILABLE
+    kinds_perm = fs.KIND_PERMISSION_DENIED
+    kinds_exists = fs.KIND_EXISTS
+    kinds_xdev = fs.KIND_CROSS_DEVICE
+    kinds_io = fs.KIND_IO
+    kinds_inval = fs.KIND_INVALID
+    kinds_loop = fs.KIND_LOOP
+    kinds_long = fs.KIND_NAME_TOO_LONG
+    kinds_nospc = fs.KIND_NO_SPACE
+    kinds_isdir = fs.KIND_IS_DIR
+    kinds_notdir = fs.KIND_NOT_DIR
+    kinds_unavail = fs.KIND_UNAVAILABLE
 
     // Sample of the most-relied-on assertions; don't enumerate the
     // full triangle — collisions tend to happen in clusters.
-    if kinds_not_found == kinds_ok       { println("FAIL 10b: NOT_FOUND==OK");       exit(1) }
-    if kinds_perm      == kinds_not_found { println("FAIL 10c: PERM==NOT_FOUND");    exit(1) }
-    if kinds_io        == kinds_perm     { println("FAIL 10d: IO==PERM");            exit(1) }
-    if kinds_inval     == kinds_io       { println("FAIL 10e: INVAL==IO");           exit(1) }
-    if kinds_isdir     == kinds_inval    { println("FAIL 10f: IS_DIR==INVAL");       exit(1) }
-    if kinds_notdir    == kinds_isdir    { println("FAIL 10g: NOT_DIR==IS_DIR");     exit(1) }
-    if kinds_unavail   == kinds_io       { println("FAIL 10h: UNAVAILABLE==IO");     exit(1) }
+    if kinds_not_found == kinds_ok { println("FAIL 10b: NOT_FOUND==OK"); exit(1) }
+    if kinds_perm == kinds_not_found { println("FAIL 10c: PERM==NOT_FOUND"); exit(1) }
+    if kinds_io == kinds_perm { println("FAIL 10d: IO==PERM"); exit(1) }
+    if kinds_inval == kinds_io { println("FAIL 10e: INVAL==IO"); exit(1) }
+    if kinds_isdir == kinds_inval { println("FAIL 10f: IS_DIR==INVAL"); exit(1) }
+    if kinds_notdir == kinds_isdir { println("FAIL 10g: NOT_DIR==IS_DIR"); exit(1) }
+    if kinds_unavail == kinds_io { println("FAIL 10h: UNAVAILABLE==IO"); exit(1) }
     println("  PASS 10b-h: KIND constants are distinct")
 
     // --- Cleanup ---

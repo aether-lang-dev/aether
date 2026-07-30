@@ -43,14 +43,14 @@ extern exit(code: int)
 
 // Case 1: single-clause precondition.
 inc(x: int) -> int
-    requires x >= 0
+requires x >= 0
 {
     return x + 1
 }
 
 // Case 2: multiple-clause precondition.
 clamp(x: int, lo: int, hi: int) -> int
-    requires lo <= hi
+requires lo <= hi
 {
     if x < lo {
         return lo
@@ -63,7 +63,7 @@ clamp(x: int, lo: int, hi: int) -> int
 
 // Case 3: single-clause postcondition with `result`.
 abs_int(x: int) -> int
-    ensures result >= 0
+ensures result >= 0
 {
     if x < 0 {
         return 0 - x
@@ -73,24 +73,24 @@ abs_int(x: int) -> int
 
 // Case 4: multiple postconditions.
 add(a: int, b: int) -> int
-    ensures result >= a
-    ensures result >= b
+ensures result >= a
+ensures result >= b
 {
     return a + b
 }
 
 // Case 5: mixed pre + post.
 safe_div(a: int, b: int) -> int
-    requires b != 0
-    ensures result == a / b
+requires b != 0
+ensures result == a / b
 {
     return a / b
 }
 
 // Case 6: multiple return sites — checks fire at each.
 sign(x: int) -> int
-    ensures result >= 0 - 1
-    ensures result <= 1
+ensures result >= 0 - 1
+ensures result <= 1
 {
     if x > 0 {
         return 1
@@ -103,17 +103,17 @@ sign(x: int) -> int
 
 // Case 7: predicate referencing both a parameter and `result`.
 add_capped(x: int, cap: int) -> int
-    requires cap >= x
-    ensures result >= x
-    ensures result <= cap
+requires cap >= x
+ensures result >= x
+ensures result <= cap
 {
     return cap
 }
 
 // Case 8: boolean-only predicate.
 toggle(enabled: bool) -> bool
-    requires enabled
-    ensures result == false
+requires enabled
+ensures result == false
 {
     return false
 }
@@ -122,12 +122,12 @@ main() {
     println("=== requires / ensures contracts ===")
 
     // 1. Single-clause precondition satisfied.
-    if inc(0) != 1 { println("FAIL 1: inc(0) != 1");      exit(1) }
+    if inc(0) != 1 { println("FAIL 1: inc(0) != 1"); exit(1) }
     if inc(99) != 100 { println("FAIL 1: inc(99) != 100"); exit(1) }
     println("  PASS 1: single precondition")
 
     // 2. Multiple-clause precondition.
-    if clamp(5, 0, 10) != 5  { println("FAIL 2a"); exit(1) }
+    if clamp(5, 0, 10) != 5 { println("FAIL 2a"); exit(1) }
     if clamp(-1, 0, 10) != 0 { println("FAIL 2b"); exit(1) }
     if clamp(99, 0, 10) != 10 { println("FAIL 2c"); exit(1) }
     println("  PASS 2: multiple preconditions")
@@ -144,14 +144,14 @@ main() {
     println("  PASS 4: multiple postconditions")
 
     // 5. Mixed pre + post.
-    if safe_div(10, 2) != 5  { println("FAIL 5a"); exit(1) }
-    if safe_div(0, 7) != 0   { println("FAIL 5b"); exit(1) }
+    if safe_div(10, 2) != 5 { println("FAIL 5a"); exit(1) }
+    if safe_div(0, 7) != 0 { println("FAIL 5b"); exit(1) }
     println("  PASS 5: mixed pre + post")
 
     // 6. Multiple return sites.
-    if sign(5)  != 1     { println("FAIL 6a"); exit(1) }
+    if sign(5) != 1 { println("FAIL 6a"); exit(1) }
     if sign(0 - 5) != 0 - 1 { println("FAIL 6b"); exit(1) }
-    if sign(0)  != 0     { println("FAIL 6c"); exit(1) }
+    if sign(0) != 0 { println("FAIL 6c"); exit(1) }
     println("  PASS 6: multiple return sites")
 
     // 7. Predicate referencing parameter + result.

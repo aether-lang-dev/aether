@@ -82,12 +82,12 @@ main() {
     // ---- Test 6: cell values ----
     print("\nTest 6: cell values\n")
     // Row 0 should be (1, "Alice") after ORDER BY id.
-    if sqlite.cell(rs, 0, 0) != "1"     { print("  FAIL [0,0]\n"); exit(1) }
+    if sqlite.cell(rs, 0, 0) != "1" { print("  FAIL [0,0]\n"); exit(1) }
     if sqlite.cell(rs, 0, 1) != "Alice" { print("  FAIL [0,1]\n"); exit(1) }
-    if sqlite.cell(rs, 1, 0) != "2"     { print("  FAIL [1,0]\n"); exit(1) }
-    if sqlite.cell(rs, 1, 1) != "Bob"   { print("  FAIL [1,1]\n"); exit(1) }
-    if sqlite.cell(rs, 2, 0) != "3"     { print("  FAIL [2,0]\n"); exit(1) }
-    if sqlite.cell(rs, 2, 1) != "Chen"  { print("  FAIL [2,1]\n"); exit(1) }
+    if sqlite.cell(rs, 1, 0) != "2" { print("  FAIL [1,0]\n"); exit(1) }
+    if sqlite.cell(rs, 1, 1) != "Bob" { print("  FAIL [1,1]\n"); exit(1) }
+    if sqlite.cell(rs, 2, 0) != "3" { print("  FAIL [2,0]\n"); exit(1) }
+    if sqlite.cell(rs, 2, 1) != "Chen" { print("  FAIL [2,1]\n"); exit(1) }
     print("  PASS: all 6 cells match\n")
 
     sqlite.free(rs)

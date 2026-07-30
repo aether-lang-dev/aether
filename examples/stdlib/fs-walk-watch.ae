@@ -30,20 +30,20 @@ main() {
 
     // Walk the tree: indent by depth, tag directories.
     println("Tree of ${base}:")
-    n, err = fs.walk(base, |path: string, kind: int, depth: int| {
-        pad = ""
-        d = 0
-        while d < depth {
-            pad = string.concat(pad, "  ")
-            d = d + 1
-        }
-        tag = ""
-        if kind == 2 {
-            tag = "/"
-        }
-        println("  ${pad}${path}${tag}")
-        return 0
-    })
+    n, err = fs.walk(base, | path: string, kind: int, depth: int | {
+            pad = ""
+            d = 0
+            while d < depth {
+                pad = string.concat(pad, "  ")
+                d = d + 1
+            }
+            tag = ""
+            if kind == 2 {
+                tag = "/"
+            }
+            println("  ${pad}${path}${tag}")
+            return 0
+        })
     if err != "" {
         println("walk failed: ${err}")
         return
@@ -53,13 +53,13 @@ main() {
 
     // Prune: skip the docs/ subtree.
     println("Same walk, pruning docs/:")
-    np, _perr = fs.walk(base, |path: string, kind: int, depth: int| {
-        if string.ends_with(path, "/docs") == 1 {
-            return 1     // don't descend
-        }
-        println("  ${path}")
-        return 0
-    })
+    np, _perr = fs.walk(base, | path: string, kind: int, depth: int | {
+            if string.ends_with(path, "/docs") == 1 {
+                return 1 // don't descend
+            }
+            println("  ${path}")
+            return 0
+        })
     println("  (${np} entries visited)")
     println("")
 

@@ -15,11 +15,11 @@ find_decorated(prefix: string, n: int) -> string {
         // target, return early WITHIN the loop body.
         candidate = string.concat(prefix, "_match")
         if i == 5 {
-            return candidate           // Mid-loop early return
+            return candidate // Mid-loop early return
         }
         i = i + 1
     }
-    return string.concat(prefix, "_fallback")  // After-loop return
+    return string.concat(prefix, "_fallback") // After-loop return
 }
 
 main() {

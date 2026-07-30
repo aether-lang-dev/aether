@@ -4,8 +4,8 @@
 // The timeout fires if no message arrives within the specified milliseconds.
 // It is one-shot: cancelled when any message is received.
 
-message Heartbeat { }
-message Status { }
+message Heartbeat {}
+message Status {}
 
 actor Monitor {
     state beats = 0

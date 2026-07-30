@@ -32,7 +32,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     sm3_hex, sm3_bytes
 )
@@ -67,11 +67,11 @@ struct Sm3Ctx {
     v5: long
     v6: long
     v7: long
-    block: ptr        // std.bytes buffer, 64 bytes
+    block: ptr // std.bytes buffer, 64 bytes
     block_len: int
     count_lo: long
     count_hi: long
-    w: ptr            // intarr(68) message expansion
+    w: ptr // intarr(68) message expansion
 }
 
 m32(x: long) -> long {
@@ -301,7 +301,7 @@ finalize_to_bytes(c: *Sm3Ctx) -> ptr {
 }
 
 emit_be32(out: ptr, off: int, v: long) {
-    bytes.set(out, off,     bits.lsr64(v, 24) & 255)
+    bytes.set(out, off, bits.lsr64(v, 24) & 255)
     bytes.set(out, off + 1, bits.lsr64(v, 16) & 255)
     bytes.set(out, off + 2, bits.lsr64(v, 8) & 255)
     bytes.set(out, off + 3, v & 255)

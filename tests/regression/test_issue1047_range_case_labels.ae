@@ -5,9 +5,9 @@ extern exit(code: int)
 grade(score: int) -> int {
     r = match score {
         90..=100 -> 4
-        80..<90  -> 3
+        80..<90 -> 3
         70..<80, 65 -> 2
-        _        -> 1
+        _ -> 1
     }
     return r
 }
@@ -16,8 +16,8 @@ digit_kind(n: int) -> int {
     r = match n {
         0, 2, 4, 6, 8 -> 2
         1, 3, 5, 7, 9 -> 1
-        10..<20       -> 10
-        _             -> 0
+        10..<20 -> 10
+        _ -> 0
     }
     return r
 }
@@ -25,8 +25,8 @@ digit_kind(n: int) -> int {
 word_kind(s: string) -> int {
     r = match s {
         "y", "yes" -> 1
-        "n", "no"  -> 0
-        _          -> -1
+        "n", "no" -> 0
+        _ -> -1
     }
     return r
 }
@@ -35,13 +35,13 @@ bucket(x: int) -> int {
     int r = 0
     switch x {
         case 1, 3, 5:
-            r = 10
+        r = 10
         case 10..<20:
-            r = 20
+        r = 20
         case 20..=25, 30:
-            r = 30
+        r = 30
         default:
-            r = 99
+        r = 99
     }
     return r
 }

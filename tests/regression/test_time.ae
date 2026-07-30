@@ -68,9 +68,9 @@ main() {
     // malformed rejected
     _, be = time.parse_iso8601("not-a-date")
     fails = fails + ck(be != "", "malformed rejected")
-    _, be2 = time.parse_iso8601("2009-13-13T00:00:00Z")   // month 13
+    _, be2 = time.parse_iso8601("2009-13-13T00:00:00Z") // month 13
     fails = fails + ck(be2 != "", "bad month rejected")
-    _, be3 = time.parse_iso8601("2023-02-29T00:00:00Z")   // not a leap year
+    _, be3 = time.parse_iso8601("2023-02-29T00:00:00Z") // not a leap year
     fails = fails + ck(be3 != "", "feb 29 non-leap rejected")
 
     // ---- diff + ordering ----
@@ -81,7 +81,7 @@ main() {
     fails = fails + ck(time.is_after(b, a), "b after a")
 
     // ---- add_hours / add_minutes ----
-    h = time.add_hours(e0, 25)   // 1970-01-02T01:00:00Z
+    h = time.add_hours(e0, 25) // 1970-01-02T01:00:00Z
     fails = fails + ck(h.day == 2 && h.hour == 1, "add 25 hours")
 
     // ---- a far-future + negative (pre-epoch) date, exact civil math ----

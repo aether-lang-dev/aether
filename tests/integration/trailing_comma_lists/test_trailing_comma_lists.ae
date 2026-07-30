@@ -14,7 +14,7 @@
 //
 // This test must compile cleanly (no E0100) and exit 0.
 
-import listmod (alpha, beta, gamma,)
+import listmod(alpha, beta, gamma,)
 
 main() {
     if listmod.alpha(10) != 11 { println("FAIL alpha"); exit(1) }

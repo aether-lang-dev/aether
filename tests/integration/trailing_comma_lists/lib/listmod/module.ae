@@ -9,7 +9,7 @@
 // The error was mis-located onto the *importing* file's path with this
 // module's line number, and surfaced as the "nondeterministic E0100 on
 // rebuild" the avnproxy port reported.
-exports (
+exports(
     alpha,
     beta,
     gamma,

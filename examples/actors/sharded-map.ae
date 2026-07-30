@@ -45,7 +45,7 @@ actor Shard {
         Get(key) -> {
             // Compute into one variable and reply ONCE at the end of the
             // handler. A single trailing reply is the robust ask pattern.
-            result = 0 - 1                    // ABSENT sentinel
+            result = 0 - 1 // ABSENT sentinel
             v = map_get_raw(store, key)
             if v != null {
                 n, _ = string.to_int(v)
@@ -62,14 +62,14 @@ actor Shard {
 // well-distributing non-cryptographic hash — the right tool for routing
 // (a crypto hash would be wasteful here).
 shard_for(key: string, nshards: int) -> int {
-    h = 2166136261                            // FNV offset basis
+    h = 2166136261 // FNV offset basis
     n = string.length(key)
     i = 0
     while i < n {
         c = string.char_at(key, i)
         h = h ^ c
-        h = h * 16777619                      // FNV prime
-        h = h & 2147483647                    // keep it non-negative
+        h = h * 16777619 // FNV prime
+        h = h & 2147483647 // keep it non-negative
         i = i + 1
     }
     return h % nshards

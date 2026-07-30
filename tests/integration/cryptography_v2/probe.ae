@@ -88,7 +88,7 @@ main() {
     // bytes must match the digest of the original. We can't string.equals
     // because of the embedded NUL.
     h_orig, _ = cryptography.sha256_hex(bin, bin_len)
-    h_rt, _   = cryptography.sha256_hex(dec4, string.length(dec4))
+    h_rt, _ = cryptography.sha256_hex(dec4, string.length(dec4))
     if string.equals(h_orig, h_rt) != 1 {
         println("  FAIL: round-tripped digest differs")
         println("    orig=${h_orig}")

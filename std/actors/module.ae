@@ -44,7 +44,7 @@
 //
 // Section 2 of nuther-ask-of-aether-team.md / Nico's reply.
 
-exports (
+exports(
     aether_actor_register, aether_actor_whereis,
     aether_actor_unregister, aether_actor_is_registered,
     aether_actor_registry_size, aether_actor_registry_clear,

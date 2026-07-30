@@ -4,9 +4,9 @@
 import types
 
 main() {
-    c = types.default_color()          // Color.Green
-    println("${types.color_code(c)}")  // 1
+    c = types.default_color() // Color.Green
+    println("${types.color_code(c)}") // 1
 
-    s = types.a_rect()                 // Shape = Rect
-    println("${types.shape_kind(s)}")  // 2
+    s = types.a_rect() // Shape = Rect
+    println("${types.shape_kind(s)}") // 2
 }

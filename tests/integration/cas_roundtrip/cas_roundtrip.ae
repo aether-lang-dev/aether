@@ -20,7 +20,7 @@ main() {
         return
     }
 
-    in_path  = string.concat(work, "/input.txt")
+    in_path = string.concat(work, "/input.txt")
     out_path = string.concat(work, "/output.txt")
 
     // Write a known-content payload to disk, put it in the CAS,
@@ -88,7 +88,7 @@ main() {
     // Negative get: unknown digest must surface an error.
     bogus_dest = string.concat(work, "/should_not_exist.txt")
     bogus_err = cas.get("0000000000000000000000000000000000000000000000000000000000000000",
-                        bogus_dest)
+        bogus_dest)
     if bogus_err == "" {
         println("FAIL: get of unknown digest didn't error")
         return

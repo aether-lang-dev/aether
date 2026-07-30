@@ -6,7 +6,7 @@
 // raw qualified value ("uikit.register_btn") missed the merged-AST node
 // (which is named "uikit_register_btn"), the shift was skipped, and the
 // escape walk checked the wrong parameter → false-non-escape → UAF.
-exports (register_btn)
+exports(register_btn)
 
 extern aether_ui_button_create(label: string, boxed: ptr) -> int
 

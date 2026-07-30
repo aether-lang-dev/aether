@@ -37,7 +37,7 @@ extern malloc(size: int) -> ptr
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 extern string_length(s: string) -> int
 
-exports (
+exports(
     HttpResponse,
     response_new, response_free,
     parse_status_line, parse_headers,
@@ -52,17 +52,17 @@ exports (
 // fresh buffer holding the decoded body (dechunked if needed). Headers are two
 // parallel std.lists of owned lower-cased-name / raw-value strings.
 struct HttpResponse {
-    buf: ptr            // growable accumulator (raw bytes from the transport)
-    buf_len: int        // valid bytes in buf
-    status: int         // e.g. 200
-    reason: ptr         // reason phrase bytes (e.g. "OK") or null
+    buf: ptr // growable accumulator (raw bytes from the transport)
+    buf_len: int // valid bytes in buf
+    status: int // e.g. 200
+    reason: ptr // reason phrase bytes (e.g. "OK") or null
     reason_len: int
-    header_names: ptr   // std.list of owned lower-case name strings
-    header_values: ptr  // std.list of owned value strings (parallel)
-    body: ptr           // decoded body bytes or null
+    header_names: ptr // std.list of owned lower-case name strings
+    header_values: ptr // std.list of owned value strings (parallel)
+    body: ptr // decoded body bytes or null
     body_len_v: int
-    headers_done: int   // 1 once the status line + headers are parsed
-    header_end: int     // byte offset in buf just past the "\r\n\r\n"
+    headers_done: int // 1 once the status line + headers are parsed
+    header_end: int // byte offset in buf just past the "\r\n\r\n"
 }
 
 response_new() -> ptr {
@@ -195,9 +195,9 @@ find_header_end(buf: ptr, len: int) -> int {
     i = 0
     while i + 3 < len {
         if (bytes.get(buf, i) & 0xFF) == 13 {
-            if (bytes.get(buf, i+1) & 0xFF) == 10 {
-                if (bytes.get(buf, i+2) & 0xFF) == 13 {
-                    if (bytes.get(buf, i+3) & 0xFF) == 10 {
+            if (bytes.get(buf, i + 1) & 0xFF) == 10 {
+                if (bytes.get(buf, i + 2) & 0xFF) == 13 {
+                    if (bytes.get(buf, i + 3) & 0xFF) == 10 {
                         return i + 4
                     }
                 }
@@ -213,7 +213,7 @@ fn find_crlf(buf: ptr, len: int, off: int) -> int {
     i = off
     while i + 1 < len {
         if (bytes.get(buf, i) & 0xFF) == 13 {
-            if (bytes.get(buf, i+1) & 0xFF) == 10 { return i }
+            if (bytes.get(buf, i + 1) & 0xFF) == 10 { return i }
         }
         i = i + 1
     }
@@ -358,7 +358,7 @@ decode_chunked(buf: ptr, len: int, start: int) -> (ptr, string) {
                     if data_start + sz + 2 > len { err = "incomplete"; done = 1 } else {
                         bytes.copy_from_bytes(out, outn, buf, data_start, sz)
                         outn = outn + sz
-                        p = data_start + sz + 2   // skip the chunk's trailing CRLF
+                        p = data_start + sz + 2 // skip the chunk's trailing CRLF
                     }
                 }
             }

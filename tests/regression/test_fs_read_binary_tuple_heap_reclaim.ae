@@ -43,7 +43,7 @@ main() {
     chunk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     payload = ""
     i = 0
-    while i < 160 {                        // 160 * 64 = 10240 bytes
+    while i < 160 { // 160 * 64 = 10240 bytes
         payload = string.concat(payload, chunk)
         i = i + 1
     }

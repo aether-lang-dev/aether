@@ -93,39 +93,39 @@ main() {
 
     // (13) chain stays integer
     expect_eq(render_x("{{ x | plus:\"3\" | times:\"2\" | minus:\"1\" }}", "5"),
-              "15", "13 chain plus|times|minus")
+        "15", "13 chain plus|times|minus")
 
     // (14) strip_html drops tags
     expect_eq(render_x("{{ x | strip_html }}", "a<b>bold</b>c<br/>d"),
-              "aboldcd", "14 strip_html")
+        "aboldcd", "14 strip_html")
 
     // (15) strip_html unterminated `<` swallows
     expect_eq(render_x("{{ x | strip_html }}", "ok<oops"),
-              "ok", "15 strip_html unterminated")
+        "ok", "15 strip_html unterminated")
 
     // (16) strip_newlines drops \r and \n
     expect_eq(render_x("{{ x | strip_newlines }}", "a\nb\r\nc\rd"),
-              "abcd", "16 strip_newlines")
+        "abcd", "16 strip_newlines")
 
     // (17) slice:"start" returns 1 byte
     expect_eq(render_x("{{ x | slice:\"1\" }}", "abcdef"),
-              "b", "17 slice 1-arg")
+        "b", "17 slice 1-arg")
 
     // (18) slice:"start","len"
     expect_eq(render_x("{{ x | slice:\"1\",\"3\" }}", "abcdef"),
-              "bcd", "18 slice 2-arg")
+        "bcd", "18 slice 2-arg")
 
     // (19) negative start
     expect_eq(render_x("{{ x | slice:\"-2\",\"2\" }}", "abcdef"),
-              "ef", "19 slice negative start")
+        "ef", "19 slice negative start")
 
     // (20) past-end clamp
     expect_eq(render_x("{{ x | slice:\"4\",\"10\" }}", "abcdef"),
-              "ef", "20 slice past-end clamp")
+        "ef", "20 slice past-end clamp")
 
     // (21) negative len
     expect_eq(render_x("{{ x | slice:\"0\",\"-1\" }}", "abcdef"),
-              "", "21 slice negative len")
+        "", "21 slice negative len")
 
     println("All PASS")
 }

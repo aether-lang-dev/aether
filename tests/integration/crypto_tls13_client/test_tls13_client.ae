@@ -58,8 +58,8 @@ main() {
     total_ok = 1
 
     // --- transcript accumulator == SHA-256 of concatenated messages ---
-    m1 = from_hex("41414141")       // "AAAA"
-    m2 = from_hex("424242424242")   // "BBBBBB"
+    m1 = from_hex("41414141") // "AAAA"
+    m2 = from_hex("424242424242") // "BBBBBB"
     t = tls13_client.transcript_new()
     tls13_client.transcript_add(t, m1, 4)
     tls13_client.transcript_add(t, m2, 6)

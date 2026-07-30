@@ -6,15 +6,15 @@ draw_horizontal(width: int, left: int, right: int) {
     print_char(left)
     i = 0
     for i in 0..width {
-        print_char(45)  // -
+        print_char(45) // -
     }
     print_char(right)
-    print_char(10)  // newline
+    print_char(10) // newline
 }
 
 draw_content_line(text: string, width: int) {
-    print_char(124)  // |
-    print_char(32)   // space
+    print_char(124) // |
+    print_char(32) // space
     print(text)
     // pad to width (text length approximated, just pad generously)
     j = 0
@@ -26,11 +26,11 @@ draw_content_line(text: string, width: int) {
 }
 
 draw_box(title: string, body: string, width: int) {
-    draw_horizontal(width, 43, 43)       // +---+
+    draw_horizontal(width, 43, 43) // +---+
     draw_content_line(title, width - 2)
-    draw_horizontal(width, 43, 43)       // +---+
+    draw_horizontal(width, 43, 43) // +---+
     draw_content_line(body, width - 2)
-    draw_horizontal(width, 43, 43)       // +---+
+    draw_horizontal(width, 43, 43) // +---+
 }
 
 // Draw with escape sequences for color
@@ -48,9 +48,9 @@ draw_progress(pct: int) {
     i = 0
     for i in 0..width {
         if i < filled {
-            print_char(61)  // =
+            print_char(61) // =
         } else {
-            print_char(32)  // space
+            print_char(32) // space
         }
     }
     print("] ${pct}%")

@@ -12,7 +12,7 @@
 // (MIT, Copyright (c) 2022-2026 Christoffer Lernö and contributors),
 // re-expressed for Aether's concrete array types.
 
-exports (
+exports(
     ints, longs, floats,
     int_search, long_search, float_search
 )
@@ -48,7 +48,7 @@ ints(arr: ptr) {
         idx = idx + 1
     }
     while gap < n / 2 {
-        gap = (gap * 9) / 4   // ~*2.25
+        gap = (gap * 9) / 4 // ~*2.25
     }
     // Shell sort with the descending gap chain.
     while gap >= 1 {

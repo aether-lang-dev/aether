@@ -28,7 +28,7 @@
 // paths surfaced the need.  Future additions (pointer arithmetic
 // helpers, little-endian variants) ship when concrete uses surface.
 
-exports (
+exports(
     aether_mem_get_byte, aether_mem_set_byte,
     aether_mem_get_byte_sz, aether_mem_set_byte_sz,
     aether_mem_get_ptr, aether_mem_set_ptr,

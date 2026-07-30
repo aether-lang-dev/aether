@@ -47,11 +47,11 @@ main() {
         println("FAIL kind=1: length=${string.length(b)}, expected 12")
         exit(1)
     }
-    if string.char_at(b, 0) != 104 {  // 'h'
+    if string.char_at(b, 0) != 104 { // 'h'
         println("FAIL kind=1: byte 0 = ${string.char_at(b, 0)}, expected 104")
         exit(1)
     }
-    if string.char_at(b, 11) != 100 {  // 'd' (last char of "_decorated")
+    if string.char_at(b, 11) != 100 { // 'd' (last char of "_decorated")
         println("FAIL kind=1: byte 11 = ${string.char_at(b, 11)}, expected 100")
         exit(1)
     }

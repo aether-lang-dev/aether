@@ -26,7 +26,7 @@ import std.os
 import std.string
 import std.bytes
 
-exports (generate)
+exports(generate)
 
 // Epoch: 2020-01-01T00:00:00Z in unix-ms. Subtracting this keeps the
 // timestamp within 42 bits until ~2160. Same anchor TSID-Java's
@@ -38,7 +38,7 @@ const ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 // Generate a 13-char TSID. Returns (tsid, "") on success,
 // ("", error) on CSPRNG failure.
 generate() -> {
-    raw, n, err = cryptography.random_bytes(3)  // 22 bits, rounded up to 3 bytes
+    raw, n, err = cryptography.random_bytes(3) // 22 bits, rounded up to 3 bytes
     if err != "" {
         return "", err
     }

@@ -1,2 +1,2 @@
 import mid
-exports (mid_base, leaf_double, LEAF_C)
+exports(mid_base, leaf_double, LEAF_C)

@@ -9,7 +9,7 @@ import std.string
 extern exit(code: int)
 
 type USD = distinct float
-type Fd  = distinct int
+type Fd = distinct int
 
 add(a: USD, b: USD) -> USD { return (a as float + b as float) as USD }
 fd_value(f: Fd) -> int { return f as int }
@@ -17,12 +17,12 @@ fd_value(f: Fd) -> int { return f as int }
 main() {
     x = 3.0 as USD
     y = 2.0 as USD
-    sum = add(x, y)                 // USD + USD via unwrap/rewrap
+    sum = add(x, y) // USD + USD via unwrap/rewrap
     if (sum as float) != 5.0 {
         println("FAIL #480: USD wrap/unwrap arithmetic")
         exit(1)
     }
-    fd = 7 as Fd                    // wrap an int into a capability-token type
+    fd = 7 as Fd // wrap an int into a capability-token type
     if fd_value(fd) != 7 {
         println("FAIL #480: Fd unwrap at call boundary")
         exit(1)

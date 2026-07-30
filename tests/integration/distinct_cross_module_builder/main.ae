@@ -1,4 +1,4 @@
-import distmod (doc, child, num, unwrap)
+import distmod(doc, child, num, unwrap)
 main() {
     // plain cross-module distinct wrap/unwrap
     println("${unwrap(num(5))}")

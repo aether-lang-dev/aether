@@ -27,7 +27,7 @@
 
 import std.string
 
-exports (
+exports(
     arena_create, arena_alloc, arena_alloc_aligned,
     arena_reset, arena_destroy,
     arena_get_used, arena_get_size,

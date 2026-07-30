@@ -64,9 +64,9 @@ chain_label(e: *ErrChain) -> string {
 }
 
 main() {
-    leaf   = mk_err(1, "io: enoent",    0 as *ErrChain, "io.c",     7)
-    middle = mk_err(2, "fs: read fail", leaf,           "fs.c",     42)
-    top    = mk_err(3, "svn: open",     middle,         "client.c", 99)
+    leaf = mk_err(1, "io: enoent", 0 as *ErrChain, "io.c", 7)
+    middle = mk_err(2, "fs: read fail", leaf, "fs.c", 42)
+    top = mk_err(3, "svn: open", middle, "client.c", 99)
 
     // Case 1: chain walk with int field reads.
     total = sum_codes(top)

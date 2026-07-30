@@ -9,8 +9,8 @@ extern exit(code: int)
 compute_sum(stop: int) {
     total = 0
     // Closure writes `total` — promotes it in compute_sum's scope.
-    add = |n: int| { total = total + n }
-    for (i = 1; i <= stop; i++) {
+    add = | n: int | { total = total + n }
+    for (i = 1; i <= stop; i ++) {
         call(add, i)
     }
     // Return the promoted var — just the int value, cell freed on exit.
@@ -24,13 +24,13 @@ first_of(a: int, b: int) {
 }
 
 main() {
-    r1 = compute_sum(4)     // 1+2+3+4 = 10
+    r1 = compute_sum(4) // 1+2+3+4 = 10
     if r1 != 10 { println("FAIL: compute_sum(4), expected 10, got:"); println(r1); exit(1) }
 
-    r2 = compute_sum(10)    // sum 1..10 = 55
+    r2 = compute_sum(10) // sum 1..10 = 55
     if r2 != 55 { println("FAIL: compute_sum(10), expected 55, got:"); println(r2); exit(1) }
 
-    r3 = first_of(3, 7)     // 3 + 7 = 10
+    r3 = first_of(3, 7) // 3 + 7 = 10
     if r3 != 10 { println("FAIL: first_of(3,7), expected 10, got:"); println(r3); exit(1) }
 
     // Repeated calls — each invocation gets its own heap cell that's

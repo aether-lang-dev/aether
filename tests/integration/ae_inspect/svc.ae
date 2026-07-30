@@ -3,7 +3,7 @@
 import std.string
 import std.fs
 
-struct Config { int port  int workers }
+struct Config { int port int workers }
 
 const DEFAULT_PORT = 8080
 

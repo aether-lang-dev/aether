@@ -6,12 +6,12 @@
 // rehydrated in the binimport stub.
 //
 // `make` is reserved, so the function is named `pulse`.
-exports ( K_INT, K_LONG, K_STR, K_TRUE, K_FALSE, pulse )
+exports(K_INT, K_LONG, K_STR, K_TRUE, K_FALSE, pulse)
 
-const K_INT   = 42
-const K_LONG  = 9000000000        // > 2^31, exercises the long path
-const K_STR   = "compaction: index unavailable"
-const K_TRUE  = true
+const K_INT = 42
+const K_LONG = 9000000000 // > 2^31, exercises the long path
+const K_STR = "compaction: index unavailable"
+const K_TRUE = true
 const K_FALSE = false
 
 pulse() -> int { return 7 }

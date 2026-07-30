@@ -37,15 +37,15 @@ import std.cryptography.hmac
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     new, generate, generate_with_input, reseed, free_ctx
 )
 
 struct DrbgCtx {
-    k: ptr            // std.bytes, mac_size bytes
-    v: ptr            // std.bytes, mac_size bytes
-    mac_size: int     // HMAC output length in bytes
-    algo: string      // underlying sha2 algo
+    k: ptr // std.bytes, mac_size bytes
+    v: ptr // std.bytes, mac_size bytes
+    mac_size: int // HMAC output length in bytes
+    algo: string // underlying sha2 algo
     reseed_counter: long
 }
 

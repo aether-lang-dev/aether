@@ -15,4 +15,3 @@ main() {
     c ! Tick {};
     print("Actor spawned and message sent\n");
 }
-

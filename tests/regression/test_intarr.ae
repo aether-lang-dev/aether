@@ -47,12 +47,12 @@ main() {
     intarr_set_raw(a, 0, 42)
     intarr_set_raw(a, 2, 99)
     intarr_set_raw(a, 4, -17)
-    if intarr_get_raw(a, 0) != 42  { print("  FAIL [0]\n"); exit(1) }
-    if intarr_get_raw(a, 2) != 99  { print("  FAIL [2]\n"); exit(1) }
+    if intarr_get_raw(a, 0) != 42 { print("  FAIL [0]\n"); exit(1) }
+    if intarr_get_raw(a, 2) != 99 { print("  FAIL [2]\n"); exit(1) }
     if intarr_get_raw(a, 4) != -17 { print("  FAIL [4]\n"); exit(1) }
     // Untouched slots still zero
-    if intarr_get_raw(a, 1) != 0   { print("  FAIL [1]\n"); exit(1) }
-    if intarr_get_raw(a, 3) != 0   { print("  FAIL [3]\n"); exit(1) }
+    if intarr_get_raw(a, 1) != 0 { print("  FAIL [1]\n"); exit(1) }
+    if intarr_get_raw(a, 3) != 0 { print("  FAIL [3]\n"); exit(1) }
     print("  PASS: 42/99/-17 round-trip, untouched slots stay zero\n")
 
     intarr_free(a)

@@ -1,5 +1,5 @@
 // String utility module — tests multi-import alongside mymath.
-exports (repeat_sum, MAGIC)
+exports(repeat_sum, MAGIC)
 
 repeat_sum(x, times) {
     total = 0

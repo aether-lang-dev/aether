@@ -73,7 +73,7 @@ main() {
             exit(1)
         }
         err = middleware.use_bearer_auth(raw, "api",
-                                          aether_test_bearer_verify, 0)
+            aether_test_bearer_verify, 0)
         if err != "" {
             println("FAIL: use_bearer_auth: ${err}")
             exit(1)
@@ -92,7 +92,7 @@ main() {
             exit(1)
         }
         err = middleware.use_session_auth(raw, "SESSIONID", "/login",
-                                           aether_test_session_verify, 0)
+            aether_test_session_verify, 0)
         if err != "" {
             println("FAIL: use_session_auth: ${err}")
             exit(1)

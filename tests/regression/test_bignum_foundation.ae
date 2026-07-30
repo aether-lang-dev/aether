@@ -32,7 +32,7 @@ bhex(b: ptr) -> string {
     d = "0123456789abcdef"; out = ""; n = bytes.length(b); i = 0
     while i < n {
         v = bytes.get(b, i)
-        out = string.concat(out, string.concat(string.substring(d, (v/16)&15, ((v/16)&15)+1), string.substring(d, v&15, (v&15)+1)))
+        out = string.concat(out, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
         i = i + 1
     }
     return out
@@ -45,9 +45,9 @@ main() {
     // ---- arithmetic via from_int, compared to to_hex (Python-style) ----
     a = bignum.from_int(1234567890)
     b = bignum.from_int(-987654321)
-    s = bignum.add(a, b)        // 246913569 = 0xeb79a21
+    s = bignum.add(a, b) // 246913569 = 0xeb79a21
     if string.equals(bignum.to_hex(s), "eb79a21") != 1 { print("FAIL add\n"); fails = fails + 1 }
-    d = bignum.subtract(a, b)   // 2222222211 = 0x84746b83
+    d = bignum.subtract(a, b) // 2222222211 = 0x84746b83
     if string.equals(bignum.to_hex(d), "84746b83") != 1 { print("FAIL subtract\n"); fails = fails + 1 }
     if bignum.compare(a, b) != 1 { print("FAIL compare a>b\n"); fails = fails + 1 }
     if bignum.compare(b, a) != -1 { print("FAIL compare b<a\n"); fails = fails + 1 }

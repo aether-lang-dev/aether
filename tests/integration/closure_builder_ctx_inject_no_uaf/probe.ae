@@ -8,12 +8,12 @@
 // on_press), got a false-non-escape verdict, and emitted
 // `free(_ad_0.env)` after the call → the C side later read the freed
 // env (UAF).
-import uikit (register_btn)
+import uikit(register_btn)
 extern fire_btn()
 
 main() {
     msg = "ok"
-    inner = |d: int| { println(msg) }
+    inner = | d: int | { println(msg) }
     // No `_ctx` arg → codegen injects ctx → drain gate must map
     // AST arg idx 1 (the callback) → param idx 2 (on_press).
     register_btn("=") callback { call(inner, 7) }

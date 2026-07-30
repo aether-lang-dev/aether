@@ -3,7 +3,7 @@
 // them, and run_detached must still spawn its own thread. Completions run on
 // the drain (this) thread, serialised, so the counter needs no lock.
 
-import std.io (println)
+import std.io(println)
 import std.bytes
 import std.worker
 
@@ -25,7 +25,7 @@ main() {
                 bytes.set(p, 0, idx)
                 return p
             },
-            |res: ptr| {
+            | res: ptr | {
                 bytes.set(t, 0, bytes.get(t, 0) + 1)
                 bytes.free(res)
             }

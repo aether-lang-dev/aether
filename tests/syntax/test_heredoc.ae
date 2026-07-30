@@ -27,7 +27,7 @@ BLOCK
 heredoc passed directly
 to a function call
 MSG
-)
+    )
 
     // Heredoc with underscore marker
     data = <<CONFIG_DATA

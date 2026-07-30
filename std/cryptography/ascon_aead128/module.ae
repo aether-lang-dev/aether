@@ -26,15 +26,15 @@
 import std.bits
 import std.bytes
 
-exports (
+exports(
     aead_seal, aead_open,
     KEY_BYTES, NONCE_BYTES, TAG_BYTES
 )
 
-const KEY_BYTES   = 16
+const KEY_BYTES = 16
 const NONCE_BYTES = 16
-const TAG_BYTES   = 16
-const RATE        = 16
+const TAG_BYTES = 16
+const RATE = 16
 
 // The 320-bit sponge state, carried explicitly through the one-shot flow.
 struct Aead128St {

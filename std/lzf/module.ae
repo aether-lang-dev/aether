@@ -8,7 +8,7 @@
 // LZF streams do not carry the original uncompressed length, so
 // decompress requires the caller to provide `output_length`.
 
-exports (
+exports(
     lzf_max_compressed_size,
     lzf_try_compress, lzf_get_compress_bytes, lzf_get_compress_length,
     lzf_release_compress,

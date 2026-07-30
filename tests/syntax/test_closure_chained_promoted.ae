@@ -8,15 +8,15 @@ main() {
     total = 0
 
     // inner captures and writes `total`.
-    inner = |d: int| { total = total + d }
+    inner = | d: int | { total = total + d }
 
     // outer captures inner and writes through it.
-    outer = |d: int| { call(inner, d); call(inner, d) }
+    outer = | d: int | { call(inner, d); call(inner, d) }
 
-    call(outer, 5)   // inner called twice with 5 => total += 10
+    call(outer, 5) // inner called twice with 5 => total += 10
     if total != 10 { println("FAIL: after first outer, expected 10, got:"); println(total); exit(1) }
 
-    call(outer, 3)   // total += 6 => 16
+    call(outer, 3) // total += 6 => 16
     if total != 16 { println("FAIL: after second outer, expected 16, got:"); println(total); exit(1) }
 
     // Direct call to inner also lands on the same cell.

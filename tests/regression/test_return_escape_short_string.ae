@@ -10,9 +10,9 @@ extern exit(code: int)
 
 one_byte(cond: int) -> string {
     if cond == 1 {
-        return string.concat("a", "")  // 1-byte heap result
+        return string.concat("a", "") // 1-byte heap result
     }
-    return "b"                          // 1-byte literal
+    return "b" // 1-byte literal
 }
 
 main() {
@@ -23,7 +23,7 @@ main() {
         println("FAIL heap: length=${string.length(a)}, expected 1")
         exit(1)
     }
-    if string.char_at(a, 0) != 97 {  // 'a'
+    if string.char_at(a, 0) != 97 { // 'a'
         println("FAIL heap: byte 0 = ${string.char_at(a, 0)}, expected 97")
         exit(1)
     }
@@ -34,7 +34,7 @@ main() {
         println("FAIL literal: length=${string.length(b)}, expected 1")
         exit(1)
     }
-    if string.char_at(b, 0) != 98 {  // 'b'
+    if string.char_at(b, 0) != 98 { // 'b'
         println("FAIL literal: byte 0 = ${string.char_at(b, 0)}, expected 98")
         exit(1)
     }

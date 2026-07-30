@@ -22,7 +22,7 @@ import std.os
 import std.string
 import std.bytes
 
-exports (generate)
+exports(generate)
 
 // Generate a new ULID. Returns (ulid_string, "") on success,
 // ("", error) on CSPRNG failure.

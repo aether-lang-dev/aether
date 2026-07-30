@@ -37,7 +37,7 @@ main() {
     print("\nTest 3: Cons pattern [h|t] on 5 elements\n")
     match (nums) {
         [] -> { print("  FAIL: not empty\n") }
-        [h|t] -> {
+        [h | t] -> {
             print("  PASS: head=")
             print(h)
             print("\n")
@@ -88,7 +88,7 @@ main() {
     print("\nTest 6: Cons [h|t] on single element\n")
     match (one) {
         [] -> { print("  FAIL: not empty\n") }
-        [h|t] -> {
+        [h | t] -> {
             print("  PASS: head=")
             print(h)
             print("\n")
@@ -102,7 +102,7 @@ main() {
     print("\nTest 7: Cons [h|t] on two elements\n")
     match (two) {
         [] -> { print("  FAIL: not empty\n") }
-        [h|t] -> {
+        [h | t] -> {
             print("  PASS: head=")
             print(h)
             print("\n")
@@ -127,7 +127,7 @@ main() {
 
     print("\nTest 9: Empty does not match cons\n")
     match (empty2) {
-        [h|t] -> { print("  FAIL: empty should not match cons\n") }
+        [h | t] -> { print("  FAIL: empty should not match cons\n") }
         [] -> { print("  PASS: empty correctly skipped cons\n") }
         _ -> { print("  FAIL: unexpected\n") }
     }

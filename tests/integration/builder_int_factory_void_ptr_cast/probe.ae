@@ -25,7 +25,7 @@ builder thing() with make_handle_factory {
 }
 
 main() {
-    thing() { }
+    thing() {}
     println("ok")
     return 0
 }

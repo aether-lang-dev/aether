@@ -16,7 +16,7 @@ count_down(n: int) {
         return 0
     }
 
-    call(tick)  // decrements n in THIS frame's heap cell
+    call(tick) // decrements n in THIS frame's heap cell
     // n is now n-1 in this frame. Recursive call gets a new frame
     // with its own promoted n.
     return 1 + count_down(n)
@@ -27,7 +27,7 @@ count_down(n: int) {
 // closure that sums. Tests recursion depth isn't foiled by promotion.
 sum_down(n: int) {
     total = 0
-    acc = |v: int| { total = total + v }
+    acc = | v: int | { total = total + v }
 
     if n <= 0 {
         call(acc, 0)
@@ -61,12 +61,12 @@ main() {
     r2 = sum_down(3)
     if r2 != 6 { println("FAIL: sum_down(3) expected 6, got:"); println(r2); exit(1) }
 
-    r3 = sum_down(5)    // 5+4+3+2+1+0 = 15
+    r3 = sum_down(5) // 5+4+3+2+1+0 = 15
     if r3 != 15 { println("FAIL: sum_down(5) expected 15, got:"); println(r3); exit(1) }
 
     // Run a deep recursion to make sure we don't leak or corrupt across
     // many frames.
-    r4 = sum_down(20)   // 20+19+...+1+0 = 210
+    r4 = sum_down(20) // 20+19+...+1+0 = 210
     if r4 != 210 { println("FAIL: sum_down(20) expected 210, got:"); println(r4); exit(1) }
 
     println("ok")

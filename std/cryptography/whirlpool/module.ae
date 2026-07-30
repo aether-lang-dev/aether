@@ -39,7 +39,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     whirlpool_hex, whirlpool_bytes
 )
@@ -64,16 +64,16 @@ const WP_SBOX: long[256] = [
 ]
 
 struct WpCtx {
-    hash: ptr         // longarr(8), chaining st
-    c0: ptr           // longarr(256), diffusion table C0
-    rc: ptr           // longarr(11), round constants rc[0..10]
-    kk: ptr           // longarr(8), round key K
-    ll: ptr           // longarr(8), scratch L
-    block: ptr        // longarr(8), the mu(buffer) words
-    cst: ptr          // longarr(8), cipher st
-    buf: ptr          // bytes(64), byte buffer
+    hash: ptr // longarr(8), chaining st
+    c0: ptr // longarr(256), diffusion table C0
+    rc: ptr // longarr(11), round constants rc[0..10]
+    kk: ptr // longarr(8), round key K
+    ll: ptr // longarr(8), scratch L
+    block: ptr // longarr(8), the mu(buffer) words
+    cst: ptr // longarr(8), cipher st
+    buf: ptr // bytes(64), byte buffer
     buf_pos: int
-    bitcount: ptr     // bytes(32), 256-bit big-endian length, incremented by 8
+    bitcount: ptr // bytes(32), 256-bit big-endian length, incremented by 8
 }
 
 mulx(input: long) -> long {
@@ -128,14 +128,14 @@ build_tables(c: *WpCtx) {
     r = 1
     while r <= 10 {
         idx = 8 * (r - 1)
-        v = (ctab(c, 0, idx)     & 0xff00000000000000) ^
-            (ctab(c, 1, idx + 1) & 0x00ff000000000000) ^
-            (ctab(c, 2, idx + 2) & 0x0000ff0000000000) ^
-            (ctab(c, 3, idx + 3) & 0x000000ff00000000) ^
-            (ctab(c, 4, idx + 4) & 0x00000000ff000000) ^
-            (ctab(c, 5, idx + 5) & 0x0000000000ff0000) ^
-            (ctab(c, 6, idx + 6) & 0x000000000000ff00) ^
-            (ctab(c, 7, idx + 7) & 0x00000000000000ff)
+        v = (ctab(c, 0, idx) & 0xff00000000000000) ^
+        (ctab(c, 1, idx + 1) & 0x00ff000000000000) ^
+        (ctab(c, 2, idx + 2) & 0x0000ff0000000000) ^
+        (ctab(c, 3, idx + 3) & 0x000000ff00000000) ^
+        (ctab(c, 4, idx + 4) & 0x00000000ff000000) ^
+        (ctab(c, 5, idx + 5) & 0x0000000000ff0000) ^
+        (ctab(c, 6, idx + 6) & 0x000000000000ff00) ^
+        (ctab(c, 7, idx + 7) & 0x00000000000000ff)
         longarr_set_unchecked(c.rc, r, v)
         r = r + 1
     }

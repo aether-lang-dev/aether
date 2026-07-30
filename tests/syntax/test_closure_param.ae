@@ -18,8 +18,8 @@ combine(x: int, f: fn, g: fn) {
 }
 
 main() {
-    doubler = |x: int| -> x * 2
-    add_ten = |x: int| -> x + 10
+    doubler = | x: int | -> x * 2
+    add_ten = | x: int | -> x + 10
 
     // Pass closure to function
     result = apply(21, doubler)

@@ -51,7 +51,7 @@
 //   capsicum.rights_limit(file.fd(handle), capsicum.R_READ | capsicum.R_SEEK)
 //   capsicum.enter()
 
-exports (
+exports(
     // Return codes
     CAP_OK, CAP_ERR, CAP_UNSUPPORTED,
     // Raw externs
@@ -69,9 +69,9 @@ exports (
 
 // ---- Return codes (mirror aether_capsicum.h) ----
 
-const CAP_OK          =  0   // operation succeeded
-const CAP_ERR         = -1   // syscall failed
-const CAP_UNSUPPORTED = -2   // not FreeBSD, or kernel lacks Capsicum
+const CAP_OK = 0 // operation succeeded
+const CAP_ERR = -1 // syscall failed
+const CAP_UNSUPPORTED = -2 // not FreeBSD, or kernel lacks Capsicum
 
 // ---- cap_rights bits ----
 // OR these for rights_limit(): capsicum.R_READ | capsicum.R_SEEK.
@@ -79,28 +79,28 @@ const CAP_UNSUPPORTED = -2   // not FreeBSD, or kernel lacks Capsicum
 // a `|` immediately after a call is read as a closure delimiter.
 // Values mirror AETHER_CAPR_* in aether_capsicum.h.
 
-const R_READ      = 0x0001
-const R_WRITE     = 0x0002
-const R_SEEK      = 0x0004
-const R_FSTAT     = 0x0008
+const R_READ = 0x0001
+const R_WRITE = 0x0002
+const R_SEEK = 0x0004
+const R_FSTAT = 0x0008
 const R_FTRUNCATE = 0x0010
-const R_FSYNC     = 0x0020
-const R_MMAP      = 0x0040
-const R_ACCEPT    = 0x0080
-const R_CONNECT   = 0x0100
-const R_BIND      = 0x0200
-const R_LISTEN    = 0x0400
-const R_RECV      = 0x0800
-const R_SEND      = 0x1000
-const R_EVENT     = 0x2000
-const R_IOCTL     = 0x4000
-const R_FCNTL     = 0x8000
+const R_FSYNC = 0x0020
+const R_MMAP = 0x0040
+const R_ACCEPT = 0x0080
+const R_CONNECT = 0x0100
+const R_BIND = 0x0200
+const R_LISTEN = 0x0400
+const R_RECV = 0x0800
+const R_SEND = 0x1000
+const R_EVENT = 0x2000
+const R_IOCTL = 0x4000
+const R_FCNTL = 0x8000
 
 // ---- fcntl-command bits ----
 // OR these for fcntls_limit(). Mirror AETHER_CAPF_* in aether_capsicum.h.
 
-const F_GETFL  = 0x01
-const F_SETFL  = 0x02
+const F_GETFL = 0x01
+const F_SETFL = 0x02
 const F_GETOWN = 0x04
 const F_SETOWN = 0x08
 

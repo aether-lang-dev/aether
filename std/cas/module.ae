@@ -44,7 +44,7 @@ import std.string
 // std/string's `string_concat` / `string_length`.)
 extern os_getenv(name: string) -> string
 
-exports (
+exports(
     // Aether-native API.
     root, path, has, put, get,
     // Raw escape hatches if a caller needs the per-step pieces.

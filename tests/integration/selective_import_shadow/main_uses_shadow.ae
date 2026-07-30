@@ -1,7 +1,7 @@
 // Driver that imports the shadowing module. Building this should
 // FAIL with the shadow-error message — the test harness asserts
 // both the non-zero exit code and the diagnostic text.
-import mod_with_shadow (length)
+import mod_with_shadow(length)
 
 main() {
     n = length("hello")

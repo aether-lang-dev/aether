@@ -14,7 +14,7 @@ main() {
     defer list.free(held)
 
     base = 100
-    op = |x: int| { return x + base }
+    op = | x: int | { return x + base }
 
     // Capture a boxed reference to op-v1. The box_closure copies the
     // {fn, env} struct, so the list now holds a pointer to op-v1's env.
@@ -23,7 +23,7 @@ main() {
     // Reassign op. op now points at a different closure. The original
     // env is still reachable via `held` and must NOT be freed — otherwise
     // the call through the boxed copy below would read freed memory.
-    op = |x: int| { return x * base }
+    op = | x: int | { return x * base }
 
     // Call the new op.
     r2 = call(op, 5)

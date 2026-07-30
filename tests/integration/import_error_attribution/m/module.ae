@@ -3,5 +3,5 @@
 // originates HERE, so the diagnostic must name this file (module.ae)
 // and render this line — not the importing main.ae.
 // comment line to push the error onto a known line number
-    module_orphan_field: long
+module_orphan_field: long
 }

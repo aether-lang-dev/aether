@@ -18,7 +18,7 @@
 // is still rejected at the qualified-call site by the existing
 // is_export_blocked path. Only the cloned caller can reach the helper.
 
-import mathy (cube)
+import mathy(cube)
 
 extern exit(code: int)
 

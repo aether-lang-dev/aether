@@ -24,7 +24,7 @@ extern exit(code: int)
 
 main() {
     // Case 1: wrapped concat with binary content — embedded NULs survive.
-    raw, _ = encoding.base64_decode("AABCAA==")  // 4 bytes: 0x00 0x00 0x42 0x00
+    raw, _ = encoding.base64_decode("AABCAA==") // 4 bytes: 0x00 0x00 0x42 0x00
     if string.length(raw) != 4 {
         println("FAIL: base64_decode raw_len=${string.length(raw)}, expected 4")
         exit(1)

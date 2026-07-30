@@ -13,7 +13,7 @@ main() {
     byte[128] static_ids
     mem.set_int(static_ids, 0, 11)
 
-    ids = static_ids                 // decays to ptr (was: "array type not assignable")
+    ids = static_ids // decays to ptr (was: "array type not assignable")
     if mem.get_int(ids, 0) != 11 {
         println("FAIL #892: decayed pointer does not alias the array")
         exit(1)

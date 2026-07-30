@@ -8,7 +8,7 @@
 // The implementations are in std/net/aether_http.c and std/net/aether_http_server.c
 // which are compiled into libaether.a
 
-exports (
+exports(
     http_get_raw, http_get_with_timeout_raw, http_get_with_timeout_ns_raw,
     http_post_raw, http_put_raw, http_delete_raw,
     http_response_free, http_response_status_code,
@@ -378,7 +378,7 @@ server_shutdown_graceful(server: ptr, timeout: Duration) -> {
 // pointer to the hook function. Hooks are C function pointers — declare
 // them with @c_callback on the Aether side.
 extern http_server_set_on_start(server: ptr, hook: ptr, user_data: ptr)
-extern http_server_set_on_stop (server: ptr, hook: ptr, user_data: ptr)
+extern http_server_set_on_stop(server: ptr, hook: ptr, user_data: ptr)
 
 server_on_start(server: ptr, hook: ptr, user_data: ptr) {
     http_server_set_on_start(server, hook, user_data)
@@ -394,15 +394,15 @@ server_on_stop(server: ptr, hook: ptr, user_data: ptr) {
 // Either path may be "" to skip registration. ready_check may be null —
 // in that case ready_path returns 200 too.
 extern http_server_set_health_probes_raw(server: ptr,
-                                         live_path: string,
-                                         ready_path: string,
-                                         ready_check: ptr,
-                                         user_data: ptr) -> string
+    live_path: string,
+    ready_path: string,
+    ready_check: ptr,
+    user_data: ptr) -> string
 
 server_set_health_probes(server: ptr, live_path: string, ready_path: string,
-                         ready_check: ptr, user_data: ptr) -> {
+    ready_check: ptr, user_data: ptr) -> {
     return http_server_set_health_probes_raw(server, live_path, ready_path,
-                                             ready_check, user_data)
+        ready_check, user_data)
 }
 
 // Built-in access logger (#260 Tier 3 / F1). format: "combined" or
@@ -749,7 +749,7 @@ request_body_read(req: ptr, offset: int, max: int) -> {
         return "", 0, "request_body_read failed"
     }
     raw = http_get_request_body_read()
-    n   = http_get_request_body_read_length()
+    n = http_get_request_body_read_length()
     owned = string_new_with_length(raw, n)
     http_release_request_body_read()
     return owned, n, ""

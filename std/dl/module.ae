@@ -16,7 +16,7 @@
 // real dlopen and consults the per-process grant table, so dl.open
 // inherits sandbox grants transparently.
 
-exports (
+exports(
     open_raw, symbol_raw, close_raw, last_error_raw,
     open, symbol, close, last_error
 )

@@ -54,11 +54,11 @@ main() {
         println("FAIL 1: length(s) after noop_free = ${string.length(s)}, expected 5")
         exit(1)
     }
-    if string.char_at(s, 0) != 104 {  // 'h'
+    if string.char_at(s, 0) != 104 { // 'h'
         println("FAIL 1: s[0] = ${string.char_at(s, 0)}, expected 104 ('h')")
         exit(1)
     }
-    if string.char_at(s, 4) != 111 {  // 'o'
+    if string.char_at(s, 4) != 111 { // 'o'
         println("FAIL 1: s[4] = ${string.char_at(s, 4)}, expected 111 ('o')")
         exit(1)
     }

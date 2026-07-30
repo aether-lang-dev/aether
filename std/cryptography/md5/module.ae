@@ -14,7 +14,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     md5_hex, md5_bytes
 )
@@ -24,7 +24,7 @@ struct Md5Ctx {
     v1: long
     v2: long
     v3: long
-    block: ptr        // std.bytes buffer, 64 bytes
+    block: ptr // std.bytes buffer, 64 bytes
     block_len: int
     count_lo: long
 }
@@ -55,16 +55,16 @@ K(u: long, v: long, w: long) -> long {
 
 process_block(c: *Md5Ctx) {
     // Load 16 little-endian 32-bit words
-    X0  = bytes.get_le32(c.block, 0) & 0xFFFFFFFF
-    X1  = bytes.get_le32(c.block, 4) & 0xFFFFFFFF
-    X2  = bytes.get_le32(c.block, 8) & 0xFFFFFFFF
-    X3  = bytes.get_le32(c.block, 12) & 0xFFFFFFFF
-    X4  = bytes.get_le32(c.block, 16) & 0xFFFFFFFF
-    X5  = bytes.get_le32(c.block, 20) & 0xFFFFFFFF
-    X6  = bytes.get_le32(c.block, 24) & 0xFFFFFFFF
-    X7  = bytes.get_le32(c.block, 28) & 0xFFFFFFFF
-    X8  = bytes.get_le32(c.block, 32) & 0xFFFFFFFF
-    X9  = bytes.get_le32(c.block, 36) & 0xFFFFFFFF
+    X0 = bytes.get_le32(c.block, 0) & 0xFFFFFFFF
+    X1 = bytes.get_le32(c.block, 4) & 0xFFFFFFFF
+    X2 = bytes.get_le32(c.block, 8) & 0xFFFFFFFF
+    X3 = bytes.get_le32(c.block, 12) & 0xFFFFFFFF
+    X4 = bytes.get_le32(c.block, 16) & 0xFFFFFFFF
+    X5 = bytes.get_le32(c.block, 20) & 0xFFFFFFFF
+    X6 = bytes.get_le32(c.block, 24) & 0xFFFFFFFF
+    X7 = bytes.get_le32(c.block, 28) & 0xFFFFFFFF
+    X8 = bytes.get_le32(c.block, 32) & 0xFFFFFFFF
+    X9 = bytes.get_le32(c.block, 36) & 0xFFFFFFFF
     X10 = bytes.get_le32(c.block, 40) & 0xFFFFFFFF
     X11 = bytes.get_le32(c.block, 44) & 0xFFFFFFFF
     X12 = bytes.get_le32(c.block, 48) & 0xFFFFFFFF

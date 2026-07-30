@@ -94,7 +94,7 @@ main() {
     // Both messages share the same `[...]` literal syntax. The
     // typechecker dispatches by target field type — Urls.sites
     // gets a static C array, Sites.sites gets a cons chain.
-    v ! Urls  { sites: ["alpha", "beta", "gamma"], count: 3 }
+    v ! Urls { sites: ["alpha", "beta", "gamma"], count: 3 }
     v ! Sites { sites: ["alpha", "beta", "gamma"] }
 
     sleep(1000)

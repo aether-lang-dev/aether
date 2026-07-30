@@ -6,6 +6,6 @@ fallible(x: int) -> int! {
 }
 
 main() {
-    fallible(5)   // dropped `int!` — must be consumed
+    fallible(5) // dropped `int!` — must be consumed
     println("unreachable")
 }

@@ -6,23 +6,23 @@ const primes[] = [2, 3, 5, 7, 11, 13]
 
 main() {
     // Test integer array access
-    println(sizes[0])    // expect: 4
-    println(sizes[2])    // expect: 16
-    println(sizes[4])    // expect: 64
+    println(sizes[0]) // expect: 4
+    println(sizes[2]) // expect: 16
+    println(sizes[4]) // expect: 64
 
     // Test another integer array
-    println(primes[0])   // expect: 2
-    println(primes[5])   // expect: 13
+    println(primes[0]) // expect: 2
+    println(primes[5]) // expect: 13
 
     // Test in loop
     sum = 0
     for (i = 0; i < 5; i = i + 1) {
         sum = sum + sizes[i]
     }
-    println(sum)         // expect: 124
+    println(sum) // expect: 124
 
     // Test conditional
     if primes[2] == 5 {
-        println("five: ok")  // expect: five: ok
+        println("five: ok") // expect: five: ok
     }
 }

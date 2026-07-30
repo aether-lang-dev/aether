@@ -56,16 +56,16 @@ fn build_server_hello(ks_fill: int) -> (ptr, int) {
     buf = bytes.new(256)
     bytes.set(buf, 255, 0)
     body = 4
-    off = put16(buf, body, 0x0303)         // legacy_version
+    off = put16(buf, body, 0x0303) // legacy_version
     i = 0
-    while i < 32 {                          // random[32]
+    while i < 32 { // random[32]
         bytes.set(buf, off + i, 0x11)
         i = i + 1
     }
     off = off + 32
-    off = put8(buf, off, 0)                 // legacy_session_id_echo len 0
-    off = put16(buf, off, 0x1303)           // cipher_suite = ChaCha20-Poly1305
-    off = put8(buf, off, 0)                 // compression = null
+    off = put8(buf, off, 0) // legacy_session_id_echo len 0
+    off = put16(buf, off, 0x1303) // cipher_suite = ChaCha20-Poly1305
+    off = put8(buf, off, 0) // compression = null
 
     ext_len_pos = off
     off = off + 2
@@ -76,7 +76,7 @@ fn build_server_hello(ks_fill: int) -> (ptr, int) {
     off = put16(buf, off, 0x0304)
     // key_share (51): group x25519, key<32>
     off = put16(buf, off, 51)
-    off = put16(buf, off, 36)               // 2+2+32
+    off = put16(buf, off, 36) // 2+2+32
     off = put16(buf, off, 0x001d)
     off = put16(buf, off, 32)
     j = 0
@@ -88,7 +88,7 @@ fn build_server_hello(ks_fill: int) -> (ptr, int) {
     put16(buf, ext_len_pos, off - ext_start)
 
     body_len = off - 4
-    bytes.set(buf, 0, 2)                     // HS type = server_hello
+    bytes.set(buf, 0, 2) // HS type = server_hello
     bytes.set(buf, 1, (body_len >> 16) & 0xFF)
     bytes.set(buf, 2, (body_len >> 8) & 0xFF)
     bytes.set(buf, 3, body_len & 0xFF)
@@ -224,10 +224,10 @@ main() {
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
     tls13_hs.client_hello_psk(random, sid, 32, pub, "example.com", tkt, 16, 0, 32, 0, &pch)
     pok = 1
-    if g8(pch.buf, 0) != 1 { pok = 0 }                       // client_hello type
+    if g8(pch.buf, 0) != 1 { pok = 0 } // client_hello type
     if pch.binder_off <= 0 { pok = 0 }
     if pch.truncated_len <= 0 { pok = 0 }
-    if pch.truncated_len >= pch.binder_off { pok = 0 }       // truncation precedes binder
+    if pch.truncated_len >= pch.binder_off { pok = 0 } // truncation precedes binder
     // binder placeholder must be zero
     z = 0
     zi = 0
@@ -268,7 +268,7 @@ main() {
     // is well over 1200 bytes) and advertise GROUP_X25519MLKEM768 (0x11EC).
     pqok = 1
     if g8(pqch, 0) != 1 { pqok = 0 }
-    if bytes.length(pqch) < 1250 { pqok = 0 }   // hybrid share alone is 1216
+    if bytes.length(pqch) < 1250 { pqok = 0 } // hybrid share alone is 1216
     // The group id 0x11EC (0x11, 0xEC) must appear in the buffer (supported_
     // groups + key_share both name it).
     found_pq = 0

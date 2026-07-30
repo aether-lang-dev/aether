@@ -17,7 +17,7 @@ extern fire_cb()
 
 main() {
     msg = "captured"
-    register_cb(|| { println(msg) })   // closure captures msg → heap env
-    fire_cb()                          // pre-fix: reads freed env (UAF)
+    register_cb(|| { println(msg) }) // closure captures msg → heap env
+    fire_cb() // pre-fix: reads freed env (UAF)
     return 0
 }

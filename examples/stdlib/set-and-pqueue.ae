@@ -19,7 +19,7 @@ main() {
     print("  crawling: ${urls}\n")
 
     added_index = set.add(visited, "/index")
-    dup_index   = set.add(visited, "/index")
+    dup_index = set.add(visited, "/index")
     set.add(visited, "/about")
     set.add(visited, "/contact")
 
@@ -45,7 +45,7 @@ main() {
     pqueue.push(jobs, 30, "send newsletter")
     pqueue.push(jobs, 10, "restore backup")
     pqueue.push(jobs, 20, "rebuild index")
-    pqueue.push(jobs, 5,  "page on-call")
+    pqueue.push(jobs, 5, "page on-call")
 
     print("  queued ${pqueue.size(jobs)} jobs out of order\n")
     next_job = pqueue.peek(jobs)

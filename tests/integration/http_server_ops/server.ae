@@ -75,7 +75,7 @@ main() {
     if raw == 0 { println("FAIL: server_create"); exit(1) }
 
     http.server_on_start(raw, on_started, null)
-    http.server_on_stop (raw, on_stopped, null)
+    http.server_on_stop(raw, on_stopped, null)
 
     e = http.server_set_health_probes(raw, "/healthz", "/readyz", ready_check, null)
     if e != "" { println("FAIL: probes: ${e}"); exit(1) }

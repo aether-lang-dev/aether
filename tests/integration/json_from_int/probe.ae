@@ -61,8 +61,8 @@ main() {
     // Case 6 — mixed object, backward compat with json.num()
     root = json.obj()
     json.set(root, "bytes", json.from_int(53248000))
-    json.set(root, "pi",    json.num(3.14))
-    json.set(root, "name",  json.str("fbs-core"))
+    json.set(root, "pi", json.num(3.14))
+    json.set(root, "name", json.str("fbs-core"))
     out, _ = json.encode(root)
     // We don't pin exact whitespace — assert each fragment is present
     // and the integer one is bare (no exponent).

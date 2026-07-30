@@ -32,7 +32,7 @@ main() {
     if bytes.get(dst, 1) != 0xBB { print("  FAIL [1]\n"); exit(1) }
     if bytes.get(dst, 2) != 0xCC { print("  FAIL [2]\n"); exit(1) }
     if bytes.get(dst, 3) != 0xDD { print("  FAIL [3]\n"); exit(1) }
-    if bytes.length(dst) != 4    { print("  FAIL: dst length\n"); exit(1) }
+    if bytes.length(dst) != 4 { print("  FAIL: dst length\n"); exit(1) }
     print("  PASS: 4 bytes copied; dst length advanced\n")
 
     // ---- Test 2: src_off and dst_off both non-zero -----------
@@ -53,7 +53,7 @@ main() {
     // src[1..2] landed at dst[5..6]
     if bytes.get(dst2, 5) != 0xBB { print("  FAIL [5]\n"); exit(1) }
     if bytes.get(dst2, 6) != 0xCC { print("  FAIL [6]\n"); exit(1) }
-    if bytes.length(dst2) != 7    { print("  FAIL: dst2 length\n"); exit(1) }
+    if bytes.length(dst2) != 7 { print("  FAIL: dst2 length\n"); exit(1) }
     print("  PASS: src[1..2] -> dst[5..6], gap zero-filled\n")
 
     // ---- Test 3: failure modes ------------------------------

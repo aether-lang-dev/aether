@@ -15,7 +15,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     sha1_hex, sha1_bytes
 )
@@ -26,10 +26,10 @@ struct Sha1Ctx {
     v2: long
     v3: long
     v4: long
-    block: ptr        // std.bytes buffer, 64 bytes
+    block: ptr // std.bytes buffer, 64 bytes
     block_len: int
     count_lo: long
-    w: ptr            // intarr(80) message schedule
+    w: ptr // intarr(80) message schedule
 }
 
 m32(x: long) -> long {

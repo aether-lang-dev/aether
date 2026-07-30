@@ -28,7 +28,7 @@
 //   out = xml.finish(b)          // owned string; escaping already applied
 //   xml.free_builder(b)
 
-exports (
+exports(
     EVENT_START, EVENT_END, EVENT_TEXT, EVENT_EOF, EVENT_ERROR,
     xml_parser_new_str, xml_next, xml_event_name, xml_event_text,
     xml_event_attr_count, xml_event_attr_name, xml_event_attr_value,
@@ -44,9 +44,9 @@ exports (
 
 // Event kinds returned by `next` — match the C `XML_EVENT_*` values.
 const EVENT_START = 1
-const EVENT_END   = 2
-const EVENT_TEXT  = 3
-const EVENT_EOF   = 4
+const EVENT_END = 2
+const EVENT_TEXT = 3
+const EVENT_EOF = 4
 const EVENT_ERROR = 5
 
 // ---- raw externs (C core) ----

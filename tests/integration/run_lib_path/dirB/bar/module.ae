@@ -1,7 +1,7 @@
 // Module `bar` exists only in dirB. Used to prove that a chain
 // `--lib dirA:dirB` reaches dirB after dirA misses. Issue #413
 // fixture.
-exports (bar_origin)
+exports(bar_origin)
 
 bar_origin() -> string {
     return "bar-from-B"

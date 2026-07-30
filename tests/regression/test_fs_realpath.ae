@@ -78,7 +78,7 @@ main() {
         // The resolved path should NOT include "link_to_probe".
         // Use a poor-man's contains check via substring scan.
         contains_link = 0
-        max_idx = string.length(resolved3) - 13  // length of "link_to_probe"
+        max_idx = string.length(resolved3) - 13 // length of "link_to_probe"
         if max_idx > 0 {
             i = 0
             while i <= max_idx {
@@ -107,7 +107,7 @@ main() {
     println("  PASS 4: missing path → KIND_NOT_FOUND")
 
     // --- Case 5: path through a non-directory ---
-    not_dir = "${tmpdir}/probe/inside"  // probe is a regular file
+    not_dir = "${tmpdir}/probe/inside" // probe is a regular file
     resolved5, kind5, msg5 = fs.realpath(not_dir)
     if kind5 != fs.KIND_NOT_DIR {
         // Some POSIX implementations report ENOENT for this case

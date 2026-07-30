@@ -16,8 +16,8 @@ btn(_ctx: ptr, label: string, action: fn) {
 
 grid() {
     g = list.new()
-    list.add(g, list.new())  // labels
-    list.add(g, list.new())  // handlers
+    list.add(g, list.new()) // labels
+    list.add(g, list.new()) // handlers
     return g
 }
 
@@ -26,7 +26,7 @@ render(g: ptr, val: int, cursor: int, op: int, prev: int) {
     print("\x1b[H\x1b[2J  \x1b[1;36mCalculator\x1b[0m\n\n")
     println("  \x1b[44;97;1m  ${val}                \x1b[0m\n")
     n = list.size(labs)
-    for (i = 0; i < n; i++) {
+    for (i = 0; i < n; i ++) {
         b, _ = list.get(labs, i)
         col = i - (i / 4) * 4
         if col == 0 { print("  ") }
@@ -47,32 +47,32 @@ render(g: ptr, val: int, cursor: int, op: int, prev: int) {
 main() {
     // Shared mutable state
     // Key constants
-    const ESC   = 27
-    const UP    = 65
-    const DOWN  = 66
+    const ESC = 27
+    const UP = 65
+    const DOWN = 66
     const RIGHT = 67
-    const LEFT  = 68
+    const LEFT = 68
     const SPACE = 32
     const ENTER = 10
-    const PLUS  = 43
+    const PLUS = 43
     const MINUS = 45
-    const STAR  = 42
+    const STAR = 42
     const SLASH = 47
     const EQUAL = 61
     const KEY_C = 99
     const KEY_Q = 113
 
     // Shared mutable state
-    num  = ref(0)
+    num = ref(0)
     prev = ref(0)
-    op   = ref(0)
+    op = ref(0)
     defer ref_free(num)
     defer ref_free(prev)
     defer ref_free(op)
 
     // Reusable actions
-    digit = |n: ptr, d: int| { ref_set(n, ref_get(n) * 10 + d) }
-    set_op = |n: ptr, p: ptr, o: ptr, v: int| {
+    digit = | n: ptr, d: int | { ref_set(n, ref_get(n) * 10 + d) }
+    set_op = | n: ptr, p: ptr, o: ptr, v: int | {
         ref_set(p, ref_get(n))
         ref_set(n, 0)
         ref_set(o, v)
@@ -98,14 +98,14 @@ main() {
         btn("*") callback { call(set_op, num, prev, op, STAR) }
 
         btn("0") callback { call(digit, num, 0) }
-        btn(".") callback { }
+        btn(".") callback {}
         btn("=") callback {
             v = ref_get(num)
             pv = ref_get(prev)
             ov = ref_get(op)
-            if ov == PLUS  { v = pv + v }
+            if ov == PLUS { v = pv + v }
             if ov == MINUS { v = pv - v }
-            if ov == STAR  { v = pv * v }
+            if ov == STAR { v = pv * v }
             if ov == SLASH && v != 0 { v = pv / v }
             ref_set(num, v)
             ref_set(prev, 0)
@@ -126,10 +126,10 @@ main() {
         if key == KEY_Q { running = 0 }
 
         if key == ESC { read_char(); d = read_char()
-            if d == UP    { cur = cur - 4 }
-            if d == DOWN  { cur = cur + 4 }
+            if d == UP { cur = cur - 4 }
+            if d == DOWN { cur = cur + 4 }
             if d == RIGHT { cur = cur + 1 }
-            if d == LEFT  { cur = cur - 1 }
+            if d == LEFT { cur = cur - 1 }
         }
         if cur < 0 { cur = 0 }
         if cur > 15 { cur = 15 }
@@ -149,9 +149,9 @@ main() {
         }
         if key == EQUAL {
             v = ref_get(num); pv = ref_get(prev); ov = ref_get(op)
-            if ov == PLUS  { v = pv + v }
+            if ov == PLUS { v = pv + v }
             if ov == MINUS { v = pv - v }
-            if ov == STAR  { v = pv * v }
+            if ov == STAR { v = pv * v }
             if ov == SLASH && v != 0 { v = pv / v }
             ref_set(num, v); ref_set(prev, 0); ref_set(op, 0)
         }

@@ -11,12 +11,12 @@
 // so dep.dep_now() links and returns a monotonic-ns timestamp.
 
 import dep
-import std.os (getenv)
+import std.os(getenv)
 
 extern exit(code: int)
 
 main() {
-    ns = dep.dep_now()          // must resolve os.now_monotonic_ns() inside dep
+    ns = dep.dep_now() // must resolve os.now_monotonic_ns() inside dep
     // A non-empty numeric string proves the qualified os.* call ran.
     println("OK ${ns}")
     exit(0)

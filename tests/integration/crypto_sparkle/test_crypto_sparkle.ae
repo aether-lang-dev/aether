@@ -102,7 +102,7 @@ main() {
     // a rate-filling block (16 bytes) was absorbed eagerly with slim steps and
     // finalize then ran on an empty padded block, hashing one block short.
     // An input of EXACTLY the 16-byte rate is the critical case. ----
-    inc16 = incrementing(16)   // 0x00..0x0F
+    inc16 = incrementing(16) // 0x00..0x0F
     fails = fails + check("esch-256 16B(0x00..0x0F, exact rate)",
         esch_digest("esch-256", inc16, 16),
         "acff841e2a526d83d6e94ab5564d6d64c98f5e8016bb1c2950386ed156c6c174")

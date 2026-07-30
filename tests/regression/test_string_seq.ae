@@ -106,7 +106,7 @@ main() {
     shared = string.seq_cons("y", shared)
     a = string.seq_cons("a", shared)
     b = string.seq_cons("b", shared)
-    string.seq_free(shared)  // drop our local; a and b each still own one ref
+    string.seq_free(shared) // drop our local; a and b each still own one ref
 
     if string.seq_length(a) != 3 {
         println("FAIL 4a: a.length=${string.seq_length(a)}, want 3")
@@ -135,13 +135,13 @@ main() {
     // by an extra free. retain bumps the refcount; the seq survives the
     // first free and is reclaimed by the second.
     base = string.seq_cons("p", string.seq_empty())
-    kept = string.seq_retain(base)   // refcount 1 -> 2 (base and kept alias)
-    string.seq_free(base)            // -> 1; kept still valid
+    kept = string.seq_retain(base) // refcount 1 -> 2 (base and kept alias)
+    string.seq_free(base) // -> 1; kept still valid
     if string.seq_length(kept) != 1 {
         println("FAIL 4b-retain: kept.length=${string.seq_length(kept)}, want 1")
         exit(1)
     }
-    string.seq_free(kept)            // -> 0; reclaimed
+    string.seq_free(kept) // -> 0; reclaimed
     println("  PASS 4b: seq_retain extra reference balanced by extra free")
 
     // ---- Case 5: deep list (5000 cells), iterative free ----
@@ -155,7 +155,7 @@ main() {
         println("FAIL 5a: deep length=${string.seq_length(deep)}, want 5000")
         exit(1)
     }
-    string.seq_free(deep)  // must be iterative — recursive free at this depth would overflow
+    string.seq_free(deep) // must be iterative — recursive free at this depth would overflow
     println("  PASS 5: deep list (5000 cells) frees iteratively")
 
     // ---- Case 6: free(empty) is a no-op ----

@@ -60,7 +60,7 @@ main() {
     e3 = middleware.use_rate_limit(raw, 10, 5000)
     if e3 != "" { println("FAIL: rate: ${e3}"); exit(1) }
     e4 = middleware.use_cors(raw, "*", "GET, POST, OPTIONS",
-                              "Content-Type, Authorization", 0, 600)
+        "Content-Type, Authorization", 0, 600)
     if e4 != "" { println("FAIL: cors: ${e4}"); exit(1) }
     println("READY")
 

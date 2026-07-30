@@ -33,7 +33,7 @@ build_one() -> string {
     b = strbuilder.new(1024)
     k = 0
     while k < 200 {
-        strbuilder.append(b, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")  // 30 bytes
+        strbuilder.append(b, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") // 30 bytes
         k = k + 1
     }
     return strbuilder.finish(b)

@@ -1,5 +1,5 @@
 // Source for the --emit=csrc regression (aether#996).
-exports (add, greet, VERSION)
+exports(add, greet, VERSION)
 
 const VERSION = "1.0"
 

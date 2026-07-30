@@ -2,7 +2,7 @@
 // Python-style: minimal syntax, maximum inference
 
 struct Point {
-    x,  // Type inferred from initialization
+    x, // Type inferred from initialization
     y
 }
 
@@ -14,15 +14,14 @@ struct Player {
 
 main() {
     // Struct literal with inferred field types
-    p1 = Point{ x: 10, y: 20 };  // x,y inferred: int
-    
-    player = Player{ 
-        name: "Alice",           // inferred: string
-        score: 100,              // inferred: int
-        position: [0, 0, 0]      // inferred: int[]
+    p1 = Point { x: 10, y: 20 }; // x,y inferred: int
+
+    player = Player {
+        name: "Alice", // inferred: string
+        score: 100, // inferred: int
+        position: [0, 0, 0] // inferred: int[]
     };
-    
+
     print(p1.x);
     print(player.score);
 }
-

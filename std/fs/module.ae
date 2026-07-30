@@ -22,7 +22,7 @@
 // primitives. `move` is rename(2) with transparent EXDEV →
 // copy + unlink fallback. See aether_fs.c for the full hierarchy.
 
-exports (
+exports(
     file_open_raw, file_close, file_read_all_raw, file_write_raw,
     file_exists, fs_path_exists, file_delete_raw, file_size_raw, file_mtime,
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
@@ -71,19 +71,19 @@ exports (
 // the surface contract. Mirror these in std/fs/aether_fs.h as
 // AETHER_FS_KIND_* macros so the C side and the Aether surface
 // remain in lock-step.
-const KIND_OK                = 0
-const KIND_NOT_FOUND         = 1   // ENOENT — path or component missing
-const KIND_PERMISSION_DENIED = 2   // EACCES, EPERM
-const KIND_EXISTS            = 3   // EEXIST — destination already there (when caller asked not to overwrite)
-const KIND_CROSS_DEVICE      = 4   // EXDEV — rename across filesystems (move falls back transparently)
-const KIND_IO                = 5   // EIO and other partial-I/O failures
-const KIND_INVALID           = 6   // EINVAL — illegal argument (e.g. src == dst)
-const KIND_LOOP              = 7   // ELOOP — symlink cycle on realpath
-const KIND_NAME_TOO_LONG     = 8   // ENAMETOOLONG
-const KIND_NO_SPACE          = 9   // ENOSPC — disk full
-const KIND_IS_DIR            = 10  // EISDIR — operation on a directory where a regular file was required (or vice-versa for copy/move src)
-const KIND_NOT_DIR           = 11  // ENOTDIR — component of path is not a directory
-const KIND_UNAVAILABLE       = 99  // platform feature compiled out (reserved for follow-up modules; fs primitives never return this)
+const KIND_OK = 0
+const KIND_NOT_FOUND = 1 // ENOENT — path or component missing
+const KIND_PERMISSION_DENIED = 2 // EACCES, EPERM
+const KIND_EXISTS = 3 // EEXIST — destination already there (when caller asked not to overwrite)
+const KIND_CROSS_DEVICE = 4 // EXDEV — rename across filesystems (move falls back transparently)
+const KIND_IO = 5 // EIO and other partial-I/O failures
+const KIND_INVALID = 6 // EINVAL — illegal argument (e.g. src == dst)
+const KIND_LOOP = 7 // ELOOP — symlink cycle on realpath
+const KIND_NAME_TOO_LONG = 8 // ENAMETOOLONG
+const KIND_NO_SPACE = 9 // ENOSPC — disk full
+const KIND_IS_DIR = 10 // EISDIR — operation on a directory where a regular file was required (or vice-versa for copy/move src)
+const KIND_NOT_DIR = 11 // ENOTDIR — component of path is not a directory
+const KIND_UNAVAILABLE = 99 // platform feature compiled out (reserved for follow-up modules; fs primitives never return this)
 
 // File operations - raw externs
 extern file_open_raw(path: string, mode: string) -> ptr
@@ -643,9 +643,9 @@ file_stat(path: string) -> {
 // the first `return` pins the tuple slots to long. The getters all read 0
 // after a failed fs_try_statvfs, so binding them before the ok-check is safe.
 statvfs(path: string) -> {
-    ok    = fs_try_statvfs(path)
+    ok = fs_try_statvfs(path)
     total = fs_get_statvfs_total()
-    free  = fs_get_statvfs_free()
+    free = fs_get_statvfs_free()
     avail = fs_get_statvfs_avail()
     if ok != 0 {
         return total, free, avail, ""
@@ -782,7 +782,7 @@ first_element(path: string) -> string {
     cleaned = path_clean(path)
     start = 0
     if string_length(cleaned) > 0 {
-        if string_char_at(cleaned, 0) == 47 {   // leading '/'
+        if string_char_at(cleaned, 0) == 47 { // leading '/'
             start = 1
         }
     }
@@ -863,7 +863,7 @@ pread(file: ptr, length: int, offset: long) -> {
         return "", 0, "pread failed"
     }
     raw = fs_get_pread()
-    n   = fs_get_pread_length()
+    n = fs_get_pread_length()
     owned = string_new_with_length(raw, n)
     fs_release_pread()
     return owned, n, ""

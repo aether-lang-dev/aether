@@ -1,7 +1,7 @@
 // Same shadow pattern but INSIDE main.ae itself rather than a
 // module. The orchestrator's check applies to the entry-point AST
 // too, so this should fail with the same diagnostic shape.
-import std.string (length)
+import std.string(length)
 
 length(s: string) -> int {
     return length(s)

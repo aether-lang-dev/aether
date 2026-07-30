@@ -19,24 +19,24 @@ import std.string
 
 // Note: `reply` is a reserved keyword in Aether — name reply-target
 // fields `to`, `target`, `dest`, etc. instead.
-message SetUser    { name: string }
-message SetToken   { value: string }
-message GetUser    { to: actor_ref }
-message GetToken   { to: actor_ref }
-message UserReply  { value: string }
+message SetUser { name: string }
+message SetToken { value: string }
+message GetUser { to: actor_ref }
+message GetToken { to: actor_ref }
+message UserReply { value: string }
 message TokenReply { value: string }
 
 // The singleton. Spawn exactly one of these at startup; pass the
 // resulting actor_ref to anything that needs config reads.
 actor ConfigActor {
-    state user  = ""
+    state user = ""
     state token = ""
 
     receive {
-        SetUser(name)   -> { user  = name  }
+        SetUser(name) -> { user = name }
         SetToken(value) -> { token = value }
-        GetUser(to)     -> { to ! UserReply  { value: user  } }
-        GetToken(to)    -> { to ! TokenReply { value: token } }
+        GetUser(to) -> { to ! UserReply { value: user } }
+        GetToken(to) -> { to ! TokenReply { value: token } }
     }
 }
 
@@ -44,11 +44,11 @@ actor ConfigActor {
 // Shows the full ask shape: send Get* with self as the reply target,
 // then receive the matching *Reply message and act on it.
 actor RequestHandler {
-    state cached_user  = ""
+    state cached_user = ""
     state cached_token = ""
 
     receive {
-        UserReply(value)  -> {
+        UserReply(value) -> {
             cached_user = value
             println("RequestHandler cached user='${value}'")
         }
@@ -63,14 +63,14 @@ main() {
     cfg = spawn(ConfigActor())
 
     // Write-once at startup (in a real CLI: from parsed --flag args).
-    cfg ! SetUser  { name:  "alice" }
+    cfg ! SetUser { name: "alice" }
     cfg ! SetToken { value: "secret-xyz" }
 
     // Spawn a request handler and have it ask the config for both
     // values. The handler stashes them in its own state so subsequent
     // request-processing reads are zero-overhead local field access.
     h = spawn(RequestHandler())
-    cfg ! GetUser  { to: h }
+    cfg ! GetUser { to: h }
     cfg ! GetToken { to: h }
 
     // Yield long enough for the message round-trips to land.

@@ -43,7 +43,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new_b, new_b_keyed, new_s, new_s_keyed,
     update, update_bytes, final_hex, final_bytes, free_ctx,
     blake2b_hex, blake2b_bytes, blake2s_hex, blake2s_bytes,
@@ -67,30 +67,30 @@ const IV_S: long[8] = [
 
 // ---- SIGMA permutation (12 rows x 16; BLAKE2s uses the first 10) ----
 const SIGMA: long[192] = [
-    0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
-    14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3,
-    11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4,
-    7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8,
-    9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13,
-    2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9,
-    12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11,
-    13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10,
-    6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5,
-    10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0,
-    0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
-    14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3,
+    11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4,
+    7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8,
+    9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13,
+    2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9,
+    12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11,
+    13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10,
+    6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5,
+    10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3
 ]
 
 // is_b: 1 = BLAKE2b (64-bit, 128-byte block), 0 = BLAKE2s (32-bit, 64-byte).
 struct Blake2Ctx {
-    h: ptr            // longarr(16): 8 chaining words (low 32 bits used for s)
-    block: ptr        // std.bytes input block buffer
-    block_len: int    // bytes currently in `block`
-    t0: long          // byte counter, low
-    t1: long          // byte counter, high
+    h: ptr // longarr(16): 8 chaining words (low 32 bits used for s)
+    block: ptr // std.bytes input block buffer
+    block_len: int // bytes currently in `block`
+    t0: long // byte counter, low
+    t1: long // byte counter, high
     out_len: int
     is_b: int
-    block_size: int   // 128 (b) or 64 (s)
+    block_size: int // 128 (b) or 64 (s)
 }
 
 m32(x: long) -> long {
@@ -205,16 +205,16 @@ compress(c: *Blake2Ctx, last: int) {
     r = 0
     while r < rounds {
         so = r * 16
-        s0  = SIGMA[so]
-        s1  = SIGMA[so + 1]
-        s2  = SIGMA[so + 2]
-        s3  = SIGMA[so + 3]
-        s4  = SIGMA[so + 4]
-        s5  = SIGMA[so + 5]
-        s6  = SIGMA[so + 6]
-        s7  = SIGMA[so + 7]
-        s8  = SIGMA[so + 8]
-        s9  = SIGMA[so + 9]
+        s0 = SIGMA[so]
+        s1 = SIGMA[so + 1]
+        s2 = SIGMA[so + 2]
+        s3 = SIGMA[so + 3]
+        s4 = SIGMA[so + 4]
+        s5 = SIGMA[so + 5]
+        s6 = SIGMA[so + 6]
+        s7 = SIGMA[so + 7]
+        s8 = SIGMA[so + 8]
+        s9 = SIGMA[so + 9]
         s10 = SIGMA[so + 10]
         s11 = SIGMA[so + 11]
         s12 = SIGMA[so + 12]
@@ -223,23 +223,23 @@ compress(c: *Blake2Ctx, last: int) {
         s15 = SIGMA[so + 15]
 
         if c.is_b == 1 {
-            gb(v, 0, 4,  8, 12, longarr_get_unchecked(m, s0),  longarr_get_unchecked(m, s1))
-            gb(v, 1, 5,  9, 13, longarr_get_unchecked(m, s2),  longarr_get_unchecked(m, s3))
-            gb(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4),  longarr_get_unchecked(m, s5))
-            gb(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6),  longarr_get_unchecked(m, s7))
-            gb(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8),  longarr_get_unchecked(m, s9))
+            gb(v, 0, 4, 8, 12, longarr_get_unchecked(m, s0), longarr_get_unchecked(m, s1))
+            gb(v, 1, 5, 9, 13, longarr_get_unchecked(m, s2), longarr_get_unchecked(m, s3))
+            gb(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4), longarr_get_unchecked(m, s5))
+            gb(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6), longarr_get_unchecked(m, s7))
+            gb(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8), longarr_get_unchecked(m, s9))
             gb(v, 1, 6, 11, 12, longarr_get_unchecked(m, s10), longarr_get_unchecked(m, s11))
-            gb(v, 2, 7,  8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
-            gb(v, 3, 4,  9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
+            gb(v, 2, 7, 8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
+            gb(v, 3, 4, 9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
         } else {
-            gs(v, 0, 4,  8, 12, longarr_get_unchecked(m, s0),  longarr_get_unchecked(m, s1))
-            gs(v, 1, 5,  9, 13, longarr_get_unchecked(m, s2),  longarr_get_unchecked(m, s3))
-            gs(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4),  longarr_get_unchecked(m, s5))
-            gs(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6),  longarr_get_unchecked(m, s7))
-            gs(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8),  longarr_get_unchecked(m, s9))
+            gs(v, 0, 4, 8, 12, longarr_get_unchecked(m, s0), longarr_get_unchecked(m, s1))
+            gs(v, 1, 5, 9, 13, longarr_get_unchecked(m, s2), longarr_get_unchecked(m, s3))
+            gs(v, 2, 6, 10, 14, longarr_get_unchecked(m, s4), longarr_get_unchecked(m, s5))
+            gs(v, 3, 7, 11, 15, longarr_get_unchecked(m, s6), longarr_get_unchecked(m, s7))
+            gs(v, 0, 5, 10, 15, longarr_get_unchecked(m, s8), longarr_get_unchecked(m, s9))
             gs(v, 1, 6, 11, 12, longarr_get_unchecked(m, s10), longarr_get_unchecked(m, s11))
-            gs(v, 2, 7,  8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
-            gs(v, 3, 4,  9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
+            gs(v, 2, 7, 8, 13, longarr_get_unchecked(m, s12), longarr_get_unchecked(m, s13))
+            gs(v, 3, 4, 9, 14, longarr_get_unchecked(m, s14), longarr_get_unchecked(m, s15))
         }
         r = r + 1
     }

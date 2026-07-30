@@ -18,7 +18,7 @@
 //     with no duplicate-typedef error and no dependency on a `client` typedef.
 
 import std.mem
-import cdefs (*)
+import cdefs(*)
 
 extern malloc(n: size_t) -> ptr
 extern free(p: ptr)

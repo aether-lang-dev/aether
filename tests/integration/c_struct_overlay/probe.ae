@@ -5,15 +5,15 @@ extern malloc(n: int) -> ptr
 extern free(p: ptr)
 
 @c_struct streamID {
-    ms:  uint64 @0
+    ms: uint64 @0
     seq: uint64 @8
 }
 
 @c_struct stream {
-    rax:         ptr      @0
-    length:      uint64   @8
-    slen:        uint32   @16   // a 32-bit field next to 64-bit ones
-    last_id:     streamID @24
+    rax: ptr @0
+    length: uint64 @8
+    slen: uint32 @16 // a 32-bit field next to 64-bit ones
+    last_id: streamID @24
     max_deleted: streamID @40
 }
 
@@ -24,12 +24,12 @@ main() {
     // scalar fields, width derived from type
     s.length = 1000000
     s.slen = 42
-    s.length = s.length - 1            // the s->length-- shape
+    s.length = s.length - 1 // the s->length-- shape
 
     // nested overlay, cumulative offsets
     s.last_id.ms = 111
     s.last_id.seq = 222
-    s.max_deleted.ms = s.last_id.ms    // overlay-to-overlay copy
+    s.max_deleted.ms = s.last_id.ms // overlay-to-overlay copy
 
     println("length=${s.length}")
     println("slen=${s.slen}")

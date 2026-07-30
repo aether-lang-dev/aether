@@ -1,6 +1,6 @@
 // Vendored `foo`. Used when lib/foo is absent or when vendor/ comes
 // first in the --lib chain.
-exports (foo_origin)
+exports(foo_origin)
 
 foo_origin() -> string {
     return "vendor/ (default)"

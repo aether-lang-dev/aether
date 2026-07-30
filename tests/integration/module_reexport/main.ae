@@ -1,7 +1,7 @@
 import hub
 main() {
-    a = hub.leaf_double(5)   // transitive fn re-export: hub -> mid -> leaf
-    b = hub.LEAF_C           // transitive const re-export
-    c = hub.mid_base()       // re-export of mid's own fn
+    a = hub.leaf_double(5) // transitive fn re-export: hub -> mid -> leaf
+    b = hub.LEAF_C // transitive const re-export
+    c = hub.mid_base() // re-export of mid's own fn
     println("${a} ${b} ${c}")
 }

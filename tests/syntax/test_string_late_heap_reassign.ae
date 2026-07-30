@@ -46,7 +46,7 @@ build2(input: string) {
     } else {
         line = input
     }
-    line = string_trim(line)  // heap-string reassignment
+    line = string_trim(line) // heap-string reassignment
     return string_concat(line, "")
 }
 

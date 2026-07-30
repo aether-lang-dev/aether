@@ -49,7 +49,7 @@ import std.os
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     cert_verify_content, verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     LeafCert,
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
@@ -63,9 +63,9 @@ exports (
 )
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
-const SCHEME_ECDSA_P256_SHA256   = 0x0403
+const SCHEME_ECDSA_P256_SHA256 = 0x0403
 const SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804
-const SCHEME_ED25519             = 0x0807
+const SCHEME_ED25519 = 0x0807
 
 // The CertificateVerify context string for a server's signature
 // (RFC 8446 §4.4.3): "TLS 1.3, server CertificateVerify".
@@ -90,7 +90,7 @@ cert_verify_content(transcript_hash: ptr, th_len: int) -> (ptr, int) {
     ctx_len = string.length("TLS 1.3, server CertificateVerify")
     total = 64 + ctx_len + 1 + th_len
     out = bytes.new(total)
-    bytes.set(out, total - 1, 0)   // force full zero-fill
+    bytes.set(out, total - 1, 0) // force full zero-fill
 
     // 64 spaces (0x20)
     i = 0
@@ -153,7 +153,7 @@ fn split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
 // zeros; high bytes dropped if the value somehow exceeds 32 bytes — it never
 // should for a P-256 scalar).
 fn bn_to_fixed(v: ptr, width: int) -> ptr {
-    be = bignum.to_bytes_unsigned(v)   // variable-length big-endian magnitude
+    be = bignum.to_bytes_unsigned(v) // variable-length big-endian magnitude
     n = bytes.length(be)
     out = bytes.new(width)
     i = 0
@@ -233,7 +233,7 @@ verify_cert_verify_rsa_pss(spki_key: ptr, spki_len: int, transcript_hash: ptr, t
     digest = sha256_of_bytes(content, clen)
     k = rsa.key_from_components(n, e, null)
     result = rsa.verify_pss(k, digest, sig, 32)
-    rsa.key_free(k)   // frees n, e
+    rsa.key_free(k) // frees n, e
     bytes.free(content)
     bytes.free(digest)
     return result
@@ -259,23 +259,23 @@ verify_cert_verify_rsa_pss(spki_key: ptr, spki_len: int, transcript_hash: ptr, t
 // times, and dNSNames are held as bytes; compare via bytes, or stringify a
 // transient copy when needed.
 struct LeafCert {
-    tbs: ptr             // full tbsCertificate DER (tag+len+content)
+    tbs: ptr // full tbsCertificate DER (tag+len+content)
     tbs_len: int
-    sig_alg_oid: ptr     // outer signatureAlgorithm OID (dotted, as bytes) or null
-    signature: ptr       // outer signatureValue (BIT STRING content)
+    sig_alg_oid: ptr // outer signatureAlgorithm OID (dotted, as bytes) or null
+    signature: ptr // outer signatureValue (BIT STRING content)
     signature_len: int
-    spki_algo_oid: ptr   // SPKI algorithm OID (dotted, as bytes) or null
+    spki_algo_oid: ptr // SPKI algorithm OID (dotted, as bytes) or null
     spki_key: ptr
     spki_key_len: int
-    issuer: ptr          // raw DER of the issuer Name (fresh bytes) or null
+    issuer: ptr // raw DER of the issuer Name (fresh bytes) or null
     issuer_len: int
-    subject: ptr         // raw DER of the subject Name (fresh bytes) or null
+    subject: ptr // raw DER of the subject Name (fresh bytes) or null
     subject_len: int
-    not_before: ptr      // validity notBefore, raw time bytes or null
+    not_before: ptr // validity notBefore, raw time bytes or null
     not_before_len: int
-    not_after: ptr       // validity notAfter, raw time bytes or null
+    not_after: ptr // validity notAfter, raw time bytes or null
     not_after_len: int
-    dns_names: ptr        // std.list of dNSName BYTES buffers (SAN), or null
+    dns_names: ptr // std.list of dNSName BYTES buffers (SAN), or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -490,7 +490,7 @@ fn parse_extensions_for_san(ext_wrapper: ptr, out: *LeafCert) {
     if string.equals(serr, "") != 1 { return }
     er = asn1.reader_new(seq_content)
     while asn1.reader_eof(er) != 1 {
-        one, oerr = asn1.read_tlv(er)   // one Extension SEQUENCE content
+        one, oerr = asn1.read_tlv(er) // one Extension SEQUENCE content
         if string.equals(oerr, "") != 1 { break }
         xr = asn1.reader_new(one)
         oid, oiderr = asn1.read_oid(xr)
@@ -529,7 +529,7 @@ fn parse_extensions_for_san(ext_wrapper: ptr, out: *LeafCert) {
 // rejecting any with an embedded NUL.
 fn decode_san_dnsnames(octet_content: ptr, out: *LeafCert) {
     or = asn1.reader_new(octet_content)
-    gn_content, gerr = asn1.read_tlv(or)   // the GeneralNames SEQUENCE content
+    gn_content, gerr = asn1.read_tlv(or) // the GeneralNames SEQUENCE content
     asn1.reader_free(or)
     if string.equals(gerr, "") != 1 { return }
     gr = asn1.reader_new(gn_content)
@@ -558,7 +558,6 @@ fn decode_san_dnsnames(octet_content: ptr, out: *LeafCert) {
     asn1.reader_free(gr)
     bytes.free(gn_content)
 }
-
 
 // ---- LeafCert accessors + cleanup ----
 
@@ -621,7 +620,6 @@ free_leaf(c: *LeafCert) {
 }
 
 // ---- validity-period check (RFC 5280 §4.1.2.5) ----
-
 
 // Normalise an ASN.1 time (as bytes: UTCTime "YYMMDDHHMMSSZ" or
 // GeneralizedTime "YYYYMMDDHHMMSSZ") to a 14-char "YYYYMMDDHHMMSS" key string,
@@ -718,8 +716,8 @@ fn dnsname_matches(pat: ptr, plen: int, host: string, hlen: int) -> int {
     // Wildcard iff the pattern is "*." + rest  (first byte '*', second '.').
     is_wild = 0
     if plen >= 2 {
-        if (bytes.get(pat, 0) & 0xFF) == 42 {         // '*'
-            if (bytes.get(pat, 1) & 0xFF) == 46 {     // '.'
+        if (bytes.get(pat, 0) & 0xFF) == 42 { // '*'
+            if (bytes.get(pat, 1) & 0xFF) == 46 { // '.'
                 is_wild = 1
             }
         }
@@ -747,7 +745,7 @@ fn dnsname_matches(pat: ptr, plen: int, host: string, hlen: int) -> int {
         if (string_char_at_n(host, hlen, j) & 0xFF) == 46 { hdot = j; break }
         j = j + 1
     }
-    if hdot <= 0 { return 0 }        // no dot, or empty first label -> no match
+    if hdot <= 0 { return 0 } // no dot, or empty first label -> no match
     // The pattern tail is pat[1..plen) == ".rest"; host tail is host[hdot..hlen).
     tail_len = plen - 1
     if tail_len != (hlen - hdot) { return 0 }
@@ -792,10 +790,10 @@ check_hostname(c: *LeafCert, host: string) -> string {
 // substitute for a full RFC 6960 validator. A missing/soft-fail staple is not
 // treated as revoked (fail-open on absence, fail-closed on an explicit revoked).
 
-const OCSP_GOOD    = 0
+const OCSP_GOOD = 0
 const OCSP_REVOKED = 1
 const OCSP_UNKNOWN = 2
-const OCSP_ERROR   = 3    // malformed / unsuccessful responseStatus
+const OCSP_ERROR = 3 // malformed / unsuccessful responseStatus
 
 // Read a DER TLV header at buf[p]: returns (tag, content_offset, content_len,
 // next_offset) or (-1,...) on truncation. Handles short + long-form lengths.
@@ -834,10 +832,10 @@ parse_ocsp_status(der: ptr, len: int) -> int {
     tb, cb, lb2, nb = der_tlv(der, ns, end0)
     if tb != 0xA0 { return OCSP_ERROR }
     endb = cb + lb2
-    trb, crb, lrb, nrb = der_tlv(der, cb, endb)   // inner SEQUENCE
+    trb, crb, lrb, nrb = der_tlv(der, cb, endb) // inner SEQUENCE
     if trb != 0x30 { return OCSP_ERROR }
     endrb = crb + lrb
-    toid, coid, loid, noid = der_tlv(der, crb, endrb)  // responseType OID (skip)
+    toid, coid, loid, noid = der_tlv(der, crb, endrb) // responseType OID (skip)
     if toid != 0x06 { return OCSP_ERROR }
     toct, coct, loct, noct = der_tlv(der, noid, endrb) // response OCTET STRING
     if toct != 0x04 { return OCSP_ERROR }
@@ -1002,7 +1000,7 @@ verify_cert_signature(leaf: *LeafCert, issuer: *LeafCert) -> int {
                 di = sha256_digestinfo(hash)
                 result = rsa.verify_pkcs1(k, di, leaf.signature)
                 bytes.free(di)
-                rsa.key_free(k)   // frees n, e too
+                rsa.key_free(k) // frees n, e too
             }
             bytes.free(hash)
         }

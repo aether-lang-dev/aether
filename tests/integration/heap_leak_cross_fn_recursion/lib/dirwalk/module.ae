@@ -1,6 +1,6 @@
 import std.string
 
-exports (rebuild_dir, dir_entry_line, reclist_append_unique_)
+exports(rebuild_dir, dir_entry_line, reclist_append_unique_)
 
 // Mimics avn's dir_entry_line — produces a small heap string per call.
 dir_entry_line(kind: int, sha: string, name: string) -> string {

@@ -99,10 +99,10 @@ main() {
     // ---- Per-mount options -------------------------------------
     opts = proxy.opts_new()
     proxy.opts_bind_cache(opts, cache)
-    proxy.opts_set_xforwarded(opts, 1, 1, 1)        // XFF + XFP + XFH all on
-    proxy.opts_set_body_cap(opts, 8 * 1024 * 1024)   // 8 MiB
-    proxy.opts_set_retry_policy(opts, 3, 100)        // 3 retries, 100ms base
-    proxy.opts_set_trace_inject(opts, 1)             // generate traceparent if absent
+    proxy.opts_set_xforwarded(opts, 1, 1, 1) // XFF + XFP + XFH all on
+    proxy.opts_set_body_cap(opts, 8 * 1024 * 1024) // 8 MiB
+    proxy.opts_set_retry_policy(opts, 3, 100) // 3 retries, 100ms base
+    proxy.opts_set_trace_inject(opts, 1) // generate traceparent if absent
 
     // ---- Optional: drain a host (e.g., during a deploy) --------
     // Uncomment to take A out of rotation without removing it from

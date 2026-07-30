@@ -43,7 +43,7 @@
 //     contends a cache line; a write lock starves readers. The COW
 //     cell's reads touch nothing shared but the pointer.
 
-exports (
+exports(
     // Raw externs (over std/snapshot/aether_snapshot.c).
     aether_snapshot_new, aether_snapshot_load, aether_snapshot_store,
     aether_snapshot_cas, aether_snapshot_free,

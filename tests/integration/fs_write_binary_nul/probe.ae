@@ -24,7 +24,7 @@ main() {
     if tmp == 0 { tmp = io.getenv("TEMP") }
     if tmp == 0 { tmp = "/tmp" }
     seed_path = "${tmp}/aether_wb_seed.bin"
-    out_path  = "${tmp}/aether_wb_out.bin"
+    out_path = "${tmp}/aether_wb_out.bin"
 
     // ---- Test 1: shim seeds a 10-byte file with NUL at offset 3 ----
     print("Test 1: seed 10-byte file via C shim\n")
@@ -77,15 +77,15 @@ main() {
     // ---- Test 5: every byte preserved, including the NUL ----
     print("\nTest 5: byte-by-byte match including NUL at offset 3\n")
     // Expected: 01 02 03 00 05 06 07 08 09 0A
-    if string.char_at(rt_data, 0) != 1  { print("  FAIL [0]\n"); exit(1) }
-    if string.char_at(rt_data, 1) != 2  { print("  FAIL [1]\n"); exit(1) }
-    if string.char_at(rt_data, 2) != 3  { print("  FAIL [2]\n"); exit(1) }
-    if string.char_at(rt_data, 3) != 0  { print("  FAIL [3] — NUL lost\n"); exit(1) }
-    if string.char_at(rt_data, 4) != 5  { print("  FAIL [4]\n"); exit(1) }
-    if string.char_at(rt_data, 5) != 6  { print("  FAIL [5]\n"); exit(1) }
-    if string.char_at(rt_data, 6) != 7  { print("  FAIL [6]\n"); exit(1) }
-    if string.char_at(rt_data, 7) != 8  { print("  FAIL [7]\n"); exit(1) }
-    if string.char_at(rt_data, 8) != 9  { print("  FAIL [8]\n"); exit(1) }
+    if string.char_at(rt_data, 0) != 1 { print("  FAIL [0]\n"); exit(1) }
+    if string.char_at(rt_data, 1) != 2 { print("  FAIL [1]\n"); exit(1) }
+    if string.char_at(rt_data, 2) != 3 { print("  FAIL [2]\n"); exit(1) }
+    if string.char_at(rt_data, 3) != 0 { print("  FAIL [3] — NUL lost\n"); exit(1) }
+    if string.char_at(rt_data, 4) != 5 { print("  FAIL [4]\n"); exit(1) }
+    if string.char_at(rt_data, 5) != 6 { print("  FAIL [5]\n"); exit(1) }
+    if string.char_at(rt_data, 6) != 7 { print("  FAIL [6]\n"); exit(1) }
+    if string.char_at(rt_data, 7) != 8 { print("  FAIL [7]\n"); exit(1) }
+    if string.char_at(rt_data, 8) != 9 { print("  FAIL [8]\n"); exit(1) }
     if string.char_at(rt_data, 9) != 10 { print("  FAIL [9]\n"); exit(1) }
     print("  PASS: all 10 bytes round-trip, NUL at [3] preserved\n")
 

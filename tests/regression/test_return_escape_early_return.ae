@@ -9,13 +9,13 @@ extern exit(code: int)
 
 maybe_concat(cond: int, a: string, b: string) -> string {
     if cond == 0 {
-        return "fast-path"            // Early return — literal
+        return "fast-path" // Early return — literal
     }
     if cond == 1 {
-        return string.concat(a, b)    // Mid return — heap
+        return string.concat(a, b) // Mid return — heap
     }
     if cond == 2 {
-        return a                       // Bare-param return (borrow; non-heap class)
+        return a // Bare-param return (borrow; non-heap class)
     }
     // Final return — also literal
     return "default"

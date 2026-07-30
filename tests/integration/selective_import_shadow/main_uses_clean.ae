@@ -1,5 +1,5 @@
 // Driver for the non-shadowing module. Builds and runs cleanly.
-import mod_clean (my_length)
+import mod_clean(my_length)
 
 main() {
     n = my_length("hello")

@@ -1,7 +1,7 @@
 // std.os - Shell & Process Execution
 // Import with: import std.os
 
-exports (
+exports(
     os_system, os_exec_raw, os_run, os_run_capture_raw, os_run_capture_status_raw,
     os_run_pipe_raw, os_wait_pid_raw, os_run_pipe_drain_and_wait_raw,
     os_spawn_raw, os_wait_raw, os_wait_any_raw, os_wait_any_timeout_raw,
@@ -428,8 +428,8 @@ extern os_wait_pid_timeout_raw(pid: int, secs: int) -> (int, int, string)
 // reports "signalled" (no signal concept) — a killed child reads as
 // "exited" with its terminate code.
 extern os_run_supervised_raw(prog: string, argv: ptr, env: ptr,
-                             new_process_group: int, forward_signals: int,
-                             timeout_secs: int, reap_group: int) -> (int, string)
+    new_process_group: int, forward_signals: int,
+    timeout_secs: int, reap_group: int) -> (int, string)
 
 // Send `sig` to `pid` (POSIX kill(2)). 0 = success, -1 = failure.
 // Negative pid = whole group; sig 0 = existence probe. See
@@ -448,11 +448,11 @@ wait_pid_timeout(pid: int, secs: int) -> {
 // `run_supervised(prog, argv, env, 1, 1, timeout, 1)`: own group,
 // forward Ctrl-C, enforce a timeout, group-reap leaks.
 run_supervised(prog: string, argv: ptr, env: ptr,
-               new_process_group: int, forward_signals: int,
-               timeout_secs: int, reap_group: int) -> {
+    new_process_group: int, forward_signals: int,
+    timeout_secs: int, reap_group: int) -> {
     return os_run_supervised_raw(prog, argv, env,
-                                 new_process_group, forward_signals,
-                                 timeout_secs, reap_group)
+        new_process_group, forward_signals,
+        timeout_secs, reap_group)
 }
 
 // Length of a (length-aware) Aether string, used to feed stdin to a
@@ -480,7 +480,7 @@ extern string_length(str: string) -> int
 // aren't pollable). An empty `stdin_data` gives the child an
 // immediately-closed stdin (it can't block on the terminal).
 extern os_run_full_raw(prog: string, argv: ptr, env: ptr,
-                       stdin_data: string, stdin_len: int) -> (string @heap, string @heap, int, string)
+    stdin_data: string, stdin_len: int) -> (string @heap, string @heap, int, string)
 
 // (stdout, stderr, exit_code, err) — feed `stdin_data` and capture both
 // streams. Pass "" for stdin_data when the child reads no input. See
@@ -568,14 +568,14 @@ now_utc_iso8601() -> string {
 //   nanos:               0..999_999_999
 //   tz_offset_minutes:   -720..+840 from UTC (negative = west)
 struct LocalTime {
-    year:               int
-    month:              int
-    day:                int
-    hour:               int
-    minute:             int
-    second:             int
-    nanos:              int
-    tz_offset_minutes:  int
+    year: int
+    month: int
+    day: int
+    hour: int
+    minute: int
+    second: int
+    nanos: int
+    tz_offset_minutes: int
 }
 
 extern os_now_local_fill_raw(out: ptr)

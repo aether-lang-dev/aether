@@ -45,11 +45,11 @@ main() {
         exit(1)
     }
     // Shape check: position 4 must be '-', 7 '-', 10 'T', 13 ':', 16 ':'
-    if string.char_at(s, 4) != 45 { fail("iso8601 pos 4 not '-'") }    // '-'
-    if string.char_at(s, 7) != 45 { fail("iso8601 pos 7 not '-'") }    // '-'
-    if string.char_at(s, 10) != 84 { fail("iso8601 pos 10 not 'T'") }  // 'T'
-    if string.char_at(s, 13) != 58 { fail("iso8601 pos 13 not ':'") }  // ':'
-    if string.char_at(s, 16) != 58 { fail("iso8601 pos 16 not ':'") }  // ':'
+    if string.char_at(s, 4) != 45 { fail("iso8601 pos 4 not '-'") } // '-'
+    if string.char_at(s, 7) != 45 { fail("iso8601 pos 7 not '-'") } // '-'
+    if string.char_at(s, 10) != 84 { fail("iso8601 pos 10 not 'T'") } // 'T'
+    if string.char_at(s, 13) != 58 { fail("iso8601 pos 13 not ':'") } // ':'
+    if string.char_at(s, 16) != 58 { fail("iso8601 pos 16 not ':'") } // ':'
 
     // The suffix is either "Z" (length 20) or "[+-]HH:MM" (length 25)
     n = string.length(s)
@@ -73,9 +73,9 @@ main() {
     // Sanity: the year prefix of the ISO string must match the struct's year.
     // Year is the first 4 chars (e.g. "2026").
     iso_year_thousands = string.char_at(s, 0) - 48
-    iso_year_hundreds  = string.char_at(s, 1) - 48
-    iso_year_tens      = string.char_at(s, 2) - 48
-    iso_year_ones      = string.char_at(s, 3) - 48
+    iso_year_hundreds = string.char_at(s, 1) - 48
+    iso_year_tens = string.char_at(s, 2) - 48
+    iso_year_ones = string.char_at(s, 3) - 48
     iso_year = iso_year_thousands * 1000 + iso_year_hundreds * 100 + iso_year_tens * 10 + iso_year_ones
     if iso_year != t.year {
         println("FAIL: iso year ${iso_year} != struct year ${t.year} (one of the two clocks crossed a year boundary mid-call?)")

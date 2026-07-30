@@ -36,7 +36,7 @@ import std.os
 
 const PORT = 18271
 const DEFAULT_CERT = "/tmp/aether-h2.cert.pem"
-const DEFAULT_KEY  = "/tmp/aether-h2.key.pem"
+const DEFAULT_KEY = "/tmp/aether-h2.key.pem"
 
 handle_root(req: ptr, res: ptr, ud: ptr) {
     http.response_set_status(res, 200)
@@ -111,7 +111,7 @@ main() {
     // shape includes observability out of the box.
     http.server_set_access_log(server, "combined", "-")
 
-    http.server_get(server,  "/",     handle_root, 0)
+    http.server_get(server, "/", handle_root, 0)
     http.server_post(server, "/echo", handle_echo, 0)
 
     println("listening on https://localhost:${PORT}/")

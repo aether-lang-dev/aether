@@ -11,7 +11,7 @@
 //     inside the block must continue to work — receiver fallback
 //     is purely additive, never blocking the explicit form.
 
-exports (run, script, tag)
+exports(run, script, tag)
 
 import std.map
 

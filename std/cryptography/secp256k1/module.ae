@@ -27,7 +27,7 @@
 import std.bytes
 import std.bignum
 
-exports (
+exports(
     scalar_mult_base, scalar_mult, ecdh, ecdsa_sign, ecdsa_verify
 )
 
@@ -96,7 +96,7 @@ from_be32(b: ptr) -> ptr {
 }
 
 // ---- Jacobian point (X:Y:Z) ----
-struct Pt { x: ptr  y: ptr  z: ptr }
+struct Pt { x: ptr y: ptr z: ptr }
 pt_new(x: ptr, y: ptr, z: ptr) -> *Pt { q = malloc(24) as *Pt; q.x = x; q.y = y; q.z = z; return q }
 pt_free(q: *Pt) { bignum.free(q.x); bignum.free(q.y); bignum.free(q.z); libc_free(q) }
 

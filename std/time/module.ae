@@ -16,7 +16,7 @@
 import std.string
 import std.os
 
-exports (
+exports(
     DateTime,
     now, now_ms,
     from_civil,
@@ -31,15 +31,15 @@ exports (
 // fields are a decoded view of it. Build with from_civil / from_unix / now;
 // read fields directly.
 struct DateTime {
-    epoch: long      // canonical: seconds since 1970-01-01T00:00:00Z
+    epoch: long // canonical: seconds since 1970-01-01T00:00:00Z
     year: int
-    month: int      // 1..12
-    day: int        // 1..31
-    hour: int       // 0..23
-    minute: int     // 0..59
-    second: int     // 0..59
-    wday: int       // 0=Sunday .. 6=Saturday
-    yday: int       // 1..366
+    month: int // 1..12
+    day: int // 1..31
+    hour: int // 0..23
+    minute: int // 0..59
+    second: int // 0..59
+    wday: int // 0=Sunday .. 6=Saturday
+    yday: int // 1..366
 }
 
 // ---- calendar core (Hinnant's algorithms) --------------------------------
@@ -68,10 +68,10 @@ fn days_from_civil(y: int, m: int, d: int) -> long {
     era = yy
     if era < 0 { era = era - 399 }
     era = era / 400
-    yoe = yy - era * 400                       // [0, 399]
+    yoe = yy - era * 400 // [0, 399]
     mp = m + 9
-    if m > 2 { mp = m - 3 }                     // [0, 11]
-    doy = (153 * mp + 2) / 5 + d - 1            // [0, 365]
+    if m > 2 { mp = m - 3 } // [0, 11]
+    doy = (153 * mp + 2) / 5 + d - 1 // [0, 365]
     doe = yoe * 365 + yoe / 4 - yoe / 100 + doy // [0, 146096]
     return (era as long) * 146097 + (doe as long) - 719468
 }
@@ -82,14 +82,14 @@ fn civil_from_days(z: long) -> (int, int, int) {
     era = zz
     if era < 0 { era = era - 146096 }
     era = era / 146097
-    doe = zz - era * 146097                     // [0, 146096]
-    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365  // [0, 399]
+    doe = zz - era * 146097 // [0, 146096]
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365 // [0, 399]
     y = (yoe as int) + (era as int) * 400
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)               // [0, 365]
-    mp = (5 * (doy as int) + 2) / 153                            // [0, 11]
-    d = (doy as int) - (153 * mp + 2) / 5 + 1                    // [1, 31]
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100) // [0, 365]
+    mp = (5 * (doy as int) + 2) / 153 // [0, 11]
+    d = (doy as int) - (153 * mp + 2) / 5 + 1 // [1, 31]
     m = mp + 3
-    if mp >= 10 { m = mp - 9 }                                   // [1, 12]
+    if mp >= 10 { m = mp - 9 } // [1, 12]
     yr = y
     if m <= 2 { yr = y + 1 }
     return yr, m, d
@@ -187,17 +187,17 @@ to_iso8601(dt: DateTime) -> string {
     bytes_set(buf, 1, 48 + (y / 100) % 10)
     bytes_set(buf, 2, 48 + (y / 10) % 10)
     bytes_set(buf, 3, 48 + y % 10)
-    bytes_set(buf, 4, 45)   // '-'
+    bytes_set(buf, 4, 45) // '-'
     pad2(buf, 5, dt.month)
-    bytes_set(buf, 7, 45)   // '-'
+    bytes_set(buf, 7, 45) // '-'
     pad2(buf, 8, dt.day)
-    bytes_set(buf, 10, 84)  // 'T'
+    bytes_set(buf, 10, 84) // 'T'
     pad2(buf, 11, dt.hour)
-    bytes_set(buf, 13, 58)  // ':'
+    bytes_set(buf, 13, 58) // ':'
     pad2(buf, 14, dt.minute)
-    bytes_set(buf, 16, 58)  // ':'
+    bytes_set(buf, 16, 58) // ':'
     pad2(buf, 17, dt.second)
-    bytes_set(buf, 19, 90)  // 'Z'
+    bytes_set(buf, 19, 90) // 'Z'
     return bytes_finish(buf, 20)
 }
 
@@ -214,7 +214,7 @@ parse_iso8601(s: string) -> (DateTime, string) {
     mm = digits2(s, n, 14)
     ss = digits2(s, n, 17)
     if y < 0 || mo < 1 || mo > 12 || d < 1 || d > 31 ||
-       hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 {
+    hh < 0 || hh > 23 || mm < 0 || mm > 59 || ss < 0 || ss > 59 {
         return zero_dt(), "time: invalid ISO-8601 field"
     }
     // Separators must be '-','-','T'|' ',':',':'.

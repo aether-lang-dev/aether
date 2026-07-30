@@ -7,8 +7,8 @@ main() {
     actions = list.new()
     defer list.free(actions)
 
-    add_five = |x: int| -> x + 5
-    mul_two  = |x: int| -> x * 2
+    add_five = | x: int | -> x + 5
+    mul_two = | x: int | -> x * 2
 
     list.add(actions, box_closure(add_five))
     list.add(actions, box_closure(mul_two))

@@ -13,11 +13,11 @@ extern struct Layout {
     c: int
 }
 
-const SIZEOF_LAYOUT = sizeof(Layout)          // 12 on a 4-byte-int target
-const OFF_B         = offsetof(Layout, b)      // 4
-const OFF_C         = offsetof(Layout, c)      // 8
-const PADDED        = sizeof(Layout) + 8       // arithmetic over sizeof
-const COMBINED      = offsetof(Layout, c) - offsetof(Layout, b)  // 4
+const SIZEOF_LAYOUT = sizeof(Layout) // 12 on a 4-byte-int target
+const OFF_B = offsetof(Layout, b) // 4
+const OFF_C = offsetof(Layout, c) // 8
+const PADDED = sizeof(Layout) + 8 // arithmetic over sizeof
+const COMBINED = offsetof(Layout, c) - offsetof(Layout, b) // 4
 
 main() {
     // Compare against the same builtins used inline (which were always legal),

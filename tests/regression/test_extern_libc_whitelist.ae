@@ -68,7 +68,7 @@ main() {
         println("  FAIL: strstr missed substring")
         exit(1)
     }
-    chit = strchr(s, 113)        // 'q'
+    chit = strchr(s, 113) // 'q'
     if chit == null {
         println("  FAIL: strchr missed char")
         exit(1)
@@ -89,12 +89,12 @@ main() {
     // `void*` lowering clashed with glibc's
     // `int(*)(const void*, const void*)` before the whitelist
     // entry. Sort three pointers (each a char*) lexicographically.
-    sorted_buf = malloc(24)                // 3 × sizeof(void*)
+    sorted_buf = malloc(24) // 3 × sizeof(void*)
     s_a = strdup("banana")
     s_b = strdup("apple")
     s_c = strdup("cherry")
-    mem.set_ptr(sorted_buf, 0,  s_a)
-    mem.set_ptr(sorted_buf, 8,  s_b)
+    mem.set_ptr(sorted_buf, 0, s_a)
+    mem.set_ptr(sorted_buf, 8, s_b)
     mem.set_ptr(sorted_buf, 16, s_c)
     qsort(sorted_buf, 3, 8, test_libc_cmp)
     e0 = mem.get_ptr(sorted_buf, 0)

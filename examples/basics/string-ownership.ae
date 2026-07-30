@@ -41,9 +41,9 @@ my_concat(a: string, b: string) -> string {
 // the tracker so a later free of a *different* literal doesn't fire.
 banner(name: string) -> string {
     if string.length(name) == 0 {
-        return "guest"      // literal — NOT heap
+        return "guest" // literal — NOT heap
     }
-    return string.concat("hi ", name)  // heap
+    return string.concat("hi ", name) // heap
 }
 
 main() {
@@ -63,8 +63,8 @@ main() {
     // 2. Heap → literal transition. Frees the previous heap buffer
     // and resets the tracker so the literal isn't double-freed
     // later.
-    msg = string.concat("hello ", "world")  // heap
-    msg = "all done"                         // literal — frees the heap above
+    msg = string.concat("hello ", "world") // heap
+    msg = "all done" // literal — frees the heap above
     println(msg)
 
     // 3. Cross-block reassignment. Pre-#405 this failed to compile
@@ -76,9 +76,9 @@ main() {
     if score > 90 {
         result = my_concat("excellent: ", "A")
     } else if score > 60 {
-        result = my_concat("passing: ",   "C")
+        result = my_concat("passing: ", "C")
     } else {
-        result = "fail"   // literal branch — tracker resets here
+        result = "fail" // literal branch — tracker resets here
     }
     println(result)
 
@@ -89,18 +89,18 @@ main() {
     // be freed when reassigned. (Heap returns leak in this case;
     // box the literal via `string.concat("", lit)` if you want all
     // returns to be heap and reclaimable.)
-    g = banner("")          // literal "guest"
-    g = banner("Aether")    // heap "hi Aether"
+    g = banner("") // literal "guest"
+    g = banner("Aether") // heap "hi Aether"
     println(g)
 
     // 5. Nested-block reassignment. Tracker is visible at every
     // depth.
     deep = ""
     if 1 == 1 {
-        deep = my_concat("outer-", "init")   // heap
+        deep = my_concat("outer-", "init") // heap
         j = 0
         while j < 3 {
-            deep = my_concat(deep, "+")      // heap reassign at depth 2
+            deep = my_concat(deep, "+") // heap reassign at depth 2
             j = j + 1
         }
     }

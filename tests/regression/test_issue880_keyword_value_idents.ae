@@ -12,11 +12,11 @@
 extern exit(code: int)
 
 // Each token as a parameter name, used as a value in the body.
-add_ptr(ptr: int) -> int   { return ptr + 1 }
-add_func(func: int) -> int { return func + 1 }
+add_ptr(ptr: int) -> int { return ptr + 1 }
+add_func(func: int) -> int { return func +1 }
 add_byte(byte: int) -> int { return byte + 1 }
-add_state(state: int) -> int { return state + 1 }
-add_after(after: int) -> int { return after + 1 }
+add_state(state: int) -> int { return state +1 }
+add_after(after: int) -> int { return after +1 }
 
 // C-style typed param: here `byte` is the TYPE and `b` the name — still works.
 cstyle_byte(byte b) -> int { return b + 1 }
@@ -38,7 +38,7 @@ main() {
 
     // Struct field definition + literal + access with keyword names.
     n = Node { ptr: 1, func: 2, after: 3 }
-    if n.ptr + n.func + n.after != 6 {
+    if n.ptr + n.func +n.after != 6 {
         println("FAIL #880: struct field def/literal/access")
         exit(1)
     }
@@ -48,13 +48,13 @@ main() {
     let func = 200
     let byte = 7
     let after = 3
-    if ptr + func + byte + after != 310 {
+    if ptr + func +byte + after != 310 {
         println("FAIL #880: keyword-named locals")
         exit(1)
     }
 
     // Bare assignment + compound-assignment on a keyword-named local.
-    func = func + 1
+    func = func +1
     after += 10
     if func != 201 { println("FAIL #880: bare assignment"); exit(1) }
     if after != 13 { println("FAIL #880: compound assignment"); exit(1) }

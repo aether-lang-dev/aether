@@ -21,10 +21,10 @@
 // Both should coexist in one translation unit without conflict, and
 // the program should run end-to-end.
 
-extern sleep(ms: int) -> int   // user-declared libc binding (no-op decl)
+extern sleep(ms: int) -> int // user-declared libc binding (no-op decl)
 
 main() {
     println("test: aether built-in sleep + user extern sleep coexist")
-    sleep(1)  // Aether built-in — lowered to aether_sleep_ms
+    sleep(1) // Aether built-in — lowered to aether_sleep_ms
     println("PASS: build clean, sleep(1) executed without libc collision")
 }

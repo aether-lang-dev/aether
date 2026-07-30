@@ -31,7 +31,7 @@ import std.longarr
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     sha256_hex, sha256_bytes,
     sha224_hex, sha224_bytes,
@@ -58,14 +58,14 @@ struct Sha2Ctx {
     h5: long
     h6: long
     h7: long
-    block: ptr        // std.bytes buffer, block_size bytes
-    block_len: int    // bytes currently buffered (0..block_size-1 between blocks)
-    count_lo: long    // total message length in bytes (low 64 bits)
-    count_hi: long    // high bits of the byte count (for SHA-512's 128-bit length)
-    w: ptr            // longarr(80) message schedule
-    is512: int        // 1 => 64-bit core, 0 => 32-bit core
-    block_size: int   // 64 (sha256 family) or 128 (sha512 family)
-    digest_len: int   // output length in bytes (28/32/48/64/...)
+    block: ptr // std.bytes buffer, block_size bytes
+    block_len: int // bytes currently buffered (0..block_size-1 between blocks)
+    count_lo: long // total message length in bytes (low 64 bits)
+    count_hi: long // high bits of the byte count (for SHA-512's 128-bit length)
+    w: ptr // longarr(80) message schedule
+    is512: int // 1 => 64-bit core, 0 => 32-bit core
+    block_size: int // 64 (sha256 family) or 128 (sha512 family)
+    digest_len: int // output length in bytes (28/32/48/64/...)
 }
 
 // ---- SHA-256 round constants (first 32 bits of cube roots of first 64 primes) ----
@@ -541,7 +541,7 @@ emit_be32_words(c: *Sha2Ctx, out: ptr) {
 // Write the low 32 bits of `v` big-endian at byte offset `off`. We avoid
 // bytes.set_be32 here because v is a 64-bit long; emit byte-by-byte.
 set_be32_masked(out: ptr, off: int, v: long) {
-    bytes.set(out, off,     bits.lsr64(v, 24) & 255)
+    bytes.set(out, off, bits.lsr64(v, 24) & 255)
     bytes.set(out, off + 1, bits.lsr64(v, 16) & 255)
     bytes.set(out, off + 2, bits.lsr64(v, 8) & 255)
     bytes.set(out, off + 3, v & 255)

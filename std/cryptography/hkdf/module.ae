@@ -27,7 +27,7 @@
 import std.bytes
 import std.cryptography.hmac
 
-exports (
+exports(
     hkdf_extract, hkdf_expand, hkdf, hash_len
 )
 
@@ -106,7 +106,7 @@ hkdf_expand(algo: string, prk: ptr, prk_len: int, info: ptr, info_len: int, out_
     out = bytes.new(out_len)
     produced = 0
     counter = 1
-    prev = null          // T(i-1) bytes buffer (null for T(0))
+    prev = null // T(i-1) bytes buffer (null for T(0))
     prev_len = 0
 
     while produced < out_len {

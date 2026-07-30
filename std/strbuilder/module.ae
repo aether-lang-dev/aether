@@ -28,7 +28,7 @@
 
 import std.string
 
-exports (
+exports(
     aether_strbuilder_new, aether_strbuilder_append, aether_strbuilder_append_n,
     aether_strbuilder_append_byte, aether_strbuilder_append_int,
     aether_strbuilder_append_long, aether_strbuilder_append_hex,

@@ -18,7 +18,7 @@ check_int(got: int, want: int, lbl: string) -> int {
 }
 
 name(c: Color) -> string {
-    return match c { Red -> "red"  Green -> "green"  Blue -> "blue" }
+    return match c { Red -> "red" Green -> "green" Blue -> "blue" }
 }
 
 // return position
@@ -47,8 +47,8 @@ main() {
     fails = fails + check_str(name(c), "green", "init Green")
 
     // comparison, both operand orders
-    if c == Green { } else { fails = fails + 1; println("FAIL cmp c==Green") }
-    if Green == c { } else { fails = fails + 1; println("FAIL cmp Green==c") }
+    if c == Green {} else { fails = fails + 1; println("FAIL cmp c==Green") }
+    if Green == c {} else { fails = fails + 1; println("FAIL cmp Green==c") }
     if c == Red { fails = fails + 1; println("FAIL cmp c==Red") }
 
     // bare-local reassignment

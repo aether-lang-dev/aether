@@ -5,24 +5,24 @@
 main() {
     // Test 1: Hex escape before interpolation
     x = 42
-    println("\x48ello ${x}")  // H + ello 42
+    println("\x48ello ${x}") // H + ello 42
 
     // Test 2: Hex escape after interpolation
-    println("val=${x}\x21")  // val=42!
+    println("val=${x}\x21") // val=42!
 
     // Test 3: Tab escape between interpolations
     a = 1
     b = 2
-    println("${a}\x09${b}")  // 1<tab>2
+    println("${a}\x09${b}") // 1<tab>2
 
     // Test 4: Octal escape in interpolated string
     name = "World"
-    println("\110i ${name}")  // Hi World (H=\110 octal)
+    println("\110i ${name}") // Hi World (H=\110 octal)
 
     // Test 5: Multiple escapes + multiple interpolations
     v1 = 10
     v2 = 20
-    println("\x5b${v1}\x2c ${v2}\x5d")  // [10, 20]
+    println("\x5b${v1}\x2c ${v2}\x5d") // [10, 20]
 
     // Test 6: Newline escape in interpolated string
     msg = "done"
@@ -30,19 +30,19 @@ main() {
 
     // Test 7: Backslash escape in interpolated string
     path = "home"
-    println("C:\\\\${path}\\\\file")  // C:\home\file
+    println("C:\\\\${path}\\\\file") // C:\home\file
 
     // Test 8: Empty interpolation context with escapes
-    println("\x2d\x2d\x2d")  // ---
+    println("\x2d\x2d\x2d") // ---
 
     // Test 9: Interpolation at start and end with escapes in middle
     left = "["
     right = "]"
-    println("${left}\x2d\x2d\x2d${right}")  // [---]
+    println("${left}\x2d\x2d\x2d${right}") // [---]
 
     // Test 10: Numeric interpolation with hex padding
     num = 7
-    println("|\x20${num}\x20|")  // | 7 |
+    println("|\x20${num}\x20|") // | 7 |
 
     println("PASS")
 }

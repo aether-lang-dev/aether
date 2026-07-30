@@ -56,15 +56,15 @@ main() {
 
     print("\nTest 4: every byte preserved, including the NUL\n")
     // File layout: 01 02 03 00 05 06 07 08 09 0A
-    if string.char_at(data, 0) != 1  { print("  FAIL [0]\n"); exit(1) }
-    if string.char_at(data, 1) != 2  { print("  FAIL [1]\n"); exit(1) }
-    if string.char_at(data, 2) != 3  { print("  FAIL [2]\n"); exit(1) }
-    if string.char_at(data, 3) != 0  { print("  FAIL [3] — embedded NUL lost\n"); exit(1) }
-    if string.char_at(data, 4) != 5  { print("  FAIL [4]\n"); exit(1) }
-    if string.char_at(data, 5) != 6  { print("  FAIL [5]\n"); exit(1) }
-    if string.char_at(data, 6) != 7  { print("  FAIL [6]\n"); exit(1) }
-    if string.char_at(data, 7) != 8  { print("  FAIL [7]\n"); exit(1) }
-    if string.char_at(data, 8) != 9  { print("  FAIL [8]\n"); exit(1) }
+    if string.char_at(data, 0) != 1 { print("  FAIL [0]\n"); exit(1) }
+    if string.char_at(data, 1) != 2 { print("  FAIL [1]\n"); exit(1) }
+    if string.char_at(data, 2) != 3 { print("  FAIL [2]\n"); exit(1) }
+    if string.char_at(data, 3) != 0 { print("  FAIL [3] — embedded NUL lost\n"); exit(1) }
+    if string.char_at(data, 4) != 5 { print("  FAIL [4]\n"); exit(1) }
+    if string.char_at(data, 5) != 6 { print("  FAIL [5]\n"); exit(1) }
+    if string.char_at(data, 6) != 7 { print("  FAIL [6]\n"); exit(1) }
+    if string.char_at(data, 7) != 8 { print("  FAIL [7]\n"); exit(1) }
+    if string.char_at(data, 8) != 9 { print("  FAIL [8]\n"); exit(1) }
     if string.char_at(data, 9) != 10 { print("  FAIL [9]\n"); exit(1) }
     print("  PASS: all 10 bytes intact including byte[3]=0x00\n")
 

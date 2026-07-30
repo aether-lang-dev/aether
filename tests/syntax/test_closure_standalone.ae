@@ -2,7 +2,7 @@
 
 main() {
     // Arrow closure with typed params
-    doubler = |x: int| -> x * 2
+    doubler = | x: int | -> x * 2
 
     // Trailing block on a function call
     println("trailing block test")

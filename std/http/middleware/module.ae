@@ -33,7 +33,7 @@
 //     // @c_callback function returning int.
 //     middleware.use_basic_auth(server, "Restricted", verify_creds_cb)
 
-exports (
+exports(
     use_cors,
     use_basic_auth,
     use_rate_limit,
@@ -52,26 +52,26 @@ exports (
 // ---- Raw externs ----
 
 extern aether_cors_opts_new(allow_origin: string,
-                            allow_methods: string,
-                            allow_headers: string,
-                            allow_credentials: int,
-                            max_age_seconds: int) -> ptr
+    allow_methods: string,
+    allow_headers: string,
+    allow_credentials: int,
+    max_age_seconds: int) -> ptr
 extern aether_middleware_cors(req: ptr, res: ptr, user_data: ptr) -> int
 
 extern aether_basic_auth_opts_new(realm: string,
-                                  verifier: ptr,
-                                  verifier_user_data: ptr) -> ptr
+    verifier: ptr,
+    verifier_user_data: ptr) -> ptr
 extern aether_middleware_basic_auth(req: ptr, res: ptr, user_data: ptr) -> int
 
 extern aether_bearer_auth_opts_new(realm: string,
-                                   verifier: ptr,
-                                   verifier_user_data: ptr) -> ptr
+    verifier: ptr,
+    verifier_user_data: ptr) -> ptr
 extern aether_middleware_bearer_auth(req: ptr, res: ptr, user_data: ptr) -> int
 
 extern aether_session_auth_opts_new(cookie_name: string,
-                                    redirect_url: string,
-                                    verifier: ptr,
-                                    verifier_user_data: ptr) -> ptr
+    redirect_url: string,
+    verifier: ptr,
+    verifier_user_data: ptr) -> ptr
 extern aether_middleware_session_auth(req: ptr, res: ptr, user_data: ptr) -> int
 
 extern aether_rate_limit_opts_new(max_requests: int, window_ms: int) -> ptr
@@ -111,14 +111,14 @@ extern string_length(s: string) -> int
 //
 // Returns "" on success, error string on allocation failure.
 use_cors(server: ptr,
-         allow_origin: string,
-         allow_methods: string,
-         allow_headers: string,
-         allow_credentials: int,
-         max_age_seconds: int) -> {
+    allow_origin: string,
+    allow_methods: string,
+    allow_headers: string,
+    allow_credentials: int,
+    max_age_seconds: int) -> {
     opts = aether_cors_opts_new(allow_origin, allow_methods,
-                                 allow_headers, allow_credentials,
-                                 max_age_seconds)
+        allow_headers, allow_credentials,
+        max_age_seconds)
     if opts == null {
         return "cors: allocation failed"
     }
@@ -131,9 +131,9 @@ use_cors(server: ptr,
 // username + password and returns 1 if valid, 0 otherwise. The
 // realm string is shown in the browser's auth prompt.
 use_basic_auth(server: ptr,
-               realm: string,
-               verify: ptr,
-               verifier_user_data: ptr) -> {
+    realm: string,
+    verify: ptr,
+    verifier_user_data: ptr) -> {
     if verify == null {
         return "basic_auth: verify callback is null"
     }
@@ -156,9 +156,9 @@ use_basic_auth(server: ptr,
 // the credential is malformed (per RFC 6750 §3.1) so conforming
 // clients can distinguish "missing" from "bad" credentials.
 use_bearer_auth(server: ptr,
-                realm: string,
-                verify: ptr,
-                verifier_user_data: ptr) -> {
+    realm: string,
+    verify: ptr,
+    verifier_user_data: ptr) -> {
     if verify == null {
         return "bearer_auth: verify callback is null"
     }
@@ -180,10 +180,10 @@ use_bearer_auth(server: ptr,
 // it from the `Cookie:` header — encoding (signed token / DB
 // lookup / Redis hit) is the verifier's responsibility.
 use_session_auth(server: ptr,
-                 cookie_name: string,
-                 redirect_url: string,
-                 verify: ptr,
-                 verifier_user_data: ptr) -> {
+    cookie_name: string,
+    redirect_url: string,
+    verify: ptr,
+    verifier_user_data: ptr) -> {
     if verify == null {
         return "session_auth: verify callback is null"
     }
@@ -191,7 +191,7 @@ use_session_auth(server: ptr,
         return "session_auth: cookie_name must not be empty"
     }
     opts = aether_session_auth_opts_new(cookie_name, redirect_url,
-                                         verify, verifier_user_data)
+        verify, verifier_user_data)
     if opts == null {
         return "session_auth: allocation failed"
     }
@@ -232,7 +232,7 @@ use_vhost(server: ptr, hosts_csv: string) -> {
     start = 0
     i = 0
     while i <= n {
-        if i == n || char_at(hosts_csv, i) == 44 {  // 44 == ','
+        if i == n || char_at(hosts_csv, i) == 44 { // 44 == ','
             // Substring from start..i-1 (trim leading/trailing spaces).
             len = i - start
             if len > 0 {
@@ -264,7 +264,7 @@ substring_trim(s: string, start: int, len: int) -> string {
     }
     // Backward-trim.
     while len > 0 && (char_at(s, start + len - 1) == 32 ||
-                      char_at(s, start + len - 1) == 9) {
+        char_at(s, start + len - 1) == 9) {
         len = len - 1
     }
     if len <= 0 {

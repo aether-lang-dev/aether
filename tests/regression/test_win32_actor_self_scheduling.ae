@@ -4,9 +4,9 @@
 // If this compiles and runs with actors + sleep, the Windows compat shims work.
 
 message Tick { n: int }
-message AnimStart { }
-message AnimStep { }
-message AnimStop { }
+message AnimStart {}
+message AnimStep {}
+message AnimStop {}
 
 actor Counter {
     state total = 0

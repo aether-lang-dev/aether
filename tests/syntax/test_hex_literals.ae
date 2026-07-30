@@ -2,29 +2,29 @@
 
 main() {
     // Hex literals
-    println(0xFF)         // expect: 255
-    println(0x0F)         // expect: 15
-    println(0x10)         // expect: 16
+    println(0xFF) // expect: 255
+    println(0x0F) // expect: 15
+    println(0x10) // expect: 16
 
     // Octal literals
-    println(0o777)        // expect: 511
-    println(0o10)         // expect: 8
-    println(0o755)        // expect: 493
+    println(0o777) // expect: 511
+    println(0o10) // expect: 8
+    println(0o755) // expect: 493
 
     // Binary literals
-    println(0b11111111)   // expect: 255
-    println(0b10101010)   // expect: 170
-    println(0b1000)       // expect: 8
+    println(0b11111111) // expect: 255
+    println(0b10101010) // expect: 170
+    println(0b1000) // expect: 8
 
     // Underscore separators
-    println(0xFF_FF)      // expect: 65535
-    println(0b1111_0000)  // expect: 240
-    println(0o7_7_7)      // expect: 511
+    println(0xFF_FF) // expect: 65535
+    println(0b1111_0000) // expect: 240
+    println(0o7_7_7) // expect: 511
 
     // Bitwise ops with hex
-    println(0xFF & 0x0F)  // expect: 15
-    println(0xF0 | 0x0F)  // expect: 255
-    println(1 << 8)       // expect: 256
+    println(0xFF & 0x0F) // expect: 15
+    println(0xF0 | 0x0F) // expect: 255
+    println(1 << 8) // expect: 256
 
     // Use in expressions
     mask = 0xFF

@@ -75,7 +75,7 @@ main() {
         last_first_byte = string.char_at(s, 0)
         i = i + 1
     }
-    if last_first_byte != 104 {  // 'h'
+    if last_first_byte != 104 { // 'h'
         println("FAIL: last_first_byte expected 104, got ${last_first_byte}")
         exit(1)
     }

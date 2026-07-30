@@ -59,8 +59,8 @@ main() {
     liquid.context_set_include_root(ctx2, root)
     out2, _ = liquid.render(t2, ctx2)
     expect_eq(out2,
-              "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
-              "2 multiple blocks")
+        "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
+        "2 multiple blocks")
 
     // (3) Missing override -> parent default.
     src3 = "{% layout 'base' %}{% block title %}T{% endblock %}"
@@ -69,8 +69,8 @@ main() {
     liquid.context_set_include_root(ctx3, root)
     out3, _ = liquid.render(t3, ctx3)
     expect_eq(out3,
-              "<html>\n<head><title>T</title></head>\n<body>\ndefault content\n</body>\n</html>\n",
-              "3 missing override uses parent default")
+        "<html>\n<head><title>T</title></head>\n<body>\ndefault content\n</body>\n</html>\n",
+        "3 missing override uses parent default")
 
     // (4) Child text outside block tags dropped.
     src4 = "{% layout 'simple' %}\nNOISE BEFORE\n{% block body %}OK{% endblock %}\nNOISE AFTER"
@@ -119,8 +119,8 @@ main() {
     liquid.context_put_string(ctx8, "name", "bob")
     out8, _ = liquid.render(t8, ctx8)
     expect_eq(out8,
-              "<html>\n<head><title>default title</title></head>\n<body>\nHi bob\n</body>\n</html>\n",
-              "8 if/else inside block")
+        "<html>\n<head><title>default title</title></head>\n<body>\nHi bob\n</body>\n</html>\n",
+        "8 if/else inside block")
 
     // (9) Render middle.liquid directly via parse_file — middle.liquid
     //     itself uses `{% layout 'base' %}`. This exercises single-level
@@ -138,8 +138,8 @@ main() {
     liquid.context_set_include_root(ctx9, root)
     out9, _ = liquid.render(t9, ctx9)
     expect_eq(out9,
-              "<html>\n<head><title>default title</title></head>\n<body>\nmiddle content\n</body>\n</html>\n",
-              "9 single-level inherit via parse_file")
+        "<html>\n<head><title>default title</title></head>\n<body>\nmiddle content\n</body>\n</html>\n",
+        "9 single-level inherit via parse_file")
 
     // (10) No root.
     t10, _ = liquid.parse_string("{% layout 'simple' %}{% block body %}x{% endblock %}")

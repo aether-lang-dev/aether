@@ -43,9 +43,9 @@ extern proxy_test_str_eq(a: ptr, b: string) -> int
 extern proxy_test_atoi(s: ptr) -> int
 
 const PROXY_PORT = 19100
-const UP_A_PORT  = 19101
-const UP_B_PORT  = 19102
-const UP_C_PORT  = 19103
+const UP_A_PORT = 19101
+const UP_B_PORT = 19102
+const UP_C_PORT = 19103
 
 // ---- Upstream handlers (one set per role; they read the shim
 // counter so we don't need a tag arg).
@@ -189,15 +189,15 @@ build_upstream_a() {
     if s == 0 { println("FAIL: A server_create"); exit(1) }
     http.server_set_host(s, "127.0.0.1")
     http.server_set_keepalive(s, 1, 0, 5000ms)
-    http.server_get(s, "/echo",            handle_echo_a,         0)
-    http.server_post(s, "/echo",           handle_echo_a,         0)
-    http.server_get(s, "/repos/:repo/info", handle_echo_a,        0)
-    http.server_post(s, "/repos/:repo/commit", handle_echo_a,     0)
-    http.server_get(s, "/echo_vary",       handle_echo_vary,      0)
-    http.server_get(s, "/echo_cacheable",  handle_echo_cacheable, 0)
-    http.server_get(s, "/echo_cacheable_ttl",  handle_echo_cacheable_ttl, 0)
-    http.server_get(s, "/count",           handle_count,          0)
-    http.server_get(s, "/health",          handle_health_ok,      0)
+    http.server_get(s, "/echo", handle_echo_a, 0)
+    http.server_post(s, "/echo", handle_echo_a, 0)
+    http.server_get(s, "/repos/:repo/info", handle_echo_a, 0)
+    http.server_post(s, "/repos/:repo/commit", handle_echo_a, 0)
+    http.server_get(s, "/echo_vary", handle_echo_vary, 0)
+    http.server_get(s, "/echo_cacheable", handle_echo_cacheable, 0)
+    http.server_get(s, "/echo_cacheable_ttl", handle_echo_cacheable_ttl, 0)
+    http.server_get(s, "/count", handle_count, 0)
+    http.server_get(s, "/health", handle_health_ok, 0)
     println("READY")
     run_server(s)
 }
@@ -207,20 +207,20 @@ build_upstream_b() {
     if s == 0 { println("FAIL: B server_create"); exit(1) }
     http.server_set_host(s, "127.0.0.1")
     http.server_set_keepalive(s, 1, 0, 5000ms)
-    http.server_get(s,  "/echo",            handle_echo_b,         0)
-    http.server_post(s, "/echo",            handle_echo_b,         0)
-    http.server_get(s,  "/repos/:repo/info", handle_echo_b,        0)
-    http.server_get(s,  "/repos/:repo/log",  handle_echo_b,        0)
+    http.server_get(s, "/echo", handle_echo_b, 0)
+    http.server_post(s, "/echo", handle_echo_b, 0)
+    http.server_get(s, "/repos/:repo/info", handle_echo_b, 0)
+    http.server_get(s, "/repos/:repo/log", handle_echo_b, 0)
     // The cache + vary routes live on every upstream so cache
     // tests don't 404 when a TTL-expired refetch hits a different
     // upstream under round-robin.
-    http.server_get(s,  "/echo_vary",       handle_echo_vary,      0)
-    http.server_get(s,  "/echo_cacheable",  handle_echo_cacheable, 0)
-    http.server_get(s, "/echo_cacheable_ttl",  handle_echo_cacheable_ttl, 0)
-    http.server_get(s,  "/count",           handle_count,          0)
-    http.server_get(s,  "/health",          handle_health_b,       0)
-    http.server_post(s, "/admin/503",       handle_admin_503,      0)
-    http.server_post(s, "/admin/200",       handle_admin_200,      0)
+    http.server_get(s, "/echo_vary", handle_echo_vary, 0)
+    http.server_get(s, "/echo_cacheable", handle_echo_cacheable, 0)
+    http.server_get(s, "/echo_cacheable_ttl", handle_echo_cacheable_ttl, 0)
+    http.server_get(s, "/count", handle_count, 0)
+    http.server_get(s, "/health", handle_health_b, 0)
+    http.server_post(s, "/admin/503", handle_admin_503, 0)
+    http.server_post(s, "/admin/200", handle_admin_200, 0)
     println("READY")
     run_server(s)
 }
@@ -230,15 +230,15 @@ build_upstream_c() {
     if s == 0 { println("FAIL: C server_create"); exit(1) }
     http.server_set_host(s, "127.0.0.1")
     http.server_set_keepalive(s, 1, 0, 5000ms)
-    http.server_get(s, "/echo",           handle_echo_c,         0)
-    http.server_post(s, "/echo",          handle_echo_c,         0)
-    http.server_get(s, "/repos/:repo/info", handle_echo_c,       0)
-    http.server_get(s, "/repos/:repo/log",  handle_echo_c,       0)
-    http.server_get(s, "/echo_vary",      handle_echo_vary,      0)
+    http.server_get(s, "/echo", handle_echo_c, 0)
+    http.server_post(s, "/echo", handle_echo_c, 0)
+    http.server_get(s, "/repos/:repo/info", handle_echo_c, 0)
+    http.server_get(s, "/repos/:repo/log", handle_echo_c, 0)
+    http.server_get(s, "/echo_vary", handle_echo_vary, 0)
     http.server_get(s, "/echo_cacheable", handle_echo_cacheable, 0)
     http.server_get(s, "/echo_cacheable_ttl", handle_echo_cacheable_ttl, 0)
-    http.server_get(s, "/count",          handle_count,          0)
-    http.server_get(s, "/health",         handle_health_ok,      0)
+    http.server_get(s, "/count", handle_count, 0)
+    http.server_get(s, "/health", handle_health_ok, 0)
     println("READY")
     run_server(s)
 }
@@ -407,18 +407,18 @@ main() {
     if role == "upstream_b" { build_upstream_b(); return }
     if role == "upstream_c" { build_upstream_c(); return }
 
-    if role == "proxy_rr"          { build_proxy_rr();          return }
-    if role == "proxy_wrr"         { build_proxy_wrr();         return }
-    if role == "proxy_ip_hash"     { build_proxy_ip_hash();     return }
+    if role == "proxy_rr" { build_proxy_rr(); return }
+    if role == "proxy_wrr" { build_proxy_wrr(); return }
+    if role == "proxy_ip_hash" { build_proxy_ip_hash(); return }
     if role == "proxy_cookie_hash" { build_proxy_cookie_hash(); return }
-    if role == "proxy_health"      { build_proxy_health();      return }
-    if role == "proxy_breaker"     { build_proxy_breaker();     return }
-    if role == "proxy_cache"       { build_proxy_cache();       return }
-    if role == "proxy_retry"       { build_proxy_retry();       return }
-    if role == "proxy_rate_limit"  { build_proxy_rate_limit();  return }
-    if role == "proxy_trace"       { build_proxy_trace();       return }
-    if role == "proxy_drain"       { build_proxy_drain();       return }
-    if role == "proxy_methods"     { build_proxy_methods();     return }
+    if role == "proxy_health" { build_proxy_health(); return }
+    if role == "proxy_breaker" { build_proxy_breaker(); return }
+    if role == "proxy_cache" { build_proxy_cache(); return }
+    if role == "proxy_retry" { build_proxy_retry(); return }
+    if role == "proxy_rate_limit" { build_proxy_rate_limit(); return }
+    if role == "proxy_trace" { build_proxy_trace(); return }
+    if role == "proxy_drain" { build_proxy_drain(); return }
+    if role == "proxy_methods" { build_proxy_methods(); return }
 
     println("FAIL: unknown role: ${role}")
     exit(1)

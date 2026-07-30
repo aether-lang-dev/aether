@@ -70,15 +70,15 @@
 // nginx/haproxy configs used above. Re-run on a dedicated (non-co-located) box for
 // absolute numbers.
 
-import std.http (http_server_create, http_server_set_host, http_server_start_raw,
-                 http_server_use_middleware, request_path, request_body,
-                 http_response_set_status, http_response_set_body)
-import std.http.proxy (upstream_pool_new, upstream_add, health_checks_enable,
-                       breaker_configure, cache_new, opts_new, opts_bind_cache, mount,
-                       upstream_drain, upstream_undrain)
-import std.string (string_length, string_get_int, string_index_of, string_substring)
+import std.http(http_server_create, http_server_set_host, http_server_start_raw,
+    http_server_use_middleware, request_path, request_body,
+    http_response_set_status, http_response_set_body)
+import std.http.proxy(upstream_pool_new, upstream_add, health_checks_enable,
+    breaker_configure, cache_new, opts_new, opts_bind_cache, mount,
+    upstream_drain, upstream_undrain)
+import std.string(string_length, string_get_int, string_index_of, string_substring)
 
-exports (
+exports(
     serve, serve_at,
     health, no_health, breaker, no_breaker, cache, no_cache,
     parse_backends,
@@ -174,7 +174,7 @@ serve_at(host: string, port: int, algo: string, backends: string, prefix: string
     if string_length(merr) > 0 {
         return "lb: mount: ${merr}"
     }
-    rc = http_server_start_raw(server)      // blocks
+    rc = http_server_start_raw(server) // blocks
     if rc < 0 {
         return "lb: server start failed"
     }

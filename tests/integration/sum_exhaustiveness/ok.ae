@@ -1,11 +1,11 @@
 // Control: a complete match must pass.
 struct Circle { r: float }
-struct Rect   { w: float  h: float }
+struct Rect { w: float h: float }
 type Shape = Circle | Rect
 f(s: Shape) -> int {
     match s {
         Circle -> { return 1 }
-        Rect   -> { return 2 }
+        Rect -> { return 2 }
     }
     return 0
 }

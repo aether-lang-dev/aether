@@ -14,7 +14,7 @@ import std.http.client
 extern exit(code: int)
 
 const ORIGIN = "http://127.0.0.1:18120/"
-const PROXY  = "http://127.0.0.1:18121"
+const PROXY = "http://127.0.0.1:18121"
 
 main() {
     // 1. Explicit proxy -> via proxy.

@@ -13,16 +13,16 @@ actor ProgressBar {
 
     receive {
         Draw(frame) -> {
-            print_char(91)   // [
+            print_char(91) // [
             i = 0
             for i in 0..width {
                 if i < frame {
-                    print_char(35)   // #
+                    print_char(35) // #
                 } else {
-                    print_char(45)   // -
+                    print_char(45) // -
                 }
             }
-            print_char(93)   // ]
+            print_char(93) // ]
             println("")
             done = 1
         }

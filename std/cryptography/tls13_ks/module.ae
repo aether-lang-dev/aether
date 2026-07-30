@@ -47,7 +47,7 @@ import std.cryptography.tls13_kdf
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
-exports (
+exports(
     early_secret, early_secret_psk, psk_from_resumption, binder_key, early_traffic_secret,
     handshake_secret, master_secret,
     traffic_secret, write_key, write_iv,

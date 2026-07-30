@@ -64,9 +64,9 @@ cross_block_demo(input: string) -> string {
 // across an if-chain. Validates the tracker reset.
 mixed_transitions() -> string {
     s = ""
-    s = my_concat("hello ", "world")  // heap
-    s = "literal middle"               // literal — tracker must reset to 0
-    s = my_concat(s, " end")           // heap again — must NOT free the literal
+    s = my_concat("hello ", "world") // heap
+    s = "literal middle" // literal — tracker must reset to 0
+    s = my_concat(s, " end") // heap again — must NOT free the literal
     return s
 }
 
@@ -100,8 +100,8 @@ main() {
     println("  PASS 2: cross-block reassignment compiles and runs")
 
     // --- Case 3: heap → literal transition ---
-    t = my_concat("a", "b")     // heap
-    t = "literal"                // tracker must reset to 0
+    t = my_concat("a", "b") // heap
+    t = "literal" // tracker must reset to 0
     if t != "literal" {
         println("FAIL 3: heap→literal: got '${t}'")
         exit(1)

@@ -5,7 +5,7 @@ import std.cryptography.tiger
 import std.cryptography.skein
 import std.io
 
-ck(lbl: string, got: string, want: string) -> int { if got==want { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}"); println("  got:  ${got}"); println("  want: ${want}"); return 1 }
+ck(lbl: string, got: string, want: string) -> int { if got == want { println("ok   ${lbl}"); return 0 } println("FAIL ${lbl}"); println("  got:  ${got}"); println("  want: ${want}"); return 1 }
 
 main() {
     fails = 0

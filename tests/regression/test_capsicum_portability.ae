@@ -41,7 +41,7 @@ main() {
         if m == capsicum.CAP_UNSUPPORTED {
             print("FAIL freebsd: in_mode() returned CAP_UNSUPPORTED\n"); fails = fails + 1 }
         if m != 0 { if m != 1 {
-            print("FAIL freebsd: in_mode() not 0/1: ${m}\n"); fails = fails + 1 } }
+                print("FAIL freebsd: in_mode() not 0/1: ${m}\n"); fails = fails + 1 } }
         if casper.available() != 1 {
             print("FAIL freebsd: casper.available() != 1\n"); fails = fails + 1 }
     } else {

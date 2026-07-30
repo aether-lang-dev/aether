@@ -32,7 +32,7 @@ score(g: string) -> int {
     return match g {
         "A" -> 4
         "B" -> 3
-        _   -> 0
+        _ -> 0
     }
 }
 
@@ -41,7 +41,7 @@ name(d: Dir) -> string {
     return match d {
         Dir.N -> "north"
         Dir.E -> "east"
-        _     -> "other"
+        _ -> "other"
     }
 }
 

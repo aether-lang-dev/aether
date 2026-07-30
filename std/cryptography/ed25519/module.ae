@@ -24,7 +24,7 @@ import std.bytes
 import std.bignum
 import std.cryptography.sha2
 
-exports (
+exports(
     publickey, sign, verify
 )
 
@@ -53,7 +53,7 @@ order_L() -> ptr {
 curve_d(p: ptr) -> ptr {
     n121665 = bignum.from_int(121665)
     n121666 = bignum.from_int(121666)
-    neg = bignum.subtract(p, n121665)      // -121665 mod p = p - 121665
+    neg = bignum.subtract(p, n121665) // -121665 mod p = p - 121665
     inv = bignum.mod_inverse(n121666, p)
     prod = bignum.multiply(neg, inv)
     d = bignum.mod(prod, p)
@@ -102,7 +102,7 @@ fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(
 fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
 finv(a: ptr, p: ptr) -> ptr {
     two = bignum.from_int(2)
-    e = bignum.subtract(p, two)            // p - 2
+    e = bignum.subtract(p, two) // p - 2
     r = bignum.mod_pow(a, e, p)
     bignum.free(two); bignum.free(e)
     return r
@@ -130,7 +130,7 @@ to_le32(nn: ptr) -> ptr {
 }
 
 // ---- extended-coordinate point (X:Y:Z:T), each a *BN ----
-struct EdPt { x: ptr  y: ptr  z: ptr  t: ptr }
+struct EdPt { x: ptr y: ptr z: ptr t: ptr }
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
@@ -228,14 +228,14 @@ base_point(p: ptr, d: ptr) -> *EdPt {
 recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
     one = bignum.from_int(1)
     y2 = fmul(y, y, p)
-    u = fsub(y2, one, p)                 // y^2 - 1
+    u = fsub(y2, one, p) // y^2 - 1
     dy2 = fmul(d, y2, p)
-    v = fadd(dy2, one, p)                // d y^2 + 1
+    v = fadd(dy2, one, p) // d y^2 + 1
 
     // x = u * v^3 * (u v^7)^((p-5)/8)
     v2 = fmul(v, v, p); v3 = fmul(v2, v, p)
-    v4 = fmul(v3, v, p)                   // v^4 = v^3 * v
-    v7 = fmul(v3, v4, p)                  // v^7 = v^3 * v^4
+    v4 = fmul(v3, v, p) // v^4 = v^3 * v
+    v7 = fmul(v3, v4, p) // v^7 = v^3 * v^4
     bignum.free(v4)
     uv7 = fmul(u, v7, p)
     exp = exp_p_minus_5_over_8(p)
@@ -245,7 +245,7 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
 
     // Check v*x^2 == u (mod p). If v*x^2 == -u, multiply x by sqrt(-1).
     x2 = fmul(x, x, p); vx2 = fmul(v, x2, p)
-    chk = fsub(vx2, u, p)                // should be 0
+    chk = fsub(vx2, u, p) // should be 0
     if bignum.is_zero(chk) != 1 {
         // try x * I
         I = sqrt_m1(p)
@@ -257,7 +257,7 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
 
     // Adjust sign: x's low bit must equal `sign`.
     if bit0(x) != sign {
-        nx = fsub(p, x, p)               // p - x (i.e. -x mod p)
+        nx = fsub(p, x, p) // p - x (i.e. -x mod p)
         bignum.free(x); x = nx
     }
 

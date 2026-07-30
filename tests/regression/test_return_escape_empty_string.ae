@@ -9,9 +9,9 @@ extern exit(code: int)
 
 empty_or_x(cond: int) -> string {
     if cond == 1 {
-        return string.concat("", "")    // length-0 heap result
+        return string.concat("", "") // length-0 heap result
     }
-    return ""                            // length-0 literal
+    return "" // length-0 literal
 }
 
 main() {

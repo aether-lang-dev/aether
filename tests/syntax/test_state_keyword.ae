@@ -3,14 +3,14 @@
 
 main() {
     state = 42
-    println(state)  // expect: 42
+    println(state) // expect: 42
 
-    state = state + 1
-    println(state)  // expect: 43
+    state = state +1
+    println(state) // expect: 43
 
     // Use 'state' in expressions
-    doubled = state * 2
-    println(doubled)  // expect: 86
+    doubled = state *2
+    println(doubled) // expect: 86
 
     // Use 'state' in conditionals
     if state > 40 {
@@ -20,7 +20,7 @@ main() {
     // Use 'state' in loops
     state = 0
     for (i = 0; i < 5; i = i + 1) {
-        state = state + i
+        state = state +i
     }
-    println(state)  // expect: 10
+    println(state) // expect: 10
 }

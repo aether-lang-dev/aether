@@ -52,8 +52,8 @@ main() {
     r = deque.new(3)
     r = deque.push_back(r, 10)
     r = deque.push_back(r, 20)
-    r = deque.push_back(r, 30)   // full: [10,20,30]
-    r = deque.push_back(r, 40)   // overwrite 10: [20,30,40]
+    r = deque.push_back(r, 30) // full: [10,20,30]
+    r = deque.push_back(r, 40) // overwrite 10: [20,30,40]
     fails = fails + ck(deque.len(r) == 3, "ring stays at cap")
     pf, _ = deque.peek_front(r)
     pb, _ = deque.peek_back(r)
@@ -63,11 +63,11 @@ main() {
     q = deque.new(4)
     q = deque.push_back(q, 2)
     q = deque.push_back(q, 3)
-    q = deque.push_front(q, 1)   // [1,2,3]
+    q = deque.push_front(q, 1) // [1,2,3]
     fq, _ = deque.peek_front(q)
     bq, _ = deque.peek_back(q)
     fails = fails + ck(fq == 1 && bq == 3, "push_front/back ends")
-    vb, q, _ = deque.pop_back(q)  // pops 3
+    vb, q, _ = deque.pop_back(q) // pops 3
     fails = fails + ck(vb == 3, "pop_back")
     vf, q, _ = deque.pop_front(q) // pops 1
     fails = fails + ck(vf == 1, "pop_front after pop_back")

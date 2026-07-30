@@ -24,7 +24,7 @@ extern exit(code: int)
 struct OpCode {
     byte op
     byte flags
-    int  imm
+    int imm
 }
 
 set_tag(t: byte) -> byte {
@@ -72,8 +72,8 @@ main() {
 
     // Case 7: bitwise on bytes.
     byte mask = 0x0F
-    byte v    = 0xA5
-    byte and  = v & mask
+    byte v = 0xA5
+    byte and = v & mask
     if and != 5 { println("FAIL 7a: and=${and}"); exit(1) }
     byte or = v | mask
     if or != 175 { println("FAIL 7b: or=${or}"); exit(1) }
@@ -85,10 +85,10 @@ main() {
 
     // Case 8: literals at the boundary.
     byte zero = 0
-    byte max  = 255
-    byte hex  = 0xFF
-    byte bin  = 0b1111_1111
-    byte oct  = 0o377
+    byte max = 255
+    byte hex = 0xFF
+    byte bin = 0b1111_1111
+    byte oct = 0o377
     if zero != 0 { println("FAIL 8a"); exit(1) }
     if max != 255 { println("FAIL 8b"); exit(1) }
     if hex != 255 { println("FAIL 8c"); exit(1) }

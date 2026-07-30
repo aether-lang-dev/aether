@@ -45,7 +45,7 @@ main() {
         println("FAIL literal: length(b) = ${string.length(b)}, expected 8")
         exit(1)
     }
-    if string.char_at(b, 0) != 102 {  // 'f'
+    if string.char_at(b, 0) != 102 { // 'f'
         println("FAIL literal: byte 0 = ${string.char_at(b, 0)}, expected 102")
         exit(1)
     }

@@ -91,7 +91,7 @@ main() {
     //       return
     //   }
 
-    http.server_get(server, "/",     handle_root, 0)
+    http.server_get(server, "/", handle_root, 0)
     http.server_post(server, "/echo", handle_echo, 0)
 
     println("listening on :${PORT}")

@@ -15,7 +15,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     gost3411_2012_256_hex, gost3411_2012_256_bytes,
     gost3411_2012_512_hex, gost3411_2012_512_bytes

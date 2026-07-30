@@ -10,10 +10,10 @@
 // aether.toml) plus EOF from <stdio.h> (always included by the runtime
 // prelude), uses them in comparison / call contexts, and asserts.
 
-extern const MY_FLAG: int @c_import      // = 7   (header)
-extern const MY_LIMIT: int @c_import     // = 1000 (header)
-extern const MY_BUILD: ptr @c_import     // = "aether-702" (string macro)
-extern const EOF: int @c_import          // = -1  (stdio.h)
+extern const MY_FLAG: int @c_import // = 7   (header)
+extern const MY_LIMIT: int @c_import // = 1000 (header)
+extern const MY_BUILD: ptr @c_import // = "aether-702" (string macro)
+extern const EOF: int @c_import // = -1  (stdio.h)
 
 extern puts(s: ptr) -> int
 extern exit(code: int)

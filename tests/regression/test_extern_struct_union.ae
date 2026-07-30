@@ -33,13 +33,13 @@ extern free(p: ptr)
 extern exit(code: int)
 
 extern struct Variant {
-    tag: int           //  0
+    tag: int //  0
     u: union {
-        f64: float    //  8
-        ip: ptr       //  8
+        f64: float //  8
+        ip: ptr //  8
         nested: struct {
-            length: byte    //  8
-            payload: ptr    // 16
+            length: byte //  8
+            payload: ptr // 16
         }
     }
 }

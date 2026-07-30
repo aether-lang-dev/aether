@@ -3,7 +3,7 @@
 // foo_origin() returns "lib/" — exactly what you want when a
 // vendored module has a bug and you're trying out a local patch
 // before pushing it upstream.
-exports (foo_origin)
+exports(foo_origin)
 
 foo_origin() -> string {
     return "lib/ (project-local override)"

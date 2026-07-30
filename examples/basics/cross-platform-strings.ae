@@ -80,7 +80,7 @@ main() {
 
 walk_seq(s: *StringSeq, idx: int) {
     match s {
-        []      -> { /* end */ }
+        [] -> { /* end */ }
         [h | t] -> {
             print("  [")
             print(idx)

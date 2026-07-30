@@ -19,22 +19,22 @@ fn ck(cond: bool, msg: string) -> int {
 // `rate` Hz, every sample set to `sample16` (a signed 16-bit value).
 // Returns (wav_bytes, total_length).
 fn make_wav(frames: int, ch: int, rate: int, sample16: int) -> (string, int) {
-    data_bytes = frames * ch * 2         // 16-bit
+    data_bytes = frames * ch * 2 // 16-bit
     total = 44 + data_bytes
     b = bytes.new(total)
     // RIFF header
-    bytes.set(b, 0, 82); bytes.set(b, 1, 73); bytes.set(b, 2, 70); bytes.set(b, 3, 70)  // "RIFF"
+    bytes.set(b, 0, 82); bytes.set(b, 1, 73); bytes.set(b, 2, 70); bytes.set(b, 3, 70) // "RIFF"
     bytes.set_le32(b, 4, 36 + data_bytes)
     bytes.set(b, 8, 87); bytes.set(b, 9, 65); bytes.set(b, 10, 86); bytes.set(b, 11, 69) // "WAVE"
     // fmt chunk
     bytes.set(b, 12, 102); bytes.set(b, 13, 109); bytes.set(b, 14, 116); bytes.set(b, 15, 32) // "fmt "
-    bytes.set_le32(b, 16, 16)            // fmt size
-    bytes.set_le16(b, 20, 1)             // PCM
+    bytes.set_le32(b, 16, 16) // fmt size
+    bytes.set_le16(b, 20, 1) // PCM
     bytes.set_le16(b, 22, ch)
     bytes.set_le32(b, 24, rate)
     bytes.set_le32(b, 28, rate * ch * 2) // byte rate
-    bytes.set_le16(b, 32, ch * 2)        // block align
-    bytes.set_le16(b, 34, 16)            // bits per sample
+    bytes.set_le16(b, 32, ch * 2) // block align
+    bytes.set_le16(b, 34, 16) // bits per sample
     // data chunk
     bytes.set(b, 36, 100); bytes.set(b, 37, 97); bytes.set(b, 38, 116); bytes.set(b, 39, 97) // "data"
     bytes.set_le32(b, 40, data_bytes)
@@ -76,9 +76,9 @@ main() {
     // ---- seek (clamped) ----
     _ = audio.seek_ms(src, 250)
     fails = fails + ck(audio.position_ms(src) == 250, "seek 250ms")
-    _ = audio.seek_ms(src, 999999)   // past end -> clamps to duration
+    _ = audio.seek_ms(src, 999999) // past end -> clamps to duration
     fails = fails + ck(audio.position_ms(src) == 1000, "seek past end clamps to 1000ms")
-    _ = audio.seek_ms(src, -5)       // negative -> clamps to 0
+    _ = audio.seek_ms(src, -5) // negative -> clamps to 0
     fails = fails + ck(audio.position_ms(src) == 0, "seek negative clamps to 0")
 
     // ---- stop rewinds ----
@@ -90,9 +90,9 @@ main() {
     // ---- volume clamp ----
     _ = audio.volume(src, 0.5)
     fails = fails + ck(audio.get_volume(src) == 0.5, "volume 0.5")
-    _ = audio.volume(src, 2.0)       // clamps to 1.0
+    _ = audio.volume(src, 2.0) // clamps to 1.0
     fails = fails + ck(audio.get_volume(src) == 1.0, "volume clamps high")
-    _ = audio.volume(src, -1.0)      // clamps to 0.0
+    _ = audio.volume(src, -1.0) // clamps to 0.0
     fails = fails + ck(audio.get_volume(src) == 0.0, "volume clamps low")
 
     audio.unload(src)
@@ -100,7 +100,7 @@ main() {
     // ---- error paths ----
     _, e1 = audio.load_wav("not a wav at all!!", 18)
     fails = fails + ck(e1 != "", "garbage rejected")
-    _, e2 = audio.load_wav("RIFFxxxxWAVE", 12)   // valid magic, no chunks
+    _, e2 = audio.load_wav("RIFFxxxxWAVE", 12) // valid magic, no chunks
     fails = fails + ck(e2 != "", "no fmt/data rejected")
 
     // ---- mono 44100 duration math ----

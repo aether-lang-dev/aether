@@ -70,7 +70,6 @@ main() {
     res_256_2 = gost3411_2012.final_hex(ctx_256_2)
     fails = fails + check("Streebog-256 M2", res_256_2, "9dd2fe4e90409e5da87f53976d7405b0c0cac628fc669a741d50063c557e8f50")
 
-
     // ---- Streebog-512 Tests ----
     ctx_512_1, _ = gost3411_2012.new("gost3411_2012_512")
     gost3411_2012.update_bytes(ctx_512_1, m1_bytes, m1_len)

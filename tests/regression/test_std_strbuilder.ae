@@ -57,7 +57,7 @@ main() {
     b2 = strbuilder.new(0)
     i = 0
     while i < 500 {
-        strbuilder.append(b2, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")  // 30 'x's
+        strbuilder.append(b2, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") // 30 'x's
         i = i + 1
     }
     if strbuilder.length(b2) != 15000 {
@@ -83,7 +83,7 @@ main() {
     // Case 3: append_byte.
     b3 = strbuilder.new(8)
     strbuilder.append(b3, "row1")
-    strbuilder.append_byte(b3, 10)   // '\n'
+    strbuilder.append_byte(b3, 10) // '\n'
     strbuilder.append(b3, "row2")
     out3 = strbuilder.finish(b3)
     if string.length(out3) != 9 {
@@ -100,7 +100,7 @@ main() {
     b4 = strbuilder.new(0)
     strbuilder.append(b4, "count=")
     strbuilder.append_int(b4, 42)
-    strbuilder.append_byte(b4, 44)   // ','
+    strbuilder.append_byte(b4, 44) // ','
     strbuilder.append_int(b4, -17)
     out4 = strbuilder.finish(b4)
     if out4 != "count=42,-17" {
@@ -115,7 +115,7 @@ main() {
     // length-explicit path with a shorter-than-strlen request to
     // confirm the n parameter is honored.
     b5 = strbuilder.new(0)
-    strbuilder.append_n(b5, "abcdefgh", 3)   // only "abc"
+    strbuilder.append_n(b5, "abcdefgh", 3) // only "abc"
     strbuilder.append(b5, "XYZ")
     out5 = strbuilder.finish(b5)
     if out5 != "abcXYZ" {

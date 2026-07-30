@@ -32,7 +32,7 @@ main() {
     string_list_add(L, "banana")
     string_list_add(L, "apple")
     string_list_add(L, "cherry")
-    string_list_add(L, "apple")   // duplicate — exercises stability
+    string_list_add(L, "apple") // duplicate — exercises stability
 
     // 1. lexicographic
     string_list_sort_lex(L)
@@ -44,9 +44,9 @@ main() {
 
     // 2. comparator closure: by length descending, then the 6-length ones
     //    first. banana(6), cherry(6) before apple(5), apple(5).
-    string_list_sort(L, |a: string, b: string| {
-        return string.length(b) - string.length(a)
-    })
+    string_list_sort(L, | a: string, b: string | {
+            return string.length(b) - string.length(a)
+        })
     first = string_list_get(L, 0)
     second = string_list_get(L, 1)
     if string.length(first) != 6 {
@@ -65,9 +65,9 @@ main() {
     string_list_add(S, "one")
     string_list_add(S, "two")
     string_list_add(S, "three")
-    string_list_sort(S, |a: string, b: string| {
-        return 0        // all "equal" — a stable sort preserves input order
-    })
+    string_list_sort(S, | a: string, b: string | {
+            return 0 // all "equal" — a stable sort preserves input order
+        })
     order = joined(S)
     if string.equals(order, "one,two,three,") != 1 {
         println("FAIL stability: ${order}")
@@ -77,7 +77,7 @@ main() {
     // 4. empty and single-element lists are no-ops (must not crash).
     E = string_list_new()
     string_list_sort_lex(E)
-    string_list_sort(E, |a: string, b: string| { return 0 })
+    string_list_sort(E, | a: string, b: string | { return 0 })
     string_list_add(E, "solo")
     string_list_sort_lex(E)
     if string.equals(string_list_get(E, 0), "solo") != 1 {

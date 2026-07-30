@@ -1,6 +1,6 @@
 import std.string
 
-exports (inner)
+exports(inner)
 
 inner(seed: string) -> string {
     return string.concat(seed, "-tail")

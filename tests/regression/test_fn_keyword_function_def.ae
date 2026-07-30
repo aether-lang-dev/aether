@@ -28,7 +28,7 @@ fn apply(f: fn(int, int) -> int, x: int, y: int) -> int {
 
 main() {
     if add(40, 2) != 42 { println("FAIL: fn add"); exit(1) }
-    if mul(6, 7) != 42  { println("FAIL: bare mul"); exit(1) }
+    if mul(6, 7) != 42 { println("FAIL: bare mul"); exit(1) }
     if apply(add as fn(int, int) -> int, 20, 22) != 42 { println("FAIL: fn apply + fn-ptr param"); exit(1) }
     println("OK: fn-keyword function definitions")
 }

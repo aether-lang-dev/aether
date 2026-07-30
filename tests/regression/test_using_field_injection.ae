@@ -9,7 +9,7 @@ struct Entity {
 }
 
 struct Frog {
-    using entity: Entity    // promotes x, y into Frog
+    using entity: Entity // promotes x, y into Frog
     hops: int
 }
 

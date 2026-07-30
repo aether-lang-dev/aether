@@ -29,11 +29,11 @@ extern free(p: ptr)
 // is an int (4 bytes) at predictable offsets so mem.get_int / set_int
 // can target them directly.
 struct ParseCounters {
-    start_count:  int     // offset 0
-    end_count:    int     // offset 4
-    text_count:   int     // offset 8
-    last_attrs:   int     // offset 12  — attr_count from the most recent start
-    last_text_len: int    // offset 16
+    start_count: int // offset 0
+    end_count: int // offset 4
+    text_count: int // offset 8
+    last_attrs: int // offset 12  — attr_count from the most recent start
+    last_text_len: int // offset 16
 }
 
 // ---- Handlers --------------------------------------------------------
@@ -49,7 +49,7 @@ count_start(ud: ptr, name: string, atts: ptr) {
     // owns the storage.
     c = ud as *ParseCounters
     c.start_count = c.start_count + 1
-    c.last_attrs  = xml_expat.attr_count(atts)
+    c.last_attrs = xml_expat.attr_count(atts)
 }
 
 count_end(ud: ptr, name: string) {
@@ -59,8 +59,8 @@ count_end(ud: ptr, name: string) {
 
 count_text(ud: ptr, text: ptr, len: int) {
     c = ud as *ParseCounters
-    c.text_count    = c.text_count + 1
-    c.last_text_len = c.last_text_len + len   // sum across chunked text
+    c.text_count = c.text_count + 1
+    c.last_text_len = c.last_text_len + len // sum across chunked text
 }
 
 // ---- Helpers --------------------------------------------------------
@@ -71,11 +71,11 @@ fail(msg: string) {
 }
 
 new_counters() -> *ParseCounters {
-    c = malloc(32) as *ParseCounters       // 5 int fields, 32 bytes is comfortable
-    c.start_count   = 0
-    c.end_count     = 0
-    c.text_count    = 0
-    c.last_attrs    = 0
+    c = malloc(32) as *ParseCounters // 5 int fields, 32 bytes is comfortable
+    c.start_count = 0
+    c.end_count = 0
+    c.text_count = 0
+    c.last_attrs = 0
     c.last_text_len = 0
     return c
 }
@@ -91,10 +91,10 @@ main() {
     // main() so nothing dangles. Each case prefixes its names to
     // avoid collisions.
     sb_entity = strbuilder.new(16)
-    sb_cdata  = strbuilder.new(16)
-    sb_title  = strbuilder.new(32)
-    sb_link   = strbuilder.new(32)
-    sb_desc   = strbuilder.new(32)
+    sb_cdata = strbuilder.new(16)
+    sb_title = strbuilder.new(32)
+    sb_link = strbuilder.new(32)
+    sb_desc = strbuilder.new(32)
     sb_c13_attr = strbuilder.new(16)
     c10_event_log = ""
     c13_elem_name_bytes = 0
@@ -117,8 +117,8 @@ main() {
         defer free(c)
         xml_expat.set_user_data(p, c)
         xml_expat.on_start(p, count_start as fn(ptr, string, ptr) -> void)
-        xml_expat.on_end(p,   count_end as fn(ptr, string) -> void)
-        xml_expat.on_text(p,  count_text as fn(ptr, ptr, int) -> void)
+        xml_expat.on_end(p, count_end as fn(ptr, string) -> void)
+        xml_expat.on_text(p, count_text as fn(ptr, ptr, int) -> void)
 
         doc = "<root><a/><b>hi</b><c x=\"1\" y=\"two\"/></root>"
         ok = xml_expat.parse(p, doc, string.length(doc), 1)
@@ -128,7 +128,7 @@ main() {
 
         cc = c as *ParseCounters
         if cc.start_count != 4 { fail("start_count = ${cc.start_count}, want 4 (root,a,b,c)") }
-        if cc.end_count   != 4 { fail("end_count = ${cc.end_count}, want 4") }
+        if cc.end_count != 4 { fail("end_count = ${cc.end_count}, want 4") }
         // The text handler must have fired at least once for "hi". libexpat
         // may chunk text content, so we don't assert a precise count — just
         // that the total length sums to the literal we passed.
@@ -149,7 +149,7 @@ main() {
         defer free(c)
         xml_expat.set_user_data(p, c)
         xml_expat.on_start(p, count_start as fn(ptr, string, ptr) -> void)
-        xml_expat.on_end(p,   count_end as fn(ptr, string) -> void)
+        xml_expat.on_end(p, count_end as fn(ptr, string) -> void)
 
         doc = "<root><c x=\"1\" y=\"two\" z=\"three\"/></root>"
         ok = xml_expat.parse(p, doc, string.length(doc), 1)
@@ -180,8 +180,8 @@ main() {
         if msg == null { fail("error_string returned null after parse failure") }
         // Line/column should at least be > 0 for the location of the
         // mismatched </root>.
-        if xml_expat.error_line(p) <= 0   { fail("error_line <= 0 after failure") }
-        if xml_expat.error_column(p) < 0  { fail("error_column < 0 after failure") }
+        if xml_expat.error_line(p) <= 0 { fail("error_line <= 0 after failure") }
+        if xml_expat.error_column(p) < 0 { fail("error_column < 0 after failure") }
         println("  PASS: parse error surfaced (msg='${msg}' at line ${xml_expat.error_line(p)})")
     }
 
@@ -199,8 +199,8 @@ main() {
         defer free(c)
         xml_expat.set_user_data(p, c)
         xml_expat.on_start(p, count_start as fn(ptr, string, ptr) -> void)
-        xml_expat.on_end(p,   count_end as fn(ptr, string) -> void)
-        xml_expat.on_text(p,  count_text as fn(ptr, ptr, int) -> void)
+        xml_expat.on_end(p, count_end as fn(ptr, string) -> void)
+        xml_expat.on_text(p, count_text as fn(ptr, ptr, int) -> void)
 
         chunk1 = "<root><a>hel"
         chunk2 = "lo</a><b/></root>"
@@ -213,7 +213,7 @@ main() {
 
         cc = c as *ParseCounters
         if cc.start_count != 3 { fail("multi-chunk start_count = ${cc.start_count}, want 3") }
-        if cc.end_count   != 3 { fail("multi-chunk end_count = ${cc.end_count}, want 3") }
+        if cc.end_count != 3 { fail("multi-chunk end_count = ${cc.end_count}, want 3") }
         // "hello" totals 5 bytes regardless of how libexpat chunks it
         // across the parse-buffer boundary.
         if cc.last_text_len != 5 {
@@ -244,7 +244,7 @@ main() {
         xml_expat.set_user_data(p2, c2)
         xml_expat.on_start(p2, count_start as fn(ptr, string, ptr) -> void)
 
-        d1 = "<a/><b/>"           // not well-formed standalone — single root needed
+        d1 = "<a/><b/>" // not well-formed standalone — single root needed
         d1_root = "<r><a/><b/></r>"
         d2_root = "<r><x/></r>"
         if xml_expat.parse(p1, d1_root, string.length(d1_root), 1) != 1 {
@@ -271,9 +271,9 @@ main() {
     {
         count = 0
         ok = xml_expat.parse_with("<root><a/><b/><c/></root>") {
-            bind_start(|name: string, atts: ptr| {
-                count = count + 1
-            })
+            bind_start(| name: string, atts: ptr | {
+                    count = count + 1
+                })
         }
         if ok != 1 { fail("parse_with single-handler failed") }
         if count != 4 { fail("parse_with count = ${count}, want 4 (root,a,b,c)") }
@@ -289,17 +289,17 @@ main() {
 
     {
         starts = 0
-        ends   = 0
-        bytes  = 0
+        ends = 0
+        bytes = 0
         ok = xml_expat.parse_with("<g>hi<inner/>there</g>") {
-            bind_start(|name: string, atts: ptr| { starts = starts + 1 })
-            bind_end(  |name: string|             { ends   = ends + 1 })
-            bind_text( |text: string, len: int|   { bytes  = bytes + len })
+            bind_start(| name: string, atts: ptr | { starts = starts + 1 })
+            bind_end(| name: string | { ends = ends + 1 })
+            bind_text(| text: string, len: int | { bytes = bytes + len })
         }
         if ok != 1 { fail("parse_with 3-handler failed") }
         if starts != 2 { fail("parse_with starts = ${starts}, want 2 (g,inner)") }
-        if ends   != 2 { fail("parse_with ends = ${ends}, want 2") }
-        if bytes  != 7 { fail("parse_with bytes = ${bytes}, want 7 ('hi'+'there')") }
+        if ends != 2 { fail("parse_with ends = ${ends}, want 2") }
+        if bytes != 7 { fail("parse_with bytes = ${bytes}, want 7 ('hi'+'there')") }
         println("  PASS: parse_with 3-handler fan-out (2 starts / 2 ends / 7 text bytes)")
     }
 
@@ -312,9 +312,9 @@ main() {
     {
         only_starts = 0
         ok = xml_expat.parse_with("<root><a><b/></a></root>") {
-            bind_start(|name: string, atts: ptr| {
-                only_starts = only_starts + 1
-            })
+            bind_start(| name: string, atts: ptr | {
+                    only_starts = only_starts + 1
+                })
         }
         if ok != 1 { fail("parse_with start-only failed") }
         if only_starts != 3 { fail("parse_with only_starts = ${only_starts}, want 3 (root,a,b)") }
@@ -340,13 +340,13 @@ main() {
         max_depth = 0
         doc = "<a><b><c><d><e><f/></e></d></c><c2/></b></a>"
         ok = xml_expat.parse_with(doc) {
-            bind_start(|name: string, atts: ptr| {
-                depth = depth + 1
-                if depth > max_depth { max_depth = depth }
-            })
-            bind_end(|name: string| {
-                depth = depth - 1
-            })
+            bind_start(| name: string, atts: ptr | {
+                    depth = depth + 1
+                    if depth > max_depth { max_depth = depth }
+                })
+            bind_end(| name: string | {
+                    depth = depth - 1
+                })
         }
         if ok != 1 { fail("nesting parse failed") }
         if max_depth != 6 { fail("max_depth = ${max_depth}, want 6 (a/b/c/d/e/f)") }
@@ -362,15 +362,15 @@ main() {
 
     {
         ok = xml_expat.parse_with("<p>Hello <b>bold</b> world.</p>") {
-            bind_start(|name: string, atts: ptr| {
-                c10_event_log = "${c10_event_log}S(${name})"
-            })
-            bind_end(|name: string| {
-                c10_event_log = "${c10_event_log}E(${name})"
-            })
-            bind_text(|text: string, len: int| {
-                c10_event_log = "${c10_event_log}T(${len})"
-            })
+            bind_start(| name: string, atts: ptr | {
+                    c10_event_log = "${c10_event_log}S(${name})"
+                })
+            bind_end(| name: string | {
+                    c10_event_log = "${c10_event_log}E(${name})"
+                })
+            bind_text(| text: string, len: int | {
+                    c10_event_log = "${c10_event_log}T(${len})"
+                })
         }
         if ok != 1 { fail("mixed-content parse failed") }
         // Expected: S(p) T(6 'Hello ') S(b) T(4 'bold') E(b) T(7 ' world.') E(p)
@@ -396,10 +396,10 @@ main() {
         // Three whitespace runs: "\n  ", "\n  ", "\n" between sibling tags.
         doc = "<r>\n  <a/>\n  <b/>\n</r>"
         ok = xml_expat.parse_with(doc) {
-            bind_text(|text: string, len: int| {
-                ws_text_events = ws_text_events + 1
-                ws_bytes = ws_bytes + len
-            })
+            bind_text(| text: string, len: int | {
+                    ws_text_events = ws_text_events + 1
+                    ws_bytes = ws_bytes + len
+                })
         }
         if ok != 1 { fail("whitespace-only parse failed") }
         if ws_text_events == 0 {
@@ -421,9 +421,9 @@ main() {
 
     {
         ok = xml_expat.parse_with("<r>&amp;&lt;&gt;&quot;&apos;&#65;&#x42;</r>") {
-            bind_text(|text: string, len: int| {
-                strbuilder.append_n(sb_entity, text, len)
-            })
+            bind_text(| text: string, len: int | {
+                    strbuilder.append_n(sb_entity, text, len)
+                })
         }
         if ok != 1 { fail("entity parse failed") }
         result = strbuilder.finish(sb_entity)
@@ -453,16 +453,16 @@ main() {
         // duration of the start callback; storing it directly worked
         // on Linux but the bytes were freed under us on macOS.
         ok = xml_expat.parse_with("<café leño=\"árbol\">日本語 🎉</café>") {
-            bind_start(|name: string, atts: ptr| {
-                c13_elem_name_bytes = string.length(name)
-                if xml_expat.attr_count(atts) > 0 {
-                    v = xml_expat.attr_value(atts, 0)
-                    strbuilder.append_n(sb_c13_attr, v, string.length(v))
-                }
-            })
-            bind_text(|text: string, len: int| {
-                c13_text_total = c13_text_total + len
-            })
+            bind_start(| name: string, atts: ptr | {
+                    c13_elem_name_bytes = string.length(name)
+                    if xml_expat.attr_count(atts) > 0 {
+                        v = xml_expat.attr_value(atts, 0)
+                        strbuilder.append_n(sb_c13_attr, v, string.length(v))
+                    }
+                })
+            bind_text(| text: string, len: int | {
+                    c13_text_total = c13_text_total + len
+                })
         }
         if ok != 1 { fail("UTF-8 parse failed") }
         c13_attr_val = strbuilder.finish(sb_c13_attr)
@@ -495,9 +495,9 @@ main() {
         // through without parsing as markup or entity expansion.
         doc = "<r><![CDATA[<x>&amp;</x>]]></r>"
         ok = xml_expat.parse_with(doc) {
-            bind_text(|text: string, len: int| {
-                strbuilder.append_n(sb_cdata, text, len)
-            })
+            bind_text(| text: string, len: int | {
+                    strbuilder.append_n(sb_cdata, text, len)
+                })
         }
         if ok != 1 { fail("CDATA parse failed") }
         result = strbuilder.finish(sb_cdata)
@@ -527,27 +527,27 @@ main() {
         // string ptr — that goes stale by the time bind_text fires).
         rss = "<rss version=\"2.0\"><channel><item><title>Hello World</title><link>https://example.com/post/1</link><description>A short post.</description></item></channel></rss>"
         ok = xml_expat.parse_with(rss) {
-            bind_start(|name: string, atts: ptr| {
-                if name == "title"       { c15_current_field = 1 }
-                if name == "link"        { c15_current_field = 2 }
-                if name == "description" { c15_current_field = 3 }
-            })
-            bind_text(|text: string, len: int| {
-                if c15_current_field == 1 { strbuilder.append_n(sb_title, text, len) }
-                if c15_current_field == 2 { strbuilder.append_n(sb_link,  text, len) }
-                if c15_current_field == 3 { strbuilder.append_n(sb_desc, text, len) }
-            })
-            bind_end(|name: string| {
-                c15_current_field = 0
-            })
+            bind_start(| name: string, atts: ptr | {
+                    if name == "title" { c15_current_field = 1 }
+                    if name == "link" { c15_current_field = 2 }
+                    if name == "description" { c15_current_field = 3 }
+                })
+            bind_text(| text: string, len: int | {
+                    if c15_current_field == 1 { strbuilder.append_n(sb_title, text, len) }
+                    if c15_current_field == 2 { strbuilder.append_n(sb_link, text, len) }
+                    if c15_current_field == 3 { strbuilder.append_n(sb_desc, text, len) }
+                })
+            bind_end(| name: string | {
+                    c15_current_field = 0
+                })
         }
         if ok != 1 { fail("RSS parse failed") }
         title = strbuilder.finish(sb_title)
-        link  = strbuilder.finish(sb_link)
-        desc  = strbuilder.finish(sb_desc)
+        link = strbuilder.finish(sb_link)
+        desc = strbuilder.finish(sb_desc)
         if title != "Hello World" { fail("RSS title = '${title}', want 'Hello World'") }
-        if link  != "https://example.com/post/1" { fail("RSS link = '${link}'") }
-        if desc  != "A short post." { fail("RSS desc = '${desc}'") }
+        if link != "https://example.com/post/1" { fail("RSS link = '${link}'") }
+        if desc != "A short post." { fail("RSS desc = '${desc}'") }
         println("  PASS: RSS fragment — title/link/description all extracted")
     }
 
@@ -562,20 +562,20 @@ main() {
         width_sum = 0
         svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"50\"><rect x=\"0\" y=\"0\" width=\"10\" height=\"10\"/><rect x=\"20\" y=\"0\" width=\"30\" height=\"10\"/><rect x=\"60\" y=\"0\" width=\"40\" height=\"10\"/></svg>"
         ok = xml_expat.parse_with(svg) {
-            bind_start(|name: string, atts: ptr| {
-                if name == "rect" {
-                    rect_count = rect_count + 1
-                    n = xml_expat.attr_count(atts)
-                    i = 0
-                    while i < n {
-                        if xml_expat.attr_name(atts, i) == "width" {
-                            w, _ = string.to_int(xml_expat.attr_value(atts, i))
-                            width_sum = width_sum + w
+            bind_start(| name: string, atts: ptr | {
+                    if name == "rect" {
+                        rect_count = rect_count + 1
+                        n = xml_expat.attr_count(atts)
+                        i = 0
+                        while i < n {
+                            if xml_expat.attr_name(atts, i) == "width" {
+                                w, _ = string.to_int(xml_expat.attr_value(atts, i))
+                                width_sum = width_sum + w
+                            }
+                            i = i + 1
                         }
-                        i = i + 1
                     }
-                }
-            })
+                })
         }
         if ok != 1 { fail("SVG parse failed") }
         if rect_count != 3 { fail("SVG rect_count = ${rect_count}, want 3") }

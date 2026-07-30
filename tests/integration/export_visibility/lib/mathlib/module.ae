@@ -1,6 +1,6 @@
 // Public API — declared once at the top via `exports (…)`. Names not
 // in the list are private to this module.
-exports (double_it, add, PI)
+exports(double_it, add, PI)
 
 double_it(x) {
     return internal_multiply(x, 2)

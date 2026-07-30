@@ -1,5 +1,5 @@
 // Overlapping bit ranges are an error unless the bitstruct says @overlap.
-bitstruct B : uint8_t {
+bitstruct B: uint8_t {
     a: int 0..=3
     b: int 2..=5
 }

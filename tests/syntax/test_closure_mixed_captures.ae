@@ -7,8 +7,8 @@
 extern exit(code: int)
 
 main() {
-    base = 100           // read-only in closure — captured by value
-    count = 0            // mutated in closure — heap-promoted
+    base = 100 // read-only in closure — captured by value
+    count = 0 // mutated in closure — heap-promoted
     step = || {
         count = count + 1
         return base + count

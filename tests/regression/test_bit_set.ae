@@ -9,8 +9,8 @@
 //   set == set / set != set    equality            -> bool
 //   card(set)                  cardinality         -> int
 // All operations lower to bitwise ops on the backing word (zero runtime cost).
-enum Perm { Read, Write, Exec }                 // 0, 1, 2
-enum Flag { Lo = 1, Mid = 8, Hi = 40 }          // explicit, sparse values
+enum Perm { Read, Write, Exec } // 0, 1, 2
+enum Flag { Lo = 1, Mid = 8, Hi = 40 } // explicit, sparse values
 
 import std.io
 
@@ -26,7 +26,7 @@ check_bool(got: bool, want: bool, lbl: string) -> int {
 
 // bit_set as a parameter and as a return type
 with_exec(s: bit_set[Perm]) -> bit_set[Perm] {
-    return s + bit_set[Perm]{ Perm.Exec }
+    return s + bit_set[Perm] { Perm.Exec }
 }
 
 struct Caps {
@@ -37,13 +37,13 @@ struct Caps {
 main() {
     var fails = 0
 
-    let a = bit_set[Perm]{ Perm.Read, Perm.Write }
-    let b = bit_set[Perm]{ Perm.Write, Perm.Exec }
+    let a = bit_set[Perm] { Perm.Read, Perm.Write }
+    let b = bit_set[Perm] { Perm.Write, Perm.Exec }
 
     // cardinality of literals + the empty set
     fails = fails + check_int(card(a), 2, "card a")
-    fails = fails + check_int(card(bit_set[Perm]{}), 0, "card empty")
-    fails = fails + check_int(card(bit_set[Perm]{ Read, Write, Exec }), 3, "card bare full")
+    fails = fails + check_int(card(bit_set[Perm] {}), 0, "card empty")
+    fails = fails + check_int(card(bit_set[Perm] { Read, Write, Exec }), 3, "card bare full")
 
     // membership
     fails = fails + check_bool(Perm.Read in a, true, "Read in a")
@@ -63,12 +63,12 @@ main() {
     fails = fails + check_bool(u >= a, true, "u superset a")
 
     // equality (order-independent) / inequality
-    let a2 = bit_set[Perm]{ Perm.Write, Perm.Read }
+    let a2 = bit_set[Perm] { Perm.Write, Perm.Read }
     fails = fails + check_bool(a == a2, true, "a equals a2")
     fails = fails + check_bool(a == b, false, "a not equal b")
 
     // explicit, sparse enum values place bits at the value (Hi = bit 40)
-    let f = bit_set[Flag]{ Flag.Lo, Flag.Hi }
+    let f = bit_set[Flag] { Flag.Lo, Flag.Hi }
     fails = fails + check_int(card(f), 2, "card flags")
     fails = fails + check_bool(Flag.Hi in f, true, "Hi in f")
     fails = fails + check_bool(Flag.Mid in f, false, "Mid not in f")
@@ -78,7 +78,7 @@ main() {
     fails = fails + check_bool(Perm.Exec in with_exec(a), true, "Exec added")
 
     // bit_set as a struct field
-    let c = Caps { name: "root", perms: bit_set[Perm]{ Perm.Read, Perm.Exec } }
+    let c = Caps { name: "root", perms: bit_set[Perm] { Perm.Read, Perm.Exec } }
     fails = fails + check_int(card(c.perms), 2, "card caps")
     fails = fails + check_bool(Perm.Exec in c.perms, true, "Exec in caps")
 

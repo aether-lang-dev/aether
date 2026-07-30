@@ -15,7 +15,7 @@ import std.map
 message Set { key: string, val: int }
 message Delete { key: string }
 message Get { key: string }
-message GetReply { value: int }   // first field = the int the asker receives
+message GetReply { value: int } // first field = the int the asker receives
 
 actor Shard {
     state store = map_new()
@@ -28,7 +28,7 @@ actor Shard {
         }
         Get(key) -> {
             // One trailing reply per handler: compute, then reply once.
-            result = 0 - 1                    // ABSENT sentinel
+            result = 0 - 1 // ABSENT sentinel
             v = map_get_raw(store, key)
             if v != null {
                 n, _ = string.to_int(v)

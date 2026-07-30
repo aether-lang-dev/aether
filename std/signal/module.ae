@@ -14,7 +14,7 @@
 // they are intentionally omitted rather than shipped wrong; read them
 // from the platform header on the C side if you need them.
 
-exports (
+exports(
     SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT,
     SIGFPE, SIGKILL, SIGSEGV, SIGPIPE, SIGALRM, SIGTERM
 )

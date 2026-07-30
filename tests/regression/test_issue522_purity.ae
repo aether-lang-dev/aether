@@ -8,25 +8,25 @@ import std.fs
 import std.os
 extern exit(code: int)
 
-square(n: int) -> int { return n * n }                 // pure
-checks(p: string) -> int { return fs.exists(p) }        // impure (fs)
-runs() -> int { return os.system("true") }              // impure (os)
-calls_pure(n: int) -> int { return square(n) + 1 }      // pure (transitive)
-calls_impure() -> int { return runs() }                 // impure (transitive os)
+square(n: int) -> int { return n * n } // pure
+checks(p: string) -> int { return fs.exists(p) } // impure (fs)
+runs() -> int { return os.system("true") } // impure (os)
+calls_pure(n: int) -> int { return square(n) + 1 } // pure (transitive)
+calls_impure() -> int { return runs() } // impure (transitive os)
 
 struct Box { v: int }
-mutates(b: *Box) { b.v = 5 }                            // impure (mutates a param's pointee)
-reads(b: *Box) -> int { return b.v }                    // pure (read only)
+mutates(b: *Box) { b.v = 5 } // impure (mutates a param's pointee)
+reads(b: *Box) -> int { return b.v } // pure (read only)
 
 fail(m: string) { println(m) exit(1) }
 
 main() {
-    if __pure(square)       == false { fail("FAIL: square should be pure") }
-    if __pure(checks)       == true  { fail("FAIL: checks (fs) should be impure") }
-    if __pure(runs)         == true  { fail("FAIL: runs (os) should be impure") }
-    if __pure(calls_pure)   == false { fail("FAIL: calls_pure should be pure") }
-    if __pure(calls_impure) == true  { fail("FAIL: calls_impure should be impure") }
-    if __pure(mutates)      == true  { fail("FAIL: mutates (param write) should be impure") }
-    if __pure(reads)        == false { fail("FAIL: reads should be pure") }
+    if __pure(square) == false { fail("FAIL: square should be pure") }
+    if __pure(checks) == true { fail("FAIL: checks (fs) should be impure") }
+    if __pure(runs) == true { fail("FAIL: runs (os) should be impure") }
+    if __pure(calls_pure) == false { fail("FAIL: calls_pure should be pure") }
+    if __pure(calls_impure) == true { fail("FAIL: calls_impure should be impure") }
+    if __pure(mutates) == true { fail("FAIL: mutates (param write) should be impure") }
+    if __pure(reads) == false { fail("FAIL: reads should be pure") }
     println("PASS: #522 __pure folds purity (incl. transitive + mutation)")
 }

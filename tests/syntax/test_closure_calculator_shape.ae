@@ -13,20 +13,20 @@
 extern exit(code: int)
 
 main() {
-    num  = 0
+    num = 0
     prev = 0
-    op   = |a: int, b: int| { return a }   // identity, reassigned later
+    op = | a: int, b: int | { return a } // identity, reassigned later
 
-    digit    = |d: int|  { num = num * 10 + d }
-    apply_op = |fn: fn|  { prev = num; num = 0; op = fn }
-    equals   = ||        { num = call(op, prev, num); prev = 0 }
-    clear    = ||        { num = 0; prev = 0 }
+    digit = | d: int | { num = num * 10 + d }
+    apply_op = | fn: fn | { prev = num; num = 0; op = fn }
+    equals = || { num = call(op, prev, num); prev = 0 }
+    clear = || { num = 0; prev = 0 }
 
     // 2 + 3 = 5
     call(digit, 2)
     if num != 2 { println("FAIL: after digit 2, num="); println(num); exit(1) }
 
-    call(apply_op, |a: int, b: int| { return a + b })
+    call(apply_op, | a: int, b: int | { return a + b })
     if prev != 2 { println("FAIL: after apply_op +, prev="); println(prev); exit(1) }
     if num != 0 { println("FAIL: after apply_op +, num="); println(num); exit(1) }
 
@@ -41,7 +41,7 @@ main() {
     if num != 0 { println("FAIL: after clear, num="); println(num); exit(1) }
 
     call(digit, 4)
-    call(apply_op, |a: int, b: int| { return a * b })
+    call(apply_op, | a: int, b: int | { return a * b })
     call(digit, 7)
     call(equals)
     if num != 28 { println("FAIL: 4*7, num="); println(num); exit(1) }
@@ -51,7 +51,7 @@ main() {
     call(digit, 1)
     call(digit, 2)
     if num != 12 { println("FAIL: 12, num="); println(num); exit(1) }
-    call(apply_op, |a: int, b: int| { return a - b })
+    call(apply_op, | a: int, b: int | { return a - b })
     call(digit, 5)
     call(equals)
     if num != 7 { println("FAIL: 12-5, num="); println(num); exit(1) }

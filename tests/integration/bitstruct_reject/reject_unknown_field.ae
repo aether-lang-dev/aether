@@ -1,5 +1,5 @@
 // A bitstruct's fields are a closed, declared set — a typo is not an open question.
-bitstruct B : uint8_t { a: bool 0 }
+bitstruct B: uint8_t { a: bool 0 }
 main() {
     b = 0 as B
     println("${b.nope}")

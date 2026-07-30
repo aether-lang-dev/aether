@@ -12,6 +12,6 @@
 struct S { count: int }
 
 get(v: int) -> int {
-    flags = S { count: v }   // local shadows the module name `flags`
-    return flags.count       // must resolve as struct-field, not flags_count
+    flags = S { count: v } // local shadows the module name `flags`
+    return flags.count // must resolve as struct-field, not flags_count
 }

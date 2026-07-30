@@ -1,4 +1,4 @@
 // A signed backing type would reintroduce the very bug this feature kills
 // (a C bitfield's `int x : 3` is SIGNED, so 0b111 reads back as -1).
-bitstruct B : int { a: bool 0 }
+bitstruct B: int { a: bool 0 }
 main() { println("unreachable") }

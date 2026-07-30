@@ -5,7 +5,7 @@ extern exit(code: int)
 
 build_handler() {
     count = 0
-    digit = |d: int| { count = count + d; return count }
+    digit = | d: int | { count = count + d; return count }
     bump = || { return call(digit, 1) }
     return bump
 }

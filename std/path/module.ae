@@ -7,7 +7,7 @@
 //
 // The implementations are in std/fs/aether_fs.c which is compiled into libaether.a
 
-exports (
+exports(
     path_join, path_dirname, path_basename, path_extension, path_is_absolute
 )
 

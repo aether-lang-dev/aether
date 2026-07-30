@@ -4,7 +4,7 @@
 // compound short flags, inline short values, positionals, and required-arg
 // enforcement.
 
-import std.clapae (*)
+import std.clapae(*)
 import std.clapae
 import std.list
 import std.string
@@ -25,10 +25,10 @@ fn build_cmd() -> *Command {
     c = command("myapp") {
         about("My awesome CLI app")
         arg("config") { short(99); long_("config"); help("config file"); string_arg() }
-        arg("count")  { long_("count"); help("iterations"); int_arg() }
-        arg("debug")  { short(100); long_("debug"); flag() }
-        arg("verbose"){ short(118); long_("verbose"); flag() }
-        arg("input")  { help("input file"); positional(); required() }
+        arg("count") { long_("count"); help("iterations"); int_arg() }
+        arg("debug") { short(100); long_("debug"); flag() }
+        arg("verbose") { short(118); long_("verbose"); flag() }
+        arg("input") { help("input file"); positional(); required() }
         subcommand("test") {
             about("run tests")
             arg("list") { short(108); long_("list"); flag() }
@@ -47,8 +47,8 @@ main() {
     list_add_raw(argv, "app.json")
     list_add_raw(argv, "--count")
     list_add_raw(argv, "7")
-    list_add_raw(argv, "-dv")            // compound flags
-    list_add_raw(argv, "my_input")       // positional
+    list_add_raw(argv, "-dv") // compound flags
+    list_add_raw(argv, "my_input") // positional
     res, m, err = parse_list(cmd, argv)
     list_free(argv)
     if res != clapae.RESULT_OK { fail(string_concat("expected OK, err=", err)) }
@@ -95,7 +95,7 @@ main() {
     // --- subcommand with its own flag ---
     cmd4 = build_cmd()
     a4 = list_new()
-    list_add_raw(a4, "input_needed")   // required positional for parent
+    list_add_raw(a4, "input_needed") // required positional for parent
     list_add_raw(a4, "test")
     list_add_raw(a4, "--list")
     res4, m4, err4 = parse_list(cmd4, a4)
@@ -214,7 +214,7 @@ main() {
         arg("out") { long_("out"); string_arg() }
     }
     a12 = list_new()
-    list_add_raw(a12, "--out")   // no following value
+    list_add_raw(a12, "--out") // no following value
     res12, m12, err12 = parse_list(cmd12, a12)
     list_free(a12)
     if res12 != clapae.RESULT_ERROR { fail("expected ERROR: --out requires a value") }
@@ -226,7 +226,7 @@ main() {
     cmd14 = command("mp") {
         arg("src") { positional(); required() }
         arg("dst") { positional(); required() }
-        arg("mode") { positional() }        // optional third positional
+        arg("mode") { positional() } // optional third positional
     }
     a14 = list_new()
     list_add_raw(a14, "from.txt")
@@ -248,7 +248,7 @@ main() {
     }
     a15 = list_new()
     list_add_raw(a15, "one")
-    list_add_raw(a15, "two")     // no slot for a second positional
+    list_add_raw(a15, "two") // no slot for a second positional
     res15, m15, err15 = parse_list(cmd15, a15)
     list_free(a15)
     if res15 != clapae.RESULT_ERROR { fail("expected ERROR: unexpected positional") }
@@ -271,7 +271,7 @@ main() {
 
     // --- int validation via short inline: -n99 ok, -nX error ---
     cmd17 = command("si") {
-        arg("num") { short(110); int_arg() }     // -n
+        arg("num") { short(110); int_arg() } // -n
     }
     a17ok = list_new()
     list_add_raw(a17ok, "-n99")

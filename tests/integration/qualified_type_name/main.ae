@@ -2,12 +2,12 @@ import lib
 // #946: a module-qualified type name `lib.Box` in type positions —
 // parameter, return, and C-style typed local. The qualifier resolves to
 // the bare exported type (the disambiguator, mirroring `lib.mk()` for calls).
-bump(b: lib.Box) -> lib.Box {       // qualified param AND return type
+bump(b: lib.Box) -> lib.Box { // qualified param AND return type
     return lib.mk(b.v + 1)
 }
 main() {
-    lib.Box start = lib.mk(5)       // qualified C-style typed local
-    a = bump(start)                 // 6
-    b = bump(a)                     // 7
+    lib.Box start = lib.mk(5) // qualified C-style typed local
+    a = bump(start) // 6
+    b = bump(a) // 7
     println("${a.v} ${b.v}")
 }

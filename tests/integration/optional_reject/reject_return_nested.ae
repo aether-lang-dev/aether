@@ -1,2 +1,2 @@
-f() -> int?? { return 5 }
+f() -> int ?? { return 5 }
 main() { println("unreachable") }

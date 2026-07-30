@@ -56,8 +56,8 @@ main() {
     floatarr_set_raw(a, 2, 2.71828)
     floatarr_set_raw(a, 4, 0.0 - 1.5)
     if eps_ok(floatarr_get_raw(a, 0), 3.14159265) == 0 { print("  FAIL [0]\n"); exit(1) }
-    if eps_ok(floatarr_get_raw(a, 2), 2.71828) == 0    { print("  FAIL [2]\n"); exit(1) }
-    if eps_ok(floatarr_get_raw(a, 4), 0.0 - 1.5) == 0  { print("  FAIL [4]\n"); exit(1) }
+    if eps_ok(floatarr_get_raw(a, 2), 2.71828) == 0 { print("  FAIL [2]\n"); exit(1) }
+    if eps_ok(floatarr_get_raw(a, 4), 0.0 - 1.5) == 0 { print("  FAIL [4]\n"); exit(1) }
     // Untouched slots still zero
     if eps_ok(floatarr_get_raw(a, 1), 0.0) == 0 { print("  FAIL [1]\n"); exit(1) }
     if eps_ok(floatarr_get_raw(a, 3), 0.0) == 0 { print("  FAIL [3]\n"); exit(1) }

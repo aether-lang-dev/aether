@@ -24,8 +24,8 @@ main() {
     // outer's body constructs and passes two inline lambdas. Each
     // lambda gets its own _closure_fn_N. Some of them will be
     // numbered after outer.
-    outer = |x: int| {
-        return invoke(|a: int| { return a * 2 }, |a: int| { return a + 100 }, x)
+    outer = | x: int | {
+        return invoke(| a: int | { return a * 2 }, | a: int | { return a + 100 }, x)
     }
 
     r = call(outer, 5)

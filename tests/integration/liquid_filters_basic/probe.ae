@@ -41,12 +41,12 @@ render_with_name(src: string, key: string, val: string) -> string {
 
 main() {
     // (1) upcase / downcase / capitalize
-    expect_eq(render_with_name("{{ s | upcase }}",     "s", "hi there"), "HI THERE",  "1a upcase")
-    expect_eq(render_with_name("{{ s | downcase }}",   "s", "HI There"), "hi there",  "1b downcase")
-    expect_eq(render_with_name("{{ s | capitalize }}", "s", "hELLO"),    "Hello",     "1c capitalize")
+    expect_eq(render_with_name("{{ s | upcase }}", "s", "hi there"), "HI THERE", "1a upcase")
+    expect_eq(render_with_name("{{ s | downcase }}", "s", "HI There"), "hi there", "1b downcase")
+    expect_eq(render_with_name("{{ s | capitalize }}", "s", "hELLO"), "Hello", "1c capitalize")
 
     // (2) strip / lstrip / rstrip
-    expect_eq(render_with_name("[{{ s | strip }}]",  "s", "   hi   "), "[hi]",    "2a strip")
+    expect_eq(render_with_name("[{{ s | strip }}]", "s", "   hi   "), "[hi]", "2a strip")
     expect_eq(render_with_name("[{{ s | lstrip }}]", "s", "   hi   "), "[hi   ]", "2b lstrip")
     expect_eq(render_with_name("[{{ s | rstrip }}]", "s", "   hi   "), "[   hi]", "2c rstrip")
 
@@ -70,23 +70,23 @@ main() {
 
     // (9) truncate cuts + adds ellipsis
     expect_eq(render_with_name("{{ s | truncate:\"10\" }}", "s", "abcdefghijklmnop"),
-              "abcdefg...", "9 truncate cuts")
+        "abcdefg...", "9 truncate cuts")
 
     // (10) truncate on short string is identity
     expect_eq(render_with_name("{{ s | truncate:\"5\" }}", "s", "abc"), "abc", "10 truncate identity")
 
     // (11) replace replaces every occurrence
     expect_eq(render_with_name("{{ s | replace:\"foo\",\"bar\" }}", "s", "foo foo foo"),
-              "bar bar bar", "11 replace multi")
+        "bar bar bar", "11 replace multi")
 
     // (12) Filter chain
     expect_eq(render_with_name("{{ s | upcase | append:\"!\" | prepend:\"<<\" }}",
-                               "s", "hi"),
-              "<<HI!", "12 chain upcase|append|prepend")
+            "s", "hi"),
+        "<<HI!", "12 chain upcase|append|prepend")
 
     // (13) Literal | inside a quoted arg must not split the pipeline.
     expect_eq(render_with_name("{{ s | append:\"|END\" }}", "s", "hi"),
-              "hi|END", "13 quoted pipe in arg")
+        "hi|END", "13 quoted pipe in arg")
 
     // (14) Single-quoted args.
     expect_eq(render_with_name("{{ s | append:'!' }}", "s", "hi"), "hi!", "14 single-quoted arg")

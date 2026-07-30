@@ -51,7 +51,7 @@ main() {
     seen = ""
     c = f(true) or {
         seen = err
-        -2
+        - 2
     }
     fails = fails + check(c, -2, "multi-statement block yields its last expression")
     if seen != "boom" { println("FAIL: err not bound in block: '${seen}'"); fails = fails + 1 }

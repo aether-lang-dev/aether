@@ -1,6 +1,6 @@
 // Test: actor timeout with variable expression (not just literal)
 
-message Ping { }
+message Ping {}
 
 actor Waiter {
     state _count = 0

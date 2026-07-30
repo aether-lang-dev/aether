@@ -41,15 +41,15 @@ main() {
     println("=== test_fn_pointer_struct_fields ===")
 
     o = Ops { hash: bump as fn(int) -> int, combine: addf as fn(int, int) -> int }
-    if o.hash(5) != 105       { println("FAIL: value o.hash"); exit(1) }
+    if o.hash(5) != 105 { println("FAIL: value o.hash"); exit(1) }
     if o.combine(10, 20) != 30 { println("FAIL: value o.combine"); exit(1) }
-    if run_hash(o, 7) != 107  { println("FAIL: dispatch via value param"); exit(1) }
+    if run_hash(o, 7) != 107 { println("FAIL: dispatch via value param"); exit(1) }
 
-    *Ops p = malloc(16) as *Ops
+    * Ops p = malloc(16) as *Ops
     p.hash = bump as fn(int) -> int
     p.combine = addf as fn(int, int) -> int
     if run_hash_ptr(p, 9) != 109 { println("FAIL: dispatch via ptr param"); exit(1) }
-    if p.combine(3, 4) != 7      { println("FAIL: ptr o.combine"); exit(1) }
+    if p.combine(3, 4) != 7 { println("FAIL: ptr o.combine"); exit(1) }
 
     println("  PASS: fn-pointer struct fields dispatch (value + pointer)")
     println("OK")

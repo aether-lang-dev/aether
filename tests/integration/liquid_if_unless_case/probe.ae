@@ -71,112 +71,112 @@ render_empty(src: string) -> string {
 main() {
     // (1) Truthy var -> body emitted.
     expect_eq(render_with("{% if name %}YES{% endif %}", "name", "alice"),
-              "YES", "1 if true branch on bound var")
+        "YES", "1 if true branch on bound var")
 
     // (2) Unbound var -> body skipped.
     expect_eq(render_empty("[{% if missing %}YES{% endif %}]"),
-              "[]", "2 if false on unbound var")
+        "[]", "2 if false on unbound var")
 
     // (3) Keyword `true`.
     expect_eq(render_empty("{% if true %}A{% endif %}"), "A", "3 if true literal")
 
     // (4) Keyword `false`.
     expect_eq(render_empty("[{% if false %}A{% endif %}]"), "[]",
-              "4 if false literal")
+        "4 if false literal")
 
     // (5) else branch.
     expect_eq(render_empty("{% if false %}A{% else %}B{% endif %}"),
-              "B", "5 if/else")
+        "B", "5 if/else")
 
     // (6) elsif wins.
     expect_eq(render_empty("{% if false %}A{% elsif true %}B{% else %}C{% endif %}"),
-              "B", "6 elsif wins")
+        "B", "6 elsif wins")
 
     // (7) else wins.
     expect_eq(render_empty("{% if false %}A{% elsif false %}B{% else %}C{% endif %}"),
-              "C", "7 else wins")
+        "C", "7 else wins")
 
     // (8) Equality.
     expect_eq(render_with("{% if name == \"alice\" %}HI{% else %}NO{% endif %}",
-                          "name", "alice"),
-              "HI", "8 equality true")
+            "name", "alice"),
+        "HI", "8 equality true")
 
     // (9) Inequality.
     expect_eq(render_with("{% if name != \"bob\" %}HI{% else %}NO{% endif %}",
-                          "name", "alice"),
-              "HI", "9 inequality")
+            "name", "alice"),
+        "HI", "9 inequality")
 
     // (10) Ordering on numeric strings.
     expect_eq(render_with("{% if x > \"5\" %}BIG{% else %}small{% endif %}",
-                          "x", "10"),
-              "BIG", "10 ordering int")
+            "x", "10"),
+        "BIG", "10 ordering int")
 
     // (11) `contains` substring.
     expect_eq(render_with("{% if name contains \"li\" %}Y{% endif %}",
-                          "name", "alice"),
-              "Y", "11 contains")
+            "name", "alice"),
+        "Y", "11 contains")
 
     // (12) `and`: both must hold.
     expect_eq(render_with("{% if name and tag %}Y{% else %}N{% endif %}",
-                          "name", "alice"),
-              "N", "12a and both required (tag unbound)")
+            "name", "alice"),
+        "N", "12a and both required (tag unbound)")
 
     // (13) `or`: either suffices.
     expect_eq(render_with("{% if missing or name %}Y{% else %}N{% endif %}",
-                          "name", "alice"),
-              "Y", "13 or one suffices")
+            "name", "alice"),
+        "Y", "13 or one suffices")
 
     // (14) Flat left-to-right: `a and b or c` = `(a and b) or c`.
     //   With name truthy, tag falsy, fallback truthy: (T and F) or T = T
     expect_eq(render_empty("{% assign name = \"alice\" %}{% assign fallback = \"x\" %}{% if name and tag or fallback %}Y{% else %}N{% endif %}"),
-              "Y", "14 a and b or c flat")
+        "Y", "14 a and b or c flat")
 
     // (15) Nested if-in-if, both true.
     expect_eq(render_empty("{% if true %}{% if true %}YES{% endif %}{% endif %}"),
-              "YES", "15 nested true/true")
+        "YES", "15 nested true/true")
 
     // (16) Nested if-in-if, outer true / inner false / outer else does
     //   NOT cover inner-else absence (the inner-if just emits nothing).
     expect_eq(render_empty("[{% if true %}{% if false %}A{% endif %}B{% else %}C{% endif %}]"),
-              "[B]", "16 nested outer-T inner-F still falls to outer body")
+        "[B]", "16 nested outer-T inner-F still falls to outer body")
 
     // (17) unless truthy -> skip.
     expect_eq(render_with("[{% unless name %}HIDDEN{% endunless %}]",
-                          "name", "alice"),
-              "[]", "17 unless truthy skips")
+            "name", "alice"),
+        "[]", "17 unless truthy skips")
 
     // (18) unless falsy -> emit.
     expect_eq(render_empty("[{% unless missing %}SHOWN{% endunless %}]"),
-              "[SHOWN]", "18 unless falsy emits")
+        "[SHOWN]", "18 unless falsy emits")
 
     // (19) unless + else.
     expect_eq(render_with("{% unless name %}A{% else %}B{% endunless %}",
-                          "name", "alice"),
-              "B", "19 unless else branch")
+            "name", "alice"),
+        "B", "19 unless else branch")
 
     // (20) case/when matches.
     expect_eq(render_with("{% case x %}{% when \"1\" %}ONE{% when \"2\" %}TWO{% else %}OTHER{% endcase %}",
-                          "x", "2"),
-              "TWO", "20 case/when match")
+            "x", "2"),
+        "TWO", "20 case/when match")
 
     // (21) case/when with multiple alternatives.
     expect_eq(render_with("{% case x %}{% when \"a\", \"b\", \"c\" %}LO{% when \"X\" %}HI{% endcase %}",
-                          "x", "b"),
-              "LO", "21 case multi-alternative")
+            "x", "b"),
+        "LO", "21 case multi-alternative")
 
     // (22) case/when falls through to else.
     expect_eq(render_with("{% case x %}{% when \"1\" %}A{% else %}DEFAULT{% endcase %}",
-                          "x", "99"),
-              "DEFAULT", "22 case else")
+            "x", "99"),
+        "DEFAULT", "22 case else")
 
     // (23) First match wins (no fallthrough).
     expect_eq(render_with("{% case x %}{% when \"a\" %}FIRST{% when \"a\" %}SECOND{% endcase %}",
-                          "x", "a"),
-              "FIRST", "23 case first match wins")
+            "x", "a"),
+        "FIRST", "23 case first match wins")
 
     // (24) Whitespace control trims around the block.
     expect_eq(render_empty("a   {%- if true -%}   X   {%- endif -%}   b"),
-              "aXb", "24 whitespace control around if")
+        "aXb", "24 whitespace control around if")
 
     // (25) Unmatched if.
     t25, _ = liquid.parse_string("a {% if true %}b no end")
@@ -198,7 +198,7 @@ main() {
 
     // (27) if reads a {% capture %}-bound name.
     expect_eq(render_empty("{% capture s %}set{% endcapture %}{% if s == \"set\" %}HIT{% endif %}"),
-              "HIT", "27 if sees captured var")
+        "HIT", "27 if sees captured var")
 
     println("All PASS")
 }

@@ -4,7 +4,7 @@
 // Run with: ae run examples/actors/self-scheduling.ae
 
 message Tick { remaining: int }
-message Done { }
+message Done {}
 message Status { label: string, value: int }
 
 actor Timer {

@@ -1,7 +1,7 @@
 // std.math - Math Module
 // Import with: import std.math
 
-exports (
+exports(
     math_abs_int, math_abs_float,
     math_min_int, math_max_int, math_min_float, math_max_float,
     math_clamp_int, math_clamp_float,

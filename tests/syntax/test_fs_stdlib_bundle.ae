@@ -58,7 +58,6 @@ main() {
 
     if is_windows == 0 {
         // ---- POSIX-only symlink sub-cases (4 through 11) ----
-
         // 5. fs_symlink — create a symlink pointing at the file
         if fs_symlink_raw("../a/target.txt", "build/test_fs_bundle/single/link.txt") != 1 {
             fail("fs_symlink should succeed")

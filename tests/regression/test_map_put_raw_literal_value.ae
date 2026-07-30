@@ -30,30 +30,30 @@ main() {
 
     // --- raw API, literal value (the filed crash) ---
     m1 = map.new()
-    sentinel = "1"                       // string-typed, _heap == 0
+    sentinel = "1" // string-typed, _heap == 0
     map.put_raw(m1, "k", sentinel)
-    map.put_raw(m1, "k2", sentinel)      // same literal, second key
+    map.put_raw(m1, "k2", sentinel) // same literal, second key
     got1, _ = map.get(m1, "k")
     if got1 != "1" {
         println("  FAIL: raw+literal readback got '${got1}'")
         exit(1)
     }
-    map.free(m1)                         // pre-fix: free() on "1" → abort
+    map.free(m1) // pre-fix: free() on "1" → abort
 
     // --- raw API, heap value ---
     m2 = map.new()
-    heap_val = string.concat("pre", "fix")   // _heap == 1
+    heap_val = string.concat("pre", "fix") // _heap == 1
     map.put_raw(m2, "k", heap_val)
     got2, _ = map.get(m2, "k")
     if got2 != "prefix" {
         println("  FAIL: raw+heap readback got '${got2}'")
         exit(1)
     }
-    map.free(m2)                         // map owns heap_val, releases once
+    map.free(m2) // map owns heap_val, releases once
 
     // --- wrapper, literal value (the latent wrapper case) ---
     m3 = map.new()
-    flag = "y"                           // string-typed, _heap == 0
+    flag = "y" // string-typed, _heap == 0
     map.put(m3, "k", flag)
     got3, _ = map.get(m3, "k")
     if got3 != "y" {
@@ -64,7 +64,7 @@ main() {
 
     // --- wrapper, heap value ---
     m4 = map.new()
-    heap_val2 = string.concat("on", "e")     // _heap == 1
+    heap_val2 = string.concat("on", "e") // _heap == 1
     map.put(m4, "k", heap_val2)
     got4, _ = map.get(m4, "k")
     if got4 != "one" {

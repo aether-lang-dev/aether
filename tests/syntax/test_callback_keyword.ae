@@ -14,8 +14,8 @@ register(_ctx: ptr, name: string, handler: fn) {
 
 make_registry() {
     r = list.new()
-    list.add(r, list.new())  // names
-    list.add(r, list.new())  // handlers
+    list.add(r, list.new()) // names
+    list.add(r, list.new()) // handlers
     return r
 }
 

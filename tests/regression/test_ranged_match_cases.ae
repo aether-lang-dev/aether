@@ -9,11 +9,11 @@ import std.io
 // match as an expression (assigned), inclusive + half-open + multi-value.
 grade(s: int) -> string {
     g = match s {
-        90..=100   -> "A"
-        80..<90    -> "B"
-        70..<80    -> "C"
+        90..=100 -> "A"
+        80..<90 -> "B"
+        70..<80 -> "C"
         60, 61, 62 -> "D"
-        _          -> "F"
+        _ -> "F"
     }
     return g
 }
@@ -22,8 +22,8 @@ grade(s: int) -> string {
 classify(ch: int) -> string {
     c = match ch {
         97..=122, 65..=90 -> "letter"
-        48..=57           -> "digit"
-        _                 -> "other"
+        48..=57 -> "digit"
+        _ -> "other"
     }
     return c
 }
@@ -32,13 +32,13 @@ classify(ch: int) -> string {
 bucket(n: int) -> string {
     r = "other"
     switch n {
-    case 1, 2, 3:
+        case 1, 2, 3:
         r = "low"
-    case 10..=20:
+        case 10..=20:
         r = "mid"
-    case 30..<40:
+        case 30..<40:
         r = "high"
-    default:
+        default:
         r = "other"
     }
     return r
@@ -69,10 +69,10 @@ main() {
     fails = fails + check(grade(40), "F", "grade 40 wild")
 
     // char-class via int codes, comma-listed ranges
-    fails = fails + check(classify(109), "letter", "classify m")   // 'm'
-    fails = fails + check(classify(66), "letter", "classify B")    // 'B'
-    fails = fails + check(classify(52), "digit", "classify 4")     // '4'
-    fails = fails + check(classify(36), "other", "classify $")     // '$'
+    fails = fails + check(classify(109), "letter", "classify m") // 'm'
+    fails = fails + check(classify(66), "letter", "classify B") // 'B'
+    fails = fails + check(classify(52), "digit", "classify 4") // '4'
+    fails = fails + check(classify(36), "other", "classify $") // '$'
 
     // switch
     fails = fails + check(bucket(2), "low", "bucket multi")

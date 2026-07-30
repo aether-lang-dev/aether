@@ -26,14 +26,14 @@ main() {
     println("=== std.string to_* width regression ===")
 
     // to_long: values that overflow 32 bits must round-trip exactly.
-    v1, e1 = string.to_long("4294967296")          // 2^32
+    v1, e1 = string.to_long("4294967296") // 2^32
     if e1 != "" { fail("to_long 2^32 err: ${e1}") }
     if v1 != 4294967296 { fail("to_long truncated 2^32 to ${v1}") }
 
-    v2, _ = string.to_long("139637976727552")       // ~0x7f00_0000_0000
+    v2, _ = string.to_long("139637976727552") // ~0x7f00_0000_0000
     if v2 != 139637976727552 { fail("to_long truncated 48-bit value to ${v2}") }
 
-    v3, _ = string.to_long("-8589934592")           // -2^33, sign + width
+    v3, _ = string.to_long("-8589934592") // -2^33, sign + width
     if v3 != -8589934592 { fail("to_long mangled negative 64-bit: ${v3}") }
     println("  PASS: to_long preserves 64 bits (incl. sign)")
 

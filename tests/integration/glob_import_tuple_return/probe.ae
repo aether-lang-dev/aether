@@ -12,7 +12,7 @@
 // reached unqualified. If it compiles and runs, the glob alias types are
 // correct.
 
-import std.fs (*)
+import std.fs(*)
 
 extern exit(code: int)
 

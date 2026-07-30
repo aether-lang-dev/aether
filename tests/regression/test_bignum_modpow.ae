@@ -82,7 +82,7 @@ main() {
 
     // ---- gcd ----
     g1 = bignum.from_int(1071); g2 = bignum.from_int(462)
-    g = bignum.gcd(g1, g2)       // 21
+    g = bignum.gcd(g1, g2) // 21
     if string.equals(bignum.to_hex(g), "15") != 1 { print("FAIL gcd\n"); fails = fails + 1 }
     bignum.free(g); bignum.free(g1); bignum.free(g2)
 
@@ -100,7 +100,7 @@ main() {
 
     // ---- mod_inverse ----
     a = bignum.from_int(3); nmod = bignum.from_int(11)
-    inv = bignum.mod_inverse(a, nmod)   // 4
+    inv = bignum.mod_inverse(a, nmod) // 4
     if string.equals(bignum.to_hex(inv), "4") != 1 { print("FAIL modinv\n"); fails = fails + 1 }
     bignum.free(inv); bignum.free(a); bignum.free(nmod)
 
@@ -126,13 +126,13 @@ main() {
     pa = bignum.from_int(97)
     if bignum.is_probable_prime(pa, 13) != 1 { print("FAIL prime 97\n"); fails = fails + 1 }
     bignum.free(pa)
-    pc = bignum.from_int(91)            // 7*13
+    pc = bignum.from_int(91) // 7*13
     if bignum.is_probable_prime(pc, 13) != 0 { print("FAIL composite 91\n"); fails = fails + 1 }
     bignum.free(pc)
-    pm = bignum.from_int(561)           // Carmichael number (composite)
+    pm = bignum.from_int(561) // Carmichael number (composite)
     if bignum.is_probable_prime(pm, 13) != 0 { print("FAIL carmichael 561\n"); fails = fails + 1 }
     bignum.free(pm)
-    pbig = bignum.from_int(2147483647)  // Mersenne prime M31
+    pbig = bignum.from_int(2147483647) // Mersenne prime M31
     if bignum.is_probable_prime(pbig, 13) != 1 { print("FAIL prime M31\n"); fails = fails + 1 }
     bignum.free(pbig)
     pcomp = bignum.from_int(2147483649) // 3 * 715827883

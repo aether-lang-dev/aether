@@ -55,7 +55,7 @@ main() {
 
     // Case 3: accessors agree with embedded line:col
     line = json.last_error_line()
-    col  = json.last_error_col()
+    col = json.last_error_col()
     if line == 0 {
         println("FAIL 3: line accessor returned 0")
         exit(1)
@@ -76,14 +76,14 @@ main() {
     println("  PASS 4: success after failure → kind reset")
 
     // Case 5: distinct positions for distinct errors
-    v_a, _, _ = json.parse_strict("{\"x\":")  // unterminated, line 1
+    v_a, _, _ = json.parse_strict("{\"x\":") // unterminated, line 1
     line_a = json.last_error_line()
-    col_a  = json.last_error_col()
+    col_a = json.last_error_col()
     if v_a != null { json.free(v_a) }
 
-    v_b, _, _ = json.parse_strict("{\n\"x\": 1,\n\"y\":\n}")  // unexpected '}' on line 4
+    v_b, _, _ = json.parse_strict("{\n\"x\": 1,\n\"y\":\n}") // unexpected '}' on line 4
     line_b = json.last_error_line()
-    col_b  = json.last_error_col()
+    col_b = json.last_error_col()
     if v_b != null { json.free(v_b) }
 
     if line_a == line_b && col_a == col_b {

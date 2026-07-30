@@ -15,7 +15,7 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
-exports (
+exports(
     new, update, update_bytes, final_hex, final_bytes, free_ctx,
     sparkle_hex, sparkle_bytes
 )
@@ -26,14 +26,14 @@ const RCON: long[8] = [
 ]
 
 struct SparkleCtx {
-    state: ptr        // longarr(16)
-    block: ptr        // std.bytes, 16 bytes
+    state: ptr // longarr(16)
+    block: ptr // std.bytes, 16 bytes
     block_len: int
     digest_bytes: int
     sparkle_steps_slim: int
     sparkle_steps_big: int
     state_words: int
-    algo: string      // "esch-256" or "esch-384"
+    algo: string // "esch-256" or "esch-384"
 }
 
 ell(x: long) -> long {

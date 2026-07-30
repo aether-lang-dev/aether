@@ -82,7 +82,7 @@ main() {
     println("READY")
 
     http.server_get(raw, "/api/data", handle_api, 0)
-    http.server_get(raw, "/kaboom",   handle_kaboom, 0)
+    http.server_get(raw, "/kaboom", handle_kaboom, 0)
 
     spawn(SchedHelper())
     a = spawn(SrvActor())

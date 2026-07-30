@@ -11,27 +11,27 @@ main() {
 
     println("Framed message:")
     // Top border
-    print_char(43)  // +
-    for (i = 0; i < width; i = i + 1) { print_char(45) }  // -
-    print_char(43)  // +
+    print_char(43) // +
+    for (i = 0; i < width; i = i + 1) { print_char(45) } // -
+    print_char(43) // +
     print_char(10)
 
     // Middle rows
     for (row = 0; row < 3; row = row + 1) {
-        print_char(124)  // |
+        print_char(124) // |
         if (row == 1) {
             // Center row: print the message centered
             pad = (width - msg_len) / 2
             for (i = 0; i < pad; i = i + 1) { print_char(32) }
             for (i = 0; i < msg_len; i = i + 1) {
-                print_char(msg[i])  // string indexing!
+                print_char(msg[i]) // string indexing!
             }
             for (i = 0; i < width - pad - msg_len; i = i + 1) { print_char(32) }
         } else {
             // Empty row
             for (i = 0; i < width; i = i + 1) { print_char(32) }
         }
-        print_char(124)  // |
+        print_char(124) // |
         print_char(10)
     }
 
@@ -66,16 +66,16 @@ main() {
     banner = "* AETHER *"
     banner_len = 10
     print("\n")
-    print("\x1b[1;33m")  // bold yellow
+    print("\x1b[1;33m") // bold yellow
     for (i = 0; i < banner_len + 4; i = i + 1) { print_char(42) }
     print_char(10)
     print("* ")
-    print("\x1b[1;36m")  // bold cyan
+    print("\x1b[1;36m") // bold cyan
     for (i = 0; i < banner_len; i = i + 1) { print_char(banner[i]) }
-    print("\x1b[1;33m")  // back to yellow
+    print("\x1b[1;33m") // back to yellow
     print(" *\n")
     for (i = 0; i < banner_len + 4; i = i + 1) { print_char(42) }
-    print("\x1b[0m")  // reset
+    print("\x1b[0m") // reset
     print_char(10)
 
     // Reverse a string using indexing

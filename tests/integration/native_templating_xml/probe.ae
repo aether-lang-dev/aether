@@ -34,7 +34,7 @@ main() {
     prolog = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 
     // (1) Prolog + empty block.
-    out1 = native.render_xml() { }
+    out1 = native.render_xml() {}
     expect_eq(out1, prolog, "1 prolog only")
 
     // (2) Basic tag wrap.
@@ -76,8 +76,8 @@ main() {
         }
     }
     expect_eq(out6,
-              "${prolog}<channel><item><title>First</title></item><item><title>Second</title></item><item><title>Third &amp; last</title></item></channel>",
-              "6 for loop inside xml_tag")
+        "${prolog}<channel><item><title>First</title></item><item><title>Second</title></item><item><title>Third &amp; last</title></item></channel>",
+        "6 for loop inside xml_tag")
 
     // (7) ${...} interpolation flows through xml_text with XML escape.
     user_input = "<script>alert('xss')</script>"
@@ -85,8 +85,8 @@ main() {
         native.xml_tag("comment") { native.xml_text("user said: ${user_input}") }
     }
     expect_eq(out7,
-              "${prolog}<comment>user said: &lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;</comment>",
-              "7 interp escapes captured user value")
+        "${prolog}<comment>user said: &lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;</comment>",
+        "7 interp escapes captured user value")
 
     println("All PASS")
 }

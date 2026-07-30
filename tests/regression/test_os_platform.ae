@@ -20,16 +20,16 @@ main() {
     // Set of values documented in the module.ae doc-comment plus
     // "unknown". A future BSD / WASM port should add itself here.
     is_known = 0
-    if p == "linux"     { is_known = 1 }
-    if p == "darwin"    { is_known = 1 }
-    if p == "windows"   { is_known = 1 }
-    if p == "freebsd"   { is_known = 1 }
-    if p == "openbsd"   { is_known = 1 }
-    if p == "netbsd"    { is_known = 1 }
+    if p == "linux" { is_known = 1 }
+    if p == "darwin" { is_known = 1 }
+    if p == "windows" { is_known = 1 }
+    if p == "freebsd" { is_known = 1 }
+    if p == "openbsd" { is_known = 1 }
+    if p == "netbsd" { is_known = 1 }
     if p == "dragonfly" { is_known = 1 }
-    if p == "solaris"   { is_known = 1 }
-    if p == "wasm"      { is_known = 1 }
-    if p == "unknown"   { is_known = 1 }
+    if p == "solaris" { is_known = 1 }
+    if p == "wasm" { is_known = 1 }
+    if p == "unknown" { is_known = 1 }
 
     if is_known == 0 {
         println("FAIL: platform() returned unrecognized value '${p}'")

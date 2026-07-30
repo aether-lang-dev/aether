@@ -1,5 +1,5 @@
 // Test: selective imports - only imported symbols are accessible
-import std.math (sqrt, abs_int)
+import std.math(sqrt, abs_int)
 
 main() {
     // sqrt and abs_int should be available via qualified name

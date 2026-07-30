@@ -1,12 +1,12 @@
 // A match that omits the Empty variant must be rejected (#914 exhaustiveness).
 struct Circle { r: float }
-struct Rect   { w: float  h: float }
-struct Empty  {}
+struct Rect { w: float h: float }
+struct Empty {}
 type Shape = Circle | Rect | Empty
 f(s: Shape) -> int {
     match s {
         Circle -> { return 1 }
-        Rect   -> { return 2 }
+        Rect -> { return 2 }
     }
     return 0
 }

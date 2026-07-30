@@ -18,7 +18,7 @@ read_top_level() {
 
 main() {
     outer_visible = "visible_value"
-    outer_secret  = "secret_value"
+    outer_secret = "secret_value"
 
     // Inner block hides outer_secret but can still call read_top_level()
     // (which is visible from the surrounding scope) and can still read

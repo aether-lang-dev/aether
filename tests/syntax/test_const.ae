@@ -6,16 +6,16 @@ const GREETING = "hello"
 const OFFSET = 10
 
 main() {
-    println(MAX_SIZE)    // expect: 100
-    println(GREETING)    // expect: hello
+    println(MAX_SIZE) // expect: 100
+    println(GREETING) // expect: hello
 
     // Constants can be used in expressions
     half = MAX_SIZE / 2
-    println(half)        // expect: 50
+    println(half) // expect: 50
 
     // Constants in arithmetic
     result = MAX_SIZE + OFFSET
-    println(result)      // expect: 110
+    println(result) // expect: 110
 
     // Constants in conditionals
     x = 50
@@ -28,5 +28,5 @@ main() {
     for (i = 0; i < OFFSET; i = i + 1) {
         sum = sum + 1
     }
-    println(sum)         // expect: 10
+    println(sum) // expect: 10
 }

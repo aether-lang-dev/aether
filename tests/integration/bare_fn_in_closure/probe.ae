@@ -11,9 +11,9 @@ apply2(f: fn, a: int, b: int) -> int { return call(f, a, b) }
 run_block(b: fn) { call(b) }
 
 main() {
-    println("top ${runit(val)}")            // control (top level) -> 42
+    println("top ${runit(val)}") // control (top level) -> 42
     run_block() callback {
-        println("closure ${runit(val)}")    // #943 core -> 42
-        println("closure2 ${apply2(add, 3, 4)}")  // bare fn + params -> 7
+        println("closure ${runit(val)}") // #943 core -> 42
+        println("closure2 ${apply2(add, 3, 4)}") // bare fn + params -> 7
     }
 }

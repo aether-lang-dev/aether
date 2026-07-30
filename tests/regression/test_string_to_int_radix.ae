@@ -102,11 +102,11 @@ main() {
     // on Windows — pin it here too so the next iteration of the
     // bug surfaces immediately.
 
-    v, err = string.to_int_radix("100000000", 16)  // 2^32
+    v, err = string.to_int_radix("100000000", 16) // 2^32
     if eq(err, "") != 1 { fail("hex 2^32: err=${err}") }
     if v != 4294967296 { fail("hex 2^32: got ${v}, want 4294967296") }
 
-    v, err = string.to_int_radix("10000000000", 16)  // 2^40
+    v, err = string.to_int_radix("10000000000", 16) // 2^40
     if eq(err, "") != 1 { fail("hex 2^40: err=${err}") }
     if v != 1099511627776 { fail("hex 2^40: got ${v}, want 1099511627776") }
     println("  PASS: 64-bit hex round-trips (2^32, 2^40)")

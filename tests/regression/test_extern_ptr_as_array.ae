@@ -33,7 +33,7 @@ main() {
         ints[i] = i * 100
         i = i + 1
     }
-    if ints[0] != 0   { println("  FAIL: int[0]"); exit(1) }
+    if ints[0] != 0 { println("  FAIL: int[0]"); exit(1) }
     if ints[4] != 400 { println("  FAIL: int[4]"); exit(1) }
     // Cross-check via mem.* to confirm the byte layout — ints[1] at
     // offset 4 should equal mem.get_int(raw_int, 4).

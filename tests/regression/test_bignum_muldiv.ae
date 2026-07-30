@@ -60,15 +60,15 @@ main() {
     fails = 0
 
     // ---- multiply ----
-    a = parse("75bcd15")        // 123456789
-    b = parse("3ade68b1")       // 987654321
-    m = bignum.multiply(a, b)   // 0x1b13114fbff5385
+    a = parse("75bcd15") // 123456789
+    b = parse("3ade68b1") // 987654321
+    m = bignum.multiply(a, b) // 0x1b13114fbff5385
     if string.equals(bignum.to_hex(m), "1b13114fbff5385") != 1 { print("FAIL mul\n"); fails = fails + 1 }
     bignum.free(m)
 
     // multiply at the limb boundary: (2^64-1)^2
     f = parse("ffffffffffffffff")
-    m2 = bignum.multiply(f, f)  // 0xfffffffffffffffe0000000000000001
+    m2 = bignum.multiply(f, f) // 0xfffffffffffffffe0000000000000001
     if string.equals(bignum.to_hex(m2), "fffffffffffffffe0000000000000001") != 1 { print("FAIL mul 64x64\n"); fails = fails + 1 }
     bignum.free(m2); bignum.free(f)
 
@@ -85,10 +85,10 @@ main() {
     bignum.free(mn); bignum.free(nb)
 
     // ---- divide / remainder ----
-    q = bignum.divide(b, a)     // 987654321 / 123456789 = 8
+    q = bignum.divide(b, a) // 987654321 / 123456789 = 8
     if string.equals(bignum.to_hex(q), "8") != 1 { print("FAIL div\n"); fails = fails + 1 }
     bignum.free(q)
-    r = bignum.remainder(b, a)  // 987654321 - 8*123456789 = 9
+    r = bignum.remainder(b, a) // 987654321 - 8*123456789 = 9
     if string.equals(bignum.to_hex(r), "9") != 1 { print("FAIL rem\n"); fails = fails + 1 }
     bignum.free(r)
 
@@ -101,8 +101,8 @@ main() {
     bignum.free(rsmall)
 
     // exact division: 123456*789 / 789 = 123456 (0x1e240), remainder 0
-    e1 = parse("1e240")          // 123456
-    e2 = parse("315")            // 789
+    e1 = parse("1e240") // 123456
+    e2 = parse("315") // 789
     eprod = bignum.multiply(e1, e2)
     eq = bignum.divide(eprod, e2)
     if string.equals(bignum.to_hex(eq), "1e240") != 1 { print("FAIL div exact\n"); fails = fails + 1 }
@@ -113,27 +113,27 @@ main() {
     // multi-limb division: 5-limb / 2-limb (the case a naive shift-division looped on)
     big = parse("1c074113cb033354fc7eefadf23a7cda6c3")
     sm = parse("aa58695187b8a519")
-    bq = bignum.divide(big, sm)     // 0x2a1f2eba04136ac87c6
+    bq = bignum.divide(big, sm) // 0x2a1f2eba04136ac87c6
     if string.equals(bignum.to_hex(bq), "2a1f2eba04136ac87c6") != 1 { print("FAIL div 5x2\n"); fails = fails + 1 }
-    br = bignum.remainder(big, sm)  // 0x8ca2bd471d21c66d
+    br = bignum.remainder(big, sm) // 0x8ca2bd471d21c66d
     if string.equals(bignum.to_hex(br), "8ca2bd471d21c66d") != 1 { print("FAIL rem 5x2\n"); fails = fails + 1 }
     bignum.free(bq); bignum.free(br); bignum.free(big); bignum.free(sm)
 
     // 2^200 / 2^64 = 2^136
-    p2 = parse("100000000000000000000000000000000000000000000000000")   // 2^200
-    d64 = parse("10000000000000000")                                    // 2^64
+    p2 = parse("100000000000000000000000000000000000000000000000000") // 2^200
+    d64 = parse("10000000000000000") // 2^64
     pq = bignum.divide(p2, d64)
     if string.equals(bignum.to_hex(pq), "10000000000000000000000000000000000") != 1 { print("FAIL div pow2\n"); fails = fails + 1 }
     bignum.free(pq); bignum.free(p2); bignum.free(d64)
 
     // ---- signed division semantics (BC: trunc toward zero; rem sign = dividend) ----
-    nbig = parse("-3635c9adc5dea00000")     // -1000000000000000000000
+    nbig = parse("-3635c9adc5dea00000") // -1000000000000000000000
     seven = bignum.from_int(7)
-    nq = bignum.divide(nbig, seven)         // -142857142857142857142 = -0x7be8a8689fb3b6db6
+    nq = bignum.divide(nbig, seven) // -142857142857142857142 = -0x7be8a8689fb3b6db6
     if string.equals(bignum.to_hex(nq), "-7be8a8689fb3b6db6") != 1 { print("FAIL div neg\n"); fails = fails + 1 }
-    nr = bignum.remainder(nbig, seven)      // -6
+    nr = bignum.remainder(nbig, seven) // -6
     if string.equals(bignum.to_hex(nr), "-6") != 1 { print("FAIL rem neg\n"); fails = fails + 1 }
-    nm = bignum.mod(nbig, seven)            // (-6) + 7 = 1
+    nm = bignum.mod(nbig, seven) // (-6) + 7 = 1
     if string.equals(bignum.to_hex(nm), "1") != 1 { print("FAIL mod neg\n"); fails = fails + 1 }
     bignum.free(nq); bignum.free(nr); bignum.free(nm); bignum.free(nbig); bignum.free(seven)
 

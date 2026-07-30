@@ -17,7 +17,7 @@
 // The 32-bit ops take/return `int`; the 64-bit ops take/return `long`
 // for the value with an `int` shift/rotate count.
 
-exports (
+exports(
     lsr32, lsr64,
     rotr32, rotl32, rotr64, rotl64,
     popcount32, popcount64,

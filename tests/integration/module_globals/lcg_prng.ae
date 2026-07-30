@@ -14,7 +14,7 @@ import std.string
 
 extern exit(code: int)
 
-var rand48_x: uint64 = 0x1234ABCD330E      // module scope, mutable, 48-bit seed
+var rand48_x: uint64 = 0x1234ABCD330E // module scope, mutable, 48-bit seed
 
 next_rand() -> uint64 {
     rand48_x = (rand48_x * 0x5DEECE66D + 0xB) & 0xFFFFFFFFFFFF

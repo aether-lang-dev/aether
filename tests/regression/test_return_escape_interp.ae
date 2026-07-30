@@ -21,11 +21,11 @@ main() {
         println("FAIL: length=${string.length(a)}, expected 8")
         exit(1)
     }
-    if string.char_at(a, 0) != 118 {  // 'v'
+    if string.char_at(a, 0) != 118 { // 'v'
         println("FAIL: byte 0 = ${string.char_at(a, 0)}, expected 118")
         exit(1)
     }
-    if string.char_at(a, 6) != 52 {   // '4'
+    if string.char_at(a, 6) != 52 { // '4'
         println("FAIL: byte 6 = ${string.char_at(a, 6)}, expected 52")
         exit(1)
     }

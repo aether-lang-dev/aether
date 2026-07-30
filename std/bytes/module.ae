@@ -18,7 +18,7 @@
 
 import std.string
 
-exports (
+exports(
     aether_bytes_new, aether_bytes_set, aether_bytes_get,
     aether_bytes_length,
     aether_bytes_set_le16, aether_bytes_get_le16,

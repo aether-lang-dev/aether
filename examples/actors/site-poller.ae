@@ -26,9 +26,9 @@ message Stop {}
 
 actor SitePollerOne {
     state interval_ms = 100
-    state url         = "http://does-not-resolve.invalid/one"
-    state poll_count  = 0
-    state max_polls   = 2
+    state url = "http://does-not-resolve.invalid/one"
+    state poll_count = 0
+    state max_polls = 2
 
     receive {
         Poll -> {
@@ -59,9 +59,9 @@ actor SitePollerOne {
 
 actor SitePollerTwo {
     state interval_ms = 100
-    state url         = "http://does-not-resolve.invalid/two"
-    state poll_count  = 0
-    state max_polls   = 2
+    state url = "http://does-not-resolve.invalid/two"
+    state poll_count = 0
+    state max_polls = 2
 
     receive {
         Poll -> {

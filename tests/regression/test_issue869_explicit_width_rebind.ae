@@ -15,9 +15,9 @@ extern exit(code: int)
 // The issue's exact 7-line shape: int RHS, then uint64 RHS.
 f(x: int) -> long {
     uint64 v = 0
-    v = x - 48        // int RHS — must widen into v, not re-narrow v to int
+    v = x - 48 // int RHS — must widen into v, not re-narrow v to int
     uint64 d = 5
-    v = v + d         // uint64 RHS
+    v = v + d // uint64 RHS
     return v
 }
 

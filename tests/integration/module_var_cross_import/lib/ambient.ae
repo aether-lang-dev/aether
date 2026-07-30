@@ -1,6 +1,6 @@
 // An imported module providing an ambient/process-global cell via #701
 // module-level `var` — set by one fn, mutated by another, read by a third.
-exports ( init, bump, current, scratch )
+exports(init, bump, current, scratch)
 var cur = 0
 init(v: int) { cur = v }
 bump() { cur = cur + 1 }

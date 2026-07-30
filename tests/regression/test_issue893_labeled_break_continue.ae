@@ -37,7 +37,7 @@ main() {
             if b == 2 { continue top }
             visited = visited + 1
         }
-        visited = visited + 100        // skipped by `continue top`
+        visited = visited + 100 // skipped by `continue top`
     }
     if visited != 3 { println("FAIL #893: continue top"); exit(1) }
 
@@ -45,7 +45,7 @@ main() {
     found = -1
     for x in 0..5 {
         scan: for y in 0..5 {
-            if x == 1 && y == 2 { found = x * 10 + y  break scan }
+            if x == 1 && y == 2 { found = x * 10 + y break scan }
         }
     }
     if found != 12 { println("FAIL #893: break scan (for)"); exit(1) }

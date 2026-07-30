@@ -29,7 +29,7 @@ main() {
     for (i = 32; i < 127; i = i + 1) {
         print_char(i)
         if ((i - 31) % 32 == 0) {
-            print_char(10)  // newline every 32 chars
+            print_char(10) // newline every 32 chars
         }
     }
     print_char(10)
@@ -38,7 +38,7 @@ main() {
     print("\nBar chart:\n")
     values = 5
     print("  A: ")
-    for (i = 0; i < 8; i = i + 1) { print_char(35) }   // '#'
+    for (i = 0; i < 8; i = i + 1) { print_char(35) } // '#'
     print(" 8\n")
     print("  B: ")
     for (i = 0; i < 15; i = i + 1) { print_char(35) }

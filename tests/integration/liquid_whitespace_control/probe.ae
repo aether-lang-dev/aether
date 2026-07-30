@@ -49,7 +49,7 @@ main() {
 
     // (3) Both sides.
     expect_eq(render_x("hi   {{- x -}}   END", "X"),
-              "hiXEND", "3 both sides")
+        "hiXEND", "3 both sides")
 
     // (4) No whitespace at all is a no-op.
     expect_eq(render_x("hi{{- x -}}END", "X"), "hiXEND", "4 no-op when no ws")
@@ -61,24 +61,24 @@ main() {
 
     // (6) `comment` block: both sides strip outer whitespace.
     expect_eq(render_x("a   {%- comment %}hidden{% endcomment -%}   b",
-                       "ignored"),
-              "ab", "6 comment outer trim")
+            "ignored"),
+        "ab", "6 comment outer trim")
 
     // (7) `raw` block: opener-right trims raw body LEADING ws;
     //     closer-left trims raw body TRAILING ws; closer-right trims
     //     the next TEXT.
     expect_eq(render_x("a {%- raw -%}   inside   {%- endraw -%}   b",
-                       "ignored"),
-              "ainsideb", "7 raw inner + outer trim")
+            "ignored"),
+        "ainsideb", "7 raw inner + outer trim")
 
     // (8) Dash-less raw preserves whitespace inside its body.
     expect_eq(render_x("{% raw %}   keep   {% endraw %}",
-                       "ignored"),
-              "   keep   ", "8 raw without dashes preserves")
+            "ignored"),
+        "   keep   ", "8 raw without dashes preserves")
 
     // (9) Multi-line whitespace consumed by a single `-`.
     expect_eq(render_x("hi\n\n   {{- x }}", "X"),
-              "hiX", "9 multi-line ws strip")
+        "hiX", "9 multi-line ws strip")
 
     // (10) Two `{%- ... -%}` in a row collapse intervening ws.
     t10, _ = liquid.parse_string("a   {%- assign x = \"X\" -%}   {%- assign y = \"Y\" -%}   {{ x }}{{ y }}")

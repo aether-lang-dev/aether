@@ -22,7 +22,7 @@ import std.os
 import std.string
 import std.bytes
 
-exports (generate)
+exports(generate)
 
 const KSUID_EPOCH_SECS = 1400000000
 

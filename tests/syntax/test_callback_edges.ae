@@ -15,17 +15,17 @@ make_list() { return list.new() }
 
 main() {
     // --- 1. callback with explicit params ---
-    adder = store_fn() callback |a: int, b: int| {
+    adder = store_fn() callback | a: int, b: int | {
         return a + b
     }
     println(call(adder, 3, 4))
 
     // --- 2. callback with arrow body ---
-    doubler = store_fn() callback |x: int| -> x * 2
+    doubler = store_fn() callback | x: int | -> x * 2
     println(call(doubler, 6))
 
     // --- 3. empty callback body ---
-    noop = store_fn() callback { }
+    noop = store_fn() callback {}
     call(noop)
     println("noop ok")
 
@@ -49,9 +49,9 @@ main() {
     // --- 6. callbacks created inside a loop ---
     fns = list.new()
     defer list.free(fns)
-    for (i = 1; i <= 3; i++) {
-        captured = i  // snapshot
-        list.add(fns, box_closure(store_fn() callback |x: int| -> x + captured))
+    for (i = 1; i <= 3; i ++) {
+        captured = i // snapshot
+        list.add(fns, box_closure(store_fn() callback | x: int | -> x + captured))
     }
     fn_box0, _ = list.get(fns, 0)
     fn_box1, _ = list.get(fns, 1)

@@ -6,9 +6,9 @@ import std.bytes
 import std.string
 import std.io
 
-hv(c: int) -> int { if c>=48 { if c<=57 { return c-48 } } if c>=97 { if c<=102 { return c-87 } } return 0 }
-hb(h: string) -> ptr { n=string.length(h); b=bytes.new(n/2); i=0; while i<n { bytes.set(b,i/2,hv(string_char_at_n(h,n,i))*16+hv(string_char_at_n(h,n,i+1))); i=i+2 } return b }
-bh(b: ptr) -> string { d="0123456789abcdef"; o=""; n=bytes.length(b); i=0; while i<n { v=bytes.get(b,i); o=string.concat(o,string.concat(string.substring(d,(v/16)&15,((v/16)&15)+1),string.substring(d,v&15,(v&15)+1))); i=i+1 } return o }
+hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } return 0 }
+hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
+bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
 
 check(label: string, got: string, want: string) -> int {
     if got == want { println("ok   ${label}"); return 0 }
@@ -27,8 +27,8 @@ main() {
         "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
 
     // PBKDF2-HMAC-SHA256 (widely-published vectors)
-    pw = hb("70617373776f7264")   // "password"
-    sp = hb("73616c74")          // "salt"
+    pw = hb("70617373776f7264") // "password"
+    sp = hb("73616c74") // "salt"
     dk1 = pbkdf2.pbkdf2("sha256", pw, bytes.length(pw), sp, bytes.length(sp), 1, 32)
     fails = fails + check("pbkdf2 sha256 c=1", bh(dk1),
         "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")

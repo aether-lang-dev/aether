@@ -25,11 +25,11 @@ main() {
         println("FAIL: length=${string.length(a)}, expected 16")
         exit(1)
     }
-    if string.char_at(a, 0) != 72 {  // 'H'
+    if string.char_at(a, 0) != 72 { // 'H'
         println("FAIL: byte 0 = ${string.char_at(a, 0)}, expected 72")
         exit(1)
     }
-    if string.char_at(a, 8) != 72 {  // 'H' (second copy starts here)
+    if string.char_at(a, 8) != 72 { // 'H' (second copy starts here)
         println("FAIL: byte 8 = ${string.char_at(a, 8)}, expected 72")
         exit(1)
     }

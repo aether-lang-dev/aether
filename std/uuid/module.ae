@@ -20,7 +20,7 @@ import std.os
 import std.string
 import std.bytes
 
-exports (v4, v7)
+exports(v4, v7)
 
 // Format a 16-byte AetherString as the canonical 8-4-4-4-12 hex
 // form. The version/variant bytes must already be patched by the
@@ -39,7 +39,7 @@ fn format_uuid(b: string) -> string {
         out = out + 2
         // Hyphens after bytes 3, 5, 7, 9.
         if i == 3 || i == 5 || i == 7 || i == 9 {
-            bytes.set(buf, out, 45)  // '-'
+            bytes.set(buf, out, 45) // '-'
             out = out + 1
         }
         i = i + 1

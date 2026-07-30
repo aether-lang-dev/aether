@@ -8,7 +8,7 @@
 //     `err` returns and are the idiomatic way to call collections
 //     operations that can fail.
 
-exports (
+exports(
     list_new, list_new_in, list_add_raw, list_get_raw, list_set, list_size,
     list_remove, list_clear, list_free,
     map_new, map_put_raw, map_get_raw, map_has, map_remove,

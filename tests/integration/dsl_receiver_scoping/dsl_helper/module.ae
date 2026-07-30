@@ -8,7 +8,7 @@
 // names fall through to `dsl_helper_script` / `dsl_helper_tag`
 // automatically.
 
-exports (run, script, tag)
+exports(run, script, tag)
 
 import std.map
 

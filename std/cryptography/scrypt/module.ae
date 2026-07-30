@@ -38,7 +38,7 @@ import std.cryptography.pbkdf2
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-exports (
+exports(
     scrypt, scrypt_hex
 )
 

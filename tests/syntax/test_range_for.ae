@@ -6,7 +6,7 @@ main() {
         print(i)
         print(" ")
     }
-    println("")           // expect: 0 1 2 3 4
+    println("") // expect: 0 1 2 3 4
 
     // Range with variable bound
     n = 10
@@ -14,11 +14,11 @@ main() {
     for i in 1..n {
         sum += i
     }
-    println(sum)          // expect: 45
+    println(sum) // expect: 45
 
     // Range for with single iteration
     for i in 0..1 {
-        println(i)        // expect: 0
+        println(i) // expect: 0
     }
 
     // Range for with computation in body
@@ -26,7 +26,7 @@ main() {
     for i in 1..6 {
         total += i * i
     }
-    println(total)        // expect: 55
+    println(total) // expect: 55
 
     // Nested range for
     count = 0
@@ -35,5 +35,5 @@ main() {
             count += 1
         }
     }
-    println(count)        // expect: 9
+    println(count) // expect: 9
 }

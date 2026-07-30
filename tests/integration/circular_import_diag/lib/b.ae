@@ -1,3 +1,3 @@
 import a
-exports (fb)
+exports(fb)
 fb() -> int { return 2 }

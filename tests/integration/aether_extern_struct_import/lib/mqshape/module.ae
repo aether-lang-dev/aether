@@ -8,7 +8,7 @@ extern struct ABRecord {
 }
 
 extern struct Flags {
-    on:  byte : 1
-    off: byte : 1
-    pad: byte : 6
+    on: byte: 1
+    off: byte: 1
+    pad: byte: 6
 }

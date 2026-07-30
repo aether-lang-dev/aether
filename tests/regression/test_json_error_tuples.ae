@@ -9,10 +9,10 @@ main() {
     print("=== JSON Wrapper Error Tuple Tests ===\n\n")
 
     // Prepare sample values of different types
-    num, _  = json.parse("42")
-    str, _  = json.parse("\"hello\"")
-    arr, _  = json.parse("[1,2,3]")
-    obj, _  = json.parse("{\"x\":10}")
+    num, _ = json.parse("42")
+    str, _ = json.parse("\"hello\"")
+    arr, _ = json.parse("[1,2,3]")
+    obj, _ = json.parse("{\"x\":10}")
 
     fails = 0
 

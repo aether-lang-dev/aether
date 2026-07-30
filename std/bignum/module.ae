@@ -42,7 +42,7 @@ import std.bits
 import std.strbuilder
 import std.bytes
 
-exports (
+exports(
     from_bytes, from_bytes_unsigned, to_bytes, to_bytes_unsigned,
     from_int,
     compare, is_zero, sign, bit_length,
@@ -65,9 +65,9 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
 struct BN {
-    sign: int   // -1, 0, or 1
-    mag: ptr    // std.intarr of 32-bit limbs, big-endian ([0] = MSB), or null
-    len: int    // number of limbs; 0 for zero
+    sign: int // -1, 0, or 1
+    mag: ptr // std.intarr of 32-bit limbs, big-endian ([0] = MSB), or null
+    len: int // number of limbs; 0 for zero
 }
 
 // ---- internal construction helpers ----
@@ -229,7 +229,7 @@ from_bytes(b: ptr, length: int) -> ptr {
     // build the inverted+1 (negated) byte buffer into a temp intarr-as-bytes
     // We compute the magnitude bytes directly: inverse = ~byte, then +1
     // with carry propagation from the least-significant end.
-    inv = intarr_new_raw(numbytes)   // one byte per slot
+    inv = intarr_new_raw(numbytes) // one byte per slot
     idx = 0
     src = ib
     while idx < numbytes {
@@ -487,7 +487,7 @@ mag_add(x: ptr, xlen: int, y: ptr, ylen: int) -> (ptr, int) {
     long m = 0
     ti = xlen - 1
     vi = ylen - 1
-    ri = xlen   // result index (xlen+1 slots, [0..xlen])
+    ri = xlen // result index (xlen+1 slots, [0..xlen])
     while vi >= 0 {
         m = m + limb(x, ti) + limb(y, vi)
         intarr_set_raw(res, ri, (m & 0xFFFFFFFF))
@@ -705,7 +705,7 @@ le_limb(a: ptr, alen: int, i: int) -> long {
 
 // Schoolbook multiply of two LE arrays into a fresh LE array of xn+yn.
 le_schoolbook(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
-    res = intarr_new_raw(xn + yn)   // zero-filled
+    res = intarr_new_raw(xn + yn) // zero-filled
     i = 0
     while i < xn {
         a = le_limb(x, xn, i)
@@ -844,7 +844,7 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
 
     // result = z0 + z1*B^half + z2*B^(2*half)
     reslen = xn + yn
-    res = intarr_new_raw(reslen)   // zero
+    res = intarr_new_raw(reslen) // zero
     // add z0
     le_add_into(res, reslen, z0, xl_len + yl_len, 0)
     // add z1 shifted by half
@@ -863,7 +863,7 @@ le_karatsuba(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
 // empty).
 le_mul_maybe_zero(x: ptr, xn: int, y: ptr, yn: int) -> ptr {
     if xn == 0 {
-        return intarr_new_raw(yn)   // all zero, length xn+yn = yn
+        return intarr_new_raw(yn) // all zero, length xn+yn = yn
     }
     if yn == 0 {
         return intarr_new_raw(xn)
@@ -931,7 +931,7 @@ multiply(a: ptr, b: ptr) -> ptr {
         return bn_from_mag_checked(rsign, res, reslen)
     }
     reslen = ba.len + bb.len
-    res = intarr_new_raw(reslen)   // calloc: zero-filled
+    res = intarr_new_raw(reslen) // calloc: zero-filled
     mag_multiply(res, reslen, ba.mag, ba.len, bb.mag, bb.len)
     return bn_from_mag_checked(rsign, res, reslen)
 }
@@ -948,9 +948,9 @@ multiply(a: ptr, b: ptr) -> ptr {
 
 // Test bit `pos` (0 = LSB) of a magnitude (big-endian limbs).
 mag_test_bit(mag: ptr, len: int, pos: int) -> int {
-    limbfromlsb = bits.lsr32(pos, 5)   // pos / 32
+    limbfromlsb = bits.lsr32(pos, 5) // pos / 32
     bitinlimb = pos & 0x1f
-    idx = len - 1 - limbfromlsb        // big-endian: LSB limb is last
+    idx = len - 1 - limbfromlsb // big-endian: LSB limb is last
     if idx < 0 {
         return 0
     }
@@ -1030,7 +1030,7 @@ make_pow2(pos: int) -> ptr {
 divide(a: ptr, b: ptr) -> ptr {
     bb = b as *BN
     if bb.sign == 0 {
-        return bn_zero()   // division by zero -> zero (caller should guard)
+        return bn_zero() // division by zero -> zero (caller should guard)
     }
     ba = a as *BN
     if ba.sign == 0 {
@@ -1129,7 +1129,7 @@ mont_mdash(m0: long) -> long {
 // -m^(-1) mod 2^32. Returns a fresh LE array of n limbs in [0, m).
 mont_mul(x: ptr, y: ptr, mle: ptr, n: int, mdash: long) -> ptr {
     // accumulator t has n+2 limbs to hold intermediate carry safely.
-    t = intarr_new_raw(n + 2)   // zero
+    t = intarr_new_raw(n + 2) // zero
     i = 0
     while i < n {
         long xi = intarr_get_raw(x, i) & 0xFFFFFFFF
@@ -1216,7 +1216,7 @@ mont_mul(x: ptr, y: ptr, mle: ptr, n: int, mdash: long) -> ptr {
 // magnitude (value assumed < 2^(32n)). For a zero BN, returns all zeros.
 le_padded_from_bn(n_bn: ptr, n: int) -> ptr {
     bn = n_bn as *BN
-    out = intarr_new_raw(n)   // zero
+    out = intarr_new_raw(n) // zero
     if bn.sign == 0 {
         return out
     }
@@ -1240,20 +1240,20 @@ bn_from_le(le: ptr, n: int) -> ptr {
 mod_pow_monty(base: ptr, exp: ptr, m: ptr) -> ptr {
     bm = m as *BN
     n = bm.len
-    long m0 = intarr_get_raw(bm.mag, n - 1) & 0xFFFFFFFF   // LSB limb (BE last)
+    long m0 = intarr_get_raw(bm.mag, n - 1) & 0xFFFFFFFF // LSB limb (BE last)
     long mdash = mont_mdash(m0)
     mle = le_padded_from_bn(m, n)
 
     // R = 2^(32n); R mod m and R^2 mod m via the existing (correct) path.
     // base_mont = base * R mod m  ; one_mont = R mod m (Montgomery 1).
     one = from_int(1)
-    rshift = shift_left(one, 32 * n)          // R
-    r_mod = mod(rshift, m)                     // R mod m  == Montgomery(1)
-    base_mod = mod(base, m)                     // base mod m, in [0, m)
-    base_r = multiply(base_mod, rshift)         // base * R
-    base_mont_bn = mod(base_r, m)               // base * R mod m
+    rshift = shift_left(one, 32 * n) // R
+    r_mod = mod(rshift, m) // R mod m  == Montgomery(1)
+    base_mod = mod(base, m) // base mod m, in [0, m)
+    base_r = multiply(base_mod, rshift) // base * R
+    base_mont_bn = mod(base_r, m) // base * R mod m
 
-    one_le = le_padded_from_bn(r_mod, n)        // Montgomery form of 1
+    one_le = le_padded_from_bn(r_mod, n) // Montgomery form of 1
     base_le = le_padded_from_bn(base_mont_bn, n)
 
     free(one); free(rshift); free(r_mod); free(base_mod)
@@ -1276,7 +1276,7 @@ mod_pow_monty(base: ptr, exp: ptr, m: ptr) -> ptr {
         i = i - 1
     }
     // convert out of Montgomery form: result = acc * 1 * R^(-1) mod m.
-    one_mont = intarr_new_raw(n)   // value 1 in plain form (LE)
+    one_mont = intarr_new_raw(n) // value 1 in plain form (LE)
     intarr_set_raw(one_mont, 0, 1)
     final_le = mont_mul(acc, one_mont, mle, n, mdash)
     result = bn_from_le(final_le, n)
@@ -1386,7 +1386,7 @@ mod_inverse(a: ptr, m: ptr) -> ptr {
     // extended Euclid: track (old_r, r) and (old_s, s) with
     //   old_r = old_s*a' + ...  ; on termination old_s is the inverse.
     old_r = clone(m)
-    r = d              // d owned here
+    r = d // d owned here
     old_s = from_int(0)
     s = from_int(1)
     while is_zero(r) != 1 {
@@ -1472,11 +1472,11 @@ is_probable_prime(n: ptr, rounds: int) -> int {
     }
     // fixed deterministic witness bases (first 13 primes)
     bases = intarr_new_raw(13)
-    intarr_set_raw(bases, 0, 2);   intarr_set_raw(bases, 1, 3)
-    intarr_set_raw(bases, 2, 5);   intarr_set_raw(bases, 3, 7)
-    intarr_set_raw(bases, 4, 11);  intarr_set_raw(bases, 5, 13)
-    intarr_set_raw(bases, 6, 17);  intarr_set_raw(bases, 7, 19)
-    intarr_set_raw(bases, 8, 23);  intarr_set_raw(bases, 9, 29)
+    intarr_set_raw(bases, 0, 2); intarr_set_raw(bases, 1, 3)
+    intarr_set_raw(bases, 2, 5); intarr_set_raw(bases, 3, 7)
+    intarr_set_raw(bases, 4, 11); intarr_set_raw(bases, 5, 13)
+    intarr_set_raw(bases, 6, 17); intarr_set_raw(bases, 7, 19)
+    intarr_set_raw(bases, 8, 23); intarr_set_raw(bases, 9, 29)
     intarr_set_raw(bases, 10, 31); intarr_set_raw(bases, 11, 37)
     intarr_set_raw(bases, 12, 41)
     nbases = 13
@@ -1513,7 +1513,7 @@ is_probable_prime(n: ptr, rounds: int) -> int {
                     x = x2
                     if compare(x, nm1) == 0 {
                         passes = 1
-                        rr = s   // break
+                        rr = s // break
                     } else {
                         rr = rr + 1
                     }
@@ -1523,7 +1523,7 @@ is_probable_prime(n: ptr, rounds: int) -> int {
             free(a)
             if passes == 0 {
                 result = 0
-                bi = limit   // composite — stop
+                bi = limit // composite — stop
             } else {
                 bi = bi + 1
             }
@@ -1538,7 +1538,7 @@ is_probable_prime(n: ptr, rounds: int) -> int {
 
 // BC ShiftLeft of a magnitude by n bits (n > 0). Returns (mag, len).
 mag_shift_left(mag: ptr, maglen: int, n: int) -> (ptr, int) {
-    nints = bits.lsr32(n, 5)   // n / 32
+    nints = bits.lsr32(n, 5) // n / 32
     nbits = n & 0x1f
     if nbits == 0 {
         newlen = maglen + nints
@@ -1620,9 +1620,9 @@ shift_right(n: ptr, bits_to: int) -> ptr {
     // (i.e. add 1 to the magnitude). Detect dropped bits first.
     dropped = mag_has_low_bits(bn.mag, bn.len, bits_to)
 
-    resultlength = bits.lsr32((bl - bits_to + 31), 5)   // (bl - n + 31) / 32
+    resultlength = bits.lsr32((bl - bits_to + 31), 5) // (bl - n + 31) / 32
     res = intarr_new_raw(resultlength)
-    numints = bits.lsr32(bits_to, 5)   // n / 32
+    numints = bits.lsr32(bits_to, 5) // n / 32
     numbits = bits_to & 31
     if numbits == 0 {
         // copy the leading resultlength limbs of the magnitude
@@ -1664,7 +1664,7 @@ mag_has_low_bits(mag: ptr, maglen: int, nbits: int) -> int {
     if nbits <= 0 {
         return 0
     }
-    fulllimbs = bits.lsr32(nbits, 5)   // nbits / 32
+    fulllimbs = bits.lsr32(nbits, 5) // nbits / 32
     rembits = nbits & 31
     // check the `fulllimbs` least-significant limbs (the tail of the array)
     i = 0
@@ -1760,7 +1760,7 @@ to_bytes_impl(n: ptr, as_unsigned: int) -> ptr {
     mag = bn.mag
     maglen = bn.len
     magindex = maglen
-    bytesindex = nbytes   // exclusive end within the byte region
+    bytesindex = nbytes // exclusive end within the byte region
 
     if effsign > 0 {
         while magindex > 1 {
@@ -1837,9 +1837,9 @@ to_bytes_impl(n: ptr, as_unsigned: int) -> ptr {
 
 hex_digit(v: int) -> int {
     if v < 10 {
-        return 48 + v       // '0'..'9'
+        return 48 + v // '0'..'9'
     }
-    return 87 + v           // 'a'..'f'  (97 - 10)
+    return 87 + v // 'a'..'f'  (97 - 10)
 }
 
 to_hex(n: ptr) -> string {
@@ -1859,7 +1859,7 @@ to_hex(n: ptr) -> string {
     }
     sb = strbuilder.new(maglen * 8 + 1)
     if bn.sign < 0 {
-        strbuilder.append_byte(sb, 45)   // '-'
+        strbuilder.append_byte(sb, 45) // '-'
     }
     // first significant limb: no leading zeros
     append_limb_nolead(sb, limb(mag, start))
@@ -1885,7 +1885,7 @@ append_limb_padded(sb: ptr, v: long) {
 // hex of one limb with no leading zeros (most-significant limb).
 append_limb_nolead(sb: ptr, v: long) {
     if v == 0 {
-        strbuilder.append_byte(sb, 48)   // '0'
+        strbuilder.append_byte(sb, 48) // '0'
         return
     }
     shift = 28

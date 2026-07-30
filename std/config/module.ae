@@ -29,7 +29,7 @@
 //
 // Section 2 of nuther-ask-of-aether-team.md / Nico's reply.
 
-exports (
+exports(
     aether_config_store_put, aether_config_store_get, aether_config_store_get_or,
     aether_config_store_has, aether_config_store_size, aether_config_store_clear,
     put, get, get_or, has, size, clear

@@ -7,14 +7,14 @@ extern exit(code: int)
 
 main() {
     balance = 0
-    deposit  = || { balance = balance + 10 }
+    deposit = || { balance = balance + 10 }
     withdraw = || { balance = balance - 3 }
 
-    call(deposit)   // 10
-    call(deposit)   // 20
-    call(withdraw)  // 17
-    call(deposit)   // 27
-    call(withdraw)  // 24
+    call(deposit) // 10
+    call(deposit) // 20
+    call(withdraw) // 17
+    call(deposit) // 27
+    call(withdraw) // 24
 
     if balance != 24 { println("FAIL: balance=24 expected, got:"); println(balance); exit(1) }
 

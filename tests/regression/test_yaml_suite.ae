@@ -71,102 +71,102 @@ main() {
     passed_tests = 0
     failed_tests = 0
 
-    _, err = fs.walk(suite_dir, |path: string, kind: int, depth: int| {
-        if kind == 1 { // regular file
-            if string_ends_with(path, ".yaml") == 1 {
-                total_tests = total_tests + 1
+    _, err = fs.walk(suite_dir, | path: string, kind: int, depth: int | {
+            if kind == 1 { // regular file
+                if string_ends_with(path, ".yaml") == 1 {
+                    total_tests = total_tests + 1
 
-                content, read_err = fs.read(path)
-                if read_err != "" {
-                    println("  FAIL to read: ${path} (${read_err})")
-                    failed_tests = failed_tests + 1
-                    return 0
-                }
+                    content, read_err = fs.read(path)
+                    if read_err != "" {
+                        println("  FAIL to read: ${path} (${read_err})")
+                        failed_tests = failed_tests + 1
+                        return 0
+                    }
 
-                // 1. Parse outer test case YAML
-                outer_doc, parse_err = yaml.parse(content)
-                if parse_err != "" {
-                    println("  FAIL to parse outer test case: ${path} (${parse_err})")
-                    failed_tests = failed_tests + 1
-                    return 0
-                }
+                    // 1. Parse outer test case YAML
+                    outer_doc, parse_err = yaml.parse(content)
+                    if parse_err != "" {
+                        println("  FAIL to parse outer test case: ${path} (${parse_err})")
+                        failed_tests = failed_tests + 1
+                        return 0
+                    }
 
-                root = yaml.root(outer_doc)
-                if root != null {
-                    seq_size = yaml.sequence_size(root)
-                    if seq_size > 0 {
-                        item = yaml.sequence_get(root, 0)
-                        if item != null {
-                            // Extract metadata
-                            name_node = yaml.mapping_lookup(item, "name")
-                            name = ""
-                            if name_node != null {
-                                name, _ = yaml.get_scalar(name_node)
-                            }
-
-                            fail_node = yaml.mapping_lookup(item, "fail")
-                            expect_fail = 0
-                            if fail_node != null {
-                                fail_str, _ = yaml.get_scalar(fail_node)
-                                if string_equals(fail_str, "true") == 1 {
-                                    expect_fail = 1
+                    root = yaml.root(outer_doc)
+                    if root != null {
+                        seq_size = yaml.sequence_size(root)
+                        if seq_size > 0 {
+                            item = yaml.sequence_get(root, 0)
+                            if item != null {
+                                // Extract metadata
+                                name_node = yaml.mapping_lookup(item, "name")
+                                name = ""
+                                if name_node != null {
+                                    name, _ = yaml.get_scalar(name_node)
                                 }
-                            }
 
-                            yaml_node = yaml.mapping_lookup(item, "yaml")
-                            if yaml_node != null {
-                                yaml_str, _ = yaml.get_scalar(yaml_node)
+                                fail_node = yaml.mapping_lookup(item, "fail")
+                                expect_fail = 0
+                                if fail_node != null {
+                                    fail_str, _ = yaml.get_scalar(fail_node)
+                                    if string_equals(fail_str, "true") == 1 {
+                                        expect_fail = 1
+                                    }
+                                }
 
-                                // Replace whitespace indicator representations before parsing
-                                yaml_str = replace(yaml_str, "———»", "\t")
-                                yaml_str = replace(yaml_str, "——»", "\t")
-                                yaml_str = replace(yaml_str, "—»", "\t")
-                                yaml_str = replace(yaml_str, "»", "\t")
-                                yaml_str = replace(yaml_str, "␣", " ")
-                                yaml_str = replace(yaml_str, "↵", "")
-                                yaml_str = replace(yaml_str, "∎", "")
-                                yaml_str = replace(yaml_str, "←", "\r")
-                                yaml_str = replace(yaml_str, "⇔", "\xef\xbb\xbf")
+                                yaml_node = yaml.mapping_lookup(item, "yaml")
+                                if yaml_node != null {
+                                    yaml_str, _ = yaml.get_scalar(yaml_node)
 
-                                // 2. Parse inner test case YAML
-                                inner_doc, inner_err = yaml.parse(yaml_str)
+                                    // Replace whitespace indicator representations before parsing
+                                    yaml_str = replace(yaml_str, "———»", "\t")
+                                    yaml_str = replace(yaml_str, "——»", "\t")
+                                    yaml_str = replace(yaml_str, "—»", "\t")
+                                    yaml_str = replace(yaml_str, "»", "\t")
+                                    yaml_str = replace(yaml_str, "␣", " ")
+                                    yaml_str = replace(yaml_str, "↵", "")
+                                    yaml_str = replace(yaml_str, "∎", "")
+                                    yaml_str = replace(yaml_str, "←", "\r")
+                                    yaml_str = replace(yaml_str, "⇔", "\xef\xbb\xbf")
 
-                                if expect_fail == 0 {
-                                    // Should succeed!
-                                    if inner_err != "" {
-                                        println("  FAIL [Valid Case] ${path}: ${name}")
-                                        println("    Error: ${inner_err}")
-                                        failed_tests = failed_tests + 1
+                                    // 2. Parse inner test case YAML
+                                    inner_doc, inner_err = yaml.parse(yaml_str)
+
+                                    if expect_fail == 0 {
+                                        // Should succeed!
+                                        if inner_err != "" {
+                                            println("  FAIL [Valid Case] ${path}: ${name}")
+                                            println("    Error: ${inner_err}")
+                                            failed_tests = failed_tests + 1
+                                        } else {
+                                            passed_tests = passed_tests + 1
+                                        }
                                     } else {
-                                        passed_tests = passed_tests + 1
+                                        // Should fail!
+                                        if inner_err == "" {
+                                            // Some leniency/compatibility warnings
+                                            println("  NOTE [Lax Parser] ${path}: ${name} parsed successfully despite 'fail: true'")
+                                            passed_tests = passed_tests + 1
+                                        } else {
+                                            passed_tests = passed_tests + 1
+                                        }
+                                    }
+
+                                    if inner_doc != null {
+                                        yaml.free(inner_doc)
                                     }
                                 } else {
-                                    // Should fail!
-                                    if inner_err == "" {
-                                        // Some leniency/compatibility warnings
-                                        println("  NOTE [Lax Parser] ${path}: ${name} parsed successfully despite 'fail: true'")
-                                        passed_tests = passed_tests + 1
-                                    } else {
-                                        passed_tests = passed_tests + 1
-                                    }
+                                    // No 'yaml' key in test (e.g. meta cases or tags-only)
+                                    passed_tests = passed_tests + 1
                                 }
-
-                                if inner_doc != null {
-                                    yaml.free(inner_doc)
-                                }
-                            } else {
-                                // No 'yaml' key in test (e.g. meta cases or tags-only)
-                                passed_tests = passed_tests + 1
                             }
                         }
                     }
-                }
 
-                yaml.free(outer_doc)
+                    yaml.free(outer_doc)
+                }
             }
-        }
-        return 0
-    })
+            return 0
+        })
 
     println("YAML Test Suite Results:")
     println("  Total cases processed: ${total_tests}")

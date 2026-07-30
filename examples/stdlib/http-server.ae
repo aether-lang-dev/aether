@@ -94,11 +94,11 @@ main() {
     middleware.use_real_ip(server, "")
 
     middleware.use_cors(server,
-        "*",                       // allow any origin (demo-only)
+        "*", // allow any origin (demo-only)
         "GET, POST, OPTIONS",
         "Content-Type, X-Requested-With",
-        0,                          // allow_credentials = false
-        600)                        // Access-Control-Max-Age (10 min)
+        0, // allow_credentials = false
+        600) // Access-Control-Max-Age (10 min)
 
     // Response transformer — gzips bodies >= 256 bytes when the
     // client advertises Accept-Encoding: gzip. Skipped for tiny
@@ -123,10 +123,10 @@ main() {
     http.server_set_metrics(server, "/metrics")
 
     // ---- Routes --------------------------------------------------
-    http.server_get(server,  "/",        handle_root,   0)
-    http.server_get(server,  "/greet",   handle_greet,  0)
-    http.server_post(server, "/echo",    handle_echo,   0)
-    http.server_get(server,  "/whoami",  handle_whoami, 0)
+    http.server_get(server, "/", handle_root, 0)
+    http.server_get(server, "/greet", handle_greet, 0)
+    http.server_post(server, "/echo", handle_echo, 0)
+    http.server_get(server, "/whoami", handle_whoami, 0)
 
     println("listening on http://localhost:${PORT}/")
     println("try: curl http://localhost:${PORT}/")

@@ -30,7 +30,7 @@
 // returned from regex.capture / regex.replace* are heap-tracked
 // AetherString refcounts — Aether's auto-cleanup reclaims them.
 
-exports (
+exports(
     // raw externs (callable, but the wrappers below are the Go-style API)
     aether_regex_compile, aether_regex_free, aether_regex_matches,
     aether_regex_captures, aether_regex_captures_count, aether_regex_captures_get,
@@ -53,11 +53,11 @@ exports (
 )
 
 // PCRE2 option bits — kept in sync with <pcre2.h>.
-const FLAG_CASELESS   = 0x00000008   // case-insensitive match
-const FLAG_MULTILINE  = 0x00000400   // ^ and $ match per-line
-const FLAG_DOTALL     = 0x00000020   // . matches newline
-const FLAG_EXTENDED   = 0x00000080   // ignore whitespace + #comments in pattern
-const FLAG_UNGREEDY   = 0x00040000   // greedy quantifiers become lazy and vice versa
+const FLAG_CASELESS = 0x00000008 // case-insensitive match
+const FLAG_MULTILINE = 0x00000400 // ^ and $ match per-line
+const FLAG_DOTALL = 0x00000020 // . matches newline
+const FLAG_EXTENDED = 0x00000080 // ignore whitespace + #comments in pattern
+const FLAG_UNGREEDY = 0x00040000 // greedy quantifiers become lazy and vice versa
 
 // ---- Raw externs (resolved by std/regex/aether_regex.c).
 

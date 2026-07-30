@@ -1,4 +1,4 @@
-exports (begin, note)
+exports(begin, note)
 
 import std.map
 

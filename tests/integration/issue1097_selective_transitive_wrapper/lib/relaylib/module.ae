@@ -2,8 +2,8 @@
 // imported by a top-level unit that selectively imports std.tcp WITHOUT
 // naming poll2/read_n/write_n — the #1097 case that used to fail because
 // the omitted wrappers were not instantiated for this transitive use.
-import std.tcp (poll2, read_n, write_n)
-exports (splicey)
+import std.tcp(poll2, read_n, write_n)
+exports(splicey)
 splicey(a: ptr, b: ptr, mx: int) -> string {
     ar, br, e = poll2(a, b, 100)
     if e != "" { return e }

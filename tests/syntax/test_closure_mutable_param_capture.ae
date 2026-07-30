@@ -6,7 +6,7 @@
 extern exit(code: int)
 
 bumper(start: int) {
-    n = start    // declaration forced by the write below — is n promoted?
+    n = start // declaration forced by the write below — is n promoted?
     inc = || { n = n + 1 }
     call(inc)
     call(inc)

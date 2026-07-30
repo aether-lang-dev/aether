@@ -18,16 +18,16 @@ import std.string
 
 extern exit(code: int)
 
-var token: string = "none"   // STRING module global (the #701 string gap)
-var calls = 0                // scalar module global (guards #701)
+var token: string = "none" // STRING module global (the #701 string gap)
+var calls = 0 // scalar module global (guards #701)
 
 set_token(s: string) {
-    token = s                // pure write — must hit the file-scope static
+    token = s // pure write — must hit the file-scope static
     calls = calls + 1
 }
 
 get_token() -> string {
-    return token             // cross-function read of the same static
+    return token // cross-function read of the same static
 }
 
 call_count() -> int {
