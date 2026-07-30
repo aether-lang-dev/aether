@@ -56,7 +56,7 @@ exports(
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
     leaf_dns_count, leaf_dns_name,
     leaf_tbs_len, leaf_subject_len, leaf_issuer_len,
-    SCHEME_ECDSA_P256_SHA256, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
+    SCHEME_ECDSA_P256_SHA256, SCHEME_ECDSA_P384_SHA384, SCHEME_ED25519, SCHEME_RSA_PSS_RSAE_SHA256,
     check_validity, time_to_key, check_hostname,
     chain_verify, chain_verify_path, verify_cert_signature,
     trust_store_load, free_anchors,
@@ -65,6 +65,7 @@ exports(
 
 // SignatureScheme code points (RFC 8446 §4.2.3).
 const SCHEME_ECDSA_P256_SHA256 = 0x0403
+const SCHEME_ECDSA_P384_SHA384 = 0x0503
 const SCHEME_RSA_PSS_RSAE_SHA256 = 0x0804
 const SCHEME_ED25519 = 0x0807
 
@@ -252,6 +253,18 @@ verify_cert_verify(scheme: int, pubx: ptr, puby: ptr, transcript_hash: ptr, th_l
             result = p256.ecdsa_verify(pubx, puby, digest, r32, s32)
             bytes.free(r32)
             bytes.free(s32)
+        }
+        bytes.free(digest)
+    }
+    if scheme == SCHEME_ECDSA_P384_SHA384 {
+        // ECDSA over SHA-384(content) on a P-384 leaf key; pubx/puby are the
+        // 48-byte affine coordinates. DER sig -> (r,s), each 48 bytes.
+        digest = sha384_of_bytes(content, clen)
+        r48, s48, serr = split_ecdsa_sig(sig, sig_len, 48)
+        if string.equals(serr, "") == 1 {
+            result = p384.ecdsa_verify(pubx, puby, digest, r48, s48)
+            bytes.free(r48)
+            bytes.free(s48)
         }
         bytes.free(digest)
     }

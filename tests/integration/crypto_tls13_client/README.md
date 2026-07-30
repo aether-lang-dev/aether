@@ -42,6 +42,8 @@ default). This was verified end-to-end against `openssl s_server`:
 | Case | Server cert | Result |
 |------|-------------|--------|
 | valid + trusted + `SAN=localhost` | CA-signed, CA in trust store | **CONNECTED** |
+| P-384 leaf + multi-cert chain | `en.wikipedia.org` (ECDSA-P384 leaf, leaf→2 intermediates→root) | **CONNECTED** — P-384 CertificateVerify verified, full chain built to a system anchor |
+| P-256 leaf + multi-cert chain | `github.com` (leaf→2 intermediates→root) | **CONNECTED** — chain built to a system anchor |
 | untrusted | CA-signed, CA **not** in trust store | rejected — does not chain to a trusted anchor |
 | self-signed | self-signed, `SAN=localhost` | rejected — does not chain to a trusted anchor |
 | wrong host | CA-signed, `SAN=example.com`, connect as `localhost` | rejected — not valid for the requested hostname |
@@ -62,7 +64,9 @@ openssl s_server -accept 4433 -tls1_3 \
 # rejection: "certificate does not chain to a trusted anchor"
 ```
 
-**Remaining limits:** only ECDSA-P256 CertificateVerify is wired (an RSA server
-CertificateVerify fails closed; the cert *chain* verify handles RSA + ECDSA);
-the leaf must chain directly to a trusted anchor (no intermediate-CA path
-building yet); no revocation (CRL/OCSP). See the module header.
+**Remaining limits:** server CertificateVerify is wired for ECDSA-P256,
+ECDSA-P384, and RSA-PSS-rsae-SHA256 (Ed25519 / P-521 leaf CertVerify fail
+closed); the cert *chain* verify handles RSA + ECDSA (P-256/P-384) and builds a
+full leaf→intermediate→…→root path against the system trust store; OCSP is
+staple-only (no CRL / no OCSP fetch), responder signature not verified. See the
+module header.
