@@ -1,4 +1,5 @@
 #include "optimizer.h"
+#include "../aether_error.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -110,7 +111,36 @@ static ASTNode* fold_binary_expression(ASTNode* node) {
                            (right->node_type && right->node_type->kind == TYPE_INT);
             // When both operands are int, use C integer division semantics (truncate)
             // so that 10/3 = 3, not 3.333... — avoids %d format mismatch warning
-            if (both_int) result = (double)(long long)result;
+            if (both_int) {
+                long long exact = (long long)result;
+                /* The fold runs in double, which represents values far
+                 * beyond 32 bits exactly, but the emitted C computes the
+                 * same expression in `int`. Left alone, the two disagree:
+                 * `(250000000 - 200000000) * 50 / 225000000` folded to 11
+                 * while the identical expression over int VARIABLES
+                 * evaluated to -7 at runtime. That gap is what let the
+                 * benchmark runner's CV overflow hide during development
+                 * (the literal form looked right).
+                 *
+                 * Wrap to the value the runtime actually produces, so
+                 * constant folding is semantics-preserving, and warn:
+                 * an int expression whose true value does not fit is a
+                 * bug essentially every time, and here the compiler can
+                 * prove it. Widen a term to `long` to keep the value. */
+                int wrapped = (int)exact;
+                if ((long long)wrapped != exact) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "int constant expression overflows 32 bits: the exact value is "
+                             "%lld, which wraps to %d at runtime. Widen a term to `long` "
+                             "(e.g. `long x = a` then `x * b`) to keep the full value.",
+                             exact, wrapped);
+                    AetherError w = {NULL, NULL, node->line, node->column, msg,
+                                     NULL, NULL, AETHER_WARN_CONST_OVERFLOW};
+                    aether_warning_report(&w);
+                }
+                result = (double)wrapped;
+            }
             ASTNode* folded = create_numeric_literal(result, both_int, node->line, node->column);
             
             // Free old node (but not the original structure, return new one)

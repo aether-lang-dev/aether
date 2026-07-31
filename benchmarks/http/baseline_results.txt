@@ -1,5 +1,0 @@
-=== HTTP Baseline Benchmark (thread-per-connection) ===
-Date: Wed Jul 22 12:38:56 -03 2026
-CPU: Apple M1 Pro
-Cores: 8
-

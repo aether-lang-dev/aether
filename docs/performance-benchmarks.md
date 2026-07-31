@@ -99,6 +99,15 @@ figure, regardless of which language is being measured:
 - **5–15%** (orange): moderate variance; read medians alongside Min–Max range.
 - **> 15%** (red): high variance; investigate thermal throttling, OS scheduling, or shared-host noise before citing numbers.
 
+The runner computes CV in 64-bit and refuses to publish a negative
+value. Both matter for the fastest patterns: throughput in the hundreds
+of millions of msg/sec makes `range * 50` exceed the 32-bit ceiling
+before the divide, which used to yield a NEGATIVE CV for exactly the
+results most likely to be quoted. A negative coefficient of variation is
+arithmetically impossible, so if one ever appears the runner reports it
+and substitutes zero rather than letting a consumer read it as a
+stability signal.
+
 ### Measurement
 
 - Wall-clock time via `CLOCK_MONOTONIC` (not CPU time)
