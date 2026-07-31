@@ -22,7 +22,7 @@ from-source / HEAD case specifically.
 ## TL;DR
 
 ```sh
-git clone https://github.com/aether-lang-org/aether.git
+git clone https://github.com/aether-lang-dev/aether.git
 cd aether
 
 make ae                      # build the compiler (aetherc) + the `ae` CLI, no tests

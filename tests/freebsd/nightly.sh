@@ -18,12 +18,12 @@
 #
 # Env:
 #   BRANCH  branch to test          (default: feat/freebsd-sandbox-parity-v2)
-#   REPO    owner/name for issues   (default: aether-lang-org/aether)
+#   REPO    owner/name for issues   (default: aether-lang-dev/aether)
 #   NO_ISSUE=1  run tests, never file an issue (dry run)
 set -u
 
 BRANCH="${BRANCH:-feat/freebsd-sandbox-parity-v2}"
-REPO="${REPO:-aether-lang-org/aether}"
+REPO="${REPO:-aether-lang-dev/aether}"
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT" || exit 3
 

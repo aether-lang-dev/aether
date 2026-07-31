@@ -4,7 +4,7 @@ A runnable scaling study comparing the **three** concurrency designs
 Aether ships for a shared, concurrently-accessed map, and the guidance
 that falls out of it.
 
-[Design discussion on the issue tracker](https://github.com/aether-lang-org/aether/issues/841).
+[Design discussion on the issue tracker](https://github.com/aether-lang-dev/aether/issues/841).
 Benchmark:
 [`benchmarks/concurrent-cache/concurrent_cache_bench.ae`](../../benchmarks/concurrent-cache/concurrent_cache_bench.ae).
 

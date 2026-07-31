@@ -125,7 +125,7 @@ for a host that needs the result back. So this bridge cannot bind a stock
 distro `libfactor`.
 
 It depends on a small **fork** that restores embedded eval —
-[`aether-lang-org/factor-language`](https://github.com/aether-lang-org/factor-language),
+[`aether-lang-dev/factor-language`](https://github.com/aether-lang-dev/factor-language),
 `vm/embed_api.cpp` (one commit on top of upstream `master`):
 
 ```c
@@ -202,7 +202,7 @@ experiment:
 
 1. Build the fork's `libfactor` and bootstrap its `factor.image`:
    ```sh
-   git clone https://github.com/aether-lang-org/factor-language
+   git clone https://github.com/aether-lang-dev/factor-language
    cd factor-language && make linux-x86-64 factor-lib
    curl -fsSLO https://downloads.factorcode.org/images/master/boot.unix-x86.64.image
    ./factor -i=boot.unix-x86.64.image           # bootstraps factor.image

@@ -477,7 +477,7 @@ jobs:
     - name: Checkout aether-crossbuild
       uses: actions/checkout@v4
       with:
-        repository: aether-lang-org/aether-crossbuild
+        repository: aether-lang-dev/aether-crossbuild
         path: crossbuild
         fetch-depth: 1
 

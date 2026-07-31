@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Repository URLs pointed at the pre-rename organisation.** Every
+  `github.com/aether-lang-org/...` reference (57 across the README, LLM.md,
+  docs, `get.sh`, the release workflow, Docker scripts and the Makefile) now
+  names `aether-lang-dev`. They had been resolving only through GitHub's
+  rename redirect, a silent dependency that breaks the install one-liner,
+  the release pipeline's crossbuild checkout and every documented clone
+  command the day it lapses. Each rewritten target was verified to resolve,
+  including the `raw.githubusercontent.com` one-liner and the workflow's
+  `repository:` field, neither of which is a `github.com` URL. The
+  `servirtium-vcr` links were wrong independently of the rename: that repo
+  lives in the `servirtium` org and never existed under Aether's (LLM.md
+  already said so in one place), so those five now point at
+  `servirtium/servirtium-vcr`. `CHANGELOG-archive.md` keeps its historical
+  URLs as written.
 ## [0.470.0]
 
 ### Fixed

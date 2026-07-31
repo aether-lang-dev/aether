@@ -2,7 +2,7 @@
 # contrib/host/factor end-to-end smoke test.
 #
 # Skips cleanly unless BOTH env vars point at the embed-api fork
-# (aether-lang-org/factor-language):
+# (aether-lang-dev/factor-language):
 #   AETHER_FACTOR_SONAME  - path to its built libfactor (.so)
 #   AETHER_FACTOR_IMAGE   - path to its bootstrapped factor.image
 # CI machines won't have these, so the test no-ops there (host bridges
@@ -17,7 +17,7 @@ AE="$ROOT/build/ae"
 
 if [ -z "$AETHER_FACTOR_SONAME" ] || [ -z "$AETHER_FACTOR_IMAGE" ]; then
     echo "  [SKIP] AETHER_FACTOR_SONAME / AETHER_FACTOR_IMAGE unset"
-    echo "         (needs the aether-lang-org/factor-language fork: build its"
+    echo "         (needs the aether-lang-dev/factor-language fork: build its"
     echo "          libfactor + bootstrap factor.image, then point these env vars)"
     exit 0
 fi

@@ -1,7 +1,7 @@
 # Aether Programming Language
 
-[![CI](https://github.com/aether-lang-org/aether/actions/workflows/ci.yml/badge.svg)](https://github.com/aether-lang-org/aether/actions/workflows/ci.yml)
-[![Windows](https://github.com/aether-lang-org/aether/actions/workflows/windows.yml/badge.svg)](https://github.com/aether-lang-org/aether/actions/workflows/windows.yml)
+[![CI](https://github.com/aether-lang-dev/aether/actions/workflows/ci.yml/badge.svg)](https://github.com/aether-lang-dev/aether/actions/workflows/ci.yml)
+[![Windows](https://github.com/aether-lang-dev/aether/actions/workflows/windows.yml/badge.svg)](https://github.com/aether-lang-dev/aether/actions/workflows/windows.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM%20%7C%20Embedded-lightgrey)]()
 [![Website](https://img.shields.io/badge/website-aether--lang.dev-8A2BE2)](https://aether-lang.dev/)
@@ -44,12 +44,12 @@ See [Performance Benchmarks](docs/performance-benchmarks.md) for methodology and
 
 **Linux / macOS / FreeBSD, prebuilt binary (no toolchain, no build):**
 
-Every [release](https://github.com/aether-lang-org/aether/releases/latest) ships a ready-to-run tarball (`ae` + `aetherc` + stdlib) named `aether-<version>-<platform>.tar.gz`, where `<platform>` is one of `linux-x86_64`, `macos-arm64`, `macos-x86_64`, `freebsd-x86_64`. Grab the URL for your platform from the [latest release](https://github.com/aether-lang-org/aether/releases/latest), then extract and add its `bin/` to your `PATH`:
+Every [release](https://github.com/aether-lang-dev/aether/releases/latest) ships a ready-to-run tarball (`ae` + `aetherc` + stdlib) named `aether-<version>-<platform>.tar.gz`, where `<platform>` is one of `linux-x86_64`, `macos-arm64`, `macos-x86_64`, `freebsd-x86_64`. Grab the URL for your platform from the [latest release](https://github.com/aether-lang-dev/aether/releases/latest), then extract and add its `bin/` to your `PATH`:
 
 ```bash
 # Example (substitute the current version + your platform from the Releases page):
 VER=0.458.0; PLATFORM=linux-x86_64
-curl -fsSL "https://github.com/aether-lang-org/aether/releases/download/v${VER}/aether-${VER}-${PLATFORM}.tar.gz" | tar xz -C ~/.local
+curl -fsSL "https://github.com/aether-lang-dev/aether/releases/download/v${VER}/aether-${VER}-${PLATFORM}.tar.gz" | tar xz -C ~/.local
 export PATH="$HOME/.local/bin:$PATH"     # add to ~/.bashrc / ~/.zshrc to persist
 ae version
 ```
@@ -57,15 +57,15 @@ ae version
 **Linux / macOS, build from source (remote one-liner, no clone):**
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh | sh
+curl -sSL https://raw.githubusercontent.com/aether-lang-dev/aether/main/get.sh | sh
 ```
 
-Fetches a pinned source tarball, builds the toolchain (Aether compiles to C, so the only prerequisites are a C compiler + GNU make, no tests run), and installs to `~/.local` (sudo-free). Pin a version with `AETHER_REF=<tag>` (see the [releases page](https://github.com/aether-lang-org/aether/releases) for tags), or change the prefix with `PREFIX=/usr/local` (system-wide; needs sudo). Add `~/.local/bin` to your `PATH` if it isn't already.
+Fetches a pinned source tarball, builds the toolchain (Aether compiles to C, so the only prerequisites are a C compiler + GNU make, no tests run), and installs to `~/.local` (sudo-free). Pin a version with `AETHER_REF=<tag>` (see the [releases page](https://github.com/aether-lang-dev/aether/releases) for tags), or change the prefix with `PREFIX=/usr/local` (system-wide; needs sudo). Add `~/.local/bin` to your `PATH` if it isn't already.
 
 **Linux / macOS, full clone install** (editor extension, `ae version` management, shell-PATH setup, `~/.aether` layout):
 
 ```bash
-git clone https://github.com/aether-lang-org/aether.git
+git clone https://github.com/aether-lang-dev/aether.git
 cd aether
 ./install.sh
 ```
@@ -74,7 +74,7 @@ Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run
 
 **Windows, download and run:**
 
-1. Download `aether-*-windows-x86_64.zip` from [Releases](https://github.com/aether-lang-org/aether/releases)
+1. Download `aether-*-windows-x86_64.zip` from [Releases](https://github.com/aether-lang-dev/aether/releases)
 2. Extract to any folder (e.g. `C:\aether`)
 3. Add `C:\aether\bin` to your PATH
 4. **Restart your terminal** (so PATH takes effect)
@@ -91,7 +91,7 @@ ae install                   # install the latest release (or `ae install <tag>`
 ae use <tag>                 # switch to an already-installed version
 ```
 
-Run `ae version list` (or check the [latest release](https://github.com/aether-lang-org/aether/releases/latest)) to find the current tag; there's no need to hard-code one.
+Run `ae version list` (or check the [latest release](https://github.com/aether-lang-dev/aether/releases/latest)) to find the current tag; there's no need to hard-code one.
 
 (The longer `ae version install <v>` / `ae version use <v>` forms still
 work and are equivalent to `ae install` / `ae use`.)
@@ -179,7 +179,7 @@ make help                        # Show all targets
 
 The Aether build is GNU-make based. Use one of the two paths below, `nmake` from a Visual Studio Developer Prompt **will not work** (the Makefile uses GNU-only syntax that NMAKE can't parse).
 
-**Just running Aether? Skip this section** and use the [release binary](https://github.com/aether-lang-org/aether/releases), no MSYS2 setup required.
+**Just running Aether? Skip this section** and use the [release binary](https://github.com/aether-lang-dev/aether/releases), no MSYS2 setup required.
 
 **Building from source, recommended (MSYS2 / MinGW-w64):**
 
@@ -192,14 +192,14 @@ The Aether build is GNU-make based. Use one of the two paths below, `nmake` from
    ```
 3. Clone and build:
    ```bash
-   git clone https://github.com/aether-lang-org/aether.git
+   git clone https://github.com/aether-lang-dev/aether.git
    cd aether
    make ci   # full suite: compiler, ae, stdlib, REPL, C tests, .ae tests, examples
    ```
 
 For HTTPS to verify certs, the `mingw-w64-x86_64-ca-certificates` package above provides the bundle at `/mingw64/etc/ssl/certs/ca-bundle.crt`. The runtime auto-detects it; if your install is in a non-standard location, export `SSL_CERT_FILE` to the bundle's Windows path.
 
-**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-org/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe` so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
+**Native MSVC (cl.exe / nmake):** not currently supported as a full build path, tracker [#99](https://github.com/aether-lang-dev/aether/issues/99). The MSVC matrix job in CI verifies our public headers parse under `cl.exe` so a future native MSVC port stays feasible, but `make` (the build system itself) requires GNU make. The MSYS2 MinGW build above is the supported source-build path for Windows today.
 
 ## Project Structure
 
@@ -363,7 +363,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Standard Library Reference](docs/stdlib-reference.md) - Full stdlib surface
 - [HTTP Server](docs/http-server.md) - TLS, HTTP/2, middleware, health probes, metrics, graceful shutdown
 - [Reverse Proxy](docs/http-reverse-proxy.md) - `std.http.proxy` upstream pool, load balancing, health, cache, circuit breaker
-- [HTTP Record/Replay (VCR)](docs/http-vcr.md) - moved to the [`servirtium-vcr`](https://github.com/aether-lang-org/servirtium-vcr) monorepo; no longer in the Aether stdlib
+- [HTTP Record/Replay (VCR)](docs/http-vcr.md) - moved to the [`servirtium-vcr`](https://github.com/servirtium/servirtium-vcr) monorepo; no longer in the Aether stdlib
 - [Install Layout](docs/install-layout.md) - What ships in `~/.aether`, MANIFEST format, downstream-link contract
 - [C constant import](docs/bindgen-consts.md) - `ae bindgen consts`, C macro constants as Aether consts
 - [Module System](docs/module-system-design.md) - `import`/`exports`, PATH-style `--lib` search chain, selective imports, package layout
@@ -447,12 +447,12 @@ The benchmark runner is written in Aether (`run_benchmarks.ae`), dogfooding the 
 The Aether ecosystem includes downstream consumers that live in their
 own repos and release independently:
 
-- **[aether-ui](https://github.com/aether-lang-org/aether-ui)**,
+- **[aether-ui](https://github.com/aether-lang-dev/aether-ui)**,
   Cross-platform widget toolkit (GTK4 on Linux, AppKit on macOS, Win32
   on Windows) with an AetherUIDriver HTTP test server for headless
   integration testing. Previously shipped as `contrib/aether_ui/` in
   this repo; spun out so it can iterate on its own cadence.
-- **[aeb](https://github.com/aether-lang-org/aeb)**, Build system for
+- **[aeb](https://github.com/aether-lang-dev/aeb)**, Build system for
   multi-package Aether projects. Reads `share/aether/MANIFEST` (the
   authoritative list of link-suitable runtime/stdlib `.c` files) and
   dispatches per-package builds with cache reuse and incremental

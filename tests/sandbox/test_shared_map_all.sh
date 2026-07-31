@@ -332,7 +332,7 @@ echo "=== Factor ==="
 if [ -z "$AETHER_FACTOR_SONAME" ] || [ -z "$AETHER_FACTOR_IMAGE" ] || \
    [ ! -f "$AETHER_FACTOR_SONAME" ] || [ ! -f "$AETHER_FACTOR_IMAGE" ]; then
     echo "  [SKIP] Factor: \$AETHER_FACTOR_SONAME / \$AETHER_FACTOR_IMAGE unset"
-    echo "         (needs the aether-lang-org/factor-language fork's libfactor + image)"
+    echo "         (needs the aether-lang-dev/factor-language fork's libfactor + image)"
 else
 FACTOR_OUT=$(gcc -o /tmp/test_map_factor \
     "$ROOT/contrib/host/factor/aether_host_factor.c" \

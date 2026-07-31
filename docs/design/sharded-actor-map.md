@@ -10,7 +10,7 @@ readers and writers without collapsing onto a single core.
 > `hash(key) % N`, and operations on different keys land on different
 > mailboxes. Contention drops roughly `N×`.
 
-[Design discussion on the issue tracker](https://github.com/aether-lang-org/aether/issues/839).
+[Design discussion on the issue tracker](https://github.com/aether-lang-dev/aether/issues/839).
 
 See the runnable example at
 [`examples/actors/sharded-map.ae`](../../examples/actors/sharded-map.ae) and

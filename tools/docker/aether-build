@@ -338,7 +338,7 @@ RUN mkdir -p /src && tar xzf /src.tar.gz -C /src --strip-components=1 && rm /src
     # Step 2 + 3: cached tarball, downloading first if absent.
     TARBALL="$CACHE_DIR/aether-${AETHER_REF}.tar.gz"
     if [ ! -f "$TARBALL" ]; then
-        URL="https://github.com/aether-lang-org/aether/archive/refs/tags/${AETHER_REF}.tar.gz"
+        URL="https://github.com/aether-lang-dev/aether/archive/refs/tags/${AETHER_REF}.tar.gz"
         echo "aether-build: fetching $URL" >&2
         echo "aether-build:   → $TARBALL" >&2
         if command -v curl >/dev/null 2>&1; then
@@ -372,7 +372,7 @@ RUN mkdir -p /src && tar xzf /src.tar.gz -C /src --strip-components=1 && rm /src
     # Step 4: fallback — git clone inside the image. The image build
     # needs network access to github.com at this point.
     SOURCE_STAGE="RUN git clone --depth 1 --branch ${AETHER_REF} \\
-        https://github.com/aether-lang-org/aether.git /src"
+        https://github.com/aether-lang-dev/aether.git /src"
 }
 
 # ── Image bootstrap (one-time) ────────────────────────────────────
@@ -557,7 +557,7 @@ case "${1:-}" in
             echo "aether-build (container): --aeb needs an aeb-bearing image."  >&2
             echo "  The base aether-builder image ships ae/aetherc but NOT aeb."  >&2
             echo "  Layer aeb on top: see aeb's tools/container/Containerfile.aeb-toolchain" >&2
-            echo "  ( https://github.com/aether-lang-org/aeb )"                   >&2
+            echo "  ( https://github.com/aether-lang-dev/aeb )"                   >&2
             echo "  Then re-run with the aeb image:"                              >&2
             echo "    AETHER_BUILDER_IMAGE=aeb-toolchain:slim aether-build --aeb <target>"  >&2
             exit 1
