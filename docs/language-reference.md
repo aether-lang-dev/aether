@@ -2593,6 +2593,31 @@ check(x: int) -> {
 }
 ```
 
+### Constant-Expression Overflow [W1003]
+
+An `int` expression whose operands are all constants is folded at
+compile time. When its exact value does not fit 32 bits, the fold wraps
+exactly as the runtime would and reports what happened:
+
+```aether
+main() {
+    cv = (250000000 - 200000000) * 50 / 225000000
+    // warning[W1003]: int constant expression overflows 32 bits: the
+    // exact value is 2500000000, which wraps to -1794967296 at runtime.
+}
+```
+
+Folding wraps rather than keeping the wide value on purpose: otherwise
+the constant form and the identical expression written over `int`
+variables would disagree, and the literal form (the one you reach for
+while developing) would look correct while production code silently
+overflowed. Widen a term to keep the value:
+
+```aether
+long span = 250000000 - 200000000
+cv = span * 50 / 225000000          // 11, no warning
+```
+
 Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`.
 
 ---

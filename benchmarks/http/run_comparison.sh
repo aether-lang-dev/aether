@@ -24,7 +24,17 @@ cpu_cores() {
     fi
 }
 
-RESULTS="benchmarks/http/comparison_results.txt"
+# Preflight: wrk drives every measurement here too.
+if ! command -v wrk >/dev/null 2>&1; then
+    echo "ERROR: wrk is not installed (brew install wrk / apt install wrk)." >&2
+    exit 1
+fi
+
+# Write to a temp file, publish only on success, so an interrupted run
+# never leaves a truncated results file in the tree.
+RESULTS_FINAL="benchmarks/http/comparison_results.txt"
+RESULTS="$(mktemp "${TMPDIR:-/tmp}/aether_comparison.XXXXXX")"
+trap 'rm -f "$RESULTS"' EXIT
 echo "=== HTTP Server Benchmark: Thread vs Actor ===" > "$RESULTS"
 echo "Date: $(date)" >> "$RESULTS"
 echo "CPU: $(cpu_model)" >> "$RESULTS"
@@ -84,3 +94,8 @@ done
 
 echo ""
 echo "=== Full results saved to $RESULTS ==="
+
+# Every measurement landed: publish the complete file.
+mv "$RESULTS" "$RESULTS_FINAL"
+trap - EXIT
+echo "=== Results saved to $RESULTS_FINAL ==="

@@ -190,7 +190,13 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
     // Warmup (discarded)
     w = 0
     while w < warmup {
-        os_system(string_concat(run_cmd, " >/dev/null 2>&1"))
+        // Warmup: the exit status is deliberately ignored (a failing
+        // warmup shows up in the timed runs), but bind it so the
+        // generated C does not discard a value and warn.
+        warm_rc = os_system(string_concat(run_cmd, " >/dev/null 2>&1"))
+        if warm_rc < 0 {
+            println("[WARN] warmup command could not be launched")
+        }
         w = w + 1
     }
 
@@ -199,7 +205,9 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
     worst = 999999999
     median_mps = 0
     median_ns = 0
-    total = 0
+    // 64-bit: msg/sec runs into the hundreds of millions, so five runs
+    // already approach the int32 ceiling and BENCH_RUNS is user-settable.
+    long total = 0
     mem = 0
     runs_json = ""
 
@@ -227,11 +235,29 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
         return ""
     }
 
-    // CV% approximation: range / mean * 50
-    mean = total / num_runs
-    cv = 0
+    // CV% approximation: range / mean * 50.
+    //
+    // 64-bit throughout. In int32 the multiply overflowed before the
+    // divide for the fastest patterns (skynet, counting): a 50,000,000
+    // range gives 50,000,000 * 50 = 2.5e9, past the 2,147,483,647
+    // ceiling, so cv came out NEGATIVE for exactly the results most
+    // likely to be quoted. Doing the divide first would dodge the
+    // overflow but throw away precision on small ranges, so widen
+    // instead.
+    long mean = total / num_runs
+    long span = best - worst
+    long cv = 0
     if mean > 0 {
-        cv = (best - worst) * 50 / mean
+        cv = span * 50 / mean
+    }
+    // A coefficient of variation is non-negative by definition. If one
+    // ever appears, that is arithmetic damage, not a measurement:
+    // refuse to publish it rather than let a consumer treat it as a
+    // stability signal (docs/performance-benchmarks.md gates citability
+    // on this number).
+    if cv < 0 {
+        println("[WARN] discarding negative cv_pct for this run")
+        cv = 0
     }
 
     // Print
@@ -264,7 +290,7 @@ string run_lang(string name, string build_cmd, string run_cmd, int num_runs, int
     j = string_concat(j, ",\n      \"max_mps\": ")
     j = string_concat(j, string_from_int(best))
     j = string_concat(j, ",\n      \"cv_pct\": ")
-    j = string_concat(j, string_from_int(cv))
+    j = string_concat(j, string_from_long(cv))
     j = string_concat(j, ",\n      \"notes\": \"")
     j = string_concat(j, get_notes(name))
     j = string_concat(j, "\"\n    }")

@@ -1,0 +1,90 @@
+// Regression: the cross-language benchmark runner computed its
+// coefficient of variation as `(best - worst) * 50 / mean` in 32-bit
+// int. For the fastest patterns (skynet, counting run in the hundreds
+// of millions of msg/sec) the multiply overflowed before the divide:
+// a 50,000,000 range gives 50,000,000 * 50 = 2.5e9, past the
+// 2,147,483,647 ceiling, so cv_pct came out NEGATIVE. A coefficient of
+// variation is non-negative by definition, and
+// docs/performance-benchmarks.md gates citability on it, so exactly
+// the numbers most likely to be quoted carried a meaningless value.
+//
+// The runner now computes span, mean and cv in `long`, and the run
+// accumulator is `long` too (five runs at 250M already approach the
+// int32 ceiling, and BENCH_RUNS is user-settable).
+//
+// This test pins the arithmetic the runner depends on:
+//   1. The overflowing shape yields the correct positive value in long
+//   2. It genuinely overflowed in int (guarding against a silent
+//      revert to the narrow type)
+//   3. Slower patterns, which were always fine, are unchanged
+//   4. A ten-run accumulator that would wrap int32 stays correct
+//   5. Zero variance yields exactly zero
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// The runner's formula, in the widened types it now uses.
+cv_pct(best: int, worst: int, total: long, num_runs: int) -> long {
+    long mean = total / num_runs
+    long span = best - worst
+    long cv = 0
+    if mean > 0 {
+        cv = span * 50 / mean
+    }
+    return cv
+}
+
+main() {
+    // 1. The reported case: 250M best, 200M worst, 225M mean.
+    fast = cv_pct(250000000, 200000000, 1125000000, 5)
+    if fast != 11 {
+        fail("fast-pattern cv should be 11, got ${fast}")
+    }
+    if fast < 0 {
+        fail("cv must never be negative")
+    }
+    println("PASS 1: the overflowing shape yields 11, not a negative")
+
+    // 2. The narrow computation really does overflow. Computed through
+    //    int VARIABLES so this is the runtime path: the same expression
+    //    written with literals is constant-folded, and since the fold
+    //    became semantics-preserving it now wraps identically (and
+    //    warns, W1003), so either form demonstrates the overflow. Using
+    //    variables keeps this test free of the warning.
+    nb = 250000000
+    nw = 200000000
+    nm = 225000000
+    narrow = (nb - nw) * 50 / nm
+    if narrow >= 0 {
+        fail("expected the int32 formula to overflow negative, got ${narrow}")
+    }
+    println("PASS 2: the int32 formula still demonstrates the overflow (${narrow})")
+
+    // 3. A slow pattern was always correct; it must not move.
+    slow = cv_pct(1200, 1000, 5500, 5)
+    if slow != 9 {
+        fail("slow-pattern cv should be 9, got ${slow}")
+    }
+    println("PASS 3: slow patterns unchanged")
+
+    // 4. Ten runs of a fast pattern: 2.25e9 total wraps a 32-bit
+    //    accumulator, so this guards the accumulator width too.
+    ten = cv_pct(250000000, 200000000, 2250000000, 10)
+    if ten != 11 {
+        fail("ten-run cv should be 11, got ${ten}")
+    }
+    println("PASS 4: a ten-run accumulator does not wrap")
+
+    // 5. Zero variance is exactly zero.
+    stable = cv_pct(250000000, 250000000, 1250000000, 5)
+    if stable != 0 {
+        fail("zero-variance cv should be 0, got ${stable}")
+    }
+    println("PASS 5: zero variance yields zero")
+
+    println("=== All cases passed ===")
+}
