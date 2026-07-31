@@ -1038,6 +1038,18 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
         }
         return;
     }
+    /* A closure body is its OWN return context: its type comes from
+     * resolve_closure_return_type, not from the enclosing function.
+     * Carrying the outer type in would stamp `return call(...)` inside
+     * a closure with the enclosing function's return type, which is how
+     * `bump = || { return call(digit, 1) }` inside a closure-returning
+     * builder got typed as the closure struct instead of int. */
+    if (node->type == AST_CLOSURE) {
+        for (int i = 0; i < node->child_count; i++) {
+            propagate_call_return_types_in(gen, node->children[i], NULL);
+        }
+        return;
+    }
     if (node->type == AST_RETURN_STATEMENT && node->child_count == 1 &&
         fn_ret && fn_ret->kind != TYPE_UNKNOWN && fn_ret->kind != TYPE_INT) {
         ASTNode* r = node->children[0];
