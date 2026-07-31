@@ -252,7 +252,7 @@ probe_tinyweb() {
 probe_factor() {
     # The bridge .c loads libfactor purely via dlopen (mirrors host/lua,
     # host/python after their dlopen rewrites) — it needs NO Factor dev
-    # lib at COMPILE time. The aether-lang-org/factor-language fork's
+    # lib at COMPILE time. The aether-lang-dev/factor-language fork's
     # libfactor + bootstrapped factor.image are only required at RUNTIME
     # (the host_factor integration test gates on AETHER_FACTOR_SONAME /
     # AETHER_FACTOR_IMAGE and skips when unset). So the archive always

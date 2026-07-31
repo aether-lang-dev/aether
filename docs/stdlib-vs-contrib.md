@@ -94,8 +94,8 @@ project iterates on its own release cadence.
 
 | Sibling repo | Replaces |
 |---|---|
-| [aether-lang-org/aether-ui](https://github.com/aether-lang-org/aether-ui) | The widget toolkit (GTK4 / AppKit / Win32 backends + AetherUIDriver HTTP test server), formerly `contrib/aether_ui/`. |
-| [aether-lang-org/aeb](https://github.com/aether-lang-org/aeb) | The build system (formerly aetherBuild / `aeb-link`); a downstream consumer of `share/aether/MANIFEST` and the runtime sources. |
+| [aether-lang-dev/aether-ui](https://github.com/aether-lang-dev/aether-ui) | The widget toolkit (GTK4 / AppKit / Win32 backends + AetherUIDriver HTTP test server), formerly `contrib/aether_ui/`. |
+| [aether-lang-dev/aeb](https://github.com/aether-lang-dev/aeb) | The build system (formerly aetherBuild / `aeb-link`); a downstream consumer of `share/aether/MANIFEST` and the runtime sources. |
 | servirtium-vcr (`integration/climate_interop/`) | The Servirtium climate-API record/replay harness, formerly `contrib/climate_http_tests/`. The VCR tapes + record-then-replay tests live alongside the other-language reference impls there. |
 
 ## Migration test

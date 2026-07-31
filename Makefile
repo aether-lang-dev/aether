@@ -1735,7 +1735,7 @@ install: $(VERSION_HEADER) release ae stdlib
 # bridges, different build shape — javac/jar and cgo c-archive don't fit
 # the cc→ar pipeline). The widget toolkit
 # (formerly contrib/aether_ui) spun out to
-# https://github.com/aether-lang-org/aether-ui and is no longer in this repo.
+# https://github.com/aether-lang-dev/aether-ui and is no longer in this repo.
 # The Servirtium climate-API record/replay harness (formerly
 # contrib/climate_http_tests) moved to the servirtium-vcr repo's
 # integration/climate_interop, where the VCR tapes + replay tests live.
@@ -2221,7 +2221,7 @@ contrib-host-check: compiler ae stdlib
 	@echo "==================================="
 
 # aether_ui has been spun out into its own repo. The widget toolkit
-# now lives at https://github.com/aether-lang-org/aether-ui and is
+# now lives at https://github.com/aether-lang-dev/aether-ui and is
 # consumed as a downstream package, not built from this repo. The
 # previous `contrib-aether-ui-check` and `benchmark-aether-ui` targets
 # (along with their CI step) were removed when the spin-out happened.

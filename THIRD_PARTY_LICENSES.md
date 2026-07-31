@@ -9,7 +9,7 @@ here.
 ## Bouncy Castle (bc-csharp) — MIT License
 
 Used by the cryptography port (issue
-[#739](https://github.com/aether-lang-org/aether/issues/739)). Files that port
+[#739](https://github.com/aether-lang-dev/aether/issues/739)). Files that port
 logic, structure, or test vectors from Bouncy Castle for .NET carry the
 attribution header:
 

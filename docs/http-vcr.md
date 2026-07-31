@@ -3,7 +3,7 @@
 The Servirtium record/replay engine that used to ship in the Aether
 stdlib as **`std.http.server.vcr`** has moved to its own repository:
 
-> **https://github.com/aether-lang-org/servirtium-vcr**
+> **https://github.com/servirtium/servirtium-vcr**
 
 That monorepo is now its authoritative home, the VCR core (`core/vcr.ae`,
 `core/embed.ae`, `core/aether_vcr.c`) plus its language bindings (.NET, Go,

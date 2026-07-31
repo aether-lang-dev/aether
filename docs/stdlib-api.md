@@ -804,7 +804,7 @@ Full reference: [`docs/http-reverse-proxy.md`](http-reverse-proxy.md).
 
 The Servirtium record/replay engine that used to ship as
 `std.http.server.vcr` has been lifted into its own repository,
-[`servirtium-vcr`](https://github.com/aether-lang-org/servirtium-vcr),
+[`servirtium-vcr`](https://github.com/servirtium/servirtium-vcr),
 which is now its authoritative home (alongside its language bindings).
 It is no longer part of the Aether stdlib. See [`docs/http-vcr.md`](http-vcr.md).
 

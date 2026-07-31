@@ -314,7 +314,7 @@ plays that role), no interfaces.
   body". Server-side stays in `std.http` (there's no v2 server).
   Record/replay HTTP testing (Servirtium VCR) is NOT in the stdlib, it's
   a separate repo,
-  [`servirtium-vcr`](https://github.com/aether-lang-org/servirtium-vcr)
+  [`servirtium-vcr`](https://github.com/servirtium/servirtium-vcr)
   (`import core.vcr`). Don't look for `std.http.server.vcr`.
 
 ## Type-system & effect features worth reaching for
@@ -410,13 +410,13 @@ workaround, they cover cases a porter often hand-rolls.
 
 ## Working with downstream users
 
-- **aether-ui** (`https://github.com/aether-lang-org/aether-ui`) 
+- **aether-ui** (`https://github.com/aether-lang-dev/aether-ui`) 
   cross-platform widget toolkit (GTK4 / AppKit / Win32) with an
   AetherUIDriver HTTP test server. Was `contrib/aether_ui/` in this
   repo until the spin-out; now consumes Aether the same way external
   users do (install + `$(ae cflags)`). Useful reference for the
   embedded-DSL pattern: the toolkit's surface IS a closure-DSL (think QML or Flutter)
-- **aeb** (`https://github.com/aether-lang-org/aeb`) 
+- **aeb** (`https://github.com/aether-lang-dev/aeb`) 
   multi-package and multi-language build system, the second major sibling.
   Bazel-shaped in ambition but stops short of full reproducibility.
   Reads `share/aether/MANIFEST` to discover
@@ -426,7 +426,7 @@ workaround, they cover cases a porter often hand-rolls.
   without forcing it to guess via `find -name '*.c'`. If you're touching
   install-layout / shipped source / link contract, ping aeb side.
   See also google-monorepo-sim (../google-monorepo-sim) which showcases aeb.
-- **aeo** (`https://github.com/aether-lang-org/aeo`) 
+- **aeo** (`https://github.com/aether-lang-dev/aeo`) 
   the third major sibling:
   an infrastructure orchestrator that stands up / tears down a dependency-
   ordered tree of VMs + containers (FreeBSD jail/bhyve, Linux
@@ -436,13 +436,13 @@ workaround, they cover cases a porter often hand-rolls.
   compose surface is the `config IS code` closure-DSL applied to live
   infra, the canonical proof the DSL pitch works beyond config files.
   Has an `aeo-agent` and attempt to adhere to the principles of containment.
-- **aeocha** (`https://github.com/aether-lang-org/aeocha`)
+- **aeocha** (`https://github.com/aether-lang-dev/aeocha`)
   BDD-style test framework for Aether (`describe` / `it` / `before_each` /
   `after_each` via trailing blocks + closures, Cuppa-inspired). The
   reference consumer of the trailing-block/closure DSL for a test surface;
   look here for a worked example of the `builder`-shaped API in practice.
   There is a co-located mutation testing facility too.
-- **svn-aether port (avn)** (`https://github.com/aether-lang-org/avn`) 
+- **svn-aether port (avn)** (`https://github.com/aether-lang-dev/avn`) 
   is a big
   real-world consumer. Port is methodical C → Aether, one-leaf-per-
   commit. Downstream finds the gaps before anyone else, every
@@ -450,7 +450,7 @@ workaround, they cover cases a porter often hand-rolls.
   propagation, 128-decl cap) was filed by avn before showing up
   anywhere else. As much as anything it was used to shake out
   missing features and bugs for Aether.
-- **mquickjs-port** (`https://github.com/aether-lang-org/mquickjs-port`)
+- **mquickjs-port** (`https://github.com/aether-lang-dev/mquickjs-port`)
   a full C→Aether port of Bellard & Gordon's
   MicroQuickJS (ES5-subset embedded JS engine, tracing GC, ~10 kB RAM). The
   end state is pure Aether: `mquickjs.c` deleted entirely, every engine leaf
@@ -477,7 +477,7 @@ workaround, they cover cases a porter often hand-rolls.
   wires many FFI consumers through one `aeb` run. Aether-side entry is
   `import core.vcr` it's a separate repo, not part of `std.http` (the
   HTTP-client idiom above says the same).
-- **zsync-port** (`https://github.com/aether-lang-org/zsync-port`)
+- **zsync-port** (`https://github.com/aether-lang-dev/zsync-port`)
   a pure-Aether port of zsync (rsync-over-HTTP: fetch only the changed blocks
   of a file, driven by a `.zsync` control file). ~3.4k lines of Aether + one
   small Artistic-licensed C shim (`rcksum/fileio.c`, positional file I/O); the

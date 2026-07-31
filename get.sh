@@ -7,7 +7,7 @@
 # from-HEAD developer flow see docs/bootstrap-from-source.md.
 #
 # Usage:
-#   curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh | sh
+#   curl -sSL https://raw.githubusercontent.com/aether-lang-dev/aether/main/get.sh | sh
 #   AETHER_REF=v0.184.0 sh get.sh
 #   AETHER_REF=v0.184.0 PREFIX=/usr/local sh get.sh   # system-wide (needs sudo)
 #
@@ -22,7 +22,7 @@
 # are NOT run (building + installing is enough to use Aether).
 set -eu
 
-REPO="aether-lang-org/aether"
+REPO="aether-lang-dev/aether"
 PREFIX="${PREFIX:-$HOME/.local}"
 CC="${CC:-cc}"
 

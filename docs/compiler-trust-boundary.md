@@ -96,7 +96,7 @@ statement.
 
 ### 3. If remote packages ever exist, fetch is a separate, audited, pinned step
 
-`aeb` (the external multi-package build system, github.com/aether-lang-org/aeb)
+`aeb` (the external multi-package build system, github.com/aether-lang-dev/aeb)
 reads `share/aether/MANIFEST` to discover link-suitable runtime/stdlib `.c`
 files; [install-layout.md](install-layout.md) documents the MANIFEST contract it
 consumes. Today it operates entirely on the local install tree.

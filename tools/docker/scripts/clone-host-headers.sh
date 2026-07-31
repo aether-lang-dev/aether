@@ -17,7 +17,7 @@
 
 set -eu
 
-HEADERS_REPO="${HEADERS_REPO:-https://github.com/aether-lang-org/hosted-language-headers.git}"
+HEADERS_REPO="${HEADERS_REPO:-https://github.com/aether-lang-dev/hosted-language-headers.git}"
 # Bumped to 80b44be — the commit that adds the per-target configured-header
 # overlays (targets/<triple>/<lang>/). install-python-headers.sh now overlays
 # targets/x86_64-linux-gnu/python/pyconfig.h from this tree, so the pin MUST

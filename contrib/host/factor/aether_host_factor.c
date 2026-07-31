@@ -1,7 +1,7 @@
 // aether_host_factor.c — Embedded Factor Language Host Module
 //
 // Runs Factor code inside the Aether process via a *forked* libfactor
-// (github.com/aether-lang-org/factor-language, branch feat/embed-api) that
+// (github.com/aether-lang-dev/factor-language, branch feat/embed-api) that
 // exposes a generic, re-entrant C eval-with-result API the modern upstream
 // VM lacks. The fork restores the old start_embedded_factor behaviour:
 //   char* factor_embed_eval(const char* image, const char* src);

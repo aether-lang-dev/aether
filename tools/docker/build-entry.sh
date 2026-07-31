@@ -70,7 +70,7 @@ case "$1" in
             echo "build-entry: --aeb needs an aeb-bearing image."                    >&2
             echo "  The aether-builder base ships ae/aetherc but NOT aeb."           >&2
             echo "  Layer aeb on top: see aeb's tools/container/Containerfile.aeb-toolchain" >&2
-            echo "  ( https://github.com/aether-lang-org/aeb )"                      >&2
+            echo "  ( https://github.com/aether-lang-dev/aeb )"                      >&2
             echo "  Then re-run with the aeb image:"                                 >&2
             echo "    podman run ... aeb-toolchain:slim --aeb <target>"              >&2
             exit 1
