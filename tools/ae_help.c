@@ -1275,10 +1275,10 @@ static void apply_type_mismatch_english(Finding* f) {
     if (strcmp(expected_type, "int") == 0 &&
         (strcmp(actual_type, "string") == 0 || strcmp(actual_type, "AetherString") == 0)) {
         snprintf(buf, sizeof(buf),
-                 "Drop the quotes — pass an integer literal (e.g. `9990`), not a string `\"9990\"`.");
+                 "Drop the quotes, pass an integer literal (e.g. `9990`), not a string `\"9990\"`.");
     } else if (strcmp(expected_type, "string") == 0 && strcmp(actual_type, "int") == 0) {
         snprintf(buf, sizeof(buf),
-                 "Quote the value — pass `\"%s\"`-shaped string literal, not an integer.", actual_type);
+                 "Quote the value, pass `\"%s\"`-shaped string literal, not an integer.", actual_type);
     } else if (strcmp(expected_type, "bool") == 0 && strcmp(actual_type, "int") == 0) {
         snprintf(buf, sizeof(buf),
                  "Use `true` / `false` literals here, not `0`/`1`.");
@@ -1287,7 +1287,7 @@ static void apply_type_mismatch_english(Finding* f) {
                  "Use an integer literal here (1 / 0), not `true` / `false`.");
     } else if (strcmp(expected_type, "float") == 0 && strcmp(actual_type, "int") == 0) {
         snprintf(buf, sizeof(buf),
-                 "Use a decimal literal — `9.0` rather than `9` — to force the float type.");
+                 "Use a decimal literal, `9.0` rather than `9`, to force the float type.");
     } else {
         snprintf(buf, sizeof(buf),
                  "Use a `%s` value here, not a `%s`.", expected_type, actual_type);
@@ -1861,7 +1861,7 @@ static void render_human(const Finding* findings, int count, const SourceFile* s
         printf("ae help: no diagnostics for %s.\n", sf->path);
         return;
     }
-    printf("\nae help — %d finding%s for %s\n\n",
+    printf("\nae help, %d finding%s for %s\n\n",
            count, count == 1 ? "" : "s", sf->path);
     for (int i = 0; i < count; i++) {
         const Finding* f = &findings[i];

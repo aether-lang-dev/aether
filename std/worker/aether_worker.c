@@ -15,6 +15,7 @@
 #include "aether_worker.h"
 #include "../../runtime/utils/aether_thread.h"
 
+#include <stdio.h>   /* the wait() poster diagnostic */
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
@@ -61,6 +62,10 @@ static atomic_int g_init_state = 0;   /* 0 = uninit, 1 = initialising, 2 = ready
 
 #if AETHER_WORKER_HAS_THREADS
 static pthread_cond_t g_pend_cv;   /* signalled on enqueue / shutdown */
+/* Signalled whenever a job finishes: either it lands on the ready-list
+ * for delivery, or a detached/raw job retires without one. This is what
+ * aether_worker_wait() blocks on, so waiting costs no polling. */
+static pthread_cond_t g_done_cv;
 #endif
 
 static void ensure_init(void) {
@@ -69,6 +74,7 @@ static void ensure_init(void) {
         pthread_mutex_init(&g_lock, NULL);
 #if AETHER_WORKER_HAS_THREADS
         pthread_cond_init(&g_pend_cv, NULL);
+        pthread_cond_init(&g_done_cv, NULL);
 #endif
         atomic_store(&g_init_state, 2);
         return;
@@ -121,11 +127,25 @@ static void call_poster(AetherWorkerClosure c, void* job) {
 
 /* ---- ready-list (under g_lock) ----------------------------------------- */
 
+/* Caller holds g_lock. */
 static void ready_push(WorkerJob* job) {
     job->next = NULL;
     if (g_ready_tail) g_ready_tail->next = job;
     else              g_ready_head = job;
     g_ready_tail = job;
+#if AETHER_WORKER_HAS_THREADS
+    pthread_cond_broadcast(&g_done_cv);
+#endif
+}
+
+/* A job retired without reaching the ready-list (detached, or a raw
+ * submit): the pending count dropped, so a waiter must re-evaluate. */
+static void note_job_retired(void) {
+#if AETHER_WORKER_HAS_THREADS
+    pthread_mutex_lock(&g_lock);
+    pthread_cond_broadcast(&g_done_cv);
+    pthread_mutex_unlock(&g_lock);
+#endif
 }
 
 static WorkerJob* ready_pop(void) {
@@ -172,6 +192,7 @@ static void run_job(WorkerJob* job) {
         free_job_envs(job);
         atomic_fetch_sub(&g_pending, 1);
         free(job);
+        note_job_retired();
         return;
     }
 
@@ -380,6 +401,69 @@ int aether_worker_drain(int max) {
 
 int aether_worker_pending(void) {
     return atomic_load(&g_pending);
+}
+
+/* Block until every submitted job has completed AND had its completion
+ * delivered, running those completions on THIS thread. The pool is left
+ * running and reusable, so a reusable batch helper can call this once
+ * per batch (pool_shutdown, the only previous way to join, tears down
+ * the process-global pool and makes a second batch return nothing).
+ *
+ * Returns the number of completions delivered, or -1 when a main-thread
+ * poster is installed: there, completions are routed to the host to
+ * marshal onto the loop thread, so a wait on that same thread would
+ * block the very thread that has to deliver them. Failing fast with a
+ * diagnostic beats an unexplained hang; GUI hosts already have their
+ * loop and do not need this call.
+ *
+ * No polling: the wait blocks on a condition variable signalled when a
+ * job lands on the ready-list or retires detached. On a threadless
+ * build, work already ran synchronously at submit time, so this reduces
+ * to draining whatever queued. */
+int aether_worker_wait(void) {
+    ensure_init();
+
+    pthread_mutex_lock(&g_lock);
+    int have_poster = (g_poster.fn != NULL);
+    pthread_mutex_unlock(&g_lock);
+    if (have_poster) {
+        fprintf(stderr,
+                "aether: worker.wait() with a main-thread poster installed; "
+                "completions are delivered by the host loop, not by wait(). "
+                "Pump the host loop instead.\n");
+        return -1;
+    }
+
+    int ran = 0;
+    for (;;) {
+        /* Deliver everything ready right now, on the caller's thread. */
+        for (;;) {
+            pthread_mutex_lock(&g_lock);
+            WorkerJob* job = ready_pop();
+            pthread_mutex_unlock(&g_lock);
+            if (!job) break;
+            aether_worker_deliver(job);
+            ran++;
+        }
+        if (atomic_load(&g_pending) == 0) break;
+#if AETHER_WORKER_HAS_THREADS
+        /* Jobs are still in flight but nothing is deliverable yet. Block
+         * until a worker signals. The pending re-check inside the lock
+         * closes the race where the last job completes between the
+         * drain above and the wait. */
+        pthread_mutex_lock(&g_lock);
+        if (!g_ready_head && atomic_load(&g_pending) > 0) {
+            pthread_cond_wait(&g_done_cv, &g_lock);
+        }
+        pthread_mutex_unlock(&g_lock);
+#else
+        /* Threadless: work ran inline at submit, so a non-zero pending
+         * with an empty ready-list cannot resolve itself. Bail rather
+         * than spin. */
+        break;
+#endif
+    }
+    return ran;
 }
 
 /* ---- pool control (#1205) ---------------------------------------------- */

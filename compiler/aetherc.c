@@ -173,7 +173,7 @@ static int audit_mem_walk(ASTNode* node, FILE* out) {
                          node->children[1]->value);
             }
             fprintf(out,
-                "%s:%d:%d: %s %s %d byte%s%s — verify the width matches the C field's type\n",
+                "%s:%d:%d: %s %s %d byte%s%s, verify the width matches the C field's type\n",
                 file, node->line, node->column, node->value, kind,
                 w, w == 1 ? "" : "s", offbuf);
             n++;
@@ -2048,7 +2048,7 @@ void print_help(const char* program_name) {
     printf("  %s <input.ae> <output.c>         Compile Aether to C\n", program_name);
     printf("  %s lsp                           Run the language server on stdio\n", program_name);
     printf("  %s --concat-ae <files...> -o <out.ae>\n", program_name);
-    printf("                                   Discover-and-dedupe source merge — emits one\n");
+    printf("                                   Discover-and-dedupe source merge, emits one\n");
     printf("                                   synthetic .ae with each file's content, imports\n");
     printf("                                   deduped, accepting at most one main()\n");
     printf("\n");

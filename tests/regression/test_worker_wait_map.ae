@@ -1,0 +1,110 @@
+// Regression test for worker.wait() and worker.map().
+//
+// Before these, a headless batch had to hand-roll the join:
+//
+//     while worker.pending() > 0 { worker.drain(0); sleep(1) }
+//
+// a poll rather than a wait, and the obvious alternative
+// (pool_shutdown + one drain) tore down the process-global pool, so a
+// second call to the same helper returned nothing.
+//
+// What this test guards:
+//   1. wait() returns only after every completion has been delivered
+//   2. The pool stays reusable: a second batch through the same helper
+//      delivers in full (the reported failure)
+//   3. wait() on an idle pool returns immediately with zero
+//   4. map() applies the closure to every element, result list is
+//      index-aligned with the input
+//   5. map() over an empty list yields an empty list
+//   6. The input list is untouched and still usable afterwards
+
+import std.worker
+import std.list
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// One batch of `n` jobs joined with wait(); returns how many completions
+// actually ran. Reusable by construction: no pool teardown.
+batch(n: int) -> int {
+    seen = list.new()
+    i = 0
+    while i < n {
+        worker.run(
+            || { return 0 },
+            | r: ptr | { list.add(seen, 1) }
+        )
+        i = i + 1
+    }
+    worker.wait()
+    got = list.size(seen)
+    list.free(seen)
+    return got
+}
+
+main() {
+    idle = worker.wait()
+    if idle != 0 {
+        fail("wait() on an idle pool should deliver nothing, got ${idle}")
+    }
+    println("PASS 3: wait() on an idle pool returns immediately")
+
+    first = batch(16)
+    if first != 16 {
+        fail("first batch delivered ${first} of 16")
+    }
+    println("PASS 1: wait() joins every completion")
+
+    second = batch(16)
+    if second != 16 {
+        fail("second batch delivered ${second} of 16 (pool not reusable)")
+    }
+    println("PASS 2: the pool survives wait() and is reusable")
+
+    items = list.new()
+    list.add(items, "alpha")
+    list.add(items, "beta")
+    list.add(items, "gamma")
+
+    out = worker.map(items, | x: ptr | { return x })
+    if list.size(out) != 3 {
+        n = list.size(out)
+        fail("map produced ${n} results for 3 inputs")
+    }
+    a, aerr = list.get(out, 0)
+    b, berr = list.get(out, 1)
+    c, cerr = list.get(out, 2)
+    if string.equals(a, "alpha") != 1 {
+        fail("map result 0 out of order: '${a}'")
+    }
+    if string.equals(b, "beta") != 1 {
+        fail("map result 1 out of order: '${b}'")
+    }
+    if string.equals(c, "gamma") != 1 {
+        fail("map result 2 out of order: '${c}'")
+    }
+    println("PASS 4: map is index-aligned with its input")
+    list.free(out)
+
+    empty = list.new()
+    eout = worker.map(empty, | x: ptr | { return x })
+    if list.size(eout) != 0 {
+        fail("map over an empty list should be empty")
+    }
+    list.free(eout)
+    list.free(empty)
+    println("PASS 5: map over an empty list")
+
+    if list.size(items) != 3 {
+        fail("map damaged its input list")
+    }
+    list.free(items)
+    println("PASS 6: input list untouched")
+
+    println("=== All cases passed ===")
+}

@@ -106,7 +106,7 @@ fi
 # verdict pass. Without the extern-aware extension to is_heap_string_expr
 # this prints "NOT HEAP" because the bare extern call at the return site
 # isn't classifiable.
-if ! grep -qE "^  wrap_owned .* HEAP — every return path heap-classified" "$out"; then
+if ! grep -qE "^  wrap_owned .* HEAP, every return path heap-classified" "$out"; then
     echo "  [FAIL] extern_single_value_heap: wrap_owned should be classified HEAP (wraps an @heap extern)"
     cat "$out"
     exit 1

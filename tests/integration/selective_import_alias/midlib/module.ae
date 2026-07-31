@@ -1,0 +1,7 @@
+import vglib(path as inner_path)
+
+exports(describe)
+
+describe(d: string) -> string {
+    return inner_path(d)
+}

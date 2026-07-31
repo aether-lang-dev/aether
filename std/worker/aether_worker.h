@@ -67,6 +67,13 @@ int aether_worker_drain(int max);
  * or in flight through the poster). For backpressure and test synchronisation. */
 int aether_worker_pending(void);
 
+/* Block until every submitted job has completed and been delivered,
+ * running completions on the calling thread; leaves the pool reusable.
+ * Returns the number of completions delivered, or -1 if a main-thread
+ * poster is installed (there the host loop delivers, so waiting on that
+ * thread would deadlock). No polling: blocks on a condition variable. */
+int aether_worker_wait(void);
+
 /* Set the bounded pool size. Only takes effect before the pool starts
  * (first run()); a no-op afterwards and on threadless builds. Default is
  * derived from the core count. */

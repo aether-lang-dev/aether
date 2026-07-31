@@ -304,7 +304,7 @@ Type* parse_type(Parser* parser) {
     }
     if (nested_opt) {
         parser_error(parser,
-            "nested optional `T??` is not supported — an optional is a single "
+            "nested optional `T??` is not supported, an optional is a single "
             "presence layer; remove the extra `?`");
     }
     // #913: a postfix `!` makes the type a fallible result (`string!`,
@@ -326,7 +326,7 @@ Type* parse_type(Parser* parser) {
          * guidance rather than emit the mis-shaped type. */
         if (t && t->kind == TYPE_TUPLE) {
             parser_error(parser,
-                "a tuple payload in `T!` is not supported — `(A, B)!` would "
+                "a tuple payload in `T!` is not supported, `(A, B)!` would "
                 "nest as `((A, B), string)`, which is not ABI-compatible with "
                 "a flat `(A, B, string)` tuple and breaks `a, b, e = f()` "
                 "destructuring. Use a raw `(A, B, string)` tuple for a "
@@ -2357,7 +2357,7 @@ ASTNode* parse_statement(Parser* parser) {
             Token* attr = peek_token(parser);
             if (!attr || attr->type != TOKEN_IDENTIFIER || !attr->value ||
                 strcmp(attr->value, "scoped") != 0) {
-                parser_error(parser, "unknown statement annotation — only `@scoped` is supported on a binding");
+                parser_error(parser, "unknown statement annotation, only `@scoped` is supported on a binding");
                 return NULL;
             }
             advance_token(parser); // consume 'scoped'
@@ -3439,6 +3439,19 @@ ASTNode* parse_import_statement(Parser* parser) {
 
                 ASTNode* symbol_node = create_ast_node(AST_IDENTIFIER, symbol->value,
                                                       symbol->line, symbol->column);
+                // Per-symbol aliasing: `import M (path as vgpath)` keeps
+                // the node's value as the EXPORTED name and carries the
+                // local binding in the annotation, so every consumer that
+                // classifies names against the module's exports keeps
+                // working unchanged.
+                if (peek_token(parser) && peek_token(parser)->type == TOKEN_AS) {
+                    advance_token(parser);  // consume 'as'
+                    Token* alias = expect_token(parser, TOKEN_IDENTIFIER);
+                    if (!alias) break;
+                    char ann[160];
+                    snprintf(ann, sizeof(ann), "select_alias:%s", alias->value);
+                    symbol_node->annotation = strdup(ann);
+                }
                 add_child(import_stmt, symbol_node);
             } while (match_token(parser, TOKEN_COMMA));
 
@@ -4430,7 +4443,7 @@ ASTNode* parse_extern_declaration(Parser* parser) {
         }
         if (has_c_import && has_packed) {
             parser_error(parser,
-                "@packed and @c_import are mutually exclusive — a @c_import "
+                "@packed and @c_import are mutually exclusive, a @c_import "
                 "struct's layout (incl. packing) comes from the C header; "
                 "use @packed only on a struct whose body Aether emits");
             free_ast_node(sd);
@@ -4500,7 +4513,7 @@ ASTNode* parse_extern_declaration(Parser* parser) {
         }
         if (!has_c_import) {
             parser_error(parser,
-                "extern const requires @c_import — it imports an object-like "
+                "extern const requires @c_import, it imports an object-like "
                 "C macro by name (e.g. `extern const EAGAIN: int @c_import`)");
             free_type(ctype);
             return NULL;

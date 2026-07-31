@@ -1419,7 +1419,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                     struct_sym->type->kind != TYPE_STRUCT) {
                     char msg[256];
                     snprintf(msg, sizeof(msg),
-                        "`as *%s` — '%s' is not a struct type", expr->value, expr->value);
+                        "`as *%s`, '%s' is not a struct type", expr->value, expr->value);
                     type_error(msg, expr->line, expr->column);
                     return create_type(TYPE_UNKNOWN);
                 }
@@ -2399,9 +2399,9 @@ static void contract_check_clauses_at_definition(ASTNode* func) {
         char emsg[768];
         snprintf(emsg, sizeof(emsg),
                  is_req
-                     ? "`requires` predicate is always false — no call to '%s' "
+                     ? "`requires` predicate is always false, no call to '%s' "
                        "can ever satisfy it: %s"
-                     : "`ensures` predicate is always false — '%s' can never "
+                     : "`ensures` predicate is always false, '%s' can never "
                        "return legally: %s",
                  func->value ? func->value : "<fn>", ptxt);
         type_error(emsg, cl->line, cl->column);
@@ -3126,12 +3126,24 @@ int typecheck_program(ASTNode* program) {
         int loop_end = is_glob ? glob_count : child->child_count;
         for (int k = 0; k < loop_end; k++) {
             const char* short_name;
+            const char* local_name;
             if (is_glob) {
                 short_name = glob_names[k];
+                local_name = short_name;
             } else {
                 ASTNode* sel = child->children[k];
                 if (!sel || sel->type != AST_IDENTIFIER) continue;
                 short_name = sel->value;
+                local_name = short_name;
+                /* Per-symbol alias (`import M (path as vgpath)`): the
+                 * node's value is the exported name; the LOCAL binding
+                 * the program sees is the alias. Resolution below maps
+                 * alias -> ns.exported, so a bare `vgpath(...)` rewrites
+                 * to the same qualified call `path` would have. */
+                if (sel->annotation &&
+                    strncmp(sel->annotation, "select_alias:", 13) == 0) {
+                    local_name = sel->annotation + 13;
+                }
             }
 
             // Build the full C name: namespace_shortname
@@ -3140,7 +3152,7 @@ int typecheck_program(ASTNode* program) {
 
             Symbol* full_sym = lookup_symbol(global_table, full_name);
             if (full_sym) {
-                Symbol* existing_short = lookup_symbol_local(global_table, short_name);
+                Symbol* existing_short = lookup_symbol_local(global_table, local_name);
                 if (!existing_short || !existing_short->is_function) {
                     // Register or override: either no existing symbol, or existing
                     // is not a function (e.g. C's sqrt from math.h)
@@ -3151,23 +3163,24 @@ int typecheck_program(ASTNode* program) {
                         existing_short->is_function = full_sym->is_function;
                         existing_short->node = full_sym->node;
                     } else {
-                        add_symbol(global_table, short_name,
+                        add_symbol(global_table, local_name,
                                    full_sym->type ? clone_type(full_sym->type) : create_type(TYPE_UNKNOWN),
                                    0, full_sym->is_function, 0);
-                        Symbol* short_sym = lookup_symbol(global_table, short_name);
+                        Symbol* short_sym = lookup_symbol(global_table, local_name);
                         if (short_sym && full_sym->node) {
                             short_sym->node = full_sym->node;
                         }
                     }
                 }
 
-                // Store alias for AST rewriting: "release" -> "build.release".
+                // Store alias for AST rewriting: "release" -> "build.release"
+                // (or, per-symbol aliased, "vgpath" -> "vg.path").
                 // Only register when the prefixed symbol exists — otherwise
                 // we'd rewrite calls to externs (which keep their bare
                 // names) into nonexistent `ns_extern` forms.
                 char dotted[256];
                 snprintf(dotted, sizeof(dotted), "%s.%s", ns, short_name);
-                add_import_alias(short_name, dotted);
+                add_import_alias(local_name, dotted);
             }
         }
         free((void*)glob_names);
@@ -3595,7 +3608,7 @@ static int scoped_check_subtree(ASTNode* node, const char* name) {
         char msg[320];
         snprintf(msg, sizeof(msg),
             "`@scoped` binding '%s' escapes its block: %s. A @scoped value "
-            "must not outlive the block that introduced it — return a scalar "
+            "must not outlive the block that introduced it, return a scalar "
             "derived from it (e.g. `%s.len()`), or drop the `@scoped`.",
             name, reason, name);
         type_error(msg, node->line, node->column);
@@ -4658,7 +4671,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (!rhs_type || rhs_type->kind != TYPE_TUPLE) {
                 char msg[256];
                 snprintf(msg, sizeof(msg),
-                    "cannot destructure — '%s' returns '%s', not a tuple",
+                    "cannot destructure, '%s' returns '%s', not a tuple",
                     rhs->value ? rhs->value : "expression",
                     type_to_string(rhs_type));
                 aether_error_with_suggestion(msg, stmt->line, stmt->column,
@@ -4671,7 +4684,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (rhs_type->tuple_count != var_count) {
                 char msg[256];
                 snprintf(msg, sizeof(msg),
-                    "tuple destructuring count mismatch — %d variables, but expression returns %d values",
+                    "tuple destructuring count mismatch, %d variables, but expression returns %d values",
                     var_count, rhs_type->tuple_count);
                 aether_error_with_suggestion(msg, stmt->line, stmt->column,
                     "match the number of variables to the number of returned values");
@@ -4703,7 +4716,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->value && scope_name_is_hidden(table, stmt->value)) {
                 char error_msg[256];
                 snprintf(error_msg, sizeof(error_msg),
-                         "cannot declare '%s' — it is hidden in this scope by `hide`",
+                         "cannot declare '%s', it is hidden in this scope by `hide`",
                          stmt->value);
                 type_error(error_msg, stmt->line, stmt->column);
                 return 0;
@@ -4769,12 +4782,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                              * startup. */
                             snprintf(msg, sizeof(msg),
                                 "module-level `var` initializer must be a compile-time constant "
-                                "expression — it lowers to a file-scope `static`, which C requires "
+                                "expression, it lowers to a file-scope `static`, which C requires "
                                 "to have a constant initializer. Initialize it to a constant here "
                                 "and assign the computed value from a function at startup instead.");
                         } else {
                             snprintf(msg, sizeof(msg),
-                                "const initializer must be a compile-time constant expression — "
+                                "const initializer must be a compile-time constant expression, "
                                 "function calls are inlined at each use site, which would re-evaluate "
                                 "the call (and re-allocate / re-side-effect) on every reference. "
                                 "Use a regular assignment in main() (or std.config / std.actors for "
@@ -5000,7 +5013,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         if (init->node_type) free_type(init->node_type);
                         init->node_type = clone_type(existing->type);
                     } else {
-                        type_error("cannot infer optional type from `none` alone — "
+                        type_error("cannot infer optional type from `none` alone, "
                                    "annotate the binding (e.g. `x: int? = none`)",
                                    stmt->line, stmt->column);
                     }
@@ -6007,7 +6020,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     int ec = handler->line ? handler->column : expr->column;
                     type_error("`or { }` handler must end with a value for the "
                                "expression to yield, or exit via return / panic / "
-                               "break / continue — otherwise the result would be "
+                               "break / continue, otherwise the result would be "
                                "uninitialized on the error path", el, ec);
                 }
                 free_symbol_table(h);
@@ -6089,7 +6102,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 struct_sym->type->kind != TYPE_STRUCT) {
                 char msg[256];
                 snprintf(msg, sizeof(msg),
-                    "heap.new(%s) — '%s' is not a struct type",
+                    "heap.new(%s), '%s' is not a struct type",
                     expr->value, expr->value);
                 type_error(msg, expr->line, expr->column);
                 expr->node_type = create_type(TYPE_UNKNOWN);
@@ -6859,7 +6872,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         right_type && right_type->kind == TYPE_STRING) {
         free_type(left_type);
         free_type(right_type);
-        type_error("'+' is not defined for strings — use \"${a}${b}\" interpolation or string.concat(a, b)",
+        type_error("'+' is not defined for strings, use \"${a}${b}\" interpolation or string.concat(a, b)",
                    expr->line, expr->column);
         return 0;
     }
@@ -7139,7 +7152,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         int ok = !arg || arg->kind == TYPE_PTR || arg->kind == TYPE_UNKNOWN;
         if (arg) free_type(arg);
         if (!ok) {
-            type_error("heap.free(p) — argument must be a pointer "
+            type_error("heap.free(p), argument must be a pointer "
                        "(a `*T` from heap.new)", call->line, call->column);
             call->node_type = create_type(TYPE_VOID);
             return 0;
@@ -7461,7 +7474,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     // filling with an undefined value.
                     char err[256];
                     snprintf(err, sizeof(err),
-                             "Function '%s' parameter %d has no default — caller must supply it",
+                             "Function '%s' parameter %d has no default, caller must supply it",
                              call->value, param_idx + 1);
                     type_error(err, call->line, call->column);
                     return 0;
@@ -7856,7 +7869,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                                   da->kind == TYPE_BITSTRUCT);
                         char emsg[340];
                         snprintf(emsg, sizeof(emsg),
-                            "Argument %d '%s' of '%s': expected %s, got %s — a "
+                            "Argument %d '%s' of '%s': expected %s, got %s, a "
                             "%s type needs an explicit `as` cast at the "
                             "boundary", arg_slot + 1,
                             param->value ? param->value : "?",
@@ -7935,7 +7948,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             contract_str_terminate(&ps);
             char emsg[768];
             snprintf(emsg, sizeof(emsg),
-                     "precondition violation at compile time: %s in %s — this "
+                     "precondition violation at compile time: %s in %s, this "
                      "call's constant arguments can never satisfy it (the same "
                      "check would panic at run time)",
                      ptxt, call->value ? call->value : "?");

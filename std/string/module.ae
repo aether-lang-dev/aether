@@ -27,6 +27,7 @@ exports(
     string_seq_is_empty, string_seq_length, string_seq_retain, string_seq_free,
     string_seq_from_array, string_seq_to_array,
     string_seq_reverse, string_seq_concat, string_seq_take, string_seq_drop,
+    string_seq_join, join,
     string_seq_each, string_seq_map, string_seq_filter, string_seq_reduce,
     string_seq_zip_each,
     string_to_cstr, string_from_int, string_from_long, string_from_float,
@@ -282,6 +283,13 @@ extern string_seq_to_array(s: *StringSeq) -> ptr
 // O(length) work with no auxiliary stack.
 extern string_seq_reverse(s: *StringSeq) -> *StringSeq
 extern string_seq_concat(a: *StringSeq, b: *StringSeq) -> *StringSeq
+// Join every element of a *StringSeq with `sep` between adjacent
+// elements: the complement of split_to_seq, and the linear-cost
+// escape from O(n^2) interpolation self-append accumulation (for
+// piecewise building without a seq, use std.strbuilder). Two passes,
+// one exact-size allocation, binary-safe. Returns a fresh owned
+// string; "" for the empty seq.
+extern string_seq_join(s: *StringSeq, sep: string) -> string
 extern string_seq_take(s: *StringSeq, n: int) -> *StringSeq
 extern string_seq_drop(s: *StringSeq, n: int) -> *StringSeq
 
@@ -452,6 +460,10 @@ strip_prefix(s: string, prefix: string) -> {
 // discoverable name.
 copy(s: string) -> string {
     return string_concat(s, "")
+}
+
+join(s: *StringSeq, sep: string) -> string {
+    return string_seq_join(s, sep)
 }
 
 // Format a string by substituting `{}` placeholders with the

@@ -50,7 +50,7 @@ if ! "$AETHERC" --diagnose=ownership "$tmpdir/fixture.ae" >"$out" 2>&1; then
 fi
 
 # Pass 1 — function verdicts.
-if ! grep -qE "^  my_concat .* HEAP — every return path heap-classified" "$out"; then
+if ! grep -qE "^  my_concat .* HEAP, every return path heap-classified" "$out"; then
     echo "  [FAIL] diagnose_ownership: my_concat should be classified HEAP"
     cat "$out"
     exit 1

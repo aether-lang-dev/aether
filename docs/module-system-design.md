@@ -139,6 +139,41 @@ collecting every `export`-tagged name into one `exports (…)` line at
 the top, then removing the per-function keywords. Mixing both forms in
 one module is a hard error.
 
+## Per-symbol import aliasing
+
+An entry in a selective-import list can be renamed with `as`, the same
+token module-level aliasing already uses:
+
+```aether
+import vg (rect, fill, path as vgpath, text_paths)
+```
+
+`vgpath` now binds `vg`'s exported `path`, and the bare name `path` is
+free for a local function, parameter, or another import. This is the
+standard resolution when exactly one name in an otherwise-convenient
+selective import collides: keep the other names bare, rename the one
+that clashes, instead of qualifying every call to rescue a single
+symbol.
+
+```aether
+import vg (rect, path as vgpath)
+
+path(x: int) -> int { … }        // the local `path` is unaffected
+
+main() {
+    rect(0.0, 0.0, 460.0, 90.0)  // bare, as before
+    vgpath(d)                    // vg's path, under the alias
+    path(9)                      // the local one
+}
+```
+
+Aliases work for constants as well as functions (`import cfg (LIMIT as
+CAP)`), inside a module's own imports (the alias resolves when that
+module's bodies are merged into a consumer), and alongside module-level
+aliasing. The shadow rejection below applies to the **alias**, the name
+the program actually binds: `import vg (path as vgpath)` plus a local
+`vgpath` is the collision, while a local `path` is now fine.
+
 ## Selective-import shadow rejection
 
 A module (or main program) that selectively imports a name AND defines a local function with the same name silently shadowed the import:

@@ -185,9 +185,9 @@ Tuple returns are the natural shape for any C function that produces a value plu
 ### Binding struct-returning C functions
 
 The mechanism above is, in practice, **by-value struct return** for any C
-struct whose layout matches the synthesized typedef — not just for
-"multiple logical values". raylib's `Image LoadImage(const char*)` —
-layout `{void*, int, int, int, int}` — binds with zero glue:
+struct whose layout matches the synthesized typedef, not just for
+"multiple logical values". raylib's `Image LoadImage(const char*)`
+layout `{void*, int, int, int, int}`, binds with zero glue:
 
 ```aether
 @extern("LoadImage") load_image(path: string) -> (ptr, int, int, int, int)
@@ -201,11 +201,11 @@ main() {
 Any struct of scalar/pointer fields works this way; the field ORDER in the
 tuple is the layout contract.
 
-### Tuple parameters — by-value struct arguments
+### Tuple parameters, by-value struct arguments
 
 The parameter-position mirror: an extern parameter typed as a tuple lowers
 to the same synthesized struct typedef, passed **by value**. This is most
-of any real C API — raylib again:
+of any real C API, raylib again:
 
 ```c
 void ImageDrawTriangle(Image *dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
@@ -219,7 +219,7 @@ img_triangle(dst: ptr, v1: (f32, f32), v2: (f32, f32), v3: (f32, f32),
 img_triangle(img, (10.0, 10.0), (60.0, 10.0), (35.0, 50.0), (255, 0, 0, 255))
 ```
 
-Call sites pass **parenthesized tuple literals** — `(x, y)`; a comma inside
+Call sites pass **parenthesized tuple literals**, `(x, y)`; a comma inside
 parens is what makes it a tuple rather than grouping. The codegen packs
 each literal into the matching `_tuple_*` compound literal with per-element
 casts, so Aether `float` (double) expressions narrow to `float` fields and
@@ -249,7 +249,7 @@ return position (`extern get_pos() -> (f32, f32)`); Aether-side arithmetic
 on the destructured values still happens in double.
 
 **Conservative slice** (current contract): tuple parameter elements may be
-`int`, `long`, `float`, `f32`, `byte`, `bool`, or `ptr` — no strings, no
+`int`, `long`, `float`, `f32`, `byte`, `bool`, or `ptr`, no strings, no
 nesting. The typechecker enforces element count and kinds, and rejects a tuple
 literal aimed at a non-tuple parameter. Exercised end-to-end by
 `tests/integration/extern_tuple_param/` (literals) and

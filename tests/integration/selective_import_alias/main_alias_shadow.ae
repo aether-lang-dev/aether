@@ -1,0 +1,9 @@
+import vglib(path as vgpath)
+
+vgpath(x: int) -> int {
+    return x
+}
+
+main() {
+    println(vgpath(1))
+}

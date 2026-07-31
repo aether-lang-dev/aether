@@ -390,3 +390,45 @@ void* string_seq_to_array(StringSeq* s) {
     }
     return arr;
 }
+
+/* Join every element of `s` with `sep` between adjacent elements:
+ * the natural complement to string_split / string_split_to_seq, and
+ * the linear-cost escape from the O(n²) interpolation-self-append
+ * accumulation trap (an SVG path builder went from ~30ms to seconds
+ * per call on dense fonts through that shape). Two passes: sum
+ * lengths, then fill one exact-size buffer. Binary-safe on both
+ * elements and separator (aether_string_length/_data dispatch
+ * on the AetherString magic). Empty seq joins to "". Returns a fresh
+ * caller-owned AetherString. */
+const char* string_seq_join(StringSeq* s, const char* sep) {
+    size_t sep_len = sep ? aether_string_length(sep) : 0;
+    const char* sep_data = sep ? aether_string_data(sep) : NULL;
+
+    size_t total = 0;
+    int n = 0;
+    for (StringSeq* c = s; c; c = c->tail) {
+        total += c->head ? aether_string_length(c->head) : 0;
+        n++;
+    }
+    if (n > 1) total += sep_len * (size_t)(n - 1);
+
+    char* buf = (char*)aether_caps_malloc(total + 1);
+    if (!buf) return NULL;
+
+    size_t w = 0;
+    for (StringSeq* c = s; c; c = c->tail) {
+        if (c->head) {
+            size_t hl = aether_string_length(c->head);
+            memcpy(buf + w, aether_string_data(c->head), hl);
+            w += hl;
+        }
+        if (c->tail && sep_len) {
+            memcpy(buf + w, sep_data, sep_len);
+            w += sep_len;
+        }
+    }
+    buf[total] = '\0';
+    AetherString* out = string_new_with_length(buf, total);
+    aether_caps_free(buf, total + 1);
+    return (const char*)out;
+}

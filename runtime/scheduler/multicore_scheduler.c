@@ -161,7 +161,7 @@ static inline void aether_step_safe(ActorBase* actor) {
 
 // Layout assertions to catch struct padding/size mismatches between translation units
 #if INTPTR_MAX == INT64_MAX
-_Static_assert(sizeof(Message) == 48, "Message size changed — update tests");
+_Static_assert(sizeof(Message) == 48, "Message size changed, update tests");
 #endif
 _Static_assert(sizeof(Mailbox) % 8 == 0, "Mailbox not 8-byte aligned");
 

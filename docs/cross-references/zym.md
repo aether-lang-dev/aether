@@ -664,11 +664,11 @@ Full ranked priority for the Aether roadmap:
 | P3  | §2.1 `AetherCompileConfig` struct unification   | Small  | Refactor, bundle when next adding a `--with=` capability |
 | P4  | §5 instruction-budget preemption                | Large  | Only after §3 lands                                       |
 | P4  | §7.1 PGO build mode                             | Small  | Only if benchmarks say it's worth it                      |
-| ✗   | §1 self-extracting binary trailer               | —      | Aether emits native, not needed                          |
-| ✗   | §4 delimited continuations                      | —      | Wrong tool for C-emit                                     |
-| ✗   | §6 `@tco aggressive`                            | —      | No demand                                                 |
-| ✗   | §7.2 "Tiny" build                               | —      | No demand                                                 |
-| ✗   | §7.3 custom allocator hook                      | —      | Too invasive                                              |
+| ✗   | §1 self-extracting binary trailer               |, | Aether emits native, not needed                          |
+| ✗   | §4 delimited continuations                      |, | Wrong tool for C-emit                                     |
+| ✗   | §6 `@tco aggressive`                            |, | No demand                                                 |
+| ✗   | §7.2 "Tiny" build                               |, | No demand                                                 |
+| ✗   | §7.3 custom allocator hook                      |, | Too invasive                                              |
 
 ---
 
@@ -739,9 +739,9 @@ The full doc above is a survey of [Zym](https://github.com/zym-lang/zym), a byte
 | P3 | §2.1 `AetherCompileConfig` struct unification | Small | Refactor, bundle when next adding a --with= capability |
 | P4 | §5 instruction-budget preemption | Large | Only after §3 lands |
 | P4 | §7.1 PGO build mode | Small | Only if benchmarks say it's worth it |
-| ✗ | §1 self-extracting binary trailer | — | Aether emits native, not needed |
-| ✗ | §4 delimited continuations | — | Wrong tool for C-emit |
-| ✗ | §6 `@tco aggressive` | — | No demand |
+| ✗ | §1 self-extracting binary trailer |, | Aether emits native, not needed |
+| ✗ | §4 delimited continuations |, | Wrong tool for C-emit |
+| ✗ | §6 `@tco aggressive` |, | No demand |
 
 ## The headline lift: §3 nested in-process VMs
 
