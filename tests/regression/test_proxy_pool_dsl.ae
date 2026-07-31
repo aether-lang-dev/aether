@@ -1,0 +1,78 @@
+// Regression test for the std.http.proxy trailing-block "config IS code" DSL.
+//
+// The DSL (proxy.pool(...) { upstream(...) health(...) breaker(...) ... }) is a
+// thin sugar over the positional pool API using Aether's Immediate trailing-
+// block form: pool(...) runs first and returns the pool ptr, which becomes the
+// block's builder_context(); the child calls configure that live pool. This
+// test asserts the child setters actually reach the live pool — by re-adding an
+// upstream the DSL block already added and observing the duplicate-URL error,
+// and by confirming a fresh URL still adds cleanly.
+//
+// (It deliberately avoids proxy.pool_metrics_text for the assertion: that
+// function returns a raw, non-@heap char* that leaks on free — a pre-existing
+// ownership quirk unrelated to this DSL — and this test must stay leak-clean
+// for the CI gate.)
+
+import std.http.proxy
+import std.string
+
+extern exit(code: int)
+
+main() {
+    total_ok = 1
+
+    // Build a pool via the DSL. pool(...) runs first (creates the pool),
+    // then the block configures it through builder_context().
+    p = proxy.pool("weighted_rr", 30, 0, 0) {
+        upstream("http://localhost:9001", 3)
+        upstream("http://localhost:9002", 2)
+        upstream("http://localhost:9003", 1)
+        breaker(5, 30000, 1)
+        rate_limit(100, 0)
+    }
+    if p == 0 {
+        println("FAIL: DSL pool is null")
+        exit(1)
+    }
+    println("ok   DSL pool constructed")
+
+    // Proof the DSL children reached the live pool: re-adding a URL the block
+    // already added must fail with the duplicate-URL error (upstream_add
+    // returns non-empty on a duplicate). If the DSL upstream() had been a
+    // no-op, this add would SUCCEED (empty error) instead.
+    dup = proxy.upstream_add(p, "http://localhost:9001", 3)
+    if string.equals(dup, "") != 1 {
+        println("ok   DSL-added upstream is present (duplicate rejected)")
+    } else {
+        println("FAIL DSL upstream() did not add 9001 (duplicate accepted)")
+        total_ok = 0
+    }
+
+    // A brand-new URL still adds cleanly on the DSL-built pool.
+    fresh = proxy.upstream_add(p, "http://localhost:9004", 1)
+    if string.equals(fresh, "") == 1 {
+        println("ok   fresh upstream adds to DSL pool")
+    } else {
+        println("FAIL fresh upstream rejected: ${fresh}")
+        total_ok = 0
+    }
+
+    // Reconfiguring the breaker on the DSL pool returns success (proves the
+    // pool is a real, live pool the positional API also drives).
+    berr = proxy.breaker_configure(p, 3, 15000, 1)
+    if string.equals(berr, "") == 1 {
+        println("ok   breaker reconfigurable on DSL pool")
+    } else {
+        println("FAIL breaker_configure on DSL pool: ${berr}")
+        total_ok = 0
+    }
+
+    proxy.upstream_pool_free(p)
+
+    if total_ok == 1 {
+        println("proxy_pool_dsl: all checks pass")
+    } else {
+        println("proxy_pool_dsl: FAILURES")
+        exit(1)
+    }
+}

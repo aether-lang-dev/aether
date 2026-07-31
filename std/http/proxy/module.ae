@@ -17,13 +17,23 @@
 //         http.server_start(server)
 //     }
 //
-// Pool form (load balancing, health checks, cache):
+// Pool form (load balancing, health checks, cache) — positional:
 //
 //     pool = proxy.upstream_pool_new("weighted_rr", 30, 5000, 100)
 //     proxy.upstream_add(pool, "http://10.0.0.1:8080", 3)
 //     proxy.upstream_add(pool, "http://10.0.0.2:8080", 1)
 //     proxy.health_checks_enable(pool, "/health", 200, 5000, 1000, 2, 3)
 //     proxy.breaker_configure(pool, 5, 30000, 1)
+//
+// ...or the same pool as a "config IS code" trailing block (see the DSL
+// section at the bottom of this module):
+//
+//     pool = proxy.pool("weighted_rr", 30, 5000, 100) {
+//         upstream("http://10.0.0.1:8080", 3)
+//         upstream("http://10.0.0.2:8080", 1)
+//         health("/health", 200, 5000, 1000, 2, 3)
+//         breaker(5, 30000, 1)
+//     }
 //
 //     cache = proxy.cache_new(1000, 65536, 60, "method_url_vary")
 //
@@ -48,6 +58,8 @@ exports(
     opts_set_retry_policy, opts_set_trace_inject,
     mount, mount_methods, mount_match, mount_simple,
     pool_metrics_text,
+    // Trailing-block "config IS code" DSL over the pool API (see bottom).
+    pool, upstream, health, breaker, rate_limit, cookie_name, drain,
 )
 
 // ---- Raw externs ----
@@ -375,4 +387,98 @@ mount_simple(server: ptr,
     request_timeout_sec: int) -> string {
     return aether_proxy_use_simple_proxy(server, path_prefix, upstream_url,
         request_timeout_sec)
+}
+
+// ---- "config IS code" trailing-block DSL ------------------------------------
+//
+// The positional pool API above is complete, but a reverse proxy is config-
+// shaped — a reader gets more from a nested block than from a run of positional
+// ints. This DSL is a thin, allocation-free sugar over the same functions,
+// using Aether's Immediate trailing-block form: `pool(...)` runs first and
+// returns the pool ptr, which becomes the block's builder_context(); the child
+// calls (`upstream`, `health`, `breaker`, ...) read that context and configure
+// the live pool. Body-first ordering means the pool already exists when the
+// children run — no recording/replay.
+//
+//     p = proxy.pool("weighted_rr", 30, 0, 0) {
+//         upstream("http://localhost:9001", 3)
+//         upstream("http://localhost:9002", 2)
+//         upstream("http://localhost:9003", 1)
+//         health("/health", 200, 5000, 2000, 2, 2)   // probe /health every 5s
+//         breaker(5, 30000, 1)                        // 5 fails → open 30s
+//         rate_limit(100, 0)                          // 100 rps/upstream
+//     }
+//
+// `pool` returns the same ptr as `upstream_pool_new` (null on bad algo/inputs),
+// so `p` is used exactly as before (mount, pool_metrics_text, free). The child
+// setters are ergonomic: they apply to the current context and drop the
+// underlying `-> string` error (a config block favours readability). When you
+// need to inspect a per-line error (e.g. a duplicate upstream URL), call the
+// positional functions directly — both surfaces drive the same pool.
+
+// The block's context head: create the pool, return it (pushed as context).
+pool(lb_algo: string,
+    request_timeout_sec: int,
+    dial_timeout_ms: int,
+    max_inflight_per_up: int) -> ptr {
+    return upstream_pool_new(lb_algo, request_timeout_sec, dial_timeout_ms,
+        max_inflight_per_up)
+}
+
+// Add a weighted upstream to the pool under construction.
+upstream(base_url: string, weight: int) {
+    p = builder_context()
+    if p != null {
+        _ = upstream_add(p, base_url, weight)
+    }
+}
+
+// Enable health probing on the pool under construction. Same argument order as
+// health_checks_enable: probe_path, expect_status, interval_ms, timeout_ms,
+// healthy_threshold, unhealthy_threshold.
+health(probe_path: string,
+    expect_status: int,
+    interval_ms: int,
+    timeout_ms: int,
+    healthy_threshold: int,
+    unhealthy_threshold: int) {
+    p = builder_context()
+    if p != null {
+        _ = health_checks_enable(p, probe_path, expect_status, interval_ms,
+            timeout_ms, healthy_threshold, unhealthy_threshold)
+    }
+}
+
+// Configure the circuit breaker: failure_threshold, open_duration_ms,
+// half_open_max.
+breaker(failure_threshold: int, open_duration_ms: int, half_open_max: int) {
+    p = builder_context()
+    if p != null {
+        _ = breaker_configure(p, failure_threshold, open_duration_ms, half_open_max)
+    }
+}
+
+// Per-upstream token-bucket rate limit: max_rps, burst (0 burst = max_rps).
+rate_limit(max_rps: int, burst: int) {
+    p = builder_context()
+    if p != null {
+        _ = rate_limit_set(p, max_rps, burst)
+    }
+}
+
+// Cookie name for the cookie_hash LB algorithm.
+cookie_name(name: string) {
+    p = builder_context()
+    if p != null {
+        _ = pool_set_cookie_name(p, name)
+    }
+}
+
+// Mark an upstream as draining at construction time (rarely needed in a fresh
+// pool, but symmetric with the positional API).
+drain(base_url: string) {
+    p = builder_context()
+    if p != null {
+        _ = upstream_drain(p, base_url)
+    }
 }

@@ -1,0 +1,95 @@
+// Reverse-proxy demo — the SAME enterprise stack as
+// http-reverse-proxy-pool.ae, but the pool is assembled with the
+// trailing-block "config IS code" DSL instead of positional calls.
+//
+// The pool's shape reads top-to-bottom like a config file — the block is
+// ordinary Aether (you can compute weights, read env vars, branch), and every
+// line maps to the same std.http.proxy function the positional form calls. No
+// framework, no YAML, no sidecar.
+//
+//   p = proxy.pool("weighted_rr", 30, 0, 0) {
+//       upstream(...)   health(...)   breaker(...)   rate_limit(...)
+//   }
+//
+// Both this file and http-reverse-proxy-pool.ae drive the identical pool; pick
+// whichever reads better for you. Run exactly the same way:
+//
+//     ae build examples/stdlib/http-reverse-proxy-pool-dsl.ae -o /tmp/proxy
+//     /tmp/proxy
+//     # three upstreams you control, e.g.:
+//     python3 -m http.server 9001 &
+//     python3 -m http.server 9002 &
+//     python3 -m http.server 9003 &
+//     curl -i http://localhost:8080/api/
+//     curl http://localhost:8080/proxy-metrics
+//
+// See docs/http-reverse-proxy.md for the full reference.
+
+import std.http
+import std.http.proxy
+
+const PORT = 8080
+
+handle_metrics(req: ptr, res: ptr, ud: ptr) {
+    body = proxy.pool_metrics_text(ud)
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain; version=0.0.4")
+    http.response_set_body(res, body)
+}
+
+main() {
+    server = http.server_create(PORT)
+    if server == 0 {
+        println("server_create failed")
+        return
+    }
+    http.server_set_keepalive(server, 1, 0, 30000ms)
+
+    // ---- Pool, as a config block --------------------------------
+    // pool(...) runs first and returns the pool ptr; the block then
+    // configures that live pool. Weighted round-robin (A ~3/6, B ~2/6,
+    // C ~1/6), health probes every 5s (2 OK up / 2 fail down), breaker
+    // opens after 5 consecutive failures for 30s, 200 rps/upstream
+    // burst 50.
+    pool = proxy.pool("weighted_rr", 30, 0, 0) {
+        upstream("http://localhost:9001", 3)
+        upstream("http://localhost:9002", 2)
+        upstream("http://localhost:9003", 1)
+        health("/health", 200, 5000, 2000, 2, 2)
+        breaker(5, 30000, 1)
+        rate_limit(200, 50)
+    }
+    if pool == 0 {
+        println("pool_new failed")
+        return
+    }
+
+    // ---- Cache + per-mount options (unchanged from the positional
+    // example — these hang off `opts`, not the pool) --------------
+    cache = proxy.cache_new(1000, 65536, 60, "method_url_vary")
+    if cache == 0 {
+        println("cache_new failed")
+        return
+    }
+    opts = proxy.opts_new()
+    proxy.opts_bind_cache(opts, cache)
+    proxy.opts_set_xforwarded(opts, 1, 1, 1)
+    proxy.opts_set_body_cap(opts, 8 * 1024 * 1024)
+    proxy.opts_set_retry_policy(opts, 3, 100)
+    proxy.opts_set_trace_inject(opts, 1)
+
+    // ---- Metrics endpoint + mount -------------------------------
+    http.server_get(server, "/proxy-metrics", handle_metrics, pool)
+    err = proxy.mount(server, "/api", pool, opts)
+    if err != "" {
+        println("mount: ${err}")
+        return
+    }
+
+    println("listening on http://localhost:${PORT}/api/  (DSL-configured pool: 3 upstreams 3:2:1, cache, breaker, retry, rate-limit, traceparent inject)")
+    println("prometheus metrics at http://localhost:${PORT}/proxy-metrics")
+    start_err = http.server_start(server)
+    if start_err != "" {
+        println("server_start: ${start_err}")
+    }
+}
