@@ -19,6 +19,7 @@ typedef enum {
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,
+    AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
 } AetherErrorCode;
 
 // Error reporting with source context

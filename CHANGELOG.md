@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Benchmark runner reported a negative `cv_pct`** (#1352). The
+  coefficient of variation was computed as `(best - worst) * 50 / mean` in
+  32-bit int, so for the fastest patterns (skynet and counting run in the
+  hundreds of millions of msg/sec) the multiply overflowed before the
+  divide and the result came out negative, on exactly the numbers most
+  likely to be quoted. Span, mean and CV are now 64-bit, the run
+  accumulator is too (five runs at 250M already approach the int32
+  ceiling and `BENCH_RUNS` is user-settable), and a negative value is
+  refused rather than published, since a coefficient of variation cannot
+  be negative. `docs/performance-benchmarks.md` states the guarantee.
+- **Constant folding did not preserve runtime semantics for `int`**, which
+  is what let the overflow above hide during development. The folder
+  evaluates in `double`, so `(250000000 - 200000000) * 50 / 225000000`
+  folded to `11` while the same expression over `int` variables evaluated
+  to `-7`: the literal form looked correct. The fold now wraps exactly as
+  the runtime does and reports the overflow (new `warning[W1003]`, with
+  the exact value, the wrapped value, and how to widen). No code in the
+  tree trips it.
+- **`benchmarks/http/baseline_results.txt` was committed containing only a
+  header** (#1353). The harness writes the header, starts the server, then
+  measures; the server had failed to start, `set -e` exited, and the stub
+  was committed. The generated file is removed from the tree and
+  gitignored (it is machine-specific), and both HTTP harnesses now
+  preflight `wrk` before building anything, write to a temp file and
+  publish only on success (so an interrupted run leaves no truncated
+  artifact), and report the actual cause when the server cannot start
+  instead of a bare "failed".
+
 ## [0.469.0]
 
 ### Added
@@ -76,6 +108,7 @@ next version number before tagging the release.
   `s = seq_cons(x, s)` loop feeding a later join was conservatively marked
   escaped and every intermediate spine ref leaked. Both `string_join` and
   `string_seq_join` are now recognised as non-storing readers.
+
 
 ## [0.467.0]
 
