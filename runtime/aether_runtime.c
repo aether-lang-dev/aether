@@ -138,13 +138,13 @@ void aether_runtime_print_config() {
     
     printf("Tier:\n");
     if (config->use_lockfree_mailbox && config->use_simd && config->use_mwait) {
-        printf("  MAXIMUM  — lock-free mailbox + SIMD + MWAIT idle\n");
+        printf("  MAXIMUM:  lock-free mailbox + SIMD + MWAIT idle\n");
     } else if (config->use_lockfree_mailbox && config->use_simd) {
-        printf("  HIGH     — lock-free mailbox + SIMD\n");
+        printf("  HIGH:     lock-free mailbox + SIMD\n");
     } else if (config->use_lockfree_mailbox) {
-        printf("  MODERATE — lock-free mailbox only\n");
+        printf("  MODERATE: lock-free mailbox only\n");
     } else {
-        printf("  BASELINE — locks-based mailbox, no SIMD, no MWAIT\n");
+        printf("  BASELINE: locks-based mailbox, no SIMD, no MWAIT\n");
     }
     printf("  (Run benchmarks/cross-language to measure on this host.)\n");
     

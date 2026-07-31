@@ -137,14 +137,9 @@ int list_add_raw(ArrayList* list, void* item) {
  * Per-element ownership lets a single list mix owned heap strings
  * with literals / ints. Each element's `owned_flags[i]` tracks
  * its own ownership independently. */
-int list_add_string_owned(ArrayList* list, const void* item) {
-    if (!list) return 0;
-    /* Ownership transfer, not a share: the codegen routes here only when
-     * `item` is a heap string escaping into the list (caller escape-marked,
-     * does not release), so the list adopts the caller's single reference.
-     * No string_retain — that would leave the value one refcount above what
-     * list_free can reclaim (a per-add leak once values are magic strings).
-     * The matching release is in list_free (owned_flags path). */
+/* Store `item` in the list's owned slot `slot`, tagging it for release
+ * by list_free. Shared by the adopting and owning entry points. */
+static int list_store_owned(ArrayList* list, const void* item) {
     /* Lazy-allocate the flags array on first owned-put. Best-effort:
      * on alloc failure the item is still stored and the buffer leaks
      * on free rather than crashing. */
@@ -155,6 +150,51 @@ int list_add_string_owned(ArrayList* list, const void* item) {
     /* Retry: capacity may have been 0 until list_add_raw's grow. */
     list_grow_owned_flags(list);
     if (list->owned_flags) list->owned_flags[slot] = 1;
+    return 1;
+}
+
+/* ADOPTING add: takes over the caller's single reference without
+ * retaining. Codegen emits this for `list.add(l, <heap_string_expr>)`,
+ * where the value is escaping into the list and the caller's escape
+ * marking suppresses its own release. Retaining here instead would
+ * leave the value one refcount above what list_free can reclaim (a
+ * per-add leak once values are magic strings). NOT for hand-written
+ * calls: adopting a pointer whose ownership was not actually
+ * transferred double-frees at list_free time. Hand-written code wants
+ * list_add_string_owned below. */
+int list_add_string_adopted(ArrayList* list, const void* item) {
+    if (!list) return 0;
+    return list_store_owned(list, item);
+}
+
+/* OWNING add: the list acquires its OWN reference to `item`, so the
+ * caller keeps (and independently frees) theirs and any number of
+ * containers can hold the same value. This is the documented,
+ * hand-callable contract.
+ *
+ * A refcounted AetherString is retained; a plain pointer (a string
+ * literal, a borrowed char*) cannot be refcounted, so the list stores
+ * an owned COPY. Copying is what makes the contract honest: before
+ * this, a literal was adopted and list_free called libc free() on
+ * .rodata, and two lists holding one pointer each freed it once,
+ * aborting inside malloc on the second free. */
+int list_add_string_owned(ArrayList* list, const void* item) {
+    if (!list) return 0;
+    if (!item) return list_add_raw(list, NULL);
+    const void* store = item;
+    if (is_aether_string(item)) {
+        string_retain(item);
+    } else {
+        size_t n = strlen((const char*)item);
+        AetherString* copy = string_new_with_length((const char*)item, n);
+        if (!copy) return 0;
+        store = copy;
+    }
+    if (!list_store_owned(list, store)) {
+        /* Undo the acquire so a failed add does not leak. */
+        string_release((const char*)store);
+        return 0;
+    }
     return 1;
 }
 
@@ -432,17 +472,16 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
  * Codegen routes `map.put(m, k, heap_string_expr)` here when the
  * value is heap-classified (string.concat, string interp, heap-
  * returning user-fn). Plain literals stay on map_put_raw. */
-int map_put_string_owned(HashMap* map, const char* key, const void* value) {
+/* ADOPTING put: takes over the caller's single reference without
+ * retaining. Codegen emits this for `map.put(m, k, <heap_string_expr>)`,
+ * where the value escapes into the map and the caller's escape marking
+ * suppresses its own release. Retaining here instead would leave the
+ * value one refcount above what map_free can reclaim (a per-put leak
+ * once values are magic strings). NOT for hand-written calls: adopting
+ * a pointer whose ownership was not actually transferred double-frees
+ * at map_free time. Hand-written code wants map_put_string_owned. */
+int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     if (!map || !key) return 0;
-    /* The codegen routes here only when `value` is a heap string that
-     * ESCAPES into the map — the caller is escape-marked and does NOT
-     * release its reference. So the map adopts the caller's single
-     * reference (ownership transfer); it must NOT string_retain, or the
-     * value would carry one refcount more than the map_free release can
-     * reclaim. Before the magic-string unification this retain was a
-     * silent no-op (values were plain char*); a magic value now makes
-     * the imbalance a per-put leak. The matching release lives in
-     * map_free / map_clear / the replace path below. */
 
     /* Replace path: walk the bucket. If the key exists, release
      * the previous value when it was previously owned, then store
@@ -481,6 +520,32 @@ int map_put_string_owned(HashMap* map, const char* key, const void* value) {
     unsigned int index = hash % (unsigned int)map->capacity;
     HashMapEntry* head = map->buckets[index];
     if (head) head->value_owned = 1;
+    return 1;
+}
+
+/* OWNING put: the map acquires its OWN reference to `value`, so the
+ * caller keeps (and independently frees) theirs and any number of
+ * containers can hold the same value. This is the documented,
+ * hand-callable contract; see list_add_string_owned for the same
+ * split and the failure mode it fixes (a literal adopted into a
+ * container was libc-freed from .rodata at free time, and two
+ * containers sharing one pointer double-freed it). */
+int map_put_string_owned(HashMap* map, const char* key, const void* value) {
+    if (!map || !key) return 0;
+    if (!value) return map_put_raw(map, key, NULL);
+    const void* store = value;
+    if (is_aether_string(value)) {
+        string_retain(value);
+    } else {
+        size_t n = strlen((const char*)value);
+        AetherString* copy = string_new_with_length((const char*)value, n);
+        if (!copy) return 0;
+        store = copy;
+    }
+    if (!map_put_string_adopted(map, key, store)) {
+        string_release(store);
+        return 0;
+    }
     return 1;
 }
 

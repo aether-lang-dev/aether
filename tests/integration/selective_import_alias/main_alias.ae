@@ -1,0 +1,13 @@
+import vglib(rect, path as vgpath, LIMIT as CAP)
+import midlib(describe)
+
+path(x: int) -> int {
+    return x + 1
+}
+
+main() {
+    println(rect(CAP))
+    println(vgpath("M0,0"))
+    println(path(9))
+    println(describe("Z"))
+}

@@ -1090,7 +1090,7 @@ void push_defer_mode(CodeGenerator* gen, ASTNode* stmt, DeferMode mode) {
         gen->defer_mode[gen->defer_count] = mode;
         gen->defer_stack[gen->defer_count++] = stmt;
     } else {
-        AetherError w = {NULL, NULL, 0, 0, "defer stack overflow — too many nested defers",
+        AetherError w = {NULL, NULL, 0, 0, "defer stack overflow, too many nested defers",
                          "simplify scope nesting or reduce number of deferred statements",
                          NULL, AETHER_ERR_NONE};
         aether_warning_report(&w);
@@ -1970,7 +1970,7 @@ const char* safe_value_name(const char* name) {
 const char* get_c_type(Type* type) {
     if (!type) {
         AetherError w = {NULL, NULL, 0, 0, "internal: NULL type in codegen, defaulting to int",
-                         "this is a compiler bug — please report it", NULL, AETHER_ERR_NONE};
+                         "this is a compiler bug, please report it", NULL, AETHER_ERR_NONE};
         aether_warning_report(&w);
         return "int";
     }
@@ -2194,7 +2194,7 @@ const char* get_c_type(Type* type) {
             char wbuf[128];
             snprintf(wbuf, sizeof(wbuf), "internal: unknown type kind %d in codegen, defaulting to void", type->kind);
             AetherError w = {NULL, NULL, 0, 0, wbuf,
-                             "this is a compiler bug — please report it", NULL, AETHER_ERR_NONE};
+                             "this is a compiler bug, please report it", NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
             return "void";
         }
@@ -4201,7 +4201,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
-    print_line(gen, "    /* AetherString-aware length probe — see is_aether_string in");
+    print_line(gen, "    /* AetherString-aware length probe, see is_aether_string in");
     print_line(gen, "     * std/string/aether_string.h. Byte-by-byte to stay ASan-clean");
     print_line(gen, "     * on short literal allocations (e.g. \"x\"). */");
     print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
@@ -4210,7 +4210,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (_p[0] == 0xDE && _p[1] == 0xC0 && _p[2] == 0x57 && _p[3] == 0xAE) {");
     print_line(gen, "        /* Struct layout: magic(u32), ref_count(i32), length(size_t),");
     print_line(gen, "         * capacity(size_t), data(char*). Read length and data via");
-    print_line(gen, "         * a typed view — the struct's data pointer is what we copy. */");
+    print_line(gen, "         * a typed view, the struct's data pointer is what we copy. */");
     print_line(gen, "        struct _AeStrHdr { unsigned int magic; int ref_count; size_t length; size_t capacity; char* data; };");
     print_line(gen, "        const struct _AeStrHdr* _h = (const struct _AeStrHdr*)s;");
     print_line(gen, "        _n = _h->length;");
@@ -4358,8 +4358,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * conflict. The header's `const void*` declaration is the
      * source-of-truth for consumers in C; the registry maps Aether's
      * `ptr` to `void*` without const, which is what this matches. */
-    print_line(gen, "extern int list_add_string_owned(void* list, void* item);");
-    print_line(gen, "extern int map_put_string_owned(void* map, const char* key, void* value);");
+    /* Adopting variants: the value is escaping into the container and
+     * the caller's escape marking suppresses its own release, so the
+     * container takes over that single reference without retaining.
+     * The *_owned entries are the hand-callable ones that acquire
+     * their own reference; routing codegen at them would leak a
+     * refcount per add. */
+    print_line(gen, "extern int list_add_string_adopted(void* list, void* item);");
+    print_line(gen, "extern int map_put_string_adopted(void* map, const char* key, void* value);");
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
     print_line(gen, "    if (!s) return \"(null)\";");
     print_line(gen, "    return aether_string_data(s);");

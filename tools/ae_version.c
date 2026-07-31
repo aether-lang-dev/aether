@@ -361,7 +361,7 @@ static int cmd_version_install(const char* version) {
                 printf("Switch to it with: ae version use %s\n", vtag);
                 return 0;
             }
-            printf("Version %s has binaries but missing lib/share — reinstalling...\n", vtag);
+            printf("Version %s has binaries but missing lib/share, reinstalling...\n", vtag);
             // Fall through to remove and re-download
         }
         // Incomplete install — remove and re-download
@@ -428,7 +428,7 @@ static int cmd_version_install(const char* version) {
         }
         if (asize < 1024) {
             remove(archive);
-            fprintf(stderr, "Error: Downloaded archive is too small (%ld bytes) — likely corrupt.\n", asize);
+            fprintf(stderr, "Error: Downloaded archive is too small (%ld bytes), likely corrupt.\n", asize);
             return 1;
         }
     }
@@ -505,7 +505,7 @@ static int cmd_version_install(const char* version) {
             snprintf(probe, sizeof(probe), "rm -rf '%s'", ver_dir);
 #endif
             if (system(probe) != 0) { /* cleanup failed — non-fatal */ }
-            fprintf(stderr, "Error: Installation of %s failed — no bin/, lib/, or share/ found.\n", vtag);
+            fprintf(stderr, "Error: Installation of %s failed, no bin/, lib/, or share/ found.\n", vtag);
             fprintf(stderr, "This version may not have a release for " AE_PLATFORM ".\n");
             fprintf(stderr, "Available versions: ae version list\n");
             return 1;

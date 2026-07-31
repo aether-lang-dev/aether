@@ -1,0 +1,92 @@
+// Regression: two containers holding one string value must both free
+// cleanly. `list_add_string_owned` / `map_put_string_owned` are
+// documented as acquiring their own reference, but they adopted the
+// caller's instead, so:
+//   - a string LITERAL added this way was libc-freed from .rodata at
+//     free time, aborting inside malloc (reported as a hang)
+//   - two containers each "owning" one pointer freed it twice
+// The owning entries now retain a refcounted string and copy a plain
+// pointer; codegen's escaping-value path uses the adopting siblings,
+// so its zero-cost ownership transfer is unchanged.
+//
+// What this test guards:
+//   1. A literal added via the owning entry frees without aborting
+//   2. Two lists sharing one value both free (the reported repro)
+//   3. The same for a map value, and for a list/map mix
+//   4. The caller's own reference stays valid after the containers go
+//   5. Values remain readable while a second owner is alive
+
+import std.list
+import std.map
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    // 1 + 2: the issue's exact repro shape.
+    paths = list.list_new()
+    list.list_add_string_owned(paths, "a.tiff")
+
+    p, perr = list.get(paths, 0)
+    if string.equals(p, "a.tiff") != 1 {
+        fail("element read back wrong: '${p}'")
+    }
+
+    rec = list.list_new()
+    list.list_add_string_owned(rec, p)
+
+    list.list_free(rec)
+    println("PASS 1: first container freed")
+
+    // The value must still be readable: `paths` holds its own reference.
+    p2, p2err = list.get(paths, 0)
+    if string.equals(p2, "a.tiff") != 1 {
+        fail("value damaged after the other owner freed: '${p2}'")
+    }
+    println("PASS 2: survivor's reference still valid")
+
+    list.list_free(paths)
+    println("PASS 3: second container freed (was an abort inside malloc)")
+
+    // 3: map value shared with a list.
+    m = map.map_new()
+    map.map_put_string_owned(m, "k", "shared-value")
+    v, verr = map.get(m, "k")
+    if string.equals(v, "shared-value") != 1 {
+        fail("map value read back wrong: '${v}'")
+    }
+
+    l2 = list.list_new()
+    list.list_add_string_owned(l2, v)
+    map.map_free(m)
+    v2, v2err = list.get(l2, 0)
+    if string.equals(v2, "shared-value") != 1 {
+        fail("list copy damaged when the map freed: '${v2}'")
+    }
+    list.list_free(l2)
+    println("PASS 4: map and list can share one value")
+
+    // 5: many owners of one value, freed in an arbitrary order.
+    src = list.list_new()
+    list.list_add_string_owned(src, "fanout")
+    s0, s0err = list.get(src, 0)
+    a = list.list_new()
+    b = list.list_new()
+    list.list_add_string_owned(a, s0)
+    list.list_add_string_owned(b, s0)
+    list.list_free(src)
+    list.list_free(b)
+    last, lerr = list.get(a, 0)
+    if string.equals(last, "fanout") != 1 {
+        fail("value damaged with three owners: '${last}'")
+    }
+    list.list_free(a)
+    println("PASS 5: three owners, arbitrary free order")
+
+    println("=== All cases passed ===")
+}

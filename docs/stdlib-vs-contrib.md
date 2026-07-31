@@ -57,7 +57,7 @@ Each clears all four rubric questions. Listed roughly by purpose:
 | Networking | `net` (low-level TCP/HTTP client), `tcp`, `http` (high-level: `http.server`, `http.client`, `http.middleware`, `http.server.h2` for HTTP/2) |
 | Numeric + time | `math` |
 | Serialisation | `json` |
-| Hashing + crypto primitives | `cryptography` (SHA-1/256, MD4/MD5, HMAC-SHA256, Base64, CSPRNG, streaming digests, plus the public-key/cipher families — RSA, AES, ChaCha20-Poly1305, Ed25519, X25519, P-256/384/521, …) |
+| Hashing + crypto primitives | `cryptography` (SHA-1/256, MD4/MD5, HMAC-SHA256, Base64, CSPRNG, streaming digests, plus the public-key/cipher families, RSA, AES, ChaCha20-Poly1305, Ed25519, X25519, P-256/384/521, …) |
 | Compression | `zlib` (deflate/inflate, ambient on POSIX) |
 | Process + env | `os`, `io`, `dl` (dlopen) |
 | Memory primitives | `arena` (bulk allocator), `cas` (content-addressed store, sha256 + atomic-rename) |

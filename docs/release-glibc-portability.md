@@ -6,14 +6,14 @@ The prebuilt Linux `ae` / `aetherc` binaries published to GitHub Releases are
 dynamically-linked glibc PIEs. glibc uses **forward-only symbol versioning**: a
 binary linked on a machine with glibc *N* references versioned symbols like
 `GLIBC_2.38`, and a target machine whose glibc is **older** than *N* cannot
-satisfy them — the loader aborts at startup with:
+satisfy them, the loader aborts at startup with:
 
 ```
 ./ae: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found (required by ./ae)
 ```
 
 The release workflow historically built the Linux artifact on `ubuntu-latest`.
-That label tracks the newest Ubuntu image — as of this writing Ubuntu 24.04,
+That label tracks the newest Ubuntu image, as of this writing Ubuntu 24.04,
 which ships **glibc 2.39**. The resulting binary therefore demanded glibc ≥2.38
 and failed to load on still-current distributions, e.g. Debian 12 (glibc 2.36),
 which is how this surfaced.
@@ -28,7 +28,7 @@ whatever the host provides.
 Aether compiles by **emitting C and invoking a C compiler**. The `ae` driver
 resolves that compiler at runtime (`AE_CC` → `CC` → `gcc`; see `tools/ae.c`), and
 cross-compilation goes through `zig cc` via `--target`. So **every machine that
-runs Aether already has a working C toolchain and its own glibc** — Aether cannot
+runs Aether already has a working C toolchain and its own glibc**, Aether cannot
 function without one.
 
 The consequence is important for scoping the fix: **the glibc-version hazard is
@@ -87,7 +87,7 @@ glibc at all**. Two established techniques:
   libc: `zig cc -target x86_64-linux-musl` (Aether already carries the zig-cc
   cross backend used by `ae --target` and `test-cross`; Windows releases already
   link `-static`). A static-musl binary has **zero** dynamic libc dependency and
-  runs on every x86-64 Linux — glibc distros, Alpine, containers, old and new
+  runs on every x86-64 Linux, glibc distros, Alpine, containers, old and new
   alike. This is what Go ships and what portable CLI tools converge on.
 
 - **manylinux-style old-glibc container.** Build inside
@@ -109,22 +109,22 @@ same-day change:
    PCRE2, and (via std) other C libraries so `std.net` TLS, `std.zlib`,
    `std.regex` etc. work out of the box. Under a static-musl link each of these
    must be available as a **musl-built static archive**, or the corresponding
-   feature silently drops to its "unavailable" stub in the shipped binary — a
+   feature silently drops to its "unavailable" stub in the shipped binary, a
    regression for downstream users who currently get TLS/zlib/regex for free.
    zig cc can build these from source, but it is real per-dependency work and
    must be verified feature-by-feature, not assumed.
 
 2. **Runtime behavior differences.** musl is not glibc. Differences that can
    bite: NSS / `getaddrinfo` (musl's resolver is simpler and has historically
-   differed on `/etc/hosts`, search domains, and IPv6 ordering — relevant to
+   differed on `/etc/hosts`, search domains, and IPv6 ordering, relevant to
    `std.net`), locale handling, DNS, and dlopen (a fully static binary cannot
-   `dlopen` — check whether `std.dl` or any plugin path needs it). The full
+   `dlopen`, check whether `std.dl` or any plugin path needs it). The full
    `make test` / `make test-ae` suite must pass **when run as the static-musl
    binary**, not merely compile.
 
 3. **The toolchain-at-runtime interaction.** Because `ae` shells out to the
    host `cc`, a static-musl `ae` on a glibc host will invoke the host's *glibc*
-   gcc to build the user's program — which is correct and desirable (the user's
+   gcc to build the user's program, which is correct and desirable (the user's
    program matches the user's system). But it means the shipped `ae` being musl
    does **not** make user output musl; the two are independent. This is fine, but
    it must be documented so nobody assumes a musl `ae` produces musl programs.
@@ -134,7 +134,7 @@ same-day change:
    long tail (Alpine, RHEL 8, Amazon Linux 2, future-proofing against runner
    deprecation) at the cost of a meaningful CI + dependency-packaging + testing
    effort. It should be scheduled deliberately, with the dependency matrix
-   (item 1) and the musl test pass (item 2) as explicit acceptance criteria —
+   (item 1) and the musl test pass (item 2) as explicit acceptance criteria
    not bolted on reactively.
 
 ### Acceptance criteria for the static-musl release (when scheduled)
@@ -143,7 +143,7 @@ same-day change:
   executable"); the binary loads and runs on a glibc distro, on Alpine, and in a
   `scratch`/`distroless` container.
 - `AETHER_HAS_OPENSSL`, `AETHER_HAS_ZLIB`, `AETHER_HAS_PCRE2` (and any other
-  baked-in feature flags) are **defined** in the shipped binary — verified by a
+  baked-in feature flags) are **defined** in the shipped binary, verified by a
   smoke test that exercises TLS, zlib round-trip, and a regex match, not just by
   the flags being set at build time.
 - `make test` + `make test-ae` pass **executed as the static-musl binary**,

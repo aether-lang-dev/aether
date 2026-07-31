@@ -1,0 +1,11 @@
+exports(path, rect, LIMIT)
+
+const LIMIT = 7
+
+path(d: string) -> string {
+    return "path:${d}"
+}
+
+rect(w: int) -> int {
+    return w * 2
+}

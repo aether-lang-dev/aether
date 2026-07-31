@@ -921,6 +921,11 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
              * (which returns a COPY, never the borrowed input). */
             strcmp(fn, "string_replace") == 0 ||
             strcmp(fn, "string_replace_all") == 0 ||
+            /* string_seq_join always returns a fresh AetherString
+             * built from an exact-size buffer, never a borrowed or
+             * literal pointer, same shape as substring. */
+            strcmp(fn, "string_seq_join") == 0 ||
+            strcmp(fn, "string_join") == 0 ||
             /* string.copy returns `string_concat(s, "")` — always a
              * fresh owned heap buffer (never a borrowed/literal pointer),
              * the same shape as its sibling string_concat already on this
@@ -2683,7 +2688,14 @@ static int is_nonstoring_builtin(const char* fn) {
            strcmp(fn, "aether_string_data") == 0 ||
            strcmp(fn, "aether_string_len") == 0 ||
            strcmp(fn, "aether_string_length") == 0 ||
-           strcmp(fn, "_aether_safe_str") == 0;
+           strcmp(fn, "_aether_safe_str") == 0 ||
+           /* string_seq_join walks the spine read-only and copies the
+            * bytes into a fresh buffer; it retains neither the seq nor
+            * the separator. Without this, a `s = seq_cons(x, s)`
+            * accumulator that is later joined has its whole loop
+            * marked escaped, and every intermediate spine ref leaks. */
+           strcmp(fn, "string_seq_join") == 0 ||
+           strcmp(fn, "string_join") == 0;
 }
 
 /* Does argument position `arg_idx` of `call` escape — i.e. might the
@@ -2998,7 +3010,13 @@ static void seq_escape_walk(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_FUNCTION_CALL && node->value) {
         char fn_norm[256];
         const char* fn = codegen_normalise_callee(node->value, fn_norm, sizeof(fn_norm));
-        int callee_is_seq_op = fn && strncmp(fn, "string_seq_", 11) == 0;
+        /* `string.join(seq, sep)` normalises to `string_join`, not the
+         * `string_seq_` prefix, but it is a pure read of the spine like
+         * every other seq op — without it here, a `s = seq_cons(x, s)`
+         * accumulator that is later joined is marked escaped and every
+         * intermediate spine ref leaks. */
+        int callee_is_seq_op = fn && (strncmp(fn, "string_seq_", 11) == 0 ||
+                                      strcmp(fn, "string_join") == 0);
         for (int i = 0; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
             if (a && a->type == AST_IDENTIFIER && a->value &&
@@ -7489,7 +7507,7 @@ static void diag_walk_assignments(CodeGenerator* gen, ASTNode* node,
                     "    line %4d: %-20s = ...   _heap_%s = %d   [%s]%s\n",
                     node->line,
                     node->value, node->value, rhs_heap ? 1 : 0, shape,
-                    escaped ? "  ESCAPED — wrapper skips free" : "");
+                    escaped ? "  ESCAPED, wrapper skips free" : "");
             *found_any = 1;
         }
     }
@@ -7560,8 +7578,8 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
         fprintf(out, "  %-30s line %4d   %s\n",
                 c->value ? c->value : "(anonymous)",
                 c->line,
-                heap ? "HEAP — every return path heap-classified"
-                     : "NOT HEAP — ≥ 1 return literal/borrowed/unclassified");
+                heap ? "HEAP, every return path heap-classified"
+                     : "NOT HEAP, ≥ 1 return literal/borrowed/unclassified");
         sr_count++;
     }
     if (sr_count == 0) {
@@ -7583,7 +7601,7 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
             "\n[2] string-typed variable assignments\n"
             "    (the codegen wrapper at line 1611-1631 emits\n"
             "     `if (_heap_<lhs>) free(_tmp_old); _heap_<lhs> = N`\n"
-            "     after each assignment, with N as shown — except\n"
+            "     after each assignment, with N as shown, except\n"
             "     where the var is marked ESCAPED, in which case the\n"
             "     wrapper emits a plain assignment instead, leaving\n"
             "     the previous heap value alive for the function's\n"
@@ -7641,12 +7659,12 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
             "ESCAPED already had their wrapper-free skipped by the\n"
             "type-based escape analysis (the var was passed to a `ptr`\n"
             "parameter, captured by a closure, or returned from the\n"
-            "function — all of which let the recipient store the\n"
+            "function, all of which let the recipient store the\n"
             "pointer past the next reassignment); those leak the value\n"
             "across the function's lifetime in exchange for alias\n"
             "safety. If you see an ESCAPED-tagged line that you expected\n"
             "to free, check whether the recipient really retains the\n"
-            "pointer — and if not, the conservative analysis is leaking\n"
+            "pointer, and if not, the conservative analysis is leaking\n"
             "more than necessary (file an issue with a repro).\n"
             "\n=== end diagnosis ===\n");
 }

@@ -845,7 +845,7 @@ example() {
 // Output: Third, Second, First
 ```
 
-### `defer try` and `defer catch` — cleanup for one outcome only
+### `defer try` and `defer catch`, cleanup for one outcome only
 
 A plain `defer` runs on **every** exit. Two qualified forms run on only one:
 
@@ -855,7 +855,7 @@ defer try   commit()     // only when the function returns SUCCESSFULLY
 defer catch rollback()   // only when the function returns an ERROR
 ```
 
-"Error" means the function returned a **non-empty error slot** — Aether's
+"Error" means the function returned a **non-empty error slot**, Aether's
 `(value, err)` convention, and `T!`, which is the same shape.
 
 Together they give you the transactional shape in three lines: acquire, register
@@ -877,7 +877,7 @@ Without them, every early return needs its own `if err != "" { free(p); return }
 and the one you forget is the leak.
 
 Ordering is unchanged: **all** defers still run in LIFO order, and the
-conditional ones interleave with the unconditional ones by registration order —
+conditional ones interleave with the unconditional ones by registration order
 they are not hoisted into separate groups. In
 
 ```aether
@@ -888,7 +888,7 @@ defer try   log("T")
 
 a successful return logs `T`, `A`; an error return logs `C`, `A`.
 
-**Cost.** One predictable compare on the return path — and not even that where
+**Cost.** One predictable compare on the return path, and not even that where
 the outcome is known at compile time. An `expr!` propagation is *always* an error
 exit and a bare `return v` is *always* a success exit, so in a `T!` function both
 are resolved statically and no guard is emitted at all. There is no runtime defer
@@ -1086,8 +1086,8 @@ q = safe_divide(10, 0) or -1      // q == -1
 ```
 
 **`expr or { ... }` run a block on error, with `err` bound to the message.**
-The block's **last statement is its value** — so a handler can log, compute,
-and still yield a fallback — or the block exits (`return`, `break`,
+The block's **last statement is its value**, so a handler can log, compute,
+and still yield a fallback, or the block exits (`return`, `break`,
 `continue`, `panic`) and never falls through:
 
 ```aether
@@ -1103,7 +1103,7 @@ r = safe_divide(x, y) or {
 ```
 
 A block that neither yields a value of the right type nor exits is a compile
-error (`` `or { }` handler must end with a value … or exit ``) — previously
+error (`` `or { }` handler must end with a value … or exit ``), previously
 that shape compiled and read an **uninitialized** result on the error path.
 
 **`expr!` propagate the error.** Inside a function that itself returns `T!`,
@@ -1152,7 +1152,7 @@ Suppresses contract-check emission entirely. Equivalent to C's `-DNDEBUG` for `a
 
 **Compile-time folding** (design: [docs/contract-folding.md](contract-folding.md)):
 predicates are evaluated at compile time whenever every operand is a
-compile-time constant — literals, top-level `const` names, enum members,
+compile-time constant, literals, top-level `const` names, enum members,
 arithmetic (`+ - * / %`, exact in int64), comparisons, `&& || !`. Three
 outcomes:
 
@@ -1177,12 +1177,12 @@ outcomes:
   ```
 
   This is trait-bound/concepts-like checking from the contract syntax you
-  already wrote. Anything the evaluator cannot decide — a runtime variable, a
-  call, member access, a partial set of constant arguments — keeps today's
+  already wrote. Anything the evaluator cannot decide, a runtime variable, a
+  call, member access, a partial set of constant arguments, keeps today's
   runtime check and produces no diagnostic. Platform-dead code cannot
   false-positive: `when` arms are pruned before the typechecker runs.
 
-  Compile-time contract errors fire **even under `--no-contracts`** — that
+  Compile-time contract errors fire **even under `--no-contracts`**, that
   flag removes runtime *checks*, not free compile-time correctness findings.
   If a provably-violating call is intentionally unreachable, route the value
   through a runtime variable; only constant arguments participate in folding.
@@ -1192,7 +1192,7 @@ outcomes:
 - Postconditions are checked only at explicit `return <expr>` statements with a single value. Multi-value (tuple) returns and fall-off-the-end of void functions are not yet wrapped, calling `aether_panic` from those paths is a follow-up.
 - Short-circuit folding is asymmetric on purpose. `x || true` (unknown `x`)
   keeps the runtime check, because evaluating `x` may carry a side effect the
-  user expects to fire — but `true || x` elides, since the runtime would
+  user expects to fire, but `true || x` elides, since the runtime would
   short-circuit past `x` anyway; and `x && false` may be reported
   always-false, because a false verdict never skips any runtime evaluation
   (it is either a build error or an emitted runtime check).
@@ -1270,7 +1270,7 @@ equal values: `a == b` for `int?` compares the ints, and for `string?` compares
 the **contents** (via the same header-aware string comparison the language uses
 elsewhere), not the underlying pointers.
 
-An optional is a **single** presence layer — `T??` is rejected at parse time
+An optional is a **single** presence layer, `T??` is rejected at parse time
 (*"nested optional `T??` is not supported"*). If you find yourself wanting one,
 you almost certainly want the distinct "fallible-and-absent" spelling instead,
 which composes from a result and an optional rather than nesting two optionals.
@@ -1558,7 +1558,7 @@ arithmetic on the backing integer. This is the whole point of the feature: C's
 straddling behaviour, which makes them unusable for anything that has to match a
 byte-exact layout. In particular gcc gives `int x : 3` a **signed**
 representation, so a stored `0b111` reads back as `-1`. A bitstruct field cannot
-do that — the backing word is unsigned and the mask is applied after the shift,
+do that, the backing word is unsigned and the mask is applied after the shift,
 so there is nothing to sign-extend from.
 
 The rules, each of which exists to keep the layout exact:
@@ -1567,7 +1567,7 @@ The rules, each of which exists to keep the layout exact:
   `uint32_t`, `uint64_t`. Naming the storage explicitly is what fixes its width
   and its signedness. Omitting it is a compile error, not a default.
 - **Bit positions are explicit.** A bare index (`0`) is a one-bit field. A range
-  may be written inclusively (`1..=3`) or exclusively (`1..<4`) — both denote the
+  may be written inclusively (`1..=3`) or exclusively (`1..<4`), both denote the
   same three bits. Aether does not pick one for you (C3, which this borrows from,
   hardcodes inclusive ranges and leaves you to remember); the source says which
   it means, using the same `..=` / `..<` spellings as match-range labels.
@@ -1580,13 +1580,13 @@ The rules, each of which exists to keep the layout exact:
   to its own field rather than bleeding into the next one.
 - **A bitstruct is nominal.** It never implicitly converts to or from its backing
   integer, and two bitstructs over the same backing type are still different
-  types. Crossing the boundary is an explicit `as` in either direction — a
+  types. Crossing the boundary is an explicit `as` in either direction, a
   bitstruct is a packed layout, not a number you do arithmetic on.
 
 ### Bit layout and byte order are separate concerns
 
 A bitstruct says **which bits**. It deliberately says nothing about **which byte
-order** — there is no `@bigendian` annotation, and no hidden byte-swapping on
+order**, there is no `@bigendian` annotation, and no hidden byte-swapping on
 field access. Byte order is a property of *serialisation*, not of the layout, and
 Aether already has endian-explicit accessors for it in [`std.mem`](../std/mem/):
 
@@ -1605,7 +1605,7 @@ mem.set_u16_be(buf, 0, hdr as uint16_t)
 Keeping the two apart means there is exactly one place where a byte swap can
 happen, and it is visible in the source. Folding endianness into the type would
 make the swap implicit and raise the question "does it happen on every field
-read, or only at the byte boundary?" — the sort of ambiguity that makes C
+read, or only at the byte boundary?", the sort of ambiguity that makes C
 bitfields untrustworthy in the first place.
 
 ## Sum / Variant Types

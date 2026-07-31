@@ -148,6 +148,15 @@ StringSeq* string_seq_reverse(StringSeq* s);
  * work — `b` is shared, not walked. NULL on OOM. */
 StringSeq* string_seq_concat(StringSeq* a, StringSeq* b);
 
+/* Join elements with `sep` between adjacent pairs. Linear cost (two
+ * passes, one exact-size allocation); the escape from the O(n^2)
+ * interpolation-self-append accumulation trap. Returns a fresh
+ * caller-owned AetherString (returned as const char*, matching the
+ * string_seq_head convention and the generated extern declaration);
+ * "" for the empty seq. The separator accepts both AetherString* and
+ * plain char* (magic-dispatched). */
+const char* string_seq_join(StringSeq* s, const char* sep);
+
 /* Returns a new seq with the first min(n, length(s)) elements of
  * `s`. New cells; the tail is NULL (independent spine, not shared
  * with `s`). n <= 0 returns empty. O(min(n, length)) work. */

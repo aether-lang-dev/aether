@@ -133,6 +133,7 @@ typedef struct AetherString {
 - `string_to_upper()` - Convert to uppercase
 - `string_to_lower()` - Convert to lowercase
 - `string_trim()` - Remove whitespace
+- `string.join(seq, sep)` - Concatenate a `*StringSeq`'s elements with `sep` between adjacent pairs. Linear cost (two passes, one exact-size allocation), the complement of `string.split_to_seq`. For building a string piece by piece instead, use `std.strbuilder`; both avoid the O(n²) self-append trap described in the [Standard Library Reference](stdlib-reference.md#building-strings-incrementally-avoiding-quadratic-cost).
 
 #### Conversion
 
@@ -215,7 +216,7 @@ main() {
 - `file.open(path, mode)` → `(ptr, string)` - Low-level open (caller must `file.close`)
 - `file.close(handle)` - Close a file handle
 - `file.size(path)` → `(int, string)` - Get file size in bytes
-- `fs.statvfs(path)` → `(total, free, avail, err)` - Filesystem byte counts (POSIX `statvfs`) for the fs containing `path`. `avail` is space usable by a non-root process (`f_bavail`) — use it for "how much can I actually write" (`end = avail / file_size`). Portable Linux/macOS/BSD; Windows returns the error branch.
+- `fs.statvfs(path)` → `(total, free, avail, err)` - Filesystem byte counts (POSIX `statvfs`) for the fs containing `path`. `avail` is space usable by a non-root process (`f_bavail`), use it for "how much can I actually write" (`end = avail / file_size`). Portable Linux/macOS/BSD; Windows returns the error branch.
 - `fs.mounts()` → `(count, err)` - Load the mount table: Linux `/proc/self/mountinfo` (octal escapes decoded), macOS/BSD `getmntinfo(3)`, Windows drive letters. Read entries with `fs.mount_source(i)` / `fs.mount_point(i)` / `fs.mount_fstype(i)` / `fs.mount_options(i)` (strings borrowed from a thread-local table, valid until the next `mounts()` or `fs.fs_release_mounts()`). Out-of-range indexes return `""`.
 - `fs.block_info(dev)` → `(size_bytes, removable, transport, err)` - Block-device facts, Linux sysfs backend. `dev` accepts `/dev/sda`, `sda`, or a partition (`nvme0n1p2`; the removable flag resolves through the parent disk). `removable` is 1/0 or -1 when unknown; `transport` is `usb`/`nvme`/`sata`/`virtio`/`mmc` or `""`. Non-Linux platforms return the error branch, never a fabricated answer.
 - `file.delete(path)` → `string` - Delete a file, return error string
@@ -349,7 +350,7 @@ main() {
 - `os.args_count()` → `int` Ergonomic alias for `aether_args_count()`
 - `os.args_get(index)` → `string` Ergonomic wrapper: owned copy of argv[index], `""` when out of range / sealed (never null)
 
-All four raw `aether_args_*` names also resolve qualified (`os.aether_args_count()` — the form the language reference shows).
+All four raw `aether_args_*` names also resolve qualified (`os.aether_args_count()`, the form the language reference shows).
 
 Typical use: a tool that needs to find its own binary (to locate sibling helpers next to itself, re-exec with different flags, or print a self-path in a diagnostic) can call `os.argv0()` and skip the argv-index bookkeeping.
 
@@ -585,7 +586,7 @@ main() {
 
 ### What's not in `std.cryptography`
 
-The public-key and cipher families (RSA, ECDSA, Ed25519, X25519, AES, ChaCha20-Poly1305, …) live under `std.cryptography` as explicitly-imported sub-modules (`std.cryptography.rsa`, `std.cryptography.x25519`, …) — pure-Aether, no OpenSSL. URL-safe Base64 (RFC 4648 §5) and constant-time comparison remain out of the top-level module. See [stdlib-reference.md](stdlib-reference.md) §"What `std.cryptography` doesn't do" for the rationale.
+The public-key and cipher families (RSA, ECDSA, Ed25519, X25519, AES, ChaCha20-Poly1305, …) live under `std.cryptography` as explicitly-imported sub-modules (`std.cryptography.rsa`, `std.cryptography.x25519`, …), pure-Aether, no OpenSSL. URL-safe Base64 (RFC 4648 §5) and constant-time comparison remain out of the top-level module. See [stdlib-reference.md](stdlib-reference.md) §"What `std.cryptography` doesn't do" for the rationale.
 
 ---
 
@@ -733,8 +734,8 @@ main() {
 
 **TLS + proxy (per request):**
 - `client.set_insecure(req, on)` → `string` - `1` skips TLS peer + hostname verification for this request only (`curl -k` / `--no-check-certificate`); relaxed per-connection, never on the shared `SSL_CTX`. Default `0` (verify). Use only against hosts you trust out-of-band.
-- `client.set_cafile(req, path)` → `string` - pin a custom CA for this request: verify the peer against the PEM bundle at `path` instead of the system trust store, **keeping peer + hostname verification on**. Strictly stronger than `set_insecure` — for M2M calls to a host with a private/self-signed CA you've couriered out-of-band (e.g. a Proxmox VE API's `pve-root-ca.pem`). Per-connection (never touches the shared `SSL_CTX`); `""` clears the pin. A cert the pinned CA doesn't cover fails the handshake (fails closed, never open).
-- `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY`. **Off by default** — the client does not honour env proxies unless you opt in (the hardened inverse of the httpoxy/CVE-2016-5385 default-follow). Guarded: the CGI-injectable uppercase `HTTP_PROXY` is refused under `$REQUEST_METHOD`/`$GATEWAY_INTERFACE`, and a proxy at a loopback/link-local IP is rejected (SSRF).
+- `client.set_cafile(req, path)` → `string` - pin a custom CA for this request: verify the peer against the PEM bundle at `path` instead of the system trust store, **keeping peer + hostname verification on**. Strictly stronger than `set_insecure`, for M2M calls to a host with a private/self-signed CA you've couriered out-of-band (e.g. a Proxmox VE API's `pve-root-ca.pem`). Per-connection (never touches the shared `SSL_CTX`); `""` clears the pin. A cert the pinned CA doesn't cover fails the handshake (fails closed, never open).
+- `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY`. **Off by default**, the client does not honour env proxies unless you opt in (the hardened inverse of the httpoxy/CVE-2016-5385 default-follow). Guarded: the CGI-injectable uppercase `HTTP_PROXY` is refused under `$REQUEST_METHOD`/`$GATEWAY_INTERFACE`, and a proxy at a loopback/link-local IP is rejected (SSRF).
 - `client.use_http_proxy(req, "http://host:port")` → `string` - Pin an explicit forward proxy; env is ignored entirely (empty url = direct). A team-controlled proxy is immune to whatever the shell/CI set.
 - `client.ignore_http_proxy(req)` → `string` - Force a direct connection regardless of env / any set proxy (determinism escape hatch, e.g. VCR record mode). Precedence: ignore > explicit > env > direct.
 

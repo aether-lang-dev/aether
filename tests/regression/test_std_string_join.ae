@@ -1,0 +1,75 @@
+// Regression test for string.join / string_seq_join, the linear-cost
+// complement of split_to_seq and the escape from the O(n^2)
+// interpolation-self-append accumulation trap (an SVG path builder hit
+// seconds-per-call through that shape on dense fonts).
+//
+// What this test guards:
+//   1. join with a separator interleaves exactly n-1 separators
+//   2. join with an empty separator concatenates
+//   3. The empty seq joins to ""
+//   4. A single-element seq gets no separator
+//   5. Multi-byte separators and elements round-trip
+//   6. Joining inside interpolation frees its temporary (the
+//      interp-segment drain; leak-checked by the CI sanitizer jobs)
+//   7. Linear cost in practice: joining 2000 elements stays instant
+//      (the suite timeout would catch quadratic behaviour)
+
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+expect(got: string, want: string, label: string) {
+    if string.equals(got, want) != 1 {
+        fail("${label}: expected '${want}', got '${got}'")
+    }
+}
+
+main() {
+    parts = string.split_to_seq("a,b,c", ",")
+    expect(string.join(parts, " - "), "a - b - c", "separator join")
+    println("PASS 1: separators interleave")
+
+    expect(string.join(parts, ""), "abc", "empty separator")
+    println("PASS 2: empty separator concatenates")
+
+    empty = string.seq_empty()
+    expect(string.join(empty, ","), "", "empty seq")
+    println("PASS 3: empty seq joins to empty")
+
+    one = string.seq_cons("solo", string.seq_empty())
+    expect(string.join(one, ","), "solo", "single element")
+    println("PASS 4: single element gets no separator")
+
+    wide = string.split_to_seq("alpha::beta::gamma", "::")
+    expect(string.join(wide, "<=>"), "alpha<=>beta<=>gamma", "multi-byte")
+    println("PASS 5: multi-byte separators round-trip")
+
+    boxed = "[${string.join(parts, "|")}]"
+    expect(boxed, "[a|b|c]", "interp segment")
+    println("PASS 6: join inside interpolation")
+
+    big = string.seq_empty()
+    i = 0
+    while i < 2000 {
+        big = string.seq_cons("chunk", big)
+        i = i + 1
+    }
+    joined = string.join(big, ",")
+    if string.length(joined) != 11999 {
+        n = string.length(joined)
+        fail("2000-element join: expected 11999 bytes, got ${n}")
+    }
+    string.release(joined)
+    string.seq_free(big)
+    println("PASS 7: 2000-element join is linear and exact")
+
+    string.seq_free(parts)
+    string.seq_free(one)
+    string.seq_free(wide)
+    println("=== All cases passed ===")
+}

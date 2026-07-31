@@ -484,7 +484,7 @@ Token* read_raw_identifier(void) {
 
     if (i == 0) {
         free(buffer);
-        return create_token(TOKEN_ERROR, "empty raw identifier — `` is not a valid name", start_line, start_col);
+        return create_token(TOKEN_ERROR, "empty raw identifier, `` is not a valid name", start_line, start_col);
     }
     if (isdigit((unsigned char)buffer[0])) {
         free(buffer);
@@ -492,7 +492,7 @@ Token* read_raw_identifier(void) {
     }
     if (current_pos >= source_length || peek() != '`') {
         free(buffer);
-        return create_token(TOKEN_ERROR, "unterminated raw identifier — missing closing backtick", start_line, start_col);
+        return create_token(TOKEN_ERROR, "unterminated raw identifier, missing closing backtick", start_line, start_col);
     }
     advance(); /* consume the closing backtick */
 

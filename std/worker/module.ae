@@ -66,13 +66,15 @@
 // retained on capture. The `ptr` result is owned by `done` — free it there if
 // it is heap memory you allocated in `work`.
 
+import std.list
+
 exports(
     aether_worker_run, aether_worker_run_detached,
     aether_worker_set_main_poster, aether_worker_deliver,
-    aether_worker_drain, aether_worker_pending,
+    aether_worker_drain, aether_worker_pending, aether_worker_wait,
     aether_worker_pool_configure, aether_worker_pool_shutdown,
-    run, run_detached, set_main_poster, deliver, drain, pending,
-    pool_size, pool_shutdown
+    run, run_detached, set_main_poster, deliver, drain, pending, wait,
+    map, pool_size, pool_shutdown
 )
 
 // ---- raw externs (std/worker/aether_worker.c) ----
@@ -86,6 +88,7 @@ extern aether_worker_set_main_poster(poster: fn)
 extern aether_worker_deliver(job: ptr)
 extern aether_worker_drain(max: int) -> int
 extern aether_worker_pending() -> int
+extern aether_worker_wait() -> int
 extern aether_worker_pool_configure(n: int)
 extern aether_worker_pool_shutdown()
 
@@ -130,6 +133,66 @@ drain(max: int) -> int {
 // through the poster). For backpressure and test synchronisation.
 pending() -> int {
     return aether_worker_pending()
+}
+
+// Block until every submitted job has completed AND had its completion
+// delivered, running those completions on the calling thread. Returns how
+// many completions ran, or -1 when a main-thread poster is installed (there
+// the host loop delivers, so waiting on that thread would block the very
+// thread that has to deliver; pump the host loop instead).
+//
+// This is the headless batch join: no poll loop, and unlike pool_shutdown it
+// leaves the pool running, so a reusable function can wait once per batch and
+// be called again.
+//
+//     i = 0
+//     while i < n {
+//         worker.run(|| { return compute(i) }, |r: ptr| { collect(r) })
+//         i = i + 1
+//     }
+//     worker.wait()          // every collect() has run by here
+wait() -> int {
+    return aether_worker_wait()
+}
+
+// Bounded parallel map: apply `f` to every element of `items` on the worker
+// pool and collect the results into a new list, index-aligned with the input.
+// Concurrency is bounded by the pool (job N+1 queues behind the N in flight),
+// which is the Go errgroup.SetLimit / bounded-semaphore shape.
+//
+//     doubled = worker.map(nums, |x: ptr| { return double(x) })
+//
+// `f` runs on a worker thread, so it must not touch shared mutable state
+// without synchronisation; the result slots are written on the calling thread
+// during the wait, so the returned list needs no locking. The caller owns the
+// returned list (free it with list.free) and keeps ownership of `items`.
+//
+// Returns an empty list when a main-thread poster is installed: completions
+// go to the host loop there, so this helper cannot join them (wait() reports
+// the same condition on stderr).
+map(items: ptr, f: fn) -> ptr {
+    n = list.size(items)
+    out = list.new()
+    i = 0
+    while i < n {
+        list.add(out, 0)
+        i = i + 1
+    }
+    if n == 0 {
+        return out
+    }
+    i = 0
+    while i < n {
+        item, ierr = list.get(items, i)
+        slot = i
+        worker.run(
+            || { return call(f, item) },
+            | r: ptr | { list.set(out, slot, r) }
+        )
+        i = i + 1
+    }
+    worker.wait()
+    return out
 }
 
 // Set the bounded pool size. Only takes effect before the first run(); the

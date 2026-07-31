@@ -15,10 +15,14 @@ exports(
 extern list_new() -> ptr
 extern list_new_in(alloc: ptr) -> ptr
 extern list_add_raw(list: ptr, item: ptr) -> int
-// Heap-string-aware add (#467). Retains the value and tags the
-// list so list_free releases each string element before freeing
-// the backing array. Codegen auto-routes `list.add(l, heap_string_expr)`
-// here when the value is heap-classified.
+// Heap-string-aware add. The list acquires its OWN reference: a
+// refcounted string is retained, a plain pointer (a literal, a
+// borrowed char*) is copied. The caller keeps and independently frees
+// theirs, so the same value can live in several containers. list_free
+// releases each owned element before freeing the backing array.
+// Codegen auto-routes `list.add(l, heap_string_expr)` to the adopting
+// sibling instead, where the value is escaping into the list and the
+// caller does not release it.
 extern list_add_string_owned(list: ptr, item: ptr) -> int
 extern list_get_raw(list: ptr, index: int) -> ptr
 extern list_set(list: ptr, index: int, item: ptr)

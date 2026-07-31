@@ -62,7 +62,7 @@ static AetherDeathHook death_hook = NULL;
 
 AetherJmpFrame* aether_try_push(void) {
     if (tls_stack.depth >= AETHER_PANIC_MAX_DEPTH) {
-        fprintf(stderr, "aether: try/catch nesting exceeded %d — aborting\n",
+        fprintf(stderr, "aether: try/catch nesting exceeded %d, aborting\n",
                 AETHER_PANIC_MAX_DEPTH);
         abort();
     }

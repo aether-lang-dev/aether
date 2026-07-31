@@ -62,7 +62,7 @@ int main(void) {
 
 ## `--emit=csrc`: distribute source, not N native libs
 
-A single **native** lib can't be universal across OSes — ELF vs Mach-O vs
+A single **native** lib can't be universal across OSes, ELF vs Mach-O vs
 PE/COFF are different loader formats. But the **pre-native** artifact can be:
 the generated C is portable, so `--emit=csrc` moves the "which platform"
 decision from *distribution time* (ship 6 natives) to the consumer's build:

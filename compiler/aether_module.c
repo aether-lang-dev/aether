@@ -1093,7 +1093,16 @@ static int check_selective_import_shadow(ASTNode* ast,
             if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
             if (sel->annotation &&
                 strcmp(sel->annotation, "module_alias") == 0) continue;
-            selected_names[selected_count] = sel->value;
+            /* Per-symbol alias: the LOCAL name a def could shadow is
+             * the alias, not the exported name (`import vg (path as
+             * vgpath)` frees up `path` for local use; a local `vgpath`
+             * is now the collision). */
+            if (sel->annotation &&
+                strncmp(sel->annotation, "select_alias:", 13) == 0) {
+                selected_names[selected_count] = sel->annotation + 13;
+            } else {
+                selected_names[selected_count] = sel->value;
+            }
             selected_from[selected_count] = child->value;
             selected_count++;
         }
@@ -1133,7 +1142,7 @@ static int check_selective_import_shadow(ASTNode* ast,
                     "  the local def silently shadows the import, so a "
                     "bare call to '%s(...)' inside the local body would\n"
                     "  recurse into the local rather than forward to the "
-                    "imported symbol — at runtime this is a stack\n"
+                    "imported symbol, at runtime this is a stack\n"
                     "  overflow with no compile-time signal.\n", fn_name);
                 fprintf(stderr,
                     "  fix one of:\n"
@@ -1183,7 +1192,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
     if (has_legacy_export && has_exports_list) {
         fprintf(stderr,
                 "error: module '%s' mixes the legacy `export <fn>` form with "
-                "the new top-of-file `exports (…)` list — pick one.\n",
+                "the new top-of-file `exports (…)` list, pick one.\n",
                 module_name);
     }
     if (has_legacy_export && !has_exports_list) {
@@ -1545,7 +1554,7 @@ static int check_namespace_prefix_collision(ASTNode* program) {
                     "imported '%s.%s' from '%s'\n",
                     prefixed, user_line[u], user_col[u], ns, decl->value, child->value);
                 fprintf(stderr,
-                    "  an import mangles '%s.%s' to the flat C symbol '%s' — the\n"
+                    "  an import mangles '%s.%s' to the flat C symbol '%s', the\n"
                     "  same symbol your local function emits. Every '%s.%s(...)'\n"
                     "  call would silently dispatch to your local function: clean\n"
                     "  compile, clean link, wrong function at runtime.\n",
@@ -1909,6 +1918,28 @@ static int program_has_message(ASTNode* program, const char* name) {
 // the selection list is computed at typecheck time from the source
 // module's exports, not stored on the AST. Most ports use the explicit
 // selective form, so deferring glob to a follow-up PR.
+/* Rename references bound through a per-symbol import alias
+ * (`import X (name as alias)`) inside a cloned module body: bare
+ * `alias(...)` calls become `<ns>_<name>(...)`; when the aliased
+ * symbol is a const, bare `alias` identifiers rename the same way.
+ * Mirrors the two rename branches of rename_intra_module_refs. */
+static void rename_aliased_import_refs(ASTNode* node, const char* alias,
+                                       const char* prefixed, int is_const) {
+    if (!node) return;
+    if (node->type == AST_FUNCTION_CALL && node->value &&
+        strcmp(node->value, alias) == 0) {
+        free(node->value);
+        node->value = strdup(prefixed);
+    } else if (is_const && node->type == AST_IDENTIFIER && node->value &&
+               strcmp(node->value, alias) == 0) {
+        free(node->value);
+        node->value = strdup(prefixed);
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rename_aliased_import_refs(node->children[i], alias, prefixed, is_const);
+    }
+}
+
 static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) {
     if (!clone || !mod_ast) return;
 
@@ -1981,6 +2012,20 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 ASTNode* sel = imp->children[k];
                 if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
                 if (sel->annotation && strcmp(sel->annotation, "module_alias") == 0) continue;
+                /* Per-symbol alias inside a module's own import: the
+                 * cloned body's bare refs use the ALIAS; rewrite them
+                 * straight to the prefixed EXPORTED name (the generic
+                 * name->ns_name pass below cannot express the rename,
+                 * so aliased entries get a dedicated pass here). */
+                if (sel->annotation &&
+                    strncmp(sel->annotation, "select_alias:", 13) == 0) {
+                    char prefixed[256];
+                    snprintf(prefixed, sizeof(prefixed), "%s_%s", sub_ns, sel->value);
+                    rename_aliased_import_refs(clone, sel->annotation + 13, prefixed,
+                                               name_in_list(sel->value, sub_const_names,
+                                                            sub_const_count));
+                    continue;
+                }
                 if (name_in_list(sel->value, sub_func_names, sub_func_count) &&
                     sel_func_count < AETHER_MODULE_MAX_DECLS) {
                     sel_func_names[sel_func_count++] = sel->value;
@@ -2849,11 +2894,35 @@ void module_merge_into_program(ASTNode* program) {
         int mod_const_count = collect_module_const_names(mod->ast, mod_const_names,
                                                          AETHER_MODULE_MAX_DECLS);
 
+        const char* alias_from[AETHER_MODULE_MAX_DECLS];
+        const char* alias_to_name[AETHER_MODULE_MAX_DECLS];
+        int alias_is_const[AETHER_MODULE_MAX_DECLS];
+        int alias_count = 0;
+
         for (int k = 0; k < import_node->child_count; k++) {
             ASTNode* sel = import_node->children[k];
             if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
             // Skip alias nodes — the parser marks them with annotation="module_alias".
             if (sel->annotation && strcmp(sel->annotation, "module_alias") == 0) continue;
+            /* Per-symbol alias (`import M (path as vgpath)`): the local
+             * name in the program body is the ALIAS, and only the alias.
+             * The exported name must NOT be added to the plain rename
+             * list — leaving it there would capture a same-named local
+             * definition, which is exactly the collision the alias
+             * exists to avoid. */
+            if (sel->annotation &&
+                strncmp(sel->annotation, "select_alias:", 13) == 0) {
+                if (alias_count < AETHER_MODULE_MAX_DECLS &&
+                    (name_in_list(sel->value, mod_func_names, mod_func_count) ||
+                     name_in_list(sel->value, mod_const_names, mod_const_count))) {
+                    alias_from[alias_count] = sel->annotation + 13;
+                    alias_to_name[alias_count] = sel->value;
+                    alias_is_const[alias_count] =
+                        name_in_list(sel->value, mod_const_names, mod_const_count);
+                    alias_count++;
+                }
+                continue;
+            }
             if (name_in_list(sel->value, mod_func_names, mod_func_count) &&
                 sel_func_count < AETHER_MODULE_MAX_DECLS) {
                 sel_func_names[sel_func_count++] = sel->value;
@@ -2862,7 +2931,7 @@ void module_merge_into_program(ASTNode* program) {
                 sel_const_names[sel_const_count++] = sel->value;
             }
         }
-        if (sel_func_count == 0 && sel_const_count == 0) continue;
+        if (sel_func_count == 0 && sel_const_count == 0 && alias_count == 0) continue;
 
         for (int m = 0; m < program->child_count; m++) {
             ASTNode* top = program->children[m];
@@ -2871,6 +2940,12 @@ void module_merge_into_program(ASTNode* program) {
             if (top->is_imported) continue;
             rename_intra_module_refs(top, ns, sel_func_names, sel_func_count,
                                      sel_const_names, sel_const_count, NULL, 0);
+            for (int a = 0; a < alias_count; a++) {
+                char prefixed[256];
+                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to_name[a]);
+                rename_aliased_import_refs(top, alias_from[a], prefixed,
+                                           alias_is_const[a]);
+            }
         }
     }
 

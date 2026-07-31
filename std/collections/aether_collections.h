@@ -25,7 +25,15 @@ int list_add_raw(ArrayList* list, void* item);
  * interp, heap-returning user-fn, heap-tracked local). Plain
  * literals stay on `list_add_raw` (no retain, list won't release
  * at free). */
+/* Owning add: the list acquires its own reference (retain for a
+ * refcounted AetherString, an owned copy for a plain pointer), so the
+ * caller keeps theirs. Safe to share one value across containers and
+ * safe with string literals. */
 int list_add_string_owned(ArrayList* list, const void* item);
+/* Adopting add: takes over the caller's single reference. Emitted by
+ * codegen for values escaping into the list; not for hand-written
+ * calls (see the note in aether_collections.c). */
+int list_add_string_adopted(ArrayList* list, const void* item);
 /* Add a heap closure box the list owns (owned_flags == 2): list_free
  * reclaims the box AND its captured env. Routed when a `fn`-typed closure
  * value is stored into a list. */
@@ -49,7 +57,9 @@ int map_put_raw(HashMap* map, const char* key, void* value);
  * `map.put(m, k, heap_string_expr)` here when the value is heap-
  * classified. Plain literals stay on map_put_raw (no retain, map
  * won't release at free). */
+/* Owning put / adopting put: same split as the list pair above. */
 int map_put_string_owned(HashMap* map, const char* key, const void* value);
+int map_put_string_adopted(HashMap* map, const char* key, const void* value);
 // Return value for `key`, or NULL for absent / null-input. The Aether
 // wrapper `map.get` distinguishes "absent" (null, "") from wrong-input
 // (null, "null map").

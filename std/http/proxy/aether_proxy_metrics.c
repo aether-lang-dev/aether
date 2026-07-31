@@ -238,7 +238,7 @@ char* aether_proxy_pool_metrics_text(AetherProxyPool* pool) {
     free(snap);
     if (buf.data == NULL) {
         /* No metrics emitted at all (empty pool, no allocations). */
-        buf.data = strdup("# Aether proxy: empty pool — no metrics.\n");
+        buf.data = strdup("# Aether proxy: empty pool, no metrics.\n");
     }
     return buf.data;
 

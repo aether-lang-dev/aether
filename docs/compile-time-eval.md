@@ -36,7 +36,7 @@ is itself a const.
   `string.trim(...)`, a user function, an `extern`, `malloc`. Even though
   some of these are pure, they are rejected in a const initializer with:
 
-  > `const initializer must be a compile-time constant expression — …`
+  > `const initializer must be a compile-time constant expression, …`
 
   This is deliberate. A *general* compile-time evaluator would be able to
   synthesize `std.fs` / `std.net` calls and evaluate them at build time,

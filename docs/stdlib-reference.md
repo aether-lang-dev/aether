@@ -77,6 +77,26 @@ main() {
 
 Raw extern: `list_add_raw` (returns 1/0).
 
+**String-value ownership.** `list.add(l, <heap string expr>)` is auto-routed
+by the compiler to an *adopting* add: the value is escaping into the list, the
+caller's own release is suppressed, and `list.free` releases it. That transfer
+is invisible and costs nothing.
+
+Calling the owned-add extern **by hand** is different, and the two entry points
+say which they are:
+
+- `list_add_string_owned(l, s)` gives the list its **own** reference. A
+  refcounted string is retained; a plain pointer (a literal, a borrowed
+  `char*`) is copied, because a non-refcounted pointer cannot be shared
+  safely. The caller keeps and independently frees theirs, so the same value
+  may live in several containers, in any free order.
+- `list_add_string_adopted(l, s)` takes over the caller's single reference
+  without retaining. This is what codegen emits. Call it by hand only when
+  ownership genuinely transfers: adopting a pointer you did not own
+  double-frees at `list.free` time.
+
+`map_put_string_owned` / `map_put_string_adopted` are the same pair for maps.
+
 ### String list (`string_list_*`)
 
 Refcount-aware list for `AetherString` values. Use this instead of plain `list_*` when the list is meant to hold strings, the plain list stores items as raw `void*` and doesn't bump the refcount, so a string pushed and held while its original variable goes out of scope silently dangles.
@@ -572,6 +592,7 @@ main() {
 - `string.seq_concat(a, b)` → `*StringSeq` O(|a|), `a` copied, `b` shared via refcount bump
 - `string.seq_take(s, n)` → `*StringSeq` first `n` elements (clamped to length, negative yields empty); fresh independent spine
 - `string.seq_drop(s, n)` → `*StringSeq` n-th tail retained (clamped to length, negative yields `s` retained); pointer walk only, no allocations
+- `string.join(s, sep)` → `string` concatenate every element with `sep` between adjacent pairs; the complement of `split_to_seq`. **Linear cost**: two passes (sum lengths, fill one exact-size buffer), one allocation regardless of element count. Empty seq yields `""`, a single element yields itself with no separator, and both elements and separator are binary-safe. Returns a fresh owned string.
 
 Pattern-match `[]` and `[h|t]` arms work directly against `*StringSeq` matched expressions:
 
@@ -613,6 +634,59 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.retain(str)` - Increment reference count
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
+
+### Building strings incrementally (avoiding quadratic cost)
+
+Self-append accumulation re-copies everything you have built so far on
+every iteration, so a loop that appends `n` pieces costs O(n²) in total
+bytes copied:
+
+```aether
+// SLOW: quadratic. Each iteration allocates a fresh buffer and copies
+// the entire accumulation into it.
+d = ""
+while i < n {
+    d = "${d}${piece}"           // same shape as string.concat(d, piece)
+    i = i + 1
+}
+```
+
+The trap is invisible at small `n` and catastrophic at large `n`: a
+real SVG path builder went from ~30 ms per call on a light font to
+seconds per call (wedging the host app's event loop) once a denser
+face pushed the outline-point count into the thousands.
+
+Two linear-cost escapes, pick by shape.
+
+**Appending piece by piece**: use `std.strbuilder`, which grows one
+buffer with amortized doubling:
+
+```aether
+import std.strbuilder
+
+b = strbuilder.new(0)            // 0 = default capacity hint
+i = 0
+while i < n {
+    strbuilder.append(b, piece)  // amortized O(len(piece))
+    i = i + 1
+}
+d = strbuilder.finish(b)         // finalize; frees the builder
+```
+
+`strbuilder` also carries typed appends (`append_int`, `append_long`,
+`append_hex`, `append_byte`, `append_codepoint`) so number formatting
+doesn't route through an intermediate string.
+
+**Joining a sequence you already have**: use `string.join`, which
+sizes one exact buffer in a first pass and fills it in a second:
+
+```aether
+d = string.join(parts, ", ")     // parts: *StringSeq
+```
+
+Neither escape changes the semantics of the naive form; they only
+change its cost. Reach for the builder when pieces arrive one at a
+time, `join` when the elements already exist as a `*StringSeq`.
 
 ### String ownership and the heap-string tracker
 
@@ -1282,13 +1356,13 @@ main() {
 
 Coming from Java's `java.security`, Python's `cryptography`, or Go's `crypto/*`, expect to reach for an external library if you need:
 
-- **Public-key crypto (RSA, ECDSA, Ed25519, X25519), symmetric ciphers (AES, ChaCha20-Poly1305), and key derivation (KDFs).** These live under [`std.cryptography`](../std/cryptography/) (`rsa`, `aes`, `chacha20poly1305`, `ed25519`, `x25519`, `p256`, `secp256k1`, `pem`, `asn1`, ...) — pure-Aether ports with no OpenSSL dependency. Each family is a separate sub-module you import explicitly.
+- **Public-key crypto (RSA, ECDSA, Ed25519, X25519), symmetric ciphers (AES, ChaCha20-Poly1305), and key derivation (KDFs).** These live under [`std.cryptography`](../std/cryptography/) (`rsa`, `aes`, `chacha20poly1305`, `ed25519`, `x25519`, `p256`, `secp256k1`, `pem`, `asn1`, ...), pure-Aether ports with no OpenSSL dependency. Each family is a separate sub-module you import explicitly.
 - **URL-safe Base64 (RFC 4648 §5).** Standard alphabet only; URL-safe (`-` / `_` instead of `+` / `/`) is a separate variant the wrappers don't expose.
 - **Constant-time comparison.** Equality checks via `string.equals` are not constant-time; callers comparing hashes for security-sensitive cases need their own constant-time helper.
 
 Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return allocated `char*` or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
 
-Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`) — pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
+Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptography` as explicitly-imported sub-modules (e.g. `std.cryptography.rsa`, `std.cryptography.x25519`, `std.cryptography.aes`), pure-Aether ports, no OpenSSL. The top-level `std.cryptography` module stays focused on the hash/HMAC/Base64/CSPRNG primitives with a single obvious shape.
 
 ---
 
@@ -1599,15 +1673,15 @@ main() {
 - `client.send_stream(req)` → `(ptr, string)` - Like `send_request`, but the response body is streamed rather than buffered (see below)
 - `client.request_free(req)` - Free the request handle
 
-**TLS + forward proxy (per request):** the client is hardened by default — TLS
+**TLS + forward proxy (per request):** the client is hardened by default, TLS
 peer verification is **on** and env proxies are **not** followed unless you opt
 in. These knobs relax that per request; precedence for proxy is
 `ignore > explicit > env > direct`.
-- `client.set_insecure(req, on)` → `string` - `1` skips TLS peer + hostname verification for this request only (`curl -k` / `wget --no-check-certificate`). Relaxed per-connection, never on the shared process-wide `SSL_CTX`, so other requests keep verifying. Default `0`. Use only against hosts trusted out-of-band (self-signed dev/staging/appliance certs) — it removes MITM protection for that request.
-- `client.set_cafile(req, path)` → `string` - pin a custom CA for this request: verify the peer against the PEM bundle at `path` instead of the system trust store, while **keeping peer and hostname verification on**. This is the "verify, but against THIS cert" knob — strictly stronger than `set_insecure`, for machine-to-machine calls to a host with a private/self-signed CA couriered out-of-band (courier the CA once over SSH, then pin it instead of blind-trusting). Per-connection via a per-`SSL` `X509_STORE`; never touches the shared `SSL_CTX`. `""` clears the pin (revert to the system store). A certificate the pinned CA doesn't cover fails the handshake — fails closed, never open.
-- `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY` (Go-compatible). **Off by default** — the deliberate inverse of the default-follow that caused the httpoxy vulnerability class (CVE-2016-5385). It is a code-visible opt-in, never ambient, and carries two guards: the CGI-injectable uppercase `HTTP_PROXY` is refused when `$REQUEST_METHOD`/`$GATEWAY_INTERFACE` is set (lowercase `http_proxy` stays honoured), and a proxy resolving to a loopback/link-local IP literal (127/8, 169.254/16 IMDS, `::1`, `fc00::/7`, `fe80::/10`) is rejected (SSRF).
+- `client.set_insecure(req, on)` → `string` - `1` skips TLS peer + hostname verification for this request only (`curl -k` / `wget --no-check-certificate`). Relaxed per-connection, never on the shared process-wide `SSL_CTX`, so other requests keep verifying. Default `0`. Use only against hosts trusted out-of-band (self-signed dev/staging/appliance certs), it removes MITM protection for that request.
+- `client.set_cafile(req, path)` → `string` - pin a custom CA for this request: verify the peer against the PEM bundle at `path` instead of the system trust store, while **keeping peer and hostname verification on**. This is the "verify, but against THIS cert" knob, strictly stronger than `set_insecure`, for machine-to-machine calls to a host with a private/self-signed CA couriered out-of-band (courier the CA once over SSH, then pin it instead of blind-trusting). Per-connection via a per-`SSL` `X509_STORE`; never touches the shared `SSL_CTX`. `""` clears the pin (revert to the system store). A certificate the pinned CA doesn't cover fails the handshake, fails closed, never open.
+- `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY` (Go-compatible). **Off by default**, the deliberate inverse of the default-follow that caused the httpoxy vulnerability class (CVE-2016-5385). It is a code-visible opt-in, never ambient, and carries two guards: the CGI-injectable uppercase `HTTP_PROXY` is refused when `$REQUEST_METHOD`/`$GATEWAY_INTERFACE` is set (lowercase `http_proxy` stays honoured), and a proxy resolving to a loopback/link-local IP literal (127/8, 169.254/16 IMDS, `::1`, `fc00::/7`, `fe80::/10`) is rejected (SSRF).
 - `client.use_http_proxy(req, "http://host:port")` → `string` - Pin an explicit forward proxy; env is ignored entirely (empty url reverts to direct). A team-controlled proxy (recorder / toxiproxy) is thus immune to whatever the shell or CI has set. HTTP goes through the proxy with an absolute-form request line; HTTPS establishes a `CONNECT` tunnel with TLS end-to-end to the origin.
-- `client.ignore_http_proxy(req)` → `string` - Force a direct connection regardless of env or any proxy a higher layer set (the determinism escape hatch — e.g. a VCR that must record the origin, not a proxy's view).
+- `client.ignore_http_proxy(req)` → `string` - Force a direct connection regardless of env or any proxy a higher layer set (the determinism escape hatch, e.g. a VCR that must record the origin, not a proxy's view).
 
 **Response accessors:**
 - `client.response_status(resp)` → `int` - HTTP status code
@@ -1758,7 +1832,7 @@ arm.
 | Function | Returns | Description |
 |---|---|---|
 | `net.await_io(fd)` | `string` | Register `fd` with the current core's I/O poller and suspend the calling actor. Returns `""` on success, error string on failure. One-shot: the fd is automatically unregistered after the next `IoReady` delivery. |
-| `net.ae_io_cancel(fd)` | — | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
+| `net.ae_io_cancel(fd)` |, | Abandon a pending `await_io` without waiting for the message. Rarely needed due to one-shot policy. |
 
 **Constraints:**
 
@@ -2039,6 +2113,36 @@ Raw externs: `io_read_file_raw`, `io_write_file_raw`, `io_append_file_raw`, `io_
 - `wait_for_idle()` - Block until all actors finish
 - `sleep(milliseconds)` - Pause execution
 - `release(s)` - Decrement an AetherString's refcount and free if it reaches zero. Sugar for `string.release(s)` argument must be `string`-typed (other heap types call their typed release, e.g. `string.string_seq_free`). Pair with `defer` to undo allocations made by stdlib functions returning ownership: `body, err = http.get(url); defer release(body)`.
+
+### Blocking work off the loop (`std.worker`)
+
+Runs blocking work on a bounded thread pool and delivers the result back on
+the thread that owns the event loop. The full contract (poster vs drain,
+cooperative builds, pool sizing) is documented at the top of
+`std/worker/module.ae`; the batch surface is:
+
+- `worker.run(work, done)` - Run `work` on a pool thread; `done` receives its
+  `ptr` result on the loop thread. Concurrency is bounded by the pool, so job
+  N+1 queues behind the N in flight.
+- `worker.wait()` → `int` - Block until every submitted job has completed
+  **and** had its completion delivered, running those completions on the
+  calling thread. Returns how many ran, or -1 if a main-thread poster is
+  installed (there the host loop delivers, so waiting on that thread would
+  block the very thread that has to deliver). This is the headless batch
+  join: no poll loop, and unlike `pool_shutdown` it leaves the pool running,
+  so a reusable helper can wait once per batch and be called again.
+- `worker.map(items, f)` → `ptr` - Bounded parallel map: apply `f` to every
+  element of `items` on the pool, collecting results into a new list that is
+  index-aligned with the input (the Go `errgroup.SetLimit` shape). `f` runs on
+  a worker thread; the result slots are written on the calling thread during
+  the wait, so the returned list needs no locking. The caller owns the
+  returned list and keeps ownership of `items`.
+- `worker.drain(max)` / `worker.pending()` - Manual pump and outstanding
+  count, for hosts driving their own loop.
+
+```aether
+lengths = worker.map(paths, |p: ptr| { return measure(p) })
+```
 
 ---
 

@@ -9,6 +9,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Per-symbol aliasing in selective imports**: `import vg (rect, path as
+  vgpath)` binds the exported symbol under the alias and frees the original
+  name for local use, the standard resolution when exactly one name in an
+  otherwise-convenient selective import collides. Works for constants as
+  well as functions, inside a module's own imports (aliases resolve when
+  that module's bodies merge into a consumer), and alongside module-level
+  `as`. The selective-import shadow guard now fires on the alias, the name
+  the program actually binds, so a local `path` beside `path as vgpath` is
+  legal while a local `vgpath` is still rejected. Closes #1345.
+- **`worker.wait()` and `worker.map(items, f)`** (#1350). `wait()` blocks
+  until every submitted job has completed and been delivered, running the
+  completions on the calling thread and leaving the pool reusable: the
+  headless batch join that previously had to be hand-rolled as a
+  `pending()`/`drain()`/`sleep()` poll, and that `pool_shutdown` could not
+  provide because it tears down the process-global pool (a second batch
+  then returned nothing). It blocks on a condition variable, not a poll, and
+  returns -1 rather than deadlocking when a main-thread poster is installed.
+  `map` is the bounded parallel map over a list, results index-aligned with
+  the input, concurrency bounded by the pool. Regression:
+  `tests/regression/test_worker_wait_map.ae`.
+- **`string.join(seq, sep)`**: concatenate a `*StringSeq`'s elements with a
+  separator, the complement of `string.split_to_seq` and a linear-cost
+  escape from the O(n^2) self-append accumulation trap (two passes, one
+  exact-size allocation, binary-safe on elements and separator). The trap
+  itself, and both escapes (`std.strbuilder` for piece-by-piece appends,
+  `join` for an existing sequence), are now documented in the Standard
+  Library Reference. Closes #1346.
+
+### Fixed
+
+- **Containers holding one string value could not both be freed** (#1349).
+  `list_add_string_owned` / `map_put_string_owned` are documented as
+  acquiring their own reference, but they adopted the caller's instead, so
+  a string literal added through them was libc-freed from `.rodata` at free
+  time (malloc's error path aborts, which the reporter saw as a hang), and
+  two containers each "owning" one pointer freed it twice. The owning
+  entries now genuinely own: a refcounted string is retained, a plain
+  pointer is copied. Codegen's escaping-value path moved to new
+  `*_string_adopted` siblings, so its zero-cost ownership transfer and the
+  no-per-add-leak property are unchanged. Regression:
+  `tests/regression/test_list_shared_string_free.ae`.
+- **Closures returning a parameter truncated pointers.** A block closure's
+  return type is inferred from its body, but the inference only looked in
+  the parent function's scope, so `|x: ptr| { return x }` fell back to `int`
+  and the emitted C signature truncated a 64-bit pointer. The closure's own
+  parameters are now consulted first.
+- **`call(f, ...)` on a `fn` parameter truncated pointers.** The `call`
+  builtin is typed `int` by default and resolved to the real type only when
+  the callee is a known local closure. In `-> ptr fn(...) { return call(f,
+  v) }` the enclosing function's declared return type now supplies it, which
+  is the one case the closure-body resolution cannot see.
+- **Heap-producing calls inside string interpolation leaked their
+  temporary**: `"[${string.join(parts, ",")}]"` allocated a result that
+  nothing owned, once per interpolation, in both the printf (print/println)
+  and the heap-building forms. Interpolation segments that are
+  heap-producing calls now bind to a drained temp that is freed after the
+  segment is consumed; bare identifiers keep their owner's free.
+- **A sequence accumulator later passed to `join` leaked its whole spine.**
+  The seq escape walk allowlists `string_seq_*` callees as pure readers, but
+  the `string.join` wrapper normalises to `string_join`, so a
+  `s = seq_cons(x, s)` loop feeding a later join was conservatively marked
+  escaped and every intermediate spine ref leaked. Both `string_join` and
+  `string_seq_join` are now recognised as non-storing readers.
+
 ## [0.467.0]
 
 ### Fixed
