@@ -131,10 +131,10 @@ void fs_watch_close(void* w) { (void)w; }
 #include <sys/statvfs.h>     // statvfs() for fs_try_statvfs (#1117)
 #endif
 #include <stddef.h>           // offsetof for the mount-table getters (#1118)
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
 #include <sys/param.h>
 #include <sys/ucred.h>
-#include <sys/mount.h>        // getmntinfo() for fs_try_mounts (#1118)
+#include <sys/mount.h>        // getmntinfo() for fs_try_mounts
 #endif
 
 #ifdef _WIN32
@@ -1130,16 +1130,32 @@ int fs_try_mounts(void) {
     }
     fclose(fp);
     return s_mount_count;
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+    /* macOS / FreeBSD / OpenBSD share the `struct statfs` getmntinfo(3).
+     * NetBSD is deliberately NOT in this list: there getmntinfo fills a
+     * `struct statvfs` and the flag field is `f_flag`, not `f_flags`, so
+     * this body would not compile. It falls through to the unsupported
+     * branch and reports the error rather than shipping a shape nobody
+     * has built, which is how the MNT_NODEV break below reached CI. */
     struct statfs* mntbuf = NULL;
     int n = getmntinfo(&mntbuf, MNT_NOWAIT);
     if (n <= 0) return -1;
     for (int i = 0; i < n; i++) {
+        /* MNT_NODEV is not universal: FreeBSD deprecated it (it became a
+         * no-op) and removed the macro in FreeBSD 10, while macOS and
+         * OpenBSD still define it. Probe the macro, not the platform, so
+         * a future removal elsewhere degrades to omitting the flag
+         * instead of failing the build. */
+#ifdef MNT_NODEV
+        const char* nodev_opt = (mntbuf[i].f_flags & MNT_NODEV) ? ",nodev" : "";
+#else
+        const char* nodev_opt = "";
+#endif
         char opts[128];
         snprintf(opts, sizeof(opts), "%s%s%s%s",
                  (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw",
                  (mntbuf[i].f_flags & MNT_NOSUID) ? ",nosuid" : "",
-                 (mntbuf[i].f_flags & MNT_NODEV)  ? ",nodev"  : "",
+                 nodev_opt,
                  (mntbuf[i].f_flags & MNT_NOEXEC) ? ",noexec" : "");
         if (!fs_mounts_append(mntbuf[i].f_mntfromname, mntbuf[i].f_mntonname,
                               mntbuf[i].f_fstypename, opts)) {
