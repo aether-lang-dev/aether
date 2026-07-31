@@ -4235,10 +4235,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * index 2); wrapper (`list_add` / `map_put`
                      * returns string) vs raw extern (`list_add_raw`
                      * / `map_put_raw` returns int). */
+                    /* An EXPLICIT owned-add whose value is a fresh heap
+                     * expression is the same ownership transfer as the
+                     * auto-routed `list.add(l, heap)`: the temporary has no
+                     * other owner, so the container must adopt it rather
+                     * than acquire a second reference (which would leak the
+                     * caller's). Routing it through the same branch picks
+                     * the adopting entry below; a borrowed / literal /
+                     * read-back value falls through to the owning entry,
+                     * which is what makes sharing across containers safe. */
+                    int is_explicit_owned_list = (strcmp(c_func_name, "list_add_string_owned") == 0);
+                    int is_explicit_owned_map  = (strcmp(c_func_name, "map_put_string_owned") == 0);
                     int is_list_shape = (strcmp(c_func_name, "list_add_raw") == 0 ||
-                                         strcmp(c_func_name, "list_add") == 0);
+                                         strcmp(c_func_name, "list_add") == 0 ||
+                                         is_explicit_owned_list);
                     int is_map_shape  = (strcmp(c_func_name, "map_put_raw") == 0 ||
-                                         strcmp(c_func_name, "map_put") == 0);
+                                         strcmp(c_func_name, "map_put") == 0 ||
+                                         is_explicit_owned_map);
                     int is_wrapper    = (strcmp(c_func_name, "list_add") == 0 ||
                                          strcmp(c_func_name, "map_put") == 0);
                     if (is_list_shape || is_map_shape) {
