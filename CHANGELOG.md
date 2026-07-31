@@ -11,6 +11,19 @@ next version number before tagging the release.
 
 ## [0.471.0]
 
+### Added
+
+- **`std.http.proxy` gains a trailing-block "config IS code" DSL** for pool
+  setup, alongside the existing positional API. `proxy.pool(algo, ...) { ... }`
+  runs first and returns the pool ptr, which becomes the block's
+  `builder_context()`; the child calls (`upstream`, `health`, `breaker`,
+  `rate_limit`, `cookie_name`, `drain`) configure that live pool. Body-first
+  ordering means the pool already exists when the children run — thin,
+  allocation-free sugar over the same functions, no recording/replay. Both
+  surfaces drive the identical pool. Example:
+  `examples/stdlib/http-reverse-proxy-pool-dsl.ae`; regression:
+  `tests/regression/test_proxy_pool_dsl.ae`.
+
 ### Fixed
 
 - **Repository URLs pointed at the pre-rename organisation.** Every
