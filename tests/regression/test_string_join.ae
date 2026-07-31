@@ -1,0 +1,91 @@
+// Regression test for string.join (issue #1346) — the linear-cost complement
+// to string.split / string.split_to_seq. Joins a *StringSeq with a separator
+// between elements in O(total bytes): one pass to size, one allocation, one
+// pass to copy. This is the guaranteed-linear escape from the O(n²)
+// `d = "${d}${piece}"` accumulation trap.
+//
+// Surface under test:
+//   - basic join with a single-char and a multi-char separator
+//   - empty separator (pure concatenation)
+//   - single-element sequence (no separator emitted)
+//   - empty sequence -> ""
+//   - split -> join round-trip
+//   - a separator that itself contains the delimiter
+//   - a longer sequence (order + separator placement)
+
+import std.string
+
+extern exit(code: int)
+
+fn expect(got: string, want: string, label: string) {
+    if string.equals(got, want) != 1 {
+        println("FAIL ${label}: got '${got}' want '${want}'")
+        exit(1)
+    }
+    println("ok   ${label}")
+}
+
+main() {
+    // ---- basic: single-char separator ----
+    p1 = string.split_to_seq("a,b,c", ",")
+    j1 = string.join(p1, "-")
+    string.seq_free(p1)
+    expect(j1, "a-b-c", "single-char sep")
+
+    // ---- multi-char separator ----
+    p2 = string.split_to_seq("a,b,c", ",")
+    j2 = string.join(p2, " <-> ")
+    string.seq_free(p2)
+    expect(j2, "a <-> b <-> c", "multi-char sep")
+
+    // ---- empty separator = concatenation ----
+    p3 = string.split_to_seq("x,y,z", ",")
+    j3 = string.join(p3, "")
+    string.seq_free(p3)
+    expect(j3, "xyz", "empty sep")
+
+    // ---- single element: no separator emitted ----
+    p4 = string.split_to_seq("solo", ",")
+    j4 = string.join(p4, "|")
+    string.seq_free(p4)
+    expect(j4, "solo", "single element")
+
+    // ---- empty sequence -> "" ----
+    e = string.seq_empty()
+    j5 = string.join(e, ",")
+    expect(j5, "", "empty seq")
+
+    // ---- split -> join round-trip reproduces the original ----
+    original = "one/two/three/four"
+    p6 = string.split_to_seq(original, "/")
+    j6 = string.join(p6, "/")
+    string.seq_free(p6)
+    expect(j6, original, "split-join round-trip")
+
+    // ---- separator containing the split delimiter ----
+    p7 = string.split_to_seq("a,b", ",")
+    j7 = string.join(p7, ",,")
+    string.seq_free(p7)
+    expect(j7, "a,,b", "sep contains delimiter")
+
+    // ---- longer sequence: order + placement ----
+    p8 = string.split_to_seq("1,2,3,4,5", ",")
+    j8 = string.join(p8, ".")
+    string.seq_free(p8)
+    expect(j8, "1.2.3.4.5", "longer sequence")
+
+    // ---- cons-built sequence (not from split) ----
+    // Build back-to-front, dropping each intermediate local as the next cons
+    // takes its own retained ref (the canonical *StringSeq ownership dance).
+    t0 = string.seq_empty()
+    t1 = string.seq_cons("gamma", t0)
+    t2 = string.seq_cons("beta", t1)
+    string.seq_free(t1)
+    t3 = string.seq_cons("alpha", t2)
+    string.seq_free(t2)
+    j9 = string.join(t3, ", ")
+    string.seq_free(t3)
+    expect(j9, "alpha, beta, gamma", "cons-built sequence")
+
+    println("string_join: all checks pass")
+}

@@ -672,6 +672,49 @@ void string_array_free(AetherStringArray* arr) {
 struct StringSeq;  /* forward decl — full def in std/collections/aether_stringseq.h */
 extern struct StringSeq* string_seq_cons(const char* head, struct StringSeq* tail);
 extern void string_seq_free(struct StringSeq* s);
+extern const char* string_seq_head(struct StringSeq* s);
+extern struct StringSeq* string_seq_tail(struct StringSeq* s);
+extern int string_seq_length(struct StringSeq* s);
+
+/* Join a *StringSeq into one string with `sep` between elements — the
+ * linear-cost complement to string_split (issue #1346). Two passes: size
+ * the result (sum of element lengths + sep_len*(n-1)), allocate ONE cap-aware
+ * buffer, then copy. Returns a magic AetherString* (heap-owned; the @heap
+ * extern makes the caller own it, reclaimed at scope exit). Empty seq -> "".
+ * Both elements and `sep` may be magic AetherString* or plain char* (str_len/
+ * str_data unwrap either), so the join is binary-safe. */
+void* string_join(struct StringSeq* seq, const void* sep) {
+    int n = string_seq_length(seq);
+    if (n <= 0) return string_empty();
+    size_t sep_len = str_len(sep);
+    /* Pass 1: total size. */
+    size_t total = 0;
+    struct StringSeq* cur = seq;
+    for (int i = 0; i < n && cur; i++) {
+        total += str_len(string_seq_head(cur));
+        cur = string_seq_tail(cur);
+    }
+    total += sep_len * (size_t)(n - 1);
+    /* One allocation (+1 for the NUL terminator string_adopt expects). */
+    char* buf = (char*)aether_caps_malloc(total + 1);
+    if (!buf) return NULL;
+    /* Pass 2: copy elements, interleaving the separator. */
+    size_t off = 0;
+    cur = seq;
+    const char* sep_data = str_data(sep);
+    for (int i = 0; i < n && cur; i++) {
+        if (i > 0 && sep_len > 0) {
+            memcpy(buf + off, sep_data, sep_len);
+            off += sep_len;
+        }
+        const void* h = string_seq_head(cur);
+        size_t hl = str_len(h);
+        if (hl > 0) { memcpy(buf + off, str_data(h), hl); off += hl; }
+        cur = string_seq_tail(cur);
+    }
+    buf[off] = '\0';
+    return string_adopt_caps_buffer(buf, off, total + 1);
+}
 
 void* string_split_to_seq(const void* str, const void* delimiter) {
     AetherStringArray* arr = string_split(str, delimiter);
