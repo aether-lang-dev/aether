@@ -2587,7 +2587,7 @@ ci-optional-macros:
 	         FNR==last { print "#undef " m } { print }' \
 	        "$$src" "$$src" > "$$out"; \
 	    printf '  %-28s without %s ... ' "$$(basename $$src)" "$$macro"; \
-	    if $(CC) -std=c11 -Werror -fsyntax-only \
+	    if $(CC) -std=gnu11 -Werror -fsyntax-only \
 	             -I"$$(dirname $$src)" $(CFLAGS) "$$out" \
 	             2>build/portability/err.log; then \
 	        echo "OK"; \
