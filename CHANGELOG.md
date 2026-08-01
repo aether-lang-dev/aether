@@ -72,6 +72,33 @@ next version number before tagging the release.
   artifact), and report the actual cause when the server cannot start
   instead of a bare "failed".
 
+## [current]
+
+### Fixed
+
+- **FreeBSD build break in `fs.mounts`.** `MNT_NODEV` was used unguarded in
+  the BSD `getmntinfo` backend. FreeBSD deprecated that flag and removed the
+  macro in FreeBSD 10, while macOS and OpenBSD still define it, so the
+  fallback path had never been compiled anywhere and the break only appeared
+  on FreeBSD. The flag is now probed with `#ifdef` rather than keyed on the
+  platform, so a future removal elsewhere degrades to omitting the option
+  instead of failing the build.
+- **NetBSD was claimed but never buildable.** It sat in the same
+  `getmntinfo` branch, but there the call fills a `struct statvfs` and the
+  flag field is `f_flag`, not `f_flags`, so that body could not have
+  compiled. NetBSD now falls through to the unsupported branch and reports
+  the error, matching the module's convention of degrading rather than
+  fabricating, instead of shipping a shape nobody has built.
+
+### Added
+
+- **`make ci-optional-macros`, a portability probe, now step 10 of `make
+  ci`.** It recompiles the affected sources with each guarded platform macro
+  forced absent, so both sides of every `#ifdef` are built on every run.
+  This reproduces the FreeBSD failure above on any host: verified by
+  reintroducing the bug and watching the probe fail, then restoring the fix
+  and watching it pass. Registering a new guarded macro is one line.
+
 ## [0.469.0]
 
 ### Added

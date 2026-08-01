@@ -2118,37 +2118,40 @@ ci: clean
 	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-1} (shell tests)"
 	@echo "==================================="
 	@echo ""
-	@echo "[0/9] Restoring miniaudio object cache (if valid)..."
+	@echo "[0/10] Restoring miniaudio object cache (if valid)..."
 	@$(MAKE) audio-cache-restore
 	@echo ""
-	@echo "[1/9] Building compiler (-Werror)..."
+	@echo "[1/10] Building compiler (-Werror)..."
 	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
 	@$(MAKE) audio-cache-save
 	@echo ""
-	@echo "[2/9] Building ae CLI..."
+	@echo "[2/10] Building ae CLI..."
 	@$(MAKE) -j$(NPROC) ae
 	@echo ""
-	@echo "[3/9] Building stdlib..."
+	@echo "[3/10] Building stdlib..."
 	@$(MAKE) -j$(NPROC) stdlib
 	@echo ""
-	@echo "[4/9] Running C unit tests..."
+	@echo "[4/10] Running C unit tests..."
 	@$(MAKE) -j$(NPROC) test
 	@echo ""
-	@echo "[5/9] Running .ae integration tests..."
+	@echo "[5/10] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
-	@echo "[6/9] Building examples..."
+	@echo "[6/10] Building examples..."
 	@$(MAKE) examples
 	@echo ""
-	@echo "[7/9] Install smoke test..."
+	@echo "[7/10] Install smoke test..."
 	@$(MAKE) test-install
 	@echo ""
-	@echo "[8/9] ae test smoke check..."
+	@echo "[8/10] ae test smoke check..."
 	@AETHER_HOME="" ./build/ae test examples/basics/hello.ae 2>&1 | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
-	@echo "[9/9] Release archive smoke test..."
+	@echo "[9/10] Release archive smoke test..."
 	@$(MAKE) test-release-archive
+	@echo ""
+	@echo "[10/10] Optional-macro portability probe..."
+	@$(MAKE) ci-optional-macros
 	@echo ""
 	@echo "==================================="
 	@echo "  CI PASSED — all checks green"
@@ -2258,7 +2261,7 @@ asan-check: clean
 	  fi
 	@echo "✓ ASan clean — no memory errors detected"
 
-.PHONY: all compiler lsp apkg ae profiler docgen docs-server docs docs-serve test test-build test-valgrind test-asan test-macos-leaks test-memory test-manual-runtime test-cross test-install test-release-archive benchmark benchmark-ui examples run compile repl clean help self-test install stats stdlib stdlib-asan stdlib-memory stdlib-dbg ci ci-windows docker-ci docker-ci-windows docker-build-ci valgrind-check asan-check ci-coop ci-wasm ci-embedded ci-portability docker-ci-wasm docker-ci-embedded contrib-host-check contrib install-contrib stdlib-cov ci-coverage ci-coverage-clean ci-coverage-html
+.PHONY: ci-optional-macros all compiler lsp apkg ae profiler docgen docs-server docs docs-serve test test-build test-valgrind test-asan test-macos-leaks test-memory test-manual-runtime test-cross test-install test-release-archive benchmark benchmark-ui examples run compile repl clean help self-test install stats stdlib stdlib-asan stdlib-memory stdlib-dbg ci ci-windows docker-ci docker-ci-windows docker-build-ci valgrind-check asan-check ci-coop ci-wasm ci-embedded ci-portability docker-ci-wasm docker-ci-embedded contrib-host-check contrib install-contrib stdlib-cov ci-coverage ci-coverage-clean ci-coverage-html
 
 # Cross-language benchmark UI (alias for benchmark)
 benchmark-ui: benchmark
@@ -2558,6 +2561,46 @@ docker-ci-embedded:
 	docker run --rm -v $(PWD):/aether -w /aether aether-embedded make ci-embedded
 
 # Run ALL portability checks (native coop + Docker WASM + Docker embedded)
+# Optional-macro portability probe. Some platform macros this tree keys on
+# exist on one BSD and not another: FreeBSD 10 removed MNT_NODEV while macOS
+# and OpenBSD still define it, and that difference broke the FreeBSD build
+# after passing macOS CI, because the fallback path had never been compiled
+# anywhere. This target compiles the affected sources with each such macro
+# forced absent, so both sides of every #ifdef are built on every run.
+#
+# The undef goes before the LAST match of the anchor, not the first: these
+# files carry a no-op stub of the same function for platforms without the
+# feature, and that stub sits ABOVE the system include that defines the
+# macro, so undefining there would be silently reversed by the include.
+#
+# Add a line here whenever you guard a new optional platform macro.
+ci-optional-macros:
+	@echo "=== Optional-macro portability probe ==="
+	@mkdir -p build/portability
+	@fail=0; \
+	for probe in "std/fs/aether_fs.c:MNT_NODEV:fs_try_mounts(void) {"; do \
+	    src=$${probe%%:*}; rest=$${probe#*:}; \
+	    macro=$${rest%%:*}; anchor=$${rest#*:}; \
+	    out="build/portability/$$(basename $$src)"; \
+	    awk -v a="$$anchor" -v m="$$macro" \
+	        'NR==FNR { if (index($$0, a)) last=FNR; next } \
+	         FNR==last { print "#undef " m } { print }' \
+	        "$$src" "$$src" > "$$out"; \
+	    printf '  %-28s without %s ... ' "$$(basename $$src)" "$$macro"; \
+	    if $(CC) -std=gnu11 -Werror -fsyntax-only \
+	             -I"$$(dirname $$src)" $(CFLAGS) "$$out" \
+	             2>build/portability/err.log; then \
+	        echo "OK"; \
+	    else \
+	        echo "FAILED"; sed 's/^/      /' build/portability/err.log; fail=1; \
+	    fi; \
+	done; \
+	if [ $$fail -ne 0 ]; then \
+	    echo "  A guarded platform macro's fallback path does not compile."; \
+	    exit 1; \
+	fi
+	@echo "  All optional-macro fallback paths compile."
+
 ci-portability: ci-coop docker-ci-wasm docker-ci-embedded
 	@echo ""
 	@echo "==================================="
