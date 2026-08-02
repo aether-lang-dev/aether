@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
-## [current]
+## [0.473.0]
 
 ### Added
 
@@ -101,7 +101,7 @@ next version number before tagging the release.
   artifact), and report the actual cause when the server cannot start
   instead of a bare "failed".
 
-## [current]
+## [0.473.0]
 
 ### Fixed
 
