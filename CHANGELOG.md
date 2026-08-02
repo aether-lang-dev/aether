@@ -11,6 +11,14 @@ next version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **The FreeBSD native build-and-test job now runs on every pull request**,
+  not only on merges to main. It was put behind the merge on the assumption
+  that a VM boot plus a from-scratch build would cost tens of minutes; measured
+  on its first real run it is 1.6 minutes end to end, including 229/229 unit
+  tests. There is no reason to find out after merge what can be known before.
+
 ### Fixed
 
 - **The build no longer assumes gcc exists.** `CC` was hardcoded to `gcc`, so a

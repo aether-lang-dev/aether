@@ -187,17 +187,14 @@ jobs:
         file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
 
   # ============================================================
-  # FreeBSD native build + test (#402) — POST-MERGE
-  # Off the PR path: a VM boot plus a from-scratch build costs tens
-  # of minutes, and it only adds runtime coverage over the cross
-  # gate. Scoped to `make test`; the .ae suites would rebuild
-  # through the fresh toolchain and take hours in the VM.
+  # FreeBSD native build + test (#402)
+  # Scoped to `make test`; the .ae suites would rebuild through the
+  # freshly built toolchain and take hours inside the VM.
   # ============================================================
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
 
     steps:
     - uses: actions/checkout@v4
