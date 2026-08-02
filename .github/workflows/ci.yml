@@ -205,13 +205,28 @@ jobs:
         file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
 
   # ============================================================
-  # FreeBSD native build + test (#402)
+  # FreeBSD native build + test (#402) — POST-MERGE
   #
   # The cross gate above proves the FreeBSD branches COMPILE. It
   # cannot run anything: a FreeBSD ELF needs a FreeBSD kernel. This
   # job boots a real FreeBSD VM and runs the C unit suite, so the
   # runtime, scheduler (kqueue poller) and stdlib are exercised on
   # the platform rather than merely type-checked for it.
+  #
+  # Why this one runs on push to main and not on pull requests:
+  # booting a VM, installing packages and building the tree from
+  # scratch costs tens of minutes, and what it adds over the cross
+  # gate is RUNTIME divergence, which is far rarer than a compile
+  # break and rarely PR-specific. The compile-break class, which is
+  # what actually broke FreeBSD, is fully covered before merge by
+  # the cross gate. Every merge to main runs this, so coverage is
+  # continuous rather than scheduled.
+  #
+  # What makes this safe as a post-merge check is that it HARD
+  # FAILS. The MNT_NODEV break did not hide because its check ran
+  # after merge; it hid because that check was continue-on-error
+  # and excluded from the release gate, so failing looked exactly
+  # like passing. Nothing here is allowed to fail quietly.
   #
   # Scope is `make test` (the 229 C unit tests), not the full
   # `make ci`: the .ae suites and examples shell out through the
@@ -221,6 +236,7 @@ jobs:
   # ============================================================
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -232,10 +248,11 @@ jobs:
       with:
         release: '14.2'
         usesh: true
-        # FreeBSD base ships clang and BSD make; this tree needs GNU make.
-        # bc and pkgconf are what the Makefile probes with.
+        # FreeBSD base ships clang, bc and BSD make; this tree needs GNU make,
+        # and pkgconf for the Makefile's optional-library probes. bc is NOT a
+        # package here (it lives in base), so asking pkg for it fails the run.
         prepare: |
-          pkg install -y gmake bc pkgconf
+          pkg install -y gmake pkgconf
         run: |
           set -e
           gmake compiler ae stdlib

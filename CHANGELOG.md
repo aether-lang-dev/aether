@@ -13,14 +13,17 @@ next version number before tagging the release.
 
 ### Added
 
-- **FreeBSD is a real CI target** (#402). Every pull request now cross-compiles
-  the toolchain for FreeBSD (`FREEBSD=1`, zig cc against a pinned FreeBSD base
-  sysroot) and, separately, builds and runs the C unit suite inside a native
-  FreeBSD VM. Both jobs are required. Until now the only FreeBSD compile in the
-  tree lived in the release workflow, which runs after merge, so nothing read
-  the FreeBSD branch of any `#ifdef` before code landed. `make ci` cannot cover
-  this on its own: it compiles only the branch of each platform conditional
-  that matches the host it runs on.
+- **FreeBSD is a real CI target** (#402), split by what each check can catch.
+  Every pull request cross-compiles the toolchain for FreeBSD (`FREEBSD=1`,
+  zig cc against a pinned FreeBSD base sysroot): a compile break can only be
+  caught by compiling, and this is fast and deterministic. Every merge to main
+  additionally builds the tree and runs the C unit suite inside a native
+  FreeBSD VM, which is what covers runtime divergence (the kqueue poller) and
+  costs too much to put in front of every pull request. Both hard-fail. Until
+  now the only FreeBSD compile in the tree lived in the release workflow, so
+  nothing read the FreeBSD branch of any `#ifdef` before code landed. `make ci`
+  cannot cover this on its own: it compiles only the branch of each platform
+  conditional that matches the host it runs on.
 
 ### Changed
 
