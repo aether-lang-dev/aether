@@ -803,7 +803,7 @@ main() {
 - `dir.list(path)` → `(ptr, string)` - List contents (caller must `dir.list_free`)
 - `dir.list_count(list)` → `int` - Number of entries
 - `dir.list_get(list, index)` → `string` - Entry name at `index`
-- `dir.list_kind(list, index)` → `int` - Entry's file kind from readdir's `d_type`, avoiding a `stat(2)` per entry: 1 = file, 2 = directory, 3 = symlink (target not followed), 4 = other; 0 = unknown (the filesystem didn't report a type, stat that entry to resolve it). Same encoding as `file_stat`'s kind.
+- `dir.list_kind(list, index)` → `int` - Entry's file kind from readdir's `d_type`, avoiding a `stat(2)` per entry: 1 = file, 2 = directory, 3 = symlink (target not followed), 4 = other, 5 = socket, 6 = FIFO, 7 = device; 0 = unknown (the filesystem didn't report a type, stat that entry to resolve it). Same encoding as `file_stat`'s kind. Kinds 5-7 are POSIX-only: Windows reports those nodes as 4. The named constants `fs.STAT_KIND_FILE`, `STAT_KIND_DIR`, `STAT_KIND_SYMLINK`, `STAT_KIND_OTHER`, `STAT_KIND_SOCKET`, `STAT_KIND_FIFO` and `STAT_KIND_DEVICE` are exported from `std.fs`, prefer them over the bare numbers.
 - `dir.exists(path)` - 1 if a **directory** is at `path`, 0 otherwise. Returns 0 for regular files, even if they exist, see `fs.exists` for the path-agnostic check.
 - `dir.list_free(list)` - Free directory listing
 
@@ -818,7 +818,8 @@ import std.fs
 
 // Walk: the callback sees every entry with its kind and depth.
 n, err = fs.walk(root, |path: string, kind: int, depth: int| {
-    // kind: 1 file / 2 dir / 3 symlink / 4 other (same as file_stat)
+    // kind: 1 file / 2 dir / 3 symlink / 4 other / 5 socket / 6 fifo / 7 device
+    // (same encoding as file_stat; see fs.STAT_KIND_*)
     if kind == 2 && string.ends_with(path, "/node_modules") == 1 {
         return 1                 // skip this subtree
     }
@@ -899,7 +900,8 @@ main() {
 - `fs.rename(from, to)` → `string` - POSIX `rename(2)` wrapper. Atomic when source and target are on the same filesystem.
 - `fs.create_dir_with_mode(path, mode)` → `string` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. Windows ignores the mode at the directory layer; the parameter is accepted for portability.
 - `fs.mtime(path)` → `(int, string)` - File's mtime as Unix epoch seconds, in the standard `(value, err)` shape. Distinguishes "stat failed" from "file's mtime is 0 (1970 epoch)", the older `file_mtime` extern collapsed both into a single 0 sentinel and is kept only for back-compat.
-- `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed.
+- `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed. Kind is 1 = file, 2 = directory, 3 = symlink, 4 = other, 5 = socket, 6 = FIFO, 7 = device (char and block devices share 7). Sockets, FIFOs and devices are distinguished on POSIX only; Windows reports them as 4. Use the `fs.STAT_KIND_*` constants rather than the literals.
+- `fs.fs_is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.fs_is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
 - `fs.read_binary(path)` → `(content, length, err)` - Length-aware read preserving embedded NULs.
 
 ### Structured-error pilot
@@ -1934,6 +1936,7 @@ main() {
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
 - `os.getpid()` → `int` - Process identifier of the current process. POSIX `getpid(2)`; Windows `_getpid()`. Useful for tmpfile names (`/tmp/myprog.${os.getpid()}.tmp`), per-process locks, log prefixes, and stable tagging across forked children. Returns 0 on platforms compiled without filesystem support.
+- `os.user_id()` → `int` - Effective user id of the calling process (POSIX `geteuid(2)`). Windows has no numeric uid model and returns -1, so treat any negative result as "unavailable" rather than as a uid. Mainly for building per-user runtime paths like `/run/user/${os.user_id()}/`.
 - `os.now_utc_iso8601()` → `string` - Current UTC time as ISO-8601 (`YYYY-MM-DDThh:mm:ssZ`). Returns `""` (never null) on clock/format failure. Thread-safe.
 - `os.wall_seconds()` → `long` - Whole seconds since the Unix epoch (POSIX `gettimeofday`; Windows `GetSystemTimeAsFileTime`). NTP-jumpable, pair with `wall_micros` for sub-second precision, or use the monotonic accessors below for elapsed-time measurements.
 - `os.wall_micros()` → `int` - Sub-second microsecond fraction (0..999999) from the same `struct timeval` as `wall_seconds`.

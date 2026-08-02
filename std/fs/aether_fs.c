@@ -1171,26 +1171,40 @@ int fs_try_mounts(void) {
      * this body would not compile. It falls through to the unsupported
      * branch and reports the error rather than shipping a shape nobody
      * has built, which is how the MNT_NODEV break below reached CI. */
+    /* The optional mount flags this platform actually has. A flag is listed
+     * only where the OS defines it, so the table IS the platform's flag set
+     * rather than a full list with substitutes for the missing entries.
+     * MNT_NODEV is the reason this is a table: nodev became a no-op on
+     * FreeBSD and the macro was removed in FreeBSD 10, so a FreeBSD mount
+     * has no nodev state and must report none, while macOS and OpenBSD
+     * still carry it. MNT_RDONLY is not here because it is not optional:
+     * every entry reports ro or rw. */
+    static const struct { unsigned long long mask; const char* name; }
+    k_optional_mount_flags[] = {
+        { MNT_NOSUID, ",nosuid" },
+#ifdef MNT_NODEV
+        { MNT_NODEV,  ",nodev"  },
+#endif
+        { MNT_NOEXEC, ",noexec" },
+    };
     struct statfs* mntbuf = NULL;
     int n = getmntinfo(&mntbuf, MNT_NOWAIT);
     if (n <= 0) return -1;
     for (int i = 0; i < n; i++) {
-        /* MNT_NODEV is not universal: FreeBSD deprecated it (it became a
-         * no-op) and removed the macro in FreeBSD 10, while macOS and
-         * OpenBSD still define it. Probe the macro, not the platform, so
-         * a future removal elsewhere degrades to omitting the flag
-         * instead of failing the build. */
-#ifdef MNT_NODEV
-        const char* nodev_opt = (mntbuf[i].f_flags & MNT_NODEV) ? ",nodev" : "";
-#else
-        const char* nodev_opt = "";
-#endif
         char opts[128];
-        snprintf(opts, sizeof(opts), "%s%s%s%s",
-                 (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw",
-                 (mntbuf[i].f_flags & MNT_NOSUID) ? ",nosuid" : "",
-                 nodev_opt,
-                 (mntbuf[i].f_flags & MNT_NOEXEC) ? ",noexec" : "");
+        int used = snprintf(opts, sizeof(opts), "%s",
+                            (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw");
+        if (used < 0) return -1;
+        for (size_t k = 0;
+             k < sizeof(k_optional_mount_flags) / sizeof(k_optional_mount_flags[0]);
+             k++) {
+            if (!((unsigned long long)mntbuf[i].f_flags & k_optional_mount_flags[k].mask))
+                continue;
+            int w = snprintf(opts + used, sizeof(opts) - (size_t)used, "%s",
+                             k_optional_mount_flags[k].name);
+            if (w < 0 || (size_t)w >= sizeof(opts) - (size_t)used) break;
+            used += w;
+        }
         if (!fs_mounts_append(mntbuf[i].f_mntfromname, mntbuf[i].f_mntonname,
                               mntbuf[i].f_fstypename, opts)) {
             fs_release_mounts();

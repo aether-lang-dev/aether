@@ -149,6 +149,12 @@ char* os_platform_raw(void);
 // _getpid(). Returns 0 on platforms without filesystem (no-op stub).
 int os_getpid_raw(void);
 
+// Effective user id of the calling process. POSIX geteuid(2). Windows
+// has no numeric uid model, so it returns -1 there and on
+// no-filesystem builds; callers treat a negative result as
+// "unavailable" rather than as a real uid.
+int os_user_id_raw(void);
+
 // Wall-clock time as the two fields of POSIX struct timeval: whole
 // seconds since the Unix epoch, and the sub-second microsecond
 // fraction (0..999999). POSIX gettimeofday(2); Windows

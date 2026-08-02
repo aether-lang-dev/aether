@@ -244,7 +244,7 @@ Keep checked-in Aether source canonically formatted; CI enforces this
 Run the full CI suite locally, this is the same suite that GitHub Actions runs:
 
 ```bash
-make ci          # Full 10-step suite with -Werror (compiler, tests, examples, smoke tests)
+make ci          # Full 9-step suite with -Werror (compiler, tests, examples, smoke tests)
 HARDEN=1 make ci # Hardened-build sweep (-fstack-protector-all + _FORTIFY_SOURCE=2);
                  # required for any PR that touches C in compiler/, runtime/, or std/.
                  # Catches unchecked memcpy / printf-format-injection bugs early.
