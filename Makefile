@@ -131,11 +131,15 @@ $(VERSION_HEADER): VERSION Makefile
 .PHONY: gen-version-header
 gen-version-header: $(VERSION_HEADER)
 
-# Compiler configuration with ccache support
+# Compiler configuration with ccache support.
+# FreeBSD base has no gcc at all (clang is installed as `cc`).
 ifdef WINDOWS_NATIVE
 CC := gcc
 else
-CC := $(shell command -v ccache >/dev/null 2>&1 && echo "ccache gcc" || echo "gcc")
+BASE_CC := $(shell if command -v gcc >/dev/null 2>&1; then echo gcc; \
+                   elif command -v cc >/dev/null 2>&1; then echo cc; \
+                   else echo clang; fi)
+CC := $(shell command -v ccache >/dev/null 2>&1 && echo "ccache $(BASE_CC)" || echo "$(BASE_CC)")
 endif
 EXTRA_CFLAGS ?=
 PLATFORM ?= native
