@@ -118,20 +118,8 @@ jobs:
 
   # ============================================================
   # FreeBSD cross-compile gate (#402)
-  #
-  # Why this exists: the FreeBSD spelling of every `#ifdef` in the
-  # tree used to be compiled in exactly one place, the release
-  # workflow's build-freebsd leg, which runs only AFTER merge and was
-  # best-effort. A FreeBSD-only break therefore passed PR CI, passed
-  # the release, and surfaced only when somebody built on FreeBSD.
-  # That is how MNT_NODEV (removed in FreeBSD 10, still present on
-  # macOS and OpenBSD) reached main.
-  #
-  # `make ci` cannot catch this on any single host: it compiles only
-  # the branch of each platform conditional that matches the runner.
-  # Compiling FOR FreeBSD is the only thing that reads the FreeBSD
-  # branches, so it has to happen before merge, and it has to be
-  # required. No continue-on-error here on purpose.
+  # `make ci` only ever compiles the platform branch matching its
+  # runner, so this is the only job that reads the FreeBSD #ifdefs.
   # ============================================================
   ci-freebsd-cross:
     name: FreeBSD / cross-compile (x86_64)
@@ -144,10 +132,8 @@ jobs:
     - name: Install toolchain
       run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
-    # The pinned zig and the FreeBSD base sysroot (headers + libc) live in the
-    # sibling aether-crossbuild repo, same as the release leg uses. zig cc does
-    # not bundle a FreeBSD libc, so the base is what makes FreeBSD headers
-    # visible to the compile.
+    # zig cc bundles no FreeBSD libc, so the base sysroot is what makes the
+    # FreeBSD headers visible. Same source as the release leg.
     - name: Checkout aether-crossbuild
       uses: actions/checkout@v4
       with:
@@ -155,11 +141,8 @@ jobs:
         path: crossbuild
         fetch-depth: 1
 
-    # Cache the downloaded tarballs, not the unpacked trees: get-zig.sh and
-    # fetch-freebsd-base.sh both skip the download when the tarball is already
-    # present and then re-extract, and fetch-freebsd-base.sh deletes and
-    # rebuilds its sysroot dir every run. Keyed on deps.lock, which pins both
-    # URLs and their checksums, so a hit is always the pinned bytes.
+    # Tarballs, not unpacked trees: fetch-freebsd-base.sh rm -rf's its sysroot
+    # dir every run. deps.lock pins both URLs and checksums.
     - name: Restore cross-toolchain download cache
       id: cross_cache
       uses: actions/cache/restore@v4
@@ -199,40 +182,16 @@ jobs:
           FREEBSD=1 \
           ZIG="${{ steps.prov.outputs.zig }}" \
           AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}"
-        # A cross-build that silently produced Linux binaries would pass the
-        # compile and prove nothing, so confirm the target really is FreeBSD.
+        # A cross-build that silently emitted Linux binaries would prove nothing.
         file build/aetherc build/ae
         file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
 
   # ============================================================
   # FreeBSD native build + test (#402) — POST-MERGE
-  #
-  # The cross gate above proves the FreeBSD branches COMPILE. It
-  # cannot run anything: a FreeBSD ELF needs a FreeBSD kernel. This
-  # job boots a real FreeBSD VM and runs the C unit suite, so the
-  # runtime, scheduler (kqueue poller) and stdlib are exercised on
-  # the platform rather than merely type-checked for it.
-  #
-  # Why this one runs on push to main and not on pull requests:
-  # booting a VM, installing packages and building the tree from
-  # scratch costs tens of minutes, and what it adds over the cross
-  # gate is RUNTIME divergence, which is far rarer than a compile
-  # break and rarely PR-specific. The compile-break class, which is
-  # what actually broke FreeBSD, is fully covered before merge by
-  # the cross gate. Every merge to main runs this, so coverage is
-  # continuous rather than scheduled.
-  #
-  # What makes this safe as a post-merge check is that it HARD
-  # FAILS. The MNT_NODEV break did not hide because its check ran
-  # after merge; it hid because that check was continue-on-error
-  # and excluded from the release gate, so failing looked exactly
-  # like passing. Nothing here is allowed to fail quietly.
-  #
-  # Scope is `make test` (the 229 C unit tests), not the full
-  # `make ci`: the .ae suites and examples shell out through the
-  # freshly built toolchain and would put a multi-hour build inside
-  # an emulated VM. The C suite is where the platform-specific
-  # runtime and stdlib code actually lives.
+  # Off the PR path: a VM boot plus a from-scratch build costs tens
+  # of minutes, and it only adds runtime coverage over the cross
+  # gate. Scoped to `make test`; the .ae suites would rebuild
+  # through the fresh toolchain and take hours in the VM.
   # ============================================================
   ci-freebsd-native:
     name: FreeBSD / native build + unit tests
@@ -248,9 +207,7 @@ jobs:
       with:
         release: '14.2'
         usesh: true
-        # FreeBSD base ships clang, bc and BSD make; this tree needs GNU make,
-        # and pkgconf for the Makefile's optional-library probes. bc is NOT a
-        # package here (it lives in base), so asking pkg for it fails the run.
+        # bc lives in FreeBSD base, not in pkg: asking for it fails the run.
         prepare: |
           pkg install -y gmake pkgconf
         run: |

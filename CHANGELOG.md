@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The build no longer assumes gcc exists.** `CC` was hardcoded to `gcc`, so a
+  native build on FreeBSD, whose base ships clang as `cc` and carries no gcc at
+  all, died with `gcc: No such file or directory` before compiling anything.
+  `CC` now prefers gcc, then the system `cc`, then clang. Platforms that build
+  today are unaffected: they all have gcc, macOS included, via its clang shim.
+  Caught by the new FreeBSD native CI job (#402) on its first real run.
+
 ## [0.474.0]
 
 ### Added
