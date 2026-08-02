@@ -1,14 +1,25 @@
-// std.path - Path Utilities (alias for std.fs)
+// std.path - Path Utilities
 //
-// This is a convenience module that re-exports path functions from std.fs.
-// You can use either:
-//   import std.path   (this module)
-//   import std.fs     (consolidated filesystem module)
+// Pure, lexical path manipulation — no filesystem access, so every function
+// here works on paths that don't exist yet (e.g. computing an output path
+// before creating it; contrast fs.realpath, which hits the FS and fails on a
+// missing path). The implementations live in std/fs/aether_fs.c (compiled into
+// libaether.a) and are also re-exported from std.fs; this module is the
+// discoverable home for path work when you don't need the rest of std.fs.
 //
-// The implementations are in std/fs/aether_fs.c which is compiled into libaether.a
+//   import std.path
+//   import std.fs      (also carries these, alongside filesystem I/O)
+//
+// #1369: `clean` (lexical normalize), `rel`, `is_within_base`, and `separator`
+// used to live only under std.fs, so callers reaching for `import std.path` to
+// normalize a path couldn't find them. They are surfaced here now.
 
 exports(
-    path_join, path_dirname, path_basename, path_extension, path_is_absolute
+    path_join, path_dirname, path_basename, path_extension, path_is_absolute,
+    path_clean, path_rel, path_is_within_base, path_separator,
+    // Short aliases (the std.fs surface uses these bare names too).
+    join, dirname, basename, extension, is_absolute,
+    clean, rel, is_within_base, separator
 )
 
 extern path_join(path1: string, path2: string) -> string
@@ -16,3 +27,32 @@ extern path_dirname(path: string) -> string
 extern path_basename(path: string) -> string
 extern path_extension(path: string) -> string
 extern path_is_absolute(path: string) -> int
+
+// Lexical normalize: collapses `//`, resolves `.` and `..`, drops trailing
+// slashes — purely on the string, never touching the filesystem. Empty input
+// → ".". POSIX-separator aware (`/`); on Windows, normalise `\` to `/` first
+// if needed (see the module note / #1369).
+extern path_clean(path: string) -> string
+
+// Relative path from `base` to `target`, lexically (no FS access).
+extern path_rel(base: string, target: string) -> string
+
+// 1 if `target` is lexically within `base` (no `..` escape), else 0.
+extern path_is_within_base(base: string, target: string) -> int
+
+// The platform path separator: "/" on POSIX, "\\" on Windows. Use this
+// instead of hardcoding "/" when a separator is genuinely needed. (#1369)
+extern path_separator() -> string
+
+// ---- short-name aliases -----------------------------------------------------
+// Mirror the bare names std.fs exposes, so `path.clean(...)` reads naturally.
+
+join(a: string, b: string) -> string { return path_join(a, b) }
+dirname(p: string) -> string { return path_dirname(p) }
+basename(p: string) -> string { return path_basename(p) }
+extension(p: string) -> string { return path_extension(p) }
+is_absolute(p: string) -> int { return path_is_absolute(p) }
+clean(p: string) -> string { return path_clean(p) }
+rel(base: string, target: string) -> string { return path_rel(base, target) }
+is_within_base(base: string, target: string) -> int { return path_is_within_base(base, target) }
+separator() -> string { return path_separator() }

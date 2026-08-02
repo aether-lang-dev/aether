@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`fs` stat now distinguishes sockets, FIFOs and devices** (#1368). Previously
+  all three collapsed into `STAT_KIND_OTHER` (4), so an AF_UNIX socket was
+  indistinguishable from a FIFO. `fs.fs_get_stat_kind` / `dir_list_kind` now
+  return `STAT_KIND_SOCKET` (5), `STAT_KIND_FIFO` (6), `STAT_KIND_DEVICE` (7)
+  on POSIX (named constants exported from `std.fs`; Windows keeps `OTHER`).
+  Adds `fs.fs_is_socket(path)` (mirrors `fs_is_symlink`) and, in `std.os`,
+  `os.user_id()` (POSIX `geteuid`; -1 on Windows). Together these let e.g.
+  aeb's podman-socket auto-detect move out of a bash trampoline into Aether.
+  Regression: `tests/regression/test_fs_stat_kind_socket_fifo.ae`.
+- **`std.path` surfaces the lexical path helpers and a separator accessor**
+  (#1369). `path.clean` (lexical normalize — no filesystem access, works on
+  paths that don't exist yet), `path.rel`, `path.is_within_base`, and the new
+  `path.separator()` ("/" POSIX, "\\" Windows) are now reachable via
+  `import std.path` (they previously lived only under `std.fs`, so callers
+  reaching for a normalize couldn't find it). Also exported from `std.fs`.
+  Regression: `tests/regression/test_path_clean_separator.ae`.
+
+### Fixed
+
+- **`fs.glob` dropped the directory prefix for a simple glob on Windows**
+  (#1367). A non-`**` pattern like `dir/*.c` returned bare `foo.c` from the
+  `FindFirstFile` backend, where POSIX `glob(3)` returns `dir/foo.c`; the
+  prefix is now reattached so both platforms agree (the recursive `**` path was
+  already correct). Regression: `tests/regression/test_glob_dir_prefix.ae`.
+
 ## [0.471.0]
 
 ### Added

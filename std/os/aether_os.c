@@ -109,6 +109,7 @@ char* os_now_local_iso8601_raw(void) { return NULL; }
 void os_now_local_fill_raw(void* out) { (void)out; }
 char* os_platform_raw(void) { return NULL; }
 int os_getpid_raw(void) { return 0; }
+int os_user_id_raw(void) { return -1; }
 int64_t os_wall_seconds_raw(void) { return 0; }
 int os_wall_micros_raw(void) { return 0; }
 int64_t os_now_monotonic_ms_raw(void) { return 0; }
@@ -473,6 +474,17 @@ int os_getpid_raw(void) {
     return (int)_getpid();
 #else
     return (int)getpid();
+#endif
+}
+
+/* #1368: effective user id of the calling process. POSIX geteuid(). Windows
+ * has no numeric uid model, so it returns -1 (callers treat <0 as
+ * "unavailable" — e.g. building /run/user/<uid>/ only makes sense on POSIX). */
+int os_user_id_raw(void) {
+#ifdef _WIN32
+    return -1;
+#else
+    return (int)geteuid();
 #endif
 }
 
