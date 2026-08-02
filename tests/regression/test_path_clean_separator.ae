@@ -1,0 +1,62 @@
+// Regression for #1369: std.path surfaces the lexical helpers (clean/rel/
+// is_within_base) that previously lived only under std.fs, plus a separator
+// accessor so callers stop hardcoding "/". `clean` is a pure lexical normalize
+// (no filesystem access), so it works on paths that don't exist yet.
+
+import std.path
+import std.string
+import std.io
+
+extern exit(code: int)
+
+fn ck(got: string, want: string, label: string, ok: int) -> int {
+    if string.equals(got, want) == 1 {
+        println("ok   ${label}")
+        return ok
+    }
+    println("FAIL ${label}: got '${got}' want '${want}'")
+    return 0
+}
+
+main() {
+    total_ok = 1
+
+    // Lexical normalize on a path that does NOT exist (the whole point vs realpath).
+    total_ok = ck(path.clean("a/./b/../c"), "a/c", "clean collapses . and ..", total_ok)
+    total_ok = ck(path.clean("//x//y/"), "/x/y", "clean collapses // and trailing /", total_ok)
+    total_ok = ck(path.clean(""), ".", "clean('') -> '.'", total_ok)
+
+    // Separator accessor (POSIX '/'; on Windows this returns '\\').
+    sep = path.separator()
+    if string.equals(sep, "/") == 1 {
+        println("ok   path.separator() = '/'")
+    } else {
+        // Don't hard-fail on Windows where it is "\\"; just assert non-empty.
+        if string.length(sep) == 1 {
+            println("ok   path.separator() = '${sep}' (non-POSIX platform)")
+        } else {
+            println("FAIL path.separator() = '${sep}'"); total_ok = 0
+        }
+    }
+
+    // The helpers that were previously fs-only are reachable via std.path.
+    total_ok = ck(path.join("a", "b"), "a/b", "path.join", total_ok)
+    total_ok = ck(path.rel("/x", "/x/y/z"), "y/z", "path.rel", total_ok)
+
+    if path.is_within_base("/base", "/base/sub/f") == 1 {
+        println("ok   path.is_within_base true for a contained path")
+    } else {
+        println("FAIL path.is_within_base"); total_ok = 0
+    }
+    if path.is_within_base("/base", "/base/../escape") == 0 {
+        println("ok   path.is_within_base false for a .. escape")
+    } else {
+        println("FAIL path.is_within_base allowed a .. escape"); total_ok = 0
+    }
+
+    if total_ok == 1 {
+        println("path_clean_separator: all checks pass")
+    } else {
+        println("path_clean_separator: FAILURES"); exit(1)
+    }
+}

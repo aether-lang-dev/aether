@@ -9,14 +9,14 @@ exports(
     aether_args_count, aether_args_get, aether_argv0, aether_argv_raw,
     aether_args_seal, aether_args_sealed, args_seal, args_sealed,
     args_count, args_get,
-    os_execv, os_now_utc_iso8601_raw, os_getpid_raw, exit,
+    os_execv, os_now_utc_iso8601_raw, os_getpid_raw, os_user_id_raw, exit,
     os_wall_seconds_raw, os_wall_micros_raw,
     os_now_monotonic_ms_raw, os_now_monotonic_ns_raw,
     os_now_unix_ms_raw,
     os_now_local_fill_raw, os_now_local_iso8601_raw,
     os_platform_raw,
     io_setenv_raw, io_unsetenv_raw,
-    exec, run_capture, argv0, now_utc_iso8601, getpid,
+    exec, run_capture, argv0, now_utc_iso8601, getpid, user_id,
     wall_seconds, wall_micros,
     now_monotonic_ms, now_monotonic_ns,
     now_unix_ms,
@@ -646,12 +646,20 @@ platform() -> string {
 // `getpid(2)`; Windows `_getpid()`. Returns 0 on platforms compiled
 // without filesystem support (no-op stub).
 extern os_getpid_raw() -> int
+extern os_user_id_raw() -> int
 
 // Terminate the current process with `code`.
 extern exit(code: int)
 
 getpid() -> int {
     return os_getpid_raw()
+}
+
+// Effective user id of the calling process (POSIX geteuid). Returns -1 on
+// Windows, which has no numeric uid model — treat <0 as "unavailable".
+// Useful for building per-user runtime paths like /run/user/<uid>/ (#1368).
+user_id() -> int {
+    return os_user_id_raw()
 }
 
 // Wall-clock time, split into whole seconds since the Unix epoch and

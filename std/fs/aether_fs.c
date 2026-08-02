@@ -25,6 +25,7 @@ int fs_mkdir_p_raw(const char* p) { (void)p; return 0; }
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
 int fs_is_symlink(const char* p) { (void)p; return 0; }
+int fs_is_socket(const char* p) { (void)p; return 0; }
 int fs_unlink_raw(const char* p) { (void)p; return 0; }
 int fs_write_binary_raw(const char* p, const char* d, int l) {
     (void)p; (void)d; (void)l; return 0;
@@ -95,6 +96,7 @@ char* path_dirname(const char* p) { (void)p; return NULL; }
 char* path_basename(const char* p) { (void)p; return NULL; }
 char* path_extension(const char* p) { (void)p; return NULL; }
 int path_is_absolute(const char* p) { (void)p; return 0; }
+const char* path_separator(void) { return "/"; }
 char* path_clean(const char* p) { (void)p; return NULL; }
 int path_is_within_base(const char* base, const char* target) { (void)base; (void)target; return 0; }
 char* path_rel(const char* base, const char* target) { (void)base; (void)target; return NULL; }
@@ -738,6 +740,20 @@ int fs_is_symlink(const char* path) {
     return S_ISLNK(st.st_mode) ? 1 : 0;
 }
 
+// #1368: Returns 1 if `path` is a UNIX-domain socket, else 0 (including when
+// the path is missing). Follows symlinks (uses stat, not lstat) — the caller
+// asking "is this a socket?" (e.g. a podman/docker socket auto-detect) cares
+// about the target. Mirrors fs_is_symlink's shape. POSIX only; the Windows
+// stub returns 0.
+int fs_is_socket(const char* path) {
+    if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;
+
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return S_ISSOCK(st.st_mode) ? 1 : 0;
+}
+
 // Remove a file or symlink. Will NOT remove a directory — use dir_delete
 // for that. Returns 1 on success, 0 on failure.
 int fs_unlink_raw(const char* path) {
@@ -754,6 +770,7 @@ int fs_unlink_raw(const char* path) {
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
 int fs_is_symlink(const char* p) { (void)p; return 0; }
+int fs_is_socket(const char* p) { (void)p; return 0; }
 int fs_unlink_raw(const char* path) {
     if (!path) return 0;
     if (!aether_sandbox_check("fs_write", path)) return 0;
@@ -913,6 +930,15 @@ int fs_rename_raw(const char* from, const char* to) {
 #define FS_STAT_KIND_DIR     2
 #define FS_STAT_KIND_SYMLINK 3
 #define FS_STAT_KIND_OTHER   4
+// #1368: sockets, FIFOs and devices previously all collapsed into OTHER (4),
+// making an AF_UNIX socket indistinguishable from a FIFO. Give them distinct
+// kinds so callers can identify e.g. a podman/docker socket lexically. These
+// are POSIX-only (the S_IS* macros below are guarded #ifndef _WIN32); on
+// Windows such nodes keep reporting OTHER. Additive — existing callers that
+// only test 1..4 are unaffected.
+#define FS_STAT_KIND_SOCKET  5
+#define FS_STAT_KIND_FIFO    6
+#define FS_STAT_KIND_DEVICE  7
 
 int fs_stat_raw(const char* path, int* out_kind,
                 int64_t* out_size, int64_t* out_mtime) {
@@ -951,6 +977,14 @@ int fs_stat_raw(const char* path, int* out_kind,
 #endif
     if (S_ISREG(st.st_mode))       kind = FS_STAT_KIND_FILE;
     else if (S_ISDIR(st.st_mode))  kind = FS_STAT_KIND_DIR;
+#ifndef _WIN32
+    // #1368: distinguish sockets / FIFOs / devices (POSIX only; the MSVC
+    // stat model has no S_ISSOCK/S_ISFIFO and its S_ISCHR/S_ISBLK cover
+    // console/pipe handles, so Windows keeps these as OTHER).
+    else if (S_ISSOCK(st.st_mode)) kind = FS_STAT_KIND_SOCKET;
+    else if (S_ISFIFO(st.st_mode)) kind = FS_STAT_KIND_FIFO;
+    else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) kind = FS_STAT_KIND_DEVICE;
+#endif
     else                           kind = FS_STAT_KIND_OTHER;
 
     if (out_kind)  *out_kind  = kind;
@@ -2168,6 +2202,17 @@ int path_is_absolute(const char* path) {
     return 0;
 }
 
+/* #1369: the platform path separator as a static string ("/" on POSIX, "\\"
+ * on Windows). Returned as a plain const char* literal — no allocation, no
+ * free. Lets callers stop hardcoding "/" in path concatenation. */
+const char* path_separator(void) {
+#ifdef _WIN32
+    return "\\";
+#else
+    return "/";
+#endif
+}
+
 /* #462: strdup through the capability allocator. The matching free in
  * dir_list_free recomputes strlen(name)+1, which equals this size, so
  * the accounting balances exactly. NULL-safe. */
@@ -2189,10 +2234,10 @@ static int fs_dtype_to_kind(unsigned char dt) {
         case DT_REG:  return FS_STAT_KIND_FILE;
         case DT_DIR:  return FS_STAT_KIND_DIR;
         case DT_LNK:  return FS_STAT_KIND_SYMLINK;
-        case DT_FIFO:
-        case DT_SOCK:
+        case DT_SOCK: return FS_STAT_KIND_SOCKET;  /* #1368 */
+        case DT_FIFO: return FS_STAT_KIND_FIFO;    /* #1368 */
         case DT_CHR:
-        case DT_BLK:  return FS_STAT_KIND_OTHER;
+        case DT_BLK:  return FS_STAT_KIND_DEVICE;  /* #1368 */
         default:      return 0;   /* DT_UNKNOWN or unrecognised */
     }
 #else
@@ -2507,13 +2552,38 @@ DirList* fs_glob_raw(const char* pattern) {
         // (issue #1279). Rely solely on the walk.
         walk_recursive(dir, suffix, result);
     } else {
-        // Simple glob (no **)
+        // Simple glob (no **). FindFirstFileA matches against the full
+        // `pattern` but its WIN32_FIND_DATA::cFileName is the BARE file name,
+        // with no directory component. POSIX glob(3) returns full paths
+        // (`subdir/foo.c`), so to keep parity we must reattach the pattern's
+        // directory prefix — otherwise a Windows caller globbing `dir/*.c`
+        // gets back `foo.c` it can't open relative to CWD (issue #1367).
+        // Split the leading directory off `pattern` at the last separator
+        // (Windows accepts both '/' and '\\').
+        const char* last_slash = strrchr(pattern, '/');
+        const char* last_bslash = strrchr(pattern, '\\');
+        const char* sep = (last_bslash > last_slash) ? last_bslash : last_slash;
+        size_t dir_prefix_len = sep ? (size_t)(sep - pattern) + 1 : 0; // includes the separator
+
         WIN32_FIND_DATAA fd;
         HANDLE h = FindFirstFileA(pattern, &fd);
         if (h != INVALID_HANDLE_VALUE) {
             do {
                 if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    dirlist_add(result, fd.cFileName);
+                    if (dir_prefix_len > 0) {
+                        char full[4096];
+                        // Copy the pattern's dir prefix verbatim (preserving the
+                        // caller's separator), then the bare match name.
+                        if (dir_prefix_len < sizeof(full)) {
+                            memcpy(full, pattern, dir_prefix_len);
+                            snprintf(full + dir_prefix_len,
+                                     sizeof(full) - dir_prefix_len,
+                                     "%s", fd.cFileName);
+                            dirlist_add(result, full);
+                        }
+                    } else {
+                        dirlist_add(result, fd.cFileName);
+                    }
                 }
             } while (FindNextFileA(h, &fd));
             FindClose(h);

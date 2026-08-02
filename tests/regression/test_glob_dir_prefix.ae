@@ -1,0 +1,65 @@
+// Regression for #1367: fs.glob returns directory-prefixed paths for a simple
+// (non-**) glob whose pattern includes a directory. POSIX glob(3) always did;
+// the Windows FindFirstFile backend used to return the bare file name, dropping
+// the prefix. This test pins the contract on POSIX (where it already held) so
+// the Windows fix is held to the same behaviour — a caller globbing `dir/*.x`
+// must get back `dir/foo.x`, not `foo.x`.
+
+import std.fs
+import std.string
+import std.os
+import std.io
+
+extern exit(code: int)
+extern system(cmd: string) -> int
+
+main() {
+    if os.getenv("OS") == "Windows_NT" {
+        // The bug is Windows-specific; the assertion here is the cross-platform
+        // contract. On the Windows CI runner the same test binary would need a
+        // Windows shell to set up the fixture, so skip and rely on the POSIX
+        // run to pin the contract the Windows backend now matches.
+        println("SKIP glob_dir_prefix: fixture setup is POSIX-shell")
+        return
+    }
+
+    total_ok = 1
+    dir = "/tmp/aeth_glob_1367"
+    _ = system("rm -rf ${dir}; mkdir -p ${dir}/sub")
+    _ = system("touch ${dir}/sub/a.x ${dir}/sub/b.x")
+
+    matches, err = fs.glob("${dir}/sub/*.x")
+    if string.equals(err, "") != 1 {
+        println("FAIL glob err: ${err}"); exit(1)
+    }
+    n = fs.dir_list_count(matches)
+    if n != 2 {
+        println("FAIL expected 2 matches, got ${n}"); total_ok = 0
+    }
+
+    // Every returned entry must carry the `sub/` directory prefix, not be bare.
+    i = 0
+    all_prefixed = 1
+    while i < n {
+        entry = fs.dir_list_get(matches, i)
+        if string.contains(entry, "/sub/") != 1 {
+            println("FAIL entry lost its directory prefix: '${entry}'")
+            all_prefixed = 0
+        }
+        i = i + 1
+    }
+    if all_prefixed == 1 {
+        println("ok   glob('dir/sub/*.x') entries retain the dir prefix")
+    } else {
+        total_ok = 0
+    }
+
+    fs.dir_list_free(matches)
+    _ = system("rm -rf ${dir}")
+
+    if total_ok == 1 {
+        println("glob_dir_prefix: all checks pass")
+    } else {
+        println("glob_dir_prefix: FAILURES"); exit(1)
+    }
+}

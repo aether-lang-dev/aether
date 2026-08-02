@@ -27,7 +27,9 @@ exports(
     file_exists, fs_path_exists, file_delete_raw, file_size_raw, file_mtime,
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
     fs_mkdir_p_raw,
-    fs_symlink_raw, fs_readlink_raw, fs_is_symlink, fs_unlink_raw,
+    fs_symlink_raw, fs_readlink_raw, fs_is_symlink, fs_is_socket, fs_unlink_raw,
+    STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK, STAT_KIND_OTHER,
+    STAT_KIND_SOCKET, STAT_KIND_FIFO, STAT_KIND_DEVICE,
     fs_write_binary_raw, fs_write_atomic_raw, fs_rename_raw,
     fs_try_stat, fs_get_stat_kind, fs_get_stat_size, fs_get_stat_mtime,
     fs_try_statvfs, fs_get_statvfs_total, fs_get_statvfs_free, fs_get_statvfs_avail,
@@ -41,7 +43,7 @@ exports(
     fs_release_read_binary, fs_read_binary_tuple,
     dir_list_count, dir_list_get, dir_list_kind, dir_list_free,
     path_join, path_dirname, path_basename, path_extension, path_is_absolute,
-    path_clean, path_is_within_base, path_rel,
+    path_clean, path_is_within_base, path_rel, path_separator,
     clean, is_within_base, rel, join_clean, first_element,
     fs_pwrite_raw, fs_pread_raw, fs_pread_into_raw, fs_get_pread, fs_get_pread_length,
     fs_release_pread, fs_ftruncate_raw, fs_fsync_raw,
@@ -142,6 +144,10 @@ extern fs_mkdir_p_raw(path: string) -> int
 extern fs_symlink_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string
 extern fs_is_symlink(path: string) -> int
+//   fs_is_socket     — 1 if the path is a UNIX-domain socket (follows
+//                      symlinks). POSIX only; returns 0 on Windows. Pure
+//                      boolean query, no wrapper (matches fs_is_symlink). #1368
+extern fs_is_socket(path: string) -> int
 extern fs_unlink_raw(path: string) -> int
 
 // Non-atomic binary write: fopen("wb") + fwrite(len bytes) + fclose.
@@ -159,10 +165,21 @@ extern fs_write_atomic_raw(path: string, data: string, length: int) -> int
 extern fs_rename_raw(from: string, to: string) -> int
 
 // Split-accessor stat: call fs_try_stat first, then read the
-// getters. kind encoding: 1=file, 2=dir, 3=symlink, 4=other.
+// getters. kind encoding: see STAT_KIND_* below.
 // Pair is thread-local so back-to-back calls on one thread are safe.
 extern fs_try_stat(path: string) -> int
 extern fs_get_stat_kind() -> int
+
+// Values fs_get_stat_kind / dir_list_kind return. SOCKET/FIFO/DEVICE are
+// POSIX-only (#1368); on Windows those nodes report OTHER. Additive — code
+// that only tested FILE/DIR/SYMLINK/OTHER is unaffected.
+const STAT_KIND_FILE = 1
+const STAT_KIND_DIR = 2
+const STAT_KIND_SYMLINK = 3
+const STAT_KIND_OTHER = 4
+const STAT_KIND_SOCKET = 5
+const STAT_KIND_FIFO = 6
+const STAT_KIND_DEVICE = 7
 // size/mtime are `long` (#1021): 64-bit sizes (no >= 2 GiB wrap) and
 // Y2038-safe mtimes.
 extern fs_get_stat_size() -> long
@@ -287,6 +304,8 @@ extern path_is_absolute(path: string) -> int
 extern path_clean(path: string) -> string
 extern path_is_within_base(base: string, target: string) -> int
 extern path_rel(base: string, target: string) -> string
+// Platform path separator ("/" POSIX, "\\" Windows) — #1369.
+extern path_separator() -> string
 
 // Positional I/O (#640).
 extern fs_pwrite_raw(file: ptr, data: string, length: int, offset: long) -> long

@@ -1,0 +1,85 @@
+// Regression for #1368: fs stat distinguishes socket / FIFO / device, and
+// std.os exposes user_id(). Previously sockets, FIFOs and devices all
+// collapsed into STAT_KIND_OTHER (4) — an AF_UNIX socket was indistinguishable
+// from a FIFO, so aeb's podman-socket auto-detect had to stay in bash.
+//
+// This test builds a real FIFO and a real regular file in a temp dir and
+// asserts they classify distinctly, that fs.is_socket discriminates, and that
+// os.user_id() returns a non-negative uid on POSIX. (A real AF_UNIX socket
+// can't be created from pure Aether without net bind, so the socket *kind*
+// value is asserted via the named constant, and is_socket is checked to return
+// 0 for a non-socket — the negative direction.)
+
+import std.fs
+import std.os
+import std.io
+
+extern exit(code: int)
+extern system(cmd: string) -> int
+
+fn stat_kind(p: string) -> int {
+    _ = fs.fs_try_stat(p)
+    return fs.fs_get_stat_kind()
+}
+
+main() {
+    // POSIX-only: mkfifo, /tmp, and a numeric uid don't exist on Windows,
+    // where sockets/FIFOs stay STAT_KIND_OTHER and user_id() returns -1 by
+    // design. Skip gracefully rather than crash the Windows matrix.
+    if os.getenv("OS") == "Windows_NT" {
+        println("SKIP fs_stat_kind_socket_fifo: POSIX-only (socket/fifo kinds + uid)")
+        return
+    }
+
+    total_ok = 1
+    dir = "/tmp/aeth_statkind_1368"
+    _ = system("rm -rf ${dir}; mkdir -p ${dir}")
+    _ = system("mkfifo ${dir}/f")
+    _ = system("touch ${dir}/reg")
+
+    // Regular file classifies as FILE (1), not OTHER.
+    kf = stat_kind("${dir}/reg")
+    if kf == fs.STAT_KIND_FILE {
+        println("ok   regular file -> STAT_KIND_FILE")
+    } else {
+        println("FAIL regular file kind=${kf} want ${fs.STAT_KIND_FILE}"); total_ok = 0
+    }
+
+    // FIFO classifies as FIFO (6) — the key #1368 distinction: NOT OTHER (4).
+    kfifo = stat_kind("${dir}/f")
+    if kfifo == fs.STAT_KIND_FIFO {
+        println("ok   FIFO -> STAT_KIND_FIFO (distinct from OTHER)")
+    } else {
+        println("FAIL FIFO kind=${kfifo} want ${fs.STAT_KIND_FIFO}"); total_ok = 0
+    }
+
+    // The three new kinds are distinct values.
+    if fs.STAT_KIND_SOCKET != fs.STAT_KIND_FIFO && fs.STAT_KIND_FIFO != fs.STAT_KIND_DEVICE && fs.STAT_KIND_SOCKET != fs.STAT_KIND_OTHER {
+        println("ok   socket/fifo/device/other are distinct constants")
+    } else {
+        println("FAIL kind constants not distinct"); total_ok = 0
+    }
+
+    // is_socket is false for a non-socket (a FIFO and a regular file).
+    if fs.fs_is_socket("${dir}/f") == 0 && fs.fs_is_socket("${dir}/reg") == 0 {
+        println("ok   fs.is_socket false for fifo + regular file")
+    } else {
+        println("FAIL fs.is_socket true for a non-socket"); total_ok = 0
+    }
+
+    // os.user_id() returns a real (>= 0) uid on POSIX.
+    uid = os.user_id()
+    if uid >= 0 {
+        println("ok   os.user_id() = ${uid} (>= 0 on POSIX)")
+    } else {
+        println("FAIL os.user_id() = ${uid} (< 0 on POSIX)"); total_ok = 0
+    }
+
+    _ = system("rm -rf ${dir}")
+
+    if total_ok == 1 {
+        println("fs_stat_kind_socket_fifo: all checks pass")
+    } else {
+        println("fs_stat_kind_socket_fifo: FAILURES"); exit(1)
+    }
+}
