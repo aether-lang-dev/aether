@@ -442,17 +442,18 @@ jobs:
   # cc (Makefile FREEBSD=1 mode), against a FreeBSD base sysroot        #
   # provisioned from the aether-crossbuild repo.                        #
   #                                                                    #
-  # continue-on-error: this leg is BEST-EFFORT — a provisioning hiccup  #
-  # (mirror down, upstream base moved) must never block the release of  #
-  # the four first-class platforms. The artifact is also UNTESTED (no   #
-  # FreeBSD to run `make test` on); it is validated only as a correct   #
-  # FreeBSD ELF. If the leg fails or is skipped, publish simply omits   #
-  # the FreeBSD asset.                                                  #
+  # This leg is REQUIRED, not best-effort. It used to be                #
+  # continue-on-error with publish deliberately excluding it from the   #
+  # gate, so a FreeBSD compile failure produced a green release that    #
+  # silently shipped without the FreeBSD asset. That is precisely how   #
+  # the MNT_NODEV break stayed invisible after merge (#402). A broken   #
+  # FreeBSD build is now a broken release. PR CI cross-compiles for     #
+  # FreeBSD on every pull request, so a code break is caught before it  #
+  # can ever reach this point.                                          #
   # ================================================================== #
   build-freebsd:
     name: Build -- freebsd-x86_64 (cross)
     needs: tag
-    continue-on-error: true
     if: |
       always() && (
         (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
@@ -548,13 +549,14 @@ jobs:
   # ================================================================== #
   publish:
     name: Publish release
-    # build-freebsd is in `needs` only so publish waits for its artifact to be
-    # available — it is NOT in the `if` gate, so a failed/skipped FreeBSD leg
-    # (continue-on-error) never blocks the release; publish just omits the asset.
+    # build-freebsd is in the `if` gate, not just in `needs`: a release that
+    # quietly drops a platform because its build broke is worse than no
+    # release, and dropping it silently is what hid the last FreeBSD break.
     needs: [tag, build, build-freebsd]
     runs-on: ubuntu-latest
     if: |
-      always() && needs.build.result == 'success' && (
+      always() && needs.build.result == 'success'
+      && needs.build-freebsd.result == 'success' && (
         (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
         startsWith(github.ref, 'refs/tags/')
       )

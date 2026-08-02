@@ -386,7 +386,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 ### Running Tests
 
 ```bash
-# Full CI suite (10 steps, -Werror), runs on your current platform
+# Full CI suite (9 steps, -Werror), runs on your current platform
 make ci
 
 # Unit tests only (runtime C test suite)

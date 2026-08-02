@@ -81,12 +81,19 @@ int fs_mkdir_p_raw(const char* path);
 //                follow), 0 otherwise. Pure boolean query — no wrapper
 //                needed, matches file_exists / dir_exists shape.
 //
+// fs_is_socket: returns 1 if `path` is a UNIX-domain socket, 0
+//               otherwise (including when the path does not exist).
+//               DOES follow symlinks, unlike fs_is_symlink: a caller
+//               asking "is this a socket" wants the target. POSIX
+//               only; returns 0 on Windows.
+//
 // fs_unlink_raw: remove a file or symlink. Will NOT remove a directory
 //                — use dir_delete_raw for that. Returns 1 on success,
 //                0 on failure.
 int   fs_symlink_raw(const char* target, const char* link_path);
 char* fs_readlink_raw(const char* path);
 int   fs_is_symlink(const char* path);
+int   fs_is_socket(const char* path);
 int   fs_unlink_raw(const char* path);
 
 // Non-atomic binary write to `path` — opens "wb", writes exactly

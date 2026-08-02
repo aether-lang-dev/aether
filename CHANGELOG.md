@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **FreeBSD is a real CI target** (#402). Every pull request now cross-compiles
+  the toolchain for FreeBSD (`FREEBSD=1`, zig cc against a pinned FreeBSD base
+  sysroot) and, separately, builds and runs the C unit suite inside a native
+  FreeBSD VM. Both jobs are required. Until now the only FreeBSD compile in the
+  tree lived in the release workflow, which runs after merge, so nothing read
+  the FreeBSD branch of any `#ifdef` before code landed. `make ci` cannot cover
+  this on its own: it compiles only the branch of each platform conditional
+  that matches the host it runs on.
+
+### Changed
+
+- **A failed FreeBSD build now fails the release** instead of silently shipping
+  without the FreeBSD asset. The leg was `continue-on-error` and deliberately
+  left out of the publish gate, so a broken FreeBSD build produced a green
+  release with a platform quietly missing. That is what kept the `MNT_NODEV`
+  break invisible after it merged.
+- **Mount options are built from a table of the flags the platform actually
+  defines**, rather than a fixed format string with an empty-string substitute
+  for whatever is missing. A flag absent from the OS is absent from the table,
+  so FreeBSD (which removed `MNT_NODEV` in 10, where nodev became a no-op)
+  reports no nodev state instead of reporting it as off.
+
+### Removed
+
+- **The optional-macro portability probe** (`make ci-optional-macros`), added
+  one release ago to simulate a missing `MNT_NODEV` by preprocessing the source
+  and recompiling it. Compiling for FreeBSD in CI supersedes it: the probe
+  approximated one platform through a hand-maintained list of file/macro/anchor
+  triples that every future guard had to be added to by hand, and its awk
+  line-insertion and its hardcoded `-std=` both diverged from the real build
+  before it caught anything. `make ci` is back to 9 steps.
+
+### Fixed
+
+- `fs_is_socket` and `os_user_id_raw` (#1368) were defined without declarations
+  in `std/fs/aether_fs.h` and `std/os/aether_os.h`, the only functions in
+  either module missing a prototype. Documented the new stat kinds,
+  `fs.fs_is_socket` and `os.user_id()` in `docs/stdlib-reference.md`, where the
+  kind encoding still described only kinds 1 through 4.
+
 ## [0.473.0]
 
 ### Added

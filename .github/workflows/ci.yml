@@ -117,6 +117,131 @@ jobs:
       run: make test-macos-leaks
 
   # ============================================================
+  # FreeBSD cross-compile gate (#402)
+  #
+  # Why this exists: the FreeBSD spelling of every `#ifdef` in the
+  # tree used to be compiled in exactly one place, the release
+  # workflow's build-freebsd leg, which runs only AFTER merge and was
+  # best-effort. A FreeBSD-only break therefore passed PR CI, passed
+  # the release, and surfaced only when somebody built on FreeBSD.
+  # That is how MNT_NODEV (removed in FreeBSD 10, still present on
+  # macOS and OpenBSD) reached main.
+  #
+  # `make ci` cannot catch this on any single host: it compiles only
+  # the branch of each platform conditional that matches the runner.
+  # Compiling FOR FreeBSD is the only thing that reads the FreeBSD
+  # branches, so it has to happen before merge, and it has to be
+  # required. No continue-on-error here on purpose.
+  # ============================================================
+  ci-freebsd-cross:
+    name: FreeBSD / cross-compile (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+
+    # The pinned zig and the FreeBSD base sysroot (headers + libc) live in the
+    # sibling aether-crossbuild repo, same as the release leg uses. zig cc does
+    # not bundle a FreeBSD libc, so the base is what makes FreeBSD headers
+    # visible to the compile.
+    - name: Checkout aether-crossbuild
+      uses: actions/checkout@v4
+      with:
+        repository: aether-lang-dev/aether-crossbuild
+        path: crossbuild
+        fetch-depth: 1
+
+    # Cache the downloaded tarballs, not the unpacked trees: get-zig.sh and
+    # fetch-freebsd-base.sh both skip the download when the tarball is already
+    # present and then re-extract, and fetch-freebsd-base.sh deletes and
+    # rebuilds its sysroot dir every run. Keyed on deps.lock, which pins both
+    # URLs and their checksums, so a hit is always the pinned bytes.
+    - name: Restore cross-toolchain download cache
+      id: cross_cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          crossbuild/toolchain
+          crossbuild/work/downloads
+        key: freebsd-cross-${{ hashFiles('crossbuild/deps.lock') }}
+
+    - name: Provision zig + FreeBSD base sysroot
+      id: prov
+      run: |
+        cd crossbuild
+        ./scripts/get-zig.sh
+        ./scripts/fetch-freebsd-base.sh x86_64 15
+        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
+        SR="$PWD/bases/x86_64-freebsd15"
+        test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        test -f "$SR/lib/libc.so.7" || { echo "FreeBSD base sysroot missing libc.so.7"; exit 1; }
+        echo "zig=$ZIG"    >> "$GITHUB_OUTPUT"
+        echo "sysroot=$SR" >> "$GITHUB_OUTPUT"
+
+    - name: Save cross-toolchain download cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.cross_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          crossbuild/toolchain
+          crossbuild/work/downloads
+        key: freebsd-cross-${{ hashFiles('crossbuild/deps.lock') }}
+
+    - name: Cross-build for FreeBSD (FREEBSD=1)
+      run: |
+        make compiler ae stdlib \
+          FREEBSD=1 \
+          ZIG="${{ steps.prov.outputs.zig }}" \
+          AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}"
+        # A cross-build that silently produced Linux binaries would pass the
+        # compile and prove nothing, so confirm the target really is FreeBSD.
+        file build/aetherc build/ae
+        file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
+
+  # ============================================================
+  # FreeBSD native build + test (#402)
+  #
+  # The cross gate above proves the FreeBSD branches COMPILE. It
+  # cannot run anything: a FreeBSD ELF needs a FreeBSD kernel. This
+  # job boots a real FreeBSD VM and runs the C unit suite, so the
+  # runtime, scheduler (kqueue poller) and stdlib are exercised on
+  # the platform rather than merely type-checked for it.
+  #
+  # Scope is `make test` (the 229 C unit tests), not the full
+  # `make ci`: the .ae suites and examples shell out through the
+  # freshly built toolchain and would put a multi-hour build inside
+  # an emulated VM. The C suite is where the platform-specific
+  # runtime and stdlib code actually lives.
+  # ============================================================
+  ci-freebsd-native:
+    name: FreeBSD / native build + unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Build and test inside a FreeBSD VM
+      uses: vmactions/freebsd-vm@v1
+      with:
+        release: '14.2'
+        usesh: true
+        # FreeBSD base ships clang and BSD make; this tree needs GNU make.
+        # bc and pkgconf are what the Makefile probes with.
+        prepare: |
+          pkg install -y gmake bc pkgconf
+        run: |
+          set -e
+          gmake compiler ae stdlib
+          gmake test
+
+  # ============================================================
   # contrib/host bridge check — syntax check of every host bridge
   # in stub mode (always-on), plus end-to-end build+link+run of
   # host demos for every language whose dev library is installed
