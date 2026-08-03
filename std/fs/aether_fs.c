@@ -2260,11 +2260,16 @@ static size_t path_volume_len(const char* p, size_t n) {
     }
     if (n >= 2 && path_is_sep(p[0]) && path_is_sep(p[1])) {
         size_t i = 2;
+        size_t server_start = i;
         while (i < n && !path_is_sep(p[i])) i++;          /* server */
-        if (i < n) {
-            i++;
-            while (i < n && !path_is_sep(p[i])) i++;      /* share  */
-        }
+        if (i == server_start || i >= n) return 0;        /* no server */
+        i++;
+        size_t share_start = i;
+        while (i < n && !path_is_sep(p[i])) i++;          /* share  */
+        /* Both components must be non-empty. Otherwise this is just a path
+         * with a doubled leading separator ("//x//y/"), which collapses like
+         * any other run of separators rather than naming a volume. */
+        if (i == share_start) return 0;
         return i;
     }
 #else
