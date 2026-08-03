@@ -1,0 +1,59 @@
+// Regression: std.bytes entry points take their buffer as `ptr`, so the type
+// system cannot stop an AetherString* being passed where an AetherBytes* is
+// meant. The two layouts differ (magic+ref_count occupy the slot `length`
+// reads), so the length bounds check saw ~7.2e9 and `data` read a small
+// integer which was then dereferenced. `bytes.get(d, 0)` on the value from
+// fs.read_binary_tuple hung so hard it had to be SIGKILLed.
+//
+// Every entry point now rejects a tagged AetherString and returns its
+// documented failure value instead of dereferencing garbage.
+
+import std.fs
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    path = "aeth_bytes_foreign_probe.bin"
+    werr = fs.write_binary(path, "HELLO", 5)
+    if werr != "" { fail("could not write the probe: ${werr}") }
+
+    // An AetherString* in a `string` slot, handed to a bytes accessor.
+    d, n, e = fs.read_binary_tuple(path)
+    if n != 5 { fail("probe length: want 5 got ${n}") }
+
+    if bytes.get(d, 0) != -1 { fail("bytes.get accepted a string: ${bytes.get(d, 0)}") }
+    if bytes.length(d) != -1 { fail("bytes.length accepted a string") }
+    if bytes.get_le32(d, 0) != -1 { fail("bytes.get_le32 accepted a string") }
+    println("PASS 1: bytes accessors reject a foreign pointer")
+
+    // A real buffer still works: the guard must not reject legitimate callers.
+    b = bytes.new(8)
+    _ = bytes.set(b, 0, 72)
+    _ = bytes.set(b, 1, 105)
+    if bytes.get(b, 0) != 72 { fail("real buffer get(0): got ${bytes.get(b, 0)}") }
+    if bytes.get(b, 1) != 105 { fail("real buffer get(1): got ${bytes.get(b, 1)}") }
+    if bytes.length(b) != 2 { fail("real buffer length: got ${bytes.length(b)}") }
+    println("PASS 2: a real bytes buffer is unaffected")
+
+    // The documented way to get file bytes into a buffer still works.
+    b2 = bytes.new(n)
+    _ = bytes.copy_from_string(b2, 0, d, n)
+    if bytes.get(b2, 0) != 72 { fail("copy_from_string then get: got ${bytes.get(b2, 0)}") }
+    println("PASS 3: copy_from_string remains the supported route")
+
+    bytes.free(b)
+    bytes.free(b2)
+    // `d` is passed to a `ptr` parameter, which marks it escaped, so the
+    // scope-exit tracker stops owning it. Release it explicitly.
+    release(d)
+    _ = fs.file_delete_raw(path)
+    println("=== All cases passed ===")
+}
