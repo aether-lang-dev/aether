@@ -2695,7 +2695,23 @@ static int is_nonstoring_builtin(const char* fn) {
             * accumulator that is later joined has its whole loop
             * marked escaped, and every intermediate spine ref leaks. */
            strcmp(fn, "string_seq_join") == 0 ||
-           strcmp(fn, "string_join") == 0;
+           strcmp(fn, "string_join") == 0 ||
+           /* std.bytes readers that yield a scalar. They cannot retain the
+            * pointer they are given, and since #1380 they reject anything that
+            * is not an AetherBytes outright. Without these, a heap string
+            * passed to bytes.length/get had its scope-exit free suppressed and
+            * leaked unless the caller added an explicit release(). */
+           strcmp(fn, "aether_bytes_length") == 0 ||
+           strcmp(fn, "aether_bytes_capacity") == 0 ||
+           strcmp(fn, "aether_bytes_get") == 0 ||
+           strcmp(fn, "aether_bytes_get_le16") == 0 ||
+           strcmp(fn, "aether_bytes_get_le32") == 0 ||
+           strcmp(fn, "aether_bytes_get_le64") == 0 ||
+           strcmp(fn, "aether_bytes_get_be16") == 0 ||
+           strcmp(fn, "aether_bytes_get_be32") == 0 ||
+           strcmp(fn, "aether_bytes_get_be64") == 0 ||
+           /* Copies the source bytes into the buffer; retains neither. */
+           strcmp(fn, "aether_bytes_copy_from_string") == 0;
 }
 
 /* Does argument position `arg_idx` of `call` escape — i.e. might the

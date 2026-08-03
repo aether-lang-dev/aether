@@ -51,9 +51,7 @@ main() {
 
     bytes.free(b)
     bytes.free(b2)
-    // `d` is passed to a `ptr` parameter, which marks it escaped, so the
-    // scope-exit tracker stops owning it. Release it explicitly.
-    release(d)
+
     _ = fs.file_delete_raw(path)
     println("=== All cases passed ===")
 }
