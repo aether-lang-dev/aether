@@ -1,0 +1,14 @@
+// #1377: two arms for the same case. The second can never run, so a typo that
+// collapses two intended-different arms into one compiles clean and silently
+// dead-codes the later one.
+import std.io
+
+main() {
+    x = 2
+    match x {
+        1 -> { println("one") }
+        2 -> { println("two") }
+        2 -> { println("unreachable") }
+        _ -> { println("other") }
+    }
+}

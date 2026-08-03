@@ -1,0 +1,12 @@
+// #1377: an arm below a `_` catch-all. First match wins, so nothing after the
+// wildcard is reachable.
+import std.io
+
+main() {
+    x = 2
+    match x {
+        1 -> { println("one") }
+        _ -> { println("other") }
+        3 -> { println("unreachable") }
+    }
+}

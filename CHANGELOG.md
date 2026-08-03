@@ -5,7 +5,27 @@ All notable changes to Aether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Workflow**: New changes go under `## [0.421.0]`. When a PR merges to
+**Workflow**: New changes go under `## [current]
+
+### Added
+
+- **Unreachable `match` arms are reported** (#1377), warning `W1004`. Arms are
+  tried in source order, so an arm an earlier one already covers is dead code
+  the compiler used to accept silently: a mis-ordered `_`, or two arms meant to
+  differ that a typo collapsed onto the same case. Three shapes are reported: a
+  duplicate case, an arm below a `_` catch-all, and a `_` on a sum or enum
+  match where every case is already handled. That last one is worth removing
+  rather than silencing, because without it adding a variant later becomes a
+  compile error from the exhaustiveness check instead of quietly falling
+  through.
+
+  Reported only where the shadowing is certain. A bare identifier arm binds the
+  value rather than naming a case, so it is never compared, and a `_` over a
+  partially-handled enum is left alone. Verified against every `.ae` file in
+  the tree: one genuine dead arm, in `tests/regression/test_enum_basic.ae`,
+  now removed. No other file warns.
+
+## [0.421.0]`. When a PR merges to
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 

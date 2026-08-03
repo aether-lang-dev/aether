@@ -4672,6 +4672,98 @@ static void mark_optional_narrowed(ASTNode* n, const char* name, Type* inner) {
         mark_optional_narrowed(n->children[i], name, inner);
 }
 
+/* #1377 match-arm reachability.
+ *
+ * Arms are tried in source order, so an arm that can never be reached is dead
+ * code the compiler accepted silently: a mis-ordered `_`, or two arms that were
+ * meant to differ and collapsed to the same case through a typo.
+ *
+ * Reported only where the shadowing is certain. A bare identifier arm can be a
+ * binding that matches anything rather than a named case, so those are never
+ * compared; a warning on correct code would be worse than none. */
+static int match_arm_is_wildcard(ASTNode* p) {
+    if (!p) return 0;
+    if (p->node_type && p->node_type->kind == TYPE_WILDCARD) return 1;
+    return p->value && strcmp(p->value, "_") == 0;
+}
+
+/* Writes a comparable key for the pattern shapes whose identity is
+ * unambiguous. Returns 0 for everything else, which is then left alone. */
+static int match_arm_key(ASTNode* p, char* out, size_t cap) {
+    if (!p || match_arm_is_wildcard(p)) return 0;
+    if (p->type == AST_LITERAL && p->value) {
+        snprintf(out, cap, "lit:%s", p->value);
+        return 1;
+    }
+    if (p->type == AST_MEMBER_ACCESS && p->value &&
+        p->child_count > 0 && p->children[0] && p->children[0]->value) {
+        snprintf(out, cap, "mem:%s.%s", p->children[0]->value, p->value);
+        return 1;
+    }
+    return 0;
+}
+
+static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
+                                 const char* suggestion) {
+    AetherError w = {
+        .filename = NULL, .source_code = NULL,
+        .line = pattern->line, .column = pattern->column,
+        .message = msg, .suggestion = suggestion,
+        .context = NULL, .code = AETHER_WARN_UNREACHABLE_ARM
+    };
+    aether_warning_report(&w);
+    warning_count++;
+}
+
+static void check_match_arm_reachability(ASTNode* stmt) {
+    if (!stmt) return;
+    enum { MATCH_KEYS_MAX = 64 };
+    char keys[MATCH_KEYS_MAX][160];
+    int  key_line[MATCH_KEYS_MAX];
+    int  nkeys = 0;
+    int  wildcard_line = -1;
+
+    for (int i = 1; i < stmt->child_count; i++) {
+        ASTNode* arm = stmt->children[i];
+        if (!arm || arm->type != AST_MATCH_ARM || arm->child_count < 1) continue;
+        ASTNode* pattern = arm->children[0];
+        if (!pattern) continue;
+
+        if (wildcard_line >= 0) {
+            char msg[240];
+            snprintf(msg, sizeof(msg),
+                     "unreachable match arm: the `_` arm on line %d already "
+                     "matches every remaining case", wildcard_line);
+            warn_unreachable_arm(pattern, msg,
+                                 "move this arm above the `_`, or remove it");
+            continue;
+        }
+        if (match_arm_is_wildcard(pattern)) {
+            wildcard_line = pattern->line;
+            continue;
+        }
+
+        char key[160];
+        if (!match_arm_key(pattern, key, sizeof(key))) continue;
+        int dup_line = -1;
+        for (int k = 0; k < nkeys; k++) {
+            if (strcmp(keys[k], key) == 0) { dup_line = key_line[k]; break; }
+        }
+        if (dup_line >= 0) {
+            char msg[240];
+            snprintf(msg, sizeof(msg),
+                     "unreachable match arm: this case is already handled on "
+                     "line %d", dup_line);
+            warn_unreachable_arm(pattern, msg,
+                                 "remove the duplicate, or change it to the case you meant");
+        } else if (nkeys < MATCH_KEYS_MAX) {
+            snprintf(keys[nkeys], sizeof(keys[nkeys]), "%s", key);
+            key_line[nkeys] = pattern->line;
+            nkeys++;
+        }
+    }
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -5597,6 +5689,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int sum_covered[64];
             for (int z = 0; z < 64; z++) sum_covered[z] = 0;
             int sum_wildcard = 0;
+            int sum_wildcard_line = -1;
 
             // #1044 enum `match` bookkeeping (mirrors the sum path): resolve
             // bare-name arms (`Red ->`) to the enum constant and track member
@@ -5608,6 +5701,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int enum_covered[64];
             for (int z = 0; z < 64; z++) enum_covered[z] = 0;
             int enum_wildcard = 0;
+            int enum_wildcard_line = -1;
+
+            check_match_arm_reachability(stmt);   /* #1377 */
 
             // Type check each match arm
             for (int i = 1; i < stmt->child_count; i++) {
@@ -5686,6 +5782,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                   (pattern->value && strcmp(pattern->value, "_") == 0);
                     if (is_wild) {
                         sum_wildcard = 1;
+                        if (sum_wildcard_line < 0) sum_wildcard_line = pattern->line;
                     } else if ((pattern->type == AST_IDENTIFIER ||
                                 pattern->type == AST_PATTERN_VARIABLE) && pattern->value) {
                         int vidx = -1;
@@ -5727,6 +5824,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                   (pattern->value && strcmp(pattern->value, "_") == 0);
                     if (is_wild) {
                         enum_wildcard = 1;
+                        if (enum_wildcard_line < 0) enum_wildcard_line = pattern->line;
                     } else if ((pattern->type == AST_IDENTIFIER ||
                                 pattern->type == AST_PATTERN_VARIABLE) && pattern->value) {
                         size_t elen = strlen(enum_name);
@@ -5797,6 +5895,58 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
 
                 free_symbol_table(arm_table);
+            }
+
+            /* #1377: the opposite of the exhaustiveness check below. When
+             * every variant or member is already handled, the `_` arm cannot
+             * run. Reported for sums and enums only, where the set of cases
+             * is closed and known. */
+            if (sum_match && sum_wildcard && sum_nvar > 0 && sum_nvar <= 64) {
+                int all = 1;
+                for (int vi = 0; vi < sum_nvar; vi++) {
+                    if (!sum_covered[vi]) { all = 0; break; }
+                }
+                if (all && sum_wildcard_line >= 0) {
+                    char msg[240];
+                    snprintf(msg, sizeof(msg),
+                             "unreachable match arm: every variant of sum type "
+                             "'%s' is already handled, so the `_` arm cannot run",
+                             match_expr_type->struct_name ? match_expr_type->struct_name : "?");
+                    AetherError w = {
+                        .filename = NULL, .source_code = NULL,
+                        .line = sum_wildcard_line, .column = 0,
+                        .message = msg,
+                        .suggestion = "remove the `_` arm; adding a variant later will then be a compile error rather than silently falling through",
+                        .context = NULL, .code = AETHER_WARN_UNREACHABLE_ARM
+                    };
+                    aether_warning_report(&w);
+                    warning_count++;
+                }
+            }
+            if (enum_match && enum_def && enum_wildcard) {
+                int nmem = 0, all = 1;
+                for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                    ASTNode* mn = enum_def->children[mi];
+                    if (!mn || mn->type != AST_ENUM_MEMBER) continue;
+                    nmem++;
+                    if (!enum_covered[mi]) { all = 0; break; }
+                }
+                if (all && nmem > 0 && enum_wildcard_line >= 0) {
+                    char msg[240];
+                    snprintf(msg, sizeof(msg),
+                             "unreachable match arm: every member of enum '%s' "
+                             "is already handled, so the `_` arm cannot run",
+                             enum_name ? enum_name : "?");
+                    AetherError w = {
+                        .filename = NULL, .source_code = NULL,
+                        .line = enum_wildcard_line, .column = 0,
+                        .message = msg,
+                        .suggestion = "remove the `_` arm; adding a member later will then be a compile error rather than silently falling through",
+                        .context = NULL, .code = AETHER_WARN_UNREACHABLE_ARM
+                    };
+                    aether_warning_report(&w);
+                    warning_count++;
+                }
             }
 
             // #914 exhaustiveness: every variant of the sum must be handled,

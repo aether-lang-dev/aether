@@ -1,0 +1,11 @@
+// The valid shape must stay completely silent: distinct arms, catch-all last.
+import std.io
+
+main() {
+    x = 2
+    match x {
+        1 -> { println("one") }
+        2 -> { println("two") }
+        _ -> { println("other") }
+    }
+}

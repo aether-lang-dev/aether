@@ -2622,6 +2622,62 @@ Use `ae check file.ae` to see warnings without compiling. It skips codegen and l
 
 ---
 
+### Unreachable Match Arm [W1004]
+
+`match` tries its arms in source order, so an arm that an earlier arm
+already covers can never run. Two shapes are reported: an arm below a
+`_` catch-all, and a second arm for a case already handled.
+
+```aether
+main() {
+    x = 2
+    match x {
+        1 -> { println("one") }
+        2 -> { println("two") }
+        2 -> { println("never runs") }
+        // warning[W1004]: unreachable match arm: this case is already
+        // handled on line 5
+        _ -> { println("other") }
+    }
+}
+```
+
+The check reports only where the shadowing is certain. A bare
+identifier arm binds the value rather than naming a case, so it matches
+anything and is never compared against other arms:
+
+```aether
+match x {
+    1 -> { println("one") }
+    n -> { println("got ${n}") }   // a binding, not a duplicate: no warning
+}
+```
+
+A third shape is the mirror of the exhaustiveness check: a `_` arm on a
+`match` over a sum type or enum where every case is already handled.
+
+```aether
+enum Direction { North, East, South, West }
+
+match d {
+    Direction.North -> { println("N") }
+    Direction.East  -> { println("E") }
+    Direction.South -> { println("S") }
+    Direction.West  -> { println("W") }
+    _ -> { println("?") }
+    // warning[W1004]: every member of enum 'Direction' is already
+    // handled, so the `_` arm cannot run
+}
+```
+
+Removing the catch-all is worth doing rather than silencing: with it
+gone, adding a member later becomes a compile error from the
+exhaustiveness check instead of quietly falling into `_`. A `_` over a
+partially-handled enum is doing real work and is never reported.
+
+This pairs with the exhaustiveness check, which reports the opposite
+direction, a `match` over a sum type or enum that is missing a case.
+
 ## Match Expressions
 
 `match` can be used as a statement or as an expression:

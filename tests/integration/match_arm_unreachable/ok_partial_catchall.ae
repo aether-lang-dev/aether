@@ -1,0 +1,14 @@
+// A `_` over a partially-handled enum is doing real work and must stay silent.
+import std.io
+
+enum Direction { North, East, South, West }
+
+label(d: Direction) -> string {
+    l = match d {
+        Direction.North -> "N"
+        _ -> "?"
+    }
+    return l
+}
+
+main() { println(label(Direction.East)) }
