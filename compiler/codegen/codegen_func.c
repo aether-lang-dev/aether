@@ -20,8 +20,7 @@ int is_c_callback(ASTNode* func) {
    guarantee that an Aether-owned definition matches a force-included C
    header, so collisions are resolved by renaming instead (see
    rename_extern_colliding_functions). */
-int fn_has_internal_linkage(CodeGenerator* gen, ASTNode* func) {
-    (void)gen;
+int fn_has_internal_linkage(ASTNode* func) {
     if (!func || is_c_callback(func)) return 0;
     if (func->is_imported) return 1;
     if (func->value) {
@@ -914,7 +913,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // .ae files in the same namespace bundle / [[bin]] can each
     // declare their own `record_start_` / `helper_` without the
     // generated C colliding at link time. Closes #279.
-    if (fn_has_internal_linkage(gen, func)) {
+    if (fn_has_internal_linkage(func)) {
         fprintf(gen->output, "static ");
     }
 
@@ -1659,7 +1658,7 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     // generate_function_definition for the full rationale. @c_callback
     // overrides this so the symbol is reachable from other TUs (#235).
     // Trailing-underscore private helpers (#279) also get `static`.
-    if (fn_has_internal_linkage(gen, first)) {
+    if (fn_has_internal_linkage(first)) {
         fprintf(gen->output, "static ");
     }
 

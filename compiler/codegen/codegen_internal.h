@@ -304,7 +304,7 @@ const char* c_callback_symbol(ASTNode* func);
    (definition, combined multi-clause definition, forward declaration) must
    agree or C rejects the file with "static declaration follows non-static
    declaration". #1366 */
-int fn_has_internal_linkage(CodeGenerator* gen, ASTNode* func);
+int fn_has_internal_linkage(ASTNode* func);
 /* Look up a top-level @c_callback function by its current AST value
    (after any import-rename pass) and return its bound C symbol — or
    NULL when no such callback exists. Used at value-position

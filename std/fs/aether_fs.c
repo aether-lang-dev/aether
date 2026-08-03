@@ -2833,7 +2833,7 @@ char* path_clean(const char* path) {
         total += stk[k].len;
     }
     /* Nothing left: the volume root if rooted, else "." (kept after a volume,
-     * so "C:" cleans to "C:." — a drive-relative current directory). */
+     * so "C:" cleans to "C:.", a drive-relative current directory). */
     if (sp == 0) {
         char* empty = (char*)malloc(vol + 2);
         if (!empty) { aether_caps_free(stk, stk_bytes); return NULL; }

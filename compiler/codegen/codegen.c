@@ -5082,7 +5082,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // out of `static` so it stays externally addressable; the forward
         // declaration follows suit. Trailing-underscore private helpers
         // (#279) match the same `static` rule.
-        if (fn_has_internal_linkage(gen, child)) {
+        if (fn_has_internal_linkage(child)) {
             fprintf(gen->output, "static ");
         }
 

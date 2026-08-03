@@ -134,7 +134,7 @@ gen-version-header: $(VERSION_HEADER)
 # #1366: the bare C symbols the stdlib exposes. Codegen renames a user function
 # that would collide with one, so this must track std/ automatically: a
 # hand-kept list is what let string_replace_all reach a release.
-# GENERATED — do not commit / edit by hand (gitignored).
+# GENERATED, do not commit or edit by hand (gitignored).
 STDLIB_SYMS_HEADER := compiler/codegen/aether_stdlib_symbols.h
 STDLIB_MODULE_AE := $(wildcard std/*/module.ae) $(wildcard std/*/*/module.ae)
 $(STDLIB_SYMS_HEADER): $(STDLIB_MODULE_AE) Makefile
