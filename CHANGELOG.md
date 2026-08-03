@@ -30,7 +30,7 @@ version number before tagging the release.
   test` and nothing else; diagnosing it meant reproducing locally. Its output is
   now captured and the last 30 lines are printed when it fails.
 
-## [current]
+## [0.482.0]
 
 ### Fixed
 
