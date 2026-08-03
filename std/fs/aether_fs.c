@@ -2243,11 +2243,11 @@ static int path_is_sep(char c) {
 #endif
 }
 
-#ifdef _WIN32
-#define PATH_SEP_CHAR '\\'
-#else
+/* The separator these helpers EMIT. Always '/', including on Windows, which
+ * accepts it everywhere: the cleaned form feeds globs, import paths and
+ * existing callers that compare against '/'. Only the INPUT side is
+ * platform-dependent (path_is_sep), which is what #1369 actually needed. */
 #define PATH_SEP_CHAR '/'
-#endif
 
 /* Bytes at the head of `p` naming a volume rather than a path segment: 2 for
  * "C:", the whole "\\server\share" for a UNC path, 0 otherwise (always 0 on

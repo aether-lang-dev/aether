@@ -61,7 +61,7 @@ main() {
         // the only place the branch is live; on POSIX a backslash is an ordinary
         // filename byte and must NOT be treated as a separator.
         if os.getenv("OS") == "Windows_NT" {
-            if path.clean("C:\\a\\b\\..\\c") != "C:\\a\\c" {
+            if path.clean("C:\\a\\b\\..\\c") != "C:/a/c" {
                 println("FAIL windows clean did not collapse .. in a backslash path")
                 exit(1)
             }
