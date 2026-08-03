@@ -54,6 +54,10 @@ main() {
     if intarr.intarr_size(z) != 4 { fail("bare_return length wrong") }
     println("PASS 3: qualified call in a bare return")
 
+    intarr.intarr_free(x.a)
+    intarr.intarr_free(y.a)
+    intarr.intarr_free(z)
+
     // An export that carries NO module prefix resolves to its own C symbol,
     // not <module>_<name>. Same fallback, opposite direction.
     n = os.aether_args_count()
