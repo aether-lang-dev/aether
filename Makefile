@@ -1575,7 +1575,7 @@ LTO_FLAG = $(shell \
 	else echo -flto; fi)
 
 # Release build with optimizations and warnings as errors
-release: clean
+release: clean $(STDLIB_SYMS_HEADER)
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="

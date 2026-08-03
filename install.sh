@@ -144,8 +144,15 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         fi
     fi
 
-    # Detect make command (prefer make, fall back to mingw32-make on Windows)
-    if command -v make >/dev/null 2>&1; then
+    # Detect make command. The Makefile is GNU make syntax (ifeq, $(shell),
+    # pattern rules), so we need GNU make specifically. Prefer `gmake` when it
+    # exists — it is the GNU make binary on every BSD, and on Linux `gmake` and
+    # `make` are the same program. Falling back to bare `make` picks BSD make on
+    # FreeBSD/*BSD, which then dies with a confusing "Invalid line ifeq" parse
+    # error mid-build (asks/install-sh-picks-bsd-make-on-freebsd.md).
+    if command -v gmake >/dev/null 2>&1; then
+        MAKE_CMD="gmake"
+    elif command -v make >/dev/null 2>&1; then
         MAKE_CMD="make"
     elif command -v mingw32-make >/dev/null 2>&1; then
         MAKE_CMD="mingw32-make"
@@ -162,15 +169,38 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         exit 1
     fi
 
-    # Show what compiler we found
-    if command -v gcc >/dev/null 2>&1; then
-        CC_VERSION=$(gcc --version 2>&1 | head -1)
+    # Resolve the C compiler we'll hand to make. The Makefile hardcodes
+    # `CC := gcc` (Makefile:136), but FreeBSD/macOS ship no gcc — the system
+    # compiler is `cc` (-> clang). Prefer an explicit $CC, else gcc, else the
+    # POSIX `cc`, else clang, and pass it through as `CC=` so the build uses a
+    # compiler that actually exists (asks/install-sh-picks-bsd-make-on-freebsd.md
+    # ask 3). `cc` is gcc on Linux and clang on the BSDs/macOS.
+    if [ -n "${CC:-}" ]; then
+        CC_BIN="$CC"
+    elif command -v gcc >/dev/null 2>&1; then
+        CC_BIN="gcc"
+    elif command -v cc >/dev/null 2>&1; then
+        CC_BIN="cc"
     elif command -v clang >/dev/null 2>&1; then
-        CC_VERSION=$(clang --version 2>&1 | head -1)
+        CC_BIN="clang"
     else
-        CC_VERSION=$(cc --version 2>&1 | head -1)
+        CC_BIN="cc"
     fi
-    ok "  C compiler: $CC_VERSION"
+    CC_VERSION=$("$CC_BIN" --version 2>&1 | head -1)
+    ok "  C compiler: $CC_VERSION  (CC=$CC_BIN)"
+
+    # Verify the chosen make is GNU make, not just *a* make. On BSD, `make` is
+    # BSD make, which cannot parse this GNU Makefile; catch that here with an
+    # actionable message instead of a mid-build "Invalid line ifeq" parse error.
+    # (mingw32-make on Windows is GNU make, so it passes this probe.)
+    if ! "$MAKE_CMD" --version 2>/dev/null | head -1 | grep -qi 'gnu make'; then
+        error "Error: '$MAKE_CMD' is not GNU make (the Makefile is GNU make syntax)."
+        echo "  Found: $("$MAKE_CMD" --version 2>&1 | head -1)"
+        echo "  Install GNU make and re-run:"
+        echo "    FreeBSD/*BSD: pkg install gmake   (then this script prefers gmake)"
+        echo "    Linux:        it is already 'make'"
+        exit 1
+    fi
     ok "  make: $($MAKE_CMD --version 2>&1 | head -1)"
     echo ""
 
@@ -181,14 +211,15 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         git fetch --tags --quiet 2>/dev/null || true
     fi
 
-    # Build
+    # Build. Pass CC= explicitly so a box with no gcc (FreeBSD/macOS) uses the
+    # resolved system compiler instead of the Makefile's hardcoded `gcc`.
     info "Building Aether..."
-    $MAKE_CMD compiler 2>&1 | tail -1
-    $MAKE_CMD ae 2>&1 | tail -1
+    $MAKE_CMD CC="$CC_BIN" compiler 2>&1 | tail -1
+    $MAKE_CMD CC="$CC_BIN" ae 2>&1 | tail -1
 
     # Build precompiled stdlib
     info "Building standard library..."
-    $MAKE_CMD stdlib 2>&1 | tail -1
+    $MAKE_CMD CC="$CC_BIN" stdlib 2>&1 | tail -1
 
     # Build the language server too so the editor extension's LSP
     # client can wire up out of the box (go-to-def, hover,
@@ -199,7 +230,7 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # install: the editor extension falls back to syntax-only mode
     # and the user still has a working `ae` / `aetherc`.
     info "Building language server..."
-    if ! $MAKE_CMD lsp 2>&1 | tail -1; then
+    if ! $MAKE_CMD CC="$CC_BIN" lsp 2>&1 | tail -1; then
         warn "  lsp build failed — editor extension will fall back to syntax-only mode."
     fi
 
