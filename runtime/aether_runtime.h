@@ -39,6 +39,10 @@ void aether_args_init(int argc, char** argv);
 int aether_args_count(void);
 const char* aether_args_get(int index);
 
+// Reclaim a closure environment through the destructor stored in its first
+// field. Safe on NULL and on an env with no destructor. #1398
+void aether_closure_env_free(void* env);
+
 // Return argv[0] — the path the OS launched the current process with.
 // Borrowed pointer into the OS argv storage; do not free. Returns NULL
 // when aether_args_init has not been called.

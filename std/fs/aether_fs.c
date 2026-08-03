@@ -3009,10 +3009,14 @@ char* path_rel(const char* base, const char* target) {
  * is malloc'd by _aether_box_closure and OWNED by the callee. */
 typedef struct { void (*fn)(void); void* env; } AeFsClosure;
 
+extern void aether_closure_env_free(void* env);
+
 static void fs_closure_free(void* box) {
     if (!box) return;
     AeFsClosure* clo = (AeFsClosure*)box;
-    if (clo->env) free(clo->env);
+    /* #1398: through the env's own destructor, so the references its string
+     * captures own are released, not just the struct. */
+    if (clo->env) aether_closure_env_free(clo->env);
     free(box);
 }
 

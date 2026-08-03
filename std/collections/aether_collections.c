@@ -206,6 +206,19 @@ int list_add_string_owned(ArrayList* list, const void* item) {
  * every target we build for. */
 typedef struct { void (*fn)(void); void* env; } AeClosureBox;
 
+/* #1398: a closure env's first field is a pointer to its generated destructor,
+ * which releases the references its string captures own. Lets an owner with no
+ * type for the env reclaim it correctly. Must match the `_dtor` field codegen
+ * emits first in every env struct. */
+typedef struct { void (*dtor)(void*); } _AeEnvHeader;
+
+void aether_closure_env_free(void* env) {
+    if (!env) return;
+    _AeEnvHeader* h = (_AeEnvHeader*)env;
+    if (h->dtor) { h->dtor(env); return; }
+    free(env);
+}
+
 /* Add a heap-allocated closure BOX the list owns (owned_flags == 2).
  * Unlike a string value, the box also owns its captured `env`, so
  * list_free frees env first, then the box. Routed from codegen when a
@@ -281,7 +294,9 @@ void list_free(ArrayList* list) {
                 /* Owned closure box: reclaim the captured env, then the
                  * box. env is NULL for a non-capturing closure (no-op). */
                 void* env = ((AeClosureBox*)it)->env;
-                if (env) free(env);
+                /* #1398: through the env's own destructor, so the references
+                 * its string captures own are released, not just the struct. */
+                if (env) aether_closure_env_free(env);
                 free(it);
             } else if (is_aether_string(it)) {
                 string_release(it);

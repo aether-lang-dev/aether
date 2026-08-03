@@ -107,7 +107,22 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
     fprintf(gen->output, "; ");
     arg_drain_bind(closure_node, nm);          /* now substitutes in the call */
     generate_expression(gen, call);
-    fprintf(gen->output, "; if (%s.env) free((void*)%s.env); }", nm, nm);
+    /* #1398: member-aware teardown, so the env gives back the references its
+       string captures own. Falls back to free() only when the closure is not
+       in the registry (no captures, hence nothing owned). */
+    int env_id = -1;
+    for (int ci = 0; ci < gen->closure_count; ci++) {
+        if (gen->closures[ci].closure_node == closure_node) {
+            env_id = gen->closures[ci].id;
+            break;
+        }
+    }
+    if (env_id >= 0) {
+        fprintf(gen->output, "; if (%s.env) _closure_env_%d_free((void*)%s.env); }",
+                nm, env_id, nm);
+    } else {
+        fprintf(gen->output, "; if (%s.env) free((void*)%s.env); }", nm, nm);
+    }
     arg_drain_truncate(saved);                 /* frees nm */
 }
 
@@ -1625,6 +1640,10 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
      * / parameter (no link symbol involved), so raw is both correct
      * and consistent. See new_string_len_something.md §3. */
     fprintf(gen->output, "typedef struct {\n");
+    /* #1398: first field by contract, so a runtime owner (list_free, the
+       worker pool) can release a captured env it has no type for. Must stay
+       first and must match _AeEnvHeader in the runtime. */
+    fprintf(gen->output, "    void (*_dtor)(void*);\n");
     if (cap_count == 0) {
         fprintf(gen->output, "    int _dummy;\n");
     } else {
@@ -1645,6 +1664,33 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
         }
     }
     fprintf(gen->output, "} _closure_env_%d;\n\n", id);
+
+    /* #1398: the env owns a reference per retained-string capture, so teardown
+       has to be member-aware. Promoted captures share a heap cell rather than
+       owning a reference and are skipped. */
+    fprintf(gen->output, "static void _closure_env_%d_free(void* _p) {\n", id);
+    fprintf(gen->output, "    if (!_p) return;\n");
+    {
+        int released = 0;
+        for (int i = 0; i < cap_count; i++) {
+            int is_promoted = 0;
+            for (int p2 = 0; p2 < parent_promoted_count; p2++) {
+                if (parent_promoted[p2] && strcmp(parent_promoted[p2], captures[i]) == 0) {
+                    is_promoted = 1;
+                    break;
+                }
+            }
+            if (is_promoted) continue;
+            if (!capture_is_retained_string(gen, captures[i], parent_func)) continue;
+            if (!released) {
+                fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
+                released = 1;
+            }
+            fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
+        }
+    }
+    fprintf(gen->output, "    free(_p);\n");
+    fprintf(gen->output, "}\n\n");
 }
 
 // Emit all hoisted closure environment structs and static functions.
@@ -1895,6 +1941,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             }
             fprintf(gen->output, ") {\n");
             fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
+            fprintf(gen->output, "    _e->_dtor = _closure_env_%d_free;\n", id);
             for (int i = 0; i < cap_count; i++) {
                 if (capture_is_retained_string(gen, captures[i], parent_func)) {
                     /* env owns a reference — see aether_str_capture preamble */
@@ -5649,7 +5696,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             } else {
                 // Heap-allocate the environment (portable, no use-after-free)
                 fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
-                fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); ", id, id);
+                fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); _e->_dtor = _closure_env_%d_free; ", id, id, id);
                 for (int i = 0; i < cap_count; i++) {
                     if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference — see aether_str_capture preamble */

@@ -4383,9 +4383,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * (magic-less, e.g. from an @heap extern) still can't be retained
      * — rare in capture position; noted in the ask. */
     print_line(gen, "extern void string_retain(const char*);");
+    /* #1398: string_retain cannot take a reference to a magic-less pointer, so
+       a plain malloc'd heap string was captured borrowed and freed by the
+       enclosing scope while a stored closure still held it. The env now owns a
+       real reference and gives it back in its generated teardown. */
+    print_line(gen, "extern const char* aether_string_capture_owned(const char*);");
+    print_line(gen, "extern void aether_string_release_captured(const char*);");
     print_line(gen, "static inline const char* aether_str_capture(const char* s) {");
-    print_line(gen, "    if (s) string_retain(s);");
-    print_line(gen, "    return s;");
+    print_line(gen, "    return aether_string_capture_owned(s);");
     print_line(gen, "}");
     /* Prototypes for the magic-aware string builtins the codegen emits
      * directly (char_at -> string_char_at, str_eq / match-on-string ->
