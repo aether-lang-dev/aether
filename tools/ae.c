@@ -1989,16 +1989,26 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     } else {
-        cc = "gcc";
-        // Pre-flight check: ensure gcc (or cc) is available
-        if (system("command -v gcc >/dev/null 2>&1") != 0 &&
-            system("command -v cc >/dev/null 2>&1") != 0) {
-            fprintf(stderr, "Error: C compiler not found (gcc or cc).\n");
+        // No $AE_CC/$CC override: prefer `gcc`, but fall back to the POSIX
+        // `cc` when gcc is absent. FreeBSD/macOS ship no gcc at all — the
+        // system compiler is `cc` (-> clang) — so defaulting hard to "gcc"
+        // made `ae build` fail out of the box there even though `cc` works
+        // (asks/install-sh-picks-bsd-make-on-freebsd.md, ask 4). `cc` is gcc
+        // on Linux and clang on FreeBSD/macOS, so this is a no-op where gcc
+        // exists and a fix where it doesn't.
+        if (system("command -v gcc >/dev/null 2>&1") == 0) {
+            cc = "gcc";
+        } else if (system("command -v cc >/dev/null 2>&1") == 0) {
+            cc = "cc";
+        } else {
+            fprintf(stderr, "Error: no C compiler found (looked for gcc, then cc).\n");
+            fprintf(stderr, "Set $CC to your compiler, or install one:\n");
 #ifdef __APPLE__
-            fprintf(stderr, "Install Xcode Command Line Tools: xcode-select --install\n");
+            fprintf(stderr, "  Xcode Command Line Tools: xcode-select --install\n");
 #else
-            fprintf(stderr, "Install GCC: sudo apt install gcc  (Debian/Ubuntu)\n");
-            fprintf(stderr, "             sudo dnf install gcc  (Fedora)\n");
+            fprintf(stderr, "  Debian/Ubuntu: sudo apt install gcc\n");
+            fprintf(stderr, "  Fedora:        sudo dnf install gcc\n");
+            fprintf(stderr, "  FreeBSD:       cc ships with the base system\n");
 #endif
             snprintf(cmd, size, "false");
             return;
