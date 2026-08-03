@@ -1,0 +1,64 @@
+// Regression (#1383): a module-qualified call whose exported name already
+// begins with the module name was emitted with the prefix applied twice when it
+// appeared inside a struct literal in `return` position:
+// `intarr.intarr_new_raw(4)` became `intarr_intarr_new_raw(4)`, which does not
+// exist, so it surfaced as a C compiler error rather than an Aether one.
+//
+// The same call in every other position resolved correctly, which is why this
+// went unnoticed: only the return-position literal reached the fallback that
+// substituted '_' for the dot instead of using the declared extern.
+//
+// Compiling and running this file at all is the assertion; a regression is a
+// build failure. The values are checked too so a wrong-symbol resolution that
+// happened to link cannot pass.
+
+import std.intarr
+import std.os
+import std.io
+
+extern exit(code: int)
+
+struct Box { a: ptr }
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// The shape that worked: assign, then return.
+via_assign() -> Box {
+    b = Box { a: intarr.intarr_new_raw(4) }
+    return b
+}
+
+// The shape that did not: the literal directly in return position.
+via_return() -> Box {
+    return Box { a: intarr.intarr_new_raw(4) }
+}
+
+// A bare return of the same call, for completeness.
+bare_return() -> ptr {
+    return intarr.intarr_new_raw(4)
+}
+
+main() {
+    x = via_assign()
+    if intarr.intarr_size(x.a) != 4 { fail("via_assign length wrong") }
+    println("PASS 1: qualified call in an assigned struct literal")
+
+    y = via_return()
+    if intarr.intarr_size(y.a) != 4 { fail("via_return length wrong") }
+    println("PASS 2: qualified call in a returned struct literal")
+
+    z = bare_return()
+    if intarr.intarr_size(z) != 4 { fail("bare_return length wrong") }
+    println("PASS 3: qualified call in a bare return")
+
+    // An export that carries NO module prefix resolves to its own C symbol,
+    // not <module>_<name>. Same fallback, opposite direction.
+    n = os.aether_args_count()
+    if n < 1 { fail("os.aether_args_count returned ${n}") }
+    println("PASS 4: a bare-named export still resolves")
+
+    println("=== All cases passed ===")
+}

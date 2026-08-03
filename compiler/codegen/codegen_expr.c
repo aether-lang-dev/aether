@@ -4185,6 +4185,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     for (char* p = c_func_name; *p; p++) {
                         if (*p == '.') *p = '_';
                     }
+                    /* #1383: substituting '_' for the dot assumes the C symbol is
+                       `<module>_<name>`. It is not when the export already carries
+                       the module (`intarr.intarr_new_raw`) or carries none
+                       (`os.aether_args_count`). Prefer the declared extern. */
+                    {
+                        const char* qdot = strchr(func_name, '.');
+                        if (qdot && qdot[1] && !is_extern_func(gen, c_func_name)) {
+                            const char* after = qdot + 1;
+                            if (is_extern_func(gen, after)) {
+                                const char* real = lookup_extern_c_name(gen, after);
+                                if (real) {
+                                    strncpy(c_func_name, real, sizeof(c_func_name) - 1);
+                                    c_func_name[sizeof(c_func_name) - 1] = '\0';
+                                }
+                            }
+                        }
+                    }
 
                     // spawn_ActorName(preferred_core) — pass core hint or -1
                     if (strncmp(func_name, "spawn_", 6) == 0 &&
