@@ -20,6 +20,7 @@ typedef enum {
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,
     AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
+    AETHER_WARN_UNREACHABLE_ARM = 1004,  // match arm shadowed by an earlier arm
 } AetherErrorCode;
 
 // Error reporting with source context

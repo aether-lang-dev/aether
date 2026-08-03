@@ -1,0 +1,20 @@
+// #1377: every member of the enum is handled, so the `_` arm cannot run.
+// Worth reporting rather than tolerating: with the catch-all gone, adding a
+// member later becomes a compile error from the exhaustiveness check instead
+// of silently falling into `_`.
+import std.io
+
+enum Direction { North, East, South, West }
+
+label(d: Direction) -> string {
+    l = match d {
+        Direction.North -> "N"
+        Direction.East -> "E"
+        Direction.South -> "S"
+        Direction.West -> "W"
+        _ -> "?"
+    }
+    return l
+}
+
+main() { println(label(Direction.North)) }

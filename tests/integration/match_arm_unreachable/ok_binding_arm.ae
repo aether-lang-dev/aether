@@ -1,0 +1,12 @@
+// A bare identifier arm binds the value rather than naming a case. It is not
+// compared against other arms, because treating a binding as a duplicate would
+// warn on correct code.
+import std.io
+
+main() {
+    x = 7
+    match x {
+        1 -> { println("one") }
+        n -> { println("got ${n}") }
+    }
+}

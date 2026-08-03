@@ -1,0 +1,59 @@
+// Regression (#1380): a `string` value is either a plain char* or a
+// refcounted AetherString*. The length-bearing producers return the latter,
+// and indexing one used to read the struct header rather than the payload:
+// `d[0]` came back as -34, the first byte of the 0xAE57C0DE magic, instead of
+// the first byte of the file. Silent and plausible-looking, which is why it
+// went unnoticed.
+//
+// Indexing now goes through the same payload accessor println and
+// string.length already used, so every `string` indexes the same way
+// regardless of which representation it carries.
+
+import std.string
+import std.fs
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    // Written through std.fs, not a shell: `system` runs cmd.exe on Windows,
+    // where `printf` does not exist.
+    path = "aeth_1380_probe.txt"
+    werr = fs.write_binary(path, "HELLO", 5)
+    if werr != "" { fail("could not write the probe file: ${werr}") }
+
+    // A string literal: plain char*, the representation that always worked.
+    lit = "HELLO"
+    if lit[0] != 72 { fail("literal index: want 72 got ${lit[0]}") }
+    println("PASS 1: literal indexes to 'H'")
+
+    // fs.read_binary_tuple hands back an AetherString* in a `string` slot.
+    d, n, e = fs.read_binary_tuple(path)
+    if n != 5 { fail("length: want 5 got ${n}") }
+    if d[0] != 72 { fail("binary read index 0: want 72 got ${d[0]}") }
+    if d[4] != 79 { fail("binary read index 4: want 79 got ${d[4]}") }
+    println("PASS 2: AetherString-backed string indexes to its payload")
+
+    // string.concat also returns an AetherString*, so its result must index
+    // the same way. concat itself always read its inputs correctly.
+    c = string.concat(d, "")
+    if string.length(c) != 5 { fail("concat length: want 5 got ${string.length(c)}") }
+    if c[0] != 72 { fail("concat index: want 72 got ${c[0]}") }
+    println("PASS 3: concat result indexes to its payload")
+
+    // fs.realpath is `string @heap` too and must not regress.
+    r, kind, _rerr = fs.realpath(path)
+    // The absolute path's first byte is platform-dependent ('/' on POSIX, a
+    // drive letter on Windows), so assert what the regression was: a header
+    // byte reads back as -34, a real path character never does.
+    if r[0] <= 32 { fail("realpath index read a header byte: got ${r[0]}") }
+    println("PASS 4: realpath still indexes correctly")
+
+    _ = fs.file_delete_raw(path)
+    println("=== All cases passed ===")
+}

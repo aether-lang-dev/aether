@@ -5,7 +5,41 @@ All notable changes to Aether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Workflow**: New changes go under `## [0.421.0]`. When a PR merges to
+**Workflow**: New changes go under `## [current]
+
+### Fixed
+
+- **Indexing a `string` reads its payload, not a struct header** (#1380). A
+  `string` value is either a plain `char*` or a refcounted `AetherString*`, and
+  the length-bearing producers (`fs.read_binary_tuple`, `string.concat`) return
+  the latter. `println` and `string.length` already detected the magic header
+  and unwrapped; the `[]` operator did not, so `d[0]` on a binary file read
+  returned -34, the first byte of the header, rather than the first byte of the
+  file. Silent and plausible-looking rather than an error. Indexing now goes
+  through the same payload accessor, so every `string` indexes identically
+  whichever representation it carries. Note `string.concat` was not at fault as
+  the issue supposed: it already read its inputs correctly through the
+  dispatching accessors, and only its indexed *result* was misread.
+
+### Added
+
+- **Unreachable `match` arms are reported** (#1377), warning `W1004`. Arms are
+  tried in source order, so an arm an earlier one already covers is dead code
+  the compiler used to accept silently: a mis-ordered `_`, or two arms meant to
+  differ that a typo collapsed onto the same case. Three shapes are reported: a
+  duplicate case, an arm below a `_` catch-all, and a `_` on a sum or enum
+  match where every case is already handled. That last one is worth removing
+  rather than silencing, because without it adding a variant later becomes a
+  compile error from the exhaustiveness check instead of quietly falling
+  through.
+
+  Reported only where the shadowing is certain. A bare identifier arm binds the
+  value rather than naming a case, so it is never compared, and a `_` over a
+  partially-handled enum is left alone. Verified against every `.ae` file in
+  the tree: one genuine dead arm, in `tests/regression/test_enum_basic.ae`,
+  now removed. No other file warns.
+
+## [0.421.0]`. When a PR merges to
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 

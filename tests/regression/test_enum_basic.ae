@@ -14,7 +14,6 @@ label(d: Direction) -> string {
         Direction.East -> "E"
         Direction.South -> "S"
         Direction.West -> "W"
-        _ -> "?"
     }
     return l
 }
