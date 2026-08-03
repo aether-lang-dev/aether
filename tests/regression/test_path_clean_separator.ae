@@ -4,6 +4,7 @@
 // (no filesystem access), so it works on paths that don't exist yet.
 
 import std.path
+import std.os
 import std.string
 import std.io
 
@@ -55,6 +56,42 @@ main() {
     }
 
     if total_ok == 1 {
+        // #1369: on Windows the lexical helpers must understand backslashes and
+        // drive letters. These assertions only run on the Windows CI job, which is
+        // the only place the branch is live; on POSIX a backslash is an ordinary
+        // filename byte and must NOT be treated as a separator.
+        if os.getenv("OS") == "Windows_NT" {
+            if path.clean("C:\\a\\b\\..\\c") != "C:/a/c" {
+                println("FAIL windows clean did not collapse .. in a backslash path")
+                exit(1)
+            }
+            if path.is_within_base("C:\\base", "C:\\base\\sub\\f") != 1 {
+                println("FAIL windows is_within_base rejected a contained path")
+                exit(1)
+            }
+            if path.is_within_base("C:\\base", "C:\\base\\..\\escape") != 0 {
+                println("FAIL windows is_within_base accepted an escape")
+                exit(1)
+            }
+            if path.separator() != "\\" {
+                println("FAIL windows separator is not a backslash")
+                exit(1)
+            }
+            println("ok   windows backslash + drive-letter handling")
+        } else {
+            if path.clean("a\\b") != "a\\b" {
+                println("FAIL posix treated a backslash as a separator")
+                exit(1)
+            }
+            println("ok   posix leaves a backslash as an ordinary byte")
+        }
+
+        if path.join_clean("bucket", "a/../b") != "bucket/b" && path.separator() == "/" {
+            println("FAIL path.join_clean not reachable from std.path")
+            exit(1)
+        }
+        println("ok   path.join_clean reachable from std.path")
+
         println("path_clean_separator: all checks pass")
     } else {
         println("path_clean_separator: FAILURES"); exit(1)

@@ -179,8 +179,30 @@ static ASTNode* fold_binary_expression(ASTNode* node) {
  * C-symbol spelling of one of the whitelisted pure conversions. The
  * parser stores dotted callees (`string.from_int`); imported/merged
  * callees can arrive underscored (`string_from_int`), so accept both. */
+/* Program root, for the shadow check below. Set by optimize_ast. */
+static ASTNode* g_opt_program;
+
+/* #1366: folding is only valid for the standard library's own primitive. When
+   the program defines a top-level function under the same name, that
+   definition is what the call resolves to, and folding would silently
+   substitute the standard library's semantics for the user's body. */
+static int user_shadows_builtin(const char* name) {
+    if (!name || !g_opt_program) return 0;
+    for (int i = 0; i < g_opt_program->child_count; i++) {
+        ASTNode* child = g_opt_program->children[i];
+        if (!child || child->is_imported) continue;
+        if ((child->type == AST_FUNCTION_DEFINITION ||
+             child->type == AST_BUILDER_FUNCTION) &&
+            child->value && strcmp(child->value, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int is_whitelisted_string_call(const char* name, const char* dotted) {
     if (!name) return 0;
+    if (user_shadows_builtin(name)) return 0;
     char buf[64];
     snprintf(buf, sizeof(buf), "string.%s", dotted);
     if (strcmp(name, buf) == 0) return 1;
@@ -741,7 +763,8 @@ recurse_children:
 // Apply all optimizations
 ASTNode* optimize_ast(ASTNode* node) {
     if (!node) return NULL;
-    
+
+    g_opt_program = node;
     reset_optimization_stats();
     
     // Apply optimizations in order

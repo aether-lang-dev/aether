@@ -1,0 +1,16 @@
+// #1366 (adjacent bug found with it): the constant folder rewrote a call to
+// `string_concat` with literal arguments into the concatenated literal,
+// keyed on the NAME alone. When the program defines its own function under
+// that name, the call resolves to that definition, so folding substituted the
+// standard library's semantics for the user's body and silently produced the
+// wrong answer with no diagnostic. This body ignores `b`, so a fold shows up
+// as "xy" where the correct result is "x".
+import std.io
+
+string_concat(a: string, b: string) -> string {
+    return a
+}
+
+main() {
+    println(string_concat("x", "y"))
+}

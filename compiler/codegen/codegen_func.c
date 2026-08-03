@@ -10,6 +10,26 @@ int is_c_callback(ASTNode* func) {
            strncmp(func->annotation, "c_callback:", 11) == 0;
 }
 
+/* Imported functions are private to each translation unit so linkers that
+   reject duplicate symbols (macOS ld64) do not see one copy per importer.
+   Trailing-underscore names are the file-local convention (#279).
+   @c_callback overrides both: that symbol must stay externally addressable.
+
+   Top-level functions keep external linkage. Making them static would also
+   have solved the libaether collisions in #1366, but it breaks the #703
+   guarantee that an Aether-owned definition matches a force-included C
+   header, so collisions are resolved by renaming instead (see
+   rename_extern_colliding_functions). */
+int fn_has_internal_linkage(ASTNode* func) {
+    if (!func || is_c_callback(func)) return 0;
+    if (func->is_imported) return 1;
+    if (func->value) {
+        size_t n = strlen(func->value);
+        if (n > 0 && func->value[n - 1] == '_') return 1;   /* #279 */
+    }
+    return 0;
+}
+
 // Returns the C symbol bound by a `@c_callback` annotation.
 //   `@c_callback("name") foo(...)` — uses "name" verbatim.
 //   `@c_callback foo(...)`         — falls back to func->value, which
@@ -893,14 +913,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // .ae files in the same namespace bundle / [[bin]] can each
     // declare their own `record_start_` / `helper_` without the
     // generated C colliding at link time. Closes #279.
-    int trailing_underscore_private = 0;
-    if (func->value && !is_c_callback(func)) {
-        size_t nlen = strlen(func->value);
-        if (nlen > 0 && func->value[nlen - 1] == '_') {
-            trailing_underscore_private = 1;
-        }
-    }
-    if ((func->is_imported || trailing_underscore_private) && !is_c_callback(func)) {
+    if (fn_has_internal_linkage(func)) {
         fprintf(gen->output, "static ");
     }
 
@@ -1645,12 +1658,7 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     // generate_function_definition for the full rationale. @c_callback
     // overrides this so the symbol is reachable from other TUs (#235).
     // Trailing-underscore private helpers (#279) also get `static`.
-    int combined_trailing_private = 0;
-    if (first->value && !is_c_callback(first)) {
-        size_t nlen = strlen(first->value);
-        if (nlen > 0 && first->value[nlen - 1] == '_') combined_trailing_private = 1;
-    }
-    if ((first->is_imported || combined_trailing_private) && !is_c_callback(first)) {
+    if (fn_has_internal_linkage(first)) {
         fprintf(gen->output, "static ");
     }
 

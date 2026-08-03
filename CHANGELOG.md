@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the
 next version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **An entry-file function no longer collides with a standard-library C
+  symbol** (#1366). `libaether.a` exports a couple of thousand bare C symbols
+  and grows every release, so a program with its own top-level
+  `string_replace_all` stopped linking the moment `std.string` gained a
+  function lowering to that name, with no change to the program. A colliding
+  definition is now renamed to the `ae_` spelling already used for libc
+  clashes, and its call sites follow. The symbol set is generated from the
+  `std` module files at build time rather than hand-maintained, because a
+  hand-kept list is exactly what let this reach a release. Covers three shapes:
+  a matching signature (a link error), a differing signature (raw C
+  conflicting-declaration errors), and a collision with a module the program
+  never imports (which previously linked and silently ran the standard
+  library's function).
+- **The lexical path helpers are correct on Windows** (#1369). `path.clean`,
+  `path.rel` and `path.is_within_base` split on a hardcoded `/` and knew
+  nothing about drive letters or UNC prefixes, so on Windows `clean` left `..`
+  unresolved in a backslash path, `is_within_base` rejected legitimately
+  contained paths, and `rel` returned nonsense like `../C:\x\y\z`. All three
+  now accept either separator, carry a `C:` or `\\server\share` prefix
+  through untouched, compare case-insensitively as the filesystem does, and
+  emit the platform separator. POSIX is unchanged: a backslash stays an
+  ordinary filename byte. `path.join_clean` is now reachable from `std.path`
+  rather than only `std.fs`, and the whole set (`clean`, `join_clean`, `rel`,
+  `is_within_base`, `separator`) is documented in the stdlib reference, which
+  still listed only the original five path functions.
+- **`ae build` rejects an unknown option** instead of ignoring it. A typo such
+  as `--targt=x86_64-linux` was silently dropped, so the build quietly produced
+  a host binary and reported success.
+- **The constant folder no longer applies standard-library semantics to a name
+  the program defines.** `string.concat` / `string_concat` and the
+  `string.from_*` conversions folded to a literal keyed on the callee name
+  alone, so a program defining its own `string_concat` had calls to it replaced
+  at compile time by the standard library's result: the wrong answer, silently,
+  with no diagnostic. Folding now skips any name the program defines as a
+  top-level function. Found while fixing #1366.
+
 ## [0.475.0]
 
 ### Changed

@@ -28,6 +28,8 @@ static int is_enum_type_name(const char* name);
 // infer_type's member-access resolution above their definitions, same as the
 // enum queries above.
 static ASTNode* g_bitstruct_program;
+// #1366: program handle for the const-fold shadow check below.
+static ASTNode* g_constfold_program;
 static ASTNode* bitstruct_field_lookup(ASTNode* program, const char* bname,
                                        const char* field);
 static int enum_has_member(const char* ename, const char* member);
@@ -893,9 +895,28 @@ static int is_const_expression(ASTNode* expr, SymbolTable* table);
  * dotted source spelling (`string.from_int`) and the underscored
  * C-symbol spelling (`string_from_int`) a merged/imported callee can
  * carry. NOTHING outside this list is admissible. */
+/* #1366: a top-level function the program itself defines under this name
+   shadows the stdlib primitive, so folding the call to a literal would run the
+   standard library's semantics instead of the user's body and silently produce
+   the wrong answer. */
+static int user_defines_top_level_fn(const char* name) {
+    if (!name || !g_constfold_program) return 0;
+    for (int i = 0; i < g_constfold_program->child_count; i++) {
+        ASTNode* child = g_constfold_program->children[i];
+        if (!child || child->is_imported) continue;
+        if ((child->type == AST_FUNCTION_DEFINITION ||
+             child->type == AST_BUILDER_FUNCTION) &&
+            child->value && strcmp(child->value, name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int is_const_expr_call(ASTNode* expr) {
     if (!expr || expr->type != AST_FUNCTION_CALL || !expr->value) return 0;
     const char* name = expr->value;
+    if (user_defines_top_level_fn(name)) return 0;
     static const char* const whitelist[] = {
         "from_int", "from_long", "from_float", "concat"
     };
@@ -4356,6 +4377,7 @@ static void enum_rewrite_member_access(ASTNode* nd) {
 static void resolve_enum_types(ASTNode* program) {
     g_enum_name_count = 0;
     g_enum_program = program;
+    g_constfold_program = program;
     if (!program) return;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];

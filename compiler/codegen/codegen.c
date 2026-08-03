@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include "codegen_internal.h"
+#include "aether_stdlib_symbols.h"   /* #1366: generated */
 #include "../aether_module.h"
 #include "../aether_error.h"
 
@@ -3880,6 +3881,93 @@ static void mangle_keyword_value_idents(ASTNode* node) {
     }
 }
 
+static int stdlib_symbol_cmp(const void* key, const void* elem) {
+    return strcmp((const char*)key, *(const char* const*)elem);
+}
+
+/* #1366: is `name` a bare C symbol the standard library exposes? libaether.a
+   is on the link line whether or not the module that owns the symbol was
+   imported, so a name that matches one collides even with no import to see.
+   The table is generated from the std module.ae files at build time, because a
+   hand-kept list is exactly what let `string_replace_all` reach a release. */
+static int is_stdlib_c_symbol(const char* name) {
+    if (!name) return 0;
+    return bsearch(name, AETHER_STDLIB_SYMBOLS, AETHER_STDLIB_SYMBOL_COUNT,
+                   sizeof(AETHER_STDLIB_SYMBOLS[0]), stdlib_symbol_cmp) != NULL;
+}
+
+/* #1366: does this TU declare an extern C function called `name`? Both the
+   file's own externs and every imported module's externs land as declarations
+   in the one emitted .c. */
+static int tu_declares_extern(ASTNode* program, const char* name) {
+    if (!program || !name) return 0;
+    if (is_stdlib_c_symbol(name)) return 1;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (!child) continue;
+        if (child->type == AST_EXTERN_FUNCTION && child->value &&
+            strcmp(child->value, name) == 0) {
+            return 1;
+        }
+        if (child->type == AST_IMPORT_STATEMENT && child->value) {
+            AetherModule* mod_entry = module_find(child->value);
+            ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
+            if (!mod_ast) continue;
+            for (int j = 0; j < mod_ast->child_count; j++) {
+                ASTNode* decl = mod_ast->children[j];
+                if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
+                    strcmp(decl->value, name) == 0) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
+    if (!node) return;
+    if (node->type == AST_FUNCTION_CALL && node->value &&
+        strcmp(node->value, from) == 0) {
+        char* dup = strdup(to);
+        if (dup) {
+            free(node->value);
+            node->value = dup;
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rename_calls_to(node->children[i], from, to);
+    }
+}
+
+/* #1366: a top-level function whose name matches an extern the same TU
+   declares would emit two conflicting declarations of one C identifier: the
+   user's definition and the stdlib prototype an import dragged in. Making the
+   definition `static` removes the cross-TU collision but not this one, so
+   rename the user's function to the same `ae_` spelling safe_c_name already
+   uses for libc collisions. Dotted stdlib calls (`string.replace_all`) carry a
+   different AST value and are untouched; a bare call resolves to the user's
+   function, which is what gets renamed with it. */
+static void rename_extern_colliding_functions(ASTNode* program) {
+    if (!program) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* fn = program->children[i];
+        if (!fn || (fn->type != AST_FUNCTION_DEFINITION &&
+                    fn->type != AST_BUILDER_FUNCTION)) continue;
+        if (fn->is_imported || is_c_callback(fn) || !fn->value) continue;
+        if (!tu_declares_extern(program, fn->value)) continue;
+
+        char safe[280];
+        snprintf(safe, sizeof(safe), "ae_%s", fn->value);
+        rename_calls_to(program, fn->value, safe);
+        char* dup = strdup(safe);
+        if (dup) {
+            free(fn->value);
+            fn->value = dup;
+        }
+    }
+}
+
 /* ---- link-requirement emission (emit-link-requirements-from-import-graph) --
  *
  * aetherc resolves the full import graph, so it knows exactly which native
@@ -4023,6 +4111,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).
     mangle_keyword_value_idents(program);
+    rename_extern_colliding_functions(program);
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
     // here means every per-fn codegen pass beyond this point can
@@ -4993,12 +5082,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // out of `static` so it stays externally addressable; the forward
         // declaration follows suit. Trailing-underscore private helpers
         // (#279) match the same `static` rule.
-        int fwd_trailing_private = 0;
-        if (child->value && !is_c_callback(child)) {
-            size_t nlen = strlen(child->value);
-            if (nlen > 0 && child->value[nlen - 1] == '_') fwd_trailing_private = 1;
-        }
-        if ((child->is_imported || fwd_trailing_private) && !is_c_callback(child)) {
+        if (fn_has_internal_linkage(child)) {
             fprintf(gen->output, "static ");
         }
 

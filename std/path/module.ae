@@ -19,9 +19,10 @@ exports(
     path_clean, path_rel, path_is_within_base, path_separator,
     // Short aliases (the std.fs surface uses these bare names too).
     join, dirname, basename, extension, is_absolute,
-    clean, rel, is_within_base, separator
+    clean, rel, is_within_base, separator, join_clean
 )
 
+extern string_length(s: string) -> int
 extern path_join(path1: string, path2: string) -> string
 extern path_dirname(path: string) -> string
 extern path_basename(path: string) -> string
@@ -56,3 +57,15 @@ clean(p: string) -> string { return path_clean(p) }
 rel(base: string, target: string) -> string { return path_rel(base, target) }
 is_within_base(base: string, target: string) -> int { return path_is_within_base(base, target) }
 separator() -> string { return path_separator() }
+
+// Lexically-cleaned join: append `b` to `a`, then collapse `.` and `..`.
+// Use this rather than `join` wherever `b` is caller-supplied (an object
+// key, an archive entry name), so a traversal is resolved before the path
+// reaches the filesystem. Pair with `is_within_base` for the containment
+// check. Same function std.fs exports; surfaced here because std.path is
+// where path work is looked for (#1369).
+join_clean(a: string, b: string) -> string {
+    if string_length(a) == 0 { return path_clean(b) }
+    if string_length(b) == 0 { return path_clean(a) }
+    return path_clean(path_join(a, b))
+}
