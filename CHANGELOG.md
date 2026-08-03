@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Workflow**: New changes go under `## [current]
 
+### Fixed
+
+- **Indexing a `string` reads its payload, not a struct header** (#1380). A
+  `string` value is either a plain `char*` or a refcounted `AetherString*`, and
+  the length-bearing producers (`fs.read_binary_tuple`, `string.concat`) return
+  the latter. `println` and `string.length` already detected the magic header
+  and unwrapped; the `[]` operator did not, so `d[0]` on a binary file read
+  returned -34, the first byte of the header, rather than the first byte of the
+  file. Silent and plausible-looking rather than an error. Indexing now goes
+  through the same payload accessor, so every `string` indexes identically
+  whichever representation it carries. Note `string.concat` was not at fault as
+  the issue supposed: it already read its inputs correctly through the
+  dispatching accessors, and only its indexed *result* was misread.
+
 ### Added
 
 - **Unreachable `match` arms are reported** (#1377), warning `W1004`. Arms are

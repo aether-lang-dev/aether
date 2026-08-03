@@ -5288,7 +5288,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         
         case AST_ARRAY_ACCESS:
             if (expr->child_count >= 2) {
-                generate_expression(gen, expr->children[0]);
+                /* #1380: a string may be a char* or an AetherString*; index the payload. */
+                ASTNode* base = expr->children[0];
+                int str_base = base && base->node_type &&
+                               base->node_type->kind == TYPE_STRING;
+                if (str_base) fprintf(gen->output, "_aether_safe_str(");
+                generate_expression(gen, base);
+                if (str_base) fprintf(gen->output, ")");
                 fprintf(gen->output, "[");
                 generate_expression(gen, expr->children[1]);
                 fprintf(gen->output, "]");
