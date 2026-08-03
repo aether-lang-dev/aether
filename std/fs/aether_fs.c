@@ -96,7 +96,13 @@ char* path_dirname(const char* p) { (void)p; return NULL; }
 char* path_basename(const char* p) { (void)p; return NULL; }
 char* path_extension(const char* p) { (void)p; return NULL; }
 int path_is_absolute(const char* p) { (void)p; return 0; }
-const char* path_separator(void) { return "/"; }
+const char* path_separator(void) {
+#ifdef _WIN32
+    return "\\";
+#else
+    return "/";
+#endif
+}
 char* path_clean(const char* p) { (void)p; return NULL; }
 int path_is_within_base(const char* base, const char* target) { (void)base; (void)target; return 0; }
 char* path_rel(const char* base, const char* target) { (void)base; (void)target; return NULL; }
@@ -2227,6 +2233,65 @@ const char* path_separator(void) {
 #endif
 }
 
+/* #1369: on POSIX a backslash is an ordinary filename byte and must never
+ * split a segment. Only Windows accepts both. */
+static int path_is_sep(char c) {
+#ifdef _WIN32
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+#ifdef _WIN32
+#define PATH_SEP_CHAR '\\'
+#else
+#define PATH_SEP_CHAR '/'
+#endif
+
+/* Bytes at the head of `p` naming a volume rather than a path segment: 2 for
+ * "C:", the whole "\\server\share" for a UNC path, 0 otherwise (always 0 on
+ * POSIX). The prefix survives normalisation verbatim. */
+static size_t path_volume_len(const char* p, size_t n) {
+#ifdef _WIN32
+    if (n >= 2 && p[1] == ':' &&
+        ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z'))) {
+        return 2;
+    }
+    if (n >= 2 && path_is_sep(p[0]) && path_is_sep(p[1])) {
+        size_t i = 2;
+        while (i < n && !path_is_sep(p[i])) i++;          /* server */
+        if (i < n) {
+            i++;
+            while (i < n && !path_is_sep(p[i])) i++;      /* share  */
+        }
+        return i;
+    }
+#else
+    (void)p; (void)n;
+#endif
+    return 0;
+}
+
+/* Windows filesystems are case-insensitive, so a byte-exact containment test
+ * would reject a legitimate "c:\base\f" under "C:\Base". Separators compare
+ * equal to each other for the same reason. */
+static int path_chars_equal(char a, char b) {
+#ifdef _WIN32
+    if (path_is_sep(a) && path_is_sep(b)) return 1;
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+#endif
+    return a == b;
+}
+
+static int path_span_equal(const char* a, const char* b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (!path_chars_equal(a[i], b[i])) return 0;
+    }
+    return 1;
+}
+
 /* #462: strdup through the capability allocator. The matching free in
  * dir_list_free recomputes strlen(name)+1, which equals this size, so
  * the accounting balances exactly. NULL-safe. */
@@ -2705,7 +2770,13 @@ char* path_clean(const char* path) {
     size_t in_len = strlen(path);
     if (in_len == 0) return strdup(".");
 
-    int rooted = (path[0] == '/');
+    /* #1369: a Windows volume prefix ("C:", "\\server\share") is not a
+     * segment and must be copied through untouched; rootedness is then the
+     * separator that follows it, so "C:\a" is absolute while "C:a" is
+     * drive-relative. On POSIX vol is always 0 and this reduces to the
+     * original leading-'/' test. */
+    size_t vol = path_volume_len(path, in_len);
+    int rooted = (vol < in_len && path_is_sep(path[vol]));
 
     /* Segment stack — at most one entry per byte of input. */
     struct seg { size_t start; size_t len; };
@@ -2719,13 +2790,13 @@ char* path_clean(const char* path) {
     /* Count of leading `..` we couldn't resolve (relative paths only). */
     size_t leading_dotdot = 0;
 
-    size_t i = rooted ? 1 : 0;
+    size_t i = rooted ? vol + 1 : vol;
     while (i < in_len) {
-        /* Skip consecutive `/`. */
-        while (i < in_len && path[i] == '/') i++;
+        /* Skip consecutive separators. */
+        while (i < in_len && path_is_sep(path[i])) i++;
         if (i >= in_len) break;
         size_t start = i;
-        while (i < in_len && path[i] != '/') i++;
+        while (i < in_len && !path_is_sep(path[i])) i++;
         size_t len = i - start;
         /* "." — skip. */
         if (len == 1 && path[start] == '.') continue;
@@ -2750,26 +2821,37 @@ char* path_clean(const char* path) {
         sp++;
     }
 
-    /* Total output length: leading "/" or "" + segments joined by "/". */
-    size_t total = rooted ? 1 : 0;
+    /* Total output length: volume + leading separator + segments joined. */
+    size_t total = vol + (rooted ? 1 : 0);
     for (size_t k = 0; k < sp; k++) {
-        if (k > 0 || (!rooted && k == 0)) {
-            if (k > 0) total += 1;  /* separator */
-        }
+        if (k > 0) total += 1;  /* separator */
         total += stk[k].len;
     }
-    /* Empty result → "/" if rooted else "." */
+    /* Nothing left: the volume root if rooted, else "." (kept after a volume,
+     * so "C:" cleans to "C:." — a drive-relative current directory). */
     if (sp == 0) {
+        char* empty = (char*)malloc(vol + 2);
+        if (!empty) { aether_caps_free(stk, stk_bytes); return NULL; }
+        memcpy(empty, path, vol);
+        if (rooted) {
+            empty[vol] = PATH_SEP_CHAR;
+            empty[vol + 1] = '\0';
+        } else {
+            empty[vol] = '.';
+            empty[vol + 1] = '\0';
+        }
         aether_caps_free(stk, stk_bytes);
-        return strdup(rooted ? "/" : ".");
+        return empty;
     }
 
     char* out = (char*)malloc(total + 1);
     if (!out) { aether_caps_free(stk, stk_bytes); return NULL; }
     size_t o = 0;
-    if (rooted) out[o++] = '/';
+    memcpy(out, path, vol);
+    o += vol;
+    if (rooted) out[o++] = PATH_SEP_CHAR;
     for (size_t k = 0; k < sp; k++) {
-        if (k > 0) out[o++] = '/';
+        if (k > 0) out[o++] = PATH_SEP_CHAR;
         memcpy(out + o, path + stk[k].start, stk[k].len);
         o += stk[k].len;
     }
@@ -2802,12 +2884,19 @@ int path_is_within_base(const char* base, const char* target) {
     size_t bl = strlen(cb);
     size_t tl = strlen(ct);
 
+    /* #1369: compare with the platform's separator and case rules. Byte
+     * comparison against a hardcoded '/' let a backslash path slip past the
+     * boundary test on Windows, and path_clean not collapsing `..` there meant
+     * an escaping target could be reported as contained. */
     int within = 0;
-    if (bl == 1 && cb[0] == '/') {
-        within = (ct[0] == '/') ? 1 : 0;
-    } else if (tl == bl && strcmp(cb, ct) == 0) {
+    size_t bvol = path_volume_len(cb, bl);
+    if (bl == bvol + 1 && path_is_sep(cb[bvol]) &&
+        path_span_equal(cb, ct, bvol)) {
+        /* base is the volume root: any target on that volume is within. */
+        within = (tl > bvol && path_is_sep(ct[bvol])) ? 1 : 0;
+    } else if (tl == bl && path_span_equal(cb, ct, bl)) {
         within = 1;
-    } else if (tl > bl && memcmp(cb, ct, bl) == 0 && ct[bl] == '/') {
+    } else if (tl > bl && path_span_equal(cb, ct, bl) && path_is_sep(ct[bl])) {
         within = 1;
     }
     free(cb);
@@ -2837,31 +2926,37 @@ char* path_rel(const char* base, const char* target) {
     char* cb = path_clean(base);
     char* ct = path_clean(target);
     if (!cb || !ct) { free(cb); free(ct); return NULL; }
-    int b_root = (cb[0] == '/');
-    int t_root = (ct[0] == '/');
+    size_t bl = strlen(cb);
+    size_t tl = strlen(ct);
+    /* #1369: a relative path between different volumes does not exist, and
+     * mixing absolute with relative has no answer either. */
+    size_t bvol = path_volume_len(cb, bl);
+    size_t tvol = path_volume_len(ct, tl);
+    if (bvol != tvol || !path_span_equal(cb, ct, bvol)) {
+        free(cb); free(ct); return NULL;
+    }
+    int b_root = (bvol < bl && path_is_sep(cb[bvol]));
+    int t_root = (tvol < tl && path_is_sep(ct[tvol]));
     if (b_root != t_root) {
         free(cb); free(ct); return NULL;
     }
-    /* Split each into segments and walk. */
-    size_t bl = strlen(cb);
-    size_t tl = strlen(ct);
     /* Find shared-prefix segments. */
-    size_t bi = b_root ? 1 : 0;
-    size_t ti = t_root ? 1 : 0;
+    size_t bi = b_root ? bvol + 1 : bvol;
+    size_t ti = t_root ? tvol + 1 : tvol;
     while (bi < bl && ti < tl) {
         /* Compare next segment in cb vs ct. */
         size_t bsa = bi, tsa = ti;
-        while (bi < bl && cb[bi] != '/') bi++;
-        while (ti < tl && ct[ti] != '/') ti++;
+        while (bi < bl && !path_is_sep(cb[bi])) bi++;
+        while (ti < tl && !path_is_sep(ct[ti])) ti++;
         if ((bi - bsa) != (ti - tsa) ||
-            memcmp(cb + bsa, ct + tsa, bi - bsa) != 0) {
+            !path_span_equal(cb + bsa, ct + tsa, bi - bsa)) {
             /* Diverged — rewind to start of this segment. */
             bi = bsa;
             ti = tsa;
             break;
         }
-        if (bi < bl && cb[bi] == '/') bi++;
-        if (ti < tl && ct[ti] == '/') ti++;
+        if (bi < bl && path_is_sep(cb[bi])) bi++;
+        if (ti < tl && path_is_sep(ct[ti])) ti++;
     }
     /* `bi` is at the first byte of the unmatched base remainder,
      * `ti` at the first byte of the unmatched target remainder. */
@@ -2871,7 +2966,7 @@ char* path_rel(const char* base, const char* target) {
         size_t p = bi;
         while (p < bl) {
             up++;
-            while (p < bl && cb[p] != '/') p++;
+            while (p < bl && !path_is_sep(cb[p])) p++;
             if (p < bl) p++;
         }
     }
@@ -2883,7 +2978,7 @@ char* path_rel(const char* base, const char* target) {
     for (size_t u = 0; u < up; u++) {
         out[o++] = '.';
         out[o++] = '.';
-        if (u + 1 < up || ti < tl) out[o++] = '/';
+        if (u + 1 < up || ti < tl) out[o++] = PATH_SEP_CHAR;
     }
     if (ti < tl) {
         memcpy(out + o, ct + ti, tl - ti);

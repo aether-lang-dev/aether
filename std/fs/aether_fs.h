@@ -94,6 +94,10 @@ int   fs_symlink_raw(const char* target, const char* link_path);
 char* fs_readlink_raw(const char* path);
 int   fs_is_symlink(const char* path);
 int   fs_is_socket(const char* path);
+
+// Platform path separator: "/" on POSIX, "\\" on Windows. Static
+// literal, never freed. #1369
+const char* path_separator(void);
 int   fs_unlink_raw(const char* path);
 
 // Non-atomic binary write to `path` — opens "wb", writes exactly

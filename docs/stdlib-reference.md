@@ -867,6 +867,11 @@ main() {
 - `path.basename(path)` - Get file name
 - `path.extension(path)` - Get file extension including dot
 - `path.is_absolute(path)` - Check if absolute path (returns 1/0)
+- `path.clean(path)` → `string` - Lexical normalize: collapses `//`, resolves `.` and `..`, drops a trailing separator. Purely textual, it never touches the filesystem, so unlike `fs.realpath` it works on paths that do not exist yet, which is the case when you are computing an output path before creating it. On Windows it understands both separators and a `C:` / UNC volume prefix, and emits the platform separator.
+- `path.join_clean(a, b)` → `string` - `join` followed by `clean` in one call. Use this rather than `join` whenever `b` is caller-supplied (an object key, an archive entry name) so a `..` is resolved before the path reaches the filesystem: `path.join_clean("bucket", "a/../b")` is `"bucket/b"`. Pair with `is_within_base`.
+- `path.is_within_base(base, target)` → `int` - 1 if `target` lies within `base` after both are cleaned, else 0. The lexical pre-`open` check for a blob store, static-file server or archive extractor: reject the request before you open it. Comparison follows platform rules, so on Windows it accepts either separator and is case-insensitive. Symlinks are not followed, a link under `base` pointing outside is an open-time concern.
+- `path.rel(base, target)` → `string` - The relative path from `base` to `target`, such that joining it onto `base` and cleaning yields `target`. Returns empty when there is no such path (one absolute and one relative, or different Windows volumes).
+- `path.separator()` → `string` - The platform path separator, `"/"` on POSIX and `"\\"` on Windows. Use it instead of hardcoding a separator.
 
 ### Full-fat filesystem (`std.fs`)
 

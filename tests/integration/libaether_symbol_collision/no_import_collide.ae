@@ -1,0 +1,20 @@
+// #1366: the name collides with a bare C symbol libaether exports, but this
+// file never imports the module that owns it, so no extern declaration in the
+// translation unit reveals the clash. libaether.a is on the link line
+// regardless, so the collision is real: before the fix the linker resolved the
+// call to the standard library's function instead of this one.
+//
+// Arguments come from variables, not literals: a literal call is
+// constant-folded and would not exercise the link path at all.
+import std.io
+
+string_concat(a: string, b: string) -> string {
+    return a
+}
+
+main() {
+    left = "x"
+    right = "y"
+    got = string_concat(left, right)
+    println(got)
+}

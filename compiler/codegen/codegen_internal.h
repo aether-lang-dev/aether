@@ -300,6 +300,11 @@ ASTNode* find_struct_definition_by_name(ASTNode* program, const char* name);
    position reference. */
 int is_c_callback(ASTNode* func);
 const char* c_callback_symbol(ASTNode* func);
+/* Whether a top-level function is emitted `static`. All three emit sites
+   (definition, combined multi-clause definition, forward declaration) must
+   agree or C rejects the file with "static declaration follows non-static
+   declaration". #1366 */
+int fn_has_internal_linkage(CodeGenerator* gen, ASTNode* func);
 /* Look up a top-level @c_callback function by its current AST value
    (after any import-rename pass) and return its bound C symbol — or
    NULL when no such callback exists. Used at value-position

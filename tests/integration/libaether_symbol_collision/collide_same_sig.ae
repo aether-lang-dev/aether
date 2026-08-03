@@ -1,0 +1,16 @@
+// #1366: a top-level entry-file function whose name matches a bare C symbol
+// exported by libaether.a. std.string lowers `replace_all` to the C symbol
+// `string_replace_all` (added in 0.465.0), which is exactly this name, so
+// before the fix this failed at link with "duplicate symbol".
+import std.string
+import std.io
+
+string_replace_all(s: string, a: string, b: string) -> string {
+    return s
+}
+
+main() {
+    x = string.length("hi")
+    y = string_replace_all("a", "b", "c")
+    println("${x} ${y}")
+}

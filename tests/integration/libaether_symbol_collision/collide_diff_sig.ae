@@ -1,0 +1,17 @@
+// #1366, the harder half: the same name collision but with a signature that
+// does NOT match the stdlib prototype the import drags into the translation
+// unit. Making the definition `static` alone leaves two conflicting
+// declarations of one C identifier, so this failed with raw C compile errors
+// ("conflicting types for 'string_replace_all'") rather than a link error.
+import std.string
+import std.io
+
+string_replace_all(n: int) -> int {
+    return n + 1
+}
+
+main() {
+    x = string.length("hi")
+    y = string_replace_all(41)
+    println("${x} ${y}")
+}

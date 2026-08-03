@@ -4825,6 +4825,16 @@ static int cmd_build(int argc, char** argv) {
             return cmd_build_namespace(argc, argv);
         } else if (argv[i][0] != '-') {
             file = argv[i];
+        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0 ||
+                   strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            /* Consumed by the global pre-dispatch parse, seen again here. */
+        } else {
+            /* An unrecognised flag used to be dropped silently, so a typo
+               (`--targt=x86_64-linux`, `--emit-c`) built something other than
+               what was asked for and reported success. */
+            fprintf(stderr, "Error: Unknown option '%s' for `ae build`.\n", argv[i]);
+            fprintf(stderr, "Run `ae build` with no arguments to list the options.\n");
+            return 1;
         }
     }
 
