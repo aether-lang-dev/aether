@@ -5,7 +5,7 @@ All notable changes to Aether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Workflow**: New changes go under `## [current]
+**Workflow**: New changes go under `## [0.477.0]
 
 ### Fixed
 
