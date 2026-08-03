@@ -26,9 +26,11 @@ declared="$(mktemp)"
 defined="$(mktemp)"
 trap 'rm -f "$exported" "$declared" "$defined"' EXIT
 
-# Exported text symbols, with the Mach-O leading underscore stripped.
+# Exported text symbols, verbatim. Mach-O prefixes an underscore and ELF does
+# not, so the lookup below accepts either spelling rather than stripping it
+# here, which would corrupt a symbol whose name legitimately starts with '_'.
 nm -g "$ARCHIVE" 2>/dev/null | awk '$2=="T"||$2=="D"||$2=="S"{print $3}' \
-    | sed 's/^_//' | sort -u > "$exported"
+    | sort -u > "$exported"
 
 # Names declared `extern` by a std module.
 grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
@@ -44,7 +46,8 @@ missing=0
 while read -r name; do
     [ -n "$name" ] || continue
     grep -qx "$name" "$defined"  || continue   # not ours: libc / optional dep
-    grep -qx "$name" "$exported" && continue   # present, good
+    grep -qx "$name" "$exported" && continue   # ELF spelling
+    grep -qx "_$name" "$exported" && continue  # Mach-O spelling
     echo "  [FAIL] $name is declared extern by a std module and defined in a std"
     echo "         source, but $ARCHIVE does not export it (stale archive)."
     missing=$((missing + 1))

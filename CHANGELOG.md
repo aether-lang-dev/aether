@@ -25,6 +25,10 @@ version number before tagging the release.
   positives. Verified both directions: it passes on a freshly built archive and
   flags six stale symbols on the installed 0.467.0-era one, including the
   `aether_worker_wait` from the report.
+- **The install smoke test reports why it failed.** `install.sh` ran with its
+  output sent to `/dev/null`, so a genuine break printed `[FAIL] Install smoke
+  test` and nothing else; diagnosing it meant reproducing locally. Its output is
+  now captured and the last 30 lines are printed when it fails.
 
 ## [current]
 

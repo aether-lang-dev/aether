@@ -964,7 +964,8 @@ test-install: compiler ae stdlib
 	@echo "==================================="
 	@tmpdir=$$(mktemp -d) && \
 	echo "  Installing to $$tmpdir..." && \
-	./install.sh "$$tmpdir" < /dev/null > /dev/null 2>&1 && \
+	{ ./install.sh "$$tmpdir" < /dev/null > "$$tmpdir/install.log" 2>&1 || \
+	  { echo "  install.sh failed:"; tail -30 "$$tmpdir/install.log" | sed 's/^/      /'; false; }; } && \
 	echo "  Testing ae version..." && \
 	AETHER_HOME="$$tmpdir" "$$tmpdir/bin/ae$(EXE_EXT)" version > /dev/null 2>&1 && \
 	echo "  Testing ae init + ae run..." && \
