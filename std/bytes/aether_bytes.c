@@ -5,6 +5,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* #1380 follow-up: `AetherBytes*` reaches these entry points as a `ptr`, so the
+ * type system cannot stop an `AetherString*` being passed instead. The layouts
+ * differ (`magic`+`ref_count` occupy the slot `length` reads), so the length
+ * bounds check sees ~7.2e9 and `data` reads a small integer, then dereferences
+ * it. Every entry point rejects a tagged AetherString up front and returns its
+ * documented failure value. The magic test is the same discriminator
+ * println/string.length already use for this dual representation; a real
+ * AetherBytes would need length == 0xAE57C0DE (~2.9GB) to collide, and the
+ * header plausibility checks inside is_aether_string reject that too. */
 struct AetherBytes {
     size_t length;
     size_t capacity;
@@ -62,21 +71,25 @@ AetherBytes* aether_bytes_new(int initial_capacity) {
 }
 
 int aether_bytes_length(AetherBytes* b) {
+    if (is_aether_string(b)) return -1;
     if (!b) return -1;
     return (int)b->length;
 }
 
 int aether_bytes_capacity(AetherBytes* b) {
+    if (is_aether_string(b)) return -1;
     if (!b) return -1;
     return (int)b->capacity;
 }
 
 void* aether_bytes_data(AetherBytes* b) {
+    if (is_aether_string(b)) return NULL;
     if (!b || b->capacity == 0) return NULL;
     return b->data;
 }
 
 int aether_bytes_set_length(AetherBytes* b, int length) {
+    if (is_aether_string(b)) return 0;
     if (!b) return -1;
     if (length < 0) length = 0;
     if ((size_t)length > b->capacity) length = (int)b->capacity;
@@ -85,6 +98,7 @@ int aether_bytes_set_length(AetherBytes* b, int length) {
 }
 
 int aether_bytes_set(AetherBytes* b, int index, int byte) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 1;
     if (!bytes_reserve(b, needed)) return 0;
@@ -98,12 +112,14 @@ int aether_bytes_set(AetherBytes* b, int index, int byte) {
 }
 
 int aether_bytes_get(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index >= b->length) return -1;
     return (int)(unsigned char)b->data[index];
 }
 
 int aether_bytes_set_le16(AetherBytes* b, int index, int value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 2;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -115,6 +131,7 @@ int aether_bytes_set_le16(AetherBytes* b, int index, int value) {
 }
 
 int aether_bytes_get_le16(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 2 > b->length) return -1;
     unsigned int v = (unsigned char)b->data[index]
@@ -123,6 +140,7 @@ int aether_bytes_get_le16(AetherBytes* b, int index) {
 }
 
 int aether_bytes_set_le32(AetherBytes* b, int index, int value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 4;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -137,6 +155,7 @@ int aether_bytes_set_le32(AetherBytes* b, int index, int value) {
 }
 
 int aether_bytes_get_le32(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 4 > b->length) return -1;
     unsigned int v = (unsigned char)b->data[index]
@@ -147,6 +166,7 @@ int aether_bytes_get_le32(AetherBytes* b, int index) {
 }
 
 int aether_bytes_set_le64(AetherBytes* b, int index, long long value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 8;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -165,6 +185,7 @@ int aether_bytes_set_le64(AetherBytes* b, int index, long long value) {
 }
 
 long long aether_bytes_get_le64(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 8 > b->length) return -1;
     unsigned long long v =
@@ -187,6 +208,7 @@ long long aether_bytes_get_le64(AetherBytes* b, int index) {
  *     (https://www.bouncycastle.org)
  *   Portions copyright (c) 2026 Aether Developers. */
 int aether_bytes_set_be16(AetherBytes* b, int index, int value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 2;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -198,6 +220,7 @@ int aether_bytes_set_be16(AetherBytes* b, int index, int value) {
 }
 
 int aether_bytes_get_be16(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 2 > b->length) return -1;
     unsigned int v = ((unsigned int)(unsigned char)b->data[index] << 8)
@@ -206,6 +229,7 @@ int aether_bytes_get_be16(AetherBytes* b, int index) {
 }
 
 int aether_bytes_set_be32(AetherBytes* b, int index, int value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 4;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -220,6 +244,7 @@ int aether_bytes_set_be32(AetherBytes* b, int index, int value) {
 }
 
 int aether_bytes_get_be32(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 4 > b->length) return -1;
     unsigned int v = ((unsigned int)(unsigned char)b->data[index] << 24)
@@ -230,6 +255,7 @@ int aether_bytes_get_be32(AetherBytes* b, int index) {
 }
 
 int aether_bytes_set_be64(AetherBytes* b, int index, long long value) {
+    if (is_aether_string(b)) return 0;
     if (!b || index < 0) return 0;
     size_t needed = (size_t)index + 8;
     if (needed < (size_t)index) return 0;  /* overflow */
@@ -248,6 +274,7 @@ int aether_bytes_set_be64(AetherBytes* b, int index, long long value) {
 }
 
 long long aether_bytes_get_be64(AetherBytes* b, int index) {
+    if (is_aether_string(b)) return -1;
     if (!b || index < 0) return -1;
     if ((size_t)index + 8 > b->length) return -1;
     unsigned long long v =
@@ -264,6 +291,7 @@ long long aether_bytes_get_be64(AetherBytes* b, int index) {
 
 int aether_bytes_copy_from_string(AetherBytes* b, int dst,
                                   const void* src, int src_len) {
+    if (is_aether_string(b)) return 0;
     if (!b || dst < 0 || !src || src_len < 0) return 0;
     if (src_len == 0) return 1;
     size_t needed = (size_t)dst + (size_t)src_len;
@@ -301,6 +329,7 @@ int aether_bytes_copy_from_bytes(AetherBytes* dst, int dst_off,
 }
 
 int aether_bytes_copy_within(AetherBytes* b, int dst, int src, int length) {
+    if (is_aether_string(b)) return 0;
     if (!b || dst < 0 || src < 0 || length < 0) return 0;
     if (length == 0) return 1;
     /* `src` itself must point into the current logical length — we
@@ -344,6 +373,7 @@ int aether_bytes_copy_within(AetherBytes* b, int dst, int src, int length) {
 }
 
 void* aether_bytes_finish(AetherBytes* b, int length) {
+    if (is_aether_string(b)) return NULL;
     if (!b) return NULL;
     size_t use_length = (length < 0) ? 0 : (size_t)length;
     if (use_length > b->length) use_length = b->length;
@@ -358,6 +388,7 @@ void* aether_bytes_finish(AetherBytes* b, int length) {
 }
 
 void* aether_bytes_to_string(AetherBytes* b, int length) {
+    if (is_aether_string(b)) return NULL;
     /* Non-consuming twin of aether_bytes_finish: mint a fresh refcounted
      * AetherString from the first `length` bytes WITHOUT destroying the
      * buffer, so the caller can keep owning the AetherBytes and call this
@@ -371,6 +402,7 @@ void* aether_bytes_to_string(AetherBytes* b, int length) {
 }
 
 void aether_bytes_free(AetherBytes* b) {
+    if (is_aether_string(b)) return;
     if (!b) return;
     /* Cap-aware (#462): credit back the data buffer (b->capacity bytes,
      * the live allocation size; NULL/0 when never grown) and the struct

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A module-qualified call inside a `return` struct literal is no longer given
+  a doubled module prefix** (#1383). `intarr.intarr_new_raw(4)` in
+  `return Box { a: ... }` was emitted as `intarr_intarr_new_raw`, which does not
+  exist, so it surfaced as a C compiler error rather than an Aether diagnostic.
+  The same call resolved correctly in every other position, which is why it went
+  unnoticed. The emitted callee is now resolved against the declared extern
+  instead of assuming the C symbol is `<module>_<name>`: substituting `_` for the
+  dot is wrong both when the export already carries the module name
+  (`intarr.intarr_new_raw`) and when it carries none
+  (`os.aether_args_count`). Any module following the `<module>_<verb>` export
+  convention was exposed, including `std.fs`, `std.zlib` and `std.bytes`.
+
 ## [0.479.0]
 
 ## [0.478.0]

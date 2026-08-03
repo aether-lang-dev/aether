@@ -4185,6 +4185,38 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     for (char* p = c_func_name; *p; p++) {
                         if (*p == '.') *p = '_';
                     }
+                    /* #1383: substituting '_' for the dot assumes the C symbol is
+                       `<module>_<name>`. It is not when the export already carries
+                       the module (`intarr.intarr_new_raw`) or carries none
+                       (`os.aether_args_count`). Prefer the declared extern. */
+                    {
+                        const char* qdot = strchr(func_name, '.');
+                        /* `<module>_<name>` may be an Aether wrapper rather than an
+                           extern; redirecting past it would call the raw extern and
+                           skip the wrapper's ownership handling. */
+                        int qknown = is_extern_func(gen, c_func_name);
+                        if (!qknown && gen->program) {
+                            for (int qk = 0; qk < gen->program->child_count; qk++) {
+                                ASTNode* qd = gen->program->children[qk];
+                                if (qd && (qd->type == AST_FUNCTION_DEFINITION ||
+                                           qd->type == AST_BUILDER_FUNCTION) &&
+                                    qd->value && strcmp(qd->value, c_func_name) == 0) {
+                                    qknown = 1;
+                                    break;
+                                }
+                            }
+                        }
+                        if (qdot && qdot[1] && !qknown) {
+                            const char* after = qdot + 1;
+                            if (is_extern_func(gen, after)) {
+                                const char* real = lookup_extern_c_name(gen, after);
+                                if (real) {
+                                    strncpy(c_func_name, real, sizeof(c_func_name) - 1);
+                                    c_func_name[sizeof(c_func_name) - 1] = '\0';
+                                }
+                            }
+                        }
+                    }
 
                     // spawn_ActorName(preferred_core) — pass core hint or -1
                     if (strncmp(func_name, "spawn_", 6) == 0 &&
