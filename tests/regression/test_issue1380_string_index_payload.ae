@@ -14,7 +14,6 @@ import std.fs
 import std.io
 
 extern exit(code: int)
-extern system(cmd: string) -> int
 
 fail(msg: string) {
     println("FAIL: ${msg}")
@@ -22,8 +21,11 @@ fail(msg: string) {
 }
 
 main() {
-    path = "/tmp/aeth_1380_probe.txt"
-    _ = system("printf HELLO > ${path}")
+    // Written through std.fs, not a shell: `system` runs cmd.exe on Windows,
+    // where `printf` does not exist.
+    path = "aeth_1380_probe.txt"
+    werr = fs.write_binary(path, "HELLO", 5)
+    if werr != "" { fail("could not write the probe file: ${werr}") }
 
     // A string literal: plain char*, the representation that always worked.
     lit = "HELLO"
@@ -46,9 +48,12 @@ main() {
 
     // fs.realpath is `string @heap` too and must not regress.
     r, kind, _rerr = fs.realpath(path)
-    if r[0] != 47 { fail("realpath index: want 47 got ${r[0]}") }
+    // The absolute path's first byte is platform-dependent ('/' on POSIX, a
+    // drive letter on Windows), so assert what the regression was: a header
+    // byte reads back as -34, a real path character never does.
+    if r[0] <= 32 { fail("realpath index read a header byte: got ${r[0]}") }
     println("PASS 4: realpath still indexes correctly")
 
-    _ = system("rm -f ${path}")
+    _ = fs.file_delete_raw(path)
     println("=== All cases passed ===")
 }
