@@ -5,7 +5,28 @@ All notable changes to Aether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Workflow**: New changes go under `## [0.477.0]
+**Workflow**: New changes go under the `[current]` section. When a PR merges to
+`main`, the release pipeline automatically replaces `[current]` with the next
+version number before tagging the release.
+
+## [current]
+
+## [0.478.0]
+
+### Fixed
+
+- **`make release` / `make install` failed on a fresh tree** with
+  `fatal error: aether_stdlib_symbols.h: No such file or directory`. The
+  generated stdlib-symbols header (added with #1366) was a prerequisite of the
+  `compiler` target but not of `release`, so `make install` compiled codegen.c
+  before generating it. `release` now depends on the header. Also (from the
+  FreeBSD toolchain ask): `install.sh` prefers `gmake` and verifies it is GNU
+  make (bare `make` is BSD make on the BSDs and cannot parse this Makefile),
+  and resolves + passes `CC=` through; and `ae build`/`ae run` default the C
+  backend to `gcc` when present, else the POSIX `cc`, so a box with no gcc
+  (FreeBSD/macOS) builds out of the box.
+
+## [0.477.0]
 
 ### Fixed
 
@@ -38,10 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   partially-handled enum is left alone. Verified against every `.ae` file in
   the tree: one genuine dead arm, in `tests/regression/test_enum_basic.ae`,
   now removed. No other file warns.
-
-## [0.421.0]`. When a PR merges to
-`main`, the release pipeline automatically replaces `[current]` with the
-next version number before tagging the release.
 
 ## [0.476.0]
 
@@ -178,6 +195,33 @@ next version number before tagging the release.
   prefix is now reattached so both platforms agree (the recursive `**` path was
   already correct). Regression: `tests/regression/test_glob_dir_prefix.ae`.
 
+## [0.472.0]
+
+### Fixed
+
+- **FreeBSD build break in `fs.mounts`.** `MNT_NODEV` was used unguarded in
+  the BSD `getmntinfo` backend. FreeBSD deprecated that flag and removed the
+  macro in FreeBSD 10, while macOS and OpenBSD still define it, so the
+  fallback path had never been compiled anywhere and the break only appeared
+  on FreeBSD. The flag is now probed with `#ifdef` rather than keyed on the
+  platform, so a future removal elsewhere degrades to omitting the option
+  instead of failing the build.
+- **NetBSD was claimed but never buildable.** It sat in the same
+  `getmntinfo` branch, but there the call fills a `struct statvfs` and the
+  flag field is `f_flag`, not `f_flags`, so that body could not have
+  compiled. NetBSD now falls through to the unsupported branch and reports
+  the error, matching the module's convention of degrading rather than
+  fabricating, instead of shipping a shape nobody has built.
+
+### Added
+
+- **`make ci-optional-macros`, a portability probe, now step 10 of `make
+  ci`.** It recompiles the affected sources with each guarded platform macro
+  forced absent, so both sides of every `#ifdef` are built on every run.
+  This reproduces the FreeBSD failure above on any host: verified by
+  reintroducing the bug and watching the probe fail, then restoring the fix
+  and watching it pass. Registering a new guarded macro is one line.
+
 ## [0.471.0]
 
 ### Added
@@ -240,33 +284,6 @@ next version number before tagging the release.
   publish only on success (so an interrupted run leaves no truncated
   artifact), and report the actual cause when the server cannot start
   instead of a bare "failed".
-
-## [0.473.0]
-
-### Fixed
-
-- **FreeBSD build break in `fs.mounts`.** `MNT_NODEV` was used unguarded in
-  the BSD `getmntinfo` backend. FreeBSD deprecated that flag and removed the
-  macro in FreeBSD 10, while macOS and OpenBSD still define it, so the
-  fallback path had never been compiled anywhere and the break only appeared
-  on FreeBSD. The flag is now probed with `#ifdef` rather than keyed on the
-  platform, so a future removal elsewhere degrades to omitting the option
-  instead of failing the build.
-- **NetBSD was claimed but never buildable.** It sat in the same
-  `getmntinfo` branch, but there the call fills a `struct statvfs` and the
-  flag field is `f_flag`, not `f_flags`, so that body could not have
-  compiled. NetBSD now falls through to the unsupported branch and reports
-  the error, matching the module's convention of degrading rather than
-  fabricating, instead of shipping a shape nobody has built.
-
-### Added
-
-- **`make ci-optional-macros`, a portability probe, now step 10 of `make
-  ci`.** It recompiles the affected sources with each guarded platform macro
-  forced absent, so both sides of every `#ifdef` are built on every run.
-  This reproduces the FreeBSD failure above on any host: verified by
-  reintroducing the bug and watching the probe fail, then restoring the fix
-  and watching it pass. Registering a new guarded macro is one line.
 
 ## [0.469.0]
 
