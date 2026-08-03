@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A heap string passed to a `std.bytes` reader no longer leaks.** The
+  compiler's non-storing-callee allowlist covers the string readers
+  (`aether_string_data`, `string_seq_join`, `println`, ...) but never included
+  `std.bytes`, so passing a heap string to `bytes.length` / `bytes.get` marked it
+  escaped and suppressed its scope-exit free. The caller leaked unless it added
+  an explicit `release()`, and nothing signalled that. The scalar-returning
+  readers (`length`, `capacity`, `get`, `get_le16/32/64`, `get_be16/32/64`) and
+  `copy_from_string`, which copies out and retains nothing, are now listed.
+  `aether_bytes_data` is deliberately excluded: it returns an interior view
+  rather than a scalar. Verified on the emitted C (0 scope-exit frees before, 1
+  after) and through the macOS leak gate.
+
 ## [0.480.0]
 
 ### Fixed
