@@ -984,7 +984,17 @@ test-install: compiler ae stdlib
 # extracts it (simulating `ae version install`), and verifies ae init + ae run
 # work from the extracted layout. This catches archive structure bugs that
 # test-install (which tests install.sh) would miss.
-test-release-archive: compiler ae stdlib
+# #1395: a release archive built from an older tree than the sources it ships
+# links fine for us and fails at the user's build, silently until someone calls
+# the one function added last. Verified here, next to the archive packaging.
+.PHONY: check-archive-exports
+check-archive-exports: stdlib
+	@echo "==================================="
+	@echo "  Archive Export Check"
+	@echo "==================================="
+	@sh scripts/check_archive_exports.sh build/libaether.a
+
+test-release-archive: compiler ae stdlib check-archive-exports
 	@echo "==================================="
 	@echo "  Release Archive Smoke Test"
 	@echo "==================================="

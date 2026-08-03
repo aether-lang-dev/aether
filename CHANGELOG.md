@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **The release archive is checked against the sources it ships** (#1395).
+  0.467.0 shipped `std/worker/aether_worker.c` defining `aether_worker_wait`
+  next to a `libaether.a` built from an older tree that did not export it, so
+  `worker.wait()` and `worker.map()` failed to link. Nothing failed on our side;
+  it failed at the user's link step, and only for the function added last.
+  `make check-archive-exports` (run as part of the release-archive smoke test)
+  now fails when a symbol a std module declares `extern`, and a std C source
+  defines, is absent from the archive. Externs with no std definition are libc
+  or optional-dependency symbols and are skipped, which keeps it free of false
+  positives. Verified both directions: it passes on a freshly built archive and
+  flags six stale symbols on the installed 0.467.0-era one, including the
+  `aether_worker_wait` from the report.
+
+## [current]
+
 ### Fixed
 
 - **A heap string passed to a `std.bytes` reader no longer leaks.** The
