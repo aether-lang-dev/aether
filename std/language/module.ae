@@ -1,6 +1,6 @@
 // std.language — BCP 47 Language Tags and Matching (RFC 5646, RFC 4647)
 
-import std.string (*)
+import std.string(*)
 import std.bytes
 import std.strbuilder
 import std.list
@@ -472,7 +472,11 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
         while i < sz {
             p = list_get_raw(pref_list, i)
             if p != null {
-                heap.free(p)
+                // Cast to the struct type so heap.free emits the typed
+                // destructor that also releases the owned `tag` string field.
+                // On a raw `ptr` it degrades to a plain free() and leaks tag.
+                pref = p as *Preferred
+                heap.free(pref)
             }
             i = i + 1
         }
@@ -529,14 +533,23 @@ fn match_strings(m: *Matcher, preferred: string) -> string {
         i = i + 1
     }
 
-    sorted_pref = string_seq_empty()
+    // Build the sorted tag sequence WITHOUT a self-referential rebind
+    // (`x = cons(h, x)`): that shape makes codegen suppress freeing the old
+    // handle to avoid a double-free, but string_seq_cons takes an independent
+    // retain on its tail, so each intermediate cell leaks. Cons into a fresh
+    // `acc`, then drop the previous `prev` local (its ref is now held by the
+    // new cell) before advancing — one live handle at a time, no leak.
+    prev = string_seq_empty()
     i = sz - 1
     while i >= 0 {
         p = list_get_raw(pref_list, i)
         pref = p as *Preferred
-        sorted_pref = string_seq_cons(pref.tag, sorted_pref)
+        acc = string_seq_cons(pref.tag, prev)
+        string_seq_free(prev)
+        prev = acc
         i = i - 1
     }
+    sorted_pref = prev
     defer string_seq_free(sorted_pref)
 
     res = match_tags(m, sorted_pref)

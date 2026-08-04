@@ -3,6 +3,29 @@
 import std.language
 import std.string
 
+// Build a *StringSeq leak-cleanly. Multi-element `["a","b","c"]` literals hit a
+// codegen bug where the inner cons temporaries' refs are never dropped (they
+// leak even with string_seq_free); build via explicit cons + tail-drop instead.
+// (Tracked as a compiler bug; unrelated to std.language.)
+fn seq3(a: string, b: string, c: string) -> *StringSeq {
+    t0 = string_seq_empty()
+    t1 = string_seq_cons(c, t0)
+    string_seq_free(t0)
+    t2 = string_seq_cons(b, t1)
+    string_seq_free(t1)
+    t3 = string_seq_cons(a, t2)
+    string_seq_free(t2)
+    return t3
+}
+fn seq2(a: string, b: string) -> *StringSeq {
+    t0 = string_seq_empty()
+    t1 = string_seq_cons(b, t0)
+    string_seq_free(t0)
+    t2 = string_seq_cons(a, t1)
+    string_seq_free(t1)
+    return t2
+}
+
 main() {
     print("=== std.language ===\n\n")
 
@@ -13,6 +36,7 @@ main() {
         exit(1)
     }
     t1 = t1_str as Tag
+    defer string_free(t1 as string)
     if string_equals(t1 as string, "en-US") != 1 {
         print("FAIL: parse(\"en-us\") canonicalized to ${t1 as string}\n")
         exit(1)
@@ -25,6 +49,7 @@ main() {
         exit(1)
     }
     t2 = t2_str as Tag
+    defer string_free(t2 as string)
     if string_equals(t2 as string, "zh-Hans-CN") != 1 {
         print("FAIL: parse(\"ZH-HANS-cn\") canonicalized to ${t2 as string}\n")
         exit(1)
@@ -37,6 +62,7 @@ main() {
         exit(1)
     }
     t3 = t3_str as Tag
+    defer string_free(t3 as string)
     if string_equals(t3 as string, "x-private-tag") != 1 {
         print("FAIL: parse(\"X-private-tag\") canonicalized to ${t3 as string}\n")
         exit(1)
@@ -49,6 +75,7 @@ main() {
         exit(1)
     }
     t4 = t4_str as Tag
+    defer string_free(t4 as string)
     if string_equals(t4 as string, "en-US") != 1 {
         print("FAIL: parse(\"en_US\") canonicalized to ${t4 as string}\n")
         exit(1)
@@ -121,19 +148,23 @@ main() {
     print("PASS: extract region\n")
 
     base_t2 = language.base(t2)
+    defer string_free(base_t2 as string)
     if string_equals(base_t2 as string, "zh") != 1 {
         print("FAIL: base(zh-Hans-CN)=${base_t2 as string}\n")
         exit(1)
     }
     print("PASS: extract base\n")
 
-    // 4. Matcher
-    let supported: *StringSeq = ["zh-Hans-CN", "en-US", "da"]
+    // 4. Matcher. matcher_create RETAINS `supported`, so the test still owns
+    // its reference and frees it; matcher_free drops the matcher's ref.
+    supported = seq3("zh-Hans-CN", "en-US", "da")
+    defer string_seq_free(supported)
     m = language.matcher_create(supported)
     defer language.matcher_free(m)
 
     // Match exact preferred
-    let pref1: *StringSeq = ["en-US", "zh-Hans"]
+    pref1 = seq2("en-US", "zh-Hans")
+    defer string_seq_free(pref1)
     res1 = language.match_tags(m, pref1)
     if string_equals(res1, "en-US") != 1 {
         print("FAIL: match_tags exact, got ${res1}\n")
@@ -143,6 +174,7 @@ main() {
 
     // Match with truncation
     let pref2: *StringSeq = ["en-US-California"]
+    defer string_seq_free(pref2)
     res2 = language.match_tags(m, pref2)
     if string_equals(res2, "en-US") != 1 {
         print("FAIL: match_tags truncated, got ${res2}\n")
@@ -152,6 +184,7 @@ main() {
 
     // Match with fallback to primary language
     let pref3: *StringSeq = ["zh-HK"]
+    defer string_seq_free(pref3)
     res3 = language.match_tags(m, pref3)
     if string_equals(res3, "zh-Hans-CN") != 1 {
         print("FAIL: match_tags fallback to primary, got ${res3}\n")
@@ -161,6 +194,7 @@ main() {
 
     // Match empty preference falls back to first supported
     let pref_empty: *StringSeq = []
+    defer string_seq_free(pref_empty)
     res_empty = language.match_tags(m, pref_empty)
     if string_equals(res_empty, "zh-Hans-CN") != 1 {
         print("FAIL: match_tags empty preference, got ${res_empty}\n")
