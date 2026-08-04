@@ -1,0 +1,12 @@
+// `x!` on an optional holding `none` must print its own category token.
+import std.io
+
+pick(flag: int) -> int? {
+    if flag == 1 { return 7 }
+    return none
+}
+
+main() {
+    v = pick(0)
+    println("${v!}")
+}

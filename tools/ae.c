@@ -744,21 +744,38 @@ static bool get_exe_dir(char* buf, size_t size) {
 // `tc.include_flags` can hold).
 // ---------------------------------------------------------------------------
 
-static int append_include_one_dir(char* out, size_t out_size, size_t* pos, const char* path) {
-    size_t path_len = strlen(path);
-    // " -I<path>" needs path_len + 4 bytes plus the NUL.
-    size_t need = (*pos == 0 ? 0 : 1) + 2 + path_len + 1;
-    if (*pos + need >= out_size) return 0;
-    if (*pos != 0) out[(*pos)++] = ' ';
-    out[(*pos)++] = '-';
-    out[(*pos)++] = 'I';
-    memcpy(out + *pos, path, path_len);
-    *pos += path_len;
-    out[*pos] = '\0';
+/* #1378 follow-up: the include list was a fixed 16 KB buffer, which the walk
+ * silently outgrew once the install prefix was long: 153 directories under a
+ * `/var/folders/.../T/tmp.XXXX/` path exceed it, and the overflow dropped -I
+ * entries with only a warning, so a build could fail to find headers that are
+ * present. The buffer grows instead. */
+static int include_flags_grow(char** out, size_t* cap, size_t need_total) {
+    if (need_total < *cap) return 1;
+    size_t next = *cap ? *cap : 16384;
+    while (next <= need_total) next *= 2;
+    char* bigger = (char*)realloc(*out, next);
+    if (!bigger) return 0;
+    *out = bigger;
+    *cap = next;
     return 1;
 }
 
-static int walk_dirs_emit_includes(const char* root, char* out, size_t out_size, size_t* pos) {
+static int append_include_one_dir(char** out, size_t* out_size, size_t* pos, const char* path) {
+    size_t path_len = strlen(path);
+    // " -I<path>" needs path_len + 4 bytes plus the NUL.
+    size_t need = (*pos == 0 ? 0 : 1) + 2 + path_len + 1;
+    if (!include_flags_grow(out, out_size, *pos + need)) return 0;
+    char* buf = *out;
+    if (*pos != 0) buf[(*pos)++] = ' ';
+    buf[(*pos)++] = '-';
+    buf[(*pos)++] = 'I';
+    memcpy(buf + *pos, path, path_len);
+    *pos += path_len;
+    buf[*pos] = '\0';
+    return 1;
+}
+
+static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_size, size_t* pos) {
     if (!root || !*root) return 1;
     // Emit the root itself first.
     if (!append_include_one_dir(out, out_size, pos, root)) return 0;
@@ -1116,18 +1133,19 @@ found_root:
     // miss anything; new modules are picked up the next build.
     if (tc.dev_mode) {
         size_t pos = 0;
-        tc.include_flags[0] = '\0';
+        if (!tc.include_flags && include_flags_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
+        if (tc.include_flags) tc.include_flags[0] = '\0';
         char rt[1024], stdroot[1024];
         snprintf(rt, sizeof(rt), "%s/runtime", tc.root);
         snprintf(stdroot, sizeof(stdroot), "%s/std", tc.root);
-        if (!walk_dirs_emit_includes(rt, tc.include_flags, sizeof(tc.include_flags), &pos) ||
-            !walk_dirs_emit_includes(stdroot, tc.include_flags, sizeof(tc.include_flags), &pos)) {
+        if (!walk_dirs_emit_includes(rt, &tc.include_flags, &tc.include_flags_cap, &pos) ||
+            !walk_dirs_emit_includes(stdroot, &tc.include_flags, &tc.include_flags_cap, &pos)) {
             // Buffer overflow — fall back to a minimal -I that gets
             // through the build. Caller will see warnings on missing
             // headers; the layout has outgrown the include_flags
             // capacity and needs to be bumped.
             fprintf(stderr,
-                    "Warning: include-flag buffer overflow during dev-tree walk; some -I dirs dropped.\n");
+                    "Warning: out of memory building the include list for the dev tree; some -I dirs dropped.\n");
         }
 
         if (!tc.has_lib) {
@@ -1194,20 +1212,21 @@ found_root:
         // from-source fallback is supported (#329 is tracking the
         // longer-term question of dropping share/ source entirely).
         size_t pos = 0;
-        tc.include_flags[0] = '\0';
+        if (!tc.include_flags && include_flags_grow(&tc.include_flags, &tc.include_flags_cap, 0)) { /* first use */ }
+        if (tc.include_flags) tc.include_flags[0] = '\0';
         char inc_rt[1024], inc_std[1024], shr_rt[1024], shr_std[1024];
         snprintf(inc_rt,  sizeof(inc_rt),  "%s/include/aether/runtime", tc.root);
         snprintf(inc_std, sizeof(inc_std), "%s/include/aether/std",     tc.root);
         snprintf(shr_rt,  sizeof(shr_rt),  "%s/share/aether/runtime",   tc.root);
         snprintf(shr_std, sizeof(shr_std), "%s/share/aether/std",       tc.root);
         int ok =
-            walk_dirs_emit_includes(inc_rt,  tc.include_flags, sizeof(tc.include_flags), &pos) &&
-            walk_dirs_emit_includes(inc_std, tc.include_flags, sizeof(tc.include_flags), &pos) &&
-            walk_dirs_emit_includes(shr_rt,  tc.include_flags, sizeof(tc.include_flags), &pos) &&
-            walk_dirs_emit_includes(shr_std, tc.include_flags, sizeof(tc.include_flags), &pos);
+            walk_dirs_emit_includes(inc_rt,  &tc.include_flags, &tc.include_flags_cap, &pos) &&
+            walk_dirs_emit_includes(inc_std, &tc.include_flags, &tc.include_flags_cap, &pos) &&
+            walk_dirs_emit_includes(shr_rt,  &tc.include_flags, &tc.include_flags_cap, &pos) &&
+            walk_dirs_emit_includes(shr_std, &tc.include_flags, &tc.include_flags_cap, &pos);
         if (!ok) {
             fprintf(stderr,
-                    "Warning: include-flag buffer overflow during installed-tree walk; some -I dirs dropped.\n");
+                    "Warning: out of memory building the include list for the installed tree; some -I dirs dropped.\n");
         }
 
         // Source fallback: when libaether.a is not available, compile from share/aether/

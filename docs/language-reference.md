@@ -1137,7 +1137,24 @@ add(a: int, b: int) -> int
 
 **Lowering**:
 
-- `requires <expr>` lowers to `if (!(<expr>)) aether_panic("precondition violation: <expr> in <fn>");` emitted at function entry, after parameters are declared and before any user code runs. Parameters are in scope.
+
+#### Panic categories
+
+Every unrecoverable failure prints a stable category token, then a colon, then
+the human detail and the source location. The token is the contract: CI and
+downstream triage match on it, so it does not change with the prose after it.
+
+| category | raised by |
+|---|---|
+| `precondition_violation` | a `requires` clause that evaluated false |
+| `postcondition_violation` | an `ensures` clause that evaluated false |
+| `forced_unwrap_none` | `x!` on an optional holding `none` |
+
+A failure that forwards an existing error value (`expr!` on a fallible) prints
+that error's own message rather than a category, because the message came from
+the callee and is not one of these classes.
+
+- `requires <expr>` lowers to `if (!(<expr>)) aether_panic("precondition_violation: <expr> in <fn>");` emitted at function entry, after parameters are declared and before any user code runs. Parameters are in scope.
 - `ensures <expr>` lowers to a pre-return wrapper `{ <T> result = <return-expr>; if (!(<expr>)) aether_panic("postcondition violation: <expr> in <fn>"); return result; }` emitted before each `return` statement. The synthetic `result` local is the return value about to be returned and is scoped to the wrapper block, it shadows any outer `result` cleanly.
 
 Multiple clauses in any order, freely interleaved. Each is checked independently, so the panic message names the specific failed predicate. The diagnostic plays nicely with `panic` stack traces for actionable error reporting.

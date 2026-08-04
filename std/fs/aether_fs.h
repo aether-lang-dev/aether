@@ -148,8 +148,14 @@ int fs_stat_raw(const char* path, int* out_kind,
 //   }
 int fs_try_stat(const char* path);
 int     fs_get_stat_kind(void);
+
 int64_t fs_get_stat_size(void);
 int64_t fs_get_stat_mtime(void);
+// #1378: raw OS error code (errno / GetLastError-derived) behind the portable
+// KIND_* value most recently produced by an fs primitive on this thread. 0 when
+// the last operation succeeded. The portable kind stays the thing to branch on;
+// this is for the cases that need the exact number.
+int     fs_last_os_error(void);
 
 // statvfs (#1117): exact filesystem byte counts for the fs containing `path`.
 // Same split try/get shape as fs_try_stat. total/free/avail are bytes; avail

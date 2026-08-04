@@ -21,7 +21,7 @@ rc=$?
 if [ "$rc" -eq 0 ]; then
     echo "  [FAIL] where_clause: violation did not panic (exit 0)"; exit 1
 fi
-if ! grep -q "precondition violation: b != 0" "$TMPDIR/run.log"; then
+if ! grep -q "precondition_violation: b != 0" "$TMPDIR/run.log"; then
     echo "  [FAIL] where_clause: panic lacked the precondition message"
     sed 's/^/    /' "$TMPDIR/run.log" | head -10; exit 1
 fi

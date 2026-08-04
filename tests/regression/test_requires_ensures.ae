@@ -12,7 +12,7 @@
 //   }
 //
 // Lowering (codegen):
-//   `requires <expr>` → `if (!(<expr>)) aether_panic("precondition violation: <text> in <fn>");`
+//   `requires <expr>` → `if (!(<expr>)) aether_panic("precondition_violation: <text> in <fn>");`
 //                       at function entry, after parameters declared.
 //   `ensures <expr>`  → emitted before each `return <expr>`, wrapped in
 //                       a fresh C scope `{ <T> result = <expr>;

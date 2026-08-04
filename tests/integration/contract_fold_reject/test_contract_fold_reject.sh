@@ -55,7 +55,7 @@ if [ -x "$AE" ]; then
     if "$AE" run "$TMPDIR/rt.ae" >"$TMPDIR/rt.log" 2>&1; then
         echo "  [FAIL] contract_fold_reject: runtime violation did not panic"; exit 1
     fi
-    if ! grep -q "precondition violation: b != 0 in divide" "$TMPDIR/rt.log"; then
+    if ! grep -q "precondition_violation: b != 0 in divide" "$TMPDIR/rt.log"; then
         echo "  [FAIL] contract_fold_reject: runtime panic lost its message"
         sed 's/^/    /' "$TMPDIR/rt.log" | head -6; exit 1
     fi
