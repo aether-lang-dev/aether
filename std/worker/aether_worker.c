@@ -160,19 +160,21 @@ static WorkerJob* ready_pop(void) {
 
 /* ---- job execution ----------------------------------------------------- */
 
-/* Reclaim a job's per-job closure environments. The env is a plain malloc
- * block the compiler heap-allocated for the closure's captures; because we
- * received the closures through an extern boundary, codegen does NOT free them
- * (the env-drain is suppressed — closure_extern_retains_no_uaf), so ownership
- * is ours once the closures have fired. Freeing here keeps a long-lived app
- * (thousands of worker.run calls) from leaking an env per job. NOTE: if a
- * capture is a retained AetherString, its refcount is not released by this
- * plain free (the retain-on-capture ref is never released by design) — that
- * residual is the language's existing bounded per-closure behaviour, not new.
+/* Reclaim a job's per-job closure environments. The env is heap-allocated by
+ * the compiler for the closure's captures; because we received the closures
+ * through an extern boundary, codegen does NOT free them (the env-drain is
+ * suppressed, closure_extern_retains_no_uaf), so ownership is ours once the
+ * closures have fired.
+ *
+ * Goes through the env's own destructor (#1398), so the references its string
+ * captures own are released too. A plain free reclaimed the struct and leaked
+ * every captured string, which is what `worker.run` capturing a path did.
  * The poster env is host-owned (installed once) and is never touched here. */
+extern void aether_closure_env_free(void* env);
+
 static void free_job_envs(WorkerJob* job) {
-    if (job->work.env) free(job->work.env);
-    if (job->done.env) free(job->done.env);
+    if (job->work.env) aether_closure_env_free(job->work.env);
+    if (job->done.env) aether_closure_env_free(job->done.env);
 }
 
 /* Run the work closure, then route the completion. Called on a worker thread

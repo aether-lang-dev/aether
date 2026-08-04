@@ -182,6 +182,11 @@ const char* string_to_cstr(const void* str);
 const char* aether_string_data(const void* s);
 size_t      aether_string_length(const void* s);
 
+// Closure-capture ownership (#1398). capture_owned returns a pointer the
+// caller owns a reference to; release_captured gives it back.
+const char* aether_string_capture_owned(const char* s);
+void        aether_string_release_captured(const char* s);
+
 AetherString* string_from_int(int value);
 // 64-bit sibling of string_from_int. Uses `long long` so it covers
 // Aether's `long` type across platforms where `long` is 32-bit (MSVC).

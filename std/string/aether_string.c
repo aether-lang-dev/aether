@@ -760,6 +760,24 @@ size_t aether_string_length(const void* s) {
     return str_len(s);
 }
 
+/* #1398: a closure env must OWN each string it captures. string_retain is a
+ * no-op on a magic-less pointer, so a plain malloc'd `-> string` was captured
+ * borrowed and freed by the enclosing scope while a stored closure still held
+ * it. Retains an AetherString in place; promotes anything else to a refcounted
+ * copy. Balanced by aether_string_release_captured at env teardown. */
+const char* aether_string_capture_owned(const char* s) {
+    if (!s) return s;
+    if (is_aether_string(s)) {
+        string_retain(s);
+        return s;
+    }
+    return (const char*)string_new(s);
+}
+
+void aether_string_release_captured(const char* s) {
+    if (s) string_release(s);
+}
+
 AetherString* string_from_int(int value) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "%d", value);

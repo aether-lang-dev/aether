@@ -5273,8 +5273,12 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         if (is_first_assignment) {
                             for (int ci = 0; ci < gen->closure_count; ci++) {
                                 if (gen->closures[ci].id == cid && gen->closures[ci].capture_count > 0) {
-                                    // Create a synthetic defer: free(var.env)
-                                    ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, "free",
+                                    /* #1398: member-aware teardown so the env
+                                       releases what its captures own. */
+                                    char envfree[64];
+                                    snprintf(envfree, sizeof(envfree),
+                                             "_closure_env_%d_free", cid);
+                                    ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, envfree,
                                         stmt->line, stmt->column);
                                     char env_access[256];
                                     snprintf(env_access, sizeof(env_access), "%s.env", safe_c_name(stmt->value));
