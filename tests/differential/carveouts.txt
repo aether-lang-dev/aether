@@ -1,0 +1,12 @@
+# Differential-testing carveouts (#523).
+#
+# One `<case> <reason>` per line. A case listed here is REPORTED as opted out
+# with its reason on every run, never silently skipped: an accepted divergence
+# has to stay visible, or the suite quietly stops testing what it claims to.
+#
+# A carveout naming a case that no longer exists is an error, so this file
+# cannot rot into a list of ghosts.
+#
+# Nothing is carved out today. The entries this is designed for are cases whose
+# behaviour legitimately differs between lowering paths, which so far has not
+# happened.

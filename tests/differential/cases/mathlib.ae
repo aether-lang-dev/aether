@@ -1,0 +1,15 @@
+// Differential case (#523): built and run under BOTH lowering paths, with the
+// outputs compared. `run()` is the entry the --emit=lib driver calls by name;
+// `main()` is what the --emit=exe path runs. Keep the two identical, so any
+// difference in output is a difference in LOWERING, not in the program.
+//
+// Must stay capability-empty (no fs / net / os) and deterministic: no clocks,
+// no addresses, no iteration order that depends on allocation.
+
+import std.math
+import std.string
+run() {
+    println("abs=${math.abs_int(-5)} min=${math.min_int(3, 7)} max=${math.max_int(3, 7)}")
+    println("clamp=${math.clamp_int(15, 0, 10)}")
+}
+main() { run() }
