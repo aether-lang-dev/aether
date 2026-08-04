@@ -142,7 +142,7 @@ ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     out = bytes.new(n)
     _ = aether_bytes_set_length(out, n)
     _ = aether_aes_ctr_xor(c.native, aether_bytes_data(iv),
-                           aether_bytes_data(data), aether_bytes_data(out), n)
+        aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 ctr_increment(ctr: ptr) {
@@ -172,7 +172,7 @@ cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     out = bytes.new(n)
     _ = aether_bytes_set_length(out, n)
     _ = aether_aes_cbc_encrypt(c.native, aether_bytes_data(iv),
-                               aether_bytes_data(data), aether_bytes_data(out), n)
+        aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 
@@ -184,7 +184,7 @@ cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     out = bytes.new(n)
     _ = aether_bytes_set_length(out, n)
     _ = aether_aes_cbc_decrypt(c.native, aether_bytes_data(iv),
-                               aether_bytes_data(data), aether_bytes_data(out), n)
+        aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 
