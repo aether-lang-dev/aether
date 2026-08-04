@@ -506,6 +506,11 @@ jobs:
         # than no FreeBSD zip.
         file build/aetherc build/ae
         file build/ae | grep -q 'FreeBSD' || { echo "ae is not a FreeBSD binary"; exit 1; }
+        # #1402: the Unix and Windows legs get this through
+        # test-release-archive, which this cross leg does not run. Without it a
+        # cross-built archive could ship missing a symbol its own sources
+        # define, and fail at the user's link step rather than here.
+        sh scripts/check_archive_exports.sh build/libaether.a
 
     - name: Strip
       run: strip build/aetherc build/ae 2>/dev/null || true
