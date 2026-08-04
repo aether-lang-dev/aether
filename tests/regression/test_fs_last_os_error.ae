@@ -1,0 +1,35 @@
+// Regression (#1378 part A): std.fs reports portable KIND_* values, which are
+// deliberately coarse so they mean the same thing on every platform. A caller
+// that needs the exact OS number (to tell EAGAIN from EWOULDBLOCK, or to put
+// the number in a log) had no way to get it. fs.last_os_error() carries it
+// alongside the kind, recorded at the single errno-to-kind translation site so
+// the two can never drift apart.
+
+import std.fs
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    // A missing path: portable kind says NOT_FOUND, the raw code says which
+    // errno produced it. ENOENT is 2 on every platform Aether targets.
+    v, kind, msg = fs.realpath("/definitely/not/here/aeth1378")
+    if kind != fs.KIND_NOT_FOUND { fail("want KIND_NOT_FOUND got ${kind}") }
+    code = fs.last_os_error()
+    if code <= 0 { fail("expected a non-zero OS code behind the kind, got ${code}") }
+    println("ok   failure carries its OS code (kind=${kind} code=${code})")
+
+    // Success must clear it, so a caller cannot read a stale code from an
+    // earlier failure and attribute it to a call that worked.
+    v2, k2, m2 = fs.realpath("/tmp")
+    if k2 != fs.KIND_OK { fail("realpath(/tmp) want KIND_OK got ${k2}") }
+    if fs.last_os_error() != 0 { fail("success left a stale OS code: ${fs.last_os_error()}") }
+    println("ok   success clears the OS code")
+
+    println("=== All cases passed ===")
+}

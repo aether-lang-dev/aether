@@ -62,7 +62,8 @@ exports(
     KIND_OK, KIND_NOT_FOUND, KIND_PERMISSION_DENIED, KIND_EXISTS,
     KIND_CROSS_DEVICE, KIND_IO, KIND_INVALID, KIND_LOOP,
     KIND_NAME_TOO_LONG, KIND_NO_SPACE, KIND_IS_DIR, KIND_NOT_DIR,
-    KIND_UNAVAILABLE
+    KIND_UNAVAILABLE,
+    fs_last_os_error, last_os_error
 )
 
 // ---- Structured-error kinds (pilot — issue #392) ----
@@ -167,6 +168,16 @@ extern fs_rename_raw(from: string, to: string) -> int
 // Split-accessor stat: call fs_try_stat first, then read the
 // getters. kind encoding: see STAT_KIND_* below.
 // Pair is thread-local so back-to-back calls on one thread are safe.
+// #1378: the raw OS code behind the portable kind from the most recent fs
+// call on this thread. 0 after a success. Branch on the KIND_* value; reach
+// for this only when the exact number matters, such as telling EAGAIN from
+// EWOULDBLOCK or putting the number in a log.
+extern fs_last_os_error() -> int
+
+last_os_error() -> int {
+    return fs_last_os_error()
+}
+
 extern fs_try_stat(path: string) -> int
 extern fs_get_stat_kind() -> int
 

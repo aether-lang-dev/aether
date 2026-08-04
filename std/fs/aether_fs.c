@@ -1463,7 +1463,18 @@ typedef struct {
 // Single errno -> kind translation site, used by every pilot
 // primitive. Adding a new kind: extend the switch + the macros in
 // aether_fs.h + the const block in std/fs/module.ae together.
+/* #1378: the raw OS code behind the portable kind. A caller that needs to tell
+ * EAGAIN from EWOULDBLOCK, or wants the exact number for a log, cannot get it
+ * from the kind alone, which is deliberately coarse and portable. Recorded at
+ * the single translation site below so it can never drift from the kind it
+ * accompanies. Thread-local, like the stat accessors, so concurrent callers do
+ * not read each other's value. */
+static AETHER_FS_TLS int s_last_os_error = 0;
+
+int fs_last_os_error(void) { return s_last_os_error; }
+
 static int aether_fs_errno_to_kind(int err) {
+    s_last_os_error = err;
     switch (err) {
         case 0:            return AETHER_FS_KIND_OK;
         case ENOENT:       return AETHER_FS_KIND_NOT_FOUND;
@@ -1515,7 +1526,7 @@ static _tuple_int_int_string aether_fs_iks_err_partial(long long bytes, int kind
     return out;
 }
 static _tuple_int_int_string aether_fs_iks_ok(long long bytes) {
-    _tuple_int_int_string out = { aether_fs_saturate_int(bytes), AETHER_FS_KIND_OK, "" };
+    _tuple_int_int_string out = { aether_fs_saturate_int(bytes), aether_fs_errno_to_kind(0), "" };
     return out;
 }
 
@@ -1604,6 +1615,7 @@ static long long aether_fs_copy_readwrite(int in_fd, int out_fd, long long* out_
  *   Windows: CopyFileExW (kernel block copy; UTF-8 path conversion)
  */
 _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
+    s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!src || !dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
@@ -1829,6 +1841,7 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
  * propagated. Windows MoveFileExW with REPLACE_EXISTING +
  * COPY_ALLOWED handles the cross-fs case internally. */
 _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
+    s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!src || !dst) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
@@ -1882,11 +1895,11 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
         }
         return aether_fs_iks_err(kind, msg);
     }
-    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #else
     if (rename(src, dst) == 0) {
-        _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+        _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
         return out;
     }
     int saved = errno;
@@ -1912,7 +1925,7 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
         _tuple_int_int_string out = { 1, kind, "moved (copy) but unlink src failed" };
         return out;
     }
-    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #endif
 }
@@ -1946,7 +1959,7 @@ static _tuple_string_int_string aether_fs_sks_err(int kind, const char* msg) {
     return out;
 }
 static _tuple_string_int_string aether_fs_sks_ok(const char* resolved) {
-    _tuple_string_int_string out = { resolved, AETHER_FS_KIND_OK, "" };
+    _tuple_string_int_string out = { resolved, aether_fs_errno_to_kind(0), "" };
     return out;
 }
 
@@ -1959,6 +1972,7 @@ static _tuple_string_int_string aether_fs_sks_ok(const char* resolved) {
  * \\?\ prefix that GetFinalPathNameByHandleW prepends is stripped
  * before returning so callers get plain forward-slash paths. */
 _tuple_string_int_string fs_realpath_raw(const char* path) {
+    s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) {
         return aether_fs_sks_err(AETHER_FS_KIND_INVALID, "null path");
     }
@@ -2064,6 +2078,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
  * Python's `os.chmod`. Returns (1, KIND_OK, "") on success or
  * (0, KIND_*, msg) on failure. */
 _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
+    s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) {
         return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
     }
@@ -2107,14 +2122,14 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
                    : AETHER_FS_KIND_IO;
         return aether_fs_iks_err(kind, "SetFileAttributesW failed");
     }
-    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #else
     if (chmod(path, (mode_t)(mode & 07777)) != 0) {
         int kind = aether_fs_errno_to_kind(errno);
         return aether_fs_iks_err(kind, "chmod failed");
     }
-    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #endif
 }

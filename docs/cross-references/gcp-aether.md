@@ -179,7 +179,7 @@ add(a: int, b: int) -> int
   `ensures` to the return value (compiler emits an alias to the
   return slot).
 - **Lowering:** `requires` lowers to a runtime check at function entry
-  with `panic("precondition violation: <expr> in <fn>")` on false.
+  with `panic("precondition_violation: <expr> in <fn>")` on false.
   `ensures` lowers to the same, but at every `return` statement; the
   compiler walks the body and inserts the check before each return
   (and at function-end for void/falloff).

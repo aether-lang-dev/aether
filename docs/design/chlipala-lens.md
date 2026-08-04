@@ -106,7 +106,7 @@ The capability system proves *a program cannot touch the filesystem*; it does
 not prove *the program meets its spec*. Chlipala's premise is search where "a
 tool might give up but will never return an incorrect program", full
 functional correctness. Aether's `where`-contracts are **runtime** panics
-(`precondition violation: b != 0 in divide`), not static proofs. A violation is
+(`precondition_violation: b != 0 in divide`), not static proofs. A violation is
 caught at execution, which is exactly what a correct-by-construction search
 *cannot* rely on. To play in his world, those contracts would need to be
 *discharged statically* (SMT / refinement-type style). They currently are not.

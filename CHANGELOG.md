@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.fs` reports the raw OS code behind its portable error kind** (#1378).
+  `KIND_*` is deliberately coarse so it means the same thing on every platform,
+  which leaves no way to tell `EAGAIN` from `EWOULDBLOCK` or to put the exact
+  number in a log. `fs.last_os_error()` carries it, recorded at the single
+  errno-to-kind translation site so the code and the kind cannot drift apart. It
+  is 0 after a success, and a call reports only its own code, never a stale one
+  from an earlier failure.
+
+### Changed
+
+- **Panic categories are a stable, greppable vocabulary** (#1378).
+  Unrecoverable failures now lead with a fixed token: `precondition_violation:`,
+  `postcondition_violation:`, `forced_unwrap_none:`, followed by the human
+  detail and location. Previously each site invented its own wording, so CI and
+  downstream triage could not match on the failure class. The canonical list is
+  documented in the language reference. A failure that forwards an existing
+  error value still prints that error's own message, since it did not originate
+  in one of these classes.
+
+### Fixed
+
+- **The `-I` list no longer silently drops directories.** `ae` built it in a
+  fixed 16 KB buffer, which the tree walk outgrew once the install prefix was
+  long: 153 directories under a `/var/folders/.../T/tmp.XXXX/` path overflow it,
+  and the overflow dropped entries with only a warning, so a build could fail to
+  find headers that are present. The buffer grows now. The install smoke test
+  used to print that warning on every run and no longer does.
+
 ## [0.485.0]
 
 ### Added

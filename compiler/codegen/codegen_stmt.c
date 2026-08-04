@@ -3531,7 +3531,10 @@ static void emit_contract_check(CodeGenerator* gen,
     print_indent(gen);
     fprintf(gen->output, "if (!(");
     generate_expression(gen, predicate);
-    fprintf(gen->output, ")) aether_panic(\"%s violation: ", role);
+    /* #1378: a stable, greppable category token leads the message, so CI and
+       downstream triage can match on the category instead of prose that each
+       site words differently. The human detail follows the colon. */
+    fprintf(gen->output, ")) aether_panic(\"%s_violation: ", role);
     /* Re-render the predicate text into the C string literal. We
      * escape backslash and double-quote; everything else passes
      * through (Aether-source-level printable ASCII is safe in C

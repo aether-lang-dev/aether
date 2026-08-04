@@ -1,0 +1,18 @@
+// A `requires` clause that fails must print the stable category token.
+//
+// The divisor comes from a runtime value, not a literal: with constant
+// arguments the compiler rejects the call at compile time (a different
+// diagnostic), and this test is about the runtime panic.
+import std.os
+import std.io
+
+divide(a: int, b: int) -> int
+requires b != 0
+{
+    return a / b
+}
+
+main() {
+    zero = os.aether_args_count() - os.aether_args_count()
+    println("${divide(10, zero)}")
+}

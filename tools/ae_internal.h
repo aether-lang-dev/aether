@@ -16,11 +16,13 @@ typedef struct {
     char root[1024];           // Aether root directory
     char compiler[2048];       // Path to aetherc (root + /bin/aetherc = up to 1036 bytes)
     char lib[1024];            // Path to libaether.a (if exists)
-    char include_flags[16384]; // -I flags for GCC. Sized to comfortably
-                               // hold the runtime/ + std/ + contrib/
-                               // sub-tree walks (issue #334 added contrib/
-                               // and the previous 4096 ceiling started
-                               // dropping dirs at the tail end of the walk).
+    char*  include_flags;      // -I flags for GCC. Heap-grown: a fixed ceiling
+                               // silently dropped entries once the install
+                               // prefix was long enough (153 dirs under a
+                               // /var/folders/.../T/tmp.XXXX/ path overflow
+                               // 16 KB), and a build could then fail to find
+                               // headers that are present.
+    size_t include_flags_cap;  // bytes allocated for include_flags
     char runtime_srcs[8192];   // Runtime .c files (source fallback)
     bool has_lib;              // Whether precompiled lib exists
     bool dev_mode;             // Running from source tree

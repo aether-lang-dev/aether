@@ -2389,7 +2389,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 int id = fu_counter++;
                 fprintf(gen->output, "({ %s _fu%d = ", get_c_type(ot), id);
                 generate_expression(gen, operand);
-                fprintf(gen->output, "; if (!_fu%d.has) aether_panic(\"forced unwrap of `none`\"); _fu%d.val; })",
+                fprintf(gen->output, "; if (!_fu%d.has) aether_panic(\"forced_unwrap_none: forced unwrap of `none`\"); _fu%d.val; })",
                         id, id);
                 break;
             }
