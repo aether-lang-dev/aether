@@ -42,6 +42,18 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`install.sh` no longer rejects the GNU make it just found.** The probe was
+  `make --version | head -1 | grep -qi 'gnu make'`, and the script runs under
+  `set -o pipefail`: `head` exits after the first line, the producer then dies
+  of SIGPIPE, and the pipeline reports that failure even though the read
+  succeeded. Whether it happens depends on the producer finishing before `head`
+  closes the pipe, so it failed intermittently and only under load, printing the
+  self-contradicting `Error: 'gmake' is not GNU make` immediately followed by
+  `Found: GNU Make 4.3`. The banner is now captured once with no pipe to break,
+  and the test and the error message read that same value, so they cannot
+  disagree. Applied to the three other `| head -1` probes in the script, which
+  had the same latent race, including the one guarding `set -e`.
+
 - **A trailing extern attribute no longer discards an earlier one.** `extern
   printf(fmt: string, ...) -> string @heap` overwrote the annotation slot that
   already held the variadic marker, so the extern quietly stopped being
