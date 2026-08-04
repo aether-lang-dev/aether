@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`@c_struct ... @c_verify` checks overlay offsets against the C header**
+  (#1242). A `@c_struct` overlay's field offsets are written by hand, because
+  Aether never reads the C header. Nothing validated them, so adding a field
+  upstream shifted the layout while the overlay kept reading the old offsets:
+  the types still matched, the program still ran, and it silently read the wrong
+  field. `@c_verify` emits a `_Static_assert` per field comparing the declared
+  offset against `offsetof` and the declared width against `sizeof` of the real
+  member, so drift is a build error that names the field. Opt-in, since
+  `offsetof` needs the header in scope, and free at runtime.
+
+- **Aether functions can be stored in C callback tables** (#1240). Declare the
+  fields of a C-owned struct with their signatures (`hashFunction: fn(ptr) ->
+  int`) and assign a top-level function to them. The slot is typed, so a
+  function with the wrong arity or parameter types is a compile error rather
+  than a corrupt call later. This is the `dictType` / `rio` / vtable shape that
+  previously had to stay in C.
+
+- **`va_list` parameters forward a variadic tail to C** (#1244). A function with
+  a trailing `...` can open its tail with `va_start()` and pass it to the `v*`
+  half of a printf-style pair (`vprintf`, `vsnprintf`), which is what logging
+  and reply-formatting boundaries need.
+
+### Fixed
+
+- **Assigning an Aether function into a C struct's function-pointer field no
+  longer crashes** (#1240). The field was given an `_AeClosure` **box**, which
+  is a heap pointer, so the first callback from C jumped into a malloc'd struct
+  and took SIGBUS. It compiled without a warning, and the `fn(...)`-typed
+  spelling of the same field was rejected at typecheck, so there was no correct
+  way to write it. C-owned struct fields now receive the function's real
+  address, cast to the member type the header declared. Boxing is unchanged for
+  Aether-owned structs, where the field holds a closure and must keep its
+  captures.
+
+- **A forwarded `va_list` is dereferenced at the call boundary** (#1244).
+  `va_start()` yields a cookie pointing at the function's `va_list`, and
+  `va_arg` / `va_end` unwrapped it but the call site did not, so a `v*` callee
+  received a pointer where the argument list belonged. No warning, no crash,
+  just garbage in the formatted output. Spelling the parameter `va_list` now
+  emits the unwrap.
+
+- **`docs/c-interop.md` no longer claims Aether cannot define varargs.** It
+  stated that "an ordinary Aether wrapper cannot forward a `...` tail (Aether
+  has no varargs-defining syntax)", which stopped being true once the
+  `va_start` / `va_arg` / `va_end` intrinsics landed.
+
 ## [0.487.0]
 
 ### Added

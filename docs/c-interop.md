@@ -287,7 +287,7 @@ An `@extern` declaration is part of its module's public surface: unlike a bare `
 append_format(b: ptr, fmt: string, ...) -> int
 ```
 
-Call sites pass any number of trailing arguments literally. This is the only way to give a variadic C function a clean module-qualified name, an ordinary Aether wrapper cannot forward a `...` tail (Aether has no varargs-defining syntax, only varargs-declaring).
+Call sites pass any number of trailing arguments literally, and `@extern` is the way to give a variadic C function a clean module-qualified name with no wrapper at all. An Aether function can also *define* a variadic tail and forward it, see [Forwarding a variadic tail to C](#forwarding-a-variadic-tail-to-c-va_list).
 
 ## Exporting an Aether Function as a C Callback, `@c_callback`
 
@@ -337,6 +337,29 @@ on_sigint(sig: int) {
 
 For plain Aether-to-Aether function-pointer use within a single program, no annotation is needed, top-level functions are already addressable as values. The annotation is specifically for the cross-language path.
 
+### Callback tables: Aether functions in C function-pointer fields
+
+`@c_callback` gives an Aether function a C symbol; the other half of the pattern is storing it in a C struct that C then calls through. Callback tables are everywhere in C: Redis's `dictType`, `rio` method tables and connection vtables, `qsort` comparators, module hooks.
+
+Declare the fields with their signatures rather than as bare `ptr`:
+
+```aether
+extern struct dictType @c_import {
+    hashFunction: fn(ptr) -> int
+    keyCompare: fn(ptr, ptr) -> int
+}
+
+@c_callback
+my_hash(key: ptr) -> int { return 7 }
+
+t = malloc(64) as *dictType
+t.hashFunction = my_hash        // checked against fn(ptr) -> int
+```
+
+- **The slot is typed.** A function whose arity or parameter types do not match the field is a compile error, so the table cannot be wired up wrong. A `ptr`-typed field would accept anything and fail as a corrupt call later.
+- **The field holds the function's real address**, cast to whatever type the header declared for that member, so C can call through it directly. Only a top-level function qualifies: a closure carries an environment pointer, and a C function pointer has nowhere to put it.
+- This is specific to **C-owned** structs (`extern struct`, with or without `@c_import`). A callback field on an Aether-owned struct holds a closure and keeps its captures, which is the right behaviour there and unchanged.
+
 ### Companion: `@extern("c_symbol")`
 
 `@extern` and `@c_callback` close the FFI loop in both directions. `@extern` binds an Aether-namespace name to a C symbol the linker provides; `@c_callback` emits an Aether function under a C symbol the linker can hand to any consumer. Both use the same `@`-prefixed annotation grammar.
@@ -379,6 +402,35 @@ extern api_inline_twice(v: int) -> int @c_import
 With `@c_import` the force-included definition is the only one the translation unit sees, the call inlines directly, and no hand-written C bridge function is needed. Without it, Aether's `int api_inline_twice(int);` collides with the header and the build fails. This is the shape to reach for when porting a C codebase whose headers are full of small inline helpers.
 
 `@c_import` stacks with the other extern attributes, `-> string @heap @c_import` and variadic `extern log_line(fmt: string, ...) @c_import` are both legal. It is the same "the header is the sole source of truth" contract as `extern struct ... @c_import` and `extern const NAME: type @c_import`.
+
+## Forwarding a Variadic Tail to C, `va_list`
+
+Every printf-style C function comes in a pair: the variadic one and the `v*` one that takes an already-collected argument list (`printf`/`vprintf`, `snprintf`/`vsnprintf`, and in Redis `serverLog`, `sdscatprintf`, `sentinelEvent`). An Aether function can define a variadic tail and forward it to the `v*` half:
+
+```aether
+extern vsnprintf(buf: ptr, n: int, fmt: ptr, ap: va_list) -> int
+
+format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
+    let ap = va_start()
+    let written = vsnprintf(buf, n, fmt, ap)
+    va_end(ap)
+    return written
+}
+```
+
+Three intrinsics drive it, mirroring `<stdarg.h>`:
+
+| Form | Meaning |
+|---|---|
+| `va_start()` | Opens the calling function's variadic tail and yields an opaque cookie. Valid only inside a function declared with a trailing `...`. |
+| `va_arg(ap, T)` | Reads the next argument as `T`. The declared type is trusted, exactly as C trusts it, there is no runtime tag to check it against. |
+| `va_end(ap)` | Closes the tail. |
+
+**Spell the receiving parameter `va_list`, not `ptr`.** `va_start()` yields a cookie that *points at* the function's `va_list`, so it can be held in an ordinary `ptr` local; the callee needs the `va_list` itself. Declaring the parameter `va_list` is what tells the call site to pass it correctly. Declaring it `ptr` compiles without a warning and then formats garbage, because the callee reads the cookie as though it were the argument list.
+
+`va_list` typechecks as an opaque `ptr`; the difference is only the C spelling that codegen emits, the same mechanism as `size_t` and `cstring` under [Typed and qualified C pointers](#typed-and-qualified-c-pointers).
+
+For **checking** format strings rather than forwarding them, nothing extra is needed: a call to a printf-family extern with a literal format keeps that literal in the generated C, so the C compiler's `-Wformat` sees it and the warning is attributed back to the `.ae` line.
 
 ## Linking External Libraries
 
@@ -846,6 +898,48 @@ s.max_deleted.ms = s.last_id.ms   // nested: offsets add (40+0, 24+0)
 Choose `@c_struct` when the C side owns the memory and you want by-name,
 width-safe access; choose `extern struct` (below) only when a C header genuinely
 owns the struct type and you're linking against it.
+
+### Checking overlay offsets against the header, `@c_verify`
+
+The offsets above are written by hand, and nothing so far has checked them. That
+is the overlay's one remaining sharp edge: add a field to the C struct upstream
+and every offset after it shifts, while the overlay keeps reading the old ones.
+The types still line up, the program still runs, and it quietly reads the wrong
+field. The same goes for the width, declaring `uint32` for a field the header
+widened to `uint64` reads half of it.
+
+When the owning header is in scope, `@c_verify` hands both checks to the C
+compiler:
+
+```aether
+@c_struct shape @c_verify {
+    rax: ptr @0
+    length: uint64 @8
+    slen: uint32 @16
+}
+```
+
+```toml
+[build]
+cflags = "-include shape.h -I."
+```
+
+Codegen emits a `_Static_assert` per field, comparing the declared offset against
+`offsetof` and the declared width against `sizeof` of the real member. A
+mismatch is a build error naming the field:
+
+```
+@c_struct shape: field 'length' is declared at offset 16, the C header puts it elsewhere
+```
+
+- **Opt-in, because it needs the C type.** `offsetof` requires the struct to be
+  complete at that point, so `@c_verify` only works when the header is
+  force-included. Without it the overlay behaves exactly as before, the author
+  asserts the offsets.
+- **Free at runtime.** The assertions are checked and discarded by the C
+  compiler; the emitted accessors are unchanged.
+- The C field names have to match the Aether ones, since that is what
+  `offsetof` is given.
 
 ### `extern struct` unions, `union { ... }` and nested `struct { ... }`
 

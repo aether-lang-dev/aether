@@ -2435,6 +2435,26 @@ extern api_inline_twice(v: int) -> int   @c_import   // static inline in the hea
 - This is the only correct shape for a **`static inline`** header helper: it has no linkable symbol, so a non-static prototype referring to it is meaningless. With `@c_import` the call inlines directly and needs no hand-written C shim.
 - Stacks with the other extern attributes: `-> string @heap @c_import` and variadic `extern printf(fmt: string, ...) -> int @c_import` are both legal.
 
+### `va_list` forward a variadic tail to C
+
+A function declared with a trailing `...` can open its variadic tail and hand it to the `v*` half of a printf-style C pair:
+
+```aether
+extern vsnprintf(buf: ptr, n: int, fmt: ptr, ap: va_list) -> int
+
+format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
+    let ap = va_start()
+    let written = vsnprintf(buf, n, fmt, ap)
+    va_end(ap)
+    return written
+}
+```
+
+- `va_start()` opens the tail (valid only inside a `...` function), `va_arg(ap, T)` reads the next argument as `T`, `va_end(ap)` closes it. The type given to `va_arg` is trusted, exactly as in C.
+- **The receiving parameter must be spelled `va_list`, not `ptr`.** `va_start()` yields a cookie that points at the `va_list` so it can live in an ordinary `ptr` local, while the callee needs the list itself. Declaring the parameter `ptr` compiles clean and then formats garbage. `va_list` typechecks as an opaque `ptr`; only the emitted C spelling differs.
+
+See [`docs/c-interop.md`](c-interop.md#forwarding-a-variadic-tail-to-c-va_list) for the full treatment, including `-Wformat` checking of literal format strings.
+
 ### `@c_callback` export an Aether function as a C callback
 
 The inverse of `@extern`. Marks an Aether function as having a stable, externally-visible C symbol so it can be passed across the linkage boundary as a function pointer to C externs that take callbacks (HTTP route handlers, signal handlers, `qsort` comparators, libcurl write callbacks, sqlite hooks):

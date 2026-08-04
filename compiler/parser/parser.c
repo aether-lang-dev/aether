@@ -699,6 +699,17 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * header does. */
                     type = create_type(TYPE_STRING);
                     type->c_alias = strdup("const char*");
+                } else if (strcmp(token->value, "va_list") == 0) {
+                    /* #1244: `va_list`, the C type of a forwarded variadic
+                     * tail, for the `v*` half of every printf-style pair
+                     * (vprintf, vsnprintf, the shape Redis's serverLog and
+                     * sdscatprintf need). Typechecks as the opaque `ptr` that
+                     * va_start() yields; the C spelling is what matters,
+                     * because the call site has to hand the callee the va_list
+                     * ITSELF, not the cookie pointing at it. Declaring the
+                     * param `ptr` instead compiles and then prints garbage. */
+                    type = create_type(TYPE_PTR);
+                    type->c_alias = strdup("va_list");
                 } else if (strcmp(token->value, "longdouble") == 0) {
                     /* #749: `long double` — the widest C floating type.
                      * An identifier-spelled primitive (no keyword token);
@@ -5931,9 +5942,31 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser);  // consume 'c_struct'
                     Token* name_tok = expect_token(parser, TOKEN_IDENTIFIER);
                     if (!name_tok) return NULL;
-                    if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
                     ASTNode* cdef = create_ast_node(AST_C_STRUCT_DEF,
                         name_tok->value, name_tok->line, name_tok->column);
+                    /* Optional `@c_verify` (#1242): a C type of the same name
+                     * is in scope, so codegen emits a _Static_assert per field
+                     * checking the declared offset and width against the real
+                     * header layout. Without it the offsets are asserted by the
+                     * author and nothing catches upstream layout drift. */
+                    if (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+                        Token* vtag = peek_ahead(parser, 1);
+                        if (vtag && vtag->type == TOKEN_IDENTIFIER && vtag->value &&
+                            strcmp(vtag->value, "c_verify") == 0) {
+                            advance_token(parser);  // consume '@'
+                            advance_token(parser);  // consume 'c_verify'
+                            cdef->annotation = strdup("c_verify");
+                        } else {
+                            parser_error(parser,
+                                "unknown @c_struct attribute (expected @c_verify)");
+                            free_ast_node(cdef);
+                            return NULL;
+                        }
+                    }
+                    if (!expect_token(parser, TOKEN_LEFT_BRACE)) {
+                        free_ast_node(cdef);
+                        return NULL;
+                    }
                     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
                         if (is_at_end(parser)) {
                             parser_error(parser, "unterminated @c_struct body (missing `}`)");

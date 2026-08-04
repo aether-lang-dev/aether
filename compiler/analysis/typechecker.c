@@ -1196,6 +1196,48 @@ int is_type_compatible(Type* from, Type* to) {
     return 0;
 }
 
+/* #1240: does `rhs` name a top-level function whose signature matches the
+ * function-pointer type `target`?
+ *
+ * The whole point of a typed callback field is that the slot rejects the wrong
+ * function, so arity and every parameter are compared, not just "it is some
+ * function". An UNKNOWN on either side is a match, the same latitude the UFCS
+ * receiver check allows, since inference may still refine it. Only bare
+ * top-level functions qualify: a closure carries an environment pointer that a
+ * C function pointer has nowhere to put. */
+static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* target) {
+    if (!table || !rhs || !target || target->kind != TYPE_FUNCTION) return 0;
+    if (rhs->type != AST_IDENTIFIER || !rhs->value) return 0;
+
+    Symbol* fs = lookup_symbol(table, rhs->value);
+    if (!fs || !fs->is_function || !fs->node) return 0;
+    if (fs->node->type != AST_FUNCTION_DEFINITION &&
+        fs->node->type != AST_BUILDER_FUNCTION) return 0;
+
+    /* Return type: the function symbol's own type IS its return type. */
+    Type* want_ret = target->return_type;
+    if (want_ret && fs->type &&
+        want_ret->kind != TYPE_UNKNOWN && fs->type->kind != TYPE_UNKNOWN &&
+        !is_type_compatible(fs->type, want_ret)) return 0;
+
+    int declared = 0;
+    for (int i = 0; i < fs->node->child_count; i++) {
+        ASTNode* p = fs->node->children[i];
+        if (!p) continue;
+        if (p->type != AST_VARIABLE_DECLARATION &&
+            p->type != AST_PATTERN_VARIABLE &&
+            p->type != AST_PATTERN_LITERAL) continue;
+        if (declared < target->param_count) {
+            Type* want = target->param_types ? target->param_types[declared] : NULL;
+            if (want && p->node_type &&
+                want->kind != TYPE_UNKNOWN && p->node_type->kind != TYPE_UNKNOWN &&
+                !is_type_compatible(p->node_type, want)) return 0;
+        }
+        declared++;
+    }
+    return declared == target->param_count;
+}
+
 int is_assignable(Type* from, Type* to) {
     return is_type_compatible(from, to);
 }
@@ -7051,10 +7093,27 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
 
     if (operator == TOKEN_ASSIGN) {
         if (!is_assignable(right_type, left_type)) {
-            free_type(left_type);
-            free_type(right_type);
-            type_error("Type mismatch in assignment", expr->line, expr->column);
-            return 0;
+            /* #1240: `table.callback = my_fn` where the field is declared
+             * `fn(T...) -> R`. A bare function name infers its RETURN type
+             * (that is what a function symbol carries), so the plain
+             * compatibility test compares `int` against `fn(ptr) -> int` and
+             * rejects the one value a C function-pointer field can actually
+             * hold. Accept it only when the signature matches, so the vtable
+             * slot stays typed rather than merely pointer-shaped, and stamp the
+             * RHS with the field's type so codegen emits the raw symbol instead
+             * of boxing it into an _AeClosure. */
+            if (left_type && left_type->kind == TYPE_FUNCTION &&
+                fn_name_matches_signature(table, right, left_type)) {
+                if (right->node_type) free_type(right->node_type);
+                right->node_type = clone_type(left_type);
+                free_type(right_type);
+                right_type = clone_type(left_type);
+            } else {
+                free_type(left_type);
+                free_type(right_type);
+                type_error("Type mismatch in assignment", expr->line, expr->column);
+                return 0;
+            }
         }
         /* `b = <int literal>` where b: byte — same range check as the
          * declaration / AST_ASSIGNMENT paths. The plain `=` operator

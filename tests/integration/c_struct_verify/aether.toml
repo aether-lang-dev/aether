@@ -1,0 +1,8 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+extra_sources = ["shape.c"]
+
+[build]
+cflags = "-include shape.h -I."

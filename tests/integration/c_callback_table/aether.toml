@@ -1,0 +1,8 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+extra_sources = ["vt.c"]
+
+[build]
+cflags = "-include vt.h -I."
