@@ -1473,6 +1473,14 @@ static AETHER_FS_TLS int s_last_os_error = 0;
 
 int fs_last_os_error(void) { return s_last_os_error; }
 
+#ifdef _WIN32
+/* The Windows paths derive the kind from GetLastError instead of errno, so they
+ * never reach aether_fs_errno_to_kind. Without this the raw code would be 0 on
+ * Windows while the header promises it on both, which is what the Windows CI
+ * caught. */
+static void aether_fs_note_os_error(int code) { s_last_os_error = code; }
+#endif
+
 static int aether_fs_errno_to_kind(int err) {
     s_last_os_error = err;
     switch (err) {
@@ -1680,6 +1688,7 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
     /* bFailIfExists=FALSE → match POSIX cp: overwrite. */
     BOOL ok = CopyFileExW(wsrc, wdst, NULL, NULL, NULL, 0);
     DWORD win_err = GetLastError();
+    aether_fs_note_os_error((int)win_err);
     aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
     if (!ok) {
         int kind = AETHER_FS_KIND_IO;
@@ -1880,6 +1889,7 @@ _tuple_int_int_string fs_move_raw(const char* src, const char* dst) {
     BOOL ok = MoveFileExW(wsrc, wdst,
                           MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
     DWORD win_err = GetLastError();
+    aether_fs_note_os_error((int)win_err);
     aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
     if (!ok) {
         int kind = AETHER_FS_KIND_IO;
@@ -2003,6 +2013,7 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
     aether_caps_free(wpath, wpath_bytes);
     if (h == INVALID_HANDLE_VALUE) {
         DWORD win_err = GetLastError();
+        aether_fs_note_os_error((int)win_err);
         int kind = (win_err == ERROR_FILE_NOT_FOUND ||
                     win_err == ERROR_PATH_NOT_FOUND)
                    ? AETHER_FS_KIND_NOT_FOUND
@@ -2102,6 +2113,7 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     if (attrs == INVALID_FILE_ATTRIBUTES) {
         aether_caps_free(wpath, wpath_bytes);
         DWORD win_err = GetLastError();
+        aether_fs_note_os_error((int)win_err);
         int kind = (win_err == ERROR_FILE_NOT_FOUND ||
                     win_err == ERROR_PATH_NOT_FOUND)
                    ? AETHER_FS_KIND_NOT_FOUND
@@ -2117,6 +2129,7 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     BOOL ok = SetFileAttributesW(wpath, attrs);
     aether_caps_free(wpath, wpath_bytes);
     if (!ok) {
+        aether_fs_note_os_error((int)GetLastError());
         int kind = (GetLastError() == ERROR_ACCESS_DENIED)
                    ? AETHER_FS_KIND_PERMISSION_DENIED
                    : AETHER_FS_KIND_IO;
