@@ -30,15 +30,20 @@ exports(
     aether_bytes_copy_from_string, aether_bytes_copy_from_bytes,
     aether_bytes_copy_within,
     aether_bytes_finish, aether_bytes_to_string, aether_bytes_free,
+    aether_bytes_data, aether_bytes_capacity, aether_bytes_set_length,
     new, set, get, length,
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
-    copy_from_string, copy_from_bytes, copy_within, finish, to_string, free
+    copy_from_string, copy_from_bytes, copy_within, finish, to_string, free,
+    data, capacity, set_length
 )
 
 // ---- Raw externs ----
 extern aether_bytes_new(initial_capacity: int) -> ptr
 extern aether_bytes_length(b: ptr) -> int
+extern aether_bytes_capacity(b: ptr) -> int
+extern aether_bytes_set_length(b: ptr, length: int) -> int
+extern aether_bytes_data(b: ptr) -> ptr
 extern aether_bytes_set(b: ptr, index: int, value: int) -> int
 extern aether_bytes_get(b: ptr, index: int) -> int
 extern aether_bytes_set_le16(b: ptr, index: int, value: int) -> int
@@ -79,6 +84,19 @@ extern aether_bytes_free(b: ptr)
 // Allocate a new mutable byte buffer with at least `initial_capacity`
 // bytes reserved. Returns null on allocation failure or negative
 // capacity. Initial logical length is 0.
+
+// Borrowed pointer to the buffer's own memory, for handing the region to a
+// foreign runtime without copying it byte by byte. Valid until the next call
+// that can grow the buffer, which may move the allocation and invalidate it.
+data(b: ptr) -> ptr { return aether_bytes_data(b) }
+
+// Bytes reserved, which is at least length and may be more.
+capacity(b: ptr) -> int { return aether_bytes_capacity(b) }
+
+// Publish how many bytes a direct write into data()'s region made live.
+// Clamped to the capacity; returns the length actually set.
+set_length(b: ptr, length: int) -> int { return aether_bytes_set_length(b, length) }
+
 new(initial_capacity: int) -> ptr {
     return aether_bytes_new(initial_capacity)
 }

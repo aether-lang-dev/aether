@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.bytes` exposes `data`, `capacity` and `set_length`** (#1399). All
+  three existed in C but were never declared or exported, so anything handing a
+  buffer to a foreign runtime had to copy it byte by byte through `get()`, or
+  redeclare the extern itself against an internal name with no compatibility
+  promise. For a 1 MB buffer crossing into JavaScript that is one `HEAPU8.set`
+  against a million calls. `std.cryptography.aes` had made exactly that private
+  redeclaration while being wired to its native core, and now uses the public
+  surface.
+
+### Fixed
+
+- **The release archive-export gate now covers the FreeBSD cross leg** (#1402).
+  The Unix and Windows release legs run it through `test-release-archive`; the
+  cross leg built and packaged without it, so a cross-built archive could ship
+  missing a symbol its own sources define and fail at the user's link step.
+
 ## [0.484.0]
 
 ### Changed

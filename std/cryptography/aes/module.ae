@@ -57,8 +57,6 @@ extern malloc(size: int) -> ptr
 // stays as the portable fallback and the reference the KATs compare against;
 // it reaches every byte through bytes.get/bytes.set, about 15 million calls
 // per megabyte for AES-256.
-extern aether_bytes_data(b: ptr) -> ptr
-extern aether_bytes_set_length(b: ptr, length: int) -> int
 extern aether_aes_available() -> int
 extern aether_aes_new(key: ptr, keylen: int, encrypt: int) -> ptr
 extern aether_aes_free(ctx: ptr)
@@ -83,14 +81,14 @@ struct AesCtx {
 
 new_encryptor(key: ptr, keylen: int) -> ptr {
     c = malloc(16) as *AesCtx
-    c.native = aether_aes_new(aether_bytes_data(key), keylen, 1)
+    c.native = aether_aes_new(bytes.data(key), keylen, 1)
     c.encrypt = 1
     return c
 }
 
 new_decryptor(key: ptr, keylen: int) -> ptr {
     c = malloc(16) as *AesCtx
-    c.native = aether_aes_new(aether_bytes_data(key), keylen, 0)
+    c.native = aether_aes_new(bytes.data(key), keylen, 0)
     c.encrypt = 0
     return c
 }
@@ -108,8 +106,8 @@ process_block(ctx: ptr, in16: ptr) -> ptr {
     out = bytes.new(16)
     // bytes.new reserves capacity; the core writes through the data pointer,
     // so the logical length has to be set for readers to see the block.
-    _ = aether_bytes_set_length(out, 16)
-    _ = aether_aes_block(c.native, aether_bytes_data(in16), aether_bytes_data(out))
+    _ = bytes.set_length(out, 16)
+    _ = aether_aes_block(c.native, bytes.data(in16), bytes.data(out))
     return out
 }
 
@@ -140,9 +138,9 @@ ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     n = bytes.length(data)
     c = ctx as *AesCtx
     out = bytes.new(n)
-    _ = aether_bytes_set_length(out, n)
-    _ = aether_aes_ctr_xor(c.native, aether_bytes_data(iv),
-        aether_bytes_data(data), aether_bytes_data(out), n)
+    _ = bytes.set_length(out, n)
+    _ = aether_aes_ctr_xor(c.native, bytes.data(iv),
+        bytes.data(data), bytes.data(out), n)
     return out
 }
 ctr_increment(ctr: ptr) {
@@ -170,9 +168,9 @@ cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     if n % 16 != 0 { return bytes.new(0) }
     c = ctx as *AesCtx
     out = bytes.new(n)
-    _ = aether_bytes_set_length(out, n)
-    _ = aether_aes_cbc_encrypt(c.native, aether_bytes_data(iv),
-        aether_bytes_data(data), aether_bytes_data(out), n)
+    _ = bytes.set_length(out, n)
+    _ = aether_aes_cbc_encrypt(c.native, bytes.data(iv),
+        bytes.data(data), bytes.data(out), n)
     return out
 }
 
@@ -182,9 +180,9 @@ cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     if n % 16 != 0 { return bytes.new(0) }
     c = ctx as *AesCtx
     out = bytes.new(n)
-    _ = aether_bytes_set_length(out, n)
-    _ = aether_aes_cbc_decrypt(c.native, aether_bytes_data(iv),
-        aether_bytes_data(data), aether_bytes_data(out), n)
+    _ = bytes.set_length(out, n)
+    _ = aether_aes_cbc_decrypt(c.native, bytes.data(iv),
+        bytes.data(data), bytes.data(out), n)
     return out
 }
 

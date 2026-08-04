@@ -1,0 +1,48 @@
+// Regression (#1399): std.bytes defines data / capacity / set_length in C but
+// never declared or exported them, so anything handing a buffer to a foreign
+// runtime had to copy it byte by byte through get(), or redeclare the extern
+// itself against an internal name with no compatibility promise. The AES
+// module did exactly that while it was being wired to its native core.
+
+import std.bytes
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    b = bytes.new(64)
+    if bytes.capacity(b) < 64 { fail("capacity: want >= 64 got ${bytes.capacity(b)}") }
+    if bytes.length(b) != 0 { fail("a fresh buffer should have length 0") }
+    println("PASS 1: capacity is reported, length starts at 0")
+
+    // A borrowed pointer into the buffer's own memory.
+    p = bytes.data(b)
+    if p == null { fail("data() returned null for a reserved buffer") }
+    println("PASS 2: data() yields a borrowed pointer")
+
+    // set_length publishes what a direct write made live, and is clamped to
+    // the capacity rather than trusting the caller.
+    n = bytes.set_length(b, 10)
+    if n != 10 { fail("set_length(10) returned ${n}") }
+    if bytes.length(b) != 10 { fail("length after set_length: ${bytes.length(b)}") }
+    over = bytes.set_length(b, 1000000)
+    if over > bytes.capacity(b) { fail("set_length exceeded capacity: ${over}") }
+    println("PASS 3: set_length publishes length and clamps to capacity")
+
+    // The three agree with the byte-at-a-time surface they exist to avoid.
+    c = bytes.new(4)
+    _ = bytes.set(c, 0, 65)
+    _ = bytes.set(c, 1, 66)
+    if bytes.length(c) != 2 { fail("set() should grow length, got ${bytes.length(c)}") }
+    if bytes.data(c) == null { fail("data() null after writes") }
+    println("PASS 4: consistent with the copying surface")
+
+    bytes.free(b)
+    bytes.free(c)
+    println("=== All cases passed ===")
+}
