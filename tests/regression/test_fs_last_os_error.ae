@@ -25,9 +25,11 @@ main() {
     println("ok   failure carries its OS code (kind=${kind} code=${code})")
 
     // Success must clear it, so a caller cannot read a stale code from an
-    // earlier failure and attribute it to a call that worked.
-    v2, k2, m2 = fs.realpath("/tmp")
-    if k2 != fs.KIND_OK { fail("realpath(/tmp) want KIND_OK got ${k2}") }
+    // earlier failure and attribute it to a call that worked. Resolve "."
+    // rather than a fixed absolute path: /tmp does not exist on Windows, so
+    // that would test the failure path again instead of success.
+    v2, k2, m2 = fs.realpath(".")
+    if k2 != fs.KIND_OK { fail("realpath(.) want KIND_OK got ${k2} msg=${m2}") }
     if fs.last_os_error() != 0 { fail("success left a stale OS code: ${fs.last_os_error()}") }
     println("ok   success clears the OS code")
 
