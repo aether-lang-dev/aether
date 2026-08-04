@@ -1,0 +1,46 @@
+// #1240: build a C callback table from Aether, put Aether functions in its
+// function-pointer fields, and let C call back through them.
+//
+// The field types are declared `fn(...) -> R` rather than bare `ptr`, so the
+// slot is typed: a function with the wrong signature is a compile error, not a
+// wrong-arity call at runtime.
+import std.io
+
+extern struct dictType @c_import {
+    hashFunction: fn(ptr) -> int
+    keyCompare: fn(ptr, ptr) -> int
+}
+
+extern vt_call_hash(t: ptr, key: ptr) -> int @c_import
+extern vt_call_cmp(t: ptr, a: ptr, b: ptr) -> int @c_import
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+@c_callback
+my_hash(key: ptr) -> int {
+    return 7
+}
+
+@c_callback
+my_cmp(a: ptr, b: ptr) -> int {
+    return 3
+}
+
+main() {
+    let t = malloc(64) as *dictType
+    t.hashFunction = my_hash
+    t.keyCompare = my_cmp
+
+    if vt_call_hash(t as ptr, t as ptr) != 7 {
+        println("FAIL hash")
+        free(t as ptr)
+        return
+    }
+    if vt_call_cmp(t as ptr, t as ptr, t as ptr) != 3 {
+        println("FAIL cmp")
+        free(t as ptr)
+        return
+    }
+    free(t as ptr)
+    println("ok")
+}

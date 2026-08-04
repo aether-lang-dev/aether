@@ -48,6 +48,51 @@ static const char* arg_drain_lookup(ASTNode* node) {
     return NULL;
 }
 
+/* A bare reference to a top-level Aether function, as opposed to a closure or
+ * an fn-typed variable. Its address is a real C symbol, which is the only thing
+ * a C function-pointer field can hold. */
+static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
+    if (!gen || !gen->program || !node ||
+        node->type != AST_IDENTIFIER || !node->value) return NULL;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* pc = gen->program->children[i];
+        if (pc && (pc->type == AST_FUNCTION_DEFINITION ||
+                   pc->type == AST_BUILDER_FUNCTION) &&
+            pc->value && strcmp(pc->value, node->value) == 0) return pc;
+    }
+    return NULL;
+}
+
+/* #1240: is `macc` a field of a C-owned struct (`extern struct`, with or
+ * without @c_import / @packed)?
+ *
+ * It decides what may be stored in a function-pointer field. C reads those
+ * fields and calls through them itself, so the field has to hold the
+ * function's real address; the `_AeClosure` box used for Aether-owned callback
+ * fields is a heap pointer, and C jumping to it faults on the first callback
+ * with no diagnostic anywhere upstream. */
+static int member_field_is_c_owned(CodeGenerator* gen, ASTNode* macc) {
+    if (!gen || !gen->program || !macc ||
+        macc->type != AST_MEMBER_ACCESS || macc->child_count < 1) return 0;
+    Type* rt = macc->children[0] ? macc->children[0]->node_type : NULL;
+    const char* sname = NULL;
+    if (rt && rt->kind == TYPE_STRUCT) {
+        sname = rt->struct_name;
+    } else if (rt && rt->kind == TYPE_PTR && rt->element_type &&
+               rt->element_type->kind == TYPE_STRUCT) {
+        sname = rt->element_type->struct_name;
+    }
+    if (!sname) return 0;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* sd = gen->program->children[i];
+        if (sd && sd->type == AST_STRUCT_DEFINITION && sd->value &&
+            strcmp(sd->value, sname) == 0) {
+            return sd->annotation && strncmp(sd->annotation, "extern", 6) == 0;
+        }
+    }
+    return 0;
+}
+
 /* Mint a unique temp name without registering it. The caller uses
  * this name for the temp's C declaration, then later registers the
  * substitution via arg_drain_bind. Splitting these lets the caller
@@ -3226,24 +3271,31 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * slot intact. */
                     int assign_box_struct = 0;
                     int assign_box_bare_fn = 0;
-                    if (is_assignment && lhs_is_ptr) {
+                    /* #1240: a C-owned struct's field is the exception to all
+                     * the boxing below. C calls through it directly, so it gets
+                     * the function's real address, cast to whatever type the
+                     * header declared for that field. __typeof__ names that type
+                     * exactly, which no cast synthesised from the Aether side
+                     * can do (`ptr` is not `const void*`), and it does not
+                     * evaluate its operand, so re-emitting the LHS inside it is
+                     * side-effect free. */
+                    int assign_c_fnptr_field =
+                        is_assignment &&
+                        bare_top_level_fn(gen, expr->children[1]) != NULL &&
+                        member_field_is_c_owned(gen, expr->children[0]);
+                    if (is_assignment && lhs_is_ptr && !assign_c_fnptr_field) {
                         if (rtype && rtype->kind == TYPE_FUNCTION && !rtype->is_fnptr) {
                             assign_box_struct = 1;
-                        } else if (expr->children[1] &&
-                                   expr->children[1]->type == AST_IDENTIFIER &&
-                                   expr->children[1]->value && gen->program) {
-                            for (int pi = 0; pi < gen->program->child_count; pi++) {
-                                ASTNode* pc = gen->program->children[pi];
-                                if (pc && (pc->type == AST_FUNCTION_DEFINITION ||
-                                           pc->type == AST_BUILDER_FUNCTION) &&
-                                    pc->value && strcmp(pc->value, expr->children[1]->value) == 0) {
-                                    assign_box_bare_fn = 1;
-                                    break;
-                                }
-                            }
+                        } else if (bare_top_level_fn(gen, expr->children[1])) {
+                            assign_box_bare_fn = 1;
                         }
                     }
-                    if (assign_box_struct) {
+                    if (assign_c_fnptr_field) {
+                        fprintf(gen->output, "(__typeof__(");
+                        generate_expression(gen, expr->children[0]);
+                        fprintf(gen->output, "))");
+                        generate_expression(gen, expr->children[1]);
+                    } else if (assign_box_struct) {
                         fprintf(gen->output, "_aether_box_closure(");
                         generate_expression(gen, expr->children[1]);
                         fprintf(gen->output, ")");
@@ -4799,6 +4851,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 tuple_param = arg->node_type;
                             }
                         }
+                        /* #1244: a `va_list` parameter receives the va_list
+                         * itself. va_start() yields a cookie that POINTS at the
+                         * function's `va_list` (so it can be passed around as a
+                         * plain ptr), and va_arg / va_end already dereference
+                         * it. Forwarding to a C `v*` callee has to do the same,
+                         * or vprintf reads the cookie as if it were the
+                         * argument list: it compiles clean and prints garbage.
+                         *
+                         * Looked up separately rather than by widening
+                         * `expected_type` to externs: that variable gates the
+                         * fn-ptr, optional-coercion and tuple branches below,
+                         * which have only ever seen user-function params. */
+                        Type* extern_param_t =
+                            lookup_extern_param_type(gen, c_func_name, arg_printed);
+                        if (extern_param_t && extern_param_t->c_alias &&
+                            strcmp(extern_param_t->c_alias, "va_list") == 0) {
+                            fprintf(gen->output, "*(va_list*)(");
+                            generate_expression(gen, arg);
+                            fprintf(gen->output, ")");
+                        } else
                         if (tuple_param && tuple_param->kind == TYPE_TUPLE) {
                             fprintf(gen->output, "(%s){", get_c_type(tuple_param));
                             for (int ti = 0; ti < arg->child_count; ti++) {

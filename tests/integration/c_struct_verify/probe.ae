@@ -1,0 +1,26 @@
+// #1242: a @c_struct overlay's offsets are written by hand, Aether cannot see
+// the C header. @c_verify makes the C compiler check every declared offset and
+// width against the real layout, so a field added upstream is a build failure
+// instead of a silently misread field.
+import std.io
+
+@c_struct shape @c_verify {
+    rax: ptr @0
+    length: uint64 @8
+    slen: uint32 @16
+}
+
+extern shape_new() -> ptr @c_import
+
+main() {
+    let s = shape_new() as *shape
+    if s.length != 4242 {
+        println("FAIL length=${s.length}")
+        return
+    }
+    if s.slen != 77 {
+        println("FAIL slen=${s.slen}")
+        return
+    }
+    println("ok")
+}

@@ -4836,6 +4836,77 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
     }
 
+    /* #1242 @c_verify: check every declared overlay offset against the C
+     * header's real layout, at C compile time. A @c_struct offset is written by
+     * hand (Aether never sees the header), so a field added upstream shifts the
+     * layout and the overlay keeps reading the old offset: right type, wrong
+     * bytes, no diagnostic anywhere. The width is asserted too, since declaring
+     * `int` for a `long` field reads half of it and is equally silent.
+     *
+     * offsetof needs the C type to be complete here, which is why this is
+     * opt-in: it only works when the owning header is in scope (`cflags =
+     * "-include foo.h"`). Costs nothing at runtime, the assertions vanish after
+     * the C compiler checks them. */
+    {
+        int any_verify = 0;
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (c && c->type == AST_C_STRUCT_DEF && c->value &&
+                annotation_has_marker(c->annotation, "c_verify")) { any_verify = 1; break; }
+        }
+        if (any_verify) {
+            fprintf(gen->output, "#include <stddef.h>\n");
+            for (int i = 0; i < program->child_count; i++) {
+                ASTNode* sd = program->children[i];
+                if (!sd || sd->type != AST_C_STRUCT_DEF || !sd->value) continue;
+                if (!annotation_has_marker(sd->annotation, "c_verify")) continue;
+
+                fprintf(gen->output,
+                        "/* #1242 @c_verify %s: the C header owns the layout. */\n",
+                        sd->value);
+                for (int f = 0; f < sd->child_count; f++) {
+                    ASTNode* fld = sd->children[f];
+                    if (!fld || fld->type != AST_STRUCT_FIELD || !fld->value) continue;
+
+                    fprintf(gen->output,
+                        "_Static_assert(offsetof(%s, %s) == %ld,\n"
+                        "    \"@c_struct %s: field '%s' is declared at offset %ld, "
+                        "the C header puts it elsewhere\");\n",
+                        sd->value, fld->value, (long)fld->bit_width,
+                        sd->value, fld->value, (long)fld->bit_width);
+
+                    /* Width: only for the field kinds whose byte size is exact.
+                     * c_struct_field_width() folds anything unrecognised into
+                     * "long", so asserting off its token would invent an
+                     * 8-byte claim the author never made. */
+                    const char* size_expr = NULL;
+                    if (fld->node_type) {
+                        switch (fld->node_type->kind) {
+                            case TYPE_BYTE:
+                            case TYPE_UINT8:  size_expr = "1"; break;
+                            case TYPE_UINT16: size_expr = "2"; break;
+                            case TYPE_INT:
+                            case TYPE_UINT32: size_expr = "4"; break;
+                            case TYPE_INT64:
+                            case TYPE_UINT64: size_expr = "8"; break;
+                            case TYPE_FLOAT:  size_expr = "sizeof(double)"; break;
+                            case TYPE_PTR:    size_expr = "sizeof(void*)"; break;
+                            default:          break;
+                        }
+                    }
+                    if (size_expr) {
+                        fprintf(gen->output,
+                            "_Static_assert(sizeof(((%s*)0)->%s) == %s,\n"
+                            "    \"@c_struct %s: field '%s' is declared %s bytes wide, "
+                            "the C header disagrees\");\n",
+                            sd->value, fld->value, size_expr,
+                            sd->value, fld->value, size_expr);
+                    }
+                }
+            }
+        }
+    }
+
     /* #891: if any @c_struct overlay exists, its field access lowers to
      * aether_mem_get_* and set_* runtime calls (linked from libaether.a). Emit
      * their prototypes here so the generated C compiles WITHOUT requiring the

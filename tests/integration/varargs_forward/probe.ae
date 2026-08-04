@@ -1,0 +1,54 @@
+// #1244: forward an Aether function's variadic tail to a C `v*` function, the
+// serverLog / sdscatprintf shape that kept Redis logging and reply formatting
+// in C.
+//
+// The `va_list` parameter spelling is what makes this work: va_start() yields a
+// cookie that POINTS at the va_list so it can be passed around as a plain ptr,
+// and the call site has to hand the callee the va_list itself. Declaring the
+// parameter `ptr` compiles clean and formats garbage.
+import std.io
+
+extern vsnprintf(buf: ptr, n: int, fmt: ptr, ap: va_list) -> int
+extern strcmp(a: ptr, b: ptr) -> int
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
+    let ap = va_start()
+    let written = vsnprintf(buf, n, fmt, ap)
+    va_end(ap)
+    return written
+}
+
+// va_arg consumption in the same function shape, for contrast: this path
+// already worked, and must keep working.
+sum_three(first: int, ...) -> int {
+    let ap = va_start()
+    let a = va_arg(ap, int)
+    let b = va_arg(ap, int)
+    va_end(ap)
+    return first + a + b
+}
+
+main() {
+    let buf = malloc(128)
+    let written = format_into(buf, 128, "%s scored %d/%d", "aether", 3, 3)
+
+    if strcmp(buf, "aether scored 3/3") != 0 {
+        println("FAIL forwarded formatting")
+        free(buf)
+        return
+    }
+    if written != 17 {
+        println("FAIL written=${written}")
+        free(buf)
+        return
+    }
+    if sum_three(1, 20, 300) != 321 {
+        println("FAIL va_arg sum")
+        free(buf)
+        return
+    }
+    free(buf)
+    println("ok")
+}
