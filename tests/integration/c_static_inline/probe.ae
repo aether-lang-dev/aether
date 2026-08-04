@@ -1,0 +1,26 @@
+// #1241: `static inline` C helpers have no linkable symbol, yet an Aether
+// `extern` can still call them when the header is force-included into the
+// generated translation unit. The inline definition is visible there, so the
+// call is inlined and no shim symbol is needed.
+import std.io
+
+extern fast_double(x: int) -> int
+extern clamp_lo(x: int, lo: int) -> int
+
+extern exit(code: int)
+
+main() {
+    if fast_double(21) != 42 {
+        println("FAIL fast_double")
+        exit(1)
+    }
+    if clamp_lo(3, 10) != 10 {
+        println("FAIL clamp_lo raising")
+        exit(1)
+    }
+    if clamp_lo(30, 10) != 30 {
+        println("FAIL clamp_lo passthrough")
+        exit(1)
+    }
+    println("ok")
+}

@@ -87,16 +87,20 @@ static int extern_c_symbol(const ASTNode* ext, char* buf, size_t bufsz) {
     return 1;
 }
 
-// Is `ext` a variadic extern? True both for the bare
-// `extern foo(fmt: string, ...)` form (annotation == "varargs") and
-// the `@extern("sym") foo(fmt: string, ...)` form (annotation
-// "c_symbol:NAME;varargs"). The `;varargs` suffix is matched with a
-// leading delimiter so a C symbol that merely contains the substring
-// "varargs" can never be misread as variadic.
+// Is `ext` a variadic extern? True for the bare
+// `extern foo(fmt: string, ...)` form and for the
+// `@extern("sym") foo(fmt: string, ...)` form (annotation
+// "c_symbol:NAME;varargs"). Delimiter-aware, so a C symbol that merely
+// contains the substring "varargs" can never be misread as variadic.
 static int extern_is_varargs(const ASTNode* ext) {
-    if (!ext || !ext->annotation) return 0;
-    return strcmp(ext->annotation, "varargs") == 0 ||
-           strstr(ext->annotation, ";varargs") != NULL;
+    if (!ext) return 0;
+    return annotation_has_marker(ext->annotation, "varargs");
+}
+
+// `@c_import` (#1239): the prototype belongs to a C header, so emit none.
+static int extern_is_c_import(const ASTNode* ext) {
+    if (!ext) return 0;
+    return annotation_has_marker(ext->annotation, "c_import");
 }
 
 // Register an extern function's parameter types for call-site cast emission.
@@ -679,6 +683,22 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
         return;
     }
 
+    /* `@c_import` (#1239): a C header owns this prototype. Emitting our own
+     * would put a second declaration in the TU whose spelling is only
+     * ABI-compatible, not identical (int vs uint8_t, long vs size_t, void*
+     * vs a typed pointer), the source of the LTO type-mismatch warnings.
+     * Emitting nothing makes disagreement impossible, and the C compiler
+     * still checks every call site against the header. Also the only shape
+     * that is safe for a `static inline` helper (#1241), which has no
+     * linkable symbol for a non-static prototype to refer to. The name is
+     * registered above, so call-site casts are unaffected. */
+    if (extern_is_c_import(ext)) {
+        fprintf(gen->output,
+                "// Extern C function: %s (@c_import, header owns the prototype)\n",
+                c_name);
+        return;
+    }
+
     fprintf(gen->output, "// Extern C function: %s\n", c_name);
 
     // Generate return type (map Aether types to C types)
@@ -1042,7 +1062,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     }
     // C-variadic function (Aether `f(..., ...)`): trailing `...`. C
     // requires at least one named parameter before it.
-    int is_variadic = (func->annotation && strcmp(func->annotation, "varargs") == 0
+    int is_variadic = (annotation_has_marker(func->annotation, "varargs")
                        && last_param_cname[0] != '\0');
     if (is_variadic) {
         if (param_count > 0) fprintf(gen->output, ", ");

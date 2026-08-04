@@ -542,6 +542,15 @@ const char* ast_node_type_to_string(ASTNodeType type);
 // `#line N "path"` directives so gcc/gdb/gcov see .ae line numbers.
 void ast_stamp_source_file(ASTNode* node, const char* path);
 
+// ASTNode.annotation is a single string shared by several independent markers
+// (`c_symbol:NAME`, `varargs`, `heap_return`, `c_import`), joined with `;`.
+// `;` never appears in a C identifier, so the set splits unambiguously.
+// Always add through annotation_add_marker: assigning the slot directly drops
+// any marker already there, which silently changes behaviour (a variadic
+// `@heap` extern would stop being variadic).
+int annotation_has_marker(const char* annotation, const char* marker);
+char* annotation_add_marker(char* annotation, const char* marker);
+
 // Utility functions
 ASTNode* create_literal_node(Token* token);
 ASTNode* create_identifier_node(Token* token);

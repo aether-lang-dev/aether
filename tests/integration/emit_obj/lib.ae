@@ -1,0 +1,12 @@
+// #1243: compiled with `ae build --emit=obj` and linked into a C program, so a
+// project can keep only handwritten Aether checked in and treat the generated C
+// as a build artifact rather than committing it and risking a stale link.
+import std.string
+
+greet(name: string) -> string {
+    return string.concat("hello ", name)
+}
+
+add(a: int, b: int) -> int {
+    return a + b
+}

@@ -1,0 +1,8 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+[build]
+# Force-include the header so the static inline definitions are visible in the
+# generated .c. This is what makes the extern resolvable without a shim.
+cflags = "-include helper.h -I."

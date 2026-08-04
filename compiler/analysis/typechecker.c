@@ -7597,8 +7597,8 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // annotation "varargs") accepts any number of trailing args
         // beyond its named parameters — so any count >= the named-param
         // count is fine.
-        int is_variadic_callee = (symbol->node->annotation &&
-                                  strcmp(symbol->node->annotation, "varargs") == 0);
+        int is_variadic_callee =
+            annotation_has_marker(symbol->node->annotation, "varargs");
         int arity_ok = (got == expected) ||
                        (ctx_first && got == expected - 1) ||
                        (got >= required && got < expected) ||
@@ -7685,13 +7685,10 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         }
         int got = call->child_count;
         /* Variadic externs (`f(named..., ...)`) accept any number of args
-         * beyond the named ones. The bare `extern` form marks this with
-         * annotation "varargs"; the `@extern("c_name")` form appends a
-         * ";varargs" suffix to its `c_symbol:` annotation (see
-         * codegen_func.c extern_is_varargs) — accept both. */
-        int is_variadic = (extern_node->annotation &&
-                           (strcmp(extern_node->annotation, "varargs") == 0 ||
-                            strstr(extern_node->annotation, ";varargs") != NULL));
+         * beyond the named ones. Both the bare `extern` form and the
+         * `@extern("c_name")` form (whose annotation also carries
+         * `c_symbol:NAME`) record it as a `varargs` marker. */
+        int is_variadic = annotation_has_marker(extern_node->annotation, "varargs");
         /* A `_ctx`-first extern (builder-DSL boundary, e.g. std.host's
          * `input(_ctx, name, type)`) is called with `_ctx` auto-injected at
          * the call site, so the caller supplies expected-1 args. Extern
