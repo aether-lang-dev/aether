@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`extern ... @c_import` lets a C header own the prototype** (#1239, #1241).
+  Aether normally emits its own forward declaration for an `extern`, spelled
+  from the Aether types: `int` where the header says `uint8_t` or `size_t`,
+  `void*` where it names a type. The two are ABI-compatible but not identical,
+  so the translation unit ends up with two disagreeing declarations of one
+  function, a hard `conflicting types` error in the cases that matter and, under
+  LTO, type-mismatch warnings that read exactly like real porting mistakes.
+  `@c_import` after the signature emits no declaration at all, leaving the
+  header's spelling as the only one present, so the two cannot disagree. Call
+  sites are still checked against the header, so a wrong Aether signature is
+  still caught. This is also the only correct shape for a `static inline` header
+  helper, which has no linkable symbol for a non-static prototype to refer to:
+  the call inlines directly and the one-line C bridge functions such a helper
+  used to require are no longer needed. Stacks with the existing extern
+  attributes (`-> string @heap @c_import`, variadic `@c_import`).
+
+- **`ae build --emit=obj` compiles a `.ae` straight to a relocatable object**
+  (#1243). Previously the only way to feed Aether into an existing C link line
+  was `--emit=csrc` plus a hand-written rule to compile the generated C, which
+  in practice meant checking that C into the tree: a stale-artifact trap, since
+  editing the `.ae` and restoring the `.c` to keep a diff clean leaves a plain
+  `make` linking the old code silently. `--emit=obj` produces the `.o` directly,
+  so a `%.o: %.ae` rule makes the `.ae` the only source and the compared
+  timestamp the right one. The object carries the same catalog as `--emit=lib`,
+  exporting both the bare names and the `aether_<name>()` C-ABI aliases. Honours
+  `$AE_CC` / `$CC` with the same resolution order as the other build paths.
+
+### Fixed
+
+- **`install.sh` no longer rejects the GNU make it just found.** The probe was
+  `make --version | head -1 | grep -qi 'gnu make'`, and the script runs under
+  `set -o pipefail`: `head` exits after the first line, the producer then dies
+  of SIGPIPE, and the pipeline reports that failure even though the read
+  succeeded. Whether it happens depends on the producer finishing before `head`
+  closes the pipe, so it failed intermittently and only under load, printing the
+  self-contradicting `Error: 'gmake' is not GNU make` immediately followed by
+  `Found: GNU Make 4.3`. The banner is now captured once with no pipe to break,
+  and the test and the error message read that same value, so they cannot
+  disagree. Applied to the three other `| head -1` probes in the script, which
+  had the same latent race, including the one guarding `set -e`.
+
+- **A trailing extern attribute no longer discards an earlier one.** `extern
+  printf(fmt: string, ...) -> string @heap` overwrote the annotation slot that
+  already held the variadic marker, so the extern quietly stopped being
+  variadic and its call sites lost variadic arity checking. Markers now
+  accumulate through one shared `;`-delimited helper, which also replaces the
+  four hand-rolled copies of the marker test that had drifted apart across the
+  parser, typechecker and codegen.
+
 ## [0.486.0]
 
 ### Added

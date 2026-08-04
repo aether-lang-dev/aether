@@ -194,6 +194,11 @@ static char g_with_caps[128] = "";
 static bool g_emit_exe = true;
 static bool g_emit_lib = false;
 static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no gcc
+/* #1243: --emit=obj compiles straight to a .o. A build that checks in only
+ * handwritten Aether can then treat the generated C as a build artifact in a
+ * temp dir, instead of committing it and risking a plain `make` linking stale
+ * generated code after an .ae edit. */
+static bool g_emit_obj = false;
 
 // Extra link flags accumulated by the binary-import prepass: when a
 // program `import`s a precompiled `--emit=lib` artifact (libfoo.so),
@@ -281,6 +286,7 @@ static bool g_coverage = false;
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
+    else if (g_emit_obj)               emit_flag = " --emit=lib";
     else if (g_emit_lib && g_emit_exe) emit_flag = " --emit=both";
     else if (g_emit_lib)               emit_flag = " --emit=lib";
     // exe-only is the default; no flag needed.
@@ -4837,6 +4843,12 @@ static int cmd_build(int argc, char** argv) {
                 free(dup_exe); free(dup_lib);
                 if (rc_exe != 0) return rc_exe;
                 return rc_lib;
+            } else if (strcmp(val, "obj") == 0) {
+                /* #1243: lib-style codegen (no `main`, callable from C), then
+                 * compile the generated C to an object and stop. */
+                g_emit_exe = false;
+                g_emit_lib = true;
+                g_emit_obj = true;
             } else if (strcmp(val, "csrc") == 0) {
                 /* #996: --emit=csrc — emit the portable generated C + a catalog
                  * header, and STOP (no gcc). Uses --emit=lib codegen (same
@@ -4846,7 +4858,7 @@ static int cmd_build(int argc, char** argv) {
                 g_emit_lib = true;
                 g_emit_csrc = true;
             } else {
-                fprintf(stderr, "Error: --emit must be one of: exe, lib, csrc (got '%s')\n", val);
+                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, obj, csrc (got '%s')\n", val);
                 return 1;
             }
         } else if (strcmp(argv[i], "--namespace") == 0 && i + 1 < argc) {
@@ -5003,7 +5015,9 @@ static int cmd_build(int argc, char** argv) {
     // Override output name for --emit=lib: swap <name> for lib<name>.so
     // (or .dylib on macOS). Only applies when the user didn't supply -o
     // with an explicit name; if they did, we honor their choice.
-    if (g_emit_lib && !g_emit_exe && !is_wasm && !output_name) {
+    // --emit=obj shares the lib codegen but produces a `.o`, not a shared
+    // library, so the lib prefix and extension do not apply to it.
+    if (g_emit_lib && !g_emit_exe && !is_wasm && !output_name && !g_emit_obj) {
 #ifdef __APPLE__
         const char* lib_ext = ".dylib";
 #elif defined(_WIN32)
@@ -5174,6 +5188,48 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "[diag] retry returned %d\n", retry_ret);
         fprintf(stderr, "Compilation failed.\n");
         return 1;
+    }
+
+    /* #1243 --emit=obj: aetherc has written the generated C; compile it to a
+     * single object and stop. No link, no `main`, so the caller drops the .o
+     * into their own build. The generated C stays in the temp dir it was
+     * written to, which is the point: nothing to check in, nothing to go
+     * stale. */
+    if (g_emit_obj) {
+        char obj_file[2048];
+        if (output_name) {
+            /* Honour -o exactly, the way `cc -c` does: a `%.o: %.ae` rule
+               passes `-o $@` and must get that path, not a decorated one. */
+            snprintf(obj_file, sizeof(obj_file), "%s", output_name);
+        } else {
+            /* Derive from the generated C rather than from exe_file: c_file
+               already encodes the same project / dev / plain-source layout
+               choice, and carries no EXE_EXT to strip. */
+            snprintf(obj_file, sizeof(obj_file), "%s", c_file);
+            size_t ol = strlen(obj_file);
+            if (ol > 2 && strcmp(obj_file + ol - 2, ".c") == 0) {
+                obj_file[ol - 1] = 'o';
+            } else {
+                snprintf(obj_file + ol, sizeof(obj_file) - ol, ".o");
+            }
+        }
+        const char* objcc = getenv("AE_CC");
+        if (!objcc || !*objcc) objcc = getenv("CC");
+        if (!objcc || !*objcc) {
+            objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
+        }
+        snprintf(cmd, sizeof(cmd), "\"%s\" -c %s \"%s\" -o \"%s\"",
+                 objcc, tc.include_flags ? tc.include_flags : "",
+                 c_file, obj_file);
+        if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
+        int orc = run_cmd(cmd);
+        if (orc != 0) {
+            fprintf(stderr, "Failed to compile the generated C to an object.\n");
+            return 1;
+        }
+        printf("Built object: %s\n", obj_file);
+        printf("Link it with `ae cflags --libs` (or -laether) from your own build.\n");
+        return 0;
     }
 
     /* #996 --emit=csrc: aetherc has written the portable `.c`, the catalog `.h`

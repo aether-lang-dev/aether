@@ -5143,7 +5143,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
         // C-variadic function: trailing `...` in the prototype, matching
         // the definition (see generate_function_definition).
-        if (child->annotation && strcmp(child->annotation, "varargs") == 0
+        if (annotation_has_marker(child->annotation, "varargs")
             && param_count > 0) {
             fprintf(gen->output, ", ...");
         } else if (param_count == 0) {

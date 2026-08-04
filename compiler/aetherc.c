@@ -791,10 +791,10 @@ static void emit_ast_node_recursive(FILE* out, ASTNode* node, int* first,
             fputs(",\"name\":", out);
             emit_json_string(out, node->value);
 
-            // variadic — parser stamps `annotation = "varargs"` on
+            // variadic: parser stamps a `varargs` marker on
             // `extern foo(..., ...)` declarations (compiler/parser/
             // parser.c, the `TOKEN_DOTDOTDOT` path).
-            if (node->annotation && strcmp(node->annotation, "varargs") == 0) {
+            if (annotation_has_marker(node->annotation, "varargs")) {
                 fputs(",\"variadic\":true", out);
             }
         } else {

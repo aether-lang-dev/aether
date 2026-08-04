@@ -341,6 +341,45 @@ For plain Aether-to-Aether function-pointer use within a single program, no anno
 
 `@extern` and `@c_callback` close the FFI loop in both directions. `@extern` binds an Aether-namespace name to a C symbol the linker provides; `@c_callback` emits an Aether function under a C symbol the linker can hand to any consumer. Both use the same `@`-prefixed annotation grammar.
 
+## Letting the Header Own the Prototype, `extern ... @c_import`
+
+For every `extern` Aether normally emits its own forward declaration into the generated C. That is what you want when the C side has no header handy. When it does have one, the two declarations have to agree exactly, and Aether's cannot always match: it writes `int` where the header says `uint8_t` or `size_t`, and `void*` where the header names a type. Both spellings are ABI-compatible, which is why the failure is confusing, you get a `conflicting types` error from a call that would have worked, or under LTO a type-mismatch warning indistinguishable from a real porting mistake.
+
+`@c_import` after the signature hands prototype ownership to the header. Aether emits no declaration at all:
+
+```aether
+extern type blob
+
+extern api_scale(v: int) -> int          @c_import   // header: uint8_t api_scale(uint8_t)
+extern api_span(a: int, b: int) -> int   @c_import   // header: size_t api_span(size_t, size_t)
+extern api_blob() -> *blob               @c_import
+```
+
+```toml
+# aether.toml, so the header is in scope in the generated TU
+[build]
+cflags = "-include api.h -I."
+```
+
+Nothing is given up by doing this. The Aether-side types are still declared and still drive typechecking, they simply never reach the generated C, so there is only one declaration in the translation unit and it is the header's. The C compiler continues to check every **call site** against that declaration, so a genuinely wrong Aether signature is still caught, just as a call-site diagnostic rather than a prototype clash.
+
+### `static inline` header helpers
+
+A `static inline` helper has no linkable symbol, so a non-static prototype for it refers to nothing and the C compiler rejects the pair outright:
+
+```c
+/* api.h */
+static inline uint8_t api_inline_twice(uint8_t v) { return (uint8_t)(v * 2); }
+```
+
+```aether
+extern api_inline_twice(v: int) -> int @c_import
+```
+
+With `@c_import` the force-included definition is the only one the translation unit sees, the call inlines directly, and no hand-written C bridge function is needed. Without it, Aether's `int api_inline_twice(int);` collides with the header and the build fails. This is the shape to reach for when porting a C codebase whose headers are full of small inline helpers.
+
+`@c_import` stacks with the other extern attributes, `-> string @heap @c_import` and variadic `extern log_line(fmt: string, ...) @c_import` are both legal. It is the same "the header is the sole source of truth" contract as `extern struct ... @c_import` and `extern const NAME: type @c_import`.
+
 ## Linking External Libraries
 
 Use `link_flags` in your `aether.toml` to link external C libraries:

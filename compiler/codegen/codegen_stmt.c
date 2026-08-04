@@ -764,7 +764,7 @@ static int extern_returns_heap_string(ASTNode* ext) {
     if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->annotation) {
         return 0;
     }
-    return strstr(ext->annotation, "heap_return") != NULL ? 1 : 0;
+    return annotation_has_marker(ext->annotation, "heap_return");
 }
 
 // Heap-allocated string sources. Used by the reassignment / scope-

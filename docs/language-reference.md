@@ -2414,6 +2414,27 @@ if syncio_errno() == EAGAIN { ... }
 - Usable in expression and comparison contexts. `@c_import` is required, it is the marker that selects the emit-verbatim semantics.
 - **Object-like macros only.** Function-like macros (`CPU_SET(i, &set)`) are out of scope; wrap those in a small `extern` C function.
 
+### `extern ... @c_import` let a C header own the prototype
+
+By default Aether emits its own forward declaration for every `extern`. That declaration is ABI-compatible with the header's but not always spelled the same: `int` where the header says `uint8_t`, `int` where it says `size_t`, `void*` where it says a typed pointer. Two differently spelled declarations of one function in the same translation unit are a hard `conflicting types` error, and under LTO the surviving cases show up as type-mismatch warnings that are hard to tell apart from real porting mistakes.
+
+`@c_import` after the signature says the header owns the prototype, so Aether emits **none**:
+
+```aether
+extern type blob
+
+extern api_scale(v: int) -> int          @c_import   // header: uint8_t api_scale(uint8_t)
+extern api_span(a: int, b: int) -> int   @c_import   // header: size_t api_span(size_t, size_t)
+extern api_blob() -> *blob               @c_import
+extern api_inline_twice(v: int) -> int   @c_import   // static inline in the header
+```
+
+- The Aether-side types are still declared, and are still what the typechecker uses, **the type is trusted as declared**, the same model as every other `extern`. They just never reach the generated C.
+- The header's spelling ends up being the only declaration in the translation unit, so the two cannot disagree. The C compiler still checks every call site against the header, so a genuinely wrong Aether signature is still caught, at the call site rather than as a prototype clash.
+- Ensure the owning header is in scope, e.g. `cflags = "-include api.h"` in `aether.toml`. Same requirement as `extern const @c_import` and `extern struct @c_import`.
+- This is the only correct shape for a **`static inline`** header helper: it has no linkable symbol, so a non-static prototype referring to it is meaningless. With `@c_import` the call inlines directly and needs no hand-written C shim.
+- Stacks with the other extern attributes: `-> string @heap @c_import` and variadic `extern printf(fmt: string, ...) -> int @c_import` are both legal.
+
 ### `@c_callback` export an Aether function as a C callback
 
 The inverse of `@extern`. Marks an Aether function as having a stable, externally-visible C symbol so it can be passed across the linkage boundary as a function pointer to C externs that take callbacks (HTTP route handlers, signal handlers, `qsort` comparators, libcurl write callbacks, sqlite hooks):

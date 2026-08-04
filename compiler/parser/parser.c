@@ -4342,6 +4342,62 @@ ASTNode* parse_extern_struct_field(Parser* parser) {
     return field;
 }
 
+/* Trailing `@`-attributes on an extern signature, shared by the bare
+ * `extern name(...)` form and the `@extern("c_sym") name(...)` form:
+ *
+ *   @heap     the `-> string` return is a malloc'd buffer the caller owns.
+ *             Recorded as "heap_return", read by is_heap_string_expr in
+ *             codegen_stmt.c. Only meaningful on `-> string`; anything else
+ *             is a parse error since integers and pointers aren't heap-
+ *             tracked and void has nothing to own.
+ *   @borrow   the unannotated default. A no-op, accepted so callers can be
+ *             explicit and symmetric with the tuple form.
+ *   @c_import a C header owns the prototype, so codegen emits no declaration
+ *             of its own (#1239). The header's exact typedef spelling ends up
+ *             being the only one in the translation unit, so the two cannot
+ *             disagree. Same "the header is the sole source of truth"
+ *             contract as `extern struct @c_import` and `extern const
+ *             @c_import`.
+ *
+ * Attributes stack and are order-independent; they accumulate as `;`-joined
+ * markers via annotation_add_marker, so adding one never drops another (a
+ * variadic `@heap` extern stays variadic).
+ *
+ * Disambiguating from the NEXT declaration: newlines aren't tokens here, so a
+ * stray `@` after the return type might be the start of a following
+ * `@c_callback` / `@extern("...")`. Two-token lookahead, only consume the
+ * `@` when the token after it is one of the names above; anything else is left
+ * for the top-level decoration handler.
+ */
+static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
+    while (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
+        Token* tag = peek_ahead(parser, 1);
+        if (!tag || tag->type != TOKEN_IDENTIFIER || !tag->value) break;
+
+        if (strcmp(tag->value, "heap") == 0) {
+            advance_token(parser);  /* consume '@' */
+            if (!ext->node_type || ext->node_type->kind != TYPE_STRING) {
+                parser_error(parser,
+                    "@heap on extern return is only valid on `-> string`");
+            } else {
+                ext->annotation =
+                    annotation_add_marker(ext->annotation, "heap_return");
+            }
+            advance_token(parser);  /* consume 'heap' */
+        } else if (strcmp(tag->value, "borrow") == 0) {
+            advance_token(parser);  /* consume '@' */
+            advance_token(parser);  /* consume 'borrow' */
+        } else if (strcmp(tag->value, "c_import") == 0) {
+            advance_token(parser);  /* consume '@' */
+            ext->annotation =
+                annotation_add_marker(ext->annotation, "c_import");
+            advance_token(parser);  /* consume 'c_import' */
+        } else {
+            break;
+        }
+    }
+}
+
 // Parse extern C function declaration
 // Syntax: extern name(param: type, ...) -> return_type
 //         extern name(param: type, ...)   (void return)
@@ -4543,8 +4599,8 @@ ASTNode* parse_extern_declaration(Parser* parser) {
             // Check for trailing `...`
             if (peek_token(parser) && peek_token(parser)->type == TOKEN_DOTDOTDOT) {
                 advance_token(parser);  // consume '...'
-                if (extern_func->annotation) free(extern_func->annotation);
-                extern_func->annotation = strdup("varargs");
+                extern_func->annotation =
+                    annotation_add_marker(extern_func->annotation, "varargs");
                 break;
             }
             Token* param_name = expect_token(parser, TOKEN_IDENTIFIER);
@@ -4646,58 +4702,12 @@ ASTNode* parse_extern_declaration(Parser* parser) {
         extern_func->node_type = create_type(TYPE_VOID);
     }
 
-    /* Single-value return @heap / @borrow annotation. The tuple form
-     * is handled inside parse_type via Type.tuple_heap_flags; that
-     * channel doesn't exist for a non-tuple return because Type has no
-     * "this whole thing is heap" slot outside the tuple_heap_flags
-     * array. Instead, store the flag on the extern's own annotation
-     * slot — read back by is_heap_string_expr in codegen_stmt.c.
-     *
-     * Only meaningful on `-> string`. @heap on `-> int`, `-> ptr`, or
-     * `-> void` is a parse error: integers and pointers aren't heap-
-     * tracked, and void has nothing to own. @borrow is accepted as a
-     * no-op for symmetry with the tuple form so callers can be
-     * uniformly explicit.
-     *
-     * The bare `extern foo(...) -> string` shape (no annotation) is
-     * unchanged — stays classified non-heap. Opt-in only. This keeps
-     * the existing ~hundreds of unannotated extern declarations
-     * behaviourally identical to pre-fix; only externs that have been
-     * audited and confirmed to return a malloc'd buffer the caller
-     * must free get the annotation.
-     *
-     * Disambiguating from the NEXT decl's annotation: a stray `@` after
-     * the return type might be the start of a following `@c_callback`
-     * or `@extern("...")` on the next declaration (newlines aren't
-     * tokens here). Two-token lookahead — only consume the `@` when
-     * the token after it is literally `heap` or `borrow`; any other
-     * identifier (or non-identifier) leaves the `@` for the top-level
-     * decoration handler to pick up. */
-    if (peek_token(parser) && peek_token(parser)->type == TOKEN_AT) {
-        Token* tag = peek_ahead(parser, 1);
-        if (tag && tag->type == TOKEN_IDENTIFIER && tag->value &&
-            (strcmp(tag->value, "heap") == 0 ||
-             strcmp(tag->value, "borrow") == 0)) {
-            advance_token(parser);  /* consume '@' */
-            if (strcmp(tag->value, "heap") == 0) {
-                if (!extern_func->node_type ||
-                    extern_func->node_type->kind != TYPE_STRING) {
-                    parser_error(parser,
-                        "@heap on extern return is only valid on `-> string`");
-                } else {
-                    /* "heap_return" — read by is_heap_string_expr to
-                     * mark calls to this extern as heap-classified. */
-                    if (extern_func->annotation) free(extern_func->annotation);
-                    extern_func->annotation = strdup("heap_return");
-                }
-            }
-            /* @borrow is a no-op — the unannotated default already is
-             * borrow. Accepted for symmetry so callers can be explicit. */
-            advance_token(parser);  /* consume the heap/borrow identifier */
-        }
-        /* Any other `@<ident>` — leave both tokens for the top-level
-         * decoration handler. */
-    }
+    /* `@heap` on a single-value return lives on the extern's annotation slot
+     * rather than on its Type: the tuple form uses Type.tuple_heap_flags, and
+     * there is no equivalent "this whole thing is heap" slot for a non-tuple
+     * return. Unannotated `-> string` stays classified non-heap, which is what
+     * keeps the hundreds of existing extern declarations unchanged. */
+    parse_extern_trailing_attrs(parser, extern_func);
 
     return extern_func;
 }
@@ -6121,24 +6131,12 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
                     do {
                         // Trailing `...` — `@extern` may be variadic just
-                        // like a bare `extern`. Record it by appending a
-                        // `;varargs` marker to the `c_symbol:NAME`
-                        // annotation; `;` never appears in a C identifier
-                        // so codegen (extern_c_symbol / extern_is_varargs)
-                        // splits the two cleanly.
+                        // like a bare `extern`.
                         if (peek_token(parser) &&
                             peek_token(parser)->type == TOKEN_DOTDOTDOT) {
                             advance_token(parser);  // consume '...'
-                            size_t cur = ext->annotation
-                                ? strlen(ext->annotation) : 0;
-                            char* combined = (char*)malloc(cur + 9);
-                            if (combined) {
-                                if (ext->annotation)
-                                    memcpy(combined, ext->annotation, cur);
-                                memcpy(combined + cur, ";varargs", 9);
-                                free(ext->annotation);
-                                ext->annotation = combined;
-                            }
+                            ext->annotation =
+                                annotation_add_marker(ext->annotation, "varargs");
                             break;
                         }
                         Token* pname = expect_token(parser, TOKEN_IDENTIFIER);
@@ -6198,6 +6196,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 } else {
                     ext->node_type = create_type(TYPE_VOID);
                 }
+                parse_extern_trailing_attrs(parser, ext);
                 node = ext;
                 break;
             }

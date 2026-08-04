@@ -1,0 +1,8 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+extra_sources = ["api.c"]
+
+[build]
+cflags = "-include api.h -I."

@@ -507,6 +507,36 @@ void ast_stamp_source_file(ASTNode* node, const char* path) {
     }
 }
 
+int annotation_has_marker(const char* annotation, const char* marker) {
+    if (!annotation || !marker || !*marker) return 0;
+    size_t n = strlen(marker);
+    const char* p = annotation;
+    while ((p = strstr(p, marker)) != NULL) {
+        int left_ok  = (p == annotation) || (p[-1] == ';');
+        int right_ok = (p[n] == '\0') || (p[n] == ';');
+        if (left_ok && right_ok) return 1;
+        p += n;
+    }
+    return 0;
+}
+
+char* annotation_add_marker(char* annotation, const char* marker) {
+    if (!marker || !*marker) return annotation;
+    if (!annotation) return strdup(marker);
+    if (annotation_has_marker(annotation, marker)) return annotation;
+
+    size_t cur = strlen(annotation);
+    size_t n = strlen(marker);
+    char* combined = (char*)malloc(cur + 1 + n + 1);
+    if (!combined) return annotation;
+    memcpy(combined, annotation, cur);
+    combined[cur] = ';';
+    memcpy(combined + cur + 1, marker, n);
+    combined[cur + 1 + n] = '\0';
+    free(annotation);
+    return combined;
+}
+
 void print_ast(ASTNode* node, int indent) {
     if (!node) return;
     

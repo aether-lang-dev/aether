@@ -8,6 +8,24 @@ set -eo pipefail
 # Always run from the repository root (where this script lives)
 cd "$(dirname "$0")"
 
+# First line of a command's combined output.
+#
+# Do NOT write `cmd --version | head -1` here: with `set -o pipefail` above,
+# `head` exits after one line, the producer then dies of SIGPIPE, and the
+# pipeline reports THAT failure even though the read succeeded. It depends on
+# whether the producer finished writing before `head` closed the pipe, so it
+# fails intermittently and only under load, which cost a green CI run once
+# already: the GNU-make probe rejected `GNU Make 4.3` while its own error
+# message printed that same string back.
+#
+# A command substitution has no pipe to break, so nothing gets signalled. A
+# non-zero exit is tolerated because callers only want whatever was printed.
+first_line() {
+    local out
+    out=$("$@" 2>&1) || true
+    printf '%s\n' "${out%%$'\n'*}"
+}
+
 # Handle --editor-only flag
 if [ "$1" = "--editor-only" ]; then
     EDITOR_ONLY=1
@@ -186,22 +204,29 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     else
         CC_BIN="cc"
     fi
-    CC_VERSION=$("$CC_BIN" --version 2>&1 | head -1)
+    CC_VERSION=$(first_line "$CC_BIN" --version)
     ok "  C compiler: $CC_VERSION  (CC=$CC_BIN)"
 
     # Verify the chosen make is GNU make, not just *a* make. On BSD, `make` is
     # BSD make, which cannot parse this GNU Makefile; catch that here with an
     # actionable message instead of a mid-build "Invalid line ifeq" parse error.
     # (mingw32-make on Windows is GNU make, so it passes this probe.)
-    if ! "$MAKE_CMD" --version 2>/dev/null | head -1 | grep -qi 'gnu make'; then
-        error "Error: '$MAKE_CMD' is not GNU make (the Makefile is GNU make syntax)."
-        echo "  Found: $("$MAKE_CMD" --version 2>&1 | head -1)"
-        echo "  Install GNU make and re-run:"
-        echo "    FreeBSD/*BSD: pkg install gmake   (then this script prefers gmake)"
-        echo "    Linux:        it is already 'make'"
-        exit 1
-    fi
-    ok "  make: $($MAKE_CMD --version 2>&1 | head -1)"
+    #
+    # The banner is captured once and both the test and the message read that
+    # one value, so they can never contradict each other.
+    MAKE_VERSION=$(first_line "$MAKE_CMD" --version)
+    case "$MAKE_VERSION" in
+        *[Gg][Nn][Uu]\ [Mm]ake*) ;;
+        *)
+            error "Error: '$MAKE_CMD' is not GNU make (the Makefile is GNU make syntax)."
+            echo "  Found: $MAKE_VERSION"
+            echo "  Install GNU make and re-run:"
+            echo "    FreeBSD/*BSD: pkg install gmake   (then this script prefers gmake)"
+            echo "    Linux:        it is already 'make'"
+            exit 1
+            ;;
+    esac
+    ok "  make: $MAKE_VERSION"
     echo ""
 
     # Fetch latest tags so the Makefile picks up the correct version number.
@@ -349,7 +374,10 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     if [ -f VERSION ]; then
         INSTALLED_VER=$(cat VERSION | tr -d '[:space:]')
     else
-        INSTALLED_VER=$("$BIN_DIR/ae" --help 2>&1 | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        INSTALLED_VER=""
+        if [[ $(first_line "$BIN_DIR/ae" --help) =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            INSTALLED_VER="${BASH_REMATCH[0]}"
+        fi
     fi
     if [ -n "$INSTALLED_VER" ] && [ "$INSTALLED_VER" != "0.0.0-dev" ]; then
         VTAG="v$INSTALLED_VER"

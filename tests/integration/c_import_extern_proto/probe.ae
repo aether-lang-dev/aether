@@ -1,0 +1,44 @@
+// #1239: `@c_import` on an extern means the C header owns the prototype.
+// Codegen emits no declaration of its own, so the header's exact typedef
+// spelling is the only one in the translation unit and the two cannot
+// disagree. The Aether-side types below are the ABI-compatible view used for
+// typechecking; the emitted C never restates them.
+//
+// api_inline_twice is `static inline` (#1241): it has no linkable symbol, so
+// suppressing the prototype is the only correct shape for it.
+import std.io
+
+extern type blob
+
+extern api_scale(v: int) -> int @c_import
+extern api_span(a: int, b: int) -> int @c_import
+extern api_blob() -> *blob @c_import
+extern api_blob_len(b: *blob) -> int @c_import
+extern api_inline_twice(v: int) -> int @c_import
+extern api_fmt(fmt: string, ...) -> string @heap @c_import
+
+extern exit(code: int)
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}")
+        exit(1)
+    }
+}
+
+main() {
+    check("api_scale", api_scale(5), 15)
+    check("api_span", api_span(4, 10), 6)
+    check("api_blob_len", api_blob_len(api_blob()), 7)
+    check("api_inline_twice", api_inline_twice(21), 42)
+
+    // Variadic + @heap + @c_import stacked: extra args past the named
+    // parameter only typecheck if the variadic marker survived the two
+    // trailing attributes, and @heap is what frees the malloc'd return.
+    let formatted = api_fmt("%s-%d", "x", 7)
+    if formatted != "x-7" {
+        println("FAIL api_fmt got ${formatted}")
+        exit(1)
+    }
+    println("ok")
+}
