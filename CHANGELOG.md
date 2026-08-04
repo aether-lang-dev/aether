@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
 ## [0.488.0]
 
 ### Added
@@ -183,6 +185,41 @@ version number before tagging the release.
   Correctness is pinned where it already was, the FIPS-197 Appendix B and C
   known-answer vectors in `tests/regression/test_aes.ae`.
 
+## [0.483.0]
+
+### Fixed
+
+- **A closure env now owns the strings it captures, and frees them** (#1398).
+  A `-> string` captured by a closure could be read after free once the job ran
+  on a `std.worker` pool thread: `aether_str_capture` called `string_retain`,
+  which is a documented no-op on a magic-less pointer, so a plain malloc'd
+  string was captured BORROWED and the enclosing scope's loop-carried
+  reassignment freed it out from under the closure. Integer captures in the
+  same closure were fine, which made it look like a threading bug. The env now
+  retains the strings it captures and reclaims them through its destructor;
+  five owners (scope-exit defer, the argument drain, `list_free`,
+  `fs_closure_free`, and the worker pool) route env cleanup through that
+  destructor instead of a plain `free()` that reclaimed the struct and leaked
+  every captured string. Caught by the macOS leak gate (`test_worker` leaked 2
+  per run); `test_worker`, `test_worker_pool`, and `test_worker_wait_map` now
+  report 0 leaks.
+
+## [0.482.0]
+
+### Fixed
+
+- **A heap string passed to a `std.bytes` reader no longer leaks.** The
+  compiler's non-storing-callee allowlist covers the string readers
+  (`aether_string_data`, `string_seq_join`, `println`, ...) but never included
+  `std.bytes`, so passing a heap string to `bytes.length` / `bytes.get` marked it
+  escaped and suppressed its scope-exit free. The caller leaked unless it added
+  an explicit `release()`, and nothing signalled that. The scalar-returning
+  readers (`length`, `capacity`, `get`, `get_le16/32/64`, `get_be16/32/64`) and
+  `copy_from_string`, which copies out and retains nothing, are now listed.
+  `aether_bytes_data` is deliberately excluded: it returns an interior view
+  rather than a scalar. Verified on the emitted C (0 scope-exit frees before, 1
+  after) and through the macOS leak gate.
+
 ## [0.481.0]
 
 ### Added
@@ -203,22 +240,6 @@ version number before tagging the release.
   output sent to `/dev/null`, so a genuine break printed `[FAIL] Install smoke
   test` and nothing else; diagnosing it meant reproducing locally. Its output is
   now captured and the last 30 lines are printed when it fails.
-
-## [0.482.0]
-
-### Fixed
-
-- **A heap string passed to a `std.bytes` reader no longer leaks.** The
-  compiler's non-storing-callee allowlist covers the string readers
-  (`aether_string_data`, `string_seq_join`, `println`, ...) but never included
-  `std.bytes`, so passing a heap string to `bytes.length` / `bytes.get` marked it
-  escaped and suppressed its scope-exit free. The caller leaked unless it added
-  an explicit `release()`, and nothing signalled that. The scalar-returning
-  readers (`length`, `capacity`, `get`, `get_le16/32/64`, `get_be16/32/64`) and
-  `copy_from_string`, which copies out and retains nothing, are now listed.
-  `aether_bytes_data` is deliberately excluded: it returns an interior view
-  rather than a scalar. Verified on the emitted C (0 scope-exit frees before, 1
-  after) and through the macOS leak gate.
 
 ## [0.480.0]
 
