@@ -1,0 +1,201 @@
+// Regression test for std.language: BCP 47 parsing, canonicalization, and Matcher.
+
+import std.language
+import std.string
+
+main() {
+    print("=== std.language ===\n\n")
+
+    // 1. Parsing & Canonicalization
+    t1_str, err1 = language.parse("en-us")
+    if err1 != "" {
+        print("FAIL: parse(\"en-us\") err=${err1}\n")
+        exit(1)
+    }
+    t1 = t1_str as Tag
+    if string_equals(t1 as string, "en-US") != 1 {
+        print("FAIL: parse(\"en-us\") canonicalized to ${t1 as string}\n")
+        exit(1)
+    }
+    print("PASS: parse basic\n")
+
+    t2_str, err2 = language.parse("ZH-HANS-cn")
+    if err2 != "" {
+        print("FAIL: parse(\"ZH-HANS-cn\") err=${err2}\n")
+        exit(1)
+    }
+    t2 = t2_str as Tag
+    if string_equals(t2 as string, "zh-Hans-CN") != 1 {
+        print("FAIL: parse(\"ZH-HANS-cn\") canonicalized to ${t2 as string}\n")
+        exit(1)
+    }
+    print("PASS: parse script and region case folding\n")
+
+    t3_str, err3 = language.parse("X-private-tag")
+    if err3 != "" {
+        print("FAIL: parse(\"X-private-tag\") err=${err3}\n")
+        exit(1)
+    }
+    t3 = t3_str as Tag
+    if string_equals(t3 as string, "x-private-tag") != 1 {
+        print("FAIL: parse(\"X-private-tag\") canonicalized to ${t3 as string}\n")
+        exit(1)
+    }
+    print("PASS: parse pure privateuse\n")
+
+    t4_str, err4 = language.parse("en_US")
+    if err4 != "" {
+        print("FAIL: parse(\"en_US\") err=${err4}\n")
+        exit(1)
+    }
+    t4 = t4_str as Tag
+    if string_equals(t4 as string, "en-US") != 1 {
+        print("FAIL: parse(\"en_US\") canonicalized to ${t4 as string}\n")
+        exit(1)
+    }
+    print("PASS: parse underscore normalization\n")
+
+    // 2. Reject Invalid Tags
+    _, err_empty = language.parse("")
+    if err_empty == "" {
+        print("FAIL: parse(\"\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject empty\n")
+
+    _, err_double = language.parse("en--US")
+    if err_double == "" {
+        print("FAIL: parse(\"en--US\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject double hyphens\n")
+
+    _, err_lead = language.parse("-en")
+    if err_lead == "" {
+        print("FAIL: parse(\"-en\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject leading hyphen\n")
+
+    _, err_trail = language.parse("en-")
+    if err_trail == "" {
+        print("FAIL: parse(\"en-\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject trailing hyphen\n")
+
+    _, err_short = language.parse("e")
+    if err_short == "" {
+        print("FAIL: parse(\"e\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject too short primary subtag\n")
+
+    _, err_num = language.parse("123")
+    if err_num == "" {
+        print("FAIL: parse(\"123\") did not error\n")
+        exit(1)
+    }
+    print("PASS: parse reject numeric primary subtag\n")
+
+    // 3. Component Extraction
+    lang_t2 = language.language(t2)
+    if string_equals(lang_t2, "zh") != 1 {
+        print("FAIL: language(zh-Hans-CN)=${lang_t2}\n")
+        exit(1)
+    }
+    print("PASS: extract language\n")
+
+    script_t2 = language.script(t2)
+    if string_equals(script_t2, "Hans") != 1 {
+        print("FAIL: script(zh-Hans-CN)=${script_t2}\n")
+        exit(1)
+    }
+    print("PASS: extract script\n")
+
+    region_t2 = language.region(t2)
+    if string_equals(region_t2, "CN") != 1 {
+        print("FAIL: region(zh-Hans-CN)=${region_t2}\n")
+        exit(1)
+    }
+    print("PASS: extract region\n")
+
+    base_t2 = language.base(t2)
+    if string_equals(base_t2 as string, "zh") != 1 {
+        print("FAIL: base(zh-Hans-CN)=${base_t2 as string}\n")
+        exit(1)
+    }
+    print("PASS: extract base\n")
+
+    // 4. Matcher
+    let supported: *StringSeq = ["zh-Hans-CN", "en-US", "da"]
+    m = language.matcher_create(supported)
+    defer language.matcher_free(m)
+
+    // Match exact preferred
+    let pref1: *StringSeq = ["en-US", "zh-Hans"]
+    res1 = language.match_tags(m, pref1)
+    if string_equals(res1, "en-US") != 1 {
+        print("FAIL: match_tags exact, got ${res1}\n")
+        exit(1)
+    }
+    print("PASS: match_tags exact\n")
+
+    // Match with truncation
+    let pref2: *StringSeq = ["en-US-California"]
+    res2 = language.match_tags(m, pref2)
+    if string_equals(res2, "en-US") != 1 {
+        print("FAIL: match_tags truncated, got ${res2}\n")
+        exit(1)
+    }
+    print("PASS: match_tags truncated\n")
+
+    // Match with fallback to primary language
+    let pref3: *StringSeq = ["zh-HK"]
+    res3 = language.match_tags(m, pref3)
+    if string_equals(res3, "zh-Hans-CN") != 1 {
+        print("FAIL: match_tags fallback to primary, got ${res3}\n")
+        exit(1)
+    }
+    print("PASS: match_tags primary fallback\n")
+
+    // Match empty preference falls back to first supported
+    let pref_empty: *StringSeq = []
+    res_empty = language.match_tags(m, pref_empty)
+    if string_equals(res_empty, "zh-Hans-CN") != 1 {
+        print("FAIL: match_tags empty preference, got ${res_empty}\n")
+        exit(1)
+    }
+    print("PASS: match_tags empty preference fallback\n")
+
+    // 5. match_strings (Accept-Language / comma-separated tags with weights)
+    res_str1 = language.match_strings(m, "da, en-gb;q=0.8, en;q=0.7")
+    if string_equals(res_str1, "da") != 1 {
+        print("FAIL: match_strings da, got ${res_str1}\n")
+        exit(1)
+    }
+    print("PASS: match_strings sorted list (da highest q)\n")
+
+    res_str2 = language.match_strings(m, "en-gb;q=0.7, da;q=0.9, en;q=0.8")
+    if string_equals(res_str2, "da") != 1 {
+        print("FAIL: match_strings da;q=0.9, got ${res_str2}\n")
+        exit(1)
+    }
+    print("PASS: match_strings sorted list (da;q=0.9 highest q)\n")
+
+    res_str3 = language.match_strings(m, "en-US-California;q=0.9")
+    if string_equals(res_str3, "en-US") != 1 {
+        print("FAIL: match_strings truncated option, got ${res_str3}\n")
+        exit(1)
+    }
+    print("PASS: match_strings truncated option\n")
+
+    res_str4 = language.match_strings(m, "fr;q=0.9")
+    if string_equals(res_str4, "zh-Hans-CN") != 1 {
+        print("FAIL: match_strings unsupported, got ${res_str4}\n")
+        exit(1)
+    }
+    print("PASS: match_strings unsupported fallback\n")
+
+    print("\nAll PASS\n")
+}
