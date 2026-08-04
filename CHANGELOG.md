@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **`std.cryptography.aes` runs on a native core** (#1394). The cipher was
+  written in Aether and reached every byte of state through `bytes.get` and
+  `bytes.set`, roughly 15 million calls per megabyte for AES-256, measured at
+  4.4 MB/s. The same cipher now lives in `std/cryptography/aes/aether_aes.c`
+  and works on a raw pointer: 1 MB of AES-256-CBC goes from 227 ms to 12 ms,
+  about 21x, and `cbc_encrypt` / `cbc_decrypt` / `ctr_xor` drive the loop in C
+  rather than one call per block. Every mode built on `process_block` (GCM,
+  CCM, EAX, OCB, CMAC, key wrap) inherits it.
+
+  There is no second implementation: the byte-by-byte Aether cipher is deleted
+  rather than kept as a fallback. It is plain C, so every target Aether
+  compiles for has it, and a fallback would only be a copy to keep in step.
+  Correctness is pinned where it already was, the FIPS-197 Appendix B and C
+  known-answer vectors in `tests/regression/test_aes.ae`.
+
 ## [0.481.0]
 
 ### Added
