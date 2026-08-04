@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Differential testing across lowering paths** (#523). Every
+  `tests/differential/cases/*.ae` is built and run under both `--emit=exe` and
+  `--emit=lib` and the outputs compared, because per-path correctness is weaker
+  than cross-path agreement: a bug that miscompiles one path passes today, since
+  that path's expected output was captured from the same build. A divergence is
+  a hard failure naming both paths with the diff. Carved-out cases are reported
+  with their reason on every run rather than silently skipped, and a carveout
+  naming a case that no longer exists is an error, so the file cannot rot. Wired
+  in as step 9 of `make ci` and available as `make test-differential`. See
+  `docs/differential-testing.md`.
+
+### Changed
+
+- **Actor pooling measured and rejected** (#1332), with the numbers recorded in
+  `docs/runtime-optimizations.md`. On the skynet benchmark constructing 11.1M
+  actors, malloc/free is 2.9% of non-idle CPU during the tree-construction phase
+  and 0.3-0.5% across a whole run, against `scheduler_spawn_actor`'s own 10.1%
+  spent re-initializing state a pool would still have to re-initialize. The
+  ceiling is too small to justify a size-class bucketed, NUMA-aware pool with a
+  cross-core release path. A side finding is recorded with it: `tlv_get_addr` is
+  6.7% of non-idle time, roughly twice the allocator, making thread-local access
+  a bigger cost in the actor hot path than actor allocation.
+
 ## [0.489.0]
 
 ## [0.488.0]

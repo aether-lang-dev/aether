@@ -2166,41 +2166,57 @@ ci: clean
 	@echo "  Parallel: $(NPROC) jobs (build) / $(NPROC) (.ae tests) / $${SH_NPROC:-1} (shell tests)"
 	@echo "==================================="
 	@echo ""
-	@echo "[0/9] Restoring miniaudio object cache (if valid)..."
+	@echo "[0/10] Restoring miniaudio object cache (if valid)..."
 	@$(MAKE) audio-cache-restore
 	@echo ""
-	@echo "[1/9] Building compiler (-Werror)..."
+	@echo "[1/10] Building compiler (-Werror)..."
 	@$(MAKE) -j$(NPROC) compiler EXTRA_CFLAGS=-Werror
 	@$(MAKE) audio-cache-save
 	@echo ""
-	@echo "[2/9] Building ae CLI..."
+	@echo "[2/10] Building ae CLI..."
 	@$(MAKE) -j$(NPROC) ae
 	@echo ""
-	@echo "[3/9] Building stdlib..."
+	@echo "[3/10] Building stdlib..."
 	@$(MAKE) -j$(NPROC) stdlib
 	@echo ""
-	@echo "[4/9] Running C unit tests..."
+	@echo "[4/10] Running C unit tests..."
 	@$(MAKE) -j$(NPROC) test
 	@echo ""
-	@echo "[5/9] Running .ae integration tests..."
+	@echo "[5/10] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
-	@echo "[6/9] Building examples..."
+	@echo "[6/10] Building examples..."
 	@$(MAKE) examples
 	@echo ""
-	@echo "[7/9] Install smoke test..."
+	@echo "[7/10] Install smoke test..."
 	@$(MAKE) test-install
 	@echo ""
-	@echo "[8/9] ae test smoke check..."
+	@echo "[8/10] ae test smoke check..."
 	@AETHER_HOME="" ./build/ae test examples/basics/hello.ae 2>&1 | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
-	@echo "[9/9] Release archive smoke test..."
+	@echo "[9/10] Differential test (lowering paths agree)..."
+	@$(MAKE) test-differential
+	@echo ""
+	@echo "[10/10] Release archive smoke test..."
 	@$(MAKE) test-release-archive
 	@echo ""
 	@echo "==================================="
 	@echo "  CI PASSED — all checks green"
 	@echo "==================================="
+
+# -----------------------------------------------------------------
+# Differential testing (#523)
+#
+# Runs every tests/differential/cases/*.ae through both lowering paths
+# (--emit=exe and --emit=lib) and compares stdout + exit code. Per-path
+# correctness is weaker than cross-path agreement: a bug that miscompiles
+# one path passes today, because that path's expected output was generated
+# from the same build. See docs/differential-testing.md.
+# -----------------------------------------------------------------
+.PHONY: test-differential
+test-differential: ae
+	@sh tests/differential/run_differential.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

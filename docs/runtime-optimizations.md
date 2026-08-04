@@ -389,6 +389,55 @@ Benchmarks showed hardware prefetchers handle sequential ring buffer access more
 
 Message processing is memory-bound. Vectorization overhead exceeded benefits for typical message sizes.
 
+### Actor Pooling (#1332)
+
+Reusing actor allocations across spawn/destroy churn, so a high-churn workload
+stops paying malloc/free per actor. Measured before implementing, per the rule
+that perf work needs profiling evidence first, and the measurement did not
+support it.
+
+Workload: the skynet benchmark at `SKYNET_LEAVES=1000000000`, which constructs
+**11.1M actors**, the most spawn-heavy workload in the tree. Sampled with
+`sample(1)` on macOS/arm64. Idle frames (`swtch_pri`, `__semwait_signal`,
+`scheduler_wait`) are excluded from the denominator, since a pool cannot recover
+time nobody is using.
+
+Sampling the **tree-construction phase specifically**, which is where every
+spawn happens:
+
+| Frame | Share of non-idle |
+|---|---|
+| `scheduler_thread` (the scheduler loop) | 70.0% |
+| `scheduler_spawn_actor` (self) | 10.1% |
+| `tlv_get_addr` (thread-local access) | 6.7% |
+| `scheduler_io_poll` | 4.8% |
+| **malloc / free, all frames** | **2.9%** |
+| `scheduler_register_actor` | 0.2% |
+
+Sampling a whole run mid-flight instead, so steady-state messaging dominates,
+puts the allocator at **0.3-0.5%** of non-idle time across two runs.
+
+So the ceiling for actor pooling is roughly 3% of non-idle CPU in the
+construction phase of a benchmark built to do nothing but construct actors, and
+well under 1% of a realistic run. A pool cannot capture even that much: it still
+has to re-initialize the mailbox, atomics, `alloc_size` and the panic/dead flags,
+which is most of what `scheduler_spawn_actor`'s own 10% is doing. The allocation
+call is the small half of the small number.
+
+Against that, a correct pool has to be size-class bucketed (actors are
+variable-size derived structs), preserve NUMA affinity, and handle release
+happening on a different core than spawn because work stealing migrates actors
+mid-life. The previous attempt (removed in PR #1330) got the layout wrong and
+routed NUMA-allocated memory to plain `free()`.
+
+Not worth it at this ratio. Revisit if a profile ever shows allocation as a
+double-digit share.
+
+**Side finding worth its own look:** `tlv_get_addr` is 6.7% of non-idle time,
+stable across all three samples, and about twice the allocator. Thread-local
+variable access is a larger cost in the actor hot path than actor allocation
+ever was.
+
 ## Opt-In Features
 
 The following optimizations are available but disabled by default. Enable them via runtime configuration flags when appropriate for your workload.
