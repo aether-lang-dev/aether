@@ -39,8 +39,26 @@ for sym in add greet; do
 done
 
 # The point of the mode: link it into a C program and run it.
-LIBS=$("$AE" cflags --libs 2>/dev/null)
-if ! sh -c "cc -o \"$TMPDIR/consume\" \"$SCRIPT_DIR/consume.c\" \"$TMPDIR/lib.o\" $LIBS" \
+#
+# The runtime comes from the in-tree archive by path, not from `-laether`:
+# `ae cflags --libs` emits `-L<prefix>/lib -laether` for an *installed*
+# runtime, and CI never runs `make install`, so that spelling fails on
+# `cannot find -laether` even when the object under test is perfect.
+#
+# Every other flag from `ae cflags --libs` is kept: it is the right source of
+# truth for the archive's transitive dependencies (OpenSSL, PCRE2, nghttp2, and
+# the platform sockets library on Windows), and the `-L` paths that go with
+# them are load-bearing, dropping those breaks `-lssl` on a Homebrew host.
+# pthread is needed because libaether uses TLS and the actor scheduler; -lm
+# covers math.h symbols pulled in by the stdlib.
+LIB="$ROOT/build/libaether.a"
+if [ ! -f "$LIB" ]; then
+    echo "  [SKIP] emit_obj: libaether.a not built"
+    exit 0
+fi
+DEPS=$("$AE" cflags --libs 2>/dev/null | tr ' ' '\n' \
+       | grep -v '^-laether$' | tr '\n' ' ')
+if ! sh -c "cc -o \"$TMPDIR/consume\" \"$SCRIPT_DIR/consume.c\" \"$TMPDIR/lib.o\" \"$LIB\" $DEPS -lpthread -lm" \
         >"$TMPDIR/link.log" 2>&1; then
     echo "  [FAIL] emit_obj: C consumer failed to link against the object"
     grep -v "^ld: warning" "$TMPDIR/link.log" | head -8 | sed 's/^/        /'
