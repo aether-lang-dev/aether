@@ -52,233 +52,65 @@ exports(
 )
 
 extern malloc(size: int) -> ptr
+
+// #1394: the same cipher over a raw pointer. The Aether implementation below
+// stays as the portable fallback and the reference the KATs compare against;
+// it reaches every byte through bytes.get/bytes.set, about 15 million calls
+// per megabyte for AES-256.
+extern aether_bytes_data(b: ptr) -> ptr
+extern aether_bytes_set_length(b: ptr, length: int) -> int
+extern aether_aes_available() -> int
+extern aether_aes_new(key: ptr, keylen: int, encrypt: int) -> ptr
+extern aether_aes_free(ctx: ptr)
+extern aether_aes_block(ctx: ptr, inp: ptr, out: ptr) -> int
+extern aether_aes_cbc_encrypt(ctx: ptr, iv: ptr, inp: ptr, out: ptr, n: int) -> int
+extern aether_aes_cbc_decrypt(ctx: ptr, iv: ptr, inp: ptr, out: ptr, n: int) -> int
+extern aether_aes_ctr_xor(ctx: ptr, iv: ptr, inp: ptr, out: ptr, n: int) -> int
 @extern("free") libc_free(p: ptr)
 
 block_size() -> int { return 16 }
 
 // Round-key schedule (bytes, 16*(rounds+1) slots), round count, direction.
 struct AesCtx {
-    rk: ptr // intarr of round-key bytes
-    rounds: int
+    native: ptr // handle from aether_aes_new
     encrypt: int // 1 = encryptor, 0 = decryptor
 }
 
-// ---- S-boxes (FIPS-197) ----
-SBOX_HEX() -> string {
-    return "637c777bf26b6fc53001672bfed7ab76ca82c97dfa5947f0add4a2af9ca472c0b7fd9326363ff7cc34a5e5f171d8311504c723c31896059a071280e2eb27b27509832c1a1b6e5aa0523bd6b329e32f8453d100ed20fcb15b6acbbe394a4c58cfd0efaafb434d338545f9027f503c9fa851a3408f929d38f5bcb6da2110fff3d2cd0c13ec5f974417c4a77e3d645d197360814fdc222a908846eeb814de5e0bdbe0323a0a4906245cc2d3ac629195e479e7c8376d8dd54ea96c56f4ea657aae08ba78252e1ca6b4c6e8dd741f4bbd8b8a703eb5664803f60e613557b986c11d9ee1f8981169d98e949b1e87e9ce5528df8ca1890dbfe6426841992d0fb054bb16"
-}
-ISBOX_HEX() -> string {
-    return "52096ad53036a538bf40a39e81f3d7fb7ce339829b2fff87348e4344c4dee9cb547b9432a6c2233dee4c950b42fac34e082ea16628d924b2765ba2496d8bd12572f8f66486689816d4a45ccc5d65b6926c704850fdedb9da5e154657a78d9d8490d8ab008cbcd30af7e45805b8b34506d02c1e8fca3f0f02c1afbd0301138a6b3a9111414f67dcea97f2cfcef0b4e67396ac7422e7ad3585e2f937e81c75df6e47f11a711d29c5896fb7620eaa18be1bfc563e4bc6d279209adbc0fe78cd5af41fdda8338807c731b11210592780ec5f60517fa919b54a0d2de57a9f93c99cefa0e03b4dae2af5b0c8ebbb3c83539961172b047eba77d626e169146355210c7d"
-}
+// The cipher itself lives in aether_aes.c (#1394). It is plain C, so every
+// target Aether compiles for has it; there is no second implementation to
+// keep in step. Correctness is pinned by the FIPS-197 KATs in
+// tests/regression/test_aes.ae.
 
-hexval(c: int) -> int {
-    if c >= 48 { if c <= 57 { return c - 48 } }
-    if c >= 97 { if c <= 102 { return c - 87 } }
-    return 0
-}
-// 256-byte table from a 512-char hex string.
-make_box(h: string) -> ptr {
-    t = intarr_new_raw(256)
-    n = string.length(h)
-    i = 0
-    idx = 0
-    while i + 1 < n {
-        hi = hexval(string_char_at_n(h, n, i))
-        lo = hexval(string_char_at_n(h, n, i + 1))
-        intarr_set_raw(t, idx, (hi * 16 + lo) & 0xFF)
-        idx = idx + 1
-        i = i + 2
-    }
-    return t
-}
-
-// ---- GF(2^8) ----
-xtime(x: int) -> int {
-    r = (x << 1) & 0xFF
-    if (x & 0x80) != 0 { r = r ^ 0x1b }
-    return r & 0xFF
-}
-gmul(a: int, b: int) -> int {
-    p = 0
-    aa = a & 0xFF
-    bb = b & 0xFF
-    k = 0
-    while k < 8 {
-        if (bb & 1) != 0 { p = p ^ aa }
-        aa = xtime(aa)
-        bb = bits.lsr32(bb, 1)
-        k = k + 1
-    }
-    return p & 0xFF
-}
-
-// state accessors (state is a 16-slot intarr, column-major: idx = col*4 + row)
-g(s: ptr, i: int) -> int { return intarr_get_raw(s, i) & 0xFF }
-p(s: ptr, i: int, v: int) { intarr_set_raw(s, i, v & 0xFF) }
-
-// ---- key expansion ----
-new_ctx(key: ptr, keylen: int, sbox: ptr, encrypt: int) -> ptr {
-    nk = keylen / 4 // 4 / 6 / 8
-    rounds = nk + 6 // 10 / 12 / 14
-    total_words = 4 * (rounds + 1)
-    w = intarr_new_raw(total_words * 4)
-    i = 0
-    while i < nk * 4 {
-        intarr_set_raw(w, i, bytes.get(key, i) & 0xFF)
-        i = i + 1
-    }
-    rcon = 1
-    wi = nk
-    while wi < total_words {
-        pp = (wi - 1) * 4
-        t0 = intarr_get_raw(w, pp + 0) & 0xFF
-        t1 = intarr_get_raw(w, pp + 1) & 0xFF
-        t2 = intarr_get_raw(w, pp + 2) & 0xFF
-        t3 = intarr_get_raw(w, pp + 3) & 0xFF
-        if (wi % nk) == 0 {
-            r0 = t1; r1 = t2; r2 = t3; r3 = t0
-            t0 = (intarr_get_raw(sbox, r0) & 0xFF) ^ rcon
-            t1 = intarr_get_raw(sbox, r1) & 0xFF
-            t2 = intarr_get_raw(sbox, r2) & 0xFF
-            t3 = intarr_get_raw(sbox, r3) & 0xFF
-            rcon = xtime(rcon)
-        } else {
-            if nk > 6 {
-                if (wi % nk) == 4 {
-                    t0 = intarr_get_raw(sbox, t0) & 0xFF
-                    t1 = intarr_get_raw(sbox, t1) & 0xFF
-                    t2 = intarr_get_raw(sbox, t2) & 0xFF
-                    t3 = intarr_get_raw(sbox, t3) & 0xFF
-                }
-            }
-        }
-        q = (wi - nk) * 4
-        o = wi * 4
-        intarr_set_raw(w, o + 0, (intarr_get_raw(w, q + 0) ^ t0) & 0xFF)
-        intarr_set_raw(w, o + 1, (intarr_get_raw(w, q + 1) ^ t1) & 0xFF)
-        intarr_set_raw(w, o + 2, (intarr_get_raw(w, q + 2) ^ t2) & 0xFF)
-        intarr_set_raw(w, o + 3, (intarr_get_raw(w, q + 3) ^ t3) & 0xFF)
-        wi = wi + 1
-    }
-    c = malloc(24) as *AesCtx
-    c.rk = w
-    c.rounds = rounds
-    c.encrypt = encrypt
+new_encryptor(key: ptr, keylen: int) -> ptr {
+    c = malloc(16) as *AesCtx
+    c.native = aether_aes_new(aether_bytes_data(key), keylen, 1)
+    c.encrypt = 1
     return c
 }
 
-new_encryptor(key: ptr, keylen: int) -> ptr {
-    sbox = make_box(SBOX_HEX())
-    ctx = new_ctx(key, keylen, sbox, 1)
-    intarr_free(sbox)
-    return ctx
-}
 new_decryptor(key: ptr, keylen: int) -> ptr {
-    sbox = make_box(SBOX_HEX())
-    ctx = new_ctx(key, keylen, sbox, 0)
-    intarr_free(sbox)
-    return ctx
+    c = malloc(16) as *AesCtx
+    c.native = aether_aes_new(aether_bytes_data(key), keylen, 0)
+    c.encrypt = 0
+    return c
 }
+
 free(ctx: ptr) {
     if ctx == null { return }
     c = ctx as *AesCtx
-    if c.rk != null { intarr_free(c.rk) }
+    if c.native != null { aether_aes_free(c.native) }
     libc_free(ctx)
-}
-
-// ---- round transforms ----
-add_round_key(s: ptr, rk: ptr, rnd: int) {
-    base = rnd * 16
-    i = 0
-    while i < 16 {
-        p(s, i, g(s, i) ^ (intarr_get_raw(rk, base + i) & 0xFF))
-        i = i + 1
-    }
-}
-sub_bytes(s: ptr, sbox: ptr) {
-    i = 0
-    while i < 16 { p(s, i, intarr_get_raw(sbox, g(s, i))); i = i + 1 }
-}
-inv_sub_bytes(s: ptr, isbox: ptr) {
-    i = 0
-    while i < 16 { p(s, i, intarr_get_raw(isbox, g(s, i))); i = i + 1 }
-}
-// byte index = col*4 + row; shift row k left by k.
-shift_rows(s: ptr) {
-    t = g(s, 1); p(s, 1, g(s, 5)); p(s, 5, g(s, 9)); p(s, 9, g(s, 13)); p(s, 13, t)
-    t = g(s, 2); u = g(s, 6); p(s, 2, g(s, 10)); p(s, 6, g(s, 14)); p(s, 10, t); p(s, 14, u)
-    t = g(s, 15); p(s, 15, g(s, 11)); p(s, 11, g(s, 7)); p(s, 7, g(s, 3)); p(s, 3, t)
-}
-inv_shift_rows(s: ptr) {
-    t = g(s, 13); p(s, 13, g(s, 9)); p(s, 9, g(s, 5)); p(s, 5, g(s, 1)); p(s, 1, t)
-    t = g(s, 2); u = g(s, 6); p(s, 2, g(s, 10)); p(s, 6, g(s, 14)); p(s, 10, t); p(s, 14, u)
-    t = g(s, 3); p(s, 3, g(s, 7)); p(s, 7, g(s, 11)); p(s, 11, g(s, 15)); p(s, 15, t)
-}
-mix_columns(s: ptr) {
-    c = 0
-    while c < 4 {
-        b = c * 4
-        a0 = g(s, b + 0); a1 = g(s, b + 1); a2 = g(s, b + 2); a3 = g(s, b + 3)
-        p(s, b + 0, xtime(a0) ^ xtime(a1) ^ a1 ^ a2 ^ a3)
-        p(s, b + 1, a0 ^ xtime(a1) ^ xtime(a2) ^ a2 ^ a3)
-        p(s, b + 2, a0 ^ a1 ^ xtime(a2) ^ xtime(a3) ^ a3)
-        p(s, b + 3, xtime(a0) ^ a0 ^ a1 ^ a2 ^ xtime(a3))
-        c = c + 1
-    }
-}
-inv_mix_columns(s: ptr) {
-    c = 0
-    while c < 4 {
-        b = c * 4
-        a0 = g(s, b + 0); a1 = g(s, b + 1); a2 = g(s, b + 2); a3 = g(s, b + 3)
-        p(s, b + 0, gmul(a0, 14) ^ gmul(a1, 11) ^ gmul(a2, 13) ^ gmul(a3, 9))
-        p(s, b + 1, gmul(a0, 9) ^ gmul(a1, 14) ^ gmul(a2, 11) ^ gmul(a3, 13))
-        p(s, b + 2, gmul(a0, 13) ^ gmul(a1, 9) ^ gmul(a2, 14) ^ gmul(a3, 11))
-        p(s, b + 3, gmul(a0, 11) ^ gmul(a1, 13) ^ gmul(a2, 9) ^ gmul(a3, 14))
-        c = c + 1
-    }
 }
 
 // ---- single block ----
 process_block(ctx: ptr, in16: ptr) -> ptr {
     c = ctx as *AesCtx
     out = bytes.new(16)
-    if c.encrypt == 1 { encrypt_block(c, in16, out) } else { decrypt_block(c, in16, out) }
+    // bytes.new reserves capacity; the core writes through the data pointer,
+    // so the logical length has to be set for readers to see the block.
+    _ = aether_bytes_set_length(out, 16)
+    _ = aether_aes_block(c.native, aether_bytes_data(in16), aether_bytes_data(out))
     return out
-}
-
-encrypt_block(c: *AesCtx, in16: ptr, out: ptr) {
-    sbox = make_box(SBOX_HEX())
-    s = intarr_new_raw(16)
-    i = 0
-    while i < 16 { p(s, i, bytes.get(in16, i)); i = i + 1 }
-    add_round_key(s, c.rk, 0)
-    r = 1
-    while r < c.rounds {
-        sub_bytes(s, sbox); shift_rows(s); mix_columns(s); add_round_key(s, c.rk, r)
-        r = r + 1
-    }
-    sub_bytes(s, sbox); shift_rows(s); add_round_key(s, c.rk, c.rounds)
-    i = 0
-    while i < 16 { bytes.set(out, i, g(s, i)); i = i + 1 }
-    intarr_free(s); intarr_free(sbox)
-}
-
-decrypt_block(c: *AesCtx, in16: ptr, out: ptr) {
-    isbox = make_box(ISBOX_HEX())
-    s = intarr_new_raw(16)
-    i = 0
-    while i < 16 { p(s, i, bytes.get(in16, i)); i = i + 1 }
-    add_round_key(s, c.rk, c.rounds)
-    r = c.rounds - 1
-    while r >= 1 {
-        inv_shift_rows(s); inv_sub_bytes(s, isbox); add_round_key(s, c.rk, r); inv_mix_columns(s)
-        r = r - 1
-    }
-    inv_shift_rows(s); inv_sub_bytes(s, isbox); add_round_key(s, c.rk, 0)
-    i = 0
-    while i < 16 { bytes.set(out, i, g(s, i)); i = i + 1 }
-    intarr_free(s); intarr_free(isbox)
 }
 
 // ---- ECB (block-aligned, NO padding) ----
@@ -306,25 +138,11 @@ ecb_run(ctx: ptr, data: ptr) -> ptr {
 // the initial 16-byte counter block, incremented big-endian per block.
 ctr_xor(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     n = bytes.length(data)
+    c = ctx as *AesCtx
     out = bytes.new(n)
-    ctr = bytes.new(16)
-    i = 0
-    while i < 16 { bytes.set(ctr, i, bytes.get(iv, i)); i = i + 1 }
-    off = 0
-    while off < n {
-        ks = process_block(ctx, ctr)
-        j = 0
-        while j < 16 {
-            if off + j < n {
-                bytes.set(out, off + j, (bytes.get(data, off + j) ^ bytes.get(ks, j)) & 0xFF)
-            }
-            j = j + 1
-        }
-        bytes.free(ks)
-        ctr_increment(ctr)
-        off = off + 16
-    }
-    bytes.free(ctr)
+    _ = aether_bytes_set_length(out, n)
+    _ = aether_aes_ctr_xor(c.native, aether_bytes_data(iv),
+                           aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 ctr_increment(ctr: ptr) {
@@ -349,62 +167,24 @@ ctr_increment(ctr: ptr) {
 // CBC encrypt: C_i = E(P_i XOR C_{i-1}), with C_{-1} = IV.
 cbc_encrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     n = bytes.length(data)
-    if n % 16 != 0 {
-        return bytes.new(0)
-    }
+    if n % 16 != 0 { return bytes.new(0) }
+    c = ctx as *AesCtx
     out = bytes.new(n)
-    prev = bytes.new(16)
-    i = 0
-    while i < 16 { bytes.set(prev, i, bytes.get(iv, i)); i = i + 1 }
-    off = 0
-    while off < n {
-        blk = bytes.new(16)
-        j = 0
-        while j < 16 {
-            bytes.set(blk, j, (bytes.get(data, off + j) ^ bytes.get(prev, j)) & 0xFF)
-            j = j + 1
-        }
-        eb = process_block(ctx, blk)
-        k = 0
-        while k < 16 {
-            v = bytes.get(eb, k)
-            bytes.set(out, off + k, v)
-            bytes.set(prev, k, v) // ciphertext becomes the next XOR mask
-            k = k + 1
-        }
-        bytes.free(blk); bytes.free(eb)
-        off = off + 16
-    }
-    bytes.free(prev)
+    _ = aether_bytes_set_length(out, n)
+    _ = aether_aes_cbc_encrypt(c.native, aether_bytes_data(iv),
+                               aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 
 // CBC decrypt: P_i = D(C_i) XOR C_{i-1}, with C_{-1} = IV.
 cbc_decrypt(ctx: ptr, iv: ptr, data: ptr) -> ptr {
     n = bytes.length(data)
-    if n % 16 != 0 {
-        return bytes.new(0)
-    }
+    if n % 16 != 0 { return bytes.new(0) }
+    c = ctx as *AesCtx
     out = bytes.new(n)
-    prev = bytes.new(16)
-    i = 0
-    while i < 16 { bytes.set(prev, i, bytes.get(iv, i)); i = i + 1 }
-    off = 0
-    while off < n {
-        blk = bytes.new(16)
-        j = 0
-        while j < 16 { bytes.set(blk, j, bytes.get(data, off + j)); j = j + 1 }
-        db = process_block(ctx, blk)
-        k = 0
-        while k < 16 {
-            bytes.set(out, off + k, (bytes.get(db, k) ^ bytes.get(prev, k)) & 0xFF)
-            bytes.set(prev, k, bytes.get(blk, k)) // this ciphertext block
-            k = k + 1
-        }
-        bytes.free(blk); bytes.free(db)
-        off = off + 16
-    }
-    bytes.free(prev)
+    _ = aether_bytes_set_length(out, n)
+    _ = aether_aes_cbc_decrypt(c.native, aether_bytes_data(iv),
+                               aether_bytes_data(data), aether_bytes_data(out), n)
     return out
 }
 
