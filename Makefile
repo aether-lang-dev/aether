@@ -396,15 +396,31 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 # (vcr_embed_abi_wish.md Part A). Negligible codegen cost on x86-64/arm64
 # (most distros already default to PIE); one archive serves both the exe
 # link and the shared-object link.
-CFLAGS = -O2 -fPIC -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(EXTRA_CFLAGS)
+# Two kinds of flag, kept apart on purpose.
+#
+# AETHER_REQUIRED_CFLAGS is structural: the include paths, dependency
+# generation, and the defines that select which code is compiled in. The build
+# is not merely slower without them, it is a different build.
+#
+# CFLAGS is the tunable half: optimisation, debug info, warnings, sanitizers.
+# Callers replace it wholesale and are right to, e.g.
+#
+#     make test-build CFLAGS="-O0 -g"                       (valgrind leg)
+#     make compiler   CFLAGS="-fsanitize=address ... -O1 -g" (ASan leg)
+#
+# They were previously one variable, so those commands did far more than they
+# said: every -I disappeared, and with them -DAETHER_HAS_SANDBOX, which gates
+# real code in runtime/aether_sandbox.c. The sanitizer and valgrind legs were
+# therefore testing a configuration that never ships. It stayed invisible
+# because the remaining includes all resolved same-directory or relatively,
+# until a header outside those trees (include/libaether.h, #1420) finally made
+# it fail out loud.
+#
+# Recipes use `$(AETHER_REQUIRED_CFLAGS) $(CFLAGS)` so tuning one cannot
+# silently delete the other.
+AETHER_REQUIRED_CFLAGS = -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS)
 
-# include/ holds the public embedder header (libaether.h) that
-# runtime/libaether_caps.c includes by name. `override` so a wholesale CFLAGS
-# override cannot drop it: CI passes CFLAGS="-O0 -g" and the sanitizer flags on
-# the valgrind, ASan and memory-profiling legs, which replaces the assignment
-# above and every -I in it. Unconditional and not inside any ifeq, because
-# without this path that translation unit does not compile at all.
-override CFLAGS += -Iinclude
+CFLAGS = -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function $(EXTRA_CFLAGS)
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
 # passwd / sysctl past Capsicum capability mode. libcasper + the
 # per-service libs ship in the FreeBSD base system. We resolve them by
@@ -434,13 +450,24 @@ else ifeq ($(shell uname -s),Darwin)
   AUDIO_LDFLAGS := -framework CoreFoundation -framework CoreAudio -framework AudioToolbox
 endif
 
+# The link-side half of the AETHER_REQUIRED_CFLAGS split above, and it has to
+# stay in lockstep with it: feature detection decides BOTH the -I/-D for a
+# dependency and the -l that resolves the symbols that then get emitted. Split
+# only the compile side and an `LDFLAGS="..."` override compiles OpenSSL in and
+# links it out, so the build fails on undefined SSL symbols. Neither half is
+# tunable on its own.
 ifeq ($(FREEBSD),1)
 # Cross build: the explicit base-libc link tail replaces the native assembly
 # (which would pull the host's -lm / -pthread / globbed host casper libs).
-LDFLAGS = $(FREEBSD_LDFLAGS)
+AETHER_REQUIRED_LDFLAGS = $(FREEBSD_LDFLAGS)
 else
-LDFLAGS = -lm $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS) $(NGHTTP2_LDFLAGS) $(PCRE2_LDFLAGS) $(YAML_LDFLAGS) $(CASPER_LDFLAGS) $(AUDIO_LDFLAGS)
+AETHER_REQUIRED_LDFLAGS = -lm $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS) $(NGHTTP2_LDFLAGS) $(PCRE2_LDFLAGS) $(YAML_LDFLAGS) $(CASPER_LDFLAGS) $(AUDIO_LDFLAGS)
 endif
+
+# Tunable link flags: sanitizers and anything else a caller passes. Empty by
+# default, so `make ... LDFLAGS="-fsanitize=address"` adds to the required set
+# rather than replacing it.
+LDFLAGS =
 
 # Hardening flags (issue #396). Opt-in via `HARDEN=1`. The CI matrix
 # pins a Linux/gcc + HARDEN=1 entry so a hardened-build regression
@@ -474,7 +501,7 @@ ifneq ($(FREEBSD),1)
 ifneq ($(PLATFORM),wasm)
 ifneq ($(PLATFORM),embedded)
 ifeq ($(findstring AETHER_NO_THREADING,$(EXTRA_CFLAGS)),)
-LDFLAGS += -pthread
+AETHER_REQUIRED_LDFLAGS += -pthread
 endif
 endif
 endif
@@ -491,13 +518,13 @@ OBJ_DIR = $(BUILD_DIR)/obj
 # and std.cryptography work in Windows release binaries.
 WIN_LINK_LIBS = -static -lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp
 ifdef WINDOWS_NATIVE
-    LDFLAGS += $(WIN_LINK_LIBS)
+    AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
 else ifneq ($(findstring MINGW,$(DETECTED_OS)),)
-    LDFLAGS += $(WIN_LINK_LIBS)
+    AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
 else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
-    LDFLAGS += $(WIN_LINK_LIBS)
+    AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
 else ifneq ($(findstring CYGWIN,$(DETECTED_OS)),)
-    LDFLAGS += $(WIN_LINK_LIBS)
+    AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
 endif
 
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/aether_error.c compiler/aether_module.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
@@ -596,7 +623,7 @@ endif
 # Pattern rule for object files
 $(OBJ_DIR)/%.o: %.c | $(STDLIB_SYMS_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
 	@echo "Compiling $<..."
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c $< -o $@
 
 # Upstream liblzf (vendored verbatim under std/lzf/) has a few style
 # choices the modern -Werror set flags:
@@ -681,7 +708,7 @@ audio-cache-save: $(AUDIO_OBJ)
 # Compiler target (incremental build with object files)
 compiler: $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) -o build/aetherc$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
@@ -691,14 +718,14 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) build
 endif
-	$(CC) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c -o build/aetherc$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
 	@echo "Building Test Suite ($(DETECTED_OS))"
 	@echo "==================================="
 	@echo "Linking test runner..."
-	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "Running Tests"
@@ -716,7 +743,7 @@ test-fast: compiler-fast
 	@echo "==================================="
 	@echo "Building Test Suite ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(CFLAGS) $(TEST_SRC) $(COMPILER_LIB_SRC) $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(TEST_SRC) $(COMPILER_LIB_SRC) $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "Running Tests"
@@ -734,7 +761,7 @@ test-valgrind: compiler stdlib-dbg
 	@echo "==================================="
 	@echo "Running Tests with Valgrind"
 	@echo "==================================="
-	$(CC) $(CFLAGS_NO_OPT) $(DBG_OPT) $(TEST_SRC) build/dbg/libaether_compiler.a build/dbg/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) $(TEST_SRC) build/dbg/libaether_compiler.a build/dbg/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --error-exitcode=1 ./build/test_runner$(EXE_EXT)
 
 # -----------------------------------------------------------------
@@ -760,10 +787,10 @@ ci-coverage: compiler ae stdlib-cov
 	@echo "==================================="
 	@echo "  Building coverage-instrumented test runner"
 	@echo "==================================="
-	@$(CC) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) $(TEST_SRC) \
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) $(TEST_SRC) \
 		build/cov/libaether_compiler.a build/cov/libaether.a \
 		-Icompiler -Istd -Istd/collections \
-		-o build/test_runner_cov$(EXE_EXT) $(LDFLAGS)
+		-o build/test_runner_cov$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo ""
 	@echo "==================================="
 	@echo "  [1/2] Running C-level tests with coverage counters"
@@ -803,7 +830,7 @@ test-asan: compiler stdlib-asan
 	@echo "==================================="
 	@echo "Running Tests with AddressSanitizer"
 	@echo "==================================="
-	$(CC) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) $(TEST_SRC) build/asan/libaether_compiler.a build/asan/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_asan$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) $(TEST_SRC) build/asan/libaether_compiler.a build/asan/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_asan$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(shell uname -s),Linux)
 	ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 ./build/test_runner_asan$(EXE_EXT)
 else
@@ -824,12 +851,12 @@ test-memory: compiler stdlib-memory
 	@echo "==================================="
 	@echo "Running Memory Tracking Tests"
 	@echo "==================================="
-	$(CC) $(CFLAGS) $(MEM_FLAGS) $(TEST_SRC) build/memory/libaether_compiler.a build/memory/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_mem$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) $(TEST_SRC) build/memory/libaether_compiler.a build/memory/libaether.a -Icompiler -Istd -Istd/collections -o build/test_runner_mem$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	./build/test_runner_mem$(EXE_EXT)
 
 test-manual-runtime: compiler
 	@echo "Building manual runtime test..."
-	$(CC) $(CFLAGS) tests/runtime/test_runtime_manual.c $(RUNTIME_SRC) $(LDFLAGS) -o build/test_runtime_manual$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tests/runtime/test_runtime_manual.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/test_runtime_manual$(EXE_EXT)
 	@echo "Running manual runtime test..."
 	./build/test_runtime_manual$(EXE_EXT)
 
@@ -1251,7 +1278,7 @@ examples: compiler ae stdlib
 	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
 	printf '  exit 1\n'                                                                             >> "$$script"; \
 	printf 'fi\n'                                                                                   >> "$$script"; \
-	printf 'if ! $(CC) $(CFLAGS) "$$out_c" $$extra_c "$$root/$(BUILD_DIR)/libaether.a" -o "$$root/$(BUILD_DIR)/examples/$$name$(EXE_EXT)" $(LDFLAGS) 2>"$$tmpdir/$$key.gcc.err"; then\n' >> "$$script"; \
+	printf 'if ! $(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) "$$out_c" $$extra_c "$$root/$(BUILD_DIR)/libaether.a" -o "$$root/$(BUILD_DIR)/examples/$$name$(EXE_EXT)" $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) 2>"$$tmpdir/$$key.gcc.err"; then\n' >> "$$script"; \
 	printf '  printf "  %%-30s %%s\\n" "$$name" "FAIL (gcc)"\n'                                     >> "$$script"; \
 	printf '  head -20 "$$tmpdir/$$key.gcc.err"\n'                                                  >> "$$script"; \
 	printf '  touch "$$tmpdir/FAIL_$$key"\n'                                                        >> "$$script"; \
@@ -1299,14 +1326,14 @@ lsp: compiler stdlib
 	@echo "==================================="
 	@echo "Building Aether LSP Server ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(CFLAGS) lsp/main.c build/libaether_compiler.a build/libaether.a -Icompiler -Ilsp -Istd -Istd/collections -o build/aether-lsp$(EXE_EXT) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c build/libaether_compiler.a build/libaether.a -Icompiler -Ilsp -Istd -Istd/collections -o build/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "✓ LSP Server built successfully: build/aether-lsp$(EXE_EXT)"
 
 apkg:
 	@echo "==================================="
 	@echo "Building Aether Package Manager ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(LDFLAGS) -o build/apkg$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/apkg$(EXE_EXT)
 	@echo "✓ Package Manager built successfully: build/apkg$(EXE_EXT)"
 
 # Per-object compile for the tools driver (#1221). Static pattern rule so it
@@ -1320,7 +1347,7 @@ ae: compiler $(TOOLS_OBJS)
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	@$(CC) $(TOOLS_OBJS) -o build/ae$(EXE_EXT) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
+	@$(CC) $(TOOLS_OBJS) -o build/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
 	@echo "✓ Built successfully: build/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
@@ -1334,7 +1361,7 @@ profiler:
 	@echo "==================================="
 	@echo "Building Aether Profiler Dashboard ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(CFLAGS) -DAETHER_PROFILING tools/profiler/profiler_server.c tools/profiler/profiler_demo.c $(RUNTIME_SRC) $(LDFLAGS) -o build/profiler_demo$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -DAETHER_PROFILING tools/profiler/profiler_server.c tools/profiler/profiler_demo.c $(RUNTIME_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o build/profiler_demo$(EXE_EXT)
 	@echo "✓ Profiler built successfully: build/profiler_demo$(EXE_EXT)"
 	@echo ""
 	@echo "Run the demo and open http://localhost:8081"
@@ -1355,7 +1382,7 @@ docs-server: compiler
 	@echo "==================================="
 	@./build/aetherc$(EXE_EXT) tools/docgen/server.ae build/docs_server_gen.c
 	@$(CC) -O2 -o build/docs-server$(EXE_EXT) build/docs_server_gen.c tools/docgen/server_ffi.c \
-		$(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) $(LDFLAGS)
+		$(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@rm -f build/docs_server_gen.c
 	@echo "✓ Documentation server built: build/docs-server$(EXE_EXT)"
 
@@ -1510,19 +1537,19 @@ COV_COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(COV_OBJ_DIR)/%.o)
 
 $(ASAN_OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) -c $< -o $@
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) -c $< -o $@
 
 $(MEM_OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS) $(MEM_FLAGS) -c $< -o $@
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) -c $< -o $@
 
 $(DBG_OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS_NO_OPT) $(DBG_OPT) -c $< -o $@
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) -c $< -o $@
 
 $(COV_OBJ_DIR)/%.o: %.c
 	@mkdir -p $(dir $@)
-	@$(CC) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) -c $< -o $@
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) -c $< -o $@
 
 build/asan/libaether.a: $(ASAN_LIB_OBJS)
 	@mkdir -p build/asan
@@ -1613,7 +1640,7 @@ release: clean $(STDLIB_SYMS_HEADER)
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
-		-o build/aetherc-release$(EXE_EXT) $(LDFLAGS)
+		-o build/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
 	@strip build/aetherc-release$(EXE_EXT)
@@ -1868,7 +1895,7 @@ endif
 	@echo "Compiling $(FILE) to C..."
 	@./build/aetherc$(EXE_EXT) $(FILE) build/output.c
 	@echo "Building executable..."
-	@$(CC) $(CFLAGS) build/output.c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/output$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) build/output.c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/output$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running..."
 	@./build/output$(EXE_EXT)
 
@@ -1896,20 +1923,20 @@ endif
 	@echo "Compiling $(FILE) to C..."
 	@./build/aetherc$(EXE_EXT) $(FILE) build/$(OUTPUT).c
 	@echo "Building executable..."
-	@$(CC) $(CFLAGS) build/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/$(OUTPUT)$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) build/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o build/$(OUTPUT)$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "✓ Built: build/$(OUTPUT)$(EXE_EXT)"
 
 # Benchmark computed goto dispatch
 bench-dispatch:
 	@echo "Building computed goto benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o build/bench_computed_goto$(EXE_EXT) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o build/bench_computed_goto$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running benchmark..."
 	@./build/bench_computed_goto$(EXE_EXT)
 
 # Benchmark manual prefetch hints
 bench-prefetch:
 	@echo "Building prefetch benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o build/bench_prefetch$(EXE_EXT) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o build/bench_prefetch$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running benchmark..."
 	@./build/bench_prefetch$(EXE_EXT)
 
@@ -1920,7 +1947,7 @@ pgo-generate:
 	@echo "==================================="
 	@echo "PGO Step 1: Building with instrumentation..."
 	@echo "==================================="
-	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o build/pgo_workload$(EXE_EXT) $(LDFLAGS)
+	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o build/pgo_workload$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Running workload to collect profile data..."
 	@./build/pgo_workload$(EXE_EXT)
 	@echo "Profile data collected in *.gcda files"
@@ -1929,12 +1956,12 @@ pgo-build:
 	@echo "==================================="
 	@echo "PGO Step 2: Building with profile data..."
 	@echo "==================================="
-	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o build/bench_pgo_optimized$(EXE_EXT) $(LDFLAGS)
+	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o build/bench_pgo_optimized$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "PGO-optimized benchmark built"
 
 pgo-baseline:
 	@echo "Building baseline (no PGO)..."
-	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o build/bench_pgo_baseline$(EXE_EXT) $(LDFLAGS)
+	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o build/bench_pgo_baseline$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Baseline benchmark built"
 
 pgo-benchmark: pgo-baseline pgo-generate pgo-build
@@ -2077,7 +2104,7 @@ help:
 
 test-build: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "Building test runner..."
-	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(LDFLAGS)
+	@$(CC) $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) -o build/test_runner$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 # Docker CI/CD targets
 docker-build-ci:
