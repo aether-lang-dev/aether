@@ -9,7 +9,13 @@
  * — that's the documented, ABI-stable shape.
  */
 
-#include "../include/libaether.h"
+/* Resolved through the include path, NOT as `../include/libaether.h`: that
+ * spelling only works in the source tree. In an install the runtime sits at
+ * share/aether/runtime/ while headers are under include/aether/, so the
+ * relative hop pointed at a directory that does not exist and every
+ * cross-compile died here (#1420). Native builds never noticed, because they
+ * pass the include set from `ae cflags` and never rely on the relative path. */
+#include "libaether.h"
 #include "aether_resource_caps.h"
 
 AETHER_API void aether_set_memory_cap(uint64_t bytes) {

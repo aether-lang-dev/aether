@@ -1,0 +1,67 @@
+// Regression (#1421): `return (a, b)` means the same as `return a, b`.
+//
+// `(a, b)` is a tuple literal, so the parenthesised spelling reached codegen as
+// ONE return value where the bare one arrives as two, and the literal was
+// flattened into the return slot. The C compiler then failed on invented
+// identifiers built from the flattened text: `NULL0` for `return (null, 0)`,
+// `bufw` for `return (w.buf, w.off)`. Nothing in the message mentioned
+// parentheses, so the error pointed away from its cause.
+//
+// The two spellings now produce the same AST, so they cannot drift apart.
+import std.string
+
+extern exit(code: int)
+
+bare() -> (int, int) {
+    return 1, 2
+}
+
+parens() -> (int, int) {
+    return (1, 2)
+}
+
+// The reporter's shape: a parenthesised tuple on an early-return branch.
+maybe_buffer(n: int) -> (ptr, int) {
+    if n == 0 {
+        return (null, 0)
+    }
+    return null, n
+}
+
+three() -> (int, int, int) {
+    return (7, 8, 9)
+}
+
+main() {
+    println("=== test_paren_tuple_return ===")
+
+    a, b = bare()
+    c, d = parens()
+    if a != c || b != d {
+        println("  FAIL: parenthesised and bare returns disagree")
+        exit(1)
+    }
+    if c != 1 || d != 2 {
+        println("  FAIL: parenthesised return values wrong")
+        exit(1)
+    }
+
+    p, zero = maybe_buffer(0)
+    if zero != 0 {
+        println("  FAIL: early parenthesised return")
+        exit(1)
+    }
+    q, seven = maybe_buffer(7)
+    if seven != 7 {
+        println("  FAIL: bare return on the same function")
+        exit(1)
+    }
+
+    x, y, z = three()
+    if x != 7 || y != 8 || z != 9 {
+        println("  FAIL: three-element parenthesised return")
+        exit(1)
+    }
+
+    println("  PASS: (a, b) and a, b agree in return position")
+}

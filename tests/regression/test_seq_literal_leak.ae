@@ -1,0 +1,61 @@
+// Regression (#1417): a multi-element `*StringSeq` literal must not leak its
+// inner cons cells.
+//
+// `["a","b","c"]` lowers to a cons chain, and `string_seq_cons` takes its OWN
+// retain on the tail, so the builder has to drop each intermediate handle
+// (`cons(h, t); string_seq_free(t)`). As a nested expression the intermediates
+// were anonymous temporaries nothing ever dropped, so every cell but the head
+// ended at refcount 2. A correct `string_seq_free(head)` then stopped at the
+// first cell that stayed above zero (the shared-tail protection) and the rest
+// leaked: 24 bytes per element past the first, with the program otherwise
+// behaving perfectly.
+//
+// Runs under the leak gate, which is what actually asserts the fix; the
+// value checks here keep the fold honest about order and length.
+import std.string
+
+extern exit(code: int)
+
+main() {
+    println("=== test_seq_literal_leak ===")
+
+    let empty: *StringSeq = []
+    if string_seq_length(empty) != 0 {
+        println("  FAIL: empty literal length")
+        exit(1)
+    }
+    string_seq_free(empty)
+
+    let one: *StringSeq = ["only"]
+    if string_seq_length(one) != 1 {
+        println("  FAIL: single-element literal length")
+        exit(1)
+    }
+    string_seq_free(one)
+
+    // The shape that leaked: every element past the head.
+    let three: *StringSeq = ["a", "b", "c"]
+    if string_seq_length(three) != 3 {
+        println("  FAIL: three-element literal length")
+        exit(1)
+    }
+    if string.equals(string_seq_head(three), "a") != 1 {
+        println("  FAIL: head is not the first element")
+        exit(1)
+    }
+    string_seq_free(three)
+
+    // Longer chain, and repeated so a per-iteration leak would compound.
+    i = 0
+    while i < 200 {
+        let many: *StringSeq = ["one", "two", "three", "four", "five", "six"]
+        if string_seq_length(many) != 6 {
+            println("  FAIL: six-element literal length")
+            exit(1)
+        }
+        string_seq_free(many)
+        i = i + 1
+    }
+
+    println("  PASS: seq literals are leak-clean")
+}

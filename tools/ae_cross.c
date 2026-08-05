@@ -9,6 +9,7 @@
 
 #include "ae_internal.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,6 +172,35 @@ bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz) {
  * default on when no AETHER_NO_* is passed). The external-library macros
  * (AETHER_HAS_OPENSSL / _ZLIB / _NGHTTP2 / _PCRE2) are deliberately left
  * undefined so their stub paths compile, matching the excluded sources. */
+/* Grow *buf to hold at least `need` bytes, doubling. Same shape as
+ * include_flags_grow in ae.c, and for the same reason: the cross-compile
+ * command line scales with the install prefix and the module count, so any
+ * fixed size is a limit someone eventually runs into with nothing they can do
+ * about it. */
+static bool cross_buf_reserve(char** buf, size_t* cap, size_t need) {
+    if (need <= *cap) return true;
+    size_t next = *cap ? *cap : 8192;
+    while (next < need) next *= 2;
+    char* bigger = (char*)realloc(*buf, next);
+    if (!bigger) return false;
+    *buf = bigger;
+    *cap = next;
+    return true;
+}
+
+/* printf into a heap buffer that grows to fit. Returns false only on OOM. */
+static bool cross_cmd_fmt(char** buf, size_t* cap, const char* fmt, ...) {
+    for (;;) {
+        va_list ap;
+        va_start(ap, fmt);
+        int w = vsnprintf(*buf, *cap, fmt, ap);
+        va_end(ap);
+        if (w < 0) return false;
+        if ((size_t)w < *cap) return true;
+        if (!cross_buf_reserve(buf, cap, (size_t)w + 1)) return false;
+    }
+}
+
 int run_cross_build(const char* c_file, const char* out_file,
                            bool optimize, const char* extra,
                            const char* ztriple) {
@@ -396,12 +426,24 @@ int run_cross_build(const char* c_file, const char* out_file,
             }
         }
     }
-    static char cmd[24576];
+    /* Heap-grown rather than fixed: the command line is dominated by
+     * tc.include_flags, which is itself heap-grown and scales with the install
+     * prefix length and the module count. A fixed buffer turned a longer-than-
+     * usual prefix into "cross-compile command exceeded the N-byte buffer",
+     * with no way for the user to shorten anything that mattered. */
+    char* cmd = NULL;
+    size_t cmd_cap = 0;
     /* Accumulated quoted "<objpath>" list, in compile order, for the ar
      * step. posix_run tokenizes the command itself (no shell), so the
-     * archive must name each object explicitly rather than glob. */
-    static char objlist[24576];
+     * archive must name each object explicitly rather than glob. Also grows:
+     * it holds one quoted path per runtime object. */
+    char* objlist = NULL;
+    size_t objlist_cap = 0;
     size_t obj_pos = 0;
+    if (!cross_buf_reserve(&objlist, &objlist_cap, 1)) {
+        fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
+        return 1;
+    }
     objlist[0] = '\0';
     int rc = 1;
 
@@ -418,13 +460,11 @@ int run_cross_build(const char* c_file, const char* out_file,
             /* basename with its trailing ".c" replaced by ".o" */
             snprintf(objpath, sizeof(objpath), "%s/%.*so", objdir,
                      (int)(strlen(bn) - 1), bn);
-            w = snprintf(cmd, sizeof(cmd),
+            if (!cross_cmd_fmt(&cmd, &cmd_cap,
                 "zig cc -target %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
                 ztriple, sysroot_flag, opt, feature_defs, user_cflags, tc.include_flags,
-                srcs[i], objpath);
-            if (w < 0 || (size_t)w >= sizeof(cmd)) {
-                fprintf(stderr, "Error: cross-compile command exceeded the %zu-byte buffer.\n",
-                        sizeof(cmd));
+                srcs[i], objpath)) {
+                fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
                 compile_failed = true;
                 break;
             }
@@ -433,13 +473,15 @@ int run_cross_build(const char* c_file, const char* out_file,
                 compile_failed = true;
                 break;
             }
-            int ow = snprintf(objlist + obj_pos, sizeof(objlist) - obj_pos,
-                              "%s\"%s\"", obj_pos ? " " : "", objpath);
-            if (ow < 0 || obj_pos + (size_t)ow >= sizeof(objlist)) {
-                fprintf(stderr, "Error: cross-compile object list overflowed its buffer.\n");
+            size_t need = obj_pos + strlen(objpath) + 4;
+            if (!cross_buf_reserve(&objlist, &objlist_cap, need)) {
+                fprintf(stderr, "Error: out of memory building the cross-compile object list.\n");
                 compile_failed = true;
                 break;
             }
+            int ow = snprintf(objlist + obj_pos, objlist_cap - obj_pos,
+                              "%s\"%s\"", obj_pos ? " " : "", objpath);
+            if (ow < 0) { compile_failed = true; break; }
             obj_pos += (size_t)ow;
         }
         if (compile_failed) break;
@@ -447,11 +489,9 @@ int run_cross_build(const char* c_file, const char* out_file,
         /* 2. Archive the objects (named explicitly, no glob) so the final
          *    link pulls only what the program references (native
          *    `-laether` semantics). */
-        w = snprintf(cmd, sizeof(cmd),
-            "zig ar rcs \"%s/libaether.a\" %s", objdir, objlist);
-        if (w < 0 || (size_t)w >= sizeof(cmd)) {
-            fprintf(stderr, "Error: cross-compile archive command exceeded the %zu-byte buffer.\n",
-                    sizeof(cmd));
+        if (!cross_cmd_fmt(&cmd, &cmd_cap,
+            "zig ar rcs \"%s/libaether.a\" %s", objdir, objlist)) {
+            fprintf(stderr, "Error: out of memory building the cross-compile archive command.\n");
             break;
         }
         if (run_cmd_show_warnings(cmd) != 0) {
@@ -472,21 +512,20 @@ int run_cross_build(const char* c_file, const char* out_file,
             /* Platform -l names go AFTER libaether.a — it references their
              * symbols (casper's cap_*, openssl's SSL_*, …), so they must
              * follow it on the link line for ld.lld's single-pass resolution. */
-            w = snprintf(cmd, sizeof(cmd),
+            w = cross_cmd_fmt(&cmd, &cmd_cap,
                 "zig cc -target %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
                 ztriple, sysroot_flag, fbsd_link, opt, feature_defs, tc.include_flags,
-                c_file, ex, objdir, fbsd_platform_libs, crossbuild_libs, out_file);
+                c_file, ex, objdir, fbsd_platform_libs, crossbuild_libs, out_file) ? 1 : -1;
         } else {
             /* Tier A (linux/macos/windows): compact form + any CROSSBUILD_SYSROOT
              * Tier-2 libs AND the Windows system libs after libaether.a (it
              * references their symbols — BCryptGenRandom etc.). */
-            w = snprintf(cmd, sizeof(cmd),
+            w = cross_cmd_fmt(&cmd, &cmd_cap,
                 "zig cc -target %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
-                ztriple, sysroot_flag, opt, feature_defs, tc.include_flags, c_file, ex, objdir, crossbuild_libs, win_platform_libs, out_file);
+                ztriple, sysroot_flag, opt, feature_defs, tc.include_flags, c_file, ex, objdir, crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
         }
-        if (w < 0 || (size_t)w >= sizeof(cmd)) {
-            fprintf(stderr, "Error: cross-compile link command exceeded the %zu-byte buffer.\n",
-                    sizeof(cmd));
+        if (w < 0) {
+            fprintf(stderr, "Error: out of memory building the cross-compile link command.\n");
             break;
         }
         if (run_cmd_show_warnings(cmd) != 0) {
@@ -506,6 +545,9 @@ int run_cross_build(const char* c_file, const char* out_file,
         }
         rc = 0;
     } while (0);
+
+    free(cmd);
+    free(objlist);
 
     /* Best-effort removal of the temp object tree. */
     char rmcmd[1100];

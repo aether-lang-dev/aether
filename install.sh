@@ -306,6 +306,10 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # modules added under std/ or new subdirs under std/http/ etc.
     # don't silently fall off the install.
     mkdir -p "$INCLUDE_DIR"
+    # The public embedder header lives in include/, outside the runtime/ and
+    # std/ trees walked below, so it shipped in no install at all and
+    # runtime/libaether_caps.c could not find it when cross-compiling (#1420).
+    cp include/*.h "$INCLUDE_DIR/" 2>/dev/null || true
     (cd runtime && find . -name '*.h' -print) | while read -r h; do
         mkdir -p "$INCLUDE_DIR/runtime/$(dirname "$h")"
         cp "runtime/$h" "$INCLUDE_DIR/runtime/$h" 2>/dev/null || true

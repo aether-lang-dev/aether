@@ -1144,7 +1144,13 @@ found_root:
         char rt[1024], stdroot[1024];
         snprintf(rt, sizeof(rt), "%s/runtime", tc.root);
         snprintf(stdroot, sizeof(stdroot), "%s/std", tc.root);
-        if (!walk_dirs_emit_includes(rt, &tc.include_flags, &tc.include_flags_cap, &pos) ||
+        /* #1420: the public embedder header (include/libaether.h) is not
+         * under runtime/ or std/, so nothing put its directory on the include
+         * path. runtime/libaether_caps.c includes it by name. */
+        char pubinc[1024];
+        snprintf(pubinc, sizeof(pubinc), "%s/include", tc.root);
+        if (!append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, pubinc) ||
+            !walk_dirs_emit_includes(rt, &tc.include_flags, &tc.include_flags_cap, &pos) ||
             !walk_dirs_emit_includes(stdroot, &tc.include_flags, &tc.include_flags_cap, &pos)) {
             // Buffer overflow — fall back to a minimal -I that gets
             // through the build. Caller will see warnings on missing
@@ -1225,7 +1231,13 @@ found_root:
         snprintf(inc_std, sizeof(inc_std), "%s/include/aether/std",     tc.root);
         snprintf(shr_rt,  sizeof(shr_rt),  "%s/share/aether/runtime",   tc.root);
         snprintf(shr_std, sizeof(shr_std), "%s/share/aether/std",       tc.root);
+        /* #1420: include/aether/ itself holds the public embedder header
+         * (libaether.h); the walks below only cover its runtime/ and std/
+         * subtrees. */
+        char inc_root[1024];
+        snprintf(inc_root, sizeof(inc_root), "%s/include/aether", tc.root);
         int ok =
+            append_include_one_dir(&tc.include_flags, &tc.include_flags_cap, &pos, inc_root) &&
             walk_dirs_emit_includes(inc_rt,  &tc.include_flags, &tc.include_flags_cap, &pos) &&
             walk_dirs_emit_includes(inc_std, &tc.include_flags, &tc.include_flags_cap, &pos) &&
             walk_dirs_emit_includes(shr_rt,  &tc.include_flags, &tc.include_flags_cap, &pos) &&
