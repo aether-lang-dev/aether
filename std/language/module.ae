@@ -1,0 +1,557 @@
+// std.language — BCP 47 Language Tags and Matching (RFC 5646, RFC 4647)
+
+import std.string(*)
+import std.bytes
+import std.strbuilder
+import std.list
+
+exports(
+    Tag, parse, language, script, region, base,
+    Matcher, matcher_create, matcher_free, match_tags, match_strings
+)
+
+type Tag = distinct string
+
+struct Matcher {
+    supported: *StringSeq
+}
+
+struct Preferred {
+    tag: string
+    q: float
+}
+
+fn is_alpha_char(c: int) -> int {
+    if (c >= 97 && c <= 122) || (c >= 65 && c <= 90) {
+        return 1
+    }
+    return 0
+}
+
+fn is_digit_char(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return 1
+    }
+    return 0
+}
+
+fn is_alnum_char(c: int) -> int {
+    if is_alpha_char(c) == 1 || is_digit_char(c) == 1 {
+        return 1
+    }
+    return 0
+}
+
+fn is_alpha(s: string) -> int {
+    len = string_length(s)
+    if len == 0 {
+        return 0
+    }
+    i = 0
+    while i < len {
+        c = string_char_at(s, i)
+        if is_alpha_char(c) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn is_digit(s: string) -> int {
+    len = string_length(s)
+    if len == 0 {
+        return 0
+    }
+    i = 0
+    while i < len {
+        c = string_char_at(s, i)
+        if is_digit_char(c) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn is_alnum(s: string) -> int {
+    len = string_length(s)
+    if len == 0 {
+        return 0
+    }
+    i = 0
+    while i < len {
+        c = string_char_at(s, i)
+        if is_alnum_char(c) == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+fn to_title_case(s: string) -> string {
+    len = string_length(s)
+    if len == 0 {
+        return ""
+    }
+    buf = bytes.new(len)
+    c0 = string_char_at(s, 0)
+    if c0 >= 97 && c0 <= 122 {
+        bytes.set(buf, 0, c0 - 32)
+    } else {
+        bytes.set(buf, 0, c0)
+    }
+    i = 1
+    while i < len {
+        ci = string_char_at(s, i)
+        if ci >= 65 && ci <= 90 {
+            bytes.set(buf, i, ci + 32)
+        } else {
+            bytes.set(buf, i, ci)
+        }
+        i = i + 1
+    }
+    return bytes.finish(buf, len)
+}
+
+fn parse(s: string) -> (string, string) {
+    if string_length(s) == 0 {
+        return "", "empty language tag"
+    }
+
+    // Normalize structure: replace underscores with hyphens
+    norm = string_replace_all(s, "_", "-")
+
+    // Validate that we don't have leading, trailing, or double hyphens
+    if string_starts_with(norm, "-") == 1 || string_ends_with(norm, "-") == 1 || string_contains(norm, "--") == 1 {
+        return "", "invalid language tag structure"
+    }
+
+    parts = string_split_to_seq(norm, "-")
+    if string_seq_is_empty(parts) == 1 {
+        string_seq_free(parts)
+        return "", "empty language tag"
+    }
+    defer string_seq_free(parts)
+
+    first = string_seq_head(parts)
+    first_len = string_length(first)
+
+    is_private_use = 0
+    if string_equals(first, "x") == 1 || string_equals(first, "X") == 1 {
+        is_private_use = 1
+    }
+
+    if is_private_use == 0 {
+        if first_len < 2 || first_len > 8 || is_alpha(first) == 0 {
+            // Check grandfathered i-
+            if first_len == 1 && (string_equals(first, "i") == 1 || string_equals(first, "I") == 1) {
+                // valid grandfathered prefix
+            } else {
+                return "", "invalid primary language subtag"
+            }
+        }
+    }
+
+    b = strbuilder.new(32)
+    defer catch strbuilder.free(b)
+
+    parsed_script = 0
+    parsed_region = 0
+    in_extension = 0
+    in_private_use_zone = 0
+    idx = 0
+
+    curr = parts
+    while string_seq_is_empty(curr) == 0 {
+        subtag = string_seq_head(curr)
+        sub_len = string_length(subtag)
+
+        if sub_len == 0 {
+            return "", "invalid empty subtag"
+        }
+
+        canonicalized = ""
+
+        if is_private_use == 1 {
+            canonicalized = string_to_lower(subtag)
+        } else if in_private_use_zone == 1 {
+            canonicalized = string_to_lower(subtag)
+        } else if in_extension == 1 {
+            if sub_len == 1 {
+                if string_equals(subtag, "x") == 1 || string_equals(subtag, "X") == 1 {
+                    in_private_use_zone = 1
+                    in_extension = 0
+                    canonicalized = "x"
+                } else {
+                    if is_alnum(subtag) == 0 {
+                        return "", "invalid extension singleton"
+                    }
+                    canonicalized = string_to_lower(subtag)
+                }
+            } else {
+                if sub_len < 2 || sub_len > 8 || is_alnum(subtag) == 0 {
+                    return "", "invalid extension subtag"
+                }
+                canonicalized = string_to_lower(subtag)
+            }
+        } else {
+            if idx == 0 {
+                canonicalized = string_to_lower(subtag)
+            } else {
+                if sub_len == 1 {
+                    if string_equals(subtag, "x") == 1 || string_equals(subtag, "X") == 1 {
+                        in_private_use_zone = 1
+                        canonicalized = "x"
+                    } else {
+                        if is_alnum(subtag) == 0 {
+                            return "", "invalid extension singleton"
+                        }
+                        in_extension = 1
+                        canonicalized = string_to_lower(subtag)
+                    }
+                } else {
+                    matched = 0
+                    if parsed_script == 0 && parsed_region == 0 && sub_len == 4 && is_alpha(subtag) == 1 {
+                        canonicalized = to_title_case(subtag)
+                        parsed_script = 1
+                        matched = 1
+                    }
+
+                    if matched == 0 && parsed_region == 0 {
+                        if sub_len == 2 && is_alpha(subtag) == 1 {
+                            canonicalized = string_to_upper(subtag)
+                            parsed_region = 1
+                            matched = 1
+                        } else if sub_len == 3 && is_digit(subtag) == 1 {
+                            canonicalized = subtag
+                            parsed_region = 1
+                            matched = 1
+                        }
+                    }
+
+                    if matched == 0 {
+                        is_var = 0
+                        if sub_len >= 5 && sub_len <= 8 && is_alnum(subtag) == 1 {
+                            is_var = 1
+                        } else if sub_len == 4 && is_digit_char(string_char_at(subtag, 0)) == 1 && is_alnum(subtag) == 1 {
+                            is_var = 1
+                        }
+                        if is_var == 1 {
+                            canonicalized = string_to_lower(subtag)
+                            matched = 1
+                        }
+                    }
+
+                    if matched == 0 && parsed_script == 0 && parsed_region == 0 && sub_len == 3 && is_alpha(subtag) == 1 {
+                        canonicalized = string_to_lower(subtag)
+                        matched = 1
+                    }
+
+                    if matched == 0 {
+                        if is_alnum(subtag) == 1 {
+                            canonicalized = string_to_lower(subtag)
+                        } else {
+                            return "", "invalid subtag"
+                        }
+                    }
+                }
+            }
+        }
+
+        if idx > 0 {
+            strbuilder.append_byte(b, 45) // '-'
+        }
+        strbuilder.append(b, canonicalized)
+
+        curr = string_seq_tail(curr)
+        idx = idx + 1
+    }
+
+    res = strbuilder.finish(b)
+    return res, ""
+}
+
+fn language(tag: Tag) -> string {
+    s = tag as string
+    parts = string_split_to_seq(s, "-")
+    defer string_seq_free(parts)
+    if string_seq_is_empty(parts) == 1 {
+        return ""
+    }
+    return string_copy(string_seq_head(parts))
+}
+
+fn script(tag: Tag) -> string {
+    s = tag as string
+    parts = string_split_to_seq(s, "-")
+    defer string_seq_free(parts)
+    curr = parts
+    idx = 0
+    while string_seq_is_empty(curr) == 0 {
+        subtag = string_seq_head(curr)
+        sub_len = string_length(subtag)
+        if idx > 0 {
+            if sub_len == 4 && is_alpha(subtag) == 1 {
+                c0 = string_char_at(subtag, 0)
+                c1 = string_char_at(subtag, 1)
+                c2 = string_char_at(subtag, 2)
+                c3 = string_char_at(subtag, 3)
+                if c0 >= 65 && c0 <= 90 && c1 >= 97 && c1 <= 122 && c2 >= 97 && c2 <= 122 && c3 >= 97 && c3 <= 122 {
+                    return string_copy(subtag)
+                }
+            }
+            if sub_len == 2 {
+                c0 = string_char_at(subtag, 0)
+                c1 = string_char_at(subtag, 1)
+                if c0 >= 65 && c0 <= 90 && c1 >= 65 && c1 <= 90 {
+                    break
+                }
+            }
+            if sub_len == 3 && is_digit(subtag) == 1 {
+                break
+            }
+            if sub_len == 1 {
+                break
+            }
+        }
+        curr = string_seq_tail(curr)
+        idx = idx + 1
+    }
+    return ""
+}
+
+fn region(tag: Tag) -> string {
+    s = tag as string
+    parts = string_split_to_seq(s, "-")
+    defer string_seq_free(parts)
+    curr = parts
+    idx = 0
+    while string_seq_is_empty(curr) == 0 {
+        subtag = string_seq_head(curr)
+        sub_len = string_length(subtag)
+        if idx > 0 {
+            if sub_len == 2 {
+                c0 = string_char_at(subtag, 0)
+                c1 = string_char_at(subtag, 1)
+                if c0 >= 65 && c0 <= 90 && c1 >= 65 && c1 <= 90 {
+                    return string_copy(subtag)
+                }
+            }
+            if sub_len == 3 && is_digit(subtag) == 1 {
+                return string_copy(subtag)
+            }
+            if sub_len == 1 {
+                break
+            }
+        }
+        curr = string_seq_tail(curr)
+        idx = idx + 1
+    }
+    return ""
+}
+
+fn base(tag: Tag) -> Tag {
+    return language(tag) as Tag
+}
+
+fn matcher_create(supported: *StringSeq) -> *Matcher {
+    m = heap.new(Matcher)
+    m.supported = string_seq_retain(supported)
+    return m
+}
+
+fn matcher_free(m: *Matcher) {
+    if m != null {
+        string_seq_free(m.supported)
+        heap.free(m)
+    }
+}
+
+fn find_last_hyphen(s: string) -> int {
+    len = string_length(s)
+    i = len - 1
+    while i >= 0 {
+        if string_char_at(s, i) == 45 { // '-'
+            return i
+        }
+        i = i - 1
+    }
+    return -1
+}
+
+fn match_tags(m: *Matcher, preferred: *StringSeq) -> string {
+    if m == null || string_seq_is_empty(m.supported) == 1 {
+        return ""
+    }
+
+    fallback = string_seq_head(m.supported)
+    if string_seq_is_empty(preferred) == 1 {
+        fallback_tag_str, _ = parse(fallback)
+        return fallback_tag_str
+    }
+
+    // First pass: strict Lookup matching (truncating from the end of each preferred tag)
+    curr_pref = preferred
+    while string_seq_is_empty(curr_pref) == 0 {
+        p_str = string_seq_head(curr_pref)
+        p_tag_str, p_err = parse(p_str)
+        if p_err == "" {
+            t_str = string_copy(p_tag_str)
+            while string_length(t_str) > 0 {
+                curr_supp = m.supported
+                while string_seq_is_empty(curr_supp) == 0 {
+                    s_str = string_seq_head(curr_supp)
+                    s_tag_str, s_err = parse(s_str)
+                    if s_err == "" {
+                        if string_equals(t_str, s_tag_str) == 1 {
+                            return string_copy(s_tag_str)
+                        }
+                    }
+                    curr_supp = string_seq_tail(curr_supp)
+                }
+
+                last_idx = find_last_hyphen(t_str)
+                if last_idx >= 0 {
+                    t_str = string_substring(t_str, 0, last_idx)
+                } else {
+                    t_str = ""
+                }
+            }
+        }
+        curr_pref = string_seq_tail(curr_pref)
+    }
+
+    // Second pass: fallback to primary language matching (base language)
+    curr_pref = preferred
+    while string_seq_is_empty(curr_pref) == 0 {
+        p_str = string_seq_head(curr_pref)
+        p_tag_str, p_err = parse(p_str)
+        if p_err == "" {
+            p_tag = p_tag_str as Tag
+            p_lang = language(p_tag)
+            curr_supp = m.supported
+            while string_seq_is_empty(curr_supp) == 0 {
+                s_str = string_seq_head(curr_supp)
+                s_tag_str, s_err = parse(s_str)
+                if s_err == "" {
+                    s_tag = s_tag_str as Tag
+                    s_lang = language(s_tag)
+                    if string_equals(p_lang, s_lang) == 1 {
+                        return string_copy(s_tag_str)
+                    }
+                }
+                curr_supp = string_seq_tail(curr_supp)
+            }
+        }
+        curr_pref = string_seq_tail(curr_pref)
+    }
+
+    fallback_tag_str, _ = parse(fallback)
+    return fallback_tag_str
+}
+
+fn match_strings(m: *Matcher, preferred: string) -> string {
+    if m == null || string_seq_is_empty(m.supported) == 1 {
+        return ""
+    }
+
+    fallback = string_seq_head(m.supported)
+    if string_length(preferred) == 0 {
+        fallback_tag_str, _ = parse(fallback)
+        return fallback_tag_str
+    }
+
+    parts = string_split_to_seq(preferred, ",")
+    defer string_seq_free(parts)
+    pref_list = list_new()
+    defer {
+        i = 0
+        sz = list_size(pref_list)
+        while i < sz {
+            p = list_get_raw(pref_list, i)
+            if p != null {
+                // Cast to the struct type so heap.free emits the typed
+                // destructor that also releases the owned `tag` string field.
+                // On a raw `ptr` it degrades to a plain free() and leaks tag.
+                pref = p as *Preferred
+                heap.free(pref)
+            }
+            i = i + 1
+        }
+        list_free(pref_list)
+    }
+
+    curr = parts
+    while string_seq_is_empty(curr) == 0 {
+        part = string_seq_head(curr)
+        trimmed = string_trim(part)
+        if string_length(trimmed) > 0 {
+            subparts = string_split_to_seq(trimmed, ";")
+            tag_str = ""
+            q_val = 1.0
+
+            if string_seq_is_empty(subparts) == 0 {
+                tag_str = string_trim(string_seq_head(subparts))
+                tail = string_seq_tail(subparts)
+                if string_seq_is_empty(tail) == 0 {
+                    q_str = string_trim(string_seq_head(tail))
+                    stripped, ok = strip_prefix(q_str, "q=")
+                    if ok == 1 {
+                        q_val = to_float(stripped) or 1.0
+                    }
+                }
+            }
+
+            if string_length(tag_str) > 0 {
+                p = heap.new(Preferred)
+                p.tag = string_copy(tag_str)
+                p.q = q_val
+                list_add_raw(pref_list, p)
+            }
+            string_seq_free(subparts)
+        }
+        curr = string_seq_tail(curr)
+    }
+
+    sz = list_size(pref_list)
+    i = 0
+    while i < sz {
+        j = i + 1
+        while j < sz {
+            pi = list_get_raw(pref_list, i)
+            pj = list_get_raw(pref_list, j)
+            pref_i = pi as *Preferred
+            pref_j = pj as *Preferred
+            if pref_j.q > pref_i.q {
+                list_set(pref_list, i, pref_j)
+                list_set(pref_list, j, pref_i)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // Build the sorted tag sequence WITHOUT a self-referential rebind
+    // (`x = cons(h, x)`): that shape makes codegen suppress freeing the old
+    // handle to avoid a double-free, but string_seq_cons takes an independent
+    // retain on its tail, so each intermediate cell leaks. Cons into a fresh
+    // `acc`, then drop the previous `prev` local (its ref is now held by the
+    // new cell) before advancing — one live handle at a time, no leak.
+    prev = string_seq_empty()
+    i = sz - 1
+    while i >= 0 {
+        p = list_get_raw(pref_list, i)
+        pref = p as *Preferred
+        acc = string_seq_cons(pref.tag, prev)
+        string_seq_free(prev)
+        prev = acc
+        i = i - 1
+    }
+    sorted_pref = prev
+    defer string_seq_free(sorted_pref)
+
+    res = match_tags(m, sorted_pref)
+    return res
+}
