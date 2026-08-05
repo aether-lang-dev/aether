@@ -31,6 +31,7 @@ exports(
     string_seq_each, string_seq_map, string_seq_filter, string_seq_reduce,
     string_seq_zip_each,
     string_to_cstr, string_from_int, string_from_long, string_from_float,
+    string_from_double,
     string_from_int_radix, string_pad_start, string_pad_end,
     string_to_int_raw, string_to_long_raw, string_to_float_raw, string_to_double_raw,
     string_try_int, string_get_int, string_try_long, string_get_long,
@@ -323,6 +324,7 @@ extern string_to_cstr(str: string) -> string
 extern string_from_int(value: int) -> ptr
 extern string_from_long(value: long) -> ptr
 extern string_from_float(value: float) -> ptr
+extern string_from_double(value: float) -> string
 
 // Inverse of to_int_radix. Render `value` in base `radix` (2..36).
 // Returns an empty string for radix outside [2, 36]; otherwise the

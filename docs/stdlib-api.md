@@ -140,6 +140,7 @@ typedef struct AetherString {
 - `string.to_cstr(str)` - Get C string pointer
 - `string.from_int(value)` - Convert int to string
 - `string.from_float(value)` - Convert float to string
+- `string.from_double(value)` - Convert float (binary64) to lossless decimal string (round-trip safe)
 
 #### Parsing (Go-style)
 

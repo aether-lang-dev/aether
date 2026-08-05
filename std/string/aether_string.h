@@ -196,6 +196,10 @@ AetherString* string_from_long(long long value);
 // ABI-mismatch hazard caused `from_float(1.0)` to serialise as `"0"`
 // — see the .c-side comment for the full diagnosis.
 AetherString* string_from_float(double value);
+// Lossless, deterministic double-to-decimal text conversion pairing with
+// `string.to_double`. Round-trips every finite IEEE-754 binary64 value,
+// and normalizes special values.
+AetherString* string_from_double(double value);
 
 // Inverse of string_to_int_radix: render `value` in base `radix`
 // (2..36). Empty string on out-of-range radix; '-' prefix for
