@@ -3646,6 +3646,34 @@ ASTNode* parse_return_statement(Parser* parser) {
             }
         }
 
+        /* #1421: `return (a, b)` means the same thing as `return a, b`.
+         *
+         * `(a, b)` parses as a tuple literal, so the parenthesised spelling
+         * arrived here as ONE child where the bare one arrives as two, and
+         * codegen flattened the literal into the return slot: the reported
+         * symptom was C naming an identifier `NULL0` (from `(null, 0)`) or
+         * `bufw` (from `(w.buf, w.off)`), with nothing pointing at the
+         * parentheses. Splicing the elements up makes the two spellings the
+         * same AST, so every later stage treats them identically by
+         * construction rather than by having two paths that agree.
+         *
+         * Only when the literal is the whole return value: `return (a, b), c`
+         * keeps its existing shape rather than silently regrouping. */
+        if (return_stmt->child_count == 1 &&
+            return_stmt->children[0] &&
+            return_stmt->children[0]->type == AST_TUPLE_LITERAL &&
+            return_stmt->children[0]->child_count > 1) {
+            ASTNode* tup = return_stmt->children[0];
+            return_stmt->child_count = 0;
+            for (int i = 0; i < tup->child_count; i++) {
+                add_child(return_stmt, tup->children[i]);
+            }
+            /* The elements now belong to the return statement; detach them
+             * before freeing the husk, or free_ast_node takes them with it. */
+            tup->child_count = 0;
+            free_ast_node(tup);
+        }
+
         match_token(parser, TOKEN_SEMICOLON);
     }
 

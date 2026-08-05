@@ -396,7 +396,7 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 # (vcr_embed_abi_wish.md Part A). Negligible codegen cost on x86-64/arm64
 # (most distros already default to PIE); one archive serves both the exe
 # link and the shared-object link.
-CFLAGS = -O2 -fPIC -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(EXTRA_CFLAGS)
+CFLAGS = -O2 -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(EXTRA_CFLAGS)
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
 # passwd / sysctl past Capsicum capability mode. libcasper + the
 # per-service libs ship in the FreeBSD base system. We resolve them by
@@ -1018,6 +1018,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	    cp "$$dir"/*.h "$$reldir/include/aether/$$dir/" 2>/dev/null || true; \
 	  fi; \
 	done && \
+	cp include/*.h "$$reldir/include/aether/" 2>/dev/null; \
 	cp -r runtime "$$reldir/share/aether/" && \
 	cp -r std     "$$reldir/share/aether/" && \
 	rm -rf "$$reldir/share/aether/runtime/examples" && \
@@ -1645,6 +1646,10 @@ install: $(VERSION_HEADER) release ae stdlib
 	@# (or a human) can read it with no compiler in the loop to detect a
 	@# partial / shadowed install (the stale ~/.local/include/aether case).
 	@printf '%s\n' "$(VERSION)" > $(PREFIX)/include/aether/VERSION
+	@# The public embedder header lives in include/, outside the runtime/ and
+	@# std/ trees the walks below cover, so it was never installed at all and
+	@# runtime/libaether_caps.c could not find it in an install (#1420).
+	@install -m 644 include/*.h $(PREFIX)/include/aether/ 2>/dev/null || true
 	@cd runtime && find . -name '*.h' -print | while read h; do \
 		install -d "$(PREFIX)/include/aether/runtime/$$(dirname $$h)"; \
 		install -m 644 "$$h" "$(PREFIX)/include/aether/runtime/$$h"; \

@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Cross-compiling failed for every target from an installed toolchain**
+  (#1420). `runtime/libaether_caps.c` included the public header as
+  `../include/libaether.h`, a path that only exists in the source tree: an
+  install puts the runtime at `share/aether/runtime/` and headers under
+  `include/aether/`, so the hop resolved to a directory that does not exist.
+  Worse, `include/libaether.h` was never installed at all, because both
+  installers walk only the `runtime/` and `std/` trees for headers. Native
+  builds never noticed, since they pass the include set from `ae cflags` and
+  never rely on the relative path, which is how this shipped. The header is now
+  installed by both paths and included by name, and the directory holding it is
+  on the include path in both layouts. Verified end to end from a real install:
+  `x86_64-linux` and `aarch64-linux` both produce working ELF binaries.
+
+- **`ae build` served a stale binary after an imported module changed**
+  (#1421). The cache key covered the entry file's content and the lib dirs, but
+  not the project's own sibling modules: `import helper` next to `src/main.ae`
+  resolves to `src/helper.ae`, which is in no lib dir. Editing it left the key
+  unchanged, so the build reported `Built (cache hit)` and ran code from the
+  previous version, and deleting `target/` did not help because the cache lives
+  under `~/.aether/cache`. The key now covers the entry file's whole directory
+  tree, content-hashed with the same caps the lib-dir walk uses. Unchanged
+  rebuilds still hit the cache.
+
+- **`return (a, b)` compiled to garbage instead of returning a tuple** (#1421).
+  `(a, b)` is a tuple literal, so the parenthesised spelling reached codegen as
+  one return value where the bare `return a, b` gives two, and the literal was
+  flattened into the return slot. The C compiler then failed on identifiers
+  invented from the flattened text (`NULL0` from `return (null, 0)`, `bufw` from
+  `return (w.buf, w.off)`), with nothing pointing at the parentheses. Both
+  spellings now produce the same AST, so they cannot disagree.
+
+- **Multi-element `*StringSeq` literals leaked their inner cons cells**
+  (#1417). `string_seq_cons` takes its own retain on the tail, so a builder must
+  drop each intermediate handle. As a nested expression the intermediates were
+  anonymous temporaries nothing ever dropped, leaving every cell but the head at
+  refcount 2; a correct `string_seq_free(head)` then stopped at the first cell
+  that stayed above zero and the rest leaked, 24 bytes per element past the
+  first. The literal now folds into a local, dropping each handle once the next
+  cell has retained it, with elements still evaluated in source order.
+
+- **Cross-compiling failed with a longer-than-usual install prefix.** The
+  command line is dominated by the include set, which scales with the prefix
+  length and the module count, and it was assembled in a fixed 24576-byte
+  buffer: past that, `ae` reported `cross-compile command exceeded the
+  24576-byte buffer` with nothing the user could shorten. The command and object
+  list now grow on demand, the same shape the include set itself already used.
+  Found while reproducing #1420 from an install under a long path.
+
 ## [0.490.0]
 
 ### Added

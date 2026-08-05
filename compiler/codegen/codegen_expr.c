@@ -40,6 +40,9 @@ static int g_arg_drain_count = 0;
 static int g_arg_drain_cap   = 0;
 static int g_arg_drain_counter = 0;
 
+/* #1417: unique ids for the *StringSeq literal fold temps. */
+static int g_seq_lit_counter = 0;
+
 static const char* arg_drain_lookup(ASTNode* node) {
     if (!node) return NULL;
     for (int i = g_arg_drain_count - 1; i >= 0; i--) {
@@ -5327,6 +5330,42 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * branch and docs/sequences.md § Literal disambiguation
              * for the user-visible rule. */
             if (is_string_seq_ptr_type(expr->node_type)) {
+                /* #1417: two or more elements need the tail dropped as the
+                 * chain is built. `string_seq_cons` takes its OWN retain on
+                 * the tail, so the canonical builder is
+                 * `cons(h, t); string_seq_free(t)`. The nested-expression
+                 * form has no name for the intermediate results, so nothing
+                 * ever dropped them: every cell but the head ended at
+                 * refcount 2, and a correct `string_seq_free(head)` stopped
+                 * at the first cell that stayed >0 (the shared-tail
+                 * protection), leaking the rest.
+                 *
+                 * Fold into a local instead, dropping each handle after the
+                 * next cell has retained it. Elements are evaluated into
+                 * temps in SOURCE order first, so an element with a side
+                 * effect still runs left to right even though the chain is
+                 * built right to left. */
+                if (expr->child_count >= 2) {
+                    int id = g_seq_lit_counter++;
+                    fprintf(gen->output, "({ ");
+                    for (int i = 0; i < expr->child_count; i++) {
+                        fprintf(gen->output, "const char* _sqe%d_%d = (const char*)(", id, i);
+                        generate_expression(gen, expr->children[i]);
+                        fprintf(gen->output, "); ");
+                    }
+                    fprintf(gen->output,
+                            "StringSeq* _sqa%d = string_seq_empty(); StringSeq* _sqn%d; ",
+                            id, id);
+                    for (int i = expr->child_count - 1; i >= 0; i--) {
+                        fprintf(gen->output,
+                                "_sqn%d = string_seq_cons(_sqe%d_%d, _sqa%d); "
+                                "string_seq_free(_sqa%d); _sqa%d = _sqn%d; ",
+                                id, id, i, id, id, id, id);
+                    }
+                    fprintf(gen->output, "_sqa%d; })", id);
+                    break;
+                }
+                /* 0 or 1 element: no intermediate exists to drop. */
                 for (int i = 0; i < expr->child_count; i++) {
                     fprintf(gen->output, "string_seq_cons(");
                     generate_expression(gen, expr->children[i]);

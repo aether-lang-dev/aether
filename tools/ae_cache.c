@@ -314,6 +314,44 @@ unsigned long long compute_cache_key(const char* ae_file,
         }
     }
 
+    /* #1421: the entry file's OWN directory tree.
+     *
+     * The key hashed the entry file's content and the lib dirs, but a
+     * project's other sources are neither: `import helper` next to
+     * `src/main.ae` resolves to `src/helper.ae`, which lived in no lib dir and
+     * was not an extra_file. Editing it left the key unchanged, so `ae build`
+     * printed "Built (cache hit)" and served a binary built from the old
+     * module. Deleting `target/` did not help, because the cache lives under
+     * ~/.aether/cache, so the stale result looked like the build simply had
+     * nothing to do.
+     *
+     * That is the worst shape a cache bug can take: the output is wrong, the
+     * report says success, and every measurement taken against it is quietly
+     * invalid. Hash the whole tree the entry sits in, with the same
+     * content-hash and the same depth/entry caps the lib-dir walk uses, so any
+     * edit to any project source bumps the key. Over-invalidating costs a
+     * rebuild; under-invalidating costs a wrong answer.
+     */
+    {
+        char entry_dir[1024];
+        snprintf(entry_dir, sizeof(entry_dir), "%s", ae_file);
+        char* cut = strrchr(entry_dir, '/');
+#ifdef _WIN32
+        char* bcut = strrchr(entry_dir, '\\');
+        if (!cut || (bcut && bcut > cut)) cut = bcut;
+#endif
+        if (cut) *cut = '\0';
+        else snprintf(entry_dir, sizeof(entry_dir), ".");
+
+        unsigned long long src_tree = 0;
+        int src_count = 0;
+        hash_lib_dir_entries(entry_dir, "", &src_tree, &src_count, 0);
+        if (src_count > 0) {
+            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                            ":src=%016llx", src_tree);
+        }
+    }
+
     /* Issue #413: include the --lib search path in the cache key.
      * Two builds of the same source with different lib paths must
      * resolve different imports — they're materially different
