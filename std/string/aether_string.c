@@ -8,6 +8,8 @@
 #include <errno.h>
 #include <limits.h>
 #include <stdint.h>  // SIZE_MAX (not in <limits.h> on MinGW)
+#include <math.h>
+#include <locale.h>
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -813,6 +815,54 @@ AetherString* string_from_float(double value) {
     return string_new(buffer);
 }
 
+// Deterministic double-to-decimal text conversion paired with
+// string_to_double_raw. Seventeen significant decimal digits are sufficient
+// to recover every finite IEEE-754 binary64 value exactly. This is deliberately
+// round-trip-safe rather than shortest-round-trip formatting.
+AetherString* string_from_double(double value) {
+    if (isnan(value)) {
+        return string_new("NaN");
+    }
+    if (isinf(value)) {
+        if (value < 0.0) {
+            return string_new("-Infinity");
+        } else {
+            return string_new("Infinity");
+        }
+    }
+    if (value == 0.0) {
+        if (signbit(value)) {
+            return string_new("-0");
+        } else {
+            return string_new("0");
+        }
+    }
+
+    char buffer[128];
+    int written = snprintf(buffer, sizeof(buffer), "%.17g", value);
+    if (written < 0 || (size_t)written >= sizeof(buffer)) {
+        return string_empty();
+    }
+
+    // snprintf obeys LC_NUMERIC. Normalize its (possibly multibyte) decimal
+    // point without mutating the process-global locale; callers embedding
+    // Aether may have selected a non-C locale before reaching this function.
+    struct lconv* lc = localeconv();
+    const char* decimal_point = lc ? lc->decimal_point : NULL;
+    if (decimal_point && decimal_point[0] && strcmp(decimal_point, ".") != 0) {
+        char* at = strstr(buffer, decimal_point);
+        if (at) {
+            size_t point_len = strlen(decimal_point);
+            at[0] = '.';
+            if (point_len > 1) {
+                memmove(at + 1, at + point_len, strlen(at + point_len) + 1);
+            }
+        }
+    }
+
+    return string_new(buffer);
+}
+
 // Inverse of string_to_int_radix: render `value` as a base-N digit
 // string. radix in [2, 36]; out-of-range radix yields the empty
 // string (caller-detectable, matches the existing string_empty()
@@ -996,7 +1046,7 @@ int string_to_float_raw(const void* str, float* out_value) {
     errno = 0;
     float val = strtof(data, &endptr);
 
-    if (endptr == data || errno == ERANGE) {
+    if (endptr == data || (errno == ERANGE && (val == HUGE_VALF || val == -HUGE_VALF))) {
         return 0;
     }
 
@@ -1015,7 +1065,7 @@ int string_to_double_raw(const void* str, double* out_value) {
     errno = 0;
     double val = strtod(data, &endptr);
 
-    if (endptr == data || errno == ERANGE) {
+    if (endptr == data || (errno == ERANGE && (val == HUGE_VAL || val == -HUGE_VAL))) {
         return 0;
     }
 

@@ -1,0 +1,114 @@
+import std.mem
+import std.string
+
+check_roundtrip(bits: long) -> int {
+    value = mem.float_from_bits(bits)
+    text = string.from_double(value)
+    parsed, err = string.to_double(text)
+    parsed_bits = mem.bits_of_float(parsed)
+
+    ok = 1
+    if err != "" || bits != parsed_bits {
+        ok = 0
+    }
+
+    if ok == 0 {
+        orig_hex = string.from_int_radix(bits, 16)
+        parsed_hex = string.from_int_radix(parsed_bits, 16)
+        println("  FAIL: bit mismatch!")
+        println("    Original bits: ${orig_hex}")
+        println("    Emitted text:  ${text}")
+        println("    Parse error:   ${err}")
+        println("    Parsed bits:   ${parsed_hex}")
+        string.free(orig_hex)
+        string.free(parsed_hex)
+    }
+
+    string.free(text)
+    string.free(err)
+
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+check_text(value: float, expected: string, label: string) -> int {
+    text = string.from_double(value)
+    ok = 1
+    if string.equals(text, expected) != 1 {
+        ok = 0
+        println("  FAIL ${label}: got \"${text}\", expected \"${expected}\"")
+    } else {
+        println("  PASS ${label}: ${expected}")
+    }
+    string.free(text)
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+main() {
+    println("=== Running IEEE-754 binary64 round-trip tests ===")
+    fails = 0
+
+    // Required raw bit patterns
+    fails = fails + check_roundtrip(0x0000000000000000)
+    fails = fails + check_roundtrip(0x8000000000000000)
+    fails = fails + check_roundtrip(0x0000000000000001)
+    fails = fails + check_roundtrip(0x000fffffffffffff)
+    fails = fails + check_roundtrip(0x0010000000000000)
+    fails = fails + check_roundtrip(0x3ff0000000000000)
+    fails = fails + check_roundtrip(0x3ff0000000000001)
+    fails = fails + check_roundtrip(0x3fefffffffffffff)
+    fails = fails + check_roundtrip(0x3fb999999999999a)
+    fails = fails + check_roundtrip(0x400921fb54442d18)
+    fails = fails + check_roundtrip(0x7fefffffffffffff)
+
+    // Negative counterparts
+    fails = fails + check_roundtrip(0x8000000000000001)
+    fails = fails + check_roundtrip(0x800fffffffffffff)
+    fails = fails + check_roundtrip(0x8010000000000000)
+    fails = fails + check_roundtrip(0xbff0000000000000)
+    fails = fails + check_roundtrip(0xffefffffffffffff)
+
+    // Ordinary expected text tests
+    fails = fails + check_text(0.0, "0", "zero text")
+    fails = fails + check_text(mem.float_from_bits(0x8000000000000000), "-0", "neg zero text")
+    fails = fails + check_text(1.0, "1", "1.0 text")
+    fails = fails + check_text(-2.5, "-2.5", "-2.5 text")
+
+    // Special values: Infinity, -Infinity, NaN
+    inf_val = mem.float_from_bits(0x7ff0000000000000)
+    neginf_val = mem.float_from_bits(0xfff0000000000000)
+    nan_val = mem.float_from_bits(0x7ff8000000000000)
+
+    fails = fails + check_text(inf_val, "Infinity", "Infinity text")
+    fails = fails + check_text(neginf_val, "-Infinity", "-Infinity text")
+    fails = fails + check_text(nan_val, "NaN", "NaN text")
+
+    // Deterministic loop over several thousand generated finite bit patterns.
+    var state = 1234567890123456789
+    var count = 0
+    var loop_fails = 0
+    while count < 5000 {
+        state = (state *6364136223846793005) + 1442695040888963407
+        if (state &0x7ff0000000000000) != 0x7ff0000000000000 {
+            loop_fails = loop_fails + check_roundtrip(state)
+            count = count + 1
+        }
+    }
+    if loop_fails > 0 {
+        println("  FAIL: ${loop_fails} loop patterns failed.")
+        fails = fails + loop_fails
+    } else {
+        println("  PASS: 5000 deterministic pseudo-random finite bit patterns round-tripped perfectly.")
+    }
+
+    if fails > 0 {
+        println("FAIL: Some tests failed.")
+        exit(1)
+    }
+    println("All PASS")
+}

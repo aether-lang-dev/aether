@@ -618,6 +618,7 @@ For a `split_once`-style operation (find the first `sep` in `s`, return the halv
 - `string.to_cstr(str)` - Get raw C string pointer
 - `string.from_int(value)` - Create string from integer
 - `string.from_float(value)` - Create string from float
+- `string.from_double(value)` - Create lossless, round-trip-safe decimal string from float (binary64)
 
 **Parsing (Go-style):**
 - `string.to_int(s)` → `(int, string)` - Parse base-10 integer

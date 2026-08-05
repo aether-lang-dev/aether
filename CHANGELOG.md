@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Lossless binary64 text-conversion prerequisite** (#863 Phase 3.5). Implemented `string.from_double(value: float) -> string` in `std.string`. This function converts every finite IEEE-754 binary64 value to a lossless decimal representation (using `"%.17g"` format), ensuring exact bit equality after parsing back with `string.to_double()`. It handles positive/negative normal and subnormal values, signed zeros, NaN, and positive/negative infinity cleanly and locale-independently.
+
+### Fixed
+
+- **`string.to_float` / `string.to_double` rejected subnormal values.** `strtof` and `strtod` may set `ERANGE` for a representable underflow result, but the wrappers treated every `ERANGE` as failure. They now reject range overflow while accepting correctly rounded subnormal and zero results.
+
 ## [0.491.0]
 
 ### Fixed
