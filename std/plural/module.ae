@@ -1,0 +1,142 @@
+// std.plural — CLDR Plural Rules evaluation (Phase 2 of #863)
+
+import std.string(*)
+import std.language
+
+exports(
+    plural_category, plural_category_decimal
+)
+
+fn plural_en(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if i == 1 && v == 0 {
+        return "one"
+    }
+    return "other"
+}
+
+fn plural_fr(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if i == 0 || i == 1 {
+        return "one"
+    }
+    return "other"
+}
+
+fn plural_ru(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if v == 0 {
+        mod10 = i % 10
+        mod100 = i % 100
+        if mod10 == 1 && mod100 != 11 {
+            return "one"
+        }
+        if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) {
+            return "few"
+        }
+        if mod10 == 0 || (mod10 >= 5 && mod10 <= 9) || (mod100 >= 11 && mod100 <= 14) {
+            return "many"
+        }
+    }
+    return "other"
+}
+
+fn plural_ar(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if n == 0.0 {
+        return "zero"
+    }
+    if n == 1.0 {
+        return "one"
+    }
+    if n == 2.0 {
+        return "two"
+    }
+    if v == 0 {
+        mod100 = i % 100
+        if mod100 >= 3 && mod100 <= 10 {
+            return "few"
+        }
+        if mod100 >= 11 && mod100 <= 99 {
+            return "many"
+        }
+    }
+    return "other"
+}
+
+fn plural_ja_zh(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    return "other"
+}
+
+fn plural_pl(n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if v == 0 {
+        if i == 1 {
+            return "one"
+        }
+        mod10 = i % 10
+        mod100 = i % 100
+        if mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14) {
+            return "few"
+        }
+        if (mod10 == 0 || mod10 == 1) || (mod10 >= 5 && mod10 <= 9) || (mod100 >= 12 && mod100 <= 14) {
+            return "many"
+        }
+    }
+    return "other"
+}
+
+fn plural_category(lang_tag: string, n: int) -> string {
+    abs_n = n
+    if abs_n < 0 {
+        abs_n = -abs_n
+    }
+    return plural_category_decimal(lang_tag, abs_n as float, abs_n as long, 0, 0, 0, 0)
+}
+
+fn plural_category_decimal(lang_tag: string, n: float, i: long, v: int, w: int, f: long, t: long) -> string {
+    if string_length(lang_tag) == 0 {
+        return "other"
+    }
+
+    canonical, err = language.parse(lang_tag)
+    if err != "" {
+        return "other"
+    }
+
+    t_tag = canonical as Tag
+    base_lang = language.language(t_tag)
+
+    abs_n = n
+    if abs_n < 0.0 {
+        abs_n = -abs_n
+    }
+    abs_i = i
+    if abs_i < 0 {
+        abs_i = -abs_i
+    }
+    abs_f = f
+    if abs_f < 0 {
+        abs_f = -abs_f
+    }
+    abs_t = t
+    if abs_t < 0 {
+        abs_t = -abs_t
+    }
+
+    result = "other"
+
+    if string_equals(base_lang, "en") == 1 {
+        result = plural_en(abs_n, abs_i, v, w, abs_f, abs_t)
+    } else if string_equals(base_lang, "fr") == 1 {
+        result = plural_fr(abs_n, abs_i, v, w, abs_f, abs_t)
+    } else if string_equals(base_lang, "ru") == 1 {
+        result = plural_ru(abs_n, abs_i, v, w, abs_f, abs_t)
+    } else if string_equals(base_lang, "ar") == 1 {
+        result = plural_ar(abs_n, abs_i, v, w, abs_f, abs_t)
+    } else if string_equals(base_lang, "ja") == 1 || string_equals(base_lang, "zh") == 1 {
+        result = plural_ja_zh(abs_n, abs_i, v, w, abs_f, abs_t)
+    } else if string_equals(base_lang, "pl") == 1 {
+        result = plural_pl(abs_n, abs_i, v, w, abs_f, abs_t)
+    }
+
+    canonical = ""
+    base_lang = ""
+
+    return result
+}

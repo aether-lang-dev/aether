@@ -1,0 +1,100 @@
+// Standalone regression test for std.plural
+
+import std.plural
+import std.string
+
+fn assert_category(lang: string, n: int, expected: string) {
+    res = plural.plural_category(lang, n)
+    if string_equals(res, expected) != 1 {
+        print("FAIL: plural_category(\"${lang}\", ${n}) expected ${expected}, got ${res}\n")
+        exit(1)
+    }
+}
+
+fn assert_category_decimal(lang: string, n: float, i: long, v: int, w: int, f: long, t: long, expected: string) {
+    res = plural.plural_category_decimal(lang, n, i, v, w, f, t)
+    if string_equals(res, expected) != 1 {
+        print("FAIL: plural_category_decimal(\"${lang}\", ...) expected ${expected}, got ${res}\n")
+        exit(1)
+    }
+}
+
+main() {
+    print("=== std.plural ===\n\n")
+
+    // 1. English (en) Tests
+    assert_category("en", 1, "one")
+    assert_category("en", 0, "other")
+    assert_category("en", 2, "other")
+    assert_category("en", 100, "other")
+    assert_category("en", -1, "one")
+    assert_category_decimal("en", 1.0, 1, 1, 0, 0, 0, "other")
+    assert_category_decimal("en", 1.5, 1, 1, 1, 5, 5, "other")
+    assert_category_decimal("en", -1.0, -1, 1, 0, 0, 0, "other")
+    print("PASS: en rules\n")
+
+    // 2. French (fr) Tests
+    assert_category("fr", 0, "one")
+    assert_category("fr", 1, "one")
+    assert_category("fr", 2, "other")
+    assert_category("fr", 100, "other")
+    assert_category("fr", -1, "one")
+    assert_category_decimal("fr", 1.5, 1, 1, 1, 5, 5, "one")
+    assert_category_decimal("fr", 2.0, 2, 1, 0, 0, 0, "other")
+    print("PASS: fr rules\n")
+
+    // 3. Russian (ru) Tests
+    assert_category("ru", 1, "one")
+    assert_category("ru", 21, "one")
+    assert_category("ru", 11, "many")
+    assert_category("ru", 2, "few")
+    assert_category("ru", 4, "few")
+    assert_category("ru", 12, "many")
+    assert_category("ru", 14, "many")
+    assert_category("ru", 5, "many")
+    assert_category("ru", 10, "many")
+    assert_category_decimal("ru", 1.5, 1, 1, 1, 5, 5, "other")
+    print("PASS: ru rules\n")
+
+    // 4. Arabic (ar) Tests
+    assert_category("ar", 0, "zero")
+    assert_category_decimal("ar", 0.0, 0, 1, 0, 0, 0, "zero")
+    assert_category("ar", 1, "one")
+    assert_category("ar", 2, "two")
+    assert_category("ar", 3, "few")
+    assert_category("ar", 10, "few")
+    assert_category("ar", 11, "many")
+    assert_category("ar", 99, "many")
+    assert_category("ar", 100, "other")
+    assert_category_decimal("ar", 1.5, 1, 1, 1, 5, 5, "other")
+    print("PASS: ar rules\n")
+
+    // 5. Japanese & Chinese (ja, zh) Tests
+    assert_category("ja", 1, "other")
+    assert_category("ja", 100, "other")
+    assert_category("zh", 1, "other")
+    assert_category("zh", 100, "other")
+    print("PASS: ja / zh rules\n")
+
+    // 6. Polish (pl) Tests
+    assert_category("pl", 1, "one")
+    assert_category("pl", 2, "few")
+    assert_category("pl", 4, "few")
+    assert_category("pl", 12, "many")
+    assert_category("pl", 14, "many")
+    assert_category("pl", 22, "few")
+    assert_category("pl", 5, "many")
+    assert_category("pl", 0, "many")
+    assert_category_decimal("pl", 1.5, 1, 1, 1, 5, 5, "other")
+    print("PASS: pl rules\n")
+
+    // 7. Locale Fallbacks and Edge Cases
+    assert_category("en-US", 1, "one")
+    assert_category("fr-FR", 1, "one")
+    assert_category("ru-RU", 2, "few")
+    assert_category("de", 1, "other") // unknown falls back to other-only
+    assert_category("invalid--tag", 1, "other") // invalid structure falls back to other-only
+    print("PASS: fallback tags and invalid tags\n")
+
+    print("\nAll PASS\n")
+}
