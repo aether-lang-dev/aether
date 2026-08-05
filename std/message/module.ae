@@ -1,0 +1,627 @@
+// std.message — ICU MessageFormat + message catalog (Phase 3 of #863)
+
+import std.string(*)
+import std.plural
+import std.map
+import std.list
+import std.strbuilder
+import std.mem
+
+exports(
+    format, parse, format_pattern, pattern_free,
+    catalog_new, catalog_add, catalog_format, catalog_free
+)
+
+struct Node {
+    kind: int // 0: Literal, 1: Placeholder, 2: Plural, 3: Select, 4: Hash
+    text: string // For Literal/Placeholder/Plural/Select
+    branches: ptr // *List of *Branch
+}
+
+struct Branch {
+    selector: string
+    pattern: ptr // *List of *Node
+}
+
+struct Pattern {
+    nodes: ptr // *List of *Node
+}
+
+struct Parser {
+    msg: string
+    len: int
+    pos: int
+    plural_depth: int
+}
+
+struct Catalog {
+    locale: string
+    messages: ptr // Map of ID -> *Pattern
+}
+
+struct MessageMapKeys {
+    keys: ptr
+    count: int
+}
+
+fn skip_ws(p: *Parser) {
+    while p.pos < p.len {
+        c = string_char_at(p.msg, p.pos)
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            p.pos = p.pos + 1
+        } else {
+            break
+        }
+    }
+}
+
+fn node_free(n_ptr: ptr) {
+    if n_ptr == null { return }
+    n = n_ptr as *Node
+    if n.branches != null {
+        sz = list_size(n.branches)
+        i = 0
+        while i < sz {
+            b = list_get_raw(n.branches, i) as *Branch
+            if b != null {
+                if b.pattern != null {
+                    pattern_nodes_free(b.pattern)
+                }
+                heap.free(b)
+            }
+            i = i + 1
+        }
+        list_free(n.branches)
+    }
+    heap.free(n)
+}
+
+fn pattern_nodes_free(nodes_list: ptr) {
+    if nodes_list == null { return }
+    sz = list_size(nodes_list)
+    i = 0
+    while i < sz {
+        n = list_get_raw(nodes_list, i) as *Node
+        if n != null {
+            node_free(n)
+        }
+        i = i + 1
+    }
+    list_free(nodes_list)
+}
+
+fn pattern_free(pat_ptr: ptr) {
+    if pat_ptr == null { return }
+    pat = pat_ptr as *Pattern
+    if pat.nodes != null {
+        pattern_nodes_free(pat.nodes)
+    }
+    heap.free(pat)
+}
+
+fn parse_literal(p: *Parser) -> *Node {
+    b = strbuilder.new(32)
+    defer catch strbuilder.free(b)
+
+    while p.pos < p.len {
+        c = string_char_at(p.msg, p.pos)
+        if c == 123 { // '{'
+            break
+        }
+        if c == 125 { // '}'
+            break
+        }
+        if p.plural_depth > 0 && c == 35 { // '#'
+            break
+        }
+        if c == 39 { // '\''
+            if p.pos + 1 < p.len && string_char_at(p.msg, p.pos + 1) == 39 {
+                // '' -> literal '
+                strbuilder.append_byte(b, 39)
+                p.pos = p.pos + 2
+            } else if p.pos + 1 < p.len && (string_char_at(p.msg, p.pos + 1) == 123 || string_char_at(p.msg, p.pos + 1) == 125 || (p.plural_depth > 0 && string_char_at(p.msg, p.pos + 1) == 35)) {
+                // Find matching '
+                closing = -1
+                j = p.pos + 1
+                while j < p.len {
+                    if string_char_at(p.msg, j) == 39 {
+                        closing = j
+                        break
+                    }
+                    j = j + 1
+                }
+                if closing >= 0 {
+                    k = p.pos + 1
+                    while k < closing {
+                        ck = string_char_at(p.msg, k)
+                        if ck == 39 && k + 1 < closing && string_char_at(p.msg, k + 1) == 39 {
+                            strbuilder.append_byte(b, 39)
+                            k = k + 2
+                        } else {
+                            strbuilder.append_byte(b, ck)
+                            k = k + 1
+                        }
+                    }
+                    p.pos = closing + 1
+                } else {
+                    strbuilder.append_byte(b, 39)
+                    p.pos = p.pos + 1
+                }
+            } else {
+                strbuilder.append_byte(b, 39)
+                p.pos = p.pos + 1
+            }
+        } else {
+            strbuilder.append_byte(b, c)
+            p.pos = p.pos + 1
+        }
+    }
+
+    s = strbuilder.finish(b)
+    n = heap.new(Node)
+    n.kind = 0 // Literal
+    n.text = s
+    n.branches = null
+    return n
+}
+
+fn parse_pattern_err(p: *Parser) -> (ptr, string) {
+    nodes = list_new()
+    while p.pos < p.len {
+        c = string_char_at(p.msg, p.pos)
+        if c == 125 { // '}'
+            break
+        }
+        if p.plural_depth > 0 && c == 35 { // '#'
+            n = heap.new(Node)
+            n.kind = 4 // Hash
+            n.text = ""
+            n.branches = null
+            list_add_raw(nodes, n)
+            p.pos = p.pos + 1
+            continue
+        }
+        if c == 123 { // '{'
+            block_node, err = parse_block(p)
+            if err != "" {
+                pattern_nodes_free(nodes)
+                return null, err
+            }
+            string_release(err)
+            list_add_raw(nodes, block_node)
+        } else {
+            lit_node = parse_literal(p)
+            if string_length(lit_node.text) == 0 {
+                node_free(lit_node)
+            } else {
+                list_add_raw(nodes, lit_node)
+            }
+        }
+    }
+    return nodes, ""
+}
+
+fn parse_block(p: *Parser) -> (ptr, string) {
+    if p.pos >= p.len || string_char_at(p.msg, p.pos) != 123 {
+        return null, "expected '{'"
+    }
+    p.pos = p.pos + 1 // skip '{'
+
+    skip_ws(p)
+    if p.pos >= p.len {
+        return null, "unclosed '{' block"
+    }
+
+    start_arg = p.pos
+    while p.pos < p.len {
+        c = string_char_at(p.msg, p.pos)
+        if c == 44 || c == 125 { // ',' or '}'
+            break
+        }
+        p.pos = p.pos + 1
+    }
+    if p.pos >= p.len {
+        return null, "unclosed '{' block"
+    }
+
+    arg_name = string_trim(string_substring(p.msg, start_arg, p.pos))
+    if string_length(arg_name) == 0 {
+        return null, "missing argument name in '{' block"
+    }
+
+    if string_char_at(p.msg, p.pos) == 125 {
+        p.pos = p.pos + 1 // skip '}'
+        n = heap.new(Node)
+        n.kind = 1 // Placeholder
+        n.text = arg_name
+        n.branches = null
+        return n, ""
+    }
+
+    // Otherwise must be ','
+    p.pos = p.pos + 1 // skip ','
+    skip_ws(p)
+
+    start_type = p.pos
+    while p.pos < p.len {
+        c = string_char_at(p.msg, p.pos)
+        if c == 44 {
+            break
+        }
+        p.pos = p.pos + 1
+    }
+    if p.pos >= p.len {
+        arg_name = ""
+        return null, "unclosed '{' block"
+    }
+
+    type_name = string_trim(string_substring(p.msg, start_type, p.pos))
+    if string_char_at(p.msg, p.pos) != 44 {
+        arg_name = ""
+        type_name = ""
+        return null, "expected ',' after format type"
+    }
+    p.pos = p.pos + 1 // skip ','
+
+    is_plural = string_equals(type_name, "plural")
+    is_select = string_equals(type_name, "select")
+    if is_plural == 0 && is_select == 0 {
+        err_msg = string_concat("unsupported format type: ", type_name)
+        arg_name = ""
+        type_name = ""
+        return null, err_msg
+    }
+    type_name = ""
+
+    branches = list_new()
+
+    if is_plural == 1 {
+        p.plural_depth = p.plural_depth + 1
+    }
+
+    err = ""
+    while p.pos < p.len {
+        skip_ws(p)
+        if p.pos >= p.len {
+            err = "unclosed plural/select block"
+            break
+        }
+        if string_char_at(p.msg, p.pos) == 125 { // '}'
+            break
+        }
+
+        // Parse selector
+        selector_start = p.pos
+        while p.pos < p.len {
+            c = string_char_at(p.msg, p.pos)
+            if c == 123 || c == 32 || c == 9 || c == 10 || c == 13 {
+                break
+            }
+            p.pos = p.pos + 1
+        }
+        if p.pos >= p.len {
+            err = "expected '{' after selector"
+            break
+        }
+
+        selector = string_trim(string_substring(p.msg, selector_start, p.pos))
+        if string_length(selector) == 0 {
+            err = "empty selector"
+            break
+        }
+
+        skip_ws(p)
+        if p.pos >= p.len || string_char_at(p.msg, p.pos) != 123 {
+            selector = ""
+            err = "expected '{' after selector"
+            break
+        }
+        p.pos = p.pos + 1 // skip '{'
+
+        branch_nodes, b_err = parse_pattern_err(p)
+        if b_err != "" {
+            selector = ""
+            err = b_err
+            break
+        }
+        string_release(b_err)
+
+        if p.pos >= p.len || string_char_at(p.msg, p.pos) != 125 {
+            selector = ""
+            pattern_nodes_free(branch_nodes)
+            err = "expected '}' to close branch"
+            break
+        }
+        p.pos = p.pos + 1 // skip '}'
+
+        b = heap.new(Branch)
+        b.selector = selector
+        b.pattern = branch_nodes
+        list_add_raw(branches, b)
+    }
+
+    if is_plural == 1 {
+        p.plural_depth = p.plural_depth - 1
+    }
+
+    if err != "" {
+        sz = list_size(branches)
+        i = 0
+        while i < sz {
+            b = list_get_raw(branches, i) as *Branch
+            if b != null {
+                pattern_nodes_free(b.pattern)
+                heap.free(b)
+            }
+            i = i + 1
+        }
+        list_free(branches)
+        arg_name = ""
+        return null, err
+    }
+
+    if p.pos >= p.len || string_char_at(p.msg, p.pos) != 125 {
+        sz = list_size(branches)
+        i = 0
+        while i < sz {
+            b = list_get_raw(branches, i) as *Branch
+            if b != null {
+                pattern_nodes_free(b.pattern)
+                heap.free(b)
+            }
+            i = i + 1
+        }
+        list_free(branches)
+        arg_name = ""
+        return null, "expected '}' to close plural/select block"
+    }
+    p.pos = p.pos + 1 // skip '}'
+
+    n = heap.new(Node)
+    if is_plural == 1 {
+        n.kind = 2 // Plural
+    } else {
+        n.kind = 3 // Select
+    }
+    n.text = arg_name
+    n.branches = branches
+    string_release(err)
+    return n, ""
+}
+
+fn parse(msg: string) -> (ptr, string) {
+    p = heap.new(Parser)
+    p.msg = msg
+    p.len = string_length(msg)
+    p.pos = 0
+    p.plural_depth = 0
+
+    nodes, err = parse_pattern_err(p)
+    if err == "" && p.pos < p.len {
+        pattern_nodes_free(nodes)
+        heap.free(p)
+        return null, "unmatched '}' at top level"
+    }
+
+    heap.free(p)
+    if err != "" {
+        return null, err
+    }
+
+    pat = heap.new(Pattern)
+    pat.nodes = nodes
+    string_release(err)
+    return pat, ""
+}
+
+fn format_nodes(locale: string, nodes: ptr, args: ptr, plural_val: string) -> string {
+    sb = strbuilder.new(64)
+    defer catch strbuilder.free(sb)
+
+    sz = list_size(nodes)
+    i = 0
+    while i < sz {
+        n = list_get_raw(nodes, i) as *Node
+        if n != null {
+            if n.kind == 0 {
+                strbuilder.append(sb, n.text)
+            } else if n.kind == 1 {
+                val = ""
+                if map_has(args, n.text) == 1 {
+                    val = map_get_raw(args, n.text)
+                }
+                strbuilder.append(sb, val)
+            } else if n.kind == 2 {
+                count_str = "0"
+                if map_has(args, n.text) == 1 {
+                    count_str = map_get_raw(args, n.text)
+                }
+                count, count_err = to_int(count_str)
+                string_release(count_err)
+
+                chosen_branch = null as *Branch
+                bz = list_size(n.branches)
+
+                // 1. Check explicit branches `=N`
+                bi = 0
+                while bi < bz {
+                    b = list_get_raw(n.branches, bi) as *Branch
+                    if b != null && string_starts_with(b.selector, "=") == 1 {
+                        sel_val_str = string_substring(b.selector, 1, string_length(b.selector))
+                        sel_int_val, err_sel = to_int(sel_val_str)
+                        string_release(sel_val_str)
+                        if string_length(err_sel) == 0 && sel_int_val == count {
+                            string_release(err_sel)
+                            chosen_branch = b
+                            break
+                        }
+                        string_release(err_sel)
+                    }
+                    bi = bi + 1
+                }
+
+                // 2. Check plural category
+                if chosen_branch == null {
+                    category = plural.plural_category(locale, count)
+                    bi = 0
+                    while bi < bz {
+                        b = list_get_raw(n.branches, bi) as *Branch
+                        if b != null && string_equals(b.selector, category) == 1 {
+                            chosen_branch = b
+                            break
+                        }
+                        bi = bi + 1
+                    }
+                    string_release(category)
+                }
+
+                // 3. Fall back to "other"
+                if chosen_branch == null {
+                    bi = 0
+                    while bi < bz {
+                        b = list_get_raw(n.branches, bi) as *Branch
+                        if b != null && string_equals(b.selector, "other") == 1 {
+                            chosen_branch = b
+                            break
+                        }
+                        bi = bi + 1
+                    }
+                }
+
+                // 4. Degrade gracefully
+                if chosen_branch == null && bz > 0 {
+                    chosen_branch = list_get_raw(n.branches, 0) as *Branch
+                }
+
+                if chosen_branch != null {
+                    branch_str = format_nodes(locale, chosen_branch.pattern, args, count_str)
+                    strbuilder.append(sb, branch_str)
+                }
+            } else if n.kind == 3 {
+                sel_val = ""
+                if map_has(args, n.text) == 1 {
+                    sel_val = map_get_raw(args, n.text)
+                }
+
+                chosen_branch = null as *Branch
+                bz = list_size(n.branches)
+
+                bi = 0
+                while bi < bz {
+                    b = list_get_raw(n.branches, bi) as *Branch
+                    if b != null && string_equals(b.selector, sel_val) == 1 {
+                        chosen_branch = b
+                        break
+                    }
+                    bi = bi + 1
+                }
+
+                if chosen_branch == null {
+                    bi = 0
+                    while bi < bz {
+                        b = list_get_raw(n.branches, bi) as *Branch
+                        if b != null && string_equals(b.selector, "other") == 1 {
+                            chosen_branch = b
+                            break
+                        }
+                        bi = bi + 1
+                    }
+                }
+
+                if chosen_branch == null && bz > 0 {
+                    chosen_branch = list_get_raw(n.branches, 0) as *Branch
+                }
+
+                if chosen_branch != null {
+                    branch_str = format_nodes(locale, chosen_branch.pattern, args, plural_val)
+                    strbuilder.append(sb, branch_str)
+                }
+            } else if n.kind == 4 {
+                strbuilder.append(sb, plural_val)
+            }
+        }
+        i = i + 1
+    }
+
+    return strbuilder.finish(sb)
+}
+
+fn format_pattern(locale: string, pat_ptr: ptr, args: ptr) -> string {
+    if pat_ptr == null {
+        return ""
+    }
+    pat = pat_ptr as *Pattern
+    return format_nodes(locale, pat.nodes, args, "")
+}
+
+fn format(locale: string, msg: string, args: ptr) -> string {
+    pat, err = parse(msg)
+    if err != "" {
+        string_release(err)
+        return ""
+    }
+    string_release(err)
+    res = format_pattern(locale, pat, args)
+    pattern_free(pat)
+    return res
+}
+
+fn catalog_new(locale: string) -> ptr {
+    cat = heap.new(Catalog)
+    cat.locale = string_copy(locale)
+    cat.messages = map_new()
+    return cat as ptr
+}
+
+fn catalog_add(cat_ptr: ptr, id: string, msg: string) {
+    if cat_ptr == null { return }
+    cat = cat_ptr as *Catalog
+    pat, err = parse(msg)
+    if err != "" {
+        string_release(err)
+        return
+    }
+    string_release(err)
+    if map_has(cat.messages, id) == 1 {
+        old_pat = map_get_raw(cat.messages, id) as *Pattern
+        pattern_free(old_pat)
+    }
+    map_put_raw(cat.messages, id, pat as ptr)
+}
+
+fn catalog_format(cat_ptr: ptr, id: string, args: ptr) -> string {
+    if cat_ptr == null {
+        return string_concat("[missing: ", string_concat(id, "]"))
+    }
+    cat = cat_ptr as *Catalog
+    if map_has(cat.messages, id) == 0 {
+        return string_concat("[missing: ", string_concat(id, "]"))
+    }
+    pat = map_get_raw(cat.messages, id) as *Pattern
+    if pat == null {
+        return string_concat("[missing: ", string_concat(id, "]"))
+    }
+    return format_pattern(cat.locale, pat, args)
+}
+
+fn catalog_free(cat_ptr: ptr) {
+    if cat_ptr == null { return }
+    cat = cat_ptr as *Catalog
+
+    mk_ptr = map_keys_raw(cat.messages)
+    if mk_ptr != null {
+        mk = mk_ptr as *MessageMapKeys
+        i = 0
+        while i < mk.count {
+            id = mem.get_ptr(mk.keys, i * 8)
+            pat = map_get_raw(cat.messages, id) as *Pattern
+            if pat != null {
+                pattern_free(pat)
+            }
+            i = i + 1
+        }
+        map_keys_free(mk_ptr)
+    }
+    map_free(cat.messages)
+    heap.free(cat)
+}

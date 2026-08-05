@@ -1,0 +1,143 @@
+// Standalone regression test for std.message
+
+import std.`message`(*)
+import std.map(*)
+import std.string(string_equals)
+
+fn assert_format(locale: string, msg: string, args: ptr, expected: string) {
+    res = format(locale, msg, args)
+    if string_equals(res, expected) != 1 {
+        print("FAIL: format(\"${locale}\", \"${msg}\") expected \"${expected}\", got \"${res}\"\n")
+        exit(1)
+    }
+}
+
+main() {
+    print("=== std.message regression tests ===\n\n")
+
+    // Empty args map
+    empty_args = map_new()
+
+    // 1. Simple placeholder
+    args1 = map_new()
+    map_put_raw(args1, "name", "Ada")
+    assert_format("en", "Hello, {name}!", args1, "Hello, Ada!")
+    map_free(args1)
+    print("PASS: simple placeholder\n")
+
+    // 2. Plural with one/other and with #
+    args2 = map_new()
+    map_put_raw(args2, "count", "1")
+    assert_format("en", "{count, plural, one {# item} other {# items}}", args2, "1 item")
+
+    map_put_raw(args2, "count", "5")
+    assert_format("en", "{count, plural, one {# item} other {# items}}", args2, "5 items")
+    map_free(args2)
+    print("PASS: plural with category and #\n")
+
+    // 3. Plural with explicit-value branches =0, =1 matching before category
+    args3 = map_new()
+    map_put_raw(args3, "count", "0")
+    assert_format("en", "{count, plural, =0 {No items} =1 {One item} one {# item} other {# items}}", args3, "No items")
+
+    map_put_raw(args3, "count", "1")
+    assert_format("en", "{count, plural, =0 {No items} =1 {One item} one {# item} other {# items}}", args3, "One item")
+
+    map_put_raw(args3, "count", "2")
+    assert_format("en", "{count, plural, =0 {No items} =1 {One item} one {# item} other {# items}}", args3, "2 items")
+    map_free(args3)
+    print("PASS: plural with explicit-value branches (=0, =1)\n")
+
+    // 4. Russian plural (few/many)
+    args4 = map_new()
+    // 21 -> one
+    map_put_raw(args4, "count", "21")
+    assert_format("ru", "{count, plural, one {# яблоко} few {# яблока} many {# яблок} other {# яблока}}", args4, "21 яблоко")
+    // 2 -> few
+    map_put_raw(args4, "count", "2")
+    assert_format("ru", "{count, plural, one {# яблоко} few {# яблока} many {# яблок} other {# яблока}}", args4, "2 яблока")
+    // 5 -> many
+    map_put_raw(args4, "count", "5")
+    assert_format("ru", "{count, plural, one {# яблоко} few {# яблока} many {# яблок} other {# яблока}}", args4, "5 яблок")
+    map_free(args4)
+    print("PASS: Russian plural rules (one/few/many)\n")
+
+    // 5. Polish plural
+    args_pl = map_new()
+    // 1 -> one
+    map_put_raw(args_pl, "count", "1")
+    assert_format("pl", "{count, plural, one {# przedmiot} few {# przedmioty} many {# przedmiotów} other {# przedmiotu}}", args_pl, "1 przedmiot")
+    // 2 -> few
+    map_put_raw(args_pl, "count", "2")
+    assert_format("pl", "{count, plural, one {# przedmiot} few {# przedmioty} many {# przedmiotów} other {# przedmiotu}}", args_pl, "2 przedmioty")
+    // 5 -> many
+    map_put_raw(args_pl, "count", "5")
+    assert_format("pl", "{count, plural, one {# przedmiot} few {# przedmioty} many {# przedmiotów} other {# przedmiotu}}", args_pl, "5 przedmiotów")
+    map_free(args_pl)
+    print("PASS: Polish plural rules (one/few/many)\n")
+
+    // 6. Select (string choice)
+    args5 = map_new()
+    map_put_raw(args5, "gender", "female")
+    assert_format("en", "{gender, select, male {He} female {She} other {They}}", args5, "She")
+
+    map_put_raw(args5, "gender", "unknown")
+    assert_format("en", "{gender, select, male {He} female {She} other {They}}", args5, "They")
+    map_free(args5)
+    print("PASS: select formatting\n")
+
+    // 7. Escaping '{', '}', and ''
+    assert_format("en", "This is '{'not an argument'}'", empty_args, "This is {not an argument}")
+    assert_format("en", "This is ''an apostrophe''", empty_args, "This is 'an apostrophe'")
+    print("PASS: escaping of curly braces and apostrophes\n")
+
+    // 8. Nesting
+    args6 = map_new()
+    map_put_raw(args6, "count", "5")
+    map_put_raw(args6, "name", "Ada")
+    assert_format("en", "{count, plural, other {{count} people liked {name}''s photo}}", args6, "5 people liked Ada's photo")
+    map_free(args6)
+    print("PASS: nested formatting (placeholders and escaping inside plural)\n")
+
+    // 9. Catalog tests
+    cat = catalog_new("en")
+    catalog_add(cat, "welcome", "Welcome, {name}!")
+    catalog_add(cat, "item_count", "{count, plural, =0 {No items} =1 {One item} other {# items}}")
+
+    args7 = map_new()
+    map_put_raw(args7, "name", "Ada")
+    res_cat1 = catalog_format(cat, "welcome", args7)
+    if string_equals(res_cat1, "Welcome, Ada!") != 1 {
+        print("FAIL: catalog_format welcome expected \"Welcome, Ada!\", got \"${res_cat1}\"\n")
+        exit(1)
+    }
+
+    map_put_raw(args7, "count", "0")
+    res_cat2 = catalog_format(cat, "item_count", args7)
+    if string_equals(res_cat2, "No items") != 1 {
+        print("FAIL: catalog_format item_count 0 expected \"No items\", got \"${res_cat2}\"\n")
+        exit(1)
+    }
+
+    map_put_raw(args7, "count", "3")
+    res_cat3 = catalog_format(cat, "item_count", args7)
+    if string_equals(res_cat3, "3 items") != 1 {
+        print("FAIL: catalog_format item_count 3 expected \"3 items\", got \"${res_cat3}\"\n")
+        exit(1)
+    }
+
+    // Missing ID lookup
+    res_missing = catalog_format(cat, "nonexistent", args7)
+    if string_equals(res_missing, "[missing: nonexistent]") != 1 {
+        print("FAIL: catalog_format nonexistent expected \"[missing: nonexistent]\", got \"${res_missing}\"\n")
+        exit(1)
+    }
+
+    map_free(args7)
+    catalog_free(cat)
+    print("PASS: message catalog add, format, and missing-id lookup\n")
+
+    map_free(empty_args)
+
+    print("\nAll PASS\n")
+}
