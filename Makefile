@@ -396,7 +396,15 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 # (vcr_embed_abi_wish.md Part A). Negligible codegen cost on x86-64/arm64
 # (most distros already default to PIE); one archive serves both the exe
 # link and the shared-object link.
-CFLAGS = -O2 -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(EXTRA_CFLAGS)
+CFLAGS = -O2 -fPIC -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(EXTRA_CFLAGS)
+
+# include/ holds the public embedder header (libaether.h) that
+# runtime/libaether_caps.c includes by name. `override` so a wholesale CFLAGS
+# override cannot drop it: CI passes CFLAGS="-O0 -g" and the sanitizer flags on
+# the valgrind, ASan and memory-profiling legs, which replaces the assignment
+# above and every -I in it. Unconditional and not inside any ifeq, because
+# without this path that translation unit does not compile at all.
+override CFLAGS += -Iinclude
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
 # passwd / sysctl past Capsicum capability mode. libcasper + the
 # per-service libs ship in the FreeBSD base system. We resolve them by
