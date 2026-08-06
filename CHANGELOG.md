@@ -13,6 +13,47 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The HTTP client and server public headers can be included together**
+  (#1433). Both published a type named `HttpRequest`, and they were different
+  structs: `std/net/aether_http.h` an opaque handle for an *outgoing* request,
+  `std/net/aether_http_server.h` a full struct for an *incoming* one. Any
+  translation unit including both failed to compile, so a C consumer could not
+  serve HTTP and make HTTP calls. The proxy had been working around it by
+  hand-declaring the client prototypes under different type names, which is
+  worse than the collision it dodged: duplicated signatures the compiler can no
+  longer check against the real definitions, the same hazard `@c_import`
+  (#1239) exists to remove for user code. The client type is now
+  `HttpClientRequest`, the name the workaround had already chosen; the server
+  keeps `HttpRequest` (its tinyweb-compatible surface, and the far more widely
+  used of the two, mirroring how its response type is already
+  `HttpServerResponse`). Both workarounds are deleted in favour of including the
+  header. The Aether-level API is untouched: `std.http.client` passes these as
+  `ptr`.
+
+### Removed
+
+- **`std/aether_std.h`**, an umbrella header that shipped in every install and
+  was included by nothing. It listed 7 of the 44 std headers, appeared in no
+  documentation, and had not been touched since it was added. Anyone who found
+  it got a misleading tenth of the standard library. It could not simply be
+  completed, either: including all std headers in one translation unit is a
+  compile error (#1433 is why), which is how that bug was found. The public
+  entry points remain the per-module headers, all of which are self-contained,
+  and `include/libaether.h` for embedders.
+
+### Added
+
+- **A guard that every public header compiles standalone**
+  (`tests/integration/public_headers`). Nothing checked this: the MSVC job
+  probes a handful of runtime headers under `cl.exe` and stops there. All 45
+  std and embedder headers pass today, and the check now also pins the
+  client/server pair from #1433 in both include orders, since an
+  order-dependent fix would not be one.
+
+## [current]
+
+### Fixed
+
 - **The cross-language benchmark suite excluded Aether, and said so quietly.**
   Every run printed `Aether... [SKIP] Build failed` for all five benchmarks
   while the other ten languages reported numbers, and then published a results

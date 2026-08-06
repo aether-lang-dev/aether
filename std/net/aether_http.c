@@ -15,24 +15,24 @@ int http_response_body_length(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_headers(HttpResponse* r) { (void)r; return ""; }
 const char* http_response_error(HttpResponse* r) { (void)r; return "networking disabled at build time"; }
 int http_response_ok(HttpResponse* r) { (void)r; return 0; }
-struct HttpRequest { int unused; };
-HttpRequest* http_request_raw(const char* m, const char* u) { (void)m; (void)u; return NULL; }
-int http_request_set_header_raw(HttpRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
-int http_request_set_body_raw(HttpRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
-int http_request_set_timeout_raw(HttpRequest* r, int s) { (void)r; (void)s; return -1; }
-int http_request_set_timeout_ns_raw(HttpRequest* r, int64_t ns) { (void)r; (void)ns; return -1; }
-int http_request_set_follow_redirects_raw(HttpRequest* r, int n) { (void)r; (void)n; return -1; }
-int http_request_set_insecure_raw(HttpRequest* r, int on) { (void)r; (void)on; return -1; }
-int http_request_set_cafile_raw(HttpRequest* r, const char* p) { (void)r; (void)p; return -1; }
-int http_request_use_env_proxy_raw(HttpRequest* r, int on) { (void)r; (void)on; return -1; }
-int http_request_use_http_proxy_raw(HttpRequest* r, const char* u) { (void)r; (void)u; return -1; }
-int http_request_ignore_http_proxy_raw(HttpRequest* r) { (void)r; return -1; }
-void http_request_free_raw(HttpRequest* r) { (void)r; }
-HttpResponse* http_send_raw(HttpRequest* r) { (void)r; return NULL; }
+struct HttpClientRequest { int unused; };
+HttpClientRequest* http_request_raw(const char* m, const char* u) { (void)m; (void)u; return NULL; }
+int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
+int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
+int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
+int http_request_set_timeout_ns_raw(HttpClientRequest* r, int64_t ns) { (void)r; (void)ns; return -1; }
+int http_request_set_follow_redirects_raw(HttpClientRequest* r, int n) { (void)r; (void)n; return -1; }
+int http_request_set_insecure_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
+int http_request_set_cafile_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
+int http_request_use_env_proxy_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
+int http_request_use_http_proxy_raw(HttpClientRequest* r, const char* u) { (void)r; (void)u; return -1; }
+int http_request_ignore_http_proxy_raw(HttpClientRequest* r) { (void)r; return -1; }
+void http_request_free_raw(HttpClientRequest* r) { (void)r; }
+HttpResponse* http_send_raw(HttpClientRequest* r) { (void)r; return NULL; }
 const char* http_response_header_raw(HttpResponse* r, const char* n) { (void)r; (void)n; return ""; }
 const char* http_response_effective_url_raw(HttpResponse* r) { (void)r; return ""; }
 const char* http_response_redirect_error_raw(HttpResponse* r) { (void)r; return ""; }
-int http_request_set_stream_raw(HttpRequest* r, int on) { (void)r; (void)on; return -1; }
+int http_request_set_stream_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
 int http_response_is_stream_raw(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return ""; }
 #else
@@ -519,7 +519,7 @@ typedef struct HttpHeader {
     struct HttpHeader* next;
 } HttpHeader;
 
-struct HttpRequest {
+struct HttpClientRequest {
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
@@ -556,15 +556,15 @@ struct HttpRequest {
     char* proxy_url;     /* owned; set only for PROXY_MODE_EXPLICIT */
 };
 
-/* Proxy-mode ladder (see struct HttpRequest.proxy_mode). */
+/* Proxy-mode ladder (see struct HttpClientRequest.proxy_mode). */
 #define PROXY_MODE_DIRECT   0
 #define PROXY_MODE_ENV      1
 #define PROXY_MODE_EXPLICIT 2
 #define PROXY_MODE_IGNORE   3
 
-HttpRequest* http_request_raw(const char* method, const char* url) {
+HttpClientRequest* http_request_raw(const char* method, const char* url) {
     if (!method || !*method || !url || !*url) return NULL;
-    HttpRequest* req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+    HttpClientRequest* req = (HttpClientRequest*)calloc(1, sizeof(HttpClientRequest));
     if (!req) return NULL;
     req->method = strdup(method);
     req->url    = strdup(url);
@@ -575,7 +575,7 @@ HttpRequest* http_request_raw(const char* method, const char* url) {
     return req;
 }
 
-int http_request_set_header_raw(HttpRequest* req, const char* name, const char* value) {
+int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
     if (!req || !name || !*name || !value) return -1;
     HttpHeader* h = (HttpHeader*)calloc(1, sizeof(HttpHeader));
     if (!h) return -1;
@@ -598,7 +598,7 @@ int http_request_set_header_raw(HttpRequest* req, const char* name, const char* 
     return 0;
 }
 
-int http_request_set_body_raw(HttpRequest* req, const char* body, int len, const char* content_type) {
+int http_request_set_body_raw(HttpClientRequest* req, const char* body, int len, const char* content_type) {
     if (!req || len < 0) return -1;
     /* Replace any prior body. Cap-aware (#343): req->body_len holds
      * the original allocation size and is reset to 0 below before
@@ -635,19 +635,19 @@ int http_request_set_body_raw(HttpRequest* req, const char* body, int len, const
     return 0;
 }
 
-int http_request_set_timeout_raw(HttpRequest* req, int seconds) {
+int http_request_set_timeout_raw(HttpClientRequest* req, int seconds) {
     if (!req || seconds < 0) return -1;
     req->timeout_ns = (int64_t)seconds * 1000000000LL;
     return 0;
 }
 
-int http_request_set_timeout_ns_raw(HttpRequest* req, int64_t timeout_ns) {
+int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns) {
     if (!req || timeout_ns < 0) return -1;
     req->timeout_ns = timeout_ns;
     return 0;
 }
 
-int http_request_set_follow_redirects_raw(HttpRequest* req, int max_hops) {
+int http_request_set_follow_redirects_raw(HttpClientRequest* req, int max_hops) {
     if (!req || max_hops < 0) return -1;
     req->max_redirects = max_hops;
     return 0;
@@ -658,7 +658,7 @@ int http_request_set_follow_redirects_raw(HttpRequest* req, int max_hops) {
  * verifies. The relaxation is applied per-SSL in the TLS path below, never on
  * the process-wide SSL_CTX singleton — so one insecure request cannot silently
  * downgrade verification for every other request in the process. */
-int http_request_set_insecure_raw(HttpRequest* req, int on) {
+int http_request_set_insecure_raw(HttpClientRequest* req, int on) {
     if (!req) return -1;
     req->insecure = on ? 1 : 0;
     return 0;
@@ -672,7 +672,7 @@ int http_request_set_insecure_raw(HttpRequest* req, int on) {
  * per-connection in the TLS path via a per-SSL X509_STORE, never on the shared
  * SSL_CTX. Passing NULL/empty clears the pin (revert to the system store).
  * `path` is copied. Returns 0, or -1 on a null request. */
-int http_request_set_cafile_raw(HttpRequest* req, const char* path) {
+int http_request_set_cafile_raw(HttpClientRequest* req, const char* path) {
     if (!req) return -1;
     free(req->cafile);
     req->cafile = (path && *path) ? strdup(path) : NULL;
@@ -683,7 +683,7 @@ int http_request_set_cafile_raw(HttpRequest* req, const char* path) {
  * response returned by http_send_raw carries an open HttpStream instead of a
  * buffered body; the caller pulls the body via http_response_read_chunk_raw
  * and must free the response (which closes the transport) when done. */
-int http_request_set_stream_raw(HttpRequest* req, int on) {
+int http_request_set_stream_raw(HttpClientRequest* req, int on) {
     if (!req) return -1;
     req->stream = on ? 1 : 0;
     return 0;
@@ -704,7 +704,7 @@ int http_request_set_stream_raw(HttpRequest* req, int on) {
 /* use_env_proxy: follow $HTTP_PROXY/$HTTPS_PROXY/$NO_PROXY (Go-compatible),
  * WITH the httpoxy + SSRF guards applied at connect time (see
  * resolve_proxy_for). `on` non-zero enables; 0 reverts to direct. */
-int http_request_use_env_proxy_raw(HttpRequest* req, int on) {
+int http_request_use_env_proxy_raw(HttpClientRequest* req, int on) {
     if (!req) return -1;
     req->proxy_mode = on ? PROXY_MODE_ENV : PROXY_MODE_DIRECT;
     return 0;
@@ -714,7 +714,7 @@ int http_request_use_env_proxy_raw(HttpRequest* req, int on) {
  * env entirely — $HTTP_PROXY is never consulted — so a team-controlled proxy
  * (recorder / toxiproxy) is immune to whatever the shell/CI has set. Passing
  * an empty/NULL url reverts to direct. */
-int http_request_use_http_proxy_raw(HttpRequest* req, const char* proxy_url) {
+int http_request_use_http_proxy_raw(HttpClientRequest* req, const char* proxy_url) {
     if (!req) return -1;
     free(req->proxy_url);
     req->proxy_url = NULL;
@@ -731,7 +731,7 @@ int http_request_use_http_proxy_raw(HttpRequest* req, const char* proxy_url) {
 /* ignore_http_proxy: force a direct connection regardless of env or any proxy
  * a higher layer set. The determinism escape hatch (e.g. VCR record mode that
  * must capture the origin, not a proxy's view). */
-int http_request_ignore_http_proxy_raw(HttpRequest* req) {
+int http_request_ignore_http_proxy_raw(HttpClientRequest* req) {
     if (!req) return -1;
     free(req->proxy_url);
     req->proxy_url = NULL;
@@ -739,7 +739,7 @@ int http_request_ignore_http_proxy_raw(HttpRequest* req) {
     return 0;
 }
 
-void http_request_free_raw(HttpRequest* req) {
+void http_request_free_raw(HttpClientRequest* req) {
     if (!req) return;
     free(req->method);
     free(req->url);
@@ -760,7 +760,7 @@ void http_request_free_raw(HttpRequest* req) {
 }
 
 /* Forward decls — defined below the static request() function. */
-static int header_already_set(HttpRequest* req, const char* name);
+static int header_already_set(HttpClientRequest* req, const char* name);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 /* Decode HTTP/1.1 chunked transfer-encoding. Returns a malloc'd decoded
  * buffer (NUL-terminated; *out_len excludes the NUL) or NULL on malformed
@@ -851,7 +851,7 @@ static int host_in_no_proxy(const char* target_host, const char* no_proxy) {
  * ladder and all guards. On "use a proxy" writes proxy_host/proxy_port and
  * returns 1; returns 0 for a direct connection; returns -1 with *err set on a
  * rejected/malformed proxy (caller surfaces it). */
-static int resolve_proxy_for(HttpRequest* req, const char* target_host, int use_tls,
+static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, int use_tls,
                              char* proxy_host, size_t phost_size, int* proxy_port,
                              const char** err) {
     *err = NULL;
@@ -914,11 +914,11 @@ static int resolve_proxy_for(HttpRequest* req, const char* target_host, int use_
 }
 
 // -----------------------------------------------------------------
-// Core request — operates on an HttpRequest. v1 wrappers build a
-// throwaway HttpRequest and discard it after send.
+// Core request, operating on an HttpClientRequest. v1 wrappers build a
+// throwaway HttpClientRequest and discard it after send.
 // -----------------------------------------------------------------
 
-static HttpResponse* http_request_internal(HttpRequest* req) {
+static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
     const char* body   = req->body;          /* may be NULL */
@@ -1633,7 +1633,7 @@ static int http_strcaseeq(const char* a, const char* b) {
     return *a == 0 && *b == 0;
 }
 
-static int header_already_set(HttpRequest* req, const char* name) {
+static int header_already_set(HttpClientRequest* req, const char* name) {
     if (!req) return 0;
     for (HttpHeader* h = req->headers; h; h = h->next) {
         if (http_strcaseeq(h->name, name)) return 1;
@@ -1816,7 +1816,7 @@ static char* http_resolve_location(const char* base_url, const char* location) {
  * (Authorization, Cookie, Proxy-Authorization). Modifies req in
  * place. Called on each redirect hop where the target host differs
  * from the previous host. */
-static void http_strip_cross_host_headers(HttpRequest* req) {
+static void http_strip_cross_host_headers(HttpClientRequest* req) {
     if (!req) return;
     HttpHeader** link = &req->headers;
     while (*link) {
@@ -1836,7 +1836,7 @@ static void http_strip_cross_host_headers(HttpRequest* req) {
 /* v2 entry point. The v1 wrappers below build a throwaway request
  * and call this. Handles redirect-following when the request was
  * configured with max_redirects > 0 (issue #239). */
-HttpResponse* http_send_raw(HttpRequest* req) {
+HttpResponse* http_send_raw(HttpClientRequest* req) {
     if (!req) return NULL;
 
     HttpResponse* resp = http_request_internal(req);
@@ -1974,7 +1974,7 @@ HttpResponse* http_send_raw(HttpRequest* req) {
  * the original "block forever" behaviour callers had before v2. */
 
 HttpResponse* http_get_raw(const char* url) {
-    HttpRequest* req = http_request_raw("GET", url);
+    HttpClientRequest* req = http_request_raw("GET", url);
     if (!req) return NULL;
     HttpResponse* resp = http_send_raw(req);
     http_request_free_raw(req);
@@ -1987,7 +1987,7 @@ HttpResponse* http_get_raw(const char* url) {
 // compatibility; new callers should reach for this variant any time
 // the URL is third-party or non-local.
 HttpResponse* http_get_with_timeout_raw(const char* url, int timeout_ms) {
-    HttpRequest* req = http_request_raw("GET", url);
+    HttpClientRequest* req = http_request_raw("GET", url);
     if (!req) return NULL;
     if (timeout_ms > 0) {
         // SO_RCVTIMEO / SO_SNDTIMEO storage is integer seconds; round
@@ -2004,7 +2004,7 @@ HttpResponse* http_get_with_timeout_raw(const char* url, int timeout_ms) {
 }
 
 HttpResponse* http_get_with_timeout_ns_raw(const char* url, int64_t timeout_ns) {
-    HttpRequest* req = http_request_raw("GET", url);
+    HttpClientRequest* req = http_request_raw("GET", url);
     if (!req) return NULL;
     if (http_request_set_timeout_ns_raw(req, timeout_ns) != 0) {
         http_request_free_raw(req);
@@ -2016,7 +2016,7 @@ HttpResponse* http_get_with_timeout_ns_raw(const char* url, int64_t timeout_ns) 
 }
 
 HttpResponse* http_post_raw(const char* url, const char* body, const char* content_type) {
-    HttpRequest* req = http_request_raw("POST", url);
+    HttpClientRequest* req = http_request_raw("POST", url);
     if (!req) return NULL;
     if (body) {
         http_request_set_body_raw(req, body, (int)strlen(body), content_type);
@@ -2027,7 +2027,7 @@ HttpResponse* http_post_raw(const char* url, const char* body, const char* conte
 }
 
 HttpResponse* http_put_raw(const char* url, const char* body, const char* content_type) {
-    HttpRequest* req = http_request_raw("PUT", url);
+    HttpClientRequest* req = http_request_raw("PUT", url);
     if (!req) return NULL;
     if (body) {
         http_request_set_body_raw(req, body, (int)strlen(body), content_type);
@@ -2038,7 +2038,7 @@ HttpResponse* http_put_raw(const char* url, const char* body, const char* conten
 }
 
 HttpResponse* http_delete_raw(const char* url) {
-    HttpRequest* req = http_request_raw("DELETE", url);
+    HttpClientRequest* req = http_request_raw("DELETE", url);
     if (!req) return NULL;
     HttpResponse* resp = http_send_raw(req);
     http_request_free_raw(req);
