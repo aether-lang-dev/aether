@@ -1,0 +1,1302 @@
+// std.tar - Streaming POSIX ustar TAR Archive Module
+// Import with: import std.tar
+
+import std.io
+import std.fs
+import std.string
+import std.bytes
+import std.list
+
+exports(
+    KIND_FILE, KIND_DIRECTORY, KIND_SYMLINK, KIND_OTHER,
+    ExtractOptions, default_extract_options, extract,
+    reader_open, reader_next,
+    entry_name, entry_kind, entry_size, entry_mode, entry_mtime, entry_link_name,
+    entry_read, entry_skip, reader_close,
+    writer_create, writer_add_file, writer_add_directory, writer_add_symlink,
+    writer_finish, writer_abort
+)
+
+const KIND_FILE = 1
+const KIND_DIRECTORY = 2
+const KIND_SYMLINK = 3
+const KIND_OTHER = 4
+
+// C extern declarations from std/tar/aether_tar.c
+extern aether_tar_set_mtime_raw(path: string, mtime: long, is_symlink: int) -> int
+extern aether_tar_get_mode_raw(path: string) -> int
+extern aether_tar_slice_string(data: string, offset: int, len: int) -> ptr
+extern aether_tar_join_name(prefix: string, name: string) -> ptr
+
+struct TarReader {
+    fd: int
+    entry_offset: long
+    entry_bytes_read: long
+    entry_bytes_total: long
+    entry_name: ptr
+    entry_kind: int
+    entry_mode: int
+    entry_mtime: long
+    entry_size: long
+    entry_link_name: ptr
+    reached_eof: int
+    is_at_entry: int
+}
+
+struct TarWriter {
+    fd: int
+    path: string
+    is_finished: int
+}
+
+struct DirMetadata {
+    path: string
+    mode: int
+    mtime: long
+}
+
+struct ExtractOptions {
+    max_entries: int
+    max_entry_bytes: long
+    max_total_bytes: long
+    allow_symlinks: int
+    overwrite: int
+    preserve_mode: int
+    preserve_mtime: int
+}
+
+default_extract_options() -> ExtractOptions {
+    ExtractOptions opts
+    opts.max_entries = 10000
+    opts.max_entry_bytes = 1024 as long * 1024 * 1024 // 1 GiB
+    opts.max_total_bytes = 10 as long * 1024 * 1024 * 1024 // 10 GiB
+    opts.allow_symlinks = 0
+    opts.overwrite = 0
+    opts.preserve_mode = 0
+    opts.preserve_mtime = 0
+    return opts
+}
+
+// Helper: decode a NUL-terminated or fixed-width string from a block
+decode_string(block: string, offset: int, max_len: int) -> ptr {
+    var len = 0
+    while len < max_len {
+        c = string_char_at_n(block, 512, offset + len)
+        if c == 0 {
+            break
+        }
+        len = len + 1
+    }
+    return aether_tar_slice_string(block, offset, len)
+}
+
+// Helper: parse an octal field into a long, checking for overflow and malformation
+parse_octal(block: string, offset: int, max_len: int) -> {
+    var val: long = 0
+    var i = 0
+    // Skip leading spaces or nulls
+    while i < max_len {
+        c = string_char_at_n(block, 512, offset + i)
+        if c != 32 && c != 0 {
+            break
+        }
+        i = i + 1
+    }
+    if i == max_len {
+        return 0 as long, ""
+    }
+    while i < max_len {
+        c = string_char_at_n(block, 512, offset + i)
+        if c == 0 || c == 32 {
+            break // NUL or space terminates
+        }
+        if c < 48 || c > 55 {
+            return 0 as long, "malformed octal field"
+        }
+        digit = c - 48
+        // Check for numeric overflow before multiplying: (2^63 - 1) / 8 = 1152921504606846975
+        if val > 1152921504606846975 {
+            return 0 as long, "numeric overflow in octal parsing"
+        }
+        val = val * 8 + digit
+        i = i + 1
+    }
+    return val, ""
+}
+
+// Helper: calculate the header checksum (with chksum field as spaces)
+calculate_checksum(block: string) -> {
+    var sum: long = 0
+    var i = 0
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            sum = sum + 32
+        } else {
+            sum = sum + string_char_at_n(block, 512, i)
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// Helper: validate UTF-8 of a string
+is_valid_utf8(s: string) -> {
+    n = string_length(s)
+    var i = 0
+    while i < n {
+        c1 = string_char_at_n(s, n, i)
+        if c1 <= 127 {
+            i = i + 1
+        } else if c1 >= 194 && c1 <= 223 {
+            if i + 1 >= n { return false }
+            c2 = string_char_at_n(s, n, i + 1)
+            if c2 < 128 || c2 > 191 { return false }
+            i = i + 2
+        } else if c1 >= 224 && c1 <= 239 {
+            if i + 2 >= n { return false }
+            c2 = string_char_at_n(s, n, i + 1)
+            c3 = string_char_at_n(s, n, i + 2)
+            if c2 < 128 || c2 > 191 { return false }
+            if c3 < 128 || c3 > 191 { return false }
+            if c1 == 224 && c2 < 160 { return false }
+            if c1 == 237 && c2 >= 160 { return false } // surrogate
+            i = i + 3
+        } else if c1 >= 240 && c1 <= 244 {
+            if i + 3 >= n { return false }
+            c2 = string_char_at_n(s, n, i + 1)
+            c3 = string_char_at_n(s, n, i + 2)
+            c4 = string_char_at_n(s, n, i + 3)
+            if c2 < 128 || c2 > 191 { return false }
+            if c3 < 128 || c3 > 191 { return false }
+            if c4 < 128 || c4 > 191 { return false }
+            if c1 == 240 && c2 < 144 { return false }
+            if c1 == 244 && c2 >= 144 { return false }
+            i = i + 4
+        } else {
+            return false
+        }
+    }
+    return true
+}
+
+// Validate a POSIX archive path without normalizing unsafe input. Backslashes
+// and colons are rejected so the same name cannot become absolute on Windows.
+is_unsafe_path(name: string) -> {
+    n = string_length(name)
+    if n == 0 { return true }
+    c0 = string_char_at_n(name, n, 0)
+    if c0 == 47 || c0 == 92 {
+        return true
+    }
+
+    var depth = 0
+    var segment_start = 0
+    var i = 0
+    while i <= n {
+        var c = 47
+        if i < n {
+            c = string_char_at_n(name, n, i)
+        }
+        if c == 92 || c == 58 {
+            return true
+        }
+        if c == 47 {
+            segment_len = i - segment_start
+            if segment_len == 2 && string_char_at_n(name, n, segment_start) == 46 && string_char_at_n(name, n, segment_start + 1) == 46 {
+                if depth == 0 { return true }
+                depth = depth - 1
+            } else if segment_len > 0 && !(segment_len == 1 && string_char_at_n(name, n, segment_start) == 46) {
+                depth = depth + 1
+            }
+            segment_start = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// Resolve a symlink target only as component depth. Returning true means the
+// target is absolute, platform-qualified, or climbs above the extraction root.
+symlink_target_escapes(entry: string, target: string) -> {
+    target_len = string_length(target)
+    if target_len == 0 { return true }
+    first = string_char_at_n(target, target_len, 0)
+    if first == 47 || first == 92 { return true }
+
+    var depth = 0
+    entry_len = string_length(entry)
+    var e = 0
+    while e < entry_len {
+        if string_char_at_n(entry, entry_len, e) == 47 {
+            depth = depth + 1
+        }
+        e = e + 1
+    }
+
+    var segment_start = 0
+    var i = 0
+    while i <= target_len {
+        var c = 47
+        if i < target_len {
+            c = string_char_at_n(target, target_len, i)
+        }
+        if c == 92 || c == 58 { return true }
+        if c == 47 {
+            segment_len = i - segment_start
+            if segment_len == 2 && string_char_at_n(target, target_len, segment_start) == 46 && string_char_at_n(target, target_len, segment_start + 1) == 46 {
+                if depth == 0 { return true }
+                depth = depth - 1
+            } else if segment_len > 0 && !(segment_len == 1 && string_char_at_n(target, target_len, segment_start) == 46) {
+                depth = depth + 1
+            }
+            segment_start = i + 1
+        }
+        i = i + 1
+    }
+    return false
+}
+
+reader_open(path: string) -> {
+    fd, err = io.fd_open_read(path)
+    if err != "" {
+        return null, "cannot open file: ${err}"
+    }
+    reader = heap.new(TarReader)
+    reader.fd = fd
+    reader.entry_name = null
+    reader.entry_link_name = null
+    reader.entry_bytes_read = 0
+    reader.entry_bytes_total = 0
+    reader.reached_eof = 0
+    reader.is_at_entry = 0
+    return reader as ptr, ""
+}
+
+reader_next(reader_ptr: ptr) -> {
+    if reader_ptr == null {
+        return 0, "null reader"
+    }
+    reader = reader_ptr as *TarReader
+    if reader.reached_eof == 1 {
+        return 0, ""
+    }
+
+    // Skip remaining payload from previous entry
+    if reader.is_at_entry == 1 {
+        skip_err = entry_skip(reader_ptr)
+        if skip_err != "" {
+            return 0, "failed to skip previous entry: ${skip_err}"
+        }
+    }
+
+    // Read the 512-byte header
+    block, n, err = io.fd_read_n(reader.fd, 512)
+    if err != "" {
+        string_release(block)
+        return 0, "failed to read header: ${err}"
+    }
+    if n == 0 {
+        string_release(block)
+        return 0, "truncated archive: missing end-of-archive marker"
+    }
+    if n < 512 {
+        string_release(block)
+        return 0, "truncated header block"
+    }
+
+    // Check if the block is all zeroes
+    is_zero = 1
+    var i = 0
+    while i < 512 {
+        if string_char_at_n(block, 512, i) != 0 {
+            is_zero = 0
+            break
+        }
+        i = i + 1
+    }
+
+    if is_zero == 1 {
+        string_release(block)
+        // Read second terminator block
+        block2, n2, err2 = io.fd_read_n(reader.fd, 512)
+        if err2 != "" {
+            string_release(block2)
+            return 0, "failed to read second terminator block: ${err2}"
+        }
+        if n2 == 0 {
+            string_release(block2)
+            return 0, "truncated archive: missing second zero block"
+        }
+        if n2 < 512 {
+            string_release(block2)
+            return 0, "truncated second terminator block"
+        }
+        is_zero2 = 1
+        var j = 0
+        while j < 512 {
+            if string_char_at_n(block2, 512, j) != 0 {
+                is_zero2 = 0
+                break
+            }
+            j = j + 1
+        }
+        string_release(block2)
+        if is_zero2 == 0 {
+            return 0, "malformed archive: second terminator block is not zeroed"
+        }
+        reader.reached_eof = 1
+        reader.is_at_entry = 0
+        return 0, ""
+    }
+
+    // Parse header fields
+    parsed_chksum, chksum_err = parse_octal(block, 148, 8)
+    if chksum_err != "" {
+        string_release(block)
+        return 0, "bad checksum field: ${chksum_err}"
+    }
+    calc_chksum = calculate_checksum(block)
+    if parsed_chksum != calc_chksum {
+        string_release(block)
+        return 0, "checksum validation failed: header claims ${parsed_chksum}, calculated ${calc_chksum}"
+    }
+
+    // This module intentionally accepts POSIX ustar, not legacy/GNU/PAX
+    // variants with different header semantics.
+    if string_char_at_n(block, 512, 257) != 117 || string_char_at_n(block, 512, 258) != 115 || string_char_at_n(block, 512, 259) != 116 || string_char_at_n(block, 512, 260) != 97 || string_char_at_n(block, 512, 261) != 114 || string_char_at_n(block, 512, 262) != 0 || string_char_at_n(block, 512, 263) != 48 || string_char_at_n(block, 512, 264) != 48 {
+        string_release(block)
+        return 0, "unsupported tar format: expected POSIX ustar header"
+    }
+
+    // Decode Name and Prefix
+    name = decode_string(block, 0, 100)
+    prefix = decode_string(block, 345, 155)
+
+    var full_name: ptr = name
+    if string_length(prefix) > 0 {
+        full_name = aether_tar_join_name(prefix, name)
+    }
+
+    if string_length(full_name) == 0 {
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "empty entry name"
+    }
+
+    // Validate UTF-8 of the name
+    if !is_valid_utf8(full_name) {
+        if string_length(prefix) > 0 {
+            string_release(full_name)
+        }
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "invalid UTF-8 in entry name"
+    }
+
+    // Decode Size
+    size, size_err = parse_octal(block, 124, 12)
+    if size_err != "" {
+        if string_length(prefix) > 0 {
+            string_release(full_name)
+        }
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "invalid octal size: ${size_err}"
+    }
+    if size < 0 {
+        if string_length(prefix) > 0 {
+            string_release(full_name)
+        }
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "negative size in header"
+    }
+
+    // Decode Mode
+    mode, mode_err = parse_octal(block, 100, 8)
+    if mode_err != "" {
+        if string_length(prefix) > 0 {
+            string_release(full_name)
+        }
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "invalid octal mode: ${mode_err}"
+    }
+
+    // Decode Mtime
+    mtime, mtime_err = parse_octal(block, 136, 12)
+    if mtime_err != "" {
+        if string_length(prefix) > 0 {
+            string_release(full_name)
+        }
+        string_release(name)
+        string_release(prefix)
+        string_release(block)
+        return 0, "invalid octal mtime: ${mtime_err}"
+    }
+
+    // Decode Linkname
+    linkname = decode_string(block, 157, 100)
+    if string_length(linkname) > 0 {
+        if !is_valid_utf8(linkname) {
+            if string_length(prefix) > 0 {
+                string_release(full_name)
+            }
+            string_release(name)
+            string_release(prefix)
+            string_release(linkname)
+            string_release(block)
+            return 0, "invalid UTF-8 in symlink target"
+        }
+    }
+
+    // Decode Kind from Typeflag
+    typeflag = string_char_at_n(block, 512, 156)
+    var kind = KIND_OTHER
+    if typeflag == 48 || typeflag == 0 { // '0' or '\0'
+        kind = KIND_FILE
+    } else if typeflag == 53 { // '5'
+        kind = KIND_DIRECTORY
+    } else if typeflag == 50 { // '2'
+        kind = KIND_SYMLINK
+    } else {
+        kind = KIND_OTHER
+    }
+
+    // Release the previous entry's metadata before replacing it.
+    string_release(reader.entry_name)
+    string_release(reader.entry_link_name)
+
+    // Populate reader fields
+    reader.entry_name = full_name
+    reader.entry_kind = kind
+    reader.entry_size = size
+    reader.entry_mode = mode as int
+    reader.entry_mtime = mtime
+    reader.entry_size = size
+    reader.entry_link_name = linkname
+    reader.entry_bytes_read = 0
+    reader.entry_bytes_total = size
+    reader.is_at_entry = 1
+
+    // Release temporary name and prefix since full_name was duplicated if split
+    if string_length(prefix) > 0 {
+        string_release(name)
+        string_release(prefix)
+    } else {
+        string_release(prefix)
+    }
+    string_release(block)
+
+    return 1, ""
+}
+
+entry_name(reader_ptr: ptr) -> string {
+    if reader_ptr == null { return "" }
+    return (reader_ptr as *TarReader).entry_name as string
+}
+
+entry_kind(reader_ptr: ptr) -> int {
+    if reader_ptr == null { return KIND_OTHER }
+    return (reader_ptr as *TarReader).entry_kind
+}
+
+entry_size(reader_ptr: ptr) -> long {
+    if reader_ptr == null { return 0 }
+    return (reader_ptr as *TarReader).entry_size
+}
+
+entry_mode(reader_ptr: ptr) -> int {
+    if reader_ptr == null { return 0 }
+    return (reader_ptr as *TarReader).entry_mode
+}
+
+entry_mtime(reader_ptr: ptr) -> long {
+    if reader_ptr == null { return 0 }
+    return (reader_ptr as *TarReader).entry_mtime
+}
+
+entry_link_name(reader_ptr: ptr) -> string {
+    if reader_ptr == null { return "" }
+    return (reader_ptr as *TarReader).entry_link_name as string
+}
+
+entry_read(reader_ptr: ptr, max_bytes: int) -> {
+    if reader_ptr == null {
+        return "", 0, "null reader"
+    }
+    reader = reader_ptr as *TarReader
+    if reader.is_at_entry == 0 {
+        return "", 0, "not positioned on an entry"
+    }
+    if reader.entry_bytes_read >= reader.entry_bytes_total {
+        return "", 0, "" // EOF for this entry
+    }
+
+    remaining_bytes = reader.entry_bytes_total - reader.entry_bytes_read
+    var to_read = max_bytes
+    if to_read > remaining_bytes {
+        to_read = remaining_bytes as int
+    }
+    if to_read <= 0 {
+        return "", 0, ""
+    }
+
+    block, n, err = io.fd_read_n(reader.fd, to_read)
+    if err != "" {
+        string_release(block)
+        return "", 0, "failed to read entry payload: ${err}"
+    }
+    if n == 0 {
+        string_release(block)
+        return "", 0, "unexpected EOF in entry payload"
+    }
+    if n < to_read {
+        reader.entry_bytes_read = reader.entry_bytes_read + n
+        return block, n, "truncated entry payload"
+    }
+
+    reader.entry_bytes_read = reader.entry_bytes_read + n
+
+    if reader.entry_bytes_read == reader.entry_bytes_total {
+        // Consume padding
+        pad_size = (512 - (reader.entry_bytes_total % 512)) % 512
+        if pad_size > 0 {
+            pad_block, pad_n, pad_err = io.fd_read_n(reader.fd, pad_size as int)
+            if pad_err != "" {
+                string_release(pad_block)
+                return block, n, "failed to read payload padding: ${pad_err}"
+            }
+            string_release(pad_block)
+            if pad_n < pad_size {
+                return block, n, "missing payload padding"
+            }
+        }
+        reader.is_at_entry = 0
+    }
+
+    return block, n, ""
+}
+
+entry_skip(reader_ptr: ptr) -> string {
+    if reader_ptr == null {
+        return "null reader"
+    }
+    reader = reader_ptr as *TarReader
+    if reader.is_at_entry == 0 {
+        return ""
+    }
+
+    remaining_bytes = reader.entry_bytes_total - reader.entry_bytes_read
+    pad_size = (512 - (reader.entry_bytes_total % 512)) % 512
+    total_to_skip = remaining_bytes + pad_size
+
+    var skipped = 0 as long
+    while skipped < total_to_skip {
+        var chunk = 4096 as long
+        if total_to_skip - skipped < chunk {
+            chunk = total_to_skip - skipped
+        }
+        pad_block, n, err = io.fd_read_n(reader.fd, chunk as int)
+        if err != "" {
+            string_release(pad_block)
+            return "failed to skip payload: ${err}"
+        }
+        string_release(pad_block)
+        if n == 0 {
+            return "unexpected EOF during skip"
+        }
+        if n < chunk {
+            return "truncated payload/padding during skip"
+        }
+        skipped = skipped + n
+    }
+
+    reader.is_at_entry = 0
+    return ""
+}
+
+reader_close(reader_ptr: ptr) {
+    if reader_ptr == null { return }
+    reader = reader_ptr as *TarReader
+    if reader.fd >= 0 {
+        io.fd_close(reader.fd)
+        reader.fd = 0 - 1
+    }
+    string_release(reader.entry_name)
+    string_release(reader.entry_link_name)
+    heap.free(reader)
+}
+
+// -------------------------------------------------------------
+// Writer API
+// -------------------------------------------------------------
+
+// Helper: encode a number as octal digits padded with leading '0's and NUL-terminated
+encode_octal(buf: ptr, offset: int, size: int, value: long) {
+    var i = 0
+    while i < size - 1 {
+        bytes.set(buf, offset + i, 48) // '0'
+        i = i + 1
+    }
+    bytes.set(buf, offset + size - 1, 0) // NUL
+
+    var val = value
+    var idx = offset + size - 2
+    while idx >= offset && val > 0 {
+        digit = (val % 8) as int
+        bytes.set(buf, idx, 48 + digit)
+        val = val / 8
+        idx = idx - 1
+    }
+}
+
+octal_fits(value: long, digits: int) -> bool {
+    if value < 0 { return false }
+    var limit = 1 as long
+    var i = 0
+    while i < digits {
+        limit = limit * 8
+        i = i + 1
+    }
+    return value < limit
+}
+
+// Helper: encode checksum as 6 octal digits + NUL + space
+encode_octal_chksum(buf: ptr, offset: int, value: long) {
+    var i = 0
+    while i < 6 {
+        bytes.set(buf, offset + i, 48) // '0'
+        i = i + 1
+    }
+    bytes.set(buf, offset + 6, 0) // NUL
+    bytes.set(buf, offset + 7, 32) // Space
+
+    var val = value
+    var idx = offset + 5
+    while idx >= offset && val > 0 {
+        digit = (val % 8) as int
+        bytes.set(buf, idx, 48 + digit)
+        val = val / 8
+        idx = idx - 1
+    }
+}
+
+// Helper: find split point for ustar name/prefix splitting.
+// Returns split index (the '/' char index), or 0 if no split is needed, or -1 if impossible.
+find_split_point(path_str: string) -> int {
+    n = string_length(path_str)
+    if n <= 100 {
+        return 0
+    }
+    if n > 256 {
+        return 0 - 1
+    }
+    var best_split = 0 - 1
+    var i = 0
+    while i < n {
+        if string_char_at_n(path_str, n, i) == 47 { // '/'
+            prefix_len = i
+            suffix_len = n - 1 - i
+            if prefix_len > 0 && prefix_len <= 155 && suffix_len > 0 && suffix_len <= 100 {
+                best_split = i
+            }
+        }
+        i = i + 1
+    }
+    return best_split
+}
+
+// Helper: write a ustar header block to the writer
+write_header(fd: int, archive_name: string, kind: int, size: long, mode: int, mtime: long, linkname: string) -> string {
+    n = string_length(archive_name)
+    if n == 0 {
+        return "archive entry name must not be empty"
+    }
+    if !octal_fits(mode as long, 7) {
+        return "file mode is not representable in a ustar header"
+    }
+    if !octal_fits(size, 11) {
+        return "file size is not representable in a ustar header"
+    }
+    if !octal_fits(mtime, 11) {
+        return "modification time is not representable in a ustar header"
+    }
+    var name_field = archive_name
+    var prefix_field = ""
+
+    if n > 100 {
+        split_idx = find_split_point(archive_name)
+        if split_idx < 0 {
+            return "name is too long or cannot be split into ustar name and prefix fields"
+        }
+        prefix_field = string_substring(archive_name, 0, split_idx)
+        name_field = string_substring(archive_name, split_idx + 1, n)
+    }
+
+    let buf = bytes.new(512)
+    defer bytes.free(buf)
+
+    // Clear buffer
+    var j = 0
+    while j < 512 {
+        bytes.set(buf, j, 0)
+        j = j + 1
+    }
+
+    // Write name (up to 100 bytes)
+    bytes.copy_from_string(buf, 0, name_field, string_length(name_field))
+
+    // Write mode (8 bytes, octal)
+    encode_octal(buf, 100, 8, mode as long)
+
+    // Write uid/gid (8 bytes, octal, default to 0)
+    encode_octal(buf, 108, 8, 0 as long)
+    encode_octal(buf, 116, 8, 0 as long)
+
+    // Write size (12 bytes, octal)
+    encode_octal(buf, 124, 12, size)
+
+    // Write mtime (12 bytes, octal)
+    encode_octal(buf, 136, 12, mtime)
+
+    // Write typeflag (1 byte)
+    var typeflag = 48 // '0'
+    if kind == KIND_DIRECTORY {
+        typeflag = 53 // '5'
+    } else if kind == KIND_SYMLINK {
+        typeflag = 50 // '2'
+    }
+    bytes.set(buf, 156, typeflag)
+
+    // Write linkname (up to 100 bytes)
+    if string_length(linkname) > 0 {
+        if string_length(linkname) > 100 {
+            if string_length(prefix_field) > 0 {
+                string_release(prefix_field)
+                string_release(name_field)
+            }
+            return "symbolic link target exceeds 100 bytes"
+        }
+        bytes.copy_from_string(buf, 157, linkname, string_length(linkname))
+    }
+
+    // Write magic ("ustar\0") and version ("00")
+    bytes.copy_from_string(buf, 257, "ustar", 5)
+    bytes.set(buf, 262, 0)
+    bytes.set(buf, 263, 48) // '0'
+    bytes.set(buf, 264, 48) // '0'
+
+    // Write prefix (up to 155 bytes)
+    if string_length(prefix_field) > 0 {
+        bytes.copy_from_string(buf, 345, prefix_field, string_length(prefix_field))
+    }
+
+    // Compute and write checksum
+    hdr_str = bytes.to_string(buf, 512)
+    chksum = calculate_checksum(hdr_str)
+    encode_octal_chksum(buf, 148, chksum)
+    string_release(hdr_str)
+
+    // Write header to file
+    final_hdr = bytes.to_string(buf, 512)
+    write_err = io.fd_write_n(fd, final_hdr, 512)
+    string_release(final_hdr)
+
+    if string_length(prefix_field) > 0 {
+        string_release(prefix_field)
+        string_release(name_field)
+    }
+
+    if write_err != 0 {
+        return "failed to write tar header"
+    }
+
+    return ""
+}
+
+writer_create(path: string) -> {
+    fd, err = io.fd_open_write(path)
+    if err != "" {
+        return null, "cannot create file: ${err}"
+    }
+    writer = heap.new(TarWriter)
+    writer.fd = fd
+    writer.path = string.copy(path)
+    string_retain(writer.path)
+    writer.is_finished = 0
+    return writer as ptr, ""
+}
+
+writer_add_file(writer_ptr: ptr, archive_name: string, source_path: string) -> string {
+    if writer_ptr == null {
+        return "null writer"
+    }
+    writer = writer_ptr as *TarWriter
+    if writer.fd < 0 {
+        return "writer is closed"
+    }
+
+    // Get source file stats
+    kind, size, mtime, err = fs.file_stat(source_path)
+    if err != "" {
+        return "cannot stat source file: ${err}"
+    }
+    if kind != fs.STAT_KIND_FILE {
+        return "source path is not a regular file"
+    }
+
+    // Validate archive_name UTF-8
+    if !is_valid_utf8(archive_name) {
+        return "archive entry name must be valid UTF-8"
+    }
+
+    mode = aether_tar_get_mode_raw(source_path)
+    perm_mode = mode & 4095
+
+    // Write Header
+    hdr_err = write_header(writer.fd, archive_name, KIND_FILE, size, perm_mode, mtime, "")
+    if hdr_err != "" {
+        return "failed to write header: ${hdr_err}"
+    }
+
+    // Stream regular-file content in bounded chunks
+    src_fd, src_err = io.fd_open_read(source_path)
+    if src_err != "" {
+        return "failed to open source file: ${src_err}"
+    }
+    defer io.fd_close(src_fd)
+
+    var bytes_copied = 0 as long
+    while bytes_copied < size {
+        var to_copy = 4096
+        if (size - bytes_copied) < 4096 {
+            to_copy = (size - bytes_copied) as int
+        }
+        chunk, read_n, read_err = io.fd_read_n(src_fd, to_copy)
+        if read_err != "" {
+            string_release(chunk)
+            return "failed to read source file: ${read_err}"
+        }
+        if read_n == 0 {
+            string_release(chunk)
+            return "source file truncated during write"
+        }
+        write_err = io.fd_write_n(writer.fd, chunk, read_n)
+        string_release(chunk)
+        if write_err != 0 {
+            return "failed to write file content to archive"
+        }
+        bytes_copied = bytes_copied + read_n
+    }
+
+    // Payload padding
+    pad_size = (512 - (size % 512)) % 512
+    if pad_size > 0 {
+        let pad_buf = bytes.new(pad_size as int)
+        defer bytes.free(pad_buf)
+        var p = 0
+        while p < pad_size {
+            bytes.set(pad_buf, p, 0)
+            p = p + 1
+        }
+        pad_str = bytes.to_string(pad_buf, pad_size as int)
+        pad_write_err = io.fd_write_n(writer.fd, pad_str, pad_size as int)
+        string_release(pad_str)
+        if pad_write_err != 0 {
+            return "failed to write payload padding to archive"
+        }
+    }
+
+    return ""
+}
+
+writer_add_directory(writer_ptr: ptr, archive_name: string, mode: int, mtime: long) -> string {
+    if writer_ptr == null {
+        return "null writer"
+    }
+    writer = writer_ptr as *TarWriter
+    if writer.fd < 0 {
+        return "writer is closed"
+    }
+
+    if !is_valid_utf8(archive_name) {
+        return "archive entry name must be valid UTF-8"
+    }
+
+    perm_mode = mode & 4095
+    hdr_err = write_header(writer.fd, archive_name, KIND_DIRECTORY, 0, perm_mode, mtime, "")
+    if hdr_err != "" {
+        return "failed to write header: ${hdr_err}"
+    }
+
+    return ""
+}
+
+writer_add_symlink(writer_ptr: ptr, archive_name: string, target: string, mode: int, mtime: long) -> string {
+    if writer_ptr == null {
+        return "null writer"
+    }
+    writer = writer_ptr as *TarWriter
+    if writer.fd < 0 {
+        return "writer is closed"
+    }
+
+    if !is_valid_utf8(archive_name) {
+        return "archive entry name must be valid UTF-8"
+    }
+    if !is_valid_utf8(target) {
+        return "symlink target must be valid UTF-8"
+    }
+
+    perm_mode = mode & 4095
+    hdr_err = write_header(writer.fd, archive_name, KIND_SYMLINK, 0, perm_mode, mtime, target)
+    if hdr_err != "" {
+        return "failed to write header: ${hdr_err}"
+    }
+
+    return ""
+}
+
+writer_finish(writer_ptr: ptr) -> string {
+    if writer_ptr == null {
+        return "null writer"
+    }
+    writer = writer_ptr as *TarWriter
+    if writer.fd < 0 {
+        return "writer is closed"
+    }
+
+    // Write the two 512-byte zero blocks
+    let zero_buf = bytes.new(1024)
+    defer bytes.free(zero_buf)
+    var z = 0
+    while z < 1024 {
+        bytes.set(zero_buf, z, 0)
+        z = z + 1
+    }
+    zero_str = bytes.to_string(zero_buf, 1024)
+    err = io.fd_write_n(writer.fd, zero_str, 1024)
+    string_release(zero_str)
+    if err != 0 {
+        return "failed to write end-of-archive marker"
+    }
+
+    io.fd_close(writer.fd)
+    writer.fd = 0 - 1
+    writer.is_finished = 1
+
+    string_release(writer.path)
+    heap.free(writer)
+    return ""
+}
+
+writer_abort(writer_ptr: ptr) {
+    if writer_ptr == null {
+        return
+    }
+    writer = writer_ptr as *TarWriter
+    if writer.fd >= 0 {
+        io.fd_close(writer.fd)
+        writer.fd = 0 - 1
+    }
+    if writer.is_finished == 0 && string_length(writer.path) > 0 {
+        // Unlink/delete incomplete output on failure where practical
+        fs.unlink(writer.path)
+    }
+    string_release(writer.path)
+    heap.free(writer)
+}
+
+// -------------------------------------------------------------
+// Extraction API
+// -------------------------------------------------------------
+
+extract(archive_path: string, destination: string, options: ExtractOptions) -> string {
+    // Declare all heap string variables at function scope so they are cleanly freed on early returns
+    var parent_dir: string = ""
+    var full_parent_path: string = ""
+    var parent_part: string = ""
+    var name: string = ""
+    var linkname: string = ""
+    var ext_err: string = ""
+    var mkdir_err: string = ""
+    var write_open_err: string = ""
+    var write_err_str: string = ""
+    var chunk: string = ""
+    var read_err: string = ""
+    var symlink_err: string = ""
+    var next_err: string = ""
+    var dest_mkdir_err: string = ""
+    var open_err: string = ""
+
+    // Open reader
+    reader_ptr, open_err = reader_open(archive_path)
+    if open_err != "" {
+        return "cannot open archive: ${open_err}"
+    }
+    defer reader_close(reader_ptr)
+
+    // Ensure destination directory exists (treat already-existing as success)
+    dest_mkdir_err = fs.mkdir_p(destination)
+    if dest_mkdir_err != "" {
+        return "failed to create destination directory: ${dest_mkdir_err}"
+    }
+    destination_prefix = string_concat_wrapped(destination, "/")
+    defer string_release(destination_prefix)
+
+    // List of DirMetadata to apply at the end
+    dir_list = list_new()
+    defer {
+        // Clean up remaining dir_list items in case of early return/error
+        var d = list_size(dir_list) - 1
+        while d >= 0 {
+            dm = list_get_raw(dir_list, d) as *DirMetadata
+            heap.free(dm)
+            d = d - 1
+        }
+        list_free(dir_list)
+    }
+
+    var entries_count = 0
+    var total_bytes_extracted = 0 as long
+
+    for_next_res = 1
+    while for_next_res == 1 {
+        next_val, next_err = reader_next(reader_ptr)
+        if next_err != "" {
+            return "tar read error: ${next_err}"
+        }
+        if next_val == 0 {
+            break // Clean EOF
+        }
+
+        name = entry_name(reader_ptr)
+        kind = entry_kind(reader_ptr)
+        size = entry_size(reader_ptr)
+        mode = entry_mode(reader_ptr)
+        mtime = entry_mtime(reader_ptr)
+        linkname = entry_link_name(reader_ptr)
+
+        // -------------------------------------------------------------
+        // Security checks
+        // -------------------------------------------------------------
+
+        // 1. Check for absolute, Windows drive-qualified, UNC, or escaping paths
+        if is_unsafe_path(name) {
+            return "security violation: unsafe archive path '${name}'"
+        }
+
+        // 2. Prevent symlinks if not explicitly allowed
+        if kind == KIND_SYMLINK && options.allow_symlinks == 0 {
+            return "security violation: symlinks are disabled by policy, rejecting '${name}'"
+        }
+
+        // 3. Prevent symlink escapes if symlinks are explicitly allowed
+        if kind == KIND_SYMLINK && options.allow_symlinks == 1 {
+            if symlink_target_escapes(name, linkname) {
+                return "security violation: symlink target '${linkname}' escapes extraction root for '${name}'"
+            }
+        }
+
+        // 4. Validate parents of regular files / directories are not symlinks on filesystem
+        var parent_idx = 0
+        n_len = string_length(name)
+        while parent_idx < n_len {
+            if string_char_at_n(name, n_len, parent_idx) == 47 { // '/'
+                parent_part = string_substring(name, 0, parent_idx)
+                if string_length(parent_part) > 0 {
+                    full_parent_path = string_concat_wrapped(destination_prefix, parent_part)
+                    is_sym = fs.fs_is_symlink(full_parent_path)
+                    string_release(full_parent_path)
+                    if is_sym == 1 {
+                        string_release(parent_part)
+                        return "security violation: parent component '${parent_part}' resolves through a symlink"
+                    }
+                }
+                string_release(parent_part)
+            }
+            parent_idx = parent_idx + 1
+        }
+
+        // 5. Check bounds limits
+        entries_count = entries_count + 1
+        if entries_count > options.max_entries {
+            return "limit exceeded: maximum entries exceeded"
+        }
+        if size > options.max_entry_bytes {
+            return "limit exceeded: maximum entry size exceeded"
+        }
+        // Check overflow and total size limit
+        if total_bytes_extracted > 9223372036854775807 - size {
+            return "limit exceeded: total size overflow"
+        }
+        if total_bytes_extracted + size > options.max_total_bytes {
+            return "limit exceeded: maximum total bytes exceeded"
+        }
+
+        // -------------------------------------------------------------
+        // Materialize target
+        // -------------------------------------------------------------
+
+        target = heap.new(DirMetadata)
+        target.path = string_concat_wrapped(destination_prefix, name)
+        target.mode = mode
+        target.mtime = mtime
+
+        // Ensure parent directories exist
+        var last_slash = 0 - 1
+        var slash_idx = 0
+        while slash_idx < n_len {
+            if string_char_at_n(name, n_len, slash_idx) == 47 {
+                last_slash = slash_idx
+            }
+            slash_idx = slash_idx + 1
+        }
+        if last_slash >= 0 {
+            parent_part = string_substring(name, 0, last_slash)
+            parent_dir = string_concat_wrapped(destination_prefix, parent_part)
+            string_release(parent_part)
+        } else {
+            parent_dir = string.copy(destination)
+        }
+        mkdir_err = fs.mkdir_p(parent_dir)
+        string_release(parent_dir)
+        if mkdir_err != "" {
+            heap.free(target)
+            return "failed to create parent directory: ${mkdir_err}"
+        }
+
+        if kind == KIND_FILE {
+            // Check overwrite policy
+            if fs.fs_path_exists(target.path) == 1 {
+                if options.overwrite == 0 {
+                    heap.free(target)
+                    return "file '${name}' already exists and overwrite is disabled"
+                }
+                // Unlink old path if it exists to allow fresh write
+                unlink_err = fs.unlink(target.path)
+                if unlink_err != "" {
+                    heap.free(target)
+                    return "cannot replace existing path '${name}': ${unlink_err}"
+                }
+            }
+
+            // Extract file in streaming chunks
+            out_fd, write_open_err = io.fd_open_write(target.path)
+            if write_open_err != "" {
+                heap.free(target)
+                return "failed to open output file '${name}': ${write_open_err}"
+            }
+
+            var bytes_extracted = 0 as long
+            while bytes_extracted < size {
+                chunk, read_n, read_err = entry_read(reader_ptr, 4096)
+                if read_err != "" {
+                    write_err_str = "failed to read archive payload for '${name}': ${read_err}"
+                    string_release(chunk)
+                    break
+                }
+                if read_n == 0 {
+                    write_err_str = "unexpected EOF in archive payload for '${name}'"
+                    string_release(chunk)
+                    break
+                }
+                write_ok = io.fd_write_n(out_fd, chunk, read_n)
+                string_release(chunk)
+                if write_ok != 0 {
+                    write_err_str = "failed to write to output file '${name}'"
+                    break
+                }
+                bytes_extracted = bytes_extracted + read_n
+            }
+            io.fd_close(out_fd)
+
+            if write_err_str != "" {
+                fs.unlink(target.path)
+                heap.free(target)
+                return write_err_str
+            }
+
+            total_bytes_extracted = total_bytes_extracted + size
+
+            // Apply file metadata immediately
+            if options.preserve_mode == 1 {
+                fs.chmod(target.path, mode)
+            }
+            if options.preserve_mtime == 1 {
+                aether_tar_set_mtime_raw(target.path, mtime, 0)
+            }
+            heap.free(target)
+        } else if kind == KIND_DIRECTORY {
+            if fs.fs_is_symlink(target.path) == 1 {
+                if options.overwrite == 0 {
+                    heap.free(target)
+                    return "directory destination '${name}' is a symlink"
+                }
+                unlink_err = fs.unlink(target.path)
+                if unlink_err != "" {
+                    heap.free(target)
+                    return "cannot replace symlink '${name}': ${unlink_err}"
+                }
+            }
+            mkdir_err = fs.mkdir_p(target.path)
+            if mkdir_err != "" {
+                heap.free(target)
+                return "failed to create directory '${name}': ${mkdir_err}"
+            }
+
+            // Queue directory metadata to be applied last
+            list_add_raw(dir_list, target as ptr)
+        } else if kind == KIND_SYMLINK {
+            if fs.fs_path_exists(target.path) == 1 {
+                if options.overwrite == 0 {
+                    heap.free(target)
+                    return "symlink destination '${name}' already exists"
+                }
+                unlink_err = fs.unlink(target.path)
+                if unlink_err != "" {
+                    heap.free(target)
+                    return "cannot replace existing path '${name}': ${unlink_err}"
+                }
+            }
+            symlink_err = fs.symlink(linkname, target.path)
+            if symlink_err != "" {
+                heap.free(target)
+                return "failed to create symlink at '${name}': ${symlink_err}"
+            }
+
+            // Apply symlink metadata immediately
+            if options.preserve_mtime == 1 {
+                aether_tar_set_mtime_raw(target.path, mtime, 1)
+            }
+            heap.free(target)
+        } else {
+            heap.free(target)
+            return "unsupported entry type flag for '${name}'"
+        }
+    }
+
+    // Apply directory metadata in reverse order of creation
+    var d = list_size(dir_list) - 1
+    while d >= 0 {
+        dm = list_get_raw(dir_list, d) as *DirMetadata
+        if options.preserve_mode == 1 {
+            fs.chmod(dm.path, dm.mode)
+        }
+        if options.preserve_mtime == 1 {
+            aether_tar_set_mtime_raw(dm.path, dm.mtime, 0)
+        }
+        // dm will be freed, which releases dm.path!
+        heap.free(dm)
+        d = d - 1
+    }
+    list_clear(dir_list)
+
+    return ""
+}

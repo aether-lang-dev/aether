@@ -27,6 +27,7 @@ Functions are called using **namespace-style syntax**: `namespace.function()`
 | `import std.file` | `file` | `file.exists("path")`, `file.open("path", "r")` |
 | `import std.dir` | `dir` | `dir.exists("path")`, `dir.create("path")` |
 | `import std.path` | `path` | `path.join("a", "b")`, `path.dirname("/a/b")` |
+| `import std.tar` | `tar` | `tar.reader_open("src.tar")`, `tar.extract("src.tar", "out", opts)` |
 | `import std.json` | `json` | `json.parse(str)`, `json.create_object()` |
 | `import std.cryptography` | `cryptography` | `cryptography.sha256_hex(data, n)`, `cryptography.base64_encode(data, n)` |
 | `import std.http` | `http` | `http.get(url)`, `http.server_create(port)` |
