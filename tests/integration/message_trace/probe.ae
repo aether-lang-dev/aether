@@ -1,0 +1,24 @@
+// #1333: a known message sequence, so the trace can be asserted against it.
+// Ping, Pong, Ping in that order, to one actor.
+import std.io
+
+message Ping { n: int }
+message Pong { n: int }
+
+actor Worker {
+    receive {
+        Ping(n) -> {
+            println("ping ${n}")
+        }
+        Pong(n) -> {
+            println("pong ${n}")
+        }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    w ! Ping { n: 1 }
+    w ! Pong { n: 2 }
+    w ! Ping { n: 3 }
+}

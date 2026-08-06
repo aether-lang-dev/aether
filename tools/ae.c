@@ -199,6 +199,12 @@ static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no 
  * temp dir, instead of committing it and risking a plain `make` linking stale
  * generated code after an .ae edit. */
 static bool g_emit_obj = false;
+/* #1333: `ae build --trace` compiles the program AND the runtime with
+ * -DAETHER_TRACE, so message tracing exists in that one binary. Tracing is a
+ * compile-time gate rather than a runtime flag because message send is the
+ * runtime's core loop; the default build must carry no tracing code at all,
+ * not a branch that is usually false. */
+static bool g_trace = false;
 
 // Extra link flags accumulated by the binary-import prepass: when a
 // program `import`s a precompiled `--emit=lib` artifact (libfoo.so),
@@ -1083,6 +1089,11 @@ found_root:
         }
     }
     tc.has_lib = path_exists(tc.lib);
+    /* #1333: a prebuilt libaether.a was compiled without -DAETHER_TRACE and
+     * would satisfy the link with untraced objects, so a traced build compiles
+     * the runtime from source. This sits with the other has_lib logic so the
+     * from-source source list below is populated under the same decision. */
+    if (g_trace) tc.has_lib = false;
 
     if (tc.verbose) {
         fprintf(stderr, "[toolchain] lib: %s (%s)\n", tc.lib,
@@ -1971,10 +1982,11 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* yaml_libs = "";
 #endif
     char opt[600];
+    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s %s", opt_flags(optimize), user_cflags);
+        snprintf(opt, sizeof(opt), "-static %s %s%s", opt_flags(optimize), user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static %s", opt_flags(optimize));
+        snprintf(opt, sizeof(opt), "-static %s%s", opt_flags(optimize), trace_def);
     // -ldbghelp is required for the panic stack-trace path
     // (CaptureStackBackTrace is in kernel32 / always-linked, but
     // SymInitialize/SymFromAddr live in dbghelp). Issue #347.
@@ -2074,10 +2086,11 @@ void build_gcc_cmd(char* cmd, size_t size,
     // string short helps the cmd-buffer size budget.
     const char* base_opt = g_coverage ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe" : "-O0 -g -pipe");
+    const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "%s%s %s", emit_lib_flags, base_opt, user_cflags);
+        snprintf(opt, sizeof(opt), "%s%s %s%s", emit_lib_flags, base_opt, user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "%s%s", emit_lib_flags, base_opt);
+        snprintf(opt, sizeof(opt), "%s%s%s", emit_lib_flags, base_opt, trace_def);
 
     // Append aether_config.c to the compile when building a lib so the
     // aether_config_* accessors are bundled into the .so. The .c file
@@ -4755,6 +4768,13 @@ static int cmd_build(int argc, char** argv) {
             output_name = argv[++i];
         } else if (strcmp(argv[i], "--quick") == 0) {
             quick = true;
+        } else if (strcmp(argv[i], "--trace") == 0) {
+            /* #1333: compile message tracing into this binary. The runtime has
+             * to be rebuilt from source for it, since a prebuilt libaether.a
+             * was compiled without the gate; forcing the from-source path is
+             * what makes one flag enough. Run with AETHER_TRACE=<file> to
+             * collect. */
+            g_trace = true;
         } else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
             target = argv[++i];
         } else if (strncmp(argv[i], "--target=", 9) == 0) {
@@ -5155,9 +5175,15 @@ static int cmd_build(int argc, char** argv) {
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
     if (cache_eligible) {
+        /* #1333: the salt distinguishes a traced build from a normal one.
+         * Without it `ae build --trace` after a plain build is served the
+         * cached untraced binary, which runs fine and produces no trace at
+         * all: the same silent-staleness shape as the imported-module miss
+         * (#1421). Any flag that changes the emitted code has to reach the
+         * key. */
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
-                                      "build");
+                                      g_trace ? "build+trace" : "build");
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
@@ -6531,6 +6557,16 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         print_usage();
         return 1;
+    }
+
+    /* #1333: --trace has to be known BEFORE the toolchain is resolved, not
+     * when `ae build` parses its own flags. Toolchain setup decides has_lib
+     * and, from it, whether to populate the from-source runtime list; flipping
+     * has_lib afterwards left that list empty and the link failed on every
+     * runtime symbol. Scanned across the whole argv because it is written
+     * after the subcommand (`ae build --trace prog.ae`). */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--trace") == 0) { g_trace = true; break; }
     }
 
     // Parse global flags before command

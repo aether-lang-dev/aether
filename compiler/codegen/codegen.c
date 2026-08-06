@@ -3246,6 +3246,48 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
 
 // --emit-main=<func> shim. Issue #268.3.
 //
+/* #1333: emit the message-id to name table used by message tracing.
+ *
+ * The runtime records msg.type, an integer the message registry assigned. Only
+ * the compiler knows the names behind those ids, so it writes them out as a
+ * static table and registers it at startup. Indexed by id with NULL for the
+ * gaps (the reserved IO_READY id is not dense with the user ones), so a lookup
+ * is a bounds check and a load.
+ *
+ * Everything here sits inside `#ifdef AETHER_TRACE`: without the flag the
+ * generated C contains no table, no call, and no reference to the tracing
+ * runtime at all. */
+static void emit_trace_message_name_table(CodeGenerator* gen) {
+    if (!gen || !gen->message_registry) return;
+
+    int max_id = -1;
+    for (MessageDef* m = gen->message_registry->messages; m; m = m->next) {
+        if (m->message_id > max_id) max_id = m->message_id;
+    }
+    if (max_id < 0) return;
+
+    /* A pathological reserved id would make the table enormous for no gain;
+     * the trace falls back to printing the raw id in that case. */
+    if (max_id > 4096) return;
+
+    print_line(gen, "#ifdef AETHER_TRACE");
+    /* Declared here rather than via an include: the generated C is compiled
+     * with a variety of include sets and this keeps the table self-contained. */
+    print_line(gen, "extern void aether_trace_register_message_names(const char* const*, int, int);");
+    fprintf(gen->output, "static const char* const _aether_trace_msg_names[%d] = {\n", max_id + 1);
+    for (int id = 0; id <= max_id; id++) {
+        const char* name = NULL;
+        for (MessageDef* m = gen->message_registry->messages; m; m = m->next) {
+            if (m->message_id == id) { name = m->name; break; }
+        }
+        if (name) fprintf(gen->output, "    [%d] = \"%s\",\n", id, name);
+    }
+    fprintf(gen->output, "};\n");
+    print_line(gen, "aether_trace_register_message_names(_aether_trace_msg_names, %d, 0);", max_id + 1);
+    print_line(gen, "#endif");
+    print_line(gen, "");
+}
+
 // Emits a thin `int main(int argc, char** argv)` that calls the named
 // Aether function. Lets one source compile to both a loadable library
 // (`aether_*` exports) AND a regular binary (with this main as entry),
@@ -3651,6 +3693,11 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "// TIER 2 (auto-detect): SIMD (if AVX2/NEON), MWAIT (if supported)");
         print_line(gen, "int num_cores = cpu_recommend_cores();");
         print_line(gen, "scheduler_init(num_cores);  // Auto-detects hardware capabilities");
+        /* #1333: hand the runtime the message-id to name mapping. The runtime
+         * only ever sees the integer id, so without this a trace reads as bare
+         * ordinals. Emitted inside the AETHER_TRACE guard so a normal build
+         * carries neither the table nor the call. */
+        emit_trace_message_name_table(gen);
         print_line(gen, "");
         print_line(gen, "#ifdef AETHER_VERBOSE");
         print_line(gen, "aether_print_config();");

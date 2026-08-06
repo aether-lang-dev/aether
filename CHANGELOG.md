@@ -9,6 +9,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The cross-language benchmark suite excluded Aether, and said so quietly.**
+  Every run printed `Aether... [SKIP] Build failed` for all five benchmarks
+  while the other ten languages reported numbers, and then published a results
+  file anyway. Two separate faults. First, `benchmarks/cross-language/aether/`
+  compiles the runtime with its own hand-written `-I` list, which did not have
+  `include/` on it, so `runtime/libaether_caps.c` could not find the public
+  header it now includes by name (#1420). That Makefile already reads the
+  MANIFEST for its source list, after a hand-maintained copy of that went stale
+  with this identical symptom; the include set is now taken from `ae cflags`
+  for the same reason, so neither list can drift again. Second, the runner
+  treated an Aether build failure as a skip. That is right for a third-party
+  toolchain that may not be installed and wrong for Aether in its own suite: a
+  results file missing the language the suite exists to measure still reads as
+  a complete comparison. It is now a hard error with the reproduction command,
+  and the runner exits non-zero. Aether builds and reports again (15.5M
+  msg/sec on ping_pong, the fastest entry).
+
+### Changed
+
+- **Flint survey leftovers decided and recorded** (#1096). The issue kept two
+  ideas open and asked for a decision, not a plan; both are declined, with the
+  reasoning written into `docs/cross-references/flint.md` rather than left in a
+  thread. The substantive finding: the C-header interop candidate lost most of
+  its motivation to the C-interop batch (#1239-#1244), which removed the
+  extern-disagrees-with-header and layout-drift problems by deferring to the
+  header (`@c_import`, `@c_verify`) instead of parsing it, and `ae bindgen
+  consts` had already taken the constants slice. What remains is bulk
+  convenience, at month scale. The in-grammar `test` block candidate is
+  declined as a stylistic gain that would add a second in-tree test story
+  alongside 321 working regression tests.
+
+- **Fork-join over `std.worker` measured, with the result recorded** (#1297).
+  The issue proposed building a `parallel_map`; `worker.map` had shipped in the
+  meantime, so the open question was whether the layer earns its place and what
+  is still missing. On 8 cores it reaches 5.1x on CPU-bound work and costs
+  nothing over a hand-written `worker.run` fan-out (943 us vs 952 us for the
+  same batch), and it is leak-clean. The proposed automatic sequential fallback
+  below a threshold N is deliberately NOT added: the measurement shows the
+  crossover is a function of work per item, not of N (at 8 items the layer is a
+  100x loss for trivial work and a 5x win for heavy work), so an N-based cutoff
+  would key on the one variable that does not decide the answer. The crossover
+  (~20 us of work per item) is documented instead, next to the API. A parallel
+  fold remains worth adding and now has numbers to design against. Harness in
+  `benchmarks/fork-join/`, findings in `docs/cross-references/bend.md`.
+
+### Added
+
+- **Message tracing** (#1333). `ae build --trace` compiles a per-message
+  delivery trace into a binary; `AETHER_TRACE=<file>` then records every step a
+  message takes (which send path, which queue, when it was received, which step
+  processed it) as JSONL, ordered by timestamp across cores. Message names come
+  from a table codegen emits, because the runtime only ever sees the integer id
+  the registry assigned, and a trace of bare ordinals is barely a trace.
+
+  It is compiled out by default rather than switched off at runtime, and that
+  is verifiable rather than asserted: building the scheduler before and after
+  the hooks were added yields a **byte-identical object file**, same size and
+  same disassembly. Message send is the runtime's core loop, so nothing less
+  than "the machine code is unchanged" is worth claiming. When enabled, the
+  cost is one timestamp and a 32-byte append to a per-core ring buffer, with no
+  locks or atomics on the hot path: a core writes only its own buffer, and the
+  merge runs after `scheduler_shutdown()` has joined every thread.
+
+  This replaces the tracing capability the README advertised until PR #1330
+  removed it as dead code that had no call sites, no activation surface and no
+  overhead story. The claim is back because it is now true. See
+  `docs/message-tracing.md`.
+
 ## [0.495.0]
 
 ### Added

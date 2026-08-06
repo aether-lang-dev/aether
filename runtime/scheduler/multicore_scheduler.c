@@ -21,6 +21,7 @@
 #include <errno.h>
 #include <time.h>
 #include "multicore_scheduler.h"
+#include "../utils/aether_trace.h"
 #include "../utils/aether_cpu_detect.h"
 #include "../utils/aether_compiler.h"
 #include "../config/aether_optimization_config.h"
@@ -111,7 +112,9 @@ static inline void aether_step_safe(ActorBase* actor) {
     if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
         g_aether_in_actor_step = 1;
         g_aether_current_actor_id = actor->id;
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_BEGIN, actor->id, -1, -1);
         actor->step(actor);
+        AETHER_TRACE_EVENT(AE_TRACE_STEP_END, actor->id, -1, -1);
         g_aether_in_actor_step = 0;
         g_aether_current_actor_id = -1;
         aether_try_pop();
@@ -1258,6 +1261,13 @@ void scheduler_shutdown() {
         // Cleanup NUMA resources
         aether_numa_cleanup();
     }
+
+    /* Write the trace here, not from atexit: every scheduler thread has been
+     * joined by this point, so the per-core buffers are quiescent and the join
+     * supplies the happens-before the merge relies on. It also keeps the exit
+     * path free of the hang the worker pool hit when it tried to do teardown
+     * work from atexit. Compiles to nothing without -DAETHER_TRACE. */
+    AETHER_TRACE_FLUSH();
 }
 
 void scheduler_cleanup() {
@@ -1503,11 +1513,15 @@ static AETHER_TLS int inline_depth = 0;
 #define MAX_INLINE_DEPTH 2
 
 void scheduler_send_local(ActorBase* actor, Message msg) {
+    AETHER_TRACE_EVENT(AE_TRACE_SEND_LOCAL, actor ? actor->id : 0,
+                       msg.type, msg.sender_id);
     // Drop messages to dead actors — they can't process them and we don't
     // want to grow their mailbox or fire their step(). The payload and any
     // reply-slot reference still belong to this message; release them
     // (no processed credit: the send is not counted yet on this path).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
+                           msg.type, msg.sender_id);
         if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
         if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
         if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
@@ -1531,9 +1545,11 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
     }
     // auto_process actors own their mailbox; deliver via thread-safe SPSC.
     if (unlikely(actor->auto_process)) {
+        AETHER_TRACE_EVENT(AE_TRACE_SPSC_ENQUEUE, actor->id, msg.type, msg.sender_id);
         spsc_enqueue(ensure_spsc_queue(actor), msg);
         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
     } else {
+        AETHER_TRACE_EVENT(AE_TRACE_MAILBOX_SEND, actor->id, msg.type, msg.sender_id);
         // Set active=1 BEFORE the mailbox_send count++ (release).
         // mailbox_send does atomic_fetch_add(&count, release), which publishes
         // both the message data AND this active=1 to any thread that subsequently
@@ -1587,8 +1603,12 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
 }
 
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
+    AETHER_TRACE_EVENT(AE_TRACE_SEND_REMOTE, actor ? actor->id : 0,
+                       msg.type, msg.sender_id);
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
+        AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0,
+                           msg.type, msg.sender_id);
         if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
         if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
         if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
