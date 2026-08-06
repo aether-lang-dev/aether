@@ -1,0 +1,73 @@
+// #1297 benchmark 3: does the combinator cost anything over the primitive?
+//
+// `worker.map` against the same fan-out written by hand with worker.run +
+// worker.wait, on the same pool with the same kernel. If map is slower, it is
+// sugar with a tax; if it matches, the convenience is free.
+import std.io
+import std.list
+import std.worker
+
+var sink = 0
+
+burn() -> int {
+    acc = 1
+    i = 0
+    while i < 50000 {
+        acc = (acc * 1103515245 + 12345) % 2147483647
+        i = i + 1
+    }
+    return acc
+}
+
+kernel(p: ptr) -> ptr {
+    sink = sink + burn()
+    return p
+}
+
+main() {
+    println("items,map_us,handrolled_us")
+
+    count = 32
+    items = list.new()
+    i = 0
+    while i < count {
+        list.add(items, "x")
+        i = i + 1
+    }
+
+    // Warm the pool so neither number pays thread creation.
+    warm = worker.map(items, kernel)
+    list.free(warm)
+
+    t0 = clock_ns()
+    res = worker.map(items, kernel)
+    t1 = clock_ns()
+    list.free(res)
+    map_us = (t1 - t0) / 1000
+
+    out = list.new()
+    j = 0
+    while j < count {
+        list.add(out, 0)
+        j = j + 1
+    }
+    t2 = clock_ns()
+    k = 0
+    while k < count {
+        item, ierr = list.get(items, k)
+        slot = k
+        worker.run(
+            || { return kernel(item) },
+            | r: ptr | { list.set(out, slot, r) }
+        )
+        k = k + 1
+    }
+    worker.wait()
+    t3 = clock_ns()
+    hand_us = (t3 - t2) / 1000
+
+    println("${count},${map_us},${hand_us}")
+    list.free(out)
+    list.free(items)
+    println("# sink=${sink}")
+}

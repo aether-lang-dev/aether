@@ -2156,6 +2156,14 @@ cooperative builds, pool sizing) is documented at the top of
 lengths = worker.map(paths, |p: ptr| { return measure(p) })
 ```
 
+  **When it pays.** Dispatching and joining a batch costs a flat ~100 us
+  (measured on 8 cores, #1297), independent of how much work the items do, so
+  `worker.map` wins only when each item is worth more than roughly 20 us. Below
+  that it is slower than a plain loop, by a lot at trivial work sizes. There is
+  deliberately no automatic fallback: the threshold depends on the work per
+  item, which the runtime cannot see. Numbers and method in
+  [`docs/cross-references/bend.md`](cross-references/bend.md).
+
 ---
 
 ## Memory

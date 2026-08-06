@@ -1,0 +1,84 @@
+// Fork-join benchmark for #1297: does the `worker.map` layer earn its place?
+//
+// The issue asks for measurements before any further stdlib commitment:
+//   1. speedup vs pool size on CPU-bound work
+//   2. the crossover N where parallel first beats sequential
+//   3. the combinator vs the same fan-out rolled by hand
+//
+// Work per item is a fixed-cost, allocation-free integer kernel, so the
+// numbers measure the fan-out layer rather than the allocator. Every item does
+// identical work, which is the friendliest possible case for a bounded pool:
+// if the crossover is bad here it is worse in real code.
+import std.io
+import std.list
+import std.worker
+
+// A global sink so the kernel's result is observable. Without it the whole
+// loop is dead code and the optimiser deletes it, which is how the first run
+// of this benchmark reported 0 us of sequential work.
+var sink = 0
+
+// CPU-bound kernel, branch-light and allocation-free.
+burn() -> int {
+    acc = 1
+    i = 0
+    while i < 200000 {
+        acc = (acc * 1103515245 + 12345) % 2147483647
+        i = i + 1
+    }
+    return acc
+}
+
+kernel(p: ptr) -> ptr {
+    sink = sink + burn()
+    return p
+}
+
+build_items(count: int) -> ptr {
+    xs = list.new()
+    i = 0
+    while i < count {
+        list.add(xs, "item")
+        i = i + 1
+    }
+    return xs
+}
+
+run_case(count: int) {
+    items = build_items(count)
+
+    t0 = clock_ns()
+    i = 0
+    while i < count {
+        sink = sink + burn()
+        i = i + 1
+    }
+    t1 = clock_ns()
+    seq_us = (t1 - t0) / 1000
+
+    t2 = clock_ns()
+    res = worker.map(items, kernel)
+    t3 = clock_ns()
+    par_us = (t3 - t2) / 1000
+    list.free(res)
+
+    long pct = 0
+    if par_us > 0 {
+        pct = (seq_us * 100) / par_us
+    }
+    println("${count},${seq_us},${par_us},${pct}")
+    list.free(items)
+}
+
+main() {
+    println("items,sequential_us,parallel_us,speedup_pct")
+    run_case(1)
+    run_case(2)
+    run_case(4)
+    run_case(8)
+    run_case(16)
+    run_case(32)
+    run_case(64)
+    // Printed so the sink cannot be optimised away either.
+    println("# sink=${sink}")
+}

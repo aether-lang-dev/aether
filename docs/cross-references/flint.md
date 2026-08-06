@@ -928,6 +928,54 @@ The biggest divergence: **Flint's FIP** has no analogue in the other comparisons
 - Not litigating §8 (DCMP / entity composition). Correctly identified as a competing-with-actors design that doesn't fit Aether's identity.
 - Not litigating §7 indentation-sensitive syntax (skipped per the broader convention across all three comparisons).
 
+## Decision on the two leftovers (#1096, August 2026)
+
+#1096 kept the two ideas from this survey that were still open after optionals
+and variants shipped, and asked for a decision rather than a plan. Both are
+**declined for now**, on the following evidence.
+
+### Candidate A, FIP-shaped C-header interop: declined, and much of it arrived by another route
+
+Two things changed since the survey.
+
+First, a slice already shipped: [`ae bindgen consts`](../bindgen-consts.md)
+ingests object-like C macros into Aether consts, preprocessor-only, with
+skipped macros listed in the output so an omission is never silent. That is
+exactly the capability-gated shape the survey argued any header ingest would
+have to take, and it covers the constants third of the problem.
+
+Second, and more decisive: the C-interop batch (#1239, #1240, #1241, #1242,
+#1243, #1244) removed most of the friction FIP was proposed to remove, without
+parsing a single header:
+
+| The friction FIP targeted | What now addresses it |
+|---|---|
+| a hand-written `extern` disagreeing with the real C symbol | `@c_import` on an extern: the header owns the prototype and Aether emits none, so the two cannot disagree |
+| hand-maintained struct layouts drifting from the header | `@c_verify` on a `@c_struct`: a `_Static_assert` per field checks offset and width against the real layout |
+| one-line C shims for `static inline` header helpers | callable directly, no shim |
+| shims for the `v*` half of printf-style pairs | `va_list` parameters forward the tail |
+
+Flint solves the disagreement problem by generating the binding from the
+header. Aether now solves it by deferring to the header, which needs no C
+parser, no libclang dependency, and no new capability surface. The remaining
+unshipped part of A is bulk inventory (structs and function signatures in one
+sweep), which is still month-scale, and its payoff is now convenience rather
+than correctness.
+
+**Revisit if** someone is porting a large C library and the remaining
+declaration boilerplate, not the correctness of it, is what stalls them.
+
+### Candidate B, in-grammar `test` blocks: declined
+
+The issue called this an ergonomics upgrade over a solved problem, and that
+reading holds: `tests/regression/` currently carries 321 `.ae` tests through a
+working harness. The cost is not the parser work, it is that a second in-tree
+test story has to be kept coherent with the existing one forever, for a
+stylistic gain. Nothing in the survey's argument turned out to be blocked on it.
+
+**Revisit if** the regression harness itself becomes the bottleneck, which
+would be a different issue with different evidence.
+
 ## Cross-refs
 
 - Optionals (§1): filed as separate issue

@@ -1,0 +1,68 @@
+// #1297 benchmark 2: the crossover point.
+//
+// Fan-out is fixed at 8 (the core count on the measuring machine) and the work
+// per item is swept, to find the per-item cost at which dispatching to the
+// pool first beats just doing it inline. That threshold is what an
+// auto-sequential fallback would key on.
+import std.io
+import std.list
+import std.worker
+
+var sink = 0
+var rounds = 1
+
+burn(n: int) -> int {
+    acc = 1
+    i = 0
+    while i < n {
+        acc = (acc * 1103515245 + 12345) % 2147483647
+        i = i + 1
+    }
+    return acc
+}
+
+kernel(p: ptr) -> ptr {
+    sink = sink + burn(rounds)
+    return p
+}
+
+main() {
+    println("rounds_per_item,sequential_us,parallel_us,speedup_pct")
+
+    items = list.new()
+    i = 0
+    while i < 8 {
+        list.add(items, "x")
+        i = i + 1
+    }
+
+    // Swept by multiplying rather than reading back out of a list: list.get
+    // yields a ptr and this benchmark needs the int.
+    rounds = 10
+    while rounds <= 100000 {
+
+        t0 = clock_ns()
+        j = 0
+        while j < 8 {
+            sink = sink + burn(rounds)
+            j = j + 1
+        }
+        t1 = clock_ns()
+        seq_us = (t1 - t0) / 1000
+
+        t2 = clock_ns()
+        res = worker.map(items, kernel)
+        t3 = clock_ns()
+        par_us = (t3 - t2) / 1000
+        list.free(res)
+
+        long pct = 0
+        if par_us > 0 {
+            pct = (seq_us * 100) / par_us
+        }
+        println("${rounds},${seq_us},${par_us},${pct}")
+        rounds = rounds * 5
+    }
+    list.free(items)
+    println("# sink=${sink}")
+}

@@ -144,6 +144,7 @@ make ae
 ae init <name>           # Create a new project
 ae run [file.ae]         # Compile and run (file or project)
 ae build [file.ae]       # Compile to executable
+ae build --trace f.ae    # ...with message tracing compiled in (docs/message-tracing.md)
 ae check [file.ae]       # Type-check without compiling (skips codegen + link)
 ae fmt [--check] [path]  # Format source (stdin, or .ae files/dirs in place)
 ae test [file|dir]       # Discover and run tests
@@ -378,6 +379,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Memory Management](docs/memory-management.md) - defer-first manual model, arena allocators
 - [Structured Concurrency](docs/structured-concurrency.md) - Proposal: supervision trees + capability-scoped spawn/send (not yet shipped)
 - [Runtime Optimizations](docs/runtime-optimizations.md) - Performance techniques
+- [Message Tracing](docs/message-tracing.md) - `ae build --trace`, per-message delivery trace as JSONL; compiled out entirely by default
 - [Cross-Language Benchmarks](benchmarks/cross-language/README.md) - Comparative performance analysis
 - [Docker Setup](docker/README.md) - Container development environment
 
