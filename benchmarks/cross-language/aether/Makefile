@@ -1,6 +1,19 @@
 AETHER_COMPILER = ../../../build/aetherc
+AETHER_CLI      = ../../../build/ae
 CC = gcc
-CFLAGS = -O3 -march=native -flto -fno-plt -I../../../compiler -I../../../runtime -I../../../runtime/actors -I../../../runtime/scheduler -I../../../runtime/config -I../../../runtime/utils -I../../../std -I../../../std/string -I../../../std/io -I../../../std/math -I../../../std/net -I../../../std/collections -I../../../std/json
+
+# Include set from `ae cflags`, not a hand-written list, for the same reason
+# the source list below reads the MANIFEST: a hand-maintained copy goes stale
+# silently. It already did. When the public embedder header moved onto the
+# include path (#1420), `runtime/libaether_caps.c` started including
+# libaether.h by name and this Makefile's frozen -I list did not have it, so
+# every Aether entry in the suite turned into "[SKIP] Build failed" while all
+# ten other languages kept reporting numbers.
+#
+# `ae cflags` is the toolchain's own answer to "what -I do I need", so this
+# cannot drift again.
+AETHER_INCLUDES := $(shell $(AETHER_CLI) cflags --cflags 2>/dev/null)
+CFLAGS = -O3 -march=native -flto -fno-plt $(AETHER_INCLUDES)
 LDFLAGS = -flto -pthread -lm
 # Runtime sources, taken from the build MANIFEST (regenerated on every
 # `make stdlib`, the same set linked into libaether.a) so this list never

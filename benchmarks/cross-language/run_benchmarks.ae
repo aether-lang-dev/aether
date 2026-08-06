@@ -9,6 +9,8 @@ import std.os
 import std.io
 import std.string
 
+extern exit(code: int)
+
 // ============================================================================
 // Helpers (defined before main so they're available)
 // ============================================================================
@@ -405,6 +407,18 @@ main() {
             string_concat("cd aether && make clean >/dev/null 2>&1 && make ", string_concat(pattern, " >/dev/null 2>&1")),
             string_concat("cd aether && ", string_concat(env_prefix, string_concat(" ", string_concat(tc, string_concat(" ./", pattern))))),
             runs, 0, is_mac)
+        // A missing third-party toolchain is a fair skip; a missing Aether is
+        // not. This is Aether's own suite, and a results file that omits
+        // Aether while listing ten other languages reads as a complete
+        // comparison. That is exactly how a broken include path went unnoticed:
+        // every run printed "Aether... [SKIP] Build failed" and published
+        // numbers anyway.
+        if string_length(res) == 0 {
+            println("")
+            println("ERROR: the Aether build failed, so there is nothing to compare against.")
+            println("       Reproduce with: cd benchmarks/cross-language/aether && make clean && make <bench>")
+            exit(1)
+        }
         if string_length(res) > 0 {
             if first == 0 {
                 json = string_concat(json, ",\n")

@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **The cross-language benchmark suite excluded Aether, and said so quietly.**
+  Every run printed `Aether... [SKIP] Build failed` for all five benchmarks
+  while the other ten languages reported numbers, and then published a results
+  file anyway. Two separate faults. First, `benchmarks/cross-language/aether/`
+  compiles the runtime with its own hand-written `-I` list, which did not have
+  `include/` on it, so `runtime/libaether_caps.c` could not find the public
+  header it now includes by name (#1420). That Makefile already reads the
+  MANIFEST for its source list, after a hand-maintained copy of that went stale
+  with this identical symptom; the include set is now taken from `ae cflags`
+  for the same reason, so neither list can drift again. Second, the runner
+  treated an Aether build failure as a skip. That is right for a third-party
+  toolchain that may not be installed and wrong for Aether in its own suite: a
+  results file missing the language the suite exists to measure still reads as
+  a complete comparison. It is now a hard error with the reproduction command,
+  and the runner exits non-zero. Aether builds and reports again (15.5M
+  msg/sec on ping_pong, the fastest entry).
+
 ### Changed
 
 - **Flint survey leftovers decided and recorded** (#1096). The issue kept two
