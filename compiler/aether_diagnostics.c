@@ -284,7 +284,7 @@ void print_diagnostic_colored(EnhancedDiagnostic* diag) {
 const char* get_error_docs_url(ErrorCode code) {
     static char url[128];
     snprintf(url, sizeof(url),
-             "https://github.com/nicolasmd87/aether/wiki/E%04d", code);
+             "https://github.com/aether-lang-dev/aether/wiki/E%04d", code);
     return url;
 }
 
