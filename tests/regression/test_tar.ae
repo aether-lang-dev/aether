@@ -1,0 +1,845 @@
+import std.io
+import std.fs
+import std.path
+import std.string
+import std.bytes
+import std.list
+import std.tar
+import std.strbuilder
+
+extern exit(code: int)
+
+assert(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Helper: recursive delete for cleanups
+delete_recursive(dir: string) {
+    if fs.exists(dir) == 0 {
+        return
+    }
+    let list = list_new()
+    fs.walk(dir, | path: string, kind: int, depth: int | {
+            list_add_raw(list, string_concat(path, ""))
+            return 0
+        })
+    var i = list_size(list) - 1
+    while i >= 0 {
+        p = list_get_raw(list, i)
+        st_kind, st_size, st_mtime, st_err = fs.file_stat(p)
+        if st_kind == fs.STAT_KIND_DIR {
+            fs.delete_dir(p)
+        } else {
+            fs.unlink(p)
+        }
+        string_release(st_err)
+        i = i - 1
+    }
+    list_free(list)
+    fs.delete_dir(dir)
+}
+
+calculate_checksum_test(block: string) -> long {
+    var sum: long = 0
+    var i = 0
+    while i < 512 {
+        if i >= 148 && i < 156 {
+            sum = sum + 32
+        } else {
+            sum = sum + string_char_at_n(block, 512, i)
+        }
+        i = i + 1
+    }
+    return sum
+}
+
+// Helper to write a mock tar header with precision
+write_mock_tar(path: string, name: string, size: long, chksum_val: long, typeflag: int, use_bad_chksum: bool, use_bad_size: bool, size_str: string) {
+    let buf = bytes.new(512)
+    defer bytes.free(buf)
+    var j = 0
+    while j < 512 {
+        bytes.set(buf, j, 0)
+        j = j + 1
+    }
+    bytes.copy_from_string(buf, 0, name, string_length(name))
+    if use_bad_size {
+        bytes.copy_from_string(buf, 124, size_str, string_length(size_str))
+    } else {
+        // Write size (12 bytes)
+        var i = 0
+        while i < 11 {
+            bytes.set(buf, 124 + i, 48)
+            i = i + 1
+        }
+        bytes.set(buf, 124 + 11, 0)
+        var val = size
+        var idx = 124 + 10
+        while idx >= 124 && val > 0 {
+            digit = (val % 8) as int
+            bytes.set(buf, idx, 48 + digit)
+            val = val / 8
+            idx = idx - 1
+        }
+    }
+
+    // Write mode
+    var i = 0
+    while i < 7 {
+        bytes.set(buf, 100 + i, 48)
+        i = i + 1
+    }
+    bytes.set(buf, 100 + 7, 0)
+    bytes.set(buf, 100 + 6, 48 + 4) // '4'
+    bytes.set(buf, 100 + 5, 48 + 2) // '2'
+    bytes.set(buf, 100 + 4, 48 + 0) // '0'
+
+    // Write uid/gid
+    i = 0
+    while i < 7 {
+        bytes.set(buf, 108 + i, 48)
+        bytes.set(buf, 116 + i, 48)
+        i = i + 1
+    }
+    bytes.set(buf, 108 + 7, 0)
+    bytes.set(buf, 116 + 7, 0)
+
+    // Write mtime
+    i = 0
+    while i < 11 {
+        bytes.set(buf, 136 + i, 48)
+        i = i + 1
+    }
+    bytes.set(buf, 136 + 11, 0)
+
+    bytes.set(buf, 156, typeflag)
+    bytes.copy_from_string(buf, 257, "ustar", 5)
+    bytes.set(buf, 262, 0)
+    bytes.set(buf, 263, 48)
+    bytes.set(buf, 264, 48)
+
+    // Calculate checksum
+    hdr_str = bytes.to_string(buf, 512)
+    var sum = calculate_checksum_test(hdr_str)
+
+    if use_bad_chksum {
+        sum = chksum_val
+    }
+
+    // Write checksum
+    i = 0
+    while i < 6 {
+        bytes.set(buf, 148 + i, 48)
+        i = i + 1
+    }
+    bytes.set(buf, 148 + 6, 0)
+    bytes.set(buf, 148 + 7, 32)
+    var val2 = sum
+    var idx2 = 148 + 5
+    while idx2 >= 148 && val2 > 0 {
+        digit = (val2 % 8) as int
+        bytes.set(buf, idx2, 48 + digit)
+        val2 = val2 / 8
+        idx2 = idx2 - 1
+    }
+
+    final_hdr = bytes.to_string(buf, 512)
+    fs.write_binary(path, final_hdr, 512)
+    string_release(hdr_str)
+    string_release(final_hdr)
+}
+
+test_bad_checksum(base_dir: string) {
+    var tar_path = "${base_dir}/bad_checksum.tar"
+    var r_err = ""
+    var r_err2 = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 100, 99999 as long, 48, true, false, "")
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open bad chksum")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 0 && string_index_of(r_err2, "checksum validation failed") >= 0, "expected checksum failure")
+    tar.reader_close(r_ptr)
+    println("PASS: bad checksum rejected")
+}
+
+test_truncated_header(base_dir: string) {
+    var tar_path = "${base_dir}/truncated_header.tar"
+    var r_err = ""
+    var r_err2 = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+    }
+
+    fs.write_binary(tar_path, "short block", 11)
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open short")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 0 && string_index_of(r_err2, "truncated header") >= 0, "expected truncated header failure")
+    tar.reader_close(r_ptr)
+    println("PASS: truncated header rejected")
+}
+
+test_truncated_payload(base_dir: string) {
+    var tar_path = "${base_dir}/truncated_payload.tar"
+    var r_err = ""
+    var r_err2 = ""
+    var read_err = ""
+    var chunk = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+        string_release(read_err)
+        string_release(chunk)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 1000, 0, 48, false, false, "")
+    let pad_buf = bytes.new(50)
+    defer bytes.free(pad_buf)
+    var p = 0
+    while p < 50 {
+        bytes.set(pad_buf, p, 65)
+        p = p + 1
+    }
+    var pad_str = bytes.to_string(pad_buf, 50)
+    io.append_file(tar_path, pad_str)
+    string_release(pad_str)
+
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open short payload")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 1, "next should succeed to read header")
+
+    var read_n = 0
+    chunk, read_n, read_err = tar.entry_read(r_ptr, 4096)
+    assert(read_err != "" && string_index_of(read_err, "payload") >= 0, "expected payload read failure: ${read_err}")
+
+    tar.reader_close(r_ptr)
+    println("PASS: truncated file payload rejected")
+}
+
+test_missing_padding(base_dir: string) {
+    var tar_path = "${base_dir}/missing_padding.tar"
+    var r_err = ""
+    var r_err2 = ""
+    var read_err = ""
+    var chunk = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+        string_release(read_err)
+        string_release(chunk)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 1, 0, 48, false, false, "")
+    io.append_file(tar_path, "A")
+
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open missing padding")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 1, "next header ok")
+
+    var read_n = 0
+    chunk, read_n, read_err = tar.entry_read(r_ptr, 4096)
+    assert(read_err != "" && string_index_of(read_err, "padding") >= 0, "expected padding read failure: ${read_err}")
+
+    tar.reader_close(r_ptr)
+    println("PASS: missing payload padding rejected")
+}
+
+test_invalid_size(base_dir: string) {
+    var tar_path = "${base_dir}/invalid_size.tar"
+    var r_err = ""
+    var r_err2 = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 0, 0, 48, false, true, "12345g789\0\0")
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open invalid size")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 0 && string_index_of(r_err2, "invalid octal size") >= 0, "expected size error")
+    tar.reader_close(r_ptr)
+    println("PASS: invalid octal size rejected")
+}
+
+test_overflowing_size(base_dir: string) {
+    var tar_path = "${base_dir}/overflow_size.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 0, 0, 48, false, true, "777777777777")
+    var opts = tar.default_extract_options()
+    opts.max_entry_bytes = 1000
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_overflow", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "maximum entry size exceeded") >= 0, "expected overflow limit")
+    println("PASS: overflowing entry size limit rejected")
+}
+
+test_one_zero(base_dir: string) {
+    var tar_path = "${base_dir}/one_zero.tar"
+    var r_err = ""
+    var r_err2 = ""
+    defer {
+        string_release(tar_path)
+        string_release(r_err)
+        string_release(r_err2)
+    }
+
+    let zero_buf = bytes.new(512)
+    defer bytes.free(zero_buf)
+    var z = 0
+    while z < 512 {
+        bytes.set(zero_buf, z, 0)
+        z = z + 1
+    }
+    var zero_str = bytes.to_string(zero_buf, 512)
+    fs.write_binary(tar_path, zero_str, 512)
+    string_release(zero_str)
+
+    var r_ptr: ptr = null
+    var ok = 0
+    r_ptr, r_err = tar.reader_open(tar_path)
+    assert(r_err == "", "open one zero")
+    ok, r_err2 = tar.reader_next(r_ptr)
+    assert(ok == 0 && string_index_of(r_err2, "truncated archive: missing second zero block") >= 0, "expected missing second zero block")
+    tar.reader_close(r_ptr)
+    println("PASS: archive with only one zero block rejected")
+}
+
+test_abs_path(base_dir: string) {
+    var tar_path = "${base_dir}/abs_path.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "/etc/passwd", 0, 0, 48, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_abs", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "security violation: unsafe archive path") >= 0, "expected abs path rejection")
+    assert(fs.exists("/etc/passwd.tar_temp") == 0, "passwd created!")
+    println("PASS: absolute path rejected")
+}
+
+test_traversal(base_dir: string) {
+    var tar_path = "${base_dir}/traversal.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "../outside.txt", 0, 0, 48, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_traversal", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "security violation: unsafe") >= 0, "expected traversal rejection")
+    assert(fs.exists("${base_dir}/outside.txt") == 0, "outside created!")
+    println("PASS: ../ traversal rejected")
+}
+
+test_nested_traversal(base_dir: string) {
+    var tar_path = "${base_dir}/nested_traversal.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "a/b/../../../outside_nested.txt", 0, 0, 48, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_nested_traversal", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "security violation") >= 0, "expected nested traversal rejection")
+    assert(fs.exists("${base_dir}/outside_nested.txt") == 0, "outside_nested created!")
+    println("PASS: nested traversal rejected")
+}
+
+test_windows_drive(base_dir: string) {
+    var tar_path = "${base_dir}/windows_drive.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "C:escaped.txt", 0, 0, 48, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_win_drive", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "security violation") >= 0, "expected win drive rejection")
+    println("PASS: Windows drive path rejected")
+}
+
+test_unc_path(base_dir: string) {
+    var tar_path = "${base_dir}/unc_path.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "\\\\server\\share\\escaped.txt", 0, 0, 48, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_unc", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "security violation") >= 0, "expected UNC rejection")
+    println("PASS: UNC path rejected")
+}
+
+test_sym_escape(base_dir: string, can_create_symlinks: int) {
+    if can_create_symlinks == 1 {
+        var tar_path = "${base_dir}/sym_escape.tar"
+        var w_err = ""
+        var err = ""
+        var ext_err = ""
+        defer {
+            string_release(tar_path)
+            string_release(w_err)
+            string_release(err)
+            string_release(ext_err)
+        }
+
+        var w_ptr: ptr = null
+        w_ptr, w_err = tar.writer_create(tar_path)
+        assert(w_err == "", "create sym_escape.tar")
+
+        err = tar.writer_add_symlink(w_ptr, "sym_escaped", "../../outside.txt", 511, 123456789)
+        assert(err == "", "add escaping symlink")
+
+        err = tar.writer_finish(w_ptr)
+        assert(err == "", "finish sym_escape.tar")
+
+        var opts = tar.default_extract_options()
+        opts.allow_symlinks = 1
+        ext_err = tar.extract(tar_path, "${base_dir}/ext_sym_escape", opts)
+        assert(ext_err != "" && string_index_of(ext_err, "escapes extraction root") >= 0, "expected symlink escape rejection: ${ext_err}")
+        println("PASS: symlink escape target rejected")
+    }
+}
+
+test_parent_symlink(base_dir: string, can_create_symlinks: int) {
+    if can_create_symlinks == 1 {
+        var tar_path = "${base_dir}/parent_symlink.tar"
+        var w_err = ""
+        var err = ""
+        var ext_err = ""
+        defer {
+            string_release(tar_path)
+            string_release(w_err)
+            string_release(err)
+            string_release(ext_err)
+        }
+
+        var w_ptr: ptr = null
+        w_ptr, w_err = tar.writer_create(tar_path)
+        assert(w_err == "", "create parent symlink tar")
+
+        err = tar.writer_add_symlink(w_ptr, "link", "sub", 511, 123456789)
+        assert(err == "", "add symlink link")
+
+        fs.write("${base_dir}/dummy_empty.txt", "")
+        err = tar.writer_add_file(w_ptr, "link/file.txt", "${base_dir}/dummy_empty.txt")
+        assert(err == "", "add link/file.txt")
+        fs.unlink("${base_dir}/dummy_empty.txt")
+
+        err = tar.writer_finish(w_ptr)
+        assert(err == "", "finish parent_symlink.tar")
+
+        var opts = tar.default_extract_options()
+        opts.allow_symlinks = 1
+        ext_err = tar.extract(tar_path, "${base_dir}/ext_parent_sym", opts)
+        assert(ext_err != "" && string_index_of(ext_err, "resolves through a symlink") >= 0, "expected parent symlink rejection: ${ext_err}")
+        println("PASS: parent component as symlink rejected")
+    }
+}
+
+test_max_entries(base_dir: string) {
+    var ext_err = ""
+    defer {
+        string_release(ext_err)
+    }
+    var opts = tar.default_extract_options()
+    opts.max_entries = 1
+    ext_err = tar.extract("${base_dir}/test1.tar", "${base_dir}/ext_max_entries", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "maximum entries exceeded") >= 0, "expected max entries exceeded")
+    println("PASS: max_entries limit enforced")
+}
+
+test_max_total_bytes(base_dir: string) {
+    var ext_err = ""
+    defer {
+        string_release(ext_err)
+    }
+    var opts = tar.default_extract_options()
+    opts.max_total_bytes = 100
+    ext_err = tar.extract("${base_dir}/test1.tar", "${base_dir}/ext_max_total", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "maximum total bytes exceeded") >= 0, "expected max total bytes exceeded")
+    println("PASS: max_total_bytes limit enforced")
+}
+
+test_max_entry_bytes(base_dir: string) {
+    var ext_err = ""
+    defer {
+        string_release(ext_err)
+    }
+    var opts = tar.default_extract_options()
+    opts.max_entry_bytes = 100
+    ext_err = tar.extract("${base_dir}/test1.tar", "${base_dir}/ext_max_entry", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "maximum entry size exceeded") >= 0, "expected max entry bytes exceeded")
+    println("PASS: max_entry_bytes limit enforced")
+}
+
+test_default_symlink_policy(base_dir: string) {
+    var tar_path = "${base_dir}/default_symlink.tar"
+    var w_err = ""
+    var err = ""
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(w_err)
+        string_release(err)
+        string_release(ext_err)
+    }
+
+    var writer: ptr = null
+    writer, w_err = tar.writer_create(tar_path)
+    assert(w_err == "", "create default symlink archive")
+    err = tar.writer_add_symlink(writer, "link", "inside.txt", 511, 123456789)
+    assert(err == "", "add policy-test symlink")
+    err = tar.writer_finish(writer)
+    assert(err == "", "finish default symlink archive")
+
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_default_symlink", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "symlinks are disabled") >= 0, "expected default symlink rejection")
+    println("PASS: symlinks disabled by default")
+}
+
+test_overwrite(base_dir: string) {
+    var overwrite_dest = "${base_dir}/ext_overwrite"
+    var ext_err = ""
+    defer {
+        string_release(overwrite_dest)
+        string_release(ext_err)
+    }
+
+    fs.mkdir_p(overwrite_dest)
+    fs.mkdir_p("${overwrite_dest}/dir")
+    fs.write("${overwrite_dest}/dir/empty.txt", "pre-existing content")
+
+    var opts = tar.default_extract_options()
+    opts.overwrite = 0
+    ext_err = tar.extract("${base_dir}/test1.tar", overwrite_dest, opts)
+    assert(ext_err != "" && string_index_of(ext_err, "already exists and overwrite is disabled") >= 0, "expected overwrite error")
+    println("PASS: overwrite check enforced")
+}
+
+test_unsupported(base_dir: string) {
+    var tar_path = "${base_dir}/unsupported.tar"
+    var ext_err = ""
+    defer {
+        string_release(tar_path)
+        string_release(ext_err)
+    }
+
+    write_mock_tar(tar_path, "test.txt", 0, 0, 51, false, false, "")
+    var opts = tar.default_extract_options()
+    ext_err = tar.extract(tar_path, "${base_dir}/ext_unsupported", opts)
+    assert(ext_err != "" && string_index_of(ext_err, "unsupported entry type flag") >= 0, "expected unsupported rejection")
+    println("PASS: unsupported special entry rejected during extraction")
+}
+
+main() {
+    println("=== TAR REGRESSION TESTS ===")
+
+    var base_dir = path.clean("tar_temp_test_dir")
+    var probe_err = ""
+    defer {
+        string_release(base_dir)
+        string_release(probe_err)
+    }
+
+    delete_recursive(base_dir)
+    fs.mkdir_p(base_dir)
+
+    // Probe if host can create symlinks
+    var can_create_symlinks = 1
+    probe_err = fs.symlink("dummy", "${base_dir}/probe_symlink")
+    if probe_err != "" {
+        can_create_symlinks = 0
+        println("Note: host platform cannot create symlinks, skipping symlink filesystem tests.")
+    } else {
+        fs.unlink("${base_dir}/probe_symlink")
+    }
+
+    // -------------------------------------------------------------
+    // Test 1: Positive roundtrip (Writer & Reader)
+    // -------------------------------------------------------------
+    {
+        var src_dir = "${base_dir}/src"
+        var archive_path = "${base_dir}/test1.tar"
+        var err = ""
+        var r_err = ""
+        var r_err_dir = ""
+        var r_err_empty = ""
+        var r_err_512 = ""
+        var r_err_padded = ""
+        var r_err_utf8 = ""
+        var r_err_long = ""
+        var r_err_sym = ""
+        var r_err_eof = ""
+        var long_name = ""
+        var str_512 = ""
+        var str_padded = ""
+        defer {
+            string_release(src_dir)
+            string_release(archive_path)
+            string_release(err)
+            string_release(r_err)
+            string_release(r_err_dir)
+            string_release(r_err_empty)
+            string_release(r_err_512)
+            string_release(r_err_padded)
+            string_release(r_err_utf8)
+            string_release(r_err_long)
+            string_release(r_err_sym)
+            string_release(r_err_eof)
+            string_release(long_name)
+            string_release(str_512)
+            string_release(str_padded)
+        }
+
+        fs.mkdir_p(src_dir)
+        fs.mkdir_p("${src_dir}/a")
+        fs.mkdir_p("${src_dir}/a/b")
+
+        fs.write("${src_dir}/empty.txt", "")
+
+        // 512-byte payload
+        let sb_512 = strbuilder.new(512)
+        var i = 0
+        while i < 512 {
+            strbuilder.append_byte(sb_512, 65) // 'A'
+            i = i + 1
+        }
+        str_512 = strbuilder.finish(sb_512)
+        fs.write("${src_dir}/a/512.txt", str_512)
+
+        // 123-byte padded payload
+        let sb_padded = strbuilder.new(128)
+        i = 0
+        while i < 123 {
+            strbuilder.append_byte(sb_padded, 66) // 'B'
+            i = i + 1
+        }
+        str_padded = strbuilder.finish(sb_padded)
+        fs.write("${src_dir}/a/b/padded.txt", str_padded)
+
+        // UTF-8 filename
+        fs.write("${src_dir}/a/b/utf8_파일.txt", "UTF-8 content")
+
+        // Create archive
+        var w_ptr: ptr = null
+        w_ptr, err = tar.writer_create(archive_path)
+        assert(err == "", "writer_create failed: ${err}")
+
+        err = tar.writer_add_directory(w_ptr, "dir", 493, 123456789) // 0o755
+        assert(err == "", "add directory failed: ${err}")
+
+        err = tar.writer_add_file(w_ptr, "dir/empty.txt", "${src_dir}/empty.txt")
+        assert(err == "", "add empty failed: ${err}")
+
+        err = tar.writer_add_file(w_ptr, "dir/512.txt", "${src_dir}/a/512.txt")
+        assert(err == "", "add 512 failed: ${err}")
+
+        err = tar.writer_add_file(w_ptr, "dir/padded.txt", "${src_dir}/a/b/padded.txt")
+        assert(err == "", "add padded failed: ${err}")
+
+        err = tar.writer_add_file(w_ptr, "dir/utf8_파일.txt", "${src_dir}/a/b/utf8_파일.txt")
+        assert(err == "", "add utf8 failed: ${err}")
+
+        // Test long path representation through ustar split
+        long_name = "prefix_field_goes_here_to_be_represented_by_ustar_prefix_split_because_this_is_such_an_exceedingly_long_directory_name/suffix_name_of_the_file_is_here.txt"
+        err = tar.writer_add_file(w_ptr, long_name, "${src_dir}/a/b/padded.txt")
+        assert(err == "", "add long name failed: ${err}")
+
+        if can_create_symlinks == 1 {
+            err = tar.writer_add_symlink(w_ptr, "dir/sym.txt", "empty.txt", 511, 123456789) // 0o777
+            assert(err == "", "add symlink failed: ${err}")
+        }
+
+        err = tar.writer_finish(w_ptr)
+        assert(err == "", "writer_finish failed: ${err}")
+
+        // Read & Validate archive
+        var r_ptr: ptr = null
+        r_ptr, r_err = tar.reader_open(archive_path)
+        assert(r_err == "", "reader_open failed: ${r_err}")
+
+        // 1. dir
+        var ok = 0
+        ok, r_err_dir = tar.reader_next(r_ptr)
+        assert(r_err_dir == "" && ok == 1, "next failed on dir: ${r_err_dir}")
+        assert(tar.entry_name(r_ptr) == "dir", "mismatch name")
+        assert(tar.entry_kind(r_ptr) == tar.KIND_DIRECTORY, "mismatch kind")
+        assert(tar.entry_mode(r_ptr) == 493, "mismatch mode")
+        assert(tar.entry_mtime(r_ptr) == 123456789, "mismatch mtime")
+
+        // 2. dir/empty.txt
+        ok, r_err_empty = tar.reader_next(r_ptr)
+        assert(r_err_empty == "" && ok == 1, "next failed on empty: ${r_err_empty}")
+        assert(tar.entry_name(r_ptr) == "dir/empty.txt", "mismatch name")
+        assert(tar.entry_size(r_ptr) == 0, "mismatch size")
+
+        // 3. dir/512.txt (read in small chunks)
+        ok, r_err_512 = tar.reader_next(r_ptr)
+        assert(r_err_512 == "" && ok == 1, "next failed on 512: ${r_err_512}")
+        assert(tar.entry_name(r_ptr) == "dir/512.txt", "mismatch name")
+        assert(tar.entry_size(r_ptr) == 512, "mismatch size")
+
+        var bytes_read = 0
+        while bytes_read < 512 {
+            var chunk, n, read_err = tar.entry_read(r_ptr, 13)
+            assert(read_err == "", "read err: ${read_err}")
+            assert(n > 0, "unexpected EOF")
+            string_release(chunk)
+            bytes_read = bytes_read + n
+            string_release(read_err)
+        }
+        assert(bytes_read == 512, "mismatch payload size read")
+
+        // 4. dir/padded.txt (test skip)
+        ok, r_err_padded = tar.reader_next(r_ptr)
+        assert(r_err_padded == "" && ok == 1, "next failed on padded: ${r_err_padded}")
+        assert(tar.entry_name(r_ptr) == "dir/padded.txt", "mismatch name")
+
+        var skip_err = tar.entry_skip(r_ptr)
+        assert(skip_err == "", "skip failed: ${skip_err}")
+        string_release(skip_err)
+
+        // 5. dir/utf8_파일.txt
+        ok, r_err_utf8 = tar.reader_next(r_ptr)
+        assert(r_err_utf8 == "" && ok == 1, "next failed on utf8: ${r_err_utf8}")
+        assert(tar.entry_name(r_ptr) == "dir/utf8_파일.txt", "mismatch name")
+
+        // 6. long_name
+        ok, r_err_long = tar.reader_next(r_ptr)
+        assert(r_err_long == "" && ok == 1, "next failed on long_name: ${r_err_long}")
+        assert(tar.entry_name(r_ptr) == long_name, "mismatch long_name")
+
+        if can_create_symlinks == 1 {
+            // 7. dir/sym.txt
+            ok, r_err_sym = tar.reader_next(r_ptr)
+            assert(r_err_sym == "" && ok == 1, "next failed on symlink: ${r_err_sym}")
+            assert(tar.entry_name(r_ptr) == "dir/sym.txt", "mismatch name")
+            assert(tar.entry_kind(r_ptr) == tar.KIND_SYMLINK, "mismatch kind")
+            assert(tar.entry_link_name(r_ptr) == "empty.txt", "mismatch linkname")
+        }
+
+        // Clean EOF
+        ok, r_err_eof = tar.reader_next(r_ptr)
+        assert(r_err_eof == "" && ok == 0, "expected clean EOF: ${r_err_eof}")
+
+        tar.reader_close(r_ptr)
+        println("PASS: low-level writer and reader roundtrip")
+    }
+
+    // -------------------------------------------------------------
+    // Test 2: Safe Extraction
+    // -------------------------------------------------------------
+    {
+        var extract_dest = "${base_dir}/extract_dest"
+        var ext_err = ""
+        defer {
+            string_release(extract_dest)
+            string_release(ext_err)
+        }
+
+        fs.mkdir_p(extract_dest)
+
+        var opts = tar.default_extract_options()
+        opts.overwrite = 1
+        opts.preserve_mode = 1
+        opts.preserve_mtime = 1
+        if can_create_symlinks == 1 {
+            opts.allow_symlinks = 1
+        }
+
+        ext_err = tar.extract("${base_dir}/test1.tar", extract_dest, opts)
+        assert(ext_err == "", "extraction failed: ${ext_err}")
+
+        // Verify regular files, directories, modes and contents
+        assert(fs.exists("${extract_dest}/dir") == 1, "dir missing")
+        assert(fs.exists("${extract_dest}/dir/empty.txt") == 1, "empty missing")
+        assert(fs.exists("${extract_dest}/dir/512.txt") == 1, "512 missing")
+        assert(fs.exists("${extract_dest}/dir/padded.txt") == 1, "padded missing")
+        assert(fs.exists("${extract_dest}/dir/utf8_파일.txt") == 1, "utf8 missing")
+
+        // Check file size
+        var s_sz, s_err = fs.size("${extract_dest}/dir/512.txt")
+        assert(s_err == "" && s_sz == 512, "mismatch 512 size")
+        string_release(s_err)
+
+        var p_sz, p_err = fs.size("${extract_dest}/dir/padded.txt")
+        assert(p_err == "" && p_sz == 123, "mismatch padded size")
+        string_release(p_err)
+
+        if can_create_symlinks == 1 {
+            assert(fs.fs_is_symlink("${extract_dest}/dir/sym.txt") == 1, "symlink missing")
+        }
+
+        println("PASS: safe extraction and metadata preservation")
+    }
+
+    // Run modularized rejection/malformed/security tests
+    test_bad_checksum(base_dir)
+    test_truncated_header(base_dir)
+    test_truncated_payload(base_dir)
+    test_missing_padding(base_dir)
+    test_invalid_size(base_dir)
+    test_overflowing_size(base_dir)
+    test_one_zero(base_dir)
+    test_abs_path(base_dir)
+    test_traversal(base_dir)
+    test_nested_traversal(base_dir)
+    test_windows_drive(base_dir)
+    test_unc_path(base_dir)
+    test_sym_escape(base_dir, can_create_symlinks)
+    test_parent_symlink(base_dir, can_create_symlinks)
+    test_max_entries(base_dir)
+    test_max_entry_bytes(base_dir)
+    test_max_total_bytes(base_dir)
+    test_default_symlink_policy(base_dir)
+    test_overwrite(base_dir)
+    test_unsupported(base_dir)
+
+    delete_recursive(base_dir)
+    println("All PASS")
+}

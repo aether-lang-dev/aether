@@ -1377,6 +1377,64 @@ Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptog
 
 ---
 
+## POSIX ustar archives (`std.tar`)
+
+`std.tar` reads, writes, and safely extracts uncompressed POSIX ustar archives.
+It supports regular files, directories, symbolic links, permission modes,
+modification times, ustar prefix/name splitting, header checksums, payload
+padding, and the two-record end marker. Reader payloads and writer source files
+are transferred in bounded chunks; no entry-sized allocation is made.
+
+```aether
+import std.tar
+
+main() {
+    writer, err = tar.writer_create("release.tar")
+    if err != "" { return }
+    err = tar.writer_add_file(writer, "bin/app", "build/app")
+    if err != "" {
+        tar.writer_abort(writer)
+        return
+    }
+    tar.writer_finish(writer)
+
+    opts = tar.default_extract_options()
+    err = tar.extract("release.tar", "unpacked", opts)
+}
+```
+
+The low-level reader API is `reader_open`, `reader_next`, the `entry_*`
+metadata accessors, `entry_read`, `entry_skip`, and `reader_close`.
+`entry_read(reader, max_bytes)` returns a binary-safe `(buffer, length, err)`;
+the caller releases every non-null buffer with `string.release`. Entry metadata
+is borrowed from the reader and remains valid only until the next
+`reader_next` call or `reader_close`. Calling `reader_next` skips any unread
+payload and its padding.
+
+The writer API is `writer_create`, `writer_add_file`, `writer_add_directory`,
+`writer_add_symlink`, `writer_finish`, and `writer_abort`. Source files are
+streamed. `writer_finish` writes both zero records and consumes the writer on
+success; call `writer_abort` after an earlier add failure to close the handle
+and remove the incomplete output.
+
+`default_extract_options()` disables symlinks and overwriting, does not restore
+mode or mtime, and applies conservative entry, per-entry byte, and total-byte
+limits. `extract` rejects absolute, drive-qualified, UNC, and root-escaping
+paths; refuses parents that are symlinks; validates enabled symlink targets;
+and delays directory metadata until children have been created. Reading needs
+filesystem-read capability; writing and extraction need filesystem-write
+capability under the normal `--emit=lib` sandbox checks.
+
+This is deliberately POSIX ustar support, not general TAR support. The iterator
+reports hard links, devices, FIFOs, GNU/PAX records, sparse entries, base-256
+numbers, and unknown type flags as `KIND_OTHER`; extraction rejects them rather
+than treating them as files. Invalid UTF-8 names are rejected. Gzip, zstd, xz,
+and bzip2 are separate formats/layers and are not inferred from suffixes.
+Symlink creation and metadata preservation remain platform-dependent; no
+ownership, setuid/setgid, device-node, or FIFO restoration is attempted.
+
+---
+
 ## Compression (`std.zlib`)
 
 One-shot zlib deflate/inflate for in-memory byte buffers. Output is

@@ -141,6 +141,11 @@ version number before tagging the release.
   removed it as dead code that had no call sites, no activation surface and no
   overhead story. The claim is back because it is now true. See
   `docs/message-tracing.md`.
+- **Secure streaming POSIX ustar archives.** Added `std.tar` readers and writers
+  for regular files, directories, symlinks, modes, mtimes, prefix/name paths,
+  checksum validation, and bounded payload streaming. The high-level extractor
+  rejects traversal, unsafe symlinks, unsupported entry kinds, and configurable
+  entry/size limit violations. Compression remains a separate layer.
 
 ## [0.495.0]
 
