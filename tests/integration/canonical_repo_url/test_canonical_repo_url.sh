@@ -18,24 +18,37 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$ROOT" || exit 1
 
-# Assembled from parts so this file does not itself contain the literal it
-# searches for, which would make the check fail on its own source.
-STALE_OWNER='nicolasmd87'
-STALE="$STALE_OWNER/aether"
+# Every owner the project has moved away from. GitHub keeps each old path alive
+# as a rename redirect, so a stale reference keeps working right up until someone
+# claims the freed name — at which point anything that fetches from it lands on a
+# repo the project no longer controls. Guard against all of them, not just the
+# oldest:
+#   - nicolasmd87    : the original owner (pre-org)
+#   - aether-lang-org: renamed to aether-lang-dev by Nic
+# The owner strings are spliced from parts at runtime so this source file does
+# not itself contain a stale "owner/aether" literal and trip its own check.
+ORG_SUFFIX='org'
+STALE_OWNERS="nicolasmd87 aether-lang-${ORG_SUFFIX}"
 
-hits=$(grep -rn "$STALE" \
-        --exclude-dir=.git \
-        --exclude-dir=build \
-        --exclude-dir=target \
-        --exclude=CHANGELOG.md \
-        --exclude=CHANGELOG-archive.md \
-        . 2>/dev/null | grep -v '^\./benchmarks/json/corpus/')
+hits=""
+for owner in $STALE_OWNERS; do
+    stale="$owner/aether"
+    found=$(grep -rn "$stale" \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude-dir=target \
+            --exclude=CHANGELOG.md \
+            --exclude=CHANGELOG-archive.md \
+            . 2>/dev/null | grep -Ev '^\.?/?benchmarks/json/corpus/')
+    [ -n "$found" ] && hits="${hits}${found}
+"
+done
 
-if [ -n "$hits" ]; then
+if [ -n "$(printf '%s' "$hits" | tr -d '[:space:]')" ]; then
     echo "  [FAIL] canonical_repo_url: stale repository path still referenced"
-    echo "$hits" | sed 's/^/        /' | head -12
-    echo "        Use the current path; a rename redirect is not a durable target"
-    echo "        for anything that downloads and installs binaries."
+    printf '%s' "$hits" | sed '/^$/d; s/^/        /' | head -12
+    echo "        Use the current path (aether-lang-dev/aether); a rename redirect"
+    echo "        is not a durable target for anything that downloads/installs."
     exit 1
 fi
 

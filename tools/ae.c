@@ -2084,8 +2084,16 @@ void build_gcc_cmd(char* cmd, size_t size,
     // Coverage builds skip -pipe — gcov works fine with it, but it
     // adds nothing when -O0 -g is already forced. Keeping the flag
     // string short helps the cmd-buffer size budget.
+    //
+    // -Wformat must be present here too: the -pipe path is the mainline
+    // (non-static) build, and it previously hardcoded the opt string inline,
+    // dropping the -Wformat that opt_flags() carries. Without it the C
+    // compiler's printf-family format checks (mapped to the .ae source via
+    // #line) never run on a normal `ae build` — regressing #1252. Keep this in
+    // sync with opt_flags(); user cflags still append after, so -Wno-format
+    // remains an opt-out.
     const char* base_opt = g_coverage ? opt_flags(optimize)
-                          : (optimize ? "-O2 -pipe" : "-O0 -g -pipe");
+                          : (optimize ? "-O2 -pipe -Wformat" : "-O0 -g -pipe -Wformat");
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "%s%s %s%s", emit_lib_flags, base_opt, user_cflags, trace_def);
