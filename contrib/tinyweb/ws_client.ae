@@ -2,16 +2,16 @@
 
 import std.tcp
 import std.string
+import std.map
 
 // ---------------------------------------------------------------------------
 // WebSocket Client
 // ---------------------------------------------------------------------------
 
-// Connect to a WebSocket server. Returns a client map or 0 on failure.
-// Connect to a WebSocket server. Returns a client map or 0 on failure.
+// Connect to a WebSocket server. Returns a client map, or 0 on failure.
 ws_client_connect(host: string, port: int, ws_path: string, origin: string) {
-    sock = tcp.connect(host, port)
-    if sock == 0 { return 0 }
+    sock, err = tcp.connect(host, port)
+    if err != "" { return 0 }
 
     client = map_new()
     map_put(client, "sock", sock)
@@ -22,8 +22,7 @@ ws_client_connect(host: string, port: int, ws_path: string, origin: string) {
     return client
 }
 
-// Perform the WebSocket upgrade handshake.
-// Perform the WebSocket upgrade handshake. Returns 0 on success.
+// Perform the WebSocket upgrade handshake. Returns 0 on success, -1 on failure.
 ws_client_handshake(client: ptr) -> int {
     sock, _ = map.get(client, "sock")
     host, _ = map.get(client, "host")
@@ -31,8 +30,8 @@ ws_client_handshake(client: ptr) -> int {
     ws_path, _ = map.get(client, "path")
     origin, _ = map.get(client, "origin")
 
-    // Build HTTP upgrade request
-    // Fixed Sec-WebSocket-Key (accept key is only validated by the client)
+    // Build HTTP upgrade request.
+    // Fixed Sec-WebSocket-Key (the accept key is only validated by the client).
     request = "GET ${ws_path} HTTP/1.1\r\n"
     request = string.concat(request, "Host: ${host}:${port}\r\n")
     request = string.concat(request, "Upgrade: websocket\r\n")
@@ -41,72 +40,75 @@ ws_client_handshake(client: ptr) -> int {
     request = string.concat(request, "Sec-WebSocket-Version: 13\r\n")
     request = string.concat(request, "Origin: ${origin}\r\n\r\n")
 
-    tcp.send(sock, request)
+    _, werr = tcp.write(sock, request)
+    if werr != "" { return -1 }
 
-    // Read handshake response
-    response = tcp.receive(sock, 1024)
-    if response == 0 { return -1 }
+    // Read handshake response.
+    response, rerr = tcp.read(sock, 1024)
+    if rerr != "" { return -1 }
 
-    // Verify "101 Switching Protocols"
+    // Verify "101 Switching Protocols".
     if string.contains(response, "101 Switching Protocols") == 1 {
         return 0
     }
     return -1
 }
 
-// Send a text message over the WebSocket connection.
 // Send a text message. Client-to-server frames must be masked (RFC 6455).
-ws_client_send(client: ptr, message: string) {
+ws_client_send(client: ptr, msg: string) {
     sock, _ = map.get(client, "sock")
-    len = string.length(message)
+    len = string.length(msg)
 
-    // Frame header: FIN=1, opcode=text(1), MASK=1
-    // For simplicity, use a fixed mask key (0x00000000 = no-op XOR)
-    // A production impl would use random mask bytes
+    // Frame header: FIN=1, opcode=text(1), MASK=1.
+    // For simplicity, use a fixed all-zero mask key (0x00000000 = no-op XOR).
+    // A production impl would use random mask bytes.
     if len < 126 {
         // [0x81, 0x80|len, mask(4 bytes)]
         hdr = string.concat(string.from_int(129), string.from_int(128 + len))
-        tcp.send(sock, hdr)
+        _, _ = tcp.write(sock, hdr)
         // 4-byte mask key (all zeros = payload unchanged)
-        tcp.send(sock, string.concat(string.concat(string.from_int(0), string.from_int(0)),
-                                      string.concat(string.from_int(0), string.from_int(0))))
+        _, _ = tcp.write(sock, string.concat(string.concat(string.from_int(0), string.from_int(0)),
+                string.concat(string.from_int(0), string.from_int(0))))
     }
-    tcp.send(sock, message)
+    _, _ = tcp.write(sock, msg)
 }
 
-// Receive messages in a loop until stop_phrase is seen or connection closes.
-// Receive messages until stop_phrase or disconnect. Returns 1 if stopped, 0 if closed.
+// Receive messages in a loop until stop_phrase is seen or the connection
+// closes. Returns 1 if stopped on stop_phrase, 0 if the connection closed.
 ws_client_receive(client: ptr, stop_phrase: string, handler: fn) -> int {
     sock, _ = map.get(client, "sock")
     running = 1
     result = 0
 
-    for (running == 1; running == 1; running = running) {
-        // Read 2-byte frame header
-        hdr = tcp.receive(sock, 2)
-        if hdr == 0 { running = 0 } else {
+    while running == 1 {
+        // Read 2-byte frame header.
+        hdr, herr = tcp.read(sock, 2)
+        if herr != "" {
+            running = 0
+        } else {
             byte1 = string.char_at(hdr, 1)
-            payload_len = byte1 - ((byte1 / 128) * 128)  // byte1 & 0x7F
+            payload_len = byte1 - ((byte1 / 128) * 128) // byte1 & 0x7F
 
-            // Extended payload length
+            // Extended payload length.
             if payload_len == 126 {
-                ext = tcp.receive(sock, 2)
-                if ext == 0 { running = 0 }
-                if running == 1 {
-                    payload_len = char_at(ext) * 256 + string.char_at(ext, 1)
+                ext, eerr = tcp.read(sock, 2)
+                if eerr != "" {
+                    running = 0
+                } else {
+                    payload_len = string.char_at(ext, 0) * 256 + string.char_at(ext, 1)
                 }
             }
 
             if running == 1 && payload_len > 0 {
-                payload = tcp.receive(sock, payload_len)
-                if payload == 0 {
+                payload, perr = tcp.read(sock, payload_len)
+                if perr != "" {
                     running = 0
                 } else {
-                    if str_eq(payload, stop_phrase) == 1 {
+                    if string.equals(payload, stop_phrase) == 1 {
                         result = 1
                         running = 0
                     } else {
-                        // Call handler with the message
+                        // Call the handler with the message.
                         call(handler, payload)
                     }
                 }
@@ -117,13 +119,12 @@ ws_client_receive(client: ptr, stop_phrase: string, handler: fn) -> int {
     return result
 }
 
-// Close the WebSocket connection.
-// Close the connection (sends a masked close frame)
+// Close the connection (sends a masked close frame).
 ws_client_close(client: ptr) {
     sock, _ = map.get(client, "sock")
-    // Send masked close frame: [0x88, 0x80, mask(4 zeros)]
-    tcp.send(sock, string.concat(string.from_int(136), string.from_int(128)))
-    tcp.send(sock, string.concat(string.concat(string.from_int(0), string.from_int(0)),
-                                  string.concat(string.from_int(0), string.from_int(0))))
+    // Masked close frame: [0x88, 0x80, mask(4 zeros)]
+    _, _ = tcp.write(sock, string.concat(string.from_int(136), string.from_int(128)))
+    _, _ = tcp.write(sock, string.concat(string.concat(string.from_int(0), string.from_int(0)),
+            string.concat(string.from_int(0), string.from_int(0))))
     tcp.close(sock)
 }
