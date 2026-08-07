@@ -1,7 +1,7 @@
 # Aether Language Support
 
 Visual Studio Code (and Cursor) support for the
-[Aether programming language](https://github.com/nicolasmd87/aether).
+[Aether programming language](https://github.com/aether-lang-dev/aether).
 
 ## What you get
 
@@ -175,7 +175,7 @@ main() {
 ## Reporting issues
 
 Open an issue at
-[github.com/nicolasmd87/aether/issues](https://github.com/nicolasmd87/aether/issues).
+[github.com/aether-lang-dev/aether/issues](https://github.com/aether-lang-dev/aether/issues).
 
 ## License
 

@@ -54,6 +54,26 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The self-updater pointed at a repository path the project no longer owns.**
+  `AE_GITHUB_REPO` was still the pre-rename `nicolasmd87/aether`, which the
+  GitHub API answers with a 301. It kept working only because `curl -fsSL` and
+  `wget` follow redirects silently, and `ae upgrade` / `ae install` /
+  `ae version list` download release binaries from that path and install them.
+  A rename redirect lasts exactly as long as nobody claims the freed name: the
+  moment someone does, the redirect stops resolving here and the self-updater
+  installs whatever is at the old address. Repointed to
+  `aether-lang-dev/aether`, which resolves directly with no redirect, along
+  with the twelve other stale references (the download hint in `ae`, the
+  diagnostics wiki URL, `apkg`, the VS Code extension manifest and README, the
+  benchmark UI). The historical changelog archive is deliberately left alone:
+  those entries record the links as they were, and rewriting them would be
+  fiction rather than a fix. `tests/integration/canonical_repo_url` fails the
+  build if the stale path returns.
+
+## [current]
+
+### Fixed
+
 - **The cross-language benchmark suite excluded Aether, and said so quietly.**
   Every run printed `Aether... [SKIP] Build failed` for all five benchmarks
   while the other ten languages reported numbers, and then published a results

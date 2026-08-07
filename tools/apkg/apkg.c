@@ -738,7 +738,7 @@ void apkg_print_help() {
     printf("    search <query>    Search for packages\n");
     printf("    help              Show this help message\n");
     printf("    version           Show version information\n\n");
-    printf("For more information, see: https://github.com/nicolasmd87/aether\n");
+    printf("For more information, see: https://github.com/aether-lang-dev/aether\n");
 }
 
 void apkg_print_version() {
