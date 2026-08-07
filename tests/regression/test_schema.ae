@@ -1,0 +1,248 @@
+// Regression test for std.schema — declarative typed validation & coercion.
+// Covers: typed fields + coercion (int/float/bool), every validator's
+// pass/fail path (min/max/len/present/one_of/email/refine), required vs
+// optional, and the parse -> (values, errors) contract with Zod-style codes.
+
+import std.schema
+import std.map(map_new, map_put_raw, map_free)
+import std.map
+import std.string(string_equals, to_int)
+
+extern exit(code: int)
+
+fn fail(m: string) {
+    print("FAIL: ${m}\n")
+    exit(1)
+}
+
+// Assert parse succeeds (no errors).
+fn expect_ok(label: string, s: ptr, input: ptr) {
+    values, errors = schema.parse(s, input)
+    if schema.ok(errors) != 1 {
+        n = schema.error_count(errors)
+        c0 = schema.error_code(errors, 0)
+        print("FAIL: ${label}: expected ok, got ${n} error(s), first=${c0}\n")
+        schema.values_free(values)
+        schema.errors_free(errors)
+        exit(1)
+    }
+    print("PASS: ${label}\n")
+    schema.values_free(values)
+    schema.errors_free(errors)
+}
+
+// Assert parse fails with a specific field + code on the first error.
+fn expect_err(label: string, s: ptr, input: ptr, field: string, code: string) {
+    values, errors = schema.parse(s, input)
+    if schema.ok(errors) == 1 {
+        print("FAIL: ${label}: expected error ${code}, got none\n")
+        schema.values_free(values)
+        schema.errors_free(errors)
+        exit(1)
+    }
+    got_f = schema.error_field(errors, 0)
+    got_c = schema.error_code(errors, 0)
+    if string_equals(got_f, field) != 1 || string_equals(got_c, code) != 1 {
+        print("FAIL: ${label}: expected ${field}/${code}, got ${got_f}/${got_c}\n")
+        schema.values_free(values)
+        schema.errors_free(errors)
+        exit(1)
+    }
+    print("PASS: ${label}\n")
+    schema.values_free(values)
+    schema.errors_free(errors)
+}
+
+fn put(m: ptr, k: string, v: string) {
+    map_put_raw(m, k, v)
+}
+
+main() {
+    print("=== std.schema ===\n\n")
+
+    // ---- A schema exercising numeric, string, enum, optional, refine ----
+    person = schema.record() {
+        schema.field("age", schema.INT) {
+            schema.min(18)
+            schema.max(120)
+        }
+        schema.field("name", schema.STR) {
+            schema.present()
+            schema.len(1, 40)
+        }
+        schema.field("role", schema.STR) {
+            schema.one_of("admin,user,guest")
+            schema.optional()
+        }
+        schema.field("email", schema.STR) {
+            schema.email()
+            schema.optional()
+        }
+        schema.field("even", schema.INT) {
+            schema.refine(| v: string | {
+                    n, _ = to_int(v)
+                    if n % 2 == 0 {
+                        return 1
+                    }
+                    return 0
+                })
+        }
+    }
+
+    // 1. fully valid
+    ok1 = map_new()
+    put(ok1, "age", "25")
+    put(ok1, "name", "Ada")
+    put(ok1, "role", "admin")
+    put(ok1, "email", "ada@example.com")
+    put(ok1, "even", "4")
+    expect_ok("valid record", person, ok1)
+    map_free(ok1)
+
+    // 2. optional fields omitted -> still ok
+    ok2 = map_new()
+    put(ok2, "age", "40")
+    put(ok2, "name", "Bo")
+    put(ok2, "even", "8")
+    expect_ok("optional omitted", person, ok2)
+    map_free(ok2)
+
+    // 3. int coercion: "25" is accepted as INT
+    ok3 = map_new()
+    put(ok3, "age", "018")
+    put(ok3, "name", "X")
+    put(ok3, "even", "0")
+    expect_ok("int coercion", person, ok3)
+    map_free(ok3)
+
+    // 4. too_small (min)
+    e1 = map_new()
+    put(e1, "age", "12")
+    put(e1, "name", "Ada")
+    put(e1, "even", "4")
+    expect_err("age below min", person, e1, "age", "too_small")
+    map_free(e1)
+
+    // 5. too_big (max)
+    e2 = map_new()
+    put(e2, "age", "130")
+    put(e2, "name", "Ada")
+    put(e2, "even", "4")
+    expect_err("age above max", person, e2, "age", "too_big")
+    map_free(e2)
+
+    // 6. invalid_type (non-integer)
+    e3 = map_new()
+    put(e3, "age", "abc")
+    put(e3, "name", "Ada")
+    put(e3, "even", "4")
+    expect_err("age not integer", person, e3, "age", "invalid_type")
+    map_free(e3)
+
+    // 7. missing required
+    e4 = map_new()
+    put(e4, "age", "25")
+    put(e4, "even", "4")
+    expect_err("name missing", person, e4, "name", "missing")
+    map_free(e4)
+
+    // 8. one_of violation
+    e5 = map_new()
+    put(e5, "age", "25")
+    put(e5, "name", "Ada")
+    put(e5, "role", "wizard")
+    put(e5, "even", "4")
+    expect_err("role not in set", person, e5, "role", "invalid_value")
+    map_free(e5)
+
+    // 9. email format
+    e6 = map_new()
+    put(e6, "age", "25")
+    put(e6, "name", "Ada")
+    put(e6, "email", "not-an-email")
+    put(e6, "even", "4")
+    expect_err("bad email", person, e6, "email", "invalid_format")
+    map_free(e6)
+
+    // 10. custom refine (odd fails)
+    e7 = map_new()
+    put(e7, "age", "25")
+    put(e7, "name", "Ada")
+    put(e7, "even", "5")
+    expect_err("refine odd", person, e7, "even", "custom")
+    map_free(e7)
+
+    // 11. string too long (len max)
+    e8 = map_new()
+    put(e8, "age", "25")
+    put(e8, "name", "ThisNameIsWayTooLongToFitInFortyCharsForSure")
+    put(e8, "even", "4")
+    expect_err("name too long", person, e8, "name", "too_big")
+    map_free(e8)
+
+    schema.schema_free(person)
+
+    // ---- Float + bool coercion in their own small schema ----
+    measures = schema.record() {
+        schema.field("temp", schema.FLOAT) {
+            schema.min(0)
+        }
+        schema.field("active", schema.BOOL) {
+            schema.present()
+        }
+    }
+
+    okf = map_new()
+    put(okf, "temp", "36.6")
+    put(okf, "active", "true")
+    expect_ok("float+bool valid", measures, okf)
+    map_free(okf)
+
+    ef = map_new()
+    put(ef, "temp", "hot")
+    put(ef, "active", "true")
+    expect_err("float not a number", measures, ef, "temp", "invalid_type")
+    map_free(ef)
+
+    eb = map_new()
+    put(eb, "temp", "20.0")
+    put(eb, "active", "maybe")
+    expect_err("bool not boolean", measures, eb, "active", "invalid_type")
+    map_free(eb)
+
+    schema.schema_free(measures)
+
+    // ---- "parse, don't validate": the returned values are typed & usable ----
+    // A successful parse hands back coerced values keyed by field name; reading
+    // them needs no re-checking downstream. This is the showcase payoff.
+    acct = schema.record() {
+        schema.field("id", schema.INT) {
+            schema.min(1)
+        }
+        schema.field("handle", schema.STR) {
+            schema.present()
+        }
+    }
+    uin = map_new()
+    put(uin, "id", "0042") // coerces; retrievable as the canonical value
+    put(uin, "handle", "ada")
+    uval, uerr = schema.parse(acct, uin)
+    if schema.ok(uerr) != 1 {
+        fail("values-usable: expected ok")
+    }
+    got_id, _ = map.get(uval, "id")
+    got_handle, _ = map.get(uval, "handle")
+    if string_equals(got_id, "0042") != 1 {
+        fail("values-usable: id readback got ${got_id}")
+    }
+    if string_equals(got_handle, "ada") != 1 {
+        fail("values-usable: handle readback got ${got_handle}")
+    }
+    print("PASS: parsed values are typed and readable\n")
+    schema.values_free(uval)
+    schema.errors_free(uerr)
+    map_free(uin)
+    schema.schema_free(acct)
+
+    print("\nAll PASS\n")
+}

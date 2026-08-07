@@ -80,11 +80,39 @@ start_three_upstreams() {
     wait_for_port upstream_c 19103
 }
 
+# Non-fatal port wait: 0 if up, 1 if the process died or never bound.
+wait_for_port_soft() {
+    role="$1"; port="$2"
+    pid=$(eval echo \$PID_$role)
+    deadline=$(($(date +%s) + 15))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        kill -0 "$pid" 2>/dev/null || return 1
+        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
+                "http://127.0.0.1:$port/health" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+# Retry the proxy bind: kill -9 + immediate rebind on 19100 can briefly lose
+# to a TIME_WAIT listener even with SO_REUSEADDR — transient, so retry.
 start_proxy() {
     proxy_role="$1"
-    start_proc "$proxy_role"
-    PROXY_PID=$(eval echo \$PID_$proxy_role)
-    wait_for_port "$proxy_role" 19100
+    attempt=0
+    while [ "$attempt" -lt 5 ]; do
+        start_proc "$proxy_role"
+        PROXY_PID=$(eval echo \$PID_$proxy_role)
+        if wait_for_port_soft "$proxy_role" 19100; then
+            return 0
+        fi
+        kill -9 "$PROXY_PID" 2>/dev/null || true
+        attempt=$((attempt + 1))
+        sleep 0.3
+    done
+    echo "  [FAIL] $proxy_role never bound port 19100 after 5 attempts:"
+    head -30 "$TMPDIR/$proxy_role.log"; exit 1
 }
 
 stop_proxy() {

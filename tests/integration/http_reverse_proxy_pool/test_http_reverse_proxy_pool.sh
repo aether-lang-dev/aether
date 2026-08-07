@@ -106,12 +106,47 @@ start_three_upstreams() {
     wait_for_port upstream_c 19103
 }
 
+# Non-fatal variant of wait_for_port: returns 0 if the port comes up,
+# 1 if the process died or never bound. Used by start_proxy's rebind
+# retry so a transient TIME_WAIT loss on the proxy port isn't fatal.
+wait_for_port_soft() {
+    role="$1"; port="$2"
+    pid=$(eval echo \$PID_$role)
+    deadline=$(($(date +%s) + 15))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        kill -0 "$pid" 2>/dev/null || return 1
+        if curl -s -o /dev/null --connect-timeout 0.3 --max-time 1 \
+                "http://127.0.0.1:$port/health" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 # Bounce just the proxy. The 3 upstreams stay warm.
+#
+# The proxy is killed with `kill -9` and immediately restarted on the same
+# port (19100) between subtests. Even though the server sets SO_REUSEADDR,
+# the kernel can briefly hold the previous listener in TIME_WAIT, so a fresh
+# bind occasionally loses the race and the process exits at once. That is a
+# transient, not a real failure — retry the bind a few times before giving up.
 start_proxy() {
     proxy_role="$1"
-    start_proc "$proxy_role"
-    PROXY_PID=$(eval echo \$PID_$proxy_role)
-    wait_for_port "$proxy_role" 19100
+    attempt=0
+    while [ "$attempt" -lt 5 ]; do
+        start_proc "$proxy_role"
+        PROXY_PID=$(eval echo \$PID_$proxy_role)
+        if wait_for_port_soft "$proxy_role" 19100; then
+            return 0
+        fi
+        # bind lost the race (or crashed) — reap and back off before retrying
+        kill -9 "$PROXY_PID" 2>/dev/null || true
+        attempt=$((attempt + 1))
+        sleep 0.3
+    done
+    echo "  [FAIL] $proxy_role never bound port 19100 after 5 attempts:"
+    head -30 "$TMPDIR/$proxy_role.log"; exit 1
 }
 
 stop_proxy() {

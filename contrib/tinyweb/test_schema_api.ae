@@ -1,0 +1,115 @@
+// Integration test for tinyweb.schema_api — declarative JSON API validation.
+//
+// Mounts a resource with a std.schema definition and drives real HTTP requests
+// through the validating filter: a valid body reaches the handler (201), an
+// invalid body is rejected with a JSON:API 422 before the handler runs, and a
+// malformed body gets a 400. Proves the tinyweb (router) + std.schema
+// (validator) bridge end to end.
+
+import contrib.tinyweb
+import contrib.tinyweb.schema_api
+import std.schema
+import std.http(http_post_raw, http_response_status_code, http_response_body_str,
+    http_response_free)
+import std.string(string_contains)
+
+extern exit(code: int)
+extern sleep(ms: int)
+
+// Handler only runs on a validated body — it can assume the happy path.
+handle_create(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"data\":{\"type\":\"users\",\"ok\":true}}", 201)
+}
+
+// ---- server actor (run the blocking accept loop off the main thread) ----
+message StartSrv { srv: ptr }
+
+actor SrvActor {
+    state s = 0
+    receive {
+        StartSrv(srv) -> {
+            s = srv
+            tinyweb.tw_start(srv)
+        }
+    }
+}
+actor SchedHelper {
+    state x = 0
+    receive { Ping() -> { x = 1 } }
+}
+message Ping {}
+
+fn chk(resp: ptr, want: int, label: string) {
+    got = http_response_status_code(resp)
+    if got != want {
+        print("FAIL: ${label} — expected ${want}, got ${got}\n")
+        http_response_free(resp)
+        exit(1)
+    }
+    print("PASS: ${label} (${got})\n")
+    http_response_free(resp)
+}
+
+fn chk_body(resp: ptr, needle: string, want: int, label: string) {
+    got = http_response_status_code(resp)
+    body = http_response_body_str(resp)
+    if got != want {
+        print("FAIL: ${label} — expected ${want}, got ${got}; body=${body}\n")
+        http_response_free(resp)
+        exit(1)
+    }
+    if string_contains(body, needle) != 1 {
+        print("FAIL: ${label} — body missing '${needle}'; body=${body}\n")
+        http_response_free(resp)
+        exit(1)
+    }
+    print("PASS: ${label} (${got}, body ok)\n")
+    http_response_free(resp)
+}
+
+fn post(path: string, body: string) -> ptr {
+    return http_post_raw("http://127.0.0.1:18092${path}", body, "application/json")
+}
+
+main() {
+    print("=== tinyweb.schema_api ===\n\n")
+
+    user = schema.record() {
+        schema.field("age", schema.INT) {
+            schema.min(18)
+            schema.max(120)
+        }
+        schema.field("name", schema.STR) {
+            schema.present()
+        }
+    }
+
+    server = tinyweb.web_server_host("127.0.0.1", 18092) {
+        schema_api.json_api("/users", user) {
+            schema_api.create() | req: ptr, res: ptr, ctx: ptr | {
+                handle_create(req, res, ctx)
+            }
+        }
+    }
+
+    spawn(SchedHelper())
+    a = spawn(SrvActor())
+    a ! StartSrv { srv: server }
+    sleep(500)
+
+    // 1. valid -> handler runs -> 201
+    chk_body(post("/users/", "{\"age\":25,\"name\":\"Ada\"}"), "ok", 201, "valid POST reaches handler")
+
+    // 2. invalid (age < 18) -> 422 JSON:API, handler NOT reached
+    chk_body(post("/users/", "{\"age\":12,\"name\":\"Bob\"}"), "too_small", 422, "invalid POST -> 422 with code")
+
+    // 3. missing required name -> 422
+    chk_body(post("/users/", "{\"age\":30}"), "missing", 422, "missing field -> 422")
+
+    // 4. malformed JSON -> 400
+    chk(post("/users/", "{\"age\":"), 400, "malformed JSON -> 400")
+
+    schema.schema_free(user)
+    print("\nAll PASS\n")
+    exit(0)
+}

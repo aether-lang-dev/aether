@@ -833,6 +833,71 @@ chunked_end(sock: ptr) {
 }
 
 // ---------------------------------------------------------------------------
+// DSL request dispatch
+//
+// The C server calls registered routes as plain @c_callback (req, res, ud)
+// functions, but the DSL stores handlers/filters as boxed Aether closures. This
+// trampoline is registered as the single C handler for every DSL route; `ud` is
+// the route entry map (which also carries its pre-matched filter list). It runs
+// the matching filter chain (honoring STOP), then unboxes and calls the
+// endpoint handler. Without this, DSL routes registered via tw_start have no way
+// to invoke their closures — this is what makes the builder DSL runnable.
+// ---------------------------------------------------------------------------
+
+@c_callback dsl_dispatch(req: ptr, res: ptr, ud: ptr) {
+    entry = ud
+    // Per-request context object shared by filters and the endpoint handler.
+    ctx = attributes_new()
+
+    // 1. Run this route's filter chain; a filter returning STOP short-circuits
+    //    (it has already written the response).
+    fl, _ = map.get(entry, "route_filters")
+    if fl != 0 {
+        fn_count = list.size(fl)
+        for (fi = 0; fi < fn_count; fi++) {
+            fboxed, _ = list.get(fl, fi)
+            fhandler = unbox_closure(fboxed)
+            verdict = call(fhandler, req, res, ctx)
+            if verdict == STOP {
+                map_free(ctx)
+                return
+            }
+        }
+    }
+
+    // 2. Run the endpoint handler.
+    hboxed, _ = map.get(entry, "handler")
+    handler = unbox_closure(hboxed)
+    call(handler, req, res, ctx)
+
+    map_free(ctx)
+}
+
+// Does filter `fmethod`/`fpat` apply to a route with `rmethod`/`rpath`? Method
+// matches if the filter is ALL or the same method; path matches if the route
+// path begins with the filter's literal prefix (the common path()+filter(".*")
+// case) — a pragmatic match that covers the mounted-resource use without a full
+// regex engine in the registration path.
+fn filter_applies(fmethod: int, fpat: string, rmethod: int, rpath: string) -> int {
+    if fmethod != ALL && fmethod != rmethod {
+        return 0
+    }
+    prefix = fpat
+    if string.ends_with(fpat, "/.*") == 1 {
+        prefix = string.substring(fpat, 0, string.length(fpat) - 3)
+    } else if string.ends_with(fpat, ".*") == 1 {
+        prefix = string.substring(fpat, 0, string.length(fpat) - 2)
+    }
+    if string.length(prefix) == 0 {
+        return 1
+    }
+    if string.starts_with(rpath, prefix) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
@@ -841,9 +906,10 @@ tw_start(srv: ptr) {
     host, _ = map.get(srv, "host")
     raw = http.server_create(port)
     map_put(srv, "raw_server", raw)
-    result = http.server_bind(raw, host, port)
-    if result != 0 {
-        println("ERROR: Failed to bind to ${host}:${port}")
+    // server_bind returns "" on success, an error message otherwise.
+    bind_err = http.server_bind(raw, host, port)
+    if bind_err != "" {
+        println("ERROR: Failed to bind to ${host}:${port}: ${bind_err}")
         return -1
     }
 
@@ -851,15 +917,32 @@ tw_start(srv: ptr) {
     // Uses http.server_add_route for all methods (GET, POST, PUT, DELETE,
     // PATCH, HEAD, OPTIONS, and the extended WebDAV/REST methods)
     routes, _ = map.get(srv, "routes")
+    all_filters, _ = map.get(srv, "filters")
     n = list.size(routes)
     for (i = 0; i < n; i++) {
         entry, _ = list.get(routes, i)
         method, _ = map.get(entry, "method")
         patt, _ = map.get(entry, "path")
-        boxed_handler, _ = map.get(entry, "handler")
 
+        // Pre-match this route's filter chain (method + path prefix) so the
+        // dispatch trampoline can run them without per-request pattern work.
+        route_filters = list.new()
+        fcount = list.size(all_filters)
+        for (fi = 0; fi < fcount; fi++) {
+            fe, _ = list.get(all_filters, fi)
+            fm, _ = map.get(fe, "method")
+            fp, _ = map.get(fe, "path")
+            fh, _ = map.get(fe, "handler")
+            if filter_applies(fm, fp, method, patt) == 1 {
+                list.add(route_filters, fh)
+            }
+        }
+        map_put(entry, "route_filters", route_filters)
+
+        // Register the trampoline as the C handler; the route entry is the
+        // user_data it receives back as `ud`.
         method_str = method_to_string(method)
-        http.server_add_route(raw, method_str, patt, unbox_closure(boxed_handler), 0)
+        http.server_add_route(raw, method_str, patt, dsl_dispatch, entry)
     }
 
     // Register static file serving routes
@@ -881,8 +964,8 @@ tw_start(srv: ptr) {
     ws_port, _ = map.get(srv, "ws_port")
     ws_handlers, _ = map.get(srv, "ws_handlers")
     if ws_port > 0 && list.size(ws_handlers) > 0 {
-        ws_tcp = tcp.listen(ws_port)
-        if ws_tcp != 0 {
+        ws_tcp, ws_err = tcp.listen(ws_port)
+        if ws_err == "" {
             map_put(srv, "ws_tcp_server", ws_tcp)
             println("WebSocket server listening on port ${ws_port}")
         } else {
@@ -894,8 +977,8 @@ tw_start(srv: ptr) {
     sse_port, _ = map.get(srv, "sse_port")
     sse_handlers, _ = map.get(srv, "sse_handlers")
     if sse_port > 0 && list.size(sse_handlers) > 0 {
-        sse_tcp = tcp.listen(sse_port)
-        if sse_tcp != 0 {
+        sse_tcp, sse_err = tcp.listen(sse_port)
+        if sse_err == "" {
             map_put(srv, "sse_tcp_server", sse_tcp)
             println("SSE server listening on port ${sse_port}")
         } else {

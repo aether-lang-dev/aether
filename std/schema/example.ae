@@ -1,0 +1,140 @@
+// std.schema showcase — a declarative validator that reads like a spec.
+//
+// The point of std.schema is "parse, don't validate": one declaration both
+// checks the input AND hands you back typed, coerced values ready to use — or a
+// list of structured errors ready to render. This example shows the whole loop:
+// declare a schema, accept a good record and USE its values, reject a bad one
+// and PRINT its errors the way an API would.
+//
+// Run:  ae run std/schema/example.ae
+
+import std.schema
+import std.map(map_new, map_put_raw, map_free)
+import std.map
+import std.string(string_starts_with)
+
+// ---------------------------------------------------------------------------
+// Without std.schema, validating one signup record by hand looks like this —
+// per field: presence check, coercion, range/format check, error assembly.
+// It's ~40 lines of imperative plumbing for the schema below, and every new
+// field or rule grows it linearly:
+//
+//   if map_has(input, "age") == 0 { push "age required"; }
+//   else {
+//       age_raw = map.get(input, "age")
+//       ok = string_try_int(age_raw)
+//       if ok == 0        { push "age not an integer" }
+//       else {
+//           age = string_get_int(age_raw)
+//           if age < 18   { push "age must be >= 18" }
+//           if age > 120  { push "age must be <= 120" }
+//       }
+//   }
+//   ... repeat for name, email, plan, coupon ...
+//
+// With std.schema it is the declaration below — and you get typed values back.
+// ---------------------------------------------------------------------------
+
+fn build_signup_schema() -> ptr {
+    // Note: build the schema into a local and return that — a trailing-block
+    // builder written directly in `return` position doesn't currently keep its
+    // block's field() side-effects (compiler gap; assign-then-return is the fix).
+    s = schema.record() {
+        schema.field("age", schema.INT) {
+            schema.min(18)
+            schema.max(120)
+        }
+        schema.field("name", schema.STR) {
+            schema.present()
+            schema.len(1, 60)
+        }
+        schema.field("email", schema.STR) {
+            schema.email()
+        }
+        schema.field("plan", schema.STR) {
+            schema.one_of("free,pro,enterprise")
+            schema.optional() // defaults are the caller's business; absence is OK
+        }
+        schema.field("coupon", schema.STR) {
+            // custom rule via a closure — anything the built-ins don't cover
+            schema.refine(| v: string | {
+                    if string_starts_with(v, "SAVE") == 1 {
+                        return 1
+                    }
+                    return 0
+                })
+            schema.optional()
+        }
+    }
+    return s
+}
+
+fn signup(s: ptr, input: ptr) {
+    values, errors = schema.parse(s, input)
+
+    if schema.ok(errors) == 1 {
+        // Success: `values` holds the coerced, validated fields. Read them —
+        // this is the "parse, don't validate" payoff: no re-checking downstream.
+        name, _ = map.get(values, "name")
+        age, _ = map.get(values, "age")
+        print("  accepted: ${name} (age ${age})\n")
+    } else {
+        // Failure: structured errors — field + machine code + human message,
+        // exactly the shape a JSON:API 422 body wants.
+        print("  rejected (${schema.error_count(errors)} error(s)):\n")
+        i = 0
+        while i < schema.error_count(errors) {
+            f = schema.error_field(errors, i)
+            c = schema.error_code(errors, i)
+            m = schema.error_message(errors, i)
+            print("      - [${c}] ${f}: ${m}\n")
+            i = i + 1
+        }
+    }
+
+    schema.values_free(values)
+    schema.errors_free(errors)
+}
+
+fn put(m: ptr, k: string, v: string) {
+    map_put_raw(m, k, v)
+}
+
+main() {
+    print("std.schema — declarative validation (Zod / Pydantic / io-ts inspired)\n\n")
+
+    s = build_signup_schema()
+
+    // 1. A clean signup — coerces "27" to an int, plan omitted (optional).
+    print("valid signup:\n")
+    good = map_new()
+    put(good, "age", "27")
+    put(good, "name", "Ada Lovelace")
+    put(good, "email", "ada@analytical.engine")
+    put(good, "coupon", "SAVE20")
+    signup(s, good)
+    map_free(good)
+
+    // 2. A messy signup — several things wrong at once; each reported with a
+    //    stable code you could branch on, not a single opaque failure.
+    print("\ninvalid signup:\n")
+    bad = map_new()
+    put(bad, "age", "15") // too_small
+    put(bad, "name", "") // invalid_value (present)
+    put(bad, "email", "not-an-address") // invalid_format
+    put(bad, "plan", "platinum") // invalid_value (one_of)
+    put(bad, "coupon", "NOPE") // custom (refine)
+    signup(s, bad)
+    map_free(bad)
+
+    // 3. Missing required field — reported as `missing`, distinct from a bad value.
+    print("\nincomplete signup:\n")
+    partial = map_new()
+    put(partial, "age", "30")
+    // no name, no email
+    signup(s, partial)
+    map_free(partial)
+
+    schema.schema_free(s)
+    print("\ndone.\n")
+}

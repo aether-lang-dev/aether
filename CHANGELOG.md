@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.schema`** — declarative, typed data validation and coercion. A
+  `record { field(name, TYPE) { rules } }` builder describes typed fields with
+  composable validators (`min`/`max`/`len`/`present`/`optional`/`one_of`/
+  `email`/`refine`); `parse(schema, input) -> (values, errors)` turns an untyped
+  `string→string` map into coerced typed values or a list of `{field, code,
+  message}` errors with Zod-style issue codes. HTTP-agnostic (depends only on
+  `std.map`/`list`/`string`), so the same declaration validates a request body,
+  a config file, CLI args, or any untyped input. Includes a README, a runnable
+  showcase (`std/schema/example.ae`), and a leak-clean regression test.
+  Inspired by Zod, Pydantic, io-ts, and Ash (all MIT; credited in-module).
+- **`contrib/tinyweb/schema_api`** — declarative JSON APIs backed by
+  `std.schema`. `json_api(prefix, schema) { create/index/show/update/destroy }`
+  mounts a tinyweb path plus a validating filter: write requests are JSON-parsed
+  and validated before the handler runs; invalid bodies get a JSON:API `422`
+  with per-field errors, malformed JSON a `400`. The Ash-style "declarative
+  resource" idea resting on tinyweb (router) + std.schema (validator).
+
+### Fixed
+
+- **`contrib/tinyweb` DSL serving path** was non-functional and is now runnable.
+  Three pre-existing breakages in `tw_start`: `tcp.listen` and `server_bind` had
+  drifted to tuple/string returns the caller still compared against `int`
+  (the latter a segfault via `aether_string_data`); and the builder stored
+  handlers as boxed closures with no trampoline to invoke them (registering an
+  unboxed `_AeClosure` value as a C `@c_callback` → segfault), with filters
+  never dispatched at all. Added a `@c_callback dsl_dispatch` trampoline that
+  runs the matched filter chain (honoring `STOP`) then the endpoint handler, so
+  every builder-DSL route and its filters now work.
+
 ## [0.496.0]
 
 ### Fixed

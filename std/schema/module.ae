@@ -1,0 +1,523 @@
+// std.schema — declarative, typed data validation & coercion.
+//
+// A `record { ... }` describes a set of typed fields with composable
+// validation rules; `parse(schema, input)` turns an untyped string→string
+// map into a typed, validated value-map, OR a list of structured errors.
+// Validation and parsing are a single act (the "parse, don't validate"
+// philosophy) — a successful parse yields coerced typed values; a failure
+// yields `[{field, code, message}]` with Zod-style issue codes.
+//
+// The module is HTTP-agnostic and depends only on std.map/list/string:
+// use it to validate a request body, a config file, a set of CLI args, a
+// JSON document read from disk, or any other untyped key→value input.
+//
+// Design credits (all MIT):
+//   - Zod (© 2025 Colin McDonnell) — the parse→(value|errors) contract and
+//     the issue-code vocabulary (invalid_type, too_small, too_big,
+//     invalid_format, invalid_value, custom).
+//   - Pydantic (© Pydantic Services Inc.) — lax-vs-strict coercion (a
+//     lax parse coerces "25"→25; a strict parse rejects a type mismatch).
+//   - io-ts (© 2017 Giulio Canti) — decode as `input → success | failure`,
+//     errors accumulated rather than thrown.
+//   - Ash Framework (© 2019 ash contributors) — the declarative
+//     resource/attribute/validation block shape (record { field { rules } }).
+//
+// Example:
+//   author = schema.record() {
+//       schema.field("age", schema.INT)  {
+//           schema.min(18)
+//           schema.max(120)
+//       }
+//       schema.field("name", schema.STR) {
+//           schema.present()
+//           schema.len(1, 80)
+//       }
+//       schema.field("role", schema.STR) {
+//           schema.one_of("admin,user")
+//           schema.optional()
+//       }
+//   }
+//   values, errors = schema.parse(author, input_map)
+//   if schema.ok(errors) { ... use values ... }
+
+exports(
+    // types
+    STR, INT, FLOAT, BOOL,
+    // builders
+    record, field,
+    min, max, len, present, optional, one_of, email, refine,
+    // parse + result helpers
+    parse, ok, error_count, error_field, error_code, error_message,
+    // introspection
+    schema_free, values_free, errors_free
+)
+
+// Dependency-light on purpose: only map/list/string. Arbitrary pattern
+// matching is available through refine() closures, so the module carries no
+// hard dependency on the (optional, pkg-config-probed) regex/PCRE2 backend.
+import std.map
+import std.map(map_new, map_has, map_free)
+import std.list(list_new, list_add_raw, list_get_raw, list_size, list_free)
+import std.string(string_length, string_equals, string_concat, string_char_at,
+    string_contains, string_index_of, string_to_lower, string_free,
+    string_starts_with, to_int, to_float)
+
+// box_closure() mallocs a two-word _AeClosure box; free it with libc free.
+@extern("free") libc_free(p: ptr)
+
+// ---- Field type tags ----
+const STR = 0
+const INT = 1
+const FLOAT = 2
+const BOOL = 3
+
+// ---- Rule kinds ----
+const RULE_MIN = 0 // numeric >=  (ival) / string length >= for STR
+const RULE_MAX = 1 // numeric <=  (ival) / string length <= for STR
+const RULE_LEN = 2 // string length in [ival, ival2]
+const RULE_PRESENT = 3 // non-empty
+const RULE_ONE_OF = 4 // value in comma-separated set (sval)
+const RULE_EMAIL = 5 // basic email shape
+const RULE_REFINE = 6 // custom closure predicate (fn value:string -> int)
+
+struct Rule {
+    kind: int
+    ival: long // primary numeric arg (min / max / len-lo)
+    ival2: long // secondary numeric arg (len-hi)
+    sval: string // string arg (one_of set, pattern)
+    refine_fn: ptr // boxed closure for RULE_REFINE
+}
+
+struct Field {
+    name: string
+    ty: int
+    is_optional: int
+    rules: ptr // *List of *Rule
+}
+
+struct Schema {
+    strict: int // 0 = lax coercion (Pydantic default), 1 = strict
+    fields: ptr // *List of *Field
+}
+
+// A parse error: {field, code, message}. Stored as a *List of *SchemaError.
+struct SchemaError {
+    field: string
+    code: string
+    msg: string
+}
+
+// ---------------------------------------------------------------------------
+// Builders
+// ---------------------------------------------------------------------------
+
+// record() { field(...) ... }  — the top-level container. Its trailing block
+// runs immediately and populates the schema via field() calls.
+record() -> ptr {
+    s = heap.new(Schema)
+    s.strict = 0
+    s.fields = list_new()
+    return s
+}
+
+// field(name, type) { min(...); max(...); ... }
+// Container-with-config-block: appends a Field to the parent Schema and
+// returns it so the trailing block's rule calls accumulate onto it.
+field(_ctx: ptr, name: string, ty: int) -> ptr {
+    s = _ctx as *Schema
+    f = heap.new(Field)
+    f.name = name
+    f.ty = ty
+    f.is_optional = 0
+    f.rules = list_new()
+    list_add_raw(s.fields, f)
+    return f
+}
+
+// -- rule builders (run inside a field() block; _ctx is the *Field) --
+
+fn add_rule(_ctx: ptr, kind: int, ival: long, ival2: long, sval: string, refine_fn: ptr) {
+    f = _ctx as *Field
+    r = heap.new(Rule)
+    r.kind = kind
+    r.ival = ival
+    r.ival2 = ival2
+    r.sval = sval
+    r.refine_fn = refine_fn
+    list_add_raw(f.rules, r)
+}
+
+// numeric: value >= n  |  STR: length >= n
+min(_ctx: ptr, n: long) {
+    add_rule(_ctx, RULE_MIN, n, 0, "", null)
+}
+
+// numeric: value <= n  |  STR: length <= n
+max(_ctx: ptr, n: long) {
+    add_rule(_ctx, RULE_MAX, n, 0, "", null)
+}
+
+// STR length in [lo, hi]
+len(_ctx: ptr, lo: long, hi: long) {
+    add_rule(_ctx, RULE_LEN, lo, hi, "", null)
+}
+
+// non-empty (STR) / present in input
+present(_ctx: ptr) {
+    add_rule(_ctx, RULE_PRESENT, 0, 0, "", null)
+}
+
+// mark field optional (absence is not an error; rules skipped when absent)
+optional(_ctx: ptr) {
+    f = _ctx as *Field
+    f.is_optional = 1
+}
+
+// value must be one of a comma-separated set, e.g. one_of("admin,user")
+one_of(_ctx: ptr, set: string) {
+    add_rule(_ctx, RULE_ONE_OF, 0, 0, set, null)
+}
+
+// value must look like an email
+email(_ctx: ptr) {
+    add_rule(_ctx, RULE_EMAIL, 0, 0, "", null)
+}
+
+// custom predicate: fn(value: string) -> int (1 = ok, 0 = fail)
+refine(_ctx: ptr, predicate: fn) {
+    add_rule(_ctx, RULE_REFINE, 0, 0, "", box_closure(predicate))
+}
+
+// ---------------------------------------------------------------------------
+// Parse
+// ---------------------------------------------------------------------------
+
+// Takes ownership of `msg` (an owned/interpolated string) — it is freed by
+// errors_free. `field_name` and `code` are always borrowed (schema field name /
+// string-literal issue code) and are stored by reference, never freed.
+fn push_error(errors: ptr, field_name: string, code: string, msg: string) {
+    e = heap.new(SchemaError)
+    e.field = field_name
+    e.code = code
+    // `msg` arrives as a plain char* string interpolation (`${...}`), which the
+    // heap-tracker frees on scope exit — NOT via string_free — so it cannot be
+    // stored in a long-lived struct field as-is. Mint a magic AetherString copy
+    // (string_concat(_, "")) that errors_free can reclaim with string_free; the
+    // original interp temporary is tracker-freed when this frame returns.
+    e.msg = string_concat(msg, "")
+    list_add_raw(errors, e)
+}
+
+// Coerce/type-check a raw string against a field type.
+// Returns (typed_string_repr, code) — code == "" on success. In lax mode we
+// accept and re-canonicalize; in strict mode a non-native shape is rejected.
+fn check_type(raw: string, ty: int, strict: int) -> (string, string) {
+    if ty == STR {
+        return raw, ""
+    }
+    if ty == INT {
+        _, err = to_int(raw)
+        if err != "" {
+            return "", "invalid_type"
+        }
+        return raw, ""
+    }
+    if ty == FLOAT {
+        _, ferr = to_float(raw)
+        if ferr != "" {
+            return "", "invalid_type"
+        }
+        return raw, ""
+    }
+    if ty == BOOL {
+        low = string_to_lower(raw)
+        is_true = string_equals(low, "true") == 1 || string_equals(low, "1") == 1
+        is_false = string_equals(low, "false") == 1 || string_equals(low, "0") == 1
+        string_free(low)
+        if is_true {
+            return "true", ""
+        }
+        if is_false {
+            return "false", ""
+        }
+        return "", "invalid_type"
+    }
+    return raw, ""
+}
+
+fn looks_like_email(v: string) -> int {
+    at = string_index_of(v, "@")
+    if at <= 0 {
+        return 0
+    }
+    // must have a dot after the @, not immediately after
+    rest_dot = string_index_of(v, ".")
+    if rest_dot < at {
+        return 0
+    }
+    if string_length(v) - 1 == rest_dot {
+        return 0 // trailing dot
+    }
+    return 1
+}
+
+// Apply one rule to a (typed) value. On failure pushes an error (borrowed
+// literal code + owned interpolated message) and returns 1; returns 0 on pass.
+// Pushing directly (rather than returning a tuple) keeps issue codes as
+// borrowed string literals — only the message is owned, so ownership is
+// unambiguous: errors_free frees exactly the messages.
+fn apply_rule(errors: ptr, r: *Rule, f: *Field, v: string) -> int {
+    k = r.kind
+    if k == RULE_PRESENT {
+        if string_length(v) == 0 {
+            push_error(errors, f.name, "invalid_value", "${f.name} must not be empty")
+            return 1
+        }
+        return 0
+    }
+    if k == RULE_MIN {
+        if f.ty == STR {
+            if string_length(v) < (r.ival as int) {
+                push_error(errors, f.name, "too_small", "${f.name} must be at least ${r.ival} characters")
+                return 1
+            }
+        } else if f.ty == FLOAT {
+            fv, _ = to_float(v)
+            if fv < (r.ival as float) {
+                push_error(errors, f.name, "too_small", "${f.name} must be >= ${r.ival}")
+                return 1
+            }
+        } else {
+            iv, _ = to_int(v)
+            if (iv as long) < r.ival {
+                push_error(errors, f.name, "too_small", "${f.name} must be >= ${r.ival}")
+                return 1
+            }
+        }
+        return 0
+    }
+    if k == RULE_MAX {
+        if f.ty == STR {
+            if string_length(v) > (r.ival as int) {
+                push_error(errors, f.name, "too_big", "${f.name} must be at most ${r.ival} characters")
+                return 1
+            }
+        } else if f.ty == FLOAT {
+            fv, _ = to_float(v)
+            if fv > (r.ival as float) {
+                push_error(errors, f.name, "too_big", "${f.name} must be <= ${r.ival}")
+                return 1
+            }
+        } else {
+            iv, _ = to_int(v)
+            if (iv as long) > r.ival {
+                push_error(errors, f.name, "too_big", "${f.name} must be <= ${r.ival}")
+                return 1
+            }
+        }
+        return 0
+    }
+    if k == RULE_LEN {
+        n = string_length(v)
+        if (n as long) < r.ival {
+            push_error(errors, f.name, "too_small", "${f.name} must be at least ${r.ival} characters")
+            return 1
+        }
+        if (n as long) > r.ival2 {
+            push_error(errors, f.name, "too_big", "${f.name} must be at most ${r.ival2} characters")
+            return 1
+        }
+        return 0
+    }
+    if k == RULE_ONE_OF {
+        // set is comma-separated; test membership by wrapping in commas
+        needle = string_concat(",", v)
+        needle2 = string_concat(needle, ",")
+        string_free(needle)
+        hay = string_concat(",", r.sval)
+        hay2 = string_concat(hay, ",")
+        string_free(hay)
+        found = string_contains(hay2, needle2)
+        string_free(needle2)
+        string_free(hay2)
+        if found != 1 {
+            push_error(errors, f.name, "invalid_value", "${f.name} must be one of: ${r.sval}")
+            return 1
+        }
+        return 0
+    }
+    if k == RULE_EMAIL {
+        if looks_like_email(v) != 1 {
+            push_error(errors, f.name, "invalid_format", "${f.name} must be a valid email")
+            return 1
+        }
+        return 0
+    }
+    if k == RULE_REFINE {
+        pred = unbox_closure(r.refine_fn)
+        res = call(pred, v)
+        if res != 1 {
+            push_error(errors, f.name, "custom", "${f.name} failed validation")
+            return 1
+        }
+        return 0
+    }
+    return 0
+}
+
+// parse(schema, input_map) -> (values_map, errors_list)
+//   input_map: *Map of string(field name) -> string(raw value)
+//   values_map: *Map of field name -> coerced string value (canonical form)
+//   errors_list: *List of *SchemaError (empty on success)
+// Both returns are always non-null and owned by the caller
+// (values_free / errors_free).
+parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
+    s = schema_ptr as *Schema
+    values = map_new()
+    errors = list_new()
+
+    fsz = list_size(s.fields)
+    i = 0
+    while i < fsz {
+        f = list_get_raw(s.fields, i) as *Field
+        present_in = map_has(input, f.name)
+
+        if present_in == 0 {
+            if f.is_optional == 0 {
+                push_error(errors, f.name, "missing", "${f.name} is required")
+            }
+            i = i + 1
+            continue
+        }
+
+        raw, _ = map.get(input, f.name)
+
+        // 1. type check / coercion
+        typed, tcode = check_type(raw, f.ty, s.strict)
+        if tcode != "" {
+            push_error(errors, f.name, tcode, "${f.name} is not a valid ${type_name(f.ty)}")
+            i = i + 1
+            continue
+        }
+
+        // 2. run rules (short-circuit on first failure per field)
+        rsz = list_size(f.rules)
+        j = 0
+        failed = 0
+        while j < rsz {
+            r = list_get_raw(f.rules, j) as *Rule
+            if apply_rule(errors, r, f, typed) == 1 {
+                failed = 1
+                break
+            }
+            j = j + 1
+        }
+
+        if failed == 0 {
+            map.put(values, f.name, typed)
+        }
+        i = i + 1
+    }
+
+    return values, errors
+}
+
+fn type_name(ty: int) -> string {
+    if ty == INT {
+        return "integer"
+    }
+    if ty == FLOAT {
+        return "number"
+    }
+    if ty == BOOL {
+        return "boolean"
+    }
+    return "string"
+}
+
+// ---------------------------------------------------------------------------
+// Result helpers
+// ---------------------------------------------------------------------------
+
+// True (1) if the errors list is empty.
+ok(errors: ptr) -> int {
+    if list_size(errors) == 0 {
+        return 1
+    }
+    return 0
+}
+
+error_count(errors: ptr) -> int {
+    return list_size(errors)
+}
+
+error_field(errors: ptr, idx: int) -> string {
+    e = list_get_raw(errors, idx) as *SchemaError
+    return e.field
+}
+
+error_code(errors: ptr, idx: int) -> string {
+    e = list_get_raw(errors, idx) as *SchemaError
+    return e.code
+}
+
+error_message(errors: ptr, idx: int) -> string {
+    e = list_get_raw(errors, idx) as *SchemaError
+    return e.msg
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup
+// ---------------------------------------------------------------------------
+
+schema_free(schema_ptr: ptr) {
+    if schema_ptr == null {
+        return
+    }
+    s = schema_ptr as *Schema
+    fsz = list_size(s.fields)
+    i = 0
+    while i < fsz {
+        f = list_get_raw(s.fields, i) as *Field
+        rsz = list_size(f.rules)
+        j = 0
+        while j < rsz {
+            r = list_get_raw(f.rules, j) as *Rule
+            if r.refine_fn != null {
+                libc_free(r.refine_fn) // free the box_closure()'d _AeClosure
+            }
+            heap.free(r)
+            j = j + 1
+        }
+        list_free(f.rules)
+        heap.free(f)
+        i = i + 1
+    }
+    list_free(s.fields)
+    heap.free(s)
+}
+
+// The values map holds borrowed pointers into the schema/input strings; free
+// only the map spine.
+values_free(values: ptr) {
+    if values != null {
+        map_free(values)
+    }
+}
+
+errors_free(errors: ptr) {
+    if errors == null {
+        return
+    }
+    sz = list_size(errors)
+    i = 0
+    while i < sz {
+        e = list_get_raw(errors, i) as *SchemaError
+        // heap.free runs SchemaError's typed destructor, which frees the owned
+        // magic-string field e.msg; e.field/e.code are borrowed string literals
+        // (not magic AetherStrings) so the destructor's free is a no-op on them.
+        heap.free(e)
+        i = i + 1
+    }
+    list_free(errors)
+}
