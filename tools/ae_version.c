@@ -55,7 +55,14 @@
 #  define AE_ARCHIVE_EXT ".tar.gz"
 #endif
 
-#define AE_GITHUB_REPO "nicolasmd87/aether"
+/* The canonical repository path. It must be the CURRENT one, not an old name
+ * that still redirects: `ae upgrade` / `ae install` download release binaries
+ * from here and install them, and curl/wget both follow redirects silently. A
+ * stale owner/name only resolves while GitHub keeps the rename mapping and
+ * nobody else claims the freed path; the moment someone does, the redirect
+ * stops pointing here and the self-updater fetches its binaries from whatever
+ * is at the old address. */
+#define AE_GITHUB_REPO "aether-lang-dev/aether"
 
 // Download url → dest file. Uses curl/wget on POSIX, PowerShell on Windows.
 // Creates parent directories of dest if they don't exist.

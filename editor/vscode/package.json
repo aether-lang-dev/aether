@@ -9,12 +9,12 @@
   "main": "./out/extension.js",
   "repository": {
     "type": "git",
-    "url": "https://github.com/nicolasmd87/aether"
+    "url": "https://github.com/aether-lang-dev/aether"
   },
   "bugs": {
-    "url": "https://github.com/nicolasmd87/aether/issues"
+    "url": "https://github.com/aether-lang-dev/aether/issues"
   },
-  "homepage": "https://github.com/nicolasmd87/aether#readme",
+  "homepage": "https://github.com/aether-lang-dev/aether#readme",
   "keywords": [
     "aether",
     "actor",

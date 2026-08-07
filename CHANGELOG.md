@@ -9,7 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.496.0]
+
+### Fixed
+
+- **The HTTP client and server public headers can be included together**
+  (#1433). Both published a type named `HttpRequest`, and they were different
+  structs: `std/net/aether_http.h` an opaque handle for an *outgoing* request,
+  `std/net/aether_http_server.h` a full struct for an *incoming* one. Any
+  translation unit including both failed to compile, so a C consumer could not
+  serve HTTP and make HTTP calls. The proxy had been working around it by
+  hand-declaring the client prototypes under different type names, which is
+  worse than the collision it dodged: duplicated signatures the compiler can no
+  longer check against the real definitions, the same hazard `@c_import`
+  (#1239) exists to remove for user code. The client type is now
+  `HttpClientRequest`, the name the workaround had already chosen; the server
+  keeps `HttpRequest` (its tinyweb-compatible surface, and the far more widely
+  used of the two, mirroring how its response type is already
+  `HttpServerResponse`). Both workarounds are deleted in favour of including the
+  header. The Aether-level API is untouched: `std.http.client` passes these as
+  `ptr`.
+
+### Removed
+
+- **`std/aether_std.h`**, an umbrella header that shipped in every install and
+  was included by nothing. It listed 7 of the 44 std headers, appeared in no
+  documentation, and had not been touched since it was added. Anyone who found
+  it got a misleading tenth of the standard library. It could not simply be
+  completed, either: including all std headers in one translation unit is a
+  compile error (#1433 is why), which is how that bug was found. The public
+  entry points remain the per-module headers, all of which are self-contained,
+  and `include/libaether.h` for embedders.
+
+### Added
+
+- **A guard that every public header compiles standalone**
+  (`tests/integration/public_headers`). Nothing checked this: the MSVC job
+  probes a handful of runtime headers under `cl.exe` and stops there. All 45
+  std and embedder headers pass today, and the check now also pins the
+  client/server pair from #1433 in both include orders, since an
+  order-dependent fix would not be one.
+
+## [0.497.0]
+
+### Fixed
+
+- **The self-updater pointed at a repository path the project no longer owns.**
+  `AE_GITHUB_REPO` was still the pre-rename `nicolasmd87/aether`, which the
+  GitHub API answers with a 301. It kept working only because `curl -fsSL` and
+  `wget` follow redirects silently, and `ae upgrade` / `ae install` /
+  `ae version list` download release binaries from that path and install them.
+  A rename redirect lasts exactly as long as nobody claims the freed name: the
+  moment someone does, the redirect stops resolving here and the self-updater
+  installs whatever is at the old address. Repointed to
+  `aether-lang-dev/aether`, which resolves directly with no redirect, along
+  with the twelve other stale references (the download hint in `ae`, the
+  diagnostics wiki URL, `apkg`, the VS Code extension manifest and README, the
+  benchmark UI). The historical changelog archive is deliberately left alone:
+  those entries record the links as they were, and rewriting them would be
+  fiction rather than a fix. `tests/integration/canonical_repo_url` fails the
+  build if the stale path returns.
+
+## [0.497.0]
 
 ### Fixed
 

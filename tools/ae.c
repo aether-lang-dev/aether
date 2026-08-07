@@ -1038,7 +1038,7 @@ static void discover_toolchain(void) {
     fprintf(stderr, "Or set AETHER_HOME to the extraction folder:\n");
     fprintf(stderr, "  set AETHER_HOME=C:\\aether\n");
     fprintf(stderr, "\n");
-    fprintf(stderr, "Download: https://github.com/nicolasmd87/aether/releases\n");
+    fprintf(stderr, "Download: https://github.com/aether-lang-dev/aether/releases\n");
 #else
     fprintf(stderr, "Run 'make compiler' to build it, or set $AETHER_HOME.\n");
 #endif
