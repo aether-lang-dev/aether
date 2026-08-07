@@ -1,0 +1,235 @@
+// tinyweb.schema_api — declarative JSON APIs backed by std.schema.
+//
+// Bridges std.schema (typed, composable validation) to tinyweb's router so a
+// resource is validated at the edge: define the shape once, mount it, and every
+// write request (POST/PUT/PATCH) is JSON-parsed and validated BEFORE your
+// handler runs. Invalid bodies never reach the handler — they get a JSON:API
+// 422 with per-field errors; malformed JSON gets a 400. It rests on tinyweb
+// (the router) + std.schema (the validator) rather than a bespoke
+// reimplementation of either.
+//
+// Inspiration & credit:
+//   - Ash Framework (MIT, © 2019 ash contributors — https://github.com/ash-project/ash)
+//     inspired the "declarative resource, validated at the edge, mounted as a
+//     JSON API" shape. We deliberately diverge from Ash's framework-owns-the-
+//     resource model: validation lives in std.schema and is HTTP-agnostic, so
+//     the same resource declaration is reusable off the web entirely.
+//   - JSON:API (https://jsonapi.org) for the error envelope shape.
+//
+// Usage:
+//   user = schema.record() {
+//       schema.field("age", schema.INT)  { schema.min(18) }
+//       schema.field("name", schema.STR) { schema.present() }
+//   }
+//   server = tinyweb.web_server_host("127.0.0.1", 8080) {
+//       tinyweb.schema_api.json_api("/users", user) {
+//           tinyweb.schema_api.create() |req, res, ctx| {
+//               // body already parsed + validated; handle the happy path only
+//               tinyweb.response_json(res, "{\"ok\":true}")
+//           }
+//       }
+//   }
+//   tinyweb.server_start(server)
+
+exports(
+    json_api, create, index, show, update, destroy
+)
+
+import std.schema
+import std.map(map_new, map_put_raw, map_free)
+import std.map
+import std.json
+import std.list(list_new, list_add_raw, list_get_raw, list_size)
+import std.string(string_length, string_concat, string_equals)
+
+// tinyweb's own DSL surface (this module is a sibling under contrib/tinyweb).
+import contrib.tinyweb(
+    end_point, filter, response_write_status, response_json, response_set_header,
+    request_get_body, request_get_path, path, GET, POST, PUT, PATCH, DELETE,
+    CONTINUE, STOP
+)
+
+// A resource group threads the schema + mount prefix down to the leaf builders.
+struct ApiGroup {
+    ctx: ptr // the underlying tinyweb path/context map
+    resource: ptr // *std.schema.Schema (opaque ptr here)
+    prefix: string
+}
+
+// json_api(prefix, schema) { create(...); show(...); ... }
+// Container builder: opens a tinyweb path() at `prefix`, attaches a validating
+// filter driven by `schema`, and returns an ApiGroup for the leaf builders.
+json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
+    // Open a nested path group in tinyweb for this resource.
+    grp_ctx = path(_ctx, prefix)
+
+    g = heap.new(ApiGroup)
+    g.ctx = grp_ctx
+    g.resource = resource
+    g.prefix = prefix
+
+    // Mount the validating filter for all write methods on this path subtree.
+    // The filter closure captures `resource`; on failure it writes the response
+    // and returns STOP so the endpoint handler never runs.
+    filter(grp_ctx, POST, ".*") | req: ptr, res: ptr, ctx: ptr | {
+        return validate_body(res, req, resource)
+    }
+    filter(grp_ctx, PUT, ".*") | req: ptr, res: ptr, ctx: ptr | {
+        return validate_body(res, req, resource)
+    }
+    filter(grp_ctx, PATCH, ".*") | req: ptr, res: ptr, ctx: ptr | {
+        return validate_body(res, req, resource)
+    }
+
+    return g
+}
+
+// Parse the request body as JSON, coerce it into a schema-input map, and run
+// std.schema. On malformed JSON -> 400; on validation failure -> 422 JSON:API
+// envelope; on success -> CONTINUE (endpoint handler runs).
+fn validate_body(res: ptr, req: ptr, resource: ptr) -> int {
+    body = request_get_body(req)
+    if string_length(body) == 0 {
+        // No body to validate (e.g. a DELETE routed here) — let it through.
+        return CONTINUE
+    }
+
+    root, jerr = json.parse(body)
+    if jerr != "" {
+        write_error(res, 400, "Invalid JSON", "request body is not valid JSON")
+        return STOP
+    }
+
+    // Build the untyped string->string input map std.schema expects.
+    input = json_object_to_input(root)
+
+    values, errors = schema.parse(resource, input)
+    passed = schema.ok(errors)
+
+    if passed != 1 {
+        write_validation_errors(res, errors)
+    }
+
+    schema.values_free(values)
+    schema.errors_free(errors)
+    map_free(input)
+    json.json_free(root)
+
+    if passed == 1 {
+        return CONTINUE
+    }
+    return STOP
+}
+
+// Flatten a JSON object's top-level scalar fields into a string->string map.
+// Strings pass through; numbers/bools are stringified to their canonical text
+// (std.schema does the typed coercion from there).
+fn json_object_to_input(obj: ptr) -> ptr {
+    m = map_new()
+    if json.json_type(obj) != 5 { // 5 == JSON_OBJECT
+        return m
+    }
+    n = json.object_size(obj)
+    i = 0
+    while i < n {
+        key = json.json_object_key_at(obj, i)
+        val = json.json_object_get_raw(obj, key)
+        if val != null {
+            t = json.json_type(val)
+            if t == 3 { // JSON_STRING
+                // json_get_string_raw borrows from the JSON tree; mint an owned
+                // copy so the whole `input` map has uniform (owned) ownership
+                // and map_free reclaims every value consistently.
+                raw = json.json_get_string_raw(val)
+                map.put(m, key, string_concat(raw, ""))
+            } else if t == 0 { // JSON_NULL -> omit (treated as absent)
+                i = i + 1
+                continue
+            } else {
+                sv, _ = json.stringify(val)
+                // stringify returns an owned string; map takes ownership.
+                map.put(m, key, sv)
+            }
+        }
+        i = i + 1
+    }
+    return m
+}
+
+// ---- JSON:API error rendering ----
+
+fn write_error(res: ptr, status: int, title: string, detail: string) {
+    err_node = json.obj()
+    errors_arr = json.arr()
+    d = json.obj()
+    _ = json.set(d, "status", json.str(int_to_str(status)))
+    _ = json.set(d, "title", json.str(title))
+    _ = json.set(d, "detail", json.str(detail))
+    _ = json.push(errors_arr, d)
+    _ = json.set(err_node, "errors", errors_arr)
+    out, _ = json.encode(err_node)
+    response_set_header(res, "Content-Type", "application/vnd.api+json")
+    response_write_status(res, out, status)
+    json.json_free(err_node)
+}
+
+fn write_validation_errors(res: ptr, errors: ptr) {
+    err_node = json.obj()
+    errors_arr = json.arr()
+    n = schema.error_count(errors)
+    i = 0
+    while i < n {
+        d = json.obj()
+        _ = json.set(d, "status", json.str("422"))
+        _ = json.set(d, "code", json.str(schema.error_code(errors, i)))
+        _ = json.set(d, "title", json.str("Validation Error"))
+        _ = json.set(d, "detail", json.str(schema.error_message(errors, i)))
+        // JSON:API source pointer for the offending field
+        src = json.obj()
+        _ = json.set(src, "pointer", json.str(string_concat("/data/attributes/", schema.error_field(errors, i))))
+        _ = json.set(d, "source", src)
+        _ = json.push(errors_arr, d)
+        i = i + 1
+    }
+    _ = json.set(err_node, "errors", errors_arr)
+    out, _ = json.encode(err_node)
+    response_set_header(res, "Content-Type", "application/vnd.api+json")
+    response_write_status(res, out, 422)
+    json.json_free(err_node)
+}
+
+fn int_to_str(n: int) -> string {
+    return "${n}"
+}
+
+// ---- Leaf route builders (run inside a json_api() block; _ctx is *ApiGroup) ----
+
+// create -> POST {prefix}/
+create(_ctx: ptr, handler: fn) {
+    g = _ctx as *ApiGroup
+    end_point(g.ctx, POST, "/", handler)
+}
+
+// index -> GET {prefix}/  (list; not validated — no body)
+index(_ctx: ptr, handler: fn) {
+    g = _ctx as *ApiGroup
+    end_point(g.ctx, GET, "/", handler)
+}
+
+// show -> GET {prefix}/(\w+)
+show(_ctx: ptr, handler: fn) {
+    g = _ctx as *ApiGroup
+    end_point(g.ctx, GET, "/(\\w+)", handler)
+}
+
+// update -> PUT {prefix}/(\w+)  (validated)
+update(_ctx: ptr, handler: fn) {
+    g = _ctx as *ApiGroup
+    end_point(g.ctx, PUT, "/(\\w+)", handler)
+}
+
+// destroy -> DELETE {prefix}/(\w+)
+destroy(_ctx: ptr, handler: fn) {
+    g = _ctx as *ApiGroup
+    end_point(g.ctx, DELETE, "/(\\w+)", handler)
+}
