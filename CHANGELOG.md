@@ -50,7 +50,7 @@ version number before tagging the release.
   client/server pair from #1433 in both include orders, since an
   order-dependent fix would not be one.
 
-## [current]
+## [0.497.0]
 
 ### Fixed
 
@@ -70,7 +70,7 @@ version number before tagging the release.
   fiction rather than a fix. `tests/integration/canonical_repo_url` fails the
   build if the stale path returns.
 
-## [current]
+## [0.497.0]
 
 ### Fixed
 
