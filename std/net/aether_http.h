@@ -142,9 +142,17 @@ const char* http_response_headers_str(HttpResponse* response);
 // `http_request_body`, etc. — those stay flat for tinyweb-compat).
 // ---------------------------------------------------------------------------
 
-typedef struct HttpRequest HttpRequest;  /* opaque */
+/* Named HttpClientRequest, not HttpRequest: the server header publishes its
+ * own incoming-request type under the latter name, and the two are different
+ * structs, so a translation unit could not include both public headers (#1433).
+ * The proxy already worked around it by hand-declaring these prototypes with
+ * this very name, which duplicated signatures the compiler could then no longer
+ * cross-check; that workaround is deleted now that the header is includable.
+ * The server's response type is already HttpServerResponse for the same
+ * reason, so the two surfaces only ever collided here. */
+typedef struct HttpClientRequest HttpClientRequest;  /* opaque */
 
-HttpRequest* http_request_raw(const char* method, const char* url);
+HttpClientRequest* http_request_raw(const char* method, const char* url);
 
 // Returns 0 on success, non-zero on failure (NULL request, OOM,
 // invalid header). Header names are stored verbatim and emitted as
@@ -152,19 +160,19 @@ HttpRequest* http_request_raw(const char* method, const char* url);
 // (Host, Content-Length) are overridden by an explicit set_header
 // with the same name. Multiple values for one name produce multiple
 // `Name: value` lines (RFC 7230 §3.2.2 conformant).
-int http_request_set_header_raw(HttpRequest* req, const char* name, const char* value);
+int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value);
 
 // Set the request body. `len` is explicit so binary payloads with
 // embedded NULs survive. content_type may be NULL (defaults to
 // application/x-www-form-urlencoded for backward compat with v1).
 // Replaces any prior body.
-int http_request_set_body_raw(HttpRequest* req, const char* body, int len, const char* content_type);
+int http_request_set_body_raw(HttpClientRequest* req, const char* body, int len, const char* content_type);
 
 // Per-request timeout in whole seconds (v1 surface). 0 means
 // "no timeout — block forever". Negative values are an error.
 // Internally multiplied to nanoseconds; prefer
 // `http_request_set_timeout_ns_raw` for sub-second precision.
-int http_request_set_timeout_raw(HttpRequest* req, int seconds);
+int http_request_set_timeout_raw(HttpClientRequest* req, int seconds);
 
 // Per-request timeout as nanoseconds. 0 means "no timeout — block
 // forever". Sub-second precision is preserved through to the socket
@@ -173,7 +181,7 @@ int http_request_set_timeout_raw(HttpRequest* req, int seconds);
 // POSIX or a DWORD millisecond count on Winsock. POSIX retains full
 // μs; Winsock rounds up to the next whole millisecond so that a
 // sub-ms value doesn't degrade to "infinite" via DWORD=0.
-int http_request_set_timeout_ns_raw(HttpRequest* req, int64_t timeout_ns);
+int http_request_set_timeout_ns_raw(HttpClientRequest* req, int64_t timeout_ns);
 
 // Configure automatic redirect-following on this request. `max_hops` of
 // 0 (the default) keeps the v1/v2 behaviour: redirects are returned as
@@ -190,19 +198,19 @@ int http_request_set_timeout_ns_raw(HttpRequest* req, int64_t timeout_ns);
 // need cross-host auth can re-`set_header(req, ...)` between sends.
 //
 // Negative values are an error.
-int http_request_set_follow_redirects_raw(HttpRequest* req, int max_hops);
+int http_request_set_follow_redirects_raw(HttpClientRequest* req, int max_hops);
 
 // Skip TLS peer + hostname verification for THIS request (curl -k /
 // wget --no-check-certificate). `on` non-zero enables the skip; 0 (default)
 // verifies. Relaxed per-SSL, never on the shared process-wide SSL_CTX, so an
 // insecure request cannot downgrade verification for other requests.
-int http_request_set_insecure_raw(HttpRequest* req, int on);
+int http_request_set_insecure_raw(HttpClientRequest* req, int on);
 
 // Pin a custom CA for THIS request (#1107): verify the peer against the PEM
 // bundle at `path` instead of the system store, keeping peer + hostname
 // verification ON. Strictly stronger than set_insecure. Per-connection (never
 // touches the shared SSL_CTX); NULL/empty clears the pin. `path` is copied.
-int http_request_set_cafile_raw(HttpRequest* req, const char* path);
+int http_request_set_cafile_raw(HttpClientRequest* req, const char* path);
 
 // Enable streaming response bodies for THIS request (#1004). When on (non-zero),
 // http_send_raw returns a response whose body is NOT buffered: it carries an
@@ -212,7 +220,7 @@ int http_request_set_cafile_raw(HttpRequest* req, const char* path);
 // http_response_free the response (which closes the transport) when done, even
 // if it stops reading early. Redirects are still followed if enabled; only the
 // final hop's body streams. Default 0 = buffer the whole body.
-int http_request_set_stream_raw(HttpRequest* req, int on);
+int http_request_set_stream_raw(HttpClientRequest* req, int on);
 
 // Forward-proxy control (aether#1012). Default is DIRECT — std.http.client does
 // NOT follow $HTTP_PROXY unless the program opts in, the hardened inverse of the
@@ -226,18 +234,18 @@ int http_request_set_stream_raw(HttpRequest* req, int on);
 //                         url = revert to direct). No SSRF guard — it's a
 //                         code-visible grant.
 //   ignore_http_proxy():  force direct regardless of env / any set proxy.
-int http_request_use_env_proxy_raw(HttpRequest* req, int on);
-int http_request_use_http_proxy_raw(HttpRequest* req, const char* proxy_url);
-int http_request_ignore_http_proxy_raw(HttpRequest* req);
+int http_request_use_env_proxy_raw(HttpClientRequest* req, int on);
+int http_request_use_http_proxy_raw(HttpClientRequest* req, const char* proxy_url);
+int http_request_ignore_http_proxy_raw(HttpClientRequest* req);
 
-void http_request_free_raw(HttpRequest* req);
+void http_request_free_raw(HttpClientRequest* req);
 
 // Fire the configured request. Returns an HttpResponse on success
 // (caller frees with http_response_free), NULL only on out-of-memory
 // failures BEFORE the request is sent. Transport failures (DNS,
 // connect, TLS, timeout) return a non-NULL response with the failure
 // recorded in response->error and status_code == 0.
-HttpResponse* http_send_raw(HttpRequest* req);
+HttpResponse* http_send_raw(HttpClientRequest* req);
 
 // Case-insensitive response-header lookup. Returns "" when the header
 // isn't present. The pointer is owned by the response and valid until

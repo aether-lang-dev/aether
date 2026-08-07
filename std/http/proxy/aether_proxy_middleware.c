@@ -35,26 +35,11 @@
 #  include <windows.h>
 #endif
 
-/* std.http.client primitives, forward-declared with opaque types
- * to avoid the HttpRequest typedef collision between
- * aether_http.h (client) and aether_http_server.h (server). The
- * underlying ABI is unchanged; the type opaqueness here is purely
- * for the C compiler's name resolution. */
-typedef struct HttpClientRequest HttpClientRequest;
-typedef struct HttpClientResponse HttpClientResponse;
-extern HttpClientRequest* http_request_raw(const char* method, const char* url);
-extern int  http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value);
-extern int  http_request_set_body_raw(HttpClientRequest* req, const char* body, int len, const char* content_type);
-extern int  http_request_set_timeout_raw(HttpClientRequest* req, int seconds);
-extern void http_request_free_raw(HttpClientRequest* req);
-extern HttpClientResponse* http_send_raw(HttpClientRequest* req);
-extern int  http_response_status(HttpClientResponse* response);
-extern const char* http_response_body(HttpClientResponse* response);
-extern const char* http_response_body_str(HttpClientResponse* response);
-extern int  http_response_body_length(HttpClientResponse* response);
-extern const char* http_response_headers(HttpClientResponse* response);
-extern const char* http_response_error(HttpClientResponse* response);
-extern void http_response_free(HttpClientResponse* response);
+/* The std.http.client surface. Included directly now that the client and
+ * server headers can coexist (#1433): this file used to hand-declare these
+ * prototypes, which meant the compiler could not check them against the real
+ * definitions. */
+#include "../../net/aether_http.h"
 
 /* ----- hop-by-hop headers (RFC 7230 §6.1) ----- */
 
@@ -421,7 +406,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
      * than it should). The intermediate failed upstreams DO get
      * their own breaker_record(0) when we re-pick away from them. */
     int max_attempts = method_is_idempotent(req->method) ? (1 + opts->retry_max_retries) : 1;
-    HttpClientResponse* upstream = NULL;
+    HttpResponse* upstream = NULL;
     int upstream_status = 0;
     const char* upstream_err = NULL;
 
@@ -525,7 +510,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
 
         /* ---- Send + classify ---- */
         long t_start = aether_proxy_now_ms();
-        HttpClientResponse* resp = http_send_raw(outbound);
+        HttpResponse* resp = http_send_raw(outbound);
         long t_end = aether_proxy_now_ms();
         http_request_free_raw(outbound);
         free(upstream_url);

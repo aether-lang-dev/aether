@@ -23,21 +23,11 @@
 #include <string.h>
 #include <time.h>
 
-/* The std.http.client primitives. We can't `#include "aether_http.h"`
- * here because its `HttpRequest` typedef collides with the server's
- * `HttpRequest` brought in via aether_http_server.h. We only need
- * the request-builder + send + response-accessor surface, and they
- * take/return opaque pointers; declaring them as `void*` here is
- * ABI-equivalent for the C compiler. */
-typedef struct HttpClientRequest HttpClientRequest;
-typedef struct HttpClientResponse HttpClientResponse;
-extern HttpClientRequest* http_request_raw(const char* method, const char* url);
-extern int  http_request_set_timeout_raw(HttpClientRequest* req, int seconds);
-extern void http_request_free_raw(HttpClientRequest* req);
-extern HttpClientResponse* http_send_raw(HttpClientRequest* req);
-extern int  http_response_status(HttpClientResponse* response);
-extern const char* http_response_error(HttpClientResponse* response);
-extern void http_response_free(HttpClientResponse* response);
+/* The std.http.client surface. Included directly now that the client and
+ * server headers can coexist (#1433): this file used to hand-declare these
+ * prototypes, which meant the compiler could not check them against the real
+ * definitions. */
+#include "../../net/aether_http.h"
 
 /* Build "<base_url><probe_path>" into a freshly-malloc'd string.
  * Caller frees. Avoids double-slash by chopping a trailing '/' from
@@ -81,7 +71,7 @@ static void probe_one(AetherProxyPool* pool, AetherUpstream* u) {
             if (sec < 1) sec = 1;
             http_request_set_timeout_raw(creq, sec);
         }
-        HttpClientResponse* cresp = http_send_raw(creq);
+        HttpResponse* cresp = http_send_raw(creq);
         if (cresp) {
             const char* err = http_response_error(cresp);
             int status = http_response_status(cresp);
