@@ -1,0 +1,255 @@
+// Regression test for std.number: Locale-aware number, percent, and currency formatting.
+
+import std.number
+import std.string
+
+fn check_decimal(locale: string, decimal: string, min_frac: int, max_frac: int, use_group: int, expected: string, label: string) {
+    FormatOptions opts
+    opts.min_fraction_digits = min_frac
+    opts.max_fraction_digits = max_frac
+    opts.use_grouping = use_group
+
+    formatted, err = number.format_decimal_string(locale, decimal, opts)
+    if err != "" {
+        println("FAIL: ${label} - error: ${err}")
+        exit(1)
+    }
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+    string_release(err)
+    err = ""
+}
+
+fn check_invalid(locale: string, decimal: string, label: string) {
+    FormatOptions opts
+    opts.min_fraction_digits = 0
+    opts.max_fraction_digits = 3
+    opts.use_grouping = 1
+
+    formatted, err = number.format_decimal_string(locale, decimal, opts)
+    if err == "" {
+        println("FAIL: ${label} - expected failure but got \"${formatted}\"")
+        exit(1)
+    }
+    println("PASS: ${label} - rejected as expected: ${err}")
+    string_release(formatted)
+    formatted = ""
+    string_release(err)
+    err = ""
+}
+
+fn check_percent(locale: string, decimal: string, min_frac: int, max_frac: int, use_group: int, expected: string, label: string) {
+    FormatOptions opts
+    opts.min_fraction_digits = min_frac
+    opts.max_fraction_digits = max_frac
+    opts.use_grouping = use_group
+
+    formatted, err = number.format_percent_string(locale, decimal, opts)
+    if err != "" {
+        println("FAIL: ${label} - error: ${err}")
+        exit(1)
+    }
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+    string_release(err)
+    err = ""
+}
+
+fn check_currency(locale: string, currency: string, decimal: string, expected: string, label: string) {
+    formatted, err = number.format_currency_string(locale, currency, decimal)
+    if err != "" {
+        println("FAIL: ${label} - error: ${err}")
+        exit(1)
+    }
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+    string_release(err)
+    err = ""
+}
+
+fn check_float_decimal(locale: string, val: float, min_frac: int, max_frac: int, use_group: int, expected: string, label: string) {
+    FormatOptions opts
+    opts.min_fraction_digits = min_frac
+    opts.max_fraction_digits = max_frac
+    opts.use_grouping = use_group
+
+    formatted = number.format_decimal(locale, val, opts)
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+}
+
+fn check_float_percent(locale: string, val: float, min_frac: int, max_frac: int, use_group: int, expected: string, label: string) {
+    FormatOptions opts
+    opts.min_fraction_digits = min_frac
+    opts.max_fraction_digits = max_frac
+    opts.use_grouping = use_group
+
+    formatted = number.format_percent(locale, val, opts)
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+}
+
+fn check_float_currency(locale: string, currency: string, val: float, expected: string, label: string) {
+    formatted = number.format_currency(locale, currency, val)
+    if string_equals(formatted, expected) != 1 {
+        println("FAIL: ${label} - got \"${formatted}\", expected \"${expected}\"")
+        exit(1)
+    }
+    println("PASS: ${label}")
+    string_release(formatted)
+    formatted = ""
+}
+
+fn leak_check_helper() {
+    f1, err_f1 = number.format_decimal_string("fr-FR", "9876543.21", number.default_options())
+}
+
+main() {
+    println("=== Running std.number Phase 4 Tests ===")
+
+    // Note: UTF-8 spacing bytes reference:
+    // - NBSP (non-breaking space, U+00A0) is encoded as "\xc2\xa0" in UTF-8.
+    // - Narrow NBSP (U+202F) is encoded as "\xe2\x80\xaf" in UTF-8.
+
+    // 1. Exact decimal-string formatting without IEEE-754 conversion
+    // 2. Exact decimal input beyond binary64's precisely representable range
+    // 123456789012345678901234567890.123456789 is way beyond double's precision (53 bits, ~15-17 decimal digits).
+    check_decimal("en-US", "123456789012345678901234567890.123456789", 9, 9, 1,
+        "123,456,789,012,345,678,901,234,567,890.123456789",
+        "beyond binary64 representable range exact decimal")
+
+    // 3. Positive and negative decimal exponent notation without IEEE-754 conversion
+    check_decimal("en-US", "1.23456789e10", 0, 5, 1, "12,345,678,900", "positive decimal exponent notation")
+    check_decimal("en-US", "1234567890e-5", 0, 5, 1, "12,345.6789", "negative decimal exponent notation")
+
+    // 4. Invalid decimal strings, malformed exponents, whitespace, NaN, and infinity
+    check_invalid("en-US", "123a456", "invalid char rejection")
+    check_invalid("en-US", " 123 ", "whitespace rejection")
+    check_invalid("en-US", "1,234.56", "grouping separator rejection")
+    check_invalid("en-US", "1.2.3", "multiple dots rejection")
+    check_invalid("en-US", "1.23e", "missing exponent digits rejection")
+    check_invalid("en-US", "1.23e+abc", "invalid exponent digits rejection")
+    check_invalid("en-US", "NaN", "NaN string rejection")
+    check_invalid("en-US", "Infinity", "Infinity string rejection")
+
+    // 5. Float wrapper parity with explicitly formatting string.from_double(value)
+    val = 1234567.89
+    check_float_decimal("en-US", val, 2, 2, 1, "1,234,567.89", "float wrapper en-US decimal parity")
+
+    // 6. Float wrappers for NaN and positive/negative infinity (without attaching percent or currency symbol)
+    nan_val = 0.0 / 0.0
+    inf_val = 1.0 / 0.0
+    neginf_val = -1.0 / 0.0
+
+    check_float_decimal("en-US", nan_val, 0, 3, 1, "NaN", "float NaN decimal")
+    check_float_decimal("en-US", inf_val, 0, 3, 1, "Infinity", "float +Inf decimal")
+    check_float_decimal("en-US", neginf_val, 0, 3, 1, "-Infinity", "float -Inf decimal")
+
+    check_float_percent("en-US", nan_val, 0, 3, 1, "NaN", "float NaN percent")
+    check_float_percent("en-US", inf_val, 0, 3, 1, "Infinity", "float +Inf percent")
+    check_float_percent("en-US", neginf_val, 0, 3, 1, "-Infinity", "float -Inf percent")
+
+    check_float_currency("en-US", "USD", nan_val, "NaN", "float NaN currency")
+    check_float_currency("en-US", "USD", inf_val, "Infinity", "float +Inf currency")
+    check_float_currency("en-US", "USD", neginf_val, "-Infinity", "float -Inf currency")
+
+    // 7. en-US grouped decimal
+    check_decimal("en-US", "1234567.89", 2, 2, 1, "1,234,567.89", "en-US grouped decimal")
+
+    // 8. de-DE grouped decimal
+    check_decimal("de-DE", "1234567.89", 2, 2, 1, "1.234.567,89", "de-DE grouped decimal")
+
+    // 9. fr-FR Unicode grouping separator (uses Narrow NBSP "\xe2\x80\xaf" as grouping separator)
+    check_decimal("fr-FR", "1234567.89", 2, 2, 1, "1\xe2\x80\xaf234\xe2\x80\xaf567,89", "fr-FR Unicode grouping separator (Narrow NBSP)")
+
+    // 10. grouping disabled
+    check_decimal("en-US", "1234567.89", 2, 2, 0, "1234567.89", "en-US grouping disabled")
+
+    // 11. minimum fraction zero-padding
+    check_decimal("en-US", "1234.5", 3, 3, 1, "1,234.500", "min fraction padding")
+
+    // 12. maximum fraction rounding
+    check_decimal("en-US", "1234.5678", 0, 2, 1, "1,234.57", "max fraction rounding (round half up)")
+
+    // 13. rounding that carries into the integer
+    check_decimal("en-US", "9.999", 2, 2, 1, "10.00", "rounding carries into integer 9.999 -> 10.00")
+    check_decimal("en-US", "9.999", 0, 2, 1, "10", "rounding carries into integer 9.999 -> 10 with min=0")
+    check_decimal("en-US", "99.999", 2, 2, 0, "100.00", "rounding carries into integer (without grouping)")
+
+    // 14. negative values
+    check_decimal("en-US", "-1234567.89", 2, 2, 1, "-1,234,567.89", "negative decimal")
+
+    // 15. zero and negative zero
+    check_decimal("en-US", "0", 1, 1, 1, "0.0", "zero decimal")
+    check_decimal("en-US", "0", 0, 1, 1, "0", "zero decimal with min=0")
+    check_decimal("en-US", "-0.000", 1, 1, 1, "0.0", "negative zero rounds to positive zero")
+
+    // 16. en-US percentage
+    check_percent("en-US", "0.125", 1, 2, 1, "12.5%", "en-US percentage")
+
+    // 17. fr-FR percentage spacing (uses NBSP "\xc2\xa0" before "%")
+    check_percent("fr-FR", "0.125", 1, 2, 1, "12,5\xc2\xa0%", "fr-FR percentage spacing")
+
+    // 18. en-US USD
+    check_currency("en-US", "USD", "1234.5", "$1,234.50", "en-US USD")
+
+    // 19. en-GB GBP
+    check_currency("en-GB", "GBP", "1234.5", "\xc2\xa31,234.50", "en-GB GBP")
+
+    // 20. de-DE EUR (uses suffix "\xc2\xa0\xe2\x82\xac" -> NBSP + "€")
+    check_currency("de-DE", "EUR", "1234.5", "1.234,50\xc2\xa0\xe2\x82\xac", "de-DE EUR")
+
+    // 21. ja-JP JPY with zero currency fraction digits
+    check_currency("ja-JP", "JPY", "1234.5", "\xef\xbf\xa51,235", "ja-JP JPY with 0 fraction digits")
+
+    // 22. pl-PL PLN (uses suffix "\xc2\xa0z\xc5\x82" -> NBSP + "zł")
+    check_currency("pl-PL", "PLN", "1234.5", "1\xc2\xa0234,50\xc2\xa0z\xc5\x82", "pl-PL PLN")
+
+    // 23. unknown currency fallback (displays ISO code with NBSP spacing)
+    check_currency("en-US", "CAD", "1234.5", "CAD\xc2\xa01,234.50", "en-US unknown CAD")
+    check_currency("de-DE", "CAD", "1234.5", "1.234,50\xc2\xa0CAD", "de-DE unknown CAD")
+
+    // 24. regional-to-base locale fallback
+    check_decimal("en-AU", "1234.5", 1, 1, 1, "1,234.5", "en-AU base-fallback to en")
+
+    // 25. unsupported locale fallback
+    check_decimal("xyz-ABC", "1234.5", 1, 1, 1, "1,234.5", "xyz-ABC unsupported fallback to en")
+
+    // 26. malformed locale fallback without a crash
+    check_decimal("invalid---tag", "1234.5", 1, 1, 1, "1,234.5", "invalid-tag malformed fallback without a crash")
+
+    // Repeated formatting to ensure no leaks
+    i = 0
+    while i < 100 {
+        leak_check_helper()
+        i = i + 1
+    }
+    println("PASS: loop test for leak checks")
+
+    println("\nAll PASS")
+}

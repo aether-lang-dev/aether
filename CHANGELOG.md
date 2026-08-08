@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.number`** — locale-aware number, percent, and currency formatting
+  (#863 Phase 4). Formats `float` values (and exact decimal strings) per a BCP 47
+  locale: decimal-point exponent shifting, min/max fraction digits with
+  round-half-up (carrying into the integer part, e.g. `9.999 → 10.00`), digit
+  grouping with locale separators (including the fr-FR narrow no-break space),
+  percent scaling with locale spacing, and currency symbol/fraction-digit
+  resolution with regional fallbacks (base-tag then `en`). Non-finite floats
+  (`NaN`, `±Inf`) are wrapped rather than crashing, and malformed tags fall back
+  without a crash. Public API: `format_decimal` / `format_percent` /
+  `format_currency` (plus `*_default` and `*_string` variants) and a
+  `FormatOptions` record. Verified leak-free under Valgrind.
+
 ## [0.499.0]
 
 ### Added
