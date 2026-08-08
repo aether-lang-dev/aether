@@ -1696,8 +1696,17 @@ install: $(VERSION_HEADER) release ae stdlib
 	@echo "Installing Aether to $(PREFIX)"
 	@echo "==================================="
 	@install -d $(PREFIX)/bin
-	@install -m 755 build/ae$(EXE_EXT) $(PREFIX)/bin/ae
-	@install -m 755 build/aetherc-release$(EXE_EXT) $(PREFIX)/bin/aetherc
+	@# Install WITH $(EXE_EXT) on both sides. Dropping it on the
+	@# destination (which this used to do) is fatal on Windows: `ae`
+	@# looks for its compiler as "aetherc" EXE_EXT — i.e. aetherc.exe —
+	@# next to itself, so an extensionless install leaves `ae` unable to
+	@# find `aetherc` even though the two sit in the same directory.
+	@# `ae --version` keeps working (it never needs the compiler), so the
+	@# box reports a healthy toolchain while every compile fails with the
+	@# misleading "Aether compiler not found ... set AETHER_HOME".
+	@# EXE_EXT is empty on POSIX, so this is a no-op there.
+	@install -m 755 build/ae$(EXE_EXT) $(PREFIX)/bin/ae$(EXE_EXT)
+	@install -m 755 build/aetherc-release$(EXE_EXT) $(PREFIX)/bin/aetherc$(EXE_EXT)
 	@install -d $(PREFIX)/lib/aether
 	@install -m 644 build/libaether.a $(PREFIX)/lib/aether/
 	@# Version stamp next to libaether.a. `ae build` reads this and
@@ -1802,6 +1811,29 @@ install: $(VERSION_HEADER) release ae stdlib
 	@# a no-op so we never break the install summary.
 	@if [ -n "$$SUDO_USER" ] && [ -d build ]; then \
 		chown -R "$$SUDO_USER:$$(id -gn $$SUDO_USER 2>/dev/null || echo $$SUDO_USER)" build 2>/dev/null || true; \
+	fi
+	@# Prove the INSTALLED ae can actually reach its compiler, by
+	@# compiling something. `ae version` is not sufficient: it never needs
+	@# aetherc, so it reports a healthy toolchain even when `ae` cannot
+	@# find the compiler at all — which is exactly how the Windows
+	@# extensionless-install bug shipped, presenting as 57 red spec suites
+	@# rather than a failed install. A trivial `ae build` exercises the
+	@# lookup that actually matters.
+	@# Non-fatal by design: a sandboxed or read-only TMPDIR must not fail
+	@# an otherwise good install. It prints a loud warning instead.
+	@tmpd="$${TMPDIR:-/tmp}/ae-install-check-$$$$"; \
+	if mkdir -p "$$tmpd" 2>/dev/null; then \
+	  printf 'main() {\n    println("ok")\n}\n' > "$$tmpd/smoke.ae"; \
+	  if "$(PREFIX)/bin/ae$(EXE_EXT)" build "$$tmpd/smoke.ae" -o "$$tmpd/smoke$(EXE_EXT)" >"$$tmpd/out.txt" 2>&1; then \
+	    echo "✓ Install check: the installed ae found aetherc and compiled a test program"; \
+	  else \
+	    echo "!! Install check FAILED: the installed ae could not compile."; \
+	    echo "!! `ae version` may still work — it does not need the compiler."; \
+	    echo "!! Check that $(PREFIX)/bin holds ae$(EXE_EXT) AND aetherc$(EXE_EXT):"; \
+	    ls -l "$(PREFIX)/bin" 2>/dev/null | sed 's/^/!!   /'; \
+	    sed 's/^/!!   /' "$$tmpd/out.txt" 2>/dev/null | head -12; \
+	  fi; \
+	  rm -rf "$$tmpd" 2>/dev/null || true; \
 	fi
 	@echo "✓ Installed successfully"
 	@echo ""
