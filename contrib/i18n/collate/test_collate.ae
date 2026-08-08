@@ -1,0 +1,141 @@
+// Regression test for contrib.i18n.collate (UCA/DUCET collation).
+//
+// Build/run (needs the three C backing files):
+//   ae run contrib/i18n/collate/test_collate.ae \
+//     --extra contrib/i18n/aether_i18n.c \
+//     --extra contrib/i18n/utf8proc/utf8proc.c \
+//     --extra contrib/i18n/ducet/ducet_data.c
+//
+// Not in the `make test-ae` CI glob (contrib is not auto-discovered, and this
+// needs --extra), so it can't affect the CI matrix. Exercised by the contrib
+// nightly / manually and under valgrind.
+
+import contrib.i18n.collate
+import std.string
+import std.list
+import std.list(list_free)
+
+// sign-normalized compare to -1/0/1
+fn cmp(a: string, b: string) -> int {
+    r = collate.compare("en", a, b)
+    if r < 0 { return -1 }
+    if r > 0 { return 1 }
+    return 0
+}
+
+// Returns 0 on pass, 1 on fail (caller accumulates).
+fn expect(label: string, got: int, want: int) -> int {
+    if got == want {
+        println("PASS: ${label}")
+        return 0
+    }
+    println("FAIL: ${label} - got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    fails = 0
+
+    // ---- primary ordering (letters) ----
+    fails = fails + expect("apple < banana", cmp("apple", "banana"), -1)
+    fails = fails + expect("banana > apple", cmp("banana", "apple"), 1)
+    fails = fails + expect("abc == abc", cmp("abc", "abc"), 0)
+    fails = fails + expect("empty < a", cmp("", "a"), -1)
+    fails = fails + expect("a > empty", cmp("a", ""), 1)
+    fails = fails + expect("empty == empty", cmp("", ""), 0)
+
+    // ---- prefix rule (shorter sorts first) ----
+    fails = fails + expect("app < apple", cmp("app", "apple"), -1)
+
+    // ---- case tie-break (tertiary): lowercase before uppercase in DUCET ----
+    fails = fails + expect("apple < Apple (case tertiary)", cmp("apple", "Apple"), -1)
+    fails = fails + expect("a < A", cmp("a", "A"), -1)
+
+    // ---- accent tie-break (secondary): unaccented before accented ----
+    fails = fails + expect("cafe < café (accent secondary)", cmp("cafe", "café"), -1)
+    fails = fails + expect("resume < résumé", cmp("resume", "résumé"), -1)
+
+    // ---- canonical equivalence: precomposed == decomposed ----
+    // "café" written precomposed vs "e"+combining-acute must compare EQUAL.
+    fails = fails + expect("precomposed == decomposed", cmp("café", "café"), 0)
+
+    // ---- primary dominates: accented 'a' still sorts before 'z' ----
+    fails = fails + expect("ä < z (a-family before z)", cmp("ä", "z"), -1)
+    fails = fails + expect("z > ä", cmp("z", "ä"), 1)
+
+    // ---- sort_key is order-preserving and stable ----
+    ka = collate.sort_key("en", "apple")
+    kb = collate.sort_key("en", "banana")
+    if string_length(ka) > 0 && string_length(kb) > 0 && string_compare(ka, kb) < 0 {
+        println("PASS: sort_key order matches compare")
+    } else {
+        println("FAIL: sort_key order does not match compare")
+        fails = fails + 1
+    }
+    ka2 = collate.sort_key("en", "apple")
+    if string_equals(ka, ka2) == 1 {
+        println("PASS: sort_key is stable for identical input")
+    } else {
+        println("FAIL: sort_key not stable")
+        fails = fails + 1
+    }
+
+    // ---- sort() over a list; expected UCA order: apple, Apple, banana, cafe, café ----
+    // (b < c at the primary level, so banana precedes the cafe pair; cafe < café
+    // is the accent tie-break at the secondary level.)
+    items = list.new()
+    list.add(items, "banana")
+    list.add(items, "Apple")
+    list.add(items, "apple")
+    list.add(items, "café")
+    list.add(items, "cafe")
+    collate.sort("en", items)
+    exp = list.new()
+    list.add(exp, "apple")
+    list.add(exp, "Apple")
+    list.add(exp, "banana")
+    list.add(exp, "cafe")
+    list.add(exp, "café")
+    ok = 1
+    n = list.size(items)
+    i = 0
+    while i < n {
+        gi, _ = list.get(items, i)
+        ei, _ = list.get(exp, i)
+        if string_equals(gi, ei) != 1 { ok = 0 }
+        i = i + 1
+    }
+    if ok == 1 {
+        println("PASS: sort() produces UCA order")
+    } else {
+        print("FAIL: sort() order = ")
+        i = 0
+        while i < n { gi, _ = list.get(items, i); print("${gi} "); i = i + 1 }
+        println("")
+        fails = fails + 1
+    }
+
+    list_free(items)
+    list_free(exp)
+
+    // ---- leak-check loop ----
+    i = 0
+    while i < 500 {
+        r = collate.compare("en", "straße", "strasse")
+        kk = collate.sort_key("en", "naïve")
+        i = i + 1
+    }
+    println("PASS: leak-check loop")
+
+    if fails == 0 {
+        println("")
+        println("All PASS")
+        // Return normally (no exit(0)) so the heap-string tracker runs its
+        // scope-end cleanup — exit() would bypass it and valgrind would see the
+        // still-live sort keys as leaks.
+        return
+    }
+    println("")
+    println("${fails} FAILED")
+    exit(1)
+}
