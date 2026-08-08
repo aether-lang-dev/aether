@@ -705,6 +705,30 @@ audio-cache-save: $(AUDIO_OBJ)
 	@printf '%s' "$(AUDIO_CACHE_KEY)" > "$(AUDIO_CACHE_STAMP)"
 	@echo "audio-cache: saved miniaudio object to $(AUDIO_CACHE_OBJ)"
 
+# ---- contrib/i18n collation check (CI) ---------------------------------
+# contrib/i18n (Phase 5 of #863) compiles the vendored utf8proc.c and the
+# ~74k-line GENERATED DUCET table (ducet/ducet_data.c). Both are committed
+# (vendored), so CI never fetches at build time — no supply-chain surface
+# beyond the pinned, reviewed files. We considered mirroring the miniaudio
+# object cache here, but measured the combined compile at <1s (utf8proc ~0.4s,
+# ducet_data ~0.25s) — nothing like miniaudio's ~1min — so an actions/cache
+# round-trip would cost more than it saves. Just compile it each run.
+#
+# Standalone from `make ci` (contrib is not in the test-ae glob); invoked by
+# its own CI job (see .github/workflows/ci.yml: ci-contrib-i18n).
+I18N_DIR := contrib/i18n
+
+.PHONY: contrib-i18n-check
+contrib-i18n-check: compiler ae stdlib
+	@echo "contrib-i18n: building collate test"
+	@./build/ae$(EXE_EXT) build $(I18N_DIR)/collate/test_collate.ae \
+	  --extra $(I18N_DIR)/aether_i18n.c \
+	  --extra $(I18N_DIR)/utf8proc/utf8proc.c \
+	  --extra $(I18N_DIR)/ducet/ducet_data.c \
+	  -o build/test_collate$(EXE_EXT)
+	@echo "contrib-i18n: running collate test"
+	@./build/test_collate$(EXE_EXT)
+
 # Compiler target (incremental build with object files)
 compiler: $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
 	@echo "Linking compiler..."

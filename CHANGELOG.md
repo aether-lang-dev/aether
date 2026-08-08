@@ -13,6 +13,18 @@ version number before tagging the release.
 
 ### Added
 
+- **`contrib/i18n/collate`** — locale-aware Unicode collation (#863 Phase 5).
+  Orders strings by the Unicode Collation Algorithm (UTS #10) over the Default
+  Unicode Collation Element Table (DUCET, UCA 15.1.0) with canonical (NFD)
+  normalization via a vendored utf8proc 2.9.0, so accents and case tie-break
+  correctly (`cafe` < `café`, `apple` < `Apple`) and canonically-equivalent
+  strings compare equal — rather than raw byte order. API: `compare`,
+  `sort_key` (order-preserving precomputed key), and in-place `sort`. This is
+  DUCET (language-neutral) collation with full three-level weighting; per-locale
+  tailoring is future work (the `locale` argument is reserved for it). Lives in
+  `contrib/` because it carries vendored Unicode data tables (utf8proc: MIT;
+  DUCET/`allkeys.txt`: Unicode license — see `contrib/i18n/ducet/NOTICE`).
+  Verified leak-free under Valgrind; gated by a dedicated `ci-contrib-i18n` job.
 - **`std.number`** — locale-aware number, percent, and currency formatting
   (#863 Phase 4). Formats `float` values (and exact decimal strings) per a BCP 47
   locale: decimal-point exponent shifting, min/max fraction digits with

@@ -1,0 +1,80 @@
+// contrib.i18n.collate — locale-aware string collation (Phase 5 of #863).
+//
+// Implements a practical subset of the Unicode Collation Algorithm (UTS #10)
+// over the Default Unicode Collation Element Table (DUCET, UCA 15.1.0) with
+// canonical (NFD) normalization via the vendored utf8proc. This gives correct
+// accent- and case-aware ordering across scripts, rather than raw byte order:
+//
+//   collate.compare("en", "cafe", "café")   ==  -1   (accent tie-break)
+//   collate.compare("en", "apple", "Apple") ==  -1   (case tie-break)
+//   collate.compare("en", "z", "ä")         ==   1   (ä primary-sorts with a)
+//
+// Scope: this is DUCET (language-neutral) collation with full three-level
+// weighting (primary/secondary/tertiary). It is NOT yet per-locale *tailored*
+// collation (e.g. Swedish sorting å/ä/ö after z, or Spanish traditional ñ);
+// the `locale` argument is accepted for API stability and future tailoring but
+// currently selects DUCET order for every locale. That already matches the
+// large majority of real-world ordering expectations.
+//
+// C backing (compiled in; pass with --extra when building a consumer):
+//   contrib/i18n/aether_i18n.c
+//   contrib/i18n/utf8proc/utf8proc.c
+//   contrib/i18n/ducet/ducet_data.c
+// e.g.  ae run yourprog.ae \
+//         --extra contrib/i18n/aether_i18n.c \
+//         --extra contrib/i18n/utf8proc/utf8proc.c \
+//         --extra contrib/i18n/ducet/ducet_data.c
+
+import std.string
+import std.list
+
+exports(
+    compare, sort_key, sort
+)
+
+// The C engine. compare returns -1/0/1; sort_key_hex returns an order-
+// preserving lowercase-hex encoding of the multi-level UCA sort key as a
+// managed string (empty on error).
+extern aether_collate_compare(locale: string, a: string, b: string) -> int
+// `@heap`: the C side returns a FRESH AetherString the caller owns; the
+// heap-string tracker frees it at scope end (no manual free — leak-clean).
+extern aether_collate_sort_key_hex(locale: string, input: string) -> string @heap
+
+// Compare two strings under `locale`. Returns -1 if a < b, 0 if equal, 1 if
+// a > b, per the Unicode Collation Algorithm over the DUCET.
+compare(locale: string, a: string, b: string) -> int {
+    return aether_collate_compare(locale, a, b)
+}
+
+// A precomputed, order-preserving sort key for `s`: comparing two keys with
+// ordinary string comparison yields the same order as compare(). Useful when
+// sorting a list many times or persisting a stable order — compute the key
+// once per element instead of re-collating on every comparison.
+sort_key(locale: string, s: string) -> string {
+    return aether_collate_sort_key_hex(locale, s)
+}
+
+// Sort a list of strings in place under `locale` (ascending, UCA order).
+// Simple insertion sort using compare(); fine for the modest lists collation
+// is typically used on (menus, tag lists, directory entries). For large lists,
+// precompute sort_key() per element and sort those keys.
+sort(locale: string, items: ptr) {
+    n = list.size(items)
+    i = 1
+    while i < n {
+        cur, _ = list.get(items, i)
+        j = i - 1
+        placed = 0
+        while j >= 0 && placed == 0 {
+            prev, _ = list.get(items, j)
+            if compare(locale, prev, cur) > 0 {
+                list.set(items, j + 1, prev)
+                j = j - 1
+            } else {
+                placed = 1
+            }
+        }
+        list.set(items, j + 1, cur)
+        i = i + 1
+    }
+}

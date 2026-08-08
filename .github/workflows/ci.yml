@@ -246,6 +246,32 @@ jobs:
       run: make contrib-host-check
 
   # ============================================================
+  # contrib/i18n check — build + run the collation regression
+  # test (Phase 5 of #863). utf8proc.c + the generated DUCET
+  # table are vendored (nothing fetched at build time — no
+  # supply-chain surface), and compile in <1s combined, so no
+  # object cache is warranted (measured; see the Makefile note).
+  # Linux-only; the module is pure Aether + portable C.
+  # ============================================================
+  ci-contrib-i18n:
+    name: contrib/i18n collation (Linux)
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install build deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc make valgrind
+
+    - name: Build + run collation test
+      run: make contrib-i18n-check
+
+    - name: Valgrind the collation test (leak gate)
+      run: valgrind --leak-check=full --error-exitcode=99 ./build/test_collate
+
+  # ============================================================
   # Windows CI — MinGW via MSYS2
   # Runs `make ci` — compiler, ae, stdlib, unit tests,
   # .ae integration tests (includes REPL tests), examples.
