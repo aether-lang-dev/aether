@@ -1,0 +1,98 @@
+// LiveView-lite SPIKE (v2) — proves the core LiveView loop directly on
+// tinyweb's WebSocket accept loop + Aether's own primitives, WITHOUT the
+// template-diff compiler or a JS framework.
+//
+//   mount        -> per-connection assigns (a counter), kept server-side
+//   render       -> HTML from assigns
+//   phx-click    -> client sends {"event":"inc"} over the WebSocket
+//   handle_event -> mutate assigns -> re-render -> ws_send_frame(new HTML)
+//
+// v2 note: we drive the WebSocket accept loop directly (tcp.listen +
+// tinyweb.ws_accept_loop) rather than through tw_start + an actor. tinyweb's
+// concurrent-loop story (HTTP loop + WS loop at once) isn't wired yet, and
+// passing the DSL-built server map across an actor boundary corrupts its
+// nested closure entries. Building the ws_handlers list here sidesteps both:
+// the loop under test is exactly tinyweb's ws_handle_client message loop.
+//
+// State is keyed by the connection's socket ptr — tinyweb's web_socket handler
+// is shared, but the `sender` socket is stable for a connection's lifetime.
+
+import contrib.tinyweb
+import std.tcp
+import std.list
+import std.list(list_new)
+import std.map
+import std.map(map_new, map_has)
+import std.mem
+import std.string(string_contains, to_int, string_concat)
+
+// ---- per-connection state (assigns), keyed by socket ptr ----
+var g_state: ptr = null
+
+fn conn_key(sender: ptr) -> string {
+    return "${mem.ptr_to_long(sender)}"
+}
+
+fn get_count(sender: ptr) -> int {
+    if g_state == null { g_state = map_new() }
+    k = conn_key(sender)
+    if map_has(g_state, k) == 0 { return 0 }
+    v, _ = map.get(g_state, k)
+    n, _ = to_int(v)
+    return n
+}
+
+fn set_count(sender: ptr, n: int) {
+    if g_state == null { g_state = map_new() }
+    map.put(g_state, conn_key(sender), "${n}")
+}
+
+// ---- render: assigns -> the live region's HTML ----
+fn render(count: int) -> string {
+    // >126 bytes on purpose — exercises ws_send_frame's extended-length path.
+    h = "<div id=\"live\">"
+    h = string_concat(h, "<h1>count: ${count}</h1>")
+    h = string_concat(h, "<button onclick=\"send('dec')\">-</button> ")
+    h = string_concat(h, "<button onclick=\"send('inc')\">+</button> ")
+    h = string_concat(h, "<button onclick=\"send('reset')\">reset</button>")
+    h = string_concat(h, "</div>")
+    return h
+}
+
+// ---- handle_event: mutate assigns per the client event ----
+fn handle_event(sender: ptr, event: string) -> int {
+    n = get_count(sender)
+    if string_contains(event, "inc") == 1 {
+        n = n + 1
+    } else if string_contains(event, "dec") == 1 {
+        n = n - 1
+    } else if string_contains(event, "reset") == 1 {
+        n = 0
+    }
+    set_count(sender, n)
+    return n
+}
+
+main() {
+    println("LiveView-lite counter — WebSocket on ws://127.0.0.1:8126/live  (Ctrl-C to stop)")
+
+    // Build the ws_handlers list directly (what web_socket(...) would produce).
+    handlers = list_new()
+    entry = map_new()
+    map.put(entry, "path", "/live")
+    map.put(entry, "handler", box_closure(| msg: string, sender: ptr, ctx: ptr | {
+                // "mount" hits no branch -> returns current count (0 on first frame).
+                n = handle_event(sender, msg)
+                tinyweb.ws_send_frame(sender, render(n))
+            }))
+    list.add(handlers, entry)
+
+    // Bind and run tinyweb's own WebSocket accept loop (blocking).
+    ws_tcp, err = tcp.listen(8126)
+    if err != "" {
+        println("ERROR: bind 8126 failed: ${err}")
+        return
+    }
+    println("listening")
+    tinyweb.ws_accept_loop(ws_tcp, handlers)
+}
