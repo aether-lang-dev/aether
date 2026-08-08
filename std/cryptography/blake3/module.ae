@@ -1,0 +1,871 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc. (https://www.bouncycastle.org)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.blake3 — BLAKE3 cryptographic hash in pure Aether,
+// ported from Bouncy Castle's Blake3Digest.cs. NO externs to OpenSSL.
+//
+// Import with:  import std.cryptography.blake3
+
+import std.bits
+import std.bytes
+import std.mem
+
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+exports(
+    new, new_keyed, new_derived,
+    update, update_bytes, output, final_hex, final_bytes, free_ctx,
+    copy, copy_state,
+    blake3_hex, blake3_bytes,
+    blake3_keyed_hex, blake3_keyed_bytes,
+    blake3_derived_hex, blake3_derived_bytes
+)
+
+struct Blake3Ctx {
+    theBuffer: ptr // 64 bytes (raw pointer)
+    theK: ptr // 8 longs (64 bytes)
+    theChaining: ptr // 8 longs (64 bytes)
+    theV: ptr // 16 longs (128 bytes)
+    theM: ptr // 16 longs (128 bytes)
+    theIndices: ptr // 16 longs (128 bytes)
+    stack: ptr // 64 pointers (512 bytes)
+    stack_count: int
+    digest_len: int
+    outputting: int // 1 = true, 0 = false
+    outputAvailable: long
+    mode: int
+    outputMode: int
+    outputDataLen: int
+    counter: long
+    currBytes: int
+    pos: int
+}
+
+const NUMWORDS = 8
+const ROUNDS = 7
+const BLOCKLEN = 64
+const CHUNKLEN = 1024
+
+const CHUNKSTART = 1
+const CHUNKEND = 2
+const PARENT = 4
+const ROOT = 8
+const KEYEDHASH = 16
+const DERIVECONTEXT = 32
+const DERIVEKEY = 64
+
+const SIGMA: int[16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8]
+
+const IV: long[8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+]
+
+// ---- Helpers for Word Array Access ----
+
+m32(x: long) -> long {
+    return x & 0xFFFFFFFF
+}
+
+get_word(p: ptr, idx: int) -> long {
+    return mem.get_long(p, idx * 8)
+}
+
+set_word(p: ptr, idx: int, val: long) {
+    mem.set_long(p, idx * 8, val & 0xFFFFFFFF)
+}
+
+zero_mem(p: ptr, size: int) {
+    mem.set(p, 0, size)
+}
+
+init_indices(theIndices: ptr) {
+    i = 0
+    while i < 16 {
+        set_word(theIndices, i, i)
+        i = i + 1
+    }
+}
+
+init_null_key(c: *Blake3Ctx) {
+    i = 0
+    while i < NUMWORDS {
+        set_word(c.theK, i, IV[i])
+        i = i + 1
+    }
+}
+
+ptr_add(p: ptr, off: int) -> ptr {
+    return mem.long_to_ptr(mem.ptr_to_long(p) + off)
+}
+
+// ---- Initialization Functions ----
+
+new() -> *Blake3Ctx {
+    // Allocate 256 bytes to prevent any struct size / alignment overflow
+    ctx = malloc(256) as *Blake3Ctx
+    if ctx == null {
+        return null
+    }
+    ctx.digest_len = 32 // default digest size (256 bits = 32 bytes)
+    ctx.theBuffer = malloc(BLOCKLEN)
+    ctx.theK = malloc(NUMWORDS * 8)
+    ctx.theChaining = malloc(NUMWORDS * 8)
+    ctx.theV = malloc(16 * 8)
+    ctx.theM = malloc(16 * 8)
+    ctx.theIndices = malloc(16 * 8)
+    ctx.stack = malloc(64 * 8)
+    ctx.stack_count = 0
+    ctx.outputting = 0
+    ctx.outputAvailable = 0
+    ctx.mode = 0
+    ctx.outputMode = 0
+    ctx.outputDataLen = 0
+    ctx.counter = 0
+    ctx.currBytes = 0
+    ctx.pos = 0
+
+    zero_mem(ctx.theBuffer, BLOCKLEN)
+    zero_mem(ctx.theK, NUMWORDS * 8)
+    zero_mem(ctx.theChaining, NUMWORDS * 8)
+    zero_mem(ctx.theV, 16 * 8)
+    zero_mem(ctx.theM, 16 * 8)
+    zero_mem(ctx.theIndices, 16 * 8)
+    zero_mem(ctx.stack, 64 * 8)
+
+    init_indices(ctx.theIndices)
+    init_null_key(ctx)
+    return ctx
+}
+
+new_keyed(key: ptr, key_len: int) -> *Blake3Ctx {
+    ctx = new()
+    if ctx == null {
+        return null
+    }
+    raw_key = bytes.data(key)
+    i = 0
+    while i < NUMWORDS {
+        w = mem.get_u32_le(raw_key, i * 4) & 0xFFFFFFFF
+        set_word(ctx.theK, i, w)
+        i = i + 1
+    }
+    ctx.mode = KEYEDHASH
+    return ctx
+}
+
+new_derived(context: ptr, context_len: int) -> *Blake3Ctx {
+    ctx = new()
+    if ctx == null {
+        return null
+    }
+    init_null_key(ctx)
+    ctx.mode = DERIVECONTEXT
+
+    update_bytes(ctx, context, context_len)
+    output(ctx, ctx.theBuffer, 32)
+    reset_ctx(ctx)
+
+    init_key_from_context(ctx)
+    reset_ctx(ctx)
+    return ctx
+}
+
+init_key_from_context(c: *Blake3Ctx) {
+    i = 0
+    while i < NUMWORDS {
+        set_word(c.theK, i, get_word(c.theV, i))
+        i = i + 1
+    }
+    c.mode = DERIVEKEY
+}
+
+reset_ctx(c: *Blake3Ctx) {
+    reset_block_count(c)
+    c.pos = 0
+    c.outputting = 0
+    zero_mem(c.theBuffer, BLOCKLEN)
+}
+
+// ---- Core Blake3 Compression Algorithms ----
+
+rotr32(v: long, amt: int) -> long {
+    return bits.rotr32(v & 0xFFFFFFFF, amt) & 0xFFFFFFFF
+}
+
+mix_g(c: *Blake3Ctx, msgIdx: int, posA: int, posB: int, posC: int, posD: int) {
+    msg = msgIdx << 1
+    idx1 = get_word(c.theIndices, msg) as int
+    idx2 = get_word(c.theIndices, msg + 1) as int
+
+    v_a = get_word(c.theV, posA)
+    v_b = get_word(c.theV, posB)
+    v_c = get_word(c.theV, posC)
+    v_d = get_word(c.theV, posD)
+    m_1 = get_word(c.theM, idx1)
+    m_2 = get_word(c.theM, idx2)
+
+    v_a = m32(v_a + v_b + m_1)
+    v_d = rotr32(v_d ^ v_a, 16)
+    v_c = m32(v_c + v_d)
+    v_b = rotr32(v_b ^ v_c, 12)
+
+    v_a = m32(v_a + v_b + m_2)
+    v_d = rotr32(v_d ^ v_a, 8)
+    v_c = m32(v_c + v_d)
+    v_b = rotr32(v_b ^ v_c, 7)
+
+    set_word(c.theV, posA, v_a)
+    set_word(c.theV, posB, v_b)
+    set_word(c.theV, posC, v_c)
+    set_word(c.theV, posD, v_d)
+}
+
+perform_round(c: *Blake3Ctx) {
+    mix_g(c, 0, 0, 4, 8, 12)
+    mix_g(c, 1, 1, 5, 9, 13)
+    mix_g(c, 2, 2, 6, 10, 14)
+    mix_g(c, 3, 3, 7, 11, 15)
+
+    mix_g(c, 4, 0, 5, 10, 15)
+    mix_g(c, 5, 1, 6, 11, 12)
+    mix_g(c, 6, 2, 7, 8, 13)
+    mix_g(c, 7, 3, 4, 9, 14)
+}
+
+permute_indices(theIndices: ptr) {
+    i = 0
+    while i < 16 {
+        curr = get_word(theIndices, i) as int
+        set_word(theIndices, i, SIGMA[curr])
+        i = i + 1
+    }
+}
+
+adjust_chaining(c: *Blake3Ctx) {
+    if c.outputting == 1 {
+        i = 0
+        while i < NUMWORDS {
+            v_i = get_word(c.theV, i)
+            v_i_n = get_word(c.theV, i + NUMWORDS)
+            chain_i = get_word(c.theChaining, i)
+
+            v_i_new = m32(v_i ^ v_i_n)
+            v_i_n_new = m32(v_i_n ^ chain_i)
+
+            set_word(c.theV, i, v_i_new)
+            set_word(c.theV, i + NUMWORDS, v_i_n_new)
+            i = i + 1
+        }
+
+        i = 0
+        while i < 16 {
+            w = get_word(c.theV, i)
+            mem.set_u32_le(c.theBuffer, i * 4, w)
+            i = i + 1
+        }
+        c.pos = 0
+    } else {
+        i = 0
+        while i < NUMWORDS {
+            v_i = get_word(c.theV, i)
+            v_i_n = get_word(c.theV, i + NUMWORDS)
+            set_word(c.theChaining, i, m32(v_i ^ v_i_n))
+            i = i + 1
+        }
+    }
+}
+
+compress(c: *Blake3Ctx) {
+    init_indices(c.theIndices)
+    round = 0
+    while round < ROUNDS - 1 {
+        perform_round(c)
+        permute_indices(c.theIndices)
+        round = round + 1
+    }
+    perform_round(c)
+    adjust_chaining(c)
+}
+
+init_chunk_block(c: *Blake3Ctx, pDataLen: int, pFinal: int) {
+    i = 0
+    while i < NUMWORDS {
+        if c.currBytes == 0 {
+            set_word(c.theV, i, get_word(c.theK, i))
+        } else {
+            set_word(c.theV, i, get_word(c.theChaining, i))
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < 4 {
+        set_word(c.theV, NUMWORDS + i, IV[i])
+        i = i + 1
+    }
+
+    set_word(c.theV, 12, c.counter & 0xFFFFFFFF)
+    set_word(c.theV, 13, (c.counter >> 32) & 0xFFFFFFFF)
+    set_word(c.theV, 14, pDataLen)
+
+    flags = c.mode
+    if c.currBytes == 0 {
+        flags = flags + CHUNKSTART
+    }
+    if pFinal == 1 {
+        flags = flags + CHUNKEND
+    }
+    set_word(c.theV, 15, flags)
+
+    c.currBytes = c.currBytes + pDataLen
+    if c.currBytes >= CHUNKLEN {
+        increment_block_count(c)
+        v15 = get_word(c.theV, 15)
+        set_word(c.theV, 15, v15 | CHUNKEND)
+    }
+
+    if pFinal == 1 && c.stack_count < 1 {
+        set_root(c)
+    }
+}
+
+init_parent_block(c: *Blake3Ctx) {
+    i = 0
+    while i < NUMWORDS {
+        set_word(c.theV, i, get_word(c.theK, i))
+        i = i + 1
+    }
+    i = 0
+    while i < 4 {
+        set_word(c.theV, NUMWORDS + i, IV[i])
+        i = i + 1
+    }
+    set_word(c.theV, 12, 0)
+    set_word(c.theV, 13, 0)
+    set_word(c.theV, 14, BLOCKLEN)
+    set_word(c.theV, 15, c.mode | PARENT)
+}
+
+next_output_block(c: *Blake3Ctx) {
+    c.counter = c.counter + 1
+
+    i = 0
+    while i < NUMWORDS {
+        set_word(c.theV, i, get_word(c.theChaining, i))
+        i = i + 1
+    }
+    i = 0
+    while i < 4 {
+        set_word(c.theV, NUMWORDS + i, IV[i])
+        i = i + 1
+    }
+    set_word(c.theV, 12, c.counter & 0xFFFFFFFF)
+    set_word(c.theV, 13, (c.counter >> 32) & 0xFFFFFFFF)
+    set_word(c.theV, 14, c.outputDataLen)
+    set_word(c.theV, 15, c.outputMode)
+
+    compress(c)
+}
+
+increment_block_count(c: *Blake3Ctx) {
+    c.counter = c.counter + 1
+    c.currBytes = 0
+}
+
+reset_block_count(c: *Blake3Ctx) {
+    c.counter = 0
+    c.currBytes = 0
+}
+
+set_root(c: *Blake3Ctx) {
+    v15 = get_word(c.theV, 15)
+    set_word(c.theV, 15, v15 | ROOT)
+    c.outputMode = get_word(c.theV, 15) as int
+    c.outputDataLen = get_word(c.theV, 14) as int
+    c.counter = 0
+    c.outputting = 1
+    c.outputAvailable = -1
+
+    i = 0
+    while i < NUMWORDS {
+        set_word(c.theChaining, i, get_word(c.theV, i))
+        i = i + 1
+    }
+}
+
+adjust_stack(c: *Blake3Ctx) {
+    myCount = c.counter
+    while myCount > 0 {
+        if (myCount & 1) == 1 {
+            break
+        }
+
+        c.stack_count = c.stack_count - 1
+        myLeft = mem.get_ptr(c.stack, c.stack_count * 8)
+
+        i = 0
+        while i < NUMWORDS {
+            set_word(c.theM, i, mem.get_long(myLeft, i * 8))
+            set_word(c.theM, NUMWORDS + i, get_word(c.theChaining, i))
+            i = i + 1
+        }
+
+        free(myLeft)
+
+        init_parent_block(c)
+        compress(c)
+
+        myCount = myCount >> 1
+    }
+
+    node = malloc(8 * 8)
+    i = 0
+    while i < NUMWORDS {
+        mem.set_long(node, i * 8, get_word(c.theChaining, i))
+        i = i + 1
+    }
+    mem.set_ptr(c.stack, c.stack_count * 8, node)
+    c.stack_count = c.stack_count + 1
+}
+
+process_stack(c: *Blake3Ctx) {
+    while c.stack_count > 0 {
+        c.stack_count = c.stack_count - 1
+        myLeft = mem.get_ptr(c.stack, c.stack_count * 8)
+
+        i = 0
+        while i < NUMWORDS {
+            set_word(c.theM, i, mem.get_long(myLeft, i * 8))
+            set_word(c.theM, NUMWORDS + i, get_word(c.theChaining, i))
+            i = i + 1
+        }
+
+        free(myLeft)
+
+        init_parent_block(c)
+        if c.stack_count < 1 {
+            set_root(c)
+        }
+        compress(c)
+    }
+}
+
+init_m(c: *Blake3Ctx, block: ptr, offset: int) {
+    i = 0
+    while i < 16 {
+        w = mem.get_u32_le(block, offset + i * 4) & 0xFFFFFFFF
+        set_word(c.theM, i, w)
+        i = i + 1
+    }
+}
+
+compress_block(c: *Blake3Ctx, block: ptr, offset: int) {
+    init_chunk_block(c, BLOCKLEN, 0)
+    init_m(c, block, offset)
+    compress(c)
+
+    if c.currBytes == 0 {
+        adjust_stack(c)
+    }
+}
+
+compress_final_block(c: *Blake3Ctx, pDataLen: int) {
+    init_chunk_block(c, pDataLen, 1)
+    init_m(c, c.theBuffer, 0)
+    compress(c)
+    process_stack(c)
+}
+
+// ---- Streaming API ----
+
+update(ctx: ptr, data: string, length: int) {
+    if length <= 0 {
+        return
+    }
+    c = ctx as *Blake3Ctx
+    if c.outputting == 1 {
+        return
+    }
+
+    remainingLen = 0
+    if c.pos != 0 {
+        remainingLen = BLOCKLEN - c.pos
+        if remainingLen >= length {
+            i = 0
+            while i < length {
+                b = string_char_at_n(data, length, i)
+                mem.set_byte(c.theBuffer, c.pos + i, b)
+                i = i + 1
+            }
+            c.pos = c.pos + length
+            return
+        }
+
+        i = 0
+        while i < remainingLen {
+            b = string_char_at_n(data, length, i)
+            mem.set_byte(c.theBuffer, c.pos + i, b)
+            i = i + 1
+        }
+
+        compress_block(c, c.theBuffer, 0)
+        c.pos = 0
+        zero_mem(c.theBuffer, BLOCKLEN)
+    }
+
+    messagePos = remainingLen
+    blockWiseLastPos = length - BLOCKLEN
+    while messagePos < blockWiseLastPos {
+        i = 0
+        while i < BLOCKLEN {
+            b = string_char_at_n(data, length, messagePos + i)
+            mem.set_byte(c.theBuffer, i, b)
+            i = i + 1
+        }
+        compress_block(c, c.theBuffer, 0)
+        messagePos = messagePos + BLOCKLEN
+    }
+
+    len = length - messagePos
+    i = 0
+    while i < len {
+        b = string_char_at_n(data, length, messagePos + i)
+        mem.set_byte(c.theBuffer, i, b)
+        i = i + 1
+    }
+    c.pos = len
+}
+
+update_bytes(ctx: ptr, data: ptr, pLen: int) {
+    if data == null || pLen <= 0 {
+        return
+    }
+    c = ctx as *Blake3Ctx
+    if c.outputting == 1 {
+        return
+    }
+
+    raw_data = bytes.data(data)
+
+    remainingLen = 0
+    if c.pos != 0 {
+        remainingLen = BLOCKLEN - c.pos
+        if remainingLen >= pLen {
+            mem.copy(ptr_add(c.theBuffer, c.pos), raw_data, pLen)
+            c.pos = c.pos + pLen
+            return
+        }
+
+        mem.copy(ptr_add(c.theBuffer, c.pos), raw_data, remainingLen)
+        compress_block(c, c.theBuffer, 0)
+        c.pos = 0
+        zero_mem(c.theBuffer, BLOCKLEN)
+    }
+
+    messagePos = remainingLen
+    blockWiseLastPos = pLen - BLOCKLEN
+    while messagePos < blockWiseLastPos {
+        compress_block(c, ptr_add(raw_data, messagePos), 0)
+        messagePos = messagePos + BLOCKLEN
+    }
+
+    len = pLen - messagePos
+    mem.copy(c.theBuffer, ptr_add(raw_data, messagePos), len)
+    c.pos = len
+}
+
+output(ctx: ptr, out_buf: ptr, out_len: int) -> int {
+    if out_len <= 0 {
+        return 0
+    }
+    c = ctx as *Blake3Ctx
+
+    if c.outputting == 0 {
+        compress_final_block(c, c.pos)
+    }
+
+    dataLeft = out_len
+    outPos = 0
+
+    if c.pos < BLOCKLEN {
+        rem = BLOCKLEN - c.pos
+        dataToCopy = dataLeft
+        if rem < dataLeft {
+            dataToCopy = rem
+        }
+
+        mem.copy(ptr_add(out_buf, outPos), ptr_add(c.theBuffer, c.pos), dataToCopy)
+
+        c.pos = c.pos + dataToCopy
+        outPos = outPos + dataToCopy
+        dataLeft = dataLeft - dataToCopy
+    }
+
+    while dataLeft > 0 {
+        next_output_block(c)
+
+        dataToCopy = dataLeft
+        if BLOCKLEN < dataLeft {
+            dataToCopy = BLOCKLEN
+        }
+
+        mem.copy(ptr_add(out_buf, outPos), c.theBuffer, dataToCopy)
+
+        c.pos = c.pos + dataToCopy
+        outPos = outPos + dataToCopy
+        dataLeft = dataLeft - dataToCopy
+    }
+
+    c.outputAvailable = c.outputAvailable - out_len
+    return out_len
+}
+
+final_bytes(ctx: ptr) -> ptr {
+    c = ctx as *Blake3Ctx
+    n = c.digest_len
+    out_raw = malloc(n)
+    output(ctx, out_raw, n)
+
+    res = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(res, i, mem.get_byte(out_raw, i))
+        i = i + 1
+    }
+    free(out_raw)
+
+    reset_ctx(c)
+    free_ctx(ctx)
+    return res
+}
+
+final_hex(ctx: ptr) -> string {
+    c = ctx as *Blake3Ctx
+    n = c.digest_len
+    out_raw = malloc(n)
+    output(ctx, out_raw, n)
+
+    hexbuf = bytes.new(n * 2)
+    i = 0
+    while i < n {
+        b = mem.get_byte(out_raw, i)
+        hi = (b >> 4) & 15
+        lo = b & 15
+        c_hi = 48 + hi
+        if hi >= 10 {
+            c_hi = 87 + hi
+        }
+        c_lo = 48 + lo
+        if lo >= 10 {
+            c_lo = 87 + lo
+        }
+        bytes.set(hexbuf, i * 2, c_hi)
+        bytes.set(hexbuf, i * 2 + 1, c_lo)
+        i = i + 1
+    }
+    free(out_raw)
+
+    reset_ctx(c)
+    free_ctx(ctx)
+    return bytes.finish(hexbuf, n * 2)
+}
+
+free_ctx_internals(c: *Blake3Ctx) {
+    if c.theBuffer != null {
+        free(c.theBuffer)
+        c.theBuffer = null
+    }
+    if c.theK != null {
+        free(c.theK)
+        c.theK = null
+    }
+    if c.theChaining != null {
+        free(c.theChaining)
+        c.theChaining = null
+    }
+    if c.theV != null {
+        free(c.theV)
+        c.theV = null
+    }
+    if c.theM != null {
+        free(c.theM)
+        c.theM = null
+    }
+    if c.theIndices != null {
+        free(c.theIndices)
+        c.theIndices = null
+    }
+    if c.stack != null {
+        i = 0
+        while i < c.stack_count {
+            node = mem.get_ptr(c.stack, i * 8)
+            if node != null {
+                free(node)
+            }
+            i = i + 1
+        }
+        free(c.stack)
+        c.stack = null
+    }
+}
+
+free_ctx(ctx: ptr) {
+    if ctx == null {
+        return
+    }
+    c = ctx as *Blake3Ctx
+    free_ctx_internals(c)
+    free(ctx)
+}
+
+copy(ctx: ptr) -> *Blake3Ctx {
+    if ctx == null {
+        return null
+    }
+    src = ctx as *Blake3Ctx
+    dst = malloc(256) as *Blake3Ctx
+
+    dst.digest_len = src.digest_len
+    dst.theBuffer = malloc(BLOCKLEN)
+    dst.theK = malloc(NUMWORDS * 8)
+    dst.theChaining = malloc(NUMWORDS * 8)
+    dst.theV = malloc(16 * 8)
+    dst.theM = malloc(16 * 8)
+    dst.theIndices = malloc(16 * 8)
+    dst.stack = malloc(64 * 8)
+
+    mem.copy(dst.theBuffer, src.theBuffer, BLOCKLEN)
+    mem.copy(dst.theK, src.theK, NUMWORDS * 8)
+    mem.copy(dst.theChaining, src.theChaining, NUMWORDS * 8)
+    mem.copy(dst.theV, src.theV, 16 * 8)
+    mem.copy(dst.theM, src.theM, 16 * 8)
+    mem.copy(dst.theIndices, src.theIndices, 16 * 8)
+
+    dst.stack_count = src.stack_count
+    zero_mem(dst.stack, 64 * 8)
+    i = 0
+    while i < src.stack_count {
+        src_node = mem.get_ptr(src.stack, i * 8)
+        dst_node = malloc(8 * 8)
+        mem.copy(dst_node, src_node, 8 * 8)
+        mem.set_ptr(dst.stack, i * 8, dst_node)
+        i = i + 1
+    }
+
+    dst.outputting = src.outputting
+    dst.outputAvailable = src.outputAvailable
+    dst.mode = src.mode
+    dst.outputMode = src.outputMode
+    dst.outputDataLen = src.outputDataLen
+    dst.counter = src.counter
+    dst.currBytes = src.currBytes
+    dst.pos = src.pos
+
+    return dst
+}
+
+copy_state(dst_ptr: ptr, src_ptr: ptr) {
+    if dst_ptr == null || src_ptr == null {
+        return
+    }
+    dst = dst_ptr as *Blake3Ctx
+    src = src_ptr as *Blake3Ctx
+
+    mem.copy(dst.theBuffer, src.theBuffer, BLOCKLEN)
+    mem.copy(dst.theK, src.theK, NUMWORDS * 8)
+    mem.copy(dst.theChaining, src.theChaining, NUMWORDS * 8)
+    mem.copy(dst.theV, src.theV, 16 * 8)
+    mem.copy(dst.theM, src.theM, 16 * 8)
+    mem.copy(dst.theIndices, src.theIndices, 16 * 8)
+
+    // Free existing stack nodes in dst
+    i = 0
+    while i < dst.stack_count {
+        node = mem.get_ptr(dst.stack, i * 8)
+        if node != null {
+            free(node)
+        }
+        i = i + 1
+    }
+    zero_mem(dst.stack, 64 * 8)
+
+    // Copy stack from src
+    dst.stack_count = src.stack_count
+    i = 0
+    while i < src.stack_count {
+        src_node = mem.get_ptr(src.stack, i * 8)
+        dst_node = malloc(8 * 8)
+        mem.copy(dst_node, src_node, 8 * 8)
+        mem.set_ptr(dst.stack, i * 8, dst_node)
+        i = i + 1
+    }
+
+    dst.outputting = src.outputting
+    dst.outputAvailable = src.outputAvailable
+    dst.mode = src.mode
+    dst.outputMode = src.outputMode
+    dst.outputDataLen = src.outputDataLen
+    dst.counter = src.counter
+    dst.currBytes = src.currBytes
+    dst.pos = src.pos
+}
+
+// ---- One-shot convenience wrappers ----
+
+blake3_hex(data: string, len: int) -> string {
+    ctx = new()
+    if ctx == null {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+blake3_bytes(data: string, len: int) -> ptr {
+    ctx = new()
+    if ctx == null {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}
+
+blake3_keyed_hex(data: string, len: int, key: ptr, key_len: int) -> string {
+    ctx = new_keyed(key, key_len)
+    if ctx == null {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+blake3_keyed_bytes(data: string, len: int, key: ptr, key_len: int) -> ptr {
+    ctx = new_keyed(key, key_len)
+    if ctx == null {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}
+
+blake3_derived_hex(data: string, len: int, context: ptr, context_len: int) -> string {
+    ctx = new_derived(context, context_len)
+    if ctx == null {
+        return ""
+    }
+    update(ctx, data, len)
+    return final_hex(ctx)
+}
+
+blake3_derived_bytes(data: string, len: int, context: ptr, context_len: int) -> ptr {
+    ctx = new_derived(context, context_len)
+    if ctx == null {
+        return null
+    }
+    update(ctx, data, len)
+    return final_bytes(ctx)
+}
