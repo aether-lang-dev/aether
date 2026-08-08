@@ -41,6 +41,9 @@
 #include "aether_json.h"
 #include "../mem/aether_grow.h"
 #include "../../runtime/aether_resource_caps.h"
+// RFC 8259 fixes '.' as the decimal separator — number text must not follow
+// the ambient LC_NUMERIC in either direction.
+#include "../../runtime/aether_locale_num.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -813,8 +816,12 @@ static JsonValue* parse_number(Parser* s) {
         if (!numbuf) { err_set(line0, col0, "out of memory"); return NULL; }
     }
 
+    // Locale-pinned. RFC 8259 fixes '.' as the decimal separator, so parsing
+    // must not follow LC_NUMERIC: under a comma-decimal locale bare strtod
+    // stops at the '.', the endp check below fails, and every fractional
+    // number in the document becomes a parse error. See aether_locale_num.h.
     char* endp = NULL;
-    double val = strtod(numbuf, &endp);
+    double val = aether_c_strtod(numbuf, &endp);
     if (endp != numbuf + len) {
         err_set(line0, col0, "number conversion failed");
         return NULL;
@@ -1910,7 +1917,9 @@ static void sb_emit_value(StrBuf* b, JsonValue* v, int depth) {
                  * past ~1e7. */
                 n = snprintf(nb, sizeof(nb), "%lld", v->data.integer);
             } else {
-                n = snprintf(nb, sizeof(nb), "%g", v->data.number);
+                // Locale-pinned: RFC 8259 mandates '.', so this must not
+                // emit "3,14" just because the host set a European locale.
+                n = aether_c_snprintf_double(nb, sizeof(nb), "%g", v->data.number);
             }
             if (n > 0) sb_append(b, nb, (size_t)n);
             break;

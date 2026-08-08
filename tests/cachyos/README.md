@@ -36,3 +36,35 @@ the header comment in `nightly.sh`). Provision the contrib deps first — packag
 installs plus the `aether-lang-dev/factor-language` fork build — and export the
 `AETHER_*` dep env vars in the timer environment. The gate stays RED until every
 dep is present, by design.
+
+### The `de_DE.UTF-8` locale
+
+The dep gate also requires a **generated comma-decimal locale**. It backs
+`tests/regression/test_string_double_locale.ae`, which pins that `std.string`
+and `std.json` float text stays `.`-separated no matter what locale an
+embedding host has selected — the bug found in review of PR #1429, where
+`string.to_double("3.14")` failed outright under a comma-decimal locale.
+
+Arch ships glibc with the locale *sources* present but ungenerated, so:
+
+```sh
+sudo sed -i 's/^#de_DE.UTF-8 UTF-8/de_DE.UTF-8 UTF-8/' /etc/locale.gen
+sudo locale-gen
+locale -a | grep de_DE          # expect de_DE.utf8
+```
+
+This box is the **only** place that test really runs: the portable CI images
+ship C/POSIX only, so it SKIPs there (deliberately — see the plan doc). A green
+nightly whose locale test *skipped* is not a passing locale test; check the log
+for `PASS`, not merely the absence of failure.
+
+For a one-off local run without root, `localedef` writes anywhere and `LOCPATH`
+points libc at it:
+
+```sh
+localedef -i de_DE -f UTF-8 "$PWD/loc/de_DE.UTF-8"
+LOCPATH="$PWD/loc" ./build/ae run tests/regression/test_string_double_locale.ae
+```
+
+(`LOCPATH` locales do **not** appear in `locale -a`, so this trick satisfies the
+test but not the dep gate — the gate wants the real system locale.)

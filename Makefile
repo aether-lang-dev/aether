@@ -529,7 +529,7 @@ endif
 
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/aether_error.c compiler/aether_module.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/aether_error.c compiler/aether_module.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
-RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c
+RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c
 STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_net.c std/collections/aether_collections.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
 # g_sync_step_actor, current_core_id). Excluded from the compiler binary
@@ -743,9 +743,9 @@ contrib-check-valgrind: compiler ae stdlib
 	@EXE_EXT='$(EXE_EXT)' VALGRIND=1 bash .github/scripts/contrib_check.sh
 
 # Compiler target (incremental build with object files)
-compiler: $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
+compiler: $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
@@ -755,7 +755,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) build
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(IO_POLLER_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1677,6 +1677,7 @@ release: clean $(STDLIB_SYMS_HEADER)
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
+		runtime/aether_locale_num.c \
 		-o build/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
@@ -2500,7 +2501,7 @@ ci-wasm: clean compiler ae
 		runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c \
 		runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c \
 		runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c \
-		runtime/aether_runtime_types.c runtime/utils/aether_cpu_detect.c \
+		runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c \
 		runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c \
 		runtime/aether_host.c \
 		runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c \
@@ -2573,6 +2574,7 @@ ci-embedded: clean compiler
 	         runtime/aether_numa.c \
 	         runtime/actors/aether_send_message.c \
 	         runtime/actors/aether_send_buffer.c \
+	         runtime/aether_locale_num.c \
 	         std/string/aether_string.c \
 	         std/math/aether_math.c \
 	         std/fs/aether_fs.c \
