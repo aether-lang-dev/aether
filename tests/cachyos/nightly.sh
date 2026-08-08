@@ -6,9 +6,10 @@
 # NOT a GitHub Actions runner — the sibling of tests/freebsd/nightly.sh for a
 # platform the CI matrix can't cover. Cron it (or a systemd --user timer, since
 # CachyOS ships no crond) on a dedicated build box; it syncs origin/main to
-# HEAD, runs `make ci` + contrib, type-checks every contrib module, and — the
-# thing GitHub CI never does — exercises the whole thing under a much newer
-# toolchain. Surfaces -Werror promotions / new warnings before they hit anyone.
+# HEAD, runs `make ci` + contrib, type-checks AND runs every contrib module's
+# tests (under valgrind where leak-clean), and — the thing GitHub CI never does
+# — exercises the whole thing under a much newer toolchain. Surfaces -Werror
+# promotions / new warnings + runtime & leak rot before they hit anyone.
 # It publishes a topline pass/fail table to the `nightly-results` orphan branch.
 #
 # Install (systemd --user timer example):
@@ -329,6 +330,11 @@ run_and_record() {
 make_ci_step() { make ci; }
 make_contrib_step() { make contrib; }
 make_host_check_step() { make contrib-host-check; }
+# Build + RUN every contrib test_*.ae, under valgrind where the test is
+# leak-clean by design (see .github/scripts/contrib_check.sh). This is the
+# RUNTIME coverage the type-check sweep can't provide — the class of bug that
+# let tinyweb's WebSocket server path rot (it type-checked fine, ran broken).
+make_contrib_check_step() { make contrib-check-valgrind; }
 
 fails=0
 {
@@ -346,9 +352,14 @@ fails=0
     run_and_record "make contrib-host-check" make_host_check_step
     # `make ci` and `make contrib` never compile the contrib Aether code
     # (test-ae globs only tests/*, `make contrib` builds C shims). This sweep
-    # is the ONLY thing that type-checks every contrib module under the newer
-    # toolchain — the exact gap that let tinyweb's DSL rot (issue #1442).
+    # type-checks every contrib module under the newer toolchain — the gap that
+    # let tinyweb's DSL rot (issue #1442).
     run_and_record "contrib ae-check sweep" contrib_ae_check
+    # ...and this RUNS each contrib test (under valgrind where leak-clean),
+    # catching runtime + leak rot that type-checking alone misses — the deeper
+    # half of the same #1442 gap (the WS server path type-checked but was
+    # runtime-broken until it was actually exercised).
+    run_and_record "contrib test run (+valgrind)" make_contrib_check_step
     echo ""
     echo "--- publishing topline results to $RESULTS_REMOTE/$RESULTS_BRANCH ---"
     publish_results
