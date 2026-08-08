@@ -45,6 +45,42 @@ main() {
 
     json.free(root)
 
+    // Regression (#1447): a nested object attached into a parent that has
+    // already acquired an arena (props -> p, both built with json.obj()) must be
+    // fully reclaimed by a single json.free(root). object_set/array_add
+    // deep-copy the donated value into the parent's arena and then free the
+    // original; when that original had its OWN arena (from an earlier set into
+    // it), arena_destroy freed the arena but leaked the heap-allocated
+    // JsonValue struct wrapper. free_donated_value now frees the struct too.
+    // The leak is caught by the valgrind CI gate on this test; here we also
+    // assert the nested tree encodes correctly.
+    r2 = json.obj()
+    props = json.obj()
+    age = json.obj()
+    _ = json.set(age, "type", json.str("integer"))
+    _ = json.set(props, "age", age) // props now has an arena
+    _ = json.set(r2, "properties", props) // donating an arena-bearing value
+    items = json.arr()
+    inner = json.obj()
+    _ = json.set(inner, "k", json.num(1.0))
+    _ = json.push(items, inner) // array_add of an arena-bearing value
+    _ = json.set(r2, "items", items)
+
+    out2, err2 = json.encode(r2)
+    if err2 != "" {
+        println("  FAIL: nested encode error '${err2}'")
+        exit(1)
+    }
+    expected2 = "{\"properties\":{\"age\":{\"type\":\"integer\"}},\"items\":[{\"k\":1}]}"
+    if string_equals(out2, expected2) != 1 {
+        println("  FAIL: nested encoded mismatch")
+        println("    got:      ${out2}")
+        println("    expected: ${expected2}")
+        exit(1)
+    }
+    json.free(r2)
+    println("  PASS (nested, #1447): ${out2}")
+
     println("  PASS: ${out}")
     println("=== test_json_builder passed ===")
 }
