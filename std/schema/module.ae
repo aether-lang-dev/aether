@@ -46,8 +46,13 @@ exports(
     // builders
     record, field,
     min, max, len, present, optional, one_of, email, refine,
+    default_to, positive, nonneg, pattern,
+    // transforms
+    trim, lowercase, uppercase,
     // parse + result helpers
     parse, ok, error_count, error_field, error_code, error_message,
+    // projection
+    to_json_schema,
     // introspection
     schema_free, values_free, errors_free
 )
@@ -58,8 +63,10 @@ exports(
 import std.map
 import std.map(map_new, map_has, map_free)
 import std.list(list_new, list_add_raw, list_get_raw, list_size, list_free)
+import std.strbuilder
 import std.string(string_length, string_equals, string_concat, string_char_at,
-    string_contains, string_index_of, string_to_lower, string_free,
+    string_contains, string_index_of, string_to_lower, string_to_upper,
+    string_trim, string_ends_with, string_free, string_substring,
     string_starts_with, to_int, to_float)
 
 // box_closure() mallocs a two-word _AeClosure box; free it with libc free.
@@ -72,6 +79,9 @@ const FLOAT = 2
 const BOOL = 3
 
 // ---- Rule kinds ----
+// Rules split into two families, applied in declaration order during parse:
+//   TRANSFORMS (>= RULE_XFORM_FIRST) rewrite the canonical value (trim/case).
+//   CHECKS (< RULE_XFORM_FIRST) validate it and may push an error.
 const RULE_MIN = 0 // numeric >=  (ival) / string length >= for STR
 const RULE_MAX = 1 // numeric <=  (ival) / string length <= for STR
 const RULE_LEN = 2 // string length in [ival, ival2]
@@ -79,6 +89,14 @@ const RULE_PRESENT = 3 // non-empty
 const RULE_ONE_OF = 4 // value in comma-separated set (sval)
 const RULE_EMAIL = 5 // basic email shape
 const RULE_REFINE = 6 // custom closure predicate (fn value:string -> int)
+const RULE_POSITIVE = 7 // numeric > 0
+const RULE_NONNEG = 8 // numeric >= 0
+const RULE_PATTERN = 9 // substring/prefix/suffix contains (sval "kind:needle")
+// -- transforms (rewrite the value; never fail) --
+const RULE_XFORM_FIRST = 100
+const RULE_TRIM = 100 // strip surrounding whitespace
+const RULE_LOWER = 101 // lowercase
+const RULE_UPPER = 102 // uppercase
 
 struct Rule {
     kind: int
@@ -92,6 +110,8 @@ struct Field {
     name: string
     ty: int
     is_optional: int
+    has_default: int // 1 if default_val supplies an absent field
+    default_val: string // value substituted when the field is absent
     rules: ptr // *List of *Rule
 }
 
@@ -129,6 +149,8 @@ field(_ctx: ptr, name: string, ty: int) -> ptr {
     f.name = name
     f.ty = ty
     f.is_optional = 0
+    f.has_default = 0
+    f.default_val = ""
     f.rules = list_new()
     list_add_raw(s.fields, f)
     return f
@@ -186,6 +208,51 @@ email(_ctx: ptr) {
 // custom predicate: fn(value: string) -> int (1 = ok, 0 = fail)
 refine(_ctx: ptr, predicate: fn) {
     add_rule(_ctx, RULE_REFINE, 0, 0, "", box_closure(predicate))
+}
+
+// Supply a value when the field is absent from the input (implies optional:
+// an absent field is filled with `v` rather than erroring). A present field is
+// validated normally; the default only fires on absence.
+default_to(_ctx: ptr, v: string) {
+    f = _ctx as *Field
+    f.has_default = 1
+    f.default_val = v
+    f.is_optional = 1
+}
+
+// numeric > 0
+positive(_ctx: ptr) {
+    add_rule(_ctx, RULE_POSITIVE, 0, 0, "", null)
+}
+
+// numeric >= 0
+nonneg(_ctx: ptr) {
+    add_rule(_ctx, RULE_NONNEG, 0, 0, "", null)
+}
+
+// Lightweight string pattern match without a regex dependency. `spec` is
+// "kind:needle" where kind is one of contains / prefix / suffix, e.g.
+// pattern("prefix:SAVE") or pattern("contains:@"). For full regex, use refine().
+pattern(_ctx: ptr, spec: string) {
+    add_rule(_ctx, RULE_PATTERN, 0, 0, spec, null)
+}
+
+// -- transforms: rewrite the canonical value (applied in declaration order,
+//    before checks that follow them; they never fail) --
+
+// strip surrounding whitespace
+trim(_ctx: ptr) {
+    add_rule(_ctx, RULE_TRIM, 0, 0, "", null)
+}
+
+// lowercase the value
+lowercase(_ctx: ptr) {
+    add_rule(_ctx, RULE_LOWER, 0, 0, "", null)
+}
+
+// uppercase the value
+uppercase(_ctx: ptr) {
+    add_rule(_ctx, RULE_UPPER, 0, 0, "", null)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +429,77 @@ fn apply_rule(errors: ptr, r: *Rule, f: *Field, v: string) -> int {
         }
         return 0
     }
+    if k == RULE_POSITIVE {
+        if f.ty == FLOAT {
+            fv, _ = to_float(v)
+            if fv <= 0.0 {
+                push_error(errors, f.name, "too_small", "${f.name} must be positive")
+                return 1
+            }
+        } else {
+            iv, _ = to_int(v)
+            if iv <= 0 {
+                push_error(errors, f.name, "too_small", "${f.name} must be positive")
+                return 1
+            }
+        }
+        return 0
+    }
+    if k == RULE_NONNEG {
+        if f.ty == FLOAT {
+            fv, _ = to_float(v)
+            if fv < 0.0 {
+                push_error(errors, f.name, "too_small", "${f.name} must be non-negative")
+                return 1
+            }
+        } else {
+            iv, _ = to_int(v)
+            if iv < 0 {
+                push_error(errors, f.name, "too_small", "${f.name} must be non-negative")
+                return 1
+            }
+        }
+        return 0
+    }
+    if k == RULE_PATTERN {
+        // spec is "kind:needle" — kind in {contains, prefix, suffix}
+        colon = string_index_of(r.sval, ":")
+        matched = 0
+        if colon > 0 {
+            kind_s = string_substring(r.sval, 0, colon)
+            needle = string_substring(r.sval, colon + 1, string_length(r.sval))
+            if string_equals(kind_s, "contains") == 1 {
+                matched = string_contains(v, needle)
+            } else if string_equals(kind_s, "prefix") == 1 {
+                matched = string_starts_with(v, needle)
+            } else if string_equals(kind_s, "suffix") == 1 {
+                matched = string_ends_with(v, needle)
+            }
+            string_free(kind_s)
+            string_free(needle)
+        }
+        if matched != 1 {
+            push_error(errors, f.name, "invalid_format", "${f.name} does not match pattern ${r.sval}")
+            return 1
+        }
+        return 0
+    }
     return 0
+}
+
+// Apply a transform rule to `v`, returning a freshly-owned (magic) string.
+// The caller owns the result and must free the previous value if it owned it.
+fn apply_transform(kind: int, v: string) -> string {
+    if kind == RULE_TRIM {
+        return string_trim(v)
+    }
+    if kind == RULE_LOWER {
+        return string_to_lower(v)
+    }
+    if kind == RULE_UPPER {
+        return string_to_upper(v)
+    }
+    return string_concat(v, "") // identity copy (keeps ownership uniform)
 }
 
 // parse(schema, input_map) -> (values_map, errors_list)
@@ -383,7 +520,11 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
         present_in = map_has(input, f.name)
 
         if present_in == 0 {
-            if f.is_optional == 0 {
+            if f.has_default == 1 {
+                // absent + default → supply it. map.put auto-routes a string
+                // value to the owning sibling, so values_free reclaims it.
+                map.put(values, f.name, string_concat(f.default_val, ""))
+            } else if f.is_optional == 0 {
                 push_error(errors, f.name, "missing", "${f.name} is required")
             }
             i = i + 1
@@ -400,13 +541,20 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
             continue
         }
 
-        // 2. run rules (short-circuit on first failure per field)
+        // 2. run rules in declaration order. Transforms rewrite `cur` (owning a
+        //    fresh string each step); checks validate it. `cur` starts as an
+        //    owned copy of `typed` so ownership is uniform and freeable.
+        cur = string_concat(typed, "")
         rsz = list_size(f.rules)
         j = 0
         failed = 0
         while j < rsz {
             r = list_get_raw(f.rules, j) as *Rule
-            if apply_rule(errors, r, f, typed) == 1 {
+            if r.kind >= RULE_XFORM_FIRST {
+                next = apply_transform(r.kind, cur)
+                string_free(cur)
+                cur = next
+            } else if apply_rule(errors, r, f, cur) == 1 {
                 failed = 1
                 break
             }
@@ -414,7 +562,10 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
         }
 
         if failed == 0 {
-            map.put(values, f.name, typed)
+            // map.put auto-routes the owned string `cur` to the owning sibling.
+            map.put(values, f.name, cur)
+        } else {
+            string_free(cur)
         }
         i = i + 1
     }
@@ -467,6 +618,179 @@ error_message(errors: ptr, idx: int) -> string {
 }
 
 // ---------------------------------------------------------------------------
+// Projection — emit a standard JSON Schema document (Zod's z.toJSONSchema()).
+//
+// A schema is a description, not just a gate: to_json_schema() turns a record
+// into a draft-07 JSON Schema string so the same declaration drives OpenAPI
+// docs, other-language validators, or form generators. Constraints map as:
+//   min/max      -> minimum/maximum (numeric)  or minLength/maxLength (STR)
+//   len(lo,hi)   -> minLength/maxLength
+//   one_of       -> enum
+//   email        -> "format": "email"
+//   pattern      -> description hint (our lightweight kind:needle isn't regex)
+//   positive     -> exclusiveMinimum: 0   |  nonneg -> minimum: 0
+//   present/!opt -> listed in "required"
+// ---------------------------------------------------------------------------
+
+fn json_type_for(ty: int) -> string {
+    if ty == INT {
+        return "integer"
+    }
+    if ty == FLOAT {
+        return "number"
+    }
+    if ty == BOOL {
+        return "boolean"
+    }
+    return "string"
+}
+
+// Minimal JSON string escaping for values we emit (field names, enum items,
+// defaults). Handles the characters that would break a JSON string literal.
+fn json_escape_into(b: ptr, s: string) {
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 34 { // "
+            strbuilder.append(b, "\\\"")
+        } else if c == 92 { // backslash
+            strbuilder.append(b, "\\\\")
+        } else if c == 10 {
+            strbuilder.append(b, "\\n")
+        } else if c == 9 {
+            strbuilder.append(b, "\\t")
+        } else {
+            strbuilder.append_byte(b, c)
+        }
+        i = i + 1
+    }
+}
+
+fn append_kv_str(b: ptr, key: string, val: string) {
+    strbuilder.append(b, "\"")
+    strbuilder.append(b, key)
+    strbuilder.append(b, "\":\"")
+    json_escape_into(b, val)
+    strbuilder.append(b, "\"")
+}
+
+// to_json_schema(schema) -> owned JSON string (draft-07). Caller frees with
+// string_free. Built directly with strbuilder (no JSON DOM) so it is leak-clean
+// by construction and carries no ownership entanglement.
+to_json_schema(schema_ptr: ptr) -> string {
+    s = schema_ptr as *Schema
+    b = strbuilder.new(256)
+    strbuilder.append(b, "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",")
+    strbuilder.append(b, "\"type\":\"object\",\"properties\":{")
+
+    fsz = list_size(s.fields)
+    i = 0
+    while i < fsz {
+        f = list_get_raw(s.fields, i) as *Field
+        is_str = f.ty == STR
+        if i > 0 {
+            strbuilder.append(b, ",")
+        }
+        strbuilder.append(b, "\"")
+        strbuilder.append(b, f.name)
+        strbuilder.append(b, "\":{")
+        append_kv_str(b, "type", json_type_for(f.ty))
+
+        rsz = list_size(f.rules)
+        j = 0
+        while j < rsz {
+            r = list_get_raw(f.rules, j) as *Rule
+            k = r.kind
+            if k == RULE_MIN {
+                if is_str {
+                    strbuilder.append(b, ",\"minLength\":")
+                } else {
+                    strbuilder.append(b, ",\"minimum\":")
+                }
+                strbuilder.append_long(b, r.ival)
+            } else if k == RULE_MAX {
+                if is_str {
+                    strbuilder.append(b, ",\"maxLength\":")
+                } else {
+                    strbuilder.append(b, ",\"maximum\":")
+                }
+                strbuilder.append_long(b, r.ival)
+            } else if k == RULE_LEN {
+                strbuilder.append(b, ",\"minLength\":")
+                strbuilder.append_long(b, r.ival)
+                strbuilder.append(b, ",\"maxLength\":")
+                strbuilder.append_long(b, r.ival2)
+            } else if k == RULE_ONE_OF {
+                strbuilder.append(b, ",\"enum\":[")
+                set_s = r.sval
+                start = 0
+                slen = string_length(set_s)
+                first = 1
+                pos = 0
+                while pos <= slen {
+                    if pos == slen || string_char_at(set_s, pos) == 44 { // ','
+                        item = string_substring(set_s, start, pos)
+                        if first == 0 {
+                            strbuilder.append(b, ",")
+                        }
+                        strbuilder.append(b, "\"")
+                        json_escape_into(b, item)
+                        strbuilder.append(b, "\"")
+                        string_free(item)
+                        first = 0
+                        start = pos + 1
+                    }
+                    pos = pos + 1
+                }
+                strbuilder.append(b, "]")
+            } else if k == RULE_EMAIL {
+                strbuilder.append(b, ",\"format\":\"email\"")
+            } else if k == RULE_POSITIVE {
+                strbuilder.append(b, ",\"exclusiveMinimum\":0")
+            } else if k == RULE_NONNEG {
+                strbuilder.append(b, ",\"minimum\":0")
+            } else if k == RULE_PATTERN {
+                strbuilder.append(b, ",\"description\":\"matches ")
+                json_escape_into(b, r.sval)
+                strbuilder.append(b, "\"")
+            }
+            j = j + 1
+        }
+
+        if f.has_default == 1 {
+            strbuilder.append(b, ",")
+            append_kv_str(b, "default", f.default_val)
+        }
+        strbuilder.append(b, "}")
+        i = i + 1
+    }
+
+    strbuilder.append(b, "},\"required\":[")
+    first_req = 1
+    i = 0
+    while i < fsz {
+        f = list_get_raw(s.fields, i) as *Field
+        if f.is_optional == 0 && f.has_default == 0 {
+            if first_req == 0 {
+                strbuilder.append(b, ",")
+            }
+            strbuilder.append(b, "\"")
+            json_escape_into(b, f.name)
+            strbuilder.append(b, "\"")
+            first_req = 0
+        }
+        i = i + 1
+    }
+    strbuilder.append(b, "]}")
+
+    // strbuilder.finish returns a plain char*; mint an owned magic string so the
+    // caller can string_free it (and the plain char* is tracker-reclaimed).
+    raw = strbuilder.finish(b)
+    return string_concat(raw, "")
+}
+
+// ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------
 
@@ -497,8 +821,9 @@ schema_free(schema_ptr: ptr) {
     heap.free(s)
 }
 
-// The values map holds borrowed pointers into the schema/input strings; free
-// only the map spine.
+// The values map now OWNS each stored value (parse stores coerced/transformed/
+// defaulted strings via map_put_string_owned). map_free reclaims both the spine
+// and every owned value.
 values_free(values: ptr) {
     if values != null {
         map_free(values)

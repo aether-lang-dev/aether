@@ -6,7 +6,7 @@
 import std.schema
 import std.map(map_new, map_put_raw, map_free)
 import std.map
-import std.string(string_equals, to_int)
+import std.string(string_equals, to_int, string_contains, string_free)
 
 extern exit(code: int)
 
@@ -243,6 +243,89 @@ main() {
     schema.errors_free(uerr)
     map_free(uin)
     schema.schema_free(acct)
+
+    // ---- defaults + transforms + new checks (positive/nonneg/pattern) ----
+    ext = schema.record() {
+        schema.field("email", schema.STR) {
+            schema.trim()
+            schema.lowercase()
+            schema.email()
+        }
+        schema.field("plan", schema.STR) {
+            schema.default_to("free")
+            schema.one_of("free,pro,enterprise")
+        }
+        schema.field("qty", schema.INT) {
+            schema.positive()
+        }
+        schema.field("code", schema.STR) {
+            schema.pattern("prefix:SAVE")
+        }
+    }
+
+    // transforms normalize; default supplies absent plan
+    din = map_new()
+    put(din, "email", "  Ada@Example.COM  ")
+    put(din, "qty", "3")
+    put(din, "code", "SAVE10")
+    dv, de = schema.parse(ext, din)
+    if schema.ok(de) != 1 {
+        fail("ext: expected ok, first=${schema.error_code(de, 0)}")
+    }
+    d_email, _ = map.get(dv, "email")
+    d_plan, _ = map.get(dv, "plan")
+    if string_equals(d_email, "ada@example.com") != 1 {
+        fail("transform: email not trimmed+lowered: '${d_email}'")
+    }
+    if string_equals(d_plan, "free") != 1 {
+        fail("default: plan not defaulted: '${d_plan}'")
+    }
+    print("PASS: transforms (trim+lowercase) and default applied\n")
+    schema.values_free(dv)
+    schema.errors_free(de)
+    map_free(din)
+
+    // positive check fails on <= 0
+    dn = map_new()
+    put(dn, "email", "a@b.co")
+    put(dn, "qty", "0")
+    put(dn, "code", "SAVE1")
+    expect_err("positive rejects 0", ext, dn, "qty", "too_small")
+    map_free(dn)
+
+    // pattern (prefix) rejects wrong prefix
+    dp = map_new()
+    put(dp, "email", "a@b.co")
+    put(dp, "qty", "1")
+    put(dp, "code", "NOPE")
+    expect_err("pattern prefix mismatch", ext, dp, "code", "invalid_format")
+    map_free(dp)
+
+    // ---- to_json_schema projection ----
+    js = schema.to_json_schema(ext)
+    // spot-check a few required fragments rather than the whole string
+    if string_contains(js, "\"$schema\"") != 1 {
+        fail("json_schema: missing $schema")
+    }
+    if string_contains(js, "\"format\":\"email\"") != 1 {
+        fail("json_schema: email format not emitted")
+    }
+    if string_contains(js, "\"enum\":[\"free\",\"pro\",\"enterprise\"]") != 1 {
+        fail("json_schema: one_of not emitted as enum: ${js}")
+    }
+    if string_contains(js, "\"exclusiveMinimum\":0") != 1 {
+        fail("json_schema: positive not emitted: ${js}")
+    }
+    if string_contains(js, "\"default\":\"free\"") != 1 {
+        fail("json_schema: default not emitted")
+    }
+    // defaulted/optional fields excluded from required; email + qty + code kept
+    if string_contains(js, "\"required\":[\"email\",\"qty\",\"code\"]") != 1 {
+        fail("json_schema: required set wrong: ${js}")
+    }
+    print("PASS: to_json_schema emits draft-07 with constraints\n")
+    string_free(js)
+    schema.schema_free(ext)
 
     print("\nAll PASS\n")
 }
