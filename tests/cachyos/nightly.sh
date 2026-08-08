@@ -76,7 +76,13 @@ export AETHER_HOME="$REPO"
 } > "$LOG"
 
 # --- sync to HEAD (clean; never carry local state into a nightly) ---
-git fetch -q origin 2>>"$LOG"
+# --tags matters: the Makefile takes the highest git TAG as the authoritative
+# version (the VERSION file is only a tarball fallback), so a fetch without tags
+# builds and stamps the PREVIOUS release even though the commits are current.
+# Seen 2026-08-08: tree at 0.505.0's merge commit, newest local tag v0.504.0,
+# binaries stamped 0.504.0 — which then reads as a stale build to anything
+# comparing against the VERSION file.
+git fetch -q --tags --prune origin 2>>"$LOG"
 git checkout -q main 2>>"$LOG"
 git reset -q --hard origin/main 2>>"$LOG"
 git clean -qfdx -e 'aether-nightly*' 2>>"$LOG" || true
@@ -347,6 +353,74 @@ make_host_check_step() { make contrib-host-check; }
 # let tinyweb's WebSocket server path rot (it type-checked fine, ran broken).
 make_contrib_check_step() { make contrib-check-valgrind; }
 
+# Refresh the $HOME/.local install from the tree we just built.
+#
+# Why this is a pipeline step and not a provisioning chore: a handful of tests
+# link against the INSTALLED artifacts rather than the build tree —
+# ci_coverage_smoke is the current one, and it skips outright when no install
+# is present, so simply deleting the install would silence a test rather than
+# fix it. Left unrefreshed, the install silently drifts behind the tree and
+# fails with a mystery linker error instead:
+#
+#     undefined reference to `aether_unwind_forget'
+#
+# (Seen 2026-08-08: a Jul-19 install against an Aug-8 tree. The symbol had been
+# added in between. The nightly log shows only "gcc --coverage link failed"
+# without the linker's line, which makes it very easy to misread as a compiler
+# bug on this box's newer GCC — it is not.)
+#
+# Refreshing every run makes that drift impossible by construction.
+#
+# PREFIX is under $HOME deliberately: this must never need sudo. The OTHER
+# install on this box — the root-owned /usr/local/bin/ae that shadows PATH — is
+# not ours to touch, which is exactly why the pinning block above puts
+# $REPO/build first on PATH rather than trusting whatever is installed.
+make_install_step() { make install PREFIX="$HOME/.local"; }
+
+# Assert the refresh actually took. Deliberately separate from the install step
+# so the summary distinguishes "install failed" from "install succeeded but
+# produced something stale".
+#
+# Checks the COMPILED-IN version, exactly as contrib_ae_check does above, and
+# for the same reason: `ae --version` prints the version MANAGER's active
+# install (from ~/.aether/active_version), not the version compiled into the
+# binary you just ran. On this box that state reads 0.417.0, so a correctly
+# built and installed 0.504.0 binary still SAYS 0.417.0. Comparing against
+# `ae --version` here would report STALE forever.
+#
+# Also verifies the archive, since that is what the drift actually broke:
+# ci_coverage_smoke links $PREFIX/lib/aether/libaether.a, and a Jul-19 archive
+# against an Aug-8 tree fails with `undefined reference to aether_unwind_forget`
+# — a linker error that reads like a compiler bug if you do not know to look
+# here. Comparing mtimes catches that class directly.
+verify_install_step() {
+    # Take the version the way the Makefile does — the highest git TAG is
+    # authoritative, with the VERSION file only a tarball fallback. Reading the
+    # VERSION file here instead would produce false STALE reports whenever the
+    # sync fetched commits but not tags (`git pull` does not always bring tags),
+    # since the build would legitimately stamp the older tag.
+    want="$(cd "$REPO" && git tag -l 'v*.*.*' 2>/dev/null \
+              | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)"
+    [ -n "$want" ] || want="$(cat "$REPO/VERSION" 2>/dev/null)"
+    installed_ae="$HOME/.local/bin/ae"
+    installed_lib="$HOME/.local/lib/aether/libaether.a"
+
+    if [ ! -x "$installed_ae" ] || [ ! -f "$installed_lib" ]; then
+        echo "  install verify: no install at \$HOME/.local (ae and/or libaether.a missing)"
+        return 1
+    fi
+    if [ -n "$want" ] && ! strings "$installed_ae" 2>/dev/null | grep -qxF "$want"; then
+        echo "  install verify: installed ae does not carry VERSION=$want (stale install?)"
+        return 1
+    fi
+    if [ "$REPO/build/libaether.a" -nt "$installed_lib" ]; then
+        echo "  install verify: installed libaether.a is OLDER than the freshly built one"
+        return 1
+    fi
+    echo "  install verify: \$HOME/.local carries VERSION ${want:-unknown}, archive current"
+    return 0
+}
+
 fails=0
 {
     echo "Aether nightly summary — $STAMP"
@@ -359,6 +433,12 @@ fails=0
     : > "$STEPS_TSV"
     run_and_record "contrib dependency gate" require_deps
     run_and_record "make ci" make_ci_step
+    # Refresh $HOME/.local from the tree we just built, then prove it took.
+    # Runs AFTER `make ci` (which builds everything) and BEFORE the sweeps, so
+    # anything linking against the installed artifacts sees today's toolchain
+    # rather than whatever was installed weeks ago. See make_install_step.
+    run_and_record "make install (PREFIX=\$HOME/.local)" make_install_step
+    run_and_record "install freshness check" verify_install_step
     run_and_record "make contrib" make_contrib_step
     run_and_record "make contrib-host-check" make_host_check_step
     # `make ci` and `make contrib` never compile the contrib Aether code
