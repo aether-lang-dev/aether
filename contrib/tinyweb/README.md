@@ -67,7 +67,8 @@ leaf — its block, if any, is a request-time handler, not more DSL.
 
 - `module.ae` — The library
 - `ws_client.ae` — WebSocket client
-- `ws_handshake.c` — SHA-1 + Base64 for WebSocket accept key (C extern)
+- `ws_handshake.c` — SHA-1 + Base64 for the WebSocket accept key, plus
+  `ws_unmask` (RFC 6455 §5.3 frame unmasking) — C externs
 - `example_app.ae` — HTTP endpoints with filters and nested paths
 - `example_composition.ae` — Modular composition, deep nesting, auth filters
 - `example_websocket.ae` — HTTP + WebSocket server with echo handler
@@ -76,3 +77,6 @@ leaf — its block, if any, is a request-time handler, not more DSL.
 - `example_auth.ae` — Cookie parsing + filter-to-endpoint attributes
 - `test_spec.ae` — DSL registration unit tests
 - `test_integration.ae` — HTTP round-trip integration tests
+- `test_websocket.ae` — WebSocket codec round-trip (handshake, client-frame
+  unmasking, and extended-length server framing). Needs the C extern:
+  `ae run test_websocket.ae --extra ws_handshake.c`

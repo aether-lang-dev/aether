@@ -88,6 +88,21 @@ char* ws_base64_encode(const uint8_t *data, int len) {
 
 static const char *WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+// ---- WebSocket frame unmasking (RFC 6455 §5.3) ----
+// Client-to-server frames are always masked: payload[i] ^= mask_key[i % 4].
+// Returns a freshly malloc'd NUL-terminated copy of the unmasked payload.
+// `len` is the true payload byte length (payloads may contain NUL bytes, so we
+// do NOT rely on strlen — the caller passes the frame's declared length).
+char* ws_unmask(const char *payload, const char *mask_key, int len) {
+    if (len < 0) len = 0;
+    char *out = (char *)malloc((size_t)len + 1);
+    for (int i = 0; i < len; i++) {
+        out[i] = (char)((unsigned char)payload[i] ^ (unsigned char)mask_key[i & 3]);
+    }
+    out[len] = '\0';
+    return out;
+}
+
 char* ws_generate_accept_key(const char *client_key) {
     size_t key_len = strlen(client_key);
     size_t magic_len = strlen(WS_MAGIC);
