@@ -101,13 +101,23 @@ have_dep() {
                      ls "$d/$l".* >/dev/null 2>&1 && return 0
                  done
              done ;;
+        # A GENERATED locale. Spellings diverge on both axes: `locale -a`
+        # prints de_DE.utf8 while /etc/locale.gen takes de_DE.UTF-8. Compare
+        # with case folded AND '-' stripped so utf8/UTF-8 are the same string;
+        # matching case-insensitively alone still misses the hyphen.
+        locale) _avail=$(locale -a 2>/dev/null | tr 'A-Z' 'a-z' | tr -d '-')
+                for L in "$@"; do
+                    _want=$(printf '%s' "$L" | tr 'A-Z' 'a-z' | tr -d '-')
+                    printf '%s\n' "$_avail" | grep -qx "$_want" && return 0
+                done ;;
     esac
     return 1
 }
 
 require_deps() {
     missing=0
-    # "<pkg>|<kind>|<candidate...>"  — kind: cmd (PATH) or lib (shared object).
+    # "<pkg>|<kind>|<candidate...>"  — kind: cmd (PATH), lib (shared object)
+    # or locale (generated locale, per `locale -a`).
     set --                                              \
         "sqlite|lib|libsqlite3.so"                       \
         "expat|lib|libexpat.so"                          \
@@ -121,7 +131,8 @@ require_deps() {
         "nodejs|cmd|node"                                \
         "java|cmd|java"                                  \
         "tinygo|cmd|tinygo"                              \
-        "racket|cmd|racket"
+        "racket|cmd|racket"                              \
+        "de_DE.UTF-8 locale|locale|de_DE.utf8|de_DE.UTF-8"
     pkg_specs="$*"
     for spec in $pkg_specs; do
         pkg="${spec%%|*}"; rest="${spec#*|}"

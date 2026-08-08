@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Float text conversion no longer follows `LC_NUMERIC`** — `std.string` and
+  `std.json` produce and consume *machine* text (wire formats, JSON, config,
+  round-trips), so their decimal separator must be `.` regardless of the
+  ambient locale. The parse side had no locale handling at all: under a
+  comma-decimal locale such as `de_DE.UTF-8`, `strtod("3.14")` stops at the
+  `.`, so `string.to_double("3.14")` **rejected valid input** and every
+  fractional number in a JSON document failed to parse — breaking the
+  round-trip guarantee added in #1429 and emitting/rejecting JSON that
+  violates RFC 8259. The emit side reformatted after the fact instead of
+  controlling the conversion.
+
+  All eight conversion sites across `std/string`, `std/json` and
+  `runtime/aether_runtime_types.c` now route through a new
+  `runtime/aether_locale_num.{h,c}`, which pins each call to the C locale via
+  the `_l`-suffixed libc functions where available (macOS, BSD, Windows) and a
+  thread-local `uselocale` bracket on glibc — never `setlocale`, which is
+  process-global and would race Aether's own actor, scheduler, worker and HTTP
+  threads as well as disturb an embedding host. `atof` in the runtime is
+  replaced by the locale-pinned `strtod`. Platforms with no locale machinery
+  (WASM, ARM newlib) degrade to a plain passthrough, which is correct there
+  because `LC_NUMERIC` is structurally `C`.
+
+  This surfaced in external review of #1429. Human-facing number formatting is
+  unaffected — that is `std.number`'s job (#863 Phase 4) and correctly takes an
+  explicit locale.
+
+  New regression test `tests/regression/test_string_double_locale.ae` applies a
+  comma-decimal locale in-process and checks both directions plus a JSON
+  round-trip; it SKIPs visibly where no such locale is installed, and the
+  CachyOS nightly's dependency gate now requires `de_DE.UTF-8` so it really
+  runs somewhere.
+
 ## [0.504.0]
 
 ### Added

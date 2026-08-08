@@ -1,5 +1,6 @@
 // Runtime Type Checking Implementation
 #include "aether_runtime_types.h"
+#include "aether_locale_num.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -79,7 +80,9 @@ RuntimeValue* aether_convert_type(RuntimeValue* val, const char* target_type) {
             return result;
         } else if (target_code == RUNTIME_TYPE_STRING) {
             char buffer[32];
-            snprintf(buffer, sizeof(buffer), "%f", val->value.float_val);
+            // Locale-pinned — this is machine text (see aether_locale_num.h).
+            aether_c_snprintf_double(buffer, sizeof(buffer), "%f",
+                                     val->value.float_val);
             result->value.string_val = strdup(buffer);
             if (!result->value.string_val) { free(result); return NULL; }
             return result;
@@ -95,7 +98,10 @@ RuntimeValue* aether_convert_type(RuntimeValue* val, const char* target_type) {
             result->value.int_val = atoll(val->value.string_val);
             return result;
         } else if (target_code == RUNTIME_TYPE_FLOAT) {
-            result->value.float_val = atof(val->value.string_val);
+            // aether_c_strtod, not atof: locale-pinned (atof follows
+            // LC_NUMERIC, so "3.14" reads as 3.0 under a comma-decimal host).
+            result->value.float_val =
+                aether_c_strtod(val->value.string_val, NULL);
             return result;
         } else if (target_code == RUNTIME_TYPE_BOOL) {
             result->value.bool_val = val->value.string_val &&

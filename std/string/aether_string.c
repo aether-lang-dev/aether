@@ -9,7 +9,10 @@
 #include <limits.h>
 #include <stdint.h>  // SIZE_MAX (not in <limits.h> on MinGW)
 #include <math.h>
-#include <locale.h>
+// Locale-independent float text conversion. Replaces direct snprintf/strtod/
+// strtof, which obey LC_NUMERIC and therefore break machine text (JSON, wire
+// formats, round-trips) when Aether is embedded in a host that set a locale.
+#include "../../runtime/aether_locale_num.h"
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -811,7 +814,7 @@ AetherString* string_from_long(long long value) {
 // floating-point promotion in varargs), so the format string stays.
 AetherString* string_from_float(double value) {
     char buffer[64];
-    snprintf(buffer, sizeof(buffer), "%g", value);
+    aether_c_snprintf_double(buffer, sizeof(buffer), "%g", value);
     return string_new(buffer);
 }
 
@@ -838,26 +841,20 @@ AetherString* string_from_double(double value) {
         }
     }
 
+    // This is MACHINE text — it round-trips through string_to_double, goes
+    // into JSON, config files and onto sockets — so the decimal separator must
+    // be '.' whatever locale the process is in. aether_c_snprintf_double pins
+    // the conversion to the C locale rather than reformatting afterwards.
+    //
+    // Not setlocale(): it is process-global, it is not a library's to change
+    // on its embedder's behalf, and Aether runs its own threads (actors,
+    // scheduler, worker pool, HTTP accept threads), so mutating it would race
+    // our own runtime. Human-facing formatting lives in std.number, which
+    // takes an explicit locale.
     char buffer[128];
-    int written = snprintf(buffer, sizeof(buffer), "%.17g", value);
+    int written = aether_c_snprintf_double(buffer, sizeof(buffer), "%.17g", value);
     if (written < 0 || (size_t)written >= sizeof(buffer)) {
         return string_empty();
-    }
-
-    // snprintf obeys LC_NUMERIC. Normalize its (possibly multibyte) decimal
-    // point without mutating the process-global locale; callers embedding
-    // Aether may have selected a non-C locale before reaching this function.
-    struct lconv* lc = localeconv();
-    const char* decimal_point = lc ? lc->decimal_point : NULL;
-    if (decimal_point && decimal_point[0] && strcmp(decimal_point, ".") != 0) {
-        char* at = strstr(buffer, decimal_point);
-        if (at) {
-            size_t point_len = strlen(decimal_point);
-            at[0] = '.';
-            if (point_len > 1) {
-                memmove(at + 1, at + point_len, strlen(at + point_len) + 1);
-            }
-        }
     }
 
     return string_new(buffer);
@@ -1044,7 +1041,9 @@ int string_to_float_raw(const void* str, float* out_value) {
 
     char* endptr;
     errno = 0;
-    float val = strtof(data, &endptr);
+    // Locale-pinned: strtof obeys LC_NUMERIC, which would reject "3.14"
+    // outright under a comma-decimal locale. See aether_locale_num.h.
+    float val = aether_c_strtof(data, &endptr);
 
     if (endptr == data || (errno == ERANGE && (val == HUGE_VALF || val == -HUGE_VALF))) {
         return 0;
@@ -1063,7 +1062,10 @@ int string_to_double_raw(const void* str, double* out_value) {
 
     char* endptr;
     errno = 0;
-    double val = strtod(data, &endptr);
+    // Locale-pinned — the inverse of string_from_double. Without this, a host
+    // that has called setlocale(LC_ALL, "") to a comma-decimal locale makes
+    // this function reject "3.14" as unparseable. See aether_locale_num.h.
+    double val = aether_c_strtod(data, &endptr);
 
     if (endptr == data || (errno == ERANGE && (val == HUGE_VAL || val == -HUGE_VAL))) {
         return 0;

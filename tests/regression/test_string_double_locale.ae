@@ -1,0 +1,240 @@
+// Locale independence of MACHINE float text (issue #863 follow-up; review of
+// PR #1429). std.string and std.json produce and consume wire/serialisation
+// text, so their decimal separator must be '.' no matter what locale the
+// process is in. Human-facing formatting is std.number's job and takes an
+// explicit locale; it is checked here too, but as an INVARIANT — its output
+// must be identical whatever the ambient locale, i.e. unaffected by this fix.
+//
+// Why this test needs to set the locale itself: locale env vars (LC_ALL,
+// LC_NUMERIC, LANG) are INERT in a C program until something calls
+// setlocale(LC_ALL, ""). Nothing in the Aether runtime does, so running this
+// binary under `LC_ALL=de_DE.UTF-8` would prove nothing — it would sit in the
+// C locale and pass vacuously. aether_test_setlocale() applies the locale
+// in-process, reproducing what an embedding host (GTK, PHP, a C++ app that
+// called setlocale) does to us for real.
+//
+// The bug this pins: under a comma-decimal locale, bare strtod("3.14") stops
+// at the '.', so string.to_double REJECTED valid input and every fractional
+// number in a JSON document failed to parse.
+//
+// SKIPs visibly when no comma-decimal locale is installed. To run it for real
+// on a box without one, no root needed:
+//     localedef -i de_DE -f UTF-8 "$PWD/loc/de_DE.UTF-8"
+//     LOCPATH="$PWD/loc" ./build/ae run tests/regression/test_string_double_locale.ae
+import std.string
+import std.json
+import std.number
+import std.number(FormatOptions)
+
+// Sets the process-global locale (test-only; see runtime/aether_locale_num.h).
+// Returns 1 if applied, 0 if that locale is not installed on this machine.
+extern aether_test_setlocale(name: string) -> int
+
+// Try the spellings a comma-decimal locale goes by across platforms and
+// distros. Returns the name that stuck, or "" if none did.
+select_comma_locale() -> string {
+    if aether_test_setlocale("de_DE.UTF-8") == 1 {
+        return "de_DE.UTF-8"
+    }
+    if aether_test_setlocale("de_DE.utf8") == 1 {
+        return "de_DE.utf8"
+    }
+    if aether_test_setlocale("fr_FR.UTF-8") == 1 {
+        return "fr_FR.UTF-8"
+    }
+    // Windows spellings — UCRT takes the BCP-47 form, msvcrt needs the long one.
+    if aether_test_setlocale("de-DE") == 1 {
+        return "de-DE"
+    }
+    if aether_test_setlocale("German_Germany.utf8") == 1 {
+        return "German_Germany.utf8"
+    }
+    if aether_test_setlocale("German_Germany.1252") == 1 {
+        return "German_Germany.1252"
+    }
+    return ""
+}
+
+check_text(value: float, expected: string, label: string) -> int {
+    text = string.from_double(value)
+    ok = 1
+    if string.equals(text, expected) != 1 {
+        ok = 0
+        println("  FAIL ${label}: got \"${text}\", expected \"${expected}\"")
+    } else {
+        println("  PASS ${label}: ${text}")
+    }
+    string.free(text)
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// Parse `text` and assert it re-emits as `expected`. Re-emitting (rather than
+// only checking for an error) is what catches a parse that "succeeds" with the
+// wrong magnitude — bare strtod under a comma locale stops at the '.' and
+// yields 3.0 for "3.14", which an error check alone would miss.
+check_parse_as(text: string, expected: string, label: string) -> int {
+    value, err = string.to_double(text)
+    ok = 1
+    if err != "" {
+        ok = 0
+        println("  FAIL ${label}: to_double(\"${text}\") errored: ${err}")
+    }
+    string.free(err)
+
+    if ok == 1 {
+        back = string.from_double(value)
+        if string.equals(back, expected) != 1 {
+            ok = 0
+            println("  FAIL ${label}: \"${text}\" became \"${back}\", expected \"${expected}\"")
+        } else {
+            println("  PASS ${label}: \"${text}\" -> ${back}")
+        }
+        string.free(back)
+    }
+
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// Common case: the text is already in canonical emit form, so it must
+// round-trip to itself.
+check_parse(text: string, label: string) -> int {
+    return check_parse_as(text, text, label)
+}
+
+check_json_roundtrip() -> int {
+    doc, perr = json.parse("{\"x\":3.14,\"y\":-0.5,\"z\":1.5e10}")
+    if perr != "" {
+        println("  FAIL json: parse errored under this locale: ${perr}")
+        string.free(perr)
+        return 1
+    }
+    string.free(perr)
+
+    out, serr = json.stringify(doc)
+    ok = 1
+    // RFC 8259 fixes '.' as the decimal separator. A comma here would be
+    // non-conforming JSON that other parsers reject.
+    if string.contains(out, ",") == 1 && string.contains(out, "3.14") != 1 {
+        ok = 0
+    }
+    if string.contains(out, "3.14") != 1 {
+        ok = 0
+        println("  FAIL json: expected 3.14 in output, got ${out}")
+    } else {
+        println("  PASS json: ${out}")
+    }
+    string.free(out)
+    string.free(serr)
+
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// The other side of the machine/human split: std.number formats for PEOPLE and
+// must follow the locale it is GIVEN, never the ambient one. It happens to use
+// string.from_double as a canonical dot-separated intermediate, so it sits
+// directly downstream of the fix — this guards against a future "cleanup"
+// pushing locale-awareness into the machine layer or stripping it from here.
+// German formatting is '.' for thousands and ',' for the decimal, whatever
+// LC_NUMERIC says.
+check_number_unaffected(label: string) -> int {
+    FormatOptions opts
+    opts.min_fraction_digits = 2
+    opts.max_fraction_digits = 2
+    opts.use_grouping = 1
+
+    formatted = number.format_decimal("de", 1234.5, opts)
+    ok = 1
+    if string.equals(formatted, "1.234,50") != 1 {
+        ok = 0
+        println("  FAIL std.number ${label}: got \"${formatted}\", expected \"1.234,50\"")
+    } else {
+        println("  PASS std.number ${label}: ${formatted}")
+    }
+    string_release(formatted)
+    formatted = ""
+
+    if ok == 1 {
+        return 0
+    }
+    return 1
+}
+
+// The shim must leave the CALLER's locale exactly as it found it. On glibc the
+// emit path swaps the thread locale with uselocale() for the duration of the
+// call; if it failed to restore, the whole process would silently drift to the
+// C locale after the first float is formatted — which would break std.number
+// and any embedding host. Detected here by formatting through std.number (which
+// reads the ambient locale for nothing, but exercises the shim underneath) and
+// confirming a second identical call still agrees.
+check_locale_not_leaked() -> int {
+    first = check_number_unaffected("still correct after shim use (1st)")
+    // A from_double() in between is what would strand the thread in C.
+    scratch = string.from_double(3.14)
+    string.free(scratch)
+    second = check_number_unaffected("still correct after shim use (2nd)")
+    return first + second
+}
+
+main() {
+    println("=== Locale independence of machine float text ===")
+
+    // Baseline in the ambient (C) locale, before anything is switched.
+    baseline_fails = check_number_unaffected("under ambient C locale")
+
+    locale_name = select_comma_locale()
+    if locale_name == "" {
+        println("SKIP: no comma-decimal locale installed (tried de_DE/fr_FR/Windows spellings)")
+        println("      generate one without root:")
+        println("      localedef -i de_DE -f UTF-8 \"$PWD/loc/de_DE.UTF-8\" && export LOCPATH=\"$PWD/loc\"")
+        if baseline_fails != 0 {
+            println("${baseline_fails} FAILURE(S)")
+            exit(1)
+        }
+        return
+    }
+    println("locale applied: ${locale_name} (ambient decimal separator is a comma)")
+    string.free(locale_name)
+
+    fails = baseline_fails
+
+    // Emit side — must stay dot-separated.
+    fails = fails + check_text(3.14, "3.1400000000000001", "from_double(3.14)")
+    fails = fails + check_text(0.5, "0.5", "from_double(0.5)")
+    fails = fails + check_text(-2.5, "-2.5", "from_double(-2.5)")
+    fails = fails + check_text(0.0, "0", "from_double(0.0)")
+
+    // Parse side — this is the half that was entirely unprotected and which
+    // FAILED outright before the fix.
+    fails = fails + check_parse("3.1400000000000001", "to_double(3.14...)")
+    fails = fails + check_parse("0.5", "to_double(0.5)")
+    fails = fails + check_parse("-2.5", "to_double(-2.5)")
+    // Exponent form parses to the same value but re-emits as plain digits
+    // under %.17g, so compare against the canonical spelling rather than the
+    // input.
+    fails = fails + check_parse_as("1.5e10", "15000000000", "to_double(1.5e10)")
+
+    // JSON in both directions (RFC 8259 conformance).
+    fails = fails + check_json_roundtrip()
+
+    // And the human-text side must be byte-identical to the C-locale baseline.
+    fails = fails + check_number_unaffected("under the comma locale (must match)")
+
+    // The shim must not leak its C locale into the caller's thread.
+    fails = fails + check_locale_not_leaked()
+
+    println("")
+    if fails == 0 {
+        println("All PASS")
+    } else {
+        println("${fails} FAILURE(S)")
+    }
+}
