@@ -1,0 +1,163 @@
+// Showcase: declarative JSON APIs with tinyweb.schema_api + std.schema.
+//
+// This demonstrates the FULL std.schema surface through the web layer — the
+// aspects the minimal test doesn't show:
+//   - rich validators: email, one_of, len, positive
+//   - transforms:      trim + lowercase (the value is NORMALIZED, not just checked)
+//   - default_to:      an absent field is filled, not rejected
+//   - coercion:        FLOAT/INT/BOOL from JSON scalars (Pydantic-style)
+//   - refine:          a custom predicate closure
+//   - "parse, don't validate": the handler READS the coerced/normalized values,
+//     it doesn't re-check anything (Zod / io-ts philosophy)
+//   - projection:      GET {resource}/schema serves the resource's draft-07
+//     JSON Schema, and GET /openapi.json serves an aggregate OpenAPI 3.0 doc
+//     built from every mounted resource (FastAPI-style; the Ash idea that a
+//     declarative resource is a projectable artifact, not just a gate)
+//
+// Run:  ae run contrib/tinyweb/example_schema_api.ae
+//
+// Credits (all MIT): Zod, Pydantic, io-ts, Ash — see std/schema/README.md.
+
+import contrib.tinyweb
+import contrib.tinyweb.schema_api
+import std.schema
+import std.list
+import std.http(http_post_raw, http_get_raw, http_response_status_code,
+    http_response_body_str, http_response_free)
+import std.string(string_starts_with)
+
+extern exit(code: int)
+extern sleep(ms: int)
+
+// A "user" handler that runs ONLY on a validated body — it can trust the
+// values are typed and normalized, and just read them back.
+handle_create_user(req: ptr, res: ptr, ctx: ptr) {
+    // In a real app you'd read the parsed values from ctx; here we just confirm
+    // the happy path was reached (validation + transforms already applied).
+    tinyweb.response_write_status(res, "{\"data\":{\"type\":\"users\",\"created\":true}}", 201)
+}
+
+handle_create_order(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"data\":{\"type\":\"orders\",\"created\":true}}", 201)
+}
+
+// ---- server actor (blocking accept loop off the main thread) ----
+message StartSrv { srv: ptr }
+
+actor SrvActor {
+    state s = 0
+    receive {
+        StartSrv(srv) -> {
+            s = srv
+            tinyweb.tw_start(srv)
+        }
+    }
+}
+actor Sched {
+    state x = 0
+    receive { Ping() -> { x = 1 } }
+}
+message Ping {}
+
+fn get(path: string) -> ptr {
+    return http_get_raw("http://127.0.0.1:18096${path}")
+}
+fn post(path: string, body: string) -> ptr {
+    return http_post_raw("http://127.0.0.1:18096${path}", body, "application/json")
+}
+
+fn show(label: string, resp: ptr) {
+    st = http_response_status_code(resp)
+    body = http_response_body_str(resp)
+    print("  ${label}: ${st}\n")
+    print("    ${body}\n")
+    http_response_free(resp)
+}
+
+main() {
+    print("=== tinyweb.schema_api showcase ===\n\n")
+
+    // A user resource exercising the rich std.schema surface.
+    user = schema.record() {
+        schema.field("name", schema.STR) {
+            schema.trim() // normalize: strip whitespace
+            schema.present()
+            schema.len(1, 60)
+        }
+        schema.field("email", schema.STR) {
+            schema.trim()
+            schema.lowercase() // normalize: canonical lowercase
+            schema.email()
+        }
+        schema.field("age", schema.INT) {
+            schema.positive()
+            schema.max(120)
+        }
+        schema.field("role", schema.STR) {
+            schema.one_of("admin,user,guest")
+            schema.default_to("user") // absent -> "user", not an error
+        }
+        schema.field("score", schema.FLOAT) {
+            schema.min(0) // FLOAT coercion + bound
+        }
+        schema.field("coupon", schema.STR) {
+            schema.refine(| v: string | {
+                    if string_starts_with(v, "SAVE") == 1 {
+                        return 1
+                    }
+                    return 0
+                })
+            schema.default_to("SAVE0")
+        }
+    }
+
+    // A second resource, to make the aggregate OpenAPI doc non-trivial.
+    order = schema.record() {
+        schema.field("sku", schema.STR) { schema.present() }
+        schema.field("qty", schema.INT) { schema.positive() }
+    }
+
+    // Mount both as JSON APIs and collect the groups for the OpenAPI aggregate.
+    registry = list.new()
+    server = tinyweb.web_server_host("127.0.0.1", 18096) {
+        u = schema_api.json_api("/users", user) {
+            schema_api.create() | req: ptr, res: ptr, ctx: ptr | {
+                handle_create_user(req, res, ctx)
+            }
+        }
+        o = schema_api.json_api("/orders", order) {
+            schema_api.create() | req: ptr, res: ptr, ctx: ptr | {
+                handle_create_order(req, res, ctx)
+            }
+        }
+        list.add(registry, u)
+        list.add(registry, o)
+        schema_api.openapi_route("/openapi.json", registry)
+    }
+
+    spawn(Sched())
+    a = spawn(SrvActor())
+    a ! StartSrv { srv: server }
+    sleep(500)
+
+    // 1. Valid create — trims/lowercases email, defaults role+coupon, coerces score.
+    print("1. valid user (email has whitespace+caps; role/coupon omitted):\n")
+    show("POST /users/", post("/users/", "{\"name\":\"  Ada \",\"email\":\" Ada@EXAMPLE.com \",\"age\":30,\"score\":9.5}"))
+
+    // 2. Invalid — age not positive, bad email, coupon fails refine, role not in set.
+    print("\n2. invalid user (multiple failures, each with a code):\n")
+    show("POST /users/", post("/users/", "{\"name\":\"\",\"email\":\"nope\",\"age\":-3,\"role\":\"wizard\",\"score\":-1,\"coupon\":\"NOPE\"}"))
+
+    // 3. The resource's own JSON Schema (draft-07), served automatically.
+    print("\n3. GET /users/schema  (auto-served draft-07 JSON Schema):\n")
+    show("GET /users/schema", get("/users/schema"))
+
+    // 4. The aggregate OpenAPI 3.0 document for the whole API.
+    print("\n4. GET /openapi.json  (FastAPI-style aggregate):\n")
+    show("GET /openapi.json", get("/openapi.json"))
+
+    schema.schema_free(user)
+    schema.schema_free(order)
+    print("\n=== showcase complete ===\n")
+    exit(0)
+}

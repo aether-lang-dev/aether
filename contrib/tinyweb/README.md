@@ -43,6 +43,51 @@ server_start(server)
 - **Error callbacks** — `on_error`, `on_server_error`, `on_ws_timeout`, `on_ws_error`
 - **Statistics** — `on_stats(server) |stats| { ... }`
 - **Config** — `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`
+- **Declarative JSON APIs** (`schema_api`) — mount a [`std.schema`](../../std/schema/)
+  resource as a validated JSON API; see below.
+
+## Declarative JSON APIs — `schema_api` + `std.schema`
+
+`contrib/tinyweb/schema_api` bridges [`std.schema`](../../std/schema/) (typed,
+composable validation — inspired by Zod/Pydantic/io-ts/Ash) to the router. You
+declare a resource once and mount it; every write request is JSON-parsed and
+validated **before** your handler runs. Invalid bodies never reach the handler —
+they get a JSON:API `422` with per-field, coded errors; malformed JSON a `400`.
+
+```aether
+user = schema.record() {
+    schema.field("name",  schema.STR)   { schema.trim(); schema.present(); schema.len(1, 60) }
+    schema.field("email", schema.STR)   { schema.trim(); schema.lowercase(); schema.email() }
+    schema.field("age",   schema.INT)   { schema.positive(); schema.max(120) }
+    schema.field("role",  schema.STR)   { schema.one_of("admin,user"); schema.default_to("user") }
+    schema.field("score", schema.FLOAT) { schema.min(0) }
+}
+
+registry = list.new()
+server = tinyweb.web_server_host("127.0.0.1", 8080) {
+    u = schema_api.json_api("/users", user) {
+        schema_api.create() |req, res, ctx| {
+            // body already parsed, coerced, and normalized — just handle it
+            tinyweb.response_write_status(res, "{\"ok\":true}", 201)
+        }
+    }
+    list.add(registry, u)
+    schema_api.openapi_route("/openapi.json", registry)   // FastAPI-style aggregate
+}
+```
+
+Every mounted resource **projects itself**, not just gates requests:
+
+- `GET {prefix}/schema` — auto-serves the resource's **draft-07 JSON Schema**
+  (`std.schema.to_json_schema`): `enum`, `format:email`, `minimum`/`maximum`,
+  `default`, `required`, …
+- `GET /openapi.json` (via `openapi_route`) — an aggregate **OpenAPI 3.0**
+  document for every resource: `paths` + `components.schemas`, `$ref`-linked.
+
+The validator is HTTP-agnostic — the same `record` validates a config file or a
+CLI arg set off the web entirely. Runnable demo: `example_schema_api.ae`. The
+JSON:API error envelopes and the schema/OpenAPI docs are built with `strbuilder`
+(leak-clean; avoids the `std.json` builder-nesting leak, upstream #1447).
 
 ## DSL semantics
 
@@ -75,6 +120,10 @@ leaf — its block, if any, is a request-time handler, not more DSL.
 - `example_static.ae` — Static file serving
 - `example_sse.ae` — Server-Sent Events + chunked transfer
 - `example_auth.ae` — Cookie parsing + filter-to-endpoint attributes
+- `example_schema_api.ae` — Declarative JSON API: rich `std.schema` validation +
+  transforms + coercion, auto `/schema` (draft-07) and `/openapi.json` (OpenAPI 3.0)
+- `schema_api/` — the `std.schema`-backed JSON API layer (`json_api`, `openapi_route`)
+- `test_schema_api.ae` — schema_api integration tests (validation + schema/OpenAPI endpoints)
 - `test_spec.ae` — DSL registration unit tests
 - `test_integration.ae` — HTTP round-trip integration tests
 - `test_websocket.ae` — WebSocket codec round-trip (handshake, client-frame
