@@ -246,15 +246,18 @@ jobs:
       run: make contrib-host-check
 
   # ============================================================
-  # contrib/i18n check — build + run the collation regression
-  # test (Phase 5 of #863). utf8proc.c + the generated DUCET
-  # table are vendored (nothing fetched at build time — no
-  # supply-chain surface), and compile in <1s combined, so no
-  # object cache is warranted (measured; see the Makefile note).
-  # Linux-only; the module is pure Aether + portable C.
+  # contrib runtime check — build + RUN every contrib test_*.ae
+  # (tinyweb, i18n/collation, …), not just type-check them. This
+  # is the coverage `make ci` lacks (contrib isn't in the test-ae
+  # glob) and the class of bug type-checking misses: tinyweb's
+  # WebSocket server path type-checked fine but was runtime-broken.
+  # Runs under valgrind where the test is leak-clean by design.
+  # All C is vendored (utf8proc/DUCET committed) so nothing is
+  # fetched at build time. Linux-only; contrib here is pure Aether
+  # + portable C.
   # ============================================================
-  ci-contrib-i18n:
-    name: contrib/i18n collation (Linux)
+  ci-contrib:
+    name: contrib runtime tests (Linux)
     runs-on: ubuntu-22.04
 
     steps:
@@ -265,11 +268,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y gcc make valgrind
 
-    - name: Build + run collation test
-      run: make contrib-i18n-check
-
-    - name: Valgrind the collation test (leak gate)
-      run: valgrind --leak-check=full --error-exitcode=99 ./build/test_collate
+    - name: Build + run all contrib tests (valgrind-gated where leak-clean)
+      run: make contrib-check-valgrind
 
   # ============================================================
   # Windows CI — MinGW via MSYS2

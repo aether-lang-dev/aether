@@ -729,6 +729,19 @@ contrib-i18n-check: compiler ae stdlib
 	@echo "contrib-i18n: running collate test"
 	@./build/test_collate$(EXE_EXT)
 
+# contrib-check: build + RUN every contrib test_*.ae (not just type-check).
+# This is the runtime-coverage gate the nightly was missing — type-checking
+# alone let the tinyweb WebSocket server path rot (compiled fine, runtime-
+# broken). The table of tests + their --extra C files lives in
+# .github/scripts/contrib_check.sh. contrib-check-valgrind runs each under
+# valgrind as a leak gate (for the dedicated nightly build box).
+.PHONY: contrib-check contrib-check-valgrind
+contrib-check: compiler ae stdlib
+	@EXE_EXT='$(EXE_EXT)' bash .github/scripts/contrib_check.sh
+
+contrib-check-valgrind: compiler ae stdlib
+	@EXE_EXT='$(EXE_EXT)' VALGRIND=1 bash .github/scripts/contrib_check.sh
+
 # Compiler target (incremental build with object files)
 compiler: $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
 	@echo "Linking compiler..."
