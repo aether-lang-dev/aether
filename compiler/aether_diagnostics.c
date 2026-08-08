@@ -68,7 +68,14 @@ int levenshtein_distance(const char* s1, const char* s2) {
     
     for (int i = 1; i <= len1; i++) {
         for (int j = 1; j <= len2; j++) {
-            int cost = (tolower(s1[i-1]) == tolower(s2[j-1])) ? 0 : 1;
+            /* (unsigned char) casts are required, not cosmetic: plain `char`
+             * is signed on every platform we ship, so a byte >= 0x80 — any
+             * UTF-8 continuation byte in an identifier — arrives negative and
+             * indexes outside the ctype table, which is undefined behaviour.
+             * Reachable here because this runs over arbitrary identifier text
+             * to produce "did you mean?" suggestions. */
+            int cost = (tolower((unsigned char)s1[i-1]) ==
+                        tolower((unsigned char)s2[j-1])) ? 0 : 1;
             
             int deletion = matrix[i-1][j] + 1;
             int insertion = matrix[i][j-1] + 1;

@@ -295,7 +295,9 @@ char* os_now_utc_iso8601_raw(void) {
     if (!gmtime_r(&now, &tm_buf)) return strdup("");
 #endif
     char buf[32];
-    /* "YYYY-MM-DDThh:mm:ssZ" — 20 bytes + NUL, fits buf easily. */
+    /* "YYYY-MM-DDThh:mm:ssZ" — 20 bytes + NUL, fits buf easily.
+     * Numeric-only conversions, so no locale sensitivity. Do NOT add
+     * %b/%a/%p — this is an ISO-8601 wire format, not human-facing text. */
     if (strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm_buf) == 0) {
         return strdup("");
     }

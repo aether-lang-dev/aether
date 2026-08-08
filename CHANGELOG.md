@@ -13,6 +13,30 @@ version number before tagging the release.
 
 ### Fixed
 
+- **HTTP access log no longer emits a locale-dependent month name** — the
+  Combined Log Format timestamp was built with `strftime`'s `%b`, which renders
+  the *locale's* abbreviated month. CLF is a parseable interchange format
+  (GoAccess, AWStats, Logstash, Splunk) whose month is defined as the English
+  three-letter abbreviation, so a server embedded in a host that had called
+  `setlocale(LC_ALL, "")` wrote `08/Mär/2026` and broke every downstream parser
+  — corrupting archived logs, where nothing round-trips to reveal the damage.
+  Now formatted from a static English table, which removes the locale
+  dependency rather than pinning a locale around the call. The three remaining
+  `strftime` sites are numeric-only and carry a comment saying so. Follow-up to
+  the `LC_NUMERIC` float fix; found by the audit in #1463.
+
+- **Undefined behaviour in eleven `ctype` calls** — `isalpha`/`isdigit`/
+  `tolower` and friends take an `int` that must be `EOF` or representable as
+  `unsigned char`. Plain `char` is signed on every platform Aether ships, so any
+  byte ≥ 0x80 — every UTF-8 continuation byte — arrived negative and indexed
+  outside the ctype table. Reachable today: a non-ASCII identifier reaches
+  `isalpha()` with a negative argument in the lexer, and `levenshtein_distance`
+  runs over arbitrary identifier text for "did you mean?" suggestions. The
+  codebase already cast at 24 of 35 sites; the remaining eleven (nine in
+  `compiler/parser/lexer.c`, two in `compiler/aether_diagnostics.c`) now match.
+  No behaviour change — glibc happened to tolerate it; musl and the MSVC CRT are
+  entitled not to.
+
 - **Float text conversion no longer follows `LC_NUMERIC`** — `std.string` and
   `std.json` produce and consume *machine* text (wire formats, JSON, config,
   round-trips), so their decimal separator must be `.` regardless of the

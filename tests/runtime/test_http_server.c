@@ -1,5 +1,8 @@
 #include "test_harness.h"
 #include <string.h>
+#include <stdio.h>
+#include <locale.h>
+#include <time.h>
 #include "../../std/net/aether_http_server.h"
 
 // HTTP Server Tests - Real tests for implemented functionality
@@ -254,4 +257,66 @@ TEST(http_server_post_with_oversized_content_length_clamps_safely) {
     ASSERT_NOT_NULL(req->body);
     ASSERT_EQ(0, memcmp(req->body, "{\"name\":\"John Doe\"}", 19));
     http_request_free(req);
+}
+
+/* Combined Log Format timestamps must be locale-independent.
+ *
+ * The month in CLF is the English three-letter abbreviation; it is a parseable
+ * interchange format, not human-facing text. This previously used strftime's
+ * %b, which emits the *locale's* month name — so a server embedded in a host
+ * that had called setlocale(LC_ALL, "") wrote "08/Mär/2026" and broke every
+ * downstream log parser. Regression guard for that (issue #1463, sibling of the
+ * LC_NUMERIC float fix in #1459).
+ *
+ * The locale switch is best-effort: CI images generally ship only C/POSIX, in
+ * which case the ambient-locale half is a no-op and the C-locale assertions
+ * still run. That is deliberate — an unavailable locale must not fail the test,
+ * but it must also not make it vacuous, hence the unconditional checks first. */
+TEST(http_clf_time_is_locale_independent) {
+    struct tm tmv;
+    memset(&tmv, 0, sizeof tmv);
+    tmv.tm_year = 126;  /* 2026 */
+    tmv.tm_mon  = 2;    /* March — the month that differs in de_DE ("Mär") */
+    tmv.tm_mday = 8;
+    tmv.tm_hour = 13;
+    tmv.tm_min  = 5;
+    tmv.tm_sec  = 7;
+
+    char ts[64];
+    http_format_clf_time(ts, sizeof ts, &tmv);
+    ASSERT_STREQ("08/Mar/2026:13:05:07 +0000", ts);
+
+    /* Every month renders as its English abbreviation. */
+    static const char* const expect[12] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+    for (int m = 0; m < 12; m++) {
+        char buf[64];
+        tmv.tm_mon = m;
+        http_format_clf_time(buf, sizeof buf, &tmv);
+        ASSERT_EQ(0, memcmp(buf + 3, expect[m], 3));
+    }
+    tmv.tm_mon = 2;
+
+    /* Now the actual regression: under a comma-decimal / non-English locale the
+     * output must be byte-identical. Skipped silently where the locale is not
+     * installed (see comment above). */
+    const char* had = setlocale(LC_ALL, NULL);
+    char saved[128];
+    snprintf(saved, sizeof saved, "%s", had ? had : "C");
+    if (setlocale(LC_ALL, "de_DE.UTF-8") || setlocale(LC_ALL, "de_DE.utf8")) {
+        char under_locale[64];
+        http_format_clf_time(under_locale, sizeof under_locale, &tmv);
+        ASSERT_STREQ("08/Mar/2026:13:05:07 +0000", under_locale);
+        setlocale(LC_ALL, saved);
+    }
+
+    /* Defensive: an out-of-range tm_mon must not index off the table. */
+    tmv.tm_mon = 99;
+    http_format_clf_time(ts, sizeof ts, &tmv);
+    ASSERT_EQ(0, memcmp(ts + 3, "Jan", 3));
+    tmv.tm_mon = -1;
+    http_format_clf_time(ts, sizeof ts, &tmv);
+    ASSERT_EQ(0, memcmp(ts + 3, "Jan", 3));
 }
