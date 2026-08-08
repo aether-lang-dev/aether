@@ -525,7 +525,10 @@ Coming from Go's `json.Unmarshal`, Java's Jackson, Python's `json.load` + datacl
 - No streaming parse. The whole document is buffered into the arena before the tree is walkable. Documents into the tens of MB are fine; for multi-gigabyte JSON, use a different tool.
 - Strict RFC 8259 only: no JSON5, comments, or trailing commas.
 - Compact output only on stringify; wrap with a separate prettier if you need one.
-- No JSON Schema validation. Validate by hand or build it on top.
+- Declarative validation lives in `std.schema` (typed records, composable
+  validators, `parse -> (values, errors)`, and `to_json_schema()` to emit a
+  draft-07 JSON Schema). It does not itself *consume* external JSON Schema
+  documents — validate against a `std.schema` record, or build that on top.
 - No arbitrary-precision numbers. Numbers are `int` or `double`; the parser falls through to `strtod` for correctly-rounded IEEE-754 on edge cases (16+ significant digits, huge exponents), but there's no `BigDecimal` / `decimal.Decimal` equivalent for financial precision.
 - Hard-coded depth limit of 256, as DoS protection against deeply nested JSON bombs. Not configurable; rare to hit in practice.
 
