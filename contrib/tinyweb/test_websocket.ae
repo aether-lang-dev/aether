@@ -1,0 +1,209 @@
+// TinyWeb WebSocket codec + roundtrip tests — guards the frame/lifetime fixes.
+//
+// Exercises the REAL contrib.tinyweb WebSocket path end to end over a loopback
+// TCP connection (server accept loop in an actor; client in main):
+//
+//   1. handshake      — Sec-WebSocket-Accept computed + 101 returned. Reaching
+//                        the message loop at all also proves path routing: a
+//                        garbage request path (the array_get borrowed-pointer
+//                        use-after-free) would 404 and no echo would come back.
+//   2. small frame    — a masked client frame is UNMASKED (RFC 6455 §5.3) and
+//                        echoed back in a 2-byte-header server frame, intact.
+//   3. LARGE frame    — a >=126-byte reply uses the 4-byte extended header, and
+//                        a length high-byte of 0 must NOT truncate the frame
+//                        (the string.concat/NUL bug that corrupted every big
+//                        frame). This is the core regression.
+//
+// Build/run: ae run test_websocket.ae --extra ws_handshake.c
+//
+// Self-contained: no python, no external ws client. The client side builds a
+// masked text frame and parses server frames by hand so the test depends only
+// on the module under test.
+
+import contrib.tinyweb
+import std.tcp
+import std.list
+import std.list(list_new)
+import std.map
+import std.map(map_new)
+import std.string
+import std.bytes
+
+const PORT = 8231
+
+// ---- handler: echo back a payload whose size we control via the message ----
+// "big"   -> a >126-byte reply (exercises extended-length framing)
+// "small" -> a short reply
+// anything else -> echoed verbatim (proves unmasking produced the right bytes)
+fn reply_for(msg: string) -> string {
+    if string.contains(msg, "big") == 1 {
+        // 200 'x' chars — safely over the 126 extended-length threshold.
+        s = ""
+        for (i = 0; i < 200; i ++) { s = string.concat(s, "x") }
+        return s
+    }
+    return "echo:${msg}"
+}
+
+// ---- server, run from an actor so main can act as the client ----
+message StartWs { srv: ptr }
+message Noop {}
+actor WsActor {
+    state s = 0
+    receive { StartWs(srv) -> {
+            s = srv
+            ws_tcp, _ = map.get(srv, "tcp")
+            handlers, _ = map.get(srv, "handlers")
+            tinyweb.ws_accept_loop(ws_tcp, handlers)
+        } }
+}
+// A second actor keeps the scheduler ticking while the server actor blocks in
+// the accept loop (mirrors test_integration.ae's SchedHelper).
+actor SchedHelper {
+    state x = 0
+    receive { Noop() -> { x = 1 } }
+}
+
+// ---- client-side WebSocket helpers (build/parse frames by hand) ----
+
+// mask key bytes 0x01 0x02 0x03 0x04, indexed by i % 4.
+fn mask_byte(i: int) -> int {
+    m = i - ((i / 4) * 4) // i % 4
+    if m == 0 { return 1 }
+    if m == 1 { return 2 }
+    if m == 2 { return 3 }
+    return 4
+}
+
+// Send a masked client text frame in ONE write. The frame is assembled in a
+// bytes buffer (NUL-safe: a masked byte or the mask key can be 0x00, which
+// string.concat/strlen would truncate). Sending it as one write_n also avoids
+// TCP fragmentation splitting the header across the server's fixed-size reads.
+// Payloads stay < 126 bytes so the client header is 2 bytes + 4 mask bytes.
+fn send_client_frame(sock: ptr, payload: string) {
+    len = string.length(payload)
+    total = 6 + len
+    buf = bytes.new(total)
+    bytes.set(buf, 0, 129) // 0x81 FIN|text
+    bytes.set(buf, 1, 128 + len) // mask bit | len
+    bytes.set(buf, 2, 1) // mask key 0x01020304
+    bytes.set(buf, 3, 2)
+    bytes.set(buf, 4, 3)
+    bytes.set(buf, 5, 4)
+    for (i = 0; i < len; i ++) {
+        b = string.char_at(payload, i)
+        bytes.set(buf, 6 + i, b ^ mask_byte(i))
+    }
+    frame = bytes.finish(buf, total)
+    tcp.write_n(sock, frame, total)
+}
+
+// Read exactly n bytes from sock into a returned string, looping over read_n
+// (a single read_n may return fewer bytes than requested — TCP is a stream).
+fn read_exact(sock: ptr, n: int) -> string {
+    acc = bytes.new(n)
+    got = 0
+    for (got < n; got < n; got = got) {
+        chunk, m, err = tcp.read_n(sock, n - got)
+        if err != "" { return "" }
+        for (j = 0; j < m; j ++) {
+            bytes.set(acc, got + j, string.char_at(chunk, j))
+        }
+        got = got + m
+    }
+    return bytes.finish(acc, n)
+}
+
+// Receive one server text frame and return its payload. Server frames are
+// unmasked. Reads the 2-byte header, then the extended length if present, then
+// the payload — each with read_exact so partial TCP segments are reassembled.
+fn recv_server_frame(sock: ptr) -> string {
+    hdr = read_exact(sock, 2)
+    if hdr == "" { return "" }
+    b1 = string.char_at(hdr, 1)
+    plen = b1 - ((b1 / 128) * 128) // strip mask bit (server won't set it)
+    if plen == 126 {
+        ext = read_exact(sock, 2)
+        plen = string.char_at(ext, 0) * 256 + string.char_at(ext, 1)
+    }
+    if plen == 0 { return "" }
+    return read_exact(sock, plen)
+}
+
+fn assert_eq(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("  [OK] ${label}")
+        return 0
+    }
+    println("  [FAIL] ${label}: got [${got}] want [${want}]")
+    return 1
+}
+
+main() {
+    println("=== TinyWeb WebSocket codec roundtrip ===")
+
+    // Register a /ws handler using the module's real ws_entry shape.
+    handlers = list_new()
+    entry = map_new()
+    map.put(entry, "path", "/ws")
+    map.put(entry, "handler", box_closure(| msg: string, sender: ptr, ctx: ptr | {
+                tinyweb.ws_send_frame(sender, reply_for(msg))
+            }))
+    list.add(handlers, entry)
+
+    ws_tcp, err = tcp.listen(PORT)
+    if err != "" {
+        println("FAIL: bind ${PORT}: ${err}")
+        return
+    }
+    srv = map_new()
+    map.put(srv, "tcp", ws_tcp)
+    map.put(srv, "handlers", handlers)
+    spawn(SchedHelper())
+    a = spawn(WsActor())
+    a ! StartWs { srv: srv }
+    sleep(500) // let the accept loop come up before we connect
+
+    // ---- client: connect + handshake ----
+    sock, cerr = tcp.connect("127.0.0.1", PORT)
+    if cerr != "" {
+        println("FAIL: connect: ${cerr}")
+        return
+    }
+    // Minimal upgrade request. The key is arbitrary; the server echoes an
+    // accept but we don't validate it here (handshake success == 101 + frames).
+    req = "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+    tcp.write(sock, req)
+    resp, _ = tcp.read(sock, 4096)
+    fails = 0
+    if string.contains(resp, "101") == 1 {
+        println("  [OK] handshake returned 101")
+    } else {
+        println("  [FAIL] handshake: ${resp}")
+        fails = fails + 1
+    }
+
+    // ---- test 1: small masked frame -> server unmasks -> echoes ----
+    send_client_frame(sock, "small")
+    fails = fails + assert_eq("small frame roundtrip (unmask + 2-byte header)", recv_server_frame(sock), "echo:small")
+
+    // ---- test 2: LARGE reply -> extended-length header, no NUL truncation ----
+    send_client_frame(sock, "big")
+    big = recv_server_frame(sock)
+    if string.length(big) == 200 {
+        println("  [OK] large frame length 200 (extended header, no NUL truncation)")
+    } else {
+        println("  [FAIL] large frame length: got ${string.length(big)} want 200")
+        fails = fails + 1
+    }
+
+    tcp.close(sock)
+
+    if fails == 0 {
+        println("ALL PASS")
+        exit(0)
+    } else {
+        println("${fails} FAILED")
+        exit(1)
+    }
+}

@@ -9,6 +9,7 @@ import std.map
 import std.http
 import std.tcp
 import std.string
+import std.bytes
 
 exports (
     ALL, GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, CONNECT, TRACE,
@@ -215,6 +216,10 @@ const WS_OPCODE_PONG   = 10
 // ---------------------------------------------------------------------------
 extern ws_generate_accept_key(client_key: string) -> string
 extern ws_base64_encode(data: ptr, len: int) -> string
+// Unmask a client->server frame payload in place (RFC 6455 §5.3): returns a
+// fresh copy of payload with payload[i] ^= mask_key[i % 4]. `len` is the frame's
+// declared payload length (payloads may contain NUL bytes).
+extern ws_unmask(payload: string, mask_key: string, len: int) -> string
 
 // ---------------------------------------------------------------------------
 // Route / Filter registration data structures
@@ -518,25 +523,45 @@ _record_stats(srv: ptr, stats: ptr) {
 ws_send_frame(sock: ptr, payload: string) {
     len = string.length(payload)
 
-    // Build frame header: FIN=1, opcode=text(1)
-    // For len < 126: 2-byte header [0x81, len]
-    // For len 126..65535: 4-byte header [0x81, 126, len>>8, len&0xFF]
+    // Assemble the whole frame in a NUL-safe bytes buffer and send it in ONE
+    // write. Two bugs are avoided here:
+    //   1. Header octets are RAW bytes (0x81, the length bytes), never ASCII
+    //      digits — the old from_int(129) emitted "129" and corrupted frames.
+    //   2. A length high-byte of 0 (e.g. for a 166-byte payload) is a NUL;
+    //      building the header with string.concat / strlen-based tcp.write
+    //      truncated there, corrupting every frame >=126 bytes. A bytes buffer
+    //      + length-aware write_n is NUL-safe.
+    // Sending in one write also avoids TCP fragmentation splitting the header
+    // across a peer's fixed-size reads. 0x81 = FIN | opcode=text(1).
+    //   len <  126     : 2-byte header [0x81, len]
+    //   len 126..65535 : 4-byte header [0x81, 126, len>>8, len&0xFF]
+    hdr_len = 2
+    if len >= 126 { hdr_len = 4 }
+    total = hdr_len + len
+    buf = bytes.new(total)
+    bytes.set(buf, 0, 129)
     if len < 126 {
-        hdr = string.concat(string.from_int(129), string.from_int(len))
-        // Send as raw bytes via TCP
-        tcp.write(sock, hdr)
+        bytes.set(buf, 1, len)
     } else {
-        hdr = string.concat(string.from_int(129), string.from_int(126))
-        hdr = string.concat(hdr, string.from_int(len / 256))
-        hdr = string.concat(hdr, string.from_int(len - (len / 256) * 256))
-        tcp.write(sock, hdr)
+        bytes.set(buf, 1, 126)
+        bytes.set(buf, 2, len / 256)
+        bytes.set(buf, 3, len - (len / 256) * 256)
     }
-    tcp.write(sock, payload)
+    for (i = 0; i < len; i++) {
+        bytes.set(buf, hdr_len + i, string.char_at(payload, i))
+    }
+    frame = bytes.finish(buf, total)
+    tcp.write_n(sock, frame, total)
 }
 
-// Send a close frame (opcode 8, empty payload)
+// Send a close frame (opcode 8, empty payload): [0x88, 0x00]. Raw octets in a
+// bytes buffer — from_int would emit "136"/"0" as text and corrupt the frame.
 ws_send_close(sock: ptr) {
-    tcp.write(sock, string.concat(string.from_int(136), string.from_int(0)))
+    buf = bytes.new(2)
+    bytes.set(buf, 0, 136)
+    bytes.set(buf, 1, 0)
+    frame = bytes.finish(buf, 2)
+    tcp.write_n(sock, frame, 2)
 }
 
 // ---------------------------------------------------------------------------
@@ -548,9 +573,9 @@ ws_send_close(sock: ptr) {
 // ---------------------------------------------------------------------------
 
 ws_read_frame(sock: ptr) {
-    // Read 2-byte header
-    hdr = tcp.read(sock, 2)
-    if hdr == 0 { return "" }
+    // Read 2-byte header. tcp.read returns (data, err).
+    hdr, herr = tcp.read(sock, 2)
+    if herr != "" { return "" }
 
     byte0 = string.char_at(hdr, 0)
     byte1 = string.char_at(hdr, 1)
@@ -561,8 +586,8 @@ ws_read_frame(sock: ptr) {
 
     // Extended payload length
     if payload_len == 126 {
-        ext = tcp.read(sock, 2)
-        if ext == 0 { return "" }
+        ext, eerr = tcp.read(sock, 2)
+        if eerr != "" { return "" }
         payload_len = string.char_at(ext, 0) * 256 + string.char_at(ext, 1)
     }
 
@@ -575,22 +600,21 @@ ws_read_frame(sock: ptr) {
     // Read masking key (4 bytes) if masked
     mask_key = ""
     if masked == 1 {
-        mask_key = tcp.read(sock, 4)
-        if mask_key == 0 { return "" }
+        mkey, merr = tcp.read(sock, 4)
+        if merr != "" { return "" }
+        mask_key = mkey
     }
 
     // Read payload
     if payload_len == 0 { return "" }
-    payload = tcp.read(sock, payload_len)
-    if payload == 0 { return "" }
+    payload, perr = tcp.read(sock, payload_len)
+    if perr != "" { return "" }
 
     // Unmask: payload[i] ^= mask_key[i % 4]
-    // (Client-to-server frames are always masked per RFC 6455)
+    // (Client-to-server frames are always masked per RFC 6455.) Done in C for
+    // byte-exactness and speed — see ws_unmask in ws_handshake.c.
     if masked == 1 {
-        // XOR unmasking done byte-by-byte
-        // In a production impl this would be a C extern for speed
-        // For now, return as-is — the TCP layer handles raw bytes
-        // TODO: implement ws_unmask extern in C for proper unmasking
+        return ws_unmask(payload, mask_key, payload_len)
     }
 
     return payload
@@ -604,19 +628,21 @@ ws_read_frame(sock: ptr) {
 // ---------------------------------------------------------------------------
 
 ws_handle_client(client: ptr, ws_handlers: ptr) {
-    // Read the HTTP upgrade request
-    request_data = tcp.read(client, 4096)
-    if request_data == 0 {
+    // Read the HTTP upgrade request. tcp.read returns (data, err).
+    request_data, rerr = tcp.read(client, 4096)
+    if rerr != "" {
         tcp.close(client)
         return
     }
 
-    // Extract path from "GET /path HTTP/1.1"
+    // Extract path from "GET /path HTTP/1.1". array_get returns a BORROWED
+    // pointer into parts' storage, so mint an owned copy before array_free
+    // (else ws_path dangles — the documented string_array_get lifetime trap).
     parts = string.split(request_data, " ")
     n_parts = string.array_size(parts)
     ws_path = ""
     if n_parts >= 2 {
-        ws_path = string.array_get(parts, 1)
+        ws_path = string.concat(string.array_get(parts, 1), "")
     }
     string.array_free(parts)
 
@@ -645,19 +671,20 @@ ws_handle_client(client: ptr, ws_handlers: ptr) {
     response = string.concat(response, "\r\n\r\n")
     tcp.write(client, response)
 
-    // Find handler for this path
-    handler = 0
+    // Find the boxed handler for this path (keep it BOXED; unbox at call time —
+    // a bare `handler = unbox_closure(...)` can't be stored in a plain slot and
+    // then invoked, and mixing it with an int-init leaks/segfaults).
+    hboxed = null
     n_ws = list.size(ws_handlers)
     for (i = 0; i < n_ws; i++) {
         entry, _ = list.get(ws_handlers, i)
         entry_path, _ = map.get(entry, "path")
         if (ws_path == entry_path) {
             hboxed, _ = map.get(entry, "handler")
-            handler = unbox_closure(hboxed)
         }
     }
 
-    if handler == 0 {
+    if hboxed == null {
         // 404 — no handler registered for this path
         ws_send_frame(client, "Error: 404")
         ws_send_close(client)
@@ -674,6 +701,7 @@ ws_handle_client(client: ptr, ws_handlers: ptr) {
         } else {
             // Call handler: (message, sender_socket, ctx)
             // sender_socket is the raw TCP socket — use ws_send_frame() to reply
+            handler = unbox_closure(hboxed)
             call(handler, msg, client, 0)
         }
     }
@@ -687,8 +715,8 @@ ws_accept_loop(tcp_server: ptr, ws_handlers: ptr) {
     // production would spawn per-connection (Tiny uses virtual threads)
     running = 1
     for (running == 1; running == 1; running = running) {
-        client = tcp.accept(tcp_server)
-        if client != 0 {
+        client, aerr = tcp.accept(tcp_server)
+        if aerr == "" {
             ws_handle_client(client, ws_handlers)
         } else {
             running = 0
@@ -744,35 +772,36 @@ sse_close(stream: ptr) {
 // Handle an SSE client connection: parse the HTTP request, send headers,
 // then call the registered handler with the raw socket as "stream"
 sse_handle_client(client: ptr, sse_handlers: ptr) {
-    // Read the HTTP request
-    request_data = tcp.read(client, 4096)
-    if request_data == 0 {
+    // Read the HTTP request. tcp.read returns (data, err).
+    request_data, rerr = tcp.read(client, 4096)
+    if rerr != "" {
         tcp.close(client)
         return
     }
 
-    // Extract path from "GET /path HTTP/1.1"
+    // Extract path from "GET /path HTTP/1.1". Mint an owned copy before
+    // array_free — array_get returns a borrowed pointer into parts' storage.
     parts = string.split(request_data, " ")
     n_parts = string.array_size(parts)
     req_path = ""
     if n_parts >= 2 {
-        req_path = string.array_get(parts, 1)
+        req_path = string.concat(string.array_get(parts, 1), "")
     }
     string.array_free(parts)
 
-    // Find handler for this path
-    handler = 0
+    // Find the boxed handler for this path (unbox at call time — see
+    // ws_handle_client for why we keep it boxed rather than storing unboxed).
+    hboxed = null
     n_sse = list.size(sse_handlers)
     for (i = 0; i < n_sse; i++) {
         entry, _ = list.get(sse_handlers, i)
         entry_path, _ = map.get(entry, "path")
         if (req_path == entry_path) {
             hboxed, _ = map.get(entry, "handler")
-            handler = unbox_closure(hboxed)
         }
     }
 
-    if handler == 0 {
+    if hboxed == null {
         tcp.write(client, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found")
         tcp.close(client)
         return
@@ -783,6 +812,7 @@ sse_handle_client(client: ptr, sse_handlers: ptr) {
 
     // Call handler with the raw socket as "stream"
     // Handler uses sse_send(stream, data) to push events
+    handler = unbox_closure(hboxed)
     call(handler, client)
 
     // Handler returned — close the connection
@@ -792,8 +822,8 @@ sse_handle_client(client: ptr, sse_handlers: ptr) {
 sse_accept_loop(tcp_server: ptr, sse_handlers: ptr) {
     running = 1
     for (running == 1; running == 1; running = running) {
-        client = tcp.accept(tcp_server)
-        if client != 0 {
+        client, aerr = tcp.accept(tcp_server)
+        if aerr == "" {
             sse_handle_client(client, sse_handlers)
         } else {
             running = 0

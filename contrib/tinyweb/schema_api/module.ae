@@ -32,7 +32,8 @@
 //   tinyweb.server_start(server)
 
 exports(
-    json_api, create, index, show, update, destroy
+    json_api, create, index, show, update, destroy,
+    openapi_route
 )
 
 import std.schema
@@ -41,6 +42,7 @@ import std.map
 import std.json
 import std.list(list_new, list_add_raw, list_get_raw, list_size)
 import std.string(string_length, string_concat, string_equals)
+import std.strbuilder
 
 // tinyweb's own DSL surface (this module is a sibling under contrib/tinyweb).
 import contrib.tinyweb(
@@ -55,6 +57,11 @@ struct ApiGroup {
     resource: ptr // *std.schema.Schema (opaque ptr here)
     prefix: string
 }
+
+// An ApiGroup carries the mount prefix + resource, so a list of the groups
+// returned by json_api() is all openapi_route() needs to enumerate the API into
+// one OpenAPI document — no module-global registry required (the caller already
+// holds each group; it just passes the list).
 
 // json_api(prefix, schema) { create(...); show(...); ... }
 // Container builder: opens a tinyweb path() at `prefix`, attaches a validating
@@ -79,6 +86,18 @@ json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
     }
     filter(grp_ctx, PATCH, ".*") | req: ptr, res: ptr, ctx: ptr | {
         return validate_body(res, req, resource)
+    }
+
+    // Auto-mount GET {prefix}/schema — the resource's own draft-07 JSON Schema
+    // (std.schema.to_json_schema). "A declarative resource is a projectable
+    // artifact": the same declaration that validates requests also serves its
+    // contract. Registered before the user's show() route so /schema isn't
+    // swallowed by a GET /(\w+) id matcher.
+    end_point(grp_ctx, GET, "/schema") | req: ptr, res: ptr, ctx: ptr | {
+        js = schema.to_json_schema(resource)
+        response_set_header(res, "Content-Type", "application/schema+json")
+        response_json(res, js)
+        string.string_free(js)
     }
 
     return g
@@ -157,49 +176,71 @@ fn json_object_to_input(obj: ptr) -> ptr {
 }
 
 // ---- JSON:API error rendering ----
+//
+// Built with strbuilder rather than the JSON DOM: json.obj()/set nested-object
+// trees leak on json_free (upstream std.json bug #1447), and these envelopes
+// nest (errors[].source.pointer). strbuilder sidesteps it and is leak-clean.
+
+// Append a JSON-escaped string literal (quotes included) to the builder.
+fn json_str_into(b: ptr, s: string) {
+    strbuilder.append(b, "\"")
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 34 {
+            strbuilder.append(b, "\\\"")
+        } else if c == 92 {
+            strbuilder.append(b, "\\\\")
+        } else if c == 10 {
+            strbuilder.append(b, "\\n")
+        } else if c == 9 {
+            strbuilder.append(b, "\\t")
+        } else {
+            strbuilder.append_byte(b, c)
+        }
+        i = i + 1
+    }
+    strbuilder.append(b, "\"")
+}
 
 fn write_error(res: ptr, status: int, title: string, detail: string) {
-    err_node = json.obj()
-    errors_arr = json.arr()
-    d = json.obj()
-    _ = json.set(d, "status", json.str(int_to_str(status)))
-    _ = json.set(d, "title", json.str(title))
-    _ = json.set(d, "detail", json.str(detail))
-    _ = json.push(errors_arr, d)
-    _ = json.set(err_node, "errors", errors_arr)
-    out, _ = json.encode(err_node)
+    b = strbuilder.new(128)
+    strbuilder.append(b, "{\"errors\":[{\"status\":")
+    json_str_into(b, "${status}")
+    strbuilder.append(b, ",\"title\":")
+    json_str_into(b, title)
+    strbuilder.append(b, ",\"detail\":")
+    json_str_into(b, detail)
+    strbuilder.append(b, "}]}")
+    out = strbuilder.finish(b)
     response_set_header(res, "Content-Type", "application/vnd.api+json")
     response_write_status(res, out, status)
-    json.json_free(err_node)
+    // `out` is a plain char* from finish(); tracker-reclaimed on scope exit.
 }
 
 fn write_validation_errors(res: ptr, errors: ptr) {
-    err_node = json.obj()
-    errors_arr = json.arr()
+    b = strbuilder.new(256)
+    strbuilder.append(b, "{\"errors\":[")
     n = schema.error_count(errors)
     i = 0
     while i < n {
-        d = json.obj()
-        _ = json.set(d, "status", json.str("422"))
-        _ = json.set(d, "code", json.str(schema.error_code(errors, i)))
-        _ = json.set(d, "title", json.str("Validation Error"))
-        _ = json.set(d, "detail", json.str(schema.error_message(errors, i)))
-        // JSON:API source pointer for the offending field
-        src = json.obj()
-        _ = json.set(src, "pointer", json.str(string_concat("/data/attributes/", schema.error_field(errors, i))))
-        _ = json.set(d, "source", src)
-        _ = json.push(errors_arr, d)
+        if i > 0 {
+            strbuilder.append(b, ",")
+        }
+        strbuilder.append(b, "{\"status\":\"422\",\"code\":")
+        json_str_into(b, schema.error_code(errors, i))
+        strbuilder.append(b, ",\"title\":\"Validation Error\",\"detail\":")
+        json_str_into(b, schema.error_message(errors, i))
+        strbuilder.append(b, ",\"source\":{\"pointer\":")
+        json_str_into(b, "/data/attributes/${schema.error_field(errors, i)}")
+        strbuilder.append(b, "}}")
         i = i + 1
     }
-    _ = json.set(err_node, "errors", errors_arr)
-    out, _ = json.encode(err_node)
+    strbuilder.append(b, "]}")
+    out = strbuilder.finish(b)
     response_set_header(res, "Content-Type", "application/vnd.api+json")
     response_write_status(res, out, 422)
-    json.json_free(err_node)
-}
-
-fn int_to_str(n: int) -> string {
-    return "${n}"
 }
 
 // ---- Leaf route builders (run inside a json_api() block; _ctx is *ApiGroup) ----
@@ -232,4 +273,118 @@ update(_ctx: ptr, handler: fn) {
 destroy(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, DELETE, "/(\\w+)", handler)
+}
+
+// ---- OpenAPI aggregate (FastAPI-style /openapi.json) ----
+
+// Derive a schema name from a mount prefix: "/users" -> "Users".
+fn schema_name_for(prefix: string) -> string {
+    // drop a leading '/', capitalize first char
+    p = prefix
+    if string_length(p) > 0 && string.char_at(p, 0) == 47 { // '/'
+        p = string.substring(p, 1, string_length(p))
+    }
+    if string_length(p) == 0 {
+        return "Resource"
+    }
+    first = string.char_at(p, 0)
+    if first >= 97 && first <= 122 { // a-z -> upper
+        first = first - 32
+    }
+    rest = string.substring(p, 1, string_length(p))
+    return string_concat(string.from_char(first), rest)
+}
+
+// Build an OpenAPI 3.0 document from a list of ApiGroups (the values returned by
+// json_api()). Each resource's draft-07 schema (std.schema.to_json_schema)
+// becomes a components.schemas entry, and its CRUD routes become paths
+// referencing it. Built with strbuilder (not the JSON DOM) so it is leak-clean
+// by construction. Returns an owned string.
+fn build_openapi(groups: ptr) -> string {
+    b = strbuilder.new(512)
+    strbuilder.append(b, "{\"openapi\":\"3.0.3\",")
+    strbuilder.append(b, "\"info\":{\"title\":\"Aether tinyweb API\",\"version\":\"1.0.0\"},")
+
+    n = 0
+    if groups != null {
+        n = list_size(groups)
+    }
+
+    // paths
+    strbuilder.append(b, "\"paths\":{")
+    i = 0
+    while i < n {
+        m = list_get_raw(groups, i) as *ApiGroup
+        name = schema_name_for(m.prefix)
+        if i > 0 {
+            strbuilder.append(b, ",")
+        }
+        // collection path: GET (list) + POST (create, validated against schema)
+        strbuilder.append(b, "\"")
+        strbuilder.append(b, m.prefix)
+        strbuilder.append(b, "/\":{\"get\":{\"summary\":\"list ")
+        strbuilder.append(b, name)
+        strbuilder.append(b, "\"},\"post\":{\"summary\":\"create ")
+        strbuilder.append(b, name)
+        strbuilder.append(b, "\",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":{\"$ref\":\"#/components/schemas/")
+        strbuilder.append(b, name)
+        strbuilder.append(b, "\"}}}}}},")
+        // schema doc path
+        strbuilder.append(b, "\"")
+        strbuilder.append(b, m.prefix)
+        strbuilder.append(b, "/schema\":{\"get\":{\"summary\":\"JSON Schema for ")
+        strbuilder.append(b, name)
+        strbuilder.append(b, "\"}}")
+        name_free(name)
+        i = i + 1
+    }
+    strbuilder.append(b, "},")
+
+    // components.schemas — embed each resource's draft-07 schema verbatim
+    strbuilder.append(b, "\"components\":{\"schemas\":{")
+    i = 0
+    while i < n {
+        m = list_get_raw(groups, i) as *ApiGroup
+        name = schema_name_for(m.prefix)
+        js = schema.to_json_schema(m.resource)
+        if i > 0 {
+            strbuilder.append(b, ",")
+        }
+        strbuilder.append(b, "\"")
+        strbuilder.append(b, name)
+        strbuilder.append(b, "\":")
+        strbuilder.append(b, js)
+        string.string_free(js)
+        name_free(name)
+        i = i + 1
+    }
+    strbuilder.append(b, "}}}")
+
+    raw = strbuilder.finish(b)
+    return string_concat(raw, "")
+}
+
+// schema_name_for returns an owned string in the general case; free it.
+fn name_free(s: string) {
+    string.string_free(s)
+}
+
+// openapi_route(path, groups) — mount GET <path> serving one aggregate OpenAPI
+// document for the given resources. `groups` is a *List of the ApiGroup values
+// returned by json_api(). FastAPI-style; call once at the server root:
+//
+//   users = schema_api.json_api("/users", user_schema) { ... }
+//   orders = schema_api.json_api("/orders", order_schema) { ... }
+//   reg = list.new(); list.add(reg, users); list.add(reg, orders)
+//   schema_api.openapi_route("/openapi.json", reg)
+//
+// (Passing the groups explicitly avoids a module-global registry — the caller
+// already holds each group.)
+openapi_route(_ctx: ptr, route_path: string, groups: ptr) {
+    end_point(_ctx, GET, route_path) | req: ptr, res: ptr, ctx: ptr | {
+        doc = build_openapi(groups)
+        response_set_header(res, "Content-Type", "application/json")
+        response_json(res, doc)
+        string.string_free(doc)
+    }
 }

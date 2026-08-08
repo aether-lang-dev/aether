@@ -1606,6 +1606,27 @@ static void heap_free_tree(JsonValue* v) {
     aether_caps_free(v, sizeof(JsonValue));
 }
 
+/* Reclaim a donated builder value after its contents were deep-copied into a
+ * container's arena (object_set / array_add). Two shapes:
+ *  - value->arena set: the value acquired its own arena (e.g. json.obj() that
+ *    later had children set into it). arena_destroy frees the arena's contents,
+ *    but the JsonValue STRUCT itself is a separate heap_new allocation
+ *    (JV_FLAG_HEAP_STRUCT — "v->arena is set but the struct still sits on the
+ *    heap") and must be freed too, or it leaks (#1447). Snapshot the flag
+ *    before arena_destroy since for a parsed root the struct can live inside
+ *    the arena; a builder value never does, but be defensive.
+ *  - no arena: a plain heap tree — heap_free_tree reclaims struct + children. */
+static void free_donated_value(JsonValue* value) {
+    if (!value) return;
+    if (value->arena) {
+        int heap_struct = (value->flags & JV_FLAG_HEAP_STRUCT) != 0;
+        arena_destroy(value->arena);
+        if (heap_struct) aether_caps_free(value, sizeof(JsonValue));
+    } else {
+        heap_free_tree(value);
+    }
+}
+
 int json_array_add_raw(JsonValue* arr, JsonValue* value) {
     if (!arr || arr->type != JSON_ARRAY || !value) return 0;
     if (!ensure_container_arena(arr)) return 0;
@@ -1617,8 +1638,7 @@ int json_array_add_raw(JsonValue* arr, JsonValue* value) {
     arr->data.arr.items[arr->data.arr.count++] = copy;
 
     // The caller passed ownership to us. Free the incoming tree.
-    if (value->arena) arena_destroy(value->arena);
-    else              heap_free_tree(value);
+    free_donated_value(value);
 
     return 1;
 }
@@ -1641,8 +1661,7 @@ int json_object_set_raw(JsonValue* obj, const char* key, JsonValue* value) {
             if (blk->key_lens[i] == k32 &&
                 memcmp(blk->keys[i], key, k32) == 0) {
                 blk->values[i] = copy;
-                if (value->arena) arena_destroy(value->arena);
-                else              heap_free_tree(value);
+                free_donated_value(value);
                 return 1;
             }
         }
@@ -1659,8 +1678,7 @@ int json_object_set_raw(JsonValue* obj, const char* key, JsonValue* value) {
     blk->key_lens[idx] = k32;
     blk->values[idx] = copy;
 
-    if (value->arena) arena_destroy(value->arena);
-    else              heap_free_tree(value);
+    free_donated_value(value);
     return 1;
 }
 
