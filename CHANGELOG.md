@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.cryptography.blake3`** — BLAKE3 cryptographic hash in pure Aether,
+  ported from Bouncy Castle's `Blake3Digest.cs` (no OpenSSL/externs beyond
+  libc `malloc`/`free`, matching the sibling digest modules). Supports the
+  plain, keyed (`new_keyed`), and key-derivation (`new_derived`) modes;
+  streaming `update`/`update_bytes`; arbitrary-length XOF output (`output`);
+  and `final_hex`/`final_bytes` one-shots. Verified against the official BLAKE3
+  known-answer test vectors (all 35 input lengths from 0 to 102400 bytes, ×
+  hash/keyed/derived, plus save/reset/restore mid-output checks — the full
+  Bouncy Castle `Blake3Test` suite). Leak-free under Valgrind.
+
 ## [0.503.0]
 
 ### Added
