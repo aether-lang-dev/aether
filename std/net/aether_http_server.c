@@ -818,6 +818,35 @@ typedef struct {
     int   own_fp;       /* 1 if we opened it (need to fclose); 0 for stderr */
 } AccessLogState;
 
+/* Format a Common/Combined Log Format timestamp: "DD/MMM/YYYY:HH:MM:SS +0000".
+ *
+ * Written by hand rather than with strftime's %b, which emits the *locale's*
+ * abbreviated month name. CLF's month is defined as the English three-letter
+ * abbreviation — this is a parseable interchange format (GoAccess, AWStats,
+ * Logstash, Splunk), not human-facing text. An Aether server embedded in a host
+ * that had called setlocale(LC_ALL, "") would otherwise write "08/Mär/2026" and
+ * break every downstream parser, and unlike a bad response the damage lands in
+ * archived logs where nothing round-trips it to reveal the corruption.
+ *
+ * Same class of bug as the LC_NUMERIC float conversions fixed in #1459. A static
+ * table removes the locale dependency outright rather than pinning a locale
+ * around the call, which is the right trade when the format is specified in
+ * terms of English names rather than "the C locale's names".
+ *
+ * Not static: covered directly by tests/runtime/test_http_server.c. */
+void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv) {
+    static const char* const kMonthsEn[12] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+    if (!out || out_size == 0) return;
+    if (!tmv) { out[0] = '\0'; return; }
+    int mon = (tmv->tm_mon >= 0 && tmv->tm_mon < 12) ? tmv->tm_mon : 0;
+    snprintf(out, out_size, "%02d/%s/%04d:%02d:%02d:%02d +0000",
+             tmv->tm_mday, kMonthsEn[mon], tmv->tm_year + 1900,
+             tmv->tm_hour, tmv->tm_min, tmv->tm_sec);
+}
+
 static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
                             long duration_us, void* user_data) {
     AccessLogState* st = (AccessLogState*)user_data;
@@ -845,6 +874,9 @@ static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
 
     if (strcmp(st->format, "json") == 0) {
         char ts[32];
+        /* Numeric-only conversions: no locale-sensitive specifier here, so
+         * plain strftime is safe. Do NOT add %b/%a/%p to this format — they
+         * are locale-dependent and this string goes on the wire. */
         strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
         fprintf(st->fp,
                 "{\"ts\":\"%s\",\"method\":\"%s\",\"path\":\"%s\","
@@ -856,7 +888,7 @@ static void access_log_hook(HttpRequest* req, HttpServerResponse* res,
     } else {
         /* Combined: <ip> - - [DD/MMM/YYYY:HH:MM:SS +0000] "METHOD PATH HTTP/X.Y" status bytes "REF" "UA" */
         char ts[64];
-        strftime(ts, sizeof(ts), "%d/%b/%Y:%H:%M:%S +0000", &tmv);
+        http_format_clf_time(ts, sizeof(ts), &tmv);
         const char* ip = req ? http_get_header(req, "X-Forwarded-For") : NULL;
         if (!ip) ip = "-";
         fprintf(st->fp,

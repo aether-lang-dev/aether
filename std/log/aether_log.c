@@ -73,6 +73,9 @@ static void get_timestamp(char* buffer, size_t size) {
 #else
     localtime_r(&now, &tm_buf);
 #endif
+    /* Numeric-only conversions — no locale-sensitive specifier, so plain
+     * strftime is safe here. Do NOT add %b/%a/%p: those emit the locale's
+     * month/day/AM-PM names and would make log output environment-dependent. */
     strftime(buffer, size, "%Y-%m-%d %H:%M:%S", &tm_buf);
 }
 

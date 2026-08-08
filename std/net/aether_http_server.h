@@ -4,6 +4,8 @@
 #include "../string/aether_string.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
 #include <stdatomic.h>
+#include <stddef.h>  // size_t
+#include <time.h>    // struct tm (http_format_clf_time)
 
 // HTTP Request
 typedef struct {
@@ -704,5 +706,11 @@ const char* http_request_http_version(HttpRequest* req);
 int         http_request_header_count(HttpRequest* req);
 const char* http_request_header_name(HttpRequest* req, int index);
 const char* http_request_header_value(HttpRequest* req, int index);
+
+// Format a Common/Combined Log Format timestamp: "DD/MMM/YYYY:HH:MM:SS +0000".
+// The month is always the English three-letter abbreviation, never the
+// locale's — CLF is a parseable interchange format. Exposed (rather than
+// static) so the locale-independence can be tested directly.
+void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
 
 #endif

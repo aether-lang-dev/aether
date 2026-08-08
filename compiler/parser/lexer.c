@@ -271,7 +271,7 @@ Token* read_number() {
             // Hex literal: 0x[0-9a-fA-F]+
             buffer[i++] = advance(); // '0'
             buffer[i++] = advance(); // 'x'
-            while (current_pos < source_length && (isxdigit(peek()) || peek() == '_')) {
+            while (current_pos < source_length && (isxdigit((unsigned char)peek()) || peek() == '_')) {
                 if (peek() == '_') { advance(); continue; }
                 if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
                 buffer[i++] = advance();
@@ -311,7 +311,7 @@ Token* read_number() {
 
     // Decimal literal (with optional dot for floats)
     // Don't consume '.' if followed by another '.' (range operator '..')
-    while (current_pos < source_length && (isdigit(peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
+    while (current_pos < source_length && (isdigit((unsigned char)peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
         if (i >= capacity - 1) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
@@ -352,7 +352,7 @@ Token* read_number() {
         }
 
         while (current_pos < source_length &&
-               (isdigit(peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
+               (isdigit((unsigned char)peek()) || (peek() == '.' && (current_pos + 1 >= source_length || source[current_pos + 1] != '.')))) {
             if (i >= capacity - 1) {
                 capacity *= 2;
                 char* new_buf = realloc(buffer, capacity);
@@ -374,7 +374,7 @@ Token* read_identifier() {
     char* buffer = malloc(capacity);
     int i = 0;
     
-    while (current_pos < source_length && (isalnum(peek()) || peek() == '_')) {
+    while (current_pos < source_length && (isalnum((unsigned char)peek()) || peek() == '_')) {
         if (i >= capacity - 1) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
@@ -471,7 +471,7 @@ Token* read_raw_identifier(void) {
     char* buffer = malloc(capacity);
     int i = 0;
 
-    while (current_pos < source_length && (isalnum(peek()) || peek() == '_')) {
+    while (current_pos < source_length && (isalnum((unsigned char)peek()) || peek() == '_')) {
         if (i >= capacity - 1) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
@@ -528,12 +528,12 @@ Token* next_token() {
     }
 
     // Handle numbers
-    if (isdigit(c)) {
+    if (isdigit((unsigned char)c)) {
         return read_number();
     }
-    
+
     // Handle identifiers and keywords
-    if (isalpha(c) || c == '_') {
+    if (isalpha((unsigned char)c) || c == '_') {
         return read_identifier();
     }
     
@@ -618,11 +618,11 @@ Token* next_token() {
                 // Content is a literal string (no interpolation).
                 // Preserves all whitespace and newlines exactly.
                 // Use regular "..." strings for interpolation.
-                if (isalpha(peek()) || peek() == '_') {
+                if (isalpha((unsigned char)peek()) || peek() == '_') {
                     // Read the marker name
                     char marker[MAX_IDENTIFIER_LENGTH];
                     int mlen = 0;
-                    while ((isalnum(peek()) || peek() == '_') && mlen < MAX_IDENTIFIER_LENGTH - 1) {
+                    while ((isalnum((unsigned char)peek()) || peek() == '_') && mlen < MAX_IDENTIFIER_LENGTH - 1) {
                         marker[mlen++] = advance();
                     }
                     marker[mlen] = '\0';
