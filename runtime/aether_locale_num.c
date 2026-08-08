@@ -142,6 +142,34 @@ static aether_loc_t aether_c_locale(void) {
 // Emit
 // ---------------------------------------------------------------------------
 
+#if AETHER_LOCALE_WIN32
+// Rewrite a msvcrt three-digit exponent to the C99 minimum-two-digit form,
+// in place: "1e+010" -> "1e+10", "1e-005" -> "1e-05", "1e+300" unchanged.
+// C99 says the exponent has "at least two digits", so only zeros beyond the
+// second-from-last position are redundant. Returns the new length.
+static int aether_fix_exponent(char* buf, size_t len) {
+    char* e = NULL;
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] == 'e' || buf[i] == 'E') { e = buf + i; break; }
+    }
+    if (!e) return (int)len;
+
+    char* digits = e + 1;
+    if (*digits == '+' || *digits == '-') digits++;
+
+    size_t ndigits = 0;
+    while (digits[ndigits] >= '0' && digits[ndigits] <= '9') ndigits++;
+
+    // Drop leading zeros, but never below two digits.
+    size_t strip = 0;
+    while (strip < ndigits && digits[strip] == '0' && (ndigits - strip) > 2) strip++;
+    if (strip == 0) return (int)len;
+
+    memmove(digits, digits + strip, len - (size_t)(digits - buf) - strip + 1);
+    return (int)(len - strip);
+}
+#endif
+
 int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value) {
     if (!buf || n == 0 || !fmt) return -1;
 
@@ -164,6 +192,14 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
         int needed = loc ? _scprintf_l(fmt, loc, value) : _scprintf(fmt, value);
         return needed;
     }
+    // msvcrt's *_l printf family emits a THREE-digit exponent ("1e+010") where
+    // C99 requires the minimum two ("1e+10"). MinGW's plain snprintf uses its
+    // own C99 implementation and gets this right, so routing through _snprintf_l
+    // silently changed our output format — it broke json round-tripping
+    // ("1e+10" -> "1e+010") and would have put a non-conforming exponent on the
+    // wire. Collapse the redundant leading zero so every platform emits the
+    // identical byte sequence, which is the entire point of this file.
+    written = aether_fix_exponent(buf, (size_t)written);
     return written;
 
 #elif AETHER_HAS_SNPRINTF_L
