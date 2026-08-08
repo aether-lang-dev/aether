@@ -1,0 +1,858 @@
+// std.number — Locale-aware number, percent, and currency formatting (Phase 4 of #863)
+
+import std.string(*)
+import std.language
+import std.strbuilder
+import std.bytes
+
+exports(
+    FormatOptions, default_options,
+    format_decimal_string, format_percent_string, format_currency_string,
+    format_decimal, format_percent, format_currency,
+    format_decimal_default, format_percent_default
+)
+
+struct FormatOptions {
+    min_fraction_digits: int
+    max_fraction_digits: int
+    use_grouping: int
+}
+
+fn default_options() -> FormatOptions {
+    FormatOptions opts
+    opts.min_fraction_digits = 0
+    opts.max_fraction_digits = 3
+    opts.use_grouping = 1
+    return opts
+}
+
+// Parses and validates input decimal string. Returns (negative, integer_part, fraction_part, error).
+fn parse_decimal_string(decimal: string) -> (int, string, string, string) {
+    len = string_length(decimal)
+    if len == 0 {
+        return 0, "", "", "empty decimal string"
+    }
+
+    // Validate characters
+    i = 0
+    while i < len {
+        c = string_char_at(decimal, i)
+        if (c >= 48 && c <= 57) || c == 46 || c == 101 || c == 69 || c == 43 || c == 45 {
+            // Valid character
+        } else {
+            return 0, "", "", "invalid character in decimal string"
+        }
+        i = i + 1
+    }
+
+    negative = 0
+    pos = 0
+
+    if pos < len {
+        c = string_char_at(decimal, pos)
+        if c == 45 { // '-'
+            negative = 1
+            pos = pos + 1
+        } else if c == 43 { // '+'
+            pos = pos + 1
+        }
+    }
+
+    if pos >= len {
+        return 0, "", "", "missing digits before decimal point"
+    }
+    c = string_char_at(decimal, pos)
+    if c < 48 || c > 57 {
+        return 0, "", "", "expected digit before decimal point"
+    }
+
+    int_start = pos
+    while pos < len {
+        c = string_char_at(decimal, pos)
+        if c >= 48 && c <= 57 {
+            pos = pos + 1
+        } else {
+            break
+        }
+    }
+    int_part = string_substring(decimal, int_start, pos)
+
+    frac_part = ""
+    if pos < len && string_char_at(decimal, pos) == 46 { // '.'
+        pos = pos + 1
+        if pos >= len {
+            string_release(int_part)
+            int_part = ""
+            return 0, "", "", "expected digits after decimal point"
+        }
+        c = string_char_at(decimal, pos)
+        if c < 48 || c > 57 {
+            string_release(int_part)
+            int_part = ""
+            return 0, "", "", "expected digits after decimal point"
+        }
+        frac_start = pos
+        while pos < len {
+            c = string_char_at(decimal, pos)
+            if c >= 48 && c <= 57 {
+                pos = pos + 1
+            } else {
+                break
+            }
+        }
+        frac_part = string_substring(decimal, frac_start, pos)
+    } else {
+        frac_part = string_copy("")
+    }
+
+    exponent = 0
+    if pos < len {
+        c = string_char_at(decimal, pos)
+        if c == 101 || c == 69 { // 'e' or 'E'
+            pos = pos + 1
+            if pos >= len {
+                string_release(int_part)
+                int_part = ""
+                string_release(frac_part)
+                frac_part = ""
+                return 0, "", "", "missing exponent digits"
+            }
+            exp_neg = 0
+            c = string_char_at(decimal, pos)
+            if c == 45 { // '-'
+                exp_neg = 1
+                pos = pos + 1
+            } else if c == 43 { // '+'
+                pos = pos + 1
+            }
+            if pos >= len {
+                string_release(int_part)
+                int_part = ""
+                string_release(frac_part)
+                frac_part = ""
+                return 0, "", "", "missing exponent digits"
+            }
+            c = string_char_at(decimal, pos)
+            if c < 48 || c > 57 {
+                string_release(int_part)
+                int_part = ""
+                string_release(frac_part)
+                frac_part = ""
+                return 0, "", "", "expected digit in exponent"
+            }
+            exp_val = 0
+            while pos < len {
+                c = string_char_at(decimal, pos)
+                if c >= 48 && c <= 57 {
+                    exp_val = exp_val * 10 + (c - 48)
+                    pos = pos + 1
+                } else {
+                    break
+                }
+            }
+            if exp_neg == 1 {
+                exponent = -exp_val
+            } else {
+                exponent = exp_val
+            }
+        }
+    }
+
+    if pos < len {
+        string_release(int_part)
+        int_part = ""
+        string_release(frac_part)
+        frac_part = ""
+        return 0, "", "", "extra garbage at end of decimal string"
+    }
+
+    if exponent != 0 {
+        curr_int = int_part
+        curr_frac = frac_part
+        if exponent > 0 {
+            steps = exponent
+            while steps > 0 {
+                frac_len = string_length(curr_frac)
+                if frac_len > 0 {
+                    c = string_char_at(curr_frac, 0)
+                    ch_str = string_from_char(c)
+                    new_int = string_concat(curr_int, ch_str)
+                    string_release(ch_str)
+                    new_frac = string_substring(curr_frac, 1, frac_len)
+                    string_release(curr_int)
+                    string_release(curr_frac)
+                    curr_int = new_int
+                    curr_frac = new_frac
+                } else {
+                    new_int = string_concat(curr_int, "0")
+                    string_release(curr_int)
+                    curr_int = new_int
+                }
+                steps = steps - 1
+            }
+        } else {
+            steps = -exponent
+            while steps > 0 {
+                int_len = string_length(curr_int)
+                if int_len > 1 {
+                    c = string_char_at(curr_int, int_len - 1)
+                    ch_str = string_from_char(c)
+                    new_frac = string_concat(ch_str, curr_frac)
+                    string_release(ch_str)
+                    new_int = string_substring(curr_int, 0, int_len - 1)
+                    string_release(curr_int)
+                    string_release(curr_frac)
+                    curr_int = new_int
+                    curr_frac = new_frac
+                } else if int_len == 1 {
+                    c = string_char_at(curr_int, 0)
+                    ch_str = string_from_char(c)
+                    new_frac = string_concat(ch_str, curr_frac)
+                    string_release(ch_str)
+                    string_release(curr_int)
+                    string_release(curr_frac)
+                    curr_int = string_copy("0")
+                    curr_frac = new_frac
+                } else {
+                    new_frac = string_concat("0", curr_frac)
+                    string_release(curr_frac)
+                    curr_frac = new_frac
+                }
+                steps = steps - 1
+            }
+        }
+        int_part = curr_int
+        frac_part = curr_frac
+    }
+
+    // Normalize leading zeros in integer part
+    int_len = string_length(int_part)
+    if int_len > 1 && string_char_at(int_part, 0) == 48 {
+        zero_count = 0
+        while zero_count < int_len - 1 {
+            if string_char_at(int_part, zero_count) == 48 {
+                zero_count = zero_count + 1
+            } else {
+                break
+            }
+        }
+        if zero_count > 0 {
+            new_int = string_substring(int_part, zero_count, int_len)
+            string_release(int_part)
+            int_part = new_int
+        }
+    }
+
+    return negative, int_part, frac_part, ""
+}
+
+// Helper to increment integer part digit string by 1.
+fn increment_integer_part(int_part: string) -> string {
+    int_len = string_length(int_part)
+    int_buf = bytes.new(int_len)
+    i = 0
+    while i < int_len {
+        bytes.set(int_buf, i, string_char_at(int_part, i))
+        i = i + 1
+    }
+
+    idx = int_len - 1
+    carry = 1
+    while idx >= 0 && carry > 0 {
+        val = bytes.get(int_buf, idx) - 48
+        val = val + carry
+        if val >= 10 {
+            bytes.set(int_buf, idx, 48)
+            carry = 1
+        } else {
+            bytes.set(int_buf, idx, val + 48)
+            carry = 0
+        }
+        idx = idx - 1
+    }
+
+    if carry > 0 {
+        res_str = bytes.finish(int_buf, int_len)
+        prepended = string_concat("1", res_str)
+        string_release(res_str)
+        return prepended
+    } else {
+        return bytes.finish(int_buf, int_len)
+    }
+}
+
+// Helper to check if a decimal representation is zero.
+fn is_decimal_zero(int_part: string, frac_part: string) -> int {
+    len_int = string_length(int_part)
+    i = 0
+    while i < len_int {
+        if string_char_at(int_part, i) != 48 {
+            return 0
+        }
+        i = i + 1
+    }
+    len_frac = string_length(frac_part)
+    i = 0
+    while i < len_frac {
+        if string_char_at(frac_part, i) != 48 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Groups integer part digits from right to left using the given separator.
+fn group_integer_part(int_part: string, group_sep: string) -> string {
+    len = string_length(int_part)
+    if string_length(group_sep) == 0 || len <= 3 {
+        return string_copy(int_part)
+    }
+
+    sb = strbuilder.new(len + len / 3 + 1)
+
+    first_group_len = len % 3
+    if first_group_len == 0 {
+        first_group_len = 3
+    }
+
+    pos = 0
+    first_grp = string_substring(int_part, 0, first_group_len)
+    strbuilder.append(sb, first_grp)
+    string_release(first_grp)
+    pos = first_group_len
+
+    while pos < len {
+        strbuilder.append(sb, group_sep)
+        grp = string_substring(int_part, pos, pos + 3)
+        strbuilder.append(sb, grp)
+        string_release(grp)
+        pos = pos + 3
+    }
+
+    return strbuilder.finish(sb)
+}
+
+// Rounds and pads/trims decimal string. Returns (new_integer_part, new_fraction_part).
+fn round_and_pad_decimal(int_part: string, frac_part: string, min_frac: int, max_frac: int) -> (string, string) {
+    curr_int = string_copy(int_part)
+    curr_frac = string_copy(frac_part)
+
+    // 1. Trim trailing zeros from original fraction part to get significant fraction
+    orig_frac_len = string_length(curr_frac)
+    while orig_frac_len > 0 {
+        if string_char_at(curr_frac, orig_frac_len - 1) == 48 { // '0'
+            new_frac = string_substring(curr_frac, 0, orig_frac_len - 1)
+            string_release(curr_frac)
+            curr_frac = new_frac
+            orig_frac_len = orig_frac_len - 1
+        } else {
+            break
+        }
+    }
+
+    // 2. Target fraction length is significant length clamped to [min_frac, max_frac]
+    target_frac_len = orig_frac_len
+    if target_frac_len < min_frac {
+        target_frac_len = min_frac
+    }
+    if target_frac_len > max_frac {
+        target_frac_len = max_frac
+    }
+
+    frac_len = string_length(curr_frac)
+
+    if frac_len > target_frac_len {
+        d_discard = string_char_at(curr_frac, target_frac_len)
+
+        f_trunc = string_substring(curr_frac, 0, target_frac_len)
+        string_release(curr_frac)
+        curr_frac = f_trunc
+
+        if d_discard >= 53 { // '5'
+            carry = 1
+            idx = target_frac_len - 1
+            if target_frac_len > 0 {
+                f_buf = bytes.new(target_frac_len)
+                i = 0
+                while i < target_frac_len {
+                    bytes.set(f_buf, i, string_char_at(curr_frac, i))
+                    i = i + 1
+                }
+
+                while idx >= 0 && carry > 0 {
+                    val = bytes.get(f_buf, idx) - 48
+                    val = val + carry
+                    if val >= 10 {
+                        bytes.set(f_buf, idx, 48)
+                        carry = 1
+                    } else {
+                        bytes.set(f_buf, idx, val + 48)
+                        carry = 0
+                    }
+                    idx = idx - 1
+                }
+                string_release(curr_frac)
+                curr_frac = bytes.finish(f_buf, target_frac_len)
+            }
+
+            if carry > 0 {
+                inc_int = increment_integer_part(curr_int)
+                string_release(curr_int)
+                curr_int = inc_int
+            }
+        }
+    }
+
+    // 3. Trim trailing zeros if we rounded to target_frac_len but got zeros, down to min_frac
+    curr_frac_len = string_length(curr_frac)
+    while curr_frac_len > min_frac {
+        if string_char_at(curr_frac, curr_frac_len - 1) == 48 { // '0'
+            new_frac = string_substring(curr_frac, 0, curr_frac_len - 1)
+            string_release(curr_frac)
+            curr_frac = new_frac
+            curr_frac_len = curr_frac_len - 1
+        } else {
+            break
+        }
+    }
+
+    // 4. Pad trailing zeros up to min_frac
+    while curr_frac_len < min_frac {
+        new_frac = string_concat(curr_frac, "0")
+        string_release(curr_frac)
+        curr_frac = new_frac
+        curr_frac_len = curr_frac_len + 1
+    }
+
+    return curr_int, curr_frac
+}
+
+// Bounded CLDR-derived locale-specific data from Common Locale Data Repository (CLDR) Version 44.0
+fn get_locale_info(locale: string) -> (string, string, string, int, string) {
+    canonical, err = language.parse(locale)
+    tag_str = ""
+    if err != "" {
+        tag_str = string_copy("en")
+        string_release(canonical)
+        string_release(err)
+    } else {
+        tag_str = canonical
+        string_release(err)
+    }
+
+    t_tag = tag_str as Tag
+    base_lang = language.language(t_tag)
+
+    // Default: en
+    decimal_sep = "."
+    group_sep = ","
+    percent_spacing = ""
+    currency_prefix = 1
+    currency_spacing = ""
+
+    if string_equals(tag_str, "en-GB") == 1 {
+        // use default (en)
+    } else if string_equals(base_lang, "en") == 1 {
+        // use default (en)
+    } else if string_equals(base_lang, "fr") == 1 {
+        decimal_sep = ","
+        group_sep = "\xe2\x80\xaf" // Narrow NBSP (U+202F)
+        percent_spacing = "\xc2\xa0" // NBSP (U+00A0)
+        currency_prefix = 0
+        currency_spacing = "\xc2\xa0"
+    } else if string_equals(base_lang, "de") == 1 {
+        decimal_sep = ","
+        group_sep = "."
+        percent_spacing = "\xc2\xa0"
+        currency_prefix = 0
+        currency_spacing = "\xc2\xa0"
+    } else if string_equals(base_lang, "ru") == 1 {
+        decimal_sep = ","
+        group_sep = "\xe2\x80\xaf"
+        percent_spacing = "\xc2\xa0"
+        currency_prefix = 0
+        currency_spacing = "\xc2\xa0"
+    } else if string_equals(base_lang, "pl") == 1 {
+        decimal_sep = ","
+        group_sep = "\xc2\xa0"
+        percent_spacing = ""
+        currency_prefix = 0
+        currency_spacing = "\xc2\xa0"
+    } else if string_equals(base_lang, "ja") == 1 {
+        // default prefix spacing
+    } else if string_equals(base_lang, "zh") == 1 {
+        // default prefix spacing
+    }
+
+    string_release(tag_str)
+    tag_str = ""
+    string_release(base_lang)
+    base_lang = ""
+    return decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing
+}
+
+// Bounded CLDR-derived currency symbol mapping from CLDR Version 44.0
+fn get_currency_symbol_and_digits(locale: string, currency: string) -> (string, int, int) {
+    canonical, err = language.parse(locale)
+    tag_str = ""
+    if err != "" {
+        tag_str = string_copy("en")
+        string_release(canonical)
+        string_release(err)
+    } else {
+        tag_str = canonical
+        string_release(err)
+    }
+
+    t_tag = tag_str as Tag
+    base_lang = language.language(t_tag)
+
+    symbol = ""
+    digits = 2
+    is_known = 1
+
+    if string_equals(currency, "USD") == 1 {
+        symbol = string_copy("$")
+        digits = 2
+    } else if string_equals(currency, "EUR") == 1 {
+        symbol = string_copy("\xe2\x82\xac") // "€"
+        digits = 2
+    } else if string_equals(currency, "GBP") == 1 {
+        symbol = string_copy("\xc2\xa3") // "£"
+        digits = 2
+    } else if string_equals(currency, "JPY") == 1 {
+        digits = 0
+        if string_equals(base_lang, "ja") == 1 {
+            symbol = string_copy("\xef\xbf\xa5") // "￥" fullwidth
+        } else {
+            symbol = string_copy("\xc2\xa5") // "¥"
+        }
+    } else if string_equals(currency, "PLN") == 1 {
+        symbol = string_copy("z\xc5\x82") // "zł"
+        digits = 2
+    } else if string_equals(currency, "CNY") == 1 {
+        digits = 2
+        if string_equals(base_lang, "zh") == 1 {
+            symbol = string_copy("\xc2\xa5") // "¥"
+        } else {
+            symbol = string_copy("CN\xc2\xa5") // "CN¥"
+        }
+    } else {
+        symbol = string_copy(currency)
+        digits = 2
+        is_known = 0
+    }
+
+    string_release(tag_str)
+    tag_str = ""
+    string_release(base_lang)
+    base_lang = ""
+
+    return symbol, digits, is_known
+}
+
+fn format_decimal_string(locale: string, decimal: string, options: FormatOptions) -> (string, string) {
+    negative, int_part, frac_part, err = parse_decimal_string(decimal)
+    if err != "" {
+        return "", err
+    }
+
+    decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing = get_locale_info(locale)
+
+    rounded_int, rounded_frac = round_and_pad_decimal(int_part, frac_part, options.min_fraction_digits, options.max_fraction_digits)
+
+    if negative == 1 && is_decimal_zero(rounded_int, rounded_frac) == 1 {
+        negative = 0
+    }
+
+    grouped_int = ""
+    if options.use_grouping == 1 {
+        grouped_int = group_integer_part(rounded_int, group_sep)
+    } else {
+        grouped_int = string_copy(rounded_int)
+    }
+
+    sb = strbuilder.new(64)
+
+    if negative == 1 {
+        strbuilder.append(sb, "-")
+    }
+    strbuilder.append(sb, grouped_int)
+
+    if string_length(rounded_frac) > 0 {
+        strbuilder.append(sb, decimal_sep)
+        strbuilder.append(sb, rounded_frac)
+    }
+
+    res = strbuilder.finish(sb)
+
+    string_release(int_part)
+    int_part = ""
+    string_release(frac_part)
+    frac_part = ""
+    string_release(err)
+    err = ""
+    string_release(rounded_int)
+    rounded_int = ""
+    string_release(rounded_frac)
+    rounded_frac = ""
+    string_release(grouped_int)
+    grouped_int = ""
+
+    string_release(decimal_sep)
+    decimal_sep = ""
+    string_release(group_sep)
+    group_sep = ""
+    string_release(percent_spacing)
+    percent_spacing = ""
+    string_release(currency_spacing)
+    currency_spacing = ""
+
+    return res, ""
+}
+
+fn format_percent_string(locale: string, decimal: string, options: FormatOptions) -> (string, string) {
+    negative, int_part, frac_part, err = parse_decimal_string(decimal)
+    if err != "" {
+        return "", err
+    }
+
+    // Multiply by 100
+    curr_int = int_part
+    curr_frac = frac_part
+    steps = 2
+    while steps > 0 {
+        frac_len = string_length(curr_frac)
+        if frac_len > 0 {
+            c = string_char_at(curr_frac, 0)
+            ch_str = string_from_char(c)
+            new_int = string_concat(curr_int, ch_str)
+            string_release(ch_str)
+            new_frac = string_substring(curr_frac, 1, frac_len)
+            string_release(curr_int)
+            string_release(curr_frac)
+            curr_int = new_int
+            curr_frac = new_frac
+        } else {
+            new_int = string_concat(curr_int, "0")
+            string_release(curr_int)
+            curr_int = new_int
+        }
+        steps = steps - 1
+    }
+
+    // Normalize leading zeros in curr_int
+    int_len = string_length(curr_int)
+    if int_len > 1 && string_char_at(curr_int, 0) == 48 {
+        zero_count = 0
+        while zero_count < int_len - 1 {
+            if string_char_at(curr_int, zero_count) == 48 {
+                zero_count = zero_count + 1
+            } else {
+                break
+            }
+        }
+        if zero_count > 0 {
+            new_int = string_substring(curr_int, zero_count, int_len)
+            string_release(curr_int)
+            curr_int = new_int
+        }
+    }
+
+    decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing = get_locale_info(locale)
+
+    rounded_int, rounded_frac = round_and_pad_decimal(curr_int, curr_frac, options.min_fraction_digits, options.max_fraction_digits)
+
+    if negative == 1 && is_decimal_zero(rounded_int, rounded_frac) == 1 {
+        negative = 0
+    }
+
+    grouped_int = ""
+    if options.use_grouping == 1 {
+        grouped_int = group_integer_part(rounded_int, group_sep)
+    } else {
+        grouped_int = string_copy(rounded_int)
+    }
+
+    sb = strbuilder.new(64)
+
+    if negative == 1 {
+        strbuilder.append(sb, "-")
+    }
+    strbuilder.append(sb, grouped_int)
+
+    if string_length(rounded_frac) > 0 {
+        strbuilder.append(sb, decimal_sep)
+        strbuilder.append(sb, rounded_frac)
+    }
+
+    if string_length(percent_spacing) > 0 {
+        strbuilder.append(sb, percent_spacing)
+    }
+    strbuilder.append(sb, "%")
+
+    res = strbuilder.finish(sb)
+
+    string_release(int_part)
+    int_part = ""
+    string_release(frac_part)
+    frac_part = ""
+    string_release(err)
+    err = ""
+    string_release(curr_int)
+    curr_int = ""
+    string_release(curr_frac)
+    curr_frac = ""
+    string_release(rounded_int)
+    rounded_int = ""
+    string_release(rounded_frac)
+    rounded_frac = ""
+    string_release(grouped_int)
+    grouped_int = ""
+
+    string_release(decimal_sep)
+    decimal_sep = ""
+    string_release(group_sep)
+    group_sep = ""
+    string_release(percent_spacing)
+    percent_spacing = ""
+    string_release(currency_spacing)
+    currency_spacing = ""
+
+    return res, ""
+}
+
+fn format_currency_string(locale: string, currency: string, decimal: string) -> (string, string) {
+    negative, int_part, frac_part, err = parse_decimal_string(decimal)
+    if err != "" {
+        return "", err
+    }
+
+    decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing = get_locale_info(locale)
+
+    symbol, default_digits, is_known = get_currency_symbol_and_digits(locale, currency)
+
+    rounded_int, rounded_frac = round_and_pad_decimal(int_part, frac_part, default_digits, default_digits)
+
+    if negative == 1 && is_decimal_zero(rounded_int, rounded_frac) == 1 {
+        negative = 0
+    }
+
+    grouped_int = group_integer_part(rounded_int, group_sep)
+
+    num_sb = strbuilder.new(32)
+    strbuilder.append(num_sb, grouped_int)
+
+    if string_length(rounded_frac) > 0 {
+        strbuilder.append(num_sb, decimal_sep)
+        strbuilder.append(num_sb, rounded_frac)
+    }
+    num_str = strbuilder.finish(num_sb)
+
+    sb = strbuilder.new(64)
+
+    if currency_prefix == 1 {
+        if negative == 1 {
+            strbuilder.append(sb, "-")
+        }
+        strbuilder.append(sb, symbol)
+        if is_known == 0 {
+            strbuilder.append(sb, "\xc2\xa0") // NBSP
+        }
+        strbuilder.append(sb, num_str)
+    } else {
+        if negative == 1 {
+            strbuilder.append(sb, "-")
+        }
+        strbuilder.append(sb, num_str)
+        if is_known == 0 {
+            strbuilder.append(sb, "\xc2\xa0") // NBSP
+        } else if string_length(currency_spacing) > 0 {
+            strbuilder.append(sb, currency_spacing)
+        }
+        strbuilder.append(sb, symbol)
+    }
+
+    res = strbuilder.finish(sb)
+
+    string_release(int_part)
+    int_part = ""
+    string_release(frac_part)
+    frac_part = ""
+    string_release(err)
+    err = ""
+    string_release(rounded_int)
+    rounded_int = ""
+    string_release(rounded_frac)
+    rounded_frac = ""
+    string_release(grouped_int)
+    grouped_int = ""
+    string_release(num_str)
+    num_str = ""
+    string_release(symbol)
+    symbol = ""
+
+    string_release(decimal_sep)
+    decimal_sep = ""
+    string_release(group_sep)
+    group_sep = ""
+    string_release(percent_spacing)
+    percent_spacing = ""
+    string_release(currency_spacing)
+    currency_spacing = ""
+
+    return res, ""
+}
+
+fn format_decimal(locale: string, value: float, options: FormatOptions) -> string {
+    text = string_from_double(value)
+    if string_equals(text, "NaN") == 1 || string_equals(text, "Infinity") == 1 || string_equals(text, "-Infinity") == 1 {
+        res = string_copy(text)
+        string_free(text)
+        return res
+    }
+    formatted, err = format_decimal_string(locale, text, options)
+    string_free(text)
+    string_release(err)
+    err = ""
+    return formatted
+}
+
+fn format_percent(locale: string, value: float, options: FormatOptions) -> string {
+    text = string_from_double(value)
+    if string_equals(text, "NaN") == 1 || string_equals(text, "Infinity") == 1 || string_equals(text, "-Infinity") == 1 {
+        res = string_copy(text)
+        string_free(text)
+        return res
+    }
+    formatted, err = format_percent_string(locale, text, options)
+    string_free(text)
+    string_release(err)
+    err = ""
+    return formatted
+}
+
+fn format_currency(locale: string, currency: string, value: float) -> string {
+    text = string_from_double(value)
+    if string_equals(text, "NaN") == 1 || string_equals(text, "Infinity") == 1 || string_equals(text, "-Infinity") == 1 {
+        res = string_copy(text)
+        string_free(text)
+        return res
+    }
+    formatted, err = format_currency_string(locale, currency, text)
+    string_free(text)
+    string_release(err)
+    err = ""
+    return formatted
+}
+
+fn format_decimal_default(locale: string, value: float) -> string {
+    opts = default_options()
+    return format_decimal(locale, value, opts)
+}
+
+fn format_percent_default(locale: string, value: float) -> string {
+    opts = default_options()
+    return format_percent(locale, value, opts)
+}
