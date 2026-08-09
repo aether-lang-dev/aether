@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`audio.load_pcm(data, length, sample_rate, channels, format)`** — play PCM
+  samples the caller has **already decoded**, rather than only encoded
+  containers miniaudio can demux itself (`asks/pcm-please.md`).
+
+  `load_wav` is better than its name — it is a format-sniffing decoder, so mp3
+  and flac already work — but every entry point wanted bytes miniaudio could
+  parse. That left no way in for samples a *different* decoder produced, which
+  is exactly the case once `contrib.avcodec` has demuxed an MP4 and holds the
+  audio packets. The workaround was pre-extracting a sidecar WAV: roughly
+  doubling on-disk cost (a 20 MB sidecar for a 21 MB clip), a manual step
+  before playback, and no option at all for a live source with no file to
+  extract from — the same intermediate-file problem `contrib/avcodec` was
+  written to remove, reappearing on the audio side.
+
+  Backed by `ma_audio_buffer` fed to the same `ma_sound_init_from_data_source`
+  the encoded path uses, so the whole transport surface works unchanged: `play`,
+  `pause`, `position_ms`, `duration_ms`, `seek_ms`, `volume`. `position_ms`
+  keeps working as the A/V-sync master clock, which is the reason the ask
+  matters. Sample formats are exposed as `audio.FORMAT_U8` / `_S16` / `_S24` /
+  `_S32` / `_F32` so callers never hardcode miniaudio's numbering.
+
+  `length` must be a whole number of frames (bytes-per-sample x channels); a
+  partial trailing frame is refused rather than played as noise off the end.
+
 ## [0.510.0]
 
 ### Added
