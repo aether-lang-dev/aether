@@ -1,0 +1,114 @@
+// io.fd_read_into — zero-allocation incremental read from a raw fd (#1471).
+//
+// The issue: `std.os.run_pipe` hands back a readable fd, but the only way to
+// consume it was `fd_read_n`, which allocates a fresh string per call. For the
+// streaming-decode case that motivated the ask — one video frame per read, 8 MB
+// at 1080p, 30 times a second — that is ~250 MB/s of allocator churn a reused
+// caller-owned buffer avoids entirely. `fs.pread_into` was already the same
+// shape for files; this is the fd equivalent.
+//
+// What this pins:
+//   1. bytes arrive INCREMENTALLY, before the child exits (the property that
+//      makes streaming possible at all — a drain-to-completion read would
+//      block until EOF and defeat the purpose)
+//   2. ONE buffer serves every read
+//   3. EOF is n == 0 with no error, so `while n > 0` terminates
+//   4. a short read is not an error
+//   5. bad arguments are refused rather than silently misbehaving
+import std.os
+import std.io
+import std.bytes
+import std.string
+import std.list
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+main() {
+    println("=== io.fd_read_into ===")
+    fails = 0
+
+    // The child writes two chunks with a gap between them, to fd 3 — the
+    // AETHER_IPC_FD channel run_pipe sets up. If reads were drain-to-
+    // completion, the first would not return until the child exited.
+    args = list.new()
+    _ = list.add(args, "-c")
+    _ = list.add(args, "printf 'frame1' >&3; sleep 0.2; printf 'frame2' >&3")
+    fd, pid, err = os.run_pipe("sh", args, null)
+    list.free(args)
+    if err != "" {
+        println("  SKIP: run_pipe unavailable (${err})")
+        string.free(err)
+        return
+    }
+    string.free(err)
+
+    // One buffer, reused for every read. This is the point of the API.
+    cap = 64
+    buf = bytes.new(cap)
+
+    got1 = ""
+    got2 = ""
+    reads = 0
+    total = 0
+    n = 1
+    while n > 0 {
+        n, e = io.fd_read_into(fd, bytes.data(buf), cap)
+        if e != "" {
+            fails = fails + check(0, "read errored: ${e}")
+            n = 0
+        } else {
+            if n > 0 {
+                // Writing through data() does not publish the length; the
+                // buffer still thinks it is empty until set_length says
+                // otherwise. Only matters when converting to a string.
+                _ = bytes.set_length(buf, n)
+                s = bytes.to_string(buf, n)
+                if reads == 0 { got1 = string.concat(s, "") }
+                if reads == 1 { got2 = string.concat(s, "") }
+                string.free(s)
+                reads = reads + 1
+                total = total + n
+            }
+        }
+        string.free(e)
+    }
+
+    fails = fails + check(string.equals(got1, "frame1"), "first chunk arrives before the child exits")
+    fails = fails + check(string.equals(got2, "frame2"), "second chunk arrives after it is written")
+    fails = fails + check(reads == 2, "two incremental reads, not one drained blob (got ${reads})")
+    fails = fails + check(total == 12, "12 bytes total (got ${total})")
+    fails = fails + check(n == 0, "EOF reported as n == 0, so the loop terminates")
+
+    string.free(got1)
+    string.free(got2)
+    bytes.free(buf)
+    _ = io.fd_close(fd)
+    _st, _we = os.wait_pid(pid)
+    string.free(_we)
+
+    // Argument guards: refuse rather than read into nothing.
+    b2 = bytes.new(8)
+    bad_fd, e1 = io.fd_read_into(0 - 1, bytes.data(b2), 8)
+    fails = fails + check(bad_fd == 0 && string.length(e1) > 0, "negative fd is refused")
+    string.free(e1)
+
+    zero_len, e2 = io.fd_read_into(0, bytes.data(b2), 0)
+    fails = fails + check(zero_len == 0 && string.length(e2) > 0, "zero length is refused")
+    string.free(e2)
+    bytes.free(b2)
+
+    println("")
+    if fails == 0 {
+        println("All PASS")
+    } else {
+        println("${fails} FAILURE(S)")
+        exit(1)
+    }
+}

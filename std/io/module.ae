@@ -15,11 +15,12 @@ exports(
     io_perror_raw, io_errno_message_raw,
     io_fd_open_read_tuple, io_fd_open_write_tuple, io_fd_close_raw,
     io_fd_write_n, io_fd_read_n_tuple, io_fd_read_line_tuple,
+    io_fd_read_into_raw,
     read_file, write_file, append_file, delete_file, file_info,
     setenv, unsetenv,
     stderr_write, stdout_write, perror, errno_message,
     fd_open_read, fd_open_write, fd_close,
-    fd_write_n, fd_read_n, fd_read_line
+    fd_write_n, fd_read_n, fd_read_into, fd_read_line
 )
 
 // Console I/O — infallible in practice
@@ -78,6 +79,7 @@ extern io_fd_write_n(fd: int, data: string, length: int) -> int
 // was never reclaimed, leaking one buffer per read. aether_heap_str_free
 // dispatches on the magic header (string_release here); never a literal.
 extern io_fd_read_n_tuple(fd: int, n: int) -> (string @heap, int, string)
+extern io_fd_read_into_raw(fd: int, buf: ptr, length: int) -> int
 extern io_fd_read_line_tuple(fd: int) -> (string @heap, string)
 
 // string_concat for owned-copy duplication
@@ -246,6 +248,39 @@ fd_write_n(fd: int, data: string, length: int) -> int {
 // read_binary / realpath wrappers.
 fd_read_n(fd: int, n: int) -> {
     return io_fd_read_n_tuple(fd, n)
+}
+
+// Zero-allocation sibling of `fd_read_n` (#1471): read into a buffer the
+// caller owns instead of minting a fresh string per call. Mirrors
+// `fs.pread_into`, which is the same shape for files.
+//
+// Returns (n, err). `n == 0` means EOF; `0 < n < length` is a normal SHORT
+// READ, not an error — unlike `fd_read_n`, this returns as soon as any bytes
+// are available rather than looping to fill the buffer. That is precisely
+// what makes it usable on a live pipe: waiting to fill would stall until the
+// producer happened to send a whole buffer's worth.
+//
+// Loop until it returns 0 to consume a stream to EOF. `buf` comes from
+// `bytes.new(length)`; pass `bytes.data(buf)` and the same `length` used to
+// allocate it. Reading a frame at a time this way avoids ~250 MB/s of
+// allocator churn at 1080p30 versus the allocating form.
+//
+// GOTCHA: this writes straight into `data()`'s region, which does not update
+// the buffer's own length. Call `bytes.set_length(buf, n)` afterwards before
+// `bytes.to_string(buf, n)`, or you get an empty string back with no error:
+//
+//     n, e = io.fd_read_into(fd, bytes.data(buf), cap)
+//     _ = bytes.set_length(buf, n)          // <- required
+//     s = bytes.to_string(buf, n)
+//
+// A caller passing the bytes straight to another extern (the video case)
+// never needs this — it only matters when converting to a string.
+fd_read_into(fd: int, buf: ptr, length: int) -> int! {
+    n = io_fd_read_into_raw(fd, buf, length)
+    if n < 0 {
+        return 0, "fd_read_into failed"
+    }
+    return n, ""
 }
 
 // Read one '\n'-delimited line from `fd`. The trailing '\n' is

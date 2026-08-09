@@ -98,6 +98,11 @@ int io_fd_write_n(int fd, const char* data, int length);
 // failure. The string is binary-safe (carries explicit length;
 // embedded NULs survive).
 _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n);
+/* Zero-allocation read into a caller-owned buffer (#1471). Returns the byte
+ * count, 0 at EOF, or -1 on error. Returns as soon as ANY bytes are available
+ * (unlike io_fd_read_n_tuple, which loops to fill) so it is usable on a live
+ * pipe. */
+int io_fd_read_into_raw(int fd, void* buf, int length);
 
 // Read one '\n'-delimited line from `fd`. Trailing '\n' is stripped
 // (a trailing '\r' before it is also stripped, so CRLF input yields

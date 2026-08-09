@@ -41,6 +41,7 @@ _tuple_int_string_io io_fd_open_write_tuple(const char* p) { (void)p; _tuple_int
 const char* io_fd_close_raw(int fd) { (void)fd; return "filesystem disabled"; }
 int io_fd_write_n(int fd, const char* d, int n) { (void)fd; (void)d; (void)n; return -1; }
 _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n) { (void)fd; (void)n; _tuple_ptrintstr_io t; t._0 = NULL; t._1 = 0; t._2 = "filesystem disabled"; return t; }
+int io_fd_read_into_raw(int fd, void* buf, int length) { (void)fd; (void)buf; (void)length; return -1; }
 _tuple_ptrstr_io   io_fd_read_line_tuple(int fd) { (void)fd; _tuple_ptrstr_io t; t._0 = NULL; t._1 = "filesystem disabled"; return t; }
 #else
 
@@ -429,6 +430,41 @@ _tuple_ptrintstr_io io_fd_read_n_tuple(int fd, int n) {
     out._0 = (void*)s;
     out._1 = total;
     return out;
+}
+
+/* Zero-allocation sibling of io_fd_read_n_tuple: read into a CALLER-owned
+ * buffer instead of minting a fresh AetherString per call.
+ *
+ * Why it exists (#1471): the streaming-decode case reads one video frame per
+ * iteration. At 1080p a frame is ~8 MB, so allocating a fresh string per frame
+ * at 30fps is ~250 MB/s of pure allocator churn that a reused buffer avoids
+ * entirely. `fs.pread_into` is the same shape for files; this is the fd
+ * equivalent, so a caller streaming from a pipe gets the same option as one
+ * reading a file.
+ *
+ * Returns the byte count, or -1 on error. Like read(2) and unlike
+ * io_fd_read_n_tuple, this returns as soon as ANY bytes are available rather
+ * than looping to fill the buffer — that is what makes it usable on a live
+ * pipe, where waiting to fill would stall until the producer sent a full
+ * buffer's worth. n == 0 means EOF; 0 < n < length is a normal short read, not
+ * an error. EINTR is retried.
+ *
+ * The buffer is caller-owned (std.bytes) and its capacity is trusted the same
+ * way fs_pread_into_raw trusts its own — the Aether wrapper is the guard. */
+int io_fd_read_into_raw(int fd, void* buf, int length) {
+    if (fd < 0 || !buf || length <= 0) return -1;
+    for (;;) {
+#ifdef _WIN32
+        int r = AE_FD_READ(fd, (char*)buf, length);
+#else
+        long r = AE_FD_READ(fd, (char*)buf, length);
+#endif
+        if (r >= 0) return (int)r;   /* 0 == EOF */
+#ifndef _WIN32
+        if (errno == EINTR) continue;
+#endif
+        return -1;
+    }
 }
 
 _tuple_ptrstr_io io_fd_read_line_tuple(int fd) {
