@@ -1,0 +1,104 @@
+// contrib.avcodec — thin FFmpeg video-decode veneer for Aether.
+// Import with: import contrib.avcodec
+//
+//   avcodec.open(url, w, h)      -> (dec, err)   // w/h <= 0 = source size
+//   avcodec.width(dec)           -> int          // the SCALED output width
+//   avcodec.height(dec)          -> int
+//   avcodec.frame_bytes(dec)     -> int          // w*h*4
+//   avcodec.fps(dec)             -> (num, den)   // source rate as a ratio
+//   avcodec.next_frame(dec)      -> (bytes, n, err)   // "" ,0, "eof" at end
+//   avcodec.next_frame_into(dec, buf, cap) -> (n, err) // zero-allocation
+//   avcodec.pts_ms(dec)          -> int          // presentation time of last frame
+//   avcodec.errmsg(dec)          -> string
+//   avcodec.close(dec)           -> void
+//
+// Video only, by design. Audio, seeking and stream selection are future
+// work; none are needed to feed decoded frames to a renderer, which is the
+// job this exists for.
+//
+// Two ways to take a frame, matching contrib/sqlite's blob accessors:
+//
+//   next_frame       allocates a fresh owned string per frame — simplest,
+//                    and fine at small sizes.
+//   next_frame_into  writes into a caller-owned buffer — nothing is
+//                    allocated per frame. At 1080p a frame is 8 MB and
+//                    30fps is 250 MB/s of churn, so a long-running player
+//                    should use this one. Pair it with bytes.to_string
+//                    (NOT bytes.finish, which destroys the buffer) if the
+//                    pixels then need to be passed on as a string.
+//
+// A C-only dependency: link with
+//   [build] link_flags = "-laether_avcodec -lavcodec -lavformat -lavutil -lswscale"
+// Nothing is vendored in contrib/.
+
+exports(
+    avc_open_raw, avc_close_raw,
+    avc_width_raw, avc_height_raw, avc_frame_bytes_raw,
+    avc_fps_num_raw, avc_fps_den_raw, avc_pts_ms_raw,
+    avc_try_next_frame, avc_get_frame_bytes, avc_get_frame_length,
+    avc_release_frame, avc_copy_frame_into_raw, avc_error_raw,
+    open, close, width, height, frame_bytes, fps, pts_ms,
+    next_frame, next_frame_into, errmsg
+)
+
+extern avc_open_raw(url: string, want_w: int, want_h: int) -> ptr
+extern avc_close_raw(dec: ptr)
+extern avc_width_raw(dec: ptr) -> int
+extern avc_height_raw(dec: ptr) -> int
+extern avc_frame_bytes_raw(dec: ptr) -> int
+extern avc_fps_num_raw(dec: ptr) -> int
+extern avc_fps_den_raw(dec: ptr) -> int
+extern avc_pts_ms_raw(dec: ptr) -> int
+extern avc_try_next_frame(dec: ptr) -> int
+extern avc_get_frame_bytes() -> string
+extern avc_get_frame_length() -> int
+extern avc_release_frame()
+extern avc_copy_frame_into_raw(dec: ptr, buf: ptr, cap: int) -> int
+extern avc_error_raw(dec: ptr) -> string
+extern string_new_with_length(data: string, length: int) -> ptr
+
+// Open a media source. `want_w`/`want_h` <= 0 means "source size"; anything
+// else scales during the RGBA conversion, so resizing costs no extra pass.
+open(url: string, want_w: int, want_h: int) -> {
+    d = avc_open_raw(url, want_w, want_h)
+    if d == null { return null, "cannot open ${url}" }
+    return d, ""
+}
+
+close(dec: ptr) { avc_close_raw(dec) }
+
+width(dec: ptr) -> int       { return avc_width_raw(dec) }
+height(dec: ptr) -> int      { return avc_height_raw(dec) }
+frame_bytes(dec: ptr) -> int { return avc_frame_bytes_raw(dec) }
+pts_ms(dec: ptr) -> int      { return avc_pts_ms_raw(dec) }
+errmsg(dec: ptr) -> string   { return avc_error_raw(dec) }
+
+// Source frame rate as a ratio rather than a float: 30000/1001 (NTSC) does
+// not survive a float round-trip cleanly, and a presentation-timestamp model
+// wants the exact ratio.
+fps(dec: ptr) -> {
+    return avc_fps_num_raw(dec), avc_fps_den_raw(dec)
+}
+
+// Decode the next frame as packed RGBA8888. Returns ("", 0, "eof") at the
+// end of the stream — EOF is not an error, so callers loop until n == 0.
+next_frame(dec: ptr) -> {
+    ok = avc_try_next_frame(dec)
+    if ok == 0 { return "", 0, "eof" }
+    raw = avc_get_frame_bytes()
+    n = avc_get_frame_length()
+    owned = string_new_with_length(raw, n)
+    avc_release_frame()
+    return owned, n, ""
+}
+
+// Zero-allocation variant: decode straight into a caller-owned buffer.
+// Returns (0, "eof") at end of stream, (0, "buffer too small") if cap is
+// under frame_bytes(dec).
+next_frame_into(dec: ptr, buf: ptr, cap: int) -> {
+    need = avc_frame_bytes_raw(dec)
+    if cap < need { return 0, "buffer too small: need ${need}, have ${cap}" }
+    n = avc_copy_frame_into_raw(dec, buf, cap)
+    if n == 0 { return 0, "eof" }
+    return n, ""
+}

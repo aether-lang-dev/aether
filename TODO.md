@@ -531,6 +531,47 @@ case (no `--with=fs` → engine errors clearly):
 
 ## Other parked work
 
+### Contrib runtime coverage is split across two mechanisms
+
+`contrib/sqlite` is **not** in `.github/scripts/contrib_check.sh` — it is
+covered by `tests/integration/sqlite_roundtrip/` instead. So contrib
+runtime coverage currently lives in two places with different shapes, and
+nothing says which a new module should use.
+
+Noticed while fixing the `avcodec` entry (2026-08-09), which had been added
+to `contrib_check.sh` but could never pass: the runner builds with
+`ae build --extra shim.c`, which compiles a C shim but **cannot pass `-l`
+flags**, so any module backed by a system library compiled and then died at
+link with `undefined reference`. The fix taught `contrib_check.sh` a fifth
+column naming pkg-config modules; when set it stages an `aether.toml`
+workspace carrying `link_flags` — which is precisely the shape
+`sqlite_roundtrip` had been using all along, hand-rolled in its own `.sh`.
+
+So the two mechanisms now overlap: `contrib_check.sh` can do what
+`sqlite_roundtrip` does, generically and in a table.
+
+**The work:** move `contrib/sqlite` into the `contrib_check.sh` table
+
+```
+"sqlite/roundtrip|contrib/sqlite/test_sqlite.ae|contrib/sqlite/aether_sqlite.c|run|sqlite3"
+```
+
+and retire `tests/integration/sqlite_roundtrip/`. Needs a
+`contrib/sqlite/test_sqlite.ae` first — the existing `probe.ae` is written
+for the workspace harness and would need adapting.
+
+**Why it is worth doing:** one table means a new native-backed contrib
+module gets runtime coverage by adding one line, rather than by copying a
+50-line shell driver and rediscovering the `aether.toml` trick. It also
+puts sqlite into the nightly's `make contrib-check-valgrind` sweep, which
+it is currently outside of.
+
+**Why it is parked:** the avcodec fix already covers the mechanism, sqlite
+*is* tested today (just elsewhere), and consolidating means rewriting a
+working test — pure cleanup with no new coverage. Do it when someone next
+adds a native-backed contrib module and has to choose between the two
+patterns.
+
 ### `std.bignum` — deferred optimizations
 
 The arbitrary-precision integer surface (`std/bignum/module.ae`) is functionally
