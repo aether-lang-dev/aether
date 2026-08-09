@@ -1,0 +1,101 @@
+// test_avcodec.ae — contrib/avcodec runtime gate.
+//
+// Generates its own clip with ffmpeg so the test carries no fixture, and
+// SKIPS cleanly when ffmpeg is absent -- the shim needs FFmpeg's libraries
+// to build at all, but the ffmpeg BINARY is only needed to make test input.
+import contrib.avcodec
+import std.string
+import std.bytes
+import std.os
+import std.list
+import std.fs
+
+extern exit(code: int)
+
+fail(msg: string) { println("  FAIL: ${msg}"); exit(1) }
+pass(msg: string) { println("  PASS: ${msg}") }
+
+main() {
+    clip = "/tmp/_avc_test_clip.mp4"
+    av = list.new()
+    _ = list.add(av, "-y")
+    _ = list.add(av, "-f")
+    _ = list.add(av, "lavfi")
+    _ = list.add(av, "-i")
+    _ = list.add(av, "testsrc=size=64x48:rate=10:duration=2")
+    _ = list.add(av, "-pix_fmt")
+    _ = list.add(av, "yuv420p")
+    _ = list.add(av, clip)
+    _o, st, e = os.run_capture("ffmpeg", av, null)
+    list.free(av)
+    if st != 0 {
+        println("  SKIP: ffmpeg not available to generate test input")
+        return
+    }
+
+    d, err = avcodec.open(clip, 64, 48)
+    if string.length(err) > 0 { fail("open: ${err}") }
+    if avcodec.width(d) != 64 { fail("width ${avcodec.width(d)} want 64") }
+    if avcodec.height(d) != 48 { fail("height ${avcodec.height(d)} want 48") }
+    pass("open + geometry")
+
+    fb = avcodec.frame_bytes(d)
+    if fb != 64 * 48 * 4 { fail("frame_bytes ${fb} want ${64 * 48 * 4}") }
+    pass("frame_bytes is w*h*4")
+
+    num, den = avcodec.fps(d)
+    if num <= 0 { fail("fps num ${num}") }
+    if den <= 0 { fail("fps den ${den}") }
+    pass("fps ratio ${num}/${den}")
+
+    // Allocation path.
+    px, n, ferr = avcodec.next_frame(d)
+    if n != fb { fail("next_frame n=${n} want ${fb}") }
+    if string.length(ferr) > 0 { fail("next_frame err ${ferr}") }
+    pass("next_frame returns a full RGBA frame")
+
+    // Zero-allocation path, one buffer reused to EOF. Counting to the end
+    // also proves EOF is reported as n==0 rather than looping forever.
+    buf = bytes.new(fb)
+    count = 1
+    guard = 0
+    while guard < 400 {
+        m, e2 = avcodec.next_frame_into(d, bytes.data(buf), fb)
+        if m == 0 { guard = 400 }
+        else {
+            if m != fb { fail("next_frame_into m=${m} want ${fb}") }
+            count = count + 1
+            guard = guard + 1
+        }
+    }
+    // 2s at 10fps: expect ~20 frames. Assert a RANGE, not an exact count --
+    // encoders round duration differently and an exact number would be a
+    // flake waiting to happen.
+    if count < 15 { fail("decoded only ${count} frames, want ~20") }
+    if count > 25 { fail("decoded ${count} frames, want ~20") }
+    pass("decoded ${count} frames to EOF via the reused buffer")
+
+    // A buffer that is too small must be refused, not overrun.
+    //
+    // On a FRESH decoder: the loop above ran `d` to EOF, and at EOF
+    // next_frame_into returns 0 whatever the capacity -- so asserting here
+    // against `d` passed even with BOTH capacity guards deleted. Testing a
+    // refusal needs a decoder that would otherwise have succeeded.
+    d2, err2 = avcodec.open(clip, 64, 48)
+    if string.length(err2) > 0 { fail("reopen: ${err2}") }
+    small = bytes.new(16)
+    m2, e3 = avcodec.next_frame_into(d2, bytes.data(small), 16)
+    if m2 != 0 { fail("undersized buffer accepted (m2=${m2})") }
+    if string.length(e3) == 0 { fail("undersized buffer gave no error") }
+    // ...and the same decoder still works with a correct buffer, proving
+    // the refusal did not consume the frame or wedge the decoder.
+    ok_buf = bytes.new(fb)
+    m3, e4 = avcodec.next_frame_into(d2, bytes.data(ok_buf), fb)
+    if m3 != fb { fail("decoder unusable after a refused read (m3=${m3})") }
+    avcodec.close(d2)
+    pass("undersized buffer is refused, decoder still usable")
+
+    avcodec.close(d)
+    _e = fs.delete(clip)
+    println("=== test_avcodec passed ===")
+}

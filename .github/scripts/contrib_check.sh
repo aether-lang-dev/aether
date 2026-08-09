@@ -38,9 +38,13 @@ mkdir -p "$run_dir"
 # code is correct. Those tests are gated for RUNTIME correctness (the thing that
 # actually caught the WS rot); making them leak-clean is separate follow-up
 # work. i18n/collate was written leak-clean by design, so it IS leak-gated.
+AVC="contrib/avcodec"
 TW="contrib/tinyweb"
 I18N="contrib/i18n"
 TESTS=(
+  # avcodec: needs FFmpeg's dev libraries to link and the ffmpeg BINARY to
+  # generate its clip; the test SKIPs cleanly without the latter.
+  "avcodec/decode|$AVC/test_avcodec.ae|$AVC/aether_avcodec.c|run"
   "tinyweb/spec|$TW/test_spec.ae||run"
   "tinyweb/inventory|$TW/test_inventory.ae|$TW/ws_handshake.c|run"
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run"

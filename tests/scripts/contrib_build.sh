@@ -156,6 +156,21 @@ probe_sqlite() {
     return 1
 }
 
+probe_avcodec() {
+    # FFmpeg's decode libraries. Video-only shim, but swscale does the RGBA
+    # conversion and avutil carries the frame/image helpers, so all four are
+    # required together -- a partial install is a SKIP, not a half-build.
+    if [ -n "$CROSS_MODE" ]; then
+        cross_dep_present libavcodec/avcodec.h avcodec
+        return
+    fi
+    if pkg-config --exists libavcodec libavformat libavutil libswscale 2>/dev/null; then
+        pkg-config --cflags-only-I libavcodec libavformat libavutil libswscale
+        return 0
+    fi
+    return 1
+}
+
 probe_lua() {
     for v in lua5.4 lua5.3 lua; do
         if pkg-config --exists "$v" 2>/dev/null; then
@@ -415,6 +430,7 @@ build_module() {
 # args are exactly what the build loop calls.
 CATALOGUE=(
     "sqlite|sqlite       contrib/sqlite/aether_sqlite.c           AETHER_HAS_SQLITE  probe_sqlite"
+    "avcodec|avcodec     contrib/avcodec/aether_avcodec.c         AETHER_HAS_AVCODEC probe_avcodec"
     "python|host_python  contrib/host/python/aether_host_python.c AETHER_HAS_PYTHON  probe_python"
     "lua|host_lua        contrib/host/lua/aether_host_lua.c       AETHER_HAS_LUA     probe_lua"
     "perl|host_perl      contrib/host/perl/aether_host_perl.c     AETHER_HAS_PERL    probe_perl"
