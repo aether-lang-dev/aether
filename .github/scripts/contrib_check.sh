@@ -54,7 +54,7 @@ I18N="contrib/i18n"
 TESTS=(
   # avcodec: needs FFmpeg's dev libraries to LINK and the ffmpeg BINARY to
   # generate its clip; the test itself SKIPs cleanly without the latter.
-  "avcodec/decode|$AVC/test_avcodec.ae|$AVC/aether_avcodec.c|run|libavcodec libavformat libavutil libswscale"
+  "avcodec/decode|$AVC/test_avcodec.ae|$AVC/aether_avcodec.c|run|libavcodec libavformat libavutil libswscale libswresample"
   "tinyweb/spec|$TW/test_spec.ae||run|"
   "tinyweb/inventory|$TW/test_inventory.ae|$TW/ws_handshake.c|run|"
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run|"

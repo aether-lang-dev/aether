@@ -164,8 +164,8 @@ probe_avcodec() {
         cross_dep_present libavcodec/avcodec.h avcodec
         return
     fi
-    if pkg-config --exists libavcodec libavformat libavutil libswscale 2>/dev/null; then
-        pkg-config --cflags-only-I libavcodec libavformat libavutil libswscale
+    if pkg-config --exists libavcodec libavformat libavutil libswscale libswresample 2>/dev/null; then
+        pkg-config --cflags-only-I libavcodec libavformat libavutil libswscale libswresample
         return 0
     fi
     return 1
