@@ -157,6 +157,13 @@ int64_t fs_get_stat_mtime(void);
 // this is for the cases that need the exact number.
 int     fs_last_os_error(void);
 
+/* Format "<path>: <reason>" from the CURRENT errno, for callers composed in
+ * Aether that cannot capture errno at the failing step themselves (fs.read).
+ * Call it immediately after the failure. `fallback` is used when errno is 0.
+ * Returns a borrowed thread-local pointer, valid until this thread's next
+ * failed read — copy it if you need to keep it. */
+const char* fs_error_message(const char* path, const char* fallback);
+
 // statvfs (#1117): exact filesystem byte counts for the fs containing `path`.
 // Same split try/get shape as fs_try_stat. total/free/avail are bytes; avail
 // is space usable by an unprivileged process (f_bavail). fs_try_statvfs

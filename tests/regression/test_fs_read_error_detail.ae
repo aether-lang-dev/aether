@@ -1,0 +1,148 @@
+// fs.read / fs.read_binary must say WHICH file failed and WHY.
+//
+// Both used to collapse every failure into a bare constant — "cannot read file"
+// / "cannot open file" — with no path and no errno. Six distinct causes,
+// including sandbox denial and silent truncation, were indistinguishable, so a
+// caller could not treat a missing optional file as benign while treating a
+// permission error as fatal. Reported from the aeb line: a 79-target parallel
+// build reported "cannot read file" with no path, making an intermittent
+// hashing failure undiagnosable.
+//
+// This test pins the two properties that matter to a caller:
+//   1. the message names the path, and
+//   2. distinct causes produce distinct messages.
+//
+// It deliberately does NOT assert exact libc wording — strerror text varies by
+// platform and locale ("No such file or directory" vs "no such file"). Asserting
+// it would make this test a portability trap. Distinctness plus the path is the
+// contract; the wording is libc's business.
+import std.fs
+import std.string
+
+// Every failure message must contain the path and must not be the old constant.
+check_names_path(label: string, path: string, err: string) -> int {
+    if string.length(err) == 0 {
+        println("  FAIL ${label}: expected an error, got none")
+        return 1
+    }
+    if string.contains(err, path) != 1 {
+        println("  FAIL ${label}: message does not name the path: '${err}'")
+        return 1
+    }
+    if string.equals(err, "cannot read file") == 1 {
+        println("  FAIL ${label}: still the old collapsed constant")
+        return 1
+    }
+    if string.equals(err, "cannot open file") == 1 {
+        println("  FAIL ${label}: still the old collapsed constant")
+        return 1
+    }
+    println("  PASS ${label}: ${err}")
+    return 0
+}
+
+main() {
+    println("=== fs read errors name the path and the cause ===")
+    fails = 0
+
+    missing = "/tmp/aether-definitely-not-here-9471"
+    // A directory: fopen() succeeds on Linux, so this exercises the read-time
+    // failure rather than the open-time one. It previously returned ("", "") —
+    // success with empty content — which is worse than a bad message.
+    a_dir = "/tmp"
+
+    // --- fs.read ---
+    println("fs.read:")
+    c1, e1 = fs.read(missing)
+    fails = fails + check_names_path("missing file  ", missing, e1)
+    // COPY before the next call. The message is a borrowed pointer into
+    // thread-local storage, valid only until this thread's next failed read —
+    // comparing two live messages would compare one buffer with itself.
+    e1_copy = string.concat(e1, "")
+    string.free(c1)
+
+    c2, e2 = fs.read(a_dir)
+    fails = fails + check_names_path("directory     ", a_dir, e2)
+    string.free(c2)
+
+    // The two causes must not produce the same text.
+    if string.equals(e1_copy, e2) == 1 {
+        println("  FAIL: missing-file and directory give the SAME message")
+        fails = fails + 1
+    } else {
+        println("  PASS: distinct causes give distinct messages")
+    }
+
+    // --- fs.read_binary ---
+    println("fs.read_binary:")
+    b1, n1, be1 = fs.read_binary(missing)
+    fails = fails + check_names_path("missing file  ", missing, be1)
+    be1_copy = string.concat(be1, "") // borrowed TLS — copy before reuse
+    if n1 != 0 {
+        println("  FAIL: length should be 0 on failure, got ${n1}")
+        fails = fails + 1
+    }
+    string.free(b1)
+
+    b2, n2, be2 = fs.read_binary(a_dir)
+    fails = fails + check_names_path("directory     ", a_dir, be2)
+    string.free(b2)
+
+    if string.equals(be1_copy, be2) == 1 {
+        println("  FAIL: missing-file and directory give the SAME message")
+        fails = fails + 1
+    } else {
+        println("  PASS: distinct causes give distinct messages")
+    }
+
+    // --- the success path must be untouched ---
+    println("success path:")
+    ok, oerr = fs.read("VERSION")
+    if string.length(oerr) != 0 {
+        println("  FAIL: reading VERSION errored: ${oerr}")
+        fails = fails + 1
+    } else {
+        if string.length(ok) == 0 {
+            println("  FAIL: reading VERSION gave empty content")
+            fails = fails + 1
+        } else {
+            println("  PASS: fs.read(VERSION) still works")
+        }
+    }
+    string.free(ok)
+
+    bok, bn, boerr = fs.read_binary("VERSION")
+    if string.length(boerr) != 0 || bn == 0 {
+        println("  FAIL: read_binary(VERSION) errored: '${boerr}' len=${bn}")
+        fails = fails + 1
+    } else {
+        println("  PASS: fs.read_binary(VERSION) still works")
+    }
+    string.free(bok)
+
+    // /proc/self/status is size-0-by-stat and must stream (#1116). The
+    // fast-path ferror fix must not have broken it.
+    ps, pserr = fs.read("/proc/self/status")
+    if string.length(pserr) == 0 {
+        if string.length(ps) > 100 {
+            println("  PASS: /proc streaming read still works (#1116)")
+        } else {
+            println("  FAIL: /proc read returned ${string.length(ps)} bytes")
+            fails = fails + 1
+        }
+    } else {
+        // Not fatal — a non-Linux box has no /proc.
+        println("  SKIP: /proc/self/status unavailable (${pserr})")
+    }
+    string.free(ps)
+
+    string.free(e1_copy)
+    string.free(be1_copy)
+
+    println("")
+    if fails == 0 {
+        println("All PASS")
+    } else {
+        println("${fails} FAILURE(S)")
+    }
+}
