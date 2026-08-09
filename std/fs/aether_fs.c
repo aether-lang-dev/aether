@@ -61,6 +61,10 @@ const char* fs_get_block_transport(void) { return ""; }
 char* fs_read_binary_raw(const char* p, int* n) {
     (void)p; if (n) *n = 0; return NULL;
 }
+const char* fs_error_message(const char* path, const char* fallback) {
+    (void)path;
+    return (fallback && *fallback) ? fallback : "fs unavailable";
+}
 int fs_try_read_binary(const char* p) { (void)p; return 0; }
 const char* fs_get_read_binary(void) { return NULL; }
 int fs_get_read_binary_length(void) { return 0; }
@@ -277,7 +281,28 @@ char* file_read_all_raw(File* file) {
              * string_concat. */
             char* buffer = (char*)aether_caps_malloc((size_t)size + 1);
             if (!buffer) return NULL;
+            errno = 0;
             size_t read = fread(buffer, 1, (size_t)size, fp);
+            /* Report a failed or short read instead of returning what we got.
+             * The streaming path below has always had this ferror check; this
+             * fast path did not, so any failure here surfaced as a successful
+             * read of an EMPTY string. Reading a directory is the everyday
+             * case: on Linux fopen("/tmp","r") succeeds and ftell reports a
+             * positive size, so control lands here, fread fails with EISDIR,
+             * and fs.read returned ("", "") — success, no content, no error.
+             * Same silent-truncation class as #1116, which fixed only the
+             * streaming branch. */
+            if (read != (size_t)size) {
+                if (!ferror(fp) && feof(fp)) {
+                    /* Genuinely shorter than advertised — the file shrank
+                     * between ftell and fread. Keep what we read rather than
+                     * failing; NUL-terminate at the real length. */
+                    buffer[read] = '\0';
+                    return buffer;
+                }
+                aether_caps_free(buffer, (size_t)size + 1);
+                return NULL;
+            }
             buffer[read] = '\0';
             return buffer;
         }
@@ -1336,18 +1361,219 @@ int64_t     fs_get_block_size_bytes(void) { return s_blk_size; }
 int         fs_get_block_removable(void)  { return s_blk_removable; }
 const char* fs_get_block_transport(void)  { return s_blk_transport; }
 
+/* ── Why did the last read fail? ────────────────────────────────────────────
+ *
+ * fs_read_binary_raw returns a bare `char*`, so a failure carries no reason —
+ * which is how six distinct causes (including sandbox denial and silent
+ * truncation) all surfaced to Aether as the single string "cannot read file",
+ * with no path and no errno.
+ *
+ * Rather than change that signature (it is public and has other callers), the
+ * reason is recorded here and read back by the tuple wrapper immediately after.
+ * Thread-local for the same reason s_last_os_error is: concurrent readers must
+ * not see each other's failures. The message buffer is TLS-owned and borrowed
+ * by the caller, matching the existing `out._2` contract — the tuple's message
+ * slot is a `const char*` that Aether never frees.
+ */
+#define AETHER_FS_READ_FAIL_NONE      0
+#define AETHER_FS_READ_FAIL_INVALID   1  /* NULL path */
+#define AETHER_FS_READ_FAIL_SANDBOX   2  /* policy refusal, NOT an I/O error */
+#define AETHER_FS_READ_FAIL_OPEN      3  /* fopen failed — errno is the detail */
+#define AETHER_FS_READ_FAIL_SEEK      4  /* not seekable (pipe, socket, /proc) */
+#define AETHER_FS_READ_FAIL_ALLOC     5  /* OOM or #343 resource cap */
+#define AETHER_FS_READ_FAIL_IO        6  /* fread set the error flag */
+#define AETHER_FS_READ_FAIL_TRUNCATED 7  /* short read, no error: file shrank */
+#define AETHER_FS_READ_FAIL_UNAVAIL   8  /* built without filesystem support */
+
+static AETHER_FS_TLS int  s_read_fail_why   = AETHER_FS_READ_FAIL_NONE;
+static AETHER_FS_TLS int  s_read_fail_errno = 0;
+static AETHER_FS_TLS char s_read_fail_msg[512];
+
+/* #1378: the raw OS code behind the portable kind — see fs_last_os_error().
+ *
+ * DEFINED here rather than forward-declared. A tentative definition
+ * (`static __thread int x;` followed later by `static __thread int x = 0;`) is
+ * accepted by glibc/GCC on Linux but rejected by MinGW-GCC with "redefinition
+ * of 's_last_os_error'", because __thread objects do not get C's
+ * tentative-definition treatment there. Both Windows CI jobs caught this after
+ * Linux, Clang and macOS all built clean. */
+static AETHER_FS_TLS int s_last_os_error = 0;
+
+/* Thread-safe strerror into a caller buffer. Plain strerror() shares a static
+ * buffer, which is exactly wrong for a runtime that spawns actor, scheduler,
+ * worker and HTTP threads. The three portable spellings disagree about both
+ * name and return type, hence the ladder:
+ *   - Windows:      strerror_s(buf, len, err)          -> errno_t
+ *   - GNU:          strerror_r(err, buf, len)          -> char* (may not use buf!)
+ *   - POSIX/XSI:    strerror_r(err, buf, len)          -> int
+ * Always returns a valid NUL-terminated string. */
+static const char* aether_fs_strerror(int err, char* buf, size_t len) {
+    if (!buf || len == 0) return "unknown error";
+    buf[0] = '\0';
+#if defined(_WIN32)
+    if (strerror_s(buf, len, err) != 0) snprintf(buf, len, "error %d", err);
+    return buf;
+#elif defined(__GLIBC__) && defined(_GNU_SOURCE)
+    /* GNU strerror_r may return a pointer to an internal string and leave buf
+     * untouched — use whatever it hands back, not buf. */
+    return strerror_r(err, buf, len);
+#else
+    if (strerror_r(err, buf, len) != 0) snprintf(buf, len, "error %d", err);
+    return buf;
+#endif
+}
+
+static void aether_fs_read_fail_reset(void) {
+    s_read_fail_why = AETHER_FS_READ_FAIL_NONE;
+    s_read_fail_errno = 0;
+    s_read_fail_msg[0] = '\0';
+}
+
+static void aether_fs_read_fail_set(int why, int err) {
+    s_read_fail_why = why;
+    s_read_fail_errno = err;
+    if (err) s_last_os_error = err;   /* keep fs_last_os_error() consistent */
+}
+
+/* Render the recorded failure as "<path>: <reason>".
+ *
+ * The path is what made this ask worth filing: a 79-target parallel build
+ * reporting "cannot read file" with no path is undiagnosable. Long paths are
+ * truncated from the LEFT ("...ail/of/the/path: reason") because the tail —
+ * the filename — is the part that identifies the file.
+ *
+ * Returns a borrowed pointer into TLS, valid until the next failed read on
+ * this thread. Never NULL. */
+static const char* aether_fs_read_fail_message(const char* path) {
+    const char* reason;
+    char errbuf[128];
+
+    switch (s_read_fail_why) {
+        case AETHER_FS_READ_FAIL_INVALID:
+            return "cannot read file: null path";
+        case AETHER_FS_READ_FAIL_SANDBOX:
+            reason = "blocked by sandbox policy (no fs_read grant for this path)";
+            break;
+        case AETHER_FS_READ_FAIL_ALLOC:
+            reason = "cannot allocate a buffer for the file "
+                     "(out of memory, or the resource cap refused it)";
+            break;
+        case AETHER_FS_READ_FAIL_SEEK:
+            reason = s_read_fail_errno
+                   ? aether_fs_strerror(s_read_fail_errno, errbuf, sizeof errbuf)
+                   : "not seekable (a pipe, socket or /proc file?)";
+            break;
+        case AETHER_FS_READ_FAIL_TRUNCATED:
+            reason = "file changed size during the read (short read)";
+            break;
+        case AETHER_FS_READ_FAIL_UNAVAIL:
+            return "cannot read file: built without filesystem support";
+        case AETHER_FS_READ_FAIL_OPEN:
+        case AETHER_FS_READ_FAIL_IO:
+        default:
+            reason = s_read_fail_errno
+                   ? aether_fs_strerror(s_read_fail_errno, errbuf, sizeof errbuf)
+                   : "cannot read file";
+            break;
+    }
+
+    if (!path || !*path) {
+        snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "%s", reason);
+        return s_read_fail_msg;
+    }
+
+    /* Bound BOTH fields with precision specifiers rather than computing a
+     * budget by hand. `%.*s` caps each one at compile-visible limits, so the
+     * total can never exceed the buffer and gcc's -Wformat-truncation can see
+     * that — an earlier hand-rolled version was correct but not *provably* so,
+     * and failed the -Werror build.
+     *
+     * The path is truncated from the LEFT ("...tail/of/path") because the tail
+     * — the filename — is what identifies the file. */
+    enum { REASON_MAX = 200, PATH_MAX_SHOWN = 250 };
+    size_t path_len = strlen(path);
+    const char* path_shown = path;
+    const char* ellipsis = "";
+    if (path_len > PATH_MAX_SHOWN) {
+        path_shown = path + (path_len - PATH_MAX_SHOWN);
+        ellipsis = "...";
+    }
+    snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "%s%.*s: %.*s",
+             ellipsis, (int)PATH_MAX_SHOWN, path_shown, (int)REASON_MAX, reason);
+    return s_read_fail_msg;
+}
+
+/* Public: format "<path>: <errno reason>" for callers that are composed in
+ * Aether and so cannot reach the TLS state above directly.
+ *
+ * `fs.read` is the case this exists for: it is built in Aether from
+ * file_open_raw + file_read_all_raw, so it cannot capture errno at the failing
+ * step itself. It calls this immediately after the failure, while errno is
+ * still the failing call's. Falls back to `fallback` when errno is 0 (some
+ * paths fail without setting it) so the caller always gets a usable sentence.
+ *
+ * Returns a borrowed TLS pointer, valid until this thread's next failed read. */
+const char* fs_error_message(const char* path, const char* fallback) {
+    int err = errno;
+    aether_fs_read_fail_reset();
+    if (err) {
+        s_read_fail_why = AETHER_FS_READ_FAIL_OPEN;   /* => errno rendering */
+        s_read_fail_errno = err;
+        s_last_os_error = err;
+    } else {
+        /* No errno to explain it — carry the caller's wording through the same
+         * "<path>: <reason>" shaping so messages stay uniform. */
+        s_read_fail_why = AETHER_FS_READ_FAIL_SEEK;
+        s_read_fail_errno = 0;
+        if (fallback && *fallback) {
+            if (!path || !*path) return fallback;
+            snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "%s: %s", path, fallback);
+            return s_read_fail_msg;
+        }
+    }
+    return aether_fs_read_fail_message(path);
+}
+
 char* fs_read_binary_raw(const char* path, int* out_len) {
     if (out_len) *out_len = 0;
-    if (!path) return NULL;
-    if (!aether_sandbox_check("fs_read", path)) return NULL;
+    /* Record WHY we are about to return NULL. Every early return below used to
+     * collapse to a bare NULL, so the tuple wrapper could only ever report the
+     * constant "cannot read file" — six distinct causes, one string, no path.
+     * See fs_read_binary_fail_reason() for how this is turned into a message. */
+    aether_fs_read_fail_reset();
+    if (!path) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_INVALID, 0);
+        return NULL;
+    }
+    /* A sandbox refusal is a POLICY decision, not an I/O error: the file may be
+     * present and perfectly readable. Reporting it as a filesystem failure sends
+     * whoever is debugging a grant list looking at the filesystem instead. */
+    if (!aether_sandbox_check("fs_read", path)) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SANDBOX, 0);
+        return NULL;
+    }
 
+    errno = 0;
     FILE* fp = fopen(path, "rb");
-    if (!fp) return NULL;
+    if (!fp) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, errno);
+        return NULL;
+    }
 
-    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    errno = 0;
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SEEK, errno);
+        fclose(fp); return NULL;
+    }
     long size = ftell(fp);
-    if (size < 0) { fclose(fp); return NULL; }
-    if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
+    if (size < 0) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SEEK, errno);
+        fclose(fp); return NULL;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_SEEK, errno);
+        fclose(fp); return NULL;
+    }
 
     // Allocate size+1 so we can append a NUL past the end — handy for
     // callers who know the content is text and want to treat it as a
@@ -1356,11 +1582,29 @@ char* fs_read_binary_raw(const char* path, int* out_len) {
     // unbounded file size, caller-owned return.
     size_t alloc_cap = (size_t)size + 1;
     char* buf = (char*)aether_caps_malloc(alloc_cap);
-    if (!buf) { fclose(fp); return NULL; }
+    if (!buf) {
+        /* Distinct from an I/O error: the read never started. Either genuine
+         * OOM or the #343 resource cap refusing the allocation — telling a
+         * caller "cannot read file" when their own cap denied a 2 GB read is
+         * exactly the misdirection this change exists to remove. */
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_ALLOC, 0);
+        fclose(fp); return NULL;
+    }
 
+    errno = 0;
     size_t read = (size > 0) ? fread(buf, 1, (size_t)size, fp) : 0;
+    int read_errno = errno;
+    int truncated = ferror(fp) ? 0 : 1;   /* short but no error flag => truncation */
     fclose(fp);
-    if (read != (size_t)size) { aether_caps_free(buf, alloc_cap); return NULL; }
+    if (read != (size_t)size) {
+        /* Short read. Two very different causes: a real I/O error (ferror set)
+         * or the file shrinking between ftell and fread — a race that silently
+         * truncates the caller's data. Neither should read as "cannot read". */
+        aether_fs_read_fail_set(truncated ? AETHER_FS_READ_FAIL_TRUNCATED
+                                          : AETHER_FS_READ_FAIL_IO,
+                                read_errno);
+        aether_caps_free(buf, alloc_cap); return NULL;
+    }
 
     buf[size] = '\0';
     if (out_len) *out_len = (int)size;
@@ -1423,7 +1667,12 @@ _tuple_ptr_int_string fs_read_binary_tuple(const char* path) {
         // of a null deref.
         out._0 = (void*)string_empty();
         out._1 = 0;
-        out._2 = "cannot read file";
+        /* Was the constant "cannot read file" for every cause. Now names the
+         * path and the actual reason — see aether_fs_read_fail_message. The
+         * pointer is borrowed from TLS and stays valid until this thread's
+         * next failed read, which is the same contract the other messages in
+         * this tuple already have (they are static literals). */
+        out._2 = aether_fs_read_fail_message(path);
         return out;
     }
     AetherString* wrapped = string_new_with_length(buf, (size_t)len);
@@ -1468,8 +1717,10 @@ typedef struct {
  * from the kind alone, which is deliberately coarse and portable. Recorded at
  * the single translation site below so it can never drift from the kind it
  * accompanies. Thread-local, like the stat accessors, so concurrent callers do
- * not read each other's value. */
-static AETHER_FS_TLS int s_last_os_error = 0;
+ * not read each other's value.
+ *
+ * The definition moved up to the read-error block above, which also writes it;
+ * MinGW rejects a tentative __thread definition, so there can only be one. */
 
 int fs_last_os_error(void) { return s_last_os_error; }
 

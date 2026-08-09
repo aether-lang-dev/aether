@@ -25,3 +25,26 @@ test_cryptography_hmac_md4_md5 122
 # codegen (nested tuple-destructure error slots are heap-classified), so the
 # remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
 test_rsa_pkcs1 130
+
+# ── KNOWN CODEGEN BUG: the empty-string ("") tuple slot (#1461) ──────
+# test_fs_read_error_detail exercises fs.read / fs.read_binary FAILURE
+# paths, which return ("", <message>). The bare "" literal in the value
+# slot is heap-allocated but never freed — 1 byte per failing call. It
+# is NOT reachable from the caller: freeing the returned value with
+# string.free() or string_release() does not reclaim it, and the leak
+# is attributed to the CALLER's frame, not to std.fs.
+#
+# Same family as the #1311 quirk described for test_rsa_pkcs1 above:
+# that fix heap-classified nested tuple-destructure ERROR slots; this
+# is the mirror case, the "" literal sharing a slot with heap strings.
+# Confirmed pre-existing on main — an equivalent 4-line program using
+# only json.parse (no fs at all) leaks identically, and a plain
+# string.to_double() tuple does not, so it is specific to this shape
+# rather than to tuples in general.
+#
+# Cap is 4: the test makes exactly 4 failing calls (2x fs.read,
+# 2x fs.read_binary). Measured 2 on Linux/valgrind and 3 on macOS
+# leaks(1) — the tools differ on whether they see all of them. Set to
+# the call count so the entry cannot silently absorb a NEW leak, and
+# drop this entry entirely once #1461 lands.
+test_fs_read_error_detail 4

@@ -63,7 +63,7 @@ exports(
     KIND_CROSS_DEVICE, KIND_IO, KIND_INVALID, KIND_LOOP,
     KIND_NAME_TOO_LONG, KIND_NO_SPACE, KIND_IS_DIR, KIND_NOT_DIR,
     KIND_UNAVAILABLE,
-    fs_last_os_error, last_os_error
+    fs_last_os_error, last_os_error, fs_error_message
 )
 
 // ---- Structured-error kinds (pilot — issue #392) ----
@@ -173,6 +173,7 @@ extern fs_rename_raw(from: string, to: string) -> int
 // for this only when the exact number matters, such as telling EAGAIN from
 // EWOULDBLOCK or putting the number in a log.
 extern fs_last_os_error() -> int
+extern fs_error_message(path: string, fallback: string) -> string
 
 last_os_error() -> int {
     return fs_last_os_error()
@@ -375,15 +376,27 @@ open(path: string, mode: string) -> {
 
 // Read the entire contents of a file at `path`. Opens, reads, closes.
 // Returns (content, "") on success, ("", error) on failure.
+//
+// The error names the path and the cause — "<path>: No such file or
+// directory", "<path>: Is a directory", "<path>: Permission denied" — rather
+// than the single "cannot open file" this used to return for every cause.
+//
+// LIFETIME: the error string is BORROWED from thread-local storage and is only
+// valid until this thread's next failed read. Print it, or copy it with
+// `string.concat(err, "")`, before issuing another read — do NOT hold it across
+// one. Do not free it. (The success value IS owned and must be freed.)
 read(path: string) -> {
     handle = file_open_raw(path, "r")
     if handle == 0 {
-        return "", "cannot open file"
+        // Was the bare "cannot open file" — no path, no reason, so a missing
+        // file, a permission error and a sandbox denial were indistinguishable.
+        // fs_error_message reads errno while it is still this call's.
+        return "", fs_error_message(path, "cannot open file")
     }
     content = file_read_all_raw(handle)
     if content == 0 {
         file_close(handle)
-        return "", "cannot read file"
+        return "", fs_error_message(path, "cannot read file")
     }
     content_copy = string_concat(content, "")
     file_close(handle)
@@ -767,6 +780,18 @@ block_info(dev: string) -> {
 // silently truncate at the first embedded NUL. The TLS buffer inside
 // the runtime is released after the copy completes, so the caller
 // doesn't have to manage lifetime.
+//
+// On failure the error names the path and the cause — "<path>: No such file
+// or directory", "<path>: Permission denied", or, for a sandbox refusal,
+// "<path>: blocked by sandbox policy (no fs_read grant for this path)". That
+// last one is deliberately distinct: a policy refusal is not a filesystem
+// failure, and reporting it as one sends people looking at the disk instead of
+// at their grants.
+//
+// LIFETIME: the error string is BORROWED from thread-local storage, valid only
+// until this thread's next failed read. Print it, or copy it with
+// `string.concat(err, "")`, before issuing another read. Do not free it. The
+// bytes value IS owned and must be freed.
 read_binary(path: string) -> {
     // Single tuple-returning extern (#271 + #273). The four-extern
     // split-accessor pattern (fs_try_read_binary + fs_get_read_binary
