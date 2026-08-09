@@ -9,6 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`contrib/avcodec`** — in-process video decode, so a caller no longer needs
+  an intermediate file. A thin FFmpeg veneer following `contrib/sqlite`
+  exactly: C shim plus `module.ae`, a catalogue entry with a pkg-config probe,
+  and nothing vendored — user programs link
+  `-laether_avcodec -lavcodec -lavformat -lavutil -lswscale` via
+  `aether.toml`. `make contrib` builds it where FFmpeg's dev libraries are
+  present and SKIPs cleanly where they are not.
+
+  Motivated by aether-ui, which was spawning `ffmpeg` to transcode a whole
+  clip to raw RGBA on disk and reading frames back with `fs.pread`: 27.6 MB
+  for six seconds of 320x240, roughly 1.5 GB per minute of 1080p, and no
+  workaround at all for a *live* source such as a camera or network stream,
+  where there is no file to read. That intermediate is now gone entirely;
+  300 frames of 640x480 decode in 0.426s including compile time.
+
+  The surface is deliberately narrow — open, take the next frame as packed
+  RGBA8888, close. Video only: audio, seeking and stream selection are future
+  work and none are needed to feed a renderer. Two ways to take a frame,
+  mirroring sqlite's blob accessors: `next_frame` allocates a fresh owned
+  string (simple, fine at small sizes), while `next_frame_into` writes into a
+  caller-owned buffer and allocates nothing per frame — at 1080p30 that is
+  250 MB/s of copying avoided. `fps()` returns a *ratio* rather than a float,
+  because 30000/1001 does not survive a float round-trip and a
+  presentation-timestamp model needs the exact value.
+
+### Fixed
+
+- **`make contrib-check` could not run any test backed by a system library**
+  — the runner builds each contrib test with `ae build --extra <shim.c>`,
+  which compiles the shim but has no way to pass `-l` flags, so such a test
+  compiled and then died at link with `undefined reference to
+  avcodec_receive_frame` on a box with every FFmpeg dev library installed.
+  The gate was wired in but structurally incapable of running. The test table
+  gained an optional fifth column naming the pkg-config modules an entry must
+  link against; when set, the runner stages an `aether.toml` workspace (the
+  same shape `tests/integration/sqlite_roundtrip` uses) so the flags reach gcc
+  via `get_link_flags()`, and SKIPs the entry when pkg-config cannot find
+  them — an absent system library is a provisioning gap, not a test failure.
+  Contrib modules with native dependencies are now genuinely gated rather than
+  nominally.
+
 ## [0.505.0]
 
 ### Fixed
