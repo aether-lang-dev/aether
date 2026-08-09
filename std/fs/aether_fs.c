@@ -1389,10 +1389,15 @@ static AETHER_FS_TLS int  s_read_fail_why   = AETHER_FS_READ_FAIL_NONE;
 static AETHER_FS_TLS int  s_read_fail_errno = 0;
 static AETHER_FS_TLS char s_read_fail_msg[512];
 
-/* Defined below with the rest of the #1378 structured-error machinery; declared
- * here so the read path can keep fs_last_os_error() in step without moving an
- * existing definition. */
-static AETHER_FS_TLS int s_last_os_error;
+/* #1378: the raw OS code behind the portable kind — see fs_last_os_error().
+ *
+ * DEFINED here rather than forward-declared. A tentative definition
+ * (`static __thread int x;` followed later by `static __thread int x = 0;`) is
+ * accepted by glibc/GCC on Linux but rejected by MinGW-GCC with "redefinition
+ * of 's_last_os_error'", because __thread objects do not get C's
+ * tentative-definition treatment there. Both Windows CI jobs caught this after
+ * Linux, Clang and macOS all built clean. */
+static AETHER_FS_TLS int s_last_os_error = 0;
 
 /* Thread-safe strerror into a caller buffer. Plain strerror() shares a static
  * buffer, which is exactly wrong for a runtime that spawns actor, scheduler,
@@ -1712,8 +1717,10 @@ typedef struct {
  * from the kind alone, which is deliberately coarse and portable. Recorded at
  * the single translation site below so it can never drift from the kind it
  * accompanies. Thread-local, like the stat accessors, so concurrent callers do
- * not read each other's value. */
-static AETHER_FS_TLS int s_last_os_error = 0;
+ * not read each other's value.
+ *
+ * The definition moved up to the read-error block above, which also writes it;
+ * MinGW rejects a tentative __thread definition, so there can only be one. */
 
 int fs_last_os_error(void) { return s_last_os_error; }
 
