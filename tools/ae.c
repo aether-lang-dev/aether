@@ -1009,9 +1009,12 @@ static void discover_toolchain(void) {
     }
 
     // Strategy 5: Standard install paths
+    /* EXE_EXT so a hand-placed install resolves on Windows too. These are
+     * POSIX-shaped paths, but under MSYS2 they are real mount points, and a
+     * caller can equally have dropped the toolchain there deliberately. */
     const char* standard_paths[] = {
-        "/usr/local/bin/aetherc",
-        "/usr/bin/aetherc",
+        "/usr/local/bin/aetherc" EXE_EXT,
+        "/usr/bin/aetherc" EXE_EXT,
         NULL
     };
     for (int i = 0; standard_paths[i]; i++) {
