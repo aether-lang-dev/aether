@@ -9,6 +9,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [0.509.0]
+
+### Added
+
+- **`contrib/avcodec`** — in-process video decode, so a caller no longer needs
+  an intermediate file. A thin FFmpeg veneer following `contrib/sqlite`: C shim
+  plus `module.ae`, a catalogue entry with a pkg-config probe, and nothing
+  vendored — user programs link
+  `-laether_avcodec -lavcodec -lavformat -lavutil -lswscale` via `aether.toml`.
+  `make contrib` builds it where FFmpeg's dev libraries are present and SKIPs
+  cleanly where they are not.
+
+  Motivated by aether-ui, which was spawning `ffmpeg` to transcode a whole clip
+  to raw RGBA on disk and reading frames back with `fs.pread`: 27.6 MB for six
+  seconds of 320x240, roughly 1.5 GB per minute of 1080p, and no workaround at
+  all for a *live* source such as a camera or network stream, where there is no
+  file to read. That intermediate is gone entirely; 300 frames of 640x480
+  decode in 0.426s including compile time.
+
+  The surface is deliberately narrow — open, take the next frame as packed
+  RGBA8888, close. Video only: audio, seeking and stream selection are future
+  work and none are needed to feed a renderer. Two ways to take a frame,
+  mirroring sqlite's blob accessors: `next_frame` allocates a fresh owned
+  string, while `next_frame_into` writes into a caller-owned buffer and
+  allocates nothing per frame — at 1080p30 that is 250 MB/s of copying avoided.
+  `fps()` returns a *ratio* rather than a float, because 30000/1001 does not
+  survive a float round-trip and a presentation-timestamp model needs the exact
+  value.
+
+### Fixed
+
+- **`make contrib-check` could not run any test backed by a system library** —
+  the runner builds each contrib test with `ae build --extra <shim.c>`, which
+  compiles the shim but has no way to pass `-l` flags, so such a test compiled
+  and then died at link with `undefined reference to avcodec_receive_frame` on
+  a box with every FFmpeg dev library installed. The gate was wired in but
+  structurally incapable of running. The test table gained an optional fifth
+  column naming the pkg-config modules an entry must link against; when set,
+  the runner stages an `aether.toml` workspace (the same shape
+  `tests/integration/sqlite_roundtrip` uses) so the flags reach gcc via
+  `get_link_flags()`, and SKIPs the entry when pkg-config cannot find them — an
+  absent system library is a provisioning gap, not a test failure. Contrib
+  modules with native dependencies are now genuinely gated rather than
+  nominally.
+
+## [0.508.0]
+
+### Fixed
+
+- **`fs.read` / `fs.read_binary` now name the path and the cause** — both
+  collapsed every failure into a bare constant (`"cannot read file"`,
+  `"cannot open file"`) with no path and no errno, so six distinct causes —
+  including sandbox denial and silent truncation — were indistinguishable. No
+  program could treat a missing optional file as benign while treating a
+  permission error as fatal. Reported from the aeb line, where a 79-target
+  parallel build reported `cannot read file` with no path, making an
+  intermittent content-hash failure undiagnosable.
+
+  Failures now read `"/tmp/x: No such file or directory"`, `"/tmp: Is a
+  directory"`, `"/etc/shadow: Permission denied"`. A sandbox refusal gets its
+  own wording — `"blocked by sandbox policy (no fs_read grant for this path)"`
+  — because it is a policy decision, not a filesystem failure, and reporting it
+  as one sends whoever is debugging a grant list looking at the disk. The
+  `(bytes, length, err)` arity is unchanged, so existing callers keep working.
+  The error string is borrowed from thread-local storage and is valid until
+  that thread's next failed read; copy it with `string.concat(err, "")` to hold
+  it longer.
+
+- **`fs.read` on a directory reported success with empty content** — the
+  seekable fast path in `file_read_all_raw` never checked `ferror`, so a failed
+  read returned an empty string *as success*. Reading a directory is the
+  everyday trigger: `fopen("/tmp","r")` succeeds on Linux and `ftell` reports a
+  positive size, so control lands there and `fread` fails with `EISDIR`. Same
+  class as the #1116 silent-truncation bug, which fixed only the streaming
+  branch. A genuinely short read (the file shrank mid-read) still returns what
+  was read.
+
+## [0.507.0]
+
+### Fixed
+
+- **Windows `make install` dropped the `.exe` suffix, leaving a toolchain that
+  could not compile** — the install read the built artifacts *with* the
+  extension and wrote them *without* it, but `ae` looks for its compiler as
+  `aetherc.exe` next to itself. So `ae` could not find `aetherc` even though
+  the two sat in the same directory. `ae --version` kept reporting a healthy,
+  correctly-versioned toolchain throughout, because that path never needs the
+  compiler — the failure surfaced downstream as 57 aether-ui spec suites red
+  with 0 pass / 0 fail each, which reads as a harness fault rather than a
+  packaging one, and the accompanying `set AETHER_HOME=...` advice is a red
+  herring since the problem is a filename, not a search root.
+
+  Fixed by installing with `$(EXE_EXT)` on both sides (a no-op on POSIX), and
+  `tools/ae.c`'s `/usr/local/bin` fallback now appends it too. `make install`
+  additionally **compiles a test program** with the installed `ae` rather than
+  only running `ae version` — the check that could not catch this, since it
+  never touches the compiler.
+
+## [0.506.0]
+
+### Fixed
+
+- **The CachyOS nightly built and tested a stale toolchain** — two causes, both
+  presenting as "the newer compiler on that box is broken" and neither being
+  that. First, a few tests link the *installed* artifacts rather than the build
+  tree, and the install had drifted three weeks behind, failing with
+  `undefined reference to aether_unwind_forget` — the nightly log showed only
+  `gcc --coverage link failed` without the linker's line, which reads like a
+  GCC 16 problem. `make install PREFIX=$HOME/.local` now runs as a pipeline
+  step (never sudo) with a freshness check, so drift is impossible by
+  construction. Second, the Makefile takes the highest **git tag** as the
+  authoritative version and falls back to the `VERSION` file only for tarballs,
+  so fetching commits without tags left the tree at current HEAD but the
+  previous tag and the build correctly stamped the *older* version; the sync is
+  now `git fetch --tags --prune`.
+
+  Note for anyone reading versions by hand on that box: `ae --version` reports
+  the version *manager's* active install (`~/.aether/active_version`), not the
+  version compiled into the binary, so a correctly built 0.509.0 binary can
+  still say 0.417.0. Both the sweep guard and the install check use `strings`
+  against the compiled-in value for this reason.
+
 ## [0.505.0]
 
 ### Fixed
