@@ -1,0 +1,110 @@
+// audio.load_pcm — play samples the caller already decoded (asks/pcm-please.md).
+//
+// Every other std.audio entry point takes an ENCODED container miniaudio
+// demuxes itself (load_wav is really a format-sniffing decoder, so mp3 and
+// flac work too). That left no way in for samples a *different* decoder
+// produced — precisely the case when contrib.avcodec has demuxed an MP4 and
+// holds the audio packets. The workaround was pre-extracting a sidecar WAV:
+// roughly doubling on-disk cost, a manual step before playback, and nothing at
+// all for a live source with no file to extract from.
+//
+// What this pins:
+//   1. a caller-supplied PCM buffer becomes a playable source
+//   2. duration_ms is right, i.e. frame maths is right
+//   3. seek_ms / position_ms work — the A/V-sync master clock, and the reason
+//      the ask says this matters
+//   4. bad arguments are refused rather than played as noise
+//
+// SKIPs cleanly where there is no audio device, which is the normal case on a
+// CI runner.
+import std.audio
+import std.bytes
+import std.string
+
+check(cond: bool, label: string) -> int {
+    if cond == true {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+main() {
+    println("=== audio.load_pcm ===")
+    fails = 0
+
+    if audio.open() != true {
+        println("  SKIP: no audio device available")
+        return
+    }
+
+    // One second of silence: 44100 Hz, stereo, signed 16-bit interleaved.
+    // Silence keeps the test quiet on a machine with real speakers while still
+    // exercising the whole path — miniaudio does not care what the samples are.
+    rate = 44100
+    ch = 2
+    bytes_per_sample = 2
+    n = rate * ch * bytes_per_sample
+
+    buf = bytes.new(n)
+    i = 0
+    for (i = 0; i < n; i ++) {
+        bytes.set(buf, i, 0)
+    }
+    _ = bytes.set_length(buf, n)
+    pcm = bytes.to_string(buf, n)
+
+    src, err = audio.load_pcm(pcm, n, rate, ch, audio.FORMAT_S16)
+    if err != "" {
+        println("  FAIL load_pcm: ${err}")
+        bytes.free(buf)
+        string.free(pcm)
+        audio.close()
+        exit(1)
+    }
+    fails = fails + check(src != null, "a caller-supplied PCM buffer loads")
+
+    // Frame maths: n bytes / (channels * bytes_per_sample) frames / rate = 1s.
+    // A wrong bytes-per-frame would show up here as 500 or 2000.
+    d = audio.duration_ms(src)
+    fails = fails + check(d == 1000, "duration_ms == 1000 (got ${d})")
+    fails = fails + check(audio.channels(src) == ch, "channels round-trips")
+
+    // The clock. position_ms is what video chases for A/V sync, so it has to
+    // work on a PCM source exactly as it does on a decoded one.
+    fails = fails + check(audio.position_ms(src) == 0, "position starts at 0")
+    fails = fails + check(audio.seek_ms(src, 500) == true, "seek_ms succeeds")
+    p = audio.position_ms(src)
+    fails = fails + check(p == 500, "position follows the seek (got ${p})")
+
+    audio.unload(src)
+
+    // A partial trailing frame means the caller mis-computed its buffer.
+    // Refuse it — playing it would read past the last whole frame.
+    odd = n - 1
+    bad, e2 = audio.load_pcm(pcm, odd, rate, ch, audio.FORMAT_S16)
+    fails = fails + check(bad == null && string.length(e2) > 0,
+        "a partial trailing frame is refused")
+
+    // Nonsense format / geometry must not produce a source.
+    b2, e3 = audio.load_pcm(pcm, n, rate, ch, 99)
+    fails = fails + check(b2 == null && string.length(e3) > 0,
+        "an unknown PCM format is refused")
+
+    b3, e4 = audio.load_pcm(pcm, n, 0, ch, audio.FORMAT_S16)
+    fails = fails + check(b3 == null && string.length(e4) > 0,
+        "a zero sample rate is refused")
+
+    bytes.free(buf)
+    string.free(pcm)
+    audio.close()
+
+    println("")
+    if fails == 0 {
+        println("All PASS")
+    } else {
+        println("${fails} FAILURE(S)")
+        exit(1)
+    }
+}

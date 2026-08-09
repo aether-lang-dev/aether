@@ -23,7 +23,8 @@ import std.string
 
 exports(
     open, close, is_null_backend,
-    load_wav, last_error,
+    load_wav, load_pcm, last_error,
+    FORMAT_U8, FORMAT_S16, FORMAT_S24, FORMAT_S32, FORMAT_F32,
     play, pause, stop, is_playing,
     volume, get_volume,
     seek_ms, position_ms, duration_ms,
@@ -36,6 +37,7 @@ extern aether_audio_open() -> int
 extern aether_audio_close()
 extern aether_audio_is_null_backend() -> int
 extern aether_audio_load_wav(data: string, length: int) -> ptr
+extern aether_audio_load_pcm(data: string, length: int, sample_rate: int, channels: int, format: int) -> ptr
 extern aether_audio_last_error() -> string
 extern aether_audio_unload(sound: ptr)
 extern aether_audio_play(sound: ptr) -> int
@@ -84,6 +86,48 @@ load_wav(data: string, length: int) -> ptr! {
         // isn't a heap string it must free.
         e = aether_audio_last_error()
         if e == null { return null, "audio: load failed" }
+        return null, e
+    }
+    return s
+}
+
+// PCM sample formats for `load_pcm`. These mirror miniaudio's ma_format_*
+// numbering so a caller never has to hardcode it. FORMAT_S16 (interleaved
+// 16-bit signed) is what most decoders emit and what ffmpeg's `s16le` means.
+const FORMAT_U8 = 1
+const FORMAT_S16 = 2
+const FORMAT_S24 = 3
+const FORMAT_S32 = 4
+const FORMAT_F32 = 5
+
+// Play PCM samples the caller ALREADY decoded, rather than an encoded
+// container (asks/pcm-please.md).
+//
+// `load_wav` is really a format-sniffing decoder — it accepts mp3 and flac
+// too — but every entry point wants bytes miniaudio can demux itself. That
+// leaves no way in for samples a *different* decoder produced, which is
+// exactly the case when contrib.avcodec has demuxed an MP4 and holds the
+// audio packets. The workaround was pre-extracting a sidecar WAV: roughly
+// doubling on-disk cost, a manual step before playback, and nothing at all
+// for a live source with no file to extract from.
+//
+// `data` is interleaved samples, `length` its byte count, `format` one of
+// the FORMAT_* constants above. The bytes are copied, so the caller's buffer
+// need not outlive the source.
+//
+// Everything downstream works exactly as for `load_wav` — play, pause,
+// position_ms, duration_ms, seek_ms, volume — because they all read the
+// underlying sound, not the decoder. position_ms in particular remains
+// usable as an A/V-sync master clock.
+//
+// `length` must be a whole number of frames (bytes-per-sample x channels);
+// a partial trailing frame is refused rather than played as noise.
+load_pcm(data: string, length: int, sample_rate: int, channels: int,
+    format: int) -> ptr! {
+    s = aether_audio_load_pcm(data, length, sample_rate, channels, format)
+    if s == null {
+        e = aether_audio_last_error()
+        if e == null { return null, "audio: load_pcm failed" }
         return null, e
     }
     return s

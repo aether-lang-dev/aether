@@ -84,12 +84,14 @@ const char* aether_audio_last_error(void) {
 /* ---- sound handle ------------------------------------------------------ */
 
 typedef struct {
-    ma_sound    sound;
-    ma_decoder  decoder;
-    void*       data;        /* owned copy of the encoded input, kept alive */
-    size_t      data_len;
-    int         have_sound;
-    int         have_decoder;
+    ma_sound        sound;
+    ma_decoder      decoder;
+    ma_audio_buffer buffer;      /* raw-PCM sources use this instead */
+    void*           data;        /* owned copy of the input, kept alive */
+    size_t          data_len;
+    int             have_sound;
+    int             have_decoder;
+    int             have_buffer;
 } AudioSound;
 
 /* Decode `length` bytes of `data` (wav / mp3 / flac — any format miniaudio
@@ -134,11 +136,92 @@ void* aether_audio_load_wav(const char* data, int length) {
     return s;
 }
 
+/* Play PCM samples the CALLER already decoded (asks/pcm-please.md).
+ *
+ * Every other entry point takes an ENCODED container that miniaudio demuxes
+ * itself (load_wav is really ma_decoder_init_memory, so it accepts mp3/flac
+ * too). That leaves no way in for samples a *different* decoder produced —
+ * which is exactly the case when contrib/avcodec has already demuxed an MP4
+ * and holds the audio packets. Without this, an app has to pre-extract a
+ * sidecar WAV: ~20 MB for a 21 MB clip, a manual step before playback, and no
+ * option at all for a live source with no file to extract from.
+ *
+ * `format` is a MA_FORMAT_* value; the wrapper exposes the useful ones as
+ * constants so callers do not hardcode miniaudio's numbering.
+ *
+ * Uses ma_audio_buffer rather than ma_decoder, fed to the SAME
+ * ma_sound_init_from_data_source the encoded path uses — so play/pause/
+ * position_ms/duration_ms/seek_ms/volume all work unchanged. They read
+ * s->sound, never the decoder, which is why this drops in cleanly.
+ * position_ms in particular keeps working as the A/V-sync master clock. */
+void* aether_audio_load_pcm(const char* data, int length,
+                            int sample_rate, int channels, int format) {
+    if (!g_engine_ready) { g_audio_err = "audio: engine not open"; return NULL; }
+    if (!data || length <= 0) { g_audio_err = "audio: empty input"; return NULL; }
+    if (sample_rate <= 0) { g_audio_err = "audio: sample_rate must be > 0"; return NULL; }
+    if (channels <= 0)    { g_audio_err = "audio: channels must be > 0"; return NULL; }
+
+    ma_format fmt = (ma_format)format;
+    if (fmt != ma_format_u8  && fmt != ma_format_s16 && fmt != ma_format_s24 &&
+        fmt != ma_format_s32 && fmt != ma_format_f32) {
+        g_audio_err = "audio: unsupported PCM format"; return NULL;
+    }
+
+    /* Bytes per frame = bytes per sample * channels. A partial trailing frame
+     * means the caller mis-computed its buffer; refuse rather than play noise
+     * off the end of the last frame. */
+    ma_uint32 bps = ma_get_bytes_per_sample(fmt);
+    size_t frame_bytes = (size_t)bps * (size_t)channels;
+    if (frame_bytes == 0 || ((size_t)length % frame_bytes) != 0) {
+        g_audio_err = "audio: length is not a whole number of frames";
+        return NULL;
+    }
+    ma_uint64 frame_count = (ma_uint64)((size_t)length / frame_bytes);
+
+    AudioSound* s = (AudioSound*)aether_caps_malloc(sizeof(AudioSound));
+    if (!s) { g_audio_err = "audio: out of memory"; return NULL; }
+    memset(s, 0, sizeof(*s));
+
+    /* Own a copy: ma_audio_buffer with a config-supplied pointer reads from it
+     * for the sound's whole lifetime, exactly as ma_decoder_init_memory does. */
+    s->data = aether_caps_malloc((size_t)length);
+    if (!s->data) {
+        aether_caps_free(s, sizeof(AudioSound));
+        g_audio_err = "audio: out of memory"; return NULL;
+    }
+    memcpy(s->data, data, (size_t)length);
+    s->data_len = (size_t)length;
+
+    ma_audio_buffer_config cfg = ma_audio_buffer_config_init(
+        fmt, (ma_uint32)channels, frame_count, s->data, NULL);
+    cfg.sampleRate = (ma_uint32)sample_rate;
+
+    if (ma_audio_buffer_init(&cfg, &s->buffer) != MA_SUCCESS) {
+        aether_caps_free(s->data, s->data_len);
+        aether_caps_free(s, sizeof(AudioSound));
+        g_audio_err = "audio: could not create PCM buffer"; return NULL;
+    }
+    s->have_buffer = 1;
+
+    if (ma_sound_init_from_data_source(&g_engine, &s->buffer, 0, NULL, &s->sound)
+        != MA_SUCCESS) {
+        ma_audio_buffer_uninit(&s->buffer);
+        aether_caps_free(s->data, s->data_len);
+        aether_caps_free(s, sizeof(AudioSound));
+        g_audio_err = "audio: could not create sound"; return NULL;
+    }
+    s->have_sound = 1;
+
+    g_audio_err = "";
+    return s;
+}
+
 void aether_audio_unload(void* sound) {
     if (!sound) return;
     AudioSound* s = (AudioSound*)sound;
     if (s->have_sound)   ma_sound_uninit(&s->sound);
     if (s->have_decoder) ma_decoder_uninit(&s->decoder);
+    if (s->have_buffer)  ma_audio_buffer_uninit(&s->buffer);
     if (s->data) aether_caps_free(s->data, s->data_len);
     aether_caps_free(s, sizeof(AudioSound));
 }
