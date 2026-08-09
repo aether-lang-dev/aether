@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`io.fd_read_into(fd, buf, length)`** — zero-allocation incremental read
+  from a raw file descriptor (#1471). Mirrors `fs.pread_into`, which was
+  already the same shape for files, so a caller streaming from a pipe now gets
+  the same option as one reading a file.
+
+  Returns `(n, err)`: `n == 0` is EOF, `0 < n < length` is a normal short read.
+  Unlike `io.fd_read_n` — which loops until it has filled the buffer — this
+  returns as soon as *any* bytes are available, which is what makes it usable
+  on a live pipe where waiting to fill would stall until the producer happened
+  to send a whole buffer's worth.
+
+  Motivated by streaming video decode: reading one frame per iteration, an
+  8 MB frame at 1080p30 means ~250 MB/s of allocator churn if every read mints
+  a fresh string. One caller-owned buffer reused across the loop avoids it
+  entirely.
+
+  Note it writes straight into `bytes.data(buf)`, which does not publish the
+  buffer's length — call `bytes.set_length(buf, n)` before
+  `bytes.to_string(buf, n)` or the conversion returns an empty string with no
+  error. Callers passing the bytes to another extern never need this.
+
 ## [0.509.0]
 
 ### Added
