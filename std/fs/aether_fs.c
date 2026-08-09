@@ -1477,18 +1477,24 @@ static const char* aether_fs_read_fail_message(const char* path) {
         return s_read_fail_msg;
     }
 
-    /* Reserve room for ": " + reason + NUL; give the rest to the path. */
-    size_t reason_len = strlen(reason);
-    size_t budget = sizeof s_read_fail_msg;
-    size_t path_room = (reason_len + 6 < budget) ? budget - reason_len - 6 : 0;
+    /* Bound BOTH fields with precision specifiers rather than computing a
+     * budget by hand. `%.*s` caps each one at compile-visible limits, so the
+     * total can never exceed the buffer and gcc's -Wformat-truncation can see
+     * that — an earlier hand-rolled version was correct but not *provably* so,
+     * and failed the -Werror build.
+     *
+     * The path is truncated from the LEFT ("...tail/of/path") because the tail
+     * — the filename — is what identifies the file. */
+    enum { REASON_MAX = 200, PATH_MAX_SHOWN = 250 };
     size_t path_len = strlen(path);
-
-    if (path_room >= 4 && path_len > path_room) {
-        snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "...%s: %s",
-                 path + (path_len - (path_room - 3)), reason);
-    } else {
-        snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "%s: %s", path, reason);
+    const char* path_shown = path;
+    const char* ellipsis = "";
+    if (path_len > PATH_MAX_SHOWN) {
+        path_shown = path + (path_len - PATH_MAX_SHOWN);
+        ellipsis = "...";
     }
+    snprintf(s_read_fail_msg, sizeof s_read_fail_msg, "%s%.*s: %.*s",
+             ellipsis, (int)PATH_MAX_SHOWN, path_shown, (int)REASON_MAX, reason);
     return s_read_fail_msg;
 }
 
