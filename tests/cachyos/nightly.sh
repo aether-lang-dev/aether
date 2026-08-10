@@ -102,7 +102,8 @@ have_dep() {
     case "$kind" in
         cmd) for c in "$@"; do command -v "$c" >/dev/null 2>&1 && return 0; done ;;
         lib) for l in "$@"; do
-                 for d in /usr/lib /usr/lib64 /usr/local/lib /lib; do
+                 for d in /usr/lib /usr/lib64 /usr/local/lib /lib \
+                          "/usr/lib/$(uname -m)-linux-gnu"; do
                      [ -e "$d/$l" ] && return 0
                      ls "$d/$l".* >/dev/null 2>&1 && return 0
                  done
@@ -133,6 +134,8 @@ require_deps() {
         "lua|cmd|lua|lua5.4|lua5.3"                      \
         "tcl|cmd|tclsh"                                  \
         "duktape|lib|libduktape.so"                      \
+        "ffmpeg|lib|libavcodec.so"                       \
+        "ffmpeg-swr|lib|libswresample.so"                \
         "go|cmd|go"                                      \
         "nodejs|cmd|node"                                \
         "java|cmd|java"                                  \
