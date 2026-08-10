@@ -1,0 +1,96 @@
+// A leading-underscore function name must not land in C's reserved namespace.
+//
+// C11 §7.1.3 reserves file-scope identifiers beginning with an underscore for
+// the implementation, and MSVCRT/UCRT use that namespace heavily — `_write`,
+// `_read`, `_open`, `_close`, `_access` and dozens more are real declared
+// functions there. Emitting an Aether `_write(...)` verbatim therefore landed
+// on top of a CRT prototype:
+//
+//     error: conflicting types for '_write'; have 'void(const char*, const char*)'
+//     note: previous declaration ... int(int, const void*, unsigned int)
+//
+// Windows-only, because glibc declares none of them — so the identical program
+// built clean on Linux and died on MinGW, with the error pointing at generated
+// C rather than at the function name. Reported from the aeb line, where one
+// shared `_write(path, content)` fixture broke 10 of its 118 tests.
+//
+// Codegen now renames such a function to an `ae`-prefixed symbol (`_write` ->
+// `ae_write`) and rewrites its call sites, the same shape as the #1366 extern
+// collision rename.
+//
+// THIS TEST RUNS EVERYWHERE, but only Windows could ever have failed to
+// compile it. That is deliberate: the point is that the name works on every
+// platform, and a Linux-only assertion would not have caught the original bug.
+// What every platform CAN check is that the rename is transparent — the
+// function is still callable by its Aether name and still behaves.
+import std.string
+
+// The exact name from the report. If codegen ever stops renaming, this file
+// stops compiling on Windows — which is the regression being guarded.
+_write(prefix: string, content: string) -> string {
+    return string.concat(prefix, content)
+}
+
+// Siblings from the same CRT namespace, to prove the fix is not special-cased
+// to one name.
+_read() -> int {
+    return 42
+}
+
+_close(n: int) -> int {
+    return n + 1
+}
+
+// A leading underscore on a name the CRT does NOT declare must work too — the
+// rule is about the namespace, not a blocklist of known names.
+_totally_made_up_helper() -> int {
+    return 7
+}
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+main() {
+    println("=== leading-underscore function names ===")
+    fails = 0
+
+    // Each must be callable by its Aether-level name; the rename is internal.
+    r = _write("a", "b")
+    fails = fails + check(string.equals(r, "ab"), "_write is callable and correct")
+    string.free(r)
+
+    fails = fails + check(_read() == 42, "_read is callable")
+    fails = fails + check(_close(1) == 2, "_close is callable and takes args")
+    fails = fails + check(_totally_made_up_helper() == 7,
+        "a non-CRT leading-underscore name also works")
+
+    // The trailing-underscore file-local convention (#279) is untouched by
+    // this change; guard that it still works so the two cannot drift.
+    fails = fails + check(write_("c", "d") == 1, "trailing-underscore form still works")
+
+    println("")
+    if fails == 0 {
+        println("All PASS")
+    } else {
+        println("${fails} FAILURE(S)")
+        exit(1)
+    }
+}
+
+// #279: a trailing underscore marks a function file-local. Unrelated mechanism,
+// asserted here only so a future change to one cannot silently break the other.
+write_(a: string, b: string) -> int {
+    s = string.concat(a, b)
+    n = 0
+    if string.equals(s, "cd") == 1 {
+        n = 1
+    }
+    string.free(s)
+    return n
+}

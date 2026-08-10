@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A leading-underscore function name no longer collides with the C runtime.**
+  `_write(path, content)` was emitted as a C function of the same name
+  verbatim, landing in the namespace C11 §7.1.3 reserves for the
+  implementation — which MSVCRT/UCRT populate heavily (`_write`, `_read`,
+  `_open`, `_close`, `_access`, …). On Windows the build then failed with
+  `conflicting types for '_write'`, pointing at generated C rather than at the
+  function name; on Linux the identical program built clean, because glibc
+  declares none of them.
+
+  Codegen now renames such a function to an `ae`-prefixed symbol (`_write` →
+  `ae_write`) and rewrites its call sites — the same mechanism the #1366 extern
+  collision already uses. The Aether-level name is unchanged, so this is
+  invisible to callers.
+
+  `static` alone would not have fixed it: a file-scope static whose name
+  matches a declared CRT prototype is still a conflicting-types error at
+  compile time. The trailing-underscore file-local convention (#279) is
+  untouched.
+
+  Reported from the aeb line, where one shared `_write` test fixture broke 10
+  of 118 tests on Windows only.
+
 ## [0.515.0]
 
 ### Changed
