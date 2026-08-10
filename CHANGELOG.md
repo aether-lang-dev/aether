@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.515.0]
 
 ### Changed
 
 - **The release pipeline fails instead of shipping an unrecorded release**
-  (#1477). The CHANGELOG rename was `if grep -q '## [current]'; then rename;
+  (#1477). The CHANGELOG rename was `if grep -q '## [0.515.0]'; then rename;
   fi`, which does exactly what it says and silently ships a release with no
   section when the condition is false. Releases 0.506.0 through 0.509.0 went
   out that way, four releases of real work recorded nowhere, including a
@@ -27,7 +27,7 @@ version number before tagging the release.
   release should have to say so rather than be indistinguishable from an
   oversight.
 
-## [current]'; then rename;
+## [0.515.0]'; then rename;
   fi`, which does exactly what it says and silently ships a release with no
   section when the condition is false. Releases 0.506.0 through 0.509.0 went
   out that way, four releases of real work recorded nowhere, including a
