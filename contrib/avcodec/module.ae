@@ -38,7 +38,10 @@ exports(
     avc_try_next_frame, avc_get_frame_bytes, avc_get_frame_length,
     avc_release_frame, avc_copy_frame_into_raw, avc_error_raw,
     open, close, width, height, frame_bytes, fps, pts_ms,
-    next_frame, next_frame_into, errmsg
+    next_frame, next_frame_into, errmsg,
+    avc_audio_decode_raw, avc_audio_get_pcm, avc_audio_get_pcm_length,
+    avc_audio_sample_rate, avc_audio_channels, avc_audio_release,
+    audio_pcm
 )
 
 extern avc_open_raw(url: string, want_w: int, want_h: int) -> ptr
@@ -55,6 +58,12 @@ extern avc_get_frame_length() -> int
 extern avc_release_frame()
 extern avc_copy_frame_into_raw(dec: ptr, buf: ptr, cap: int) -> int
 extern avc_error_raw(dec: ptr) -> string
+extern avc_audio_decode_raw(url: string) -> int
+extern avc_audio_get_pcm() -> string
+extern avc_audio_get_pcm_length() -> int
+extern avc_audio_sample_rate() -> int
+extern avc_audio_channels() -> int
+extern avc_audio_release()
 extern string_new_with_length(data: string, length: int) -> ptr
 
 // Open a media source. `want_w`/`want_h` <= 0 means "source size"; anything
@@ -101,4 +110,26 @@ next_frame_into(dec: ptr, buf: ptr, cap: int) -> {
     n = avc_copy_frame_into_raw(dec, buf, cap)
     if n == 0 { return 0, "eof" }
     return n, ""
+}
+
+// Decode the file's ENTIRE audio stream to interleaved s16 stereo PCM at the
+// source sample rate -- the whole-buffer counterpart to std.audio's
+// load_pcm, which is where the result goes:
+//
+//     pcm, n, rate, ch, err = avcodec.audio_pcm(url)
+//     src, aerr = audio.load_pcm(pcm, n, rate, ch, audio.FORMAT_S16)
+//
+// Whatever the source is (5.1 float-planar AAC included), libswresample
+// downmixes and converts in one pass. ("", 0, 0, 0, err) when the file has
+// no audio stream -- callers treat that as "no audio", not a failure.
+audio_pcm(url: string) -> {
+    ok = avc_audio_decode_raw(url)
+    if ok == 0 { return "", 0, 0, 0, "no decodable audio stream in ${url}" }
+    raw = avc_audio_get_pcm()
+    n = avc_audio_get_pcm_length()
+    rate = avc_audio_sample_rate()
+    ch = avc_audio_channels()
+    owned = string_new_with_length(raw, n)
+    avc_audio_release()
+    return owned, n, rate, ch, ""
 }

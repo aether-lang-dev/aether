@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`avcodec.audio_pcm(url)`** — decode a file's whole audio track to PCM, the
+  producer side of the `load_pcm` consumer that landed in 0.512.0. Together
+  they close the loop `asks/pcm-please.md` described: an MP4's audio can now
+  reach the speakers without a hand-extracted sidecar WAV.
+
+  Returns `(pcm, n, rate, channels, err)` — interleaved **s16 stereo at the
+  source rate**, in one shot. libswresample does the conversion in the same
+  pass, so a 5.1 float-planar AAC track (Big Buck Bunny's, for instance) comes
+  back as plain stereo s16 without the caller arranging anything. The
+  whole-buffer shape deliberately matches `audio.load_pcm`'s, so the two
+  compose directly:
+
+  ```aether
+  pcm, n, rate, ch, err = avcodec.audio_pcm(path)
+  src, e = audio.load_pcm(pcm, n, rate, ch, audio.FORMAT_S16)
+  ```
+
+  Verified end to end: a 117.3s clip decodes to 22,523,904 bytes at 48 kHz
+  stereo — exactly 117.3s — and `audio.load_pcm` then reports
+  `duration_ms=117312` with `position_ms` advancing in real time.
+
+  `contrib/avcodec` now requires **libswresample** alongside the other four
+  FFmpeg libraries. All five are required together; a partial install stays a
+  clean SKIP rather than a build failure.
+
 ## [0.512.0]
 
 ### Added

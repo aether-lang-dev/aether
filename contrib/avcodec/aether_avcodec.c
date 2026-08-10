@@ -35,6 +35,7 @@
 #include <libavformat/avformat.h>
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -241,4 +242,139 @@ void avc_close_raw(void* h) {
     if (d->dec)      avcodec_free_context(&d->dec);
     if (d->fmt)      avformat_close_input(&d->fmt);
     free(d);
+}
+
+/* ---- audio: whole-track decode to interleaved s16 stereo PCM ----
+ *
+ * The counterpart to std.audio's load_pcm (aether e0738b4a), which takes
+ * samples the caller already decoded. This is the caller. One shot:
+ * demux + decode the file's audio stream, converting whatever it is
+ * (Big Buck Bunny is 5.1 AAC float-planar) to interleaved s16 STEREO at
+ * the source sample rate via libswresample. Whole-track because load_pcm
+ * is whole-buffer: ~20 MB in memory for a 2-minute film, zero on disk,
+ * no manual step — the sidecar-WAV extraction this replaces doubled the
+ * on-disk cost and could not serve a live source at all.
+ *
+ * Same TLS handoff as the video frames and sqlite's blobs. */
+
+static _Thread_local char* g_apcm       = NULL;
+static _Thread_local int   g_apcm_len   = 0;
+static _Thread_local int   g_apcm_rate  = 0;
+static _Thread_local int   g_apcm_ch    = 0;
+
+void avc_audio_release(void) {
+    if (g_apcm) { free(g_apcm); g_apcm = NULL; }
+    g_apcm_len = 0; g_apcm_rate = 0; g_apcm_ch = 0;
+}
+
+const char* avc_audio_get_pcm(void)   { return g_apcm ? g_apcm : ""; }
+int avc_audio_get_pcm_length(void)    { return g_apcm_len; }
+int avc_audio_sample_rate(void)       { return g_apcm_rate; }
+int avc_audio_channels(void)          { return g_apcm_ch; }
+
+int avc_audio_decode_raw(const char* url) {
+    avc_audio_release();
+    if (!url) return 0;
+
+    AVFormatContext* fmt = NULL;
+    AVCodecContext* dec = NULL;
+    SwrContext* swr = NULL;
+    AVFrame* frame = NULL;
+    AVPacket* pkt = NULL;
+    char* out = NULL;
+    size_t out_cap = 0, out_len = 0;
+    int ok = 0;
+
+    if (avformat_open_input(&fmt, url, NULL, NULL) < 0) goto done;
+    if (avformat_find_stream_info(fmt, NULL) < 0) goto done;
+    const AVCodec* codec = NULL;
+    int si = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, &codec, 0);
+    if (si < 0 || !codec) goto done;
+    AVStream* st = fmt->streams[si];
+    dec = avcodec_alloc_context3(codec);
+    if (!dec || avcodec_parameters_to_context(dec, st->codecpar) < 0 ||
+        avcodec_open2(dec, codec, NULL) < 0) goto done;
+
+    AVChannelLayout out_layout = AV_CHANNEL_LAYOUT_STEREO;
+    if (swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_S16,
+                            dec->sample_rate, &dec->ch_layout,
+                            dec->sample_fmt, dec->sample_rate,
+                            0, NULL) < 0) goto done;
+    if (swr_init(swr) < 0) goto done;
+
+    frame = av_frame_alloc();
+    pkt = av_packet_alloc();
+    if (!frame || !pkt) goto done;
+
+    while (av_read_frame(fmt, pkt) >= 0) {
+        if (pkt->stream_index == si &&
+            avcodec_send_packet(dec, pkt) == 0) {
+            while (avcodec_receive_frame(dec, frame) == 0) {
+                int max_out = swr_get_out_samples(swr, frame->nb_samples);
+                size_t need = (size_t)max_out * 2 /*ch*/ * 2 /*s16*/;
+                if (out_len + need > out_cap) {
+                    size_t nc = out_cap ? out_cap * 2 : 1 << 20;
+                    while (nc < out_len + need) nc *= 2;
+                    char* nb = (char*)realloc(out, nc);
+                    if (!nb) goto done;
+                    out = nb; out_cap = nc;
+                }
+                uint8_t* dst = (uint8_t*)(out + out_len);
+                int got = swr_convert(swr, &dst, max_out,
+                                      (const uint8_t**)frame->extended_data,
+                                      frame->nb_samples);
+                if (got > 0) out_len += (size_t)got * 2 * 2;
+            }
+        }
+        av_packet_unref(pkt);
+    }
+    /* Flush decoder, then the resampler's tail. */
+    avcodec_send_packet(dec, NULL);
+    while (avcodec_receive_frame(dec, frame) == 0) {
+        int max_out = swr_get_out_samples(swr, frame->nb_samples);
+        size_t need = (size_t)max_out * 4;
+        if (out_len + need > out_cap) {
+            size_t nc = out_cap ? out_cap * 2 : 1 << 20;
+            while (nc < out_len + need) nc *= 2;
+            char* nb = (char*)realloc(out, nc);
+            if (!nb) goto done;
+            out = nb; out_cap = nc;
+        }
+        uint8_t* dst = (uint8_t*)(out + out_len);
+        int got = swr_convert(swr, &dst, max_out,
+                              (const uint8_t**)frame->extended_data,
+                              frame->nb_samples);
+        if (got > 0) out_len += (size_t)got * 4;
+    }
+    for (;;) {
+        size_t room = 4096 * 4;
+        if (out_len + room > out_cap) {
+            size_t nc = out_cap ? out_cap * 2 : 1 << 20;
+            while (nc < out_len + room) nc *= 2;
+            char* nb = (char*)realloc(out, nc);
+            if (!nb) goto done;
+            out = nb; out_cap = nc;
+        }
+        uint8_t* dst = (uint8_t*)(out + out_len);
+        int got = swr_convert(swr, &dst, 4096, NULL, 0);
+        if (got <= 0) break;
+        out_len += (size_t)got * 4;
+    }
+
+    if (out_len == 0) goto done;
+    g_apcm = out;
+    g_apcm_len = (int)out_len;
+    g_apcm_rate = dec->sample_rate;
+    g_apcm_ch = 2;
+    out = NULL;   /* ownership moved to the TLS slot */
+    ok = 1;
+
+done:
+    if (out) free(out);
+    if (swr) swr_free(&swr);
+    if (frame) av_frame_free(&frame);
+    if (pkt) av_packet_free(&pkt);
+    if (dec) avcodec_free_context(&dec);
+    if (fmt) avformat_close_input(&fmt);
+    return ok;
 }

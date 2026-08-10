@@ -95,6 +95,46 @@ main() {
     avcodec.close(d2)
     pass("undersized buffer is refused, decoder still usable")
 
+    // ── audio_pcm ────────────────────────────────────────────────────
+    // The test clip is testsrc-only, so it is ALSO the no-audio case:
+    // audio_pcm must report an error there, not hand back garbage.
+    _ap, _an, _ar, _ac, aerr = avcodec.audio_pcm(clip)
+    if string.length(aerr) == 0 { fail("no-audio clip decoded to something") }
+    pass("a clip without audio reports an error")
+
+    // And a clip WITH audio: a 2s sine at 22050 Hz mono in the container.
+    aclip = "/tmp/_avc_test_av.mp4"
+    av2 = list.new()
+    _ = list.add(av2, "-y")
+    _ = list.add(av2, "-f")
+    _ = list.add(av2, "lavfi")
+    _ = list.add(av2, "-i")
+    _ = list.add(av2, "testsrc=size=64x48:rate=10:duration=2")
+    _ = list.add(av2, "-f")
+    _ = list.add(av2, "lavfi")
+    _ = list.add(av2, "-i")
+    _ = list.add(av2, "sine=frequency=440:sample_rate=22050:duration=2")
+    _ = list.add(av2, "-pix_fmt")
+    _ = list.add(av2, "yuv420p")
+    _ = list.add(av2, "-c:a")
+    _ = list.add(av2, "aac")
+    _ = list.add(av2, "-shortest")
+    _ = list.add(av2, aclip)
+    _o2, st2, _e9 = os.run_capture("ffmpeg", av2, null)
+    if st2 != 0 { println("  SKIP: ffmpeg cannot make the A/V clip"); return }
+
+    pcm, pn, prate, pch, perr = avcodec.audio_pcm(aclip)
+    if string.length(perr) > 0 { fail("audio_pcm: ${perr}") }
+    if prate != 22050 { fail("rate ${prate} want 22050") }
+    if pch != 2 { fail("channels ${pch} want 2 (downmix contract)") }
+    // ~2s at 22050 Hz stereo s16 = ~176400 bytes; AAC padding varies, so a
+    // range. The LOWER bound is the real assertion -- an empty or truncated
+    // decode is the failure this guards.
+    if pn < 150000 { fail("pcm ${pn} bytes, want ~176400") }
+    if pn > 220000 { fail("pcm ${pn} bytes, want ~176400") }
+    pass("audio_pcm: ${pn} bytes @ ${prate} Hz x${pch}")
+    _e10 = fs.delete(aclip)
+
     avcodec.close(d)
     _e = fs.delete(clip)
     println("=== test_avcodec passed ===")
