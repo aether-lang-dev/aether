@@ -3995,6 +3995,58 @@ static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
    uses for libc collisions. Dotted stdlib calls (`string.replace_all`) carry a
    different AST value and are untouched; a bare call resolves to the user's
    function, which is what gets renamed with it. */
+/* A leading underscore at file scope is RESERVED for the C implementation
+   (C11 §7.1.3), and MSVCRT/UCRT use that namespace heavily: _write, _read,
+   _open, _close, _access, _aligned_malloc and dozens more are real declared
+   functions there. Emitting an Aether `_write(...)` verbatim therefore lands
+   on top of a CRT prototype and fails to compile:
+
+       error: conflicting types for '_write'; have 'void(const char*, const char*)'
+       note: previous declaration ... int(int, const void*, unsigned int)
+
+   Windows-only, because glibc declares none of these — so the identical
+   program builds clean on Linux and dies on MinGW, with the error pointing at
+   generated C rather than at the function name. Reported from the aeb line,
+   where one shared `_write(path, content)` fixture broke 10 of 118 tests.
+
+   Renaming is the fix rather than `static` alone: a file-scope static whose
+   name matches a declared CRT prototype is STILL a conflicting-types error at
+   compile time. Same `ae_` spelling and same call-rewrite as the #1366 extern
+   collision below, so the two read as one mechanism.
+
+   Deliberately narrow: only a LEADING underscore, only top-level user
+   functions. The trailing-underscore file-local convention (#279) is
+   untouched — `write_` is exactly what a caller should reach for instead, and
+   it already gets internal linkage. */
+static int name_is_c_reserved(const char* name) {
+    return name && name[0] == '_';
+}
+
+static void rename_leading_underscore_functions(ASTNode* program) {
+    if (!program) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* fn = program->children[i];
+        if (!fn || (fn->type != AST_FUNCTION_DEFINITION &&
+                    fn->type != AST_BUILDER_FUNCTION)) continue;
+        /* @c_callback names must stay externally addressable verbatim, and an
+           imported function was already renamed by its own module pass. */
+        if (fn->is_imported || is_c_callback(fn) || !fn->value) continue;
+        if (!name_is_c_reserved(fn->value)) continue;
+
+        /* `ae` + the name keeps the underscore, so `_write` becomes
+           `ae_write` — readable in a backtrace and out of the reserved
+           namespace, since the leading character is no longer `_`. */
+        char safe[280];
+        snprintf(safe, sizeof(safe), "ae%s", fn->value);
+        rename_calls_to(program, fn->value, safe);
+        char* dup = strdup(safe);
+        if (dup) {
+            free(fn->value);
+            fn->value = dup;
+        }
+    }
+}
+
 static void rename_extern_colliding_functions(ASTNode* program) {
     if (!program) return;
     for (int i = 0; i < program->child_count; i++) {
@@ -4158,6 +4210,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).
     mangle_keyword_value_idents(program);
+    rename_leading_underscore_functions(program);
     rename_extern_colliding_functions(program);
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
