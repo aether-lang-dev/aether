@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **The release pipeline fails instead of shipping an unrecorded release**
+  (#1477). The CHANGELOG rename was `if grep -q '## [current]'; then rename;
+  fi`, which does exactly what it says and silently ships a release with no
+  section when the condition is false. Releases 0.506.0 through 0.509.0 went
+  out that way, four releases of real work recorded nowhere, including a
+  Windows packaging fix. Three guards: the release now fails when there is no
+  `[current]` to rename, fails rather than creating a duplicate heading (which
+  is how `## [0.435.0]` and `## [0.497.0]` each came to appear twice), and a CI
+  job requires a CHANGELOG entry on any PR touching shipped code, which is what
+  makes a `[current]` section exist to be renamed in the first place. All three
+  have an explicit `[skip changelog]` opt-out, because a genuinely empty
+  release should have to say so rather than be indistinguishable from an
+  oversight.
+
+## [current]'; then rename;
+  fi`, which does exactly what it says and silently ships a release with no
+  section when the condition is false. Releases 0.506.0 through 0.509.0 went
+  out that way, four releases of real work recorded nowhere, including a
+  Windows packaging fix. Three guards: the release now fails when there is no
+  `[current]` to rename, fails rather than creating a duplicate heading (which
+  is how `## [0.435.0]` and `## [0.497.0]` each came to appear twice), and a CI
+  job requires a CHANGELOG entry on any PR touching shipped code, which is what
+  makes a `[current]` section exist to be renamed in the first place. All three
+  have an explicit `[skip changelog]` opt-out, because a genuinely empty
+  release should have to say so rather than be indistinguishable from an
+  oversight.
+
 ## [0.513.0]
 
 ### Added
