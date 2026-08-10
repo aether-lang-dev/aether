@@ -121,6 +121,78 @@ jobs:
   # `make ci` only ever compiles the platform branch matching its
   # runner, so this is the only job that reads the FreeBSD #ifdefs.
   # ============================================================
+  # ============================================================
+  # CHANGELOG guard (#1477)
+  #
+  # The release workflow turns a `## [current]` section into the version
+  # heading. When no such section exists it used to rename nothing and ship
+  # silently: releases 0.506.0 through 0.509.0 went out with no CHANGELOG
+  # section at all, four releases of real work recorded nowhere, including a
+  # Windows packaging fix. The release side now fails loudly, but that catches
+  # it at release time, when the work has already merged and the author has
+  # moved on.
+  #
+  # This catches it at the point it can still be fixed cheaply: a PR that
+  # changes shipped code has to say what changed. Escape hatch for the genuine
+  # exceptions (pure refactors, test-only work, CI plumbing): put
+  # [skip changelog] in the PR title or any commit message.
+  # ============================================================
+  ci-changelog:
+    name: CHANGELOG entry present
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Require a CHANGELOG entry for code changes
+      env:
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        set -eu
+
+        changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+        # Only shipped code counts. Docs, tests and CI plumbing can land
+        # without a user-visible entry.
+        code=$(printf '%s\n' "$changed" | grep -E '^(std|runtime|compiler|contrib|tools)/' || true)
+        if [ -z "$code" ]; then
+          echo "No shipped-code changes; nothing to record."
+          exit 0
+        fi
+
+        if printf '%s\n' "$changed" | grep -q '^CHANGELOG\.md$'; then
+          echo "CHANGELOG.md is updated."
+          exit 0
+        fi
+
+        # Explicit opt-out, in the PR title or any commit on the branch.
+        if printf '%s' "$PR_TITLE" | grep -qi '\[skip changelog\]'; then
+          echo "PR title opts out with [skip changelog]."
+          exit 0
+        fi
+        if git log --pretty=%B "$BASE_SHA..$HEAD_SHA" | grep -qi '\[skip changelog\]'; then
+          echo "A commit opts out with [skip changelog]."
+          exit 0
+        fi
+
+        echo "::error::This PR changes shipped code but does not touch CHANGELOG.md."
+        echo ""
+        echo "The release workflow renames a '## [current]' section into the"
+        echo "version heading. With no entry there is nothing to rename, which"
+        echo "is how 0.506.0 through 0.509.0 shipped with no CHANGELOG at all."
+        echo ""
+        echo "Add your entry under '## [current]', or put [skip changelog] in"
+        echo "the PR title if this genuinely needs no user-visible note."
+        echo ""
+        echo "Code files changed:"
+        printf '%s\n' "$code" | sed 's/^/  /'
+        exit 1
+
   ci-freebsd-cross:
     name: FreeBSD / cross-compile (x86_64)
     runs-on: ubuntu-latest

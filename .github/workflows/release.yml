@@ -170,10 +170,41 @@ jobs:
         echo "$VERSION" > VERSION
         git add VERSION
 
-        # Replace [current] with the actual version in CHANGELOG.md
-        if grep -q '## \[current\]' CHANGELOG.md; then
+        # Turn [current] into this version's heading (#1477).
+        #
+        # This used to be a bare `if grep -q ... ; then rename; fi`, which does
+        # exactly what it says and silently ships a release with no CHANGELOG
+        # section when the condition is false. Releases 0.506.0 through 0.509.0
+        # went out that way: four releases of real work, including a Windows
+        # packaging fix, recorded nowhere. The file is what a downstream
+        # consumer reads to decide whether to upgrade, so silence is the one
+        # outcome that must not be available.
+        #
+        # An intentionally empty release is still possible, it just has to say
+        # so: put [skip changelog] in the release-trigger commit message.
+        SKIP_CHANGELOG=0
+        if git log -1 --pretty=%B | grep -qi '\[skip changelog\]'; then
+          SKIP_CHANGELOG=1
+        fi
+
+        if grep -q "^## \[${VERSION}\]" CHANGELOG.md; then
+          echo "::error::CHANGELOG.md already has a '## [${VERSION}]' heading."
+          echo "A blind rename would create a second one; ## [0.435.0] and"
+          echo "## [0.497.0] are both duplicated on main from exactly this."
+          exit 1
+        fi
+
+        if grep -q '^## \[current\]' CHANGELOG.md; then
           sed -i "s/## \[current\]/## [${VERSION}]/" CHANGELOG.md
           git add CHANGELOG.md
+        elif [ "$SKIP_CHANGELOG" = "1" ]; then
+          echo "No [current] section, and the trigger commit says [skip changelog]."
+        else
+          echo "::error::No '## [current]' section in CHANGELOG.md, so ${VERSION}"
+          echo "would ship with nothing recorded. Add the entry under a"
+          echo "'## [current]' heading, or put [skip changelog] in the"
+          echo "release-trigger commit if this release is genuinely empty."
+          exit 1
         fi
 
         # Only commit if there are staged changes
