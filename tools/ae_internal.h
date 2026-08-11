@@ -23,7 +23,12 @@ typedef struct {
                                // 16 KB), and a build could then fail to find
                                // headers that are present.
     size_t include_flags_cap;  // bytes allocated for include_flags
-    char runtime_srcs[8192];   // Runtime .c files (source fallback)
+    char*  runtime_srcs;       // Runtime .c files, source build. Heap-grown
+                               // for the same reason as include_flags: 91
+                               // MANIFEST paths under a 60-char prefix pass
+                               // 8 KB, and the overflow used to silently
+                               // substitute a shorter hand-written list.
+    size_t runtime_srcs_cap;   // bytes allocated for runtime_srcs
     bool has_lib;              // Whether precompiled lib exists
     bool dev_mode;             // Running from source tree
     bool verbose;              // Verbose output
