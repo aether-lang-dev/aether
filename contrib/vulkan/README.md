@@ -112,6 +112,9 @@ cflags = "-I/opt/homebrew/include"   # or: $(pkg-config --cflags vulkan)
 
 No `link_flags` entry is needed, which is the point of the runtime loading.
 
+Headers from **1.3.204** onward work: that is what Ubuntu 22.04 ships and what
+the Linux CI leg builds against, so using a symbol newer than that fails there.
+
 | platform | headers | driver |
 |---|---|---|
 | Linux | `apt install libvulkan-dev` | vendor ICD, or `mesa-vulkan-drivers` for lavapipe on the CPU |

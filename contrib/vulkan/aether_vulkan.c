@@ -12,6 +12,18 @@
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
 
+/* VK_KHR_portability_enumeration landed in header 1.3.216, but Ubuntu 22.04
+ * still ships 1.3.204 and the module must build there. Both values are fixed
+ * by the specification, and the extension is only ever enabled after the
+ * loader reports it at runtime, so defining them changes nothing on a newer
+ * header that already has them. */
+#ifndef VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME
+#  define VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME "VK_KHR_portability_enumeration"
+#endif
+#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#  define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+
 #ifdef _WIN32
 #  include <windows.h>
 #  define AEVK_DLOPEN(p)      ((void*)LoadLibraryA(p))
