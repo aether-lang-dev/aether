@@ -14,56 +14,42 @@ version number before tagging the release.
 ### Fixed
 
 - **The shipped Windows archive could not be linked by half of Windows**
-  (#1494). A user on msys2 ucrt64 could not compile any program at all. Note
-  where the failing object was:
+  (#1494). A user on msys2 ucrt64 could not compile any program at all, with
+  the undefined references inside the `libaether.a` we ship:
 
   ```
   libaether.a(aether_locale_num.o): undefined reference to `__imp__snprintf_l'
   ```
 
-  Inside the `libaether.a` we ship. Our release builds it in the MINGW64
-  environment, which links the legacy msvcrt.dll, and msvcrt exports the
-  `_l`-suffixed printf family. The UCRT does not, and UCRT64 is the current
-  MSYS2 default. So a perfectly good archive was unlinkable for everyone on the
-  default toolchain, and CI stayed green throughout because it both built and
-  linked with the same CRT.
+  Our release builds that archive in MINGW64, which links the legacy
+  msvcrt.dll and exports the `_l`-suffixed printf family. The UCRT does not,
+  and UCRT64 is the current MSYS2 default, so the archive was fine on the
+  machine that built it and unlinkable on the default toolchain. CI stayed
+  green because it both built and linked with the same CRT.
 
   The Windows float formatter no longer uses that family. It asks
-  `localeconv()` for the radix character the formatter is about to use, and
-  pays for a locale bracket only when that character is not `.`; a process on a
-  locale that already formats with `.` never enters it. The bracket itself is
-  per-thread (`_configthreadlocale` plus `setlocale`), so formatting a number
-  is never observable by another thread, and every symbol on the path is
-  exported by both CRTs. The `_scprintf` truncation recovery went with them: it
-  existed to reconstruct the C99 would-be length from msvcrt's negative return,
-  and both mingw's `__mingw_snprintf` and the UCRT's `snprintf` return it
-  directly.
+  `localeconv()` for the radix character the formatter is about to use and
+  brackets a per-thread locale switch only when that character is not `.`, so
+  a locale that already formats with `.` pays nothing and every symbol on the
+  path is exported by both CRTs. The `_scprintf` truncation recovery went with
+  them, since mingw's `__mingw_snprintf` and the UCRT's `snprintf` both return
+  the C99 would-be length directly.
 
-  Three things now stand between this and a repeat:
+  Three things now prevent a repeat. Windows CI is a matrix over MINGW64 and
+  UCRT64, so the reporter's environment builds and runs the full suite on
+  every pull request. `tests/integration/windows_crt_symbols` bans the
+  `_l`-suffixed printf family across `runtime/` and `std/` with no toolchain
+  needed, and cross-compiles every source in `build/MANIFEST` to require each
+  external symbol in both `libucrt.a` and `libmsvcrt.a`. And the locale
+  regression test now asserts the restore by reading the radix character
+  through `localeconv`, which is thread-locale aware; the previous check went
+  through `std.number`, which takes an explicit locale and kept reporting
+  correct output from a thread stranded in "C".
 
-  - **Windows CI runs once per CRT.** The Windows job is a matrix over MINGW64
-    and UCRT64, so the reporter's exact environment builds and runs the full
-    suite on every pull request. This is the check that makes the class
-    impossible rather than merely detected.
-  - **`tests/integration/windows_crt_symbols`** enforces the invariant on the
-    source (no `_l`-suffixed printf calls anywhere in `runtime/` or `std/`,
-    which needs no toolchain and so runs on every leg) and on the link surface
-    (every source in `build/MANIFEST` cross-compiled for Windows, with every
-    external symbol required to exist in both `libucrt.a` and `libmsvcrt.a`).
-    The second half declares itself skipped when a toolchain ships the two
-    import libraries as aliases, because comparing a set with itself can only
-    ever pass.
-  - **The locale regression test now asserts the restore**, reading the radix
-    character the calling thread would format with before and after. It reads
-    it through `localeconv`, which is thread-locale aware, so it sees a
-    `uselocale` or `_configthreadlocale` bracket that fails to put things back;
-    the previous check went through `std.number`, which takes an explicit
-    locale and kept reporting correct output from a thread stranded in "C".
-
-- Untracked `cov_demo.gcda` and `cov_demo.gcno`. Two gcov output files had been
-  committed by accident, and every test run that produced coverage data
-  rewrote them, so unrelated pull requests kept picking up a spurious binary
-  diff. `*.gcda`, `*.gcno` and `*.gcov` are now ignored.
+- Untracked `cov_demo.gcda` and `cov_demo.gcno`. Two gcov output files had
+  been committed by accident and the suite rewrote them, so unrelated pull
+  requests picked up a spurious binary diff. `*.gcda`, `*.gcno` and `*.gcov`
+  are now ignored.
 
 ## [0.517.0]
 

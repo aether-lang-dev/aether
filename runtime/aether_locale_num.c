@@ -2,21 +2,16 @@
 //
 // Three backends, chosen per-function because platform support is uneven:
 //
-//   1. _l-suffixed libc calls — the locale is an explicit argument, so no
-//      thread state is touched at all. Best where available.
+//   1. _l-suffixed libc calls, locale as an explicit argument.
 //        macOS/BSD: snprintf_l(buf, n, LOC, fmt, ...)   locale BEFORE fmt
-//        Windows:   _strtod_l / _strtof_l on the PARSE side only.
+//        Windows:   _strtod_l / _strtof_l, parse side only.
 //
-//   2. Thread-local locale bracket, for platforms with a locale-taking
-//      parser but no locale-taking printf, the emit path swaps the calling
-//      thread's locale for the duration of the call and restores it on every
-//      return path. Thread-local, so unlike a bare setlocale it never
-//      disturbs other threads or the embedding host.
+//   2. Thread-local locale bracket, where the parser takes a locale but the
+//      formatter does not. Never disturbs other threads or the host.
 //        glibc/musl: uselocale()
-//        Windows:    _configthreadlocale() + setlocale(), because the
-//                    _l-suffixed printf family is msvcrt-only and an object
-//                    that imports it cannot be linked by a UCRT toolchain
-//                    (#1494). Both of these are exported by BOTH CRTs.
+//        Windows:    _configthreadlocale() + setlocale(). The _l-suffixed
+//                    printf family is msvcrt-only, and an object importing it
+//                    cannot be linked by a UCRT toolchain (#1494).
 //
 //   3. Plain passthrough — for platforms with no locale machinery at all
 //      (WASM/emcc, ARM newlib/-ffreestanding). This is NOT the post-hoc
@@ -173,33 +168,18 @@ static int aether_fix_exponent(char* buf, size_t len) {
     return (int)(len - strip);
 }
 
-// Format through a thread-local "C" LC_NUMERIC. Windows has no uselocale and
-// no CRT-portable locale-taking printf, so this is the bracket the other
-// platforms get from uselocale.
-//
-// Every path leaves the thread's locale exactly as it found it, including the
-// two paths that decline to switch at all. Formatting a number must never be
-// observable as a locale change by the caller.
+// Every path must leave the thread's locale as it found it, including the two
+// that decline to switch.
 static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, double value) {
-    // Gives this thread a private copy of the current locale, so the switch
-    // below cannot be seen by any other thread. If it fails there is no safe
-    // way to proceed: a bare setlocale would retarget the whole process.
     int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
     if (prev_mode == -1) return snprintf(buf, n, fmt, value);
 
-    // Restoring by NAME is only needed when the thread already owned its
-    // locale. Otherwise _DISABLE_PER_THREAD_LOCALE below discards the private
-    // copy made just above and puts the thread back on the untouched global
-    // one, which needs no name and so cannot be restored wrongly.
     char inline_name[128];
     char* saved = NULL;
     if (prev_mode != _DISABLE_PER_THREAD_LOCALE) {
         const char* cur = setlocale(LC_NUMERIC, NULL);
         size_t len = cur ? strlen(cur) : 0;
-        // CRITICAL: setlocale returns CRT-internal storage that the next
-        // setlocale invalidates, so the name must be copied, and it must be
-        // copied WHOLE. A truncated copy restores a different locale and
-        // strands the thread on it for the rest of its life.
+        // A truncated name would restore a DIFFERENT locale permanently.
         saved = (len < sizeof inline_name) ? inline_name : (char*)malloc(len + 1);
         if (!cur || !saved) {
             _configthreadlocale(prev_mode);
@@ -230,12 +210,9 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     return snprintf(buf, n, fmt, value);
 
 #elif AETHER_LOCALE_WIN32
-    // Backend 2 (Windows). The radix character is the only locale-dependent
-    // element of %f/%e/%g (printf groups digits only for the ' flag, which
-    // this file never passes), and localeconv() reports exactly the character
-    // the formatter is about to use. So ask it, and pay for a locale bracket
-    // only when the answer is not '.'. A process on a locale that already
-    // formats with '.' (en_US and most others) never enters the bracket.
+    // Backend 2 (Windows). The radix is the only locale-dependent element of
+    // %f/%e/%g here (no ' flag is ever passed), so bracket only when it is
+    // not '.'.
     {
         const struct lconv* lc = localeconv();
         const char* radix = lc ? lc->decimal_point : NULL;
@@ -251,11 +228,7 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
             buf[n - 1] = '\0';
             return written;
         }
-        // Legacy msvcrt emits a THREE-digit exponent ("1e+010") where C99
-        // requires the minimum two ("1e+10"). It reaches a build whenever
-        // __USE_MINGW_ANSI_STDIO is off, so the normalisation stays: an
-        // exponent that differs by platform breaks json round-tripping and
-        // puts a non-conforming number on the wire.
+        // Legacy msvcrt emits "1e+010" where C99 requires "1e+10".
         return aether_fix_exponent(buf, (size_t)written);
     }
 
@@ -357,16 +330,6 @@ int aether_test_setlocale(const char* name) {
 }
 
 int aether_test_decimal_point(void) {
-    // localeconv, not setlocale(LC_NUMERIC, NULL): the emit backends bracket
-    // with uselocale (glibc) and _configthreadlocale (Windows), both of which
-    // change the THREAD's locale, while a setlocale query reports the global
-    // one and would answer identically whether or not the restore happened.
-    //
-    // CRITICAL: returns the byte, not a pointer. Both localeconv's struct and
-    // any static this could copy into are single-instance, so a caller holding
-    // a "before" pointer would be handed the same storage again on the second
-    // call and could only ever compare it with itself. A returned value cannot
-    // be aliased that way.
     const struct lconv* lc = localeconv();
     if (!lc || !lc->decimal_point) return 0;
     return (unsigned char)lc->decimal_point[0];

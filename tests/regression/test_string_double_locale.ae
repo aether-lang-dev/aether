@@ -30,9 +30,7 @@ import std.number(FormatOptions)
 // Returns 1 if applied, 0 if that locale is not installed on this machine.
 extern aether_test_setlocale(name: string) -> int
 
-// The radix byte this thread would format with, for asserting that the emit
-// path put the locale back. A byte rather than a string on purpose: see the
-// note on the C declaration.
+// The radix byte this thread would format with.
 extern aether_test_decimal_point() -> int
 
 // Try the spellings a comma-decimal locale goes by across platforms and
@@ -174,21 +172,10 @@ check_number_unaffected(label: string) -> int {
     return 1
 }
 
-// The shim must leave the CALLER's locale exactly as it found it. Every emit
-// backend brackets a locale switch around the format call: uselocale() on
-// glibc, _configthreadlocale() + setlocale() on Windows, where there is no
-// uselocale and no CRT-portable locale-taking printf (#1494). If any of them
-// failed to restore, the process would silently drift to the C locale after
-// the first float is formatted, breaking std.number and any embedding host.
-//
-// Read the thread's radix character directly rather than inferring it:
-// std.number takes an EXPLICIT locale, so it keeps producing German output
-// even from a thread stranded in "C", and would report a leak as a pass.
-//
-// `expected` is captured the moment the locale is applied, NOT re-read here.
-// Reading it here compares the state after one from_double against the state
-// after all the earlier ones, so a backend that leaks on every call looks
-// perfectly stable and the check passes while the process sits in "C".
+// The emit path brackets a locale switch (uselocale on glibc,
+// _configthreadlocale on Windows) and must restore it; a leak strands the
+// process in "C". `expected` is captured before ANY formatting, because a
+// backend that leaks on every call looks stable when compared against itself.
 check_locale_not_leaked(expected: int) -> int {
     scratch = string.from_double(3.14)
     string.free(scratch)
@@ -208,8 +195,6 @@ check_locale_not_leaked(expected: int) -> int {
         string.free(now)
     }
 
-    // Formatting for people must still work afterwards, which is the concrete
-    // damage a failed restore does.
     return fails + check_number_unaffected("still correct after shim use")
 }
 
@@ -235,8 +220,6 @@ main() {
     println("locale applied: ${locale_name} (ambient decimal separator is a comma)")
     string.free(locale_name)
 
-    // Captured BEFORE any formatting happens, so a backend that leaks on every
-    // call cannot hide behind its own consistency.
     radix_at_start = aether_test_decimal_point()
 
     fails = baseline_fails

@@ -19,12 +19,8 @@ jobs:
   # Full CI suite: compiler (-Werror), ae, stdlib, unit tests,
   # .ae integration tests (includes REPL tests), examples.
   #
-  # Run once per C RUNTIME, not just once. MSYS2 ships two: MINGW64 links the
-  # legacy msvcrt.dll, UCRT64 links the UCRT, and they export different symbol
-  # sets. Building only MINGW64 shipped a libaether.a that no UCRT64 user could
-  # link (#1494): every program failed at the link step, and CI stayed green
-  # the whole time because it both built and linked with the same CRT. UCRT64
-  # is the current MSYS2 default, so it is not a niche configuration.
+  # Once per CRT: MINGW64 links msvcrt.dll, UCRT64 links the UCRT, and their
+  # export sets differ (#1494).
   # ============================================================
   build-mingw:
     name: Build + Test (Windows / ${{ matrix.msystem }})
@@ -69,7 +65,7 @@ jobs:
     # carries the MSYS2 environment, so the two CRT legs never share an object
     # and neither collides with the Linux/macOS caches. Split restore/save: PR
     # runs only RESTORE; only a push to main SAVES, and only on a cache miss
-    # (an unchanged source is a key hit, so there is nothing new to write, the
+    # (an unchanged source is a key hit, so there is nothing new to write; the
     # key already embeds the source hash).
     - name: Restore miniaudio object cache
       id: audio_cache

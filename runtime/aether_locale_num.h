@@ -40,8 +40,7 @@ extern "C" {
 // Returns C99 snprintf semantics on EVERY platform: the number of characters
 // that would have been written excluding the NUL, or negative on encoding
 // error. `buf` is always NUL-terminated when `n > 0`, including on truncation
-// and on the negative-return path, which the legacy Windows CRT does not
-// guarantee on its own.
+// and on the negative-return path.
 int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value);
 
 // strtod/strtof with '.' as the decimal separator regardless of locale.
@@ -60,13 +59,8 @@ float  aether_c_strtof(const char* s, char** endptr);
 // machine (callers should print a visible SKIP and pass).
 int aether_test_setlocale(const char* name);
 
-// TEST-ONLY. The radix BYTE the calling thread would currently format with,
-// or 0 if the platform will not report one.
-//
-// Every emit backend here brackets a locale switch around the format call, so
-// the invariant that decides whether this file is safe to use is "formatting a
-// number is not observable as a locale change". That is what this exists to
-// let a test assert: read it, format, read it again, compare.
+// TEST-ONLY. The radix BYTE the calling thread would format with, 0 if
+// unavailable. A byte, not a pointer: two calls would alias one buffer.
 int aether_test_decimal_point(void);
 
 #ifdef __cplusplus
