@@ -1,0 +1,89 @@
+// Renders a triangle on the GPU to an offscreen image and writes it out.
+//
+//   ae build --extra contrib/vulkan/aether_vulkan.c \
+//            contrib/vulkan/example_triangle.ae -o triangle
+//   ./triangle out.ppm
+//
+// Exits 0 and prints a SKIP line when no Vulkan driver is present, so it is
+// safe to run anywhere.
+
+import std.fs
+import std.string
+import contrib.vulkan
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    if err != "" {
+        println("cannot read ${path}: ${err}")
+        return ("", 0)
+    }
+    return (data, length)
+}
+
+main() {
+    out_path = "triangle.ppm"
+
+    if vulkan.available() != 1 {
+        println("SKIP: no Vulkan driver available (${vulkan.last_error()})")
+        return
+    }
+    println("device: ${vulkan.device_name()}")
+
+    dev = vulkan.device_create()
+    if dev == 0 {
+        println("device_create failed: ${vulkan.last_error()}")
+        return
+    }
+    defer vulkan.device_destroy(dev)
+
+    width = 256
+    height = 256
+    target = vulkan.target_create(dev, width, height)
+    if target == 0 {
+        println("target_create failed: ${vulkan.last_error()}")
+        return
+    }
+    defer vulkan.target_destroy(target)
+
+    vert, vert_len = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+    frag, frag_len = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+    if vert_len == 0 || frag_len == 0 {
+        println("shaders missing; build them with tools/build_shaders.sh")
+        return
+    }
+
+    pipe = vulkan.pipeline_create(dev, target, vert, vert_len, frag, frag_len)
+    if pipe == 0 {
+        println("pipeline_create failed: ${vulkan.last_error()}")
+        return
+    }
+    defer vulkan.pipeline_destroy(pipe)
+
+    // Counter-clockwise in Vulkan NDC, where y points down.
+    rc = vulkan.verts_reserve(target, 3)
+    if rc != 0 {
+        println("verts_reserve failed: ${vulkan.last_error()}")
+        return
+    }
+    vulkan.verts_set(target, 0,  0.0, -0.7,  1.0, 0.0, 0.0)
+    vulkan.verts_set(target, 1, -0.7,  0.7,  0.0, 1.0, 0.0)
+    vulkan.verts_set(target, 2,  0.7,  0.7,  0.0, 0.0, 1.0)
+
+    rc = vulkan.draw(target, pipe, 0.06, 0.06, 0.1, 1.0)
+    if rc != 0 {
+        println("draw failed: ${vulkan.last_error()}")
+        return
+    }
+
+    centre = vulkan.pixel(target, width / 2, height / 2)
+    corner = vulkan.pixel(target, 0, 0)
+    println("centre rgba ${vulkan.red(centre)} ${vulkan.green(centre)} ${vulkan.blue(centre)} ${vulkan.alpha(centre)}")
+    println("corner rgba ${vulkan.red(corner)} ${vulkan.green(corner)} ${vulkan.blue(corner)} ${vulkan.alpha(corner)}")
+
+    rc = vulkan.save_ppm(target, out_path)
+    if rc != 0 {
+        println("save_ppm failed: ${vulkan.last_error()}")
+        return
+    }
+    println("wrote ${out_path} (${width}x${height})")
+}

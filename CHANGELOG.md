@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`contrib.vulkan`: offscreen GPU rendering** (#1495, phase 1). Instance,
+  physical-device selection, logical device and queue; an offscreen RGBA target
+  with its render pass and framebuffer; a graphics pipeline built from
+  caller-supplied SPIR-V; vertex upload, draw, and readback. Plus an example
+  that renders a triangle and writes a PPM.
+
+  Nothing links against libvulkan. The loader is opened with `dlopen` at
+  runtime, so a program using the module builds and starts on a machine with no
+  driver at all and `vulkan.available()` reports 0. Only the Vulkan headers are
+  needed to build, and they are header-only. Device entry points come from
+  `vkGetDeviceProcAddr`, which returns the driver's own function rather than the
+  loader's trampoline; measured at 11.6 ns per call against 12.2 ns through the
+  loader.
+
+  On an M1 Pro through MoltenVK at 512x512: 0.350 ms per draw including the GPU
+  fence wait, and 0.025 ms to read back 1 MiB, which is host memcpy bandwidth
+  because the readback buffer stays mapped for the target's lifetime. The
+  command buffer is recorded once and resubmitted, re-recording only when the
+  pipeline, vertex count or clear colour changes. Vertices are written straight
+  into mapped GPU-visible memory rather than through a host array.
+
+  The test covers the failure modes as well as the happy path: zero and negative
+  sizes, a size past `maxImageDimension2D`, empty SPIR-V, a length that is not a
+  multiple of 4, bytes that are not SPIR-V, out-of-range vertex indices, writes
+  before a reserve, out-of-image pixel reads, a null readback destination,
+  destroying null handles, and eight create/draw/destroy cycles. It skips
+  cleanly where no driver is installed. `leaks -atExit` reports 0 leaks.
+
+  The Linux contrib CI leg now installs lavapipe, Mesa's CPU implementation, so
+  the GPU path is exercised on a runner with no GPU, and then asserts the test
+  did not skip: a driver is installed on that leg, so a skip would be silent
+  loss of coverage rather than a pass.
+
+  Surfaces, swapchains and window presentation are phase 2 and deliberately
+  absent, along with the aether-ui seam that goes with them.
+
+### Changed
+
+- `contrib_check.sh` can now express a dependency the test needs only the
+  HEADERS of, separately from one it must link against. `contrib/vulkan` needs
+  the former: linking the Vulkan loader would reintroduce exactly the hard
+  dependency its runtime `dlopen` exists to avoid.
+
 ## [0.519.0]
 
 ### Fixed

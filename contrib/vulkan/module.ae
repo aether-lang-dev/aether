@@ -1,0 +1,139 @@
+// contrib.vulkan: offscreen GPU rendering (#1495, phase 1).
+// Import with: import contrib.vulkan
+//
+//   vulkan.available()                  -> int     1 when a driver is usable
+//   vulkan.device_name()                -> string  "" when none
+//   vulkan.last_error()                 -> string
+//
+//   vulkan.device_create()              -> ptr     0 on failure
+//   vulkan.device_destroy(dev)
+//
+//   vulkan.target_create(dev, w, h)     -> ptr     offscreen RGBA image
+//   vulkan.target_destroy(t)
+//   vulkan.target_width(t)              -> int
+//   vulkan.target_height(t)             -> int
+//   vulkan.rgba_size(t)                 -> int     w * h * 4
+//
+//   vulkan.pipeline_create(dev, t, vert_spv, vert_len, frag_spv, frag_len) -> ptr
+//   vulkan.pipeline_destroy(p)
+//
+//   vulkan.verts_reserve(t, count)      -> int     status
+//   vulkan.verts_set(t, i, x, y, r, g, b) -> int   status
+//   vulkan.draw(t, pipe, r, g, b, a)    -> int     status
+//   vulkan.pixel(t, x, y)               -> int     0xRRGGBBAA, -1 outside
+//   vulkan.copy_rgba(t, dest, dest_len) -> int     status
+//   vulkan.save_ppm(t, path)            -> int     status
+//
+// Nothing links against libvulkan: the loader is opened at runtime, so a
+// program using this module builds and starts on a machine with no driver and
+// vulkan.available() reports 0. Check it before anything else.
+//
+// Coordinates are Vulkan NDC: x and y run -1..1, y points DOWN, and a
+// front-facing triangle is counter-clockwise. Colours are 0..1.
+//
+// Build:
+//   - add contrib/vulkan/aether_vulkan.c to your aether.toml [[bin]]
+//     extra_sources (or pass --extra)
+//   - the Vulkan HEADERS must be on the include path (they are header-only;
+//     no library is linked). On Debian/Ubuntu: libvulkan-dev. On macOS:
+//     brew install vulkan-headers.
+//   - on Linux add `link_flags = "-ldl"` for dlopen.
+
+import std.string
+
+exports (
+    OK, ERR_NO_LOADER, ERR_NO_DEVICE, ERR_ARG, ERR_OOM,
+    ERR_UNSUPPORTED, ERR_SHADER, ERR_DEVICE_LOST,
+    aevk_ae_available, aevk_ae_last_error, aevk_ae_device_name,
+    aevk_ae_device_create, aevk_ae_device_destroy,
+    aevk_ae_target_create, aevk_ae_target_destroy,
+    aevk_ae_target_width, aevk_ae_target_height, aevk_ae_rgba_size,
+    aevk_ae_pipeline_create, aevk_ae_pipeline_destroy,
+    aevk_ae_verts_reserve, aevk_ae_verts_set, aevk_ae_draw,
+    aevk_ae_copy_rgba, aevk_ae_pixel, aevk_ae_save_ppm,
+    available, last_error, device_name,
+    device_create, device_destroy,
+    target_create, target_destroy, target_width, target_height, rgba_size,
+    pipeline_create, pipeline_destroy,
+    verts_reserve, verts_set, draw, copy_rgba, pixel, save_ppm,
+    red, green, blue, alpha
+)
+
+extern aevk_ae_available() -> int
+extern aevk_ae_last_error() -> string
+extern aevk_ae_device_name() -> string
+
+extern aevk_ae_device_create() -> ptr
+extern aevk_ae_device_destroy(dev: ptr)
+
+extern aevk_ae_target_create(dev: ptr, w: int, h: int) -> ptr
+extern aevk_ae_target_destroy(t: ptr)
+extern aevk_ae_target_width(t: ptr) -> int
+extern aevk_ae_target_height(t: ptr) -> int
+extern aevk_ae_rgba_size(t: ptr) -> int
+
+extern aevk_ae_pipeline_create(dev: ptr, t: ptr, vspv: string, vlen: int,
+                               fspv: string, flen: int) -> ptr
+extern aevk_ae_pipeline_destroy(p: ptr)
+
+extern aevk_ae_verts_reserve(t: ptr, count: int) -> int
+extern aevk_ae_verts_set(t: ptr, index: int, x: float, y: float,
+                         r: float, g: float, b: float) -> int
+extern aevk_ae_draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int
+extern aevk_ae_copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int
+extern aevk_ae_pixel(t: ptr, x: int, y: int) -> int
+extern aevk_ae_save_ppm(t: ptr, path: string) -> int
+
+// Status codes, mirroring aether_vulkan.h. A positive value is a VkResult
+// passed through from the driver.
+const OK = 0
+const ERR_NO_LOADER = -1
+const ERR_NO_DEVICE = -2
+const ERR_ARG = -3
+const ERR_OOM = -4
+const ERR_UNSUPPORTED = -5
+const ERR_SHADER = -6
+const ERR_DEVICE_LOST = -7
+
+available() -> int { return aevk_ae_available() }
+last_error() -> string { return aevk_ae_last_error() }
+device_name() -> string { return aevk_ae_device_name() }
+
+device_create() -> ptr { return aevk_ae_device_create() }
+device_destroy(dev: ptr) { aevk_ae_device_destroy(dev) }
+
+target_create(dev: ptr, w: int, h: int) -> ptr { return aevk_ae_target_create(dev, w, h) }
+target_destroy(t: ptr) { aevk_ae_target_destroy(t) }
+target_width(t: ptr) -> int { return aevk_ae_target_width(t) }
+target_height(t: ptr) -> int { return aevk_ae_target_height(t) }
+rgba_size(t: ptr) -> int { return aevk_ae_rgba_size(t) }
+
+pipeline_create(dev: ptr, t: ptr, vert_spv: string, vert_len: int,
+                frag_spv: string, frag_len: int) -> ptr {
+    return aevk_ae_pipeline_create(dev, t, vert_spv, vert_len, frag_spv, frag_len)
+}
+pipeline_destroy(p: ptr) { aevk_ae_pipeline_destroy(p) }
+
+verts_reserve(t: ptr, count: int) -> int { return aevk_ae_verts_reserve(t, count) }
+
+verts_set(t: ptr, index: int, x: float, y: float,
+          r: float, g: float, b: float) -> int {
+    return aevk_ae_verts_set(t, index, x, y, r, g, b)
+}
+
+draw(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aevk_ae_draw(t, p, r, g, b, a)
+}
+
+copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int {
+    return aevk_ae_copy_rgba(t, dest, dest_len)
+}
+
+pixel(t: ptr, x: int, y: int) -> int { return aevk_ae_pixel(t, x, y) }
+save_ppm(t: ptr, path: string) -> int { return aevk_ae_save_ppm(t, path) }
+
+// Channel accessors for the packed value pixel() returns.
+red(px: int) -> int { return (px >> 24) & 255 }
+green(px: int) -> int { return (px >> 16) & 255 }
+blue(px: int) -> int { return (px >> 8) & 255 }
+alpha(px: int) -> int { return px & 255 }

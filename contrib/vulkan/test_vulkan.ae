@@ -1,0 +1,229 @@
+// contrib.vulkan tests (#1495).
+//
+// Runs anywhere: with no Vulkan driver it prints SKIP and exits 0, which is
+// the same path a user's program takes on a machine without one. Where a
+// driver exists it renders on the GPU and checks the pixels.
+
+import std.fs
+import std.string
+import contrib.vulkan
+
+// Each check returns the number of failures it saw, so main can total them
+// without module-level state.
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+check_eq(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} (${got})")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+// A failed call must leave a non-empty explanation behind, or a caller has
+// nothing to report.
+check_errored(label: string) -> int {
+    msg = vulkan.last_error()
+    if string.length(msg) > 0 {
+        println("  PASS ${label} reports: ${msg}")
+        return 0
+    }
+    println("  FAIL ${label} failed without an error message")
+    return 1
+}
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    if err != "" { return ("", 0) }
+    return (data, length)
+}
+
+main() {
+    println("=== contrib.vulkan ===")
+    failures = 0
+
+    // available() is cached; two calls must agree.
+    a1 = vulkan.available()
+    a2 = vulkan.available()
+    failures = failures + check_eq(a2, a1, "available() is stable across calls")
+
+    if a1 != 1 {
+        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
+        println("0 FAILURES (skipped)")
+        return
+    }
+
+    name = vulkan.device_name()
+    failures = failures + check(string.length(name) > 0, "device_name() is not empty")
+    println("  device: ${name}")
+
+    dev = vulkan.device_create()
+    failures = failures + check(dev != 0, "device_create()")
+    if dev == 0 {
+        println("${failures} FAILURE(S)")
+        return
+    }
+    defer vulkan.device_destroy(dev)
+
+    // ---- target edge cases -------------------------------------------------
+    zero_w = vulkan.target_create(dev, 0, 16)
+    failures = failures + check(zero_w == 0, "target_create rejects width 0")
+    failures = failures + check_errored("width 0")
+
+    neg = vulkan.target_create(dev, 16, -4)
+    failures = failures + check(neg == 0, "target_create rejects a negative height")
+
+    // Far past any real maxImageDimension2D: must be refused, not attempted.
+    huge = vulkan.target_create(dev, 1000000, 1000000)
+    failures = failures + check(huge == 0, "target_create refuses a size beyond the device limit")
+    failures = failures + check_errored("oversized target")
+
+    target = vulkan.target_create(dev, 64, 64)
+    failures = failures + check(target != 0, "target_create(64, 64)")
+    if target == 0 {
+        println("${failures} FAILURE(S)")
+        return
+    }
+    defer vulkan.target_destroy(target)
+
+    failures = failures + check_eq(vulkan.target_width(target), 64, "target_width")
+    failures = failures + check_eq(vulkan.target_height(target), 64, "target_height")
+    failures = failures + check_eq(vulkan.rgba_size(target), 64 * 64 * 4, "rgba_size")
+
+    // ---- shader edge cases -------------------------------------------------
+    empty = vulkan.pipeline_create(dev, target, "", 0, "", 0)
+    failures = failures + check(empty == 0, "pipeline_create rejects empty SPIR-V")
+    failures = failures + check_errored("empty SPIR-V")
+
+    // SPIR-V is a stream of 32-bit words, so a length that is not a multiple
+    // of 4 cannot be valid whatever the bytes are.
+    ragged = vulkan.pipeline_create(dev, target, "abc", 3, "abc", 3)
+    failures = failures + check(ragged == 0, "pipeline_create rejects a length that is not a multiple of 4")
+
+    // Right shape, wrong content: this one reaches the driver's validator.
+    garbage = vulkan.pipeline_create(dev, target, "abcdefgh", 8, "abcdefgh", 8)
+    failures = failures + check(garbage == 0, "pipeline_create rejects non-SPIR-V bytes")
+
+    vert, vert_len = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+    frag, frag_len = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+    failures = failures + check(vert_len > 0 && frag_len > 0, "shader binaries are present")
+    if vert_len == 0 || frag_len == 0 {
+        println("${failures} FAILURE(S)")
+        return
+    }
+
+    pipe = vulkan.pipeline_create(dev, target, vert, vert_len, frag, frag_len)
+    failures = failures + check(pipe != 0, "pipeline_create with real SPIR-V")
+    if pipe == 0 {
+        println("  ${vulkan.last_error()}")
+        println("${failures} FAILURE(S)")
+        return
+    }
+    defer vulkan.pipeline_destroy(pipe)
+
+    // ---- geometry edge cases ------------------------------------------------
+    failures = failures + check(vulkan.verts_set(target, 0, 0.0, 0.0, 1.0, 1.0, 1.0) != 0,
+          "verts_set before reserve is refused")
+
+    failures = failures + check_eq(vulkan.verts_reserve(target, 0), vulkan.ERR_ARG, "verts_reserve(0) is refused")
+    failures = failures + check_eq(vulkan.verts_reserve(target, 3), vulkan.OK, "verts_reserve(3)")
+
+    failures = failures + check(vulkan.verts_set(target, 3, 0.0, 0.0, 1.0, 1.0, 1.0) != 0,
+          "verts_set past the end is refused")
+    failures = failures + check(vulkan.verts_set(target, -1, 0.0, 0.0, 1.0, 1.0, 1.0) != 0,
+          "verts_set with a negative index is refused")
+
+    failures = failures + check_eq(vulkan.verts_set(target, 0,  0.0, -0.7, 1.0, 0.0, 0.0), vulkan.OK, "verts_set 0")
+    failures = failures + check_eq(vulkan.verts_set(target, 1, -0.7,  0.7, 0.0, 1.0, 0.0), vulkan.OK, "verts_set 1")
+    failures = failures + check_eq(vulkan.verts_set(target, 2,  0.7,  0.7, 0.0, 0.0, 1.0), vulkan.OK, "verts_set 2")
+
+    // ---- draw ---------------------------------------------------------------
+    failures = failures + check_eq(vulkan.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw")
+
+    centre = vulkan.pixel(target, 32, 40)
+    corner = vulkan.pixel(target, 0, 0)
+    failures = failures + check(centre != corner, "the triangle differs from the background")
+    failures = failures + check_eq(vulkan.alpha(corner), 255, "the clear colour is opaque")
+    failures = failures + check_eq(vulkan.red(corner) + vulkan.green(corner) + vulkan.blue(corner), 0,
+             "a black clear leaves black corners")
+    failures = failures + check(vulkan.red(centre) + vulkan.green(centre) + vulkan.blue(centre) > 0,
+          "the interior is lit")
+
+    // ---- pixel bounds --------------------------------------------------------
+    failures = failures + check_eq(vulkan.pixel(target, -1, 0), -1, "pixel() rejects a negative x")
+    failures = failures + check_eq(vulkan.pixel(target, 0, 64), -1, "pixel() rejects y past the height")
+    failures = failures + check_eq(vulkan.pixel(target, 64, 0), -1, "pixel() rejects x past the width")
+
+    // ---- determinism, and the command-buffer reuse path ----------------------
+    // The second draw hits the recorded-command-buffer fast path; identical
+    // input must give identical output, or the reuse is unsound.
+    before = vulkan.pixel(target, 32, 40)
+    failures = failures + check_eq(vulkan.draw(target, pipe, 0.0, 0.0, 0.0, 1.0), vulkan.OK, "draw again")
+    failures = failures + check_eq(vulkan.pixel(target, 32, 40), before, "a repeated draw is bit-identical")
+
+    // Changing the clear colour must invalidate that recording.
+    failures = failures + check_eq(vulkan.draw(target, pipe, 1.0, 0.0, 0.0, 1.0), vulkan.OK, "draw with a red clear")
+    red_corner = vulkan.pixel(target, 0, 0)
+    failures = failures + check_eq(vulkan.red(red_corner), 255, "the new clear colour took effect")
+    failures = failures + check_eq(vulkan.green(red_corner), 0, "the new clear colour has no green")
+
+    // ---- readback ------------------------------------------------------------
+    failures = failures + check(vulkan.copy_rgba(target, 0, 16) != 0, "copy_rgba rejects a null destination")
+
+    // ---- an empty draw is still a valid frame ---------------------------------
+    bare = vulkan.target_create(dev, 8, 8)
+    failures = failures + check(bare != 0, "a second target can be created")
+    if bare != 0 {
+        failures = failures + check_eq(vulkan.draw(bare, 0, 0.0, 1.0, 0.0, 1.0), vulkan.OK, "draw with no pipeline clears")
+        g = vulkan.pixel(bare, 4, 4)
+        failures = failures + check_eq(vulkan.green(g), 255, "the clear-only frame is green")
+        failures = failures + check_eq(vulkan.red(g), 0, "the clear-only frame has no red")
+        vulkan.target_destroy(bare)
+    }
+
+    // ---- lifecycle -------------------------------------------------------------
+    // Destroying nothing must be safe: a caller that bailed early passes 0.
+    vulkan.target_destroy(0)
+    vulkan.pipeline_destroy(0)
+    vulkan.device_destroy(0)
+    failures = failures + check(1 == 1, "destroying a null handle is safe")
+
+    // Repeated create/destroy must not accumulate anything. Under valgrind or
+    // leaks this is the cycle that would show it.
+    cycles = 0
+    while cycles < 8 {
+        t2 = vulkan.target_create(dev, 32, 32)
+        if t2 == 0 {
+            failures = failures + check(0 == 1, "target_create in cycle ${cycles}")
+            cycles = 8
+        } else {
+            p2 = vulkan.pipeline_create(dev, t2, vert, vert_len, frag, frag_len)
+            if p2 != 0 {
+                vulkan.verts_reserve(t2, 3)
+                vulkan.verts_set(t2, 0,  0.0, -0.5, 1.0, 1.0, 1.0)
+                vulkan.verts_set(t2, 1, -0.5,  0.5, 1.0, 1.0, 1.0)
+                vulkan.verts_set(t2, 2,  0.5,  0.5, 1.0, 1.0, 1.0)
+                vulkan.draw(t2, p2, 0.0, 0.0, 0.0, 1.0)
+                vulkan.pipeline_destroy(p2)
+            }
+            vulkan.target_destroy(t2)
+            cycles = cycles + 1
+        }
+    }
+    failures = failures + check(1 == 1, "8 create/draw/destroy cycles completed")
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+    }
+}
