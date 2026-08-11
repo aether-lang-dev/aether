@@ -27,19 +27,41 @@ if [ -n "$hits" ]; then
 fi
 
 # 2. Link surface: every symbol must exist in both CRTs.
-CC_WIN=x86_64-w64-mingw32-gcc
-NM_WIN=x86_64-w64-mingw32-nm
+CC_WIN=""
+NM_WIN=""
+AR_WIN=""
+if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 &&
+   command -v x86_64-w64-mingw32-nm  >/dev/null 2>&1; then
+    CC_WIN=x86_64-w64-mingw32-gcc
+    NM_WIN=x86_64-w64-mingw32-nm
+    AR_WIN=x86_64-w64-mingw32-ar
+elif command -v gcc >/dev/null 2>&1 && command -v nm >/dev/null 2>&1 &&
+     gcc -dumpmachine 2>/dev/null | grep -q 'mingw'; then
+    # MSYS2 names its native compiler `gcc`, and it is where the two CRT import
+    # libraries actually differ, so this is the host that can run the full check.
+    CC_WIN='gcc'
+    NM_WIN='nm'
+    AR_WIN='ar'
+fi
 
-if ! command -v "$CC_WIN" >/dev/null 2>&1 || ! command -v "$NM_WIN" >/dev/null 2>&1; then
+if [ -z "$CC_WIN" ]; then
     if [ "$rc" -eq 0 ]; then
         echo "  [PASS] windows_crt_symbols: $scanned sources free of msvcrt-only printf calls"
-        echo "         (link-surface check skipped: no x86_64-w64-mingw32 toolchain)"
+        echo "         (link-surface check skipped: no Windows-targeting toolchain)"
     fi
     exit "$rc"
 fi
 
+ARCHIVE=build/libaether.a
 MANIFEST=build/MANIFEST
-if [ ! -f "$MANIFEST" ]; then
+# On a Windows host the archive `make stdlib` just produced IS the artifact we
+# ship, built with the real flags, so inspect it rather than recompiling with a
+# guessed include set. Elsewhere it holds host objects and the sources have to
+# be cross-compiled instead.
+USE_ARCHIVE=0
+if [ "$CC_WIN" = gcc ] && [ -f "$ARCHIVE" ]; then
+    USE_ARCHIVE=1
+elif [ ! -f "$MANIFEST" ]; then
     echo "  [FAIL] windows_crt_symbols: $MANIFEST missing, run 'make stdlib' first"
     exit 1
 fi
@@ -58,22 +80,34 @@ INC="-Iinclude -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils
      -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math
      -Istd/net -Istd/collections -Istd/json"
 
-mkdir -p "$TMP/objs"
-compiled=0
-for src in $(grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$'); do
-    [ -f "$src" ] || continue
-    obj="$TMP/objs/$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
-    if ! $CC_WIN -O2 $INC -DAETHER_VERSION='"test"' -c "$src" -o "$obj" 2>"$TMP/cc.log"; then
-        echo "  [FAIL] windows_crt_symbols: $src does not cross-compile for Windows"
-        sed 's/^/        /' "$TMP/cc.log" | head -8
-        exit 1
-    fi
-    compiled=$((compiled + 1))
-done
+if [ "$USE_ARCHIVE" -eq 1 ]; then
+    subject="$ARCHIVE"
+    compiled=$("$AR_WIN" t "$ARCHIVE" 2>/dev/null | wc -l | tr -d ' ')
+    what="objects in $ARCHIVE"
+else
+    mkdir -p "$TMP/objs"
+    compiled=0
+    for src in $(grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$'); do
+        [ -f "$src" ] || continue
+        obj="$TMP/objs/$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
+        if ! $CC_WIN -O2 $INC -DAETHER_VERSION='"test"' -c "$src" -o "$obj" 2>"$TMP/cc.log"; then
+            echo "  [FAIL] windows_crt_symbols: $src does not cross-compile for Windows"
+            sed 's/^/        /' "$TMP/cc.log" | head -8
+            exit 1
+        fi
+        compiled=$((compiled + 1))
+    done
+    subject="$TMP/objs/*.o"
+    what="objects cross-compiled"
+fi
 
+# -A so archive members are prefixed per line rather than announced by a bare
+# `member.o:` header, which would otherwise be read as a symbol name.
 # __imp_ is import-thunk decoration, not part of the exported name.
-"$NM_WIN" -u "$TMP"/objs/*.o | awk '{print $2}' | sort -u > "$TMP/undef.txt"
-"$NM_WIN" --defined-only "$TMP"/objs/*.o | awk '{print $3}' | sort -u > "$TMP/ours.txt"
+# shellcheck disable=SC2086
+"$NM_WIN" -A -u $subject | awk 'NF >= 3 {print $NF}' | sort -u > "$TMP/undef.txt"
+# shellcheck disable=SC2086
+"$NM_WIN" -A --defined-only $subject | awk 'NF >= 3 {print $NF}' | sort -u > "$TMP/ours.txt"
 comm -23 "$TMP/undef.txt" "$TMP/ours.txt" | sed 's/^__imp_//' | sort -u > "$TMP/external.txt"
 
 crt_exports() {
@@ -87,7 +121,7 @@ crt_exports "$LIBMSVCRT" > "$TMP/msvcrt.txt"
 # an alias. Comparing a set with itself can never fail, so say so instead.
 if [ "$(comm -3 "$TMP/ucrt.txt" "$TMP/msvcrt.txt" | wc -l | tr -d ' ')" -eq 0 ]; then
     if [ "$rc" -eq 0 ]; then
-        echo "  [PASS] windows_crt_symbols: $scanned sources clean; $compiled objects cross-compiled"
+        echo "  [PASS] windows_crt_symbols: $scanned sources clean; $compiled $what"
         echo "         (CRT comparison skipped: this toolchain's libucrt.a and"
         echo "          libmsvcrt.a export identical sets, so it cannot tell them apart)"
     fi
@@ -113,7 +147,7 @@ if [ -n "$only_ucrt" ]; then
 fi
 
 if [ "$rc" -eq 0 ]; then
-    echo "  [PASS] windows_crt_symbols: $scanned sources clean; $compiled objects, \
+    echo "  [PASS] windows_crt_symbols: $scanned sources clean; $compiled $what, \
 $(wc -l < "$TMP/external.txt" | tr -d ' ') external symbols, all CRT-portable"
 fi
 exit "$rc"
