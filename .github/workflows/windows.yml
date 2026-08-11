@@ -18,10 +18,24 @@ jobs:
   # MinGW build — primary Windows target
   # Full CI suite: compiler (-Werror), ae, stdlib, unit tests,
   # .ae integration tests (includes REPL tests), examples.
+  #
+  # Once per CRT: MINGW64 links msvcrt.dll, UCRT64 links the UCRT, and their
+  # export sets differ (#1494).
   # ============================================================
   build-mingw:
-    name: Build + Test (Windows / MinGW-w64)
+    name: Build + Test (Windows / ${{ matrix.msystem }})
     runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+            root: mingw64
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+            root: ucrt64
 
     defaults:
       run:
@@ -34,37 +48,38 @@ jobs:
     - name: Set up MSYS2 / MinGW-w64
       uses: msys2/setup-msys2@v2
       with:
-        msystem: MINGW64
+        msystem: ${{ matrix.msystem }}
         update: true
         install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-make
-          mingw-w64-x86_64-openssl
-          mingw-w64-x86_64-ca-certificates
-          mingw-w64-x86_64-zlib
+          ${{ matrix.prefix }}-gcc
+          ${{ matrix.prefix }}-make
+          ${{ matrix.prefix }}-openssl
+          ${{ matrix.prefix }}-ca-certificates
+          ${{ matrix.prefix }}-zlib
           pkg-config
           make
           bc
 
     # Cache the compiled miniaudio object — same rationale as ci.yml. The
     # MinGW toolchain identity is folded into the Makefile stamp, and the key
-    # is Windows/MinGW-specific, so it never collides with the Linux/macOS
-    # caches. Split restore/save: PR runs only RESTORE; only a push to main
-    # SAVES, and only on a cache miss (an unchanged source is a key hit, so
-    # there is nothing new to write — the key already embeds the source hash).
+    # carries the MSYS2 environment, so the two CRT legs never share an object
+    # and neither collides with the Linux/macOS caches. Split restore/save: PR
+    # runs only RESTORE; only a push to main SAVES, and only on a cache miss
+    # (an unchanged source is a key hit, so there is nothing new to write; the
+    # key already embeds the source hash).
     - name: Restore miniaudio object cache
       id: audio_cache
       uses: actions/cache/restore@v4
       with:
         path: .ci-cache
-        key: audio-obj-windows-mingw64-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+        key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Run full CI suite
       # See ci.yml::ci-windows for why SSL_CERT_FILE is exported here.
       # Hardcoded probe paths in aether_http.c don't match the GitHub
       # runner's MSYS2 install location.
       run: |
-        export SSL_CERT_FILE="$(cygpath -w /mingw64/etc/ssl/certs/ca-bundle.crt)"
+        export SSL_CERT_FILE="$(cygpath -w /${{ matrix.root }}/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
         make ci
@@ -76,12 +91,12 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: .ci-cache
-        key: audio-obj-windows-mingw64-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
+        key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Upload Windows binaries
       uses: actions/upload-artifact@v4
       with:
-        name: aether-windows-mingw64
+        name: aether-windows-${{ matrix.root }}
         path: |
           build/aetherc.exe
           build/ae.exe

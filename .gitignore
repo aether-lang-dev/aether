@@ -103,3 +103,10 @@ runtime/aether_version.h
 
 # #1366 generated stdlib symbol table
 compiler/codegen/aether_stdlib_symbols.h
+
+# gcov output. These are per-run binaries: two of them were committed by
+# accident and every test run that produced coverage data rewrote them, so
+# each unrelated PR picked up a spurious binary diff.
+*.gcda
+*.gcno
+*.gcov
