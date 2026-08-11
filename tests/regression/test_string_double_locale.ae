@@ -30,6 +30,9 @@ import std.number(FormatOptions)
 // Returns 1 if applied, 0 if that locale is not installed on this machine.
 extern aether_test_setlocale(name: string) -> int
 
+// The radix byte this thread would format with.
+extern aether_test_decimal_point() -> int
+
 // Try the spellings a comma-decimal locale goes by across platforms and
 // distros. Returns the name that stuck, or "" if none did.
 select_comma_locale() -> string {
@@ -169,20 +172,30 @@ check_number_unaffected(label: string) -> int {
     return 1
 }
 
-// The shim must leave the CALLER's locale exactly as it found it. On glibc the
-// emit path swaps the thread locale with uselocale() for the duration of the
-// call; if it failed to restore, the whole process would silently drift to the
-// C locale after the first float is formatted — which would break std.number
-// and any embedding host. Detected here by formatting through std.number (which
-// reads the ambient locale for nothing, but exercises the shim underneath) and
-// confirming a second identical call still agrees.
-check_locale_not_leaked() -> int {
-    first = check_number_unaffected("still correct after shim use (1st)")
-    // A from_double() in between is what would strand the thread in C.
+// The emit path brackets a locale switch (uselocale on glibc,
+// _configthreadlocale on Windows) and must restore it; a leak strands the
+// process in "C". `expected` is captured before ANY formatting, because a
+// backend that leaks on every call looks stable when compared against itself.
+check_locale_not_leaked(expected: int) -> int {
     scratch = string.from_double(3.14)
     string.free(scratch)
-    second = check_number_unaffected("still correct after shim use (2nd)")
-    return first + second
+    after = aether_test_decimal_point()
+
+    fails = 0
+    if expected != after {
+        fails = 1
+        was = string.from_char(expected)
+        now = string.from_char(after)
+        println("  FAIL locale restored: radix was \"${was}\" when the locale was applied, formatting left it \"${now}\"")
+        string.free(was)
+        string.free(now)
+    } else {
+        now = string.from_char(after)
+        println("  PASS locale restored: radix still \"${now}\" after formatting")
+        string.free(now)
+    }
+
+    return fails + check_number_unaffected("still correct after shim use")
 }
 
 main() {
@@ -206,6 +219,8 @@ main() {
     }
     println("locale applied: ${locale_name} (ambient decimal separator is a comma)")
     string.free(locale_name)
+
+    radix_at_start = aether_test_decimal_point()
 
     fails = baseline_fails
 
@@ -232,7 +247,7 @@ main() {
     fails = fails + check_number_unaffected("under the comma locale (must match)")
 
     // The shim must not leak its C locale into the caller's thread.
-    fails = fails + check_locale_not_leaked()
+    fails = fails + check_locale_not_leaked(radix_at_start)
 
     println("")
     if fails == 0 {

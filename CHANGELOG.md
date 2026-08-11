@@ -21,6 +21,47 @@ version number before tagging the release.
   does not exist; the function is `read_response_conn(rp, conn)`, and the
   prose above it stated a third signature again. Both mentions now match the
   implementation. Comments only, no behaviour change.
+## [0.518.0]
+
+### Fixed
+
+- **The shipped Windows archive could not be linked by half of Windows**
+  (#1494). A user on msys2 ucrt64 could not compile any program at all, with
+  the undefined references inside the `libaether.a` we ship:
+
+  ```
+  libaether.a(aether_locale_num.o): undefined reference to `__imp__snprintf_l'
+  ```
+
+  Our release builds that archive in MINGW64, which links the legacy
+  msvcrt.dll and exports the `_l`-suffixed printf family. The UCRT does not,
+  and UCRT64 is the current MSYS2 default, so the archive was fine on the
+  machine that built it and unlinkable on the default toolchain. CI stayed
+  green because it both built and linked with the same CRT.
+
+  The Windows float formatter no longer uses that family. It asks
+  `localeconv()` for the radix character the formatter is about to use and
+  brackets a per-thread locale switch only when that character is not `.`, so
+  a locale that already formats with `.` pays nothing and every symbol on the
+  path is exported by both CRTs. The `_scprintf` truncation recovery went with
+  them, since mingw's `__mingw_snprintf` and the UCRT's `snprintf` both return
+  the C99 would-be length directly.
+
+  Three things now prevent a repeat. Windows CI is a matrix over MINGW64 and
+  UCRT64, so the reporter's environment builds and runs the full suite on
+  every pull request. `tests/integration/windows_crt_symbols` bans the
+  `_l`-suffixed printf family across `runtime/` and `std/` with no toolchain
+  needed, and cross-compiles every source in `build/MANIFEST` to require each
+  external symbol in both `libucrt.a` and `libmsvcrt.a`. And the locale
+  regression test now asserts the restore by reading the radix character
+  through `localeconv`, which is thread-locale aware; the previous check went
+  through `std.number`, which takes an explicit locale and kept reporting
+  correct output from a thread stranded in "C".
+
+- Untracked `cov_demo.gcda` and `cov_demo.gcno`. Two gcov output files had
+  been committed by accident and the suite rewrote them, so unrelated pull
+  requests picked up a spurious binary diff. `*.gcda`, `*.gcno` and `*.gcov`
+  are now ignored.
 
 ## [0.517.0]
 
