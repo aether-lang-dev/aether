@@ -99,7 +99,7 @@ store(cell: ptr, new_value: ptr) -> ptr {
 // snapshot.cas(cell, expected, new_value) — read-modify-write CAS;
 // returns 1 on success, 0 on failure. Loop pattern (writer-actor):
 //
-//     loop {
+//     while 1 == 1 {
 //         cur = snapshot.load(cell)
 //         next = build_next_from(cur)   // pure, allocates `next`
 //         if snapshot.cas(cell, cur, next) == 1 {

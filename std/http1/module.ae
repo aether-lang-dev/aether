@@ -16,13 +16,13 @@
 //   1. parse_response(buf, len, is_eof) -> HttpResponse : a pure parser over a
 //      complete (or partial) byte buffer. Returns a fully-framed response, or
 //      signals "need more bytes".
-//   2. read_response(recv_fn, recv_ctx) : loops a caller-supplied "read more"
+//   2. read_response_conn(resp, conn) : loops a caller-supplied "read more"
 //      function into an accumulator and parses once a full message is present.
 //
 // Import with:  import std.http1
 //
 //   resp = http1.response_new()
-//   err  = http1.read_response(resp, recv_next, conn)   // recv_next: see below
+//   err  = http1.read_response_conn(resp, conn)
 //   http1.status_code(resp) / http1.header(resp, "content-type") /
 //   http1.body_ptr(resp) / http1.body_len(resp)
 //   http1.response_free(resp)
