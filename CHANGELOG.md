@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The built toolchain reported the wrong version.** `v0.516.0` shipped an
+  `ae --version` that said `0.417.0`. The binary compiled current sources
+  correctly — it was the right toolchain, mislabelling itself — but anything
+  keying off the banner recorded the wrong number, including aeb's
+  content-addressed cache key.
+
+  Two independent causes, both fixed:
+
+  1. **The Makefile preferred the highest `git tag` over the `VERSION` file.**
+     Tag visibility depends on clone depth, and `release.yml`'s build jobs
+     check out shallow, so the visible set could be stale and `tail -1` land on
+     an *older* tag — overriding a correct `VERSION`. The tree a tag points at
+     always carries the right number (`git show v0.516.0:VERSION` → `0.516.0`),
+     so the tree is now authoritative and tags are consulted only for an
+     untagged dev checkout. `fetch-depth: 0` added to the `build` and
+     `build-freebsd` jobs as defence in depth.
+
+  2. **A `VERSION` bump did not rebuild the objects that bake it in.** The
+     version arrives as `-DAETHER_VERSION` on the command line rather than
+     through an `#include`, so `-MMD` never saw it and every object stayed
+     "up to date" — leaving a binary that reported the previous version. The
+     version-bearing objects now depend on the generated `aether_version.h`,
+     which is already regenerated whenever `VERSION` changes.
+
+  New `tests/integration/version_stamp/` asserts `ae --version` matches the
+  `VERSION` file, so a mislabelled build fails CI rather than shipping.
+
 ## [0.516.0]
 
 ### Fixed
