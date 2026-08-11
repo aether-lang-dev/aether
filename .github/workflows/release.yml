@@ -428,9 +428,12 @@ jobs:
             cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
           fi
         done
-        # Runtime source (fallback for linking without libaether.a)
+        # Runtime source, for linking without libaether.a. MANIFEST lists
+        # which of those .c files to compile; without it `ae` cannot build
+        # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         cd release && tar -czf ../aether-${VERSION}-${{ matrix.target }}.tar.gz *
 
@@ -456,9 +459,12 @@ jobs:
             cp "$dir"/*.h "release/include/aether/$dir/" 2>/dev/null || true
           fi
         done
-        # Runtime source (fallback for linking without libaether.a)
+        # Runtime source, for linking without libaether.a. MANIFEST lists
+        # which of those .c files to compile; without it `ae` cannot build
+        # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         cd release && zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 
@@ -578,6 +584,7 @@ jobs:
         done
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         # Note the cross-build in the archive so downstream users know it was
         # not run through the test suite on FreeBSD.

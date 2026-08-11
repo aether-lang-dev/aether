@@ -1131,6 +1131,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	cp include/*.h "$$reldir/include/aether/" 2>/dev/null; \
 	cp -r runtime "$$reldir/share/aether/" && \
 	cp -r std     "$$reldir/share/aether/" && \
+	cp build/MANIFEST "$$reldir/share/aether/" && \
 	rm -rf "$$reldir/share/aether/runtime/examples" && \
 	echo "  Created release layout in $$reldir" && \
 	echo "  Packing tarball..." && \
@@ -1144,6 +1145,7 @@ test-release-archive: compiler ae stdlib check-archive-exports
 	test -f "$$verdir/lib/aether/libaether.a" || (echo "  FAIL: lib/aether/libaether.a missing"; exit 1) && \
 	test -d "$$verdir/share/aether/runtime"  || (echo "  FAIL: share/aether/runtime missing"; exit 1) && \
 	test -d "$$verdir/share/aether/std"      || (echo "  FAIL: share/aether/std missing"; exit 1) && \
+	test -s "$$verdir/share/aether/MANIFEST" || (echo "  FAIL: share/aether/MANIFEST missing; ae cannot build from source without it"; exit 1) && \
 	echo "  Testing ae init + ae run from extracted archive..." && \
 	projdir=$$(mktemp -d) && \
 	cd "$$projdir" && \

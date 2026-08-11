@@ -13,6 +13,37 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Released installs compiled only 40 of the 95 runtime sources when building
+  without `libaether.a`.** Three separate faults lined up:
+
+  `release.yml` builds the release tree by hand and never copied
+  `build/MANIFEST`, the list of link-suitable `.c` files, so no released
+  install has ever had it. `ae` responded by silently substituting a
+  hand-written list kept in `tools/ae.c`, which had drifted to 40 entries and
+  was missing `std/bytes` among others. And even where MANIFEST was present,
+  the list was assembled into a fixed 8 KB buffer: 95 absolute paths need
+  6.0 KB under a 32-character prefix and 9.7 KB under a 73-character one, and
+  on overflow the same silent substitution kicked in.
+
+  The visible symptom was a link failure with no connection to its cause, most
+  often from `ae build --trace`, which compiles the runtime from source by
+  design:
+
+  ```
+  Undefined symbols: _aether_bytes_data, referenced from _fs_pread_into_raw
+  ```
+
+  MANIFEST is now packaged by all three release jobs and by the release-archive
+  smoke test, which also asserts it is present. The source list grows on demand
+  through the same helper the include list already used, so path length cannot
+  truncate it. The hand-written list is deleted: a MANIFEST that cannot be read
+  is now a clear error naming the file and what to do, instead of a quietly
+  degraded build.
+
+  `tests/integration/manifest_srcs_long_path` builds through a symlink deep
+  enough to have overflowed the old buffer and fails if a hand-written source
+  list reappears in `tools/ae.c`.
+
 - **Four stdlib modules documented usage that does not compile.** `std.xml`,
   `std.arena` and `std.snapshot` showed `loop { ... }` in their header
   examples, but `loop` is not an Aether keyword, so copying one gave
