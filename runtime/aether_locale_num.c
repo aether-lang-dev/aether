@@ -5,15 +5,18 @@
 //   1. _l-suffixed libc calls — the locale is an explicit argument, so no
 //      thread state is touched at all. Best where available.
 //        macOS/BSD: snprintf_l(buf, n, LOC, fmt, ...)   locale BEFORE fmt
-//        Windows:   LC_NUMERIC checked, switched per-thread only if needed
-//                   (msvcrt's _snprintf_l is not exported by the UCRT, #1494)
-//      (The argument orders genuinely differ — hence two explicit wrappers
-//      rather than one aliased macro.)
+//        Windows:   _strtod_l / _strtof_l on the PARSE side only.
 //
-//   2. uselocale() bracket — glibc has strtod_l/strtof_l but no snprintf_l,
-//      so its emit path swaps the thread's locale for the duration of the
-//      call and restores it on every return path. Thread-local, so unlike
-//      setlocale it never disturbs other threads or the embedding host.
+//   2. Thread-local locale bracket, for platforms with a locale-taking
+//      parser but no locale-taking printf, the emit path swaps the calling
+//      thread's locale for the duration of the call and restores it on every
+//      return path. Thread-local, so unlike a bare setlocale it never
+//      disturbs other threads or the embedding host.
+//        glibc/musl: uselocale()
+//        Windows:    _configthreadlocale() + setlocale(), because the
+//                    _l-suffixed printf family is msvcrt-only and an object
+//                    that imports it cannot be linked by a UCRT toolchain
+//                    (#1494). Both of these are exported by BOTH CRTs.
 //
 //   3. Plain passthrough — for platforms with no locale machinery at all
 //      (WASM/emcc, ARM newlib/-ffreestanding). This is NOT the post-hoc
@@ -169,6 +172,54 @@ static int aether_fix_exponent(char* buf, size_t len) {
     memmove(digits, digits + strip, len - (size_t)(digits - buf) - strip + 1);
     return (int)(len - strip);
 }
+
+// Format through a thread-local "C" LC_NUMERIC. Windows has no uselocale and
+// no CRT-portable locale-taking printf, so this is the bracket the other
+// platforms get from uselocale.
+//
+// Every path leaves the thread's locale exactly as it found it, including the
+// two paths that decline to switch at all. Formatting a number must never be
+// observable as a locale change by the caller.
+static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, double value) {
+    // Gives this thread a private copy of the current locale, so the switch
+    // below cannot be seen by any other thread. If it fails there is no safe
+    // way to proceed: a bare setlocale would retarget the whole process.
+    int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+    if (prev_mode == -1) return snprintf(buf, n, fmt, value);
+
+    // Restoring by NAME is only needed when the thread already owned its
+    // locale. Otherwise _DISABLE_PER_THREAD_LOCALE below discards the private
+    // copy made just above and puts the thread back on the untouched global
+    // one, which needs no name and so cannot be restored wrongly.
+    char inline_name[128];
+    char* saved = NULL;
+    if (prev_mode != _DISABLE_PER_THREAD_LOCALE) {
+        const char* cur = setlocale(LC_NUMERIC, NULL);
+        size_t len = cur ? strlen(cur) : 0;
+        // CRITICAL: setlocale returns CRT-internal storage that the next
+        // setlocale invalidates, so the name must be copied, and it must be
+        // copied WHOLE. A truncated copy restores a different locale and
+        // strands the thread on it for the rest of its life.
+        saved = (len < sizeof inline_name) ? inline_name : (char*)malloc(len + 1);
+        if (!cur || !saved) {
+            _configthreadlocale(prev_mode);
+            return snprintf(buf, n, fmt, value);
+        }
+        memcpy(saved, cur, len + 1);
+    }
+
+    setlocale(LC_NUMERIC, "C");
+    int written = snprintf(buf, n, fmt, value);
+
+    if (saved) {
+        setlocale(LC_NUMERIC, saved);
+        if (saved != inline_name) free(saved);
+        _configthreadlocale(prev_mode);
+    } else {
+        _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
+    }
+    return written;
+}
 #endif
 
 int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value) {
@@ -179,59 +230,34 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     return snprintf(buf, n, fmt, value);
 
 #elif AETHER_LOCALE_WIN32
-    // Backend 1 (Windows). Deliberately NOT _snprintf_l / _scprintf_l /
-    // _scprintf: those are msvcrt-era exports that the UCRT does not provide,
-    // so an msys2 ucrt64 toolchain links every other object fine and then dies
-    // on this one with `undefined reference to __imp__snprintf_l` and friends.
-    // That is issue #1494: a user could not build any program at all, because
-    // the whole runtime archive fails to link over three symbols in this file.
-    //
-    // Instead: query LC_NUMERIC, and only pay for a locale switch when the
-    // process actually set a non-C one. The overwhelmingly common case is that
-    // it did not, so the hot path here is a plain snprintf.
-    //
-    // The switch is per-thread (_configthreadlocale), so a formatting call
-    // cannot change what another thread sees. Both setlocale and
-    // _configthreadlocale are exported by msvcrt AND ucrt, which is the whole
-    // point of routing through them.
-    const char* cur = setlocale(LC_NUMERIC, NULL);
-    int numeric_is_c = (!cur || strcmp(cur, "C") == 0 || strcmp(cur, "POSIX") == 0);
+    // Backend 2 (Windows). The radix character is the only locale-dependent
+    // element of %f/%e/%g (printf groups digits only for the ' flag, which
+    // this file never passes), and localeconv() reports exactly the character
+    // the formatter is about to use. So ask it, and pay for a locale bracket
+    // only when the answer is not '.'. A process on a locale that already
+    // formats with '.' (en_US and most others) never enters the bracket.
+    {
+        const struct lconv* lc = localeconv();
+        const char* radix = lc ? lc->decimal_point : NULL;
+        int written = (!radix || (radix[0] == '.' && radix[1] == '\0'))
+                      ? snprintf(buf, n, fmt, value)
+                      : aether_win_snprintf_c_locale(buf, n, fmt, value);
 
-    int written;
-    if (numeric_is_c) {
-        written = snprintf(buf, n, fmt, value);
-    } else {
-        char saved[64];
-        snprintf(saved, sizeof(saved), "%s", cur);
-        int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
-        setlocale(LC_NUMERIC, "C");
-        written = snprintf(buf, n, fmt, value);
-        setlocale(LC_NUMERIC, saved);
-        if (prev_mode != -1) _configthreadlocale(prev_mode);
+        if (written < 0) {
+            buf[0] = '\0';
+            return written;
+        }
+        if ((size_t)written >= n) {
+            buf[n - 1] = '\0';
+            return written;
+        }
+        // Legacy msvcrt emits a THREE-digit exponent ("1e+010") where C99
+        // requires the minimum two ("1e+10"). It reaches a build whenever
+        // __USE_MINGW_ANSI_STDIO is off, so the normalisation stays: an
+        // exponent that differs by platform breaks json round-tripping and
+        // puts a non-conforming number on the wire.
+        return aether_fix_exponent(buf, (size_t)written);
     }
-
-    // mingw routes snprintf to its own C99 implementation (__mingw_snprintf),
-    // which returns the would-be length and terminates on truncation, and the
-    // UCRT's snprintf is C99 too. So the old _scprintf recovery for msvcrt's
-    // negative-on-truncation return is no longer needed; the value below is
-    // already what the caller's `written >= sizeof(buf)` test expects.
-    if (written < 0) {
-        buf[n - 1] = '\0';
-        return written;
-    }
-    if ((size_t)written >= n) {
-        buf[n - 1] = '\0';
-        return written;
-    }
-    // msvcrt's *_l printf family emits a THREE-digit exponent ("1e+010") where
-    // C99 requires the minimum two ("1e+10"). MinGW's plain snprintf uses its
-    // own C99 implementation and gets this right, so routing through _snprintf_l
-    // silently changed our output format — it broke json round-tripping
-    // ("1e+10" -> "1e+010") and would have put a non-conforming exponent on the
-    // wire. Collapse the redundant leading zero so every platform emits the
-    // identical byte sequence, which is the entire point of this file.
-    written = aether_fix_exponent(buf, (size_t)written);
-    return written;
 
 #elif AETHER_HAS_SNPRINTF_L
     // Backend 1 (BSD/macOS). Locale BEFORE the format here.
@@ -328,4 +354,20 @@ int aether_test_setlocale(const char* name) {
     // is exactly why this lives in C rather than being an `extern setlocale`
     // with a hardcoded constant on the Aether side.
     return setlocale(LC_ALL, name) != NULL ? 1 : 0;
+}
+
+int aether_test_decimal_point(void) {
+    // localeconv, not setlocale(LC_NUMERIC, NULL): the emit backends bracket
+    // with uselocale (glibc) and _configthreadlocale (Windows), both of which
+    // change the THREAD's locale, while a setlocale query reports the global
+    // one and would answer identically whether or not the restore happened.
+    //
+    // CRITICAL: returns the byte, not a pointer. Both localeconv's struct and
+    // any static this could copy into are single-instance, so a caller holding
+    // a "before" pointer would be handed the same storage again on the second
+    // call and could only ever compare it with itself. A returned value cannot
+    // be aliased that way.
+    const struct lconv* lc = localeconv();
+    if (!lc || !lc->decimal_point) return 0;
+    return (unsigned char)lc->decimal_point[0];
 }

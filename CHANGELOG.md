@@ -13,25 +13,57 @@ version number before tagging the release.
 
 ### Fixed
 
-- **Windows builds using the UCRT could not link at all** (#1494). A user on
-  msys2 ucrt64 could not compile any program: every object linked except
-  `runtime/aether_locale_num.o`, which pulled in `_snprintf_l`, `_scprintf_l`
-  and `_scprintf`. Those are msvcrt-era exports, and the UCRT is the default
-  CRT on current msys2. Verified against a real UCRT import library:
-  `_snprintf_l` and `_scprintf_l` are simply not in it. The Windows float
-  formatter now queries `LC_NUMERIC` and only switches locale (per-thread, via
-  `_configthreadlocale`) when the process actually set a non-C one, so the
-  common path is a plain `snprintf` and every symbol it needs is exported by
-  both CRTs. The `_scprintf` truncation-recovery is gone with it: both mingw's
-  `__mingw_snprintf` and the UCRT's `snprintf` already return the C99 would-be
-  length, which is all that path existed to reconstruct.
+- **The shipped Windows archive could not be linked by half of Windows**
+  (#1494). A user on msys2 ucrt64 could not compile any program at all. Note
+  where the failing object was:
 
-  Nothing caught this because the project's own Windows CI uses the
-  MSVCRT-flavoured toolchain, where msvcrt.dll does export those symbols.
-  `tests/integration/windows_crt_symbols` now cross-compiles the runtime for
-  Windows and fails if any object references a symbol from that banned set. It
-  needs no Windows host and no UCRT sysroot, so it runs anywhere the mingw
-  cross toolchain is installed.
+  ```
+  libaether.a(aether_locale_num.o): undefined reference to `__imp__snprintf_l'
+  ```
+
+  Inside the `libaether.a` we ship. Our release builds it in the MINGW64
+  environment, which links the legacy msvcrt.dll, and msvcrt exports the
+  `_l`-suffixed printf family. The UCRT does not, and UCRT64 is the current
+  MSYS2 default. So a perfectly good archive was unlinkable for everyone on the
+  default toolchain, and CI stayed green throughout because it both built and
+  linked with the same CRT.
+
+  The Windows float formatter no longer uses that family. It asks
+  `localeconv()` for the radix character the formatter is about to use, and
+  pays for a locale bracket only when that character is not `.`; a process on a
+  locale that already formats with `.` never enters it. The bracket itself is
+  per-thread (`_configthreadlocale` plus `setlocale`), so formatting a number
+  is never observable by another thread, and every symbol on the path is
+  exported by both CRTs. The `_scprintf` truncation recovery went with them: it
+  existed to reconstruct the C99 would-be length from msvcrt's negative return,
+  and both mingw's `__mingw_snprintf` and the UCRT's `snprintf` return it
+  directly.
+
+  Three things now stand between this and a repeat:
+
+  - **Windows CI runs once per CRT.** The Windows job is a matrix over MINGW64
+    and UCRT64, so the reporter's exact environment builds and runs the full
+    suite on every pull request. This is the check that makes the class
+    impossible rather than merely detected.
+  - **`tests/integration/windows_crt_symbols`** enforces the invariant on the
+    source (no `_l`-suffixed printf calls anywhere in `runtime/` or `std/`,
+    which needs no toolchain and so runs on every leg) and on the link surface
+    (every source in `build/MANIFEST` cross-compiled for Windows, with every
+    external symbol required to exist in both `libucrt.a` and `libmsvcrt.a`).
+    The second half declares itself skipped when a toolchain ships the two
+    import libraries as aliases, because comparing a set with itself can only
+    ever pass.
+  - **The locale regression test now asserts the restore**, reading the radix
+    character the calling thread would format with before and after. It reads
+    it through `localeconv`, which is thread-locale aware, so it sees a
+    `uselocale` or `_configthreadlocale` bracket that fails to put things back;
+    the previous check went through `std.number`, which takes an explicit
+    locale and kept reporting correct output from a thread stranded in "C".
+
+- Untracked `cov_demo.gcda` and `cov_demo.gcno`. Two gcov output files had been
+  committed by accident, and every test run that produced coverage data
+  rewrote them, so unrelated pull requests kept picking up a spurious binary
+  diff. `*.gcda`, `*.gcno` and `*.gcov` are now ignored.
 
 ## [0.517.0]
 

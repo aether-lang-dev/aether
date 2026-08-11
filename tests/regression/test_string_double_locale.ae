@@ -30,6 +30,11 @@ import std.number(FormatOptions)
 // Returns 1 if applied, 0 if that locale is not installed on this machine.
 extern aether_test_setlocale(name: string) -> int
 
+// The radix byte this thread would format with, for asserting that the emit
+// path put the locale back. A byte rather than a string on purpose: see the
+// note on the C declaration.
+extern aether_test_decimal_point() -> int
+
 // Try the spellings a comma-decimal locale goes by across platforms and
 // distros. Returns the name that stuck, or "" if none did.
 select_comma_locale() -> string {
@@ -169,20 +174,43 @@ check_number_unaffected(label: string) -> int {
     return 1
 }
 
-// The shim must leave the CALLER's locale exactly as it found it. On glibc the
-// emit path swaps the thread locale with uselocale() for the duration of the
-// call; if it failed to restore, the whole process would silently drift to the
-// C locale after the first float is formatted — which would break std.number
-// and any embedding host. Detected here by formatting through std.number (which
-// reads the ambient locale for nothing, but exercises the shim underneath) and
-// confirming a second identical call still agrees.
-check_locale_not_leaked() -> int {
-    first = check_number_unaffected("still correct after shim use (1st)")
-    // A from_double() in between is what would strand the thread in C.
+// The shim must leave the CALLER's locale exactly as it found it. Every emit
+// backend brackets a locale switch around the format call: uselocale() on
+// glibc, _configthreadlocale() + setlocale() on Windows, where there is no
+// uselocale and no CRT-portable locale-taking printf (#1494). If any of them
+// failed to restore, the process would silently drift to the C locale after
+// the first float is formatted, breaking std.number and any embedding host.
+//
+// Read the thread's radix character directly rather than inferring it:
+// std.number takes an EXPLICIT locale, so it keeps producing German output
+// even from a thread stranded in "C", and would report a leak as a pass.
+//
+// `expected` is captured the moment the locale is applied, NOT re-read here.
+// Reading it here compares the state after one from_double against the state
+// after all the earlier ones, so a backend that leaks on every call looks
+// perfectly stable and the check passes while the process sits in "C".
+check_locale_not_leaked(expected: int) -> int {
     scratch = string.from_double(3.14)
     string.free(scratch)
-    second = check_number_unaffected("still correct after shim use (2nd)")
-    return first + second
+    after = aether_test_decimal_point()
+
+    fails = 0
+    if expected != after {
+        fails = 1
+        was = string.from_char(expected)
+        now = string.from_char(after)
+        println("  FAIL locale restored: radix was \"${was}\" when the locale was applied, formatting left it \"${now}\"")
+        string.free(was)
+        string.free(now)
+    } else {
+        now = string.from_char(after)
+        println("  PASS locale restored: radix still \"${now}\" after formatting")
+        string.free(now)
+    }
+
+    // Formatting for people must still work afterwards, which is the concrete
+    // damage a failed restore does.
+    return fails + check_number_unaffected("still correct after shim use")
 }
 
 main() {
@@ -206,6 +234,10 @@ main() {
     }
     println("locale applied: ${locale_name} (ambient decimal separator is a comma)")
     string.free(locale_name)
+
+    // Captured BEFORE any formatting happens, so a backend that leaks on every
+    // call cannot hide behind its own consistency.
+    radix_at_start = aether_test_decimal_point()
 
     fails = baseline_fails
 
@@ -232,7 +264,7 @@ main() {
     fails = fails + check_number_unaffected("under the comma locale (must match)")
 
     // The shim must not leak its C locale into the caller's thread.
-    fails = fails + check_locale_not_leaked()
+    fails = fails + check_locale_not_leaked(radix_at_start)
 
     println("")
     if fails == 0 {
