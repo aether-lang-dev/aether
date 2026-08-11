@@ -8,7 +8,7 @@
 //
 // Reader — pull one event at a time:
 //   p = xml.parser(body)
-//   loop {
+//   while 1 == 1 {
 //       ev = xml.next(p)
 //       if ev == xml.EVENT_EOF { break }
 //       if ev == xml.EVENT_ERROR { println(xml.error(p))  break }

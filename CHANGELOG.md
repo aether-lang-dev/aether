@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Four stdlib modules documented usage that does not compile.** `std.xml`,
+  `std.arena` and `std.snapshot` showed `loop { ... }` in their header
+  examples, but `loop` is not an Aether keyword, so copying one gave
+  `error[E0300]: Undefined variable 'loop'`. They now use `while 1 == 1 {`.
+  `std.http1`'s example called `read_response(resp, recv_next, conn)`, which
+  does not exist; the function is `read_response_conn(rp, conn)`, and the
+  prose above it stated a third signature again. Both mentions now match the
+  implementation. Comments only, no behaviour change.
 ## [0.518.0]
 
 ### Fixed

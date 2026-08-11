@@ -6,7 +6,7 @@
 //
 //     a = arena.create(0)            // 0 = default 1 MiB
 //     defer arena.destroy(a)
-//     loop {
+//     while 1 == 1 {
 //         arena.reset(a)             // O(1) bulk free of last iter
 //         buf = arena.alloc(a, 4096) // fill, parse, hand off, etc.
 //         …
