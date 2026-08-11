@@ -64,13 +64,37 @@ else
 NPROC ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 endif
 
-# Version: prefer highest git tag (authoritative), fall back to VERSION file (tarballs)
+# Version: the VERSION FILE IN THIS TREE is authoritative; the highest git tag
+# is only a fallback for an untagged dev checkout.
+#
+# This ordering used to be reversed ("prefer highest git tag"), which mislabels
+# a tagged release build. `git tag -l` reports the tags VISIBLE IN THIS CLONE,
+# and release.yml's build jobs check out shallow, so the visible set can be
+# stale or partial — `tail -1` then lands on an OLDER tag and overrides the
+# correct VERSION file. Measured: v0.516.0 shipped an `ae --version` saying
+# 0.417.0, while `git show v0.516.0:VERSION` said 0.516.0 all along. The tree
+# was right and the tag scan was wrong.
+#
+# For a tagged build the two should be identical, so preferring the tree costs
+# nothing and is immune to clone depth. For a tarball there is no git at all.
+# Only an untagged dev checkout — where VERSION is still the 0.0.0 placeholder
+# — consults tags, so `make` on a plain main still reports a real-ish number.
+#
+# One arm now, not two: `cat` covers Windows too (the WINDOWS_NATIVE split
+# existed because `git tag` shell-outs are awkward under cmd.exe; a file read
+# is not). WINDOWS_NATIVE keeps `type` since cmd.exe has no `cat`.
 ifdef WINDOWS_NATIVE
 VERSION := $(shell type VERSION 2>nul || echo 0.0.0)
 else
+VERSION := $(shell cat VERSION 2>/dev/null | tr -d '[:space:]')
+ifeq ($(VERSION),)
+VERSION := 0.0.0
+endif
+ifeq ($(VERSION),0.0.0)
 VERSION := $(shell git tag -l 'v*.*.*' 2>/dev/null | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
 ifeq ($(VERSION),)
-VERSION := $(shell cat VERSION 2>/dev/null || echo "0.0.0")
+VERSION := 0.0.0
+endif
 endif
 endif
 
@@ -571,6 +595,20 @@ STD_OBJS = $(STD_SRC:%.c=$(OBJ_DIR)/%.o)
 STD_REACTOR_OBJS = $(STD_REACTOR_SRC:%.c=$(OBJ_DIR)/%.o)
 COLLECTIONS_OBJS = $(COLLECTIONS_SRC:%.c=$(OBJ_DIR)/%.o)
 TEST_OBJS = $(TEST_SRC:%.c=$(OBJ_DIR)/%.o)
+
+# The version is injected as -DAETHER_VERSION on the command line, NOT via an
+# #include, so -MMD cannot see it: bump VERSION and every object still looks up
+# to date, leaving a binary that reports the PREVIOUS version. Measured: a tree
+# whose generated header said 0.516.0 produced an `ae --version` of 0.515.0,
+# because build/obj/tools/ae_version.o was hours older than the header and
+# nothing told make to rebuild it.
+#
+# $(VERSION_HEADER) is regenerated whenever VERSION changes (rule above), so
+# making the version-bearing objects depend on it is the cheap, honest link
+# between "the version changed" and "recompile the things that bake it in".
+$(OBJ_DIR)/tools/ae_version.o: $(VERSION_HEADER)
+$(OBJ_DIR)/tools/ae.o: $(VERSION_HEADER)
+$(OBJ_DIR)/compiler/aetherc.o: $(VERSION_HEADER)
 
 # Dependency files (include test objects so header changes trigger test recompilation)
 DEPS = $(COMPILER_OBJS:.o=.d) $(RUNTIME_OBJS:.o=.d) $(STD_OBJS:.o=.d) $(COLLECTIONS_OBJS:.o=.d) $(TEST_OBJS:.o=.d) $(TOOLS_OBJS:.o=.d)

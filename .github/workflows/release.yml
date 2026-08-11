@@ -314,6 +314,12 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
+        # Full history + all tags. A shallow checkout of a tag does not
+        # reliably give `git tag -l` the current tag set, which used to let the
+        # Makefile stamp binaries with an older version (see Makefile:66).
+        # Belt-and-braces now that VERSION is authoritative, but this job
+        # compiles the UPLOADED artifacts so it should not be the thin one.
+        fetch-depth: 0
         fetch-tags: true
 
     # -- Linux ---
@@ -497,6 +503,12 @@ jobs:
     - uses: actions/checkout@v4
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
+        # Full history + all tags. A shallow checkout of a tag does not
+        # reliably give `git tag -l` the current tag set, which used to let the
+        # Makefile stamp binaries with an older version (see Makefile:66).
+        # Belt-and-braces now that VERSION is authoritative, but this job
+        # compiles the UPLOADED artifacts so it should not be the thin one.
+        fetch-depth: 0
         fetch-tags: true
 
     - name: Setup
