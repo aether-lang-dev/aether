@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **Windows builds using the UCRT could not link at all** (#1494). A user on
+  msys2 ucrt64 could not compile any program: every object linked except
+  `runtime/aether_locale_num.o`, which pulled in `_snprintf_l`, `_scprintf_l`
+  and `_scprintf`. Those are msvcrt-era exports, and the UCRT is the default
+  CRT on current msys2. Verified against a real UCRT import library:
+  `_snprintf_l` and `_scprintf_l` are simply not in it. The Windows float
+  formatter now queries `LC_NUMERIC` and only switches locale (per-thread, via
+  `_configthreadlocale`) when the process actually set a non-C one, so the
+  common path is a plain `snprintf` and every symbol it needs is exported by
+  both CRTs. The `_scprintf` truncation-recovery is gone with it: both mingw's
+  `__mingw_snprintf` and the UCRT's `snprintf` already return the C99 would-be
+  length, which is all that path existed to reconstruct.
+
+  Nothing caught this because the project's own Windows CI uses the
+  MSVCRT-flavoured toolchain, where msvcrt.dll does export those symbols.
+  `tests/integration/windows_crt_symbols` now cross-compiles the runtime for
+  Windows and fails if any object references a symbol from that banned set. It
+  needs no Windows host and no UCRT sysroot, so it runs anywhere the mingw
+  cross toolchain is installed.
+
 ## [0.517.0]
 
 ### Fixed

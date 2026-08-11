@@ -5,7 +5,8 @@
 //   1. _l-suffixed libc calls — the locale is an explicit argument, so no
 //      thread state is touched at all. Best where available.
 //        macOS/BSD: snprintf_l(buf, n, LOC, fmt, ...)   locale BEFORE fmt
-//        Windows:   _snprintf_l(buf, n, fmt, LOC, ...)  locale AFTER fmt
+//        Windows:   LC_NUMERIC checked, switched per-thread only if needed
+//                   (msvcrt's _snprintf_l is not exported by the UCRT, #1494)
 //      (The argument orders genuinely differ — hence two explicit wrappers
 //      rather than one aliased macro.)
 //
@@ -178,19 +179,49 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     return snprintf(buf, n, fmt, value);
 
 #elif AETHER_LOCALE_WIN32
-    // Backend 1 (Windows). _snprintf_l takes the locale AFTER the format, and
-    // is NOT C99 on truncation: it returns negative and leaves the buffer
-    // unterminated where C99 returns the would-be length and terminates. Both
-    // are normalised here so callers can use one set of checks everywhere.
-    aether_loc_t loc = aether_c_locale();
-    int written = loc ? _snprintf_l(buf, n, fmt, loc, value)
-                      : snprintf(buf, n, fmt, value);
-    if (written < 0 || (size_t)written >= n) {
+    // Backend 1 (Windows). Deliberately NOT _snprintf_l / _scprintf_l /
+    // _scprintf: those are msvcrt-era exports that the UCRT does not provide,
+    // so an msys2 ucrt64 toolchain links every other object fine and then dies
+    // on this one with `undefined reference to __imp__snprintf_l` and friends.
+    // That is issue #1494: a user could not build any program at all, because
+    // the whole runtime archive fails to link over three symbols in this file.
+    //
+    // Instead: query LC_NUMERIC, and only pay for a locale switch when the
+    // process actually set a non-C one. The overwhelmingly common case is that
+    // it did not, so the hot path here is a plain snprintf.
+    //
+    // The switch is per-thread (_configthreadlocale), so a formatting call
+    // cannot change what another thread sees. Both setlocale and
+    // _configthreadlocale are exported by msvcrt AND ucrt, which is the whole
+    // point of routing through them.
+    const char* cur = setlocale(LC_NUMERIC, NULL);
+    int numeric_is_c = (!cur || strcmp(cur, "C") == 0 || strcmp(cur, "POSIX") == 0);
+
+    int written;
+    if (numeric_is_c) {
+        written = snprintf(buf, n, fmt, value);
+    } else {
+        char saved[64];
+        snprintf(saved, sizeof(saved), "%s", cur);
+        int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
+        setlocale(LC_NUMERIC, "C");
+        written = snprintf(buf, n, fmt, value);
+        setlocale(LC_NUMERIC, saved);
+        if (prev_mode != -1) _configthreadlocale(prev_mode);
+    }
+
+    // mingw routes snprintf to its own C99 implementation (__mingw_snprintf),
+    // which returns the would-be length and terminates on truncation, and the
+    // UCRT's snprintf is C99 too. So the old _scprintf recovery for msvcrt's
+    // negative-on-truncation return is no longer needed; the value below is
+    // already what the caller's `written >= sizeof(buf)` test expects.
+    if (written < 0) {
         buf[n - 1] = '\0';
-        // Recover the C99 "would-be length" so the caller's
-        // `written >= sizeof(buf)` truncation test still fires.
-        int needed = loc ? _scprintf_l(fmt, loc, value) : _scprintf(fmt, value);
-        return needed;
+        return written;
+    }
+    if ((size_t)written >= n) {
+        buf[n - 1] = '\0';
+        return written;
     }
     // msvcrt's *_l printf family emits a THREE-digit exponent ("1e+010") where
     // C99 requires the minimum two ("1e+10"). MinGW's plain snprintf uses its
