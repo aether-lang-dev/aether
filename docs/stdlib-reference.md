@@ -1,6 +1,84 @@
 # Aether Standard Library Reference
 
-Complete reference for Aether's standard library modules.
+Reference for Aether's standard library. The index lists every module that
+ships, with its purpose and export count taken from the source rather than
+maintained by hand, so it cannot drift out of step with the tree. The sections
+after it cover the most-used modules in depth; for the others the index links
+to the module source, whose header comment is the authoritative description.
+
+## Module index (69 modules)
+
+| Module | Purpose | Exports | Detail |
+|---|---|---:|---|
+| `std.actors` | Process-global name → actor_ref registry. | 12 | [module source](../std/actors/module.ae) |
+| `std.alloc` | std.alloc (#1045): swappable allocator convention. | 6 | [module source](../std/alloc/module.ae) |
+| `std.arena` | Arena (bulk) allocator. | 14 | [module source](../std/arena/module.ae) |
+| `std.audio` | Audio playback (v1: playback tier). | 23 | [module source](../std/audio/module.ae) |
+| `std.audit` | Query the sandbox audit trail. | 15 | [module source](../std/audit/module.ae) |
+| `std.bignum` | Arbitrary-precision integers. | 25 | [module source](../std/bignum/module.ae) |
+| `std.bits` | Unsigned-bit helpers. | 34 | [module source](../std/bits/module.ae) |
+| `std.bytes` | Mutable byte buffer with random-access write and overlap-safe forward copy_within. | 50 | [module source](../std/bytes/module.ae) |
+| `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 26 | [module source](../std/capsicum/module.ae) |
+| `std.cas` | Content-addressed artifact store. | 21 | [module source](../std/cas/module.ae) |
+| `std.casper` | FreeBSD Casper service delegation. | 22 | [module source](../std/casper/module.ae) |
+| `std.cbor` | CBOR (RFC 8949) encode and decode. | 45 | [module source](../std/cbor/module.ae) |
+| `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [module source](../std/clapae/module.ae) |
+| `std.collections` | Collections Module Import with: import std.collections. | 43 | [module source](../std/collections/module.ae) |
+| `std.config` | Process-global immutable string→string KV store. | 12 | [module source](../std/config/module.ae) |
+| `std.cryptography` | Cryptographic hash primitives + Base64 codec Import with: import std.cryptography. | 46 | [full section](#cryptography-stdcryptography) |
+| `std.deque` | A fixed-capacity double-ended queue / ring buffer of `long` values (a `long` holds any int, and a pointer via. | 14 | [module source](../std/deque/module.ae) |
+| `std.dir` | Directory Operations (alias for std.fs). | 11 | [module source](../std/dir/module.ae) |
+| `std.dl` | Cross-platform dynamic library loader. | 8 | [module source](../std/dl/module.ae) |
+| `std.encoding` | General-purpose binary/text encodings. | 11 | [module source](../std/encoding/module.ae) |
+| `std.file` | File Operations (alias for std.fs). | 14 | [module source](../std/file/module.ae) |
+| `std.floatarr` | Fixed-size packed-double buffer (float twin of std.intarr). | 13 | [module source](../std/floatarr/module.ae) |
+| `std.fs` | File System Module Import with: import std.fs. | 147 | [module source](../std/fs/module.ae) |
+| `std.hash` | Fast NON-cryptographic hashes for checksums and hashmap seeding. | 4 | [module source](../std/hash/module.ae) |
+| `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [module source](../std/host/module.ae) |
+| `std.http` | HTTP Client & Server (alias for std.net). | 142 | [module source](../std/http/module.ae) |
+| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 20 | [module source](../std/http1/module.ae) |
+| `std.intarr` | Fixed-size packed-int buffer (alias for std.collections). | 13 | [module source](../std/intarr/module.ae) |
+| `std.io` | Input/Output Module Import with: import std.io. | 43 | [full section](#io-stdio) |
+| `std.ipc` | Child-to-parent back-channel IPC. | 4 | [module source](../std/ipc/module.ae) |
+| `std.json` | JSON Module Import with: import std.json. | 54 | [full section](#json-stdjson) |
+| `std.ksuid` | KSUID (https://github.com/segmentio/ksuid). | 1 | [module source](../std/ksuid/module.ae) |
+| `std.language` | BCP 47 Language Tags and Matching (RFC 5646, RFC 4647). | 11 | [module source](../std/language/module.ae) |
+| `std.list` | ArrayList Operations (alias for std.collections). | 12 | [module source](../std/list/module.ae) |
+| `std.log` | Logging Module Import with: import std.log Log level constants. | 9 | [full section](#logging-stdlog) |
+| `std.longarr` | Fixed-size packed-long buffer (the 64-bit twin of std.intarr). | 13 | [module source](../std/longarr/module.ae) |
+| `std.lzf` | One-shot LZF compression/decompression. | 12 | [module source](../std/lzf/module.ae) |
+| `std.map` | HashMap Operations (alias for std.collections). | 14 | [module source](../std/map/module.ae) |
+| `std.math` | Math Module Import with: import std.math. | 31 | [full section](#math-stdmath) |
+| `std.mem` | Byte-level access to caller-allocated raw pointers. | 94 | [module source](../std/mem/module.ae) |
+| `std.message` | ICU MessageFormat + message catalog (Phase 3 of #863). | 8 | [module source](../std/message/module.ae) |
+| `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [module source](../std/msgpack/module.ae) |
+| `std.nanoid` | NanoID (https://github.com/ai/nanoid). | 2 | [module source](../std/nanoid/module.ae) |
+| `std.net` | Networking Module Import with: import std.net. | 69 | [module source](../std/net/module.ae) |
+| `std.number` | Locale-aware number, percent, and currency formatting (Phase 4 of #863). | 10 | [module source](../std/number/module.ae) |
+| `std.os` | Shell & Process Execution Import with: import std.os. | 75 | [full section](#os-stdos) |
+| `std.path` | Path Utilities. | 20 | [module source](../std/path/module.ae) |
+| `std.plural` | CLDR Plural Rules evaluation (Phase 2 of #863). | 2 | [module source](../std/plural/module.ae) |
+| `std.pqueue` | Priority queue over (priority, item) pairs. | 18 | [module source](../std/pqueue/module.ae) |
+| `std.regex` | Perl-compatible regular expressions (PCRE2-backed). | 12 | [module source](../std/regex/module.ae) |
+| `std.schema` | Declarative, typed data validation & coercion. | 46 | [module source](../std/schema/module.ae) |
+| `std.set` | Unordered set of unique strings. | 18 | [module source](../std/set/module.ae) |
+| `std.signal` | POSIX signal-number constants. | 11 | [module source](../std/signal/module.ae) |
+| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [module source](../std/snapshot/module.ae) |
+| `std.sort` | In-place ascending sort and binary search over the packed numeric array types. | 6 | [module source](../std/sort/module.ae) |
+| `std.strbuilder` | Amortised-O(1) string append. | 33 | [module source](../std/strbuilder/module.ae) |
+| `std.string` | String Module Import with: import std.string. | 92 | [full section](#strings-stdstring) |
+| `std.tar` | Streaming POSIX ustar TAR Archive Module Import with: import std.tar. | 24 | [full section](#posix-ustar-archives-stdtar) |
+| `std.tcp` | TCP Socket Operations (alias for std.net). | 24 | [module source](../std/tcp/module.ae) |
+| `std.time` | Civil date/time over Unix epoch seconds (UTC). | 19 | [module source](../std/time/module.ae) |
+| `std.tracking` | std.tracking (#1049): leak-detecting allocator wrapper. | 5 | [module source](../std/tracking/module.ae) |
+| `std.tsid` | TSID (Twitter Snowflake family / Discord-shaped). | 1 | [module source](../std/tsid/module.ae) |
+| `std.ulid` | ULID (https://github.com/ulid/spec). | 1 | [module source](../std/ulid/module.ae) |
+| `std.url` | RFC 3986 percent-encoding + query-string parsing (#629). | 7 | [module source](../std/url/module.ae) |
+| `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [module source](../std/uuid/module.ae) |
+| `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [module source](../std/worker/module.ae) |
+| `std.xml` | XML Module Import with: import std.xml. | 45 | [full section](#xml-stdxml) |
+| `std.yaml` | YAML Module Import with: import std.yaml. | 16 | [module source](../std/yaml/module.ae) |
+| `std.zlib` | One-shot zlib and gzip deflate/inflate. | 16 | [full section](#compression-stdzlib) |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -1002,7 +1080,7 @@ main() {
     if kind != script_gateway.KIND_OK {
         println("mount failed: ${msg}"); exit(1)
     }
-    http.server_listen(s)
+    http.server_start(s)
 }
 ```
 
@@ -1314,6 +1392,7 @@ crashing, callers should always check the error slot.
 
 ```aether
 import std.cryptography
+import std.encoding
 import std.fs
 
 main() {
@@ -1328,8 +1407,8 @@ main() {
     }
 
     // Base64, round-trip a binary payload through JSON.
-    b64, _   = cryptography.base64_encode("\x01\x02\x03", 3)   // "AQID"
-    raw, n, _ = cryptography.base64_decode(b64)                // 3 bytes
+    b64      = encoding.base64_encode("\x01\x02\x03", 3)       // "AQID"
+    raw, _   = encoding.base64_decode(b64)                     // 3 bytes
 }
 ```
 
@@ -1362,9 +1441,13 @@ main() {
 - `cryptography.digest_free(ctx)` - Abandon a context without finalizing (NULL-safe). Only for the bail-out-before-final case.
 
 **Base64 (RFC 4648 §4 standard alphabet):**
-- `cryptography.base64_encode(data, length)` → `(string, string)` - Encode `length` bytes, **unpadded** output.
-- `cryptography.base64_encode_padded(data, length)` → `(string, string)` - Encode `length` bytes, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end expects padded base64, most non-strict decoders accept either, but some auth headers and JSON-encoded blob formats explicitly require padding.
-- `cryptography.base64_decode(b64)` → `(string, int, string)` - Decode a Base64 string. Returns `(bytes, byte_count, "")` on success, `("", 0, error)` on malformed input. Accepts both padded and unpadded input; `bytes` is an AetherString preserving embedded NULs.
+- `encoding.base64_encode(data, length)` → `string` - Encode `length` bytes, **unpadded** output.
+- `encoding.base64_encode_padded(data, length)` → `string` - Encode `length` bytes, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end requires padding; most non-strict decoders accept either.
+- `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. `err` is non-empty on malformed input. Accepts both padded and unpadded input; `bytes` is an AetherString preserving embedded NULs.
+
+Base64 lives in `std.encoding`, not `std.cryptography`: encoding is not a
+security primitive, and the split keeps that honest. `std.cryptography` keeps
+`random_base64`, which is crypto-random bytes rendered as base64.
 
 **What `std.cryptography` doesn't do:**
 

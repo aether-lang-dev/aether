@@ -452,7 +452,9 @@ link_flags = ["-lsqlite3", "-lcurl", "-lm"]
 // SQLite C API
 extern sqlite3_open(path: string, db: ptr) -> int
 extern sqlite3_close(db: ptr) -> int
-extern sqlite3_exec(db: ptr, sql: string, callback: ptr, arg: ptr, errmsg: ptr) -> int
+// `callback` is a reserved word in Aether, so the parameter is named `cb`.
+// Parameter names are local to the declaration; the C symbol is unaffected.
+extern sqlite3_exec(db: ptr, sql: string, cb: ptr, arg: ptr, errmsg: ptr) -> int
 
 main() {
     db = 0  // Will hold database pointer
@@ -595,11 +597,14 @@ Both helpers accept either an `AetherString*` (the common case) or a raw `char*`
 The symmetric direction, Aether code passing a `string` value to a C extern declared `const char*` is handled by the codegen automatically. When the call site has the form:
 
 ```aether
+import std.encoding
+import std.string
+
 extern probe_consume(content: string, len: int) -> int
 
 main() {
-    raw, raw_len, _ = cryptography.base64_decode("QUI=")  // returns AetherString*
-    probe_consume(raw, raw_len)                            // C side gets payload, not header
+    raw, _ = encoding.base64_decode("QUI=")      // an AetherString
+    probe_consume(raw, string.length(raw))       // C side gets the payload, not the header
 }
 ```
 
@@ -651,7 +656,7 @@ extern do_thing(aether_msg: @aether string,
 **When to reach for it:**
 
 - Calling a function exported via `export foo(s: string) { ... }` from another `.ae` file linked into the same binary.
-- The caller's value is binary content (contains NULs, returned from `bytes.finish` / `cryptography.base64_decode` / `fs.read_binary` / etc.) and the receiver needs to see the full length, not the strlen-truncated prefix.
+- The caller's value is binary content (contains NULs, returned from `bytes.finish` / `encoding.base64_decode` / `fs.read_binary` / etc.) and the receiver needs to see the full length, not the strlen-truncated prefix.
 
 **When NOT to reach for it:**
 

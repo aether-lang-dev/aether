@@ -166,6 +166,9 @@ docker build --no-cache -t aether:latest -f docker/Dockerfile .
 
 ## More Information
 
-- Full Docker guide: [docs/setup/DOCKER.md](../docs/setup/DOCKER.md)
-- Windows setup: [docs/setup/WINDOWS_SETUP.md](../docs/setup/WINDOWS_SETUP.md)
+- Windows setup: [README.md, Building on Windows](../README.md#building-on-windows)
+- Building from source: [docs/bootstrap-from-source.md](../docs/bootstrap-from-source.md)
 - Main README: [README.md](../README.md)
+
+This file is the Docker guide; the two `docs/setup/` pages it used to point at
+were never in the tree.

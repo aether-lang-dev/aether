@@ -419,23 +419,23 @@ end.
 ### Example 4: Prime Number Check
 
 ```aether
-is_prime(n) {
+is_prime(n: int) -> bool {
     if (n < 2) {
-        return 0  // false
+        return false
     }
-    
+
     for (i = 2; i < n; i = i + 1) {
         if (n / i * i == n) {
-            return 0  // divisible, not prime
+            return false  // divisible, not prime
         }
     }
-    
-    return 1  // prime
+
+    return true
 }
 
 main() {
     numbers = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    
+
     for (i = 0; i < 10; i = i + 1) {
         num = numbers[i]
         if (is_prime(num)) {

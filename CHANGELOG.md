@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **`string.char_at` reported bytes above 0x7F as negative** (#1516). It
+  returned a signed `char`, so 0x85 came back as -123 and every binary parser
+  built on it broke on high bytes. `contrib/tinyweb` read a masked WebSocket
+  header, computed a negative payload length, and dropped the connection
+  instead of echoing the frame. The C definition also disagreed with the
+  prototype codegen emits and with the stdlib extern, both of which say `int`;
+  only the implementation said `char`. `char_at` and `char_at_n` now return the
+  byte as 0..255, which is what `bytes.get` has always documented.
+
+- **`contrib/tinyweb` would not build** (#1516). `tw_start` had no declared
+  return type and returned `-1` on one path and `http.server_start`'s string on
+  another, so the emitted C assigned an int to a `const char*` and every
+  tinyweb example and test failed to compile. It now declares `-> string` and
+  returns `""` on success, matching `http.server_start` and the stdlib's error
+  convention. The examples compared that result against `0`, which asked
+  whether the pointer was NULL and so never took the success branch; they now
+  compare against `""`.
+
+### Documentation
+
+- Audited the docs against the code. `docs/stdlib-reference.md` opened with
+  "Complete reference for Aether's standard library modules" while 37 of the 69
+  shipped modules appeared in neither it nor `docs/stdlib-api.md`. It now opens
+  with a generated index covering every module, its purpose and its export
+  count, taken from the source so it cannot drift.
+
+- Corrected API references that no longer matched the code: `http.server_listen`
+  (the function is `http.server_start`), and `cryptography.base64_encode` /
+  `base64_decode`, which live in `std.encoding` and return `string` and
+  `string!` rather than the tuples the docs described. `std.cryptography`'s own
+  header has said "use encoding.base64_*" for some time.
+
+- Fixed two documented snippets that could not compile: the `c-interop.md`
+  SQLite extern used `callback` as a parameter name, which is a reserved word,
+  and the `02-functions-and-control-flow` tutorial taught
+  `if (is_prime(num))` against an int-returning function, which the type checker
+  rejects. The tutorial now uses `-> bool`.
+
+- Repaired every broken relative link outside the changelog archive: the docker
+  guide pointed at two `docs/setup/` pages that were never in the tree, the
+  benchmark README missed the `design/` path segment, and `contrib/host/TODO.md`
+  pointed at a roadmap document that does not exist. The archive's dead
+  `contrib/aether_ui/` paths are left as written, with a note explaining that
+  the UI library moved to a sibling repository.
+
+- README: the CI suite is 10 steps, not 9, and the `ae` command list was missing
+  `inspect`, `bindgen`, `cflags` and `lib-path`.
+
 ## [0.520.0]
 
 ### Fixed

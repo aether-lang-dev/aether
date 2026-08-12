@@ -62,7 +62,7 @@ main() {
     println("  ws://localhost:8081/foo/eee  — echo x3")
 
     result = tinyweb.tw_start(server)
-    if result != 0 { println("ERROR: Failed to start server") }
+    if result != "" { println("ERROR: Failed to start server: ${result}") }
     tinyweb.tw_stop(server)
     println("Server stopped.")
 }

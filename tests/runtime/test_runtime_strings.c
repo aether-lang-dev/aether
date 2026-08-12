@@ -55,6 +55,22 @@ TEST_CATEGORY(string_char_at, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ('H', string_char_at(s, 0));
     ASSERT_EQ('e', string_char_at(s, 1));
     ASSERT_EQ('o', string_char_at(s, 4));
+
+    /* Bytes >= 0x80 must come back as 0..255, not sign-extended. The function
+     * used to return `char`, so 0x85 read as -123 and every binary parser
+     * built on it broke on high bytes; WebSocket framing in contrib/tinyweb
+     * was the casualty that surfaced it (#1516). */
+    {
+        const char raw[] = { (char)0x81, (char)0x85, (char)0xFF, 0x41, 0 };
+        AetherString* hb = string_new_with_length(raw, 4);
+        ASSERT_EQ(129, string_char_at(hb, 0));
+        ASSERT_EQ(133, string_char_at(hb, 1));
+        ASSERT_EQ(255, string_char_at(hb, 2));
+        ASSERT_EQ(65,  string_char_at(hb, 3));
+        ASSERT_EQ(129, string_char_at_n(hb, 4, 0));
+        ASSERT_EQ(255, string_char_at_n(hb, 4, 2));
+        string_release(hb);
+    }
     string_free(s);
 }
 

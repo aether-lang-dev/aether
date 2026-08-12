@@ -53,7 +53,7 @@ main() {
     println("Starting server on localhost:8080...")
     result = tinyweb.tw_start(server)
 
-    if result == 0 {
+    if result == "" {
         println("Server running! Try:")
         println("  curl http://localhost:8080/foo/bar")
         println("  curl http://localhost:8080/users/alice")
