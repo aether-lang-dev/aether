@@ -1,0 +1,104 @@
+// Regression: `x = actor ? Request {}` must take the type the handler
+// replies, not int.
+//
+// Every part of the ask pipeline handled other types already: the reply
+// statement deep-copies a string reply, and the ask expression switches on
+// the reply kind and emits `const char*`, `double`, `int64_t` or `void*` as
+// needed. The one place that did not was the type of the variable receiving
+// it: infer_type had no case for an ask, so the declaration fell to
+// TYPE_UNKNOWN, codegen defaulted it to int, and the initialiser no longer
+// matched what the expression produced. Anything but an int reply failed the
+// C compile with -Wint-conversion, pointing at generated C and naming no
+// Aether cause. In practice `?` was int-only.
+//
+// Both reply forms are covered, because they resolve differently: a reply
+// message yields the type of its first field, a bare `reply <expr>` the type
+// of that expression.
+
+import std.string
+
+message GetText {}
+message GetReal {}
+message GetFlag {}
+message GetBig {}
+message GetCount {}
+
+message GetTextMsg {}
+message TextReply { value: string }
+message GetRealMsg {}
+message RealReply { value: float }
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+actor Answers {
+    state label = "the quick brown fox"
+    state ratio = 2.5
+    state flag = 1
+    state big = 9000000000
+    state count = 42
+    receive {
+        // Bare-expression replies.
+        GetText() -> { reply label }
+        GetReal() -> { reply ratio }
+        GetFlag() -> { reply flag }
+        GetBig() -> { reply big }
+        GetCount() -> { reply count }
+        // Reply-message replies: the asker reads the first field.
+        GetTextMsg() -> { reply TextReply { value: label } }
+        GetRealMsg() -> { reply RealReply { value: ratio } }
+    }
+}
+
+main() {
+    println("=== test_ask_reply_types ===")
+    a = spawn(Answers())
+
+    // A string reply survives the hand-off intact. Comparing the text is the
+    // assertion: an int-typed slot would have truncated the pointer, and a
+    // shallow copy would dangle after the handler's scope exit.
+    text = a ? GetText {}
+    if string.equals(text, "the quick brown fox") != 1 {
+        fail("string reply came back as [${text}]")
+    }
+    println("  PASS string reply: ${text}")
+
+    // A float reply must not arrive through an int slot.
+    real = a ? GetReal {}
+    if real < 2.4 || real > 2.6 {
+        fail("float reply came back as ${real}")
+    }
+    println("  PASS float reply: ${real}")
+
+    flag = a ? GetFlag {}
+    if flag != 1 { fail("bool-shaped reply came back as ${flag}") }
+    println("  PASS int-flag reply: ${flag}")
+
+    big = a ? GetBig {}
+    if big != 9000000000 { fail("64-bit reply came back as ${big}") }
+    println("  PASS 64-bit reply: ${big}")
+
+    // The case that already worked, so the fix cannot have cost it.
+    count = a ? GetCount {}
+    if count != 42 { fail("int reply came back as ${count}") }
+    println("  PASS int reply: ${count}")
+
+    // Reply-message form: the type comes from the message's first field.
+    mtext = a ? GetTextMsg {}
+    if string.equals(mtext, "the quick brown fox") != 1 {
+        fail("string reply message came back as [${mtext}]")
+    }
+    println("  PASS string reply message: ${mtext}")
+
+    mreal = a ? GetRealMsg {}
+    if mreal < 2.4 || mreal > 2.6 {
+        fail("float reply message came back as ${mreal}")
+    }
+    println("  PASS float reply message: ${mreal}")
+
+    println("=== test_ask_reply_types passed ===")
+}

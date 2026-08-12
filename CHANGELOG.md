@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **An actor `?` ask could only ever return an int.** `x = actor ? Request {}`
+  was always declared `int`, whatever the handler replied, so any non-int reply
+  failed the C compile with `-Wint-conversion` and pointed at generated C
+  naming no Aether cause. Every other part of the pipeline already handled
+  other types: the reply statement deep-copies a string, and the ask expression
+  emits `const char*`, `double`, `int64_t` or `void*` as the reply requires.
+  The gap was inference, which had no case for an ask, so the receiving
+  variable fell to unresolved and codegen defaulted it to int. That default was
+  what the locationless `unresolved type` warning had been pointing at all
+  along.
+
+  The request-to-reply mapping now lives in one place, `analysis/actor_reply`,
+  which the type checker and codegen both call: they cannot disagree about what
+  an ask yields, which is exactly how the expression's type and the variable's
+  type came apart. A string reply is also tracked as owned, since the handler
+  deep-copied it, so it is reclaimed at scope exit instead of leaking a copy per
+  ask.
+
+- **`string.free` on an interpolated string leaked it.** An Aether `string` is
+  either a refcounted AetherString or a plain malloc'd payload, and the runtime
+  can only free the first: given a bare `char*` it cannot tell a heap payload
+  from static storage, so it no-ops. The compiler knows, through the
+  per-variable ownership flag, but the tracker was withheld from any variable
+  passed to a free, so the emitted call was the bare runtime one and every
+  interpolation freed by hand leaked.
+
+  Fixing it meant separating two questions the escape walker had been answering
+  with one predicate. At a caller's own call site, `string.free(local)` must not
+  count as an escape, or the tracker is withheld and the value leaks. Inside a
+  callee's body, the same call on a parameter must count as one, because that
+  function has consumed what it was handed and the caller must not free it
+  again. Answering the second the way the first is answered makes every caller
+  of a `free_it(s) { string.free(s) }` helper double-free, which is how
+  `contrib/tinyweb/example_schema_api` aborted while this was being built.
+
+  Still open, unchanged in either direction and measured: handing a
+  plain-payload string to such a helper leaks, because a parameter carries no
+  ownership flag. That needs per-parameter ownership.
+
 ## [0.526.0]
 
 ### Added

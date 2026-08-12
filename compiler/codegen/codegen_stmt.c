@@ -835,6 +835,15 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
         return 1;
     }
 
+    /* An ask whose handler replies with a string. The reply statement
+     * deep-copies the text so the asker's read outlives the handler's own
+     * scope exit, which makes the value the asker receives owned: without
+     * tracking it here, every string reply leaks one copy per ask. */
+    if (expr->type == AST_SEND_ASK && expr->node_type &&
+        expr->node_type->kind == TYPE_STRING) {
+        return 1;
+    }
+
     /* `fallible or handler` whose result is a string and whose success
      * value slot is heap: the `or` lowering boxes the handler's default
      * via aether_uniform_heap_str so BOTH paths yield a malloc-owned
@@ -2437,6 +2446,7 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                                      const char* pname, int depth,
                                      int return_is_escape);
 static int is_nonstoring_builtin(const char* fn);
+static int is_consuming_free(const char* fn);
 
 /* Shared resolver: find user-fn `func_name`'s param-name + body block.
  * Returns 1 and fills out_pname and out_body on success; 0 otherwise. */
@@ -2635,6 +2645,8 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                  * separately — so this is sound. */
                 if (is_nonstoring_builtin(fn)) {
                     /* not an escape via this call */
+                } else if (is_consuming_free(fn)) {
+                    return 1;  /* this function frees it; the caller must not */
                 } else if (is_retain_extern_param(gen, fn, i)) {
                     return 1;
                 } else if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) {
@@ -2655,8 +2667,9 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
  * RETAIN the pointer beyond the call, so the argument does not escape:
  *   - the print family (print / println / print_char) writes the bytes
  *     to stdout/stderr and returns;
- *   - `release` / `string_release` FREE the argument — the opposite of
- *     stashing it for later — and hand ownership back, not onward.
+ *   - the frees are NOT in this list; see is_consuming_free below. They do
+ *     not store the pointer, but they do end its life, and the two questions
+ *     this predicate answers need opposite answers for them.
  * Their parameter has no registered type, so lookup_callee_param_kind
  * returns TYPE_UNKNOWN and the conservative call_arg_escapes() would
  * mark the argument escaped. That false escape suppresses the
@@ -2669,13 +2682,32 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
  * on (a UAF) — we only restore a free the heuristic wrongly withheld.
  * The release lowering (codegen_expr.c) is itself flag-guarded, so the
  * restored defer-free and the explicit release never double-free. */
+/* The frees. They neither store nor return the pointer, but they DO end its
+ * life, and that means the two questions this file asks need opposite answers.
+ *
+ * At the caller's own call site (`string.free(local)`) the argument must stay
+ * tracked: the lowering needs `_heap_local` to know which physical shape it is
+ * freeing, and it clears the flag afterwards so scope exit cannot free it
+ * twice. Treating the call as an escape there withholds the tracker and the
+ * value leaks, which is what `string.free` on an interpolated string did.
+ *
+ * Inside a callee's body, walking whether a PARAMETER escapes, the same call
+ * means the opposite: this function consumes what it was handed, so the caller
+ * must not also free it. `name_free(s: string) { string.free(s) }` is the
+ * shape, and answering "does not escape" there makes every caller of such a
+ * helper double-free. */
+static int is_consuming_free(const char* fn) {
+    if (!fn) return 0;
+    return strcmp(fn, "release") == 0 ||
+           strcmp(fn, "string_release") == 0 ||
+           strcmp(fn, "string_free") == 0;
+}
+
 static int is_nonstoring_builtin(const char* fn) {
     if (!fn) return 0;
     return strcmp(fn, "print") == 0 ||
            strcmp(fn, "println") == 0 ||
            strcmp(fn, "print_char") == 0 ||
-           strcmp(fn, "release") == 0 ||
-           strcmp(fn, "string_release") == 0 ||
            /* Pure read-only views into a string's bytes/length. These
             * return a non-owning view (or a scalar) and never stash the
             * argument pointer, so passing a heap string to one is not an
@@ -2729,7 +2761,7 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     const char* fn = call->value
         ? codegen_normalise_callee(call->value, fn_norm, sizeof(fn_norm))
         : NULL;
-    if (fn && is_nonstoring_builtin(fn)) return 0;
+    if (fn && (is_nonstoring_builtin(fn) || is_consuming_free(fn))) return 0;
     if (fn && is_retain_extern_param(gen, fn, arg_idx)) return 1;
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through

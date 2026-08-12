@@ -7,6 +7,7 @@
 #include "aether_stdlib_symbols.h"   /* #1366: generated */
 #include "../aether_module.h"
 #include "../aether_error.h"
+#include "../analysis/actor_reply.h"
 
 /* Set of struct names declared `extern struct Name @c_import`.
  * aetherc does not emit typedefs for these because the C header owns the
@@ -3847,54 +3848,6 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
  * the `?` ask reads a garbage reply slot. Does not descend into nested
  * function/actor/builder/closure definitions, whose replies (if any) belong
  * to a different receive scope. */
-static const char* find_first_reply_msg(ASTNode* node) {
-    if (!node) return NULL;
-    if (node->type == AST_REPLY_STATEMENT) {
-        if (node->child_count > 0 && node->children[0] &&
-            node->children[0]->type == AST_MESSAGE_CONSTRUCTOR &&
-            node->children[0]->value) {
-            return node->children[0]->value;
-        }
-        return NULL;
-    }
-    if (node->type == AST_FUNCTION_DEFINITION ||
-        node->type == AST_ACTOR_DEFINITION ||
-        node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
-        return NULL;
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        const char* r = find_first_reply_msg(node->children[i]);
-        if (r) return r;
-    }
-    return NULL;
-}
-
-/* Expression-reply sibling of find_first_reply_msg (#1324): the first
- * `reply <expr>` in the arm body, where <expr> is anything but a
- * message constructor. The asker derefs the reply buffer as this
- * expression's scalar type. */
-static ASTNode* find_first_reply_expr(ASTNode* node) {
-    if (!node) return NULL;
-    if (node->type == AST_REPLY_STATEMENT) {
-        if (node->child_count > 0 && node->children[0] &&
-            node->children[0]->type != AST_MESSAGE_CONSTRUCTOR) {
-            return node->children[0];
-        }
-        return NULL;
-    }
-    if (node->type == AST_FUNCTION_DEFINITION ||
-        node->type == AST_ACTOR_DEFINITION ||
-        node->type == AST_BUILDER_FUNCTION ||
-        node->type == AST_CLOSURE) {
-        return NULL;
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        ASTNode* r = find_first_reply_expr(node->children[i]);
-        if (r) return r;
-    }
-    return NULL;
-}
 
 // #976: a value identifier that is a C reserved keyword (`short`, `int`,
 // `char`, `default`, …) is a valid Aether identifier but an invalid C one, so
@@ -5478,13 +5431,17 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 ASTNode* body = arm->children[1];
                 if (!pattern || !pattern->value || !body) continue;
                 const char* req_msg = pattern->value;
-                /* Search the whole arm body (incl. if/else/while/match
-                 * branches), not just its direct children — a branched
-                 * `reply` must still map the request to its reply type
+                /* One resolver, shared with the type checker, so the type of
+                 * the ask EXPRESSION and the type of the variable receiving
+                 * it cannot disagree. They did before #1537: this map knew a
+                 * reply was a string and inference did not, so the value slot
+                 * was declared int and the C compile failed. It searches the
+                 * whole arm body, so a `reply` inside a branch still maps
                  * (#736). */
-                const char* reply_msg = find_first_reply_msg(body);
-                ASTNode* reply_expr = reply_msg ? NULL : find_first_reply_expr(body);
-                if (reply_msg || reply_expr) {
+                AetherReplyShape shape;
+                if (aether_resolve_reply(program, req_msg, &shape)) {
+                    const char* reply_msg = shape.reply_msg;
+                    ASTNode* reply_expr = shape.reply_expr;
                     if (gen->reply_type_count >= gen->reply_type_capacity) {
                         gen->reply_type_capacity = gen->reply_type_capacity ? gen->reply_type_capacity * 2 : 16;
                         gen->reply_type_map = aether_xrealloc(gen->reply_type_map,
