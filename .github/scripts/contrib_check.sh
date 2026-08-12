@@ -76,6 +76,7 @@ TESTS=(
   # and the test's 8 create/draw/destroy cycles are what would surface
   # accumulation here.
   "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|run||vulkan"
+  "vulkan/resources|$VK/test_vulkan_resources.ae|$VK/aether_vulkan.c|run||vulkan"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted

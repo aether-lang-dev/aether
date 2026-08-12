@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **contrib/vulkan: caller-described vertex layouts and index buffers.** The
+  pipeline was built with exactly one vertex layout, an interleaved vec2
+  position and vec3 colour, so "bring your own shader" held only for shaders
+  with that signature, and without an index buffer every triangle cost three
+  full vertices. `pipeline_create_ex` now takes a layout the caller describes
+  as bindings and attributes with formats, offsets, stride and input rate, and
+  `indices_reserve` / `indices_set` drive `vkCmdDrawIndexed`. A mesh with
+  position, normal and UV renders, and a quad draws from four vertices and six
+  indices. `pipeline_create` is unchanged and still uses the built-in layout.
+
+- **contrib/vulkan: push constants, uniform buffers and textures.** The
+  pipeline layout was empty, so a shader could receive nothing but vertex
+  attributes: no transform, no camera, no material, no texture. A pipeline now
+  declares a push-constant block of up to 128 bytes, the minimum every device
+  guarantees, plus uniform-buffer and combined-image-sampler bindings, and owns
+  the descriptor set layout, pool and set for them. Textures are RGBA sampled
+  images uploaded through a staging buffer with the layout transitions the
+  driver requires. Uniform writes reuse their buffer and are host-coherent, so
+  a per-frame update is a memcpy rather than an allocation or a descriptor
+  rewrite.
+
+  Both are verified by reading pixels back, not by trusting a status: a mat4
+  pushed per draw mirrors the triangle, a 2x2 texture lands one texel per
+  quadrant of the indexed quad, and a tint uniform scales what the sampler
+  returned. The refusals are covered too, including binding a texture that was
+  never given pixels, which would otherwise sample undefined contents. Zero
+  leaks under `leaks --atExit`.
+
 ## [0.525.0]
 
 ### Fixed

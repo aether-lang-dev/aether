@@ -33,6 +33,9 @@ extern "C" {
 typedef struct AevkDevice AevkDevice;
 typedef struct AevkTarget AevkTarget;
 typedef struct AevkPipeline AevkPipeline;
+typedef struct AevkLayout AevkLayout;
+typedef struct AevkBindings AevkBindings;
+typedef struct AevkTexture AevkTexture;
 
 /* 1 when a loader AND at least one physical device are present. Cheap after
  * the first call: the probe result is cached, including the negative. */
@@ -74,7 +77,57 @@ int         aevk_target_height(const AevkTarget* t);
 AevkPipeline* aevk_pipeline_create(AevkDevice* dev, AevkTarget* target,
                                    const void* vert_spv, size_t vert_len,
                                    const void* frag_spv, size_t frag_len);
+
+/* As above, plus a caller-described vertex layout, a push-constant block of
+ * `push_bytes` (0 for none, a multiple of 4, at most 128), and declared
+ * shader resources. Any of `layout` / `bindings` may be NULL. The pipeline
+ * owns one descriptor set: enough for a transform, a material and its
+ * textures, with a lifetime that cannot outlive its pool. */
+AevkPipeline* aevk_pipeline_create_ex(AevkDevice* dev, AevkTarget* target,
+                                      const void* vert_spv, size_t vert_len,
+                                      const void* frag_spv, size_t frag_len,
+                                      const AevkLayout* layout,
+                                      int push_bytes,
+                                      const AevkBindings* bindings);
 void          aevk_pipeline_destroy(AevkPipeline* p);
+
+/* --- vertex layout -------------------------------------------------------- */
+
+/* Describes vertex input for pipeline_create_ex. Without one the pipeline
+ * uses the built-in layout: one interleaved stream of vec2 position and vec3
+ * colour, stride 20. `format` is a VkFormat value. */
+AevkLayout* aevk_layout_create(void);
+void        aevk_layout_destroy(AevkLayout* l);
+int         aevk_layout_binding(AevkLayout* l, int binding, int stride, int per_instance);
+int         aevk_layout_attr(AevkLayout* l, int location, int binding, int format, int offset);
+
+/* --- shader resources ----------------------------------------------------- */
+
+/* Declares what a shader reads besides vertex attributes. Bindings are
+ * visible to both the vertex and fragment stage. */
+AevkBindings* aevk_bindings_create(void);
+void          aevk_bindings_destroy(AevkBindings* b);
+int           aevk_bindings_uniform(AevkBindings* b, int binding);
+int           aevk_bindings_texture(AevkBindings* b, int binding);
+
+/* An R8G8B8A8_UNORM sampled image with a nearest-filter, clamped sampler.
+ * A texture must be uploaded before it is bound: sampling an image that was
+ * never given pixels is undefined, so binding one is refused. */
+AevkTexture* aevk_texture_create(AevkDevice* dev, int width, int height);
+void         aevk_texture_destroy(AevkTexture* tex);
+int          aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len);
+
+/* Writes a uniform buffer, creating and binding it on first use, then
+ * copying on every call. Host-coherent, so a per-frame update is a memcpy
+ * and no descriptor rewrite. */
+int aevk_pipeline_set_uniform(AevkPipeline* p, int binding, const void* data, size_t len);
+
+/* Points a combined-image-sampler binding at `tex`. */
+int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex);
+
+/* Stages the push-constant block used by the next draw. At most 128 bytes,
+ * the minimum every Vulkan device guarantees. */
+int aevk_target_set_push(AevkTarget* t, const void* data, size_t len);
 
 /* --- geometry ------------------------------------------------------------ */
 

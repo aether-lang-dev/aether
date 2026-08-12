@@ -20,6 +20,37 @@
 //   vulkan.verts_reserve(t, count)      -> int     status
 //   vulkan.verts_set(t, i, x, y, r, g, b) -> int   status
 //   vulkan.draw(t, pipe, r, g, b, a)    -> int     status
+//
+// Past the built-in position+colour layout (#1508, #1509):
+//
+//   vulkan.layout_create()              -> ptr     describe vertex input
+//   vulkan.layout_binding(l, binding, stride, per_instance) -> int
+//   vulkan.layout_attr(l, location, binding, format, offset) -> int
+//   vulkan.layout_destroy(l)
+//
+//   vulkan.bindings_create()            -> ptr     declare shader resources
+//   vulkan.bindings_uniform(b, binding) -> int
+//   vulkan.bindings_texture(b, binding) -> int
+//   vulkan.bindings_destroy(b)
+//
+//   vulkan.pipeline_create_ex(dev, t, vspv, vlen, fspv, flen,
+//                             layout, push_bytes, bindings) -> ptr
+//
+//   vulkan.texture_create(dev, w, h)    -> ptr     RGBA sampled image
+//   vulkan.texture_upload(tex, data, len) -> int   upload before binding
+//   vulkan.texture_destroy(tex)
+//   vulkan.set_texture(p, binding, tex) -> int
+//   vulkan.set_uniform(p, binding, data, len) -> int
+//   vulkan.uniform_floats(p, binding, count)  -> int
+//   vulkan.uniform_float(p, binding, i, v)    -> int
+//   vulkan.set_push(t, data, len)       -> int     at most 128 bytes
+//   vulkan.push_floats(t, count)        -> int
+//   vulkan.push_float(t, i, v)          -> int
+//
+//   vulkan.verts_reserve_n(t, count, floats_per_vertex) -> int
+//   vulkan.verts_set_float(t, float_index, value)       -> int
+//   vulkan.indices_reserve(t, count)    -> int     0 draws non-indexed
+//   vulkan.indices_set(t, i, vertex)    -> int
 //   vulkan.pixel(t, x, y)               -> int     0xRRGGBBAA, -1 outside
 //   vulkan.copy_rgba(t, dest, dest_len) -> int     status
 //   vulkan.save_ppm(t, path)            -> int     status
@@ -56,7 +87,29 @@ exports (
     target_create, target_destroy, target_width, target_height, rgba_size,
     pipeline_create, pipeline_destroy,
     verts_reserve, verts_set, draw, copy_rgba, pixel, save_ppm,
-    red, green, blue, alpha
+    red, green, blue, alpha,
+    aevk_ae_pipeline_create_ex,
+    aevk_ae_layout_create, aevk_ae_layout_destroy,
+    aevk_ae_layout_binding, aevk_ae_layout_attr,
+    aevk_ae_bindings_create, aevk_ae_bindings_destroy,
+    aevk_ae_bindings_uniform, aevk_ae_bindings_texture,
+    aevk_ae_texture_create, aevk_ae_texture_destroy, aevk_ae_texture_upload,
+    aevk_ae_set_uniform, aevk_ae_set_texture, aevk_ae_set_push,
+    aevk_ae_push_floats, aevk_ae_push_float,
+    aevk_ae_uniform_floats, aevk_ae_uniform_float,
+    aevk_ae_verts_reserve_n, aevk_ae_verts_set_float,
+    aevk_ae_indices_reserve, aevk_ae_indices_set,
+    pipeline_create_ex,
+    layout_create, layout_destroy, layout_binding, layout_attr,
+    bindings_create, bindings_destroy, bindings_uniform, bindings_texture,
+    texture_create, texture_destroy, texture_upload,
+    set_uniform, set_texture, set_push,
+    push_floats, push_float, uniform_floats, uniform_float,
+    verts_reserve_n, verts_set_float, indices_reserve, indices_set,
+    FORMAT_R32_SFLOAT, FORMAT_R32G32_SFLOAT,
+    FORMAT_R32G32B32_SFLOAT, FORMAT_R32G32B32A32_SFLOAT,
+    FORMAT_R8G8B8A8_UNORM,
+    PER_VERTEX, PER_INSTANCE
 )
 
 extern aevk_ae_available() -> int
@@ -75,6 +128,37 @@ extern aevk_ae_rgba_size(t: ptr) -> int
 extern aevk_ae_pipeline_create(dev: ptr, t: ptr, vspv: string, vlen: int,
                                fspv: string, flen: int) -> ptr
 extern aevk_ae_pipeline_destroy(p: ptr)
+
+extern aevk_ae_pipeline_create_ex(dev: ptr, t: ptr, vspv: string, vlen: int,
+                                  fspv: string, flen: int, layout: ptr,
+                                  push_bytes: int, bindings: ptr) -> ptr
+
+extern aevk_ae_layout_create() -> ptr
+extern aevk_ae_layout_destroy(l: ptr)
+extern aevk_ae_layout_binding(l: ptr, binding: int, stride: int, per_instance: int) -> int
+extern aevk_ae_layout_attr(l: ptr, location: int, binding: int, format: int, offset: int) -> int
+
+extern aevk_ae_bindings_create() -> ptr
+extern aevk_ae_bindings_destroy(b: ptr)
+extern aevk_ae_bindings_uniform(b: ptr, binding: int) -> int
+extern aevk_ae_bindings_texture(b: ptr, binding: int) -> int
+
+extern aevk_ae_texture_create(dev: ptr, w: int, h: int) -> ptr
+extern aevk_ae_texture_destroy(tex: ptr)
+extern aevk_ae_texture_upload(tex: ptr, rgba: ptr, len: int) -> int
+
+extern aevk_ae_set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int
+extern aevk_ae_set_texture(p: ptr, binding: int, tex: ptr) -> int
+extern aevk_ae_set_push(t: ptr, data: ptr, len: int) -> int
+extern aevk_ae_push_floats(t: ptr, count: int) -> int
+extern aevk_ae_push_float(t: ptr, index: int, value: float) -> int
+extern aevk_ae_uniform_floats(p: ptr, binding: int, count: int) -> int
+extern aevk_ae_uniform_float(p: ptr, binding: int, index: int, value: float) -> int
+
+extern aevk_ae_verts_reserve_n(t: ptr, count: int, floats_per_vertex: int) -> int
+extern aevk_ae_verts_set_float(t: ptr, float_index: int, value: float) -> int
+extern aevk_ae_indices_reserve(t: ptr, count: int) -> int
+extern aevk_ae_indices_set(t: ptr, index: int, value: int) -> int
 
 extern aevk_ae_verts_reserve(t: ptr, count: int) -> int
 extern aevk_ae_verts_set(t: ptr, index: int, x: float, y: float,
@@ -131,6 +215,90 @@ copy_rgba(t: ptr, dest: ptr, dest_len: int) -> int {
 
 pixel(t: ptr, x: int, y: int) -> int { return aevk_ae_pixel(t, x, y) }
 save_ppm(t: ptr, path: string) -> int { return aevk_ae_save_ppm(t, path) }
+
+// VkFormat values for layout_attr, spelled out so a caller never needs the
+// Vulkan headers to describe its own vertices.
+const FORMAT_R32_SFLOAT = 100
+const FORMAT_R32G32_SFLOAT = 103
+const FORMAT_R32G32B32_SFLOAT = 106
+const FORMAT_R32G32B32A32_SFLOAT = 109
+const FORMAT_R8G8B8A8_UNORM = 37
+
+// Input rate for layout_binding.
+const PER_VERTEX = 0
+const PER_INSTANCE = 1
+
+// A vertex layout: one or more interleaved streams, each with attributes at
+// byte offsets. Without one a pipeline uses the built-in position+colour
+// layout, so existing code needs no change.
+layout_create() -> ptr { return aevk_ae_layout_create() }
+layout_destroy(l: ptr) { aevk_ae_layout_destroy(l) }
+
+layout_binding(l: ptr, binding: int, stride: int, per_instance: int) -> int {
+    return aevk_ae_layout_binding(l, binding, stride, per_instance)
+}
+
+layout_attr(l: ptr, location: int, binding: int, format: int, offset: int) -> int {
+    return aevk_ae_layout_attr(l, location, binding, format, offset)
+}
+
+// What the shader reads besides vertex attributes.
+bindings_create() -> ptr { return aevk_ae_bindings_create() }
+bindings_destroy(b: ptr) { aevk_ae_bindings_destroy(b) }
+bindings_uniform(b: ptr, binding: int) -> int { return aevk_ae_bindings_uniform(b, binding) }
+bindings_texture(b: ptr, binding: int) -> int { return aevk_ae_bindings_texture(b, binding) }
+
+// Pipeline with a vertex layout, a push-constant block and shader resources.
+// Pass 0 for a layout or bindings handle to leave that part at the default.
+pipeline_create_ex(dev: ptr, t: ptr, vert_spv: string, vert_len: int,
+                   frag_spv: string, frag_len: int, layout: ptr,
+                   push_bytes: int, bindings: ptr) -> ptr {
+    return aevk_ae_pipeline_create_ex(dev, t, vert_spv, vert_len, frag_spv,
+                                      frag_len, layout, push_bytes, bindings)
+}
+
+// An RGBA texture. Upload before binding: an image with no pixels has no
+// defined contents to sample, so binding one is refused rather than drawn.
+texture_create(dev: ptr, w: int, h: int) -> ptr { return aevk_ae_texture_create(dev, w, h) }
+texture_destroy(tex: ptr) { aevk_ae_texture_destroy(tex) }
+texture_upload(tex: ptr, rgba: ptr, len: int) -> int {
+    return aevk_ae_texture_upload(tex, rgba, len)
+}
+
+set_uniform(p: ptr, binding: int, data: ptr, len: int) -> int {
+    return aevk_ae_set_uniform(p, binding, data, len)
+}
+set_texture(p: ptr, binding: int, tex: ptr) -> int {
+    return aevk_ae_set_texture(p, binding, tex)
+}
+set_push(t: ptr, data: ptr, len: int) -> int { return aevk_ae_set_push(t, data, len) }
+
+// Float staging, so a caller writes a matrix or a colour as numbers instead
+// of packing IEEE bytes by hand.
+push_floats(t: ptr, count: int) -> int { return aevk_ae_push_floats(t, count) }
+push_float(t: ptr, index: int, value: float) -> int {
+    return aevk_ae_push_float(t, index, value)
+}
+uniform_floats(p: ptr, binding: int, count: int) -> int {
+    return aevk_ae_uniform_floats(p, binding, count)
+}
+uniform_float(p: ptr, binding: int, index: int, value: float) -> int {
+    return aevk_ae_uniform_float(p, binding, index, value)
+}
+
+// Vertices for a caller-described layout: reserve by floats-per-vertex, then
+// write floats by flat index. verts_reserve / verts_set stay the shorthand
+// for the built-in five-float layout.
+verts_reserve_n(t: ptr, count: int, floats_per_vertex: int) -> int {
+    return aevk_ae_verts_reserve_n(t, count, floats_per_vertex)
+}
+verts_set_float(t: ptr, float_index: int, value: float) -> int {
+    return aevk_ae_verts_set_float(t, float_index, value)
+}
+
+// 32-bit indices. Reserving 0 goes back to non-indexed drawing.
+indices_reserve(t: ptr, count: int) -> int { return aevk_ae_indices_reserve(t, count) }
+indices_set(t: ptr, index: int, value: int) -> int { return aevk_ae_indices_set(t, index, value) }
 
 // Channel accessors for the packed value pixel() returns.
 red(px: int) -> int { return (px >> 24) & 255 }

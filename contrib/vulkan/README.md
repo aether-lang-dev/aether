@@ -41,8 +41,50 @@ main() {
 ```
 
 `example_triangle.ae` is that program in full. It is not limited to a triangle:
-the pipeline is built from whatever SPIR-V you hand it, and the vertex format is
-an interleaved `vec2` position plus `vec3` colour.
+the pipeline is built from whatever SPIR-V you hand it, and `pipeline_create`
+uses a built-in vertex format of an interleaved `vec2` position plus `vec3`
+colour.
+
+For anything past that, `pipeline_create_ex` takes a vertex layout you
+describe, a push-constant block, and the shader resources the shaders read:
+
+```aether
+// position(2) + normal(3) + uv(2), interleaved, stride 28
+lay = vulkan.layout_create()
+defer vulkan.layout_destroy(lay)
+vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX)
+vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
+vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20)
+
+binds = vulkan.bindings_create()
+defer vulkan.bindings_destroy(binds)
+vulkan.bindings_texture(binds, 0)     // layout(binding = 0) uniform sampler2D
+vulkan.bindings_uniform(binds, 1)     // layout(binding = 1) uniform Block
+
+pipe = vulkan.pipeline_create_ex(dev, target, vs, vlen, fs, flen, lay, 64, binds)
+
+tex = vulkan.texture_create(dev, w, h)
+vulkan.texture_upload(tex, bytes.data(rgba), w * h * 4)
+vulkan.set_texture(pipe, 0, tex)
+
+vulkan.uniform_floats(pipe, 1, 4)     // a vec4 the shader reads
+vulkan.uniform_float(pipe, 1, 0, 1.0)
+
+vulkan.push_floats(target, 16)        // a mat4 pushed per draw
+vulkan.push_float(target, 0, 1.0)
+
+vulkan.verts_reserve_n(target, 4, 7)  // 4 vertices of 7 floats
+vulkan.verts_set_float(target, 0, -1.0)
+vulkan.indices_reserve(target, 6)     // two triangles from four vertices
+vulkan.indices_set(target, 0, 0)
+```
+
+A texture must be uploaded before it is bound: an image that was never given
+pixels has no defined contents to sample, so binding one is refused rather than
+drawn. Push constants are capped at 128 bytes, the minimum every Vulkan device
+guarantees. A pipeline owns one descriptor set, which is enough for a
+transform, a material and its textures; per-draw sets are not yet a thing here.
 
 Coordinates are Vulkan NDC. x and y run -1 to 1, **y points down**, and a
 front-facing triangle is counter-clockwise.
@@ -132,9 +174,11 @@ the Linux CI leg builds against, so using a symbol newer than that fails there.
 
 ## Shaders
 
-`shaders/triangle.vert` and `.frag` are the GLSL sources; the `.spv` files beside
-them are committed so that building needs no shader compiler. After editing the
-GLSL, run `shaders/build_shaders.sh` and commit the result.
+`shaders/*.vert` and `*.frag` are the GLSL sources; the `.spv` files beside them
+are committed so that building needs no shader compiler. After editing the GLSL,
+run `shaders/build_shaders.sh` and commit the result. `triangle` is the built-in
+layout, `transform` adds a push-constant mat4, and `textured` reads a
+caller-described layout plus a sampler and a uniform.
 
 `tests/integration/vulkan_shaders` checks that the committed binaries are
 well-formed SPIR-V and that the GLSL still compiles. It deliberately does not
@@ -144,7 +188,7 @@ rather than on a defect. What proves the pair is correct is the render test.
 
 ## Testing
 
-`test_vulkan.ae` runs from `make contrib-check`. With no driver it prints SKIP
+`test_vulkan.ae` and `test_vulkan_resources.ae` run from `make contrib-check`. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -153,11 +197,19 @@ indices out of range, writes before a reserve, pixel coordinates outside the
 image, a null destination for readback, destroying null handles, and eight
 create/draw/destroy cycles.
 
+`test_vulkan_resources.ae` covers the phase-2 surface the same way, by reading
+pixels back rather than trusting a status code: a mat4 pushed per draw actually
+mirrors the triangle, a 2x2 texture lands one texel per quadrant of an indexed
+quad drawn from a caller-described position/normal/UV layout, and a tint uniform
+scales what the sampler returned. It also checks the refusals: a duplicate
+binding, an index past the vertex count, a short pixel upload, an over-large
+push block, and binding a texture that has no pixels yet.
+
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and then asserts the test did **not** skip. A skip there would be silent loss of
 coverage.
 
-## Not in phase 1
+## Not here yet
 
 Every limitation below has an issue. Nothing here is a TODO in a comment or a
 plan in someone's head.
@@ -167,8 +219,7 @@ plan in someone's head.
 | Surfaces, swapchains, presenting to a window, and the aether-ui handle seam | #1505 | P1 |
 | Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
-| Configurable vertex formats and index buffers (the layout here is fixed) | #1508 | P2 |
-| Uniforms, push constants, descriptor sets, textures (the pipeline layout is empty) | #1509 | P2 |
+| Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
 | A thread-safety contract (none is claimed today) | #1510 | P2 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
 | Depth, stencil and MSAA | #1512 | P3 |
