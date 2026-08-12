@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **CHANGELOG repair: a missing section, a corrupted heading, and two releases
+  out of order.** Three separate defects, all from the release pipeline as it
+  behaved before the #1477 guards landed in 0.515.0:
+
+  - **`[current]` was wholly missing**, so there was nowhere for new entries to
+    go and the next release would have had nothing to rename.
+  - **0.514.0 had no section.** It shipped one PR (#1485) and is now recorded.
+  - **The 0.515.0 heading was corrupted** into `## [0.515.0]'; then rename;`,
+    with a dozen lines of the preceding paragraph duplicated beneath it. The
+    cause is worth stating plainly: that entry's prose *quotes the pipeline's
+    own* `if grep -q '## [current]'; then rename; fi` **logic**, and the release
+    `sed` matched that literal `## [current]` **inside the prose** and rewrote
+    it. The pipeline corrupted the one entry documenting its bug — a fourth
+    failure mode in the #1477 family, and an argument for anchoring the rename
+    to a line-start match rather than a substring.
+  - **0.520.0 sat above 0.521.0**, breaking the descending order. An audit
+    of every heading turned up one more of these, much older: 0.275.0 sat
+    above 0.276.0. Both are fixed.
+
+  **The corrupting `sed` is fixed, not just its damage.** The #1477 guard
+  greps for `^## \[current\]`, correctly anchored — but the rewrite beneath it
+  was `s/## \[current\]/## [VERSION]/`, neither anchored nor limited to the
+  first match, so it rewrote every occurrence anywhere in the file. It is now
+  `0,/^## \[current\]$/s//## [VERSION]/`. Verified both ways against this very
+  file: the old form rewrites three prose mentions and re-corrupts the entry
+  you are reading, the new one renames the heading alone.
+
+  Releases 0.516.0 through 0.523.0 were audited against the merge log and are
+  complete, so the guards added in 0.515.0 are holding. The duplicate
+  `## [0.435.0]` and `## [0.497.0]` headings are left alone: they are noted in
+  #1477 as evidence and rewriting history to hide them would cost more than it
+  is worth.
+
 ## [0.523.0]
 
 ### Fixed
@@ -98,41 +135,6 @@ version number before tagging the release.
 - README: the CI suite is 10 steps, not 9, and the `ae` command list was missing
   `inspect`, `bindgen`, `cflags` and `lib-path`.
 
-## [0.520.0]
-
-### Fixed
-
-- **An idle program pegged every core** (#1517). The scheduler's extended-idle
-  branch called `scheduler_io_poll(sched, 1)` expecting it to block for a
-  millisecond. That function returns immediately when no descriptors are
-  registered, and the `aether_sched_yield()` after it also returns immediately
-  when nothing else is runnable, so the thread reset its counter to 5000 and
-  spun again. Nothing in the path ever slept. The report that opened the issue
-  was a leftover binary that had been running for five days at 650% CPU doing
-  no work.
-
-  A core with nothing registered with the poller now parks on a condition
-  variable. Producers signal it when they hand it work, so a message still
-  arrives without waiting out a timeout; the wait is timed as well, so a
-  producer that never signals costs latency rather than a hang. Cores that do
-  have descriptors registered are unchanged: the poll blocks for its timeout
-  and always did.
-
-  Measured on an 8-core M1 Pro, a program that does one thing and then idles
-  for two seconds:
-
-  | | CPU consumed |
-  |---|---:|
-  | before | 14,058,539 us (about 7 cores) |
-  | after | 5,661 us |
-
-  Throughput improves rather than regresses, because idle cores are no longer
-  competing with working ones for the machine. Medians over repeated runs:
-  thread_ring +18%, counting +187%, fork-join +17%, ping-pong within noise at
-  +2.5%. `tests/regression/test_scheduler_idle_cpu.ae` compares process CPU
-  time against wall time while quiescent and fails at 35x its budget against
-  the old scheduler.
-
 ## [0.521.0]
 
 ### Added
@@ -184,6 +186,41 @@ version number before tagging the release.
   HEADERS of, separately from one it must link against. `contrib/vulkan` needs
   the former: linking the Vulkan loader would reintroduce exactly the hard
   dependency its runtime `dlopen` exists to avoid.
+
+## [0.520.0]
+
+### Fixed
+
+- **An idle program pegged every core** (#1517). The scheduler's extended-idle
+  branch called `scheduler_io_poll(sched, 1)` expecting it to block for a
+  millisecond. That function returns immediately when no descriptors are
+  registered, and the `aether_sched_yield()` after it also returns immediately
+  when nothing else is runnable, so the thread reset its counter to 5000 and
+  spun again. Nothing in the path ever slept. The report that opened the issue
+  was a leftover binary that had been running for five days at 650% CPU doing
+  no work.
+
+  A core with nothing registered with the poller now parks on a condition
+  variable. Producers signal it when they hand it work, so a message still
+  arrives without waiting out a timeout; the wait is timed as well, so a
+  producer that never signals costs latency rather than a hang. Cores that do
+  have descriptors registered are unchanged: the poll blocks for its timeout
+  and always did.
+
+  Measured on an 8-core M1 Pro, a program that does one thing and then idles
+  for two seconds:
+
+  | | CPU consumed |
+  |---|---:|
+  | before | 14,058,539 us (about 7 cores) |
+  | after | 5,661 us |
+
+  Throughput improves rather than regresses, because idle cores are no longer
+  competing with working ones for the machine. Medians over repeated runs:
+  thread_ring +18%, counting +187%, fork-join +17%, ping-pong within noise at
+  +2.5%. `tests/regression/test_scheduler_idle_cpu.ae` compares process CPU
+  time against wall time while quiescent and fails at 35x its budget against
+  the old scheduler.
 
 ## [0.519.0]
 
@@ -332,7 +369,7 @@ version number before tagging the release.
 ### Changed
 
 - **The release pipeline fails instead of shipping an unrecorded release**
-  (#1477). The CHANGELOG rename was `if grep -q '## [0.515.0]'; then rename;
+  (#1477). The CHANGELOG rename was `if grep -q '## [current]'; then rename;
   fi`, which does exactly what it says and silently ships a release with no
   section when the condition is false. Releases 0.506.0 through 0.509.0 went
   out that way, four releases of real work recorded nowhere, including a
@@ -345,18 +382,23 @@ version number before tagging the release.
   release should have to say so rather than be indistinguishable from an
   oversight.
 
-## [0.515.0]'; then rename;
-  fi`, which does exactly what it says and silently ships a release with no
-  section when the condition is false. Releases 0.506.0 through 0.509.0 went
-  out that way, four releases of real work recorded nowhere, including a
-  Windows packaging fix. Three guards: the release now fails when there is no
-  `[current]` to rename, fails rather than creating a duplicate heading (which
-  is how `## [0.435.0]` and `## [0.497.0]` each came to appear twice), and a CI
-  job requires a CHANGELOG entry on any PR touching shipped code, which is what
-  makes a `[current]` section exist to be renamed in the first place. All three
-  have an explicit `[skip changelog]` opt-out, because a genuinely empty
-  release should have to say so rather than be indistinguishable from an
-  oversight.
+## [0.514.0]
+
+### Fixed
+
+- **The CachyOS nightly could report a green run whose avcodec test never
+  executed.** `contrib/avcodec` landed in 0.509.0 and its audio half in
+  0.513.0, and the contrib-check entry SKIPs when pkg-config cannot find the
+  FFmpeg libraries — so with no entry in the dependency gate, an absent FFmpeg
+  was a silent skip rather than the provisioning failure the gate exists to
+  surface. Both `libavcodec` and `libswresample` are now required, since
+  0.513.0 made all five FFmpeg libraries a set.
+
+  The gate's `lib` probe also now searches `/usr/lib/<arch>-linux-gnu`. On
+  Debian and Ubuntu that is the only place these libraries live, so a
+  Debian-shaped box reported *every* `lib` dependency missing; Arch has no
+  multiarch directory, so the extra path is a no-op on the box the nightly
+  actually runs on.
 
 ## [0.513.0]
 
@@ -5122,25 +5164,6 @@ those sections for the real 0.311–0.316 notes._
   no-ops where the macro is absent). Surfaced on a macOS/Homebrew
   `make install-contrib` (Lua 5.4.x, Tcl 9.0.3).
 
-## [0.275.0]
-
-### Added
-
-- **`@packed` extern structs** (#747 item 1, the Redis sds.c blocker). An
-  `extern struct ... @packed { ... }` emits the C body with
-  `__attribute__((packed))`, so the layout has no inter-field padding or
-  trailing alignment — the `sdshdr8/16/32/64` shape where the length/
-  alloc/flags header sits at fixed packed offsets before the string data.
-  `sizeof(S)` / `offsetof(S, f)` lower to C and report the packed numbers,
-  and a `*S` overlay reads/writes fields at their packed offsets (verified
-  by round-trip). `@packed` is mutually exclusive with `@c_import` (a
-  header-defined struct's packing is the header's job; combining them is a
-  parse error). Bit-width fields and a trailing flexible array still work
-  under `@packed`. Note: pure `@c_import` overlays already inherit the
-  header's packed layout (no body emitted), so `@packed` is the tool when
-  Aether owns the struct body (a pure-Aether port with no C header). See
-  [docs/c-interop.md](docs/c-interop.md) (Packed structs).
-
 ## [0.276.0]
 
 ### Added
@@ -5163,6 +5186,25 @@ those sections for the real 0.311–0.316 notes._
   of fn-pointer parameters (#750) and typed fn-ptr locals. See
   [docs/language-reference.md](docs/language-reference.md) (Function-
   pointer struct fields).
+## [0.275.0]
+
+### Added
+
+- **`@packed` extern structs** (#747 item 1, the Redis sds.c blocker). An
+  `extern struct ... @packed { ... }` emits the C body with
+  `__attribute__((packed))`, so the layout has no inter-field padding or
+  trailing alignment — the `sdshdr8/16/32/64` shape where the length/
+  alloc/flags header sits at fixed packed offsets before the string data.
+  `sizeof(S)` / `offsetof(S, f)` lower to C and report the packed numbers,
+  and a `*S` overlay reads/writes fields at their packed offsets (verified
+  by round-trip). `@packed` is mutually exclusive with `@c_import` (a
+  header-defined struct's packing is the header's job; combining them is a
+  parse error). Bit-width fields and a trailing flexible array still work
+  under `@packed`. Note: pure `@c_import` overlays already inherit the
+  header's packed layout (no body emitted), so `@packed` is the tool when
+  Aether owns the struct body (a pure-Aether port with no C header). See
+  [docs/c-interop.md](docs/c-interop.md) (Packed structs).
+
 ## [0.274.0]
 
 ### Added

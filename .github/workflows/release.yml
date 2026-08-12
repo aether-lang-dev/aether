@@ -195,7 +195,14 @@ jobs:
         fi
 
         if grep -q '^## \[current\]' CHANGELOG.md; then
-          sed -i "s/## \[current\]/## [${VERSION}]/" CHANGELOG.md
+          # Anchored to line-start and limited to the first match. An
+          # unanchored, unlimited `s/## \[current\]/.../` rewrites every
+          # occurrence in the file — including ones inside prose. That is not
+          # hypothetical: it is how the 0.515.0 heading became
+          # `## [0.515.0]'; then rename;`. That entry described this very
+          # rename step and quoted `## [current]` in its body, so the release
+          # corrupted the one entry documenting its own bug.
+          sed -i "0,/^## \[current\]$/s//## [${VERSION}]/" CHANGELOG.md
           git add CHANGELOG.md
         elif [ "$SKIP_CHANGELOG" = "1" ]; then
           echo "No [current] section, and the trigger commit says [skip changelog]."
