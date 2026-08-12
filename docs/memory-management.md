@@ -333,7 +333,7 @@ function that mints a fresh owned buffer belongs here.
 
 ### User-defined `-> string` functions
 
-A user-defined function that returns `string` is treated as heap-returning **iff *any* return statement in its body yields a heap-string-expression** (recursively considering other heap-returning user functions), an OR-fold across the return sites. A function whose returns are *all* string literals or forwarded borrowed parameters is NOT heap-returning, and the wrapper won't try to free its results. A function that *mixes* the two (one branch `return string.concat(...)`, another `return "constant"`) *is* heap-returning: its literal branches are malloc-duplicated through the uniform-heap return wrap (see [Return-ownership contract](#return-ownership-contract-uniform-heap-return-escape) below) so the caller can free every branch identically.
+A user-defined function that returns `string` is treated as heap-returning **iff *any* return statement in its body yields a heap-string-expression** (recursively considering other heap-returning user functions), an OR-fold across the return sites. A function whose returns are *all* string literals or forwarded borrowed parameters is NOT heap-returning, and the wrapper won't try to free its results. A function that *mixes* the two (one branch `return string.concat(...)`, another `return "constant"`) *is* heap-returning: its literal branches are duplicated into owned strings through the uniform-heap return wrap (see [Return-ownership contract](#return-ownership-contract-uniform-heap-return-escape) below) so the caller can free every branch identically.
 
 ```aether
 my_concat(a: string, b: string) -> string {
@@ -473,7 +473,9 @@ Audited stdlib retainers carrying `@retain` today: the refcount ops `string_reta
 
 Every function whose return type is `string` honours one rule:
 
-> **The caller may always `free()` the returned pointer exactly once, regardless of which return branch produced the value, regardless of whether the value originated as a literal, a heap allocation, or a heap-tracked local.**
+> **The caller may always release the returned pointer exactly once, regardless of which return branch produced the value, regardless of whether the value originated as a literal, a heap allocation, or a heap-tracked local.**
+
+Release it with `string.free` / `string.release`, or leave it to the scope-exit reclaim, both of which route through `aether_heap_str_free` and handle either physical shape. Not with a plain `free()`: a refcounted value would lose its payload.
 
 The classifier OR-folds the function's return statements: a function is *heap-returning* if **any** return yields a heap expression (`string.concat`, interpolation, a heap-returning user fn, an `@heap` extern, or a bare identifier of a heap-tracked local). For such functions the codegen wraps every return value through a small inline helper:
 
@@ -482,11 +484,11 @@ static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {
     if (!s) return NULL;
     if (is_heap) return s;                  // fast path, already heap-owned
     /* AetherString-aware length probe (magic-header detect, ASan-clean)... */
-    char* dup = malloc(n + 1);              // cold path, dup the literal
-    memcpy(dup, data, n); dup[n] = '\0';
-    return dup;
+    return string_new_with_length(data, n); // cold path, own the literal
 }
 ```
+
+The cold path mints a refcounted AetherString rather than a bare buffer, because a bare one is not something the caller can release: given a plain `char*` the runtime cannot tell a heap payload from static storage, so it no-ops and the value leaks. That was one leaked block per call at every error slot a caller dutifully freed. The shape is not new to callers, since the sibling branch of such a function already returns a `string.concat` result, which is the same shape.
 
 The flag is resolved at compile time wherever possible:
 
@@ -538,6 +540,8 @@ A heap string stored as a container *value* is owned by the container and releas
 The key is always interned by the container (copied via `string_new`), so a heap key is the caller's to reclaim, see the `@retain` note above.
 
 **Boxed closures.** A closure value (`fn`-typed, not a raw fn-pointer) stored into a list is heap-boxed by the `fn -> ptr` coercion (`_aether_box_closure`). The list takes ownership of the box (it is stored owned, and `list_free` reclaims the non-magic box via `free`); a bare function pointer (`is_fnptr`, a code address) is not heap and stays on the raw path.
+
+The box is `{fn, env}` followed by a tag word. The `{fn, env}` prefix is the layout C code reads, so it stays first and unchanged: `std/collections` and `std/worker` mirror it, and the box pointer is still the `malloc` base that plain `free` reclaims. The tag is how `unbox_closure` tells a real box from a raw code address, which is what a bare function coerced into a `ptr` slot leaves behind. Unboxing one of those panics naming the cause instead of reading `env` out of the function's machine code and jumping through it. To make a bare function safe to unbox, pass it through an `fn`-typed parameter or call `box_closure` on it.
 
 ### Closure environment lifetime
 

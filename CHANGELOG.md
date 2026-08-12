@@ -13,6 +13,60 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A string returned through a heap-returning boundary leaked when the caller
+  freed it.** An Aether `string` is either a refcounted AetherString or a plain
+  malloc'd payload, and the runtime cannot free the second: given a bare
+  `char*` it cannot tell a heap payload from static storage, so `string.free`
+  no-ops and the value leaks. Every heap-returning function routes its returns
+  through a uniform-heap helper whose cold half (a literal, or anything not
+  already owned) minted exactly that bare buffer, so the two branches of one
+  function returned two different shapes and the caller could only free one of
+  them. `json.parse` leaked a block per call at its success-path error slot,
+  and so did every literal returned the same way. The cold path now mints the
+  same refcounted shape the sibling branch already returns, which costs the
+  hot path nothing. `tests/leaks_known.txt` loses its
+  `test_fs_read_error_detail` entry, which was filed for this and annotated to
+  be dropped once fixed; that test reports zero rather than its allowed three,
+  and `test_string_double_locale` goes from one leak to none.
+
+  Freeing an interpolated string still leaks: interpolation has a different
+  producer, and closing that half means separating "escaped because something
+  else owns it" from "escaped because this call frees it" in the ownership
+  analysis. Tracked separately with the measurements behind that conclusion. Registering `string_free` as non-storing
+  in the codegen looks like the fix for both and is not, because it withdraws
+  the escape marking that suppresses automatic frees, and
+  `contrib/tinyweb/example_schema_api` then double-frees and aborts.
+
+- **`or` took its handler on success when the error slot was a refcounted
+  string.** "Is this an error" is "is the error slot non-empty", and the slot
+  holds either physical string shape, but the check indexed the pointer raw, so
+  a refcounted slot's magic header read as content and every such result looked
+  like a failure. A function whose success path returns `string.concat("", "")`
+  in the error slot, the uniform shape std/json documents, took the `or`
+  handler on success. The `defer` success/error guard used the same convention
+  and had the same flaw. Both now read the payload through
+  `aether_string_data`, which handles either shape.
+
+- **`unbox_closure()` on a value that was never boxed segfaulted with no
+  diagnostic.** A bare function passed into a `ptr` slot stays a raw code
+  address; unboxing it read `.env` out of the function's own machine code and
+  jumped through it. Boxed closures now carry a tag after the `{fn, env}`
+  prefix, and unbox panics with a message naming the cause and the fix. The tag
+  goes after that prefix deliberately: it is the FFI layout std/collections and
+  std/worker read, and a tag in front would turn their `fn` into the tag and
+  call it.
+
+- **`box_closure()` rejected a bare function**, which is the value most likely
+  to need boxing and what the new panic message recommends. It now wraps one in
+  the same env-ignoring adapter a ptr-typed field assignment already used.
+
+- **The codegen `unresolved type` warning had no source location**, so it could
+  not be traced or fixed from the source side, and no flag produced one. It now
+  reports file, line, column and the enclosing function. The warning fires on
+  in-tree examples today, and one of those turned out to be a real defect
+  rather than noise, filed separately: an actor `?` ask never infers its reply
+  type, so a non-int reply fails to build.
+
 - **The cross-language skynet benchmark credited every implementation for
   actors it never created.** All eleven divided by the tree's full node count,
   1,111,111, while creating between 1,111 and 1,111,111 concurrency units

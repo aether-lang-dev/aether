@@ -274,6 +274,16 @@ static void discover_bare_fn_adapters_walk(CodeGenerator* gen, ASTNode* node) {
     /* AST_FUNCTION_CALL: register any bare-fn arg whose callee param
      * is `fn`-typed. */
     if (node->type == AST_FUNCTION_CALL && node->value && gen->program) {
+        /* box_closure is a builtin, so it never resolves as a user
+         * function below; register its bare-fn argument here or the
+         * adapter the wrap site emits is never declared. */
+        if (strcmp(node->value, "box_closure") == 0 && node->child_count == 1) {
+            ASTNode* arg = node->children[0];
+            if (arg && arg->type == AST_IDENTIFIER && arg->value &&
+                find_user_function_by_name(gen, arg->value)) {
+                register_bare_fn_adapter(gen, arg->value);
+            }
+        }
         ASTNode* callee = find_user_function_by_name(gen, node->value);
         if (callee) {
             int pi = 0;
@@ -904,6 +914,8 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // function — important when the merged program intermixes
     // user-written and module-imported functions in arbitrary order.
     codegen_maybe_emit_line(gen, func);
+    codegen_note_diag_pos(func);
+    codegen_note_diag_func(func->value);
 
     // If function returns a tuple with UNKNOWN elements, scan all returns and merge
     if (func->node_type && func->node_type->kind == TYPE_TUPLE) {

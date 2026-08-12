@@ -1,0 +1,141 @@
+// Regression: a string handed back through a heap-returning boundary must be
+// reclaimable by the caller's `string.free`.
+//
+// An Aether `string` has two physical shapes: a refcounted AetherString
+// (magic header plus payload) and a plain malloc'd char*. The runtime's
+// string_release can only recognise the first: given a bare char* it cannot
+// tell a heap payload from a static literal, so it no-ops and the value
+// leaks.
+//
+// Every function classified heap-returning routes its returns through a
+// uniform-heap helper, and the cold half of that helper (a literal, or any
+// value not already owned) used to mint a bare buffer. So the two paths of one
+// function returned two different shapes, and the caller could free only one
+// of them: json.parse's error slot leaked a block per call, and so did every
+// literal returned the same way. The helper now mints the same refcounted
+// shape its sibling path already returns.
+//
+// Not covered here, because it has a different producer and is tracked
+// separately: string interpolation still yields a bare buffer, so freeing an
+// interpolated string leaks. Adding string_free to the codegen's non-storing
+// list looks like the fix and is not: it withdraws the escape marking that
+// suppresses automatic frees, and contrib/tinyweb/example_schema_api then
+// double-frees and aborts.
+//
+// The loops make one leaked block per call unmissable under the macOS
+// leaks(1) gate and Valgrind/ASan on Linux.
+
+import std.string
+import std.json
+
+extern exit(code: int)
+
+check(cond: int, msg: string) -> int {
+    if cond != 0 {
+        return 0
+    }
+    println("  FAIL: ${msg}")
+    return 1
+}
+
+// A heap-returning boundary whose two paths return DIFFERENT shapes: the
+// error path hands back a concat (magic AetherString), the success path a
+// bare literal the compiler must duplicate for the caller to own. Both
+// arrive at the caller's string.free.
+classify(n: int) -> string! {
+    if n < 0 {
+        return string.concat("negative: ", "out of range"), ""
+    }
+    return "ok", ""
+}
+
+main() {
+    println("=== test_string_free_no_leak ===")
+    fails = 0
+
+    // 1. The reported shape: parse's success-path error slot is an owned
+    //    duplicate of "", i.e. a 1-byte plain malloc'd payload.
+    n = 0
+    while n < 200 {
+        doc, perr = json.parse("{\"x\":3.14,\"name\":\"a text value\"}")
+        fails = fails + check(string.equals(perr, ""), "parse err not empty")
+        string.free(perr)
+        fails = fails + check(doc != null, "parse returned null")
+
+        out, serr = json.stringify(doc)
+        fails = fails + check(string.contains(out, "3.14"), "stringify lost the number")
+        string.free(out)
+        string.free(serr)
+        json.free(doc)
+        n = n + 1
+    }
+
+    // 2. The failure path, where the error slot is a real message rather
+    //    than an empty duplicate.
+    n = 0
+    while n < 200 {
+        bad, berr = json.parse("{\"x\":")
+        fails = fails + check(bad == null, "malformed input parsed")
+        fails = fails + check(string.equals(berr, "") == 0, "no error message")
+        string.free(berr)
+        n = n + 1
+    }
+
+    // 3. Both shapes out of one Aether function.
+    n = 0
+    while n < 200 {
+        neg, e1 = classify(-1)
+        fails = fails + check(string.contains(neg, "negative"), "concat path wrong")
+        string.free(neg)
+        string.free(e1)
+
+        pos, e2 = classify(1)
+        fails = fails + check(string.equals(pos, "ok"), "literal path wrong")
+        string.free(pos)
+        string.free(e2)
+        n = n + 1
+    }
+
+    // 4. concat, the everyday producer of an owned string.
+    n = 0
+    while n < 200 {
+        joined = string.concat("prefix-", "suffix")
+        fails = fails + check(string.equals(joined, "prefix-suffix"), "concat wrong")
+        string.free(joined)
+        n = n + 1
+    }
+
+    // 5. A variable reassigned across iterations, freed each time: the
+    //    shape that leaks linearly in a serialisation loop.
+    acc = ""
+    n = 0
+    while n < 200 {
+        string.free(acc)
+        acc = string.concat("row ", "value")
+        n = n + 1
+    }
+    fails = fails + check(string.equals(acc, "row value"), "final value wrong")
+    string.free(acc)
+
+    // 6. A producer that returns the refcounted shape directly, so the
+    //    runtime free path has to keep working unchanged.
+    n = 0
+    while n < 200 {
+        num = string.from_double(3.5)
+        fails = fails + check(string.contains(num, "3.5"), "from_double wrong")
+        string.free(num)
+        n = n + 1
+    }
+
+    // 7. A literal-holding variable was never heap-owned; freeing it must
+    //    not reach free() on static storage.
+    lit = "static text"
+    string.free(lit)
+    fails = fails + check(string.equals(lit, "static text"), "literal damaged")
+
+    if fails != 0 {
+        println("test_string_free_no_leak: ${fails} failure(s)")
+        exit(1)
+    }
+    println("=== test_string_free_no_leak passed ===")
+}
