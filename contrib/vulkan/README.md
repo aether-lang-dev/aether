@@ -159,6 +159,19 @@ coverage.
 
 ## Not in phase 1
 
-Surfaces, swapchains and presenting to a window; depth and stencil; textures and
-descriptor sets; MSAA; compute. The seam with aether-ui, where a native window
-handle is passed in, is a phase 2 decision and deliberately not pre-empted here.
+Every limitation below has an issue. Nothing here is a TODO in a comment or a
+plan in someone's head.
+
+| Missing | Issue | Priority |
+|---|---|---|
+| Surfaces, swapchains, presenting to a window, and the aether-ui handle seam | #1505 | P1 |
+| Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
+| A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
+| Configurable vertex formats and index buffers (the layout here is fixed) | #1508 | P2 |
+| Uniforms, push constants, descriptor sets, textures (the pipeline layout is empty) | #1509 | P2 |
+| A thread-safety contract (none is claimed today) | #1510 | P2 |
+| Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
+| Depth, stencil and MSAA | #1512 | P3 |
+| Frames in flight, and a configurable GPU timeout (currently a fixed 5s) | #1513 | P3 |
+| More colour formats, and PNG output rather than PPM | #1514 | P3 |
+| Compute pipelines | #1515 | P3 |
