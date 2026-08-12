@@ -94,7 +94,16 @@ Three things the design does to earn those numbers:
   Aether without an intermediate host array or a staging copy.
 
 `leaks -atExit` reports 0 leaks for the example, the test and the C-level smoke
-test; the Linux CI leg runs the same test under valgrind as a leak gate.
+test, against a real driver.
+
+The Linux CI leg runs the test for correctness but does **not** leak-gate it.
+That is a measurement decision: the CI driver is lavapipe, whose LLVM JIT
+valgrind cannot follow. One render reports around 13,000 errors from about
+1,000 contexts, all inside libvulkan and the driver's worker threads, and the
+"definitely lost" total moves between runs because the driver is `dlclose`d
+before exit and valgrind then loses the pointers into it. Gating on that would
+measure Mesa rather than this module. The eight create/draw/destroy cycles in
+the test are what would surface accumulation on that leg.
 
 ## Building against it
 
