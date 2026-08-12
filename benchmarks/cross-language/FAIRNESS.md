@@ -9,9 +9,10 @@ something written down rather than against nobody's memory.
 
 1. **Standard library only.** Each implementation uses what ships with the
    language: pthreads and `<stdatomic.h>` for C, `std::thread` for C++,
-   goroutines and channels for Go, `java.util.concurrent` for Java, `std` for
-   Rust and Zig, OTP processes for Erlang and Elixir, language actors for Pony
-   and Aether. No third-party actor framework, thread pool, or allocator.
+   goroutines and channels for Go, `java.util.concurrent` for Java and Scala,
+   `std` for Rust and Zig, OTP processes for Erlang and Elixir, language actors
+   for Pony and Aether. No third-party actor framework, thread pool or
+   allocator, and no exceptions.
 2. **The same amount of concurrency.** Every implementation of a pattern creates
    the same number of concurrency units and passes the same number of messages.
    Where a pattern cannot express that across runtimes, the pattern gets
@@ -21,8 +22,8 @@ something written down rather than against nobody's memory.
    language, a recursive descent in another and a list allocation in a third.
 4. **Divide by work actually performed.** A rate's denominator counts things the
    run really did. No implementation is credited for units it did not create.
-5. **The same region is timed.** Setup that one language performs outside the
-   timer must be outside it everywhere.
+5. **The same region is timed.** For every pattern the clock starts before the
+   concurrency units are created, so creation is measured everywhere or nowhere.
 6. **Report medians, with the spread.** A single run on a shared machine is not a
    measurement. On this hardware the thread-based languages vary by 20% run to
    run, which is wider than several of the gaps between them.
@@ -74,62 +75,90 @@ the call overhead. Erlang built a 1000-element list per leaf and summed it, and
 that cost it 2.7x: 4,017 ns per unit against 1,507 once the list was gone.
 Aether, Java and Scala already used an accumulator loop.
 
-All ten now use a plain accumulator loop over the subtree, so the sequential
+All eleven now use a plain accumulator loop over the subtree, so the sequential
 operation count is identical.
 
 ### Results
 
-Median of five runs each, three for Scala, 1,000,000 leaves, 1,111 units, on an
-8-core M1 Pro. Every implementation returns the correct sum, 499999500000.
+Median of five runs, three for Scala, 1,000,000 leaves, 1,111 units. Every
+implementation returns the correct sum, 499999500000.
 
 | Language | ns per concurrency unit | Range |
 |---|---:|---|
-| Go | 490 | 435-533 |
-| Aether | 516 | 402-558 |
-| Erlang | 990 | 919-1012 |
-| Elixir | 1,096 | 950-1124 |
-| C | 10,534 | 9369-11439 |
-| Zig | 11,700 | 11468-13004 |
-| C++ | 11,745 | 10459-12036 |
-| Rust | 12,386 | 11907-12517 |
-| Java | 13,968 | 10043-14498 |
-| Scala (Akka) | 38,322 | 35485-39661 |
+| Pony | 501 | 424-562 |
+| Go | 562 | 502-663 |
+| Aether | 594 | 417-676 |
+| Erlang | 1,034 | 944-1200 |
+| Elixir | 1,071 | 975-1204 |
+| Scala | 6,561 | 5565-8794 |
+| C | 9,230 | 8771-10087 |
+| Rust | 14,763 | 13276-22556 |
+| Zig | 15,272 | 14384-18666 |
+| Java | 15,892 | 11878-20299 |
+| C++ | 23,845 | 8666-36108 |
 
-Read that as two groups rather than ten positions. Go, Aether, Erlang and Elixir
-schedule their own units and pay roughly half a microsecond to a microsecond for
-one. C, Zig, C++, Rust and Java hand the work to the operating system or to a
-thread pool and pay ten to fourteen. Akka sits on its own.
+Read that as two groups, not eleven positions.
 
-**Go and Aether are indistinguishable on this pattern.** Their medians differ by
-5% and their ranges overlap almost entirely, so the suite does not show Aether
-ahead of Go here. Single runs earlier said Aether 471 against Go 799, which
-looked like a 1.7x win and was noise.
+Pony, Go, Aether, Erlang and Elixir schedule their own units and pay half a
+microsecond to one microsecond each. Scala, C, Rust, Zig, Java and C++ hand the
+work to an OS thread or a thread pool and pay six to twenty-four.
 
-### Scala uses Akka, which breaks rule 1
+**Within each group the ordering is not a result.** Pony, Go and Aether are 501,
+562 and 594 with ranges that overlap almost entirely, so the suite does not show
+any of them ahead of the others. The same applies to the thread-based group,
+where these figures were taken on a machine that was also running several other
+toolchains: C++ ranged from 8,666 to 36,108 across five runs, which is wider
+than its distance from C. Run them on a quiet machine before quoting any pair.
 
-All five Scala implementations import `akka.actor`, and `scala/build.sbt` pulls
-`akka-actor` 2.8.5. Akka is a third-party framework, so the Scala column is not
-measured on its standard library the way the other ten are. It is disclosed
-rather than hidden, the README names it, but it is not base-versus-base.
+An earlier pass reported single runs, which said Aether 471 against Go 799 and
+read as a 1.7x win for Aether. It was noise, and rule 6 exists because of it.
 
-Awkward, because `scala.actors` was removed in 2.13, so Scala's own library has
-no actor system: base Scala for this suite would mean `scala.concurrent` or
-`java.util.concurrent`, which is what the Java column already measures. Open in
-the issue tracker.
+### Scala depended on Akka, which broke rule 1
 
-### Pony implements three of five patterns
+All five Scala implementations imported `akka.actor`, and `scala/build.sbt`
+pulled `akka-actor` 2.8.5, so the Scala column measured a third-party framework
+while the other ten measured standard libraries.
 
-`pony/` contains `counting`, `fork_join` and `thread_ring`. There is no
-`ping_pong` and no `skynet`. The README claimed all eleven languages implement
-all five patterns with zero skips; the real figure is 53 of 55, and the runner
-would fail trying to compile the two missing directories.
+They now use `java.util.concurrent` from Scala: a bounded queue per mailbox for
+counting, ping-pong, thread-ring and fork-join, and `ForkJoinPool` for skynet,
+which is what the Java column uses. `build.sbt` has no dependencies at all.
 
-### Ping-pong times different regions
+This is the honest reading of base Scala for this suite. `scala.actors` was
+removed in 2.13, so the language's own library has no actor system, and
+`scala.concurrent.Channel` is deprecated. Dropping Akka made skynet **8x
+faster**, 38,322 ns per unit down to 4,869 on the run that measured both, which
+is itself a reason the column was misleading.
 
-Aether creates both actors before starting its timer. C, C++, Go and Rust start
-the timer first and create their threads inside the measured region. Two units
-against millions of messages puts this well under a percent, so it is not why
-any column wins, but it breaks rule 5 and the fix is to move two lines.
+### Pony implemented three of five patterns
+
+`pony/` had `counting`, `fork_join` and `thread_ring`, with no `ping_pong` and no
+`skynet`, so the README's claim of 55 benchmarks with zero skips was really 53
+and the runner would have failed on the two missing directories.
+
+Both are now written and building. Pony's skynet is the fastest of the eleven at
+501 ns per unit, which is worth having in the table: it is the other language
+here whose actors are part of the language rather than a library.
+
+### Git could not see Pony's benchmarks
+
+The two missing patterns were partly a tooling problem. `.gitignore` removes the
+compiled binaries with `benchmarks/cross-language/*/<pattern>`, and Pony compiles
+a directory rather than a file, so each of those patterns also matched a Pony
+source directory. A newly written Pony benchmark did not appear in `git status`
+at all. The three that existed were committed before the rule and stayed
+tracked, which is the only reason the gap looked like three of five rather than
+zero of five.
+
+Fixed in `.gitignore` by re-including `pony/*/` and ignoring its contents except
+`*.pony`, so the binaries stay out and any future benchmark is visible.
+
+### Ping-pong timed different regions
+
+Aether, Erlang and Elixir created their units before starting the clock; C, C++,
+Go, Rust, Zig, Java and Scala started the clock first. All eleven now start the
+clock first, so unit creation is inside the measured region everywhere. Two units
+against a million messages is well under a percent either way, but the rule is
+that the region matches, not that the error is small.
 
 ### Zig printed a malformed rate
 
@@ -145,12 +174,11 @@ from Zig and shows no error.
 ## Checking a change against these rules
 
 - **Unit counts.** Each skynet implementation prints `concurrency units: N`. All
-  ten must print the same N for the same leaf count.
+  eleven must print the same N for the same leaf count.
 - **Correctness.** Every implementation prints `Sum:`, which must be
   `499999500000` for 1,000,000 leaves. A wrong sum means work was skipped.
-- **Dependencies.** `rust/Cargo.toml` has an empty `[dependencies]`; the Go
-  files import only the standard library; `scala/build.sbt` is the one exception
-  and is described above.
+- **Dependencies.** `rust/Cargo.toml` and `scala/build.sbt` declare none, and
+  the Go files import only the standard library.
 - **Spread.** Run each at least five times. If the gap between two languages is
   smaller than either one's run-to-run range, the suite has not shown a
   difference between them.

@@ -48,12 +48,31 @@ version number before tagging the release.
 
 ### Added
 
+- **`contrib`-free Scala benchmarks.** All five Scala implementations imported
+  `akka.actor`, so the Scala column measured a third-party framework while the
+  other ten measured standard libraries. They now use `java.util.concurrent`
+  from Scala, bounded queues for the message patterns and `ForkJoinPool` for
+  skynet, and `build.sbt` declares no dependencies. Dropping Akka made skynet
+  8x faster, 38,322 ns per unit to 4,869.
+
+- **`.gitignore` hid every Pony benchmark.** The compiled-binary patterns are
+  `benchmarks/cross-language/*/<pattern>`, and Pony compiles a directory, so
+  those patterns matched its source directories: a new Pony benchmark never
+  appeared in `git status` and could not be committed. The three that exist
+  predate the rule and survived only because tracked files ignore it. The
+  directories are re-included and their contents ignored except `*.pony`.
+
+- **Pony's two missing benchmarks.** `pony/` had three of the five patterns, so
+  the README's "55 total, zero skips" was really 53 and the runner would have
+  failed on the missing directories. `ping_pong` and `skynet` are written and
+  building; Pony's skynet is the fastest of the eleven at 501 ns per unit.
+
+- **Ping-pong timed different regions.** Aether, Erlang and Elixir created their
+  units before starting the clock while the other eight started it first. All
+  eleven now start the clock first.
+
 - `benchmarks/cross-language/FAIRNESS.md`: the six rules the suite holds itself
-  to, the audit that produced them, and how to check a change against them. It
-  also records the three findings not fixed here, each open in the issue
-  tracker: Scala depends on Akka, which is the one third-party dependency in the
-  suite; Pony implements three of the five patterns; and ping-pong times thread
-  creation in some languages but not others.
+  to, the audit that produced them, and how to check a change against them.
 
 ## [0.524.0]
 

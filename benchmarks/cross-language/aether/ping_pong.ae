@@ -47,6 +47,8 @@ main() {
         total_messages = atoi(env_val);
     }
 
+    start_time = clock_ns();
+
     ping = spawn(PingActor());
     pong = spawn(PongActor());
 
@@ -54,7 +56,6 @@ main() {
     ping.target = total_messages;
     pong.ping_ref = ping;
 
-    start_time = clock_ns();
     pong ! Ping { count: 0 };
     wait_for_idle();
     end_time = clock_ns();

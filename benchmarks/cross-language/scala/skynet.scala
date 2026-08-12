@@ -1,105 +1,60 @@
 package bench.skynet
 
-// Scala Akka Skynet Benchmark
-// Based on https://github.com/atemerev/skynet
-// Recursive actor tree using Akka actors.
-// Below the sequential threshold, subtree sums are computed without spawning.
+import java.util.concurrent.{ForkJoinPool, RecursiveTask}
 
-import akka.actor.{Actor, ActorRef, ActorSystem, Props}
-import scala.concurrent.{Await, Promise}
-import scala.concurrent.duration._
-
-case class Compute(offset: Long, size: Long)
-case class SkynetResult(value: Long)
-
-// Shared by the actor and the reporting below. Same threshold as every other
-// language here.
-object SkynetNode {
+// Same threshold as every other language here; see FAIRNESS.md.
+object Leaf {
   val SeqThreshold = 1000L
-}
 
-class SkynetNode(parent: ActorRef) extends Actor {
-  var pending = 0
-  var total: Long = 0L
-  import SkynetNode.SeqThreshold
-
-  def receive = {
-    case Compute(offset, size) =>
-      if (size <= SeqThreshold) {
-        var sum = 0L
-        var i = 0L
-        while (i < size) {
-          sum += offset + i
-          i += 1
-        }
-        parent ! SkynetResult(sum)
-        context.stop(self)
-      } else {
-        val childSize = size / 10
-        val remainder = size - childSize * 10
-        pending = 10
-        var childOffset = offset
-        var idx = 0
-        while (idx < 10) {
-          val cs = childSize + (if (idx < remainder) 1 else 0)
-          val child = context.actorOf(Props(new SkynetNode(self)))
-          child ! Compute(childOffset, cs)
-          childOffset += cs
-          idx += 1
-        }
-      }
-
-    case SkynetResult(value) =>
-      total += value
-      pending -= 1
-      if (pending == 0) {
-        parent ! SkynetResult(total)
-        context.stop(self)
-      }
+  def sum(offset: Long, size: Long): Long = {
+    var acc = 0L
+    var i = 0L
+    while (i < size) { acc += offset + i; i += 1 }
+    acc
   }
 }
 
-class SkynetRoot(numLeaves: Long, promise: Promise[Long]) extends Actor {
-  def receive = {
-    case SkynetResult(value) =>
-      promise.success(value)
-      context.stop(self)
-  }
-
-  override def preStart(): Unit = {
-    val root = context.actorOf(Props(new SkynetNode(self)))
-    root ! Compute(0, numLeaves)
+final class SkynetTask(offset: Long, size: Long) extends RecursiveTask[Long] {
+  def compute(): Long = {
+    if (size <= Leaf.SeqThreshold) return Leaf.sum(offset, size)
+    val childSize = size / 10
+    val children = new Array[SkynetTask](10)
+    var i = 0
+    while (i < 10) {
+      children(i) = new SkynetTask(offset + i * childSize, childSize)
+      children(i).fork()
+      i += 1
+    }
+    var total = 0L
+    i = 9
+    while (i >= 0) { total += children(i).join(); i -= 1 }
+    total
   }
 }
 
-object SkynetBenchmark extends App {
-  val envVal = sys.env.getOrElse("BENCHMARK_MESSAGES", "1000000")
-  val numLeaves = envVal.toLong
+object SkynetBenchmark {
+  def main(args: Array[String]): Unit = {
+    val numLeaves = sys.env.getOrElse("BENCHMARK_MESSAGES", "1000000").toLong
 
-  // Total tree nodes (same formula as all languages for fair comparison)
-  // Units created; also the divisor. See FAIRNESS.md.
-  var totalNodes = 1L
-  var nn = numLeaves
-  while (nn > SkynetNode.SeqThreshold) { totalNodes += nn / SkynetNode.SeqThreshold; nn /= 10 }
+    // Units created; also the divisor. See FAIRNESS.md.
+    var units = 1L
+    var n = numLeaves
+    while (n > Leaf.SeqThreshold) { units += n / Leaf.SeqThreshold; n /= 10 }
 
-  val system = ActorSystem("skynet")
-  val promise = Promise[Long]()
+    println("=== Scala Skynet Benchmark ===")
+    println(s"Leaves: $numLeaves, concurrency units: $units (sequential below ${Leaf.SeqThreshold})")
+    println("Using java.util.concurrent.ForkJoinPool\n")
 
-  val start = System.nanoTime()
-  system.actorOf(Props(new SkynetRoot(numLeaves, promise)))
-  val result = Await.result(promise.future, 60.seconds)
-  val elapsed = System.nanoTime() - start
+    val start = System.nanoTime()
+    val pool = new ForkJoinPool()
+    val result = pool.invoke(new SkynetTask(0, numLeaves))
+    val elapsed = System.nanoTime() - start
 
-  println(s"Leaves: $numLeaves, concurrency units: $totalNodes (sequential below ${SkynetNode.SeqThreshold})")
-  println(s"Sum: $result")
+    println(s"Sum: $result")
+    val nsPerMsg = elapsed / units
+    val throughput = units.toDouble / elapsed * 1e9
 
-  if (elapsed > 0) {
-    val nsPerMsg = elapsed / totalNodes
-    val throughput = totalNodes.toDouble / elapsed * 1e9
     println(s"ns/msg:         $nsPerMsg")
     println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
   }
-
-  system.terminate()
-  Await.result(system.whenTerminated, 10.seconds)
 }

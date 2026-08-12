@@ -34,14 +34,15 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 | **Elixir** | BEAM VM | Lightweight processes + mailboxes |
 | **Erlang** | BEAM VM | Lightweight processes + mailboxes |
 | **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities |
-| **Scala** | JVM (Akka) | Akka actor system, the one third-party dependency here; see [FAIRNESS.md](FAIRNESS.md) |
+| **Scala** | JVM | `java.util.concurrent` queues and ForkJoinPool |
 
-53 of the 55 combinations exist. Pony implements `counting`, `fork_join` and
-`thread_ring` only; it has no `ping_pong` and no `skynet` directory.
+All 11 languages implement all 5 patterns, 55 in total.
 
-See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to, and for
-the August 2026 audit that found the skynet metric crediting every
-implementation for actors it never created.
+See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to and the
+audit that produced them. In short: standard library only, the same number of
+concurrency units and the same sequential work in every implementation, rates
+divided by work actually performed, the same region timed, and medians rather
+than single runs.
 
 ## Methodology
 

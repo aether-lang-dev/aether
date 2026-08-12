@@ -36,6 +36,14 @@ benchmarks/cross-language/*/fork_join
 benchmarks/cross-language/*/skynet
 benchmarks/cross-language/*/skynet_asan
 benchmarks/cross-language/*/skynet_noinline
+
+# Pony compiles a directory, not a file, so its benchmarks are pony/<name>/ and
+# the patterns above match those SOURCE DIRECTORIES: a new Pony benchmark is
+# invisible to git status and never gets committed. Re-include the directories,
+# then ignore their contents except the sources.
+!benchmarks/cross-language/pony/*/
+benchmarks/cross-language/pony/*/*
+!benchmarks/cross-language/pony/*/*.pony
 benchmarks/cross-language/*/*.exe
 benchmarks/cross-language/*/*.beam
 benchmarks/cross-language/*/*.class

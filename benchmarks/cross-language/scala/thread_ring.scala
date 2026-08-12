@@ -1,83 +1,51 @@
 package bench.thread_ring
 
-// Scala Akka Thread Ring Benchmark (Savina-style)
-import akka.actor.{Actor, ActorRef, ActorSystem, Props}
-import scala.concurrent.duration._
-import scala.concurrent.{Await, Promise}
+import java.util.concurrent.ArrayBlockingQueue
 
-case class SetNext(next: ActorRef)
-case class Token(hops: Int)
-case class RingDone(received: Int)
+// 100 threads in a ring, each passing the token to the next.
+object ThreadRingBenchmark {
+  def main(args: Array[String]): Unit = {
+    val messages = sys.env.getOrElse("BENCHMARK_MESSAGES", "1000000").toLong
+    val ringSize = 100
 
-class RingNodeActor(parent: ActorRef) extends Actor {
-  var next: ActorRef = null
-  var received = 0
+    println("=== Scala Thread Ring Benchmark ===")
+    println(s"Ring size: $ringSize, messages: $messages")
+    println("Using java.util.concurrent.ArrayBlockingQueue\n")
 
-  def receive = {
-    case SetNext(n) =>
-      next = n
-    case Token(0) =>
-      received += 1
-      parent ! RingDone(received)
-    case Token(hops) =>
-      received += 1
-      next ! Token(hops - 1)
-  }
-}
+    val queues = Array.fill(ringSize)(new ArrayBlockingQueue[java.lang.Long](1))
+    val threads = new Array[Thread](ringSize)
 
-class ParentActor(promise: Promise[Int], ringSize: Int, numHops: Int) extends Actor {
-  var nodes: Array[ActorRef] = null
+    val start = System.nanoTime()
 
-  override def preStart(): Unit = {
-    // Create ring nodes
-    nodes = Array.tabulate(ringSize)(i =>
-      context.actorOf(Props(classOf[RingNodeActor], self), s"node$i")
-    )
-
-    // Link them in a ring
-    for (i <- 0 until ringSize) {
-      nodes(i) ! SetNext(nodes((i + 1) % ringSize))
+    var id = 0
+    while (id < ringSize) {
+      val me = id
+      val next = (id + 1) % ringSize
+      threads(me) = new Thread(() => {
+        var running = true
+        while (running) {
+          val token = queues(me).take().longValue()
+          if (token <= 0) {
+            if (me != ringSize - 1) queues(next).put(java.lang.Long.valueOf(token))
+            running = false
+          } else {
+            queues(next).put(java.lang.Long.valueOf(token - 1))
+          }
+        }
+      })
+      threads(me).start()
+      id += 1
     }
 
-    // Inject token
-    nodes(0) ! Token(numHops)
+    queues(0).put(java.lang.Long.valueOf(messages))
+    var t = 0
+    while (t < ringSize) { threads(t).join(); t += 1 }
+
+    val elapsed = System.nanoTime() - start
+    val nsPerMsg = elapsed / messages
+    val throughput = messages.toDouble / elapsed * 1e9
+
+    println(s"ns/msg:         $nsPerMsg")
+    println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
   }
-
-  def receive = {
-    case RingDone(received) =>
-      promise.success(received)
-      context.system.terminate()
-  }
-}
-
-object ThreadRingBenchmark extends App {
-  val ringSize = 100
-  val numHops = sys.env.get("BENCHMARK_MESSAGES").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(100000)
-  println("=== Scala Akka Thread Ring Benchmark ===")
-  println(s"Ring size: $ringSize, Hops: $numHops\n")
-
-  val system = ActorSystem("ThreadRing")
-  val promise = Promise[Int]()
-
-  val startTime = System.nanoTime()
-
-  val parent = system.actorOf(Props(classOf[ParentActor], promise, ringSize, numHops))
-
-  val received = Await.result(promise.future, 120.seconds)
-  val endTime = System.nanoTime()
-
-  val elapsed = (endTime - startTime).toDouble / 1e9
-  val totalMessages = numHops + 1
-
-  if (received != totalMessages) {
-    println(s"VALIDATION FAILED: expected $totalMessages, got $received")
-  }
-
-  val throughput = totalMessages / elapsed / 1e6
-  val nsPerMsg = elapsed * 1e9 / totalMessages
-
-  println(f"ns/msg:         $nsPerMsg%.2f")
-  println(f"Throughput:     $throughput%.2f M msg/sec")
-
-  Await.result(system.whenTerminated, 10.seconds)
 }

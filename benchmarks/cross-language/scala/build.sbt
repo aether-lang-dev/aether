@@ -1,7 +1,5 @@
-name := "akka-benchmark"
+name := "scala-benchmark"
 version := "1.0"
 scalaVersion := "2.13.12"
 
-libraryDependencies ++= Seq(
-  "com.typesafe.akka" %% "akka-actor" % "2.8.5"
-)
+// No third-party dependencies: the suite compares standard libraries.
