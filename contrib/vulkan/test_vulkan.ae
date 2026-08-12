@@ -4,6 +4,7 @@
 // the same path a user's program takes on a machine without one. Where a
 // driver exists it renders on the GPU and checks the pixels.
 
+import std.bytes
 import std.fs
 import std.string
 import contrib.vulkan
@@ -177,6 +178,37 @@ main() {
 
     // ---- readback ------------------------------------------------------------
     failures = failures + check(vulkan.copy_rgba(target, 0, 16) != 0, "copy_rgba rejects a null destination")
+
+    need = vulkan.rgba_size(target)
+    buf = bytes.new(need)
+    failures = failures + check(buf != 0, "allocated a readback buffer")
+    if buf != 0 {
+        // A buffer one byte short must be refused outright rather than
+        // filled part-way, or a caller reads uninitialised tail bytes.
+        failures = failures + check(vulkan.copy_rgba(target, bytes.data(buf), need - 1) != 0,
+              "copy_rgba refuses a destination one byte short")
+
+        failures = failures + check_eq(vulkan.copy_rgba(target, bytes.data(buf), need), vulkan.OK,
+                 "copy_rgba into a big-enough buffer")
+        bytes.set_length(buf, need)
+
+        // The bytes it wrote must be the same pixels pixel() reports, or the
+        // two readback paths disagree about the same frame.
+        corner_px = vulkan.pixel(target, 0, 0)
+        failures = failures + check_eq(bytes.get(buf, 0), vulkan.red(corner_px), "copied byte 0 is the red channel")
+        failures = failures + check_eq(bytes.get(buf, 1), vulkan.green(corner_px), "copied byte 1 is the green channel")
+        failures = failures + check_eq(bytes.get(buf, 2), vulkan.blue(corner_px), "copied byte 2 is the blue channel")
+        failures = failures + check_eq(bytes.get(buf, 3), vulkan.alpha(corner_px), "copied byte 3 is alpha")
+
+        // And a pixel from the middle of the frame, so the check is not just
+        // reading the first row.
+        mid = vulkan.pixel(target, 32, 40)
+        off = (40 * 64 + 32) * 4
+        failures = failures + check_eq(bytes.get(buf, off), vulkan.red(mid), "an interior pixel matches too")
+        failures = failures + check_eq(bytes.get(buf, off + 3), vulkan.alpha(mid), "and its alpha")
+
+        bytes.free(buf)
+    }
 
     // ---- an empty draw is still a valid frame ---------------------------------
     bare = vulkan.target_create(dev, 8, 8)

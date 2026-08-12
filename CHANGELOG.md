@@ -41,6 +41,11 @@ version number before tagging the release.
   destroying null handles, and eight create/draw/destroy cycles. It skips
   cleanly where no driver is installed. `leaks -atExit` reports 0 leaks.
 
+  `tests/integration/contrib_vulkan_portability` cross-compiles the module for
+  Windows and asserts the object reaches `LoadLibraryA` rather than `dlopen`.
+  contrib-check runs on Linux only, so without it the `_WIN32` branch would be
+  shipped unbuilt by any leg.
+
   The Linux contrib CI leg now installs lavapipe, Mesa's CPU implementation, so
   the GPU path is exercised on a runner with no GPU, and then asserts the test
   did not skip: a driver is installed on that leg, so a skip would be silent
