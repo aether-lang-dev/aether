@@ -3,6 +3,10 @@
 #include <string.h>
 #include "typechecker.h"
 #include "type_inference.h"
+#include "actor_reply.h"
+
+/* Defined with typecheck_program below; infer_type needs it far earlier. */
+static ASTNode* aether_typecheck_program_node(void);
 #include "../parser/lexer.h"
 #include "../parser/parser.h"
 #include "../aether_error.h"
@@ -1333,6 +1337,33 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 return clone_type(expr->node_type);
             return create_optional_type(create_type(TYPE_UNKNOWN));
 
+        case AST_SEND_ASK: {
+            /* `actor ? Request {}` yields whatever the handler replies. The
+             * reply message's first field, or the type of a bare `reply
+             * <expr>`, resolved from the actor that answers this request.
+             * Unresolvable (no such handler, no reply, a reply whose own
+             * type is unknown) stays TYPE_UNKNOWN, which is what it was for
+             * every ask before this. */
+            if (expr->child_count >= 2 && expr->children[1] &&
+                expr->children[1]->value) {
+                Type* reply = aether_reply_type(aether_typecheck_program_node(),
+                                                expr->children[1]->value);
+                if (reply) {
+                    /* Stamp the node too. Codegen reads node_type to decide
+                     * whether the value the asker receives is an owned heap
+                     * string it must reclaim; a type that exists only as
+                     * this return value would leave every string reply
+                     * leaking one deep copy per ask. */
+                    if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
+                        if (expr->node_type) free_type(expr->node_type);
+                        expr->node_type = clone_type(reply);
+                    }
+                    return clone_type(reply);
+                }
+            }
+            return create_type(TYPE_UNKNOWN);
+        }
+
         case AST_NULL_COALESCE: {
             // `x ?? d` yields the value type:
             //   - optional `T?`     -> inner T
@@ -2596,8 +2627,17 @@ static Type* c_struct_field_decl_type(const char* sname, const char* field) {
 }
 
 // Type checking functions
+/* The program being checked, so infer_type can resolve an ask's reply type
+ * from the actor that answers it. infer_type takes only an expression and a
+ * symbol table, and threading a program through every one of its call sites
+ * would touch far more than the one case that needs it. */
+static ASTNode* g_typecheck_program = NULL;
+
+static ASTNode* aether_typecheck_program_node(void) { return g_typecheck_program; }
+
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
+    g_typecheck_program = program;
 
     error_count = 0;
     warning_count = 0;

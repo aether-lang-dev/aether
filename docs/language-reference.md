@@ -2001,14 +2001,40 @@ counter ! Reset {};
 ### Ask Pattern (Request-Reply)
 
 The `?` operator sends a message and blocks until the actor replies. The compiler
-infers the reply type from the actor's receive handler and extracts the first field
-of the reply message automatically. Multiple concurrent asks to the same actor are
-supported, each message carries its own reply slot.
+infers the reply type from the actor's receive handler, so the result is typed
+without an annotation. Multiple concurrent asks to the same actor are supported,
+each message carries its own reply slot.
 
 ```aether
 // Synchronous request-reply, result is an int (from Result.value)
 result = calculator ? Add { a: 5, b: 3 };
 ```
+
+A handler replies in one of two ways, and the ask takes its type from whichever
+it used:
+
+```aether
+message GetName {}
+message GetSize {}
+message SizeReply { bytes: int }
+
+actor Store {
+    state name = "primary"
+    receive {
+        GetName() -> { reply name }                    // bare expression
+        GetSize() -> { reply SizeReply { bytes: 4096 } }  // reply message
+    }
+}
+
+label = store ? GetName {}   // string, from the replied expression
+size  = store ? GetSize {}   // int, from the reply message's first field
+```
+
+A reply message hands back its **first declared field**, so put the value there.
+A string reply is deep-copied before it crosses back, so the asker's copy
+outlives the handler's own scope, and the asker owns it: it is reclaimed at
+scope exit like any other owned string, and freeing it by hand is not
+required.
 
 If the handler does not call `reply` within the timeout (default 5 seconds), `?`
 returns 0.

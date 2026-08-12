@@ -3861,6 +3861,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         "%s = NULL; _heap_%s = 0; } })",
                         arg->value, arg->value, arg->value, arg->value);
                 }
+                // string.free(X) frees what the runtime cannot: given a
+                // plain malloc'd payload, string_release cannot tell a heap
+                // buffer from a static literal, so it no-ops and the value
+                // leaks. An owned value goes through the shape-aware free
+                // and clears the flag, so scope exit cannot free it twice.
+                // The else keeps the runtime call for values the flag does
+                // not cover, which is what a magic AetherString arriving
+                // unflagged needs (string.from_double returns one).
+                else if ((strcmp(func_name, "string_free") == 0 ||
+                          strcmp(func_name, "string.free") == 0) &&
+                         expr->child_count == 1 &&
+                         expr->children[0]->type == AST_IDENTIFIER &&
+                         expr->children[0]->value &&
+                         is_heap_string_var(gen, expr->children[0]->value)) {
+                    ASTNode* arg = expr->children[0];
+                    fprintf(gen->output,
+                        "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
+                        "%s = NULL; _heap_%s = 0; } else { string_free(%s); } })",
+                        arg->value, arg->value, arg->value, arg->value, arg->value);
+                }
                 // string.seq_free(seq) — explicit refcount-decrement on a
                 // *StringSeq. For a tracked seq local, clear the ownership
                 // flag and NULL the slot so the scope-exit defer-free does

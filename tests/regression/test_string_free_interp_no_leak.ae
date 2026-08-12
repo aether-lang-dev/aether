@@ -1,0 +1,91 @@
+// Regression: `string.free(s)` on an interpolated string must reclaim it,
+// and a helper that frees its argument must not leave the caller freeing it
+// again.
+//
+// An Aether `string` is either a refcounted AetherString or a plain malloc'd
+// payload, and the runtime cannot free the second: given a bare char* it
+// cannot tell a heap payload from a static literal, so it no-ops. The
+// compiler knows, through the per-variable ownership flag, and lowers the
+// free through the shape-aware path. `string_free` was not routed that way,
+// so freeing an interpolation leaked it, while NOT freeing was correct
+// because scope exit reclaimed it.
+//
+// Routing it correctly needs the tracker to survive the call, and that is
+// where the two questions the escape walker asks come apart:
+//
+//   at the caller's own call site, `string.free(local)` must NOT count as an
+//   escape, or the tracker is withheld and the value leaks;
+//
+//   inside a callee's body, the same call on a PARAMETER must count as one,
+//   because that function has consumed what it was handed and the caller must
+//   not free it again.
+//
+// Answering the second question the same way as the first makes every caller
+// of a `free_it(s) { string.free(s) }` helper double-free, which is a crash
+// on glibc and a corrupt heap elsewhere. Both directions are pinned here.
+//
+// One shape is deliberately absent: handing a PLAIN-payload string (an
+// interpolation) to such a helper still leaks, because inside the helper the
+// parameter carries no ownership flag and the runtime free cannot tell a heap
+// payload from a literal. That is unchanged from before this fix, measured at
+// the same 100 leaks on either side, and needs per-parameter ownership rather
+// than anything here.
+
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// Takes ownership: the caller must not free after this returns.
+free_it(s: string) {
+    string.free(s)
+}
+
+main() {
+    println("=== test_string_free_interp_no_leak ===")
+
+    // 1. Interpolation is a plain malloc'd payload. One leaked block per
+    //    iteration is what this used to cost.
+    n = 0
+    while n < 200 {
+        s = "iteration ${n} of the loop"
+        if string.contains(s, "of the loop") != 1 { fail("interpolation wrong") }
+        string.free(s)
+        n = n + 1
+    }
+    println("  PASS interpolated strings are reclaimed")
+
+    // 2. A concat is the refcounted shape, freed through the same call.
+    n = 0
+    while n < 200 {
+        c = string.concat("prefix-", "suffix")
+        if string.equals(c, "prefix-suffix") != 1 { fail("concat wrong") }
+        string.free(c)
+        n = n + 1
+    }
+    println("  PASS concatenated strings are reclaimed")
+
+    // 3. Handing ownership to a helper that frees. The caller must not free
+    //    again at scope exit: on glibc a double free aborts, and the macOS
+    //    leaks gate would see the count either way.
+    n = 0
+    while n < 200 {
+        owned = string.concat("row-", "value")
+        free_it(owned)
+        n = n + 1
+    }
+    println("  PASS a consuming helper leaves nothing for the caller to free")
+
+    // 4. Freeing a variable that holds a literal must not reach free() on
+    //    static storage.
+    lit = "static text"
+    string.free(lit)
+    if string.equals(lit, "static text") != 1 { fail("literal damaged") }
+    println("  PASS freeing a literal-holding variable is safe")
+
+    println("=== test_string_free_interp_no_leak passed ===")
+}
