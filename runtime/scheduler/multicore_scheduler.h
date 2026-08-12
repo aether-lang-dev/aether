@@ -145,6 +145,15 @@ typedef struct {
 
     AdaptiveBatchState batch_state;   // Adaptive batching (small, embedded)
 
+    // Idle park (#1517). A core with no work and nothing registered with the
+    // poller sleeps here instead of spinning. The sleeper sets `parked` and
+    // then re-checks its queues, so a producer that reads parked==0 has
+    // already made its message visible to that check. The wait is timed as
+    // well, so a path that never signals costs latency, never a hang.
+    pthread_mutex_t park_mutex;
+    pthread_cond_t  park_cond;
+    atomic_int      parked;
+
     // Per-core I/O event loop (platform-agnostic: epoll/kqueue/poll)
     AetherIoPoller io_poller;         // Platform I/O poller instance
     AetherIoEntry* io_map;            // fd → actor mapping (heap-allocated, grows on demand)
