@@ -20,19 +20,15 @@ defmodule Skynet do
   end
 
   # Total actors = sum of nodes at each level
-  # Concurrency units actually created; also the divisor, since every language
-  # in this suite creates the same count. It used to sum every level of the
-  # tree, 1,111,111 for a million leaves, which is what BEAM really spawned
-  # while the thread-based languages spawned 1,111 and were scored the same way.
+  # Units created; also the divisor. See FAIRNESS.md.
   @seq_threshold 1000
   defp total_actors(n) when n <= @seq_threshold, do: 1
   defp total_actors(n), do: div(n, @seq_threshold) + total_actors(div(n, 10))
 
   # Leaf: send offset to parent. Internal: spawn 10 children, collect, sum, report up.
-  # Same threshold as every other language in this suite: below it the subtree
-  # is summed in this process rather than spawning more.
+  # Same threshold as every other language here.
   def skynet_node(offset, size, parent) when size <= @seq_threshold do
-    send(parent, Enum.reduce(0..(size - 1), 0, fn i, acc -> acc + offset + i end))
+    send(parent, seq_sum(offset, size, 0))
   end
 
   def skynet_node(offset, size, parent) do
@@ -44,6 +40,9 @@ defmodule Skynet do
     sum = collect(10, 0)
     send(parent, sum)
   end
+
+  defp seq_sum(_offset, 0, acc), do: acc
+  defp seq_sum(offset, n, acc), do: seq_sum(offset, n - 1, acc + offset + n - 1)
 
   defp collect(0, acc), do: acc
   defp collect(n, acc) do

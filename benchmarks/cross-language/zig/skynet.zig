@@ -20,12 +20,10 @@ fn getLeaves() i64 {
 }
 
 fn skynetSeq(offset: i64, size: i64) i64 {
-    if (size == 1) return offset;
-    const child_size = @divTrunc(size, 10);
     var sum: i64 = 0;
     var i: i64 = 0;
-    while (i < 10) : (i += 1) {
-        sum += skynetSeq(offset + i * child_size, child_size);
+    while (i < size) : (i += 1) {
+        sum += offset + i;
     }
     return sum;
 }
@@ -81,8 +79,7 @@ fn getTimeNs() u64 {
 pub fn main() !void {
     const num_leaves = getLeaves();
 
-    // Concurrency units actually created; also the divisor, since every language
-    // in this suite creates the same count.
+    // Units created; also the divisor. See FAIRNESS.md.
     var total_actors: i64 = 1;
     var n = num_leaves;
     while (n > SEQ_THRESHOLD) : (n = @divTrunc(n, 10)) {
@@ -105,9 +102,8 @@ pub fn main() !void {
     print("Sum: {}\n", .{root.result});
     if (elapsed_us > 0) {
         const ns_per_msg = @divTrunc(elapsed_ns, total_actors);
-        // Float, like the other four Zig benchmarks. The manual
-        // integer-and-fraction version printed "0.+4" for any rate below
-        // 1 M/sec, which the runner's parser reads as garbage.
+        // Float, like the other four Zig benchmarks: the integer-and-fraction
+        // version printed "0.+4" for rates below 1 M/sec.
         const throughput = @as(f64, @floatFromInt(total_actors)) /
             (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0) / 1_000_000.0;
         print("ns/msg:         {}\n", .{ns_per_msg});

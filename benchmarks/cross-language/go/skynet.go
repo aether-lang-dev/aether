@@ -27,26 +27,19 @@ func getLeaves() int64 {
 
 // skynetNode sends its subtree sum to the result channel.
 // Leaves send their offset directly; internal nodes spawn 10 children and sum.
-// seqSum sums a subtree on the current goroutine, no further spawning.
+// seqSum sums a subtree on the current goroutine.
 const seqThreshold int64 = 1000
 
 func seqSum(offset, size int64) int64 {
-	if size == 1 {
-		return offset
-	}
-	childSize := size / 10
 	var sum int64
-	for i := int64(0); i < 10; i++ {
-		sum += seqSum(offset+i*childSize, childSize)
+	for i := int64(0); i < size; i++ {
+		sum += offset + i
 	}
 	return sum
 }
 
 func skynetNode(result chan<- int64, offset, size int64) {
-	// Same threshold as every other language in this suite. Go could spawn all
-	// 1,111,111 goroutines and used to, but then it did a thousand times the
-	// concurrency work of the pthread implementations while being scored on the
-	// same divisor, which is why it came last on a benchmark it should win.
+	// Same threshold as every other language here. See FAIRNESS.md.
 	if size <= seqThreshold {
 		result <- seqSum(offset, size)
 		return
@@ -66,14 +59,11 @@ func skynetNode(result chan<- int64, offset, size int64) {
 func main() {
 	numLeaves := getLeaves()
 
-	// Concurrency units actually created; reported, never used as a divisor.
+	// Units created; also the divisor. See FAIRNESS.md.
 	totalActors := int64(1)
 	for n := numLeaves; n > seqThreshold; n /= 10 {
 		totalActors += n / seqThreshold
 	}
-	// Divide by the units created, not the tree's node count. Every language in
-	// this suite now uses the same threshold, so the counts are equal and a
-	// per-unit cost is directly comparable.
 	rateBase := totalActors
 
 	fmt.Println("=== Go Skynet Benchmark ===")

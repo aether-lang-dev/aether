@@ -16,19 +16,14 @@
 #include <cstring>
 #include <array>
 
-// Sequential below SEQ_THRESHOLD. The same threshold in every language in this
-// suite, so all of them create the same 1,111 concurrency units and perform the
-// same leaf additions. The divisor is that unit count, not the tree's 1,111,111
-// nodes: dividing by nodes nobody created scored the implementations that
-// created fewest the highest.
+// Same threshold in every language here; divisor is the unit count, not the
+// tree's nodes. See FAIRNESS.md.
 static const long long SEQ_THRESHOLD = 1000;
 
 static long long skynet_seq(long long offset, long long size) {
-    if (size == 1) return offset;
-    long long child_size = size / 10;
     long long sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += skynet_seq(offset + (long long)i * child_size, child_size);
+    for (long long i = 0; i < size; i++) {
+        sum += offset + i;
     }
     return sum;
 }
@@ -85,8 +80,7 @@ static long long get_leaves() {
 int main() {
     long long num_leaves = get_leaves();
 
-    // Concurrency units actually created; also the divisor, since every language
-    // in this suite creates the same count.
+    // Units created; also the divisor. See FAIRNESS.md.
     long long total_actors = 1;
     for (long long n = num_leaves; n > SEQ_THRESHOLD; n /= 10) {
         total_actors += n / SEQ_THRESHOLD;

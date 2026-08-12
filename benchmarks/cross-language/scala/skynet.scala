@@ -12,8 +12,8 @@ import scala.concurrent.duration._
 case class Compute(offset: Long, size: Long)
 case class SkynetResult(value: Long)
 
-// One definition, shared by the actor and the reporting below: the same
-// threshold every language in this suite uses, so all create 1,111 units.
+// Shared by the actor and the reporting below. Same threshold as every other
+// language here.
 object SkynetNode {
   val SeqThreshold = 1000L
 }
@@ -77,8 +77,7 @@ object SkynetBenchmark extends App {
   val numLeaves = envVal.toLong
 
   // Total tree nodes (same formula as all languages for fair comparison)
-  // Concurrency units actually created; also the divisor, since every language
-  // in this suite creates the same count.
+  // Units created; also the divisor. See FAIRNESS.md.
   var totalNodes = 1L
   var nn = numLeaves
   while (nn > SkynetNode.SeqThreshold) { totalNodes += nn / SkynetNode.SeqThreshold; nn /= 10 }

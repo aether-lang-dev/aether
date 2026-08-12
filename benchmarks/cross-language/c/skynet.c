@@ -13,17 +13,14 @@
 #include <string.h>
 #include <time.h>
 
-/* Sequential below SEQ_THRESHOLD. Same threshold in every language in this
- * suite, so all of them create the same 1,111 concurrency units and perform the
- * same 1,000,000 leaf additions. */
+/* Same threshold in every language here, so all create 1,111 units for a
+ * million leaves. See FAIRNESS.md. */
 #define SEQ_THRESHOLD 1000
 
 static long long skynet_seq(long long offset, long long size) {
-    if (size == 1) return offset;
-    long long child_size = size / 10;
     long long sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += skynet_seq(offset + (long long)i * child_size, child_size);
+    for (long long i = 0; i < size; i++) {
+        sum += offset + i;
     }
     return sum;
 }
@@ -78,17 +75,7 @@ static long long get_leaves(void) {
 int main(void) {
     long long num_leaves = get_leaves();
 
-    /* Divide by the concurrency units created, not by the tree's node count.
-     *
-     * Every language in this suite now uses the same SEQ_THRESHOLD, so every
-     * one creates the same 1,111 units and performs the same num_leaves leaf
-     * additions. A per-unit cost is therefore directly comparable, and it is
-     * what skynet is for: the price of creating a unit, passing its result up
-     * and aggregating.
-     *
-     * It used to divide by the full 1,111,111-node tree while creating between
-     * 1,111 and 1,111,111 units depending on the language, so whichever
-     * implementation created the fewest scored highest. */
+    /* Divide by units created, not the tree's node count. See FAIRNESS.md. */
     long long total_actors = 1;
     for (long long n = num_leaves; n > SEQ_THRESHOLD; n /= 10) {
         total_actors += n / SEQ_THRESHOLD;

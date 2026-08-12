@@ -20,24 +20,27 @@ version number before tagging the release.
   scored highest. Go spawned 1,111,111 goroutines and reported 3.66 M msg/sec;
   C spawned 1,111 pthreads and reported 72.02; Aether spawned 11,111 actors and
   reported 225.05. Every implementation now goes sequential below a subtree of
-  1000, so all create the same 1,111 units and perform the same 1,000,000 leaf
-  additions, and each divides by the count it actually created. Verified by
-  running all ten skynet implementations, each returning the correct sum.
+  1000, so all create the same 1,111 units, each divides by the count it created,
+  and each prints that count so the invariant is checkable.
 
   1,111,111 is not the number to equalise on: a pthread is not a goroutine, and
   this machine refuses the 4,096th concurrent pthread.
 
-  The corrected ordering, in nanoseconds per concurrency unit: Aether 471,
-  Go 799, Elixir 1,194, Erlang 4,017, Java 9,249, Zig 14,410, Rust 14,537,
-  C 15,084, C++ 20,214, Scala 33,252. That is a far more modest claim for Aether
-  than the 61x margin over Go the broken metric produced, and it reflects
-  something real: creating a unit of concurrency costs about 15 microseconds
-  when it is an OS thread and under a microsecond when the runtime schedules it.
+- **The sequential half of skynet was not equal either.** C, C++, Go, Rust and
+  Zig summed a leaf subtree by recursing 10-ary to size 1; Erlang built a
+  1000-element list per leaf, which cost it 2.7x. All ten now use a plain
+  accumulator loop, so the non-concurrent operation count matches.
+
+  Corrected results, median of five runs, 1,111 units each, every one returning
+  the correct sum: Go 490 ns per unit, Aether 516, Erlang 990, Elixir 1,096,
+  C 10,534, Zig 11,700, C++ 11,745, Rust 12,386, Java 13,968, Scala 38,322.
+  Go and Aether are indistinguishable, their ranges overlap almost entirely, and
+  the suite should not be read as showing Aether ahead of Go on this pattern.
 
 - `zig/skynet.zig` printed `0.+4 M msg/sec` for any rate below 1 M/sec, which
   the runner's parser reads as garbage. It assembled the rate from an integer
   and a fraction; the other four Zig benchmarks already used a float and
-  `{d:.2}`, and skynet now does too.
+  `{d:.2}`.
 
 - The benchmark README claimed "All 11 languages implement all 5 patterns
   (55 total benchmarks, zero skips)". Pony has three: no `ping_pong`, no
@@ -45,10 +48,12 @@ version number before tagging the release.
 
 ### Added
 
-- `benchmarks/cross-language/FAIRNESS.md`: the five rules the suite holds itself
-  to, and the audit that produced them, including the two findings not fixed
-  here (Scala's Akka dependency, and ping-pong timing different regions in
-  different languages) with issue links.
+- `benchmarks/cross-language/FAIRNESS.md`: the six rules the suite holds itself
+  to, the audit that produced them, and how to check a change against them. It
+  also records the three findings not fixed here, each open in the issue
+  tracker: Scala depends on Akka, which is the one third-party dependency in the
+  suite; Pony implements three of the five patterns; and ping-pong times thread
+  creation in some languages but not others.
 
 ## [0.524.0]
 

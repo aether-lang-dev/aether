@@ -7,13 +7,7 @@
 // This matches the approach used by C, Go, Rust, and other
 // high-performance implementations.
 //
-// Default: 1,000,000 leaves, threshold 1000 -> 1,111 actors.
-//
-// The threshold is the same in every language in this suite, so every
-// implementation creates the same 1,111 concurrency units and performs the
-// same 1,000,000 leaf additions. 1.1M units is only reachable by runtimes with
-// green threads; this machine caps pthreads at 4,095, so equalising at 1,111 is
-// what makes the comparison mean anything.
+// Default: 1,000,000 leaves, threshold 1000 -> 1,111 actors. See FAIRNESS.md.
 
 // Setup tells a node its own actor ref so it can pass itself as parent to children.
 message Setup { self_ref: ptr }
@@ -93,17 +87,7 @@ main() {
         num_leaves = atoi(env_val);
     }
 
-    // Divide by the concurrency units created, not by the tree's node count.
-    //
-    // Every language in this suite now uses the same threshold, so every one
-    // creates the same 1,111 units and performs the same num_leaves leaf
-    // additions. A per-unit cost is therefore directly comparable, and it is
-    // what skynet is for: the price of creating a unit, passing its result up
-    // and aggregating.
-    //
-    // It used to divide by the full 1,111,111-node tree while creating between
-    // 1,111 and 1,111,111 units depending on the language, so whichever
-    // implementation created the fewest scored highest.
+    // Divide by units created, not the tree's node count. See FAIRNESS.md.
     long actor_count = 1;
     long n = num_leaves;
     while (n > 1000) {

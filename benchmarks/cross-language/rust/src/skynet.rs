@@ -21,21 +21,14 @@ fn get_leaves() -> i64 {
     1_000_000
 }
 
-// Sequential below SEQ_THRESHOLD. The same threshold in every language in this
-// suite, so all of them create the same 1,111 concurrency units and perform the
-// same leaf additions. The divisor is that unit count, not the tree's 1,111,111
-// nodes: dividing by nodes nobody created scored the implementations that
-// created fewest the highest.
+// Same threshold in every language here; divisor is the unit count, not the
+// tree's nodes. See FAIRNESS.md.
 const SEQ_THRESHOLD: i64 = 1000;
 
 fn skynet_seq(offset: i64, size: i64) -> i64 {
-    if size == 1 {
-        return offset;
-    }
-    let child_size = size / 10;
     let mut sum = 0i64;
-    for i in 0..10i64 {
-        sum += skynet_seq(offset + i * child_size, child_size);
+    for i in 0..size {
+        sum += offset + i;
     }
     sum
 }
@@ -64,8 +57,7 @@ fn skynet(tx: Sender<i64>, offset: i64, size: i64, depth: usize) {
 fn main() {
     let num_leaves = get_leaves();
 
-    // Concurrency units actually created; also the divisor, since every language
-    // in this suite creates the same count.
+    // Units created; also the divisor. See FAIRNESS.md.
     let mut total_actors = 1i64;
     let mut n = num_leaves;
     while n > SEQ_THRESHOLD {

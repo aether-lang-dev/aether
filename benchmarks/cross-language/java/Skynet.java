@@ -55,9 +55,7 @@ public class Skynet {
         String env = System.getenv("BENCHMARK_MESSAGES");
         long numLeaves = env != null ? Long.parseLong(env) : 1000000;
 
-        // Concurrency units actually created; also the divisor, since every
-        // language in this suite creates the same count. It used to divide by
-        // the whole 1,111,111-node tree while creating 11,111 tasks.
+        // Units created; also the divisor. See FAIRNESS.md.
         long totalNodes = 1;
         for (long n = numLeaves; n > SEQ_THRESHOLD; n /= 10) totalNodes += n / SEQ_THRESHOLD;
 

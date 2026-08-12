@@ -15,20 +15,16 @@ get_leaves() ->
         Val -> list_to_integer(Val)
     end.
 
-%% Concurrency units actually created; also the divisor, since every language in
-%% this suite creates the same count. It used to sum every level of the tree,
-%% 1,111,111 for a million leaves, which is what BEAM really spawned while the
-%% thread-based languages spawned 1,111 and were scored on the same divisor.
+%% Units created; also the divisor. See FAIRNESS.md.
 -define(SEQ_THRESHOLD, 1000).
 total_actors(N) when N =< ?SEQ_THRESHOLD -> 1;
 total_actors(N) -> (N div ?SEQ_THRESHOLD) + total_actors(N div 10).
 
 %% Each node spawns 10 children or reports its offset (leaf).
 %% Results bubble up via message passing.
-%% Same threshold as every other language in this suite: below it the subtree is
-%% summed in this process rather than spawning more.
+%% Same threshold as every other language here.
 skynet_node(Offset, Size, Parent) when Size =< ?SEQ_THRESHOLD ->
-    Parent ! lists:sum([Offset + I || I <- lists:seq(0, Size - 1)]);
+    Parent ! seq_sum(Offset, Size, 0);
 skynet_node(Offset, Size, Parent) ->
     ChildSize = Size div 10,
     Self = self(),
@@ -39,6 +35,9 @@ skynet_node(Offset, Size, Parent) ->
     end, lists:seq(0, 9)),
     Sum = collect(10, 0),
     Parent ! Sum.
+
+seq_sum(_Offset, 0, Acc) -> Acc;
+seq_sum(Offset, N, Acc) -> seq_sum(Offset, N - 1, Acc + Offset + N - 1).
 
 collect(0, Acc) -> Acc;
 collect(N, Acc) ->
