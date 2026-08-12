@@ -56,6 +56,6 @@ main() {
     println("Open http://localhost:8080/ or: curl -N http://localhost:8082/sse/events")
 
     result = tinyweb.tw_start(server)
-    if result != 0 { println("ERROR: Failed to start server") }
+    if result != "" { println("ERROR: Failed to start server: ${result}") }
     tinyweb.tw_stop(server)
 }

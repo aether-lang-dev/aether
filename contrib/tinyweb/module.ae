@@ -931,7 +931,7 @@ fn filter_applies(fmethod: int, fpat: string, rmethod: int, rpath: string) -> in
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
-tw_start(srv: ptr) {
+tw_start(srv: ptr) -> string {
     port, _ = map.get(srv, "port")
     host, _ = map.get(srv, "host")
     raw = http.server_create(port)
@@ -939,8 +939,7 @@ tw_start(srv: ptr) {
     // server_bind returns "" on success, an error message otherwise.
     bind_err = http.server_bind(raw, host, port)
     if bind_err != "" {
-        println("ERROR: Failed to bind to ${host}:${port}: ${bind_err}")
-        return -1
+        return "failed to bind ${host}:${port}: ${bind_err}"
     }
 
     // Register all routes with the C server

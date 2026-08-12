@@ -1,0 +1,64 @@
+// #1516: string.char_at must report a byte as 0..255.
+//
+// It returned a signed `char`, so 0x85 came back as -123. Every binary parser
+// written against it broke on bytes above 0x7F: contrib/tinyweb read a masked
+// WebSocket header, computed a negative payload length, and dropped the
+// connection instead of echoing the frame. The C definition also disagreed
+// with both the prototype codegen emits and the stdlib extern, which declare
+// int; only the implementation said char.
+
+import std.io
+import std.bytes
+import std.string
+
+check(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} (${got})")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    println("=== char_at on bytes above 0x7F (#1516) ===")
+    failures = 0
+
+    b = bytes.new(8)
+    bytes.set(b, 0, 0)
+    bytes.set(b, 1, 65)
+    bytes.set(b, 2, 127)
+    bytes.set(b, 3, 128)
+    bytes.set(b, 4, 129)
+    bytes.set(b, 5, 133)
+    bytes.set(b, 6, 254)
+    bytes.set(b, 7, 255)
+    s = bytes.finish(b, 8)
+
+    failures = failures + check(string.char_at(s, 1), 65, "ASCII is unchanged")
+    failures = failures + check(string.char_at(s, 2), 127, "the last positive byte")
+    failures = failures + check(string.char_at(s, 3), 128, "the first high byte")
+    failures = failures + check(string.char_at(s, 4), 129, "0x81, a WebSocket FIN+text header")
+    failures = failures + check(string.char_at(s, 5), 133, "0x85, masked length 5")
+    failures = failures + check(string.char_at(s, 6), 254, "0xFE")
+    failures = failures + check(string.char_at(s, 7), 255, "0xFF")
+
+    // The length-aware sibling shares the implementation and the bug.
+    failures = failures + check(string.char_at_n(s, 8, 4), 129, "char_at_n agrees on 0x81")
+    failures = failures + check(string.char_at_n(s, 8, 7), 255, "char_at_n agrees on 0xFF")
+
+    // The arithmetic tinyweb does on a frame header, which is what a negative
+    // byte broke: mask bit set, payload length 5.
+    b1 = string.char_at(s, 5)
+    masked = b1 / 128
+    plen = b1 - (masked * 128)
+    failures = failures + check(masked, 1, "mask bit reads as set")
+    failures = failures + check(plen, 5, "payload length reads as 5")
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+    }
+}

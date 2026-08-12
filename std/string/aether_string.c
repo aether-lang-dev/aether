@@ -177,10 +177,15 @@ int string_length(const void* str) {
     return (int)str_len(str);
 }
 
-char string_char_at(const void* str, int index) {
+int string_char_at(const void* str, int index) {
     size_t len = str_len(str);
-    if (!str || index < 0 || index >= (int)len) return '\0';
-    return str_data(str)[index];
+    if (!str || index < 0 || index >= (int)len) return 0;
+    /* Unsigned: a byte >= 0x80 used to come back sign-extended, so 0x85 read
+     * as -123 and every binary parser written against this silently broke on
+     * high bytes (#1516 found it through WebSocket framing). Returning int
+     * also matches what codegen emits for the prototype and what the stdlib
+     * extern declares; the old `char` return disagreed with both. */
+    return (int)(unsigned char)str_data(str)[index];
 }
 
 int string_equals(const void* a, const void* b) {
@@ -443,11 +448,11 @@ int string_length_n(const void* str, int known_length) {
  * NOT consult an AetherString header even if one is present. Same
  * miss-return convention as string_char_at ('\0' for out-of-range
  * and NULL input). */
-char string_char_at_n(const void* str, int known_length, int index) {
-    if (!str) return '\0';
-    if (known_length < 0) return '\0';
-    if (index < 0 || index >= known_length) return '\0';
-    return str_data(str)[index];
+int string_char_at_n(const void* str, int known_length, int index) {
+    if (!str) return 0;
+    if (known_length < 0) return 0;
+    if (index < 0 || index >= known_length) return 0;
+    return (int)(unsigned char)str_data(str)[index];
 }
 
 /* Length-aware index_of_from. Same motivation as string_char_at_n:

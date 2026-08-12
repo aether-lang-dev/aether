@@ -12,7 +12,7 @@ The benchmark suite compares Aether's actor implementation against C, C++, Go, R
 
 **Full documentation:** [benchmarks/cross-language/README.md](cross-language/README.md)
 
-**Concurrent cache designs:** [`concurrent-cache/concurrent_cache_bench.ae`](concurrent-cache/concurrent_cache_bench.ae) — single-owner-actor vs. sharded-actor-map vs. COW snapshot cell, across read/write workload mixes (see [`docs/concurrent-cache-benchmark.md`](../docs/concurrent-cache-benchmark.md)).
+**Concurrent cache designs:** [`concurrent-cache/concurrent_cache_bench.ae`](concurrent-cache/concurrent_cache_bench.ae): single-owner-actor vs. sharded-actor-map vs. COW snapshot cell, across read/write workload mixes (see [`docs/concurrent-cache-benchmark.md`](../docs/design/concurrent-cache-benchmark.md)).
 
 ## Directory Structure
 

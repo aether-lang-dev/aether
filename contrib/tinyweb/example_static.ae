@@ -42,6 +42,6 @@ main() {
     println("  http://localhost:8080/api/health    — JSON health check")
 
     result = tinyweb.tw_start(server)
-    if result != 0 { println("ERROR: Failed to start server") }
+    if result != "" { println("ERROR: Failed to start server: ${result}") }
     tinyweb.tw_stop(server)
 }

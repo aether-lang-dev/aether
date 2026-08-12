@@ -29,7 +29,7 @@ Functions are called using **namespace-style syntax**: `namespace.function()`
 | `import std.path` | `path` | `path.join("a", "b")`, `path.dirname("/a/b")` |
 | `import std.tar` | `tar` | `tar.reader_open("src.tar")`, `tar.extract("src.tar", "out", opts)` |
 | `import std.json` | `json` | `json.parse(str)`, `json.create_object()` |
-| `import std.cryptography` | `cryptography` | `cryptography.sha256_hex(data, n)`, `cryptography.base64_encode(data, n)` |
+| `import std.cryptography` | `cryptography` | `cryptography.sha256_hex(data, n)`, `cryptography.hash_hex(algo, data, n)` |
 | `import std.http` | `http` | `http.get(url)`, `http.server_create(port)` |
 | `import std.tcp` | `tcp` | `tcp.connect(host, port)`, `tcp.write(sock, data)` |
 | `import std.list` | `list` | `list.new()`, `list.add(l, item)` |
@@ -547,15 +547,18 @@ These are absent because no downstream user has driven the need yet. If you're s
 
 ## Cryptography Library
 
-Hash digests + Base64 codec. Built on OpenSSL's EVP API. When OpenSSL isn't linked, every wrapper returns `("", "openssl unavailable")` rather than crashing.
+Hash digests, built on OpenSSL's EVP API. When OpenSSL isn't linked, every
+wrapper returns `("", "openssl unavailable")` rather than crashing. Base64 is
+next door in `std.encoding`.
 
 ```aether
 import std.cryptography
+import std.encoding
 
 main() {
     digest, _ = cryptography.sha256_hex("abc", 3)
-    b64,    _ = cryptography.base64_encode("\x01\x02\x03", 3)
-    raw, n, _ = cryptography.base64_decode(b64)
+    b64     = encoding.base64_encode("\x01\x02\x03", 3)
+    raw, _  = encoding.base64_decode(b64)
 }
 ```
 
@@ -585,9 +588,12 @@ main() {
 
 ### Base64 (RFC 4648 §4 standard alphabet)
 
-- `cryptography.base64_encode(data, length)` → `(string, string)` - Encode `length` bytes, **unpadded** output.
-- `cryptography.base64_encode_padded(data, length)` → `(string, string)` - Encode `length` bytes, **with `=` padding** to a multiple of 4. For wire formats (auth headers, JSON-encoded blobs) that require padded output.
-- `cryptography.base64_decode(b64)` → `(string, int, string)` - Decode. Returns `(bytes, byte_count, "")` on success, `bytes` is an AetherString preserving embedded NULs. Accepts both padded and unpadded input.
+Base64 lives in `std.encoding`, not here; `std.cryptography` keeps only
+`random_base64`, which is crypto-random bytes rendered as base64.
+
+- `encoding.base64_encode(data, length)` → `string` - Encode `length` bytes, **unpadded** output.
+- `encoding.base64_encode_padded(data, length)` → `string` - Encode `length` bytes, **with `=` padding** to a multiple of 4. For wire formats (auth headers, JSON-encoded blobs) that require it.
+- `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. Accepts padded and unpadded input; `bytes` is an AetherString preserving embedded NULs.
 
 ### What's not in `std.cryptography`
 

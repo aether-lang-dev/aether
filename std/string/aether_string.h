@@ -69,7 +69,8 @@ void string_free(const void* str);  // Alias for release
 AetherString* string_concat(const void* a, const void* b);
 AetherString* string_concat_wrapped(const void* a, const void* b);
 int string_length(const void* str);
-char string_char_at(const void* str, int index);
+/* The byte at `index` as 0..255, or 0 when out of range. */
+int string_char_at(const void* str, int index);
 int string_equals(const void* a, const void* b);
 int string_compare(const void* a, const void* b);
 
@@ -115,7 +116,7 @@ int string_length_n(const void* str, int known_length);
  * string-length-aware-accessors.md after avn's 5000-commit bench
  * showed 87%+ of CPU in __strlen_avx2 driven by string_char_at on
  * a multi-KB body whose length the caller had already cached. */
-char string_char_at_n(const void* str, int known_length, int index);
+int string_char_at_n(const void* str, int known_length, int index);
 
 /* Length-aware sibling of string_index_of_from. Same motivation as
  * string_char_at_n — caller has already computed `known_length`

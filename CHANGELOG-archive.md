@@ -1,5 +1,9 @@
 # Changelog — archive (0.259.0 and older)
 
+> Paths under `contrib/aether_ui/` in the entries below no longer resolve.
+> The UI library outgrew this repo and moved to a sibling one; the entries
+> are left as written, since a changelog is a record of what happened.
+
 Older release notes, split out of the active
 [CHANGELOG.md](CHANGELOG.md) to keep the live file small. Format and
 conventions are identical; new entries always go in `CHANGELOG.md`, not

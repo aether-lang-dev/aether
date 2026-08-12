@@ -153,6 +153,10 @@ ae add <host/user/repo>  # Add a dependency (any git host)
 ae repl                  # Start interactive REPL
 ae cache                 # Show build cache info
 ae cache clear           # Clear the build cache
+ae inspect [file.ae]     # Show what a script declares (imports, capabilities, exports)
+ae bindgen consts <h>    # Import C macro constants from a header as Aether consts
+ae cflags                # Print -I/-L/-laether for embedding in external builds
+ae lib-path              # Print the resolved module-search chain
 ae version               # Show current version
 ae upgrade               # Install the latest release and switch to it
 ae install <v>           # Install a specific release (latest if omitted)
@@ -388,7 +392,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 ### Running Tests
 
 ```bash
-# Full CI suite (9 steps, -Werror), runs on your current platform
+# Full CI suite (10 steps, -Werror), runs on your current platform
 make ci
 
 # Unit tests only (runtime C test suite)

@@ -5,7 +5,8 @@
 - [x] Import path drift fixed: all READMEs and module.ae headers now document the working form `import contrib.host.<lang>` (previously said `std.host.<lang>`, which the compiler's stdlib resolver doesn't handle since the modules live under `contrib/host/`, not `std/host/<lang>/`). `docs/containment-sandbox.md` already used the correct form.
 - [x] IPv6-mapped addresses normalized in `pattern_match`: a grant for `10.0.0.1` now matches a TCP resource reported as `::ffff:10.0.0.1` (and vice versa). Applied to all 6 in-process bridges, the LD_PRELOAD preload checker (`runtime/libaether_sandbox_preload.c`), and the Java-side `AetherGrantChecker`.
 - [x] CI + `make contrib-host-check` target added: syntax-checks every bridge in stub mode and runs per-language demos when the dev library is installed. Gracefully skips languages whose headers/libs aren't present. Wired into a Linux CI job (`ci-contrib-host`) that installs lua/python/ruby/perl/tcl/duktape/go dev packages.
-- [ ] **Deferred to roadmap**: see [`docs/next-steps.md`](../../docs/next-steps.md#host-language-bridges-contribhost)
+- [ ] **Deferred**, tracked in the issue tracker rather than here (the
+  `docs/next-steps.md` this used to link to is not in the tree):
   - Capture stdout/stderr from hosted code (pipe + shared map `_stdout`/`_stderr` keys, or pass-through)
   - Shared map `aether_map_get`/`aether_map_put` bindings for Perl and Ruby currently use eval-injected hashes — outputs stay in the hosted language. Need XS (Perl) or C extension (Ruby) to write outputs back to the C map.
   - `string:bytes` mode for shared map — binary data without base64
