@@ -6,26 +6,26 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM%20%7C%20Embedded-lightgrey)]()
 [![Website](https://img.shields.io/badge/website-aether--lang.dev-8A2BE2)](https://aether-lang.dev/)
 
-Erlang-style actors, Rust-grade capability discipline, and Go-flavored ergonomics, compiled to readable C.
+A compiled actor language whose permissions are part of the source, enforced from compile time down to libc. No VM and no garbage collector: the compiler emits readable C.
 
 **Website: [aether-lang.dev](https://aether-lang.dev/)**
 
 ## Overview
 
-Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve`. The mix is Pony's object capabilities, Java's removed SecurityManager, and a fraction of gVisor; see [Containment Sandbox](docs/containment-sandbox.md) for the threat model and known bypass surface.
+Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve`. See [Containment Sandbox](docs/containment-sandbox.md) for the threat model, the prior art it draws on, and the known bypass surface.
 
-Concurrency is actor-shaped: Erlang-style `actor` / `receive` / `!` with automatic multi-core scheduling, lock-free mailboxes, and migration that converges chatty actors onto one core. The compiler emits readable C, not bytecode and not a VM, which is an implementation choice rather than the pitch: it buys native speed, direct linking against existing C libraries, and a runtime that ports anywhere a C toolchain reaches.
+Concurrency is actor-shaped: `actor`, `receive` and `!`, with automatic multi-core scheduling, lock-free mailboxes, and migration that converges chatty actors onto one core. The compiler emits readable C, not bytecode and not a VM, which is an implementation choice rather than the pitch: it buys native speed, direct linking against existing C libraries, and a runtime that ports anywhere a C toolchain reaches.
 
-**Where it sits on the OO ↔ FP spectrum:** structs are plain data, behaviour is free functions, closures + trailing blocks are first-class, Aether leans **closer to functional than OO**, sitting near Go and Rust in the hybrid middle of the paradigm spectrum. There are no classes, no inheritance, no method dispatch; the one piece of OO machinery present is the actor (stateful, encapsulated behind a message boundary, no polymorphism). See [Language Reference § Paradigm placement](docs/language-reference.md#paradigm-placement).
+**Where it sits on the OO / FP spectrum:** structs are plain data, behaviour lives in free functions, and closures and trailing blocks are first-class, so the language leans closer to functional than object-oriented. There are no classes, no inheritance and no method dispatch; the one piece of OO machinery present is the actor, which is stateful and encapsulated behind a message boundary but has no polymorphism. See [Language Reference § Paradigm placement](docs/language-reference.md#paradigm-placement).
 
-The load-bearing features, one line each:
+The load-bearing features:
 
-- **Actor concurrency**, scheduled across cores for you: lock-free messaging, locality-aware spawning, work stealing. See [Actor Concurrency](docs/actor-concurrency.md).
+- **Actor concurrency**, scheduled across cores by the runtime: lock-free messaging, locality-aware spawning, work stealing. See [Actor Concurrency](docs/actor-concurrency.md).
 - **Config IS code**: library APIs double as typed, sandboxable configuration DSLs via trailing-block closures, so operators run real Aether instead of YAML. See [Config IS Code](docs/config-is-code.md).
 - **Polyglot host, both directions**: run Lua / Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
 - **Production networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus an nginx-class reverse proxy. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
 - **A deliberate memory model**: manual-first with `defer`, automatic string-ownership tracking, and `requires`/`ensures` contracts that compile out at zero cost. See [Memory Management](docs/memory-management.md).
-- **Go-flavored ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)`, and a single `ae` command for build / run / test / fmt / packages. See [Language Reference](docs/language-reference.md).
+- **Ergonomics**: type inference, `(value, err)` multi-value returns, `@derive(eq)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
 - **Portability as a feature**: Linux, macOS, Windows, FreeBSD, WebAssembly, and embedded targets; cross-compile with `ae build --target=<triple>`. See [Architecture](docs/architecture.md).
 
 ## Benchmarks

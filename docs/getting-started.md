@@ -304,7 +304,7 @@ main() {
 ```
 
 Functions are called using **namespace-style syntax**: `namespace.function()`.
-Stdlib functions that can fail return Go-style `(value, err)` tuples,
+Stdlib functions that can fail return `(value, err)` tuples,
 check `err` first, then use `value`:
 
 ```aether
@@ -398,7 +398,7 @@ See [stdlib-api.md](stdlib-api.md) for the full API reference.
 
 ### Error Handling and Memory
 
-Stdlib functions that can fail return a Go-style `(value, err)` tuple.
+Stdlib functions that can fail return a `(value, err)` tuple.
 Check the error string first, then use the value. The wrappers auto-free
 any heap allocations, so you don't need `defer free()` for stdlib returns:
 
@@ -412,7 +412,7 @@ main() {
         println(home)
     }
 
-    // io.read_file is Go-style
+    // io.read_file returns (value, err)
     content, err = io.read_file("data.txt")
     if err != "" {
         println("cannot read: ${err}")
@@ -431,7 +431,9 @@ use `defer string.release(s)` for reference counting.
 
 ## Pattern Matching
 
-Aether has Erlang-inspired pattern matching.
+Functions can be defined as several clauses, each matching a different shape of
+argument, with guards to narrow a clause further. The first clause that matches
+runs.
 
 ### Function Pattern Matching
 

@@ -61,6 +61,16 @@ version number before tagging the release.
 - README: the CI suite is 10 steps, not 9, and the `ae` command list was missing
   `inspect`, `bindgen`, `cflags` and `lib-path`.
 
+- Stopped defining the language by other languages. The README led with
+  "Erlang-style actors, Rust-grade capability discipline, and Go-flavored
+  ergonomics", and the language reference opened with "combining Erlang-inspired
+  actor concurrency". Both now state what Aether does. The same substitution ran
+  through the entry docs: "Erlang-inspired pattern matching" said nothing a
+  reader could act on, and `(value, err)` describes its own shape without being
+  called Go-style. The Acknowledgments section already credits the lineage
+  properly, at the end, which is where it belongs; the top of a README is for
+  what the thing is.
+
 ## [0.520.0]
 
 ### Fixed
