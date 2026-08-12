@@ -31,6 +31,27 @@ fn ck(cond: bool, msg: string) -> int {
     return 0
 }
 
+// Wait for the worker pool to finish, bounded by TIME rather than by a spin
+// count. The old loops counted iterations, but what they are waiting for is the
+// pool thread being scheduled, which is wall-clock. On a two-core Windows
+// runner 2,000,000 mutex-takes elapse in a fraction of a second, so the cap
+// could expire before the pool thread ever ran: the "detached worker drained
+// pending" flake. sleep() between polls also stops this thread competing with
+// the one it is waiting for, which is what starved it.
+wait_drained(timeout_ms: int) -> int {
+    waited = 0
+    while worker.pending() > 0 && waited < timeout_ms {
+        _ = worker.drain(0)
+        sleep(1)
+        waited = waited + 1
+    }
+    _ = worker.drain(0)
+    if worker.pending() == 0 {
+        return 1
+    }
+    return 0
+}
+
 main() {
     fails = 0
     t = bytes.new(4) // shared tally buffer
@@ -69,11 +90,7 @@ main() {
 
     // Pump until the completion has been delivered. drain() runs completions on
     // THIS thread; spin until pending() drains.
-    spins = 0
-    while worker.pending() > 0 && spins < 10000000 {
-        _ = worker.drain(0)
-        spins = spins + 1
-    }
+    wait_drained(10000)
     fails = fails + ck(bytes.get(t, 0) == 1, "one completion delivered")
     fails = fails + ck(bytes.get(t, 1) == 9, "captured heap string length read off-thread (9)")
     fails = fails + ck(bytes.get(t, 2) == 100, "result marker carried to done")
@@ -98,11 +115,7 @@ main() {
         )
         n = n + 1
     }
-    spins = 0
-    while worker.pending() > 0 && spins < 10000000 {
-        _ = worker.drain(0)
-        spins = spins + 1
-    }
+    wait_drained(10000)
     fails = fails + ck(bytes.get(t, 0) == 16, "all 16 concurrent completions delivered")
 
     // ---- detached worker: runs, no post-back, nothing to drain ----
@@ -116,17 +129,8 @@ main() {
     )
     fails = fails + ck(d_ok, "detached worker launched")
     // Wait for the detached pool thread to run its closure and self-decrement
-    // pending. A pure busy-spin on this thread can STARVE the pool thread on a
-    // contended/slow CI runner (both threads hot) so the fixed spin cap
-    // expired before the worker was scheduled — the "detached worker drained
-    // pending" flake on Windows CI. worker.drain(0) takes the worker mutex each
-    // call, yielding a scheduling point so the pool thread makes progress; the
-    // bound is large but the yield means we almost never approach it.
-    spins = 0
-    while worker.pending() > 0 && spins < 2000000 {
-        worker.drain(0)
-        spins = spins + 1
-    }
+    // pending.
+    wait_drained(10000)
     fails = fails + ck(worker.pending() == 0, "detached worker drained pending")
 
     bytes.free(t)
