@@ -58,12 +58,18 @@ extern string_empty() -> ptr
 // allocation immediately). The escape walker marks any heap-
 // string variable passed at this slot as escaped, so the
 // function-exit defer-free does not also call free() on the
-// same buffer — without `@retain` here, a `defer string.release(s)`
-// paired with the new auto-cleanup (issue #420 v2) would
-// double-free the underlying allocation. After the call the
-// caller's `_heap_<name>` tracker is conservatively kept at its
-// previous value; the var is treated as dead from the
-// reclamation system's perspective.
+// same buffer, without `@retain` here, a `defer string.release(s)`
+// paired with the auto-cleanup would double-free the underlying
+// allocation. After the call the caller's `_heap_<name>` tracker
+// is conservatively kept at its previous value; the var is
+// treated as dead from the reclamation system's perspective.
+//
+// These free what the runtime can SEE is heap: a value carrying
+// the AetherString magic header. A plain malloc'd payload is
+// indistinguishable from a literal here and is left alone, so
+// producing one and handing it to a caller to free would leak it.
+// That is why the uniform-heap return wrap mints the refcounted
+// shape rather than a bare buffer.
 extern string_retain(str: @retain string)
 extern string_release(str: @retain string)
 extern string_free(str: @retain string)

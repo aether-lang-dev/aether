@@ -1243,7 +1243,9 @@ static int defer_fires_at_exit(CodeGenerator* gen, int i) {
 /* #1140 — emit one deferred statement, wrapping it in a runtime guard when the
  * exit's success/error outcome is not statically known. The guard uses exactly
  * the convention the rest of the compiler uses for "this result carries an
- * error": a non-NULL, non-empty error slot (`e && e[0]`). */
+ * error": a non-NULL, non-empty error slot. Non-empty is read through
+ * aether_string_data, since the slot holds either physical string shape and
+ * indexing a refcounted one raw reads its magic header as content. */
 static void emit_deferred_one(CodeGenerator* gen, int i) {
     ASTNode* deferred = gen->defer_stack[i];
     if (!deferred) return;
@@ -1254,7 +1256,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
                    gen->defer_err_slot != NULL);
     if (guarded) {
         print_indent(gen);
-        fprintf(gen->output, "if (%s(%s && %s[0])) {\n",
+        fprintf(gen->output, "if (%s(%s && aether_string_data((const void*)%s)[0])) {\n",
                 mode == DEFER_CATCH ? "" : "!",
                 gen->defer_err_slot, gen->defer_err_slot);
         gen->indent_level++;
@@ -1968,6 +1970,34 @@ const char* safe_value_name(const char* name) {
     return buf;
 }
 
+/* Source position of the construct codegen is lowering right now.
+ * get_c_type() and the other Type-only helpers have no AST node to blame,
+ * so a diagnostic raised from inside them would print with no file or line
+ * and be impossible to act on. generate_statement / generate_expression /
+ * the function emitter keep this current as they walk. */
+static const char* g_diag_file = NULL;
+static int g_diag_line = 0;
+static int g_diag_column = 0;
+static const char* g_diag_func = NULL;
+static char g_diag_context[160];
+
+void codegen_note_diag_pos(const ASTNode* node) {
+    if (!node || node->line <= 0) return;
+    g_diag_line = node->line;
+    g_diag_column = node->column;
+    if (node->source_file) g_diag_file = node->source_file;
+}
+
+void codegen_note_diag_func(const char* name) {
+    g_diag_func = name;
+}
+
+const char* codegen_diag_context(void) {
+    if (!g_diag_func) return NULL;
+    snprintf(g_diag_context, sizeof(g_diag_context), "in function %s", g_diag_func);
+    return g_diag_context;
+}
+
 const char* get_c_type(Type* type) {
     if (!type) {
         AetherError w = {NULL, NULL, 0, 0, "internal: NULL type in codegen, defaulting to int",
@@ -2184,18 +2214,19 @@ const char* get_c_type(Type* type) {
             if (type->is_fnptr) return "void*";
             return "_AeClosure";
         case TYPE_UNKNOWN: {
-            AetherError w = {NULL, NULL, 0, 0,
+            AetherError w = {g_diag_file, NULL, g_diag_line, g_diag_column,
                              "unresolved type in codegen, defaulting to int",
                              "add explicit type annotation or check that the variable is initialized",
-                             NULL, AETHER_ERR_NONE};
+                             codegen_diag_context(), AETHER_ERR_NONE};
             aether_warning_report(&w);
             return "int";
         }
         default: {
             char wbuf[128];
             snprintf(wbuf, sizeof(wbuf), "internal: unknown type kind %d in codegen, defaulting to void", type->kind);
-            AetherError w = {NULL, NULL, 0, 0, wbuf,
-                             "this is a compiler bug, please report it", NULL, AETHER_ERR_NONE};
+            AetherError w = {g_diag_file, NULL, g_diag_line, g_diag_column, wbuf,
+                             "this is a compiler bug, please report it",
+                             codegen_diag_context(), AETHER_ERR_NONE};
             aether_warning_report(&w);
             return "void";
         }
@@ -4361,16 +4392,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * caller's unconditional `free()` would crash on it; the helper
      * duplicates so the caller's free reclaims the dup uniformly.
      *
-     * Cap-aware allocation: the cold-path dup is gated by the
-     * resource-caps tracker (#343, aether_resource_caps.h). A host
-     * that arms `aether_set_memory_cap(N)` bounds this path; with no
-     * cap armed it's a single branch + libc malloc. The matching
-     * free() at the caller side is plain libc free() — heap-safe
-     * because aether_caps_malloc returns a libc-compatible pointer
-     * (header comment at aether_resource_caps.h:89-94). Cap
-     * accounting drifts upward on the dup path; consistent with the
-     * existing string_concat and stdlib alloc shapes whose frees
-     * also bypass aether_caps_account_free.
+     * The cold-path dup mints a refcounted AetherString rather than a
+     * bare buffer, because the caller cannot free a bare one. Aether's
+     * `string` is either shape, and given a plain `char*` the runtime
+     * cannot tell a heap payload from a static literal, so
+     * `string.free(s)` no-ops on it and the value leaks: one block per
+     * call at every `json.parse` error slot, every interpolation, every
+     * HTTP body a caller dutifully frees (#1461).
+     *
+     * The hot path is untouched, so nothing that was already owned pays
+     * for this, and the shape is not new to callers: the sibling path of
+     * every one of these returns already hands back a string_concat
+     * result, which is the same refcounted shape. Both `string_release`
+     * and the codegen's `aether_heap_str_free` reclaim it, and printing
+     * and comparison go through `aether_string_data`, which reads either
+     * shape. What must NOT appear is a plain `free()` on the result: that
+     * would reclaim the header and leak the payload.
      *
      * Binary-safety: Aether's `string` carries either plain `char*` or
      * a length-bearing `AetherString*` (magic-header struct). The cold-
@@ -4387,6 +4424,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#include <stdlib.h>");
     print_line(gen, "#include <stddef.h>");
     print_line(gen, "extern void* aether_caps_malloc(size_t bytes);");
+    print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
@@ -4407,11 +4445,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    } else {");
     print_line(gen, "        _n = strlen(s);");
     print_line(gen, "    }");
-    print_line(gen, "    char* _d = (char*)aether_caps_malloc(_n + 1);");
-    print_line(gen, "    if (!_d) return (const char*)0;");
-    print_line(gen, "    if (_n) memcpy(_d, _data, _n);");
-    print_line(gen, "    _d[_n] = '\\0';");
-    print_line(gen, "    return (const char*)_d;");
+    print_line(gen, "    return (const char*)string_new_with_length(_data, (int)_n);");
     print_line(gen, "}");
     /* AetherString-aware heap-string release. A `_heap_<name>` slot
      * tracked by the codegen can hold two physically distinct shapes:
@@ -4619,9 +4653,37 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#endif");
     // Closure support: generic closure struct (function pointer + captured environment)
     print_line(gen, "typedef struct { void (*fn)(void); void* env; } _AeClosure;");
-    // Box a closure onto the heap so it can be stored in a list (void*)
-    print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) { _AeClosure* p = malloc(sizeof(_AeClosure)); *p = c; return (void*)p; }");
-    print_line(gen, "static inline _AeClosure _aether_unbox_closure(void* p) { return *(_AeClosure*)p; }");
+    /* Boxed form. The tag sits AFTER the {fn, env} prefix on purpose: that
+     * prefix is the FFI layout std/collections and std/worker mirror and
+     * embedders are documented to rely on, so putting the tag first would
+     * silently turn every C-side reader's `fn` into the tag and call it.
+     *
+     * Boxing is the only way a valid closure pointer is ever produced, so
+     * the tag is what tells a real box apart from a raw code address,
+     * which is what a bare function coerced into a `ptr` slot leaves
+     * behind. Unboxing that used to read `.env` off the function's own
+     * machine code and jump through it (issue #1439). */
+    print_line(gen, "typedef struct { void (*fn)(void); void* env; unsigned long long tag; } _AeClosureBox;");
+    print_line(gen, "#define _AE_CLOSURE_TAG 0xAEC105EDB0CEDULL");
+    print_line(gen, "static inline void* _aether_box_closure(_AeClosure c) {");
+    print_line(gen, "    _AeClosureBox* p = (_AeClosureBox*)malloc(sizeof(_AeClosureBox));");
+    print_line(gen, "    if (!p) return (void*)0;");
+    print_line(gen, "    p->fn = c.fn; p->env = c.env; p->tag = _AE_CLOSURE_TAG;");
+    print_line(gen, "    return (void*)p;");
+    print_line(gen, "}");
+    print_line(gen, "static inline _AeClosure _aether_unbox_closure(void* p) {");
+    print_line(gen, "    if (!p || ((const _AeClosureBox*)p)->tag != _AE_CLOSURE_TAG) {");
+    print_line(gen, "        aether_panic(\"unbox_closure() on a value that was never boxed. \"");
+    print_line(gen, "                     \"A bare function stored into a `ptr` slot stays a raw code \"");
+    print_line(gen, "                     \"pointer; only a value that crossed an `fn`-typed boundary or \"");
+    print_line(gen, "                     \"went through box_closure() carries an environment. Declare the \"");
+    print_line(gen, "                     \"slot `fn`, or box explicitly before storing it.\");");
+    print_line(gen, "    }");
+    print_line(gen, "    _AeClosure c;");
+    print_line(gen, "    c.fn = ((const _AeClosureBox*)p)->fn;");
+    print_line(gen, "    c.env = ((const _AeClosureBox*)p)->env;");
+    print_line(gen, "    return c;");
+    print_line(gen, "}");
     // Lazy evaluation: thunks (deferred computation with memoization)
     print_line(gen, "typedef struct { _AeClosure compute; intptr_t value; int evaluated; } _AeThunk;");
     print_line(gen, "static inline void* _aether_thunk_new(_AeClosure c) { _AeThunk* t = malloc(sizeof(_AeThunk)); t->compute = c; t->value = 0; t->evaluated = 0; return (void*)t; }");
@@ -5171,6 +5233,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         ASTNode* cd = program->children[i];
         if (cd && cd->type == AST_CONST_DECLARATION &&
             cd->value && cd->child_count > 0) {
+            codegen_note_diag_pos(cd);
+            codegen_note_diag_func(NULL);
             if (cd->annotation && strcmp(cd->annotation, "array_const") == 0) {
                 // static const T NAME[] = {v1, v2, ...};
                 Type* elem_type = (cd->node_type && cd->node_type->element_type)
@@ -5237,6 +5301,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         ASTNode* child = program->children[i];
         if (!child || (child->type != AST_FUNCTION_DEFINITION && child->type != AST_BUILDER_FUNCTION)) continue;
         if (!child->value) continue;
+        codegen_note_diag_pos(child);
+        codegen_note_diag_func(child->value);
 
         // Skip if already forward-declared (pattern matching generates combined functions)
         int already_declared = 0;

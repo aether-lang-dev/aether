@@ -533,6 +533,12 @@ void print_line(CodeGenerator* gen, const char* format, ...);
 void codegen_maybe_emit_line(CodeGenerator* gen, const ASTNode* node);
 void print_expression(CodeGenerator* gen, ASTNode* expr);
 const char* get_c_type(Type* type);
+
+/* Current-position register for diagnostics raised from Type-only helpers
+ * (get_c_type and friends), which have no AST node of their own to blame. */
+void codegen_note_diag_pos(const ASTNode* node);
+void codegen_note_diag_func(const char* name);
+const char* codegen_diag_context(void);
 const char* get_c_operator(const char* aether_op);
 
 // Defer management

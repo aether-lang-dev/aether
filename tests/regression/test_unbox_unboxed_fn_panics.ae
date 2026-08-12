@@ -1,0 +1,83 @@
+// Regression: unbox_closure() on a value that was never boxed must fail
+// where the mistake is, not by jumping through garbage.
+//
+// A closure is {fn, env}; boxing mallocs that pair. A bare named function
+// has no environment, so passing one into a `ptr` slot stores a raw code
+// address. unbox_closure() then read `.env` out of the function's own
+// machine code and call() jumped through it: SIGSEGV at runtime, and the
+// compiler said nothing at build time.
+//
+// The box now carries a tag, placed after the {fn, env} prefix because that
+// prefix is the FFI layout std/collections and std/worker read: a tag in
+// front would turn their `fn` into the tag and call it. unbox checks the tag
+// and panics with a message naming the cause and the fix.
+//
+// Both valid ways of producing a boxed value are pinned here too, so the
+// check cannot be "fixed" by making boxing itself fail.
+
+import std.string
+import std.heap
+
+extern exit(code: int)
+
+struct Holder { cb: ptr }
+
+bump(x: int) -> int { return x + 1 }
+
+// ptr-typed param: the bare function arrives as a raw code pointer and no
+// box is ever created.
+store_ptr(h: *Holder, f: ptr) { h.cb = f }
+
+// fn-typed param: the call site boxes, so the ptr field holds a real box.
+store_fn(h: *Holder, f: fn) { h.cb = f }
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    println("=== test_unbox_unboxed_fn_panics ===")
+
+    // 1. The reported crash: unboxing a raw code pointer. Catching it is
+    //    the assertion, an uncaught panic or a segfault both fail the run.
+    caught = 0
+    h = heap.new(Holder)
+    store_ptr(h, bump)
+    try {
+        g = unbox_closure(h.cb)
+        r = call(g, 41)
+        println("  unboxed a bare fn and got ${r}")
+    } catch e {
+        caught = 1
+        if string.contains(e, "never boxed") != 1 {
+            fail("panic reason does not name the cause: ${e}")
+        }
+    }
+    if caught != 1 {
+        fail("unboxing a bare fn was not diagnosed")
+    }
+    println("  PASS: raw code pointer is rejected, not jumped through")
+    heap.free(h)
+
+    // 2. An fn-typed parameter boxes at the call site.
+    h2 = heap.new(Holder)
+    store_fn(h2, bump)
+    g2 = unbox_closure(h2.cb)
+    if call(g2, 41) != 42 {
+        fail("fn-typed param path lost the value")
+    }
+    println("  PASS: fn-typed param boxes and round-trips")
+    heap.free(h2)
+
+    // 3. Explicit box_closure on a bare function, the fix the panic
+    //    message recommends, so it has to compile and run.
+    b = box_closure(bump)
+    g3 = unbox_closure(b)
+    if call(g3, 7) != 8 {
+        fail("box_closure(bare fn) lost the value")
+    }
+    println("  PASS: box_closure accepts a bare function")
+
+    println("=== test_unbox_unboxed_fn_panics passed ===")
+}

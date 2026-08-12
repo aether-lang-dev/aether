@@ -2178,6 +2178,8 @@ static int utf8_sequence_length(const char* s) {
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
+    codegen_note_diag_pos(expr);
+
     /* Argument-temp lifetime substitution. If this AST_FUNCTION_CALL
      * node has been hoisted by a parent-call wrap (see
      * arg_drain_register at the AST_FUNCTION_CALL fallthrough below),
@@ -2328,7 +2330,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                            or_fallible_value_slot_is_heap(gen, fallible));
             fprintf(gen->output, "({ %s _oe%d = ", tuple_c, id);
             generate_expression(gen, fallible);
-            fprintf(gen->output, "; %s _oer%d;\nif (_oe%d._%d && _oe%d._%d[0]) {\n",
+            /* "Is this an error" is "is the error slot non-empty", and the
+             * slot holds either physical string shape. Indexing it raw reads
+             * the AetherString magic header as content, so every refcounted
+             * error slot looks non-empty whatever it says: `parse_strict`
+             * returns an empty one on SUCCESS and `or` took the handler.
+             * aether_string_data yields the payload for either shape. */
+            fprintf(gen->output,
+                    "; %s _oer%d;\nif (_oe%d._%d && aether_string_data((const void*)_oe%d._%d)[0]) {\n",
                     val_c, id, id, err_idx, id, err_idx);
             if (handler->type == AST_BLOCK) {
                 /* Block statements emit their own `#line` directives, which
@@ -3836,9 +3845,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // clears _heap_X. This is required because string_release
                 // no longer marks its argument escaped (is_nonstoring_
                 // builtin), so X now also receives an automatic
-                // function-exit defer-free — without clearing the flag
+                // function-exit defer-free: without clearing the flag
                 // here, `defer string.release(s)` on a magic AetherString
-                // would be freed twice (explicit + auto): a double-free.
+                // would be freed twice (explicit + auto), a double-free.
                 // Non-heap-var arguments (literals, borrowed params) fall
                 // through to the plain, literal-safe string_release call.
                 else if ((strcmp(func_name, "string_release") == 0 ||
@@ -3847,7 +3856,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          expr->children[0]->type == AST_IDENTIFIER &&
                          expr->children[0]->value &&
                          is_heap_string_var(gen, expr->children[0]->value)) {
-                    /* Any heap-tracked local — NOT only string-typed.
+                    /* Any heap-tracked local, NOT only string-typed.
                      * string.from_int / from_long / new return a magic
                      * AetherString that the classifier tracks but types
                      * `-> ptr`; those too get an auto defer-free now, so
@@ -4016,9 +4025,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // The trailing block becomes the last child (a closure)
                 // box_closure(closure) — heap-allocate a closure so it can be stored in a list
                 else if (strcmp(func_name, "box_closure") == 0 && expr->child_count == 1) {
-                    fprintf(gen->output, "_aether_box_closure(");
-                    generate_expression(gen, expr->children[0]);
-                    fprintf(gen->output, ")");
+                    /* A bare function has no environment, so it is not an
+                     * _AeClosure and C rejected it outright. Wrap it in the
+                     * same env-ignoring adapter a ptr-typed struct field
+                     * assignment uses, so the one operation that exists to
+                     * make a value safe for unbox_closure accepts the value
+                     * most likely to need it. */
+                    if (bare_top_level_fn(gen, expr->children[0])) {
+                        const char* bn = expr->children[0]->value;
+                        register_bare_fn_adapter(gen, bn);
+                        fprintf(gen->output,
+                                "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
+                                bn);
+                    } else {
+                        fprintf(gen->output, "_aether_box_closure(");
+                        generate_expression(gen, expr->children[0]);
+                        fprintf(gen->output, ")");
+                    }
                 }
                 // unbox_closure(ptr) — retrieve a closure from a heap pointer
                 else if (strcmp(func_name, "unbox_closure") == 0 && expr->child_count == 1) {

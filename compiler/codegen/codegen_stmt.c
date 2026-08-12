@@ -3940,6 +3940,8 @@ static int emit_optional_chain_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode*
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
+    codegen_note_diag_pos(stmt);
+
     // Emit `#line N "src.ae"` so gcc errors, gdb breakpoints, and
     // gcov reports reference the .ae source the user wrote, not the
     // mid-file position of the merged .c output. Dedup'd inside
