@@ -86,7 +86,15 @@ static bool cross_find_manifest(char* manifest, size_t msz,
     snprintf(manifest, msz, "%s/build/MANIFEST", tc.root);
     if (path_exists(manifest)) { snprintf(base, bsz, "%s", tc.root); return true; }
     snprintf(manifest, msz, "%s/share/aether/MANIFEST", tc.root);
-    if (path_exists(manifest)) { snprintf(base, bsz, "%s/share/aether", tc.root); return true; }
+    if (path_exists(manifest)) {
+        /* tc.root is PATH_MAX-ish and bsz is the same size, so the suffix can
+           push the result past the destination. Bound the root explicitly so
+           the composed path provably fits rather than silently truncating. */
+        int n = snprintf(base, bsz, "%.*s/share/aether",
+                         (int)(bsz - sizeof("/share/aether")), tc.root);
+        if (n < 0 || (size_t)n >= bsz) { return false; }
+        return true;
+    }
     return false;
 }
 
@@ -549,9 +557,14 @@ int run_cross_build(const char* c_file, const char* out_file,
     free(cmd);
     free(objlist);
 
-    /* Best-effort removal of the temp object tree. */
+    /* Best-effort removal of the temp object tree. A failure here does not
+       affect the build result, but the status must be consumed: glibc marks
+       system() warn_unused_result, and gcc does not accept a (void) cast as
+       suppression the way clang does. */
     char rmcmd[1100];
     snprintf(rmcmd, sizeof(rmcmd), "rm -rf \"%s\"", objdir);
-    (void)system(rmcmd);
+    if (system(rmcmd) != 0) {
+        fprintf(stderr, "Warning: could not remove temporary object dir %s\n", objdir);
+    }
     return rc;
 }

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **`tools/ae_cross.c` emitted two warnings on Linux/GCC during a source
+  install.** `(void)system(rmcmd)` does not suppress glibc's
+  `warn_unused_result` on GCC the way it does on clang, so the temp-object
+  cleanup warned on every build; the status is now checked and a failure
+  reported. Separately, `snprintf(base, bsz, "%s/share/aether", tc.root)`
+  could compose up to 1037 bytes into a 1024-byte buffer, since `tc.root` is
+  itself `char[1024]`, which GCC flagged as `-Wformat-truncation`. The root is
+  now bounded with a precision specifier and truncation is treated as a
+  lookup failure rather than silently producing a wrong base path. Verified
+  under gcc 14 with `-D_FORTIFY_SOURCE=2 -Wall -Wextra`, both warnings gone.
+
 ## [0.522.0]
 
 ### Fixed
