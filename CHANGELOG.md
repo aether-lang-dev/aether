@@ -23,6 +23,17 @@ version number before tagging the release.
   now bounded with a precision specifier and truncation is treated as a
   lookup failure rather than silently producing a wrong base path. Verified
   under gcc 14 with `-D_FORTIFY_SOURCE=2 -Wall -Wextra`, both warnings gone.
+### Documentation
+
+- Stopped defining the language by other languages. The README led with
+  "Erlang-style actors, Rust-grade capability discipline, and Go-flavored
+  ergonomics", and the language reference opened with "combining Erlang-inspired
+  actor concurrency". Both now state what Aether does. The same substitution ran
+  through the entry docs: "Erlang-inspired pattern matching" said nothing a
+  reader could act on, and `(value, err)` describes its own shape without being
+  called Go-style. The Acknowledgments section already credits the lineage
+  properly, at the end, which is where it belongs; the top of a README is for
+  what the thing is.
 
 ## [0.522.0]
 
