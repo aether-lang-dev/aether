@@ -9,7 +9,8 @@ command -v glslangValidator >/dev/null 2>&1 || {
     echo "glslangValidator not found (brew install glslang / apt install glslang-tools)" >&2
     exit 1
 }
-for src in triangle.vert triangle.frag; do
+for src in triangle.vert triangle.frag transform.vert transform.frag \
+           textured.vert textured.frag; do
     glslangValidator -V --target-env vulkan1.0 "$src" -o "$src.spv"
     echo "  $src -> $src.spv"
 done
