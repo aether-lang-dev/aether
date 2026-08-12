@@ -339,9 +339,35 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y gcc make valgrind
+        # contrib/vulkan needs the headers to build and a driver to run.
+        # lavapipe is Mesa's CPU implementation, so the GPU path is exercised
+        # on a runner that has no GPU. Without these the test skips itself and
+        # the leg still passes, which would be silent non-coverage; the
+        # assertion below is what makes the skip visible.
+        sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-tools
+
+    - name: Report the Vulkan implementation in use
+      run: |
+        VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json \
+          vulkaninfo --summary 2>/dev/null | head -30 || true
 
     - name: Build + run all contrib tests (valgrind-gated where leak-clean)
+      env:
+        VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       run: make contrib-check-valgrind
+
+    # A driver is installed above, so contrib/vulkan skipping here would mean
+    # the GPU path silently stopped being covered. Fail instead.
+    - name: Assert the Vulkan test actually ran
+      env:
+        VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      run: |
+        out="$(./build/contrib-check/vulkan_offscreen 2>&1 || true)"
+        echo "$out"
+        echo "$out" | grep -q 'All PASS' || {
+          echo "contrib/vulkan did not render; lavapipe should be present on this leg"
+          exit 1
+        }
 
   # ============================================================
   # Windows CI — MinGW via MSYS2

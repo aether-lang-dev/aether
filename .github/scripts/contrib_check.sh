@@ -41,16 +41,17 @@ mkdir -p "$run_dir"
 AVC="contrib/avcodec"
 TW="contrib/tinyweb"
 I18N="contrib/i18n"
-# <label>|<test .ae>|<extra C sources>|<leakgate>|<pkg-config modules>
+VK="contrib/vulkan"
+# <label>|<test .ae>|<extra C sources>|<leakgate>|<pkg-config link>|<pkg-config headers>
 #
-# Column 5 is optional and names the pkg-config modules the test must LINK
-# against. It exists because `ae build --extra foo.c` compiles the shim but has
-# no way to pass -l flags — a module needing a system library therefore
-# compiles and then dies at link with "undefined reference". When column 5 is
-# set the runner stages an aether.toml workspace (the same shape
-# tests/integration/sqlite_roundtrip uses) so the flags reach gcc via
-# get_link_flags(), and SKIPS the entry when pkg-config cannot find the
-# modules — an absent system library is a provisioning gap, not a test failure.
+# Column 5 is optional and names the pkg-config modules the test needs to
+# BUILD against, both --cflags and --libs. It exists because `ae build --extra
+# foo.c` compiles the shim but has no way to pass -I or -l flags, so a module
+# needing a system library compiles and then dies at link. When either column
+# is set the runner stages an aether.toml workspace (the shape
+# tests/integration/sqlite_roundtrip uses) so the flags reach gcc, and SKIPS
+# the entry when pkg-config cannot find the modules: an absent system library
+# is a provisioning gap, not a test failure.
 TESTS=(
   # avcodec: needs FFmpeg's dev libraries to LINK and the ffmpeg BINARY to
   # generate its clip; the test itself SKIPs cleanly without the latter.
@@ -61,6 +62,20 @@ TESTS=(
   "tinyweb/schema_api|$TW/test_schema_api.ae|$TW/ws_handshake.c|run|"
   "tinyweb/websocket|$TW/test_websocket.ae|$TW/ws_handshake.c|run|"
   "i18n/collate|$I18N/collate/test_collate.ae|$I18N/aether_i18n.c $I18N/utf8proc/utf8proc.c $I18N/ducet/ducet_data.c|leak|"
+  # vulkan: needs only the HEADERS to build (the loader is opened at runtime),
+  # and SKIPs itself at runtime when no driver is installed.
+  #
+  # Run-only, NOT leak-gated, and this one is a measurement decision rather
+  # than a concession. The CI driver is lavapipe, whose LLVM JIT valgrind
+  # cannot follow: a single render reports ~13k errors from ~1000 contexts,
+  # all inside libvulkan and the driver's own worker threads, and the
+  # "definitely lost" total changes from run to run because the driver is
+  # dlclosed before exit and valgrind then loses the pointers into it. Gating
+  # on that would measure Mesa, not this module. Leak coverage comes from
+  # `leaks -atExit` against a real driver (0 leaks, see contrib/vulkan/README),
+  # and the test's 8 create/draw/destroy cycles are what would surface
+  # accumulation here.
+  "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|run||vulkan"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted
@@ -71,7 +86,7 @@ reap_orphans() {
 reap_orphans
 
 for entry in "${TESTS[@]}"; do
-  IFS='|' read -r label src extras leakgate pcmods <<< "$entry"
+  IFS='|' read -r label src extras leakgate pcmods pchdrs <<< "$entry"
 
   if [ ! -f "$src" ]; then
     printf '  SKIP  %-22s (%s not found)\n' "$label" "$src"
@@ -85,11 +100,11 @@ for entry in "${TESTS[@]}"; do
   extra_flags=""
   for c in $extras; do extra_flags="$extra_flags --extra $c"; done
 
-  if [ -n "$pcmods" ]; then
+  if [ -n "$pcmods" ] || [ -n "$pchdrs" ]; then
     # Needs system libraries. Skip rather than fail when they are absent —
     # a missing FFmpeg is a provisioning gap on this box, not a code defect.
-    if ! pkg-config --exists $pcmods 2>/dev/null; then
-      printf '  SKIP  %-22s (pkg-config: %s not found)\n' "$label" "$pcmods"
+    if ! pkg-config --exists $pcmods $pchdrs 2>/dev/null; then
+      printf '  SKIP  %-22s (pkg-config: %s not found)\n' "$label" "$pcmods $pchdrs"
       continue
     fi
     # `ae build --extra` cannot pass -l flags, so stage a workspace whose
@@ -105,7 +120,8 @@ for entry in "${TESTS[@]}"; do
       printf '[project]\nname = "%s"\nversion = "0.0.0"\n\n' "$safe"
       printf '[[bin]]\nname = "probe"\npath = "probe.ae"\n'
       printf 'extra_sources = [%s]\n\n' "${extra_toml%, }"
-      printf '[build]\nlink_flags = "%s"\n' "$(pkg-config --libs $pcmods)"
+      printf '[build]\nlink_flags = "%s"\n' "${pcmods:+$(pkg-config --libs $pcmods)}"
+      printf 'cflags = "%s"\n' "$(pkg-config --cflags $pcmods $pchdrs)"
     } > "$work/aether.toml"
     abs_out="$(pwd)/$out"; abs_ae="$(pwd)/${AE#./}$EXE_EXT"
     if ! berr="$( cd "$work" && "$abs_ae" build probe.ae -o "$abs_out" 2>&1 )"; then
