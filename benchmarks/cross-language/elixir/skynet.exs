@@ -20,12 +20,15 @@ defmodule Skynet do
   end
 
   # Total actors = sum of nodes at each level
-  defp total_actors(n) when n < 1, do: 0
-  defp total_actors(n), do: n + total_actors(div(n, 10))
+  # Units created; also the divisor. See FAIRNESS.md.
+  @seq_threshold 1000
+  defp total_actors(n) when n <= @seq_threshold, do: 1
+  defp total_actors(n), do: div(n, @seq_threshold) + total_actors(div(n, 10))
 
   # Leaf: send offset to parent. Internal: spawn 10 children, collect, sum, report up.
-  def skynet_node(offset, 1, parent) do
-    send(parent, offset)
+  # Same threshold as every other language here.
+  def skynet_node(offset, size, parent) when size <= @seq_threshold do
+    send(parent, seq_sum(offset, size, 0))
   end
 
   def skynet_node(offset, size, parent) do
@@ -37,6 +40,9 @@ defmodule Skynet do
     sum = collect(10, 0)
     send(parent, sum)
   end
+
+  defp seq_sum(_offset, 0, acc), do: acc
+  defp seq_sum(offset, n, acc), do: seq_sum(offset, n - 1, acc + offset + n - 1)
 
   defp collect(0, acc), do: acc
   defp collect(n, acc) do
@@ -50,7 +56,7 @@ defmodule Skynet do
     total = total_actors(num_leaves)
 
     IO.puts("=== Elixir Skynet Benchmark ===")
-    IO.puts("Leaves: #{num_leaves}")
+    IO.puts("Leaves: #{num_leaves}, concurrency units: #{total} (sequential below #{@seq_threshold})")
     IO.puts("Using Erlang/OTP processes\n")
 
     caller = self()

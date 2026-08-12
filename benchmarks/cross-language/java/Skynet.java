@@ -7,7 +7,7 @@ import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.RecursiveTask;
 
 public class Skynet {
-    private static final int SEQ_THRESHOLD = 100;
+    private static final int SEQ_THRESHOLD = 1000;
 
     static class SkynetTask extends RecursiveTask<Long> {
         private final long offset;
@@ -55,9 +55,9 @@ public class Skynet {
         String env = System.getenv("BENCHMARK_MESSAGES");
         long numLeaves = env != null ? Long.parseLong(env) : 1000000;
 
-        // Total tree nodes (same formula as all languages for fair comparison)
-        long totalNodes = 0;
-        for (long n = numLeaves; n >= 1; n /= 10) totalNodes += n;
+        // Units created; also the divisor. See FAIRNESS.md.
+        long totalNodes = 1;
+        for (long n = numLeaves; n > SEQ_THRESHOLD; n /= 10) totalNodes += n / SEQ_THRESHOLD;
 
         ForkJoinPool pool = new ForkJoinPool();
 
@@ -65,6 +65,8 @@ public class Skynet {
         long result = pool.invoke(new SkynetTask(0, numLeaves));
         long elapsed = System.nanoTime() - start;
 
+        System.out.println("Leaves: " + numLeaves + ", concurrency units: " + totalNodes
+                + " (sequential below " + SEQ_THRESHOLD + ")");
         System.out.println("Sum: " + result);
 
         if (elapsed > 0) {

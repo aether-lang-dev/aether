@@ -15,14 +15,16 @@ get_leaves() ->
         Val -> list_to_integer(Val)
     end.
 
-%% Compute total actors: sum of nodes at each level
-total_actors(N) when N < 1 -> 0;
-total_actors(N) -> N + total_actors(N div 10).
+%% Units created; also the divisor. See FAIRNESS.md.
+-define(SEQ_THRESHOLD, 1000).
+total_actors(N) when N =< ?SEQ_THRESHOLD -> 1;
+total_actors(N) -> (N div ?SEQ_THRESHOLD) + total_actors(N div 10).
 
 %% Each node spawns 10 children or reports its offset (leaf).
 %% Results bubble up via message passing.
-skynet_node(Offset, 1, Parent) ->
-    Parent ! Offset;
+%% Same threshold as every other language here.
+skynet_node(Offset, Size, Parent) when Size =< ?SEQ_THRESHOLD ->
+    Parent ! seq_sum(Offset, Size, 0);
 skynet_node(Offset, Size, Parent) ->
     ChildSize = Size div 10,
     Self = self(),
@@ -33,6 +35,9 @@ skynet_node(Offset, Size, Parent) ->
     end, lists:seq(0, 9)),
     Sum = collect(10, 0),
     Parent ! Sum.
+
+seq_sum(_Offset, 0, Acc) -> Acc;
+seq_sum(Offset, N, Acc) -> seq_sum(Offset, N - 1, Acc + Offset + N - 1).
 
 collect(0, Acc) -> Acc;
 collect(N, Acc) ->
@@ -46,7 +51,8 @@ start() ->
     TotalActors = total_actors(NumLeaves),
 
     io:format("=== Erlang Skynet Benchmark ===~n"),
-    io:format("Leaves: ~p~n~n", [NumLeaves]),
+    io:format("Leaves: ~p, concurrency units: ~p (sequential below ~p)~n~n",
+              [NumLeaves, TotalActors, ?SEQ_THRESHOLD]),
 
     Self = self(),
     Start = erlang:monotonic_time(nanosecond),

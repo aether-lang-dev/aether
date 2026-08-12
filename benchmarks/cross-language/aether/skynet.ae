@@ -7,7 +7,7 @@
 // This matches the approach used by C, Go, Rust, and other
 // high-performance implementations.
 //
-// Default: 1,000,000 leaves, threshold 100 -> ~11,111 actors (not 1.1M)
+// Default: 1,000,000 leaves, threshold 1000 -> 1,111 actors. See FAIRNESS.md.
 
 // Setup tells a node its own actor ref so it can pass itself as parent to children.
 message Setup { self_ref: ptr }
@@ -32,7 +32,7 @@ actor SkynetNode {
         }
         Spawn(offset, size, parent) -> {
             parent_ref = parent;
-            if (size <= 100) {
+            if (size <= 1000) {
                 // Sequential threshold: compute subtree sum without spawning actors.
                 long sum = 0;
                 long i = 0;
@@ -87,15 +87,14 @@ main() {
         num_leaves = atoi(env_val);
     }
 
-    // Total tree nodes = sum of nodes at each level of the 10-ary tree
-    // For 1M leaves: 1 + 10 + 100 + 1000 + 10000 + 100000 + 1000000 = 1111111
-    // All languages use this same count for fair throughput comparison
-    long total_nodes = 0;
+    // Divide by units created, not the tree's node count. See FAIRNESS.md.
+    long actor_count = 1;
     long n = num_leaves;
-    while (n >= 1) {
-        total_nodes = total_nodes + n;
+    while (n > 1000) {
+        actor_count = actor_count + n / 1000;
         n = n / 10;
     }
+    long total_nodes = actor_count;
 
     start_time = clock_ns();
 
@@ -107,6 +106,11 @@ main() {
     wait_for_idle();
     end_time = clock_ns();
 
+    print("Leaves: ");
+    print(num_leaves);
+    print(", concurrency units: ");
+    print(actor_count);
+    print(" (sequential below 1000)\n");
     print("Sum: ");
     print(root.total);
     print("\n");

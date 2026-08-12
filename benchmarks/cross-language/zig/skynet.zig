@@ -1,13 +1,13 @@
 // Zig Skynet Benchmark
 // Based on https://github.com/atemerev/skynet
-// Uses std.Thread for top THREAD_DEPTH levels, sequential below.
+// Uses std.Thread while the subtree is larger than SEQ_THRESHOLD.
 // Spawning 1M OS threads is not feasible; limits concurrent threads to ~1000.
 
 const std = @import("std");
 const Thread = std.Thread;
 const print = std.debug.print;
 
-const THREAD_DEPTH: usize = 3;
+const SEQ_THRESHOLD: i64 = 1000;
 
 fn getLeaves() i64 {
     if (std.posix.getenv("SKYNET_LEAVES")) |val| {
@@ -20,12 +20,10 @@ fn getLeaves() i64 {
 }
 
 fn skynetSeq(offset: i64, size: i64) i64 {
-    if (size == 1) return offset;
-    const child_size = @divTrunc(size, 10);
     var sum: i64 = 0;
     var i: i64 = 0;
-    while (i < 10) : (i += 1) {
-        sum += skynetSeq(offset + i * child_size, child_size);
+    while (i < size) : (i += 1) {
+        sum += offset + i;
     }
     return sum;
 }
@@ -42,7 +40,7 @@ fn skynetThread(arg: *SkynetArg) void {
     const size = arg.size;
     const depth = arg.depth;
 
-    if (size == 1 or depth >= THREAD_DEPTH) {
+    if (size <= SEQ_THRESHOLD) {
         arg.result = skynetSeq(offset, size);
         return;
     }
@@ -81,15 +79,15 @@ fn getTimeNs() u64 {
 pub fn main() !void {
     const num_leaves = getLeaves();
 
-    // Total actors = sum of nodes at each level
-    var total_actors: i64 = 0;
+    // Units created; also the divisor. See FAIRNESS.md.
+    var total_actors: i64 = 1;
     var n = num_leaves;
-    while (n >= 1) : (n = @divTrunc(n, 10)) {
-        total_actors += n;
+    while (n > SEQ_THRESHOLD) : (n = @divTrunc(n, 10)) {
+        total_actors += @divTrunc(n, SEQ_THRESHOLD);
     }
 
     print("=== Zig Skynet Benchmark ===\n", .{});
-    print("Leaves: {} (std.Thread, top {} levels parallel)\n\n", .{ num_leaves, THREAD_DEPTH });
+    print("Leaves: {}, concurrency units: {} (sequential below {})\n\n", .{ num_leaves, total_actors, SEQ_THRESHOLD });
 
     var root = SkynetArg{ .offset = 0, .size = num_leaves, .depth = 0 };
 
@@ -104,10 +102,11 @@ pub fn main() !void {
     print("Sum: {}\n", .{root.result});
     if (elapsed_us > 0) {
         const ns_per_msg = @divTrunc(elapsed_ns, total_actors);
-        const throughput_m = @divTrunc(total_actors, elapsed_us);
-        const leftover = total_actors - (throughput_m * elapsed_us);
-        const frac = @divTrunc(leftover * 100, elapsed_us);
+        // Float, like the other four Zig benchmarks: the integer-and-fraction
+        // version printed "0.+4" for rates below 1 M/sec.
+        const throughput = @as(f64, @floatFromInt(total_actors)) /
+            (@as(f64, @floatFromInt(elapsed_ns)) / 1_000_000_000.0) / 1_000_000.0;
         print("ns/msg:         {}\n", .{ns_per_msg});
-        print("Throughput:     {}.{:0>2} M msg/sec\n", .{ throughput_m, frac });
+        print("Throughput:     {d:.2} M msg/sec\n", .{throughput});
     }
 }

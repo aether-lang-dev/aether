@@ -18,7 +18,7 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 | **Counting** | Single-actor unidirectional throughput |
 | **Thread Ring** | Scheduling overhead with 100 actors in a ring |
 | **Fork-Join** | Parallel fan-out throughput to 8 workers |
-| **Skynet** | Recursive 10-ary tree summing 1M leaves — actor creation + aggregation |
+| **Skynet** | Recursive 10-ary tree summing 1M leaves, actor creation + aggregation. Every language goes sequential below a subtree of 1000, so all create the same 1,111 concurrency units |
 
 ## Languages (11)
 
@@ -34,9 +34,15 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 | **Elixir** | BEAM VM | Lightweight processes + mailboxes |
 | **Erlang** | BEAM VM | Lightweight processes + mailboxes |
 | **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities |
-| **Scala** | JVM (Akka) | Akka actor system |
+| **Scala** | JVM | `java.util.concurrent` queues and ForkJoinPool |
 
-All 11 languages implement all 5 patterns (55 total benchmarks, zero skips).
+All 11 languages implement all 5 patterns, 55 in total.
+
+See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to and the
+audit that produced them. In short: standard library only, the same number of
+concurrency units and the same sequential work in every implementation, rates
+divided by work actually performed, the same region timed, and medians rather
+than single runs.
 
 ## Methodology
 

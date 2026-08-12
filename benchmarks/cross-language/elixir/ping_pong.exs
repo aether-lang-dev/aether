@@ -44,9 +44,9 @@ defmodule PingPong do
     IO.puts("Using Erlang/OTP processes\n")
 
     ping_pid = self()
-    pong_pid = spawn(fn -> pong(0) end)
 
     start = :erlang.monotonic_time(:nanosecond)
+    pong_pid = spawn(fn -> pong(0) end)
     ping(pong_pid, @messages, 0)
     finish = :erlang.monotonic_time(:nanosecond)
 

@@ -1,6 +1,6 @@
 // Rust Skynet Benchmark
 // Based on https://github.com/atemerev/skynet
-// Uses std::thread for top levels (THREAD_DEPTH levels), sequential below.
+// Uses std::thread while the subtree is larger than SEQ_THRESHOLD.
 // Spawning 1M OS threads is not feasible; this limits concurrent threads to ~1000.
 
 use std::sync::mpsc::{channel, Sender};
@@ -21,23 +21,20 @@ fn get_leaves() -> i64 {
     1_000_000
 }
 
-// Below THREAD_DEPTH, compute the sub-tree sum sequentially on the current thread.
-const THREAD_DEPTH: usize = 3;
+// Same threshold in every language here; divisor is the unit count, not the
+// tree's nodes. See FAIRNESS.md.
+const SEQ_THRESHOLD: i64 = 1000;
 
 fn skynet_seq(offset: i64, size: i64) -> i64 {
-    if size == 1 {
-        return offset;
-    }
-    let child_size = size / 10;
     let mut sum = 0i64;
-    for i in 0..10i64 {
-        sum += skynet_seq(offset + i * child_size, child_size);
+    for i in 0..size {
+        sum += offset + i;
     }
     sum
 }
 
 fn skynet(tx: Sender<i64>, offset: i64, size: i64, depth: usize) {
-    if size == 1 || depth >= THREAD_DEPTH {
+    if size <= SEQ_THRESHOLD {
         tx.send(skynet_seq(offset, size)).unwrap();
         return;
     }
@@ -60,16 +57,16 @@ fn skynet(tx: Sender<i64>, offset: i64, size: i64, depth: usize) {
 fn main() {
     let num_leaves = get_leaves();
 
-    // Total actors = sum of nodes at each level
-    let mut total_actors = 0i64;
+    // Units created; also the divisor. See FAIRNESS.md.
+    let mut total_actors = 1i64;
     let mut n = num_leaves;
-    while n >= 1 {
-        total_actors += n;
+    while n > SEQ_THRESHOLD {
+        total_actors += n / SEQ_THRESHOLD;
         n /= 10;
     }
 
     println!("=== Rust Skynet Benchmark ===");
-    println!("Leaves: {} (std::thread, top {} levels parallel)\n", num_leaves, THREAD_DEPTH);
+    println!("Leaves: {}, concurrency units: {} (sequential below {})\n", num_leaves, total_actors, SEQ_THRESHOLD);
 
     let (tx, rx) = channel::<i64>();
     let start = Instant::now();

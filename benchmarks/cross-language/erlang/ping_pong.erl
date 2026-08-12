@@ -46,12 +46,13 @@ start() ->
     io:format("=== Erlang Ping-Pong Benchmark ===~n"),
     io:format("Messages: ~p~n~n", [Messages]),
 
-    % Spawn processes
     Parent = self(),
-    Pong = spawn(fun() -> pong(0, Messages) end),
 
-    % Start timer (monotonic_time is correct for benchmarks per Erlang docs)
+    % monotonic_time is the correct clock for benchmarks per the Erlang docs.
+    % Process creation is inside the timed region, as in every other language here.
     Start = erlang:monotonic_time(nanosecond),
+
+    Pong = spawn(fun() -> pong(0, Messages) end),
 
     % Run ping-pong - spawn returns the PID, we need to link it to receive done
     spawn_link(fun() ->

@@ -1,7 +1,7 @@
 /**
  * C Skynet Benchmark
  * Based on https://github.com/atemerev/skynet
- * Uses pthreads for top THREAD_DEPTH levels, sequential below.
+ * Uses pthreads while the subtree is larger than SEQ_THRESHOLD, sequential below.
  * Spawning 1M OS threads is not feasible; limits concurrent threads to ~1000.
  *
  * Compile with: gcc -O3 -march=native skynet.c -o skynet -pthread
@@ -13,15 +13,14 @@
 #include <string.h>
 #include <time.h>
 
-/* Below THREAD_DEPTH, compute the sub-tree sum sequentially. */
-#define THREAD_DEPTH 3
+/* Same threshold in every language here, so all create 1,111 units for a
+ * million leaves. See FAIRNESS.md. */
+#define SEQ_THRESHOLD 1000
 
 static long long skynet_seq(long long offset, long long size) {
-    if (size == 1) return offset;
-    long long child_size = size / 10;
     long long sum = 0;
-    for (int i = 0; i < 10; i++) {
-        sum += skynet_seq(offset + (long long)i * child_size, child_size);
+    for (long long i = 0; i < size; i++) {
+        sum += offset + i;
     }
     return sum;
 }
@@ -39,7 +38,7 @@ static void* skynet_thread(void* arg) {
     long long size   = a->size;
     int       depth  = a->depth;
 
-    if (size == 1 || depth >= THREAD_DEPTH) {
+    if (size <= SEQ_THRESHOLD) {
         a->result = skynet_seq(offset, size);
         return NULL;
     }
@@ -76,15 +75,16 @@ static long long get_leaves(void) {
 int main(void) {
     long long num_leaves = get_leaves();
 
-    /* Total actors = sum of nodes at each level */
-    long long total_actors = 0;
-    for (long long n = num_leaves; n >= 1; n /= 10) {
-        total_actors += n;
+    /* Divide by units created, not the tree's node count. See FAIRNESS.md. */
+    long long total_actors = 1;
+    for (long long n = num_leaves; n > SEQ_THRESHOLD; n /= 10) {
+        total_actors += n / SEQ_THRESHOLD;
     }
+    const long long rate_base = total_actors;
 
     printf("=== C Skynet Benchmark ===\n");
-    printf("Leaves: %lld (pthreads, top %d levels parallel)\n\n",
-           num_leaves, THREAD_DEPTH);
+    printf("Leaves: %lld, concurrency units: %lld (sequential below %d)\n\n",
+           num_leaves, total_actors, SEQ_THRESHOLD);
 
     SkynetArg root = { .offset = 0, .size = num_leaves, .depth = 0, .result = 0 };
 
@@ -103,9 +103,9 @@ int main(void) {
 
     printf("Sum: %lld\n", root.result);
     if (elapsed_us > 0) {
-        long long ns_per_msg   = elapsed_ns / total_actors;
-        long long throughput_m = total_actors / elapsed_us;
-        long long leftover     = total_actors - (throughput_m * elapsed_us);
+        long long ns_per_msg   = elapsed_ns / rate_base;
+        long long throughput_m = rate_base / elapsed_us;
+        long long leftover     = rate_base - (throughput_m * elapsed_us);
         long long frac         = (leftover * 100) / elapsed_us;
         printf("ns/msg:         %lld\n", ns_per_msg);
         printf("Throughput:     %lld.%02lld M msg/sec\n", throughput_m, frac);

@@ -1,89 +1,54 @@
 package bench.fork_join
 
-// Scala Akka Fork-Join Benchmark (Savina-style)
-import akka.actor.{Actor, ActorRef, ActorSystem, Props}
-import scala.concurrent.duration._
-import scala.concurrent.{Await, Promise}
+import java.util.concurrent.{ArrayBlockingQueue, CountDownLatch}
 
-case class Work(value: Int)
-case object Done
-case class Result(processed: Int)
+// Fan-out to 8 workers, each draining its own bounded queue.
+object ForkJoinBenchmark {
+  def main(args: Array[String]): Unit = {
+    val messages = sys.env.getOrElse("BENCHMARK_MESSAGES", "1000000").toLong
+    val workers = 8
+    val perWorker = messages / workers
+    val total = perWorker * workers
 
-class WorkerActor(parent: ActorRef) extends Actor {
-  var processed = 0
+    println("=== Scala Fork-Join Benchmark ===")
+    println(s"Workers: $workers, messages: $total")
+    println("Using java.util.concurrent.ArrayBlockingQueue\n")
 
-  def receive = {
-    case Work(_) =>
-      processed += 1
-    case Done =>
-      parent ! Result(processed)
-  }
-}
+    val queues = Array.fill(workers)(new ArrayBlockingQueue[java.lang.Long](1024))
+    val done = new CountDownLatch(workers)
 
-class CoordinatorActor(promise: Promise[Int], numWorkers: Int, messagesPerWorker: Int) extends Actor {
-  var workers: Array[ActorRef] = null
-  var resultsReceived = 0
-  var totalProcessed = 0
-  var startTime = 0L
+    val start = System.nanoTime()
 
-  override def preStart(): Unit = {
-    // Create workers
-    workers = Array.tabulate(numWorkers)(i =>
-      context.actorOf(Props(classOf[WorkerActor], self), s"worker$i")
-    )
-
-    startTime = System.nanoTime()
-
-    // Send messages round-robin
-    val total = numWorkers * messagesPerWorker
-    for (i <- 0 until total) {
-      workers(i % numWorkers) ! Work(i)
+    var w = 0
+    while (w < workers) {
+      val me = w
+      new Thread(() => {
+        var seen = 0L
+        while (seen < perWorker) {
+          queues(me).take()
+          seen += 1
+        }
+        done.countDown()
+      }).start()
+      w += 1
     }
 
-    // Signal workers to report
-    workers.foreach(_ ! Done)
-  }
-
-  def receive = {
-    case Result(processed) =>
-      totalProcessed += processed
-      resultsReceived += 1
-      if (resultsReceived == numWorkers) {
-        promise.success(totalProcessed)
-        context.system.terminate()
+    var i = 0L
+    while (i < perWorker) {
+      var k = 0
+      while (k < workers) {
+        queues(k).put(java.lang.Long.valueOf(i))
+        k += 1
       }
+      i += 1
+    }
+    done.await()
+
+    val elapsed = System.nanoTime() - start
+    val nsPerMsg = elapsed / total
+    val throughput = total.toDouble / elapsed * 1e9
+
+    println(s"ns/msg:         $nsPerMsg")
+    println(f"Throughput:     ${throughput / 1e6}%.2f M msg/sec")
   }
-}
-
-object ForkJoinBenchmark extends App {
-  val numWorkers = 8
-  val totalMessages = sys.env.get("BENCHMARK_MESSAGES").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(100000)
-  val messagesPerWorker = totalMessages / numWorkers
-  val total = numWorkers * messagesPerWorker
-
-  println("=== Scala Akka Fork-Join Throughput Benchmark ===")
-  println(s"Workers: $numWorkers, Messages: $total\n")
-
-  val system = ActorSystem("ForkJoin")
-  val promise = Promise[Int]()
-
-  val startTime = System.nanoTime()
-  val coordinator = system.actorOf(Props(classOf[CoordinatorActor], promise, numWorkers, messagesPerWorker))
-
-  val totalProcessed = Await.result(promise.future, 120.seconds)
-  val endTime = System.nanoTime()
-
-  val elapsed = (endTime - startTime).toDouble / 1e9
-
-  if (totalProcessed != total) {
-    println(s"VALIDATION FAILED: expected $total, got $totalProcessed")
-  }
-
-  val throughput = total / elapsed / 1e6
-  val nsPerMsg = elapsed * 1e9 / total
-
-  println(f"ns/msg:         $nsPerMsg%.2f")
-  println(f"Throughput:     $throughput%.2f M msg/sec")
-
-  Await.result(system.whenTerminated, 10.seconds)
 }

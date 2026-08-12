@@ -27,9 +27,21 @@ func getLeaves() int64 {
 
 // skynetNode sends its subtree sum to the result channel.
 // Leaves send their offset directly; internal nodes spawn 10 children and sum.
+// seqSum sums a subtree on the current goroutine.
+const seqThreshold int64 = 1000
+
+func seqSum(offset, size int64) int64 {
+	var sum int64
+	for i := int64(0); i < size; i++ {
+		sum += offset + i
+	}
+	return sum
+}
+
 func skynetNode(result chan<- int64, offset, size int64) {
-	if size == 1 {
-		result <- offset
+	// Same threshold as every other language here. See FAIRNESS.md.
+	if size <= seqThreshold {
+		result <- seqSum(offset, size)
 		return
 	}
 	children := make(chan int64, 10)
@@ -47,16 +59,16 @@ func skynetNode(result chan<- int64, offset, size int64) {
 func main() {
 	numLeaves := getLeaves()
 
-	// Total actors = sum of nodes at each level
-	totalActors := int64(0)
-	n := numLeaves
-	for n >= 1 {
-		totalActors += n
-		n /= 10
+	// Units created; also the divisor. See FAIRNESS.md.
+	totalActors := int64(1)
+	for n := numLeaves; n > seqThreshold; n /= 10 {
+		totalActors += n / seqThreshold
 	}
+	rateBase := totalActors
 
 	fmt.Println("=== Go Skynet Benchmark ===")
-	fmt.Printf("Leaves: %d\n\n", numLeaves)
+	fmt.Printf("Leaves: %d, concurrency units: %d (sequential below %d)\n\n",
+		numLeaves, totalActors, seqThreshold)
 
 	root := make(chan int64, 1)
 	start := time.Now()
@@ -69,9 +81,9 @@ func main() {
 
 	fmt.Printf("Sum: %d\n", sum)
 	if elapsedUs > 0 {
-		nsPerMsg := elapsedNs / totalActors
-		throughputM := totalActors / elapsedUs
-		leftover := totalActors - (throughputM * elapsedUs)
+		nsPerMsg := elapsedNs / rateBase
+		throughputM := rateBase / elapsedUs
+		leftover := rateBase - (throughputM * elapsedUs)
 		throughputFrac := (leftover * 100) / elapsedUs
 		fmt.Printf("ns/msg:         %d\n", nsPerMsg)
 		fmt.Printf("Throughput:     %d.", throughputM)
