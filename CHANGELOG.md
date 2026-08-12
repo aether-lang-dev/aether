@@ -44,7 +44,7 @@ version number before tagging the release.
   time against wall time while quiescent and fails at 35x its budget against
   the old scheduler.
 
-## [current]
+## [0.521.0]
 
 ### Added
 
