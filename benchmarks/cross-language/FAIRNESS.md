@@ -105,7 +105,7 @@ directories. Corrected in the README; the gap itself is #1533.
 Aether creates both actors before starting its timer. C, C++, Go and Rust start
 the timer first and create their threads inside the measured region. For two
 units against millions of messages the effect is small, but it is a systematic
-bias in one direction and it breaks rule 4. Tracked separately.
+bias in one direction and it breaks rule 4. Tracked in #1534.
 
 ### Zig printed a malformed rate
 
