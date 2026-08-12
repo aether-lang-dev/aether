@@ -227,6 +227,42 @@ static AETHER_TLS int tls_overflow_any = 0; // fast gate: any pending at all?
 // that are still queued in scheduler threads' TLS overflow buffers.
 static atomic_int g_overflow_total = 0;
 
+// Idle park bounds (#1517). A core given work directly is signalled and does
+// not wait for these; the ceiling only bounds how long a core that could STEAL
+// from a busy neighbour stays asleep, and it pays that once before finding
+// work and staying awake. Measured at 32ms: 0.28% of one core while idle,
+// against 1.4% at 4ms, with no difference in fork-join throughput either way.
+#define PARK_MS_MIN 1
+#define PARK_MS_MAX 32
+
+static inline void aether_park_deadline(struct timespec* ts, int ms) {
+#if defined(CLOCK_REALTIME)
+    clock_gettime(CLOCK_REALTIME, ts);
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ts->tv_sec = tv.tv_sec;
+    ts->tv_nsec = tv.tv_usec * 1000L;
+#endif
+    ts->tv_nsec += (long)ms * 1000000L;
+    ts->tv_sec  += ts->tv_nsec / 1000000000L;
+    ts->tv_nsec %= 1000000000L;
+}
+
+// Tell `target` it has work (#1517). Costs one acquire load on a line the
+// caller just wrote anyway; the mutex is touched only when someone is actually
+// asleep. The load-versus-park race is closed on the sleeper's side, which
+// sets `parked` and then re-checks its queues before waiting, so a producer
+// that sees parked==0 here has necessarily already made its message visible to
+// that re-check.
+static inline void sched_wake(Scheduler* target) {
+    if (atomic_load_explicit(&target->parked, memory_order_acquire)) {
+        pthread_mutex_lock(&target->park_mutex);
+        pthread_cond_signal(&target->park_cond);
+        pthread_mutex_unlock(&target->park_mutex);
+    }
+}
+
 static void overflow_append(int target, ActorBase* actor, Message msg) {
     if (unlikely(target < 0 || target > MAX_CORES)) {
         fprintf(stderr, "aether: overflow_append: target %d out of range [0, %d]\n",
@@ -334,6 +370,7 @@ static void overflow_flush(int from_core) {
                     // Actor migrated away — try to forward
                     if (queue_enqueue(&schedulers[ac].from_queues[from_idx], actor, msg)) {
                         atomic_fetch_add_explicit(&schedulers[ac].work_count, 1, memory_order_relaxed);
+                        sched_wake(&schedulers[ac]);
                         flushed++;
                     } else {
                         b->actors[start + rem] = actor;
@@ -474,6 +511,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     atomic_fetch_add_explicit(&g_threads_ready, 1, memory_order_release);
 
     int idle_count = 0;
+    int park_ms = PARK_MS_MIN;
 
     while (atomic_load_explicit(&sched->running, memory_order_acquire)) {
         int work_done = 0;
@@ -540,6 +578,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     int forwarded = 0;
                     for (int r = 0; r < 8; r++) {
                         if (queue_enqueue(&schedulers[new_core].from_queues[sched->core_id], actor, msg)) {
+                            sched_wake(&schedulers[new_core]);
                             forwarded = 1; break;
                         }
                         int cur = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
@@ -613,6 +652,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                     int forwarded = 0;
                     for (int r = 0; r < 8; r++) {
                         if (queue_enqueue(&schedulers[new_core].from_queues[sched->core_id], actor, msg)) {
+                            sched_wake(&schedulers[new_core]);
                             forwarded = 1; break;
                         }
                         int cur = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
@@ -903,17 +943,40 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 // Tight spin with architecture-specific pause
                 AETHER_PAUSE();
             } else {
-                // Extended idle: use I/O poller with short timeout instead of blind yield
-                int io_events = scheduler_io_poll(sched, 1);
+                // Extended idle. With descriptors registered the poller blocks
+                // for its timeout and that is the sleep. With none registered
+                // it returns immediately, which is what used to turn this
+                // branch into an unbounded spin (#1517): a program with no I/O
+                // pegged every core forever. Park on the condvar instead.
+                int io_events = scheduler_io_poll(sched, park_ms);
                 if (io_events > 0) {
-                    idle_count = 0;  // I/O activity — go back to active processing
+                    idle_count = 0;
+                    park_ms = PARK_MS_MIN;
+                } else if (sched->io_registered_count > 0) {
+                    // The poll above already blocked for park_ms.
+                    if (park_ms < PARK_MS_MAX) park_ms *= 2;
                 } else {
-                    aether_sched_yield();
-                    idle_count = 5000;
+                    pthread_mutex_lock(&sched->park_mutex);
+                    atomic_store_explicit(&sched->parked, 1, memory_order_release);
+                    // Publish `parked` BEFORE the last look at the queues. A
+                    // producer either sees parked==1 and signals, or its
+                    // enqueue happened before this check and is seen here.
+                    // Neither order sleeps on pending work.
+                    if (atomic_load_explicit(&sched->running, memory_order_acquire) &&
+                        !has_pending_cross_core(sched)) {
+                        struct timespec deadline;
+                        aether_park_deadline(&deadline, park_ms);
+                        pthread_cond_timedwait(&sched->park_cond,
+                                               &sched->park_mutex, &deadline);
+                    }
+                    atomic_store_explicit(&sched->parked, 0, memory_order_release);
+                    pthread_mutex_unlock(&sched->park_mutex);
+                    if (park_ms < PARK_MS_MAX) park_ms *= 2;
                 }
             }
         } else {
             idle_count = 0;
+            park_ms = PARK_MS_MIN;
             atomic_store_explicit(&sched->idle_cycles, 0, memory_order_relaxed);
         }
         
@@ -1025,6 +1088,10 @@ void scheduler_init(int cores) {
         // a NULL map that a non-zero capacity would let it index directly.
         schedulers[i].io_map_capacity = schedulers[i].io_map ? AETHER_IO_MAX_FDS : 0;
         schedulers[i].io_registered_count = 0;
+
+        pthread_mutex_init(&schedulers[i].park_mutex, NULL);
+        pthread_cond_init(&schedulers[i].park_cond, NULL);
+        atomic_store_explicit(&schedulers[i].parked, 0, memory_order_relaxed);
     }
 }
 
@@ -1093,6 +1160,14 @@ void scheduler_stop() {
         atomic_store_explicit(&schedulers[i].from_queues[MAX_CORES].tail,
                             atomic_load_explicit(&schedulers[i].from_queues[MAX_CORES].tail, memory_order_relaxed),
                             memory_order_release);
+    }
+
+    // And wake anyone parked on the condvar, or shutdown waits out their
+    // timeout for no reason (#1517).
+    for (int i = 0; i < num_cores; i++) {
+        pthread_mutex_lock(&schedulers[i].park_mutex);
+        pthread_cond_broadcast(&schedulers[i].park_cond);
+        pthread_mutex_unlock(&schedulers[i].park_mutex);
     }
 }
 
@@ -1693,6 +1768,7 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         if (queue_enqueue(&schedulers[target_core].from_queues[from_idx], actor, msg)) {
             atomic_fetch_add_explicit(&schedulers[target_core].work_count, 1,
                                        memory_order_relaxed);
+            sched_wake(&schedulers[target_core]);
             AETHER_STAT_INC(queue_sends);
             return;
         }
@@ -1715,6 +1791,7 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         AETHER_PAUSE();
     }
     atomic_fetch_add_explicit(&schedulers[target_core].work_count, 1, memory_order_relaxed);
+    sched_wake(&schedulers[target_core]);
     AETHER_STAT_INC(queue_sends);
 }
 

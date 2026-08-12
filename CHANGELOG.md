@@ -11,6 +11,41 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **An idle program pegged every core** (#1517). The scheduler's extended-idle
+  branch called `scheduler_io_poll(sched, 1)` expecting it to block for a
+  millisecond. That function returns immediately when no descriptors are
+  registered, and the `aether_sched_yield()` after it also returns immediately
+  when nothing else is runnable, so the thread reset its counter to 5000 and
+  spun again. Nothing in the path ever slept. The report that opened the issue
+  was a leftover binary that had been running for five days at 650% CPU doing
+  no work.
+
+  A core with nothing registered with the poller now parks on a condition
+  variable. Producers signal it when they hand it work, so a message still
+  arrives without waiting out a timeout; the wait is timed as well, so a
+  producer that never signals costs latency rather than a hang. Cores that do
+  have descriptors registered are unchanged: the poll blocks for its timeout
+  and always did.
+
+  Measured on an 8-core M1 Pro, a program that does one thing and then idles
+  for two seconds:
+
+  | | CPU consumed |
+  |---|---:|
+  | before | 14,058,539 us (about 7 cores) |
+  | after | 5,661 us |
+
+  Throughput improves rather than regresses, because idle cores are no longer
+  competing with working ones for the machine. Medians over repeated runs:
+  thread_ring +18%, counting +187%, fork-join +17%, ping-pong within noise at
+  +2.5%. `tests/regression/test_scheduler_idle_cpu.ae` compares process CPU
+  time against wall time while quiescent and fails at 35x its budget against
+  the old scheduler.
+
+## [current]
+
 ### Added
 
 - **`contrib.vulkan`: offscreen GPU rendering** (#1495, phase 1). Instance,

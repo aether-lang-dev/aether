@@ -1,0 +1,74 @@
+// #1517: an idle program must not burn CPU.
+//
+// The scheduler's extended-idle branch called scheduler_io_poll with a 1ms
+// timeout expecting it to block. With no descriptors registered that function
+// returns immediately, and the yield after it returns immediately too when no
+// other thread is runnable, so every scheduler thread spun forever. An idle
+// process pegged roughly one core per thread: the report that opened the issue
+// was a leftover binary at ~650% CPU for five days.
+//
+// clock() is process CPU time across all threads on POSIX, so comparing it
+// against wall time measures exactly the defect: 2 seconds of doing nothing
+// cost about 2s x cores of CPU before the fix and approximately none after.
+//
+// Skipped on Windows, where clock() returns wall time since process start
+// rather than CPU consumed, which would make the ratio meaningless.
+
+import std.io
+import std.os
+import std.string
+
+extern usleep(us: int) -> int
+extern clock() -> long
+
+message Tick { n: int }
+
+actor Worker {
+    receive {
+        Tick(n) -> {
+            // One message, then the whole system goes quiet. This is the state
+            // that used to spin: work has finished, nothing is registered with
+            // the poller, and nothing will arrive again.
+        }
+    }
+}
+
+main() {
+    println("=== scheduler idle CPU (#1517) ===")
+
+    if string.contains(os.platform(), "windows") == 1 {
+        println("SKIP: clock() measures wall time on Windows, not CPU")
+        println("All PASS")
+        return
+    }
+
+    w = spawn(Worker())
+    w ! Tick { n: 1 }
+
+    // Let the system settle past the deliberate 10000-iteration tight spin
+    // before measuring, so this tests the deep-idle path and not the spin that
+    // is there on purpose for latency.
+    usleep(300000)
+
+    start_cpu = clock()
+    usleep(2000000)
+    used_us = clock() - start_cpu
+
+    // CLOCKS_PER_SEC is 1000000 on Linux and macOS, so the delta is already
+    // microseconds of CPU. Two seconds of wall time on an idle system should
+    // cost single-digit milliseconds; the pre-fix behaviour was 2s per core,
+    // i.e. 2000000 or more with several cores running.
+    budget_us = 400000
+
+    println("cpu used while idle: ${used_us} us over 2000000 us of wall time")
+
+    if used_us < budget_us {
+        println("  PASS idle CPU is within budget")
+        println("")
+        println("All PASS")
+    } else {
+        println("  FAIL idle scheduler burned ${used_us} us of CPU, budget is ${budget_us}")
+        println("")
+        println("1 FAILURE(S)")
+    }
+}
