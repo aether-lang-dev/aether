@@ -4,7 +4,8 @@ Complete syntax and semantics of the Aether programming language.
 
 ## Overview
 
-Aether is a statically-typed, compiled language combining Erlang-inspired actor concurrency with type inference. It features clean, minimal syntax and compiles to C code.
+Aether is a statically-typed compiled language with actor-based concurrency and
+type inference. It compiles to C.
 
 ## Paradigm placement
 
@@ -24,7 +25,7 @@ The placement is deliberate, Aether picks the pieces of each tradition that comp
 
 - **Closures + trailing blocks are first-class** and are *the* idiomatic control-flow construction. The "DSL with scope" pattern (`window("Demo") { vg { circle(...) { fill("#F00") } } }`) is built from closures running in the caller's lexical scope, not from method dispatch on a builder object. See [Closures and Builder DSL](closures-and-builder-dsl.md).
 - **No classes, no inheritance, no `self` / `this`.** Structs are plain data records (`struct Circle { cx: float, cy: float, r: float }`) with no methods attached. Behaviour comes from free functions taking the struct as an argument: `circle_area(c)` not `c.area()`.
-- **Type-annotated parameters with full inference** and **Go-style multi-return** (`-> (long, string)` for value+error tuples), result-type-via-tuple rather than exceptions on the happy path. This is the Go / Rust functional-pragmatic family, not OO error handling.
+- **Type-annotated parameters with full inference** and **multi-value returns** (`-> (long, string)` for value-and-error tuples). Failure is carried in the return value rather than thrown, so the happy path has no exception machinery in it.
 - **Modules with explicit `exports`**, namespaced free functions, not classes-as-namespaces. The visible surface of a module is the export list, not a public-method set.
 - **`fn` as a first-class type**, passed, stored, boxed, unboxed. Aether's closures lower to `_AeClosure { void(*fn)(void); void* env; }` with structural sharing through ref cells (`ref()` / `ref_get` / `ref_set`); the runtime treats them as values, not as method receivers.
 - **No method-dispatch machinery in the compiler.** There's no vtable, no virtual call. Every function call resolves to a direct C function call. The bare-fn-to-closure adapter machinery and the `fn ↔ ptr` coercion rules exist to make first-class function values work end-to-end, a strictly functional priority.
@@ -468,7 +469,8 @@ site's metadata.
 
 ## Pattern Matching Functions
 
-Aether supports Erlang-style function clauses with pattern matching and guard clauses:
+A function can be written as several clauses, each matching a different shape of
+argument, with guards to narrow a clause further:
 
 ### Basic Pattern Matching
 
@@ -2187,7 +2189,7 @@ If `sqrt` internally calls a sibling helper that *isn't* in the import list, the
 ### Module Public API, `exports (…)`
 
 Each module declares its public surface once at the top of the file via
-an Erlang-style `exports (…)` list. Names in the list are callable from
+an `exports (…)` list. Names in the list are callable from
 outside the module via either qualified (`mod.name(…)`) or short-alias
 (`import mod (*)`) forms. Names **not** in the list are private, still
 callable from inside the module's own functions, but rejected at

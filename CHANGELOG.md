@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Documentation
+
+- Stopped defining the language by other languages. The README led with
+  "Erlang-style actors, Rust-grade capability discipline, and Go-flavored
+  ergonomics", and the language reference opened with "combining Erlang-inspired
+  actor concurrency". Both now state what Aether does. The same substitution ran
+  through the entry docs: "Erlang-inspired pattern matching" said nothing a
+  reader could act on, and `(value, err)` describes its own shape without being
+  called Go-style. The Acknowledgments section already credits the lineage
+  properly, at the end, which is where it belongs; the top of a README is for
+  what the thing is.
+
 ## [0.522.0]
 
 ### Fixed
