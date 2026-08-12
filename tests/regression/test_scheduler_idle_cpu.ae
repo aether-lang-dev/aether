@@ -18,7 +18,8 @@ import std.io
 import std.os
 import std.string
 
-extern usleep(us: int) -> int
+// sleep() is the Aether built-in, lowered to aether_sleep_ms, so this test
+// does not depend on usleep, which Windows does not have.
 extern clock() -> long
 
 message Tick { n: int }
@@ -48,10 +49,10 @@ main() {
     // Let the system settle past the deliberate 10000-iteration tight spin
     // before measuring, so this tests the deep-idle path and not the spin that
     // is there on purpose for latency.
-    usleep(300000)
+    sleep(300)
 
     start_cpu = clock()
-    usleep(2000000)
+    sleep(2000)
     used_us = clock() - start_cpu
 
     // CLOCKS_PER_SEC is 1000000 on Linux and macOS, so the delta is already
