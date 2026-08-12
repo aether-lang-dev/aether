@@ -23,6 +23,17 @@ version number before tagging the release.
   now bounded with a precision specifier and truncation is treated as a
   lookup failure rather than silently producing a wrong base path. Verified
   under gcc 14 with `-D_FORTIFY_SOURCE=2 -Wall -Wextra`, both warnings gone.
+
+- **`test_worker` flaked on Windows CI** with "detached worker drained pending".
+  The test waited for the pool thread by counting iterations rather than time,
+  and hot-spun on `worker.drain(0)` while it counted. Two million mutex-takes
+  elapse in a fraction of a second, so on a two-core runner the cap could expire
+  before the pool thread was ever scheduled, and the spinning was itself part of
+  why it was not scheduled. The waits are now bounded by wall-clock time and
+  sleep between polls, so the test stops competing with the thread it is waiting
+  for. The comment above the loop already described this flake; it is now fixed
+  rather than described.
+
 ### Documentation
 
 - Stopped defining the language by other languages. The README led with
