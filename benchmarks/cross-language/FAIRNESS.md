@@ -88,9 +88,9 @@ claim for Aether than the 61x the broken metric produced.
 All five Scala implementations import `akka.actor`. Akka is a third-party
 framework, so Scala is not being measured on its standard library the way every
 other language here is. It is not a hidden dependency, the README names it, but
-it is still not base-versus-base. Tracked separately; the honest options are to
-rewrite against `scala.concurrent` and `java.util.concurrent`, or to label the
-row as a framework rather than a language.
+it is still not base-versus-base. Tracked in #1532; the honest options are to rewrite
+against `scala.concurrent` and `java.util.concurrent`, or to label the row as a
+framework rather than a language.
 
 ### Pony implements three of five patterns
 
@@ -98,7 +98,7 @@ row as a framework rather than a language.
 `thread_ring`. There is no `ping_pong` and no `skynet`. The README claimed "All
 11 languages implement all 5 patterns (55 total benchmarks, zero skips)"; the
 real figure is 53, and the runner would fail trying to compile the two missing
-directories. Corrected in the README and tracked separately.
+directories. Corrected in the README; the gap itself is #1533.
 
 ### Ping-pong times different regions
 
