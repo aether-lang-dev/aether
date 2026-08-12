@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The cross-language skynet benchmark credited every implementation for
+  actors it never created.** All eleven divided by the tree's full node count,
+  1,111,111, while creating between 1,111 and 1,111,111 concurrency units
+  depending on the language, so whichever implementation created the fewest
+  scored highest. Go spawned 1,111,111 goroutines and reported 3.66 M msg/sec;
+  C spawned 1,111 pthreads and reported 72.02; Aether spawned 11,111 actors and
+  reported 225.05. Every implementation now goes sequential below a subtree of
+  1000, so all create the same 1,111 units and perform the same 1,000,000 leaf
+  additions, and each divides by the count it actually created. Verified by
+  running all ten skynet implementations, each returning the correct sum.
+
+  1,111,111 is not the number to equalise on: a pthread is not a goroutine, and
+  this machine refuses the 4,096th concurrent pthread.
+
+  The corrected ordering, in nanoseconds per concurrency unit: Aether 471,
+  Go 799, Elixir 1,194, Erlang 4,017, Java 9,249, Zig 14,410, Rust 14,537,
+  C 15,084, C++ 20,214, Scala 33,252. That is a far more modest claim for Aether
+  than the 61x margin over Go the broken metric produced, and it reflects
+  something real: creating a unit of concurrency costs about 15 microseconds
+  when it is an OS thread and under a microsecond when the runtime schedules it.
+
+- `zig/skynet.zig` printed `0.+4 M msg/sec` for any rate below 1 M/sec, which
+  the runner's parser reads as garbage. It assembled the rate from an integer
+  and a fraction; the other four Zig benchmarks already used a float and
+  `{d:.2}`, and skynet now does too.
+
+- The benchmark README claimed "All 11 languages implement all 5 patterns
+  (55 total benchmarks, zero skips)". Pony has three: no `ping_pong`, no
+  `skynet`. The real figure is 53.
+
+### Added
+
+- `benchmarks/cross-language/FAIRNESS.md`: the five rules the suite holds itself
+  to, and the audit that produced them, including the two findings not fixed
+  here (Scala's Akka dependency, and ping-pong timing different regions in
+  different languages) with issue links.
+
 ## [0.524.0]
 
 ### Fixed

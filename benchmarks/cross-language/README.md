@@ -18,7 +18,7 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 | **Counting** | Single-actor unidirectional throughput |
 | **Thread Ring** | Scheduling overhead with 100 actors in a ring |
 | **Fork-Join** | Parallel fan-out throughput to 8 workers |
-| **Skynet** | Recursive 10-ary tree summing 1M leaves — actor creation + aggregation |
+| **Skynet** | Recursive 10-ary tree summing 1M leaves, actor creation + aggregation. Every language goes sequential below a subtree of 1000, so all create the same 1,111 concurrency units |
 
 ## Languages (11)
 
@@ -34,9 +34,14 @@ Both the benchmark runner (`run_benchmarks.ae`) and the visualization server (`v
 | **Elixir** | BEAM VM | Lightweight processes + mailboxes |
 | **Erlang** | BEAM VM | Lightweight processes + mailboxes |
 | **Pony** | Native (Pony runtime) | GC-free actors, ref capabilities |
-| **Scala** | JVM (Akka) | Akka actor system |
+| **Scala** | JVM (Akka) | Akka actor system, the one third-party dependency here; see [FAIRNESS.md](FAIRNESS.md) |
 
-All 11 languages implement all 5 patterns (55 total benchmarks, zero skips).
+53 of the 55 combinations exist. Pony implements `counting`, `fork_join` and
+`thread_ring` only; it has no `ping_pong` and no `skynet` directory.
+
+See [FAIRNESS.md](FAIRNESS.md) for the rules the suite holds itself to, and for
+the August 2026 audit that found the skynet metric crediting every
+implementation for actors it never created.
 
 ## Methodology
 

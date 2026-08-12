@@ -12,10 +12,16 @@ import scala.concurrent.duration._
 case class Compute(offset: Long, size: Long)
 case class SkynetResult(value: Long)
 
+// One definition, shared by the actor and the reporting below: the same
+// threshold every language in this suite uses, so all create 1,111 units.
+object SkynetNode {
+  val SeqThreshold = 1000L
+}
+
 class SkynetNode(parent: ActorRef) extends Actor {
   var pending = 0
   var total: Long = 0L
-  val SeqThreshold = 100L
+  import SkynetNode.SeqThreshold
 
   def receive = {
     case Compute(offset, size) =>
@@ -71,9 +77,11 @@ object SkynetBenchmark extends App {
   val numLeaves = envVal.toLong
 
   // Total tree nodes (same formula as all languages for fair comparison)
-  var totalNodes = 0L
+  // Concurrency units actually created; also the divisor, since every language
+  // in this suite creates the same count.
+  var totalNodes = 1L
   var nn = numLeaves
-  while (nn >= 1) { totalNodes += nn; nn /= 10 }
+  while (nn > SkynetNode.SeqThreshold) { totalNodes += nn / SkynetNode.SeqThreshold; nn /= 10 }
 
   val system = ActorSystem("skynet")
   val promise = Promise[Long]()
@@ -83,6 +91,7 @@ object SkynetBenchmark extends App {
   val result = Await.result(promise.future, 60.seconds)
   val elapsed = System.nanoTime() - start
 
+  println(s"Leaves: $numLeaves, concurrency units: $totalNodes (sequential below ${SkynetNode.SeqThreshold})")
   println(s"Sum: $result")
 
   if (elapsed > 0) {

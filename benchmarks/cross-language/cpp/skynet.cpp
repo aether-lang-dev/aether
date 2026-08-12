@@ -1,7 +1,7 @@
 /**
  * C++ Skynet Benchmark
  * Based on https://github.com/atemerev/skynet
- * Uses std::thread for top THREAD_DEPTH levels, sequential below.
+ * Uses std::thread while the subtree is larger than SEQ_THRESHOLD.
  * Spawning 1M OS threads is not feasible; limits concurrent threads to ~1000.
  *
  * Compile with: g++ -O3 -std=c++17 -march=native skynet.cpp -o skynet -pthread
@@ -16,8 +16,12 @@
 #include <cstring>
 #include <array>
 
-// Below THREAD_DEPTH, compute the sub-tree sum sequentially on the current thread.
-static const int THREAD_DEPTH = 3;
+// Sequential below SEQ_THRESHOLD. The same threshold in every language in this
+// suite, so all of them create the same 1,111 concurrency units and perform the
+// same leaf additions. The divisor is that unit count, not the tree's 1,111,111
+// nodes: dividing by nodes nobody created scored the implementations that
+// created fewest the highest.
+static const long long SEQ_THRESHOLD = 1000;
 
 static long long skynet_seq(long long offset, long long size) {
     if (size == 1) return offset;
@@ -38,7 +42,7 @@ struct ResultSlot {
 };
 
 static void skynet(ResultSlot* out, long long offset, long long size, int depth) {
-    if (size == 1 || depth >= THREAD_DEPTH) {
+    if (size <= SEQ_THRESHOLD) {
         std::lock_guard<std::mutex> lock(out->mtx);
         out->value = skynet_seq(offset, size);
         out->ready = true;
@@ -81,14 +85,15 @@ static long long get_leaves() {
 int main() {
     long long num_leaves = get_leaves();
 
-    // Total actors = sum of nodes at each level
-    long long total_actors = 0;
-    for (long long n = num_leaves; n >= 1; n /= 10) {
-        total_actors += n;
+    // Concurrency units actually created; also the divisor, since every language
+    // in this suite creates the same count.
+    long long total_actors = 1;
+    for (long long n = num_leaves; n > SEQ_THRESHOLD; n /= 10) {
+        total_actors += n / SEQ_THRESHOLD;
     }
 
     std::cout << "=== C++ Skynet Benchmark ===" << std::endl;
-    std::cout << "Leaves: " << num_leaves << " (std::thread, top " << THREAD_DEPTH << " levels parallel)" << std::endl;
+    std::cout << "Leaves: " << num_leaves << ", concurrency units: " << total_actors << " (sequential below " << SEQ_THRESHOLD << ")" << std::endl;
     std::cout << std::endl;
 
     ResultSlot root;

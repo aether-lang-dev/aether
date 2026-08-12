@@ -20,12 +20,19 @@ defmodule Skynet do
   end
 
   # Total actors = sum of nodes at each level
-  defp total_actors(n) when n < 1, do: 0
-  defp total_actors(n), do: n + total_actors(div(n, 10))
+  # Concurrency units actually created; also the divisor, since every language
+  # in this suite creates the same count. It used to sum every level of the
+  # tree, 1,111,111 for a million leaves, which is what BEAM really spawned
+  # while the thread-based languages spawned 1,111 and were scored the same way.
+  @seq_threshold 1000
+  defp total_actors(n) when n <= @seq_threshold, do: 1
+  defp total_actors(n), do: div(n, @seq_threshold) + total_actors(div(n, 10))
 
   # Leaf: send offset to parent. Internal: spawn 10 children, collect, sum, report up.
-  def skynet_node(offset, 1, parent) do
-    send(parent, offset)
+  # Same threshold as every other language in this suite: below it the subtree
+  # is summed in this process rather than spawning more.
+  def skynet_node(offset, size, parent) when size <= @seq_threshold do
+    send(parent, Enum.reduce(0..(size - 1), 0, fn i, acc -> acc + offset + i end))
   end
 
   def skynet_node(offset, size, parent) do
@@ -50,7 +57,7 @@ defmodule Skynet do
     total = total_actors(num_leaves)
 
     IO.puts("=== Elixir Skynet Benchmark ===")
-    IO.puts("Leaves: #{num_leaves}")
+    IO.puts("Leaves: #{num_leaves}, concurrency units: #{total} (sequential below #{@seq_threshold})")
     IO.puts("Using Erlang/OTP processes\n")
 
     caller = self()
