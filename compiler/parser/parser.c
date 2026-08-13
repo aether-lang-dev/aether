@@ -3,6 +3,14 @@
 #include <string.h>
 #include <ctype.h>
 #include "parser.h"
+#include "../aether_defines.h"
+
+/* Conditional-compilation regions (#1527): shared by the top-level and the
+ * statement-level form, both of which appear later than the helpers use each
+ * other. */
+static int  at_when_region(Parser* parser);
+static int  parse_define_cond(Parser* parser, int* ok);
+static void skip_braced_region(Parser* parser);
 #include "lexer.h"
 #include "../aether_error.h"
 
@@ -4051,12 +4059,22 @@ ASTNode* parse_spawn_actor_statement(Parser* parser) {
     return spawn_stmt;
 }
 
+/* Statement-level sibling of the top-level region. Same rule: the losing
+ * branch is never parsed, so a guarded block may call functions that only
+ * exist under the same symbol. Declared here because it recurses through
+ * parse_statement. */
+static void parse_when_region_stmts(Parser* parser, ASTNode* block);
+
 ASTNode* parse_block(Parser* parser) {
     expect_token(parser, TOKEN_LEFT_BRACE);
     
     ASTNode* block = create_ast_node(AST_BLOCK, NULL, 0, 0);
     
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        if (at_when_region(parser)) {
+            parse_when_region_stmts(parser, block);
+            continue;
+        }
         int start_token = parser->current_token;
         ASTNode* stmt = parse_statement(parser);
         if (stmt) {
@@ -6550,6 +6568,186 @@ ASTNode* parse_top_level_decl(Parser* parser) {
     }
 }
 
+
+static void parse_region_stmts_into(Parser* parser, ASTNode* block) {
+    if (!match_token(parser, TOKEN_LEFT_BRACE)) {
+        parser_message(parser, "Error: expected '{' to open a `when` region");
+        return;
+    }
+    int guard = 0;
+    while (!is_at_end(parser) && guard++ < 10000) {
+        Token* t = peek_token(parser);
+        if (!t || t->type == TOKEN_RIGHT_BRACE) break;
+        int start = parser->current_token;
+        ASTNode* stmt = parse_statement(parser);
+        if (stmt) add_child(block, stmt);
+        else if (parser->current_token == start) advance_token(parser);
+    }
+    if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        parser_message(parser, "Error: unterminated `when` region");
+    }
+}
+
+static void parse_when_region_stmts(Parser* parser, ASTNode* block) {
+    advance_token(parser);            /* `when` */
+    int ok = 1;
+    int taken = parse_define_cond(parser, &ok);
+    if (!ok) { skip_braced_region(parser); return; }
+
+    if (taken) parse_region_stmts_into(parser, block);
+    else       skip_braced_region(parser);
+
+    if (peek_token(parser) && peek_token(parser)->type == TOKEN_ELSE) {
+        advance_token(parser);
+        if (taken) skip_braced_region(parser);
+        else       parse_region_stmts_into(parser, block);
+    }
+}
+
+/* ---- conditional compilation regions (#1527) --------------------------- *
+ *
+ * `when defined(NAME) { … } else { … }` around top-level declarations. The
+ * losing branch is DROPPED, not wrapped in a preprocessor `#if`: an excluded
+ * subsystem should not be in the binary, and code that never reaches codegen
+ * does not need the names it mentions to exist. That is what the reporter of
+ * #1527 could not get by any other route, and what `select()` structurally
+ * cannot become: it chooses a value, and both branches still compile and link.
+ *
+ * The condition grammar is small on purpose: defined(NAME), !, &&, ||, and
+ * parentheses. It is evaluated here, at parse time, against the symbols the
+ * build declared.
+ */
+
+static int parse_define_primary(Parser* parser, int* ok) {
+    Token* t = peek_token(parser);
+    if (!t) { *ok = 0; return 0; }
+
+    if (t->type == TOKEN_LEFT_PAREN) {
+        advance_token(parser);
+        int v = parse_define_cond(parser, ok);
+        if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
+            parser_message(parser, "Error: expected ')' in a `when` condition");
+            *ok = 0;
+        }
+        return v;
+    }
+
+    if (t->type == TOKEN_IDENTIFIER && t->value && strcmp(t->value, "defined") == 0) {
+        advance_token(parser);
+        if (!match_token(parser, TOKEN_LEFT_PAREN)) {
+            parser_message(parser, "Error: expected '(' after `defined`");
+            *ok = 0;
+            return 0;
+        }
+        Token* name = peek_token(parser);
+        if (!name || name->type != TOKEN_IDENTIFIER || !name->value) {
+            parser_message(parser, "Error: expected a symbol name inside `defined(...)`");
+            *ok = 0;
+            return 0;
+        }
+        int v = aether_define_is_set(name->value);
+        advance_token(parser);
+        if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
+            parser_message(parser, "Error: expected ')' after the symbol name");
+            *ok = 0;
+        }
+        return v;
+    }
+
+    parser_message(parser, "Error: a `when` region condition is defined(NAME), "
+                           "optionally combined with !, && and ||");
+    *ok = 0;
+    return 0;
+}
+
+static int parse_define_unary(Parser* parser, int* ok) {
+    if (peek_token(parser) &&
+        (peek_token(parser)->type == TOKEN_NOT || peek_token(parser)->type == TOKEN_EXCLAIM)) {
+        advance_token(parser);
+        return !parse_define_unary(parser, ok);
+    }
+    return parse_define_primary(parser, ok);
+}
+
+static int parse_define_cond(Parser* parser, int* ok) {
+    int value = parse_define_unary(parser, ok);
+    while (*ok && peek_token(parser) &&
+           (peek_token(parser)->type == TOKEN_AND || peek_token(parser)->type == TOKEN_OR)) {
+        int is_and = peek_token(parser)->type == TOKEN_AND;
+        advance_token(parser);
+        int rhs = parse_define_unary(parser, ok);
+        /* Both sides are always evaluated: they are symbol lookups with no
+         * side effects, and short-circuiting would leave the losing side's
+         * tokens unconsumed. */
+        value = is_and ? (value && rhs) : (value || rhs);
+    }
+    return value;
+}
+
+/* Consumes a brace-delimited region without parsing it. Used for the branch
+ * that loses, so its contents never reach the type checker. */
+static void skip_braced_region(Parser* parser) {
+    if (!match_token(parser, TOKEN_LEFT_BRACE)) return;
+    int depth = 1;
+    while (depth > 0 && !is_at_end(parser)) {
+        Token* t = peek_token(parser);
+        if (!t) break;
+        if (t->type == TOKEN_LEFT_BRACE) depth++;
+        else if (t->type == TOKEN_RIGHT_BRACE) depth--;
+        advance_token(parser);
+    }
+}
+
+/* Parses the declarations of a winning region straight into `program`, so a
+ * region leaves no trace in the AST: what it contained is indistinguishable
+ * from having been written at top level. */
+static void parse_region_into(Parser* parser, ASTNode* program) {
+    if (!match_token(parser, TOKEN_LEFT_BRACE)) {
+        parser_message(parser, "Error: expected '{' to open a `when` region");
+        return;
+    }
+    int guard = 0;
+    while (!is_at_end(parser) && guard++ < 10000) {
+        Token* t = peek_token(parser);
+        if (!t || t->type == TOKEN_RIGHT_BRACE) break;
+        int start = parser->current_token;
+        ASTNode* node = parse_top_level_decl(parser);
+        if (node) add_child(program, node);
+        else if (parser->current_token == start) advance_token(parser);
+    }
+    if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        parser_message(parser, "Error: unterminated `when` region");
+    }
+}
+
+/* True when the next tokens open a conditional-compilation region rather than
+ * a function-clause guard: `when` followed by `defined`, `!` or `(`. A guard
+ * is always attached to a clause head, so it never appears at top level. */
+static int at_when_region(Parser* parser) {
+    Token* t = peek_token(parser);
+    if (!t || t->type != TOKEN_WHEN) return 0;
+    Token* n = peek_ahead(parser, 1);
+    if (!n) return 0;
+    if (n->type == TOKEN_NOT || n->type == TOKEN_EXCLAIM || n->type == TOKEN_LEFT_PAREN) return 1;
+    return n->type == TOKEN_IDENTIFIER && n->value && strcmp(n->value, "defined") == 0;
+}
+
+static void parse_when_region(Parser* parser, ASTNode* program) {
+    advance_token(parser);            /* `when` */
+    int ok = 1;
+    int taken = parse_define_cond(parser, &ok);
+    if (!ok) { skip_braced_region(parser); return; }
+
+    if (taken) parse_region_into(parser, program);
+    else       skip_braced_region(parser);
+
+    if (peek_token(parser) && peek_token(parser)->type == TOKEN_ELSE) {
+        advance_token(parser);
+        if (taken) skip_braced_region(parser);
+        else       parse_region_into(parser, program);
+    }
+}
+
 ASTNode* parse_program(Parser* parser) {
     ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
 
@@ -6559,6 +6757,11 @@ ASTNode* parse_program(Parser* parser) {
 
     while (!is_at_end(parser) && safety_counter < MAX_ITERATIONS) {
         safety_counter++;
+
+        if (at_when_region(parser)) {
+            parse_when_region(parser, program);
+            continue;
+        }
 
         int start_token = parser->current_token;
         ASTNode* node = parse_top_level_decl(parser);
