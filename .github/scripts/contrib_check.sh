@@ -78,6 +78,7 @@ TESTS=(
   "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|run||vulkan"
   "vulkan/resources|$VK/test_vulkan_resources.ae|$VK/aether_vulkan.c|run||vulkan"
   "vulkan/actors|$VK/test_vulkan_actors.ae|$VK/aether_vulkan.c|run||vulkan"
+  "vulkan/depth-msaa|$VK/test_vulkan_depth_msaa.ae|$VK/aether_vulkan.c|run||vulkan"
   # The examples are RUN, not just compiled. An example that only builds
   # rots into decoration: both of these render and write a PPM, so a
   # regression that leaves them producing nothing fails here.

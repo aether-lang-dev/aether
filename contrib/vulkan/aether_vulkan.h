@@ -64,6 +64,24 @@ void        aevk_device_destroy(AevkDevice* dev);
  * mapped for the target's lifetime. Fails with AEVK_ERR_UNSUPPORTED rather
  * than crashing when the size exceeds the device's limits. */
 AevkTarget* aevk_target_create(AevkDevice* dev, int width, int height);
+
+/* As above, with an optional depth attachment and multisampling (#1512).
+ *
+ * `want_depth` adds a depth attachment in a format the device supports, and
+ * pipelines built for this target then test and write depth, so overlapping
+ * geometry resolves by distance instead of by submission order.
+ *
+ * `samples` is 1, 2, 4, 8 or 16, checked against what the device actually
+ * offers for framebuffers rather than rounded down silently. Above 1 the
+ * colour attachment is multisampled and resolves into the single-sample image,
+ * so readback and `pixel()` are unchanged. */
+AevkTarget* aevk_target_create_ex(AevkDevice* dev, int width, int height,
+                                  int want_depth, int samples);
+
+/* 1 when the target has a depth attachment; its sample count (1 when not
+ * multisampled). For tests and diagnostics. */
+int aevk_target_has_depth(const AevkTarget* t);
+int aevk_target_samples(const AevkTarget* t);
 void        aevk_target_destroy(AevkTarget* t);
 int         aevk_target_width(const AevkTarget* t);
 int         aevk_target_height(const AevkTarget* t);
