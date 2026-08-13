@@ -109,6 +109,33 @@ vkResetFences via loader    12.2 ns/call
 vkResetFences via driver    11.6 ns/call   (5.2% less)
 ```
 
+## Threads
+
+**One device may be used from several threads.** Vulkan requires the caller to
+synchronise a `VkQueue` and a `VkCommandPool`; this module does that with one
+lock per device, taken across queue submission and every command-pool access.
+Aether is an actor language, so two actors sharing a device is the ordinary
+shape, and leaving it undefined would be a trap rather than a simplification.
+
+What that covers and what it does not:
+
+| | |
+|---|---|
+| Two actors drawing to their own targets from one device | Safe |
+| Creating and destroying targets or textures concurrently | Safe |
+| Two threads drawing to the **same** target | Not safe: a target owns one command buffer and one fence, so serialise it or give each thread its own |
+| Destroying a device while another thread is using it | Not safe, and no lock can help: the lock lives inside the object being freed |
+| `last_error()` | Thread-local, so read it on the thread that made the failing call. On another thread it reports `""` |
+
+`available()` is safe to call concurrently. Its probe is serialised, because it
+fills a 256-byte device-name buffer that `device_name()` reads.
+
+The cost is not measurable on the offscreen path: the same two-actor workload
+takes the same wall time with the lock compiled out, since a draw already
+blocks on a fence. `test_vulkan_actors.ae` exercises the contract, and its
+header is explicit that passing does not prove the lock is load-bearing on any
+particular driver.
+
 ## Measured cost
 
 Apple M1 Pro, MoltenVK 1.4.2 over Metal, 512x512 R8G8B8A8, release build.
@@ -220,7 +247,6 @@ plan in someone's head.
 | Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
 | Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
-| A thread-safety contract (none is claimed today) | #1510 | P2 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
 | Depth, stencil and MSAA | #1512 | P3 |
 | Frames in flight, and a configurable GPU timeout (currently a fixed 5s) | #1513 | P3 |
