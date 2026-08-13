@@ -164,6 +164,29 @@ int aevk_target_set_vertices(AevkTarget* t, const float* data, int vertex_count)
 int aevk_draw(AevkTarget* t, AevkPipeline* pipe,
               float r, float g, float b, float a);
 
+/* --- frames in flight ------------------------------------------------------ */
+
+/* How many frames may be in flight at once, 1..8. One is the default and the
+ * synchronous shape: `draw` records, submits and waits. Above one, `submit`
+ * returns without waiting so the CPU can record the next frame while the GPU
+ * works, and each slot carries its own readback buffer (width*height*4) so a
+ * later frame cannot overwrite pixels an earlier one has not had read yet. */
+int aevk_target_set_frames(AevkTarget* t, int count);
+int aevk_target_frames(const AevkTarget* t);
+
+/* The fence wait in milliseconds; the default 5000 is a hang detector rather
+ * than a frame budget. */
+int aevk_target_set_timeout_ms(AevkTarget* t, int ms);
+
+/* Records and submits one frame without waiting. Returns the slot used, or a
+ * negative status. Blocks only when every slot is still in flight. */
+int aevk_submit(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a);
+
+/* Waits for every outstanding frame. The readers (`pixel`, `read_rgba`,
+ * `save_ppm`) wait for the most recent frame on their own, so this is for a
+ * caller that wants the queue drained rather than the pixels. */
+int aevk_wait_all(AevkTarget* t);
+
 /* Copies width*height*4 bytes of R8G8B8A8 from the mapped readback buffer.
  * `out_len` must be at least that; anything smaller is AEVK_ERR_ARG rather
  * than a truncated read. */
