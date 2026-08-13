@@ -9,6 +9,9 @@
 //   vulkan.device_destroy(dev)
 //
 //   vulkan.target_create(dev, w, h)     -> ptr     offscreen RGBA image
+//   vulkan.target_create_ex(dev, w, h, depth, samples) -> ptr
+//   vulkan.target_has_depth(t)          -> int
+//   vulkan.target_samples(t)            -> int
 //   vulkan.target_destroy(t)
 //   vulkan.target_width(t)              -> int
 //   vulkan.target_height(t)             -> int
@@ -77,14 +80,16 @@ exports (
     ERR_UNSUPPORTED, ERR_SHADER, ERR_DEVICE_LOST,
     aevk_ae_available, aevk_ae_last_error, aevk_ae_device_name,
     aevk_ae_device_create, aevk_ae_device_destroy,
-    aevk_ae_target_create, aevk_ae_target_destroy,
+    aevk_ae_target_create, aevk_ae_target_create_ex, aevk_ae_target_destroy,
+    aevk_ae_target_has_depth, aevk_ae_target_samples,
     aevk_ae_target_width, aevk_ae_target_height, aevk_ae_rgba_size,
     aevk_ae_pipeline_create, aevk_ae_pipeline_destroy,
     aevk_ae_verts_reserve, aevk_ae_verts_set, aevk_ae_draw,
     aevk_ae_copy_rgba, aevk_ae_pixel, aevk_ae_save_ppm,
     available, last_error, device_name,
     device_create, device_destroy,
-    target_create, target_destroy, target_width, target_height, rgba_size,
+    target_create, target_create_ex, target_destroy, target_width, target_height,
+    target_has_depth, target_samples, rgba_size,
     pipeline_create, pipeline_destroy,
     verts_reserve, verts_set, draw, copy_rgba, pixel, save_ppm,
     red, green, blue, alpha,
@@ -120,6 +125,9 @@ extern aevk_ae_device_create() -> ptr
 extern aevk_ae_device_destroy(dev: ptr)
 
 extern aevk_ae_target_create(dev: ptr, w: int, h: int) -> ptr
+extern aevk_ae_target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr
+extern aevk_ae_target_has_depth(t: ptr) -> int
+extern aevk_ae_target_samples(t: ptr) -> int
 extern aevk_ae_target_destroy(t: ptr)
 extern aevk_ae_target_width(t: ptr) -> int
 extern aevk_ae_target_height(t: ptr) -> int
@@ -187,6 +195,17 @@ device_create() -> ptr { return aevk_ae_device_create() }
 device_destroy(dev: ptr) { aevk_ae_device_destroy(dev) }
 
 target_create(dev: ptr, w: int, h: int) -> ptr { return aevk_ae_target_create(dev, w, h) }
+
+// A target with an optional depth attachment and multisampling. Depth makes
+// overlapping geometry resolve by distance instead of submission order;
+// samples is 1, 2, 4, 8 or 16 and is checked against the device rather than
+// rounded down. The multisampled image resolves into the single-sample one,
+// so readback and pixel() are unchanged.
+target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr {
+    return aevk_ae_target_create_ex(dev, w, h, want_depth, samples)
+}
+target_has_depth(t: ptr) -> int { return aevk_ae_target_has_depth(t) }
+target_samples(t: ptr) -> int { return aevk_ae_target_samples(t) }
 target_destroy(t: ptr) { aevk_ae_target_destroy(t) }
 target_width(t: ptr) -> int { return aevk_ae_target_width(t) }
 target_height(t: ptr) -> int { return aevk_ae_target_height(t) }

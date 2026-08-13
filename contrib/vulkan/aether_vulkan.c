@@ -253,6 +253,10 @@ struct AevkDevice {
     VkCommandPool    pool;
     VkPhysicalDeviceMemoryProperties mem_props;
     uint32_t         max_dim;
+    /* Which sample counts the device can actually use for framebuffer colour
+     * and depth. Asking for 4x on hardware that offers 2x is a caller error
+     * worth naming, not something to silently round down. */
+    VkSampleCountFlags sample_counts;
     char             name[256];
 };
 
@@ -277,6 +281,22 @@ struct AevkTarget {
     VkDeviceMemory readback_mem;
     void*          readback_ptr;    /* mapped for the target's lifetime */
     VkDeviceSize   readback_size;
+
+    /* Multisampling and depth, both optional (#1512). With samples > 1 the
+     * colour attachment is multisampled and resolves into `image`, which stays
+     * single-sample so readback is unchanged. */
+    int            samples;
+    VkImage        msaa_image;
+    VkDeviceMemory msaa_mem;
+    VkImageView    msaa_view;
+
+    int            has_depth;
+    VkFormat       depth_format;
+    uint32_t       clear_count;        /* attachments, so record() sizes pClearValues */
+    uint32_t       depth_clear_index;  /* where the depth clear goes in that array */
+    VkImage        depth_image;
+    VkDeviceMemory depth_mem;
+    VkImageView    depth_view;
 
     VkBuffer       vbuf;
     VkDeviceMemory vbuf_mem;
@@ -590,6 +610,8 @@ AevkDevice* aevk_device_create(void) {
     VkPhysicalDeviceProperties props;
     d->ia.vkGetPhysicalDeviceProperties(d->phys, &props);
     d->max_dim = props.limits.maxImageDimension2D;
+    d->sample_counts = props.limits.framebufferColorSampleCounts &
+                       props.limits.framebufferDepthSampleCounts;
     d->ia.vkGetPhysicalDeviceMemoryProperties(d->phys, &d->mem_props);
 
     /* VK_KHR_portability_subset must be enabled when the device advertises it,
@@ -715,7 +737,100 @@ static int aevk_make_buffer(AevkDevice* d, VkDeviceSize size,
     return AEVK_OK;
 }
 
+/* A depth format the device supports for optimal-tiling depth attachments,
+ * preferring plain depth over combined depth+stencil: a caller who asked only
+ * for depth should not pay for a stencil it never reads. VK_FORMAT_UNDEFINED
+ * when the device offers none, which is possible in principle and worth
+ * reporting rather than assuming. */
+static VkFormat aevk_pick_depth_format(AevkDevice* d) {
+    static const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D16_UNORM,
+    };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        VkFormatProperties fp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, candidates[i], &fp);
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            return candidates[i];
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
+static VkSampleCountFlagBits aevk_sample_bit(int samples) {
+    switch (samples) {
+        case 1:  return VK_SAMPLE_COUNT_1_BIT;
+        case 2:  return VK_SAMPLE_COUNT_2_BIT;
+        case 4:  return VK_SAMPLE_COUNT_4_BIT;
+        case 8:  return VK_SAMPLE_COUNT_8_BIT;
+        case 16: return VK_SAMPLE_COUNT_16_BIT;
+        default: return (VkSampleCountFlagBits)0;
+    }
+}
+
+/* Creates an image plus its memory and view in one step: the colour, resolve
+ * and depth attachments differ only in format, usage and aspect. */
+static int aevk_make_attachment(AevkDevice* d, int width, int height,
+                                VkFormat format, VkSampleCountFlagBits samples,
+                                VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                                VkImage* out_img, VkDeviceMemory* out_mem,
+                                VkImageView* out_view) {
+    VkImageCreateInfo ici = {0};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = VK_IMAGE_TYPE_2D;
+    ici.format = format;
+    ici.extent.width = (uint32_t)width;
+    ici.extent.height = (uint32_t)height;
+    ici.extent.depth = 1;
+    ici.mipLevels = 1;
+    ici.arrayLayers = 1;
+    ici.samples = samples;
+    ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ici.usage = usage;
+    ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkResult r = d->da.vkCreateImage(d->device, &ici, NULL, out_img);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateImage failed (%d)", (int)r);
+
+    VkMemoryRequirements req;
+    d->da.vkGetImageMemoryRequirements(d->device, *out_img, &req);
+    uint32_t type = 0;
+    if (aevk_find_memory(d, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                         &type) != AEVK_OK &&
+        aevk_find_memory(d, req.memoryTypeBits, 0, &type) != AEVK_OK) {
+        return aevk_fail(AEVK_ERR_UNSUPPORTED, "no memory type for an attachment");
+    }
+    VkMemoryAllocateInfo mi = {0};
+    mi.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mi.allocationSize = req.size;
+    mi.memoryTypeIndex = type;
+    r = d->da.vkAllocateMemory(d->device, &mi, NULL, out_mem);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkAllocateMemory failed (%d)", (int)r);
+    r = d->da.vkBindImageMemory(d->device, *out_img, *out_mem, 0);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkBindImageMemory failed (%d)", (int)r);
+
+    VkImageViewCreateInfo vci = {0};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = *out_img;
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = format;
+    vci.subresourceRange.aspectMask = aspect;
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.layerCount = 1;
+    r = d->da.vkCreateImageView(d->device, &vci, NULL, out_view);
+    if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkCreateImageView failed (%d)", (int)r);
+    return AEVK_OK;
+}
+
 AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
+    return aevk_target_create_ex(d, width, height, 0, 1);
+}
+
+AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
+                                  int want_depth, int samples) {
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
     if (width <= 0 || height <= 0) {
@@ -735,12 +850,35 @@ AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
         return NULL;
     }
 
+    VkSampleCountFlagBits sample_bit = aevk_sample_bit(samples);
+    if (!sample_bit) {
+        aevk_fail(AEVK_ERR_ARG, "sample count must be 1, 2, 4, 8 or 16 (got %d)", samples);
+        return NULL;
+    }
+    if (samples > 1 && !(d->sample_counts & sample_bit)) {
+        aevk_fail(AEVK_ERR_UNSUPPORTED,
+                  "device does not support %dx multisampling for framebuffers", samples);
+        return NULL;
+    }
+
+    VkFormat depth_format = VK_FORMAT_UNDEFINED;
+    if (want_depth) {
+        depth_format = aevk_pick_depth_format(d);
+        if (depth_format == VK_FORMAT_UNDEFINED) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED, "device offers no depth attachment format");
+            return NULL;
+        }
+    }
+
     AevkTarget* t = (AevkTarget*)calloc(1, sizeof(*t));
     if (!t) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     t->dev = d;
     t->width = width;
     t->height = height;
     t->readback_size = (VkDeviceSize)bytes;
+    t->samples = samples;
+    t->has_depth = want_depth ? 1 : 0;
+    t->depth_format = depth_format;
 
     VkImageCreateInfo ici = {0};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -798,34 +936,111 @@ AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
     r = d->da.vkCreateImageView(d->device, &vci, NULL, &t->view);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateImageView failed (%d)", (int)r); goto fail; }
 
-    /* finalLayout TRANSFER_SRC_OPTIMAL so the copy after the render pass needs
-     * no pipeline barrier: the render pass's implicit transition covers it. */
-    VkAttachmentDescription att = {0};
-    att.format = VK_FORMAT_R8G8B8A8_UNORM;
-    att.samples = VK_SAMPLE_COUNT_1_BIT;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    att.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    /* The extra attachments, when asked for. The multisampled colour image is
+     * TRANSIENT: it exists only inside the render pass, resolving into
+     * `image`, so a tiler never has to write it to memory at all. */
+    if (t->samples > 1) {
+        int rc = aevk_make_attachment(d, width, height, VK_FORMAT_R8G8B8A8_UNORM,
+                                      aevk_sample_bit(t->samples),
+                                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                      VK_IMAGE_ASPECT_COLOR_BIT,
+                                      &t->msaa_image, &t->msaa_mem, &t->msaa_view);
+        if (rc != AEVK_OK) goto fail;
+    }
+    if (t->has_depth) {
+        int rc = aevk_make_attachment(d, width, height, t->depth_format,
+                                      aevk_sample_bit(t->samples),
+                                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                                      VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT,
+                                      VK_IMAGE_ASPECT_DEPTH_BIT,
+                                      &t->depth_image, &t->depth_mem, &t->depth_view);
+        if (rc != AEVK_OK) goto fail;
+    }
 
-    VkAttachmentReference ref = {0};
-    ref.attachment = 0;
-    ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    /* Attachment 0 is always the one the draw writes: the multisampled image
+     * when there is one, otherwise the single-sample image that gets copied
+     * out. finalLayout TRANSFER_SRC_OPTIMAL on whichever ends up being copied,
+     * so the copy after the render pass needs no barrier.
+     *
+     * Order: [0] colour written, [1] resolve (MSAA only), [last] depth. The
+     * clear-value array is indexed by attachment, so record() has to build it
+     * in this same order. */
+    VkAttachmentDescription atts[3];
+    memset(atts, 0, sizeof(atts));
+    uint32_t n_att = 0;
+
+    uint32_t color_index = n_att;
+    atts[n_att].format = VK_FORMAT_R8G8B8A8_UNORM;
+    atts[n_att].samples = aevk_sample_bit(t->samples);
+    atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    atts[n_att].storeOp = (t->samples > 1) ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                           : VK_ATTACHMENT_STORE_OP_STORE;
+    atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    atts[n_att].finalLayout = (t->samples > 1) ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                               : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    n_att++;
+
+    uint32_t resolve_index = 0;
+    if (t->samples > 1) {
+        resolve_index = n_att;
+        atts[n_att].format = VK_FORMAT_R8G8B8A8_UNORM;
+        atts[n_att].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[n_att].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        n_att++;
+    }
+
+    uint32_t depth_index = 0;
+    if (t->has_depth) {
+        depth_index = n_att;
+        atts[n_att].format = t->depth_format;
+        atts[n_att].samples = aevk_sample_bit(t->samples);
+        atts[n_att].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        atts[n_att].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[n_att].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        atts[n_att].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[n_att].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        atts[n_att].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        n_att++;
+    }
+    t->clear_count = n_att;
+    t->depth_clear_index = t->has_depth ? depth_index : 0;
+
+    VkAttachmentReference color_ref = {0};
+    color_ref.attachment = color_index;
+    color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference resolve_ref = {0};
+    resolve_ref.attachment = resolve_index;
+    resolve_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depth_ref = {0};
+    depth_ref.attachment = depth_index;
+    depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription sub = {0};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &ref;
+    sub.pColorAttachments = &color_ref;
+    if (t->samples > 1)  sub.pResolveAttachments = &resolve_ref;
+    if (t->has_depth)    sub.pDepthStencilAttachment = &depth_ref;
 
     VkSubpassDependency deps[2] = {{0}, {0}};
     deps[0].srcSubpass = VK_SUBPASS_EXTERNAL;
     deps[0].dstSubpass = 0;
     deps[0].srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    deps[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     deps[0].srcAccessMask = 0;
-    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    deps[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     deps[1].srcSubpass = 0;
     deps[1].dstSubpass = VK_SUBPASS_EXTERNAL;
     deps[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -835,8 +1050,8 @@ AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
 
     VkRenderPassCreateInfo rpi = {0};
     rpi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    rpi.attachmentCount = 1;
-    rpi.pAttachments = &att;
+    rpi.attachmentCount = n_att;
+    rpi.pAttachments = atts;
     rpi.subpassCount = 1;
     rpi.pSubpasses = &sub;
     rpi.dependencyCount = 2;
@@ -844,11 +1059,17 @@ AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
     r = d->da.vkCreateRenderPass(d->device, &rpi, NULL, &t->pass);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateRenderPass failed (%d)", (int)r); goto fail; }
 
+    VkImageView views[3];
+    uint32_t n_view = 0;
+    views[n_view++] = (t->samples > 1) ? t->msaa_view : t->view;
+    if (t->samples > 1) views[n_view++] = t->view;
+    if (t->has_depth)   views[n_view++] = t->depth_view;
+
     VkFramebufferCreateInfo fci = {0};
     fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fci.renderPass = t->pass;
-    fci.attachmentCount = 1;
-    fci.pAttachments = &t->view;
+    fci.attachmentCount = n_view;
+    fci.pAttachments = views;
     fci.width = (uint32_t)width;
     fci.height = (uint32_t)height;
     fci.layers = 1;
@@ -912,10 +1133,19 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->view)         d->da.vkDestroyImageView(d->device, t->view, NULL);
         if (t->image)        d->da.vkDestroyImage(d->device, t->image, NULL);
         if (t->image_mem)    d->da.vkFreeMemory(d->device, t->image_mem, NULL);
+        if (t->msaa_view)    d->da.vkDestroyImageView(d->device, t->msaa_view, NULL);
+        if (t->msaa_image)   d->da.vkDestroyImage(d->device, t->msaa_image, NULL);
+        if (t->msaa_mem)     d->da.vkFreeMemory(d->device, t->msaa_mem, NULL);
+        if (t->depth_view)   d->da.vkDestroyImageView(d->device, t->depth_view, NULL);
+        if (t->depth_image)  d->da.vkDestroyImage(d->device, t->depth_image, NULL);
+        if (t->depth_mem)    d->da.vkFreeMemory(d->device, t->depth_mem, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(t);
 }
+
+int aevk_target_has_depth(const AevkTarget* t) { return t ? t->has_depth : 0; }
+int aevk_target_samples(const AevkTarget* t)   { return t ? t->samples : 0; }
 
 int aevk_target_width(const AevkTarget* t)  { return t ? t->width  : 0; }
 int aevk_target_height(const AevkTarget* t) { return t ? t->height : 0; }
@@ -1423,7 +1653,17 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
 
     VkPipelineMultisampleStateCreateInfo ms = {0};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    /* Must match the render pass's colour attachment, so it comes from the
+     * target rather than being fixed at one sample. */
+    ms.rasterizationSamples = aevk_sample_bit(t->samples ? t->samples : 1);
+
+    VkPipelineDepthStencilStateCreateInfo ds = {0};
+    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable = t->has_depth ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = t->has_depth ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS;
+    ds.minDepthBounds = 0.0f;
+    ds.maxDepthBounds = 1.0f;
 
     VkPipelineColorBlendAttachmentState cba = {0};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -1442,6 +1682,7 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
     gpi.pViewportState = &vps;
     gpi.pRasterizationState = &rs;
     gpi.pMultisampleState = &ms;
+    if (t->has_depth) gpi.pDepthStencilState = &ds;
     gpi.pColorBlendState = &cb;
     gpi.pDynamicState = &dyn;
     gpi.layout = p->layout;
@@ -1623,11 +1864,19 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
     vr = d->da.vkBeginCommandBuffer(t->cmd, &bi);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkBeginCommandBuffer failed (%d)", (int)vr);
 
-    VkClearValue clear;
-    clear.color.float32[0] = r;
-    clear.color.float32[1] = g;
-    clear.color.float32[2] = b;
-    clear.color.float32[3] = a;
+    /* Indexed by attachment, so the resolve slot is present but unused and the
+     * depth slot sits wherever the render pass put it. Cleared to the far
+     * plane: with a LESS test, anything drawn is nearer than nothing. */
+    VkClearValue clears[3];
+    memset(clears, 0, sizeof(clears));
+    clears[0].color.float32[0] = r;
+    clears[0].color.float32[1] = g;
+    clears[0].color.float32[2] = b;
+    clears[0].color.float32[3] = a;
+    if (t->has_depth) {
+        clears[t->depth_clear_index].depthStencil.depth = 1.0f;
+        clears[t->depth_clear_index].depthStencil.stencil = 0;
+    }
 
     VkRenderPassBeginInfo rp = {0};
     rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1635,8 +1884,8 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
     rp.framebuffer = t->fb;
     rp.renderArea.extent.width = (uint32_t)t->width;
     rp.renderArea.extent.height = (uint32_t)t->height;
-    rp.clearValueCount = 1;
-    rp.pClearValues = &clear;
+    rp.clearValueCount = t->clear_count ? t->clear_count : 1;
+    rp.pClearValues = clears;
 
     d->da.vkCmdBeginRenderPass(t->cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     if (p && t->vertex_count > 0) {
@@ -1786,6 +2035,12 @@ void  aevk_ae_device_destroy(void* d)    { aevk_device_destroy((AevkDevice*)d); 
 void* aevk_ae_target_create(void* d, int w, int h) {
     return (void*)aevk_target_create((AevkDevice*)d, w, h);
 }
+
+void* aevk_ae_target_create_ex(void* d, int w, int h, int want_depth, int samples) {
+    return (void*)aevk_target_create_ex((AevkDevice*)d, w, h, want_depth, samples);
+}
+int aevk_ae_target_has_depth(void* t) { return aevk_target_has_depth((AevkTarget*)t); }
+int aevk_ae_target_samples(void* t)   { return aevk_target_samples((AevkTarget*)t); }
 void  aevk_ae_target_destroy(void* t)    { aevk_target_destroy((AevkTarget*)t); }
 int   aevk_ae_target_width(void* t)      { return aevk_target_width((AevkTarget*)t); }
 int   aevk_ae_target_height(void* t)     { return aevk_target_height((AevkTarget*)t); }

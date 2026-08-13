@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **contrib/vulkan: depth attachments and multisampling.** The offscreen target
+  was one colour attachment at one sample, so draw order decided visibility and
+  every edge was a staircase. `target_create_ex(dev, w, h, depth, samples)` adds
+  either or both: the depth format is chosen from what the device reports,
+  preferring plain depth over combined depth+stencil, and the sample count is
+  checked against `framebufferColorSampleCounts & framebufferDepthSampleCounts`
+  rather than rounded down silently. A multisampled colour attachment resolves
+  into the single-sample image, so readback, `pixel()` and `save_ppm` are
+  unchanged, and both multisampled attachments are transient so a tiler never
+  writes them to memory.
+
+  The test is built so a feature doing nothing fails it: the depth case draws
+  the same two overlapping triangles in both submission orders, requires the
+  overlap to match, then runs the identical comparison on a target with no
+  depth attachment and requires it to disagree. The MSAA case counts pixels
+  that are neither background nor a saturated primary, 0 at one sample against
+  105 at four.
+
 ## [0.529.0]
 
 ### Added

@@ -94,6 +94,41 @@ transform, a material and its textures; per-draw sets are not yet a thing here.
 Coordinates are Vulkan NDC. x and y run -1 to 1, **y points down**, and a
 front-facing triangle is counter-clockwise.
 
+## Depth and multisampling
+
+`target_create` gives one colour attachment at one sample. `target_create_ex`
+adds either or both:
+
+```aether
+// depth on, 4x multisampling
+t = vulkan.target_create_ex(dev, 512, 512, 1, 4)
+```
+
+**Depth** makes overlapping geometry resolve by distance instead of by
+submission order, which is the painter's-algorithm ceiling a GPU tier exists to
+escape. The format is chosen from what the device reports for optimal-tiling
+depth attachments, preferring plain depth over combined depth+stencil so a
+caller who never reads a stencil does not pay for one. A pipeline built for a
+depth target tests and writes depth with a LESS comparison; the buffer clears
+to the far plane.
+
+Your vertex shader has to supply a z. The built-in layout is `vec2`, so a depth
+pipeline wants a caller-described layout with a `vec3` position, which is what
+`shaders/depth.vert` does.
+
+**Multisampling** takes 1, 2, 4, 8 or 16, checked against
+`framebufferColorSampleCounts & framebufferDepthSampleCounts` rather than
+rounded down silently: asking for 4x on hardware that offers 2x is an error
+with a message. Above one sample the colour attachment is multisampled and
+resolves into the single-sample image, so `pixel()`, `copy_rgba` and
+`save_ppm` are unchanged.
+
+Both multisampled attachments are `TRANSIENT`: they exist only inside the
+render pass, so a tiler never writes them to memory.
+
+`target_has_depth(t)` and `target_samples(t)` report what a target actually
+got.
+
 ## Nothing links against libvulkan
 
 The loader is opened with `dlopen` at runtime and every entry point is fetched
@@ -220,8 +255,9 @@ rather than on a defect. What proves the pair is correct is the render test.
 
 ## Testing
 
-`test_vulkan.ae`, `test_vulkan_resources.ae` and `test_vulkan_actors.ae` run
-from `make contrib-check`, along with both examples. With no driver it prints SKIP
+`test_vulkan.ae`, `test_vulkan_resources.ae`, `test_vulkan_actors.ae` and
+`test_vulkan_depth_msaa.ae` run from `make contrib-check`, along with both
+examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -250,6 +286,13 @@ lock buys is that the behaviour is DEFINED by the specification rather than
 tolerated by one driver. A test can show the contract holding; it cannot show a
 race is absent.
 
+`test_vulkan_depth_msaa.ae` is written so that a feature doing nothing fails
+it. The depth case draws the same two overlapping triangles in both submission
+orders and requires the overlap to match, then runs the identical comparison on
+a target with no depth attachment and requires it to DISAGREE. The MSAA case
+counts pixels that are neither background nor a saturated primary: 0 at one
+sample, 105 at four on this hardware.
+
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and then asserts the test did **not** skip. A skip there would be silent loss of
 coverage.
@@ -266,7 +309,6 @@ plan in someone's head.
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
 | Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
-| Depth, stencil and MSAA | #1512 | P3 |
 | Frames in flight, and a configurable GPU timeout (currently a fixed 5s) | #1513 | P3 |
 | More colour formats, and PNG output rather than PPM | #1514 | P3 |
 | Compute pipelines | #1515 | P3 |

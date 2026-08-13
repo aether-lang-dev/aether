@@ -1,0 +1,264 @@
+// contrib.vulkan depth attachments and multisampling (#1512).
+//
+// Without a depth buffer, draw order decides visibility, which is the
+// painter's-algorithm ceiling the GPU tier exists to escape. Without
+// multisampling, an edge is a staircase.
+//
+// Both claims are checked by reading pixels back, and both are checked in a
+// way that fails if the feature does nothing:
+//
+//   depth: the same two overlapping triangles are drawn in BOTH submission
+//   orders and the overlap must come out the same colour. On a target with no
+//   depth attachment the same comparison is run and must DISAGREE, so a depth
+//   test that silently did nothing would fail the test rather than pass it.
+//
+//   MSAA: a diagonal edge is rendered at 1x and at 4x and the number of
+//   partially covered pixels is counted. Antialiasing means intermediate
+//   values exist; the aliased image has none. Counting them is what makes
+//   this an assertion rather than a screenshot.
+//
+// Runs anywhere: with no driver it prints SKIP and exits 0.
+
+import std.string
+import std.fs
+import contrib.vulkan
+
+extern exit(code: int)
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// position(3) + colour(3), interleaved: 6 floats, stride 24.
+depth_layout() -> ptr {
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 24, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 0)
+    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 12)
+    return lay
+}
+
+// Two overlapping triangles. `near_first` decides which is submitted first;
+// the near one is red at z=0.2, the far one green at z=0.8, and they overlap
+// around the centre of the image.
+draw_pair(t: ptr, pipe: ptr, near_first: int) -> int {
+    _ = vulkan.verts_reserve_n(t, 6, 6)
+
+    // Near (red) covers the left two thirds, far (green) the right two thirds.
+    nx0 = -0.9  ny0 = -0.9  nx1 = 0.3  ny1 = -0.9  nx2 = -0.3  ny2 = 0.9
+    fx0 = -0.3  fy0 = -0.9  fx1 = 0.9  fy1 = -0.9  fx2 = 0.3   fy2 = 0.9
+
+    if near_first == 1 {
+        _ = vulkan.verts_set_float(t, 0, nx0)   _ = vulkan.verts_set_float(t, 1, ny0)
+        _ = vulkan.verts_set_float(t, 2, 0.2)
+        _ = vulkan.verts_set_float(t, 3, 1.0)   _ = vulkan.verts_set_float(t, 4, 0.0)
+        _ = vulkan.verts_set_float(t, 5, 0.0)
+        _ = vulkan.verts_set_float(t, 6, nx1)   _ = vulkan.verts_set_float(t, 7, ny1)
+        _ = vulkan.verts_set_float(t, 8, 0.2)
+        _ = vulkan.verts_set_float(t, 9, 1.0)   _ = vulkan.verts_set_float(t, 10, 0.0)
+        _ = vulkan.verts_set_float(t, 11, 0.0)
+        _ = vulkan.verts_set_float(t, 12, nx2)  _ = vulkan.verts_set_float(t, 13, ny2)
+        _ = vulkan.verts_set_float(t, 14, 0.2)
+        _ = vulkan.verts_set_float(t, 15, 1.0)  _ = vulkan.verts_set_float(t, 16, 0.0)
+        _ = vulkan.verts_set_float(t, 17, 0.0)
+
+        _ = vulkan.verts_set_float(t, 18, fx0)  _ = vulkan.verts_set_float(t, 19, fy0)
+        _ = vulkan.verts_set_float(t, 20, 0.8)
+        _ = vulkan.verts_set_float(t, 21, 0.0)  _ = vulkan.verts_set_float(t, 22, 1.0)
+        _ = vulkan.verts_set_float(t, 23, 0.0)
+        _ = vulkan.verts_set_float(t, 24, fx1)  _ = vulkan.verts_set_float(t, 25, fy1)
+        _ = vulkan.verts_set_float(t, 26, 0.8)
+        _ = vulkan.verts_set_float(t, 27, 0.0)  _ = vulkan.verts_set_float(t, 28, 1.0)
+        _ = vulkan.verts_set_float(t, 29, 0.0)
+        _ = vulkan.verts_set_float(t, 30, fx2)  _ = vulkan.verts_set_float(t, 31, fy2)
+        _ = vulkan.verts_set_float(t, 32, 0.8)
+        _ = vulkan.verts_set_float(t, 33, 0.0)  _ = vulkan.verts_set_float(t, 34, 1.0)
+        _ = vulkan.verts_set_float(t, 35, 0.0)
+    } else {
+        _ = vulkan.verts_set_float(t, 0, fx0)   _ = vulkan.verts_set_float(t, 1, fy0)
+        _ = vulkan.verts_set_float(t, 2, 0.8)
+        _ = vulkan.verts_set_float(t, 3, 0.0)   _ = vulkan.verts_set_float(t, 4, 1.0)
+        _ = vulkan.verts_set_float(t, 5, 0.0)
+        _ = vulkan.verts_set_float(t, 6, fx1)   _ = vulkan.verts_set_float(t, 7, fy1)
+        _ = vulkan.verts_set_float(t, 8, 0.8)
+        _ = vulkan.verts_set_float(t, 9, 0.0)   _ = vulkan.verts_set_float(t, 10, 1.0)
+        _ = vulkan.verts_set_float(t, 11, 0.0)
+        _ = vulkan.verts_set_float(t, 12, fx2)  _ = vulkan.verts_set_float(t, 13, fy2)
+        _ = vulkan.verts_set_float(t, 14, 0.8)
+        _ = vulkan.verts_set_float(t, 15, 0.0)  _ = vulkan.verts_set_float(t, 16, 1.0)
+        _ = vulkan.verts_set_float(t, 17, 0.0)
+
+        _ = vulkan.verts_set_float(t, 18, nx0)  _ = vulkan.verts_set_float(t, 19, ny0)
+        _ = vulkan.verts_set_float(t, 20, 0.2)
+        _ = vulkan.verts_set_float(t, 21, 1.0)  _ = vulkan.verts_set_float(t, 22, 0.0)
+        _ = vulkan.verts_set_float(t, 23, 0.0)
+        _ = vulkan.verts_set_float(t, 24, nx1)  _ = vulkan.verts_set_float(t, 25, ny1)
+        _ = vulkan.verts_set_float(t, 26, 0.2)
+        _ = vulkan.verts_set_float(t, 27, 1.0)  _ = vulkan.verts_set_float(t, 28, 0.0)
+        _ = vulkan.verts_set_float(t, 29, 0.0)
+        _ = vulkan.verts_set_float(t, 30, nx2)  _ = vulkan.verts_set_float(t, 31, ny2)
+        _ = vulkan.verts_set_float(t, 32, 0.2)
+        _ = vulkan.verts_set_float(t, 33, 1.0)  _ = vulkan.verts_set_float(t, 34, 0.0)
+        _ = vulkan.verts_set_float(t, 35, 0.0)
+    }
+
+    return vulkan.draw(t, pipe, 0.0, 0.0, 0.0, 1.0)
+}
+
+// Pixels that are neither background nor a saturated primary: the fringe an
+// antialiased edge leaves behind and an aliased one does not.
+count_partial(t: ptr, size: int) -> int {
+    partial = 0
+    y = 0
+    while y < size {
+        x = 0
+        while x < size {
+            px = vulkan.pixel(t, x, y)
+            r = vulkan.red(px)
+            if r > 30 && r < 225 { partial = partial + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return partial
+}
+
+main() {
+    println("=== contrib.vulkan depth + MSAA ===")
+    failures = 0
+
+    if vulkan.available() != 1 {
+        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("SKIP: device_create failed (${vulkan.last_error()})")
+        return
+    }
+
+    vs, vl = load_spv("contrib/vulkan/shaders/depth.vert.spv")
+    fs_, fl = load_spv("contrib/vulkan/shaders/depth.frag.spv")
+    failures = failures + check(vl > 0 && fl > 0, "depth SPIR-V loaded")
+    if vl == 0 || fl == 0 {
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    lay = depth_layout()
+    size = 64
+
+    // ---- depth: order must not matter ----------------------------------
+    dt = vulkan.target_create_ex(dev, size, size, 1, 1)
+    failures = failures + check(dt != null, "target with depth created")
+
+    if dt != null {
+        failures = failures + check(vulkan.target_has_depth(dt), "target reports depth")
+        dp = vulkan.pipeline_create_ex(dev, dt, vs, vl, fs_, fl, lay, 0, null)
+        failures = failures + check(dp != null, "depth pipeline created")
+
+        if dp != null {
+            // Where the two triangles actually overlap: they share x in
+            // -0.23..0.23 at ndc y -0.7, which is pixel (32, 9) on a 64px
+            // target. Sampling anywhere below the middle hits neither, which
+            // is what the first version of this test did.
+            ox = 32
+            oy = 9
+
+            _ = draw_pair(dt, dp, 1)
+            near_first = vulkan.pixel(dt, ox, oy)
+            _ = draw_pair(dt, dp, 0)
+            far_first = vulkan.pixel(dt, ox, oy)
+
+            failures = failures + check(near_first == far_first,
+                                        "with depth, the overlap is the same either order")
+            failures = failures + check(vulkan.red(near_first) > 180 &&
+                                        vulkan.green(near_first) < 80,
+                                        "with depth, the nearer triangle wins the overlap")
+            vulkan.pipeline_destroy(dp)
+        }
+        vulkan.target_destroy(dt)
+    }
+
+    // ---- no depth: the same comparison must DISAGREE --------------------
+    // Without this the depth check could pass on a target where nothing
+    // overlapped, or where the test was measuring the wrong pixel.
+    nt = vulkan.target_create_ex(dev, size, size, 0, 1)
+    if nt != null {
+        np = vulkan.pipeline_create_ex(dev, nt, vs, vl, fs_, fl, lay, 0, null)
+        if np != null {
+            _ = draw_pair(nt, np, 1)
+            a = vulkan.pixel(nt, 32, 9)
+            _ = draw_pair(nt, np, 0)
+            b = vulkan.pixel(nt, 32, 9)
+            failures = failures + check(a != b,
+                                        "without depth, submission order decides the overlap")
+            vulkan.pipeline_destroy(np)
+        }
+        vulkan.target_destroy(nt)
+    }
+
+    // ---- MSAA: a resolved edge has intermediate pixels ------------------
+    aliased = 0
+    smooth = 0
+
+    at = vulkan.target_create_ex(dev, size, size, 0, 1)
+    if at != null {
+        ap = vulkan.pipeline_create_ex(dev, at, vs, vl, fs_, fl, lay, 0, null)
+        if ap != null {
+            _ = draw_pair(at, ap, 1)
+            aliased = count_partial(at, size)
+            vulkan.pipeline_destroy(ap)
+        }
+        vulkan.target_destroy(at)
+    }
+
+    mt = vulkan.target_create_ex(dev, size, size, 0, 4)
+    if mt == null {
+        println("  SKIP 4x MSAA unsupported here (${vulkan.last_error()})")
+    } else {
+        failures = failures + check(vulkan.target_samples(mt) == 4, "target reports 4 samples")
+        mp = vulkan.pipeline_create_ex(dev, mt, vs, vl, fs_, fl, lay, 0, null)
+        failures = failures + check(mp != null, "4x MSAA pipeline created")
+        if mp != null {
+            _ = draw_pair(mt, mp, 1)
+            smooth = count_partial(mt, size)
+            println("  edge pixels: ${aliased} at 1x, ${smooth} at 4x")
+            failures = failures + check(smooth > aliased,
+                                        "4x resolves to intermediate edge pixels 1x does not have")
+            vulkan.pipeline_destroy(mp)
+        }
+        vulkan.target_destroy(mt)
+    }
+
+    // A sample count the spec does not define must be refused, not rounded.
+    failures = failures + check(vulkan.target_create_ex(dev, size, size, 0, 3) == null,
+                                "an invalid sample count is refused")
+
+    vulkan.layout_destroy(lay)
+    string.free(vs)
+    string.free(fs_)
+    vulkan.device_destroy(dev)
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}
