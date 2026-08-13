@@ -36,6 +36,35 @@
 #  define AEVK_DLCLOSE(h)     dlclose(h)
 #endif
 
+/* A mutex, spelled locally for the same reason the dlopen shim above is:
+ * this module builds against the Vulkan headers and nothing else, so it can be
+ * copied out of the tree. Reaching into runtime/utils/aether_thread.h would
+ * make that false for one lock.
+ *
+ * Vulkan requires the CALLER to synchronise a VkQueue and a VkCommandPool.
+ * Aether is an actor language, so two actors sharing one device is the
+ * expected shape rather than an exotic one, and "undefined behaviour if you
+ * do the natural thing" is not a contract worth shipping (#1510). One lock
+ * per device covers both objects; every public entry point that touches
+ * either takes it, and the internal helpers never do, so the paths that
+ * compose (texture upload runs a command buffer) cannot deadlock. */
+#ifdef _WIN32
+   typedef SRWLOCK AevkMutex;
+#  define AEVK_MUTEX_INIT(m)    InitializeSRWLock(m)
+#  define AEVK_MUTEX_LOCK(m)    AcquireSRWLockExclusive(m)
+#  define AEVK_MUTEX_UNLOCK(m)  ReleaseSRWLockExclusive(m)
+#  define AEVK_MUTEX_DESTROY(m) ((void)(m))
+#  define AEVK_MUTEX_STATIC      SRWLOCK_INIT
+#else
+#  include <pthread.h>
+   typedef pthread_mutex_t AevkMutex;
+#  define AEVK_MUTEX_INIT(m)    pthread_mutex_init((m), NULL)
+#  define AEVK_MUTEX_LOCK(m)    pthread_mutex_lock(m)
+#  define AEVK_MUTEX_UNLOCK(m)  pthread_mutex_unlock(m)
+#  define AEVK_MUTEX_DESTROY(m) pthread_mutex_destroy(m)
+#  define AEVK_MUTEX_STATIC      PTHREAD_MUTEX_INITIALIZER
+#endif
+
 #if defined(_MSC_VER)
 #  define AEVK_THREAD_LOCAL __declspec(thread)
 #elif defined(__GNUC__) || defined(__clang__)
@@ -211,6 +240,9 @@ static int aevk_load_library(void) {
 /* ------------------------------------------------------------------------ */
 
 struct AevkDevice {
+    /* Held across queue submission and any command-pool access. See the
+     * AevkMutex note above for why this exists and what it covers. */
+    AevkMutex        lock;
     AevkInstanceApi  ia;
     AevkDeviceApi    da;
     VkInstance       instance;
@@ -502,22 +534,40 @@ static int aevk_pick_physical(AevkInstanceApi* ia, VkInstance inst,
 
 int aevk_available(void) {
     if (g_probe) return g_probe > 0;
-    /* Probe by actually creating an instance and enumerating: a loader with no
-     * ICD behind it exports every symbol and still cannot render. */
-    g_probe = -1;
-    if (aevk_load_library() != AEVK_OK) return 0;
 
-    AevkInstanceApi ia;
-    VkInstance inst = VK_NULL_HANDLE;
-    if (aevk_create_instance(&ia, &inst) != AEVK_OK) return 0;
+    /* Serialised, and re-checked inside. Repeating the probe would be
+     * harmless in itself, but it writes g_dev_name, a 256-byte buffer another
+     * thread may be reading through device_name(), and that read could see it
+     * torn. Statically initialised so there is no race to set the lock up.
+     * Taken once per process in practice: the check above returns first
+     * afterwards. */
+    static AevkMutex probe_lock = AEVK_MUTEX_STATIC;
+    AEVK_MUTEX_LOCK(&probe_lock);
 
-    VkPhysicalDevice phys;
-    uint32_t family;
-    int ok = aevk_pick_physical(&ia, inst, &phys, &family,
-                                g_dev_name, sizeof(g_dev_name)) == AEVK_OK;
-    ia.vkDestroyInstance(inst, NULL);
-    if (ok) { g_probe = 1; aevk_clear_error(); }
-    return ok;
+    int result = 0;
+    if (g_probe) {
+        result = g_probe > 0;
+    } else {
+        /* Probe by actually creating an instance and enumerating: a loader
+         * with no ICD behind it exports every symbol and still cannot
+         * render. */
+        g_probe = -1;
+        if (aevk_load_library() == AEVK_OK) {
+            AevkInstanceApi ia;
+            VkInstance inst = VK_NULL_HANDLE;
+            if (aevk_create_instance(&ia, &inst) == AEVK_OK) {
+                VkPhysicalDevice phys;
+                uint32_t family;
+                result = aevk_pick_physical(&ia, inst, &phys, &family,
+                                            g_dev_name, sizeof(g_dev_name)) == AEVK_OK;
+                ia.vkDestroyInstance(inst, NULL);
+                if (result) { g_probe = 1; aevk_clear_error(); }
+            }
+        }
+    }
+
+    AEVK_MUTEX_UNLOCK(&probe_lock);
+    return result;
 }
 
 const char* aevk_device_name(void) {
@@ -531,6 +581,7 @@ AevkDevice* aevk_device_create(void) {
 
     AevkDevice* d = (AevkDevice*)calloc(1, sizeof(*d));
     if (!d) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    AEVK_MUTEX_INIT(&d->lock);
 
     if (aevk_create_instance(&d->ia, &d->instance) != AEVK_OK) goto fail;
     if (aevk_pick_physical(&d->ia, d->instance, &d->phys, &d->queue_family,
@@ -609,6 +660,10 @@ void aevk_device_destroy(AevkDevice* d) {
     if (d->instance && d->ia.vkDestroyInstance) {
         d->ia.vkDestroyInstance(d->instance, NULL);
     }
+    /* Destroying a device concurrently with anything using it is the caller's
+     * error, not something a lock can rescue: the lock is inside the object
+     * being freed. The contract is in the README. */
+    AEVK_MUTEX_DESTROY(&d->lock);
     free(d);
 }
 
@@ -810,12 +865,17 @@ AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
     r = d->da.vkMapMemory(d->device, t->readback_mem, 0, t->readback_size, 0, &t->readback_ptr);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
 
+    /* Only the pool access is inside the lock. Widening it to the whole
+     * function would cover the failure path too, and that path calls
+     * target_destroy, which takes the same lock. */
     VkCommandBufferAllocateInfo cai = {0};
     cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cai.commandPool = d->pool;
     cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cai.commandBufferCount = 1;
+    AEVK_MUTEX_LOCK(&d->lock);
     r = d->da.vkAllocateCommandBuffers(d->device, &cai, &t->cmd);
+    AEVK_MUTEX_UNLOCK(&d->lock);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkAllocateCommandBuffers failed (%d)", (int)r); goto fail; }
 
     VkFenceCreateInfo fnci = {0};
@@ -834,6 +894,7 @@ void aevk_target_destroy(AevkTarget* t) {
     if (!t) return;
     AevkDevice* d = t->dev;
     if (d && d->device) {
+        AEVK_MUTEX_LOCK(&d->lock);
         d->da.vkDeviceWaitIdle(d->device);
         if (t->fence)        d->da.vkDestroyFence(d->device, t->fence, NULL);
         if (t->cmd)          d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &t->cmd);
@@ -851,6 +912,7 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->view)         d->da.vkDestroyImageView(d->device, t->view, NULL);
         if (t->image)        d->da.vkDestroyImage(d->device, t->image, NULL);
         if (t->image_mem)    d->da.vkFreeMemory(d->device, t->image_mem, NULL);
+        AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(t);
 }
@@ -1138,6 +1200,11 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     memcpy(map, rgba, need);
     d->da.vkUnmapMemory(d->device, staging_mem);
 
+    /* run_once allocates from the device pool and submit_once uses the
+     * device queue, so both are inside the lock rather than taking it
+     * themselves: texture_upload composes them and a self-taking helper
+     * would deadlock. */
+    AEVK_MUTEX_LOCK(&d->lock);
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     rc = aevk_run_once(d, &cmd);
     if (rc == AEVK_OK) {
@@ -1163,6 +1230,7 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
                            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         rc = aevk_submit_once(d, cmd);
     }
+    AEVK_MUTEX_UNLOCK(&d->lock);
 
     d->da.vkDestroyBuffer(d->device, staging, NULL);
     d->da.vkFreeMemory(d->device, staging_mem, NULL);
@@ -1397,6 +1465,7 @@ void aevk_pipeline_destroy(AevkPipeline* p) {
     if (!p) return;
     AevkDevice* d = p->dev;
     if (d && d->device) {
+        AEVK_MUTEX_LOCK(&d->lock);
         d->da.vkDeviceWaitIdle(d->device);
         if (p->pipeline) d->da.vkDestroyPipeline(d->device, p->pipeline, NULL);
         if (p->layout)   d->da.vkDestroyPipelineLayout(d->device, p->layout, NULL);
@@ -1410,6 +1479,7 @@ void aevk_pipeline_destroy(AevkPipeline* p) {
             if (p->ub[i].buf) d->da.vkDestroyBuffer(d->device, p->ub[i].buf, NULL);
             if (p->ub[i].mem) d->da.vkFreeMemory(d->device, p->ub[i].mem, NULL);
         }
+        AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(p);
 }
@@ -1626,6 +1696,9 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
     return AEVK_OK;
 }
 
+static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
+                            float r, float g, float b, float a);
+
 int aevk_draw(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a) {
     aevk_clear_error();
     if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
@@ -1634,6 +1707,18 @@ int aevk_draw(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a
         return aevk_fail(AEVK_ERR_ARG, "vertices were never uploaded");
     }
 
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = aevk_draw_locked(t, p, r, g, b, a);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+/* The device lock is held. Records into the target's command buffer, which
+ * came from the device's pool, then submits to the device's queue: both need
+ * the caller to synchronise, which is what the lock in aevk_draw is for. */
+static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
+                            float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
     int stale = !t->recorded || t->rec_pipe != p || t->rec_vertices != t->vertex_count ||
                 t->rec_clear[0] != r || t->rec_clear[1] != g ||

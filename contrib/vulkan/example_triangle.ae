@@ -13,10 +13,14 @@ import contrib.vulkan
 
 load_spv(path: string) -> (string, int) {
     data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
     if err != "" {
         println("cannot read ${path}: ${err}")
+        string.free(err)
         return ("", 0)
     }
+    string.free(err)
     return (data, length)
 }
 

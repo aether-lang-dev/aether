@@ -51,6 +51,10 @@ erl_crash.dump
 benchmarks/cross-language/*/erl_crash.dump
 benchmarks/cross-language/**/*.dSYM/
 
+# Images the contrib/vulkan examples render into the working directory when
+# they run (contrib-check runs them, so CI produces these too).
+*.ppm
+
 # Zig build artifacts
 benchmarks/cross-language/zig/.zig-cache/
 benchmarks/cross-language/zig/zig-out/

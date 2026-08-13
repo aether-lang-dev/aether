@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **contrib/vulkan is safe to use from several actors.** Vulkan requires the
+  caller to synchronise a `VkQueue` and a `VkCommandPool`, and the module made
+  no claim either way, so two actors sharing a device was undefined behaviour
+  while being the obvious thing to write in an actor language. There is now one
+  lock per device, taken across queue submission and every command-pool access,
+  and the README states what is covered: concurrent draws to separate targets
+  and concurrent target and texture lifetimes are safe, two threads on one
+  target are not, and `last_error()` stays thread-local.
+
+  The probe behind `available()` is serialised too. Repeating it would have
+  been harmless, but it fills a 256-byte device-name buffer that
+  `device_name()` reads, and that read could have seen it torn.
+
+  `example_parallel_render.ae` shows the point: four actors rendering their own
+  tile on one device, assembled into a contact sheet. Both vulkan examples are
+  now RUN by `make contrib-check` rather than only compiled.
+
+  The cost is not measurable on the offscreen path, where a draw already blocks
+  on a fence: the two-actor test takes the same wall time with the lock
+  compiled out. That test asserts the contract holds rather than proving the
+  lock is load-bearing, and says so: run with the lock removed it passes on
+  MoltenVK, because a driver tolerating unsynchronised access is not the same
+  as the access being defined.
 ## [0.528.0]
 
 ### Added

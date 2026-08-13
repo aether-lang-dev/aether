@@ -1,0 +1,196 @@
+// contrib.vulkan thread safety (#1510).
+//
+// Vulkan requires the CALLER to synchronise a VkQueue and a VkCommandPool.
+// Aether is an actor language, so two actors sharing one device is the
+// expected shape rather than an exotic one, and "undefined behaviour if you do
+// the natural thing" is not a contract worth shipping. The module takes one
+// lock per device across queue submission and command-pool access.
+//
+// What this test is: two actors, one shared device, each drawing to its own
+// target and churning a scratch target through the shared command pool every
+// iteration, checking its OWN colour each frame. A frame rendered against the
+// wrong target, or a command buffer recorded by the other thread, shows up as
+// a wrong pixel rather than only as a crash.
+//
+// What this test is NOT: proof that the lock is load-bearing. It was run with
+// the lock compiled out, 8 times, on a real driver (MoltenVK on Apple
+// silicon), and passed every time; the wall time is identical either way. A
+// driver tolerating unsynchronised access is not the same as the access being
+// allowed, and the specification is what makes it undefined. So this asserts
+// that the contract HOLDS, and the lock is what makes the behaviour defined
+// rather than lucky. A test cannot show the absence of a race.
+//
+// Runs anywhere: with no driver it prints SKIP and exits 0.
+
+import std.string
+import std.fs
+import contrib.vulkan
+
+message Start { dev: ptr, tag: int, reps: int }
+message Poll {}
+message Probe { reps: int }
+
+extern exit(code: int)
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// Each painter owns its target and pipeline; only the DEVICE is shared, which
+// is exactly the object Vulkan says the caller must synchronise.
+actor Painter {
+    state verdict = 0
+    receive {
+        Start(dev, tag, reps) -> {
+            // Create and destroy a target per iteration, not once: the
+            // command pool is the shared object most likely to corrupt under
+            // unsynchronised allocate/free, and one target per actor would
+            // touch it twice in the whole run.
+            target = vulkan.target_create(dev, 64, 64)
+            if target == null {
+                verdict = 0
+            } else {
+                vs, vl = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+                fs_, fl = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+                pipe = vulkan.pipeline_create(dev, target, vs, vl, fs_, fl)
+                // The SPIR-V bytes are copied into the shader modules, and
+                // passing them to an extern marks them escaped, so scope exit
+                // will not reclaim them here.
+                string.free(vs)
+                string.free(fs_)
+
+                // Seeded here, not reset in the loop. Without this check the
+                // test is vacuous: drawing with a null pipeline still clears
+                // the target, so every colour check below passes having
+                // rendered nothing. Run from a directory where the SPIR-V does
+                // not resolve, that is exactly what happened.
+                bad = 0
+                if vl == 0 || fl == 0 || pipe == null {
+                    println("  no pipeline: SPIR-V ${vl}/${fl} bytes, ${vulkan.last_error()}")
+                    bad = 1
+                }
+
+                // Distinct clear colour per actor: red for tag 0, blue for 1.
+                red = 0.0
+                blue = 0.0
+                if tag == 0 { red = 1.0 } else { blue = 1.0 }
+
+                n = 0
+                while n < reps {
+                    st = vulkan.draw(target, pipe, red, 0.0, blue, 1.0)
+                    if st != vulkan.OK { bad = bad + 1 }
+                    px = vulkan.pixel(target, 4, 4)
+                    if tag == 0 {
+                        if vulkan.red(px) < 200 || vulkan.blue(px) > 60 { bad = bad + 1 }
+                    } else {
+                        if vulkan.blue(px) < 200 || vulkan.red(px) > 60 { bad = bad + 1 }
+                    }
+
+                    // Pool churn against the other actors, every iteration.
+                    scratch = vulkan.target_create(dev, 32, 32)
+                    if scratch == null {
+                        bad = bad + 1
+                    } else {
+                        if vulkan.draw(scratch, null, 0.0, 1.0, 0.0, 1.0) != vulkan.OK {
+                            bad = bad + 1
+                        }
+                        vulkan.target_destroy(scratch)
+                    }
+                    n = n + 1
+                }
+
+                if pipe != null { vulkan.pipeline_destroy(pipe) }
+                vulkan.target_destroy(target)
+                if bad == 0 { verdict = 1 } else { verdict = 0 }
+            }
+        }
+        // Concern (1) in the issue: available() fills a 256-byte device-name
+        // buffer that device_name() reads. Hammer both from several actors at
+        // once and require every read to be the same non-empty string. A torn
+        // or empty read fails here; the probe lock is what prevents it.
+        Probe(reps) -> {
+            expect = vulkan.device_name()
+            bad = 0
+            n = 0
+            while n < reps {
+                if vulkan.available() != 1 { bad = bad + 1 }
+                got = vulkan.device_name()
+                if string.equals(got, expect) != 1 { bad = bad + 1 }
+                if string.length(got) == 0 { bad = bad + 1 }
+                n = n + 1
+            }
+            if bad == 0 { verdict = 1 } else { verdict = 0 }
+        }
+
+        // Mailbox order puts this after Start, so the ask below waits for the
+        // render to finish without the sender polling or sleeping.
+        Poll() -> { reply verdict }
+    }
+}
+
+main() {
+    println("=== contrib.vulkan actors ===")
+
+    if vulkan.available() != 1 {
+        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("SKIP: device_create failed (${vulkan.last_error()})")
+        return
+    }
+
+    a = spawn(Painter())
+    b = spawn(Painter())
+
+    // Fire-and-forget both, THEN collect. Asking the first and waiting for
+    // its reply before sending the second would run them one after the other
+    // and the test would pass with no locking at all.
+    a ! Start { dev: dev, tag: 0, reps: 40 }
+    b ! Start { dev: dev, tag: 1, reps: 40 }
+
+    ra = a ? Poll {}
+    rb = b ? Poll {}
+
+    // Same two actors, now racing the cached probe and its name buffer.
+    a ! Probe { reps: 400 }
+    b ! Probe { reps: 400 }
+    pa = a ? Poll {}
+    pb = b ? Poll {}
+
+    failures = 0
+    if ra != 1 {
+        println("  FAIL painter 0 reported a bad frame")
+        failures = failures + 1
+    } else {
+        println("  PASS painter 0 rendered its own colour every frame")
+    }
+    if rb != 1 {
+        println("  FAIL painter 1 reported a bad frame")
+        failures = failures + 1
+    } else {
+        println("  PASS painter 1 rendered its own colour every frame")
+    }
+
+    if pa != 1 || pb != 1 {
+        println("  FAIL concurrent available()/device_name() disagreed")
+        failures = failures + 1
+    } else {
+        println("  PASS concurrent probe reads agree and are non-empty")
+    }
+
+    vulkan.device_destroy(dev)
+
+    if failures != 0 {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+    println("=== contrib.vulkan actors passed ===")
+}

@@ -40,6 +40,11 @@ main() {
 }
 ```
 
+`example_triangle.ae` is that program in full, and `example_parallel_render.ae`
+is four actors rendering their own tile on one shared device and writing a 2x2
+contact sheet. Both are RUN by `make contrib-check`, not merely compiled: an
+example nobody executes rots into decoration.
+
 `example_triangle.ae` is that program in full. It is not limited to a triangle:
 the pipeline is built from whatever SPIR-V you hand it, and `pipeline_create`
 uses a built-in vertex format of an interleaved `vec2` position plus `vec3`
@@ -108,6 +113,33 @@ and the driver entry is cheaper per call:
 vkResetFences via loader    12.2 ns/call
 vkResetFences via driver    11.6 ns/call   (5.2% less)
 ```
+
+## Threads
+
+**One device may be used from several threads.** Vulkan requires the caller to
+synchronise a `VkQueue` and a `VkCommandPool`; this module does that with one
+lock per device, taken across queue submission and every command-pool access.
+Aether is an actor language, so two actors sharing a device is the ordinary
+shape, and leaving it undefined would be a trap rather than a simplification.
+
+What that covers and what it does not:
+
+| | |
+|---|---|
+| Two actors drawing to their own targets from one device | Safe |
+| Creating and destroying targets or textures concurrently | Safe |
+| Two threads drawing to the **same** target | Not safe: a target owns one command buffer and one fence, so serialise it or give each thread its own |
+| Destroying a device while another thread is using it | Not safe, and no lock can help: the lock lives inside the object being freed |
+| `last_error()` | Thread-local, so read it on the thread that made the failing call. On another thread it reports `""` |
+
+`available()` is safe to call concurrently. Its probe is serialised, because it
+fills a 256-byte device-name buffer that `device_name()` reads.
+
+The cost is not measurable on the offscreen path: the same two-actor workload
+takes the same wall time with the lock compiled out, since a draw already
+blocks on a fence. `test_vulkan_actors.ae` exercises the contract, and its
+header is explicit that passing does not prove the lock is load-bearing on any
+particular driver.
 
 ## Measured cost
 
@@ -188,7 +220,8 @@ rather than on a defect. What proves the pair is correct is the render test.
 
 ## Testing
 
-`test_vulkan.ae` and `test_vulkan_resources.ae` run from `make contrib-check`. With no driver it prints SKIP
+`test_vulkan.ae`, `test_vulkan_resources.ae` and `test_vulkan_actors.ae` run
+from `make contrib-check`, along with both examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -205,6 +238,18 @@ scales what the sampler returned. It also checks the refusals: a duplicate
 binding, an index past the vertex count, a short pixel upload, an over-large
 push block, and binding a texture that has no pixels yet.
 
+`test_vulkan_actors.ae` drives the threading contract: two actors, one device,
+each drawing to its own target and churning a scratch target through the shared
+command pool, each checking its own colour every frame, plus several hundred
+concurrent `available()` / `device_name()` calls that must all agree.
+
+Its header is explicit about the limit of that: compiled with the lock removed
+it still passes on MoltenVK, and ThreadSanitizer does not flag the probe race
+either, because the window is a few microseconds at process start. What the
+lock buys is that the behaviour is DEFINED by the specification rather than
+tolerated by one driver. A test can show the contract holding; it cannot show a
+race is absent.
+
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and then asserts the test did **not** skip. A skip there would be silent loss of
 coverage.
@@ -220,7 +265,6 @@ plan in someone's head.
 | Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
 | Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
-| A thread-safety contract (none is claimed today) | #1510 | P2 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
 | Depth, stencil and MSAA | #1512 | P3 |
 | Frames in flight, and a configurable GPU timeout (currently a fixed 5s) | #1513 | P3 |
