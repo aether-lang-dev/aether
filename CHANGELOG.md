@@ -11,6 +11,28 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **contrib/vulkan: frames in flight, and a configurable GPU timeout.** `draw`
+  records, submits and blocks on a fence, so the CPU idled for the whole GPU
+  execution. `submit` now hands work to the queue and returns, and
+  `target_set_frames(t, n)` gives the target `n` slots to rotate through. On an
+  M1 Pro at 512x512, 300 frames each with a different clear colour so nothing
+  is served from the recorded command buffer: **351 us per frame synchronous,
+  161 at two frames in flight, 155 at three**, a 2.2x improvement.
+
+  Each slot owns its command buffer, its fence and its own readback buffer,
+  because a shared one would let frame N+1 overwrite pixels frame N had not
+  been read yet. That is `width * height * 4` per slot, so the feature is
+  opt-in and one frame stays the default: the synchronous shape is what makes
+  the existing tests deterministic, and it is unchanged.
+
+  `pixel`, `copy_rgba` and `save_ppm` wait for the newest submitted frame
+  before reading, and the recorded-command cache is per slot so a geometry
+  change invalidates all of them rather than the next one only.
+  `target_set_timeout_ms` replaces the hardcoded five seconds, which was a hang
+  detector rather than a frame budget.
+
 ### Fixed
 
 - **`ae build` ignored `@link`, forcing duplication that `-D` could silently

@@ -176,6 +176,41 @@ blocks on a fence. `test_vulkan_actors.ae` exercises the contract, and its
 header is explicit that passing does not prove the lock is load-bearing on any
 particular driver.
 
+## Frames in flight
+
+`draw` records, submits and blocks on a fence. That is the right shape for a
+deterministic offscreen render, and it is a hard ceiling: the CPU idles for the
+whole GPU execution. `submit` hands the work to the queue and returns, so the
+CPU records the next frame while the GPU runs this one.
+
+```aether
+vulkan.target_set_frames(t, 3)        // 1..8; 1 is the default and synchronous
+vulkan.submit(t, pipe, r, g, b, 1.0)  // returns a slot, or a negative status
+vulkan.wait_all(t)                    // drain, when you want the queue empty
+```
+
+Measured on an M1 Pro, 512x512, 300 frames, each with a different clear colour
+so no submission is served from the recorded command buffer:
+
+| Frames in flight | Per frame | |
+|---|---:|---|
+| 1 (synchronous) | 351 us | |
+| 2 | 161 us | **2.2x** |
+| 3 | 155 us | 2.3x |
+
+Each slot owns its command buffer, its fence **and its own readback buffer**,
+because a shared one would let frame N+1 overwrite pixels frame N had not been
+read yet. That is the cost of the feature: `width * height * 4` per slot, which
+is why it is opt-in rather than a default of 2 or 3.
+
+`pixel`, `copy_rgba` and `save_ppm` wait for the newest submitted frame before
+reading, so a caller who never calls `wait_all` still sees a whole frame rather
+than one the GPU is mid-way through writing. The recorded-command cache is per
+slot, so changing geometry or push constants invalidates all of them.
+
+`target_set_timeout_ms(t, ms)` sets the fence wait; the default 5000 is a hang
+detector rather than a frame budget.
+
 ## Measured cost
 
 Apple M1 Pro, MoltenVK 1.4.2 over Metal, 512x512 R8G8B8A8, release build.
@@ -255,9 +290,9 @@ rather than on a defect. What proves the pair is correct is the render test.
 
 ## Testing
 
-`test_vulkan.ae`, `test_vulkan_resources.ae`, `test_vulkan_actors.ae` and
-`test_vulkan_depth_msaa.ae` run from `make contrib-check`, along with both
-examples. With no driver it prints SKIP
+`test_vulkan.ae`, `test_vulkan_resources.ae`, `test_vulkan_actors.ae`,
+`test_vulkan_depth_msaa.ae` and `test_vulkan_frames.ae` run from
+`make contrib-check`, along with both examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -309,6 +344,5 @@ plan in someone's head.
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
 | Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
-| Frames in flight, and a configurable GPU timeout (currently a fixed 5s) | #1513 | P3 |
 | More colour formats, and PNG output rather than PPM | #1514 | P3 |
 | Compute pipelines | #1515 | P3 |

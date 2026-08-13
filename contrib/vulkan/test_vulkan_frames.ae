@@ -1,0 +1,197 @@
+// contrib.vulkan frames in flight (#1513).
+//
+// draw() records, submits and blocks on a fence. That is the right shape for
+// a deterministic offscreen render and it is a hard ceiling: the CPU idles
+// for the whole GPU execution. submit() hands work to the queue without
+// waiting, so the CPU records frame N+1 while the GPU runs frame N.
+//
+// Throughput is the point, but correctness is the risk, so this checks the
+// things that go wrong when frames overlap:
+//
+//   - a pipelined frame's pixels are its OWN, not a neighbour's. Each slot
+//     carries its own readback buffer for exactly this reason; sharing one
+//     would let frame N+1 overwrite pixels frame N had not had read yet.
+//   - reading gives the NEWEST submitted frame, not whichever slot happened
+//     to be waited on last.
+//   - the recorded-command cache is per slot, so changing the geometry
+//     invalidates every slot rather than only the next one.
+//   - the synchronous path still behaves exactly as before, which is what
+//     the other four vulkan tests keep checking.
+//
+// Runs anywhere: with no driver it prints SKIP and exits 0.
+
+import std.string
+import std.fs
+import contrib.vulkan
+
+extern exit(code: int)
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+check_eq(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} (${got})")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+main() {
+    println("=== contrib.vulkan frames in flight ===")
+    failures = 0
+
+    if vulkan.available() != 1 {
+        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("SKIP: device_create failed (${vulkan.last_error()})")
+        return
+    }
+
+    vs, vl = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+    fs_, fl = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+    failures = failures + check(vl > 0 && fl > 0, "SPIR-V loaded")
+    if vl == 0 || fl == 0 {
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    t = vulkan.target_create(dev, 64, 64)
+    failures = failures + check(t != null, "target created")
+    if t == null {
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    // One frame in flight is the default, and is the shape phase 1 shipped.
+    failures = failures + check_eq(vulkan.target_frames(t), 1, "default is one frame in flight")
+
+    pipe = vulkan.pipeline_create(dev, t, vs, vl, fs_, fl)
+    failures = failures + check(pipe != null, "pipeline created")
+    if pipe == null {
+        vulkan.target_destroy(t)
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    // ---- pipelining --------------------------------------------------
+    failures = failures + check_eq(vulkan.target_set_frames(t, 3), vulkan.OK, "three frames in flight")
+    failures = failures + check_eq(vulkan.target_frames(t), 3, "target reports three")
+
+    // Three overlapping submissions with distinct clear colours. Reading
+    // afterwards must show the LAST one: if the slots shared a readback
+    // buffer, or if reading waited on the wrong slot, this is where it shows.
+    s0 = vulkan.submit(t, null, 1.0, 0.0, 0.0, 1.0)
+    s1 = vulkan.submit(t, null, 0.0, 1.0, 0.0, 1.0)
+    s2 = vulkan.submit(t, null, 0.0, 0.0, 1.0, 1.0)
+    failures = failures + check(s0 >= 0 && s1 >= 0 && s2 >= 0, "three submits accepted")
+    failures = failures + check(s0 != s1 && s1 != s2, "each submit took its own slot")
+
+    last = vulkan.pixel(t, 32, 32)
+    failures = failures + check(vulkan.blue(last) > 200 && vulkan.red(last) < 60,
+                                "reading shows the newest submitted frame")
+
+    failures = failures + check_eq(vulkan.wait_all(t), vulkan.OK, "wait_all drains the queue")
+
+    // More submissions than slots: the fourth reuses the first slot, which
+    // means waiting for it. That is what bounds the queue depth.
+    i = 0
+    while i < 12 {
+        if vulkan.submit(t, null, 0.25, 0.5, 0.75, 1.0) < 0 {
+            failures = failures + 1
+        }
+        i = i + 1
+    }
+    _ = vulkan.wait_all(t)
+    reused = vulkan.pixel(t, 8, 8)
+    failures = failures + check(vulkan.red(reused) > 40 && vulkan.red(reused) < 100 &&
+                                vulkan.blue(reused) > 150,
+                                "slots recycle correctly past the queue depth")
+
+    // ---- geometry invalidates every slot, not just the next one --------
+    // The recorded command buffer is per slot. Draw a triangle, then change
+    // the geometry and draw again: a slot still holding the old recording
+    // would redraw the previous frame three submissions later.
+    _ = vulkan.verts_reserve(t, 3)
+    _ = vulkan.verts_set(t, 0, -1.0, -1.0, 1.0, 1.0, 1.0)
+    _ = vulkan.verts_set(t, 1, -1.0,  1.0, 1.0, 1.0, 1.0)
+    _ = vulkan.verts_set(t, 2,  1.0,  1.0, 1.0, 1.0, 1.0)
+    i = 0
+    while i < 6 {
+        _ = vulkan.submit(t, pipe, 0.0, 0.0, 0.0, 1.0)
+        i = i + 1
+    }
+    _ = vulkan.wait_all(t)
+    // Bottom-left of the covered half is white geometry.
+    covered = vulkan.pixel(t, 8, 56)
+    failures = failures + check(vulkan.red(covered) > 200 && vulkan.green(covered) > 200,
+                                "geometry drawn through the pipelined path")
+
+    // Move the triangle off that corner; every slot must re-record.
+    _ = vulkan.verts_set(t, 0, 0.6, 0.6, 1.0, 1.0, 1.0)
+    _ = vulkan.verts_set(t, 1, 0.9, 0.6, 1.0, 1.0, 1.0)
+    _ = vulkan.verts_set(t, 2, 0.9, 0.9, 1.0, 1.0, 1.0)
+    i = 0
+    while i < 6 {
+        _ = vulkan.submit(t, pipe, 0.0, 0.0, 0.0, 1.0)
+        i = i + 1
+    }
+    _ = vulkan.wait_all(t)
+    cleared = vulkan.pixel(t, 8, 56)
+    failures = failures + check(vulkan.red(cleared) < 60,
+                                "a geometry change invalidates every slot's recording")
+
+    // ---- back to synchronous -------------------------------------------
+    failures = failures + check_eq(vulkan.target_set_frames(t, 1), vulkan.OK, "back to one frame")
+    failures = failures + check_eq(vulkan.draw(t, pipe, 1.0, 0.0, 0.0, 1.0), vulkan.OK,
+                                   "draw still works after resizing the pipeline")
+    sync_px = vulkan.pixel(t, 4, 4)
+    failures = failures + check(vulkan.red(sync_px) > 200, "the synchronous path is unchanged")
+
+    // ---- timeout ---------------------------------------------------------
+    failures = failures + check_eq(vulkan.target_set_timeout_ms(t, 250), vulkan.OK,
+                                   "timeout is configurable")
+    failures = failures + check_eq(vulkan.draw(t, pipe, 0.0, 1.0, 0.0, 1.0), vulkan.OK,
+                                   "a real frame finishes well inside 250ms")
+    failures = failures + check(vulkan.target_set_timeout_ms(t, 0) != vulkan.OK,
+                                "a non-positive timeout is refused")
+    failures = failures + check(vulkan.target_set_frames(t, 0) != vulkan.OK,
+                                "zero frames in flight is refused")
+    failures = failures + check(vulkan.target_set_frames(t, 99) != vulkan.OK,
+                                "an absurd queue depth is refused")
+
+    vulkan.pipeline_destroy(pipe)
+    vulkan.target_destroy(t)
+    string.free(vs)
+    string.free(fs_)
+    vulkan.device_destroy(dev)
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}

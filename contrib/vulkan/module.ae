@@ -82,6 +82,8 @@ exports (
     aevk_ae_device_create, aevk_ae_device_destroy,
     aevk_ae_target_create, aevk_ae_target_create_ex, aevk_ae_target_destroy,
     aevk_ae_target_has_depth, aevk_ae_target_samples,
+    aevk_ae_target_set_frames, aevk_ae_target_frames,
+    aevk_ae_target_set_timeout_ms, aevk_ae_submit, aevk_ae_wait_all,
     aevk_ae_target_width, aevk_ae_target_height, aevk_ae_rgba_size,
     aevk_ae_pipeline_create, aevk_ae_pipeline_destroy,
     aevk_ae_verts_reserve, aevk_ae_verts_set, aevk_ae_draw,
@@ -90,6 +92,7 @@ exports (
     device_create, device_destroy,
     target_create, target_create_ex, target_destroy, target_width, target_height,
     target_has_depth, target_samples, rgba_size,
+    target_set_frames, target_frames, target_set_timeout_ms, submit, wait_all,
     pipeline_create, pipeline_destroy,
     verts_reserve, verts_set, draw, copy_rgba, pixel, save_ppm,
     red, green, blue, alpha,
@@ -128,6 +131,11 @@ extern aevk_ae_target_create(dev: ptr, w: int, h: int) -> ptr
 extern aevk_ae_target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr
 extern aevk_ae_target_has_depth(t: ptr) -> int
 extern aevk_ae_target_samples(t: ptr) -> int
+extern aevk_ae_target_set_frames(t: ptr, count: int) -> int
+extern aevk_ae_target_frames(t: ptr) -> int
+extern aevk_ae_target_set_timeout_ms(t: ptr, ms: int) -> int
+extern aevk_ae_submit(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int
+extern aevk_ae_wait_all(t: ptr) -> int
 extern aevk_ae_target_destroy(t: ptr)
 extern aevk_ae_target_width(t: ptr) -> int
 extern aevk_ae_target_height(t: ptr) -> int
@@ -206,6 +214,26 @@ target_create_ex(dev: ptr, w: int, h: int, want_depth: int, samples: int) -> ptr
 }
 target_has_depth(t: ptr) -> int { return aevk_ae_target_has_depth(t) }
 target_samples(t: ptr) -> int { return aevk_ae_target_samples(t) }
+
+// Frames in flight (1..8). One is the default and the synchronous shape:
+// draw() records, submits and waits. Above one, submit() returns without
+// waiting so the CPU records the next frame while the GPU works, and each
+// slot carries its own readback buffer so a later frame cannot overwrite
+// pixels an earlier one has not had read yet.
+target_set_frames(t: ptr, count: int) -> int { return aevk_ae_target_set_frames(t, count) }
+target_frames(t: ptr) -> int { return aevk_ae_target_frames(t) }
+
+// The fence wait in milliseconds; the default 5000 is a hang detector, not a
+// frame budget.
+target_set_timeout_ms(t: ptr, ms: int) -> int { return aevk_ae_target_set_timeout_ms(t, ms) }
+
+// Records and submits without waiting; returns the slot used, or a negative
+// status. Blocks only when every slot is still in flight. pixel(), copy_rgba()
+// and save_ppm() wait for the most recent frame on their own.
+submit(t: ptr, p: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aevk_ae_submit(t, p, r, g, b, a)
+}
+wait_all(t: ptr) -> int { return aevk_ae_wait_all(t) }
 target_destroy(t: ptr) { aevk_ae_target_destroy(t) }
 target_width(t: ptr) -> int { return aevk_ae_target_width(t) }
 target_height(t: ptr) -> int { return aevk_ae_target_height(t) }
