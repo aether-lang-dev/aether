@@ -329,17 +329,31 @@ native `-laether` link against the complete `libaether.a` does. The first build
 recompiles the runtime from source (a few seconds); caching the per-target
 archive is a planned optimization.
 
-**Scope.** Cross binaries are built without OpenSSL / zlib / nghttp2 / PCRE2
+**Scope.** Cross binaries are built without OpenSSL / zlib / nghttp2
 (zig ships none of those), so standard-library features that need them
-(HTTPS/TLS, hashing, base64, regex, compression, HTTP/2) report errors at
+(HTTPS/TLS, hashing, base64, compression, HTTP/2) report errors at
 runtime, exactly like a native build on a host that lacks those libraries;
 plain sockets and pure helpers keep working. `ae build` prints a note when a
 program uses such a module (`std.http`, `std.net`, `std.cryptography`,
-`std.regex`, `std.zlib`, `std.encoding`), then builds it anyway. Cross-building
-those libraries is the documented follow-up. Executables only
+`std.zlib`, `std.encoding`), then builds it anyway. Cross-building
+those libraries is the documented follow-up; staging them via
+`CROSSBUILD_SYSROOT` (provisioned by aether-crossbuild) links them for real
+today. **`std.regex` is the exception: it always works on cross builds, with
+no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
+upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
+regex-using program cross-builds self-contained for every target. A
+CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
+vendored copy. Executables only
 (`--emit=lib`/`--emit=both` are rejected for now), and the host must be POSIX
 (Linux/macOS). The generated binary targets another platform, so it is not
 runnable on the build host; copy it to a matching machine (or an emulator).
+
+The same vendored engine backs two native cases: a build box with no system
+libpcre2-8 (`make` compiles the vendored copy instead of stubbing
+`std.regex` out — `PCRE2=0` restores the stub, `PCRE2=vendored` forces the
+vendored engine even when a system library exists), and `ae`'s
+no-`libaether.a` source fallback, which always compiles the vendored engine
+so an installed toolchain never ships a silently-stubbed regex.
 
 ## Build Recommendations
 

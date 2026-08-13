@@ -111,9 +111,12 @@ static bool cross_find_manifest(char* manifest, size_t msz,
  * full set, archive it, and let the final link pull only the objects the
  * program references, exactly as a native `-laether` link against the
  * complete libaether.a does. Library-backed features (TLS, real crypto,
- * regex, zlib, HTTP/2) then report unavailable at runtime on the target,
+ * zlib, HTTP/2) then report unavailable at runtime on the target,
  * exactly like a native build on a host without those libraries, while
- * pure helpers such as base64 (std.encoding) keep working. */
+ * pure helpers such as base64 (std.encoding) keep working. std.regex is
+ * the exception (#1389): its engine is vendored (std/regex/pcre2/,
+ * compiled by the aether_pcre2_vendored.c TU in this same list), so it
+ * works on every cross target with no sysroot. */
 #define CROSS_SRC_PATH_MAX 1024
 static int cross_collect_core_list(char out[][CROSS_SRC_PATH_MAX], int max,
                                    const char* manifest, const char* base) {
@@ -154,7 +157,9 @@ bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz) {
     if (aetherc_capture_stdout("--emit=inspect", file, NULL, out, sizeof(out)) != 0)
         return false;
     static const char* mods[] = {
-        "std.http", "std.net", "std.cryptography", "std.regex", "std.zlib",
+        /* std.regex is NOT here: its engine is vendored (#1389), so cross
+         * builds get a working regex with no sysroot — nothing to warn about. */
+        "std.http", "std.net", "std.cryptography", "std.zlib",
         "std.encoding", NULL   /* base64 in std.encoding is openssl-backed */
     };
     for (int i = 0; mods[i]; i++) {
@@ -178,8 +183,11 @@ bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz) {
  * AETHER_HAS_SANDBOX is the only one not auto-derived by
  * aether_optimization_config.h (filesystem / networking / threading
  * default on when no AETHER_NO_* is passed). The external-library macros
- * (AETHER_HAS_OPENSSL / _ZLIB / _NGHTTP2 / _PCRE2) are deliberately left
- * undefined so their stub paths compile, matching the excluded sources. */
+ * (AETHER_HAS_OPENSSL / _ZLIB / _NGHTTP2) are deliberately left
+ * undefined so their stub paths compile, matching the excluded sources.
+ * AETHER_HAS_PCRE2 is the exception: it is always on, backed either by a
+ * CROSSBUILD_SYSROOT's real libpcre2-8 or by the vendored engine
+ * (AETHER_VENDOR_PCRE2) — see the fallback after the sysroot probe. */
 /* Grow *buf to hold at least `need` bytes, doubling. Same shape as
  * include_flags_grow in ae.c, and for the same reason: the cross-compile
  * command line scales with the install prefix and the module count, so any
@@ -433,6 +441,20 @@ int run_cross_build(const char* c_file, const char* out_file,
                 }
             }
         }
+    }
+    /* std.regex needs no sysroot (#1389): when nothing above staged a real
+     * libpcre2-8 (no CROSSBUILD_SYSROOT, or one without pcre2), compile the
+     * vendored engine instead. AETHER_VENDOR_PCRE2 turns
+     * std/regex/aether_pcre2_vendored.c — already in the MANIFEST compile
+     * loop below — from an empty TU into the full unity build, and switches
+     * aether_regex.c to the in-tree pcre2.h; both are self-contained
+     * (relative includes), so no -I and no -l is needed for any target.
+     * A sysroot-staged pcre2 keeps precedence: its define is already in
+     * feature_defs and its -lpcre2-8 in crossbuild_libs, and adding the
+     * vendored engine on top would compile two copies of the same symbols. */
+    if (!strstr(feature_defs, "-DAETHER_HAS_PCRE2")) {
+        strncat(feature_defs, " -DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2",
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
     /* Heap-grown rather than fixed: the command line is dominated by
      * tc.include_flags, which is itself heap-grown and scales with the install
