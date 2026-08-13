@@ -2873,6 +2873,87 @@ rename and the `` `<kw>` `` escape.
 
 ---
 
+## Conditional Compilation
+
+Two axes: the platform, which the C compiler knows, and **build symbols**,
+which the build declares. Both are resolved at compile time.
+
+### Build symbols
+
+A symbol is present or absent. It carries no value.
+
+```sh
+ae build -D TEST_SERVER app.ae      # or -DTEST_SERVER
+aetherc -D TEST_SERVER app.ae
+```
+
+```toml
+# aether.toml, for symbols the project always wants
+[build]
+defines = "TEST_SERVER VERBOSE"
+```
+
+A command-line `-D` adds to what the file declares. A symbol must be an
+identifier: letters, digits and underscore, not starting with a digit. `-D
+NAME=value` is rejected rather than accepted and ignored, because a symbol has
+no value to carry.
+
+### `when` regions
+
+`when defined(NAME) { … }` guards a group of declarations or a group of
+statements, with an optional `else`:
+
+```aether
+when defined(TEST_SERVER) {
+    driver_port() -> int { return 9222 }
+    start_driver() { println("driver on ${driver_port()}") }
+} else {
+    start_driver() { println("driver absent") }
+}
+
+main() {
+    start_driver()
+    when defined(VERBOSE) {
+        println("verbose")
+    }
+}
+```
+
+Conditions combine with `!`, `&&`, `||` and parentheses:
+
+```aether
+when defined(A) && !defined(B) { … }
+when (defined(A) || defined(B)) && !defined(C) { … }
+```
+
+**A losing region is dropped, not disabled.** It is removed from the program
+before type checking, so nothing it names has to exist, and its symbols are not
+in the binary: `nm` on a build without `TEST_SERVER` finds no `driver_port`.
+That is the difference between this and wrapping code in a runtime `if`, which
+still compiles and links every line of the subsystem you meant to leave out.
+
+The corollary is that a disabled region is not type-checked. Code you never
+build is code you never check, so a symbol that is off in every CI
+configuration will rot. Build each configuration you ship.
+
+### `select` for values
+
+`select` chooses a value rather than a region. Its keys are the platforms plus
+any build symbol:
+
+```aether
+port = select(DEV_MODE: 8080, other: 80)
+tag  = select(linux: "linux", macos: "macos", windows: "windows", other: "other")
+```
+
+A build symbol wins outright when it is set, since it is known at compile time;
+otherwise the platform decides, and `other:` is the fallback. Every branch must
+yield the same type, and a mismatch is an error rather than a surprise on
+whichever platform compiles the odd branch.
+
+Use `select` for a value and `when` for anything larger: `select` cannot remove
+a declaration, and both of its branches still compile.
+
 ## Compilation
 
 ### Using the CLI

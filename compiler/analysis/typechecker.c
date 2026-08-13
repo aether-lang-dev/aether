@@ -1651,6 +1651,47 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                                   get_token_type_from_string(expr->value));
             
         case AST_FUNCTION_CALL: {
+            /* select(...) yields whatever its branches yield. Nothing inferred
+             * it before, so it fell to unresolved and codegen defaulted to int:
+             * a select over strings assigned a pointer into an int slot and
+             * printed a number. Branches must agree, and disagreement is worth
+             * saying out loud, since one branch is only compiled per platform
+             * and the mismatch would otherwise surface on someone else's OS. */
+            if (expr->value && strcmp(expr->value, "select") == 0 &&
+                expr->child_count >= 1) {
+                Type* chosen = NULL;
+                const char* chosen_key = NULL;
+                for (int i = 0; i < expr->child_count; i++) {
+                    ASTNode* arg = expr->children[i];
+                    if (!arg || arg->type != AST_NAMED_ARG || arg->child_count < 1) continue;
+                    Type* t = infer_type(arg->children[0], table);
+                    if (!t) continue;
+                    if (t->kind == TYPE_UNKNOWN) { free_type(t); continue; }
+                    if (!chosen) {
+                        chosen = t;
+                        chosen_key = arg->value;
+                        continue;
+                    }
+                    if (t->kind != chosen->kind) {
+                        char msg[220];
+                        snprintf(msg, sizeof(msg),
+                                 "select() branches must all yield the same type: "
+                                 "'%s' is %s but '%s' is %s",
+                                 chosen_key ? chosen_key : "?", type_to_string(chosen),
+                                 arg->value ? arg->value : "?", type_to_string(t));
+                        type_error(msg, arg->line, arg->column);
+                    }
+                    free_type(t);
+                }
+                if (chosen) {
+                    if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
+                        if (expr->node_type) free_type(expr->node_type);
+                        expr->node_type = clone_type(chosen);
+                    }
+                    return chosen;
+                }
+            }
+
             /* #479 Isolated[T] builtins, resolved polymorphically here rather
              * than from a fixed symbol type. isolate(x) : Isolated[typeof x];
              * consume(iso) : the wrapped T (when iso is Isolated[T]). */
