@@ -29,7 +29,7 @@ version number before tagging the release.
   run-to-run spread. An earlier version that allocated the header separately
   cost 16%, which is why it does not.
 
-## [current]
+## [0.531.0]
 
 ### Added
 
