@@ -1,0 +1,215 @@
+// Four actors rendering on one GPU device at the same time, each producing
+// its own image, then main collecting them into a contact sheet.
+//
+// This is the shape the per-device lock exists for: one device, several
+// actors, no explicit synchronisation in user code. Each actor owns its target
+// and pipeline; only the device is shared, which is the object Vulkan requires
+// the caller to synchronise and the module does.
+//
+// Build (from the repo root):
+//   ae build contrib/vulkan/example_parallel_render.ae \
+//       --extra contrib/vulkan/aether_vulkan.c -o parallel
+//
+// With no driver installed it prints a line saying so and exits 0, the same
+// path any program using this module takes.
+
+import std.string
+import std.bytes
+import std.fs
+import contrib.vulkan
+
+message Render { dev: ptr, index: int, size: int }
+message Collect {}
+
+extern exit(code: int)
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// One corner of the colour cube per tile, so the contact sheet shows at a
+// glance that each actor rendered its own thing.
+tile_red(i: int) -> float {
+    if i == 0 || i == 3 { return 0.85 }
+    return 0.1
+}
+
+tile_green(i: int) -> float {
+    if i == 1 || i == 3 { return 0.7 }
+    return 0.15
+}
+
+tile_blue(i: int) -> float {
+    if i == 2 { return 0.9 }
+    return 0.2
+}
+
+actor Tile {
+    // `null` rather than 0, so the field is a pointer: state takes its type
+    // from its initialiser, and `= 0` would make this an int.
+    state pixels = null
+
+    receive {
+        Render(dev, index, size) -> {
+            target = vulkan.target_create(dev, size, size)
+            if target == null {
+                println("  tile ${index}: ${vulkan.last_error()}")
+            } else {
+                vs, vl = load_spv("contrib/vulkan/shaders/triangle.vert.spv")
+                fs_, fl = load_spv("contrib/vulkan/shaders/triangle.frag.spv")
+                pipe = vulkan.pipeline_create(dev, target, vs, vl, fs_, fl)
+                string.free(vs)
+                string.free(fs_)
+
+                // Refuse to produce a tile with no pipeline. A null pipeline
+                // still clears, so the sheet would come out looking plausible
+                // while containing no rendered geometry at all.
+                if pipe == null {
+                    println("  tile ${index}: no pipeline (${vulkan.last_error()})")
+                    vulkan.target_destroy(target)
+                    return
+                }
+
+                // A triangle over a tinted background, so the tile has both a
+                // clear colour and geometry.
+                _ = vulkan.verts_reserve(target, 3)
+                _ = vulkan.verts_set(target, 0,  0.0, -0.8, 1.0, 1.0, 1.0)
+                _ = vulkan.verts_set(target, 1, -0.8,  0.8, 1.0, 1.0, 1.0)
+                _ = vulkan.verts_set(target, 2,  0.8,  0.8, 1.0, 1.0, 1.0)
+
+                st = vulkan.draw(target, pipe,
+                                 tile_red(index), tile_green(index), tile_blue(index), 1.0)
+                if st == vulkan.OK {
+                    need = vulkan.rgba_size(target)
+                    buf = bytes.new(need)
+                    _ = bytes.set_length(buf, need)
+                    if vulkan.copy_rgba(target, bytes.data(buf), need) == vulkan.OK {
+                        pixels = buf
+                    } else {
+                        bytes.free(buf)
+                    }
+                } else {
+                    println("  tile ${index}: draw failed (${st})")
+                }
+
+                if pipe != null { vulkan.pipeline_destroy(pipe) }
+                vulkan.target_destroy(target)
+            }
+        }
+
+        // Mailbox order puts this after Render, so asking for the result
+        // waits for the render without polling or sleeping.
+        Collect() -> { reply pixels }
+    }
+}
+
+// Writes the four tiles side by side as one PPM: 2x2, each `side` square.
+// The buffers are passed individually rather than through a list, so this
+// example needs nothing but std.bytes to read.
+write_sheet(path: string, t0: ptr, t1: ptr, t2: ptr, t3: ptr, side: int) -> int {
+    total = side * 2
+    header = "P6\n${total} ${total}\n255\n"
+    hlen = string.length(header)
+
+    out = bytes.new(hlen + total * total * 3)
+    _ = bytes.set_length(out, hlen + total * total * 3)
+
+    i = 0
+    while i < hlen {
+        _ = bytes.set(out, i, string.char_at(header, i))
+        i = i + 1
+    }
+
+    w = hlen
+    row = 0
+    while row < total {
+        col = 0
+        while col < total {
+            // Which tile this pixel belongs to, and where inside it.
+            src = t0
+            ty = row
+            tx = col
+            if row >= side {
+                ty = row - side
+                if col >= side { src = t3 } else { src = t2 }
+            } else {
+                if col >= side { src = t1 }
+            }
+            if col >= side { tx = col - side }
+
+            off = (ty * side + tx) * 4
+            _ = bytes.set(out, w, bytes.get(src, off))
+            _ = bytes.set(out, w + 1, bytes.get(src, off + 1))
+            _ = bytes.set(out, w + 2, bytes.get(src, off + 2))
+            w = w + 3
+            col = col + 1
+        }
+        row = row + 1
+    }
+
+    err = fs.write_binary(path, bytes.data(out), bytes.length(out))
+    bytes.free(out)
+    if err != "" {
+        println("write failed: ${err}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    println("=== four actors, one GPU ===")
+
+    if vulkan.available() != 1 {
+        println("no Vulkan driver: ${vulkan.last_error()}")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("device_create failed: ${vulkan.last_error()}")
+        return
+    }
+    println("device: ${vulkan.device_name()}")
+
+    side = 128
+
+    a = spawn(Tile())
+    b = spawn(Tile())
+    c = spawn(Tile())
+    d = spawn(Tile())
+
+    // Fire all four off before collecting any: this is the concurrency. Ask
+    // the first and wait for its reply before sending the second and they
+    // would simply run one after the other.
+    a ! Render { dev: dev, index: 0, size: side }
+    b ! Render { dev: dev, index: 1, size: side }
+    c ! Render { dev: dev, index: 2, size: side }
+    d ! Render { dev: dev, index: 3, size: side }
+
+    pa = a ? Collect {}
+    pb = b ? Collect {}
+    pc = c ? Collect {}
+    pd = d ? Collect {}
+
+    if pa == null || pb == null || pc == null || pd == null {
+        println("at least one tile did not render")
+        vulkan.device_destroy(dev)
+        exit(1)
+    }
+
+    rc = write_sheet("parallel.ppm", pa, pb, pc, pd, side)
+    if rc == 0 {
+        println("wrote parallel.ppm (${side * 2}x${side * 2}, four tiles)")
+    }
+
+    bytes.free(pa)
+    bytes.free(pb)
+    bytes.free(pc)
+    bytes.free(pd)
+    vulkan.device_destroy(dev)
+}

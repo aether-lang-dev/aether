@@ -28,12 +28,17 @@ import contrib.vulkan
 
 message Start { dev: ptr, tag: int, reps: int }
 message Poll {}
+message Probe { reps: int }
 
 extern exit(code: int)
 
 load_spv(path: string) -> (string, int) {
     data, length, err = fs.read_binary(path)
-    if err != "" { return ("", 0) }
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
     return (data, length)
 }
 
@@ -60,12 +65,22 @@ actor Painter {
                 string.free(vs)
                 string.free(fs_)
 
+                // Seeded here, not reset in the loop. Without this check the
+                // test is vacuous: drawing with a null pipeline still clears
+                // the target, so every colour check below passes having
+                // rendered nothing. Run from a directory where the SPIR-V does
+                // not resolve, that is exactly what happened.
+                bad = 0
+                if vl == 0 || fl == 0 || pipe == null {
+                    println("  no pipeline: SPIR-V ${vl}/${fl} bytes, ${vulkan.last_error()}")
+                    bad = 1
+                }
+
                 // Distinct clear colour per actor: red for tag 0, blue for 1.
                 red = 0.0
                 blue = 0.0
                 if tag == 0 { red = 1.0 } else { blue = 1.0 }
 
-                bad = 0
                 n = 0
                 while n < reps {
                     st = vulkan.draw(target, pipe, red, 0.0, blue, 1.0)
@@ -95,6 +110,24 @@ actor Painter {
                 if bad == 0 { verdict = 1 } else { verdict = 0 }
             }
         }
+        // Concern (1) in the issue: available() fills a 256-byte device-name
+        // buffer that device_name() reads. Hammer both from several actors at
+        // once and require every read to be the same non-empty string. A torn
+        // or empty read fails here; the probe lock is what prevents it.
+        Probe(reps) -> {
+            expect = vulkan.device_name()
+            bad = 0
+            n = 0
+            while n < reps {
+                if vulkan.available() != 1 { bad = bad + 1 }
+                got = vulkan.device_name()
+                if string.equals(got, expect) != 1 { bad = bad + 1 }
+                if string.length(got) == 0 { bad = bad + 1 }
+                n = n + 1
+            }
+            if bad == 0 { verdict = 1 } else { verdict = 0 }
+        }
+
         // Mailbox order puts this after Start, so the ask below waits for the
         // render to finish without the sender polling or sleeping.
         Poll() -> { reply verdict }
@@ -126,6 +159,12 @@ main() {
     ra = a ? Poll {}
     rb = b ? Poll {}
 
+    // Same two actors, now racing the cached probe and its name buffer.
+    a ! Probe { reps: 400 }
+    b ! Probe { reps: 400 }
+    pa = a ? Poll {}
+    pb = b ? Poll {}
+
     failures = 0
     if ra != 1 {
         println("  FAIL painter 0 reported a bad frame")
@@ -138,6 +177,13 @@ main() {
         failures = failures + 1
     } else {
         println("  PASS painter 1 rendered its own colour every frame")
+    }
+
+    if pa != 1 || pb != 1 {
+        println("  FAIL concurrent available()/device_name() disagreed")
+        failures = failures + 1
+    } else {
+        println("  PASS concurrent probe reads agree and are non-empty")
     }
 
     vulkan.device_destroy(dev)

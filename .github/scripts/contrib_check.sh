@@ -78,6 +78,11 @@ TESTS=(
   "vulkan/offscreen|$VK/test_vulkan.ae|$VK/aether_vulkan.c|run||vulkan"
   "vulkan/resources|$VK/test_vulkan_resources.ae|$VK/aether_vulkan.c|run||vulkan"
   "vulkan/actors|$VK/test_vulkan_actors.ae|$VK/aether_vulkan.c|run||vulkan"
+  # The examples are RUN, not just compiled. An example that only builds
+  # rots into decoration: both of these render and write a PPM, so a
+  # regression that leaves them producing nothing fails here.
+  "vulkan/example-triangle|$VK/example_triangle.ae|$VK/aether_vulkan.c|run||vulkan"
+  "vulkan/example-parallel|$VK/example_parallel_render.ae|$VK/aether_vulkan.c|run||vulkan"
 )
 
 # Kill any stray cache/test binaries squatting ports before we start (aborted

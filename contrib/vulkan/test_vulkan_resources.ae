@@ -33,7 +33,11 @@ check_eq(got: int, want: int, label: string) -> int {
 
 load_spv(path: string) -> (string, int) {
     data, length, err = fs.read_binary(path)
-    if err != "" { return ("", 0) }
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
     return (data, length)
 }
 

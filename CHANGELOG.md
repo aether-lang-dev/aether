@@ -26,6 +26,10 @@ version number before tagging the release.
   been harmless, but it fills a 256-byte device-name buffer that
   `device_name()` reads, and that read could have seen it torn.
 
+  `example_parallel_render.ae` shows the point: four actors rendering their own
+  tile on one device, assembled into a contact sheet. Both vulkan examples are
+  now RUN by `make contrib-check` rather than only compiled.
+
   The cost is not measurable on the offscreen path, where a draw already blocks
   on a fence: the two-actor test takes the same wall time with the lock
   compiled out. That test asserts the contract holds rather than proving the

@@ -40,6 +40,11 @@ main() {
 }
 ```
 
+`example_triangle.ae` is that program in full, and `example_parallel_render.ae`
+is four actors rendering their own tile on one shared device and writing a 2x2
+contact sheet. Both are RUN by `make contrib-check`, not merely compiled: an
+example nobody executes rots into decoration.
+
 `example_triangle.ae` is that program in full. It is not limited to a triangle:
 the pipeline is built from whatever SPIR-V you hand it, and `pipeline_create`
 uses a built-in vertex format of an interleaved `vec2` position plus `vec3`
@@ -215,7 +220,8 @@ rather than on a defect. What proves the pair is correct is the render test.
 
 ## Testing
 
-`test_vulkan.ae` and `test_vulkan_resources.ae` run from `make contrib-check`. With no driver it prints SKIP
+`test_vulkan.ae`, `test_vulkan_resources.ae` and `test_vulkan_actors.ae` run
+from `make contrib-check`, along with both examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -231,6 +237,18 @@ quad drawn from a caller-described position/normal/UV layout, and a tint uniform
 scales what the sampler returned. It also checks the refusals: a duplicate
 binding, an index past the vertex count, a short pixel upload, an over-large
 push block, and binding a texture that has no pixels yet.
+
+`test_vulkan_actors.ae` drives the threading contract: two actors, one device,
+each drawing to its own target and churning a scratch target through the shared
+command pool, each checking its own colour every frame, plus several hundred
+concurrent `available()` / `device_name()` calls that must all agree.
+
+Its header is explicit about the limit of that: compiled with the lock removed
+it still passes on MoltenVK, and ThreadSanitizer does not flag the probe race
+either, because the window is a few microseconds at process start. What the
+lock buys is that the behaviour is DEFINED by the specification rather than
+tolerated by one driver. A test can show the contract holding; it cannot show a
+race is absent.
 
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and then asserts the test did **not** skip. A skip there would be silent loss of
