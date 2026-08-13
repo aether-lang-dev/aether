@@ -1,0 +1,42 @@
+// #1549: a module's `@link` must reach `ae build`'s link command by itself.
+//
+// contrib/sqlite/module.ae declares `@link("-laether_sqlite -lsqlite3")`. The
+// workspace staged by the .sh deliberately sets NO `link_flags`, so if those
+// libraries reach the linker at all, they came from the @link directive via
+// the generated C's `// aether-link:` header. Before #1549 this failed with
+// `undefined reference to sqlite_open_raw`.
+//
+// The import sits inside a `when defined(WITH_SQLITE)` region so the same
+// source also proves the other half: with the symbol unset the import is
+// dropped, the module leaves the import closure, and its @link contributes
+// nothing — the property a static `link_flags` cannot express.
+//
+// Sibling test link_directive/ covers the aetherc half (that the header is
+// emitted, unioned and deduped). This one covers that `ae build` USES it.
+when defined(WITH_SQLITE) {
+    import contrib.sqlite
+
+    run() {
+        db, err = sqlite.open(":memory:")
+        if err != "" {
+            println("FAIL open: ${err}")
+            return
+        }
+        e = sqlite.exec(db, "CREATE TABLE t (a INT)")
+        if e != "" {
+            println("FAIL ddl: ${e}")
+            sqlite.close(db)
+            return
+        }
+        println("linked via @link")
+        sqlite.close(db)
+    }
+} else {
+    run() {
+        println("sqlite excluded")
+    }
+}
+
+main() {
+    run()
+}

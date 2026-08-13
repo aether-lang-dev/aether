@@ -39,11 +39,17 @@
 // (`while step() == SQLITE_ROW { ... read columns ... }`).
 //
 // Build:
-//   - Drop `contrib/sqlite/aether_sqlite.c` into your project's
-//     aether.toml [[bin]] `extra_sources`, OR pass `--extra` on the
-//     command line.
-//   - Add `[build] link_flags = "-lsqlite3"` to your aether.toml so
-//     the system libsqlite3 is linked.
+//   - Nothing, if `make contrib` has built the veneer archive: the
+//     `@link` directive below carries both libraries, and `ae build`
+//     puts them on the link command for you (#1549). No aether.toml
+//     entry is needed, and the flags follow the import — including
+//     through a `when defined(...)` region, where dropping the import
+//     drops libsqlite3 from the binary too.
+//   - Without the archive, drop `contrib/sqlite/aether_sqlite.c` into
+//     your project's aether.toml [[bin]] `extra_sources` (or pass
+//     `--extra`) and add `[build] link_flags = "-lsqlite3"`. Note that
+//     `extra_sources` compiles unconditionally, so this route links
+//     libsqlite3 into every build whether the import survived or not.
 //   - If the system doesn't have libsqlite3, the link step fails —
 //     this module doesn't provide a runtime "sqlite unavailable"
 //     fallback because SQLite isn't auto-detected by the Aether
@@ -54,8 +60,9 @@
 
 // Native link deps (#1259): the whole-program `// aether-link:` header
 // unions this into the emitted C when contrib.sqlite is in the import
-// closure. -laether_sqlite is the veneer archive `make contrib` builds;
-// order matters for single-pass linkers (veneer before -lsqlite3).
+// closure, and `ae build` reads it back onto its link command (#1549).
+// -laether_sqlite is the veneer archive `make contrib` builds; order
+// matters for single-pass linkers (veneer before -lsqlite3).
 @link("-laether_sqlite -lsqlite3")
 
 exports (

@@ -1390,6 +1390,56 @@ static const char* get_link_flags(void) {
     return flags;
 }
 
+// Read the `// aether-link: <tokens>` header codegen emits on the first line
+// of the generated C, and return the tokens for the link command (#1549).
+//
+// The compiler computes this by unioning every `@link("...")` directive across
+// the resolved import closure (emit_link_requirements(), codegen.c, #1259).
+// That makes it TRANSITIVE — a module three imports deep contributes its own
+// native deps — and, since it is derived from the AST, it also tracks
+// conditional compilation: an `import` inside a losing `when defined(...)`
+// region is gone before codegen, so its `@link` never appears here.
+//
+// That last property is why this is read rather than left to aether.toml.
+// `link_flags` is static, so a hand-written `-lsqlite3` is passed on every
+// build including the ones that dropped the import, which reintroduces exactly
+// the coupling `when defined` removes. Two sources of truth for one fact, and
+// only the compiler's tracks the code.
+//
+// Consumers keep override authority: these tokens are placed BEFORE
+// aether.toml's link_flags on the command line. `-L` search paths stay the
+// consumer's job — those are site-specific in a way a module cannot know.
+static const char* get_aether_link_flags(const char* c_file) {
+    static char flags[1024] = "";
+    flags[0] = '\0';
+    if (!c_file) return flags;
+
+    FILE* f = fopen(c_file, "r");
+    if (!f) return flags;
+
+    // The header is emitted as the first line of the TU, but tolerate a few
+    // leading lines rather than depending on exact placement.
+    char line[1024];
+    int lines_read = 0;
+    while (lines_read < 8 && fgets(line, sizeof(line), f)) {
+        lines_read++;
+        const char* p = strstr(line, "// aether-link:");
+        if (!p) continue;
+        p += strlen("// aether-link:");
+        while (*p == ' ') p++;
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
+            n--;
+        if (n >= sizeof(flags)) n = sizeof(flags) - 1;
+        memcpy(flags, p, n);
+        flags[n] = '\0';
+        break;
+    }
+
+    fclose(f);
+    return flags;
+}
+
 // --------------------------------------------------------------------------
 // C-backend compiler override: honor $AE_CC then $CC (mirrors the Makefile's
 // CC=). This selects the compiler that turns Aether's generated C into the
@@ -1866,6 +1916,10 @@ void build_gcc_cmd(char* cmd, size_t size,
                           bool optimize, const char* extra_files) {
     const char* link_flags = get_link_flags();
     const char* extra = extra_files ? extra_files : "";
+    // Module-declared native deps from `@link`, via the generated C's
+    // `// aether-link:` header (#1549). Empty when nothing in the import
+    // closure declares one, which is the common case.
+    const char* ae_link = get_aether_link_flags(c_file);
 
     // User cflags from aether.toml apply to every build path — `ae build`,
     // `ae run`, and any internal invocation. Previously they were gated
@@ -1949,9 +2003,12 @@ void build_gcc_cmd(char* cmd, size_t size,
         char* fs = strrchr(lib_dir, '/');
         char* slash = (!bs) ? fs : (!fs) ? bs : (bs > fs ? bs : fs);
         if (slash) *slash = '\0';
+        // -L<lib_dir>/contrib so `@link("-laether_sqlite ...")` resolves the
+        // veneer archive `make contrib` builds there. Same dev-layout path
+        // host_bridge_a_path() already searches for host bridges.
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s -L\"%s\" -laether -o \"%s\" %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, link_flags);
+            "\"%s\" %s %s \"%s\" %s -L\"%s\" -L\"%s/contrib\" -laether -o \"%s\" %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, lib_dir, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -1959,8 +2016,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s -o \"%s\" %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, link_flags);
+            "\"%s\" %s %s \"%s\" %s %s -o \"%s\" %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -2147,8 +2204,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // BEFORE -laether on the link line — gcc resolves undefined
         // references left-to-right through static archives.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s -rdynamic -L%s -L%s/contrib %s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, lib_dir, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "
@@ -2161,8 +2218,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "

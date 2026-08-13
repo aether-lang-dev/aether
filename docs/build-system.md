@@ -49,6 +49,35 @@ path = "src/main.ae"
 extra_sources = ["src/ffi_helpers.c", "src/renderer.c"]
 ```
 
+### Link flags you do not have to write
+
+`link_flags` is for libraries *your* program needs. A library that a *module*
+needs is declared by that module, with `@link` at the top of its `module.ae`:
+
+```aether
+@link("-laether_sqlite -lsqlite3")
+```
+
+Codegen unions those declarations across the resolved import closure into a
+`// aether-link:` comment on the generated C, and `ae build` puts them on the
+link command (#1549). So `import contrib.sqlite` links libsqlite3 without any
+`aether.toml` entry, and it works transitively — a module three imports deep
+contributes its own dependencies.
+
+Two consequences worth knowing:
+
+- **Your `link_flags` still win.** Module flags are placed before them on the
+  command line, so anything you specify takes precedence.
+- **A `-D`-dropped import drops its libraries too.** Because the flags come
+  from the AST, an `import` inside a losing `when defined(...)` region never
+  contributes them — the library is absent from the binary, not merely
+  unused. Restating it in `link_flags` defeats this, since that is static and
+  applies to every build. Prefer `@link` for a module's own dependencies.
+
+`-L` search paths remain yours to supply; they are site-specific. The one
+exception is `<lib_dir>/contrib`, added automatically so the veneer archives
+`make contrib` builds resolve without configuration.
+
 ### `extra_sources` vs `--extra`
 
 Both add C files to the build, they are additive when both are present.
