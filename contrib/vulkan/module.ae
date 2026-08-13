@@ -40,6 +40,8 @@
 //                             layout, push_bytes, bindings) -> ptr
 //
 //   vulkan.texture_create(dev, w, h)    -> ptr     RGBA sampled image
+//   vulkan.texture_create_ex(dev, w, h, mipmapped, linear, repeat) -> ptr
+//   vulkan.texture_mip_levels(tex)      -> int
 //   vulkan.texture_upload(tex, data, len) -> int   upload before binding
 //   vulkan.texture_destroy(tex)
 //   vulkan.set_texture(p, binding, tex) -> int
@@ -53,7 +55,20 @@
 //   vulkan.verts_reserve_n(t, count, floats_per_vertex) -> int
 //   vulkan.verts_set_float(t, float_index, value)       -> int
 //   vulkan.indices_reserve(t, count)    -> int     0 draws non-indexed
+//   vulkan.indices_reserve_ex(t, count, bits) -> int   bits is 16 or 32
 //   vulkan.indices_set(t, i, vertex)    -> int
+//
+//   vulkan.material_create(p)           -> ptr     one binding set per draw
+//   vulkan.material_destroy(m)
+//   vulkan.material_set_texture(m, binding, tex) -> int
+//   vulkan.material_set_uniform(m, binding, data, len) -> int
+//   vulkan.material_floats(m, binding, count)    -> int
+//   vulkan.material_float(m, binding, i, v)      -> int
+//   vulkan.batch_reset(t)               -> int     back to one draw
+//   vulkan.batch_add(t, m, first, count) -> int    a draw inside the frame
+//   vulkan.batch_count(t)               -> int
+//   vulkan.draw_material(t, p, m, r, g, b, a)    -> int
+//   vulkan.submit_material(t, p, m, r, g, b, a)  -> int
 //   vulkan.pixel(t, x, y)               -> int     0xRRGGBBAA, -1 outside
 //   vulkan.copy_rgba(t, dest, dest_len) -> int     status
 //   vulkan.save_ppm(t, path)            -> int     status
@@ -106,14 +121,26 @@ exports (
     aevk_ae_push_floats, aevk_ae_push_float,
     aevk_ae_uniform_floats, aevk_ae_uniform_float,
     aevk_ae_verts_reserve_n, aevk_ae_verts_set_float,
-    aevk_ae_indices_reserve, aevk_ae_indices_set,
+    aevk_ae_indices_reserve, aevk_ae_indices_reserve_ex, aevk_ae_indices_set,
+    aevk_ae_texture_create_ex, aevk_ae_texture_mip_levels,
+    aevk_ae_material_create, aevk_ae_material_destroy,
+    aevk_ae_material_set_texture, aevk_ae_material_set_uniform,
+    aevk_ae_material_floats, aevk_ae_material_float,
+    aevk_ae_draw_material, aevk_ae_submit_material,
+    aevk_ae_batch_reset, aevk_ae_batch_add, aevk_ae_batch_count,
     pipeline_create_ex,
     layout_create, layout_destroy, layout_binding, layout_attr,
     bindings_create, bindings_destroy, bindings_uniform, bindings_texture,
     texture_create, texture_destroy, texture_upload,
     set_uniform, set_texture, set_push,
     push_floats, push_float, uniform_floats, uniform_float,
-    verts_reserve_n, verts_set_float, indices_reserve, indices_set,
+    verts_reserve_n, verts_set_float, indices_reserve, indices_reserve_ex,
+    indices_set,
+    texture_create_ex, texture_mip_levels,
+    material_create, material_destroy, material_set_texture,
+    material_set_uniform, material_floats, material_float,
+    draw_material, submit_material,
+    batch_reset, batch_add, batch_count,
     FORMAT_R32_SFLOAT, FORMAT_R32G32_SFLOAT,
     FORMAT_R32G32B32_SFLOAT, FORMAT_R32G32B32A32_SFLOAT,
     FORMAT_R8G8B8A8_UNORM,
@@ -160,6 +187,9 @@ extern aevk_ae_bindings_uniform(b: ptr, binding: int) -> int
 extern aevk_ae_bindings_texture(b: ptr, binding: int) -> int
 
 extern aevk_ae_texture_create(dev: ptr, w: int, h: int) -> ptr
+extern aevk_ae_texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int,
+                                 linear_filter: int, repeat: int) -> ptr
+extern aevk_ae_texture_mip_levels(tex: ptr) -> int
 extern aevk_ae_texture_destroy(tex: ptr)
 extern aevk_ae_texture_upload(tex: ptr, rgba: ptr, len: int) -> int
 
@@ -174,7 +204,22 @@ extern aevk_ae_uniform_float(p: ptr, binding: int, index: int, value: float) -> 
 extern aevk_ae_verts_reserve_n(t: ptr, count: int, floats_per_vertex: int) -> int
 extern aevk_ae_verts_set_float(t: ptr, float_index: int, value: float) -> int
 extern aevk_ae_indices_reserve(t: ptr, count: int) -> int
+extern aevk_ae_indices_reserve_ex(t: ptr, count: int, bits: int) -> int
 extern aevk_ae_indices_set(t: ptr, index: int, value: int) -> int
+
+extern aevk_ae_material_create(p: ptr) -> ptr
+extern aevk_ae_material_destroy(m: ptr)
+extern aevk_ae_material_set_texture(m: ptr, binding: int, tex: ptr) -> int
+extern aevk_ae_material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int
+extern aevk_ae_material_floats(m: ptr, binding: int, count: int) -> int
+extern aevk_ae_material_float(m: ptr, binding: int, index: int, value: float) -> int
+extern aevk_ae_batch_reset(t: ptr) -> int
+extern aevk_ae_batch_add(t: ptr, m: ptr, first: int, count: int) -> int
+extern aevk_ae_batch_count(t: ptr) -> int
+extern aevk_ae_draw_material(t: ptr, p: ptr, m: ptr,
+                             r: float, g: float, b: float, a: float) -> int
+extern aevk_ae_submit_material(t: ptr, p: ptr, m: ptr,
+                               r: float, g: float, b: float, a: float) -> int
 
 extern aevk_ae_verts_reserve(t: ptr, count: int) -> int
 extern aevk_ae_verts_set(t: ptr, index: int, x: float, y: float,
@@ -307,6 +352,19 @@ pipeline_create_ex(dev: ptr, t: ptr, vert_spv: string, vert_len: int,
 // An RGBA texture. Upload before binding: an image with no pixels has no
 // defined contents to sample, so binding one is refused rather than drawn.
 texture_create(dev: ptr, w: int, h: int) -> ptr { return aevk_ae_texture_create(dev, w, h) }
+// As above with a mip chain and sampler choices. A mipmapped texture stops
+// aliasing when it is drawn smaller than it is; `linear` filters instead of
+// picking the nearest texel, and `repeat` wraps instead of clamping at the
+// edge. Mipmaps need the device to support linear blitting, and creation
+// fails rather than returning a texture with an empty chain when it does not.
+texture_create_ex(dev: ptr, w: int, h: int, mipmapped: int,
+                  linear: int, repeat: int) -> ptr {
+    return aevk_ae_texture_create_ex(dev, w, h, mipmapped, linear, repeat)
+}
+
+// Levels in the chain: 1 for a texture created without mipmaps.
+texture_mip_levels(tex: ptr) -> int { return aevk_ae_texture_mip_levels(tex) }
+
 texture_destroy(tex: ptr) { aevk_ae_texture_destroy(tex) }
 texture_upload(tex: ptr, rgba: ptr, len: int) -> int {
     return aevk_ae_texture_upload(tex, rgba, len)
@@ -346,6 +404,56 @@ verts_set_float(t: ptr, float_index: int, value: float) -> int {
 // 32-bit indices. Reserving 0 goes back to non-indexed drawing.
 indices_reserve(t: ptr, count: int) -> int { return aevk_ae_indices_reserve(t, count) }
 indices_set(t: ptr, index: int, value: int) -> int { return aevk_ae_indices_set(t, index, value) }
+
+// 16-bit indices halve the index buffer for meshes under 65536 vertices,
+// which is most of them. `bits` is 16 or 32; a value that will not fit in the
+// chosen width is refused at indices_set rather than wrapping silently.
+indices_reserve_ex(t: ptr, count: int, bits: int) -> int {
+    return aevk_ae_indices_reserve_ex(t, count, bits)
+}
+
+// A material is one set of bound resources: draw two quads with different
+// textures in a single frame by making two materials from one pipeline,
+// instead of rebinding between draws and having the second overwrite the
+// first. The pipeline's own set_texture / uniform_float keep working; they
+// address its default material.
+material_create(p: ptr) -> ptr { return aevk_ae_material_create(p) }
+material_destroy(m: ptr) { aevk_ae_material_destroy(m) }
+material_set_texture(m: ptr, binding: int, tex: ptr) -> int {
+    return aevk_ae_material_set_texture(m, binding, tex)
+}
+material_set_uniform(m: ptr, binding: int, data: ptr, len: int) -> int {
+    return aevk_ae_material_set_uniform(m, binding, data, len)
+}
+material_floats(m: ptr, binding: int, count: int) -> int {
+    return aevk_ae_material_floats(m, binding, count)
+}
+material_float(m: ptr, binding: int, index: int, value: float) -> int {
+    return aevk_ae_material_float(m, binding, index, value)
+}
+
+// A batch is several draws inside one frame, each with its own material:
+// two quads with different textures without rebinding between them. Each
+// entry slices the geometry already uploaded, by index when the target has
+// an index buffer and by vertex otherwise. An empty batch, the default,
+// draws everything once.
+//
+// A material a batch refers to has to outlive the draws that use it: destroy
+// one without resetting the batch and the next frame reads freed memory.
+batch_reset(t: ptr) -> int { return aevk_ae_batch_reset(t) }
+batch_add(t: ptr, m: ptr, first: int, count: int) -> int {
+    return aevk_ae_batch_add(t, m, first, count)
+}
+batch_count(t: ptr) -> int { return aevk_ae_batch_count(t) }
+
+// draw_material blocks like draw; submit_material pipelines like submit.
+// Passing a null material uses the pipeline's default one.
+draw_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aevk_ae_draw_material(t, p, m, r, g, b, a)
+}
+submit_material(t: ptr, p: ptr, m: ptr, r: float, g: float, b: float, a: float) -> int {
+    return aevk_ae_submit_material(t, p, m, r, g, b, a)
+}
 
 // Channel accessors for the packed value pixel() returns.
 red(px: int) -> int { return (px >> 24) & 255 }

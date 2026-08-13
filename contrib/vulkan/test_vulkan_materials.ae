@@ -1,0 +1,437 @@
+// contrib.vulkan materials, draw batching, 16-bit indices and mipmaps (#1540).
+//
+// Phase 2 gave a pipeline one descriptor set, so a frame could use exactly one
+// texture: binding a second overwrote the first. Phase 3 gives each draw its
+// own set (a material) and lets a frame hold several draws, which is the point
+// of having them.
+//
+// Every check reads pixels back. "The call returned OK" would pass against a
+// shader that ignored the bindings entirely, which is the failure these
+// features actually have.
+//
+// Runs anywhere: with no driver it prints SKIP and exits 0.
+
+import std.bytes
+import std.string
+import std.fs
+import contrib.vulkan
+
+extern exit(code: int)
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+check_eq(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} (${got})")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// A 1x1 opaque texture of one colour, which is enough to tell two materials
+// apart by the pixels they produce.
+solid_texture(dev: ptr, r: int, g: int, b: int) -> ptr {
+    tex = vulkan.texture_create(dev, 1, 1)
+    if tex == null { return null }
+    px = bytes.new(4)
+    _ = bytes.set_length(px, 4)
+    _ = bytes.set(px, 0, r)
+    _ = bytes.set(px, 1, g)
+    _ = bytes.set(px, 2, b)
+    _ = bytes.set(px, 3, 255)
+    st = vulkan.texture_upload(tex, bytes.data(px), 4)
+    bytes.free(px)
+    if st != vulkan.OK {
+        vulkan.texture_destroy(tex)
+        return null
+    }
+    return tex
+}
+
+// A tint of 1,1,1,1: the sampled texel passes through unchanged, so a wrong
+// pixel means a wrong texture rather than a wrong multiply.
+white_tint(m: ptr) -> int {
+    st = vulkan.material_floats(m, 1, 4)
+    if st != vulkan.OK { return st }
+    i = 0
+    while i < 4 {
+        _ = vulkan.material_float(m, 1, i, 1.0)
+        i = i + 1
+    }
+    return vulkan.OK
+}
+
+// One quad of the seven-float layout (x, y, nx, ny, nz, u, v), spanning
+// x0..x1 horizontally and the full height, with UVs covering the texture.
+write_quad(t: ptr, base_vertex: int, x0: float, x1: float) {
+    f = base_vertex * 7
+    xs = [x0, x1, x1, x0]
+    ys = [-1.0, -1.0, 1.0, 1.0]
+    us = [0.0, 1.0, 1.0, 0.0]
+    vs = [0.0, 0.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        _ = vulkan.verts_set_float(t, f, xs[i])
+        _ = vulkan.verts_set_float(t, f + 1, ys[i])
+        _ = vulkan.verts_set_float(t, f + 2, 0.0)
+        _ = vulkan.verts_set_float(t, f + 3, 0.0)
+        _ = vulkan.verts_set_float(t, f + 4, 1.0)
+        _ = vulkan.verts_set_float(t, f + 5, us[i])
+        _ = vulkan.verts_set_float(t, f + 6, vs[i])
+        f = f + 7
+        i = i + 1
+    }
+}
+
+// A square quad centred on the origin, half-width `h`, UVs 0..1. Small `h`
+// with a large texture is minification, which is what mipmaps are for.
+write_centred_quad(t: ptr, h: float) {
+    write_quad(t, 0, -h, h)
+    // write_quad spans the full height; squash it to the same half-width.
+    _ = vulkan.verts_set_float(t, 1, -h)
+    _ = vulkan.verts_set_float(t, 8, -h)
+    _ = vulkan.verts_set_float(t, 15, h)
+    _ = vulkan.verts_set_float(t, 22, h)
+}
+
+// Two triangles per quad, wound counter-clockwise.
+write_quad_indices(t: ptr, slot: int, base_vertex: int) {
+    order = [0, 1, 2, 2, 3, 0]
+    i = 0
+    while i < 6 {
+        _ = vulkan.indices_set(t, slot * 6 + i, base_vertex + order[i])
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== contrib.vulkan materials ===")
+    failures = 0
+
+    if vulkan.available() != 1 {
+        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("SKIP: device_create failed (${vulkan.last_error()})")
+        return
+    }
+    target = vulkan.target_create(dev, 64, 64)
+    if target == null {
+        println("FAIL: target_create (${vulkan.last_error()})")
+        vulkan.device_destroy(dev)
+        exit(1)
+    }
+
+    xvs, xvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
+    xfs, xfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
+    failures = failures + check(xvl > 0 && xfl > 0, "textured SPIR-V loaded")
+    if xvl == 0 || xfl == 0 {
+        vulkan.target_destroy(target)
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
+    _ = vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20)
+
+    binds = vulkan.bindings_create()
+    _ = vulkan.bindings_texture(binds, 0)
+    _ = vulkan.bindings_uniform(binds, 1)
+
+    pipe = vulkan.pipeline_create_ex(dev, target, xvs, xvl, xfs, xfl, lay, 0, binds)
+    string.free(xvs)
+    string.free(xfs)
+    failures = failures + check(pipe != null, "pipeline created")
+    if pipe == null {
+        println("  ${vulkan.last_error()}")
+        vulkan.bindings_destroy(binds)
+        vulkan.layout_destroy(lay)
+        vulkan.target_destroy(target)
+        vulkan.device_destroy(dev)
+        println("1 FAILURE(S)")
+        exit(1)
+    }
+
+    // ---- two textures in one frame, from one pipeline -------------------
+    // Left quad and right quad, eight vertices, twelve indices. Each half is
+    // drawn with its own material. With one set per pipeline, as phase 2 had,
+    // the second binding would overwrite the first and both halves would come
+    // out the same colour.
+    _ = vulkan.verts_reserve_n(target, 8, 7)
+    write_quad(target, 0, -1.0, 0.0)
+    write_quad(target, 4, 0.0, 1.0)
+    _ = vulkan.indices_reserve(target, 12)
+    write_quad_indices(target, 0, 0)
+    write_quad_indices(target, 1, 4)
+
+    tex_red = solid_texture(dev, 255, 0, 0)
+    tex_blue = solid_texture(dev, 0, 0, 255)
+    failures = failures + check(tex_red != null && tex_blue != null, "two textures uploaded")
+
+    mat_red = vulkan.material_create(pipe)
+    mat_blue = vulkan.material_create(pipe)
+    failures = failures + check(mat_red != null && mat_blue != null, "two materials created")
+    if mat_red == null || mat_blue == null { println("  ${vulkan.last_error()}") }
+
+    failures = failures + check_eq(vulkan.material_set_texture(mat_red, 0, tex_red),
+                                   vulkan.OK, "red texture bound to its own material")
+    failures = failures + check_eq(vulkan.material_set_texture(mat_blue, 0, tex_blue),
+                                   vulkan.OK, "blue texture bound to its own material")
+    failures = failures + check_eq(white_tint(mat_red), vulkan.OK, "material uniform written")
+    _ = white_tint(mat_blue)
+
+    failures = failures + check_eq(vulkan.batch_count(target), 0, "a target starts unbatched")
+    failures = failures + check_eq(vulkan.batch_add(target, mat_red, 0, 6), vulkan.OK,
+                                   "first draw added")
+    failures = failures + check_eq(vulkan.batch_add(target, mat_blue, 6, 6), vulkan.OK,
+                                   "second draw added")
+    failures = failures + check_eq(vulkan.batch_count(target), 2, "the batch holds two draws")
+
+    failures = failures + check_eq(vulkan.draw_material(target, pipe, null, 0.0, 0.0, 0.0, 1.0),
+                                   vulkan.OK, "batched frame drawn")
+    left = vulkan.pixel(target, 16, 32)
+    right = vulkan.pixel(target, 48, 32)
+    failures = failures + check(vulkan.red(left) > 200 && vulkan.blue(left) < 60,
+                                "left quad sampled the red material")
+    failures = failures + check(vulkan.blue(right) > 200 && vulkan.red(right) < 60,
+                                "right quad sampled the blue material")
+
+    // Uniforms are per material too, and are read when the GPU runs the frame
+    // rather than when it was recorded: dimming one must not touch the other,
+    // and must take effect without any geometry change to force a re-record.
+    i = 0
+    while i < 3 {
+        _ = vulkan.material_float(mat_blue, 1, i, 0.25)
+        i = i + 1
+    }
+    _ = vulkan.draw_material(target, pipe, null, 0.0, 0.0, 0.0, 1.0)
+    dim = vulkan.blue(vulkan.pixel(target, 48, 32))
+    still_red = vulkan.red(vulkan.pixel(target, 16, 32))
+    failures = failures + check(dim > 20 && dim < 120, "one material's uniform dims only its draw")
+    failures = failures + check(still_red > 200, "the other material is untouched")
+    _ = white_tint(mat_blue)
+
+    // ---- batch validation ------------------------------------------------
+    failures = failures + check(vulkan.batch_add(target, mat_red, 6, 12) != vulkan.OK,
+                                "a draw past the uploaded indices is refused")
+    failures = failures + check(vulkan.batch_add(target, mat_red, 0, 0) != vulkan.OK,
+                                "an empty draw is refused")
+    failures = failures + check(vulkan.batch_add(target, mat_red, -1, 6) != vulkan.OK,
+                                "a negative offset is refused")
+
+    // Geometry can shrink after a batch was built, so the range is checked
+    // again for the frame it is actually drawn in.
+    _ = vulkan.indices_reserve(target, 6)
+    write_quad_indices(target, 0, 0)
+    failures = failures + check(vulkan.draw_material(target, pipe, null,
+                                                     0.0, 0.0, 0.0, 1.0) != vulkan.OK,
+                                "a batch outliving its geometry is refused at draw")
+    _ = vulkan.indices_reserve(target, 12)
+    write_quad_indices(target, 0, 0)
+    write_quad_indices(target, 1, 4)
+
+    failures = failures + check_eq(vulkan.batch_reset(target), vulkan.OK, "batch reset")
+    failures = failures + check_eq(vulkan.batch_count(target), 0, "reset empties the batch")
+
+    // Unbatched, the whole index buffer is one draw with one material, which
+    // is what every caller from phase 2 has.
+    _ = vulkan.draw_material(target, pipe, mat_red, 0.0, 0.0, 0.0, 1.0)
+    whole_left = vulkan.pixel(target, 16, 32)
+    whole_right = vulkan.pixel(target, 48, 32)
+    failures = failures + check(vulkan.red(whole_left) > 200 && vulkan.red(whole_right) > 200,
+                                "an empty batch draws all the geometry once")
+
+    // ---- 16-bit indices --------------------------------------------------
+    // Same geometry, same materials, half the index buffer. The frames must be
+    // identical byte for byte: a wrong index width shows as garbage geometry.
+    need = vulkan.rgba_size(target)
+    wide = bytes.new(need)
+    _ = bytes.set_length(wide, need)
+    narrow = bytes.new(need)
+    _ = bytes.set_length(narrow, need)
+
+    _ = vulkan.batch_add(target, mat_red, 0, 6)
+    _ = vulkan.batch_add(target, mat_blue, 6, 6)
+    _ = vulkan.draw_material(target, pipe, null, 0.0, 0.0, 0.0, 1.0)
+    failures = failures + check_eq(vulkan.copy_rgba(target, bytes.data(wide), need),
+                                   vulkan.OK, "32-bit indexed frame captured")
+
+    failures = failures + check_eq(vulkan.indices_reserve_ex(target, 12, 16), vulkan.OK,
+                                   "16-bit index buffer reserved")
+    write_quad_indices(target, 0, 0)
+    write_quad_indices(target, 1, 4)
+    _ = vulkan.draw_material(target, pipe, null, 0.0, 0.0, 0.0, 1.0)
+    failures = failures + check_eq(vulkan.copy_rgba(target, bytes.data(narrow), need),
+                                   vulkan.OK, "16-bit indexed frame captured")
+
+    same = 1
+    i = 0
+    while i < need {
+        if bytes.get(wide, i) != bytes.get(narrow, i) { same = 0 }
+        i = i + 1
+    }
+    failures = failures + check(same, "16-bit indices render identically to 32-bit")
+    bytes.free(wide)
+    bytes.free(narrow)
+
+    failures = failures + check(vulkan.indices_reserve_ex(target, 12, 8) != vulkan.OK,
+                                "an index width other than 16 or 32 is refused")
+    failures = failures + check(vulkan.indices_set(target, 0, 99) != vulkan.OK,
+                                "an index past the vertex count is still refused")
+    write_quad_indices(target, 0, 0)
+
+    // ---- mipmaps ---------------------------------------------------------
+    // A 128x128 checkerboard of single texels drawn into 16 pixels: eight
+    // times minification. Point-sampling that picks one texel per pixel and
+    // the quad comes out of pure black and white texels; a mip chain averages
+    // it towards the texture's mean, which is mid-grey.
+    _ = vulkan.batch_reset(target)
+    _ = vulkan.verts_reserve_n(target, 4, 7)
+    write_centred_quad(target, 0.125)
+    _ = vulkan.indices_reserve(target, 6)
+    write_quad_indices(target, 0, 0)
+
+    side = 128
+    tex_mip = vulkan.texture_create_ex(dev, side, side, 1, 1, 0)
+    tex_flat = vulkan.texture_create_ex(dev, side, side, 0, 0, 0)
+    failures = failures + check(tex_mip != null && tex_flat != null, "both textures created")
+    if tex_mip == null { println("  ${vulkan.last_error()}") }
+
+    failures = failures + check_eq(vulkan.texture_mip_levels(tex_mip), 8,
+                                   "a 128x128 mipmapped texture has eight levels")
+    failures = failures + check_eq(vulkan.texture_mip_levels(tex_flat), 1,
+                                   "without mipmaps there is one level")
+
+    board = bytes.new(side * side * 4)
+    _ = bytes.set_length(board, side * side * 4)
+    y = 0
+    while y < side {
+        x = 0
+        while x < side {
+            v = 0
+            if (x + y) % 2 == 0 { v = 255 }
+            o = (y * side + x) * 4
+            _ = bytes.set(board, o, v)
+            _ = bytes.set(board, o + 1, v)
+            _ = bytes.set(board, o + 2, v)
+            _ = bytes.set(board, o + 3, 255)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    failures = failures + check_eq(vulkan.texture_upload(tex_mip, bytes.data(board),
+                                                         side * side * 4),
+                                   vulkan.OK, "checkerboard uploaded with a mip chain")
+    _ = vulkan.texture_upload(tex_flat, bytes.data(board), side * side * 4)
+    bytes.free(board)
+
+    mat_mip = vulkan.material_create(pipe)
+    mat_flat = vulkan.material_create(pipe)
+    _ = vulkan.material_set_texture(mat_mip, 0, tex_mip)
+    _ = vulkan.material_set_texture(mat_flat, 0, tex_flat)
+    _ = white_tint(mat_mip)
+    _ = white_tint(mat_flat)
+
+    _ = vulkan.draw_material(target, pipe, mat_flat, 0.0, 0.0, 0.0, 1.0)
+    flat_extreme = 1
+    flat_sum = 0
+    n = 0
+    py = 29
+    while py < 36 {
+        px_ = 29
+        while px_ < 36 {
+            g = vulkan.green(vulkan.pixel(target, px_, py))
+            if g > 30 && g < 225 { flat_extreme = 0 }
+            flat_sum = flat_sum + g
+            n = n + 1
+            px_ = px_ + 1
+        }
+        py = py + 1
+    }
+
+    _ = vulkan.draw_material(target, pipe, mat_mip, 0.0, 0.0, 0.0, 1.0)
+    mip_mid = 1
+    mip_sum = 0
+    py = 29
+    while py < 36 {
+        px_ = 29
+        while px_ < 36 {
+            g = vulkan.green(vulkan.pixel(target, px_, py))
+            if g < 90 || g > 165 { mip_mid = 0 }
+            mip_sum = mip_sum + g
+            px_ = px_ + 1
+        }
+        py = py + 1
+    }
+
+    failures = failures + check(flat_extreme,
+                                "minified without mipmaps: every pixel is a single texel")
+    failures = failures + check(mip_mid,
+                                "minified with mipmaps: every pixel is the averaged mean")
+    println("    (mean brightness ${flat_sum / n} without, ${mip_sum / n} with)")
+
+    // Sampler options are per texture, and a bad one is refused rather than
+    // silently ignored.
+    failures = failures + check(vulkan.texture_create_ex(dev, 0, 8, 0, 1, 1) == null,
+                                "a zero-sized texture is refused")
+    clamped = vulkan.texture_create_ex(dev, 4, 4, 0, 1, 1)
+    failures = failures + check(clamped != null, "repeat addressing accepted")
+    vulkan.texture_destroy(clamped)
+
+    // ---- error paths on the new handles -----------------------------------
+    failures = failures + check(vulkan.material_create(null) == null,
+                                "a material needs a pipeline")
+    failures = failures + check(vulkan.material_float(mat_mip, 0, 0, 1.0) != vulkan.OK,
+                                "writing a float to a binding with no buffer is refused")
+    failures = failures + check(vulkan.material_floats(null, 1, 4) != vulkan.OK,
+                                "a null material is refused")
+    failures = failures + check(vulkan.batch_add(null, mat_mip, 0, 3) != vulkan.OK,
+                                "a null target is refused")
+    vulkan.material_destroy(null)
+
+    vulkan.material_destroy(mat_mip)
+    vulkan.material_destroy(mat_flat)
+    vulkan.material_destroy(mat_red)
+    vulkan.material_destroy(mat_blue)
+    vulkan.texture_destroy(tex_mip)
+    vulkan.texture_destroy(tex_flat)
+    vulkan.texture_destroy(tex_red)
+    vulkan.texture_destroy(tex_blue)
+    vulkan.pipeline_destroy(pipe)
+    vulkan.bindings_destroy(binds)
+    vulkan.layout_destroy(lay)
+    vulkan.target_destroy(target)
+    vulkan.device_destroy(dev)
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}
