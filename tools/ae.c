@@ -188,6 +188,33 @@ void tc_lib_dir_append(const char* spec) {
 // a string because the aetherc side owns parsing and validation.
 static char g_with_caps[128] = "";
 
+/* -D NAME build symbols, accumulated as the flags they will become on the
+ * aetherc line. `when defined(NAME)` tests them, and a region that loses is
+ * dropped from the AST, so this is what decides whether a subsystem is in the
+ * binary at all (#1527). Names come from the command line and from
+ * aether.toml's `[build] defines`. */
+static char g_defines[1024] = "";
+
+/* The cache key must see the symbols: two builds of the same source with
+ * different -D produce different binaries, and without this the second is
+ * served the first's artifact and the region silently comes back. Same
+ * silent-staleness shape as the --trace miss below. */
+static const char* ae_define_salt(const char* base, char* buf, size_t n) {
+    if (!g_defines[0]) return base;
+    snprintf(buf, n, "%s%s", base, g_defines);
+    return buf;
+}
+
+static void ae_define_append(const char* name) {
+    if (!name || !*name) return;
+    size_t used = strlen(g_defines);
+    int w = snprintf(g_defines + used, sizeof(g_defines) - used, " -D \"%s\"", name);
+    if (w < 0 || (size_t)w >= sizeof(g_defines) - used) {
+        fprintf(stderr, "warning: too many -D symbols; '%s' was dropped\n", name);
+        g_defines[used] = '\0';
+    }
+}
+
 // --emit=<exe|lib|both> for the current build. Set by cmd_build before
 // build_aetherc_cmd / build_gcc_cmd run; both helpers read these globals
 // to decide what flags to emit.
@@ -346,8 +373,9 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
         if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
         lf_off += (size_t)w;
     }
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s \"%s\" \"%s\"",
-             tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag, lib_flags, input, output);
+    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s \"%s\" \"%s\"",
+             tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
+             g_defines, lib_flags, input, output);
 }
 
 // --------------------------------------------------------------------------
@@ -1316,6 +1344,25 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
         dst[di++] = src[si++];
     }
     dst[di] = '\0';
+}
+
+/* `[build] defines = "A B"` in aether.toml, the project-level equivalent of
+ * -D. A space-separated string rather than a TOML array because the toml
+ * reader here returns scalars, and because these are bare names with no
+ * spaces in them. Command-line -D adds to whatever the file declares. */
+static void load_defines_from_toml(void) {
+    if (!path_exists("aether.toml")) return;
+    TomlDocument* doc = toml_parse_file("aether.toml");
+    if (!doc) return;
+    const char* val = toml_get_value(doc, "build", "defines");
+    if (val) {
+        char expanded[1024];
+        expand_env_vars(val, expanded, sizeof(expanded));
+        for (char* tok = strtok(expanded, " \t,"); tok; tok = strtok(NULL, " \t,")) {
+            ae_define_append(tok);
+        }
+    }
+    toml_free_document(doc);
 }
 
 // Get link_flags from aether.toml [build] section
@@ -2797,7 +2844,10 @@ static int cmd_run(int argc, char** argv) {
     // this exact source + compiler + extras combination.
     bool using_cache = false;
     char cached_exe[1024] = "";
-    unsigned long long cache_key = compute_cache_key(file, extra_files, "O0", "run");
+    char run_salt[1200];
+    unsigned long long cache_key =
+        compute_cache_key(file, extra_files, "O0",
+                          ae_define_salt("run", run_salt, sizeof(run_salt)));
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -4668,6 +4718,11 @@ static int cmd_build(int argc, char** argv) {
     const char* target = NULL;
     bool quick = false;
 
+    /* Project-level symbols first, so a command-line -D adds to them rather
+     * than replacing them. */
+    g_defines[0] = '\0';
+    load_defines_from_toml();
+
     // Reset emit mode to the default (exe-only) for this build.
     g_emit_exe = true;
     g_emit_lib = false;
@@ -4699,6 +4754,18 @@ static int cmd_build(int argc, char** argv) {
              * Repeated flags + separator-strings both feed the
              * aetherc-side multi-entry search path. */
             tc_lib_dir_append(argv[++i]);
+        } else if (strncmp(argv[i], "-D", 2) == 0) {
+            /* -D NAME or -DNAME, forwarded to aetherc, which owns the
+             * validation and the reject message. */
+            const char* dname = argv[i] + 2;
+            if (!*dname) {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "Error: -D needs a symbol name\n");
+                    return 1;
+                }
+                dname = argv[++i];
+            }
+            ae_define_append(dname);
         } else if (strncmp(argv[i], "--with=", 7) == 0) {
             // Capability opt-ins for --emit=lib. Forwarded verbatim to
             // aetherc; parsing, validation, and the reject messages all
@@ -4887,7 +4954,7 @@ static int cmd_build(int argc, char** argv) {
 
     if (!file) {
         fprintf(stderr, "Error: No input file specified.\n");
-        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--target=<triple>]\n");
+        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--target=<triple>] [-D SYMBOL]\n");
         fprintf(stderr, "  --quick    Compile with -O0 -g for faster iteration (default: -O2)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
         fprintf(stderr, "             aarch64-linux, x86_64-linux, aarch64-freebsd, x86_64-freebsd,\n");
@@ -5092,9 +5159,11 @@ static int cmd_build(int argc, char** argv) {
          * all: the same silent-staleness shape as the imported-module miss
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
+        char build_salt[1200];
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
-                                      g_trace ? "build+trace" : "build");
+                                      ae_define_salt(g_trace ? "build+trace" : "build",
+                                                     build_salt, sizeof(build_salt)));
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,

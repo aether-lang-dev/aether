@@ -1,0 +1,37 @@
+// Conditional compilation on a build symbol (#1527). The driver subsystem
+// exists only when the build declares TEST_SERVER, and the point of the
+// feature is that it is ABSENT from the binary otherwise, not merely
+// unreachable.
+
+when defined(TEST_SERVER) {
+    driver_port_number() -> int { return 9222 }
+
+    start_driver() {
+        println("driver on ${driver_port_number()}")
+    }
+} else {
+    start_driver() {
+        println("driver absent")
+    }
+}
+
+main() {
+    start_driver()
+
+    // Statement-level regions, with the platform axis nested inside so the
+    // two are shown to compose.
+    when defined(VERBOSE) {
+        detail = select(linux: "linux", macos: "macos", windows: "windows", other: "other")
+        println("verbose on ${detail}")
+    } else {
+        println("quiet")
+    }
+
+    // A build symbol also selects a value, which is the expression-level
+    // half of the same axis.
+    mode = select(TEST_SERVER: "test", other: "prod")
+    println("mode ${mode}")
+
+    when defined(TEST_SERVER) && !defined(VERBOSE) { println("test, quiet") }
+    when defined(TEST_SERVER) || defined(VERBOSE) { println("either") }
+}
