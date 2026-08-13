@@ -24,12 +24,13 @@
 // of a `free_it(s) { string.free(s) }` helper double-free, which is a crash
 // on glibc and a corrupt heap elsewhere. Both directions are pinned here.
 //
-// One shape is deliberately absent: handing a PLAIN-payload string (an
-// interpolation) to such a helper still leaks, because inside the helper the
-// parameter carries no ownership flag and the runtime free cannot tell a heap
-// payload from a literal. That is unchanged from before this fix, measured at
-// the same 100 leaks on either side, and needs per-parameter ownership rather
-// than anything here.
+// The shape that used to be absent is covered now: handing an interpolated
+// string to such a helper leaked, because inside the helper the parameter
+// carries no ownership flag and the runtime could not tell a heap payload from
+// a literal. Interpolation produces the refcounted shape today, so the runtime
+// can free it wherever it ends up, parameter or not (#1543). The payload lives
+// in the same allocation as its header, so that costs a larger malloc rather
+// than a second one.
 
 import std.string
 
@@ -80,7 +81,18 @@ main() {
     }
     println("  PASS a consuming helper leaves nothing for the caller to free")
 
-    // 4. Freeing a variable that holds a literal must not reach free() on
+    // 4. An interpolated string handed to a consuming helper. This is the
+    //    case that leaked: the helper cannot see an ownership flag, so the
+    //    value has to be reclaimable by the runtime alone.
+    n = 0
+    while n < 200 {
+        piece = "row ${n} of the table"
+        free_it(piece)
+        n = n + 1
+    }
+    println("  PASS an interpolation freed inside a helper is reclaimed")
+
+    // 5. Freeing a variable that holds a literal must not reach free() on
     //    static storage.
     lit = "static text"
     string.free(lit)

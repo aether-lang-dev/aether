@@ -185,6 +185,15 @@ size_t      aether_string_length(const void* s);
 
 // Closure-capture ownership (#1398). capture_owned returns a pointer the
 // caller owns a reference to; release_captured gives it back.
+/* Allocates a refcounted string whose payload lives in the same block as its
+ * header, for producers that format their bytes in place. `length` excludes
+ * the terminator, which is written for you. NULL on allocation failure. */
+AetherString* string_alloc_inline(size_t length);
+
+/* Writable payload of a string the caller owns and has not shared, for
+ * producers filling in bytes. NULL when `s` is not a refcounted string. */
+char* aether_string_mutable_data(void* s);
+
 const char* aether_string_capture_owned(const char* s);
 void        aether_string_release_captured(const char* s);
 

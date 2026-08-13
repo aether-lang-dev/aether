@@ -321,9 +321,21 @@ The compiler treats these expressions as heap-allocated:
 | `string.trim(s)` | Stdlib, always `malloc`'d |
 | `string_new_with_length(data, n)` | Stdlib, the length-aware AetherString constructor (`bytes.finish` is built on it) |
 | `string.from_int` / `from_long` / `from_float` / `from_char` | Stdlib, each `string_new`s a fresh refcounted AetherString |
-| String interpolation `"foo ${x}"` | Compiler-allocated via `_aether_interp` |
+| String interpolation `"foo ${x}"` | Compiler-allocated via `_aether_interp`, a refcounted AetherString whose payload shares the header's allocation |
 | User-defined `-> string` function whose body provably returns heap | Structural escape analysis (see below) |
 | Tuple-returning function / `@heap` extern, per position | Per-position analysis (see below) |
+
+**Interpolation produces the refcounted shape.** It used to hand back a plain
+`malloc`'d buffer, and the runtime cannot free one of those: given a bare
+`char*` it cannot tell a heap payload from a static literal, so `string.free`
+no-ops on it. That was fine while the compiler's per-variable ownership flag
+was in reach, and a leak the moment the value crossed a boundary where it was
+not, such as a parameter of a helper that frees what it is handed (#1543).
+
+The payload lives in the same allocation as the header, so this costs a larger
+`malloc` rather than a second one: measured at +1.6% on a loop that does
+nothing but interpolate two million strings, which is inside that benchmark's
+run-to-run spread.
 
 The stdlib entries above are hard-coded as intrinsic heap sources in the
 codegen's `is_heap_string_expr` recognised by name regardless of how a
