@@ -115,9 +115,18 @@ void string_release(const void* str) {
         /* Cap accounting: data buffer was allocated with `capacity`
          * bytes (length + 1 NUL terminator); struct is one
          * sizeof(AetherString). Both pair with the alloc-side
-         * accounting in string_new_with_length. */
-        aether_caps_free(s->data, s->capacity);
-        aether_caps_free(s, sizeof(AetherString));
+         * accounting in string_new_with_length.
+         *
+         * A string from string_alloc_inline holds both in ONE block, with
+         * `data` pointing just past the header, so freeing it separately
+         * would free an interior pointer. Recognised by position rather
+         * than by a flag: there is nothing to keep in sync. */
+        if (s->data == (char*)(s + 1)) {
+            aether_caps_free(s, sizeof(AetherString) + s->capacity);
+        } else {
+            aether_caps_free(s->data, s->capacity);
+            aether_caps_free(s, sizeof(AetherString));
+        }
     }
 }
 
@@ -775,6 +784,39 @@ size_t aether_string_length(const void* s) {
  * borrowed and freed by the enclosing scope while a stored closure still held
  * it. Retains an AetherString in place; promotes anything else to a refcounted
  * copy. Balanced by aether_string_release_captured at env teardown. */
+/* One allocation holding the header and the payload, with `data` pointing just
+ * past the header. The caller writes `length` bytes plus a terminator into it.
+ *
+ * This exists so a producer can hand back the REFCOUNTED shape without paying
+ * for a second allocation. Aether's `string` is either that or a plain buffer,
+ * and the runtime cannot free a plain one: given a bare char* it cannot tell a
+ * heap payload from a literal, so `string.free` no-ops and the value leaks.
+ * String interpolation is the producer that matters, and it is hot enough that
+ * an extra malloc per interpolation was measurable (#1543).
+ *
+ * string_release recognises the inline layout by comparing `data` against the
+ * byte after the header, so there is no flag to keep in sync and no way to
+ * free an interior pointer by mistake. */
+/* The writable payload of a string the caller just allocated. Only valid on a
+ * string it owns and has not yet shared: this is for producers filling in the
+ * bytes, not for mutating a string someone else holds. */
+char* aether_string_mutable_data(void* s) {
+    if (!s || !is_aether_string(s)) return NULL;
+    return ((AetherString*)s)->data;
+}
+
+AetherString* string_alloc_inline(size_t length) {
+    AetherString* s = (AetherString*)aether_caps_malloc(sizeof(AetherString) + length + 1);
+    if (!s) return NULL;
+    s->magic = AETHER_STRING_MAGIC;
+    s->ref_count = 1;
+    s->length = length;
+    s->capacity = length + 1;
+    s->data = (char*)(s + 1);
+    s->data[length] = '\0';
+    return s;
+}
+
 const char* aether_string_capture_owned(const char* s) {
     if (!s) return s;
     if (is_aether_string(s)) {

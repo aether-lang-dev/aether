@@ -4496,16 +4496,28 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "int list_add_closure_owned(void*, void*);");
     /* String interpolation helper — portable, always available */
     print_line(gen, "#include <stdarg.h>");
+    /* Returns the REFCOUNTED shape, not a bare buffer. Aether's `string` is
+     * either, and the runtime cannot free a bare one: given a plain char* it
+     * cannot tell a heap payload from a literal, so `string.free` no-ops and
+     * the value leaks. Every interpolated string a caller freed by hand, or
+     * handed to a helper that frees, leaked exactly that way (#1543).
+     *
+     * The buffer is adopted rather than copied, so the cost is one header
+     * allocation on top of the payload the format already needed. */
+    print_line(gen, "extern void* string_alloc_inline(size_t length);");
+    print_line(gen, "extern char* aether_string_mutable_data(void* s);");
     print_line(gen, "static void* _aether_interp(const char* fmt, ...) {");
     print_line(gen, "    va_list args, args2;");
     print_line(gen, "    va_start(args, fmt);");
     print_line(gen, "    va_copy(args2, args);");
     print_line(gen, "    int len = vsnprintf(NULL, 0, fmt, args);");
     print_line(gen, "    va_end(args);");
-    print_line(gen, "    char* str = (char*)malloc(len + 1);");
-    print_line(gen, "    vsnprintf(str, len + 1, fmt, args2);");
+    print_line(gen, "    if (len < 0) { va_end(args2); return (void*)0; }");
+    print_line(gen, "    void* owned = string_alloc_inline((size_t)len);");
+    print_line(gen, "    if (!owned) { va_end(args2); return (void*)0; }");
+    print_line(gen, "    vsnprintf(aether_string_mutable_data(owned), (size_t)len + 1, fmt, args2);");
     print_line(gen, "    va_end(args2);");
-    print_line(gen, "    return (void*)str;");
+    print_line(gen, "    return owned;");
     print_line(gen, "}");
     /* NULL-safe string helper for print/println — avoids double-evaluating
      * the expression. Goes through aether_string_data() which dispatches

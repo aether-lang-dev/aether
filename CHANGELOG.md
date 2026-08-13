@@ -11,6 +11,26 @@ version number before tagging the release.
 
 ## [0.530.0]
 
+### Fixed
+
+- **Freeing an interpolated string leaked it once it crossed a boundary.** An
+  Aether `string` is either a refcounted AetherString or a plain malloc'd
+  payload, and the runtime cannot free the second: given a bare `char*` it
+  cannot tell a heap payload from a static literal, so `string.free` no-ops.
+  The compiler's per-variable ownership flag covered the direct case, but a
+  parameter carries no flag, so handing an interpolation to a helper that frees
+  what it is given leaked one block per call.
+
+  Interpolation now produces the refcounted shape, which the runtime can free
+  wherever the value ends up. The payload lives in the same allocation as the
+  header, recognised on release by position rather than by a flag, so it costs
+  a larger `malloc` rather than a second one: measured at +1.6% on a loop that
+  does nothing but interpolate two million strings, inside that benchmark's own
+  run-to-run spread. An earlier version that allocated the header separately
+  cost 16%, which is why it does not.
+
+## [current]
+
 ### Added
 
 - **contrib/vulkan: depth attachments and multisampling.** The offscreen target
