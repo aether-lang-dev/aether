@@ -1,0 +1,248 @@
+// Four sprites, four textures, one pipeline, one frame.
+//
+// Each sprite gets a material: its own texture and its own tint. They are
+// queued as four draws inside a single frame, so the GPU never sees a bind
+// between them and the CPU submits once. The geometry is indexed with 16-bit
+// indices, which is what a sprite batch of any size wants, and the textures
+// carry mip chains so drawing them smaller than they are stays smooth.
+//
+// Build (from the repo root):
+//   ae build contrib/vulkan/example_sprites.ae \
+//       --extra contrib/vulkan/aether_vulkan.c -o sprites
+//
+// With no driver installed it prints a line saying so and exits 0.
+
+import std.bytes
+import std.string
+import std.fs
+import contrib.vulkan
+
+const TEX = 128        // texture side
+const SIDE = 256       // output side
+
+load_spv(path: string) -> (string, int) {
+    data, length, err = fs.read_binary(path)
+    // The error slot is owned even when it is empty, so it is freed on both
+    // paths: skipping it leaks one block per shader loaded.
+    ok = err == ""
+    string.free(err)
+    if ok == 0 { return ("", 0) }
+    return (data, length)
+}
+
+// A square sprite centred at (cx, cy) with half-width h, UVs 0..1.
+sprite_quad(t: ptr, base_vertex: int, cx: float, cy: float, h: float) {
+    f = base_vertex * 7
+    xs = [cx - h, cx + h, cx + h, cx - h]
+    ys = [cy - h, cy - h, cy + h, cy + h]
+    us = [0.0, 1.0, 1.0, 0.0]
+    vs = [0.0, 0.0, 1.0, 1.0]
+    i = 0
+    while i < 4 {
+        _ = vulkan.verts_set_float(t, f, xs[i])
+        _ = vulkan.verts_set_float(t, f + 1, ys[i])
+        _ = vulkan.verts_set_float(t, f + 2, 0.0)
+        _ = vulkan.verts_set_float(t, f + 3, 0.0)
+        _ = vulkan.verts_set_float(t, f + 4, 1.0)
+        _ = vulkan.verts_set_float(t, f + 5, us[i])
+        _ = vulkan.verts_set_float(t, f + 6, vs[i])
+        f = f + 7
+        i = i + 1
+    }
+}
+
+sprite_indices(t: ptr, slot: int) {
+    base = slot * 4
+    order = [0, 1, 2, 2, 3, 0]
+    i = 0
+    while i < 6 {
+        _ = vulkan.indices_set(t, slot * 6 + i, base + order[i])
+        i = i + 1
+    }
+}
+
+// One value per texel, 0..255, four different patterns.
+pattern(kind: int, x: int, y: int) -> int {
+    if kind == 0 {
+        // A one-texel checkerboard: the pattern mipmaps exist for.
+        if (x + y) % 2 == 0 { return 255 }
+        return 0
+    }
+    if kind == 1 {
+        return x * 255 / (TEX - 1)
+    }
+    if kind == 2 {
+        dx = x - TEX / 2
+        dy = y - TEX / 2
+        if dx * dx + dy * dy < (TEX / 3) * (TEX / 3) { return 255 }
+        return 40
+    }
+    if (x + y) % 16 < 8 { return 230 }
+    return 30
+}
+
+make_texture(dev: ptr, kind: int) -> ptr {
+    tex = vulkan.texture_create_ex(dev, TEX, TEX, 1, 1, 0)
+    if tex == null { return null }
+
+    n = TEX * TEX * 4
+    px = bytes.new(n)
+    _ = bytes.set_length(px, n)
+    y = 0
+    while y < TEX {
+        x = 0
+        while x < TEX {
+            v = pattern(kind, x, y)
+            o = (y * TEX + x) * 4
+            _ = bytes.set(px, o, v)
+            _ = bytes.set(px, o + 1, v)
+            _ = bytes.set(px, o + 2, v)
+            _ = bytes.set(px, o + 3, 255)
+            x = x + 1
+        }
+        y = y + 1
+    }
+    st = vulkan.texture_upload(tex, bytes.data(px), n)
+    bytes.free(px)
+    if st != vulkan.OK {
+        vulkan.texture_destroy(tex)
+        return null
+    }
+    return tex
+}
+
+// A tint per sprite, so the four share one grayscale-sampling shader and still
+// come out in different colours.
+tint(m: ptr, r: float, g: float, b: float) {
+    _ = vulkan.material_floats(m, 1, 4)
+    _ = vulkan.material_float(m, 1, 0, r)
+    _ = vulkan.material_float(m, 1, 1, g)
+    _ = vulkan.material_float(m, 1, 2, b)
+    _ = vulkan.material_float(m, 1, 3, 1.0)
+}
+
+main() {
+    println("=== four sprites, one frame ===")
+
+    if vulkan.available() != 1 {
+        println("no Vulkan driver: ${vulkan.last_error()}")
+        return
+    }
+    dev = vulkan.device_create()
+    if dev == null {
+        println("device_create failed: ${vulkan.last_error()}")
+        return
+    }
+    println("device: ${vulkan.device_name()}")
+
+    target = vulkan.target_create(dev, SIDE, SIDE)
+    if target == null {
+        println("target_create failed: ${vulkan.last_error()}")
+        vulkan.device_destroy(dev)
+        return
+    }
+
+    vs, vl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
+    fs_, fl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
+
+    lay = vulkan.layout_create()
+    _ = vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX)
+    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
+    _ = vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20)
+
+    binds = vulkan.bindings_create()
+    _ = vulkan.bindings_texture(binds, 0)
+    _ = vulkan.bindings_uniform(binds, 1)
+
+    pipe = vulkan.pipeline_create_ex(dev, target, vs, vl, fs_, fl, lay, 0, binds)
+    string.free(vs)
+    string.free(fs_)
+    if pipe == null {
+        println("pipeline_create failed: ${vulkan.last_error()}")
+        vulkan.bindings_destroy(binds)
+        vulkan.layout_destroy(lay)
+        vulkan.target_destroy(target)
+        vulkan.device_destroy(dev)
+        return
+    }
+
+    // Sixteen vertices, four quads. 16-bit indices: a sprite batch rarely has
+    // more than 65535 vertices, and the index buffer is half the size.
+    _ = vulkan.verts_reserve_n(target, 16, 7)
+    sprite_quad(target, 0, -0.35, -0.35, 0.28)
+    sprite_quad(target, 4,  0.35, -0.35, 0.28)
+    sprite_quad(target, 8, -0.35,  0.35, 0.28)
+    sprite_quad(target, 12, 0.35,  0.35, 0.28)
+
+    if vulkan.indices_reserve_ex(target, 24, 16) != vulkan.OK {
+        println("indices: ${vulkan.last_error()}")
+    }
+    i = 0
+    while i < 4 {
+        sprite_indices(target, i)
+        i = i + 1
+    }
+
+    // One material per sprite. This is what lets all four share the pipeline:
+    // each carries its own descriptor set, so the second draw does not
+    // overwrite what the first one is going to read.
+    mats = [null, null, null, null]
+    texs = [null, null, null, null]
+    reds = [1.0, 0.3, 0.4, 1.0]
+    greens = [0.4, 0.9, 0.6, 0.85]
+    blues = [0.35, 0.5, 1.0, 0.3]
+
+    _ = vulkan.batch_reset(target)
+    ok = 1
+    i = 0
+    while i < 4 {
+        texs[i] = make_texture(dev, i)
+        mats[i] = vulkan.material_create(pipe)
+        if texs[i] == null || mats[i] == null {
+            println("sprite ${i}: ${vulkan.last_error()}")
+            ok = 0
+        } else {
+            _ = vulkan.material_set_texture(mats[i], 0, texs[i])
+            tint(mats[i], reds[i], greens[i], blues[i])
+            _ = vulkan.batch_add(target, mats[i], i * 6, 6)
+        }
+        i = i + 1
+    }
+
+    if ok == 1 {
+        println("draws in the frame: ${vulkan.batch_count(target)}")
+        println("mip levels per texture: ${vulkan.texture_mip_levels(texs[0])}")
+
+        if vulkan.draw_material(target, pipe, null, 0.07, 0.07, 0.1, 1.0) != vulkan.OK {
+            println("draw failed: ${vulkan.last_error()}")
+        } else if vulkan.save_ppm(target, "sprites.ppm") != vulkan.OK {
+            println("save failed: ${vulkan.last_error()}")
+        } else {
+            println("wrote sprites.ppm (${SIDE}x${SIDE}, four sprites in one frame)")
+            // Each sprite centre, so the run says what it drew rather than
+            // only that it drew something.
+            // Sprite centres in pixels: NDC -0.35 and +0.35 on a 256 target.
+            xs = [83, 173, 83, 173]
+            ys = [83, 83, 173, 173]
+            i = 0
+            while i < 4 {
+                px = vulkan.pixel(target, xs[i], ys[i])
+                println("  sprite ${i}: rgb ${vulkan.red(px)},${vulkan.green(px)},${vulkan.blue(px)}")
+                i = i + 1
+            }
+        }
+    }
+
+    i = 0
+    while i < 4 {
+        vulkan.material_destroy(mats[i])
+        vulkan.texture_destroy(texs[i])
+        i = i + 1
+    }
+    vulkan.pipeline_destroy(pipe)
+    vulkan.bindings_destroy(binds)
+    vulkan.layout_destroy(lay)
+    vulkan.target_destroy(target)
+    vulkan.device_destroy(dev)
+}

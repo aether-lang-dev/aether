@@ -193,7 +193,8 @@ static const char* const k_loader_names[] = {
     X(vkCreateSampler)              \
     X(vkDestroySampler)             \
     X(vkCmdPipelineBarrier)         \
-    X(vkCmdCopyBufferToImage)
+    X(vkCmdCopyBufferToImage)       \
+    X(vkCmdBlitImage)
 
 #define AEVK_DECL(name) PFN_##name name;
 
@@ -268,6 +269,15 @@ struct AevkDevice {
 #define AEVK_MAX_DESC     8
 #define AEVK_MAX_PUSH     128   /* the guaranteed minimum every device offers */
 
+/* One draw inside a frame. `first`/`count` address indices when the target
+ * has an index buffer and vertices otherwise, so a batch slices whatever
+ * geometry is already uploaded rather than needing its own copy. */
+typedef struct {
+    AevkMaterial* mat;
+    int           first;
+    int           count;
+} AevkDrawItem;
+
 typedef struct {
     VkCommandBuffer cmd;
     VkFence         fence;
@@ -283,11 +293,19 @@ typedef struct {
      * so push bytes are compared by value rather than by size alone. */
     int             recorded;
     AevkPipeline*   rec_pipe;
+    AevkMaterial*   rec_mat;
     int             rec_vertices;
     int             rec_indices;
     float           rec_clear[4];
     uint32_t        rec_push_size;
     unsigned char   rec_push[AEVK_MAX_PUSH];
+    /* The batch is compared by version rather than by value: every mutation
+     * bumps it, so a slot holding an older list re-records. Material CONTENTS
+     * are deliberately not part of this; a descriptor set and a mapped uniform
+     * buffer are read when the GPU executes, not when the command is
+     * recorded. */
+    unsigned        rec_batch_version;
+    int             rec_batch_count;
 } AevkFrame;
 
 struct AevkTarget {
@@ -329,6 +347,12 @@ struct AevkTarget {
     void*          ibuf_ptr;
     int            ibuf_capacity;   /* indices the allocation can hold */
     int            index_count;     /* 0 draws non-indexed */
+    int            index_bits;      /* 16 or 32 */
+
+    AevkDrawItem*  batch;
+    int            batch_count;
+    int            batch_cap;
+    unsigned       batch_version;
 
     unsigned char  push_data[AEVK_MAX_PUSH];
     uint32_t       push_size;
@@ -365,6 +389,7 @@ struct AevkBindings {
 struct AevkTexture {
     AevkDevice*    dev;
     int            width, height;
+    uint32_t       mip_levels;
     VkImage        image;
     VkDeviceMemory mem;
     VkImageView    view;
@@ -372,26 +397,44 @@ struct AevkTexture {
     int            uploaded;   /* 0 until the first upload lays it out */
 };
 
-struct AevkPipeline {
-    AevkDevice*      dev;
-    VkShaderModule   vert, frag;
-    VkPipelineLayout layout;
-    VkPipeline       pipeline;
-
-    /* Shader resources. One descriptor set per pipeline: enough for a
-     * transform, a material and its textures, and the lifetime is the
-     * pipeline's so nothing outlives its pool. */
-    VkDescriptorSetLayout set_layout;
-    VkDescriptorPool      pool;
-    VkDescriptorSet       set;
-    uint32_t              push_bytes;
-
+/* One descriptor set plus the uniform buffers written into it: a material.
+ * Several can exist per pipeline, so one pipeline draws several objects with
+ * different textures and constants in a frame instead of needing a pipeline
+ * per material, which would duplicate the shader modules for nothing. */
+struct AevkMaterial {
+    AevkPipeline*   pipe;
+    VkDescriptorSet set;
     struct {
         VkBuffer       buf;
         VkDeviceMemory mem;
         void*          ptr;
         VkDeviceSize   size;
     } ub[AEVK_MAX_DESC];
+};
+
+#define AEVK_SETS_PER_POOL 16
+#define AEVK_MAX_POOLS     64
+
+struct AevkPipeline {
+    AevkDevice*      dev;
+    VkShaderModule   vert, frag;
+    VkPipelineLayout layout;
+    VkPipeline       pipeline;
+    uint32_t         push_bytes;
+
+    /* Descriptor pools, grown a block at a time: a fixed maxSets would put a
+     * ceiling on how many materials a scene can have, and sizing one pool for
+     * the worst case would waste memory for the common one. */
+    VkDescriptorSetLayout set_layout;
+    VkDescriptorPool      pools[AEVK_MAX_POOLS];
+    int                   pool_count;
+    int                   sets_in_pool;   /* used in the newest pool */
+    VkDescriptorPoolSize  pool_sizes[2];
+    uint32_t              pool_size_count;
+
+    /* The set pipeline_set_uniform / pipeline_set_texture write to, so code
+     * that never asks for a material keeps working unchanged. */
+    AevkMaterial*    def;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -977,6 +1020,7 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     t->height = height;
     t->readback_size = (VkDeviceSize)bytes;
     t->samples = samples;
+    t->index_bits = 32;
     t->has_depth = want_depth ? 1 : 0;
     t->depth_format = depth_format;
 
@@ -1215,7 +1259,77 @@ void aevk_target_destroy(AevkTarget* t) {
         if (t->depth_mem)    d->da.vkFreeMemory(d->device, t->depth_mem, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
+    free(t->batch);
     free(t);
+}
+
+/* Draw batching (#1540). An empty batch is the default and draws all the
+ * geometry once, which is every caller that never asks for one. */
+int aevk_batch_reset(AevkTarget* t) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    t->batch_count = 0;
+    t->batch_version++;
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return AEVK_OK;
+}
+
+int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (first < 0) return aevk_fail(AEVK_ERR_ARG, "first must not be negative, got %d", first);
+    if (count <= 0) return aevk_fail(AEVK_ERR_ARG, "draw count must be positive, got %d", count);
+
+    AEVK_MUTEX_LOCK(&t->dev->lock);
+    /* Checked here against the geometry uploaded so far, so a mistake is
+     * reported where it was made. A batch built before any geometry is legal
+     * and is caught at draw time instead. */
+    int limit = t->index_count > 0 ? t->index_count : t->vertex_count;
+    if (limit > 0 && (long long)first + (long long)count > (long long)limit) {
+        AEVK_MUTEX_UNLOCK(&t->dev->lock);
+        return aevk_fail(AEVK_ERR_ARG, "draw covers %d..%lld but only %d are uploaded",
+                         first, (long long)first + count - 1, limit);
+    }
+    if (t->batch_count == t->batch_cap) {
+        int cap = t->batch_cap ? t->batch_cap * 2 : 8;
+        AevkDrawItem* grown = (AevkDrawItem*)realloc(t->batch, (size_t)cap * sizeof(*grown));
+        if (!grown) {
+            AEVK_MUTEX_UNLOCK(&t->dev->lock);
+            return aevk_fail(AEVK_ERR_OOM, "out of memory");
+        }
+        t->batch = grown;
+        t->batch_cap = cap;
+    }
+    t->batch[t->batch_count].mat = mat;
+    t->batch[t->batch_count].first = first;
+    t->batch[t->batch_count].count = count;
+    t->batch_count++;
+    t->batch_version++;
+    AEVK_MUTEX_UNLOCK(&t->dev->lock);
+    return AEVK_OK;
+}
+
+int aevk_batch_count(const AevkTarget* t) { return t ? t->batch_count : 0; }
+
+/* Ranges are checked here rather than at add time: the geometry a batch
+ * slices can be re-uploaded between adding and drawing, so the count that
+ * matters is the one in effect for THIS frame. */
+static int aevk_batch_check(AevkTarget* t, AevkPipeline* p) {
+    int limit = t->index_count > 0 ? t->index_count : t->vertex_count;
+    const char* what = t->index_count > 0 ? "indices" : "vertices";
+    for (int i = 0; i < t->batch_count; i++) {
+        AevkDrawItem* it = &t->batch[i];
+        if ((long long)it->first + (long long)it->count > (long long)limit) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "draw %d covers %s %d..%lld but only %d are uploaded",
+                             i, what, it->first, (long long)it->first + it->count - 1, limit);
+        }
+        if (it->mat && p && it->mat->pipe != p) {
+            return aevk_fail(AEVK_ERR_ARG, "draw %d uses a material of another pipeline", i);
+        }
+    }
+    return AEVK_OK;
 }
 
 int aevk_target_has_depth(const AevkTarget* t) { return t ? t->has_depth : 0; }
@@ -1362,6 +1476,28 @@ static int aevk_submit_once(AevkDevice* d, VkCommandBuffer cmd) {
     return AEVK_OK;
 }
 
+static void aevk_image_barrier_levels(AevkDevice* d, VkCommandBuffer cmd, VkImage img,
+                                      uint32_t base_level, uint32_t level_count,
+                                      VkImageLayout from, VkImageLayout to,
+                                      VkAccessFlags src_access, VkAccessFlags dst_access,
+                                      VkPipelineStageFlags src_stage,
+                                      VkPipelineStageFlags dst_stage) {
+    VkImageMemoryBarrier b = {0};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.oldLayout = from;
+    b.newLayout = to;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = img;
+    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b.subresourceRange.baseMipLevel = base_level;
+    b.subresourceRange.levelCount = level_count;
+    b.subresourceRange.layerCount = 1;
+    b.srcAccessMask = src_access;
+    b.dstAccessMask = dst_access;
+    d->da.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
+}
+
 static void aevk_image_barrier(AevkDevice* d, VkCommandBuffer cmd, VkImage img,
                                VkImageLayout from, VkImageLayout to,
                                VkAccessFlags src_access, VkAccessFlags dst_access,
@@ -1382,7 +1518,28 @@ static void aevk_image_barrier(AevkDevice* d, VkCommandBuffer cmd, VkImage img,
     d->da.vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, NULL, 0, NULL, 1, &b);
 }
 
+/* How many mip levels a full chain needs: halving until 1x1. */
+static uint32_t aevk_mip_levels_for(int width, int height) {
+    uint32_t levels = 1;
+    int w = width, h = height;
+    while (w > 1 || h > 1) {
+        w = (w > 1) ? w / 2 : 1;
+        h = (h > 1) ? h / 2 : 1;
+        levels++;
+    }
+    return levels;
+}
+
 AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
+    return aevk_texture_create_ex(d, width, height, 0, 0, 0);
+}
+
+/* `mipmapped` builds a full mip chain, which needs the device to support
+ * linear blitting of the format. `linear_filter` picks LINEAR over NEAREST for
+ * magnification, minification and between mip levels. `repeat` picks REPEAT
+ * over CLAMP_TO_EDGE for addressing. */
+AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
+                                    int mipmapped, int linear_filter, int repeat) {
     aevk_clear_error();
     if (!d) { aevk_fail(AEVK_ERR_ARG, "device is null"); return NULL; }
     if (width <= 0 || height <= 0) {
@@ -1395,11 +1552,27 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
         return NULL;
     }
 
+    uint32_t levels = 1;
+    if (mipmapped) {
+        /* Generating the chain is a chain of blits, which the driver only has
+         * to support for formats advertising SAMPLED_IMAGE_FILTER_LINEAR.
+         * Refusing beats generating a black chain nobody notices. */
+        VkFormatProperties fp;
+        d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, VK_FORMAT_R8G8B8A8_UNORM, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+            aevk_fail(AEVK_ERR_UNSUPPORTED,
+                      "device cannot linear-filter R8G8B8A8_UNORM, so it cannot build mipmaps");
+            return NULL;
+        }
+        levels = aevk_mip_levels_for(width, height);
+    }
+
     AevkTexture* tex = (AevkTexture*)calloc(1, sizeof(*tex));
     if (!tex) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
     tex->dev = d;
     tex->width = width;
     tex->height = height;
+    tex->mip_levels = levels;
 
     VkImageCreateInfo ii = {0};
     ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -1408,11 +1581,14 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
     ii.extent.width = (uint32_t)width;
     ii.extent.height = (uint32_t)height;
     ii.extent.depth = 1;
-    ii.mipLevels = 1;
+    ii.mipLevels = levels;
     ii.arrayLayers = 1;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    /* TRANSFER_SRC as well as DST: building the chain blits level N-1 into
+     * level N, so the image reads from itself. */
+    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+               VK_IMAGE_USAGE_SAMPLED_BIT;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     VkResult r = d->da.vkCreateImage(d->device, &ii, NULL, &tex->image);
@@ -1440,20 +1616,24 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    vi.subresourceRange.levelCount = 1;
+    vi.subresourceRange.levelCount = levels;
     vi.subresourceRange.layerCount = 1;
     r = d->da.vkCreateImageView(d->device, &vi, NULL, &tex->view);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateImageView failed (%d)", (int)r); goto fail; }
 
     VkSamplerCreateInfo si = {0};
     si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = VK_FILTER_NEAREST;
-    si.minFilter = VK_FILTER_NEAREST;
-    si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    si.maxLod = 0.0f;
+    VkFilter filter = linear_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    VkSamplerAddressMode mode = repeat ? VK_SAMPLER_ADDRESS_MODE_REPEAT
+                                       : VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    si.magFilter = filter;
+    si.minFilter = filter;
+    si.mipmapMode = linear_filter ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                  : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = mode;
+    si.addressModeV = mode;
+    si.addressModeW = mode;
+    si.maxLod = (float)levels;
     si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
     r = d->da.vkCreateSampler(d->device, &si, NULL, &tex->sampler);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateSampler failed (%d)", (int)r); goto fail; }
@@ -1462,6 +1642,10 @@ AevkTexture* aevk_texture_create(AevkDevice* d, int width, int height) {
 fail:
     aevk_texture_destroy(tex);
     return NULL;
+}
+
+int aevk_texture_mip_levels(const AevkTexture* tex) {
+    return tex ? (int)tex->mip_levels : 0;
 }
 
 void aevk_texture_destroy(AevkTexture* tex) {
@@ -1512,10 +1696,12 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     rc = aevk_run_once(d, &cmd);
     if (rc == AEVK_OK) {
-        aevk_image_barrier(d, cmd, tex->image,
-                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                           VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        aevk_image_barrier_levels(d, cmd, tex->image, 0, tex->mip_levels,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                  0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT);
 
         VkBufferImageCopy copy = {0};
         copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1526,12 +1712,65 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
         d->da.vkCmdCopyBufferToImage(cmd, staging, tex->image,
                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
 
-        aevk_image_barrier(d, cmd, tex->image,
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                           VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        if (tex->mip_levels > 1) {
+            /* Each level is blitted from the one above, so level N-1 has to be
+             * readable before level N is written. Walking the chain one level
+             * at a time is what keeps that ordering explicit. */
+            int mw = tex->width, mh = tex->height;
+            for (uint32_t level = 1; level < tex->mip_levels; level++) {
+                aevk_image_barrier_levels(d, cmd, tex->image, level - 1, 1,
+                                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                          VK_ACCESS_TRANSFER_WRITE_BIT,
+                                          VK_ACCESS_TRANSFER_READ_BIT,
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+                int nw = (mw > 1) ? mw / 2 : 1;
+                int nh = (mh > 1) ? mh / 2 : 1;
+                VkImageBlit blit = {0};
+                blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blit.srcSubresource.mipLevel = level - 1;
+                blit.srcSubresource.layerCount = 1;
+                blit.srcOffsets[1].x = mw;
+                blit.srcOffsets[1].y = mh;
+                blit.srcOffsets[1].z = 1;
+                blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                blit.dstSubresource.mipLevel = level;
+                blit.dstSubresource.layerCount = 1;
+                blit.dstOffsets[1].x = nw;
+                blit.dstOffsets[1].y = nh;
+                blit.dstOffsets[1].z = 1;
+                d->da.vkCmdBlitImage(cmd,
+                                     tex->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                     tex->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     1, &blit, VK_FILTER_LINEAR);
+
+                aevk_image_barrier_levels(d, cmd, tex->image, level - 1, 1,
+                                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                          VK_ACCESS_TRANSFER_READ_BIT,
+                                          VK_ACCESS_SHADER_READ_BIT,
+                                          VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                mw = nw;
+                mh = nh;
+            }
+            /* The last level was never blitted from, so it is still DST. */
+            aevk_image_barrier_levels(d, cmd, tex->image, tex->mip_levels - 1, 1,
+                                      VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                      VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                                      VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        } else {
+            aevk_image_barrier(d, cmd, tex->image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                               VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                               VK_PIPELINE_STAGE_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        }
         rc = aevk_submit_once(d, cmd);
     }
     AEVK_MUTEX_UNLOCK(&d->lock);
@@ -1540,6 +1779,86 @@ int aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len) {
     d->da.vkFreeMemory(d->device, staging_mem, NULL);
     if (rc == AEVK_OK) tex->uploaded = 1;
     return rc;
+}
+
+/* Adds a pool. Called when the newest one is full, or for the first set. */
+static int aevk_pipeline_add_pool(AevkPipeline* p) {
+    AevkDevice* d = p->dev;
+    if (p->pool_count >= AEVK_MAX_POOLS) {
+        return aevk_fail(AEVK_ERR_OOM, "at most %d descriptor pools per pipeline (%d materials)",
+                         AEVK_MAX_POOLS, AEVK_MAX_POOLS * AEVK_SETS_PER_POOL);
+    }
+    VkDescriptorPoolCreateInfo dpi = {0};
+    dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpi.maxSets = AEVK_SETS_PER_POOL;
+    dpi.poolSizeCount = p->pool_size_count;
+    dpi.pPoolSizes = p->pool_sizes;
+    VkResult r = d->da.vkCreateDescriptorPool(d->device, &dpi, NULL, &p->pools[p->pool_count]);
+    if (r != VK_SUCCESS) {
+        return aevk_fail(AEVK_ERR_OOM, "vkCreateDescriptorPool failed (%d)", (int)r);
+    }
+    p->pool_count++;
+    p->sets_in_pool = 0;
+    return AEVK_OK;
+}
+
+AevkMaterial* aevk_material_create(AevkPipeline* p) {
+    aevk_clear_error();
+    if (!p) { aevk_fail(AEVK_ERR_ARG, "pipeline is null"); return NULL; }
+    if (!p->set_layout) {
+        aevk_fail(AEVK_ERR_ARG,
+                  "pipeline was created without bindings, so it has no materials");
+        return NULL;
+    }
+    AevkDevice* d = p->dev;
+
+    if (p->pool_count == 0 || p->sets_in_pool >= AEVK_SETS_PER_POOL) {
+        if (aevk_pipeline_add_pool(p) != AEVK_OK) return NULL;
+    }
+
+    AevkMaterial* m = (AevkMaterial*)calloc(1, sizeof(*m));
+    if (!m) { aevk_fail(AEVK_ERR_OOM, "out of memory"); return NULL; }
+    m->pipe = p;
+
+    VkDescriptorSetAllocateInfo dsi = {0};
+    dsi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    dsi.descriptorPool = p->pools[p->pool_count - 1];
+    dsi.descriptorSetCount = 1;
+    dsi.pSetLayouts = &p->set_layout;
+    VkResult r = d->da.vkAllocateDescriptorSets(d->device, &dsi, &m->set);
+
+    /* A driver may report the pool full before maxSets is reached, since
+     * descriptor counts can run out first. Take that as "add a pool" rather
+     * than as failure. */
+    if (r == VK_ERROR_OUT_OF_POOL_MEMORY || r == VK_ERROR_FRAGMENTED_POOL) {
+        if (aevk_pipeline_add_pool(p) != AEVK_OK) { free(m); return NULL; }
+        dsi.descriptorPool = p->pools[p->pool_count - 1];
+        r = d->da.vkAllocateDescriptorSets(d->device, &dsi, &m->set);
+    }
+    if (r != VK_SUCCESS) {
+        aevk_fail(AEVK_ERR_OOM, "vkAllocateDescriptorSets failed (%d)", (int)r);
+        free(m);
+        return NULL;
+    }
+    p->sets_in_pool++;
+    return m;
+}
+
+/* The set itself is owned by its pool and goes when the pipeline does; what
+ * this reclaims is the uniform buffers written into it. Destroy materials
+ * before the pipeline that made them. */
+void aevk_material_destroy(AevkMaterial* m) {
+    if (!m) return;
+    AevkPipeline* p = m->pipe;
+    if (p && p->dev && p->dev->device) {
+        AevkDevice* d = p->dev;
+        for (int i = 0; i < AEVK_MAX_DESC; i++) {
+            if (m->ub[i].ptr) d->da.vkUnmapMemory(d->device, m->ub[i].mem);
+            if (m->ub[i].buf) d->da.vkDestroyBuffer(d->device, m->ub[i].buf, NULL);
+            if (m->ub[i].mem) d->da.vkFreeMemory(d->device, m->ub[i].mem, NULL);
+        }
+    }
+    free(m);
 }
 
 AevkPipeline* aevk_pipeline_create(AevkDevice* d, AevkTarget* t,
@@ -1613,27 +1932,15 @@ AevkPipeline* aevk_pipeline_create_ex(AevkDevice* d, AevkTarget* t,
         if (n_img) { sizes[nsizes].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                      sizes[nsizes++].descriptorCount = n_img; }
 
-        VkDescriptorPoolCreateInfo dpi = {0};
-        dpi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        dpi.maxSets = 1;
-        dpi.poolSizeCount = nsizes;
-        dpi.pPoolSizes = sizes;
-        r = d->da.vkCreateDescriptorPool(d->device, &dpi, NULL, &p->pool);
-        if (r != VK_SUCCESS) {
-            aevk_fail(AEVK_ERR_OOM, "vkCreateDescriptorPool failed (%d)", (int)r);
-            goto fail;
+        /* Counts are per set; a pool holds AEVK_SETS_PER_POOL of them. */
+        for (uint32_t i = 0; i < nsizes; i++) {
+            p->pool_sizes[i] = sizes[i];
+            p->pool_sizes[i].descriptorCount = sizes[i].descriptorCount * AEVK_SETS_PER_POOL;
         }
+        p->pool_size_count = nsizes;
 
-        VkDescriptorSetAllocateInfo dsi = {0};
-        dsi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        dsi.descriptorPool = p->pool;
-        dsi.descriptorSetCount = 1;
-        dsi.pSetLayouts = &p->set_layout;
-        r = d->da.vkAllocateDescriptorSets(d->device, &dsi, &p->set);
-        if (r != VK_SUCCESS) {
-            aevk_fail(AEVK_ERR_OOM, "vkAllocateDescriptorSets failed (%d)", (int)r);
-            goto fail;
-        }
+        p->def = aevk_material_create(p);
+        if (!p->def) goto fail;
     }
 
     VkPushConstantRange pcr = {0};
@@ -1787,13 +2094,12 @@ void aevk_pipeline_destroy(AevkPipeline* p) {
         if (p->frag)     d->da.vkDestroyShaderModule(d->device, p->frag, NULL);
         if (p->vert)     d->da.vkDestroyShaderModule(d->device, p->vert, NULL);
         /* Sets are freed with their pool; the layout outlives neither. */
-        if (p->pool)       d->da.vkDestroyDescriptorPool(d->device, p->pool, NULL);
-        if (p->set_layout) d->da.vkDestroyDescriptorSetLayout(d->device, p->set_layout, NULL);
-        for (int i = 0; i < AEVK_MAX_DESC; i++) {
-            if (p->ub[i].ptr) d->da.vkUnmapMemory(d->device, p->ub[i].mem);
-            if (p->ub[i].buf) d->da.vkDestroyBuffer(d->device, p->ub[i].buf, NULL);
-            if (p->ub[i].mem) d->da.vkFreeMemory(d->device, p->ub[i].mem, NULL);
+        aevk_material_destroy(p->def);
+        p->def = NULL;
+        for (int i = 0; i < p->pool_count; i++) {
+            d->da.vkDestroyDescriptorPool(d->device, p->pools[i], NULL);
         }
+        if (p->set_layout) d->da.vkDestroyDescriptorSetLayout(d->device, p->set_layout, NULL);
         AEVK_MUTEX_UNLOCK(&d->lock);
     }
     free(p);
@@ -1803,15 +2109,17 @@ void aevk_pipeline_destroy(AevkPipeline* p) {
 /* Shader resources: uniform buffers, textures, push constants              */
 /* ------------------------------------------------------------------------ */
 
-int aevk_pipeline_set_uniform(AevkPipeline* p, int binding,
+int aevk_material_set_uniform(AevkMaterial* m, int binding,
                               const void* data, size_t len) {
     aevk_clear_error();
+    if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
+    AevkPipeline* p = m->pipe;
     if (!p || !data) return aevk_fail(AEVK_ERR_ARG, "pipeline or data is null");
     if (binding < 0 || binding >= AEVK_MAX_DESC) {
         return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
     }
     if (len == 0) return aevk_fail(AEVK_ERR_ARG, "uniform data is empty");
-    if (!p->set) {
+    if (!m->set) {
         return aevk_fail(AEVK_ERR_ARG,
                          "pipeline was created without bindings, so it has no descriptor set");
     }
@@ -1819,39 +2127,39 @@ int aevk_pipeline_set_uniform(AevkPipeline* p, int binding,
 
     /* Reuse the buffer while it is big enough; a uniform that changes every
      * frame must not allocate every frame. */
-    if (p->ub[binding].buf && p->ub[binding].size < (VkDeviceSize)len) {
-        if (p->ub[binding].ptr) d->da.vkUnmapMemory(d->device, p->ub[binding].mem);
-        d->da.vkDestroyBuffer(d->device, p->ub[binding].buf, NULL);
-        d->da.vkFreeMemory(d->device, p->ub[binding].mem, NULL);
-        p->ub[binding].buf = VK_NULL_HANDLE;
-        p->ub[binding].mem = VK_NULL_HANDLE;
-        p->ub[binding].ptr = NULL;
-        p->ub[binding].size = 0;
+    if (m->ub[binding].buf && m->ub[binding].size < (VkDeviceSize)len) {
+        if (m->ub[binding].ptr) d->da.vkUnmapMemory(d->device, m->ub[binding].mem);
+        d->da.vkDestroyBuffer(d->device, m->ub[binding].buf, NULL);
+        d->da.vkFreeMemory(d->device, m->ub[binding].mem, NULL);
+        m->ub[binding].buf = VK_NULL_HANDLE;
+        m->ub[binding].mem = VK_NULL_HANDLE;
+        m->ub[binding].ptr = NULL;
+        m->ub[binding].size = 0;
     }
 
-    if (!p->ub[binding].buf) {
+    if (!m->ub[binding].buf) {
         int rc = aevk_make_buffer(d, (VkDeviceSize)len, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                  &p->ub[binding].buf, &p->ub[binding].mem);
+                                  &m->ub[binding].buf, &m->ub[binding].mem);
         if (rc != AEVK_OK) return rc;
-        VkResult r = d->da.vkMapMemory(d->device, p->ub[binding].mem, 0,
-                                       (VkDeviceSize)len, 0, &p->ub[binding].ptr);
+        VkResult r = d->da.vkMapMemory(d->device, m->ub[binding].mem, 0,
+                                       (VkDeviceSize)len, 0, &m->ub[binding].ptr);
         if (r != VK_SUCCESS) {
-            d->da.vkDestroyBuffer(d->device, p->ub[binding].buf, NULL);
-            d->da.vkFreeMemory(d->device, p->ub[binding].mem, NULL);
-            p->ub[binding].buf = VK_NULL_HANDLE;
-            p->ub[binding].mem = VK_NULL_HANDLE;
+            d->da.vkDestroyBuffer(d->device, m->ub[binding].buf, NULL);
+            d->da.vkFreeMemory(d->device, m->ub[binding].mem, NULL);
+            m->ub[binding].buf = VK_NULL_HANDLE;
+            m->ub[binding].mem = VK_NULL_HANDLE;
             return aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
         }
-        p->ub[binding].size = (VkDeviceSize)len;
+        m->ub[binding].size = (VkDeviceSize)len;
 
         VkDescriptorBufferInfo bi = {0};
-        bi.buffer = p->ub[binding].buf;
+        bi.buffer = m->ub[binding].buf;
         bi.range = (VkDeviceSize)len;
         VkWriteDescriptorSet w = {0};
         w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet = p->set;
+        w.dstSet = m->set;
         w.dstBinding = (uint32_t)binding;
         w.descriptorCount = 1;
         w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1861,17 +2169,19 @@ int aevk_pipeline_set_uniform(AevkPipeline* p, int binding,
 
     /* Host-coherent, so the write is visible without a flush. The descriptor
      * already points at this buffer, so no set update is needed per frame. */
-    memcpy(p->ub[binding].ptr, data, len);
+    memcpy(m->ub[binding].ptr, data, len);
     return AEVK_OK;
 }
 
-int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex) {
+int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
     aevk_clear_error();
+    if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
+    AevkPipeline* p = m->pipe;
     if (!p || !tex) return aevk_fail(AEVK_ERR_ARG, "pipeline or texture is null");
     if (binding < 0 || binding >= AEVK_MAX_DESC) {
         return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
     }
-    if (!p->set) {
+    if (!m->set) {
         return aevk_fail(AEVK_ERR_ARG,
                          "pipeline was created without bindings, so it has no descriptor set");
     }
@@ -1888,7 +2198,7 @@ int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex) {
     ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w = {0};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    w.dstSet = p->set;
+    w.dstSet = m->set;
     w.dstBinding = (uint32_t)binding;
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -1896,6 +2206,28 @@ int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex) {
     d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
     return AEVK_OK;
 }
+/* The pipeline-level writers address its default material, so callers that
+ * never ask for one see no change. */
+int aevk_pipeline_set_uniform(AevkPipeline* p, int binding, const void* data, size_t len) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_uniform(p->def, binding, data, len);
+}
+
+int aevk_pipeline_set_texture(AevkPipeline* p, int binding, AevkTexture* tex) {
+    aevk_clear_error();
+    if (!p) return aevk_fail(AEVK_ERR_ARG, "pipeline is null");
+    if (!p->def) {
+        return aevk_fail(AEVK_ERR_ARG,
+                         "pipeline was created without bindings, so it has no descriptor set");
+    }
+    return aevk_material_set_texture(p->def, binding, tex);
+}
+
 
 int aevk_target_set_push(AevkTarget* t, const void* data, size_t len) {
     aevk_clear_error();
@@ -1914,6 +2246,7 @@ int aevk_target_set_push(AevkTarget* t, const void* data, size_t len) {
  * set_vertices is a thin wrapper over it so the grow-and-map path exists
  * once. */
 int aevk_ae_verts_reserve(void* tp, int count);
+int aevk_ae_indices_reserve_ex(void* tp, int count, int bits);
 
 /* ------------------------------------------------------------------------ */
 /* Geometry, draw, readback                                                  */
@@ -1927,7 +2260,7 @@ int aevk_target_set_vertices(AevkTarget* t, const float* data, int count) {
     return AEVK_OK;
 }
 
-static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p,
+static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMaterial* mat,
                        float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
     VkResult vr = d->da.vkResetCommandBuffer(fr->cmd, 0);
@@ -1971,9 +2304,13 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p,
         d->da.vkCmdSetViewport(fr->cmd, 0, 1, &vp);
         d->da.vkCmdSetScissor(fr->cmd, 0, 1, &sc);
         d->da.vkCmdBindPipeline(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
-        if (p->set) {
+        /* The material decides which set is bound; without one the pipeline's
+         * default is used, which is what a caller that never asked for
+         * materials has. */
+        AevkMaterial* bind_mat = mat ? mat : p->def;
+        if (bind_mat && bind_mat->set) {
             d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                          p->layout, 0, 1, &p->set, 0, NULL);
+                                          p->layout, 0, 1, &bind_mat->set, 0, NULL);
         }
         /* Push whatever the pipeline declared room for, so a caller who set
          * fewer bytes than the range still gets a defined block. */
@@ -1989,7 +2326,30 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p,
         VkDeviceSize off = 0;
         d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
         if (t->index_count > 0) {
-            d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0, VK_INDEX_TYPE_UINT32);
+            d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0,
+                                       (t->index_bits == 16) ? VK_INDEX_TYPE_UINT16
+                                                             : VK_INDEX_TYPE_UINT32);
+        }
+        if (t->batch_count > 0) {
+            /* Several draws inside the one render pass, each free to bind its
+             * own material. Rebinding the set between draws is the whole
+             * reason per-draw sets exist: with one set per pipeline the second
+             * draw would overwrite what the first is still going to read. */
+            for (int i = 0; i < t->batch_count; i++) {
+                AevkDrawItem* it = &t->batch[i];
+                AevkMaterial* im = it->mat ? it->mat : bind_mat;
+                if (im && im->set) {
+                    d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                  p->layout, 0, 1, &im->set, 0, NULL);
+                }
+                if (t->index_count > 0) {
+                    d->da.vkCmdDrawIndexed(fr->cmd, (uint32_t)it->count, 1,
+                                           (uint32_t)it->first, 0, 0);
+                } else {
+                    d->da.vkCmdDraw(fr->cmd, (uint32_t)it->count, 1, (uint32_t)it->first, 0);
+                }
+            }
+        } else if (t->index_count > 0) {
             d->da.vkCmdDrawIndexed(fr->cmd, (uint32_t)t->index_count, 1, 0, 0, 0);
         } else {
             d->da.vkCmdDraw(fr->cmd, (uint32_t)t->vertex_count, 1, 0, 0);
@@ -2011,15 +2371,18 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p,
 
     fr->recorded = 1;
     fr->rec_pipe = p;
+    fr->rec_mat = mat;
     fr->rec_vertices = t->vertex_count;
     fr->rec_clear[0] = r; fr->rec_clear[1] = g; fr->rec_clear[2] = b; fr->rec_clear[3] = a;
     fr->rec_indices = t->index_count;
     fr->rec_push_size = t->push_size;
     if (t->push_size) memcpy(fr->rec_push, t->push_data, t->push_size);
+    fr->rec_batch_version = t->batch_version;
+    fr->rec_batch_count = t->batch_count;
     return AEVK_OK;
 }
 
-static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
+static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                             float r, float g, float b, float a);
 
 int aevk_draw(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a) {
@@ -2032,7 +2395,7 @@ int aevk_draw(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a
 
     AevkDevice* d = t->dev;
     AEVK_MUTEX_LOCK(&d->lock);
-    int rc = aevk_draw_locked(t, p, r, g, b, a);
+    int rc = aevk_draw_locked(t, p, NULL, r, g, b, a);
     AEVK_MUTEX_UNLOCK(&d->lock);
     return rc;
 }
@@ -2077,23 +2440,31 @@ static int aevk_wait_frame_locked(AevkTarget* t, int slot) {
  * The slot is reused round-robin, so the wait here is for the work this slot
  * held `frame_count` submissions ago, not for the one just queued: that is the
  * whole point, and it is also what bounds the queue depth. */
-static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p,
+static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                               float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
     int slot = t->next_frame;
+
+    if (t->batch_count > 0 && p) {
+        int brc = aevk_batch_check(t, p);
+        if (brc != AEVK_OK) return brc;
+    }
 
     int rc = aevk_wait_frame_locked(t, slot);
     if (rc != AEVK_OK) return rc;
 
     AevkFrame* fr = &t->frames[slot];
-    int stale = !fr->recorded || fr->rec_pipe != p || fr->rec_vertices != t->vertex_count ||
+    int stale = !fr->recorded || fr->rec_pipe != p || fr->rec_mat != mat ||
+                fr->rec_vertices != t->vertex_count ||
                 fr->rec_clear[0] != r || fr->rec_clear[1] != g ||
                 fr->rec_clear[2] != b || fr->rec_clear[3] != a ||
                 fr->rec_indices != t->index_count ||
                 fr->rec_push_size != t->push_size ||
+                fr->rec_batch_version != t->batch_version ||
+                fr->rec_batch_count != t->batch_count ||
                 (t->push_size && memcmp(fr->rec_push, t->push_data, t->push_size) != 0);
     if (stale) {
-        rc = aevk_record(t, fr, p, r, g, b, a);
+        rc = aevk_record(t, fr, p, mat, r, g, b, a);
         if (rc != AEVK_OK) { fr->recorded = 0; return rc; }
     }
 
@@ -2115,9 +2486,9 @@ static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p,
     return slot;
 }
 
-static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
+static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
                             float r, float g, float b, float a) {
-    int slot = aevk_submit_locked(t, p, r, g, b, a);
+    int slot = aevk_submit_locked(t, p, mat, r, g, b, a);
     if (slot < 0) return slot;
     return aevk_wait_frame_locked(t, slot);
 }
@@ -2173,7 +2544,39 @@ int aevk_submit(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float
     }
     AevkDevice* d = t->dev;
     AEVK_MUTEX_LOCK(&d->lock);
-    int slot = aevk_submit_locked(t, p, r, g, b, a);
+    int slot = aevk_submit_locked(t, p, NULL, r, g, b, a);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return slot;
+}
+
+/* Draws with a specific material, so one pipeline serves several objects with
+ * different textures and constants in a frame. Otherwise identical to draw. */
+int aevk_draw_material(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
+                       float r, float g, float b, float a) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (p && p->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "pipeline belongs to another device");
+    if (mat && mat->pipe != p) return aevk_fail(AEVK_ERR_ARG, "material belongs to another pipeline");
+    if (p && t->vertex_count > 0 && !t->vbuf) {
+        return aevk_fail(AEVK_ERR_ARG, "vertices were never uploaded");
+    }
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = aevk_draw_locked(t, p, mat, r, g, b, a);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+/* The non-blocking sibling of draw_material. */
+int aevk_submit_material(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
+                         float r, float g, float b, float a) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (p && p->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "pipeline belongs to another device");
+    if (mat && mat->pipe != p) return aevk_fail(AEVK_ERR_ARG, "material belongs to another pipeline");
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int slot = aevk_submit_locked(t, p, mat, r, g, b, a);
     AEVK_MUTEX_UNLOCK(&d->lock);
     return slot;
 }
@@ -2374,16 +2777,97 @@ int aevk_ae_uniform_float(void* pp, int binding, int index, double value) {
     if (binding < 0 || binding >= AEVK_MAX_DESC) {
         return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
     }
-    if (!p->ub[binding].ptr) {
+    AevkMaterial* m = p->def;
+    if (!m || !m->ub[binding].ptr) {
         return aevk_fail(AEVK_ERR_ARG, "call uniform_floats for binding %d first", binding);
     }
-    int n = (int)(p->ub[binding].size / sizeof(float));
+    int n = (int)(m->ub[binding].size / sizeof(float));
     if (index < 0 || index >= n) {
         return aevk_fail(AEVK_ERR_ARG, "uniform float %d is outside 0..%d", index, n - 1);
     }
     float f = (float)value;
-    memcpy((char*)p->ub[binding].ptr + (size_t)index * sizeof(float), &f, sizeof(f));
+    memcpy((char*)m->ub[binding].ptr + (size_t)index * sizeof(float), &f, sizeof(f));
     return AEVK_OK;
+}
+
+int aevk_ae_batch_reset(void* t) { return aevk_batch_reset((AevkTarget*)t); }
+int aevk_ae_batch_add(void* t, void* m, int first, int count) {
+    return aevk_batch_add((AevkTarget*)t, (AevkMaterial*)m, first, count);
+}
+int aevk_ae_batch_count(void* t) { return aevk_batch_count((const AevkTarget*)t); }
+
+void* aevk_ae_material_create(void* pp) {
+    return (void*)aevk_material_create((AevkPipeline*)pp);
+}
+void aevk_ae_material_destroy(void* mp) { aevk_material_destroy((AevkMaterial*)mp); }
+
+int aevk_ae_material_set_texture(void* mp, int binding, void* tex) {
+    return aevk_material_set_texture((AevkMaterial*)mp, binding, (AevkTexture*)tex);
+}
+
+int aevk_ae_material_set_uniform(void* mp, int binding, const void* data, int len) {
+    if (len < 0) return aevk_fail(AEVK_ERR_ARG, "negative uniform length");
+    return aevk_material_set_uniform((AevkMaterial*)mp, binding, data, (size_t)len);
+}
+
+int aevk_ae_material_floats(void* mp, int binding, int count) {
+    AevkMaterial* m = (AevkMaterial*)mp;
+    aevk_clear_error();
+    if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
+    if (count <= 0) return aevk_fail(AEVK_ERR_ARG, "uniform float count must be positive");
+    size_t bytes = (size_t)count * sizeof(float);
+    float stack[64];
+    float* zero = stack;
+    if (count > (int)(sizeof(stack) / sizeof(stack[0]))) {
+        zero = (float*)calloc((size_t)count, sizeof(float));
+        if (!zero) return aevk_fail(AEVK_ERR_OOM, "out of memory");
+    } else {
+        memset(stack, 0, bytes);
+    }
+    int rc = aevk_material_set_uniform(m, binding, zero, bytes);
+    if (zero != stack) free(zero);
+    return rc;
+}
+
+int aevk_ae_material_float(void* mp, int binding, int index, double value) {
+    AevkMaterial* m = (AevkMaterial*)mp;
+    aevk_clear_error();
+    if (!m) return aevk_fail(AEVK_ERR_ARG, "material is null");
+    if (binding < 0 || binding >= AEVK_MAX_DESC) {
+        return aevk_fail(AEVK_ERR_ARG, "binding must be 0..%d", AEVK_MAX_DESC - 1);
+    }
+    if (!m->ub[binding].ptr) {
+        return aevk_fail(AEVK_ERR_ARG, "call material_floats for binding %d first", binding);
+    }
+    int n = (int)(m->ub[binding].size / sizeof(float));
+    if (index < 0 || index >= n) {
+        return aevk_fail(AEVK_ERR_ARG, "uniform float %d is outside 0..%d", index, n - 1);
+    }
+    float f = (float)value;
+    memcpy((char*)m->ub[binding].ptr + (size_t)index * sizeof(float), &f, sizeof(f));
+    return AEVK_OK;
+}
+
+int aevk_ae_draw_material(void* t, void* p, void* m,
+                          double r, double g, double b, double a) {
+    return aevk_draw_material((AevkTarget*)t, (AevkPipeline*)p, (AevkMaterial*)m,
+                              (float)r, (float)g, (float)b, (float)a);
+}
+
+int aevk_ae_submit_material(void* t, void* p, void* m,
+                            double r, double g, double b, double a) {
+    return aevk_submit_material((AevkTarget*)t, (AevkPipeline*)p, (AevkMaterial*)m,
+                                (float)r, (float)g, (float)b, (float)a);
+}
+
+void* aevk_ae_texture_create_ex(void* d, int w, int h,
+                                int mipmapped, int linear_filter, int repeat) {
+    return (void*)aevk_texture_create_ex((AevkDevice*)d, w, h,
+                                         mipmapped, linear_filter, repeat);
+}
+
+int aevk_ae_texture_mip_levels(void* tex) {
+    return aevk_texture_mip_levels((const AevkTexture*)tex);
 }
 
 int aevk_ae_set_push(void* t, const void* data, int len) {
@@ -2460,17 +2944,29 @@ int aevk_ae_verts_set_float(void* tp, int float_index, double value) {
  * worth a second code path at this size, and a caller who needs it can say
  * so when there is a reason. */
 int aevk_ae_indices_reserve(void* tp, int count) {
+    return aevk_ae_indices_reserve_ex(tp, count, 32);
+}
+
+/* `bits` is 16 or 32. Sixteen halves the index memory and the bandwidth to
+ * read it, which is worth having for the meshes that fit: anything under
+ * 65,536 vertices, i.e. most of them. */
+int aevk_ae_indices_reserve_ex(void* tp, int count, int bits) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
     if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
     if (count < 0) return aevk_fail(AEVK_ERR_ARG, "index count must not be negative");
-    if ((size_t)count > (size_t)(SIZE_MAX / sizeof(uint32_t))) {
+    if (bits != 16 && bits != 32) {
+        return aevk_fail(AEVK_ERR_ARG, "index width must be 16 or 32 bits (got %d)", bits);
+    }
+    size_t stride = (bits == 16) ? sizeof(uint16_t) : sizeof(uint32_t);
+    if ((size_t)count > (size_t)(SIZE_MAX / stride)) {
         return aevk_fail(AEVK_ERR_ARG, "index count %d is too large", count);
     }
 
     AevkDevice* d = t->dev;
-    if (count > t->ibuf_capacity) {
-        VkDeviceSize need = (VkDeviceSize)count * sizeof(uint32_t);
+    int width_changed = (t->index_bits != bits);
+    if (count > t->ibuf_capacity || width_changed) {
+        VkDeviceSize need = (VkDeviceSize)count * (VkDeviceSize)stride;
         d->da.vkDeviceWaitIdle(d->device);
         if (t->ibuf_ptr) { d->da.vkUnmapMemory(d->device, t->ibuf_mem); t->ibuf_ptr = NULL; }
         if (t->ibuf)     { d->da.vkDestroyBuffer(d->device, t->ibuf, NULL); t->ibuf = VK_NULL_HANDLE; }
@@ -2486,8 +2982,9 @@ int aevk_ae_indices_reserve(void* tp, int count) {
         if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
         t->ibuf_capacity = count;
     }
-    if (t->index_count != count) aevk_invalidate_records(t);
+    if (t->index_count != count || width_changed) aevk_invalidate_records(t);
     t->index_count = count;
+    t->index_bits = bits;
     return AEVK_OK;
 }
 
@@ -2503,7 +3000,15 @@ int aevk_ae_indices_set(void* tp, int index, int value) {
         return aevk_fail(AEVK_ERR_ARG, "index %d points past the %d uploaded vertices",
                          value, t->vertex_count);
     }
-    ((uint32_t*)t->ibuf_ptr)[index] = (uint32_t)value;
+    if (t->index_bits == 16) {
+        if (value > 65535) {
+            return aevk_fail(AEVK_ERR_ARG,
+                             "vertex index %d does not fit in a 16-bit index", value);
+        }
+        ((uint16_t*)t->ibuf_ptr)[index] = (uint16_t)value;
+    } else {
+        ((uint32_t*)t->ibuf_ptr)[index] = (uint32_t)value;
+    }
     aevk_invalidate_records(t);
     return AEVK_OK;
 }

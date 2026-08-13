@@ -25,6 +25,27 @@ version number before tagging the release.
   engine. Behaviour is identical either way — `std.regex` never used PCRE2's
   JIT, so the vendored interpreter matches the system-library path.
 
+- **contrib/vulkan: materials, draw batching, 16-bit indices and mipmaps.** A
+  pipeline owned one descriptor set, so a frame could use exactly one texture:
+  binding a second overwrote what the first draw was still going to read.
+  `material_create(pipe)` now gives each draw its own set, and a target holds a
+  list of draws (`batch_add(t, mat, first, count)`, `batch_reset(t)`), each
+  naming the material it uses. Four differently textured sprites in one frame
+  from one pipeline is `example_sprites.ae`. Sets come from pools of 16 the
+  pipeline grows on demand; an empty batch stays the default and draws all the
+  geometry once, so every existing caller is unchanged.
+
+  `indices_reserve_ex(t, count, 16)` halves the index buffer for meshes under
+  65536 vertices, and refuses a value the width cannot hold rather than
+  wrapping it into the wrong triangle.
+
+  `texture_create_ex(dev, w, h, mipmapped, linear, repeat)` builds a mip chain
+  on upload with `vkCmdBlitImage` and chooses the sampler filter and addressing
+  mode. A 128x128 checkerboard minified eight times reads back as pure black
+  and white texels without a chain and as its true mean of 128 with one.
+  Mipmaps require the device to advertise linear blitting, and creation fails
+  with that reason rather than returning empty levels.
+
 ## [0.532.0]
 
 ### Added

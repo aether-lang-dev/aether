@@ -40,15 +40,15 @@ main() {
 }
 ```
 
-`example_triangle.ae` is that program in full, and `example_parallel_render.ae`
-is four actors rendering their own tile on one shared device and writing a 2x2
-contact sheet. Both are RUN by `make contrib-check`, not merely compiled: an
-example nobody executes rots into decoration.
+`example_triangle.ae` is that program in full, `example_parallel_render.ae` is
+four actors rendering their own tile on one shared device and writing a 2x2
+contact sheet, and `example_sprites.ae` draws four differently textured sprites
+in a single frame. All three are RUN by `make contrib-check`, not merely
+compiled: an example nobody executes rots into decoration.
 
-`example_triangle.ae` is that program in full. It is not limited to a triangle:
-the pipeline is built from whatever SPIR-V you hand it, and `pipeline_create`
-uses a built-in vertex format of an interleaved `vec2` position plus `vec3`
-colour.
+None of it is limited to a triangle: the pipeline is built from whatever SPIR-V
+you hand it, and `pipeline_create` uses a built-in vertex format of an
+interleaved `vec2` position plus `vec3` colour.
 
 For anything past that, `pipeline_create_ex` takes a vertex layout you
 describe, a push-constant block, and the shader resources the shaders read:
@@ -88,11 +88,92 @@ vulkan.indices_set(target, 0, 0)
 A texture must be uploaded before it is bound: an image that was never given
 pixels has no defined contents to sample, so binding one is refused rather than
 drawn. Push constants are capped at 128 bytes, the minimum every Vulkan device
-guarantees. A pipeline owns one descriptor set, which is enough for a
-transform, a material and its textures; per-draw sets are not yet a thing here.
+guarantees.
 
 Coordinates are Vulkan NDC. x and y run -1 to 1, **y points down**, and a
 front-facing triangle is counter-clockwise.
+
+## Materials: several textures in one frame
+
+The calls above bind to the pipeline, which owns one descriptor set. That is
+enough for one object. A frame with two textures needs two sets, because the
+second bind would otherwise overwrite what the first draw is still going to
+read, and a `vkQueueWaitIdle` between draws is not a fix.
+
+A material is one set of bound resources. Several are made from one pipeline,
+and a frame holds a list of draws, each naming the material it uses:
+
+```aether
+mat_a = vulkan.material_create(pipe)
+mat_b = vulkan.material_create(pipe)
+defer vulkan.material_destroy(mat_a)
+defer vulkan.material_destroy(mat_b)
+
+vulkan.material_set_texture(mat_a, 0, tex_a)
+vulkan.material_set_texture(mat_b, 0, tex_b)
+vulkan.material_floats(mat_a, 1, 4)          // a vec4 per material
+vulkan.material_float(mat_a, 1, 0, 1.0)
+
+vulkan.batch_add(target, mat_a, 0, 6)        // indices 0..5 with mat_a
+vulkan.batch_add(target, mat_b, 6, 6)        // indices 6..11 with mat_b
+vulkan.draw_material(target, pipe, null, 0.0, 0.0, 0.0, 1.0)
+```
+
+`batch_add` slices the geometry already uploaded: by index when the target has
+an index buffer, by vertex otherwise. An empty batch, which is the default and
+what every earlier caller has, draws all of it once. `batch_reset` goes back to
+that. The range is checked when the draw is added and again for the frame it is
+drawn in, since geometry can be re-uploaded in between.
+
+`draw_material` blocks like `draw`; `submit_material` pipelines like `submit`.
+Passing a null material uses the pipeline's own set, so `set_texture`,
+`uniform_floats` and `uniform_float` keep working unchanged.
+
+Materials cost one descriptor set each, allocated from pools of 16 that the
+pipeline grows on demand, plus one host-mapped uniform buffer per uniform
+binding written. A material a batch refers to has to outlive the draws that use
+it: destroy one without resetting the batch and the next frame reads freed
+memory, the same contract Vulkan gives for any resource bound to a set.
+
+## 16-bit indices
+
+`indices_reserve` gives 32-bit indices. `indices_reserve_ex(t, count, 16)`
+halves the index buffer, which is the right width for any mesh under 65536
+vertices:
+
+```aether
+vulkan.indices_reserve_ex(target, 24, 16)
+vulkan.indices_set(target, 0, 0)
+```
+
+`indices_set` refuses a value the chosen width cannot hold, so a wrapped index
+cannot silently draw the wrong triangle. Changing the width reallocates, and
+the previous contents do not carry over: write the indices again after
+reserving.
+
+## Mipmaps and sampler options
+
+`texture_create` gives a single-level image sampled with a linear filter and
+clamped addressing. `texture_create_ex` chooses:
+
+```aether
+tex = vulkan.texture_create_ex(dev, 128, 128, 1, 1, 0)  // mipmapped, linear, clamped
+vulkan.texture_upload(tex, bytes.data(rgba), 128 * 128 * 4)
+vulkan.texture_mip_levels(tex)                          // 8
+```
+
+The chain is generated on upload with `vkCmdBlitImage`, level by level, so the
+pixels come from the same call that already staged them. Mipmaps need the
+device to advertise linear blitting for `R8G8B8A8_UNORM`; where it does not,
+creation fails with that reason rather than handing back a texture whose lower
+levels are empty.
+
+The difference is measurable rather than decorative. A 128x128 one-texel
+checkerboard drawn into 16 pixels, which is eight times minification, comes out
+of a non-mipmapped texture as pure black and white texels (mean brightness 255
+on this hardware: the sample points all landed on the white squares) and out of
+a mipmapped one at 128, the texture's actual average. `test_vulkan_materials.ae`
+asserts both.
 
 ## Depth and multisampling
 
@@ -291,8 +372,9 @@ rather than on a defect. What proves the pair is correct is the render test.
 ## Testing
 
 `test_vulkan.ae`, `test_vulkan_resources.ae`, `test_vulkan_actors.ae`,
-`test_vulkan_depth_msaa.ae` and `test_vulkan_frames.ae` run from
-`make contrib-check`, along with both examples. With no driver it prints SKIP
+`test_vulkan_depth_msaa.ae`, `test_vulkan_frames.ae` and
+`test_vulkan_materials.ae` run from `make contrib-check`, along with all three
+examples. With no driver it prints SKIP
 and passes, which is the same path a user's program takes. With a driver it
 renders and checks pixels, covering the failure modes as well as the happy one:
 zero and negative sizes, a size past `maxImageDimension2D`, empty SPIR-V, a
@@ -328,6 +410,17 @@ a target with no depth attachment and requires it to DISAGREE. The MSAA case
 counts pixels that are neither background nor a saturated primary: 0 at one
 sample, 105 at four on this hardware.
 
+`test_vulkan_materials.ae` is built so each of the three features fails it if
+it does nothing. Two quads with different textures are drawn in one frame and
+each half is checked for its own colour, which is exactly what one shared
+descriptor set cannot produce. The 16-bit frame is compared to the 32-bit one
+byte for byte over the whole readback rather than at a few sample points. The
+mipmap case requires every pixel of the minified quad to be a single texel
+without a chain and the averaged mean with one. It also checks the refusals: a
+draw past the uploaded geometry, at both add and draw time, an empty or
+negative draw range, an index width that is neither 16 nor 32, a material
+without a pipeline, and a uniform write to a binding that has no buffer.
+
 The Linux CI leg installs lavapipe so the GPU path runs on a runner with no GPU,
 and then asserts the test did **not** skip. A skip there would be silent loss of
 coverage.
@@ -342,7 +435,6 @@ plan in someone's head.
 | Surfaces, swapchains, presenting to a window, and the aether-ui handle seam | #1505 | P1 |
 | Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
 | A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
-| Per-draw descriptor sets, 16-bit indices, texture mipmaps | #1540 | P3 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
 | More colour formats, and PNG output rather than PPM | #1514 | P3 |
 | Compute pipelines | #1515 | P3 |
