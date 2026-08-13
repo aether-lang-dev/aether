@@ -32,6 +32,41 @@ version number before tagging the release.
   lock is load-bearing, and says so: run with the lock removed it passes on
   MoltenVK, because a driver tolerating unsynchronised access is not the same
   as the access being defined.
+## [0.528.0]
+
+### Added
+
+- **Conditional compilation on build symbols.** `select()` could choose a value
+  on a fixed set of platform keys, and nothing could exclude a subsystem: a
+  library with an optional part had to ship it in every binary behind a runtime
+  `if`, symbols and all. Builds now declare symbols with `-D NAME` (on both
+  `ae build` and `aetherc`) or `[build] defines` in aether.toml, and
+  `when defined(NAME) { … } else { … }` guards a group of declarations or a
+  group of statements, with `!`, `&&`, `||` and parentheses.
+
+  A losing region is **dropped from the AST**, not wrapped in a preprocessor
+  `#if`. It is gone before type checking, so nothing it names has to exist, and
+  its symbols are not in the binary: `nm` on a build without the symbol finds
+  no trace of the guarded functions. That is what a runtime `if` cannot do and
+  what the feature is for.
+
+  `select()` also takes build symbols as keys now. A symbol that is set wins
+  outright, since it is known at compile time; otherwise the platform chain
+  decides as before.
+
+  The build cache key includes the symbols. Without that, building the same
+  source twice with different `-D` serves the first artifact for the second and
+  the region silently comes back.
+
+### Fixed
+
+- **`select()` over strings printed a pointer as a number.** Nothing inferred
+  the expression's type, so it fell to unresolved, codegen defaulted it to
+  `int`, and `s = select(linux: "a", other: "b")` assigned a pointer into an
+  int slot. It now takes its type from its branches, and branches that
+  disagree are an error rather than a surprise on whichever platform happens to
+  compile the odd one. Pre-existing, not a regression: same output on the
+  released compiler.
 
 ## [0.527.0]
 

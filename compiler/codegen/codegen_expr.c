@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "../aether_defines.h"
 #include "../aether_error.h"
 
 /* Argument-temp lifetime management for nested heap-returning calls.
@@ -3990,6 +3991,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     ASTNode* windows_val = NULL;
                     ASTNode* macos_val = NULL;
                     ASTNode* default_val = NULL;
+                    /* A key that is not a platform is a build symbol
+                     * (#1527). Those are known now, so a matching one wins
+                     * outright and the value is emitted with no directive:
+                     * the platform chain only decides what a build symbol did
+                     * not already answer. First match wins, left to right. */
+                    ASTNode* defined_val = NULL;
                     for (int i = 0; i < expr->child_count; i++) {
                         ASTNode* arg = expr->children[i];
                         if (arg && arg->type == AST_NAMED_ARG && arg->value) {
@@ -4001,7 +4008,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 macos_val = arg->children[0];
                             else if (strcmp(arg->value, "other") == 0)
                                 default_val = arg->children[0];
+                            else if (!defined_val && aether_define_is_set(arg->value))
+                                defined_val = arg->children[0];
                         }
+                    }
+                    if (defined_val) {
+                        generate_expression(gen, defined_val);
+                        break;
                     }
                     // Validate: every platform must have a value or other: must be set
                     if (!default_val) {

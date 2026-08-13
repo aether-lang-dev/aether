@@ -26,6 +26,7 @@
 #include "analysis/derive.h"
 #include "codegen/optimizer.h"
 #include "codegen/codegen.h"
+#include "aether_defines.h"
 #include "aether_error.h"
 #include "aether_module.h"
 #include "../lsp/aether_lsp.h"
@@ -2064,6 +2065,8 @@ void print_help(const char* program_name) {
     printf("                                   that calls <func>(). Closes the exe/lib symmetry.\n");
     printf("  --emit-namespace-manifest        Print the manifest JSON for a manifest.ae and exit\n");
     printf("  --check                          Type-check only (no code generation)\n");
+    printf("  -D SYMBOL                        Define a build symbol for `when defined(SYMBOL)`\n");
+    printf("                                   and select(). Present or absent; no value.\n");
     printf("  --no-contracts                   Skip runtime emission of `requires`/`ensures` checks (#348)\n");
     printf("  --dump-ast                       Print AST and exit (no code generation)\n");
     printf("  --diagnose=ownership             Print string-ownership verdicts and exit (no code generation)\n");
@@ -2115,6 +2118,41 @@ int main(int argc, char *argv[]) {
         } else if (strcmp(argv[arg_offset], "--help") == 0 || strcmp(argv[arg_offset], "-h") == 0) {
             print_help(argv[0]);
             return 0;
+        } else if (strncmp(argv[arg_offset], "-D", 2) == 0) {
+            /* -D NAME or -DNAME: a build symbol `when defined(NAME)` tests.
+             * A `=value` suffix is rejected rather than silently ignored,
+             * because a symbol here is present or absent and accepting the
+             * spelling would imply it carries a value. */
+            const char* name = argv[arg_offset] + 2;
+            if (*name == '\0') {
+                if (arg_offset + 1 >= argc) {
+                    fprintf(stderr, "Error: -D needs a symbol name\n");
+                    return 1;
+                }
+                name = argv[++arg_offset];
+            }
+            if (strchr(name, '=')) {
+                fprintf(stderr, "Error: -D takes a bare name; build symbols are "
+                                "present or absent, they do not carry values "
+                                "(got '%s')\n", name);
+                return 1;
+            }
+            if (!aether_define_is_valid_name(name)) {
+                fprintf(stderr, "Error: -D takes an identifier: letters, digits "
+                                "and underscore, not starting with a digit "
+                                "(got '%s')\n", name);
+                if (strchr(name, ' ') || strchr(name, '\t')) {
+                    fprintf(stderr, "  A name with a space means the whole flag "
+                                    "arrived as one argument, which is what "
+                                    "\"-D NAME\" quoted together produces.\n");
+                }
+                return 1;
+            }
+            if (!aether_define_add(name)) {
+                fprintf(stderr, "Error: too many -D symbols to add '%s'\n", name);
+                return 1;
+            }
+            arg_offset++;
         } else if (strcmp(argv[arg_offset], "--verbose") == 0) {
             verbose_mode = true;
             arg_offset++;
