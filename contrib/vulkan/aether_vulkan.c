@@ -268,6 +268,28 @@ struct AevkDevice {
 #define AEVK_MAX_DESC     8
 #define AEVK_MAX_PUSH     128   /* the guaranteed minimum every device offers */
 
+typedef struct {
+    VkCommandBuffer cmd;
+    VkFence         fence;
+    VkBuffer        readback;
+    VkDeviceMemory  readback_mem;
+    void*           readback_ptr;   /* mapped for the slot's lifetime */
+    int             submitted;      /* work handed to the queue, not yet waited on */
+
+    /* What this slot's command buffer currently holds, so a repeat draw skips
+     * re-recording. Per slot, not per target: with several in flight they hold
+     * different frames. Anything the recording baked in has to take part in
+     * the reuse test, or a changed transform silently redraws the old frame,
+     * so push bytes are compared by value rather than by size alone. */
+    int             recorded;
+    AevkPipeline*   rec_pipe;
+    int             rec_vertices;
+    int             rec_indices;
+    float           rec_clear[4];
+    uint32_t        rec_push_size;
+    unsigned char   rec_push[AEVK_MAX_PUSH];
+} AevkFrame;
+
 struct AevkTarget {
     AevkDevice*    dev;
     int            width, height;
@@ -277,9 +299,6 @@ struct AevkTarget {
     VkRenderPass   pass;
     VkFramebuffer  fb;
 
-    VkBuffer       readback;
-    VkDeviceMemory readback_mem;
-    void*          readback_ptr;    /* mapped for the target's lifetime */
     VkDeviceSize   readback_size;
 
     /* Multisampling and depth, both optional (#1512). With samples > 1 the
@@ -314,21 +333,19 @@ struct AevkTarget {
     unsigned char  push_data[AEVK_MAX_PUSH];
     uint32_t       push_size;
 
-    VkCommandBuffer cmd;
-    VkFence         fence;
-
-    /* What the command buffer currently holds, so a repeat draw skips
-     * re-recording. */
-    int             recorded;
-    AevkPipeline*   rec_pipe;
-    int             rec_vertices;
-    float           rec_clear[4];
-    /* Anything the recorded commands baked in has to take part in the reuse
-     * test, or a changed transform or index list silently redraws the old
-     * frame. Push bytes are compared by value, not by size alone. */
-    int             rec_indices;
-    uint32_t        rec_push_size;
-    unsigned char   rec_push[AEVK_MAX_PUSH];
+    /* Frames in flight (#1513). One slot is the synchronous shape phase 1
+     * shipped and stays the default; more than one lets the CPU record and
+     * submit while the GPU is still working on an earlier frame.
+     *
+     * Each slot owns its command buffer, its fence and its OWN readback
+     * buffer: sharing one readback across frames in flight would have frame
+     * N+1 overwrite pixels frame N had not been read yet. */
+    AevkFrame*      frames;
+    int             frame_count;
+    int             next_frame;     /* round-robin cursor */
+    int             last_done;      /* most recent slot waited on */
+    int             last_submitted; /* newest frame, which is what readers want */
+    uint64_t        timeout_ns;
 };
 
 struct AevkLayout {
@@ -825,6 +842,89 @@ static int aevk_make_attachment(AevkDevice* d, int width, int height,
     return AEVK_OK;
 }
 
+/* Frees every per-frame slot. THE DEVICE LOCK MUST BE HELD, and the device
+ * must already be idle: the caller either just waited or is tearing the target
+ * down. */
+static void aevk_frames_free(AevkTarget* t) {
+    if (!t || !t->frames) return;
+    AevkDevice* d = t->dev;
+    for (int i = 0; i < t->frame_count; i++) {
+        AevkFrame* f = &t->frames[i];
+        if (f->fence)        d->da.vkDestroyFence(d->device, f->fence, NULL);
+        if (f->cmd)          d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &f->cmd);
+        if (f->readback_ptr) d->da.vkUnmapMemory(d->device, f->readback_mem);
+        if (f->readback)     d->da.vkDestroyBuffer(d->device, f->readback, NULL);
+        if (f->readback_mem) d->da.vkFreeMemory(d->device, f->readback_mem, NULL);
+    }
+    free(t->frames);
+    t->frames = NULL;
+    t->frame_count = 0;
+    t->next_frame = 0;
+    t->last_done = 0;
+    t->last_submitted = -1;
+}
+
+/* Allocates `count` slots, each with its own command buffer, fence and
+ * readback buffer. One slot is the synchronous shape and the default; the
+ * extra ones cost a readback buffer each, which is why they are opt-in.
+ *
+ * THE DEVICE LOCK MUST BE HELD. It touches the command pool, and taking the
+ * lock here instead would self-deadlock set_frames, which holds it across the
+ * free-and-reallocate so no other thread can submit into a half-built set.
+ * Same rule as every other helper in this file: the public entry point locks,
+ * the helpers do not. */
+static int aevk_frames_alloc(AevkTarget* t, int count) {
+    AevkDevice* d = t->dev;
+    AevkFrame* frames = (AevkFrame*)calloc((size_t)count, sizeof(AevkFrame));
+    if (!frames) return aevk_fail(AEVK_ERR_OOM, "out of memory");
+
+    for (int i = 0; i < count; i++) {
+        AevkFrame* f = &frames[i];
+        if (aevk_make_buffer(d, t->readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                             VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                             &f->readback, &f->readback_mem) != AEVK_OK) {
+            goto fail;
+        }
+        /* Mapped once and left mapped: a per-frame map/unmap pair is a driver
+         * round trip that buys nothing for a buffer that lives this long. */
+        VkResult r = d->da.vkMapMemory(d->device, f->readback_mem, 0,
+                                       t->readback_size, 0, &f->readback_ptr);
+        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
+
+        VkCommandBufferAllocateInfo cai = {0};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = d->pool;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 1;
+        r = d->da.vkAllocateCommandBuffers(d->device, &cai, &f->cmd);
+        if (r != VK_SUCCESS) {
+            aevk_fail(AEVK_ERR_OOM, "vkAllocateCommandBuffers failed (%d)", (int)r);
+            goto fail;
+        }
+
+        VkFenceCreateInfo fnci = {0};
+        fnci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        r = d->da.vkCreateFence(d->device, &fnci, NULL, &f->fence);
+        if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateFence failed (%d)", (int)r); goto fail; }
+    }
+
+    t->frames = frames;
+    t->frame_count = count;
+    t->next_frame = 0;
+    t->last_done = 0;
+    t->last_submitted = -1;
+    return AEVK_OK;
+
+fail:
+    /* Hand the partial array to the normal teardown by installing it first:
+     * a hand-rolled unwind here would be a second thing to keep correct. */
+    t->frames = frames;
+    t->frame_count = count;
+    aevk_frames_free(t);
+    return AEVK_ERR_OOM;
+}
+
 AevkTarget* aevk_target_create(AevkDevice* d, int width, int height) {
     return aevk_target_create_ex(d, width, height, 0, 1);
 }
@@ -1076,33 +1176,11 @@ AevkTarget* aevk_target_create_ex(AevkDevice* d, int width, int height,
     r = d->da.vkCreateFramebuffer(d->device, &fci, NULL, &t->fb);
     if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateFramebuffer failed (%d)", (int)r); goto fail; }
 
-    if (aevk_make_buffer(d, t->readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                         &t->readback, &t->readback_mem) != AEVK_OK) {
-        goto fail;
-    }
-    /* Mapped once and left mapped: a per-frame map/unmap pair is a driver
-     * round trip that buys nothing for a buffer that lives as long as this. */
-    r = d->da.vkMapMemory(d->device, t->readback_mem, 0, t->readback_size, 0, &t->readback_ptr);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r); goto fail; }
-
-    /* Only the pool access is inside the lock. Widening it to the whole
-     * function would cover the failure path too, and that path calls
-     * target_destroy, which takes the same lock. */
-    VkCommandBufferAllocateInfo cai = {0};
-    cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cai.commandPool = d->pool;
-    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cai.commandBufferCount = 1;
+    t->timeout_ns = 5000000000ull;
     AEVK_MUTEX_LOCK(&d->lock);
-    r = d->da.vkAllocateCommandBuffers(d->device, &cai, &t->cmd);
+    int frames_rc = aevk_frames_alloc(t, 1);
     AEVK_MUTEX_UNLOCK(&d->lock);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkAllocateCommandBuffers failed (%d)", (int)r); goto fail; }
-
-    VkFenceCreateInfo fnci = {0};
-    fnci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    r = d->da.vkCreateFence(d->device, &fnci, NULL, &t->fence);
-    if (r != VK_SUCCESS) { aevk_fail(AEVK_ERR_OOM, "vkCreateFence failed (%d)", (int)r); goto fail; }
+    if (frames_rc != AEVK_OK) goto fail;
 
     return t;
 
@@ -1117,17 +1195,13 @@ void aevk_target_destroy(AevkTarget* t) {
     if (d && d->device) {
         AEVK_MUTEX_LOCK(&d->lock);
         d->da.vkDeviceWaitIdle(d->device);
-        if (t->fence)        d->da.vkDestroyFence(d->device, t->fence, NULL);
-        if (t->cmd)          d->da.vkFreeCommandBuffers(d->device, d->pool, 1, &t->cmd);
+        aevk_frames_free(t);
         if (t->vbuf_ptr)     d->da.vkUnmapMemory(d->device, t->vbuf_mem);
         if (t->vbuf)         d->da.vkDestroyBuffer(d->device, t->vbuf, NULL);
         if (t->vbuf_mem)     d->da.vkFreeMemory(d->device, t->vbuf_mem, NULL);
         if (t->ibuf_ptr)     d->da.vkUnmapMemory(d->device, t->ibuf_mem);
         if (t->ibuf)         d->da.vkDestroyBuffer(d->device, t->ibuf, NULL);
         if (t->ibuf_mem)     d->da.vkFreeMemory(d->device, t->ibuf_mem, NULL);
-        if (t->readback_ptr) d->da.vkUnmapMemory(d->device, t->readback_mem);
-        if (t->readback)     d->da.vkDestroyBuffer(d->device, t->readback, NULL);
-        if (t->readback_mem) d->da.vkFreeMemory(d->device, t->readback_mem, NULL);
         if (t->fb)           d->da.vkDestroyFramebuffer(d->device, t->fb, NULL);
         if (t->pass)         d->da.vkDestroyRenderPass(d->device, t->pass, NULL);
         if (t->view)         d->da.vkDestroyImageView(d->device, t->view, NULL);
@@ -1853,15 +1927,15 @@ int aevk_target_set_vertices(AevkTarget* t, const float* data, int count) {
     return AEVK_OK;
 }
 
-static int aevk_record(AevkTarget* t, AevkPipeline* p,
+static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p,
                        float r, float g, float b, float a) {
     AevkDevice* d = t->dev;
-    VkResult vr = d->da.vkResetCommandBuffer(t->cmd, 0);
+    VkResult vr = d->da.vkResetCommandBuffer(fr->cmd, 0);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkResetCommandBuffer failed (%d)", (int)vr);
 
     VkCommandBufferBeginInfo bi = {0};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    vr = d->da.vkBeginCommandBuffer(t->cmd, &bi);
+    vr = d->da.vkBeginCommandBuffer(fr->cmd, &bi);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkBeginCommandBuffer failed (%d)", (int)vr);
 
     /* Indexed by attachment, so the resolve slot is present but unused and the
@@ -1887,18 +1961,18 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
     rp.clearValueCount = t->clear_count ? t->clear_count : 1;
     rp.pClearValues = clears;
 
-    d->da.vkCmdBeginRenderPass(t->cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
+    d->da.vkCmdBeginRenderPass(fr->cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     if (p && t->vertex_count > 0) {
         VkViewport vp = {0};
         vp.width = (float)t->width;
         vp.height = (float)t->height;
         vp.maxDepth = 1.0f;
         VkRect2D sc = {{0, 0}, {(uint32_t)t->width, (uint32_t)t->height}};
-        d->da.vkCmdSetViewport(t->cmd, 0, 1, &vp);
-        d->da.vkCmdSetScissor(t->cmd, 0, 1, &sc);
-        d->da.vkCmdBindPipeline(t->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
+        d->da.vkCmdSetViewport(fr->cmd, 0, 1, &vp);
+        d->da.vkCmdSetScissor(fr->cmd, 0, 1, &sc);
+        d->da.vkCmdBindPipeline(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, p->pipeline);
         if (p->set) {
-            d->da.vkCmdBindDescriptorSets(t->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+            d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                           p->layout, 0, 1, &p->set, 0, NULL);
         }
         /* Push whatever the pipeline declared room for, so a caller who set
@@ -1908,20 +1982,20 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
             memset(block, 0, sizeof(block));
             uint32_t n = t->push_size < p->push_bytes ? t->push_size : p->push_bytes;
             if (n) memcpy(block, t->push_data, n);
-            d->da.vkCmdPushConstants(t->cmd, p->layout,
+            d->da.vkCmdPushConstants(fr->cmd, p->layout,
                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                      0, p->push_bytes, block);
         }
         VkDeviceSize off = 0;
-        d->da.vkCmdBindVertexBuffers(t->cmd, 0, 1, &t->vbuf, &off);
+        d->da.vkCmdBindVertexBuffers(fr->cmd, 0, 1, &t->vbuf, &off);
         if (t->index_count > 0) {
-            d->da.vkCmdBindIndexBuffer(t->cmd, t->ibuf, 0, VK_INDEX_TYPE_UINT32);
-            d->da.vkCmdDrawIndexed(t->cmd, (uint32_t)t->index_count, 1, 0, 0, 0);
+            d->da.vkCmdBindIndexBuffer(fr->cmd, t->ibuf, 0, VK_INDEX_TYPE_UINT32);
+            d->da.vkCmdDrawIndexed(fr->cmd, (uint32_t)t->index_count, 1, 0, 0, 0);
         } else {
-            d->da.vkCmdDraw(t->cmd, (uint32_t)t->vertex_count, 1, 0, 0);
+            d->da.vkCmdDraw(fr->cmd, (uint32_t)t->vertex_count, 1, 0, 0);
         }
     }
-    d->da.vkCmdEndRenderPass(t->cmd);
+    d->da.vkCmdEndRenderPass(fr->cmd);
 
     VkBufferImageCopy copy = {0};
     copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1929,19 +2003,19 @@ static int aevk_record(AevkTarget* t, AevkPipeline* p,
     copy.imageExtent.width = (uint32_t)t->width;
     copy.imageExtent.height = (uint32_t)t->height;
     copy.imageExtent.depth = 1;
-    d->da.vkCmdCopyImageToBuffer(t->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                 t->readback, 1, &copy);
+    d->da.vkCmdCopyImageToBuffer(fr->cmd, t->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                 fr->readback, 1, &copy);
 
-    vr = d->da.vkEndCommandBuffer(t->cmd);
+    vr = d->da.vkEndCommandBuffer(fr->cmd);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkEndCommandBuffer failed (%d)", (int)vr);
 
-    t->recorded = 1;
-    t->rec_pipe = p;
-    t->rec_vertices = t->vertex_count;
-    t->rec_clear[0] = r; t->rec_clear[1] = g; t->rec_clear[2] = b; t->rec_clear[3] = a;
-    t->rec_indices = t->index_count;
-    t->rec_push_size = t->push_size;
-    if (t->push_size) memcpy(t->rec_push, t->push_data, t->push_size);
+    fr->recorded = 1;
+    fr->rec_pipe = p;
+    fr->rec_vertices = t->vertex_count;
+    fr->rec_clear[0] = r; fr->rec_clear[1] = g; fr->rec_clear[2] = b; fr->rec_clear[3] = a;
+    fr->rec_indices = t->index_count;
+    fr->rec_push_size = t->push_size;
+    if (t->push_size) memcpy(fr->rec_push, t->push_data, t->push_size);
     return AEVK_OK;
 }
 
@@ -1966,43 +2040,161 @@ int aevk_draw(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a
 /* The device lock is held. Records into the target's command buffer, which
  * came from the device's pool, then submits to the device's queue: both need
  * the caller to synchronise, which is what the lock in aevk_draw is for. */
-static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
-                            float r, float g, float b, float a) {
+static const unsigned char* aevk_readable_pixels(AevkTarget* t);
+
+/* Geometry and push data are per TARGET, so a change invalidates the recorded
+ * commands in every slot, not just the next one. Missing a slot would redraw
+ * an old frame `frame_count` submissions later, which is exactly the kind of
+ * bug that only shows up once someone turns pipelining on. */
+static void aevk_invalidate_records(AevkTarget* t) {
+    for (int i = 0; i < t->frame_count; i++) t->frames[i].recorded = 0;
+}
+
+/* Waits for one slot's work, if any is outstanding, and marks it readable.
+ * The device lock is held. */
+static int aevk_wait_frame_locked(AevkTarget* t, int slot) {
     AevkDevice* d = t->dev;
-    int stale = !t->recorded || t->rec_pipe != p || t->rec_vertices != t->vertex_count ||
-                t->rec_clear[0] != r || t->rec_clear[1] != g ||
-                t->rec_clear[2] != b || t->rec_clear[3] != a ||
-                t->rec_indices != t->index_count ||
-                t->rec_push_size != t->push_size ||
-                (t->push_size && memcmp(t->rec_push, t->push_data, t->push_size) != 0);
+    AevkFrame* fr = &t->frames[slot];
+    if (!fr->submitted) return AEVK_OK;
+
+    VkResult vr = d->da.vkWaitForFences(d->device, 1, &fr->fence, VK_TRUE, t->timeout_ns);
+    if (vr == VK_TIMEOUT) {
+        return aevk_fail(AEVK_ERR_DEVICE_LOST, "GPU did not finish within %llu ms",
+                         (unsigned long long)(t->timeout_ns / 1000000ull));
+    }
+    if (vr != VK_SUCCESS) {
+        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
+                         "vkWaitForFences failed (%d)", (int)vr);
+    }
+    fr->submitted = 0;
+    t->last_done = slot;
+    return AEVK_OK;
+}
+
+/* Records into the next slot and hands it to the queue WITHOUT waiting. The
+ * device lock is held. Returns the slot, or a negative status.
+ *
+ * The slot is reused round-robin, so the wait here is for the work this slot
+ * held `frame_count` submissions ago, not for the one just queued: that is the
+ * whole point, and it is also what bounds the queue depth. */
+static int aevk_submit_locked(AevkTarget* t, AevkPipeline* p,
+                              float r, float g, float b, float a) {
+    AevkDevice* d = t->dev;
+    int slot = t->next_frame;
+
+    int rc = aevk_wait_frame_locked(t, slot);
+    if (rc != AEVK_OK) return rc;
+
+    AevkFrame* fr = &t->frames[slot];
+    int stale = !fr->recorded || fr->rec_pipe != p || fr->rec_vertices != t->vertex_count ||
+                fr->rec_clear[0] != r || fr->rec_clear[1] != g ||
+                fr->rec_clear[2] != b || fr->rec_clear[3] != a ||
+                fr->rec_indices != t->index_count ||
+                fr->rec_push_size != t->push_size ||
+                (t->push_size && memcmp(fr->rec_push, t->push_data, t->push_size) != 0);
     if (stale) {
-        int rc = aevk_record(t, p, r, g, b, a);
-        if (rc != AEVK_OK) { t->recorded = 0; return rc; }
+        rc = aevk_record(t, fr, p, r, g, b, a);
+        if (rc != AEVK_OK) { fr->recorded = 0; return rc; }
     }
 
-    VkResult vr = d->da.vkResetFences(d->device, 1, &t->fence);
+    VkResult vr = d->da.vkResetFences(d->device, 1, &fr->fence);
     if (vr != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkResetFences failed (%d)", (int)vr);
 
     VkSubmitInfo si = {0};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &t->cmd;
-    vr = d->da.vkQueueSubmit(d->queue, 1, &si, t->fence);
+    si.pCommandBuffers = &fr->cmd;
+    vr = d->da.vkQueueSubmit(d->queue, 1, &si, fr->fence);
     if (vr != VK_SUCCESS) {
         return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
                          "vkQueueSubmit failed (%d)", (int)vr);
     }
+    fr->submitted = 1;
+    t->last_submitted = slot;
+    t->next_frame = (slot + 1) % t->frame_count;
+    return slot;
+}
 
-    /* Five seconds is not a frame budget, it is a hang detector: a correct
-     * driver finishes this work in microseconds, so anything near it means the
-     * device is wedged and returning beats blocking forever. */
-    vr = d->da.vkWaitForFences(d->device, 1, &t->fence, VK_TRUE, 5000000000ull);
-    if (vr == VK_TIMEOUT) return aevk_fail(AEVK_ERR_DEVICE_LOST, "GPU did not finish within 5s");
-    if (vr != VK_SUCCESS) {
-        return aevk_fail(vr == VK_ERROR_DEVICE_LOST ? AEVK_ERR_DEVICE_LOST : AEVK_ERR_OOM,
-                         "vkWaitForFences failed (%d)", (int)vr);
+static int aevk_draw_locked(AevkTarget* t, AevkPipeline* p,
+                            float r, float g, float b, float a) {
+    int slot = aevk_submit_locked(t, p, r, g, b, a);
+    if (slot < 0) return slot;
+    return aevk_wait_frame_locked(t, slot);
+}
+
+/* Frames in flight. 1 is the synchronous shape and the default: draw()
+ * records, submits and waits, which is what makes the phase 1 test
+ * deterministic. Above 1 the caller can submit() several frames before
+ * waiting, and the CPU records frame N+1 while the GPU runs frame N.
+ *
+ * Each slot costs its own readback buffer, width*height*4, which is why this
+ * is opt-in rather than a default of 2 or 3. */
+int aevk_target_set_frames(AevkTarget* t, int count) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (count < 1 || count > 8) {
+        return aevk_fail(AEVK_ERR_ARG, "frames in flight must be 1..8 (got %d)", count);
     }
+    if (count == t->frame_count) return AEVK_OK;
+
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    d->da.vkDeviceWaitIdle(d->device);
+    aevk_frames_free(t);
+    int rc = aevk_frames_alloc(t, count);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
+}
+
+int aevk_target_frames(const AevkTarget* t) { return t ? t->frame_count : 0; }
+
+/* The fence wait, in milliseconds. The default of five seconds is a hang
+ * detector rather than a frame budget: a correct driver finishes offscreen
+ * work in microseconds, so anything near it means the device is wedged.
+ * A caller rendering something genuinely heavy can raise it, and one that
+ * would rather fail fast can lower it. */
+int aevk_target_set_timeout_ms(AevkTarget* t, int ms) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (ms <= 0) return aevk_fail(AEVK_ERR_ARG, "timeout must be positive (got %d)", ms);
+    t->timeout_ns = (uint64_t)ms * 1000000ull;
     return AEVK_OK;
+}
+
+/* Records and submits without waiting. Returns the slot it used, or a
+ * negative status. Blocks only when every slot is still in flight, which is
+ * what bounds the queue depth to frame_count. */
+int aevk_submit(AevkTarget* t, AevkPipeline* p, float r, float g, float b, float a) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    if (p && p->dev != t->dev) return aevk_fail(AEVK_ERR_ARG, "pipeline belongs to another device");
+    if (p && t->vertex_count > 0 && !t->vbuf) {
+        return aevk_fail(AEVK_ERR_ARG, "vertices were never uploaded");
+    }
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int slot = aevk_submit_locked(t, p, r, g, b, a);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return slot;
+}
+
+/* Waits for everything outstanding. After this every submitted frame has
+ * completed and the most recent one is what the readers see. */
+int aevk_wait_all(AevkTarget* t) {
+    aevk_clear_error();
+    if (!t) return aevk_fail(AEVK_ERR_ARG, "target is null");
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    int rc = AEVK_OK;
+    /* Oldest first, so last_done ends on the most recently submitted slot
+     * rather than on whichever happened to be waited on last. */
+    for (int i = 0; i < t->frame_count; i++) {
+        int slot = (t->next_frame + i) % t->frame_count;
+        int one = aevk_wait_frame_locked(t, slot);
+        if (one != AEVK_OK) rc = one;
+    }
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    return rc;
 }
 
 int aevk_read_rgba(AevkTarget* t, void* out, size_t out_len) {
@@ -2012,8 +2204,14 @@ int aevk_read_rgba(AevkTarget* t, void* out, size_t out_len) {
         return aevk_fail(AEVK_ERR_ARG, "destination holds %zu bytes, the image needs %zu",
                          out_len, (size_t)t->readback_size);
     }
-    if (!t->readback_ptr) return aevk_fail(AEVK_ERR_ARG, "target has no readback mapping");
-    memcpy(out, t->readback_ptr, (size_t)t->readback_size);
+    if (!t->frames) return aevk_fail(AEVK_ERR_ARG, "target has no readback mapping");
+
+    /* Read the slot that finished most recently, waiting for it first: with
+     * frames in flight the caller may not have waited, and reading a buffer
+     * the GPU is still writing would hand back a torn frame. */
+    const unsigned char* src = aevk_readable_pixels(t);
+    if (!src) return aevk_fail(AEVK_ERR_ARG, "target has no readback mapping");
+    memcpy(out, src, (size_t)t->readback_size);
     return AEVK_OK;
 }
 
@@ -2035,6 +2233,19 @@ void  aevk_ae_device_destroy(void* d)    { aevk_device_destroy((AevkDevice*)d); 
 void* aevk_ae_target_create(void* d, int w, int h) {
     return (void*)aevk_target_create((AevkDevice*)d, w, h);
 }
+
+int aevk_ae_target_set_frames(void* t, int count) {
+    return aevk_target_set_frames((AevkTarget*)t, count);
+}
+int aevk_ae_target_frames(void* t) { return aevk_target_frames((AevkTarget*)t); }
+int aevk_ae_target_set_timeout_ms(void* t, int ms) {
+    return aevk_target_set_timeout_ms((AevkTarget*)t, ms);
+}
+int aevk_ae_submit(void* t, void* p, double r, double g, double b, double a) {
+    return aevk_submit((AevkTarget*)t, (AevkPipeline*)p,
+                       (float)r, (float)g, (float)b, (float)a);
+}
+int aevk_ae_wait_all(void* t) { return aevk_wait_all((AevkTarget*)t); }
 
 void* aevk_ae_target_create_ex(void* d, int w, int h, int want_depth, int samples) {
     return (void*)aevk_target_create_ex((AevkDevice*)d, w, h, want_depth, samples);
@@ -2215,7 +2426,7 @@ static int aevk_verts_reserve_impl(AevkTarget* t, int count, int fpv) {
         if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
         t->vbuf_capacity = count;
     }
-    if (t->vertex_count != count || t->vertex_floats != fpv) t->recorded = 0;
+    if (t->vertex_count != count || t->vertex_floats != fpv) aevk_invalidate_records(t);
     t->vertex_count = count;
     t->vertex_floats = fpv;
     return AEVK_OK;
@@ -2241,7 +2452,7 @@ int aevk_ae_verts_set_float(void* tp, int float_index, double value) {
                          float_index, total - 1);
     }
     ((float*)t->vbuf_ptr)[float_index] = (float)value;
-    t->recorded = 0;
+    aevk_invalidate_records(t);
     return AEVK_OK;
 }
 
@@ -2275,7 +2486,7 @@ int aevk_ae_indices_reserve(void* tp, int count) {
         if (r != VK_SUCCESS) return aevk_fail(AEVK_ERR_OOM, "vkMapMemory failed (%d)", (int)r);
         t->ibuf_capacity = count;
     }
-    if (t->index_count != count) t->recorded = 0;
+    if (t->index_count != count) aevk_invalidate_records(t);
     t->index_count = count;
     return AEVK_OK;
 }
@@ -2293,7 +2504,7 @@ int aevk_ae_indices_set(void* tp, int index, int value) {
                          value, t->vertex_count);
     }
     ((uint32_t*)t->ibuf_ptr)[index] = (uint32_t)value;
-    t->recorded = 0;
+    aevk_invalidate_records(t);
     return AEVK_OK;
 }
 
@@ -2320,19 +2531,39 @@ int aevk_ae_copy_rgba(void* t, void* dest, int dest_len) {
     return aevk_read_rgba((AevkTarget*)t, dest, (size_t)dest_len);
 }
 
+/* The pixels of the frame that finished most recently, waiting for it first.
+ * Every reader goes through this: with frames in flight the caller may not
+ * have waited, and reading a buffer the GPU is still writing hands back a torn
+ * frame. NULL when the target has no mapping or the wait failed. */
+static const unsigned char* aevk_readable_pixels(AevkTarget* t) {
+    if (!t || !t->frames) return NULL;
+    AevkDevice* d = t->dev;
+    AEVK_MUTEX_LOCK(&d->lock);
+    /* The NEWEST frame, not the last one that happened to be waited on: a
+     * caller reading after three submits means "show me what I just drew".
+     * Earlier frames may still be in flight, and are waited on when their slot
+     * comes round again or when the target is destroyed. */
+    int slot = t->last_submitted >= 0 ? t->last_submitted : t->last_done;
+    int rc = aevk_wait_frame_locked(t, slot);
+    AEVK_MUTEX_UNLOCK(&d->lock);
+    if (rc != AEVK_OK) return NULL;
+    return (const unsigned char*)t->frames[slot].readback_ptr;
+}
+
 /* Packed 0xRRGGBBAA for one pixel, or -1 when the coordinates are outside the
  * image. Reads the mapped buffer directly, so a test can sample without
  * copying the whole frame. */
 int aevk_ae_pixel(void* tp, int x, int y) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
-    if (!t || !t->readback_ptr) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
+    if (!t) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
     if (x < 0 || y < 0 || x >= t->width || y >= t->height) {
         aevk_fail(AEVK_ERR_ARG, "pixel %d,%d is outside %dx%d", x, y, t->width, t->height);
         return -1;
     }
-    const unsigned char* px =
-        (const unsigned char*)t->readback_ptr + ((size_t)y * (size_t)t->width + (size_t)x) * 4u;
+    const unsigned char* base = aevk_readable_pixels(t);
+    if (!base) { aevk_fail(AEVK_ERR_ARG, "target has no readback"); return -1; }
+    const unsigned char* px = base + ((size_t)y * (size_t)t->width + (size_t)x) * 4u;
     return (int)(((unsigned)px[0] << 24) | ((unsigned)px[1] << 16) |
                  ((unsigned)px[2] << 8)  |  (unsigned)px[3]);
 }
@@ -2344,7 +2575,8 @@ int aevk_ae_save_ppm(void* tp, const char* path) {
     AevkTarget* t = (AevkTarget*)tp;
     aevk_clear_error();
     if (!t || !path) return aevk_fail(AEVK_ERR_ARG, "target or path is null");
-    if (!t->readback_ptr) return aevk_fail(AEVK_ERR_ARG, "target has no readback");
+    const unsigned char* src = aevk_readable_pixels(t);
+    if (!src) return aevk_fail(AEVK_ERR_ARG, "target has no readback");
 
     FILE* f = fopen(path, "wb");
     if (!f) return aevk_fail(AEVK_ERR_ARG, "cannot open %s for writing", path);
@@ -2353,7 +2585,6 @@ int aevk_ae_save_ppm(void* tp, const char* path) {
         return aevk_fail(AEVK_ERR_ARG, "cannot write the PPM header to %s", path);
     }
 
-    const unsigned char* src = (const unsigned char*)t->readback_ptr;
     size_t pixels = (size_t)t->width * (size_t)t->height;
     for (size_t i = 0; i < pixels; i++) {
         if (fwrite(src + i * 4u, 1, 3, f) != 3) {
