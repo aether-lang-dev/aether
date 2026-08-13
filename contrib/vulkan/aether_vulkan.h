@@ -36,6 +36,7 @@ typedef struct AevkPipeline AevkPipeline;
 typedef struct AevkLayout AevkLayout;
 typedef struct AevkBindings AevkBindings;
 typedef struct AevkTexture AevkTexture;
+typedef struct AevkMaterial AevkMaterial;
 
 /* 1 when a loader AND at least one physical device are present. Cheap after
  * the first call: the probe result is cached, including the negative. */
@@ -132,8 +133,54 @@ int           aevk_bindings_texture(AevkBindings* b, int binding);
  * A texture must be uploaded before it is bound: sampling an image that was
  * never given pixels is undefined, so binding one is refused. */
 AevkTexture* aevk_texture_create(AevkDevice* dev, int width, int height);
+
+/* As above, with a mip chain and sampler choices. `mipmapped` builds a full
+ * chain on upload, so a minified texture stops aliasing; it needs the device
+ * to support linear blitting of R8G8B8A8_UNORM and is refused otherwise rather
+ * than producing an empty chain. `linear_filter` selects LINEAR over NEAREST
+ * for magnification, minification and between levels; `repeat` selects REPEAT
+ * over CLAMP_TO_EDGE. */
+AevkTexture* aevk_texture_create_ex(AevkDevice* dev, int width, int height,
+                                    int mipmapped, int linear_filter, int repeat);
+
+/* Mip levels the texture carries: 1 when it was not built mipmapped. */
+int aevk_texture_mip_levels(const AevkTexture* tex);
 void         aevk_texture_destroy(AevkTexture* tex);
 int          aevk_texture_upload(AevkTexture* tex, const void* rgba, size_t len);
+
+/* --- materials -------------------------------------------------------------- */
+
+/* A descriptor set plus the uniform buffers written into it. Several per
+ * pipeline, so one pipeline draws several objects with different textures and
+ * constants in a frame rather than needing a pipeline per material, which
+ * would duplicate the shader modules for nothing.
+ *
+ * Descriptor pools grow a block at a time, so there is no fixed ceiling on how
+ * many a scene may have. Destroy materials before the pipeline that made them:
+ * the set belongs to a pool the pipeline owns. */
+AevkMaterial* aevk_material_create(AevkPipeline* p);
+void          aevk_material_destroy(AevkMaterial* m);
+int           aevk_material_set_uniform(AevkMaterial* m, int binding,
+                                        const void* data, size_t len);
+int           aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex);
+
+/* Draw or submit with a specific material. Passing NULL uses the pipeline's
+ * default, which is what `aevk_draw` and `aevk_submit` do. */
+int aevk_draw_material(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
+                       float r, float g, float b, float a);
+int aevk_submit_material(AevkTarget* t, AevkPipeline* p, AevkMaterial* mat,
+                         float r, float g, float b, float a);
+
+/* Several draws inside one frame, each with its own material. `first` and
+ * `count` address indices when the target has an index buffer and vertices
+ * otherwise. An empty batch, the default, draws all the geometry once.
+ *
+ * A material referenced by a batch must outlive the draws that use it:
+ * destroying one without resetting the batch leaves a dangling reference,
+ * the same contract Vulkan gives for a resource bound to a descriptor set. */
+int aevk_batch_reset(AevkTarget* t);
+int aevk_batch_add(AevkTarget* t, AevkMaterial* mat, int first, int count);
+int aevk_batch_count(const AevkTarget* t);
 
 /* Writes a uniform buffer, creating and binding it on first use, then
  * copying on every call. Host-coherent, so a per-frame update is a memcpy
