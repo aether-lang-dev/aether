@@ -78,6 +78,14 @@ Two consequences worth knowing:
 exception is `<lib_dir>/contrib`, added automatically so the veneer archives
 `make contrib` builds resolve without configuration.
 
+The `// aether-link:` comment also lists libraries for std modules backed by
+native code (`std.http` names `-lssl -lcrypto -lnghttp2`). Those are there for
+downstream C builds; `ae build` skips them, because it already passes the same
+libraries from its own pkg-config detection — and passes *nothing* when the
+library was not found, so `std.http` still links on a box without libnghttp2
+and the h2 surface falls back to its "unavailable" stub. A module's `@link` is
+for dependencies the toolchain does not probe for.
+
 ### `extra_sources` vs `--extra`
 
 Both add C files to the build, they are additive when both are present.

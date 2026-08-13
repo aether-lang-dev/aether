@@ -38,6 +38,20 @@ version number before tagging the release.
   dev-layout path `host_bridge_a_path()` already searches, so the veneer
   archives `make contrib` builds resolve without configuration.
 
+  Only module-declared flags are taken. The header also carries rows from
+  codegen's static `g_link_reqs` table (`std.http` → `-lssl -lcrypto
+  -lnghttp2`, and so on), which exist for downstream C builds that have no
+  other way to learn them. `ae` already passes those from `AETHER_*_LIBS`,
+  which the Makefile fills in from pkg-config and leaves **empty when the
+  library is absent** — and that emptiness is load-bearing: on a box without
+  libnghttp2, `std.http` links without it and the h2 surface degrades to its
+  "unavailable" stub. Taking the static row would put `-lnghttp2` back
+  unconditionally and fail with `cannot find -lnghttp2`, turning a graceful
+  degradation into a build error on exactly the machines the capability probe
+  exists to serve. So tokens governed by a capability macro are dropped; a
+  module's own `@link` names something the toolchain does not probe for, which
+  is why the module had to declare it, so it survives the filter.
+
   A workspace with no `link_flags` and no `extra_sources` now builds and runs
   against contrib.sqlite on the strength of `@link` alone, while the same
   source with the symbol unset produces a binary that does not link libsqlite3

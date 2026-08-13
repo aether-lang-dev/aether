@@ -146,4 +146,30 @@ if [ -n "$deps_on" ]; then
     fi
 fi
 
-echo "  [PASS] link_directive_build: 2 cases"
+# -- 3. Toolchain-managed tokens must NOT be re-added from the header --------
+# The header also carries codegen's static g_link_reqs rows (std.http ->
+# "-lssl -lcrypto -lnghttp2"). `ae` supplies those itself from AETHER_*_LIBS,
+# which are EMPTY when the library was not detected — so re-adding them from
+# the header would emit `-lnghttp2` on a box that has none and fail the link.
+# Asserted by counting occurrences on the link command: exactly one (from the
+# capability macro), never two.
+HTTP_WORK="$TMPDIR/httpwork"
+mkdir -p "$HTTP_WORK"
+cat > "$HTTP_WORK/h.ae" <<'EOF'
+import std.http
+main() { println("http linked") }
+EOF
+
+if ( cd "$HTTP_WORK" && "$ROOT/build/ae" build h.ae -o "$TMPDIR/h" \
+        --verbose >"$TMPDIR/http.log" 2>&1 ); then
+    n=$(grep -o -- '-lnghttp2' "$TMPDIR/http.log" | wc -l | tr -d ' ')
+    # 0 is correct on a toolchain built without libnghttp2; 2+ means the
+    # header's copy was re-added on top of the capability macro's.
+    if [ "$n" -gt 1 ]; then
+        echo "  [FAIL] link_directive_build: -lnghttp2 appears $n times;" \
+             "a toolchain-managed token was re-added from the aether-link header"
+        exit 1
+    fi
+fi
+
+echo "  [PASS] link_directive_build: 3 cases"

@@ -1409,6 +1409,36 @@ static const char* get_link_flags(void) {
 // Consumers keep override authority: these tokens are placed BEFORE
 // aether.toml's link_flags on the command line. `-L` search paths stay the
 // consumer's job — those are site-specific in a way a module cannot know.
+//
+// The header carries two kinds of token and only one of them is ours to use.
+// Besides module-declared `@link`, emit_link_requirements() also unions rows
+// from its static g_link_reqs table (std.http -> "-lssl -lcrypto -lnghttp2",
+// std.regex -> "-lpcre2-8", ...). Those are for downstream C builds, which
+// have no other way to learn them. `ae` must NOT take them: it already passes
+// the same libraries from AETHER_*_LIBS, which the Makefile fills in from
+// pkg-config at `ae` build time and leaves EMPTY when the library is absent.
+// That emptiness is load-bearing — on a box without libnghttp2, std.http links
+// without it and the h2 surface degrades to its "unavailable" stub. Taking the
+// static row instead would put `-lnghttp2` back unconditionally and fail the
+// link with `cannot find -lnghttp2`, turning a graceful degradation into a
+// build error on exactly the machines the capability probe exists to serve.
+//
+// So: drop any token already governed by a capability macro, and keep the
+// rest. A module's own `@link` names something the toolchain does not probe
+// for (that is why the module had to declare it), so it survives the filter.
+static bool token_is_toolchain_managed(const char* tok, size_t len) {
+    // Libraries `ae` supplies itself from AETHER_*_LIBS, keyed on the -l name.
+    static const char* managed[] = {
+        "-lssl", "-lcrypto", "-lnghttp2", "-lpcre2-8", "-lz",
+        "-lpthread", "-ldl", "-lm",
+    };
+    for (size_t i = 0; i < sizeof(managed) / sizeof(managed[0]); i++) {
+        if (strlen(managed[i]) == len && strncmp(managed[i], tok, len) == 0)
+            return true;
+    }
+    return false;
+}
+
 static const char* get_aether_link_flags(const char* c_file) {
     static char flags[1024] = "";
     flags[0] = '\0';
@@ -1430,9 +1460,23 @@ static const char* get_aether_link_flags(const char* c_file) {
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
-        if (n >= sizeof(flags)) n = sizeof(flags) - 1;
-        memcpy(flags, p, n);
-        flags[n] = '\0';
+        // Copy token by token, dropping the ones `ae` already supplies from
+        // AETHER_*_LIBS (see token_is_toolchain_managed above).
+        size_t out = 0;
+        size_t i = 0;
+        while (i < n) {
+            while (i < n && p[i] == ' ') i++;
+            if (i >= n) break;
+            size_t start = i;
+            while (i < n && p[i] != ' ') i++;
+            size_t tlen = i - start;
+            if (token_is_toolchain_managed(p + start, tlen)) continue;
+            if (out + tlen + 2 >= sizeof(flags)) break;
+            if (out) flags[out++] = ' ';
+            memcpy(flags + out, p + start, tlen);
+            out += tlen;
+        }
+        flags[out] = '\0';
         break;
     }
 
