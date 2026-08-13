@@ -2050,9 +2050,22 @@ void build_gcc_cmd(char* cmd, size_t size,
         // -L<lib_dir>/contrib so `@link("-laether_sqlite ...")` resolves the
         // veneer archive `make contrib` builds there. Same dev-layout path
         // host_bridge_a_path() already searches for host bridges.
+        //
+        // Emitted ONLY when the directory exists. GNU ld ignores a missing -L
+        // silently, but macOS ld warns ("search path ... not found"), and that
+        // warning reaches stdout and corrupts every test that compares exact
+        // program output. `make contrib` is optional, so on a tree that never
+        // ran it the path is legitimately absent.
+        char contrib_L[1100];
+        char contrib_dir[1050];
+        snprintf(contrib_dir, sizeof(contrib_dir), "%s/contrib", lib_dir);
+        if (dir_exists(contrib_dir))
+            snprintf(contrib_L, sizeof(contrib_L), "-L\"%s\" ", contrib_dir);
+        else
+            contrib_L[0] = '\0';
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s -L\"%s\" -L\"%s/contrib\" -laether -o \"%s\" %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, lib_dir, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s \"%s\" %s -L\"%s\" %s-laether -o \"%s\" %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, contrib_L, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -2247,9 +2260,19 @@ void build_gcc_cmd(char* cmd, size_t size,
         // libaether.a (aether_shared_map_*, etc.), so they must appear
         // BEFORE -laether on the link line — gcc resolves undefined
         // references left-to-right through static archives.
+        // Emitted ONLY when the directory exists — macOS ld warns on a missing
+        // -L and that warning corrupts exact-output test comparisons. See the
+        // Windows branch above for the full rationale.
+        char contrib_L[1100];
+        char contrib_dir[1050];
+        snprintf(contrib_dir, sizeof(contrib_dir), "%s/contrib", lib_dir);
+        if (dir_exists(contrib_dir))
+            snprintf(contrib_L, sizeof(contrib_L), "-L%s ", contrib_dir);
+        else
+            contrib_L[0] = '\0';
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s -rdynamic -L%s -L%s/contrib %s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, lib_dir, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "

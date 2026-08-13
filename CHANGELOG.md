@@ -36,7 +36,10 @@ version number before tagging the release.
   search paths stay the consumer's job, being site-specific in a way a module
   cannot know — with one exception: `<lib_dir>/contrib` is added, the same
   dev-layout path `host_bridge_a_path()` already searches, so the veneer
-  archives `make contrib` builds resolve without configuration.
+  archives `make contrib` builds resolve without configuration. It is emitted
+  only when that directory exists: GNU `ld` ignores a missing `-L` silently but
+  macOS `ld` warns, and the warning reaches stdout and corrupts every test that
+  compares exact program output.
 
   Only module-declared flags are taken. The header also carries rows from
   codegen's static `g_link_reqs` table (`std.http` → `-lssl -lcrypto

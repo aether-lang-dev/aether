@@ -172,4 +172,28 @@ if ( cd "$HTTP_WORK" && "$ROOT/build/ae" build h.ae -o "$TMPDIR/h" \
     fi
 fi
 
-echo "  [PASS] link_directive_build: 3 cases"
+# -- 4. No linker noise on stdout -------------------------------------------
+# The contrib -L is emitted only when the directory exists, because macOS ld
+# warns on a missing search path ("ld: warning: search path ... not found")
+# and that warning lands in program output, breaking every test that compares
+# exact strings. A build of a trivial program must produce clean output.
+PLAIN="$TMPDIR/plain"
+mkdir -p "$PLAIN"
+printf 'main() { println("clean") }\n' > "$PLAIN/p.ae"
+
+if ( cd "$PLAIN" && "$ROOT/build/ae" build p.ae -o "$TMPDIR/p" \
+        >"$TMPDIR/plain.log" 2>&1 ) && [ -x "$TMPDIR/p" ]; then
+    out=$("$TMPDIR/p" 2>&1)
+    if [ "$out" != "clean" ]; then
+        echo "  [FAIL] link_directive_build: program output polluted by the linker"
+        printf '%s\n' "$out" | sed 's/^/    /' | head -5
+        exit 1
+    fi
+    if grep -qi "search path.*not found" "$TMPDIR/plain.log"; then
+        echo "  [FAIL] link_directive_build: linker warned about a missing -L path"
+        grep -i "search path" "$TMPDIR/plain.log" | sed 's/^/    /' | head -3
+        exit 1
+    fi
+fi
+
+echo "  [PASS] link_directive_build: 4 cases"
