@@ -33,25 +33,55 @@ version number before tagging the release.
   `target_set_timeout_ms` replaces the hardcoded five seconds, which was a hang
   detector rather than a frame budget.
 
-## [0.530.0]
-
 ### Fixed
 
-- **Freeing an interpolated string leaked it once it crossed a boundary.** An
-  Aether `string` is either a refcounted AetherString or a plain malloc'd
-  payload, and the runtime cannot free the second: given a bare `char*` it
-  cannot tell a heap payload from a static literal, so `string.free` no-ops.
-  The compiler's per-variable ownership flag covered the direct case, but a
-  parameter carries no flag, so handing an interpolation to a helper that frees
-  what it is given leaked one block per call.
+- **`ae build` ignored `@link`, forcing duplication that `-D` could silently
+  invalidate** (#1549). A module declares its native dependencies with
+  `@link("-laether_sqlite -lsqlite3")`, and codegen unions those across the
+  resolved import closure into the `// aether-link:` header on the generated C
+  (#1259). `ae build` never read it back, so consumers had to restate the same
+  `-l` flags in `aether.toml` — and with the archive on the search path but the
+  flags only in `@link`, the build still failed with `undefined reference to
+  sqlite_open_raw`.
 
-  Interpolation now produces the refcounted shape, which the runtime can free
-  wherever the value ends up. The payload lives in the same allocation as the
-  header, recognised on release by position rather than by a flag, so it costs
-  a larger `malloc` rather than a second one: measured at +1.6% on a loop that
-  does nothing but interpolate two million strings, inside that benchmark's own
-  run-to-run spread. An earlier version that allocated the header separately
-  cost 16%, which is why it does not.
+  Conditional compilation is what made this worth fixing rather than
+  documenting. The link requirement is derived from the AST, so it is
+  transitive (a module three imports deep contributes its own deps) and it
+  tracks `when defined`: an import inside a losing region is gone before
+  codegen, so its `@link` never appears. `aether.toml` is static, so a
+  hand-written `-lsqlite3` is passed on *every* build including the ones that
+  dropped the import — reintroducing exactly the coupling `when defined`
+  removes, from a second source of truth that cannot track the code.
+
+  `ae build` now reads the header back and appends the tokens **before**
+  `aether.toml`'s `link_flags`, so consumers keep override authority. `-L`
+  search paths stay the consumer's job, being site-specific in a way a module
+  cannot know — with one exception: `<lib_dir>/contrib` is added, the same
+  dev-layout path `host_bridge_a_path()` already searches, so the veneer
+  archives `make contrib` builds resolve without configuration. It is emitted
+  only when that directory exists: GNU `ld` ignores a missing `-L` silently but
+  macOS `ld` warns, and the warning reaches stdout and corrupts every test that
+  compares exact program output.
+
+  Only module-declared flags are taken. The header also carries rows from
+  codegen's static `g_link_reqs` table (`std.http` → `-lssl -lcrypto
+  -lnghttp2`, and so on), which exist for downstream C builds that have no
+  other way to learn them. `ae` already passes those from `AETHER_*_LIBS`,
+  which the Makefile fills in from pkg-config and leaves **empty when the
+  library is absent** — and that emptiness is load-bearing: on a box without
+  libnghttp2, `std.http` links without it and the h2 surface degrades to its
+  "unavailable" stub. Taking the static row would put `-lnghttp2` back
+  unconditionally and fail with `cannot find -lnghttp2`, turning a graceful
+  degradation into a build error on exactly the machines the capability probe
+  exists to serve. So tokens governed by a capability macro are dropped; a
+  module's own `@link` names something the toolchain does not probe for, which
+  is why the module had to declare it, so it survives the filter.
+
+  A workspace with no `link_flags` and no `extra_sources` now builds and runs
+  against contrib.sqlite on the strength of `@link` alone, while the same
+  source with the symbol unset produces a binary that does not link libsqlite3
+  at all — asserted with `ldd`, since a binary that merely does not *call*
+  sqlite is not the same as one that does not *link* it.
 
 ## [0.531.0]
 
@@ -74,6 +104,26 @@ version number before tagging the release.
   depth attachment and requires it to disagree. The MSAA case counts pixels
   that are neither background nor a saturated primary, 0 at one sample against
   105 at four.
+
+## [0.530.0]
+
+### Fixed
+
+- **Freeing an interpolated string leaked it once it crossed a boundary.** An
+  Aether `string` is either a refcounted AetherString or a plain malloc'd
+  payload, and the runtime cannot free the second: given a bare `char*` it
+  cannot tell a heap payload from a static literal, so `string.free` no-ops.
+  The compiler's per-variable ownership flag covered the direct case, but a
+  parameter carries no flag, so handing an interpolation to a helper that frees
+  what it is given leaked one block per call.
+
+  Interpolation now produces the refcounted shape, which the runtime can free
+  wherever the value ends up. The payload lives in the same allocation as the
+  header, recognised on release by position rather than by a flag, so it costs
+  a larger `malloc` rather than a second one: measured at +1.6% on a loop that
+  does nothing but interpolate two million strings, inside that benchmark's own
+  run-to-run spread. An earlier version that allocated the header separately
+  cost 16%, which is why it does not.
 
 ## [0.529.0]
 

@@ -500,9 +500,29 @@ every declared flag (first-seen order, deduplicated) into the
 downstream C builds read to link without undefined-reference archaeology.
 Declaring is enough; there is no central registry to edit. Token order
 within one `@link` is preserved, which matters for single-pass linkers
-(veneer archive before the library it references). For an ordinary
-`ae build` the consumer still supplies real link flags via `aether.toml`
-(`link_flags = ...`); `@link` feeds only the whole-program comment.
+(veneer archive before the library it references).
+
+`ae build` reads that comment back and puts the tokens on its own link
+command (#1549), so a consumer does not restate them in `aether.toml`. They
+are placed *before* `link_flags`, which therefore still wins. `-L` search
+paths remain the consumer's job — those are site-specific in a way a module
+cannot know — except for `<lib_dir>/contrib`, which is added automatically so
+the veneer archives `make contrib` builds resolve without configuration.
+
+**The link line is derived from the AST, which makes it transitive and
+`-D`-sensitive.** Both properties matter and neither is obvious:
+
+```
+-D NAME → `when` region kept or dropped → import in or out of the closure
+        → @link visible or not → // aether-link: → the link command
+```
+
+Transitive: a program that never names `contrib.sqlite` still links it when
+something it imports does, at any depth. `-D`-sensitive: an `import` inside a
+losing `when defined(...)` region is gone before codegen, so its `@link`
+contributes nothing and the library is absent from the binary entirely — not
+merely uncalled. That is the half a static `link_flags` cannot express, since
+it is passed on every build regardless of which regions survived.
 
 **What's supported:**
 - Functions (with type inference from call sites)

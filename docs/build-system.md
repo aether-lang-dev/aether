@@ -49,6 +49,43 @@ path = "src/main.ae"
 extra_sources = ["src/ffi_helpers.c", "src/renderer.c"]
 ```
 
+### Link flags you do not have to write
+
+`link_flags` is for libraries *your* program needs. A library that a *module*
+needs is declared by that module, with `@link` at the top of its `module.ae`:
+
+```aether
+@link("-laether_sqlite -lsqlite3")
+```
+
+Codegen unions those declarations across the resolved import closure into a
+`// aether-link:` comment on the generated C, and `ae build` puts them on the
+link command (#1549). So `import contrib.sqlite` links libsqlite3 without any
+`aether.toml` entry, and it works transitively — a module three imports deep
+contributes its own dependencies.
+
+Two consequences worth knowing:
+
+- **Your `link_flags` still win.** Module flags are placed before them on the
+  command line, so anything you specify takes precedence.
+- **A `-D`-dropped import drops its libraries too.** Because the flags come
+  from the AST, an `import` inside a losing `when defined(...)` region never
+  contributes them — the library is absent from the binary, not merely
+  unused. Restating it in `link_flags` defeats this, since that is static and
+  applies to every build. Prefer `@link` for a module's own dependencies.
+
+`-L` search paths remain yours to supply; they are site-specific. The one
+exception is `<lib_dir>/contrib`, added automatically so the veneer archives
+`make contrib` builds resolve without configuration.
+
+The `// aether-link:` comment also lists libraries for std modules backed by
+native code (`std.http` names `-lssl -lcrypto -lnghttp2`). Those are there for
+downstream C builds; `ae build` skips them, because it already passes the same
+libraries from its own pkg-config detection — and passes *nothing* when the
+library was not found, so `std.http` still links on a box without libnghttp2
+and the h2 surface falls back to its "unavailable" stub. A module's `@link` is
+for dependencies the toolchain does not probe for.
+
 ### `extra_sources` vs `--extra`
 
 Both add C files to the build, they are additive when both are present.

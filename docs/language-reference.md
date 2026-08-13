@@ -2932,6 +2932,24 @@ in the binary: `nm` on a build without `TEST_SERVER` finds no `driver_port`.
 That is the difference between this and wrapping code in a runtime `if`, which
 still compiles and links every line of the subsystem you meant to leave out.
 
+**A dropped `import` takes its native dependencies with it.** The effect is
+not limited to your own symbols. A module declares its native libraries with
+`@link`, and those flags reach the linker only when the module is in the
+resolved import closure — so guarding the `import` removes the C library too,
+transitively and at any depth:
+
+```aether
+when defined(WITH_SQLITE) {
+    import contrib.sqlite
+    ...
+}
+```
+
+Built without `WITH_SQLITE`, the binary does not link `libsqlite3` at all —
+`ldd` does not list it. That is usually the reason to reach for `when` in the
+first place: the measured difference on this example is 4.4x. See
+`docs/module-system-design.md` for how `@link` propagates.
+
 The corollary is that a disabled region is not type-checked. Code you never
 build is code you never check, so a symbol that is off in every CI
 configuration will rot. Build each configuration you ship.
@@ -2953,6 +2971,11 @@ whichever platform compiles the odd branch.
 
 Use `select` for a value and `when` for anything larger: `select` cannot remove
 a declaration, and both of its branches still compile.
+
+**If you are trying to keep something out of the binary, `select` is the wrong
+tool.** It picks between values that both survive to codegen; it cannot guard
+an `import` or a declaration, so it never removes a symbol or a native
+dependency. `when` is the construct that does that.
 
 ## Compilation
 
