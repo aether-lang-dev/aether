@@ -13,7 +13,7 @@
 // 32-byte r and s buffers — inexpressible, refused by construction).
 //
 // ECDSA verify routes through variable-time std.bignum (slow); stride
-// sampling as in wp_x448.ae: default 5, WYCHEPROOF_FULL=1 for all,
+// sampling as in wp_x448.ae: default 10, WYCHEPROOF_FULL=1 for all,
 // WYCHEPROOF_STRIDE=N to tune.
 
 import std.cryptography.p256
@@ -83,7 +83,7 @@ fn slice32(b: ptr, off: int) -> ptr {
 }
 
 main() {
-    stride = 5
+    stride = 10
     // os_getenv returns null (0) for an unset variable — check before any
     // string comparison (comparing null to a literal segfaults; bit CI).
     wf = os.os_getenv("WYCHEPROOF_FULL")

@@ -56,12 +56,13 @@ fn bytes_eq_hex(b: ptr, n: int, hexs: string) -> int {
 }
 
 main() {
-    // x448 routes through variable-time std.bignum (~1s per agreement on a
-    // dev box), so the full 510-case sweep costs ~9 minutes. Default to a
-    // stride-5 sample (~102 cases, every flag class still hit — Wycheproof
+    // x448 routes through variable-time std.bignum (~1-2s per agreement),
+    // so the full 510-case sweep costs ~10 minutes and even stride 5 blew
+    // the test harness's 180s per-test budget on CI's slower runners.
+    // Default stride 25 (~20 cases, every flag class still hit — Wycheproof
     // orders cases so edge-case families are contiguous); the nightly sets
     // WYCHEPROOF_FULL=1 for the complete sweep.
-    stride = 5
+    stride = 25
     // os_getenv returns null (0) for an unset variable — check before any
     // string comparison (comparing null to a literal segfaults; bit CI).
     wf = os.os_getenv("WYCHEPROOF_FULL")

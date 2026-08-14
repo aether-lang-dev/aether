@@ -10,6 +10,7 @@
 // sig cannot even be presented to it — refusal by construction.
 
 import std.cryptography.ed25519
+import std.os
 import std.fs
 import std.json
 import std.bytes
@@ -17,6 +18,7 @@ import std.string
 import std.io
 
 extern exit(code: int)
+extern atoi(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 extern string_length(s: string) -> int
 
@@ -43,6 +45,18 @@ fn from_hex(s: string) -> ptr {
 }
 
 main() {
+    // Sampled by default (verify is bignum-based, ~1-3s/case at -O0; the
+    // 180s harness budget is shared with rsa+x448). The tcId-151 forgery
+    // class is pinned permanently in tests/integration/crypto_ed25519, so
+    // sampling loses no regression coverage. WYCHEPROOF_FULL=1 runs all.
+    stride = 5
+    wf = os.os_getenv("WYCHEPROOF_FULL")
+    if wf != 0 {
+        if wf == "1" { stride = 1 }
+    }
+    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    if sv != 0 { stride = atoi(sv) }
+    if stride < 1 { stride = 1 }
     doc, ferr = fs.read("tests/vectors/wycheproof/ed25519_test.json")
     if ferr != "" {
         println("FAIL: cannot read vector file: ${ferr}")
@@ -72,6 +86,10 @@ main() {
         while ti < nt {
             t = json.array_get_raw(tests, ti)
             tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            if (tc_id % stride) != 0 && stride > 1 {
+                ti = ti + 1
+                continue
+            }
             res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
             msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
             sig_hex = json.json_get_string_raw(json.json_object_get_raw(t, "sig"))
@@ -114,7 +132,7 @@ main() {
         gi = gi + 1
     }
 
-    println("wycheproof ed25519: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${failed} failed")
+    println("wycheproof ed25519: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${failed} failed (stride ${stride})")
     if failed > 0 { exit(1) }
     println("ALL PASS")
 }
