@@ -264,3 +264,33 @@ With neither variable set, `run_summary` writes no report and the human
 - [aeocha](https://github.com/aether-lang-dev/aeocha) — the upstream
   framework, including the process/HTTP integration matchers and mutation
   testing that live outside the stdlib.
+
+## Domain matcher arms: `std.os.testing` and `std.http.client.httptest`
+
+The framework core (`std.spec`) is deliberately dependency-light. Two
+sibling modules carry the integration-shape matchers that consume other
+std surfaces, reporting through the same ambient framework cell — so
+they compose with `describe`/`it` and count into the same summary:
+
+- **`import std.os.testing`** — process matchers over the
+  `(stdout, exit, stderr)` triple from `os.run_capture`:
+  `testing.expect_exit`, `testing.expect_no_spawn_error`,
+  `testing.expect_stdout_contains` / `_line_count` / `_line_field` /
+  `_line_after` / `_matches` / `_matches_regex`, and the stderr pair
+  `testing.expect_stderr_contains` / `_empty`. They absorb the
+  bash-shaped "spawn / capture / awk-and-compare" idiom into one call.
+
+- **`import std.http.client.httptest`** (named per Go's
+  `net/http/httptest`; the namespace tail must differ from
+  `std.os.testing`'s) — response-handle matchers
+  (`httptest.expect_http_status` / `_no_error` / `_body_eq` /
+  `_body_contains` / `_header` / `_body_json_field`), one-call
+  GET/POST conveniences (`httptest.expect_http_get_status`, …), and the
+  FluentSelenium-style one-shot retry budgets `httptest.within(2s)` /
+  `httptest.without(2s)` that the convenience family honours.
+
+Both are ported verbatim from the standalone aeocha framework, which
+retains its own copies (and the mutation-testing facility) for
+standalone use. See `tests/integration/std_testing_arms/probe.ae` for
+an end-to-end example driving both arms against real subprocesses and
+an in-process fixture server.

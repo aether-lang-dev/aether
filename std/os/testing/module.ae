@@ -1,0 +1,364 @@
+// std.os.testing — process-shape test matchers (the aeocha tease-out,
+// stage 2; the framework core lives in std.spec and these matchers
+// report through its ambient framework cell via fail()).
+//
+// Ported verbatim from the standalone aeocha framework (aeocha.ae) —
+// the process half of its integration-shape matchers: consume the
+// `(stdout, exit, stderr)` triple from `os.run_capture` and absorb the
+// bash-shaped "spawn / capture / awk-and-compare" idiom into single
+// calls. See docs/testing.md.
+
+import std.spec
+import std.string
+import std.list
+import std.regex
+import std.os
+
+exports(
+    expect_exit, expect_no_spawn_error,
+    expect_stderr_contains, expect_stderr_empty,
+    expect_stdout_contains, expect_stdout_line_count,
+    expect_stdout_line_field, expect_stdout_line_after,
+    expect_stdout_matches, expect_stdout_matches_regex
+)
+
+// ---------------------------------------------------------------------------
+// Integration-shape matchers
+//
+// Built on top of the assert_* primitives above, these absorb the
+// bash-shaped "spawn / capture / awk-and-compare" idiom into a single
+// Aether call. Two flavours:
+//
+//   - Process matchers consume a `(stdout, exit, stderr)` triple from
+//     `os.run_capture(prog, argv, env)`. The triple is always passed
+//     destructured (Aether tuples don't pass around as a single value).
+//
+//   - HTTP matchers consume the response handle returned by
+//     `http.get` / `http.post` / `client.send_request`. A single
+//     `resp: ptr` arg works for both v1 and v2 responses (same C
+//     struct underneath).
+//
+// Each matcher takes (..., msg) and signals failure by calling
+// `fail(...)` — same shape as the `assert_*` primitives. None of
+// them allocate persistent state; intermediate `string_split` arrays
+// are freed before return.
+// ---------------------------------------------------------------------------
+
+// expect_exit(exit_code, want, msg) — child exited with the
+// expected status. The most common shape: caller writes
+//   out, exit, err = os.run_capture(prog, argv, null)
+//   aeocha.expect_exit(exit, 0, "ran cleanly")
+expect_exit(exit_code: int, want: int, msg: string) {
+    if exit_code != want {
+        spec.fail("${msg} — expected exit ${want}, got ${exit_code}")
+    }
+}
+
+// expect_no_spawn_error(err, msg) — `os.run_capture`'s third
+// slot is non-empty only when fork/exec itself couldn't run (binary
+// not found, EACCES, etc.). Distinct from "ran but exited non-zero",
+// which is exit_code != 0 and err == "". Use this to assert "the
+// child actually started" before asserting on its output.
+expect_no_spawn_error(err: string, msg: string) {
+    if string.equals(err, "") == 0 {
+        spec.fail("${msg} — spawn error: '${err}'")
+    }
+}
+
+// expect_stdout_contains(out, needle, msg) — captured stdout
+// has the substring somewhere. Sibling of assert_contains with a
+// slot-shaped signature for the run_capture tuple. Param is named
+// `out` not `stdout` because Windows MinGW <stdio.h> defines
+// `stdout` as a preprocessor macro (`(__acrt_iob_func(1))`) and a
+// param named `stdout` gets rewritten mid-declaration. Same
+// rationale for the other three expect_stdout_* matchers below.
+expect_stdout_contains(out: string, needle: string, msg: string) {
+    if string.contains(out, needle) == 0 {
+        spec.fail("${msg} — stdout does not contain '${needle}'")
+    }
+}
+
+// Child stderr matchers. The stderr capture these need now exists:
+// `os.run_full(prog, argv, env, stdin) -> (stdout, stderr, exit, err)`
+// captures the child's two streams SEPARATELY (no pipe-buffer
+// deadlock), unlike `os.run_capture` whose third slot is the
+// spawn-error string, not child stderr. Callers feed the 2nd tuple
+// slot to these matchers:
+//   out, err, exit, spawn_err = os.run_full(prog, argv, null, "")
+//   aeocha.expect_no_spawn_error(spawn_err, "started")
+//   aeocha.expect_stderr_contains(err, "deprecated", "warned")
+// (param `err` is the captured child stderr stream — distinct from
+// the spawn-error slot that expect_no_spawn_error consumes.)
+
+// expect_stderr_contains(err, needle, msg) — captured child
+// stderr has the substring somewhere. The stderr twin of
+// expect_stdout_contains; consumes os.run_full's 2nd slot.
+expect_stderr_contains(err: string, needle: string, msg: string) {
+    if string.contains(err, needle) == 0 {
+        spec.fail("${msg} — stderr does not contain '${needle}'")
+    }
+}
+
+// expect_stderr_empty(err, msg) — child wrote nothing to stderr.
+// Asserts a clean run with no warnings/diagnostics on fd 2. Consumes
+// os.run_full's 2nd slot.
+expect_stderr_empty(err: string, msg: string) {
+    if string.equals(err, "") == 0 {
+        spec.fail("${msg} — stderr not empty: '${err}'")
+    }
+}
+
+// expect_stdout_line_count(out, want, msg) — stdout has
+// exactly `want` newline-separated lines. Trailing-newline aware:
+// `"a\nb\n"` counts as 2 lines, not 3. (param `out`, not `stdout` —
+// see expect_stdout_contains for the Windows-MinGW reason.)
+expect_stdout_line_count(out: string, want: int, msg: string) {
+    arr = string.split(out, "\n")
+    n = string.array_size(arr)
+    // string_split("a\nb\n", "\n") produces ["a", "b", ""] — drop
+    // the trailing empty when the last byte is a newline.
+    sl = string.length(out)
+    if sl > 0 {
+        if string.char_at(out, sl - 1) == 10 {
+            n = n - 1
+        }
+    }
+    string.array_free(arr)
+    if n != want {
+        spec.fail("${msg} — expected ${want} lines, got ${n}")
+    }
+}
+
+// expect_stdout_line_field(out, prefix, n, want, msg) —
+// finds the first line starting with `prefix`, tokenises on runs
+// of whitespace (spaces and tabs), and compares field index `n` to
+// `want`. This is the matcher that absorbs the most bash:
+// `rev=$(echo "$out" | awk '/^Revision:/{print $2}')` collapses to
+// `expect_stdout_line_field(fw, out, "Revision:", 1, "3", ...)`.
+//
+// Whitespace handling matches awk's default: any run of spaces or
+// tabs separates tokens, leading whitespace is skipped, and empty
+// tokens never appear in the field array. So a column-aligned
+// `Revision:    3` line tokenises to `["Revision:", "3"]` and
+// field 1 is `"3"` regardless of how many spaces actually separate
+// them.
+//
+// Indexing is 0-based on tokens — n=0 names the prefix token,
+// n=1 the next non-blank token. (awk's `$1`/`$2` are 1-based;
+// Aeocha is 0-based to match the rest of the matcher fleet.)
+//
+// Limitations (deliberate — porter scope):
+//   - First match wins. Use a more specific prefix if multiple
+//     lines share a prefix and you want the second one.
+//   - Whitespace = ASCII space + tab. Newlines have already been
+//     consumed by the per-line split.
+//
+// (Param `out`, not `stdout` — Windows MinGW reason.)
+expect_stdout_line_field(out: string, prefix: string,
+    n: int, want: string, msg: string) {
+    lines = string.split(out, "\n")
+    line_count = string.array_size(lines)
+    found = 0
+    actual = ""
+    i = 0
+    while i < line_count {
+        line_ptr = string.array_get(lines, i)
+        if string.starts_with(line_ptr, prefix) == 1 {
+            // Tokenise on runs of whitespace (space=32, tab=9). Walk
+            // the line collecting non-whitespace spans into an
+            // imaginary array indexed by `tok_idx`; when tok_idx
+            // reaches `n` capture the span.
+            // char_at_n over char_at: line_len is already cached, so
+            // the length-aware accessor skips the per-call strlen
+            // char_at would pay on every byte of the line walk.
+            line_len = string.length(line_ptr)
+            tok_idx = 0
+            p = 0
+            while p < line_len {
+                c = string.char_at_n(line_ptr, line_len, p)
+                if c == 32 || c == 9 {
+                    p = p + 1
+                } else {
+                    start = p
+                    scanning = 1
+                    while scanning == 1 {
+                        if p >= line_len {
+                            scanning = 0
+                        } else {
+                            c2 = string.char_at_n(line_ptr, line_len, p)
+                            if c2 == 32 || c2 == 9 {
+                                scanning = 0
+                            } else {
+                                p = p + 1
+                            }
+                        }
+                    }
+                    if tok_idx == n {
+                        actual = string.substring(line_ptr, start, p)
+                        found = 1
+                        p = line_len
+                    }
+                    tok_idx = tok_idx + 1
+                }
+            }
+            i = line_count
+        } else {
+            i = i + 1
+        }
+    }
+    string.array_free(lines)
+    if found == 0 {
+        spec.fail("${msg} — no line starts with '${prefix}' or field ${n} missing")
+    } else {
+        if string.equals(actual, want) == 0 {
+            spec.fail("${msg} — expected '${want}', got '${actual}'")
+        }
+    }
+}
+
+// expect_stdout_line_after(out, prefix, want, msg) — finds
+// the first line starting with `prefix`, takes everything after
+// the prefix, trims leading and trailing whitespace, and compares
+// against `want`. Absorbs the bash idiom
+//   log=$(echo "$out" | sed -n 's/^Log: *//p')
+// which is common in svn/git-style key-value output where the
+// value can contain embedded whitespace and a single-token field
+// match wouldn't capture it correctly.
+//
+// `expect_stdout_line_field(out, "Log:", 1, ...)` would only see
+// the first whitespace-separated token after the prefix; this
+// matcher captures the entire post-prefix remainder.
+expect_stdout_line_after(out: string, prefix: string,
+    want: string, msg: string) {
+    lines = string.split(out, "\n")
+    line_count = string.array_size(lines)
+    found = 0
+    actual = ""
+    i = 0
+    while i < line_count {
+        line_ptr = string.array_get(lines, i)
+        if string.starts_with(line_ptr, prefix) == 1 {
+            plen = string.length(prefix)
+            llen = string.length(line_ptr)
+            // char_at_n over char_at: llen is already cached, so the
+            // length-aware accessor skips the per-call strlen.
+            // Skip leading whitespace immediately after the prefix.
+            start = plen
+            scanning_lead = 1
+            while scanning_lead == 1 {
+                if start >= llen {
+                    scanning_lead = 0
+                } else {
+                    c = string.char_at_n(line_ptr, llen, start)
+                    if c == 32 || c == 9 {
+                        start = start + 1
+                    } else {
+                        scanning_lead = 0
+                    }
+                }
+            }
+            // Trim trailing whitespace.
+            end = llen
+            scanning_trail = 1
+            while scanning_trail == 1 {
+                if end <= start {
+                    scanning_trail = 0
+                } else {
+                    c2 = string.char_at_n(line_ptr, llen, end - 1)
+                    if c2 == 32 || c2 == 9 {
+                        end = end - 1
+                    } else {
+                        scanning_trail = 0
+                    }
+                }
+            }
+            actual = string.substring(line_ptr, start, end)
+            found = 1
+            i = line_count
+        } else {
+            i = i + 1
+        }
+    }
+    string.array_free(lines)
+    if found == 0 {
+        spec.fail("${msg} — no line starts with '${prefix}'")
+    } else {
+        if string.equals(actual, want) == 0 {
+            spec.fail("${msg} — expected '${want}', got '${actual}'")
+        }
+    }
+}
+
+// expect_stdout_matches(out, pattern, msg) — at least one
+// stdout line matches a glob pattern (`*`, `?`, `[abc]` per
+// std.string.glob_match). Not regex — the porter spec asks for
+// "basic" pattern matching, and stdlib has no PCRE today. For full
+// regex needs, add a separate matcher after a regex extern lands.
+// (Param `out`, not `stdout` — Windows MinGW reason.)
+expect_stdout_matches(out: string, pattern: string, msg: string) {
+    lines = string.split(out, "\n")
+    line_count = string.array_size(lines)
+    found = 0
+    i = 0
+    while i < line_count {
+        line_ptr = string.array_get(lines, i)
+        if string.glob_match_raw(pattern, line_ptr, 0) == 1 {
+            found = 1
+            i = line_count
+        } else {
+            i = i + 1
+        }
+    }
+    string.array_free(lines)
+    if found == 0 {
+        spec.fail("${msg} — no stdout line matches glob '${pattern}'")
+    }
+}
+
+// expect_stdout_matches_regex(out, pattern, msg) — at least one
+// stdout line matches a PCRE2 regular expression. The richer sibling
+// of expect_stdout_matches (which is glob-only): full regex via
+// std.regex — captures, anchors, alternation, character classes,
+// quantifiers. The pattern is UNANCHORED, so it matches anywhere in a
+// line (use `^`/`$` to anchor). Tested per-line, so `^Revision: \d+$`
+// asserts a whole-line shape without the trailing-newline split issue.
+//
+// std.regex is built against libpcre2-8. If the runtime was built
+// WITHOUT it, every regex entry point returns a clean diagnostic
+// rather than crashing — matches_lit surfaces it in the error slot.
+// We treat a non-empty error slot as a matcher failure (bad pattern OR
+// missing libpcre2) and report it, so a missing-lib environment fails
+// loudly instead of silently passing. Reach for expect_stdout_matches
+// (glob) if you must run where libpcre2 may be absent.
+expect_stdout_matches_regex(out: string, pattern: string, msg: string) {
+    lines = string.split(out, "\n")
+    line_count = string.array_size(lines)
+    found = 0
+    rerr = ""
+    i = 0
+    while i < line_count {
+        line_ptr = string.array_get(lines, i)
+        ok, err = regex.matches_lit(pattern, line_ptr)
+        if string.equals(err, "") == 0 {
+            // Compile/engine error (bad pattern or no libpcre2) — same
+            // for every line, so capture once and stop.
+            rerr = err
+            i = line_count
+        } else {
+            if ok == 1 {
+                found = 1
+                i = line_count
+            } else {
+                i = i + 1
+            }
+        }
+    }
+    string.array_free(lines)
+    if string.equals(rerr, "") == 0 {
+        spec.fail("${msg} — regex '${pattern}' error: ${rerr}")
+    } else {
+        if found == 0 {
+            spec.fail("${msg} — no stdout line matches regex '${pattern}'")
+        }
+    }
+}

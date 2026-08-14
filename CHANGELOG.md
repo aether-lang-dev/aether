@@ -12,6 +12,14 @@ version number before tagging the release.
 ## [current]
 
 ### Added
+- `std.os.testing` + `std.http.client.httptest` (stage 2 of the aeocha
+  tease-out): the process-shape matchers (`expect_exit`,
+  `expect_stdout_*`, `expect_stderr_*` over `os.run_capture` triples)
+  and the HTTP-shape matchers (response-handle asserts, one-call
+  GET/POST conveniences, `within()`/`without()` one-shot retry budgets),
+  ported verbatim from aeocha and reporting through `std.spec`'s ambient
+  framework cell. `httptest` is named per Go's `net/http/httptest` — and
+  because two co-imported modules cannot share a namespace tail.
 - **`std.spec` — a BDD test framework in the stdlib.** The pure,
   dependency-light core of the standalone
   [aeocha](https://github.com/aether-lang-dev/aeocha) framework is now
