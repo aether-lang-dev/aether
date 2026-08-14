@@ -8,10 +8,11 @@
 # rejected but must match when accepted. AEAD drivers additionally check
 # the seal direction (deterministic AEADs).
 #
-# wp_x448 samples its 510 cases at stride 5 by default (~100 cases): its
-# field math is bignum-based at ~1s+/agreement, so the full sweep costs
-# ~10 minutes. Set WYCHEPROOF_FULL=1 (the nightly does) for everything;
-# WYCHEPROOF_STRIDE=N picks a custom sample density.
+# wp_x448 samples its 510 cases at stride 25 by default (~20 cases): its
+# field math is bignum-based at ~1-2s/agreement, so the full sweep costs
+# ~10 minutes and must fit the test harness's 180s per-test budget next
+# to the three fast drivers. Set WYCHEPROOF_FULL=1 (the nightly does)
+# for everything; WYCHEPROOF_STRIDE=N picks a custom sample density.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
