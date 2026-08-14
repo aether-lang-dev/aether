@@ -246,17 +246,32 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
     // Check v*x^2 == u (mod p). If v*x^2 == -u, multiply x by sqrt(-1).
     x2 = fmul(x, x, p); vx2 = fmul(v, x2, p)
     chk = fsub(vx2, u, p) // should be 0
+    ok = 1
     if bignum.is_zero(chk) != 1 {
         // try x * I
         I = sqrt_m1(p)
         nx = fmul(x, I, p)
         bignum.free(x); x = nx
         bignum.free(I)
+        // RFC 8032 §5.1.3 step 3: re-check; if v*x^2 is STILL not u, no
+        // square root exists and decoding MUST fail (previously this fell
+        // through with a garbage x, surviving only because the verify
+        // equation then failed downstream).
+        bignum.free(x2); bignum.free(vx2); bignum.free(chk)
+        x2 = fmul(x, x, p); vx2 = fmul(v, x2, p)
+        chk = fsub(vx2, u, p)
+        if bignum.is_zero(chk) != 1 { ok = 0 }
     }
     bignum.free(chk); bignum.free(vx2); bignum.free(x2)
 
+    // RFC 8032 §5.1.3 step 4: if x = 0 and the sign bit is set, decoding
+    // fails — the only points with x = 0 (y = ±1) have no "negative x"
+    // form. Skipping this check accepts non-canonical encodings; caught
+    // by Wycheproof ed25519 tcId 151 (R = y=1 with sign bit set).
+    if ok == 1 && bignum.is_zero(x) == 1 && sign == 1 { ok = 0 }
+
     // Adjust sign: x's low bit must equal `sign`.
-    if bit0(x) != sign {
+    if ok == 1 && bit0(x) != sign {
         nx = fsub(p, x, p) // p - x (i.e. -x mod p)
         bignum.free(x); x = nx
     }
@@ -264,6 +279,10 @@ recover_x(y: ptr, sign: int, p: ptr, d: ptr) -> ptr {
     bignum.free(one); bignum.free(y2); bignum.free(u); bignum.free(dy2); bignum.free(v)
     bignum.free(v2); bignum.free(v3); bignum.free(v7); bignum.free(uv7); bignum.free(exp)
     bignum.free(pw); bignum.free(uv3)
+    if ok != 1 {
+        bignum.free(x)
+        return null
+    }
     return x
 }
 
@@ -316,6 +335,12 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *EdPt {
         return null as *EdPt
     }
     x = recover_x(y, sign, p, d)
+    if x == null {
+        // Invalid encoding (no square root, or x=0 with sign bit set —
+        // RFC 8032 §5.1.3 steps 3-4).
+        bignum.free(y)
+        return null as *EdPt
+    }
     z = bignum.from_int(1)
     t = fmul(x, y, p)
     return pt_new(x, y, z, t)

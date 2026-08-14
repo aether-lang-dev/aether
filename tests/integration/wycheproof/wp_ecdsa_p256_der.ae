@@ -1,0 +1,164 @@
+// Wycheproof adversarial vectors — ECDSA P-256 / SHA-256, DER form (#739).
+//
+// The sibling wp_ecdsa_p256.ae (P1363 raw r||s) measures the verifier;
+// THIS family measures the DER signature parser — BER laxities (long-form
+// lengths, non-minimal INTEGERs, leading zeros), trailing garbage,
+// truncated/oversized integers, wrong tags. The parse path under test is
+// the real one: tls13_cert.split_ecdsa_sig (asn1 reader + bignum), the
+// exact function TLS certificate verification uses, followed by
+// p256.ecdsa_verify.
+//   "valid"   -> parse+verify MUST succeed (1).
+//   "invalid" -> parse MUST error or verify MUST return 0.
+// Stride sampling as in the P1363 driver (default 10; WYCHEPROOF_FULL=1
+// or WYCHEPROOF_STRIDE=N override) — parse-reject cases are cheap, but
+// every accepted signature costs two bignum scalar mults.
+
+import std.cryptography.tls13_cert
+import std.cryptography.p256
+import std.cryptography.sha2
+import std.os
+import std.fs
+import std.json
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn coord32(hexs: string) -> ptr {
+    raw = from_hex(hexs)
+    n = string_length(hexs) / 2
+    out = bytes.new(32)
+    if n >= 32 {
+        i = 0
+        while i < 32 { bytes.set(out, i, bytes.get(raw, n - 32 + i)) i = i + 1 }
+    } else {
+        i = 0
+        while i < n { bytes.set(out, 32 - n + i, bytes.get(raw, i)) i = i + 1 }
+    }
+    bytes.free(raw)
+    return out
+}
+
+fn sha256_of(b: ptr, n: int) -> ptr {
+    ctx, e = sha2.new("sha256")
+    sha2.update_bytes(ctx, b, n)
+    return sha2.final_bytes(ctx)
+}
+
+main() {
+    stride = 10
+    // os_getenv returns null (0) for an unset variable.
+    wf = os.os_getenv("WYCHEPROOF_FULL")
+    if wf != 0 {
+        if wf == "1" { stride = 1 }
+    }
+    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    if sv != 0 { stride = atoi(sv) }
+    if stride < 1 { stride = 1 }
+
+    doc, ferr = fs.read("tests/vectors/wycheproof/ecdsa_secp256r1_sha256_test.json")
+    if ferr != "" {
+        println("FAIL: cannot read vector file: ${ferr}")
+        exit(1)
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: vector JSON parse: ${jerr}")
+        exit(1)
+    }
+
+    groups = json.json_object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+
+    passed = 0
+    rejected_invalid = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        pkobj = json.json_object_get_raw(g, "publicKey")
+        wx = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wx"))
+        wy = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wy"))
+        pubx = coord32(wx)
+        puby = coord32(wy)
+        tests = json.json_object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            if (tc_id % stride) != 0 && stride > 1 {
+                ti = ti + 1
+                continue
+            }
+            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
+            sig_hex = json.json_get_string_raw(json.json_object_get_raw(t, "sig"))
+
+            msg = from_hex(msg_hex)
+            h = sha256_of(msg, string_length(msg_hex) / 2)
+            sig = from_hex(sig_hex)
+            sig_len = string_length(sig_hex) / 2
+
+            r32, s32, perr = tls13_cert.split_ecdsa_sig(sig, sig_len, 32)
+            ok = 0
+            if r32 != null {
+                ok = p256.ecdsa_verify(pubx, puby, h, r32, s32)
+                bytes.free(r32)
+                bytes.free(s32)
+            }
+            if res == "valid" {
+                if ok == 1 { passed = passed + 1 } else {
+                    println("FAIL tcId=${tc_id} (valid): rejected (parse: ${perr})")
+                    failed = failed + 1
+                }
+            } else {
+                if res == "invalid" {
+                    if ok == 0 { rejected_invalid = rejected_invalid + 1 } else {
+                        println("FAIL tcId=${tc_id} (invalid): ACCEPTED a forgery")
+                        failed = failed + 1
+                    }
+                } else {
+                    passed = passed + 1
+                }
+            }
+            bytes.free(msg)
+            bytes.free(h)
+            bytes.free(sig)
+            ti = ti + 1
+        }
+        bytes.free(pubx)
+        bytes.free(puby)
+        gi = gi + 1
+    }
+
+    println("wycheproof ecdsa_p256_der: ${passed} ok, ${rejected_invalid} invalid rejected, ${failed} failed (stride ${stride})")
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}

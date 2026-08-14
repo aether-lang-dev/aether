@@ -210,6 +210,9 @@ encrypt_pkcs1(k: ptr, msg: ptr) -> (ptr, string) {
 // (null, err). (Not constant-time — a hardening follow-up.)
 decrypt_pkcs1(k: ptr, ct: ptr) -> (ptr, string) {
     klen = modulus_bytes(k)
+    if sig_in_range(k, ct) != 1 {
+        return null, "ciphertext out of range"
+    }
     block = raw_decrypt(k, ct)
     // expect 0x00 0x02 PS 0x00 M
     ok = 1
@@ -263,9 +266,26 @@ sign_pkcs1(k: ptr, di: ptr) -> (ptr, string) {
     return s, ""
 }
 
+// RFC 8017 range gate, used for BOTH signatures (§8.2.2 step 1) and
+// ciphertexts (§7.1.2/§7.2.2 step 1): the input must be EXACTLY k octets
+// and its integer value must be < n. The raw modexp reduces mod n, so
+// without this check s+n / c+n (distinct byte strings, same residue)
+// verify/decrypt identically — malleability, caught by Wycheproof
+// rsa_signature tcId 244 and rsa_oaep tcId 27 ("added n to c").
+sig_in_range(k: ptr, sig: ptr) -> int {
+    kk = k as *RsaKey
+    if bytes.length(sig) != modulus_bytes(k) { return 0 }
+    s = bignum.from_bytes_unsigned(sig, bytes.length(sig))
+    ok = 1
+    if bignum.compare(s, kk.n) >= 0 { ok = 0 }
+    bignum.free(s)
+    return ok
+}
+
 // verify: public-key op on the signature, rebuild the expected EMSA block
 // from `di`, compare byte-for-byte. Returns 1 (valid) / 0 (invalid).
 verify_pkcs1(k: ptr, di: ptr, sig: ptr) -> int {
+    if sig_in_range(k, sig) != 1 { return 0 }
     klen = modulus_bytes(k)
     recovered = raw_encrypt(k, sig) // s^e mod n
     expected = build_emsa(di, klen)
@@ -406,6 +426,9 @@ decrypt_oaep(k: ptr, ct: ptr) -> {
     if bytes.length(ct) != klen {
         return null, "ciphertext length mismatch"
     }
+    if sig_in_range(k, ct) != 1 {
+        return null, "ciphertext out of range"
+    }
     if klen < 2 * hlen + 2 {
         return null, "modulus too small for OAEP"
     }
@@ -536,6 +559,9 @@ verify_pss(k: ptr, mhash: ptr, sig: ptr, slen: int) -> int {
     embits = modulus_bits(k) - 1
     emlen = (embits + 7) / 8
     if bytes.length(sig) != klen { return 0 }
+    // Same RFC 8017 range requirement as verify_pkcs1: s >= n is a
+    // distinct byte string with the same residue — reject (malleability).
+    if sig_in_range(k, sig) != 1 { return 0 }
 
     emfull = raw_encrypt(k, sig)
     // take the low emLen bytes as EM

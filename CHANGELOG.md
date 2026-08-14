@@ -60,6 +60,73 @@ version number before tagging the release.
   the registry when the exact lookup misses. Surfaced by `std.spec`, the
   first stdlib module to use a top-level mutable `var`; no working module
   changes its generated C. (`compiler/aether_module.c`.)
+## [0.537.0]
+
+### Added
+- Wycheproof wave 4 (#739): RSA decryption families — RSAES-PKCS#1 v1.5
+  (67 Bleichenbacher-shaped cases) and RSA-OAEP 2048/SHA-256 (37 Manger-
+  shaped cases; the 8 labelled cases are counted-skipped — `decrypt_oaep`
+  has no label parameter yet). Own CI suite slot: every case is a
+  private-key modexp.
+
+### Fixed
+- `std.cryptography.rsa`: `decrypt_oaep` and `decrypt_pkcs1` accepted
+  UNREDUCED ciphertexts — c + n decrypts identically after the mod-n
+  exponentiation (the ciphertext-side twin of 0.535.0's signature
+  malleability fix; RFC 8017 §7.1.2/§7.2.2 step 1 requires exactly
+  k octets with c < n). The existing range gate now guards both decrypt
+  paths. Caught by Wycheproof rsa_oaep tcId 27 ("added n to c").
+
+## [0.536.0]
+
+### Added
+- Wycheproof wave 3 (#739, #1298): ECDSA P-256 **DER-encoded** signature
+  vectors (371 cases) driven through the real TLS parse path
+  (`tls13_cert.split_ecdsa_sig`, now exported), and RSA-PSS
+  2048/SHA-256/MGF1-32 vectors (108 cases — clean on import; the
+  0.535.0 `sig_in_range` guard already covers PSS).
+
+### Fixed
+- `std.cryptography.tls13_cert.split_ecdsa_sig` accepted six classes of
+  malleable ECDSA signature encoding (Wycheproof DER family): BER
+  long-form/non-minimal/indefinite lengths, superfluous INTEGER padding,
+  trailing garbage after the SEQUENCE, and oversized scalars (r + 2^320)
+  silently truncated by the fixed-width conversion. An ECDSA-Sig-Value
+  must now be strict minimal DER — enforced by re-encoding the parsed
+  (r, s) and requiring byte-equality with the input — with non-negative
+  scalars whose magnitudes fit the curve width. TLS certificate
+  verification inherits the strictness; legitimate certs are unaffected
+  (the asn1 reader itself stays BER-tolerant for X.509 field reuse).
+
+## [0.535.0]
+
+### Added
+- Project Wycheproof adversarial test vectors for the crypto suite (#739,
+  #1298): pinned vector files under `tests/vectors/wycheproof/` with
+  per-family drivers for X25519 (518 cases: twists, small-order points,
+  non-canonical encodings — all pass), ChaCha20-Poly1305 (325 cases incl.
+  60 forgeries — all pass, and sealing is checked as well as opening),
+  AES-GCM (all supported-shape cases pass; unsupported IV/tag sizes are
+  counted, not silently dropped), and X448 (stride-sampled by default —
+  its bignum field math costs ~1s/op; `WYCHEPROOF_FULL=1` sweeps all).
+  The adversarial complement to the existing RFC/ACVP KATs. Wave 2 adds
+  Ed25519 (151 cases), ECDSA P-256/SHA-256 in P1363 form (262,
+  stride-sampled), RSA PKCS#1 v1.5 2048/SHA-256 (259), HMAC-SHA256 and
+  HKDF-SHA256 — and caught two real accepted-forgery bugs (below).
+
+### Fixed
+- `std.cryptography.ed25519`: point decoding accepted the non-canonical
+  encoding "y = 1 with the sign bit of x set" (x = 0 has no negative
+  form; RFC 8032 §5.1.3 step 4 requires failure) and silently produced a
+  garbage x when no square root exists (step 3). Both now reject.
+  Caught by Wycheproof ed25519 tcId 151 — verify accepted a forgery.
+- `std.cryptography.rsa`: `verify_pkcs1` accepted unreduced signatures
+  (s + n verifies identically after the mod-n exponentiation — RFC 8017
+  §8.2.2 step 1 requires s < n and exact k-octet length) and had no
+  length check; `verify_pss` had the same missing range check. Both
+  verifies now reject out-of-range and wrong-length signatures.
+  Caught by Wycheproof rsa_signature tcId 244 ("signature is not
+  reduced", SignatureMalleability).
 
 ## [0.534.0]
 

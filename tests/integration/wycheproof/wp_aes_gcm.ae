@@ -1,0 +1,168 @@
+// Wycheproof adversarial vectors — AES-GCM (#739).
+//
+// AeadTest schema, same semantics as wp_chacha20poly1305.ae: valid must
+// open-and-match AND seal-and-match (deterministic AEAD); invalid must be
+// rejected. Groups with ivSize != 96 or tagSize != 128 are counted
+// "skipped-unsupported": gcm_seal/gcm_open take a fixed 12-byte IV and a
+// full 16-byte tag by construction (the TLS shape). Key sizes 128/192/256
+// all run.
+
+import std.cryptography.aes
+import std.fs
+import std.json
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn bytes_eq(a: ptr, b: ptr, n: int) -> int {
+    i = 0
+    ok = 1
+    while i < n {
+        if bytes.get(a, i) != bytes.get(b, i) { ok = 0 }
+        i = i + 1
+    }
+    return ok
+}
+
+fn concat_hex(ct_hex: string, tag_hex: string) -> (ptr, int) {
+    nct = string_length(ct_hex) / 2
+    ntag = string_length(tag_hex) / 2
+    ct = from_hex(ct_hex)
+    tag = from_hex(tag_hex)
+    out = bytes.new(nct + ntag)
+    i = 0
+    while i < nct { bytes.set(out, i, bytes.get(ct, i)) i = i + 1 }
+    i = 0
+    while i < ntag { bytes.set(out, nct + i, bytes.get(tag, i)) i = i + 1 }
+    bytes.free(ct)
+    bytes.free(tag)
+    return out, nct + ntag
+}
+
+main() {
+    doc, ferr = fs.read("tests/vectors/wycheproof/aes_gcm_test.json")
+    if ferr != "" {
+        println("FAIL: cannot read vector file: ${ferr}")
+        exit(1)
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: vector JSON parse: ${jerr}")
+        exit(1)
+    }
+
+    groups = json.json_object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+
+    passed = 0
+    rejected_invalid = 0
+    skipped_unsupported = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        iv_size = json.json_get_int(json.json_object_get_raw(g, "ivSize"))
+        tag_size = json.json_get_int(json.json_object_get_raw(g, "tagSize"))
+        key_size = json.json_get_int(json.json_object_get_raw(g, "keySize"))
+        tests = json.json_object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        if iv_size != 96 || tag_size != 128 {
+            skipped_unsupported = skipped_unsupported + nt
+            gi = gi + 1
+            continue
+        }
+        key_bytes = key_size / 8
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            key_hex = json.json_get_string_raw(json.json_object_get_raw(t, "key"))
+            iv_hex = json.json_get_string_raw(json.json_object_get_raw(t, "iv"))
+            aad_hex = json.json_get_string_raw(json.json_object_get_raw(t, "aad"))
+            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
+            ct_hex = json.json_get_string_raw(json.json_object_get_raw(t, "ct"))
+            tag_hex = json.json_get_string_raw(json.json_object_get_raw(t, "tag"))
+
+            key = from_hex(key_hex)
+            iv = from_hex(iv_hex)
+            aad = from_hex(aad_hex)
+            aad_len = string_length(aad_hex) / 2
+            msg_len = string_length(msg_hex) / 2
+            ctag, ctag_len = concat_hex(ct_hex, tag_hex)
+
+            ctx = aes.new_encryptor(key, key_bytes)
+            pt, oerr = aes.gcm_open(ctx, iv, aad, aad_len, ctag, ctag_len)
+            if res == "valid" {
+                if pt == null {
+                    println("FAIL tcId=${tc_id} (valid): open rejected: ${oerr}")
+                    failed = failed + 1
+                } else {
+                    want = from_hex(msg_hex)
+                    if bytes_eq(pt, want, msg_len) == 0 {
+                        println("FAIL tcId=${tc_id} (valid): plaintext mismatch")
+                        failed = failed + 1
+                    } else {
+                        msg = from_hex(msg_hex)
+                        sealed = aes.gcm_seal(ctx, iv, aad, aad_len, msg, msg_len)
+                        if bytes_eq(sealed, ctag, ctag_len) == 1 {
+                            passed = passed + 1
+                        } else {
+                            println("FAIL tcId=${tc_id} (valid): seal mismatch")
+                            failed = failed + 1
+                        }
+                        bytes.free(sealed)
+                        bytes.free(msg)
+                    }
+                    bytes.free(want)
+                    bytes.free(pt)
+                }
+            } else {
+                if pt == null {
+                    rejected_invalid = rejected_invalid + 1
+                } else {
+                    println("FAIL tcId=${tc_id} (invalid): open ACCEPTED a forgery")
+                    failed = failed + 1
+                    bytes.free(pt)
+                }
+            }
+            aes.free(ctx)
+            bytes.free(key)
+            bytes.free(iv)
+            bytes.free(aad)
+            bytes.free(ctag)
+            ti = ti + 1
+        }
+        gi = gi + 1
+    }
+
+    println("wycheproof aes_gcm: ${passed} valid ok, ${rejected_invalid} forgeries rejected, ${skipped_unsupported} skipped (iv!=96/tag!=128), ${failed} failed")
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}
