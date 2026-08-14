@@ -61,6 +61,12 @@ for d in $(find "$ROOT/runtime" "$ROOT/std" -type d 2>/dev/null); do
 done
 RKLIBS="-lm -ldl -lpthread -lrt -lncurses -lz"
 [ "$(uname -s)" = "Darwin" ] && RKLIBS="-lm -ldl -lpthread -lncurses -lz"
+# Distro-packaged Racket CS 9.x references the system liblz4 (see the
+# identical probe in test_host_racket.sh for the full story).
+if command -v nm >/dev/null 2>&1 && \
+        nm "$AETHER_RACKET_LIB" 2>/dev/null | grep -q ' U LZ4'; then
+    RKLIBS="$RKLIBS -llz4"
+fi
 if ! $CC -O2 -I"$ROOT" $INCS -I"$AETHER_RACKET_INCLUDE" \
         "$GEN_C" "$TMPDIR_T/host_racket.o" "$ROOT/build/libaether.a" \
         "$AETHER_RACKET_LIB" -rdynamic $RKLIBS \
