@@ -1446,6 +1446,13 @@ static int name_is_module_global_var(const char* ns, const char* name) {
         // miscompile → NULL global → crash on the next read). Single-
         // segment local imports (full path == namespace) already hit the
         // exact match above and are unaffected.
+        //
+        // KNOWN LIMIT: the scan takes the FIRST module whose namespace
+        // tail matches, so two co-imported dotted modules sharing a tail
+        // ("std.spec" and "a.spec") could resolve to the wrong one —
+        // same global-namespace family as the cross-module struct-name
+        // collisions. Correct fix is plumbing the full dotted path to
+        // this call; do that if a real collision ever appears.
         if (global_module_registry) {
             for (int i = 0; i < global_module_registry->module_count; i++) {
                 AetherModule* cand = global_module_registry->modules[i];
