@@ -27,10 +27,16 @@ fi
 # its own location; for this test we just need libaether.a + headers.
 # Skip if we can't find a complete install — the coverage path is
 # only meaningful after `make install`.
-PREFIX="$HOME/.local"
+# AETHER_INSTALL_PREFIX overrides where that install is looked for: CI/
+# nightly boxes install the just-built tree to a dedicated prefix (e.g.
+# ~/.nightlyAether) so this test never links fresh codegen against
+# whatever stale toolchain happens to live in ~/.local — that mismatch
+# presents as `undefined reference to string_alloc_inline` here while
+# the tree itself is fine.
+PREFIX="${AETHER_INSTALL_PREFIX:-$HOME/.local}"
 if [ ! -f "$PREFIX/lib/aether/libaether.a" ] || \
    [ ! -d "$PREFIX/include/aether" ]; then
-    echo "  [SKIP] ci_coverage_smoke: no install at $PREFIX (run 'make install PREFIX=\$HOME/.local')"
+    echo "  [SKIP] ci_coverage_smoke: no install at $PREFIX (run 'make install PREFIX=$PREFIX')"
     exit 0
 fi
 
