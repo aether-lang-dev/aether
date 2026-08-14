@@ -1,0 +1,144 @@
+// Wycheproof adversarial vectors — X448 (#739).
+//
+// Same driver shape as wp_x25519.ae (see there for the semantics table);
+// 56-byte keys/outputs. One deliberate difference from x25519: our
+// x448() does NOT reject an all-zero shared secret (x25519.agree does),
+// so ZeroSharedSecret cases are accepted here and must then MATCH the
+// vector's (all-zero) shared value — which Wycheproof permits for
+// "acceptable" results. The API asymmetry is noted in #1298.
+
+import std.cryptography.x448
+import std.os
+import std.fs
+import std.json
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+fn bytes_eq_hex(b: ptr, n: int, hexs: string) -> int {
+    if string_length(hexs) != n * 2 { return 0 }
+    want = from_hex(hexs)
+    i = 0
+    ok = 1
+    while i < n {
+        if bytes.get(b, i) != bytes.get(want, i) { ok = 0 }
+        i = i + 1
+    }
+    bytes.free(want)
+    return ok
+}
+
+main() {
+    // x448 routes through variable-time std.bignum (~1s per agreement on a
+    // dev box), so the full 510-case sweep costs ~9 minutes. Default to a
+    // stride-5 sample (~102 cases, every flag class still hit — Wycheproof
+    // orders cases so edge-case families are contiguous); the nightly sets
+    // WYCHEPROOF_FULL=1 for the complete sweep.
+    stride = 5
+    if os.os_getenv("WYCHEPROOF_FULL") == "1" { stride = 1 }
+    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    if sv != "" { stride = atoi(sv) }
+    if stride < 1 { stride = 1 }
+    doc, ferr = fs.read("tests/vectors/wycheproof/x448_test.json")
+    if ferr != "" {
+        println("FAIL: cannot read vector file: ${ferr}")
+        exit(1)
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: vector JSON parse: ${jerr}")
+        exit(1)
+    }
+
+    groups = json.json_object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+
+    passed = 0
+    rejected_acceptable = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        tests = json.json_object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            if (tc_id % stride) != 0 && stride > 1 {
+                ti = ti + 1
+                continue
+            }
+            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            pub_hex = json.json_get_string_raw(json.json_object_get_raw(t, "public"))
+            priv_hex = json.json_get_string_raw(json.json_object_get_raw(t, "private"))
+            shared_hex = json.json_get_string_raw(json.json_object_get_raw(t, "shared"))
+
+            if string_length(pub_hex) != 112 || string_length(priv_hex) != 112 {
+                if res == "valid" {
+                    println("FAIL tcId=${tc_id}: valid case with non-56-byte key?")
+                    failed = failed + 1
+                } else {
+                    rejected_acceptable = rejected_acceptable + 1
+                }
+                ti = ti + 1
+                continue
+            }
+
+            priv = from_hex(priv_hex)
+            pub = from_hex(pub_hex)
+            shared = x448.x448(priv, pub)
+            if shared == null {
+                if res == "valid" {
+                    println("FAIL tcId=${tc_id} (valid): rejected")
+                    failed = failed + 1
+                } else {
+                    rejected_acceptable = rejected_acceptable + 1
+                }
+            } else {
+                if bytes_eq_hex(shared, 56, shared_hex) == 1 {
+                    passed = passed + 1
+                } else {
+                    println("FAIL tcId=${tc_id} (${res}): shared mismatch")
+                    failed = failed + 1
+                }
+                bytes.free(shared)
+            }
+            bytes.free(priv)
+            bytes.free(pub)
+            ti = ti + 1
+        }
+        gi = gi + 1
+    }
+
+    println("wycheproof x448: ${passed} matched, ${rejected_acceptable} rejected-acceptable, ${failed} failed")
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}

@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- Project Wycheproof adversarial test vectors for the crypto suite (#739,
+  #1298): pinned vector files under `tests/vectors/wycheproof/` with
+  per-family drivers for X25519 (518 cases: twists, small-order points,
+  non-canonical encodings — all pass), ChaCha20-Poly1305 (325 cases incl.
+  60 forgeries — all pass, and sealing is checked as well as opening),
+  AES-GCM (all supported-shape cases pass; unsupported IV/tag sizes are
+  counted, not silently dropped), and X448 (stride-sampled by default —
+  its bignum field math costs ~1s/op; `WYCHEPROOF_FULL=1` sweeps all).
+  The adversarial complement to the existing RFC/ACVP KATs.
+
 ## [0.534.0]
 
 ### Added
