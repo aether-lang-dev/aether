@@ -62,9 +62,14 @@ main() {
     // orders cases so edge-case families are contiguous); the nightly sets
     // WYCHEPROOF_FULL=1 for the complete sweep.
     stride = 5
-    if os.os_getenv("WYCHEPROOF_FULL") == "1" { stride = 1 }
+    // os_getenv returns null (0) for an unset variable — check before any
+    // string comparison (comparing null to a literal segfaults; bit CI).
+    wf = os.os_getenv("WYCHEPROOF_FULL")
+    if wf != 0 {
+        if wf == "1" { stride = 1 }
+    }
     sv = os.os_getenv("WYCHEPROOF_STRIDE")
-    if sv != "" { stride = atoi(sv) }
+    if sv != 0 { stride = atoi(sv) }
     if stride < 1 { stride = 1 }
     doc, ferr = fs.read("tests/vectors/wycheproof/x448_test.json")
     if ferr != "" {
