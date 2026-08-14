@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.537.0]
 
 ### Added
 - Wycheproof wave 4 (#739): RSA decryption families — RSAES-PKCS#1 v1.5
