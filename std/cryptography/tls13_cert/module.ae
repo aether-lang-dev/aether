@@ -52,6 +52,7 @@ extern free(p: ptr)
 exports(
     cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256,
     verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
+    split_ecdsa_sig,
     LeafCert,
     leaf_not_before, leaf_not_before_len, leaf_not_after, leaf_not_after_len,
     leaf_dns_count, leaf_dns_name,
@@ -159,7 +160,11 @@ fn cert_verify_content_ctx(ctx_str: string, transcript_hash: ptr, th_len: int) -
 // Split a DER ECDSA-Sig-Value  SEQUENCE { r INTEGER, s INTEGER }  into two
 // fixed 32-byte big-endian scalars (left-padded / high-byte-trimmed as
 // needed). Returns (r32, s32, "") or (null, null, err).
-fn split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
+// Exported (beyond internal cert-verify use) so the Wycheproof
+// ECDSA-DER driver exercises this exact parse path — the DER-encoded
+// signature family probes precisely the laxities a hand-rolled test
+// parser would mask.
+split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
     view = bytes.new(sig_len)
     if sig_len > 0 { bytes.set(view, sig_len - 1, 0) }
     bytes.copy_from_bytes(view, 0, sig, 0, sig_len)
@@ -182,6 +187,60 @@ fn split_ecdsa_sig(sig: ptr, sig_len: int, coord: int) -> (ptr, ptr, string) {
         asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
         return null, null, serr2
     }
+
+    // Strictness gate (Wycheproof ecdsa DER family caught all of these
+    // being accepted): the asn1 reader is deliberately BER-tolerant for
+    // X.509 field reuse, but an ECDSA-Sig-Value must be STRICT minimal
+    // DER with in-range scalars.
+    //   1. r and s must be non-negative;
+    //   2. their magnitudes must fit `coord` bytes (rejects r + 2^320
+    //      style padding — bn_to_fixed would silently truncate it);
+    //   3. re-encoding SEQUENCE { INTEGER r, INTEGER s } as minimal DER
+    //      must reproduce the input byte-for-byte — one comparison that
+    //      rejects long-form/non-minimal/indefinite lengths, superfluous
+    //      integer padding, and trailing garbage in a single stroke.
+    strict = 1
+    if bignum.sign(rint) < 0 { strict = 0 }
+    if bignum.sign(sint) < 0 { strict = 0 }
+    if strict == 1 {
+        rmag = bignum.to_bytes_unsigned(rint)
+        smag = bignum.to_bytes_unsigned(sint)
+        if bytes.length(rmag) > coord { strict = 0 }
+        if bytes.length(smag) > coord { strict = 0 }
+        bytes.free(rmag)
+        bytes.free(smag)
+    }
+    if strict == 1 {
+        ri = asn1.encode_integer(rint)
+        si = asn1.encode_integer(sint)
+        rilen = bytes.length(ri)
+        silen = bytes.length(si)
+        inner = bytes.new(rilen + silen)
+        bytes.copy_from_bytes(inner, 0, ri, 0, rilen)
+        bytes.copy_from_bytes(inner, rilen, si, 0, silen)
+        // encode_sequence consumes `inner` (wrap_tlv frees its content
+        // argument), so only ri/si/reenc are ours to free here.
+        reenc = asn1.encode_sequence(inner)
+        if bytes.length(reenc) != sig_len {
+            strict = 0
+        } else {
+            j = 0
+            while j < sig_len {
+                if bytes.get(reenc, j) != bytes.get(sig, j) { strict = 0 }
+                j = j + 1
+            }
+        }
+        bytes.free(ri)
+        bytes.free(si)
+        bytes.free(reenc)
+    }
+    if strict != 1 {
+        bignum.free(rint)
+        bignum.free(sint)
+        asn1.reader_free(sub); asn1.reader_free(rdr); bytes.free(view); bytes.free(body)
+        return null, null, "ecdsa-sig: not strict minimal DER, or scalar out of range"
+    }
+
     r = bn_to_fixed(rint, coord)
     s = bn_to_fixed(sint, coord)
     bignum.free(rint)

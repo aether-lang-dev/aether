@@ -1,5 +1,7 @@
 #!/bin/sh
-# Wycheproof adversarial vector suites — fast (symmetric + KDF) families.
+# Wycheproof adversarial vector suites — fast families (symmetric, KDF,
+# and stride-sampled ed25519; the tcId-151 forgery stays pinned in
+# tests/integration/crypto_ed25519 regardless of sampling).
 #
 # Runs the cheap drivers against the pinned vector JSONs in
 # tests/vectors/wycheproof/ (provenance + licence in the README there).
@@ -22,7 +24,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [FAIL] wycheproof: build/ae missing (run make)"; exit 1; }
 
 rc=0
-for drv in wp_x25519 wp_chacha20poly1305 wp_aes_gcm wp_hmac_hkdf; do
+for drv in wp_x25519 wp_chacha20poly1305 wp_aes_gcm wp_hmac_hkdf wp_ed25519; do
     out="$("$AE" run "tests/integration/wycheproof/$drv.ae" 2>&1)"
     if printf '%s' "$out" | grep -q "^ALL PASS"; then
         # A driver may cover several families (wp_hmac_hkdf) — print every
