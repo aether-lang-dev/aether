@@ -86,6 +86,14 @@ main() {
     failures = failures + check(string.index_of(err_algo, "pool_new failed") >= 0,
         "the refusal names the algorithm as the cause")
 
+    lb.config_free(hc)
+    lb.config_free(br)
+    lb.config_free(ca)
+    lb.config_free(none_h)
+    lb.config_free(none_b)
+    lb.config_free(none_c)
+    lb.config_free(null)
+
     println("")
     if failures == 0 {
         println("All PASS")

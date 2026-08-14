@@ -148,6 +148,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "uint64_t timeout_ns;     // Receive timeout (0 = none)");
     print_line(gen, "uint64_t last_activity_ns; // Idle start timestamp (0 = not idle)");
     print_line(gen, "atomic_int dead;         // Set when step() unwound via panic/signal");
+    /* The prefix of a generated actor IS an ActorBase: the scheduler is handed
+     * a pointer to it and casts. alloc_size is the last ActorBase field, and
+     * leaving it out put the first user state field at its offset, so
+     * scheduler_spawn_actor wrote the allocation size into that field and
+     * scheduler_destroy_actor later passed the field's value to
+     * aether_numa_free as a length (munmap under libnuma). */
+    print_line(gen, "size_t alloc_size;       // Allocation size, read by scheduler_destroy_actor");
     print_line(gen, "");
 
     // State fields (user-defined)
@@ -182,6 +189,15 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     
     unindent(gen);
     print_line(gen, "} %s;", actor->value);
+    /* The scheduler casts this to ActorBase*, so every field it touches has to
+     * sit at the ActorBase offset. Checking the last one pins the whole
+     * prefix: a field added to ActorBase without being added here stops the
+     * build instead of writing through the first state field at run time. */
+    print_line(gen, "#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+    print_line(gen, "_Static_assert(offsetof(%s, alloc_size) == offsetof(ActorBase, alloc_size),",
+               actor->value);
+    print_line(gen, "               \"%s prefix must match ActorBase\");", actor->value);
+    print_line(gen, "#endif");
     print_line(gen, "");
     
     // Generate individual message handler functions
@@ -666,6 +682,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "// Fallback to aligned allocation if pool exhausted");
     print_line(gen, "actor = aether_aligned_alloc(64, sizeof(%s));", actor->value);
     print_line(gen, "if (!actor) return NULL;");
+    /* The scheduler-allocated path records this; the fallback has to as well,
+     * or destroy frees with an uninitialised length. */
+    print_line(gen, "actor->alloc_size = sizeof(%s);", actor->value);
     print_line(gen, "actor->id = atomic_fetch_add(&next_actor_id, 1);");
     print_line(gen, "atomic_init(&actor->assigned_core, -1);");
     print_line(gen, "actor->step = (void (*)(void*))%s_step;", actor->value);

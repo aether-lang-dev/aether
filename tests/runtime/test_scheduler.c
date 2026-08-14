@@ -69,6 +69,40 @@ void order_step(OrderActor* self) {
     atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
 }
 
+// A pair that answers: the reply target travels in payload_ptr, so the step
+// function sends back on the same scheduler it was woken by. This is the one
+// case the deleted tests/runtime/test_scheduler_correctness.c covered that
+// nothing here did; unlike that file, the actor prefix is the shared macro.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int pings_received;
+    atomic_int pongs_sent;
+} PingPongActor;
+
+#define PINGPONG_PING 1
+#define PINGPONG_PONG 2
+
+void pingpong_step(PingPongActor* self) {
+    Message msg;
+    while (mailbox_receive(&self->mailbox, &msg)) {
+        if (msg.type == PINGPONG_PING) {
+            atomic_fetch_add(&self->pings_received, 1);
+            PingPongActor* sender = (PingPongActor*)msg.payload_ptr;
+            if (sender) {
+                /* Both actors live on the same core, so this runs on the
+                 * thread that owns the target too: the local queue is the
+                 * path the runtime itself takes for a same-core send. */
+                Message pong = message_create_simple(PINGPONG_PONG, self->id, 0);
+                scheduler_send_local((ActorBase*)sender, pong);
+                atomic_fetch_add(&self->pongs_sent, 1);
+            }
+        } else {
+            atomic_fetch_add(&self->pings_received, 1);
+        }
+    }
+    atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
+}
+
 // ============================================================================
 // Test Cases
 // ============================================================================
@@ -394,8 +428,60 @@ void test_scheduler_backpressure(void) {
 // Test Registration
 // ============================================================================
 
+void test_scheduler_bidirectional(void) {
+    scheduler_init(2);
+
+    PingPongActor* a = malloc(sizeof(PingPongActor));
+    PingPongActor* b = malloc(sizeof(PingPongActor));
+    memset(a, 0, sizeof(PingPongActor));
+    memset(b, 0, sizeof(PingPongActor));
+
+    a->id = 1;
+    a->step = (void (*)(void*))pingpong_step;
+    atomic_init(&a->migrate_to, -1);
+    mailbox_init(&a->mailbox);
+
+    b->id = 2;
+    b->step = (void (*)(void*))pingpong_step;
+    atomic_init(&b->migrate_to, -1);
+    mailbox_init(&b->mailbox);
+
+    scheduler_register_actor((ActorBase*)a, 0);
+    scheduler_register_actor((ActorBase*)b, 0);
+    scheduler_start();
+
+    /* Through the scheduler, not into the mailbox: the mailbox is drained by
+     * the scheduler thread, and pushing into it from here races that reader.
+     * (Doing exactly that is what made the deleted test drop messages.) */
+    const int pings = 50;
+    for (int i = 0; i < pings; i++) {
+        Message msg = message_create_simple(PINGPONG_PING, a->id, 0);
+        msg.payload_ptr = a;                 /* answer here */
+        scheduler_send_remote((ActorBase*)b, msg, -1);
+    }
+
+    for (int i = 0; i < 10000 && atomic_load(&a->pings_received) < pings; i++) {
+        sleep_ms(1);
+    }
+
+    int b_got = atomic_load(&b->pings_received);
+    int b_sent = atomic_load(&b->pongs_sent);
+    int a_got = atomic_load(&a->pings_received);
+
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_EQ(pings, b_got);
+    ASSERT_EQ(pings, b_sent);
+    ASSERT_EQ(pings, a_got);
+
+    free(a);
+    free(b);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Mailbox overflow handling", test_mailbox_overflow, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler init/cleanup", test_scheduler_init_cleanup, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);

@@ -6,6 +6,7 @@
 #include "../../runtime/actors/lockfree_mailbox.h"
 #include "../../runtime/actors/aether_simd_batch.h"
 #include "../../runtime/actors/aether_message_dedup.h"
+#include "../../runtime/actors/aether_message_coalescing.h"
 #include <string.h>
 
 // Test 1: Optimized actor initialization
@@ -347,4 +348,76 @@ TEST_CATEGORY(direct_send_stats, TEST_CATEGORY_RUNTIME) {
 // Note: Tests are auto-registered via TEST_CATEGORY macro
 void register_scheduler_optimization_tests() {
     // Empty - tests registered by constructor
+}
+
+
+// Message coalescing. The only coverage this header had lived in a
+// tests/runtime/test_optimizations.c that no target compiled; these are its
+// cases, in the suite that runs.
+static int coalesce_sent = 0;
+static void coalesce_probe(void* msg, uint16_t size) {
+    (void)msg; (void)size;
+    coalesce_sent++;
+}
+
+TEST_CATEGORY(coalescing_buffer_init, TEST_CATEGORY_RUNTIME) {
+    CoalescingBuffer buf;
+    coalescing_buffer_init(&buf);
+    ASSERT_EQ(0, buf.pending.count);
+    ASSERT_EQ(COALESCE_BUFFER_SIZE, buf.pending.capacity);
+}
+
+TEST_CATEGORY(coalescing_buffer_add_reaches_threshold, TEST_CATEGORY_RUNTIME) {
+    CoalescingBuffer buf;
+    coalescing_buffer_init(&buf);
+
+    int msg = 1;
+    ASSERT_EQ(0, coalescing_buffer_add(&buf, &msg, sizeof(int)));
+    ASSERT_EQ(1, buf.pending.count);
+
+    int should_flush = 0;
+    for (int i = 2; i <= COALESCE_THRESHOLD; i++) {
+        should_flush = coalescing_buffer_add(&buf, &msg, sizeof(int));
+    }
+    ASSERT_TRUE(should_flush);
+}
+
+TEST_CATEGORY(coalescing_buffer_flush_sends_every_message, TEST_CATEGORY_RUNTIME) {
+    CoalescingBuffer buf;
+    coalescing_buffer_init(&buf);
+
+    int messages[5] = {1, 2, 3, 4, 5};
+    for (int i = 0; i < 5; i++) {
+        coalescing_buffer_add(&buf, &messages[i], sizeof(int));
+    }
+
+    coalesce_sent = 0;
+    coalescing_buffer_flush(&buf, coalesce_probe);
+    ASSERT_EQ(5, coalesce_sent);
+    ASSERT_EQ(0, buf.pending.count);
+}
+
+TEST_CATEGORY(coalescing_stats_count_flushes, TEST_CATEGORY_RUNTIME) {
+    CoalescingBuffer buf;
+    coalescing_buffer_init(&buf);
+
+    for (int batch = 0; batch < 3; batch++) {
+        for (int i = 0; i < COALESCE_THRESHOLD; i++) {
+            int msg = i;
+            coalescing_buffer_add(&buf, &msg, sizeof(int));
+        }
+        coalescing_buffer_flush(&buf, coalesce_probe);
+    }
+
+    CoalescingStats stats = coalescing_buffer_stats(&buf);
+    ASSERT_EQ(3, (int)stats.flush_count);
+    ASSERT_EQ(COALESCE_THRESHOLD, (int)stats.high_watermark);
+}
+
+TEST_CATEGORY(coalescing_adaptive_decision, TEST_CATEGORY_RUNTIME) {
+    // Light load stays uncoalesced: batching would add latency for nothing.
+    ASSERT_EQ(0, coalescing_should_enable(2, 1000));
+    // Either a deep queue or a high rate turns it on.
+    ASSERT_TRUE(coalescing_should_enable(10, 1000));
+    ASSERT_TRUE(coalescing_should_enable(3, 50000));
 }

@@ -907,8 +907,11 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
     char aetherc[AE_HELP_PATH_LEN];
     find_aetherc(aetherc, sizeof(aetherc));
 
-    /* `/dev/null` on POSIX, `NUL` on Windows — aetherc's `-o <sink>`
-     * tells it not to write the compiled C anywhere. */
+    /* Where the compiled C goes: `/dev/null` on POSIX, `NUL` on Windows.
+     * aetherc takes the output as a POSITIONAL argument, so this is passed as
+     * one. Passing it as `-o <sink>` (which it was) made aetherc read the
+     * flag itself as the output path and write the generated C to a file
+     * literally named "-o" in whatever directory the user ran `ae help` in. */
 #ifdef _WIN32
     const char* sink = "NUL";
 #else
@@ -934,7 +937,7 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
      * earlier (POSIX issue + Windows path collision); we now mirror
      * it here. The previous `system(cmd)` shape was the only
      * shell-dependent invocation left in the ae_help binary. */
-    /* aetherc argv: base 4 args + one `--lib <dir>` pair per resolved
+    /* aetherc argv: base 3 args + one `--lib <dir>` pair per resolved
      * search-path entry + NULL. Forwarding `--lib` lets the wrapped
      * compile resolve project-local library imports, so `ae help` on
      * a real config script stops flagging every library call as an
@@ -943,7 +946,6 @@ static int run_aetherc_capture(const char* script_path, char* stderr_buf, size_t
     int ac = 0;
     argv[ac++] = aetherc;
     argv[ac++] = script_path;
-    argv[ac++] = "-o";
     argv[ac++] = sink;
     for (int i = 0; i < g_lib_count; i++) {
         argv[ac++] = "--lib";

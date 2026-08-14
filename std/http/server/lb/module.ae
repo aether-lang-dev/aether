@@ -81,6 +81,7 @@ import std.string(string_length, string_get_int, string_index_of, string_substri
 exports(
     serve, serve_at,
     health, no_health, breaker, no_breaker, cache, no_cache,
+    config_free,
     parse_backends,
     // health/breaker/cache config accessors (opaque tuples — callers use the
     // constructors above; these let a caller inspect/override if needed).
@@ -112,6 +113,13 @@ cache(entries: int, max_body: int, ttl_sec: int, key_strategy: string) -> ptr {
     return _cfg_cache(entries, max_body, ttl_sec, key_strategy)
 }
 no_cache() -> ptr { return _cfg_none() }
+
+// Release a config built by any of the constructors above. serve() runs until
+// the server stops, so a program that serves never needs this; one that builds
+// a config and takes another path (or a test) would otherwise leak the handle.
+config_free(c: ptr) {
+    if c != null { list_free(c) }
+}
 
 // ---- serve ---------------------------------------------------------------------
 // Build the pool, apply health/breaker/cache, register the admin middleware, mount

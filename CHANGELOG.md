@@ -9,6 +9,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`make check-standalone`: a compile gate for every C source with its own
+  `main()`.** The runtime examples, micro-benchmarks and demos are linked by no
+  target, so nothing noticed when they stopped compiling: three carried include
+  paths that had moved directories, one was written against a renamed logging
+  API, and the whole `tests/runtime/bench_*` set failed on ARM because
+  `micro_profile.h` included `<x86intrin.h>` unconditionally. All of them build
+  clean now, the cycle counter has an AArch64 and a portable path, and the gate
+  runs inside `make ci` and `make test-all`.
+
+- **141 compiler and memory unit tests that were never run.** `tests/compiler`
+  held a parser, typechecker, codegen, pattern-matching, struct and
+  module-orchestrator suite that no target compiled; the C test binary went
+  from 239 to 386 tests. Three of them asserted against the first 4 KB of
+  generated C, which is prelude, so they matched prelude text rather than the
+  program under test; they now read the whole output. `tests/compiler/test_structs.c`
+  registered nothing at all: its cases were plain functions the harness never
+  saw, behind a comment claiming they were wrapped.
+
+- **A test for `std.http.server.lb`**, which shipped with none: the backend-list
+  parser, the config constructors and the two refusals that report a bad call
+  instead of standing up a broken load balancer.
+
+### Fixed
+
+- **A generated actor's struct was missing the last `ActorBase` field.** The
+  scheduler is handed a pointer to the generated struct and casts it, so the
+  prefix has to match; codegen stopped at `dead` and left out `alloc_size`,
+  which put the first user state field at exactly that offset (1640 on
+  LP64/arm64). `scheduler_spawn_actor` wrote the allocation size through it,
+  and `scheduler_destroy_actor` later passed the field's *value* to
+  `aether_numa_free` as a length. Where that resolves to `free()` the size is
+  ignored and nothing showed; under libnuma on a multi-node host it is
+  `munmap(ptr, <state field>)`, which either fails and leaks the actor or
+  unmaps memory that was never part of it. The field is emitted now, the
+  fallback allocation path sets it, and every generated actor carries a
+  `_Static_assert` that its `alloc_size` sits at the `ActorBase` offset, so
+  the next field added to `ActorBase` breaks the build instead of the heap.
+
+- **`std.http.server.lb` had no way to release a config.** `health()`,
+  `breaker()`, `cache()` and the `no_*()` forms allocate a handle that nothing
+  could free; `serve()` blocks forever so it never mattered there, but any
+  program that builds one and takes another path leaked it. `config_free()` is
+  exported.
+
+- **Generated code no longer breaks a downstream `-Wall -Werror` build.**
+  Imported wrappers are emitted with internal linkage, so a translation unit
+  that uses part of a module is left with unused statics. They now carry
+  `AETHER_MAYBE_UNUSED`, which is the compiler's business rather than a `-Wno`
+  flag every consumer has to remember.
+
+- **`import std.message` (a module path segment spelling a keyword).** Module
+  path segments were matched against a short whitelist of keywords, so a
+  stdlib module named after a reserved word could only be imported by
+  backtick-escaping it, and the parse failed with an error pointing at the line
+  *after* the import. A segment is a name, and is parsed as one.
+
+- **`ae help` dropped a file named `-o` into the working directory.** It
+  compiles the script to a sink to collect diagnostics and passed that sink as
+  `-o <path>`, but aetherc takes the output positionally: it read the flag
+  itself as the output path and wrote the generated C there, in whatever
+  directory the user ran `ae help` in. The sink is passed positionally now,
+  aetherc refuses an output path that starts with a dash rather than creating
+  such a file, the `.gitignore` entry that had been hiding it is gone, and
+  `ae help` is asserted to leave its working directory empty.
+
+- **The language server dropped `aether-lsp.log` into whatever directory the
+  editor started it in.** Logging is opt-in through `AETHER_LSP_LOG=<path>`, and
+  `lsp_server_create` checks its allocation instead of dereferencing NULL.
+
+- **Two self-assigning `realloc` calls.** `store_emit_string` in the YAML
+  emitter lost the old buffer on failure and left the capacity claiming a size
+  the now-NULL buffer did not have, so every later call under that size
+  returned NULL; `aether_register_test` wrote through the null pointer one line
+  down. Both go through a temporary and handle failure.
+
+- **Hand-mirrored `ActorBase` layouts in the scheduler tests.** The fields live
+  in one `AETHER_ACTOR_BASE_FIELDS` macro now: the mirrors were already one
+  field stale, and the drift is silent memory corruption rather than a
+  compile error.
+
+- **Tests and examples no longer litter the tree they run in.** contrib tests
+  run from a per-test scratch directory that mirrors the repo through symlinks,
+  so an example writing `sprites.ppm` writes it there; the codegen tests
+  generate into `tmpfile()` (an assertion longjmps, so `remove()` never ran on
+  failure); the `log.init` test deletes the log it writes.
+
+- **`tests/compiler/test_msvc_compat.sh` could not compile** what it was
+  checking (two headers had moved into subdirectories since the include list
+  was written), so the C11 `-pedantic -Werror` gate on generated code had been
+  silently passing over a failed compile.
+
+- **`make test-manual-runtime` could not compile** (an include path left behind
+  when `actor_state_machine.h` moved), and
+  `tests/integration/aether_extern_param_annotation` could never pass on macOS:
+  it linked with GNU's `--allow-multiple-definition`, which `ld64` rejects and
+  which the static-marking made unnecessary years ago. It now also compiles the
+  generated C with `-Wall -Wextra -Werror` rather than `-w`.
+
+### Removed
+
+- **Dead code that no build compiled**: the superseded `runtime/actors/aether_actor.c`
+  (whose `aether_send_message` had a different signature from the live one, and
+  whose header advertised ten functions with no definition anywhere), three
+  scheduler/foundation tests that handed the scheduler a hand-rolled actor
+  struct with a stale layout and hung on the corruption, an HTTP test written
+  against an API renamed long ago, two duplicate copies of the test harness,
+  three copies of a test runner `main()`, an unused 318-line test framework
+  header, a byte-identical duplicate of `bench_scheduler.c`, and two profiler
+  demos that nothing built. Coverage that only existed in the deleted files
+  (wildcard route matching, the middleware chain) moved into the suite that
+  runs, including the message-coalescing cases (the only coverage that header
+  had) and a bidirectional ping-pong between two actors. `tests/compiler/run_tests.sh`
+  went too: it had been broken since a source file it lists was removed, and
+  the tests it compiled now run in `make test`.
+
+### Added
+
 ## [0.535.0]
 
 ### Added
@@ -56,90 +177,6 @@ version number before tagging the release.
   JIT, so the vendored interpreter matches the system-library path.
 
 ## [0.533.0]
-
-### Added
-
-- **`make check-standalone`: a compile gate for every C source with its own
-  `main()`.** The runtime examples, micro-benchmarks and demos are linked by no
-  target, so nothing noticed when they stopped compiling: three carried include
-  paths that had moved directories, one was written against a renamed logging
-  API, and the whole `tests/runtime/bench_*` set failed on ARM because
-  `micro_profile.h` included `<x86intrin.h>` unconditionally. All of them build
-  clean now, the cycle counter has an AArch64 and a portable path, and the gate
-  runs inside `make ci` and `make test-all`.
-
-- **141 compiler and memory unit tests that were never run.** `tests/compiler`
-  held a parser, typechecker, codegen, pattern-matching, struct and
-  module-orchestrator suite that no target compiled; the C test binary went
-  from 239 to 386 tests. Three of them asserted against the first 4 KB of
-  generated C, which is prelude, so they matched prelude text rather than the
-  program under test; they now read the whole output. `tests/compiler/test_structs.c`
-  registered nothing at all: its cases were plain functions the harness never
-  saw, behind a comment claiming they were wrapped.
-
-- **A test for `std.http.server.lb`**, which shipped with none: the backend-list
-  parser, the config constructors and the two refusals that report a bad call
-  instead of standing up a broken load balancer.
-
-### Fixed
-
-- **Generated code no longer breaks a downstream `-Wall -Werror` build.**
-  Imported wrappers are emitted with internal linkage, so a translation unit
-  that uses part of a module is left with unused statics. They now carry
-  `AETHER_MAYBE_UNUSED`, which is the compiler's business rather than a `-Wno`
-  flag every consumer has to remember.
-
-- **`import std.message` (a module path segment spelling a keyword).** Module
-  path segments were matched against a short whitelist of keywords, so a
-  stdlib module named after a reserved word could only be imported by
-  backtick-escaping it, and the parse failed with an error pointing at the line
-  *after* the import. A segment is a name, and is parsed as one.
-
-- **`aetherc in.ae -o out.c` silently wrote a file named `-o`.** The output path
-  is positional; a path that starts with a dash is now refused with the correct
-  invocation. The `.gitignore` entry that had been hiding the stray file is gone.
-
-- **The language server dropped `aether-lsp.log` into whatever directory the
-  editor started it in.** Logging is opt-in through `AETHER_LSP_LOG=<path>`, and
-  `lsp_server_create` checks its allocation instead of dereferencing NULL.
-
-- **Two self-assigning `realloc` calls.** `store_emit_string` in the YAML
-  emitter lost the old buffer on failure and left the capacity claiming a size
-  the now-NULL buffer did not have, so every later call under that size
-  returned NULL; `aether_register_test` wrote through the null pointer one line
-  down. Both go through a temporary and handle failure.
-
-- **Hand-mirrored `ActorBase` layouts in the scheduler tests.** The fields live
-  in one `AETHER_ACTOR_BASE_FIELDS` macro now: the mirrors were already one
-  field stale, and the drift is silent memory corruption rather than a
-  compile error.
-
-- **Tests and examples no longer litter the tree they run in.** contrib tests
-  run from a per-test scratch directory that mirrors the repo through symlinks,
-  so an example writing `sprites.ppm` writes it there; the codegen tests
-  generate into `tmpfile()` (an assertion longjmps, so `remove()` never ran on
-  failure); the `log.init` test deletes the log it writes.
-
-- **`make test-manual-runtime` could not compile** (an include path left behind
-  when `actor_state_machine.h` moved), and
-  `tests/integration/aether_extern_param_annotation` could never pass on macOS:
-  it linked with GNU's `--allow-multiple-definition`, which `ld64` rejects and
-  which the static-marking made unnecessary years ago. It now also compiles the
-  generated C with `-Wall -Wextra -Werror` rather than `-w`.
-
-### Removed
-
-- **Dead code that no build compiled**: the superseded `runtime/actors/aether_actor.c`
-  (whose `aether_send_message` had a different signature from the live one, and
-  whose header advertised ten functions with no definition anywhere), three
-  scheduler/foundation tests that handed the scheduler a hand-rolled actor
-  struct with a stale layout and hung on the corruption, an HTTP test written
-  against an API renamed long ago, two duplicate copies of the test harness,
-  three copies of a test runner `main()`, an unused 318-line test framework
-  header, a byte-identical duplicate of `bench_scheduler.c`, and two profiler
-  demos that nothing built. Coverage that only existed in the deleted files
-  (wildcard route matching, the middleware chain) moved into the suite that
-  runs.
 
 ### Added
 
