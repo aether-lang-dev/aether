@@ -8,10 +8,12 @@
 # rejected but must match when accepted. AEAD drivers additionally check
 # the seal direction (deterministic AEADs).
 #
-# wp_x448 samples its 510 cases at stride 5 by default (~100 cases): its
-# field math is bignum-based at ~1s+/agreement, so the full sweep costs
-# ~10 minutes. Set WYCHEPROOF_FULL=1 (the nightly does) for everything;
-# WYCHEPROOF_STRIDE=N picks a custom sample density.
+# wp_x448 (stride 5 of 510) and wp_ecdsa_p256 (stride 5 of 262) sample
+# by default: their field math is bignum-based at ~1s+/op, so the full
+# sweeps cost ~10 minutes each. Set WYCHEPROOF_FULL=1 (the nightly does)
+# for everything; WYCHEPROOF_STRIDE=N picks a custom sample density.
+# ed25519 (151) and rsa (259) run complete — each caught a real
+# accepted-forgery bug on import (see CHANGELOG), so no sampling there.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -22,11 +24,12 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [FAIL] wycheproof: build/ae missing (run make)"; exit 1; }
 
 rc=0
-for drv in wp_x25519 wp_chacha20poly1305 wp_aes_gcm wp_x448; do
+for drv in wp_x25519 wp_chacha20poly1305 wp_aes_gcm wp_hmac_hkdf wp_rsa_pkcs1 wp_ed25519 wp_ecdsa_p256 wp_x448; do
     out="$("$AE" run "tests/integration/wycheproof/$drv.ae" 2>&1)"
     if printf '%s' "$out" | grep -q "^ALL PASS"; then
-        summary="$(printf '%s' "$out" | grep "^wycheproof" | head -1)"
-        echo "  [PASS] $summary"
+        # A driver may cover several families (wp_hmac_hkdf) — print every
+        # per-family summary line, not just the first.
+        printf '%s\n' "$out" | grep "^wycheproof" | sed 's/^/  [PASS] /'
     else
         echo "  [FAIL] wycheproof $drv:"
         printf '%s\n' "$out" | tail -12 | sed 's/^/        /'

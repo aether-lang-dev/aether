@@ -20,7 +20,24 @@ version number before tagging the release.
   AES-GCM (all supported-shape cases pass; unsupported IV/tag sizes are
   counted, not silently dropped), and X448 (stride-sampled by default —
   its bignum field math costs ~1s/op; `WYCHEPROOF_FULL=1` sweeps all).
-  The adversarial complement to the existing RFC/ACVP KATs.
+  The adversarial complement to the existing RFC/ACVP KATs. Wave 2 adds
+  Ed25519 (151 cases), ECDSA P-256/SHA-256 in P1363 form (262,
+  stride-sampled), RSA PKCS#1 v1.5 2048/SHA-256 (259), HMAC-SHA256 and
+  HKDF-SHA256 — and caught two real accepted-forgery bugs (below).
+
+### Fixed
+- `std.cryptography.ed25519`: point decoding accepted the non-canonical
+  encoding "y = 1 with the sign bit of x set" (x = 0 has no negative
+  form; RFC 8032 §5.1.3 step 4 requires failure) and silently produced a
+  garbage x when no square root exists (step 3). Both now reject.
+  Caught by Wycheproof ed25519 tcId 151 — verify accepted a forgery.
+- `std.cryptography.rsa`: `verify_pkcs1` accepted unreduced signatures
+  (s + n verifies identically after the mod-n exponentiation — RFC 8017
+  §8.2.2 step 1 requires s < n and exact k-octet length) and had no
+  length check; `verify_pss` had the same missing range check. Both
+  verifies now reject out-of-range and wrong-length signatures.
+  Caught by Wycheproof rsa_signature tcId 244 ("signature is not
+  reduced", SignatureMalleability).
 
 ## [0.534.0]
 
