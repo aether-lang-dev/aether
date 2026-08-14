@@ -25,6 +25,10 @@ version number before tagging the release.
   engine. Behaviour is identical either way — `std.regex` never used PCRE2's
   JIT, so the vendored interpreter matches the system-library path.
 
+## [0.533.0]
+
+### Added
+
 - **contrib/vulkan: materials, draw batching, 16-bit indices and mipmaps.** A
   pipeline owned one descriptor set, so a frame could use exactly one texture:
   binding a second overwrote what the first draw was still going to read.
