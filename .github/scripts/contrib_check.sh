@@ -105,8 +105,10 @@ for entry in "${TESTS[@]}"; do
   fi
 
   safe="$(echo "$label" | tr '/' '_')"
-  out="$run_dir/${safe}${EXE_EXT}"
-  log="$run_dir/${safe}.log"
+  # Absolute: the program runs from its own scratch directory, so a relative
+  # path would resolve there instead of beside the other build output.
+  out="$(pwd)/$run_dir/${safe}${EXE_EXT}"
+  log="$(pwd)/$run_dir/${safe}.log"
   # assemble --extra flags
   extra_flags=""
   for c in $extras; do extra_flags="$extra_flags --extra $c"; done
@@ -134,7 +136,7 @@ for entry in "${TESTS[@]}"; do
       printf '[build]\nlink_flags = "%s"\n' "${pcmods:+$(pkg-config --libs $pcmods)}"
       printf 'cflags = "%s"\n' "$(pkg-config --cflags $pcmods $pchdrs)"
     } > "$work/aether.toml"
-    abs_out="$(pwd)/$out"; abs_ae="$(pwd)/${AE#./}$EXE_EXT"
+    abs_out="$out"; abs_ae="$(pwd)/${AE#./}$EXE_EXT"
     if ! berr="$( cd "$work" && "$abs_ae" build probe.ae -o "$abs_out" 2>&1 )"; then
       printf '  FAIL  %-22s (build)\n' "$label"
       echo "$berr" | grep -iE "error" | head -5
@@ -158,7 +160,19 @@ for entry in "${TESTS[@]}"; do
   else
     runner="$out"
   fi
-  if timeout 120 $runner > "$log" 2>&1 < /dev/null; then
+  # Run from a scratch directory that mirrors the repo through symlinks.
+  # The programs resolve inputs by relative path (shaders, fixtures), so the
+  # tree has to look the same; what must NOT be shared is the working
+  # directory, or every example that writes an output file drops it in the
+  # source tree. Rebuilt per entry so one test cannot see another's output.
+  rundir="$run_dir/${safe}.rundir"
+  rm -rf "$rundir"; mkdir -p "$rundir"
+  for top in */; do
+    top="${top%/}"
+    [ "$top" = "build" ] && continue
+    ln -s "$(pwd)/$top" "$rundir/$top" 2>/dev/null || true
+  done
+  if ( cd "$rundir" && timeout 120 $runner > "$log" 2>&1 < /dev/null ); then
     if [ "$use_vg" = "1" ]; then
       printf '  PASS  %-22s (run + valgrind)\n' "$label"
     elif [ "$VALGRIND" = "1" ]; then

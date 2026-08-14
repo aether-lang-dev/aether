@@ -1,5 +1,4 @@
 #include <stdio.h>
-#include <assert.h>
 #include <string.h>
 #include "../runtime/test_harness.h"
 #include "../../compiler/parser/tokens.h"
@@ -16,16 +15,16 @@ static Parser* create_test_parser(Token** tokens, int token_count) {
 }
 
 // Test struct lexing
-void test_struct_keyword() {
+TEST(struct_keyword) {
     lexer_init("struct");
     Token* token = next_token();
-    assert(token->type == TOKEN_STRUCT);
-    assert(strcmp(token->value, "struct") == 0);
+    ASSERT_TRUE(token->type == TOKEN_STRUCT);
+    ASSERT_TRUE(strcmp(token->value, "struct") == 0);
     free_token(token);
 }
 
 // Test struct parsing
-void test_parse_simple_struct() {
+TEST(parse_simple_struct) {
     const char* code = "struct Point { int x; int y; }";
     lexer_init(code);
     
@@ -45,19 +44,19 @@ void test_parse_simple_struct() {
     parser->suppress_errors = 1;  // Suppress parse errors during testing
     ASTNode* struct_def = parse_struct_definition(parser);
     
-    assert(struct_def != NULL);
-    assert(struct_def->type == AST_STRUCT_DEFINITION);
-    assert(strcmp(struct_def->value, "Point") == 0);
-    assert(struct_def->child_count == 2); // x and y fields
+    ASSERT_TRUE(struct_def != NULL);
+    ASSERT_TRUE(struct_def->type == AST_STRUCT_DEFINITION);
+    ASSERT_TRUE(strcmp(struct_def->value, "Point") == 0);
+    ASSERT_TRUE(struct_def->child_count == 2); // x and y fields
     
     // Check fields
-    assert(struct_def->children[0]->type == AST_STRUCT_FIELD);
-    assert(strcmp(struct_def->children[0]->value, "x") == 0);
-    assert(struct_def->children[0]->node_type->kind == TYPE_INT);
+    ASSERT_TRUE(struct_def->children[0]->type == AST_STRUCT_FIELD);
+    ASSERT_TRUE(strcmp(struct_def->children[0]->value, "x") == 0);
+    ASSERT_TRUE(struct_def->children[0]->node_type->kind == TYPE_INT);
     
-    assert(struct_def->children[1]->type == AST_STRUCT_FIELD);
-    assert(strcmp(struct_def->children[1]->value, "y") == 0);
-    assert(struct_def->children[1]->node_type->kind == TYPE_INT);
+    ASSERT_TRUE(struct_def->children[1]->type == AST_STRUCT_FIELD);
+    ASSERT_TRUE(strcmp(struct_def->children[1]->value, "y") == 0);
+    ASSERT_TRUE(struct_def->children[1]->node_type->kind == TYPE_INT);
     
     free_ast_node(struct_def);
     free_parser(parser);
@@ -68,7 +67,7 @@ void test_parse_simple_struct() {
 }
 
 // Test struct type checking
-void test_typecheck_struct() {
+TEST(typecheck_struct) {
     const char* code = "struct Player { int health; int score; }";
     lexer_init(code);
     
@@ -88,7 +87,7 @@ void test_typecheck_struct() {
     SymbolTable* table = create_symbol_table(NULL);
     int result = typecheck_struct_definition(struct_def, table);
     
-    assert(result == 1); // Should succeed
+    ASSERT_TRUE(result == 1); // Should succeed
     
     free_symbol_table(table);
     free_ast_node(struct_def);
@@ -100,7 +99,7 @@ void test_typecheck_struct() {
 }
 
 // Test duplicate field detection
-void test_duplicate_field_detection() {
+TEST(duplicate_field_detection) {
     const char* code = "struct Bad { int x; int x; }";
     lexer_init(code);
     
@@ -120,7 +119,7 @@ void test_duplicate_field_detection() {
     SymbolTable* table = create_symbol_table(NULL);
     int result = typecheck_struct_definition(struct_def, table);
     
-    assert(result == 0); // Should fail due to duplicate field
+    ASSERT_TRUE(result == 0); // Should fail due to duplicate field
     
     free_symbol_table(table);
     free_ast_node(struct_def);
@@ -131,5 +130,4 @@ void test_duplicate_field_detection() {
     free(tokens);
 }
 
-// Test functions are now wrapped in TEST() macros above
-// No separate main() needed - test harness provides it
+// Registration is the TEST() macro's constructor; the harness owns main().

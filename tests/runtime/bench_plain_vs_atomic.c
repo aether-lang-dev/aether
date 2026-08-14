@@ -7,17 +7,10 @@
 #include <stdint.h>
 #include <stdatomic.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#include <intrin.h>
-static inline uint64_t rdtsc() { return __rdtsc(); }
-#else
-static inline uint64_t rdtsc() {
-    uint32_t lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-#endif
+#include "micro_profile.h"
+
+/* One portable counter for every bench here; see micro_profile.h. */
+#define rdtsc() read_cycles()
 
 #define ITERATIONS 10000000
 

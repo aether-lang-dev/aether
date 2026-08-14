@@ -15,6 +15,7 @@
 #define get_time_us() (GetTickCount64() * 1000)
 #else
 #include <sys/time.h>
+#include <unistd.h>          /* usleep */
 static long get_time_us(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);

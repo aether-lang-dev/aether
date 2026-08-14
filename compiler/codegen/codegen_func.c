@@ -946,7 +946,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // declare their own `record_start_` / `helper_` without the
     // generated C colliding at link time. Closes #279.
     if (fn_has_internal_linkage(func)) {
-        fprintf(gen->output, "static ");
+        fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
     }
 
     // Determine return type:
@@ -1691,7 +1691,7 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     // overrides this so the symbol is reachable from other TUs (#235).
     // Trailing-underscore private helpers (#279) also get `static`.
     if (fn_has_internal_linkage(first)) {
-        fprintf(gen->output, "static ");
+        fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
     }
 
     if ((!ret_type || ret_type->kind == TYPE_VOID || ret_type->kind == TYPE_UNKNOWN) && has_return) {

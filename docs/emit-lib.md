@@ -338,15 +338,19 @@ Two consequences worth highlighting:
 
 **Imported Aether wrappers are private to each TU.** When module A
 and module B both `import std.string`, both generated `.c` files
-contain `static const char* string_copy(...)` a private copy each.
+contain `static AETHER_MAYBE_UNUSED const char* string_copy(...)` a
+private copy each. The attribute is there because a TU that calls part
+of a module leaves the rest of the private copies uncalled, and a
+consumer building the generated `.c` with `-Wall -Werror` would
+otherwise fail on `-Wunused-function` in code it did not write.
 Linking the two `.o` files together produces no duplicate-symbol
 errors, even on linkers that don't support
 `-Wl,--allow-multiple-definition` (notably macOS ld64). This is
 deliberate; see [`compiler/aether_module.c`](../compiler/aether_module.c)
 where cloned imported functions get `clone->is_imported = 1`, and
 [`compiler/codegen/codegen_func.c`](../compiler/codegen/codegen_func.c)
-where the `static ` prefix is emitted for functions guarded by
-`func->is_imported || trailing_underscore_private`.
+where the `static AETHER_MAYBE_UNUSED ` prefix is emitted for functions
+guarded by `func->is_imported || trailing_underscore_private`.
 
 **Locally-defined functions retain external linkage.** If two `.ae`
 files both define a function with the same name (e.g. both define

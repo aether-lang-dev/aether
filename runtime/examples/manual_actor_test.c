@@ -29,7 +29,11 @@ Counter* spawn_Counter() {
 }
 
 void send_Counter(Counter* actor, int type, int payload) {
-    Message msg = {type, 0, payload, NULL};
+    Message msg = {0};
+    msg.type = type;
+    msg.sender_id = 0;
+    msg.payload_int = payload;
+    msg.payload_ptr = NULL;
     mailbox_send(&actor->mailbox, msg);
     actor->active = 1;
 }

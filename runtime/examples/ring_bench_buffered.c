@@ -2,6 +2,7 @@
 // Measures end-to-end performance with realistic message patterns
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -70,7 +71,7 @@ int main() {
     
     printf("Ring: %d actors across %d cores\n", num_actors, cores);
     printf("Messages: %d\n", messages);
-    printf("Total message passes: %lu\n\n", (uint64_t)messages * num_actors);
+    printf("Total message passes: %" PRIu64 "\n\n", (uint64_t)messages * num_actors);
     
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -95,13 +96,13 @@ int main() {
         }
         
         if (wait % 10 == 0) {
-            printf("\rProcessed: %lu/%lu messages (%.1f%%)...", 
+            printf("\rProcessed: %" PRIu64 "/%" PRIu64 " messages (%.1f%%)...", 
                    total, expected, 100.0 * total / expected);
             fflush(stdout);
         }
         
         if (total >= expected) {
-            printf("\rProcessed: %lu/%lu messages (100.0%%)    \n", total, expected);
+            printf("\rProcessed: %" PRIu64 "/%" PRIu64 " messages (100.0%%)    \n", total, expected);
             break;
         }
         usleep(10000);  // 10ms
@@ -121,7 +122,7 @@ int main() {
     printf("\nResults:\n");
     printf("--------\n");
     printf("Time: %.3f seconds\n", elapsed);
-    printf("Messages processed: %lu\n", total_msgs);
+    printf("Messages processed: %" PRIu64 "\n", total_msgs);
     printf("Throughput: %.2f M msg/sec\n", total_msgs / elapsed / 1e6);
     printf("Per-core: %.2f M msg/sec\n", total_msgs / elapsed / 1e6 / cores);
     

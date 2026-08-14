@@ -139,26 +139,36 @@ See [benchmarks/cross-language](../benchmarks/cross-language/) for detailed meas
 ## Examples
 
 ### Example 1: Simple Program
+Actors are produced by the Aether compiler: an `actor` block becomes a struct
+carrying a mailbox, and the runtime flags below decide which mailbox and pool
+implementations it uses. A C program embedding the runtime configures it and
+then drives compiler-generated actors, or its own structs built on the mailbox
+API in `runtime/actors/actor_state_machine.h`.
+
 ```c
 #include "runtime/aether_runtime.h"
-#include "runtime/actors/aether_actor.h"
+#include "runtime/actors/actor_state_machine.h"
 
-void my_actor_process(Actor* self, void* msg, int size) {
-    // Process message
-}
+typedef struct Counter {
+    int id;
+    atomic_int active;
+    Mailbox mailbox;
+    int count;
+} Counter;
 
 int main() {
     // Initialize with auto-detect
     aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);
-    
-    // Create actor (automatically uses configured optimizations)
-    Actor* actor = aether_actor_create(my_actor_process);
-    aether_actor_start(actor);
-    
-    // Send messages...
-    
-    aether_actor_stop(actor);
-    aether_actor_destroy(actor);
+
+    Counter c = {0};
+    mailbox_init(&c.mailbox);
+
+    Message msg = {1, 0, 42, NULL};
+    mailbox_send(&c.mailbox, msg);
+    if (mailbox_receive(&c.mailbox, &msg)) {
+        c.count++;
+    }
+
     aether_runtime_shutdown();
     return 0;
 }

@@ -140,29 +140,33 @@ void run_all_tests(void) {
     
     // Find slowest tests
     printf("\nSlowest tests:\n");
+    /* Track which entries have been reported by INDEX. Comparing durations
+     * against the running maximum, as this once did, excluded nothing: the
+     * same test came out on top of every pass and got printed five times. */
+    int shown[5];
+    int shown_count = 0;
     for (int rank = 0; rank < 5 && rank < test_count; rank++) {
         int slowest_idx = -1;
         long slowest_time = 0;
-        
+
         for (int i = 0; i < test_count; i++) {
             bool already_shown = false;
-            for (int j = 0; j < rank; j++) {
-                // Check if this test was already shown
-                if (tests[i].duration_ms == slowest_time) {
+            for (int j = 0; j < shown_count; j++) {
+                if (shown[j] == i) {
                     already_shown = true;
                     break;
                 }
             }
-            
+
             if (!already_shown && tests[i].duration_ms > slowest_time) {
                 slowest_time = tests[i].duration_ms;
                 slowest_idx = i;
             }
         }
-        
-        if (slowest_idx >= 0 && slowest_time > 0) {
-            printf("  %ldms - %s\n", tests[slowest_idx].duration_ms, tests[slowest_idx].name);
-        }
+
+        if (slowest_idx < 0 || slowest_time <= 0) break;
+        printf("  %ldms - %s\n", tests[slowest_idx].duration_ms, tests[slowest_idx].name);
+        shown[shown_count++] = slowest_idx;
     }
     
     printf("%s========================================%s\n", COLOR_CYAN, COLOR_RESET);

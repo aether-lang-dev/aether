@@ -34,6 +34,7 @@ void actor_init(HighThroughputActor* actor, int id) {
 
 // Send function for coalescing
 void send_result(void* msg, uint16_t size) {
+    (void)size;   /* the coalescing callback signature carries it; unused here */
     ResultMessage* result = (ResultMessage*)msg;
     printf("Sending result: %d\n", result->result);
     free(msg);

@@ -1,6 +1,8 @@
 // Test: std.log.init Go-style wrapper.
 
 import std.log
+import std.fs
+import std.string
 
 main() {
     // Init with a writable path in the current working directory.
@@ -23,6 +25,12 @@ main() {
         exit(1)
     }
     log.shutdown()
+
+    // The log file is written relative to the working directory, so the test
+    // takes it away again: a test that leaves output behind litters whatever
+    // tree the suite runs in.
+    del_err = fs.delete("aether_test_log_init_tuple_tmp.log")
+    string.free(del_err)
 
     println("log init tuple ok")
 }

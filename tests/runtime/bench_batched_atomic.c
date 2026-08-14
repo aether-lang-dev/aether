@@ -12,24 +12,17 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <intrin.h>
-#define get_time_ms() GetTickCount64()
 #define sleep_ms(ms) Sleep(ms)
-static inline uint64_t rdtsc() { return __rdtsc(); }
 #else
 #include <unistd.h>
 #include <time.h>
-static long get_time_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 #define sleep_ms(ms) usleep((ms) * 1000)
-static inline uint64_t rdtsc() {
-    uint32_t lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((uint64_t)hi << 32) | lo;
-}
 #endif
+
+#include "micro_profile.h"
+
+/* One portable counter for every bench here; see micro_profile.h. */
+#define rdtsc() read_cycles()
 
 #define MESSAGES 10000000
 

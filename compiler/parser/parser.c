@@ -3388,19 +3388,32 @@ ASTNode* parse_module_declaration(Parser* parser) {
 // Parse import statement
 // Helper: Check if token can be used as a module name part
 // Allows identifiers and type keywords (string, int, float, etc.)
+/* A segment of a module path is a NAME, not an expression, so any keyword
+ * spelled like an identifier is unambiguous there: `import std.message` has
+ * to reach std/message/module.ae even though `message` declares an actor
+ * message elsewhere. Enumerating the keywords instead, as this once did,
+ * meant such a module could only be imported by backtick-escaping it, and the
+ * parser reported the failure on whatever followed the import. */
 static int is_module_name_token(Token* token) {
-    if (!token) return 0;
+    if (!token || !token->value || !token->value[0]) return 0;
     switch (token->type) {
-        case TOKEN_IDENTIFIER:
-        case TOKEN_STRING:  // 'string' keyword
-        case TOKEN_INT:     // 'int' keyword
-        case TOKEN_FLOAT:   // 'float' keyword
-        case TOKEN_BOOL:    // 'bool' keyword
-        case TOKEN_BYTE:    // 'byte' keyword
-            return 1;
-        default:
+        /* Literals carry identifier-looking text but are not names. */
+        case TOKEN_STRING_LITERAL:
+        case TOKEN_NUMBER:
             return 0;
+        default:
+            break;
     }
+    const char* v = token->value;
+    if (!((v[0] >= 'a' && v[0] <= 'z') || (v[0] >= 'A' && v[0] <= 'Z') || v[0] == '_')) {
+        return 0;
+    }
+    for (const char* p = v; *p; p++) {
+        int ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                 (*p >= '0' && *p <= '9') || *p == '_';
+        if (!ok) return 0;
+    }
+    return 1;
 }
 
 // Syntax: import module.name

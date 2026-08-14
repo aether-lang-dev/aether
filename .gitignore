@@ -16,7 +16,6 @@ benchmarks/http/comparison_results.txt
 *.dylib
 *.log
 .claude/
--o
 a.out
 
 # Generated C code (from .ae compilation)

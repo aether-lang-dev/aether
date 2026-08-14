@@ -1,4 +1,5 @@
-#include "aether_actor.h"
+#include "actor_state_machine.h"
+#include "../utils/aether_thread.h"
 #include "aether_actor_thread.h"
 #include "aether_spsc_queue.h"
 #include "../scheduler/multicore_scheduler.h"

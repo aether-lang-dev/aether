@@ -2,6 +2,7 @@
 // Tests passing message indices instead of copying structs
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -96,7 +97,7 @@ double bench_index_passing(int num_actors, int msgs_per_actor) {
     }
     
     double tput = total / elapsed / 1e6;
-    printf("Messages: %lu\n", total);
+    printf("Messages: %" PRIu64 "\n", total);
     printf("Time: %.3f seconds\n", elapsed);
     printf("Throughput: %.2f M msg/sec\n", tput);
     

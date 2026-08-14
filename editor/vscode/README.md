@@ -55,7 +55,9 @@ Visual Studio Code (and Cursor) support for the
   `aether.lsp.path`, then the workspace's `build/aether-lsp`, then
   `PATH`, then common install dirs (`~/.local/bin`, `~/.aether/bin`,
   `/usr/local/bin`, `/opt/homebrew/bin`). Set
-  `aether.lsp.enable: false` for syntax-only mode.
+  `aether.lsp.enable: false` for syntax-only mode. The server writes no
+  log unless you ask for one: set `AETHER_LSP_LOG=/path/to/log` in the
+  environment the editor launches it from.
 
 ## Activating the palette
 

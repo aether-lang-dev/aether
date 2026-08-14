@@ -1,0 +1,96 @@
+// std.http.server.lb — the parts that do not need a socket.
+//
+// The module shipped with no test of any kind. serve() blocks on a listening
+// server, so what is checked here is everything that runs BEFORE the bind:
+// the backend-list parser, the config constructors, and the two early
+// returns that report a bad call instead of standing a broken LB up.
+
+import std.http.server.lb
+import std.http.proxy
+import std.string
+
+extern exit(code: int)
+
+check(cond: int, label: string) -> int {
+    if cond == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}")
+    return 1
+}
+
+check_eq(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} (${got})")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+check_str(got: string, want: string, label: string) -> int {
+    if string.equals(got, want) == 1 {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}: got \"${got}\", want \"${want}\"")
+    return 1
+}
+
+main() {
+    println("=== std.http.server.lb ===")
+    failures = 0
+
+    // ---- parse_backends ------------------------------------------------
+    // The separator is ';' so a URL may contain a comma, and '|weight' is
+    // optional. Each accepted entry is added to a real pool, so a parse that
+    // produced a bogus URL would fail in upstream_add rather than here.
+    pool = proxy.upstream_pool_new("round_robin", 30, 0, 0)
+    failures = failures + check(pool != 0, "pool created")
+
+    failures = failures + check_eq(lb.parse_backends(pool, "http://a:1"), 1, "one backend, no weight")
+    failures = failures + check_eq(lb.parse_backends(pool, "http://a:1|3;http://b:2|1"), 2, "two weighted backends")
+    failures = failures + check_eq(lb.parse_backends(pool, "http://a:1;;http://b:2"), 2, "empty entries are skipped")
+    failures = failures + check_eq(lb.parse_backends(pool, ""), 0, "an empty list adds nothing")
+    failures = failures + check_eq(lb.parse_backends(pool, ";;;"), 0, "separators alone add nothing")
+    // A trailing separator must not invent an entry, and a non-numeric weight
+    // falls back to 1 rather than 0 (weight 0 would starve the upstream).
+    failures = failures + check_eq(lb.parse_backends(pool, "http://a:1|x;"), 1, "a junk weight still adds the backend")
+    proxy.upstream_pool_free(pool)
+
+    // ---- config constructors -------------------------------------------
+    // Opaque handles, but they must be distinct objects: passing no_health()
+    // where health() was meant should not silently enable health checks.
+    hc = lb.health("/healthz", 200, 500, 1000, 2, 3)
+    br = lb.breaker(5, 30000, 1)
+    ca = lb.cache(1000, 65536, 60, "method_url_vary")
+    none_h = lb.no_health()
+    none_b = lb.no_breaker()
+    none_c = lb.no_cache()
+    failures = failures + check(hc != null && br != null && ca != null, "configs constructed")
+    failures = failures + check(none_h != null && none_b != null && none_c != null, "the 'none' configs are still objects")
+    failures = failures + check(hc != none_h && br != none_b && ca != none_c, "a config is not its own 'none'")
+
+    failures = failures + check_str(lb.ADMIN_PREFIX, "/_aeo", "admin prefix")
+
+    // ---- refusals before binding ---------------------------------------
+    // Both of these return rather than block: serve() only listens once the
+    // pool is real, so a caller gets the reason instead of a dead LB.
+    err_empty = lb.serve("127.0.0.1", 0, "round_robin", "", none_h, none_b, none_c)
+    failures = failures + check_str(err_empty, "lb: no backends", "an empty backend list is refused")
+
+    err_algo = lb.serve("127.0.0.1", 0, "no_such_algorithm", "http://a:1",
+        none_h, none_b, none_c)
+    failures = failures + check(string.length(err_algo) > 0, "an unknown algorithm is refused")
+    failures = failures + check(string.index_of(err_algo, "pool_new failed") >= 0,
+        "the refusal names the algorithm as the cause")
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}

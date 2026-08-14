@@ -1,7 +1,7 @@
 #include "../runtime/test_harness.h"
-#include "../../runtime/aether_arena.h"
-#include "../../runtime/aether_pool.h"
-#include "../../runtime/aether_memory_stats.h"
+#include "../../runtime/memory/aether_arena.h"
+#include "../../runtime/memory/aether_pool.h"
+#include "../../runtime/memory/aether_memory_stats.h"
 #include <stdlib.h>
 
 TEST(no_leak_arena_simple) {

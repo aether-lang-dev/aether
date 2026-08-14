@@ -86,10 +86,9 @@ fi
 
 # Runtime check.
 INC=$(find "$PREFIX/include/aether" -type d 2>/dev/null | sed 's|^|-I|' | tr '\n' ' ')
-gcc -O2 -w $INC \
+gcc -O2 -Wall -Wextra -Werror $INC \
     "$tmpdir/positive.c" "$tmpdir/helper.c" \
     -L"$PREFIX/lib/aether" -laether \
-    -Wl,--allow-multiple-definition \
     -pthread -lm -ldl \
     -o "$tmpdir/positive" >/dev/null 2>"$tmpdir/link.err" || {
     echo "  [FAIL] positive case link failed"

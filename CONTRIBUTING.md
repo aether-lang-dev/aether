@@ -199,6 +199,10 @@ ae check file.ae
 # All tests
 make test
 
+# Every C source with its own main() that no target links (runtime examples,
+# micro-benchmarks, demos). They rot silently otherwise; this compiles each.
+make check-standalone
+
 # Specific category (when implemented)
 ./build/test_runner --category=collections
 

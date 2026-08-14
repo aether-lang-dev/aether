@@ -8,6 +8,10 @@
 #ifndef MICRO_PROFILE_H
 #define MICRO_PROFILE_H
 
+/* Everything here is `micro_profile_`-prefixed: the runtime ships its own
+ * profiler with a `profile_` prefix (runtime/utils/aether_runtime_profile.h),
+ * and the two collided, which is why a benchmark could not include both. */
+
 #include <stdint.h>
 #include <stdio.h>
 
@@ -15,8 +19,10 @@
 #include <windows.h>
 #include <intrin.h>
 #pragma intrinsic(__rdtsc)
-#else
+#elif defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
+#else
+#include <time.h>
 #endif
 
 // ============================================================================
@@ -30,10 +36,31 @@ typedef struct {
     uint64_t count;
 } CycleTimer;
 
-// Read CPU cycle counter (RDTSC instruction)
+/* A free-running counter, in whatever unit the machine offers.
+ *
+ * x86 has RDTSC and the unit is core cycles. AArch64 exposes the generic
+ * timer instead, which ticks at a fixed frequency (24 MHz on Apple silicon),
+ * so a "cycles" figure there is counter ticks and comparable only with other
+ * measurements on the same machine. Anywhere else the monotonic clock stands
+ * in. Including <x86intrin.h> unconditionally, as this once did, meant every
+ * benchmark in this directory failed to compile on ARM. */
+#if defined(_WIN32) || defined(__x86_64__) || defined(__i386__)
 static inline uint64_t read_cycles(void) {
     return __rdtsc();
 }
+#elif defined(__aarch64__)
+static inline uint64_t read_cycles(void) {
+    uint64_t ticks;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+    return ticks;
+}
+#else
+static inline uint64_t read_cycles(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+#endif
 
 // QueryPerformanceCounter for nanosecond precision
 static inline uint64_t read_nanoseconds(void) {
@@ -53,33 +80,33 @@ static inline uint64_t read_nanoseconds(void) {
 // Profiling Regions
 // ============================================================================
 
-static inline void profile_start(CycleTimer* timer) {
+static inline void micro_profile_start(CycleTimer* timer) {
     timer->start_cycles = read_cycles();
 }
 
-static inline void profile_end(CycleTimer* timer) {
+static inline void micro_profile_end(CycleTimer* timer) {
     timer->end_cycles = read_cycles();
     uint64_t elapsed = timer->end_cycles - timer->start_cycles;
     timer->total_cycles += elapsed;
     timer->count++;
 }
 
-static inline void profile_reset(CycleTimer* timer) {
+static inline void micro_profile_reset(CycleTimer* timer) {
     timer->start_cycles = 0;
     timer->end_cycles = 0;
     timer->total_cycles = 0;
     timer->count = 0;
 }
 
-static inline double profile_avg_cycles(const CycleTimer* timer) {
+static inline double micro_profile_avg_cycles(const CycleTimer* timer) {
     return timer->count > 0 ? (double)timer->total_cycles / timer->count : 0.0;
 }
 
-static inline void profile_print(const char* name, const CycleTimer* timer) {
+static inline void micro_profile_print(const char* name, const CycleTimer* timer) {
     printf("  %-30s: %12llu cycles (avg: %.2f cycles/op over %llu ops)\n",
            name, 
            (unsigned long long)timer->total_cycles,
-           profile_avg_cycles(timer),
+           micro_profile_avg_cycles(timer),
            (unsigned long long)timer->count);
 }
 
@@ -101,20 +128,20 @@ static inline void bench_atomic_overhead(MicroBenchResults* results, int iterati
     _Atomic int atomic_counter = 0;
     
     // Measure non-atomic increment
-    profile_reset(&results->without_atomic);
-    profile_start(&results->without_atomic);
+    micro_profile_reset(&results->without_atomic);
+    micro_profile_start(&results->without_atomic);
     for (int i = 0; i < iterations; i++) {
         counter++;
     }
-    profile_end(&results->without_atomic);
+    micro_profile_end(&results->without_atomic);
     
     // Measure atomic increment
-    profile_reset(&results->with_atomic);
-    profile_start(&results->with_atomic);
+    micro_profile_reset(&results->with_atomic);
+    micro_profile_start(&results->with_atomic);
     for (int i = 0; i < iterations; i++) {
         atomic_fetch_add_explicit(&atomic_counter, 1, memory_order_relaxed);
     }
-    profile_end(&results->with_atomic);
+    micro_profile_end(&results->with_atomic);
 }
 
 // Print overhead comparison
@@ -122,8 +149,8 @@ static inline void print_micro_bench_results(const MicroBenchResults* results) {
     printf("\n=== Micro-Benchmark Results ===\n");
     
     if (results->with_atomic.count > 0 && results->without_atomic.count > 0) {
-        double atomic_cycles = profile_avg_cycles(&results->with_atomic);
-        double plain_cycles = profile_avg_cycles(&results->without_atomic);
+        double atomic_cycles = micro_profile_avg_cycles(&results->with_atomic);
+        double plain_cycles = micro_profile_avg_cycles(&results->without_atomic);
         double overhead = atomic_cycles - plain_cycles;
         
         printf("Counter Increment:\n");
@@ -134,15 +161,15 @@ static inline void print_micro_bench_results(const MicroBenchResults* results) {
     }
     
     if (results->mailbox_send.count > 0) {
-        profile_print("Mailbox Send", &results->mailbox_send);
+        micro_profile_print("Mailbox Send", &results->mailbox_send);
     }
     
     if (results->mailbox_receive.count > 0) {
-        profile_print("Mailbox Receive", &results->mailbox_receive);
+        micro_profile_print("Mailbox Receive", &results->mailbox_receive);
     }
     
     if (results->message_copy.count > 0) {
-        profile_print("Message Copy", &results->message_copy);
+        micro_profile_print("Message Copy", &results->message_copy);
     }
 }
 
@@ -150,8 +177,8 @@ static inline void print_micro_bench_results(const MicroBenchResults* results) {
 // Hot Path Markers (for manual instrumentation)
 // ============================================================================
 
-#define PROFILE_REGION_START(timer) profile_start(&timer)
-#define PROFILE_REGION_END(timer) profile_end(&timer)
+#define PROFILE_REGION_START(timer) micro_profile_start(&timer)
+#define PROFILE_REGION_END(timer) micro_profile_end(&timer)
 
 // Compile-time option to disable profiling in production
 #ifdef AETHER_DISABLE_PROFILING

@@ -84,33 +84,46 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     atomic_flag_clear_explicit(&lock->lock, memory_order_release);
 }
 
-typedef struct {
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;    // Affinity hint: core to migrate to (-1 = none)
-    atomic_int main_thread_only;         // If set, scheduler threads must not process this actor
-    SPSCQueue* spsc_queue;               // Lock-free same-core messaging (lazy, only for auto_process)
-    _Atomic(ActorReplySlot*) reply_slot; // Non-NULL only while an ask/reply is in flight
-    // Prevents concurrent step() calls during work-steal handoff.
-    // Set (TAS) by the thread about to call step(); cleared (release) after.
-    // Work-stealing threads that find this set will retry next outer iteration.
-    atomic_flag step_lock;
-    // Timeout support: fire handler if no message within timeout_ns nanoseconds
-    uint64_t timeout_ns;        // 0 = no timeout
-    uint64_t last_activity_ns;  // timestamp when idle started; 0 = not idle
-    // Panic state: set to 1 when the actor's step() unwound via aether_panic()
-    // or a caught signal. Dead actors are skipped by the scheduler and incoming
-    // messages are dropped. One-way transition; never un-set.
-    atomic_int dead;
-    // Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps
-    // exactly [ptr, ptr+size), so freeing a derived actor with sizeof(ActorBase)
-    // would leak the derived-struct tail on every destroy under libnuma.
+/* A derived actor is a struct whose first bytes ARE an ActorBase: the
+ * scheduler is handed a pointer to it and casts. Anything that mirrors this
+ * layout by hand drifts the moment a field is added here, and the corruption
+ * is silent, so the fields live in one macro and every mirror expands it. */
+#define AETHER_ACTOR_BASE_FIELDS \
+    atomic_int active; \
+    int id; \
+    Mailbox mailbox; \
+    void (*step)(void*); \
+    pthread_t thread; \
+    int auto_process; \
+    atomic_int assigned_core; \
+    /* Affinity hint: core to migrate to (-1 = none) */ \
+    atomic_int migrate_to; \
+    /* If set, scheduler threads must not process this actor */ \
+    atomic_int main_thread_only; \
+    /* Lock-free same-core messaging (lazy, only for auto_process) */ \
+    SPSCQueue* spsc_queue; \
+    /* Non-NULL only while an ask/reply is in flight */ \
+    _Atomic(ActorReplySlot*) reply_slot; \
+    /* Prevents concurrent step() calls during work-steal handoff. \
+     * Set (TAS) by the thread about to call step(); cleared (release) after. \
+     * Work-stealing threads that find this set retry next outer iteration. */ \
+    atomic_flag step_lock; \
+    /* Timeout support: fire handler if no message within timeout_ns ns. \
+     * 0 = no timeout. */ \
+    uint64_t timeout_ns; \
+    /* Timestamp when idle started; 0 = not idle */ \
+    uint64_t last_activity_ns; \
+    /* Panic state: set to 1 when the actor's step() unwound via aether_panic() \
+     * or a caught signal. Dead actors are skipped by the scheduler and \
+     * incoming messages are dropped. One-way transition; never un-set. */ \
+    atomic_int dead; \
+    /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
+     * exactly [ptr, ptr+size), so freeing a derived actor with \
+     * sizeof(ActorBase) would leak the derived-struct tail under libnuma. */ \
     size_t alloc_size;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
 
 typedef struct {

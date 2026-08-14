@@ -27,44 +27,18 @@ static long get_time_ms(void) {
 // ============================================================================
 
 typedef struct {
-    // MUST match ActorBase layout exactly - fields in exact same order!
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;
-    atomic_int main_thread_only;
-    SPSCQueue* spsc_queue;
-    _Atomic(ActorReplySlot*) reply_slot;
-    atomic_flag step_lock;
-    uint64_t timeout_ns;
-    uint64_t last_activity_ns;
-    atomic_int dead;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // Test-specific fields below
     atomic_int count;
     atomic_int last_value;
 } CounterActor;
 
 typedef struct {
-    // MUST match ActorBase layout exactly - fields in exact same order!
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;
-    atomic_int main_thread_only;
-    SPSCQueue* spsc_queue;
-    _Atomic(ActorReplySlot*) reply_slot;
-    atomic_flag step_lock;
-    uint64_t timeout_ns;
-    uint64_t last_activity_ns;
-    atomic_int dead;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // Test-specific fields below
     atomic_int received[1000];
     atomic_int count;

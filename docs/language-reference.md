@@ -2860,6 +2860,18 @@ Writing an *unescaped* reserved keyword where a name is expected is an error
 (`error[E0100]: '<kw>' is a reserved keyword …`) whose hint points to both the
 rename and the `` `<kw>` `` escape.
 
+Module paths are the exception: a segment there is a name and nothing else, so
+`import std.message` needs no escape. Calling through the bare module name
+still would (`message.format(...)` puts a keyword in expression position), so
+import the symbols you need by name:
+
+```aether
+import std.message (format, catalog_new)   // format(...), catalog_new(...)
+```
+
+(`import std.message as msg` parses, but qualified calls through an alias do
+not resolve yet, see [Import with Alias](#import-with-alias).)
+
 ---
 
 ## Comments

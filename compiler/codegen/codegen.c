@@ -4297,6 +4297,19 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#endif");
     }
     /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
+    /* Imported wrappers and trailing-underscore privates are emitted with
+       internal linkage, so a translation unit that imports a module and calls
+       only part of it has unused statics left over. Downstream builds with
+       -Wall -Werror would fail on generated code they did not write, so the
+       storage class carries the attribute rather than the consumer carrying a
+       -Wno flag. */
+    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     print_line(gen, "#ifndef AETHER_GCC_COMPAT");
     print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)");
     print_line(gen, "#    define AETHER_GCC_COMPAT 1");
@@ -5290,7 +5303,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // declaration follows suit. Trailing-underscore private helpers
         // (#279) match the same `static` rule.
         if (fn_has_internal_linkage(child)) {
-            fprintf(gen->output, "static ");
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
         }
 
         // Determine return type. Mirrors generate_function_definition's

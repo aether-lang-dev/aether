@@ -129,7 +129,7 @@ character and `%'` grouping, neither of which they use).
 "callers embedding Aether may have selected a non-C locale." That conclusion is right; the
 reasoning given in review — "Aether has no threads" — is **false**, and we should not repeat it:
 
-- `runtime/actors/aether_actor.c:229` — actor threads
+- `runtime/actors/aether_actor_thread.c` — actor threads
 - `runtime/scheduler/multicore_scheduler.c:1054` — multicore scheduler threads
 - `std/worker/aether_worker.c:276,318,358` — worker pool
 - `std/net/aether_http_server.c:3617,3777` — HTTP accept threads

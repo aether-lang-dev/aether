@@ -53,7 +53,11 @@ Node* spawn_Node(int next_id) {
 }
 
 void send_Node(Node* actor, int type) {
-    Message msg = {type, 0, 0, NULL};
+    Message msg = {0};
+    msg.type = type;
+    msg.sender_id = 0;
+    msg.payload_int = 0;
+    msg.payload_ptr = NULL;
     if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == current_core_id) {
         // Local send - retry if mailbox full
         while (!mailbox_send(&actor->mailbox, msg)) {

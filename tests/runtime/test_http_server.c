@@ -320,3 +320,43 @@ TEST(http_clf_time_is_locale_independent) {
     http_format_clf_time(ts, sizeof ts, &tmv);
     ASSERT_EQ(0, memcmp(ts + 3, "Jan", 3));
 }
+
+
+/* A wildcard route and the middleware chain: the only two behaviours the
+ * since-deleted test_http_server_impl.c covered that this file did not. */
+static int mw_probe_calls = 0;
+static int mw_probe(HttpRequest* req, HttpServerResponse* res, void* user_data) {
+    (void)req; (void)res; (void)user_data;
+    mw_probe_calls++;
+    return 1;
+}
+
+TEST(http_route_wildcard_match) {
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.path = "/static/css/main.css";
+    req.param_count = 0;
+
+    ASSERT_EQ(1, http_route_matches("/static/*", "/static/css/main.css", &req));
+    ASSERT_EQ(1, http_route_matches("/static/*", "/static/x", &req));
+    ASSERT_EQ(0, http_route_matches("/static/*", "/assets/main.css", &req));
+    /* The wildcard covers a remainder, not an absent one: `/static/` has
+     * nothing left to match and falls through to the next route. */
+    ASSERT_EQ(0, http_route_matches("/static/*", "/static/", &req));
+}
+
+TEST(http_server_middleware_chain) {
+    HttpServer* server = http_server_create(8080);
+    ASSERT_NOT_NULL(server);
+
+    http_server_use_middleware(server, mw_probe, NULL);
+    ASSERT_NOT_NULL(server->middleware_chain);
+    ASSERT_TRUE(server->middleware_chain->middleware == mw_probe);
+    ASSERT_TRUE(server->middleware_chain->next == NULL);
+
+    /* A second one chains rather than replacing the first. */
+    http_server_use_middleware(server, mw_probe, NULL);
+    ASSERT_NOT_NULL(server->middleware_chain->next);
+
+    http_server_free(server);
+}

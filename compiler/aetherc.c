@@ -2425,6 +2425,17 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    /* The output path is positional, so `aetherc in.ae -o out.c` would
+     * silently write a file literally named "-o" and leave out.c untouched.
+     * A path that begins with a dash is a misplaced flag, not a filename. */
+    if (argv[arg_offset + 1][0] == '-' && argv[arg_offset + 1][1] != '\0') {
+        fprintf(stderr, "Error: '%s' is not an output path.\n", argv[arg_offset + 1]);
+        fprintf(stderr, "aetherc takes the output as a positional argument:\n");
+        fprintf(stderr, "    %s %s %s\n", argv[0], argv[arg_offset],
+                (argc - arg_offset >= 3) ? argv[arg_offset + 2] : "<output.c>");
+        return 1;
+    }
+
     if (!compile_source(argv[arg_offset], argv[arg_offset + 1])) {
         return 1;
     }

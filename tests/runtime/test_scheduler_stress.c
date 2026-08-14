@@ -27,22 +27,9 @@ static long get_time_ms(void) {
 // ============================================================================
 
 typedef struct {
-    // MUST match ActorBase layout exactly - fields in exact same order!
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;
-    atomic_int main_thread_only;
-    SPSCQueue* spsc_queue;
-    _Atomic(ActorReplySlot*) reply_slot;
-    atomic_flag step_lock;
-    uint64_t timeout_ns;
-    uint64_t last_activity_ns;
-    atomic_int dead;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // Test-specific fields below
     atomic_int count;
     atomic_int errors;
@@ -59,22 +46,9 @@ void stress_actor_step(StressActor* self) {
 
 // OrderActor type and step function for test_message_ordering_under_load
 typedef struct {
-    // MUST match ActorBase layout exactly - fields in exact same order!
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;
-    atomic_int main_thread_only;
-    SPSCQueue* spsc_queue;
-    _Atomic(ActorReplySlot*) reply_slot;
-    atomic_flag step_lock;
-    uint64_t timeout_ns;
-    uint64_t last_activity_ns;
-    atomic_int dead;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // Test-specific fields below
     atomic_int count;
     int last_seq;
@@ -95,22 +69,9 @@ static void order_step(OrderActor* self) {
 
 // CascadeActor type and step function for test_cascading_messages
 typedef struct {
-    // MUST match ActorBase layout exactly - fields in exact same order!
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;
-    atomic_int main_thread_only;
-    SPSCQueue* spsc_queue;
-    _Atomic(ActorReplySlot*) reply_slot;
-    atomic_flag step_lock;
-    uint64_t timeout_ns;
-    uint64_t last_activity_ns;
-    atomic_int dead;
+    // The scheduler casts this to ActorBase*, so the prefix is the macro
+    // rather than a hand-copied list that silently drifts when a field lands.
+    AETHER_ACTOR_BASE_FIELDS
     // Test-specific fields below
     atomic_int count;
     void* next_actor;
