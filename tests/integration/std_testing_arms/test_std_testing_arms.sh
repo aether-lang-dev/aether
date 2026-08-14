@@ -63,5 +63,24 @@ if ! grep -q "captures child stderr separately" "$tmpdir/out.log"; then
     exit 1
 fi
 
-echo "  [PASS] std_testing_arms"
+# Negative path: matchers must FIRE. probe_negative.ae deliberately
+# fails one process matcher, one stdout matcher, and an eventually()
+# with a never-true predicate; expect exit 1, the three specific
+# messages, and the 3-failing summary. (This also gives the freshly
+# exported eventually() its coverage — budget expiry + message.)
+if "$AE" run "$SCRIPT_DIR/probe_negative.ae" >"$tmpdir/neg.log" 2>&1; then
+    echo "  [FAIL] std_testing_arms: negative probe exited 0 (matchers did not fire)"
+    tail -15 "$tmpdir/neg.log"
+    exit 1
+fi
+for want in "deliberate exit mismatch" "deliberate stdout miss" \
+            "condition not met within budget" "3 failing"; do
+    if ! grep -q "$want" "$tmpdir/neg.log"; then
+        echo "  [FAIL] std_testing_arms: negative probe missing '$want'"
+        tail -15 "$tmpdir/neg.log"
+        exit 1
+    fi
+done
+
+echo "  [PASS] std_testing_arms (positive probe + negative-fire probe)"
 exit 0
