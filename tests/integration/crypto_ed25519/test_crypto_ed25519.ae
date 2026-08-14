@@ -42,6 +42,22 @@ main() {
     bytes.set(sig3, 10, bytes.get(sig3, 10) ^ 1)
     if ed25519.verify(ed25519.publickey(s3), m3, 2, sig3) != 0 { println("FAIL tamper not rejected"); fails = fails + 1 } else { println("ok   tamper rejected") }
 
+    // Regression pin — Wycheproof ed25519 tcId 151 (accepted-forgery bug,
+    // fixed in the same change that added this): R encodes y = 1 with the
+    // sign bit of x set; x = 0 has no negative form, so RFC 8032 §5.1.3
+    // step 4 requires decode failure. Kept here (not only in the sampled
+    // Wycheproof driver) so the exact case runs on every CI pass.
+    pk151 = hb("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")
+    m151 = hb("313233343030")
+    sig151 = hb("0100000000000000000000000000000000000000000000000000000000000080c803ee1f2342aa96ff698a393d1ab5e66f3eda101d6d120b394c3fd32c117d0a")
+    if ed25519.verify(pk151, m151, 6, sig151) != 0 {
+        println("FAIL wycheproof tc151 forgery accepted (x=0 sign-bit encoding)")
+        fails = fails + 1
+    } else {
+        println("ok   wycheproof tc151 non-canonical R rejected")
+    }
+    bytes.free(pk151); bytes.free(m151); bytes.free(sig151)
+
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
 }

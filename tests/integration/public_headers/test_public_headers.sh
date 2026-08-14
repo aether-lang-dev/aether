@@ -37,7 +37,12 @@ fi
 
 fail=0
 checked=0
-for h in $(cd std && find . -name '*.h' | sed 's|^\./||' | sort) ; do
+# std/regex/pcre2/ is vendored third-party internals (#1389), not Aether
+# public headers: upstream pcre2.h refuses to compile unless the consumer
+# defines PCRE2_CODE_UNIT_WIDTH first, by design. Consumers use std.regex;
+# nothing may include these directly, so the standalone-compile contract
+# does not apply to them.
+for h in $(cd std && find . -path './regex/pcre2' -prune -o -name '*.h' -print | sed 's|^\./||' | sort) ; do
     checked=$((checked + 1))
     printf '#include "std/%s"\nint main(void){return 0;}\n' "$h" > "$TMP/probe.c"
     if ! cc -I. $CFLAGS_ALL -c "$TMP/probe.c" -o /dev/null 2>"$TMP/err.txt"; then

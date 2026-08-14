@@ -71,6 +71,14 @@ for d in $(find "$ROOT/runtime" "$ROOT/std" -type d 2>/dev/null); do
 done
 RKLIBS="-lm -ldl -lpthread -lrt -lncurses -lz"
 [ "$(uname -s)" = "Darwin" ] && RKLIBS="-lm -ldl -lpthread -lncurses -lz"
+# Distro-packaged Racket CS 9.x (e.g. Arch racket 9.2) links ChezScheme's
+# compress-io against the SYSTEM liblz4, leaving LZ4F_*/LZ4_* undefined in
+# libracketcs.a; a self-built tree bundles lz4 and has none. Probe the
+# archive and link what it actually needs, so both kinds keep working.
+if command -v nm >/dev/null 2>&1 && \
+        nm "$AETHER_RACKET_LIB" 2>/dev/null | grep -q ' U LZ4'; then
+    RKLIBS="$RKLIBS -llz4"
+fi
 if ! $CC -O2 -I"$ROOT" $INCS -I"$AETHER_RACKET_INCLUDE" \
         "$GEN_C" "$TMPDIR_T/host_racket.o" "$ROOT/build/libaether.a" \
         "$AETHER_RACKET_LIB" -rdynamic $RKLIBS \

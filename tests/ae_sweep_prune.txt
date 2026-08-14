@@ -143,6 +143,7 @@ tests/integration/panic_stack_trace/
 tests/integration/panic_unwind_no_leak/
 tests/integration/ptr_return_int_zero_inference/
 tests/integration/qualified_type_name/
+tests/integration/regex_crossbuild/
 tests/integration/reserved_keyword_error/
 tests/integration/result_tuple_payload_reject/
 tests/integration/result_unconsumed_reject/
@@ -172,4 +173,5 @@ tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/varargs_forward/
 tests/integration/where_clause/
+tests/integration/wycheproof/
 tests/integration/zlib_roundtrip/

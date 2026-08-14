@@ -9,7 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.535.0]
+
+### Added
+- Project Wycheproof adversarial test vectors for the crypto suite (#739,
+  #1298): pinned vector files under `tests/vectors/wycheproof/` with
+  per-family drivers for X25519 (518 cases: twists, small-order points,
+  non-canonical encodings — all pass), ChaCha20-Poly1305 (325 cases incl.
+  60 forgeries — all pass, and sealing is checked as well as opening),
+  AES-GCM (all supported-shape cases pass; unsupported IV/tag sizes are
+  counted, not silently dropped), and X448 (stride-sampled by default —
+  its bignum field math costs ~1s/op; `WYCHEPROOF_FULL=1` sweeps all).
+  The adversarial complement to the existing RFC/ACVP KATs. Wave 2 adds
+  Ed25519 (151 cases), ECDSA P-256/SHA-256 in P1363 form (262,
+  stride-sampled), RSA PKCS#1 v1.5 2048/SHA-256 (259), HMAC-SHA256 and
+  HKDF-SHA256 — and caught two real accepted-forgery bugs (below).
+
+### Fixed
+- `std.cryptography.ed25519`: point decoding accepted the non-canonical
+  encoding "y = 1 with the sign bit of x set" (x = 0 has no negative
+  form; RFC 8032 §5.1.3 step 4 requires failure) and silently produced a
+  garbage x when no square root exists (step 3). Both now reject.
+  Caught by Wycheproof ed25519 tcId 151 — verify accepted a forgery.
+- `std.cryptography.rsa`: `verify_pkcs1` accepted unreduced signatures
+  (s + n verifies identically after the mod-n exponentiation — RFC 8017
+  §8.2.2 step 1 requires s < n and exact k-octet length) and had no
+  length check; `verify_pss` had the same missing range check. Both
+  verifies now reject out-of-range and wrong-length signatures.
+  Caught by Wycheproof rsa_signature tcId 244 ("signature is not
+  reduced", SignatureMalleability).
+
+## [0.534.0]
+
+### Added
+- `std.regex` works everywhere without a system libpcre2-8 (#1389): the PCRE2
+  engine (pinned upstream 10.44, BSD-3-Clause) is vendored under
+  `std/regex/pcre2/` and compiled as a single translation unit when no system
+  library is available. `ae build --target ...` cross builds get a working
+  regex with no `CROSSBUILD_SYSROOT` for every target; native builds on boxes
+  without libpcre2-8 compile the vendored engine instead of silently stubbing
+  `std.regex` out (the failure mode behind the aether-ui SVG-path
+  misdiagnosis); `ae`'s no-`libaether.a` source fallback now always has a
+  working regex too. A system libpcre2-8 (pkg-config) or a sysroot-staged one
+  keeps precedence; `PCRE2=0` opts out, `PCRE2=vendored` forces the vendored
+  engine. Behaviour is identical either way — `std.regex` never used PCRE2's
+  JIT, so the vendored interpreter matches the system-library path.
+
+## [0.533.0]
 
 ### Added
 

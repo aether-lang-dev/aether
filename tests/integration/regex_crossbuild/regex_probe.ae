@@ -1,0 +1,26 @@
+// Cross-build probe for #1389: std.regex must work with NO sysroot.
+// The pattern is the exact SVG path-data tokenizer from the vg incident.
+import std.regex
+
+extern exit(code: int)
+
+main() {
+    re, e = regex.compile("([MmLlHhVvCcSsQqTtAaZz])|([+-]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][+-]?\\d+)?)")
+    if re == null {
+        println("FAIL: compile: ${e}")
+        exit(1)
+    }
+    fa, ferr = regex.find_all(re, "M10.5 20L-3.2e1 4")
+    if ferr != "" {
+        println("FAIL: find_all: ${ferr}")
+        exit(1)
+    }
+    n = regex.find_all_count(fa)
+    regex.find_all_free(fa)
+    regex.free(re)
+    if n != 6 {
+        println("FAIL: tokens=${n}, want 6")
+        exit(1)
+    }
+    println("tokens=${n}")
+}
