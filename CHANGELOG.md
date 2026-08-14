@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- Wycheproof wave 4 (#739): RSA decryption families — RSAES-PKCS#1 v1.5
+  (67 Bleichenbacher-shaped cases) and RSA-OAEP 2048/SHA-256 (37 Manger-
+  shaped cases; the 8 labelled cases are counted-skipped — `decrypt_oaep`
+  has no label parameter yet). Own CI suite slot: every case is a
+  private-key modexp.
+
+### Fixed
+- `std.cryptography.rsa`: `decrypt_oaep` and `decrypt_pkcs1` accepted
+  UNREDUCED ciphertexts — c + n decrypts identically after the mod-n
+  exponentiation (the ciphertext-side twin of 0.535.0's signature
+  malleability fix; RFC 8017 §7.1.2/§7.2.2 step 1 requires exactly
+  k octets with c < n). The existing range gate now guards both decrypt
+  paths. Caught by Wycheproof rsa_oaep tcId 27 ("added n to c").
+
 ## [0.536.0]
 
 ### Added
