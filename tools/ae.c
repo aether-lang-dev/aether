@@ -2017,6 +2017,21 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* pcre2_libs = "";
 #endif
+    /* Source-fallback (no libaether.a): compile the VENDORED pcre2
+     * engine (#1389) instead of trusting this box to have the library
+     * the toolchain's build box had. The defines turn the MANIFEST's
+     * aether_pcre2_vendored.c into the full engine and switch
+     * aether_regex.c to the in-tree pcre2.h; the -l is dropped because
+     * the symbols now come from the compiled sources (and a baked-in
+     * -lpcre2-8 fails the link outright on a box without the library).
+     * Previously this path compiled aether_regex.c with no feature
+     * define at all, silently stubbing std.regex even on boxes WITH
+     * libpcre2-8 — the vg-incident failure mode. */
+    const char* pcre2_src_defs = "";
+    if (!tc.has_lib) {
+        pcre2_src_defs = "-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 ";
+        pcre2_libs = "";
+    }
 #ifdef AETHER_AUDIO_LIBS
     /* std.audio's vendored miniaudio backend link flags (pthread/dl/m on
      * Linux, audio frameworks on macOS). Empty on platforms without them. */
@@ -2073,8 +2088,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s -o \"%s\" %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s \"%s\" %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -2215,6 +2230,15 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* pcre2_libs = "";
 #endif
+    // Source-fallback (no libaether.a): compile the VENDORED pcre2 engine
+    // (#1389) — see the Windows branch above for the full rationale. The
+    // defines activate aether_pcre2_vendored.c from the MANIFEST list; the
+    // -l is dropped because the symbols come from the compiled sources.
+    const char* pcre2_src_defs = "";
+    if (!tc.has_lib) {
+        pcre2_src_defs = "-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 ";
+        pcre2_libs = "";
+    }
 
     // libcasper + cap_* services — std.casper delegates DNS / passwd /
     // sysctl past Capsicum capability mode. FreeBSD-only; empty on
@@ -2285,8 +2309,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "
@@ -5232,19 +5256,22 @@ static int cmd_build(int argc, char** argv) {
                     "Note: '%s' uses %s. CROSSBUILD_SYSROOT is set, so each of OpenSSL /\n"
                     "zlib / nghttp2 / PCRE2 that the sysroot actually stages is compiled\n"
                     "and linked for real on %s; any it does not stage reports unavailable\n"
-                    "at runtime. Building.\n",
+                    "at runtime (except regex, whose vendored engine always works). Building.\n",
                     file, mod, target);
             } else {
-                /* No sysroot: openssl/zlib/nghttp2/pcre2-backed features stub
-                 * out. HMAC is the exception — std.cryptography's HMAC is
-                 * pure-Aether and works regardless — so it is NOT listed here. */
+                /* No sysroot: openssl/zlib/nghttp2-backed features stub out.
+                 * NOT listed: HMAC (std.cryptography's HMAC is pure-Aether and
+                 * works regardless) and regex (the vendored pcre2 engine
+                 * (#1389) compiles for every target, so std.regex never
+                 * triggers this warning at all — see
+                 * cross_uses_unsupported_module). */
                 fprintf(stderr,
                     "Note: '%s' uses %s. Without a CROSSBUILD_SYSROOT, cross binaries link\n"
-                    "no OpenSSL / zlib / nghttp2 / PCRE2, so features needing them (HTTPS/TLS,\n"
-                    "SHA/MD hashing, base64, regex, compression, HTTP/2) report errors at\n"
-                    "runtime on %s. HMAC (pure-Aether) and plain sockets still work. Stage a\n"
-                    "sysroot (aether-crossbuild) and set CROSSBUILD_SYSROOT to link them for\n"
-                    "real. Building anyway.\n",
+                    "no OpenSSL / zlib / nghttp2, so features needing them (HTTPS/TLS,\n"
+                    "SHA/MD hashing, base64, compression, HTTP/2) report errors at\n"
+                    "runtime on %s. HMAC (pure-Aether), regex (vendored engine) and plain\n"
+                    "sockets still work. Stage a sysroot (aether-crossbuild) and set\n"
+                    "CROSSBUILD_SYSROOT to link the rest for real. Building anyway.\n",
                     file, mod, target);
             }
         }

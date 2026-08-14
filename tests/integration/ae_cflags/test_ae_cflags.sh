@@ -79,11 +79,21 @@ fi
 LIBAETHER="$ROOT/build/libaether.a"
 if [ -f "$LIBAETHER" ] && command -v nm >/dev/null 2>&1; then
     # For each (symbol-prefix, expected-flag-pattern) pair: if the
-    # archive references the symbol family, the link flags must
-    # mention the corresponding library.
+    # archive references the symbol family AND does not define it
+    # itself, the link flags must mention the corresponding library.
+    # The self-definition subtraction matters for the vendored pcre2
+    # engine (#1389): aether_regex.o's `U pcre2_*` refs are satisfied
+    # by aether_pcre2_vendored.o in the same archive, so a vendored
+    # build correctly emits no -lpcre2-8 — the old any-U-ref form
+    # would demand the flag exactly on the boxes that lack the lib.
+    nm_out="$(mktemp)"
+    defs_out="$(mktemp)"
+    nm "$LIBAETHER" 2>/dev/null > "$nm_out"
+    awk 'NF>=3 && $2~/^[TDBRSW]$/{print $3}' "$nm_out" | sort -u > "$defs_out"
     check_dep() {
         sym_pat="$1"; flag_pat="$2"; name="$3"
-        if nm "$LIBAETHER" 2>/dev/null | grep -q "U $sym_pat"; then
+        if awk '$1=="U"{print $2}' "$nm_out" | grep "^$sym_pat" | sort -u \
+                | grep -qvxF -f "$defs_out"; then
             if ! printf %s "$libs_only" | grep -qE -- "$flag_pat"; then
                 echo "  [FAIL] ae_cflags --libs: libaether.a references $name ($sym_pat) but no $flag_pat in cflags"
                 echo "  ---- libs ----"
@@ -96,6 +106,7 @@ if [ -f "$LIBAETHER" ] && command -v nm >/dev/null 2>&1; then
     check_dep 'SSL_'      '-l(ssl|crypto)'      'OpenSSL'
     check_dep 'deflate'   '-lz'                 'zlib'
     check_dep 'nghttp2_'  '-lnghttp2'           'nghttp2'
+    rm -f "$nm_out" "$defs_out"
 fi
 
 # Functional check: `gcc trivial.c $(ae cflags) -o out` runs end-to-end.

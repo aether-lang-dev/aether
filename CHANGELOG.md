@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- `std.regex` works everywhere without a system libpcre2-8 (#1389): the PCRE2
+  engine (pinned upstream 10.44, BSD-3-Clause) is vendored under
+  `std/regex/pcre2/` and compiled as a single translation unit when no system
+  library is available. `ae build --target ...` cross builds get a working
+  regex with no `CROSSBUILD_SYSROOT` for every target; native builds on boxes
+  without libpcre2-8 compile the vendored engine instead of silently stubbing
+  `std.regex` out (the failure mode behind the aether-ui SVG-path
+  misdiagnosis); `ae`'s no-`libaether.a` source fallback now always has a
+  working regex too. A system libpcre2-8 (pkg-config) or a sysroot-staged one
+  keeps precedence; `PCRE2=0` opts out, `PCRE2=vendored` forces the vendored
+  engine. Behaviour is identical either way — `std.regex` never used PCRE2's
+  JIT, so the vendored interpreter matches the system-library path.
+
 ## [0.533.0]
 
 ### Added

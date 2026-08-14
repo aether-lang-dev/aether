@@ -60,7 +60,17 @@ void aether_regex_clear_last_error(void) { clear_last_error(); }
 #ifdef AETHER_HAS_PCRE2
 
 #define PCRE2_CODE_UNIT_WIDTH 8
+#ifdef AETHER_VENDOR_PCRE2
+/* Vendored engine (#1389): the header ships in-tree and the code is
+ * compiled into libaether.a by aether_pcre2_vendored.c, always as a
+ * static library — hence PCRE2_STATIC, which on Windows stops these
+ * prototypes defaulting to __declspec(dllimport) and sending the
+ * linker after __imp_pcre2_* stubs that a static build doesn't have. */
+#define PCRE2_STATIC
+#include "pcre2/pcre2.h"
+#else
 #include <pcre2.h>
+#endif
 
 typedef struct {
     pcre2_code* code;
