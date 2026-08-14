@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- Wycheproof wave 3 (#739, #1298): ECDSA P-256 **DER-encoded** signature
+  vectors (371 cases) driven through the real TLS parse path
+  (`tls13_cert.split_ecdsa_sig`, now exported), and RSA-PSS
+  2048/SHA-256/MGF1-32 vectors (108 cases — clean on import; the
+  0.535.0 `sig_in_range` guard already covers PSS).
+
+### Fixed
+- `std.cryptography.tls13_cert.split_ecdsa_sig` accepted six classes of
+  malleable ECDSA signature encoding (Wycheproof DER family): BER
+  long-form/non-minimal/indefinite lengths, superfluous INTEGER padding,
+  trailing garbage after the SEQUENCE, and oversized scalars (r + 2^320)
+  silently truncated by the fixed-width conversion. An ECDSA-Sig-Value
+  must now be strict minimal DER — enforced by re-encoding the parsed
+  (r, s) and requiring byte-equality with the input — with non-negative
+  scalars whose magnitudes fit the curve width. TLS certificate
+  verification inherits the strictness; legitimate certs are unaffected
+  (the asn1 reader itself stays BER-tolerant for X.509 field reuse).
+
 ## [0.535.0]
 
 ### Added
