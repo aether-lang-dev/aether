@@ -18,7 +18,7 @@ import std.http.client
 import std.os
 
 exports(
-    within, within_poll, without, without_poll,
+    within, within_poll, without, without_poll, eventually,
     expect_http_status, expect_http_no_error,
     expect_http_body_contains, expect_http_body_eq, expect_http_header,
     expect_http_body_json_field,
