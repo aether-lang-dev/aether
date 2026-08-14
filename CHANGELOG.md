@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.534.0]
+## [0.535.0]
 
 ### Added
 - Project Wycheproof adversarial test vectors for the crypto suite (#739,
