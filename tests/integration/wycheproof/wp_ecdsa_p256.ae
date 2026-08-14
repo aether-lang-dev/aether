@@ -1,0 +1,184 @@
+// Wycheproof adversarial vectors — ECDSA P-256 / SHA-256, P1363 form (#739).
+//
+// EcdsaP1363Verify schema: signatures are raw r||s (64 bytes), which maps
+// directly onto p256.ecdsa_verify(pubx, puby, hash, r, s) with no DER in
+// between — so this measures the verifier itself: r/s range checks
+// (r=0, r=n, s=n-1, ...), k edge cases (u1/u2 special points), and
+// arithmetic edge values. The DER-encoded family (signature parsing
+// laxity) is a separate follow-on via std.cryptography.asn1.
+//   "valid"      -> verify MUST return 1.
+//   "invalid"    -> verify MUST return 0.
+//   "acceptable" -> either.
+// Wrong-length signatures are rejected up front (the API takes fixed
+// 32-byte r and s buffers — inexpressible, refused by construction).
+//
+// ECDSA verify routes through variable-time std.bignum (slow); stride
+// sampling as in wp_x448.ae: default 10, WYCHEPROOF_FULL=1 for all,
+// WYCHEPROOF_STRIDE=N to tune.
+
+import std.cryptography.p256
+import std.cryptography.sha2
+import std.os
+import std.fs
+import std.json
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+// Group coordinates (wx/wy) come with leading zeros trimmed or an extra
+// leading 00; normalize to exactly 32 big-endian bytes.
+fn coord32(hexs: string) -> ptr {
+    raw = from_hex(hexs)
+    n = string_length(hexs) / 2
+    out = bytes.new(32)
+    if n >= 32 {
+        i = 0
+        while i < 32 { bytes.set(out, i, bytes.get(raw, n - 32 + i)) i = i + 1 }
+    } else {
+        i = 0
+        while i < n { bytes.set(out, 32 - n + i, bytes.get(raw, i)) i = i + 1 }
+    }
+    bytes.free(raw)
+    return out
+}
+
+fn sha256_of(b: ptr, n: int) -> ptr {
+    ctx, e = sha2.new("sha256")
+    sha2.update_bytes(ctx, b, n)
+    return sha2.final_bytes(ctx)
+}
+
+fn slice32(b: ptr, off: int) -> ptr {
+    out = bytes.new(32)
+    i = 0
+    while i < 32 { bytes.set(out, i, bytes.get(b, off + i)) i = i + 1 }
+    return out
+}
+
+main() {
+    stride = 10
+    // os_getenv returns null (0) for an unset variable — check before any
+    // string comparison (comparing null to a literal segfaults; bit CI).
+    wf = os.os_getenv("WYCHEPROOF_FULL")
+    if wf != 0 {
+        if wf == "1" { stride = 1 }
+    }
+    sv = os.os_getenv("WYCHEPROOF_STRIDE")
+    if sv != 0 { stride = atoi(sv) }
+    if stride < 1 { stride = 1 }
+
+    doc, ferr = fs.read("tests/vectors/wycheproof/ecdsa_secp256r1_sha256_p1363_test.json")
+    if ferr != "" {
+        println("FAIL: cannot read vector file: ${ferr}")
+        exit(1)
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: vector JSON parse: ${jerr}")
+        exit(1)
+    }
+
+    groups = json.json_object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+
+    passed = 0
+    rejected_invalid = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        pkobj = json.json_object_get_raw(g, "publicKey")
+        wx = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wx"))
+        wy = json.json_get_string_raw(json.json_object_get_raw(pkobj, "wy"))
+        pubx = coord32(wx)
+        puby = coord32(wy)
+        tests = json.json_object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            if (tc_id % stride) != 0 && stride > 1 {
+                ti = ti + 1
+                continue
+            }
+            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
+            sig_hex = json.json_get_string_raw(json.json_object_get_raw(t, "sig"))
+
+            if string_length(sig_hex) != 128 {
+                if res == "valid" {
+                    println("FAIL tcId=${tc_id}: valid case with non-64-byte sig?")
+                    failed = failed + 1
+                } else {
+                    rejected_invalid = rejected_invalid + 1
+                }
+                ti = ti + 1
+                continue
+            }
+
+            msg = from_hex(msg_hex)
+            h = sha256_of(msg, string_length(msg_hex) / 2)
+            sig = from_hex(sig_hex)
+            r = slice32(sig, 0)
+            s = slice32(sig, 32)
+            ok = p256.ecdsa_verify(pubx, puby, h, r, s)
+            if res == "valid" {
+                if ok == 1 { passed = passed + 1 } else {
+                    println("FAIL tcId=${tc_id} (valid): verify rejected a good signature")
+                    failed = failed + 1
+                }
+            } else {
+                if res == "invalid" {
+                    if ok == 0 { rejected_invalid = rejected_invalid + 1 } else {
+                        println("FAIL tcId=${tc_id} (invalid): verify ACCEPTED a forgery")
+                        failed = failed + 1
+                    }
+                } else {
+                    // acceptable: either outcome
+                    passed = passed + 1
+                }
+            }
+            bytes.free(msg)
+            bytes.free(h)
+            bytes.free(sig)
+            bytes.free(r)
+            bytes.free(s)
+            ti = ti + 1
+        }
+        bytes.free(pubx)
+        bytes.free(puby)
+        gi = gi + 1
+    }
+
+    println("wycheproof ecdsa_p256_p1363: ${passed} ok, ${rejected_invalid} invalid rejected, ${failed} failed (stride ${stride})")
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}
