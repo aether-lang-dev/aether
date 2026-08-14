@@ -1,0 +1,119 @@
+// Regression: the std.spec BDD test framework itself, exercised through
+// the stdlib import boundary (`import std.spec`). Covers the surface that
+// was ported from aeocha: describe/it nesting, before_each/after_each
+// hooks, the flat assert_* family, the fluent expect_int/expect_str
+// chain (incl. not_/satisfies), the string-list collection matchers, and
+// the Duration-budget timing matchers.
+//
+// This test is ALL-GREEN by construction: every assertion is written to
+// pass, so run_summary() returns normally and the process exits 0. It is
+// also the regression that guards the compiler fix for mutable
+// module-level `var` writes across a dotted import path (`std.spec`'s
+// ambient `current_fw` cell) — before that fix, the first fail()/matcher
+// read of `current_fw` segfaulted because init()'s write landed in a
+// shadowing local instead of the shared static.
+
+import std.spec
+import std.list
+import std.string
+import std.os
+
+// Predicate for the satisfies() escape hatch: 1-arg, returns 1/0.
+is_positive(n: int) -> int {
+    if n > 0 { return 1 } else { return 0 }
+}
+
+// String predicate for expect_list_every: element is non-empty.
+is_nonempty(s: string) -> int {
+    if string.length(s) > 0 { return 1 } else { return 0 }
+}
+
+// Returns a freshly-built (heap) string that is freed after the call
+// returns — guards the expect_str copy-on-capture contract.
+built_label(prefix: string) -> string { return "${prefix}-ok" }
+
+main() {
+    fw = spec.init()
+
+    // Shared counter for the hook test — declared in main()'s scope so
+    // the before_each/after_each closures capture it by ref cleanly.
+    hook_runs = ref(0)
+
+    spec.describe(fw, "std.spec") {
+        spec.describe("flat assertions") {
+            spec.it("assert_eq / assert_not_eq / assert_gt") callback {
+                spec.assert_eq(2 + 3, 5, "2+3")
+                spec.assert_not_eq(1, 2, "1 != 2")
+                spec.assert_gt(10, 5, "10 > 5")
+            }
+            spec.it("assert_true / assert_false") callback {
+                spec.assert_true(1, "one truthy")
+                spec.assert_false(0, "zero falsy")
+            }
+            spec.it("string + contains + null") callback {
+                spec.assert_str_eq("hello", "hello", "eq")
+                spec.assert_str_eq_diff("abc", "abc", "eq-diff")
+                spec.assert_contains("hello world", "world", "contains")
+                spec.assert_null(null, "null is null")
+                spec.assert_not_null(fw, "fw non-null")
+            }
+        }
+
+        spec.describe("fluent facade") {
+            spec.it("int chain + not_ + satisfies") callback {
+                spec.expect_int(7).to_be_gt(0).to_be_lt(10).to_equal(7)
+                spec.expect_int(0).to_be_falsy()
+                spec.expect_int(3).to_be_truthy()
+                spec.expect_int(4).not_().to_equal(5)
+                spec.expect_int(9).satisfies(is_positive, "positive")
+            }
+            spec.it("string chain") callback {
+                spec.expect_str("aether").to_start_with("ae").to_contain("the")
+                spec.expect_str(built_label("run")).to_equal_str("run-ok")
+            }
+        }
+
+        spec.describe("collection matchers") {
+            spec.it("size / membership / every") callback {
+                xs = list.new()
+                list.add(xs, "alpha")
+                list.add(xs, "beta")
+                spec.expect_list_size(xs, 2, "two items")
+                spec.expect_list_has_str(xs, "alpha", "has alpha")
+                spec.expect_list_every(xs, is_nonempty, "all non-empty")
+
+                wanted = list.new()
+                list.add(wanted, "beta")
+                spec.expect_list_contains_all(xs, wanted, "contains beta")
+
+                empty = list.new()
+                spec.expect_list_empty(empty, "empty list")
+            }
+        }
+
+        spec.describe("hooks") {
+            spec.before_each() callback {
+                ref_set(hook_runs, ref_get(hook_runs) + 1)
+            }
+            spec.it("before_each ran once") callback {
+                spec.assert_eq(ref_get(hook_runs), 1, "one before run")
+            }
+            spec.it("before_each ran again") callback {
+                spec.assert_eq(ref_get(hook_runs), 2, "two before runs")
+            }
+        }
+
+        spec.describe("timing") {
+            spec.it_within("body inside budget", 5s) callback {
+                spec.assert_true(1, "trivial body")
+            }
+            spec.it("expect_elapsed_under") callback {
+                t0 = os.now_monotonic_ns()
+                t1 = os.now_monotonic_ns()
+                spec.expect_elapsed_under(t1 - t0, 5s, "two clock reads are fast")
+            }
+        }
+    }
+
+    spec.run_summary(fw)
+}

@@ -1,0 +1,946 @@
+// std.spec — BDD-style test framework for Aether
+//
+// A describe / it / before_each / after_each spec framework built on
+// Aether's trailing blocks + closures + the `_ctx` builder
+// context-injection pattern, with a flat assertion layer, a fluent
+// (subject-first, chainable) assertion facade, string-list collection
+// matchers, and Duration-budget timing checks.
+//
+// Ported from the standalone aeocha framework
+// (github.com/aether-lang-dev/aeocha); the process- and HTTP-shaped
+// integration matchers and the mutation-testing facility stay in that
+// repo. This is the pure, dependency-light core: it imports only
+// std.list / std.map / std.string / std.strbuilder / std.os / std.file
+// so it links into libaether.a with the rest of the stdlib.
+//
+// Usage:
+//
+//     import std.spec
+//
+//     main() {
+//         fw = spec.init()
+//         spec.describe(fw, "Counter") {
+//             spec.before_each() callback {
+//                 reset()
+//             }
+//             spec.it("starts at zero") callback {
+//                 spec.assert_eq(count(), 0, "initial")
+//             }
+//             spec.it("increments") callback {
+//                 increment()
+//                 spec.assert_eq(count(), 1, "after one inc")
+//             }
+//         }
+//         spec.run_summary(fw)
+//     }
+//
+// Run with `ae test` (discovers `test_*.ae` / `*_test.ae`, one process
+// per file, exit code 0 = all passed) or `ae run my_test.ae` directly.
+// Exit code 0 = all passed, 1 = failures.
+//
+// Structured reporting (opt-in, off by default): when the environment
+// variable AE_SPEC_FORMAT names a format ("tap" or "aeocha"),
+// run_summary also writes a machine-readable report to the path in
+// AE_SPEC_REPORT. `ae test --format=<fmt>` sets both per child and
+// aggregates the results. Human ✓/✗ output on stdout is unchanged
+// either way.
+//
+// fw threading (mostly removed): the framework counters live in a `fw`
+// context map, but matchers no longer take it as a parameter. init()
+// stores the context in a module-level `current_fw` cell, and every
+// assert_*/expect_*/fail reads it. Only the *structural* calls still
+// take `fw`: the top-level `describe(fw, ...)` (no enclosing block to
+// auto-inject a context) and `run_summary(fw)`. Tradeoff: one framework
+// per process — a second init() rebinds current_fw. Nested
+// describe/it/hooks omit the arg entirely (Aether auto-injects the
+// suite `_ctx`).
+//
+// `after_each` is the survivor; bare `after` was deleted because it
+// collides with Aether's actor-receive `after N -> { ... }` timeout
+// syntax.
+
+import std.list
+import std.map
+import std.string
+import std.strbuilder
+import std.os
+import std.file
+
+exports(
+    init,
+    describe, it, it_within,
+    before_each, after_each,
+    fail, assert_true, assert_false,
+    assert_eq, assert_str_eq, assert_str_eq_diff, assert_not_eq, assert_gt,
+    assert_contains, assert_null, assert_not_null,
+    // Timing-budget matcher (caller-measured monotonic-ns span vs a
+    // Duration literal)
+    expect_elapsed_under,
+    // Fluent assertion facade — subject-first, chainable. expect_int /
+    // expect_str start a chain that reads the framework from an ambient
+    // cell, so no `fw` leaks into the chain.
+    expect_int, expect_str, not_,
+    IntSubject, StrSubject,
+    to_equal, to_be_gt, to_be_lt, to_be_truthy, to_be_falsy,
+    to_equal_str, to_contain, to_start_with,
+    // Fluent escape hatch — drop into a one-off predicate mid-chain.
+    satisfies, satisfies_str,
+    // Collection matchers (std.list of strings)
+    expect_list_size, expect_list_empty, expect_list_has_str,
+    expect_list_contains_all, expect_list_every,
+    run_summary
+)
+
+// Ambient "current framework" cell. EVERY matcher reads it — the flat
+// assert_*/expect_* family and the fluent chain alike — so no `fw`
+// argument threads through assertions. init() sets it; fail() reads it.
+// Declared `ptr` so the 64-bit pointer survives, and relies on
+// module-var state being shared across the import boundary.
+// Single-framework per process: a second init() overwrites it — the
+// documented tradeoff for ambient state.
+var current_fw: ptr = null
+
+// ---------------------------------------------------------------------------
+// Framework context — counters and depth, threaded through every call
+// ---------------------------------------------------------------------------
+
+// Build a fresh framework context. Holds the test-run counters
+// (passed / failed) and the indentation depth (depth) as refs. The
+// caller threads the returned ptr through every spec.* call; the suite
+// contexts created by describe() carry it as an inner field.
+//
+// Also stamps the run-start timestamp + a per-it() record list +
+// a "current_it" pointer-cell. These exist whether or not structured
+// reporting is requested — the cost is bounded (a list of small maps,
+// one per it()) and they feed run_summary's report when AE_SPEC_FORMAT
+// is set. When no format is requested (`ae run foo.ae` from a
+// terminal), run_summary doesn't read them and they get freed at exit.
+init() -> ptr {
+    fw = map.new()
+    map.put_raw(fw, "passed", ref(0))
+    map.put_raw(fw, "failed", ref(0))
+    map.put_raw(fw, "depth", ref(0))
+    // Per-it() telemetry (for the structured report path).
+    // "current_it" stores the in-flight it-record map directly (or null
+    // when no it() is running) — bypasses ref cells because ref_get
+    // truncates pointers to 32 bits in codegen. "t_start_ns_str" is a
+    // decimal-string of the monotonic-clock start so we keep all 64
+    // bits; parsed back via string.get_long in run_summary. Monotonic
+    // (os.now_monotonic_ns), not wall-clock (clock_ns): the run-total
+    // duration is a delta, and a wall-clock jump (NTP step, DST) mid-run
+    // would otherwise corrupt it. Only deltas are meaningful here.
+    map.put_raw(fw, "its", list.new())
+    map.put_raw(fw, "current_it", null)
+    map.put_raw(fw, "t_start_ns_str", "${os.now_monotonic_ns()}")
+    // Make this the ambient framework for the fluent facade.
+    current_fw = fw
+    return fw
+}
+
+// ---------------------------------------------------------------------------
+// Suite context — what describe() returns for _ctx injection
+//
+// Each suite holds:
+//   "name"     — string label for printing
+//   "befores"  — list of boxed closures (run before each it())
+//   "afters"   — list of boxed closures (run after each it())
+//   "fw"       — back-pointer to the framework context (so it / assertions
+//                inside the trailing block can find passed/failed/depth)
+// ---------------------------------------------------------------------------
+
+_suite_new(name: string, fw: ptr, parent: ptr) -> ptr {
+    s = map.new()
+    map.put_raw(s, "name", name)
+    map.put_raw(s, "befores", list.new())
+    map.put_raw(s, "afters", list.new())
+    map.put_raw(s, "fw", fw)
+    map.put_raw(s, "parent", parent)
+    return s
+}
+
+// Return the framework context for a given _ctx (which may itself be
+// the framework context if the call is at top level, or a suite
+// context if the call is inside a describe trailing block).
+_fw_of(ctx: ptr) -> ptr {
+    if map.has(ctx, "fw") == 1 {
+        f = map.get_raw(ctx, "fw")
+        return f
+    }
+    return ctx
+}
+
+// ---------------------------------------------------------------------------
+// describe() — top-level grouping. Trailing-block-driven; the block
+// receives the suite context as _ctx so before_each/after_each/it
+// register against it.
+// ---------------------------------------------------------------------------
+
+describe(_ctx: ptr, description: string) -> ptr {
+    fw = _fw_of(_ctx)
+    depth_ref = map.get_raw(fw, "depth")
+    d = ref_get(depth_ref)
+    for (i = 0; i < d; i ++) { print("  ") }
+    println(description)
+    ref_set(depth_ref, d + 1)
+
+    parent = null
+    if map.has(_ctx, "fw") == 1 {
+        parent = _ctx
+    }
+    return _suite_new(description, fw, parent)
+}
+
+// ---------------------------------------------------------------------------
+// before_each / after_each — register hooks against the surrounding
+// describe's suite context.
+// ---------------------------------------------------------------------------
+
+before_each(_ctx: ptr, setup: fn) {
+    bl = map.get_raw(_ctx, "befores")
+    list.add(bl, box_closure(setup))
+}
+
+after_each(_ctx: ptr, teardown: fn) {
+    al = map.get_raw(_ctx, "afters")
+    list.add(al, box_closure(teardown))
+}
+
+// Helper to run all before_each hooks for a suite and its ancestors,
+// from outer-most to inner-most.
+_run_befores(s: ptr) {
+    p = map.get_raw(s, "parent")
+    if p != null {
+        _run_befores(p)
+    }
+    befores = map.get_raw(s, "befores")
+    n = list.size(befores)
+    for (i = 0; i < n; i ++) {
+        bh = list.get_raw(befores, i)
+        call(unbox_closure(bh))
+    }
+}
+
+// Helper to run all after_each hooks for a suite and its ancestors,
+// from inner-most to outer-most.
+_run_afters(s: ptr) {
+    afters = map.get_raw(s, "afters")
+    n = list.size(afters)
+    for (i = 0; i < n; i ++) {
+        ah = list.get_raw(afters, i)
+        call(unbox_closure(ah))
+    }
+    p = map.get_raw(s, "parent")
+    if p != null {
+        _run_afters(p)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// it() — one test case. Runs all befores, then the test, then all
+// afters. Failure is communicated by assertions inside the test body
+// bumping the framework's failed counter; we snapshot the count
+// before and after to know whether anything failed in this run.
+// ---------------------------------------------------------------------------
+
+it(_ctx: ptr, description: string, test_fn: fn) {
+    // budget_ns 0 = no time budget (plain it()).
+    _it_impl(_ctx, description, test_fn, 0)
+}
+
+// it_within(_ctx, description, budget, test_fn) — an it() that also
+// fails if the test body takes longer than `budget`. The budget check
+// is layered on top of the normal assertion-based pass/fail: a body
+// that asserts cleanly but runs over budget still goes red. Uses the
+// same monotonic elapsed the report already records, so there's no
+// extra measurement. `budget` is a Duration literal (`50ms`, `2s`).
+it_within(_ctx: ptr, description: string, budget: Duration, test_fn: fn) {
+    _it_impl(_ctx, description, test_fn, budget.ns)
+}
+
+// Shared it() body. budget_ns > 0 adds a "ran within budget" check
+// after the body completes; 0 disables it.
+_it_impl(_ctx: ptr, description: string, test_fn: fn, budget_ns: long) {
+    fw = _fw_of(_ctx)
+    passed_ref = map.get_raw(fw, "passed")
+    failed_ref = map.get_raw(fw, "failed")
+    depth_ref = map.get_raw(fw, "depth")
+
+    // Run before hooks (inherited outer-to-inner)
+    _run_befores(_ctx)
+
+    // Build a per-it record map and stash it as the "current" so
+    // fail() can capture the first failure message into it. The
+    // record gets appended to fw.its at the end of this call,
+    // regardless of pass/fail, with status + duration filled in.
+    // Pointer-valued slots (current_it, the it-record map, the it
+    // record's "duration_ns_str") are stored via map.put_raw rather
+    // than through ref() cells because ref_get truncates to 32 bits.
+    it_rec = map.new()
+    map.put_raw(it_rec, "name", description)
+    its_list = map.get_raw(fw, "its")
+    map.put_raw(fw, "current_it", it_rec)
+
+    // Monotonic clock for the elapsed span — only the delta matters,
+    // and clock_ns() (wall clock) could jump under NTP/DST mid-test.
+    t_start_ns = os.now_monotonic_ns()
+    old_failed = ref_get(failed_ref)
+    call(test_fn)
+    t_end_ns = os.now_monotonic_ns()
+    elapsed_ns = t_end_ns - t_start_ns
+
+    // Time-budget check (it_within). Reported via fail() while
+    // current_it is still set, so it counts against this it() and its
+    // message is captured in the record. Done before tearing down
+    // current_it below.
+    if budget_ns > 0 {
+        if elapsed_ns >= budget_ns {
+            elapsed_ms = elapsed_ns / 1000000
+            budget_ms = budget_ns / 1000000
+            fail("${description} — exceeded time budget: ${elapsed_ms}ms >= ${budget_ms}ms")
+        }
+    }
+
+    // Tear down "current" pointer before any after-hooks so a hook
+    // failure doesn't get mis-attributed to this it's record.
+    map.put_raw(fw, "current_it", null)
+
+    // Indent + result line
+    d = ref_get(depth_ref)
+    for (i = 0; i < d; i ++) { print("  ") }
+    is_fail = 0
+    if ref_get(failed_ref) == old_failed {
+        print("\x1b[32m  ✓\x1b[0m ${description}\n")
+        ref_set(passed_ref, ref_get(passed_ref) + 1)
+    } else {
+        print("\x1b[31m  ✗\x1b[0m ${description}\n")
+        is_fail = 1
+    }
+
+    // Stamp status + duration on the record.
+    if is_fail == 1 {
+        map.put_raw(it_rec, "status", "FAIL")
+    } else {
+        map.put_raw(it_rec, "status", "PASS")
+    }
+    // Store the FULL ns duration (decimal string to keep all 64 bits,
+    // like t_start_ns_str). The report derives ms from this when it
+    // needs the v1-compat field; rows carry the ns directly so fast
+    // tests don't all round to 0ms.
+    map.put_raw(it_rec, "duration_ns_str", "${elapsed_ns}")
+    list.add(its_list, it_rec)
+
+    // Run after hooks (inherited inner-to-outer)
+    _run_afters(_ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Assertions — each reports via fail(), which bumps the ambient
+// framework's failed counter (current_fw) when the check doesn't hold.
+// No `fw` parameter. They print the failure inline and continue (no
+// exit), letting the surrounding it() see the bumped counter and mark
+// the case red.
+// ---------------------------------------------------------------------------
+
+// fail(msg) — record a failure against the ambient framework
+// (current_fw, set by init()). Every matcher and user assertion reports
+// through here, reading the ambient cell rather than threading `fw`.
+// Single-framework-per-process is the documented tradeoff (a second
+// init() rebinds current_fw).
+fail(msg: string) {
+    failed_ref = map.get_raw(current_fw, "failed")
+    print("\x1b[31m      FAIL: ${msg}\x1b[0m\n")
+    ref_set(failed_ref, ref_get(failed_ref) + 1)
+
+    // Capture first failure message into the current it() record
+    // (if any). The structured report writes one message per failed
+    // it; subsequent fails within the same it are visible in the human
+    // output but only the first is recorded — keeps the report bounded
+    // and matches "what made this it red" semantics. current_it is
+    // stored directly (not via ref()) to preserve the full pointer
+    // width.
+    cur = map.get_raw(current_fw, "current_it")
+    if cur != null {
+        if map.has(cur, "failure_message") == 0 {
+            map.put_raw(cur, "failure_message", msg)
+        }
+    }
+}
+
+assert_true(condition: int, msg: string) {
+    if condition == 0 {
+        fail("${msg} — expected true")
+    }
+}
+
+assert_false(condition: int, msg: string) {
+    if condition != 0 {
+        fail("${msg} — expected false")
+    }
+}
+
+assert_eq(actual: int, expected: int, msg: string) {
+    if actual != expected {
+        fail("${msg} — expected ${expected}, got ${actual}")
+    }
+}
+
+assert_str_eq(actual: string, expected: string, msg: string) {
+    if string.equals(actual, expected) == 0 {
+        fail("${msg} — expected '${expected}', got '${actual}'")
+    }
+}
+
+// First byte index where a and b differ. -1 if equal. If one is a
+// prefix of the other, returns the shorter length (the first position
+// that's present in one but not the other). char_at_n over char_at:
+// lengths are cached, so the length-aware accessor skips a per-byte
+// strlen.
+_first_diff(a: string, b: string) -> int {
+    la = string.length(a)
+    lb = string.length(b)
+    lim = la
+    if lb < la { lim = lb }
+    i = 0
+    while i < lim {
+        if string.char_at_n(a, la, i) != string.char_at_n(b, lb, i) {
+            return i
+        }
+        i = i + 1
+    }
+    if la != lb { return lim }
+    return -1
+}
+
+// assert_str_eq_diff(actual, expected, msg) — exact string equality
+// like assert_str_eq, but on mismatch the message shows the two values
+// aligned with a caret under the first differing byte (Jest/Vitest
+// style). Reach for this over assert_str_eq when the strings are long
+// enough that "expected X got Y" buries the actual difference.
+//
+// The caret column is fixed: the value lines are printed as
+//   "        actual:   \"" + value
+// whose prefix is 19 chars (8 spaces + 'actual:   "'), so the caret
+// pads to 19 + index. ASCII byte index, not codepoint — fine for the
+// ASCII test output this targets; a multibyte value just points at the
+// first differing byte.
+assert_str_eq_diff(actual: string, expected: string, msg: string) {
+    if string.equals(actual, expected) == 0 {
+        d = _first_diff(actual, expected)
+        caret = string.pad_start("^", 19 + d + 1, 32)
+        fail("${msg} — strings differ at index ${d}\n        expected: \"${expected}\"\n        actual:   \"${actual}\"\n${caret}")
+    }
+}
+
+assert_not_eq(actual: int, expected: int, msg: string) {
+    if actual == expected {
+        fail("${msg} — expected not ${expected}")
+    }
+}
+
+assert_gt(actual: int, expected: int, msg: string) {
+    if actual <= expected {
+        fail("${msg} — expected > ${expected}, got ${actual}")
+    }
+}
+
+assert_contains(haystack: string, needle: string, msg: string) {
+    if string.contains(haystack, needle) == 0 {
+        fail("${msg} — '${haystack}' does not contain '${needle}'")
+    }
+}
+
+assert_null(value: ptr, msg: string) {
+    if value != 0 {
+        fail("${msg} — expected null")
+    }
+}
+
+assert_not_null(value: ptr, msg: string) {
+    if value == 0 {
+        fail("${msg} — expected non-null")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Timing-budget matcher
+//
+// expect_elapsed_under(elapsed_ns, budget, msg) — a measured span
+// is under a budget written as a Duration literal. The caller measures
+// the span itself with two monotonic-clock reads:
+//
+//     t0 = os.now_monotonic_ns()
+//     ... do work ...
+//     elapsed = os.now_monotonic_ns() - t0
+//     spec.expect_elapsed_under(elapsed, 50ms, "fast path")
+//
+// `elapsed_ns` is a plain int64 nanosecond count (what monotonic-ns
+// deltas yield); `budget` is a Duration (`50ms`, `2s`, `200us`). We
+// compare in ns via budget.ns — Duration-vs-plain-number is a type
+// error in Aether, so the .ns accessor is the bridge. Use monotonic
+// (not wall-clock) deltas: only the delta is meaningful and a wall
+// jump would corrupt it.
+//
+// The budget renders directly via ${budget} (Duration interpolation
+// picks the largest readable unit — `50ms`, `1.5s`); the elapsed side
+// is a plain ns count, so we show it as ms.
+expect_elapsed_under(elapsed_ns: long, budget: Duration, msg: string) {
+    if elapsed_ns < budget.ns {
+        // under budget — pass (no-op)
+    } else {
+        elapsed_ms = elapsed_ns / 1000000
+        fail("${msg} — took ${elapsed_ms}ms, budget ${budget}")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fluent assertion facade — subject-first, chainable
+//
+// The flat assert_*/expect_* matchers above are the primitive layer and
+// stay as-is. This facade is sugar on top, for tests that prefer the
+// Fowler-style fluent grammar the BDD community popularised:
+//
+//     spec.expect_int(count).to_equal(5).to_be_gt(0)
+//     spec.expect_str(name).to_contain("foo")
+//     spec.expect_int(x).not_().to_equal(5)
+//
+// How it works:
+//   - expect_int(v) / expect_str(v) return a small by-value subject
+//     record (the value + a negated flag).
+//   - each .to_* is a free function whose first parameter is the
+//     subject, so UFCS lets it be called as a method and return the
+//     subject again — that's the chain.
+//   - failures are reported via fail() against the AMBIENT framework
+//     (current_fw, set by init()), so the chain carries no `fw`.
+//   - not_() flips the next matcher's sense by returning a negated copy.
+//
+// Naming mirrors the flat layer's int/string split (assert_eq vs
+// assert_str_eq): int matchers are unsuffixed, string matchers carry a
+// distinguishing name. Aether has no receiver-type overloading, so a
+// single `to_equal` can't serve both int and string subjects —
+// expect_str uses to_equal_str.
+//
+// Single-framework caveat: the facade reads current_fw, so it asserts
+// against whichever framework init()'d last. Fine for the normal
+// one-framework-per-process test; the flat matchers remain the way to
+// drive two frameworks at once.
+// ---------------------------------------------------------------------------
+
+struct IntSubject { value: int, negated: int }
+struct StrSubject { value: string, negated: int }
+
+expect_int(v: int) -> IntSubject { return IntSubject { value: v, negated: 0 } }
+
+// expect_str COPIES v into the subject. The fluent chain outlives the
+// expect_str() call, so a caller-owned temporary — e.g. the freshly
+// built string returned by `expect_str(build_path(...))` — would be
+// freed before .to_equal_str() runs, and StrSubject.value would dangle
+// (a use-after-free that reads garbage). string.copy takes an owned
+// snapshot so the subject holds its own string end-to-end. int is
+// value-copied so expect_int needs no such guard. The copy lives until
+// process exit (one small string per expect_str, bounded by test count
+// — same lifetime policy as the rest of the per-it allocations).
+expect_str(v: string) -> StrSubject { return StrSubject { value: string.copy(v), negated: 0 } }
+
+// not_() — flip the sense of the NEXT matcher in the chain.
+not_(s: IntSubject) -> IntSubject {
+    return IntSubject { value: s.value, negated: 1 }
+}
+
+// _verdict_int(ok) — shared verdict: given whether the positive
+// predicate held, report against the ambient fw honouring the negated
+// flag.
+_verdict_int(s: IntSubject, ok: int, what: string) {
+    if s.negated == 0 {
+        if ok == 0 { fail("expected ${what}") }
+    } else {
+        if ok == 1 { fail("expected NOT ${what}") }
+    }
+}
+
+to_equal(s: IntSubject, want: int) -> IntSubject {
+    ok = 0
+    if s.value == want { ok = 1 }
+    _verdict_int(s, ok, "${want}, got ${s.value}")
+    return s
+}
+
+to_be_gt(s: IntSubject, bound: int) -> IntSubject {
+    ok = 0
+    if s.value > bound { ok = 1 }
+    _verdict_int(s, ok, "> ${bound}, got ${s.value}")
+    return s
+}
+
+to_be_lt(s: IntSubject, bound: int) -> IntSubject {
+    ok = 0
+    if s.value < bound { ok = 1 }
+    _verdict_int(s, ok, "< ${bound}, got ${s.value}")
+    return s
+}
+
+to_be_truthy(s: IntSubject) -> IntSubject {
+    ok = 0
+    if s.value != 0 { ok = 1 }
+    _verdict_int(s, ok, "truthy, got ${s.value}")
+    return s
+}
+
+to_be_falsy(s: IntSubject) -> IntSubject {
+    ok = 0
+    if s.value == 0 { ok = 1 }
+    _verdict_int(s, ok, "falsy, got ${s.value}")
+    return s
+}
+
+// String subject matchers. negated is honoured but there's no string
+// not_() yet — add one if a downstream test needs `.not_().to_contain`.
+to_equal_str(s: StrSubject, want: string) -> StrSubject {
+    if string.equals(s.value, want) == 0 {
+        fail("expected '${want}', got '${s.value}'")
+    }
+    return s
+}
+
+to_contain(s: StrSubject, needle: string) -> StrSubject {
+    if string.contains(s.value, needle) == 0 {
+        fail("'${s.value}' does not contain '${needle}'")
+    }
+    return s
+}
+
+to_start_with(s: StrSubject, prefix: string) -> StrSubject {
+    if string.starts_with(s.value, prefix) == 0 {
+        fail("'${s.value}' does not start with '${prefix}'")
+    }
+    return s
+}
+
+// satisfies(s, pred, msg) — fluent escape hatch (AssertJ-style). `pred`
+// takes the subject's value and returns 1 (ok) / 0 (fail). Lets a test
+// drop into an arbitrary one-off check mid-chain without defining a
+// whole new matcher:
+//   spec.expect_int(n).to_be_gt(0).satisfies(is_prime, "is prime")
+// `pred` is a top-level fn passed by bare name. One satisfies() per
+// subject type — Aether has no receiver-type overloading.
+satisfies(s: IntSubject, pred: fn, msg: string) -> IntSubject {
+    ok = 0
+    if call(pred, s.value) == 1 { ok = 1 }
+    _verdict_int(s, ok, "to satisfy '${msg}', got ${s.value}")
+    return s
+}
+
+satisfies_str(s: StrSubject, pred: fn, msg: string) -> StrSubject {
+    if call(pred, s.value) == 0 {
+        fail("'${s.value}' did not satisfy '${msg}'")
+    }
+    return s
+}
+
+// ---------------------------------------------------------------------------
+// Collection matchers (flat). Operate on a std.list of strings — the
+// common shape in tests (captured lines, names, ids). Tier-1 style:
+// plain functions that report via fail(), exactly like a user's own
+// custom matcher. Int lists are deliberately omitted (the raw list
+// stores pointers; an int-list convention would need boxing) — assert
+// on a string projection, or write a one-off matcher.
+// ---------------------------------------------------------------------------
+
+// expect_list_size(xs, want, msg) — the list has exactly `want` items.
+expect_list_size(xs: ptr, want: int, msg: string) {
+    n = list.size(xs)
+    if n != want {
+        fail("${msg} — expected ${want} items, got ${n}")
+    }
+}
+
+// expect_list_empty(xs, msg) — the list has no items.
+expect_list_empty(xs: ptr, msg: string) {
+    n = list.size(xs)
+    if n != 0 {
+        fail("${msg} — expected empty list, got ${n} items")
+    }
+}
+
+// _list_has_str(xs, needle) -> 1 if some element equals needle, else 0.
+// Shared by the membership matchers below; never fails on its own.
+_list_has_str(xs: ptr, needle: string) -> int {
+    n = list.size(xs)
+    i = 0
+    while i < n {
+        item = list.get_raw(xs, i)
+        if string.equals(item, needle) == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// expect_list_has_str(xs, needle, msg) — some element equals `needle`
+// (exact string match).
+expect_list_has_str(xs: ptr, needle: string, msg: string) {
+    if _list_has_str(xs, needle) == 0 {
+        fail("${msg} — list has no element equal to '${needle}'")
+    }
+}
+
+// expect_list_contains_all(xs, needles, msg) — every string in
+// `needles` (also a std.list of strings) appears somewhere in `xs`.
+// Order-independent and tolerant of extra elements in `xs` — the
+// containsInAnyOrder/hasItems shape. Reports the FIRST missing needle.
+expect_list_contains_all(xs: ptr, needles: ptr, msg: string) {
+    m = list.size(needles)
+    i = 0
+    while i < m {
+        want = list.get_raw(needles, i)
+        if _list_has_str(xs, want) == 0 {
+            fail("${msg} — list is missing '${want}'")
+            i = m
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// expect_list_every(xs, pred, msg) — every element satisfies `pred`
+// (a fn(string)->1/0). The everyItem shape. Reports the first failing
+// element and its index. An empty list passes vacuously.
+expect_list_every(xs: ptr, pred: fn, msg: string) {
+    n = list.size(xs)
+    i = 0
+    while i < n {
+        item = list.get_raw(xs, i)
+        if call(pred, item) == 0 {
+            fail("${msg} — element ${i} ('${item}') failed the predicate")
+            i = n
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Runner — print summary, emit an opt-in structured report, exit(1) if
+// anything failed
+// ---------------------------------------------------------------------------
+
+run_summary(fw: ptr) {
+    passed_ref = map.get_raw(fw, "passed")
+    failed_ref = map.get_raw(fw, "failed")
+    depth_ref = map.get_raw(fw, "depth")
+    passed = ref_get(passed_ref)
+    failed = ref_get(failed_ref)
+
+    println("")
+    if failed == 0 {
+        println("\x1b[32m  ${passed} passing\x1b[0m")
+    } else {
+        println("\x1b[32m  ${passed} passing\x1b[0m")
+        println("\x1b[31m  ${failed} failing\x1b[0m")
+    }
+    println("")
+
+    // Structured report — opt-in, off by default. Emitted only when the
+    // environment names a format (AE_SPEC_FORMAT) AND a destination path
+    // (AE_SPEC_REPORT). `ae test --format=<fmt>` sets both per child and
+    // aggregates; a plain `ae run foo.ae` from a terminal sets neither,
+    // so this block is skipped and human output is the only output.
+    _emit_report(fw, passed, failed)
+
+    ref_free(passed_ref)
+    ref_free(failed_ref)
+    ref_free(depth_ref)
+
+    if failed > 0 {
+        exit(1)
+    }
+}
+
+// _emit_report — write a machine-readable report to AE_SPEC_REPORT in
+// the format named by AE_SPEC_FORMAT, if both are set. Formats:
+//   "tap"             — TAP version 13 (one test point per it())
+//   "aeocha"          — the aeocha v1 KV-header + tab-packed rows
+//   "aeocha-v1"       — alias for "aeocha"
+// An unrecognised or empty format is a no-op (human output already
+// printed). Writing to a file (not a pipe) means no 64K pipe-buffer
+// deadlock, so the report is emitted in full.
+_emit_report(fw: ptr, passed: int, failed: int) {
+    // os.getenv returns a null pointer (== 0) for an unset variable, so
+    // null-check BEFORE any string.* call (which would deref it). An
+    // empty value counts as "not set" too.
+    fmt = os.getenv("AE_SPEC_FORMAT")
+    if fmt == 0 { return }
+    if string.equals(fmt, "") == 1 { return }
+    path = os.getenv("AE_SPEC_REPORT")
+    if path == 0 { return }
+    if string.equals(path, "") == 1 { return }
+
+    report = ""
+    if string.equals(fmt, "tap") == 1 {
+        report = _format_tap(fw)
+    } else {
+        if string.equals(fmt, "aeocha") == 1 {
+            report = _format_aeocha_v1(fw, passed, failed)
+        } else {
+            if string.equals(fmt, "aeocha-v1") == 1 {
+                report = _format_aeocha_v1(fw, passed, failed)
+            } else {
+                // Unknown format — nothing to write.
+                return
+            }
+        }
+    }
+    file.write(path, report)
+}
+
+// Build a TAP version 13 document from the recorded it() rows. One test
+// point per it(), numbered from 1, in run order. A FAIL row carries the
+// captured failure message as a YAML-ish diagnostic block so a TAP
+// consumer surfaces it. The trailing plan line `1..N` closes the
+// document (plan-at-end so the count needn't be known up front).
+//
+//   TAP version 13
+//   ok 1 - adds two numbers
+//   not ok 2 - handles overflow
+//     ---
+//     message: "expected 5, got 6"
+//     ...
+//   1..2
+_format_tap(fw: ptr) -> string {
+    its = map.get_raw(fw, "its")
+    n = list.size(its)
+    b = strbuilder.new(1024)
+    strbuilder.append(b, "TAP version 13\n")
+    i = 0
+    while i < n {
+        it_rec = list.get_raw(its, i)
+        status = map.get_raw(it_rec, "status")
+        name = map.get_raw(it_rec, "name")
+        idx = i + 1
+        if string.equals(status, "PASS") == 1 {
+            strbuilder.append(b, "ok ")
+        } else {
+            strbuilder.append(b, "not ok ")
+        }
+        strbuilder.append_int(b, idx)
+        strbuilder.append(b, " - ")
+        strbuilder.append(b, _tap_escape(name))
+        strbuilder.append_byte(b, 10)
+        // Diagnostic block for a failure, if a message was captured.
+        if string.equals(status, "PASS") == 0 {
+            if map.has(it_rec, "failure_message") == 1 {
+                msg = map.get_raw(it_rec, "failure_message")
+                strbuilder.append(b, "  ---\n  message: ")
+                strbuilder.append(b, _tap_yaml_scalar(msg))
+                strbuilder.append(b, "\n  ...\n")
+            }
+        }
+        i = i + 1
+    }
+    strbuilder.append(b, "1..")
+    strbuilder.append_int(b, n)
+    strbuilder.append_byte(b, 10)
+    return strbuilder.finish(b)
+}
+
+// A TAP description must stay on one line and must not contain a '#'
+// that would start a directive. Replace newlines with spaces and '#'
+// with a lookalike so the point description is safe.
+_tap_escape(s: string) -> string {
+    out = string.replace_all(s, "\n", " ")
+    out = string.replace_all(out, "\r", " ")
+    out = string.replace_all(out, "#", "＃")
+    return out
+}
+
+// Render a captured failure message as a single-line YAML scalar for
+// the TAP diagnostic block: newlines become spaces, and the whole thing
+// is double-quoted with embedded quotes/backslashes escaped so a YAML
+// parser reads it as one string.
+_tap_yaml_scalar(s: string) -> string {
+    flat = string.replace_all(s, "\\", "\\\\")
+    flat = string.replace_all(flat, "\n", " ")
+    flat = string.replace_all(flat, "\r", " ")
+    flat = string.replace_all(flat, "\"", "\\\"")
+    return "\"${flat}\""
+}
+
+// Build the aeocha v1 structured report — byte-compatible with the
+// format aeocha's aeb driver already parses.
+//
+//   version=1
+//   total=N
+//   passed=N
+//   failed=N
+//   errored=N
+//   duration_ms=N        (retained for v1 readers; may round to 0)
+//   duration_ns=N        (full-precision total)
+//   ---
+//   PASS\t<index>\t"<name>"\t<duration_ns>\n
+//   FAIL\t<index>\t"<name>"\t<duration_ns>\t<failure_message>\n
+//   ...
+//
+// The per-row duration is nanoseconds so sub-ms tests don't all report
+// 0; v1 row consumers match STATUS/index/"name"/message and ignore the
+// duration value, so this stays wire-compatible. errored is always 0 —
+// spec categorises everything as PASS or FAIL today.
+_format_aeocha_v1(fw: ptr, passed: int, failed: int) -> string {
+    its = map.get_raw(fw, "its")
+    n = list.size(its)
+    t_start_str = map.get_raw(fw, "t_start_ns_str")
+    t_start_ns = string.get_long(t_start_str)
+    // Monotonic end to match the monotonic start stamped in init() —
+    // mixing the two clocks would yield a garbage delta.
+    total_duration_ns = os.now_monotonic_ns() - t_start_ns
+    total_duration_ms = total_duration_ns / 1000000
+
+    total = passed + failed
+    header = "version=1\ntotal=${total}\npassed=${passed}\nfailed=${failed}\nerrored=0\nduration_ms=${total_duration_ms}\nduration_ns=${total_duration_ns}\n---\n"
+
+    rows = _build_rows(its, n)
+    return string.concat(header, rows)
+}
+
+// Build the per-it rows for the aeocha v1 report through std.strbuilder
+// (a `string.concat` accumulator would pay an O(N²) realloc-and-memcpy
+// of the whole prefix on every row). Individual failure messages are
+// capped at 256 chars to keep any single row bounded.
+_build_rows(its: ptr, n: int) -> string {
+    b = strbuilder.new(1024)
+    i = 0
+    while i < n {
+        it_rec = list.get_raw(its, i)
+        status = map.get_raw(it_rec, "status")
+        name = map.get_raw(it_rec, "name")
+        idx = i + 1
+
+        // Base row: STATUS\tindex\t"name"  (\t=9, "=34)
+        strbuilder.append(b, status)
+        strbuilder.append_byte(b, 9)
+        strbuilder.append_int(b, idx)
+        strbuilder.append_byte(b, 9)
+        strbuilder.append_byte(b, 34)
+        strbuilder.append(b, name)
+        strbuilder.append_byte(b, 34)
+
+        // Per-row duration (ns): full precision, so sub-ms tests don't
+        // all report 0.
+        dur_str = map.get_raw(it_rec, "duration_ns_str")
+        strbuilder.append_byte(b, 9)
+        strbuilder.append(b, dur_str)
+
+        if map.has(it_rec, "failure_message") == 1 {
+            msg = map.get_raw(it_rec, "failure_message")
+            strbuilder.append_byte(b, 9)
+            if string.length(msg) > 256 {
+                strbuilder.append(b, string.substring(msg, 0, 256))
+            } else {
+                strbuilder.append(b, msg)
+            }
+        }
+
+        strbuilder.append_byte(b, 10)
+        i = i + 1
+    }
+    return strbuilder.finish(b)
+}

@@ -1,0 +1,19 @@
+// Fixture for the spec-format-reporting integration test: a suite with
+// one passing and one deliberately failing `it`, so the shell test can
+// assert the FAIL rows and diagnostic blocks in both report formats.
+// Driven by `ae test --format=...`; its directory is pruned from the
+// standalone .ae runner so the intentional failure is not a red suite.
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "strings") {
+        spec.it("equal strings pass") callback {
+            spec.assert_str_eq("a", "a", "eq")
+        }
+        spec.it("mismatch fails on purpose") callback {
+            spec.assert_eq(1, 2, "one should equal two")
+        }
+    }
+    spec.run_summary(fw)
+}
