@@ -98,6 +98,8 @@ exports(
 // module-var state being shared across the import boundary.
 // Single-framework per process: a second init() overwrites it — the
 // documented tradeoff for ambient state.
+@extern("free") libc_free(p: ptr)
+
 var current_fw: ptr = null
 
 // ---------------------------------------------------------------------------
@@ -130,6 +132,11 @@ init() -> ptr {
     // duration is a delta, and a wall-clock jump (NTP step, DST) mid-run
     // would otherwise corrupt it. Only deltas are meaningful here.
     map.put_raw(fw, "its", list.new())
+    // Every _suite_new registers here so run_summary's teardown can free
+    // the suite maps + hook lists (they're otherwise orphaned when the
+    // describe block ends — the macOS leaks gate caught exactly that).
+    map.put_raw(fw, "suites", list.new())
+    map.put_raw(fw, "str_copies", list.new())
     map.put_raw(fw, "current_it", null)
     map.put_raw(fw, "t_start_ns_str", "${os.now_monotonic_ns()}")
     // Make this the ambient framework for the fluent facade.
@@ -155,6 +162,8 @@ _suite_new(name: string, fw: ptr, parent: ptr) -> ptr {
     map.put_raw(s, "afters", list.new())
     map.put_raw(s, "fw", fw)
     map.put_raw(s, "parent", parent)
+    sl = map.get_raw(fw, "suites")
+    list.add(sl, s)
     return s
 }
 
@@ -530,16 +539,22 @@ struct StrSubject { value: string, negated: int }
 
 expect_int(v: int) -> IntSubject { return IntSubject { value: v, negated: 0 } }
 
-// expect_str COPIES v into the subject. The fluent chain outlives the
-// expect_str() call, so a caller-owned temporary — e.g. the freshly
-// built string returned by `expect_str(build_path(...))` — would be
-// freed before .to_equal_str() runs, and StrSubject.value would dangle
-// (a use-after-free that reads garbage). string.copy takes an owned
-// snapshot so the subject holds its own string end-to-end. int is
-// value-copied so expect_int needs no such guard. The copy lives until
-// process exit (one small string per expect_str, bounded by test count
-// — same lifetime policy as the rest of the per-it allocations).
-expect_str(v: string) -> StrSubject { return StrSubject { value: string.copy(v), negated: 0 } }
+// expect_str COPIES v into the subject (the chain outlives the call,
+// and a caller temporary would be a use-after-free — valgrind confirms
+// borrowing reads freed memory under current semantics). The copy is
+// REGISTERED on the ambient framework's "str_copies" list so
+// run_summary's teardown releases it: the chain has no terminal hook
+// (every link returns the subject), so end-of-run is the only safe
+// release point. Without an init()'d framework the copy is untracked —
+// same single-framework tradeoff as fail() itself.
+expect_str(v: string) -> StrSubject {
+    c = string.copy(v)
+    if current_fw != null {
+        sc = map.get_raw(current_fw, "str_copies")
+        if sc != null { list.list_add_raw(sc, c) }
+    }
+    return StrSubject { value: c, negated: 0 }
+}
 
 // not_() — flip the sense of the NEXT matcher in the chain.
 not_(s: IntSubject) -> IntSubject {
@@ -724,6 +739,65 @@ expect_list_every(xs: ptr, pred: fn, msg: string) {
 // anything failed
 // ---------------------------------------------------------------------------
 
+// Free the whole framework tree (the leaks-gate contract: zero at
+// exit). Ownership rules learned the valgrind way:
+//   - map_free / list_free SNIFF every element (an is_aether_string
+//     read) and release refcounted-string values themselves — so
+//     string values (names, "${...}" stamps, failure messages, the
+//     fluent chain's registered copies) are freed BY the containers,
+//     never manually here;
+//   - non-string raw pointers (closure boxes, nested map/list handles)
+//     are ours — but because of the sniff, anything we free manually
+//     MUST be nulled out of its slot first (list.set null) or the
+//     container's own free reads freed memory.
+fn _teardown(fw: ptr) {
+    suites = map.get_raw(fw, "suites")
+    ns = list.size(suites)
+    i = 0
+    while i < ns {
+        s = list.get_raw(suites, i)
+        bl = map.get_raw(s, "befores")
+        nb = list.size(bl)
+        j = 0
+        while j < nb {
+            libc_free(list.get_raw(bl, j))
+            list.set(bl, j, null)
+            j = j + 1
+        }
+        list.free(bl)
+        al = map.get_raw(s, "afters")
+        na = list.size(al)
+        j = 0
+        while j < na {
+            libc_free(list.get_raw(al, j))
+            list.set(al, j, null)
+            j = j + 1
+        }
+        list.free(al)
+        map.free(s)
+        list.set(suites, i, null)
+        i = i + 1
+    }
+    list.free(suites)
+
+    its = map.get_raw(fw, "its")
+    ni = list.size(its)
+    i = 0
+    while i < ni {
+        map.free(list.get_raw(its, i))
+        list.set(its, i, null)
+        i = i + 1
+    }
+    list.free(its)
+
+    // The fluent chain's string copies: released by the sniff in
+    // list_free itself.
+    list.free(map.get_raw(fw, "str_copies"))
+
+    map.free(fw)
+    current_fw = null
+}
+
 run_summary(fw: ptr) {
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
@@ -750,6 +824,7 @@ run_summary(fw: ptr) {
     ref_free(passed_ref)
     ref_free(failed_ref)
     ref_free(depth_ref)
+    _teardown(fw)
 
     if failed > 0 {
         exit(1)

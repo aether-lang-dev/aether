@@ -88,6 +88,10 @@ main() {
 
                 empty = list.new()
                 spec.expect_list_empty(empty, "empty list")
+
+                list.free(xs)
+                list.free(wanted)
+                list.free(empty)
             }
         }
 
@@ -115,5 +119,6 @@ main() {
         }
     }
 
+    ref_free(hook_runs)
     spec.run_summary(fw)
 }
