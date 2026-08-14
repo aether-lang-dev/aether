@@ -4,11 +4,10 @@
 # Split from test_wycheproof.sh: these route through variable-time
 # std.bignum, and the harness kills any single shell test at 180s.
 # Budget shape at CI's -O0:
-#   rsa      full 259 cases   (~40-60s: one small-e modexp per case)
-#   ed25519  stride 5 of 151  (~60s) — the tcId-151 forgery class is
-#            pinned permanently in tests/integration/crypto_ed25519, so
-#            sampling here loses no regression coverage
+#   rsa v1.5 full 259 cases   (~40-60s: one small-e modexp per case)
+#   rsa pss  full 108 cases   (~40s, same op + MGF1)
 #   x448     stride 25 of 510 (~40s)
+# (ed25519 rides in test_wycheproof.sh; ECDSA has its own slot.)
 # WYCHEPROOF_FULL=1 (the nightly) sweeps everything; WYCHEPROOF_STRIDE=N
 # picks a custom density.
 
@@ -21,7 +20,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [FAIL] wycheproof_asym: build/ae missing (run make)"; exit 1; }
 
 rc=0
-for drv in wp_rsa_pkcs1 wp_ed25519 wp_x448; do
+for drv in wp_rsa_pkcs1 wp_rsa_pss wp_x448; do
     out="$("$AE" run "tests/integration/wycheproof/$drv.ae" 2>&1)"
     if printf '%s' "$out" | grep -q "^ALL PASS"; then
         printf '%s\n' "$out" | grep "^wycheproof" | sed 's/^/  [PASS] /'
