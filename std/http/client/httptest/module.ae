@@ -1,0 +1,467 @@
+// std.http.client.httptest — HTTP-shape test matchers (name per Go's
+// net/http/httptest; the tail must differ from std.os.testing's so the
+// two arms co-import without a namespace clash) (the aeocha
+// tease-out, stage 2; framework core in std.spec, reported through its
+// ambient cell via fail()).
+//
+// Ported verbatim from the standalone aeocha framework (aeocha.ae):
+// response-handle matchers for `http.get` / `http.post` /
+// `client.send_request` results, one-call GET/POST convenience
+// matchers, and the FluentSelenium-style within()/without() one-shot
+// retry budgets the convenience family honours. See docs/testing.md.
+
+import std.spec
+import std.string
+import std.json
+import std.http
+import std.http.client
+import std.os
+
+exports(
+    within, within_poll, without, without_poll, eventually,
+    expect_http_status, expect_http_no_error,
+    expect_http_body_contains, expect_http_body_eq, expect_http_header,
+    expect_http_body_json_field,
+    expect_http_get_status,
+    expect_http_get_body_eq, expect_http_get_body_contains,
+    expect_http_post_status, expect_http_post_ok
+)
+
+// Floating-modifier retry budget (the FluentSelenium within()/without()
+// pattern). within(5s) sets an ambient budget that the NEXT retryable
+// matcher (the expect_http_get_* family) consults, then auto-reverts —
+// "if you don't do within there is no waiting; it doesn't last beyond
+// the operation to its right." Positional, one-shot, self-reverting:
+// not a block, binds no name, attaches to the next operation like an
+// adverb to a verb. Declared `long` (ns) — an inferred int would
+// truncate a 64-bit ns budget (aether #929). `without_mode` flips the
+// poll sense: within waits for success, without waits for the condition
+// to stop holding. poll_ns is the inter-attempt sleep.
+var retry_budget_ns: long = 0
+var retry_poll_ns: long = 0
+var retry_without: int = 0
+
+// within(budget) — wait up to `budget` for the next retryable matcher to
+// pass, polling every 50ms. without(budget) — wait up to `budget` for it
+// to STOP passing (poll-until-absent). within_poll/without_poll set an
+// explicit poll interval. All four are one-shot: the next retryable
+// matcher consumes and clears the budget.
+within(budget: Duration) { retry_budget_ns = budget.ns retry_poll_ns = 50000000 retry_without = 0 }
+within_poll(budget: Duration, poll: Duration) { retry_budget_ns = budget.ns retry_poll_ns = poll.ns retry_without = 0 }
+without(budget: Duration) { retry_budget_ns = budget.ns retry_poll_ns = 50000000 retry_without = 1 }
+without_poll(budget: Duration, poll: Duration) { retry_budget_ns = budget.ns retry_poll_ns = poll.ns retry_without = 1 }
+
+// Snapshot the ambient retry budget and FULLY reset the retry state for
+// the next matcher. Returns the budget (0 = no retry). The caller must
+// read retry_poll_ns / retry_without BEFORE calling this (they're reset
+// here too). Resetting all three — not just the budget — is essential:
+// otherwise a no-within matcher after a without() would inherit the
+// stale without flag and invert its sense. One-shot means one-shot for
+// every field of the modifier.
+_take_retry_budget() -> long {
+    b = retry_budget_ns
+    retry_budget_ns = 0
+    retry_poll_ns = 0
+    retry_without = 0
+    return b
+}
+
+// ---------------------------------------------------------------------------
+// Timing-budget matcher
+//
+// expect_elapsed_under(elapsed_ns, budget, msg) — a measured span
+// is under a budget written as a Duration literal. The caller measures
+// the span itself with two monotonic-clock reads:
+//
+//     t0 = os.now_monotonic_ns()
+//     ... do work ...
+//     elapsed = os.now_monotonic_ns() - t0
+//     aeocha.expect_elapsed_under(elapsed, 50ms, "fast path")
+//
+// `elapsed_ns` is a plain int64 nanosecond count (what monotonic-ns
+// deltas yield); `budget` is a Duration (`50ms`, `2s`, `200us`). We
+// compare in ns via budget.ns — Duration-vs-plain-number is a type
+// error in Aether, so the .ns accessor is the bridge. Use monotonic
+// (not wall-clock) deltas: only the delta is meaningful and a wall
+// jump would corrupt it.
+//
+// The budget renders directly via ${budget} (Duration interpolation
+// picks the largest readable unit — `50ms`, `1.5s`); the elapsed side
+// is a plain ns count, so we show it as ms.
+expect_elapsed_under(elapsed_ns: long, budget: Duration, msg: string) {
+    if elapsed_ns < budget.ns {
+        // under budget — pass (no-op)
+    } else {
+        elapsed_ms = elapsed_ns / 1000000
+        spec.fail("${msg} — took ${elapsed_ms}ms, budget ${budget}")
+    }
+}
+
+// expect_http_status(resp, want, msg) — response has the
+// expected HTTP status code. Works for v1 (`http.get(url)`) and v2
+// (`client.send_request(req)`) responses interchangeably.
+expect_http_status(resp: ptr, want: int, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        actual = http.response_status(resp)
+        if actual != want {
+            spec.fail("${msg} — expected status ${want}, got ${actual}")
+        }
+    }
+}
+
+// expect_http_no_error(resp, msg) — transport succeeded (DNS,
+// connect, TLS, timeout all OK). Distinct from "200 OK" — non-2xx
+// is not a transport error. Pair with expect_http_status to assert
+// both layers.
+expect_http_no_error(resp: ptr, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        err = http.response_error(resp)
+        if string.equals(err, "") == 0 {
+            spec.fail("${msg} — transport error: '${err}'")
+        }
+    }
+}
+
+// expect_http_body_contains(resp, needle, msg) — substring of
+// the response body. Binary-safe via the AetherString-aware
+// string.contains; embedded NULs in `body` survive the boundary as
+// long as the porter calls `client.response_body` (which preserves
+// the header) rather than the C `http_response_body_str` accessor.
+expect_http_body_contains(resp: ptr, needle: string, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        body = http.response_body(resp)
+        if string.contains(body, needle) == 0 {
+            spec.fail("${msg} — body does not contain '${needle}'")
+        }
+    }
+}
+
+// expect_http_body_eq(resp, want, msg) — response body EXACTLY
+// equals `want`. The exact-match sibling of expect_http_body_contains:
+// reach for this when a substring match is too loose — e.g. a body of
+// "5" must not satisfy a check that "50" would also pass. Binary-safe
+// via string.equals (same AetherString-aware path as _contains), so a
+// porter holding a resp already can assert exact bodies without a
+// hand-rolled compare.
+expect_http_body_eq(resp: ptr, want: string, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        body = http.response_body(resp)
+        if string.equals(body, want) == 0 {
+            spec.fail("${msg} — body expected '${want}', got '${body}'")
+        }
+    }
+}
+
+// expect_http_header(resp, name, want, msg) — case-insensitive
+// header equality. The header NAME is matched case-insensitively (per
+// RFC 7230); the VALUE is compared exactly. Multiple values for the
+// same header arrive joined with ", " from the stdlib accessor.
+//
+// Uses the std.http.client wrapper rather than binding the C extern
+// directly: the wrapper snapshots the borrowed thread-local buffer via
+// string.copy (closes upstream #269), so the returned value is owned
+// and can't be clobbered by a later call. Binding the raw extern here
+// would re-inherit that aliasing footgun.
+expect_http_header(resp: ptr, name: string, want: string, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        actual = client.response_header(resp, name)
+        if string.equals(actual, want) == 0 {
+            spec.fail("${msg} — header '${name}' expected '${want}', got '${actual}'")
+        }
+    }
+}
+
+// expect_http_body_json_field(resp, key, want, msg) —
+// top-level JSON-string-field equality. Skips parsing libraries:
+// the porter scope is "this top-level key has this string value".
+// Looks for `"key":"want"` (with optional whitespace) inside the
+// raw body. Sufficient for status / probe / smoke endpoints; reach
+// for std.json directly when nesting or non-string values matter.
+expect_http_body_json_field(resp: ptr, key: string,
+    want: string, msg: string) {
+    if resp == 0 {
+        spec.fail("${msg} — null response")
+    } else {
+        body = http.response_body(resp)
+        // Build the canonical "key":"want" needle. Doesn't tolerate
+        // pretty-printed whitespace between `:` and the value — fine
+        // for the porter's smoke-endpoint use case where the server
+        // emits compact JSON. Document the constraint up here so the
+        // failure message points at the right fix.
+        needle = "\"${key}\":\"${want}\""
+        if string.contains(body, needle) == 0 {
+            spec.fail("${msg} — JSON field '${key}' != '${want}' in body")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level GET-and-assert matchers
+//
+// The low-level expect_http_* above all take a `resp` the caller must
+// build and free. Every integration-test consumer ends up re-writing
+// the same request / send_request / request_free / (assert) /
+// response_free dance. These three matchers hide that lifecycle: each
+// performs a GET, checks the transport, asserts, and frees the
+// response — so a test asserts an HTTP response in one line.
+//
+// All three reuse the low-level matchers internally so the underlying
+// semantics (status compare, exact/substring body) stay consistent.
+//
+// Lifecycle note: client.send_request already frees the response and
+// returns null on a transport error (DNS/connect/TLS/timeout), so the
+// `cerr != ""` branch must NOT call response_free — it would
+// double-free. Only the success branch owns `resp`.
+// ---------------------------------------------------------------------------
+
+// _http_get_probe(url, want_status, kind, want) — do ONE GET and return
+// 1 if it matched, 0 otherwise. Never calls fail; frees the response
+// itself. The silent predicate the retry driver polls. `kind`: 0 =
+// status only; 1 = status 200 + body == want; 2 = status 200 + body
+// contains want. (For kind 0, want_status is the target; for 1/2 it's
+// always 200 and `want` carries the body expectation.)
+_http_get_probe(url: string, want_status: int, kind: int, want: string) -> int {
+    req = client.request("GET", url)
+    resp, cerr = client.send_request(req)
+    client.request_free(req)
+    if string.equals(cerr, "") == 0 {
+        return 0
+    }
+    matched = 0
+    if kind == 0 {
+        if http.response_status(resp) == want_status { matched = 1 }
+    } else {
+        if http.response_status(resp) == 200 {
+            body = http.response_body(resp)
+            if kind == 1 {
+                if string.equals(body, want) == 1 { matched = 1 }
+            } else {
+                if string.contains(body, want) == 1 { matched = 1 }
+            }
+        }
+    }
+    client.response_free(resp)
+    return matched
+}
+
+// _http_get_retry(url, want_status, kind, want) — honour an ambient
+// within()/without() budget by polling _http_get_probe until the
+// condition holds (within) or stops holding (without), or the budget
+// elapses. Returns the final probe verdict the matcher reports on. When
+// no budget is set this is a single probe — identical to the old
+// one-shot behaviour. Consumes the budget (one-shot modifier).
+_http_get_retry(url: string, want_status: int, kind: int, want: string) -> int {
+    // Snapshot poll/without BEFORE _take_retry_budget (which resets them).
+    poll = retry_poll_ns
+    without = retry_without
+    budget = _take_retry_budget()
+    if budget == 0 {
+        return _http_get_probe(url, want_status, kind, want)
+    }
+    deadline = os.now_monotonic_ns() + budget
+    // For within: succeed as soon as probe==1. For without: succeed as
+    // soon as probe==0 (condition gone). `target` is the probe value
+    // that means "done, satisfied".
+    target = 1
+    if without == 1 { target = 0 }
+    last = _http_get_probe(url, want_status, kind, want)
+    done = 0
+    if last == target { done = 1 }
+    while done == 0 {
+        if os.now_monotonic_ns() >= deadline {
+            done = 1
+        } else {
+            sleep(poll / 1000000)
+            last = _http_get_probe(url, want_status, kind, want)
+            if last == target { done = 1 }
+        }
+    }
+    // Report whether the satisfied condition was reached.
+    if last == target { return 1 }
+    return 0
+}
+
+// expect_http_get_status(url, want_status, msg) — GET url, assert
+// the transport succeeded and the status equals want_status. Use this
+// for non-200 expectations (404, 500, redirects) where the body is not
+// the point. Honours a preceding within(budget)/without(budget): the
+// GET is retried until the status matches (within) or stops matching
+// (without), or the budget elapses.
+expect_http_get_status(url: string, want_status: int, msg: string) {
+    ok = _http_get_retry(url, want_status, 0, "")
+    if ok == 0 {
+        spec.fail("${msg} — GET ${url} did not reach status ${want_status}")
+    }
+}
+
+// expect_http_get_body_eq(url, want, msg) — GET url, assert
+// transport ok + status 200 + body EXACTLY equals want. Prefer this
+// over _contains when the result must match exactly (e.g. GET
+// /add/2/3 returning "5" — "50" must not pass). Honours within/without.
+expect_http_get_body_eq(url: string, want: string, msg: string) {
+    ok = _http_get_retry(url, 200, 1, want)
+    if ok == 0 {
+        spec.fail("${msg} — GET ${url} body never equalled '${want}' (200)")
+    }
+}
+
+// expect_http_get_body_contains(url, needle, msg) — GET url,
+// assert transport ok + status 200 + body contains needle. The
+// substring twin of expect_http_get_body_eq — use when the body is a
+// larger document and only a marker matters. Honours within/without.
+expect_http_get_body_contains(url: string, needle: string, msg: string) {
+    ok = _http_get_retry(url, 200, 2, needle)
+    if ok == 0 {
+        spec.fail("${msg} — GET ${url} body never contained '${needle}' (200)")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// High-level POST-and-assert matchers (sibling of the GET family)
+//
+// Body-less POSTs, the shape UI-driver style APIs use — the action is
+// encoded in the URL (POST /canvas/1/click?x=100&y=90, POST
+// /widget/7/toggle). Same one-line lifecycle contract as the GET family:
+// perform the POST, check the transport, assert the status, free the
+// response. Reuse the same within()/without() retry driver. A
+// body-carrying POST form can follow if a consumer needs it (none does).
+// ---------------------------------------------------------------------------
+
+// _http_post_probe(url, want_status, kind) — do ONE POST (no body) and
+// return 1 if it matched, 0 otherwise. Never calls fail; frees the
+// response itself. The silent predicate the retry driver polls. `kind`:
+// 0 = status == want_status; 3 = any 2xx (200–299), want_status ignored.
+_http_post_probe(url: string, want_status: int, kind: int) -> int {
+    req = client.request("POST", url)
+    resp, cerr = client.send_request(req)
+    client.request_free(req)
+    if string.equals(cerr, "") == 0 {
+        return 0
+    }
+    status = http.response_status(resp)
+    client.response_free(resp)
+    if kind == 3 {
+        if status >= 200 {
+            if status < 300 { return 1 }
+        }
+        return 0
+    }
+    if status == want_status { return 1 }
+    return 0
+}
+
+// _http_post_retry(url, want_status, kind) — POST twin of
+// _http_get_retry. Honours an ambient within()/without() budget by
+// polling _http_post_probe until the condition holds (within) or stops
+// holding (without), or the budget elapses. No budget → single probe.
+_http_post_retry(url: string, want_status: int, kind: int) -> int {
+    // Snapshot poll/without BEFORE _take_retry_budget (which resets them).
+    poll = retry_poll_ns
+    without = retry_without
+    budget = _take_retry_budget()
+    if budget == 0 {
+        return _http_post_probe(url, want_status, kind)
+    }
+    deadline = os.now_monotonic_ns() + budget
+    target = 1
+    if without == 1 { target = 0 }
+    last = _http_post_probe(url, want_status, kind)
+    done = 0
+    if last == target { done = 1 }
+    while done == 0 {
+        if os.now_monotonic_ns() >= deadline {
+            done = 1
+        } else {
+            sleep(poll / 1000000)
+            last = _http_post_probe(url, want_status, kind)
+            if last == target { done = 1 }
+        }
+    }
+    if last == target { return 1 }
+    return 0
+}
+
+// expect_http_post_status(url, want_status, msg) — POST url (no body),
+// assert the transport succeeded and the status equals want_status.
+// Fixes the common driver bug where a bespoke helper discards the status
+// so a 404'd route asserts as a transport success. Honours a preceding
+// within(budget)/without(budget) exactly like the GET family.
+expect_http_post_status(url: string, want_status: int, msg: string) {
+    ok = _http_post_retry(url, want_status, 0)
+    if ok == 0 {
+        spec.fail("${msg} — POST ${url} did not reach status ${want_status}")
+    }
+}
+
+// expect_http_post_ok(url, msg) — POST url (no body), assert transport
+// ok + any 2xx status. The "the action succeeded, I don't care which 2xx"
+// form for fire-and-forget UI-driver POSTs. Honours within/without.
+expect_http_post_ok(url: string, msg: string) {
+    ok = _http_post_retry(url, 0, 3)
+    if ok == 0 {
+        spec.fail("${msg} — POST ${url} was not 2xx (transport ok?)")
+    }
+}
+
+// eventually(pred, msg) — the generic poll-until form of the floating
+// modifier. `pred` is a zero-arg function returning 1 (condition holds)
+// or 0. Under a preceding within(budget) it polls pred until it returns
+// 1 (or the budget elapses); under without(budget) it polls until pred
+// returns 0. With no budget it evaluates pred ONCE — same "no within,
+// no waiting" contract as the GET matchers. Fails if the target wasn't
+// reached.
+//
+//   within(5s)
+//   aeocha.eventually(server_is_up, "server came up")
+//
+// `pred` is typically a top-level function passed by bare name; that
+// works from inside an it() closure and across the import boundary
+// since aether #940 / #943 landed.
+eventually(pred: fn, msg: string) {
+    // Snapshot poll/without BEFORE _take_retry_budget (which resets them).
+    without = retry_without
+    poll = retry_poll_ns
+    budget = _take_retry_budget()
+    // Target probe value meaning "satisfied": 1 for within, 0 for without.
+    target = 1
+    if without == 1 { target = 0 }
+
+    last = 0
+    if call(pred) == 1 { last = 1 }
+    done = 0
+    if last == target { done = 1 }
+    if budget == 0 {
+        // No within()/without(): single evaluation, no waiting.
+        done = 1
+    }
+    if done == 0 {
+        deadline = os.now_monotonic_ns() + budget
+        while done == 0 {
+            if os.now_monotonic_ns() >= deadline {
+                done = 1
+            } else {
+                sleep(poll / 1000000)
+                last = 0
+                if call(pred) == 1 { last = 1 }
+                if last == target { done = 1 }
+            }
+        }
+    }
+    if last != target {
+        if without == 1 {
+            spec.fail("${msg} — condition still held after budget")
+        } else {
+            spec.fail("${msg} — condition not met within budget")
+        }
+    }
+}

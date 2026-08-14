@@ -366,6 +366,7 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 - [Language Tutorial](docs/tutorial.md) - Learn Aether syntax and concepts
 - [Language Reference](docs/language-reference.md) - Complete language specification
 - [Standard Library Reference](docs/stdlib-reference.md) - Full stdlib surface
+- [Testing](docs/testing.md) - `std.spec` BDD framework (describe/it, assertions, fluent chain) + `ae test` discovery and `--format=tap|aeocha-v1` reporting
 - [HTTP Server](docs/http-server.md) - TLS, HTTP/2, middleware, health probes, metrics, graceful shutdown
 - [Reverse Proxy](docs/http-reverse-proxy.md) - `std.http.proxy` upstream pool, load balancing, health, cache, circuit breaker
 - [HTTP Record/Replay (VCR)](docs/http-vcr.md) - moved to the [`servirtium-vcr`](https://github.com/servirtium/servirtium-vcr) monorepo; no longer in the Aether stdlib

@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- `std.os.testing` + `std.http.client.httptest` (stage 2 of the aeocha
+  tease-out): the process-shape matchers (`expect_exit`,
+  `expect_stdout_*`, `expect_stderr_*` over `os.run_capture` triples)
+  and the HTTP-shape matchers (response-handle asserts, one-call
+  GET/POST conveniences, `within()`/`without()` one-shot retry budgets),
+  ported verbatim from aeocha and reporting through `std.spec`'s ambient
+  framework cell. `httptest` is named per Go's `net/http/httptest` — and
+  because two co-imported modules cannot share a namespace tail.
+- **`std.spec` — a BDD test framework in the stdlib.** The pure,
+  dependency-light core of the standalone
+  [aeocha](https://github.com/aether-lang-dev/aeocha) framework is now
+  shipped as `import std.spec`: `describe` / `it` / `it_within`,
+  `before_each` / `after_each` hooks, the flat `assert_*` family
+  (`assert_eq`, `assert_str_eq`, `assert_str_eq_diff`, `assert_gt`,
+  `assert_contains`, `assert_null`, …), the fluent subject-first chain
+  (`expect_int(x).to_be_gt(0).to_equal(4)`, `expect_str(s).to_contain(…)`,
+  `not_()`, `satisfies`, plus the exported `IntSubject`/`StrSubject` for
+  UFCS-extended matchers), the string-list collection matchers
+  (`expect_list_size`/`_empty`/`_has_str`/`_contains_all`/`_every`), and
+  the `Duration`-budget timing matchers (`it_within`,
+  `expect_elapsed_under`). Failures are soft — a check records and
+  continues, so several assertions report per `it`. Assertions read an
+  ambient framework cell set by `init()`, so no `fw` threads through them;
+  only the top-level `describe(fw, …)` and `run_summary(fw)` take it. The
+  process- and HTTP-shaped integration matchers and the mutation-testing
+  facility stay in aeocha. New doc: `docs/testing.md`. Imports only
+  `std.list`/`std.map`/`std.string`/`std.strbuilder`/`std.os`/`std.file`,
+  so it needs no build wiring.
+- **`ae test --format=<fmt>` structured reporting (opt-in).** `ae test`
+  gains a machine-readable reporting mode, off by default. `--format=tap`
+  emits one aggregated TAP version 13 stream with the test points from
+  every file renumbered into a single `1..N` sequence and each failure's
+  captured message as a YAML diagnostic block; `--format=aeocha-v1` emits
+  the aeocha v1 key/value + tab-packed-rows report, one block per file. In
+  a report mode the human progress lines and summary are suppressed so
+  stdout carries only the machine stream; the exit code still reflects
+  pass/fail. Under the flag `ae test` hands each child `AE_SPEC_FORMAT` +
+  `AE_SPEC_REPORT` (a path); `std.spec`'s `run_summary` writes the report
+  there, so `AE_SPEC_FORMAT=tap AE_SPEC_REPORT=out.tap ae run t.ae` works
+  standalone too.
+
+### Fixed
+- **Mutable module-level `var` writes miscompiled for any dotted module
+  path** (`std.*`, `contrib.*`, nested local `a.b`). A `name = expr`
+  assignment to a module-scope `var` inside one of that module's own
+  functions was emitted as a fresh shadowing local instead of a store to
+  the shared file-scope static, so the global kept its initial value and
+  the next read of it dereferenced `NULL` (segfault). The import-merge
+  write-rename pass looked the module up by its short namespace tail
+  (`spec`) while modules are registered under their full dotted path
+  (`std.spec`), so the rename never fired; single-segment local imports
+  (path == namespace) were unaffected, which is why it stayed latent.
+  `name_is_module_global_var` now falls back to a namespace-tail scan of
+  the registry when the exact lookup misses. Surfaced by `std.spec`, the
+  first stdlib module to use a top-level mutable `var`; no working module
+  changes its generated C. (`compiler/aether_module.c`.)
 ## [0.537.0]
 
 ### Added

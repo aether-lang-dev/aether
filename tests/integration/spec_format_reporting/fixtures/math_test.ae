@@ -1,0 +1,13 @@
+// Fixture for the spec-format-reporting integration test: an all-green
+// std.spec suite. Driven by `ae test --format=...` from the shell test,
+// NOT run standalone (its directory is pruned from the .ae runner).
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "math") {
+        spec.it("adds") callback { spec.assert_eq(2 + 2, 4, "2+2") }
+        spec.it("multiplies") callback { spec.assert_eq(3 * 3, 9, "3*3") }
+    }
+    spec.run_summary(fw)
+}

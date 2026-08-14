@@ -5611,8 +5611,105 @@ static int cmd_init(int argc, char** argv) {
     return 0;
 }
 
+// Set an environment variable for child processes (cross-platform).
+// Mirrors the AETHER_HOME pattern above; overrides any existing value.
+static void ae_set_env(const char* name, const char* value) {
+#ifdef _WIN32
+    char buf[2200];
+    snprintf(buf, sizeof(buf), "%s=%s", name, value);
+    _putenv(buf);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+// Clear an environment variable for child processes (cross-platform).
+static void ae_unset_env(const char* name) {
+#ifdef _WIN32
+    char buf[2200];
+    snprintf(buf, sizeof(buf), "%s=", name);
+    _putenv(buf);
+#else
+    unsetenv(name);
+#endif
+}
+
+// Read an entire file into a malloc'd NUL-terminated buffer. Returns NULL
+// on failure (missing file, read error). Caller frees. *out_len (optional)
+// receives the byte length actually read.
+static char* ae_read_file(const char* path, long* out_len) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n < 0) { fclose(f); return NULL; }
+    rewind(f);
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = '\0';
+    if (out_len) *out_len = (long)got;
+    return buf;
+}
+
+// Emit one file's TAP report into the aggregate stream, renumbering its
+// test points to continue from *point. The child wrote a full standalone
+// TAP document (its own `TAP version 13` header and `1..n` plan); we strip
+// those two lines and renumber every `ok N`/`not ok N` point, passing the
+// indented YAML diagnostic blocks through unchanged so they stay attached
+// to their point.
+static void tap_emit_child(const char* report, int* point) {
+    const char* p = report;
+    while (*p) {
+        const char* eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        // Classify the line by its prefix.
+        if (strncmp(p, "TAP version", 11) == 0) {
+            // child header — drop (the aggregate emits its own)
+        } else if (strncmp(p, "1..", 3) == 0) {
+            // child plan line — drop (the aggregate emits its own at end)
+        } else if (strncmp(p, "ok ", 3) == 0 || strncmp(p, "not ok ", 7) == 0) {
+            const char* rest = (p[0] == 'o') ? p + 3 : p + 7;
+            const char* verb = (p[0] == 'o') ? "ok" : "not ok";
+            // Skip the child's point number.
+            while (rest < p + len && *rest >= '0' && *rest <= '9') rest++;
+            (*point)++;
+            printf("%s %d%.*s\n", verb, *point, (int)((p + len) - rest), rest);
+        } else {
+            // Diagnostic / blank / other line — pass through verbatim.
+            printf("%.*s\n", (int)len, p);
+        }
+        if (!eol) break;
+        p = eol + 1;
+    }
+}
+
 static int cmd_test(int argc, char** argv) {
     const char* target = NULL;
+    // Structured-report format (opt-in via --format=<fmt>). NULL = default
+    // human output. "tap" = one aggregated TAP v13 stream; "aeocha" = one
+    // aeocha-v1 block per test file. In a report mode the per-file progress
+    // lines and the human summary are suppressed so stdout carries only the
+    // machine-readable stream; the process exit code still reflects pass/fail.
+    const char* report_format = NULL;   // value passed to children via AE_SPEC_FORMAT
+    const char* format_label = NULL;    // as the user typed it (for diagnostics)
+    for (int i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "--format=", 9) == 0) {
+            format_label = argv[i] + 9;
+            if (strcmp(format_label, "tap") == 0) {
+                report_format = "tap";
+            } else if (strcmp(format_label, "aeocha") == 0 ||
+                       strcmp(format_label, "aeocha-v1") == 0) {
+                report_format = "aeocha";
+            } else {
+                fprintf(stderr,
+                    "Error: unknown --format '%s' (want 'tap' or 'aeocha-v1')\n",
+                    format_label);
+                return 1;
+            }
+        }
+    }
     for (int i = 0; i < argc; i++) {
         if (argv[i][0] != '-') {
             if (!is_safe_path(argv[i])) {
@@ -5682,27 +5779,53 @@ static int cmd_test(int argc, char** argv) {
     }
 
     if (test_count == 0) {
-        printf("No test files found.\n");
+        if (report_format) {
+            // Keep stdout valid machine output even with no tests.
+            if (strcmp(report_format, "tap") == 0) {
+                printf("TAP version 13\n1..0\n");
+            }
+        } else {
+            printf("No test files found.\n");
+        }
         return 0;
     }
 
-    printf("Running %d test(s)...\n\n", test_count);
+    if (!report_format) {
+        printf("Running %d test(s)...\n\n", test_count);
+    }
+
+    // In a report mode, children emit a structured report to a per-file
+    // path we hand them via AE_SPEC_REPORT; AE_SPEC_FORMAT selects the
+    // shape. A std.spec-based test writes it in run_summary(); a
+    // hand-rolled test ignores the env entirely (its exit code still
+    // counts). We collect each report and aggregate after the loop.
+    if (report_format) {
+        ae_set_env("AE_SPEC_FORMAT", report_format);
+    }
+    char* reports[256];
+    int child_rc[256];   // <0 => compile/build error (no run); else exit code
+    for (int i = 0; i < 256; i++) { reports[i] = NULL; child_rc[i] = 0; }
 
     int passed = 0, failed = 0;
 
     for (int i = 0; i < test_count; i++) {
         const char* test = test_files[i];
-        printf("  %-45s ", test);
-        fflush(stdout);
+        if (!report_format) {
+            printf("  %-45s ", test);
+            fflush(stdout);
+        }
 
         char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
+        char report_file[2048];
 
         if (tc.dev_mode) {
             snprintf(c_file, sizeof(c_file), "%s/build/_test_%d.c", tc.root, i);
             snprintf(exe_file, sizeof(exe_file), "%s/build/_test_%d" EXE_EXT, tc.root, i);
+            snprintf(report_file, sizeof(report_file), "%s/build/_ae_spec_%d.txt", tc.root, i);
         } else {
             snprintf(c_file, sizeof(c_file), "%s/_ae_test_%d.c", get_temp_dir(), i);
             snprintf(exe_file, sizeof(exe_file), "%s/_ae_test_%d" EXE_EXT, get_temp_dir(), i);
+            snprintf(report_file, sizeof(report_file), "%s/_ae_spec_%d.txt", get_temp_dir(), i);
         }
 
         // Compile .ae to .c
@@ -5717,7 +5840,8 @@ static int cmd_test(int argc, char** argv) {
 #  pragma GCC diagnostic pop
 #endif
         if (run_cmd_quiet(cmd) != 0) {
-            printf("FAIL (compile)\n");
+            if (!report_format) printf("FAIL (compile)\n");
+            child_rc[i] = -1;
             failed++;
             continue;
         }
@@ -5725,28 +5849,86 @@ static int cmd_test(int argc, char** argv) {
         // Compile .c to executable
         build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, NULL);
         if (run_cmd_quiet(cmd) != 0) {
-            printf("FAIL (build)\n");
+            if (!report_format) printf("FAIL (build)\n");
+            child_rc[i] = -1;
             failed++;
             remove(c_file);
             continue;
         }
 
-        // Run
+        // Run. In report mode, point the child at a fresh report path
+        // (remove any stale file first so a child that doesn't write one
+        // leaves no leftover to misread).
+        if (report_format) {
+            remove(report_file);
+            ae_set_env("AE_SPEC_REPORT", report_file);
+        }
         snprintf(cmd, sizeof(cmd), "\"%s\"", exe_file);
         int rc = run_cmd_quiet(cmd);
+        child_rc[i] = rc;
         if (rc == 0) {
-            printf("PASS\n");
+            if (!report_format) printf("PASS\n");
             passed++;
         } else {
-            printf("FAIL (exit %d)\n", rc);
+            if (!report_format) printf("FAIL (exit %d)\n", rc);
             failed++;
         }
 
+        if (report_format) {
+            reports[i] = ae_read_file(report_file, NULL);
+            remove(report_file);
+        }
         remove(c_file);
         remove(exe_file);
     }
 
-    printf("\n%d passed, %d failed, %d total\n", passed, failed, test_count);
+    if (report_format) {
+        ae_unset_env("AE_SPEC_FORMAT");
+        ae_unset_env("AE_SPEC_REPORT");
+    }
+
+    if (report_format && strcmp(report_format, "tap") == 0) {
+        // One aggregated TAP v13 stream: renumber every point across all
+        // files into a single sequence, plan-at-end.
+        printf("TAP version 13\n");
+        int point = 0;
+        for (int i = 0; i < test_count; i++) {
+            if (reports[i]) {
+                tap_emit_child(reports[i], &point);
+            } else {
+                // No structured report (hand-rolled test, or a
+                // compile/build/crash before run_summary): one point from
+                // the child's exit code.
+                point++;
+                const char* verb = (child_rc[i] == 0) ? "ok" : "not ok";
+                printf("%s %d - %s # no structured report\n", verb, point, test_files[i]);
+            }
+        }
+        printf("1..%d\n", point);
+    } else if (report_format) {
+        // aeocha-v1: one block per test file, each preceded by a `# <path>`
+        // comment line so the blocks are separable (split on `version=1`).
+        for (int i = 0; i < test_count; i++) {
+            printf("# %s\n", test_files[i]);
+            if (reports[i]) {
+                fputs(reports[i], stdout);
+                size_t l = strlen(reports[i]);
+                if (l == 0 || reports[i][l - 1] != '\n') printf("\n");
+            } else {
+                // Synthesize a minimal v1 header for a file that emitted none.
+                int ok = (child_rc[i] == 0);
+                printf("version=1\ntotal=%d\npassed=%d\nfailed=%d\nerrored=0\n"
+                       "duration_ms=0\nduration_ns=0\n---\n",
+                       1, ok ? 1 : 0, ok ? 0 : 1);
+            }
+        }
+    } else {
+        printf("\n%d passed, %d failed, %d total\n", passed, failed, test_count);
+    }
+
+    for (int i = 0; i < test_count; i++) {
+        free(reports[i]);
+    }
     return (failed > 0) ? 1 : 0;
 }
 
@@ -6274,7 +6456,7 @@ static void print_usage(void) {
     printf("  fmt [--check] [path] Format source (stdin->stdout, or files/dirs in place)\n");
     printf("  bindgen consts <h>   Import C macro constants from a header as Aether consts\n");
     printf("  inspect [file.ae]    Show what a script declares (imports, capabilities, exports, decls)\n");
-    printf("  test [file|dir]      Discover and run tests\n");
+    printf("  test [file|dir]      Discover and run tests (--format=tap|aeocha-v1)\n");
     printf("  add <package>        Add a dependency\n");
     printf("  cache [clear]        Show or clear build cache\n");
     printf("  cflags               Print -I/-L/-laether for embedding in external builds\n");
@@ -6293,6 +6475,7 @@ static void print_usage(void) {
     printf("  ae run                     Run project (uses aether.toml)\n");
     printf("  ae build app.ae -o myapp   Build an executable\n");
     printf("  ae test                    Run all tests in tests/\n");
+    printf("  ae test --format=tap       Emit an aggregated TAP v13 stream\n");
     printf("  ae add github.com/u/pkg    Add a dependency\n");
     printf("\nOptions:\n");
     printf("  -v, --verbose        Show detailed output\n");
