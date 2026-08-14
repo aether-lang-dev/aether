@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.536.0]
 
 ### Added
 - Wycheproof wave 3 (#739, #1298): ECDSA P-256 **DER-encoded** signature
