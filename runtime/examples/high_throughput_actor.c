@@ -135,8 +135,10 @@ int main() {
     HighThroughputActor actor;
     actor_init(&actor, 1);
     
-    // Simulate incoming message batch
-    const int MESSAGE_COUNT = 32;
+    // Simulate incoming message batch. A `const int` bound makes this a
+    // variable-length array in C (clang warns that it folds it to a constant
+    // one as an extension), so the size is an enum constant instead.
+    enum { MESSAGE_COUNT = 32 };
     ComputeMessage messages[MESSAGE_COUNT];
     
     for (int i = 0; i < MESSAGE_COUNT; i++) {

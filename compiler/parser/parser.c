@@ -3141,7 +3141,7 @@ static ASTNode* parse_one_selector(Parser* parser) {
         int inclusive = (t->type == TOKEN_DOTDOT_EQ);
         advance_token(parser);  // consume ..= / ..<
         ASTNode* hi = parse_expression(parser);
-        if (!hi) return NULL;
+        if (!hi) { free_ast_node(lo); return NULL; }
         ASTNode* range = create_ast_node(AST_MATCH_RANGE, NULL, lo->line, lo->column);
         range->annotation = strdup(inclusive ? "inclusive" : "halfopen");
         add_child(range, lo);
@@ -3166,7 +3166,7 @@ static ASTNode* parse_case_selector(Parser* parser) {
     while (peek_token(parser) && peek_token(parser)->type == TOKEN_COMMA) {
         advance_token(parser);  // consume ','
         ASTNode* nxt = parse_one_selector(parser);
-        if (!nxt) return NULL;
+        if (!nxt) { free_ast_node(alt); return NULL; }
         add_child(alt, nxt);
     }
     return alt;
@@ -3317,7 +3317,7 @@ ASTNode* parse_match_case(Parser* parser) {
         pattern = create_ast_node(AST_PATTERN_VARIABLE, bind->value,
                                   bind->line, bind->column);
         pattern->annotation = strdup("some_pattern");
-        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) { free_ast_node(pattern); return NULL; }
     } else {
         // Expression pattern (literal, identifier, etc.) — includes the
         // `none` arm, which parse_expression yields as AST_NONE_LITERAL.
@@ -3327,8 +3327,9 @@ ASTNode* parse_match_case(Parser* parser) {
         if (!pattern) return NULL;
     }
     
-    // Expect -> arrow
-    if (!expect_token(parser, TOKEN_ARROW)) return NULL;
+    // Expect -> arrow. The pattern is this function's until it is attached to
+    // the arm below, so an error here has to release it.
+    if (!expect_token(parser, TOKEN_ARROW)) { free_ast_node(pattern); return NULL; }
 
     // Parse the result (expression, statement, or block)
     ASTNode* result = NULL;
@@ -3345,8 +3346,8 @@ ASTNode* parse_match_case(Parser* parser) {
         result = parse_expression(parser);
     }
     
-    if (!result) return NULL;
-    
+    if (!result) { free_ast_node(pattern); return NULL; }
+
     // Optional comma or newline
     Token* separator = peek_token(parser);
     if (separator && separator->type == TOKEN_COMMA) {
@@ -5451,12 +5452,15 @@ ASTNode* parse_struct_definition(Parser* parser) {
     ASTNode* struct_def = create_ast_node(AST_STRUCT_DEFINITION, name_token->value, 
                                          struct_token->line, struct_token->column);
     
-    if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-    
+    /* Past this point the definition (and every field attached to it) belongs
+     * to this function until it is returned, so each error path releases it. */
+    if (!expect_token(parser, TOKEN_LEFT_BRACE)) { free_ast_node(struct_def); return NULL; }
+
     // Parse fields (types optional - will be inferred!)
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
         if (is_at_end(parser)) {
             parser_error(parser, "Unexpected end of struct definition");
+            free_ast_node(struct_def);
             return NULL;
         }
 
@@ -5513,6 +5517,7 @@ ASTNode* parse_struct_definition(Parser* parser) {
             field_name = expect_token(parser, TOKEN_IDENTIFIER);
             if (!field_name) {
                 if (c_type) free_type(c_type);
+                free_ast_node(struct_def);
                 return NULL;
             }
         }

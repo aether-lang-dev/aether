@@ -22,10 +22,12 @@ version number before tagging the release.
   clean now, the cycle counter has an AArch64 and a portable path, and the gate
   runs inside `make ci` and `make test-all`.
 
-- **141 compiler and memory unit tests that were never run.** `tests/compiler`
+- **139 compiler and memory unit tests that were never run.** `tests/compiler`
   held a parser, typechecker, codegen, pattern-matching, struct and
   module-orchestrator suite that no target compiled; the C test binary went
-  from 239 to 386 tests. Three of them asserted against the first 4 KB of
+  from 230 to 390 tests (`test_typechecker.c` stays out until #1575, a
+  pre-existing leak in `typecheck_program`, is fixed; it fails the
+  LeakSanitizer job and a suppression is not a fix). Three of them asserted against the first 4 KB of
   generated C, which is prelude, so they matched prelude text rather than the
   program under test; they now read the whole output. `tests/compiler/test_structs.c`
   registered nothing at all: its cases were plain functions the harness never
@@ -36,6 +38,20 @@ version number before tagging the release.
   instead of standing up a broken load balancer.
 
 ### Fixed
+
+- **A use-after-free in the compiler's diagnostic context.** `codegen_note_diag_pos`
+  and `codegen_note_diag_func` stored borrowed pointers into AST nodes, so a
+  process that compiled one program, freed it, and compiled another read freed
+  memory the next time a codegen diagnostic fired. Valgrind counted 906 invalid
+  reads from that one dangling global once the compiler tests ran in the same
+  binary. They copy now.
+
+- **Parser error paths leaked the nodes they had built.** A match arm whose
+  `->` was missing, a range whose upper bound failed to parse, an alternation
+  with a bad element, and a struct definition that hit EOF or a bad field name
+  all returned NULL and dropped everything parsed so far. Found with
+  LeakSanitizer over the newly-running compiler tests: 3428 allocations before,
+  0 after (the test helpers were leaking their token streams too).
 
 - **A generated actor's struct was missing the last `ActorBase` field.** The
   scheduler is handed a pointer to the generated struct and casts it, so the

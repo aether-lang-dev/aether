@@ -21,7 +21,13 @@
 #pragma intrinsic(__rdtsc)
 #elif defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
-#else
+#endif
+
+/* read_nanoseconds() calls clock_gettime on every non-Windows target, and the
+ * counter fallback below does too, so this is not conditional: glibc does not
+ * declare it through <x86intrin.h>, and building without it only "worked"
+ * because nothing compiled this header. */
+#ifndef _WIN32
 #include <time.h>
 #endif
 

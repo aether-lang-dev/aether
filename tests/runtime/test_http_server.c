@@ -1,4 +1,5 @@
 #include "test_harness.h"
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <locale.h>
@@ -343,6 +344,11 @@ TEST(http_route_wildcard_match) {
     /* The wildcard covers a remainder, not an absent one: `/static/` has
      * nothing left to match and falls through to the next route. */
     ASSERT_EQ(0, http_route_matches("/static/*", "/static/", &req));
+
+    /* The matcher allocates the param arrays on the request even when the
+     * pattern captures nothing; the caller owns them. */
+    free(req.param_keys);
+    free(req.param_values);
 }
 
 TEST(http_server_middleware_chain) {
