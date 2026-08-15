@@ -66,7 +66,7 @@
 
 // Download url → dest file. Uses curl/wget on POSIX, PowerShell on Windows.
 // Creates parent directories of dest if they don't exist.
-static int ae_download(const char* url, const char* dest) {
+int ae_download(const char* url, const char* dest) {
     // Ensure parent directory exists (e.g. ~/.aether/ for releases.json)
     {
         char parent[1024];
@@ -106,7 +106,7 @@ static int ae_download(const char* url, const char* dest) {
 }
 
 // Extract archive → dest_dir.
-static int ae_extract(const char* archive, const char* dest_dir) {
+int ae_extract(const char* archive, const char* dest_dir) {
 #ifdef _WIN32
     char tmp[64];
     snprintf(tmp, sizeof(tmp), "ae_ex_%u.ps1", (unsigned)GetCurrentProcessId());

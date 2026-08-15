@@ -127,6 +127,37 @@ Available matchers: `to_equal`, `to_be_gt`, `to_be_lt`, `to_be_truthy`,
 `to_be_falsy` (int); `to_equal_str`, `to_contain`, `to_start_with`
 (string); `satisfies`, `satisfies_str` (both).
 
+#### Saying *why* a check matters
+
+Every value-comparison matcher takes an optional trailing message. The
+generated text tells you *what* the values were; the message tells a
+failing-CI triager *why* the check exists, which is the part the values
+cannot convey:
+
+```aether
+spec.expect_str(egress_fqdn_csv("python_vm"))
+    .to_equal_str(want, "a node's egress set is exactly its declared whitelist")
+spec.expect_int(n).to_be_gt(0, "a derived attempt budget is never zero")
+```
+
+```
+FAIL: a node's egress set is exactly its declared whitelist — strings differ at index 14
+        expected: "api.github.com, api.anthropic.com"
+        actual:   "api.github.com"
+                                 ^
+```
+
+The message is optional, so existing chains are unaffected and a single
+chain can annotate only the links that need it
+(`.to_be_gt(0).to_equal(7, "why")`). Omit it and the wording is exactly
+what it always was.
+
+`to_equal_str` switches to the caret-aligned diff (the same form
+`assert_str_eq_diff` uses) once either string is long enough that
+eyeballing a quoted pair stops working — on a long whitelist the index
+and caret are what actually locate the differing byte. Short strings
+keep the compact `expected 'x', got 'y'` form.
+
 ### Extending the fluent chain
 
 `IntSubject` and `StrSubject` are exported. A free function whose first

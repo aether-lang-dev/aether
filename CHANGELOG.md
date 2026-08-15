@@ -12,6 +12,40 @@ version number before tagging the release.
 ## [current]
 
 ### Added
+- std.spec's fluent value-comparison matchers take an optional trailing
+  intent message (#1576): `to_equal`, `to_be_gt`, `to_be_lt`,
+  `to_be_truthy`, `to_be_falsy`, `to_equal_str`, `to_contain` and
+  `to_start_with` now accept `msg` and render `"<msg> — <generated
+  text>"` on failure. The generated text says what the values were; the
+  message says why the check matters, which is what a failing-CI
+  triager needs. The issue weighed a breaking required-`msg` sweep
+  against parallel `*_because` variants — neither is necessary: Aether's
+  default arguments resolve through UFCS method-call chaining, so the
+  parameter is optional, existing chains are untouched (their wording is
+  byte-identical), and one chain can annotate only the links that need
+  it. `not_()` negation carries the message too.
+- `to_equal_str` now reports through the caret-aligned diff (the
+  `assert_str_eq_diff` form) once either string reaches 24 characters,
+  where a quoted pair stops being legible and the index + caret is what
+  actually locates the differing byte. Shorter strings keep the compact
+  form.
+- `ae add` installs from a published release artifact instead of always
+  git-cloning (#1360). With `@version` it looks for
+  `<repo>-<tag>-<os>-<arch>.tar.gz` (then `.zip`) under the package's
+  `releases/download/<tag>/`, the layout Aether's own releases use, and
+  falls back to the clone when nothing matches — so a package that
+  publishes no artifacts behaves exactly as before. `--source` forces
+  the clone. A sibling `<asset>.sha256` is verified when published: a
+  MISMATCH is fatal, installs nothing, and deliberately does NOT fall
+  back to git (which would defeat the verification); a missing checksum
+  installs with a warning. `AE_RELEASE_BASE_URL` repoints the origin at
+  an internal mirror. The consuming half already existed — the
+  binary-import prepass reads a `--emit=lib` artifact's catalog and
+  synthesizes its interface — so this closes the fetch gap only.
+
+## [current]
+
+### Added
 - `WINDOWS=1` cross-build knob: build the `ae`/`aetherc` toolchain FOR
   Windows from a Linux host with `zig cc -target x86_64-windows-gnu`
   (#1592). Companion to `FREEBSD=1`, and simpler — zig bundles the

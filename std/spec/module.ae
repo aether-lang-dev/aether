@@ -584,71 +584,113 @@ not_(s: IntSubject) -> IntSubject {
     return IntSubject { value: s.value, negated: 1 }
 }
 
+// _why(msg) — render an optional intent message as a failure-text
+// prefix. Every value-comparison matcher takes a trailing
+// `msg: string = ""` (#1576): the auto-generated text says WHAT the
+// values were, the message says WHY the check matters, which is the
+// part a CI triager actually needs ("peer egress -> internal net" beats
+// "expected 'internal', got 'shared'"). Default-empty, so it is purely
+// additive — existing chains keep their exact wording, and a chain can
+// mix annotated and bare links freely.
+//
+// Optional rather than required (the issue offered required-sweep vs
+// parallel *_because variants): Aether's default arguments resolve
+// correctly through UFCS method-call chaining, so neither the breaking
+// sweep nor the doubled matcher surface is necessary.
+_why(msg: string) -> string {
+    if string.equals(msg, "") == 1 { return "" }
+    return "${msg} — "
+}
+
 // _verdict_int(ok) — shared verdict: given whether the positive
 // predicate held, report against the ambient fw honouring the negated
 // flag.
-_verdict_int(s: IntSubject, ok: int, what: string) {
+_verdict_int(s: IntSubject, ok: int, what: string, msg: string) {
+    w = _why(msg)
     if s.negated == 0 {
-        if ok == 0 { fail("expected ${what}") }
+        if ok == 0 { fail("${w}expected ${what}") }
     } else {
-        if ok == 1 { fail("expected NOT ${what}") }
+        if ok == 1 { fail("${w}expected NOT ${what}") }
     }
 }
 
-to_equal(s: IntSubject, want: int) -> IntSubject {
+to_equal(s: IntSubject, want: int, msg: string = "") -> IntSubject {
     ok = 0
     if s.value == want { ok = 1 }
-    _verdict_int(s, ok, "${want}, got ${s.value}")
+    _verdict_int(s, ok, "${want}, got ${s.value}", msg)
     return s
 }
 
-to_be_gt(s: IntSubject, bound: int) -> IntSubject {
+to_be_gt(s: IntSubject, bound: int, msg: string = "") -> IntSubject {
     ok = 0
     if s.value > bound { ok = 1 }
-    _verdict_int(s, ok, "> ${bound}, got ${s.value}")
+    _verdict_int(s, ok, "> ${bound}, got ${s.value}", msg)
     return s
 }
 
-to_be_lt(s: IntSubject, bound: int) -> IntSubject {
+to_be_lt(s: IntSubject, bound: int, msg: string = "") -> IntSubject {
     ok = 0
     if s.value < bound { ok = 1 }
-    _verdict_int(s, ok, "< ${bound}, got ${s.value}")
+    _verdict_int(s, ok, "< ${bound}, got ${s.value}", msg)
     return s
 }
 
-to_be_truthy(s: IntSubject) -> IntSubject {
+to_be_truthy(s: IntSubject, msg: string = "") -> IntSubject {
     ok = 0
     if s.value != 0 { ok = 1 }
-    _verdict_int(s, ok, "truthy, got ${s.value}")
+    _verdict_int(s, ok, "truthy, got ${s.value}", msg)
     return s
 }
 
-to_be_falsy(s: IntSubject) -> IntSubject {
+to_be_falsy(s: IntSubject, msg: string = "") -> IntSubject {
     ok = 0
     if s.value == 0 { ok = 1 }
-    _verdict_int(s, ok, "falsy, got ${s.value}")
+    _verdict_int(s, ok, "falsy, got ${s.value}", msg)
     return s
 }
 
 // String subject matchers. negated is honoured but there's no string
 // not_() yet — add one if a downstream test needs `.not_().to_contain`.
-to_equal_str(s: StrSubject, want: string) -> StrSubject {
+//
+// to_equal_str reports through the CARET-ALIGNED diff once either side
+// is long enough that eyeballing two quoted strings stops working
+// (#1576): on a 40-character egress whitelist the index + caret is what
+// actually locates the differing byte, so the fluent matcher should not
+// be strictly worse than assert_str_eq_diff for the same comparison.
+// Short strings keep the compact one-line form — a diff block for
+// `expected 'a', got 'b'` is noise.
+//
+// The caret's column is computed from the rendered "expected: " line,
+// so it stays aligned whether or not a `msg` prefix is present (the
+// prefix sits on its own leading line rather than shifting the block).
+const _STR_DIFF_MIN = 24
+
+to_equal_str(s: StrSubject, want: string, msg: string = "") -> StrSubject {
     if string.equals(s.value, want) == 0 {
-        fail("expected '${want}', got '${s.value}'")
+        w = _why(msg)
+        longest = string.length(want)
+        if string.length(s.value) > longest { longest = string.length(s.value) }
+        if longest >= _STR_DIFF_MIN {
+            d = _first_diff(s.value, want)
+            caret = string.pad_start("^", 19 + d + 1, 32)
+            fail("${w}strings differ at index ${d}\n        expected: \"${want}\"\n        actual:   \"${s.value}\"\n${caret}")
+        } else {
+            fail("${w}expected '${want}', got '${s.value}'")
+        }
     }
     return s
 }
 
-to_contain(s: StrSubject, needle: string) -> StrSubject {
+to_contain(s: StrSubject, needle: string, msg: string = "") -> StrSubject {
     if string.contains(s.value, needle) == 0 {
-        fail("'${s.value}' does not contain '${needle}'")
+        fail("${_why(msg)}'${s.value}' does not contain '${needle}'")
     }
     return s
 }
 
-to_start_with(s: StrSubject, prefix: string) -> StrSubject {
+to_start_with(s: StrSubject, prefix: string, msg: string = "") -> StrSubject {
     if string.starts_with(s.value, prefix) == 0 {
-        fail("'${s.value}' does not start with '${prefix}'")
+        fail("${_why(msg)}'${s.value}' does not start with '${prefix}'")
     }
     return s
 }
@@ -663,7 +705,7 @@ to_start_with(s: StrSubject, prefix: string) -> StrSubject {
 satisfies(s: IntSubject, pred: fn, msg: string) -> IntSubject {
     ok = 0
     if call(pred, s.value) == 1 { ok = 1 }
-    _verdict_int(s, ok, "to satisfy '${msg}', got ${s.value}")
+    _verdict_int(s, ok, "to satisfy '${msg}', got ${s.value}", "")
     return s
 }
 

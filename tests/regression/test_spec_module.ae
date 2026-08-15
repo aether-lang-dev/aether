@@ -71,6 +71,25 @@ main() {
                 spec.expect_str("aether").to_start_with("ae").to_contain("the")
                 spec.expect_str(built_label("run")).to_equal_str("run-ok")
             }
+            // #1576: every value-comparison matcher takes an optional
+            // trailing intent message. These all PASS — the point is
+            // that the extra argument parses, type-checks and threads
+            // through UFCS chaining; the failure-text formatting is
+            // pinned by tests/integration/spec_why_message/, which can
+            // observe output a green suite cannot.
+            spec.it("optional why-message on every matcher") callback {
+                spec.expect_int(7).to_equal(7, "int equality carries intent")
+                spec.expect_int(7).to_be_gt(0, "budget is never zero")
+                spec.expect_int(7).to_be_lt(10, "budget is bounded")
+                spec.expect_int(1).to_be_truthy("flag is set")
+                spec.expect_int(0).to_be_falsy("flag is clear")
+                spec.expect_str("aether").to_equal_str("aether", "name is exact")
+                spec.expect_str("aether").to_contain("eth", "substring rule")
+                spec.expect_str("aether").to_start_with("ae", "prefix rule")
+                // Mixed annotated / bare links in ONE chain — the
+                // default-argument path has to survive chaining.
+                spec.expect_int(5).to_be_gt(0).to_equal(5, "why").to_be_lt(9)
+            }
         }
 
         spec.describe("collection matchers") {
