@@ -28,11 +28,6 @@ version number before tagging the release.
   `std.os.testing` + `std.http.client.httptest` are the replacements,
   and the env-file report transport replaces the old IPC-pipe
   convention for spec children.
-
-## [0.538.0]
-
-### Added
-
 - **`make check-standalone`: a compile gate for every C source with its own
   `main()`.** The runtime examples, micro-benchmarks and demos are linked by no
   target, so nothing noticed when they stopped compiling: three carried include
