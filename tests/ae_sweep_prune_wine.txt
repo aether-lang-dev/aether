@@ -1,0 +1,59 @@
+# EXTRA prune list for the Wine cross-test lane (#1593), layered ON TOP of
+# ae_sweep_prune.txt via `make test-ae AE_SWEEP_EXTRA_PRUNE=<this file>`.
+# Matched as fixed substrings of the path, same as the base list.
+#
+# These are NOT skipped because they fail — they are skipped because passing
+# or failing under Wine would tell us nothing trustworthy about Windows. The
+# MSYS2 jobs are the fidelity tip and remain the gate for every area below;
+# this lane exists only to deliver an EARLIER signal on the parts where Wine
+# is faithful (compiler, codegen, pure computation).
+#
+# Adding to this list is cheap; removing from it needs evidence that Wine's
+# behaviour matches real Windows for that surface.
+
+# ── Filesystem & path semantics ────────────────────────────────────────
+# Wine maps a case-sensitive host FS through its own case-insensitivity
+# layer; that is not NTFS. This is precisely the class that goes green
+# under Wine and red on Windows, so it must be proven on the real thing.
+tests/integration/fs_glob_recursive_dedupe/
+tests/integration/fs_read_binary_nul/
+tests/integration/fs_write_binary_nul/
+tests/integration/run_lib_path/
+tests/integration/bin_name_lookup_and_walkup/
+tests/integration/bin_path_match/
+
+# ── Sockets, HTTP, h2, TLS, proxying ───────────────────────────────────
+# Windows I/O is IOCP, not epoll, and there is no sendfile(2) (it is
+# TransmitFile). Wine emulates the surface, but this is our largest
+# behavioural delta and these tests are integration-shaped anyway.
+tests/integration/http_
+tests/integration/tcp_poll_fullduplex/
+tests/integration/std_ipc_
+
+# ── Actor scheduler timing ─────────────────────────────────────────────
+# Work stealing, migration convergence and mailbox contention assert on
+# multi-core timing. Under an emulation layer those flake in a way that
+# costs more in re-runs than the Windows minutes ever did.
+tests/integration/message_trace/
+tests/integration/panic_actor_step_drain/
+tests/integration/cross_module_actor/
+
+# ── Host-language bridges & external toolchains ────────────────────────
+# These shell out to other language runtimes/toolchains that are not
+# installed in the cross lane's Linux image at all.
+tests/integration/host_
+tests/integration/sqlite_
+tests/integration/contrib_xml_expat/
+tests/integration/regex_crossbuild/
+tests/integration/emit_
+tests/integration/multi_tu_import_link/
+tests/integration/mutation_testing/
+tests/integration/wycheproof/
+
+# ── Sandbox / containment ──────────────────────────────────────────────
+# The LD_PRELOAD containment layer is Linux/FreeBSD BY CONSTRUCTION (see
+# docs/containment-sandbox.md): there is no LD_PRELOAD on Windows, and
+# preloading into the wine process does not intercept the guest's calls
+# the way the threat model intends. A green run here would be actively
+# misleading.
+tests/integration/std_dl/

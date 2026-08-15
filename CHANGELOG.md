@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- `WINDOWS=1` cross-build knob: build the `ae`/`aetherc` toolchain FOR
+  Windows from a Linux host with `zig cc -target x86_64-windows-gnu`
+  (#1592). Companion to `FREEBSD=1`, and simpler — zig bundles the
+  mingw-w64 headers and CRT, so there is no sysroot to fetch.
+  Capability-lean by design (OpenSSL/zlib/nghttp2/YAML forced off, as
+  the host's pkg-config would poison the target; vendored PCRE2 keeps
+  std.regex).
+- `AE_TEST_RUNNER`: when set, `ae run` / `ae test` prefix the binary they
+  just built with that runner instead of exec'ing it directly — the
+  cargo `CARGO_TARGET_<triple>_RUNNER` pattern (#1592). Empty by
+  default, so every existing caller is unaffected. Keeps
+  target-awareness at the edge: nothing in std.spec or the test sources
+  knows it is running under an emulator.
+- CI fast lane `windows-cross` in windows.yml (#1593): cross-builds for
+  Windows on an ubuntu runner, verifies the artifacts really are PE,
+  warms a Wine prefix once, and runs the base of the test pyramid under
+  Wine via `AE_TEST_RUNNER=wine`. The slow MSYS2 legs now `needs:` it,
+  so a fast-lane failure skips ~20 minutes of doomed compute. Surfaces
+  Windows-only `-Werror`/MinGW breakage minutes into a PR instead of
+  ~20. It is an EARLIER signal, never a replacement: MSYS2 remains the
+  fidelity tip, and everything Wine cannot speak for honestly (fs/path
+  semantics, IOCP/TransmitFile sockets, actor timing, the LD_PRELOAD
+  containment layer) is excluded by name in
+  `tests/ae_sweep_prune_wine.txt`. `make test-ae` gained
+  `AE_SWEEP_EXTRA_PRUNE=<file>` to layer that list on top of the base
+  prune list.
+- A build-target stamp (`build/.build-target`): a native build after a
+  cross build (or vice versa) now fails immediately with an actionable
+  message instead of dying deep in the link with "unknown file type" —
+  object and archive formats do not mix in one `build/` tree. `make
+  clean` / `make help` are exempt so the guard never blocks its own
+  remedy.
+
+### Fixed
+- README's "enforced from compile time down to libc" now names the
+  platform boundary: the libc (LD_PRELOAD) tier is Linux/FreeBSD only,
+  and Windows gets the compile-time and scope layers (#1594).
+  docs/containment-sandbox.md states that Windows is out *by
+  construction* rather than by backlog, and that running under Wine
+  does not exercise containment at all (preloading into the wine
+  process intercepts wine's libc calls, not the guest's) — so a green
+  Wine run must never be read as containment coverage.
+
 ## [0.541.0]
 
 ### Fixed
