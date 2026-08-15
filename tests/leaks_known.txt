@@ -25,14 +25,3 @@ test_cryptography_hmac_md4_md5 122
 # codegen (nested tuple-destructure error slots are heap-classified), so the
 # remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
 test_rsa_pkcs1 130
-
-
-# ── ARTIFACT: codegen closure-environment leak (tracked) ────────────
-# test_spec_module builds four capturing closures at main scope
-# (describe/it trailing blocks capturing fw, hooks capturing a ref);
-# codegen mallocs each closure env and never emits a free — see the
-# issue below. std.spec's own tree is fully torn down (verified
-# valgrind-clean, 0 errors); these 4 x 16 B are the compiler's, not the
-# framework's. Remove when the codegen fix lands.
-# https://github.com/aether-lang-dev/aether/issues/1577
-test_spec_module 4
