@@ -6,7 +6,7 @@ maintained by hand, so it cannot drift out of step with the tree. The sections
 after it cover the most-used modules in depth; for the others the index links
 to the module source, whose header comment is the authoritative description.
 
-## Module index (69 modules)
+## Module index (70 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -65,6 +65,7 @@ to the module source, whose header comment is the authoritative description.
 | `std.signal` | POSIX signal-number constants. | 11 | [module source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [module source](../std/snapshot/module.ae) |
 | `std.sort` | In-place ascending sort and binary search over the packed numeric array types. | 6 | [module source](../std/sort/module.ae) |
+| `std.spec` | BDD-style test framework: describe/it, hooks, flat and fluent assertions, structured reporting. | 39 | [module source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string append. | 33 | [module source](../std/strbuilder/module.ae) |
 | `std.string` | String Module Import with: import std.string. | 92 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar TAR Archive Module Import with: import std.tar. | 24 | [full section](#posix-ustar-archives-stdtar) |

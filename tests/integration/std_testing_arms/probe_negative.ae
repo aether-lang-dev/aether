@@ -1,0 +1,37 @@
+// Negative-path probe for the std testing arms: proves the ported
+// matchers actually FIRE through std.spec's soft-fail path (a matcher
+// that can never fail is silent rot — the tinyweb lesson). Run by the
+// shell test expecting exit 1 and these specific failure messages.
+// Also gives `eventually` its negative case: a predicate that never
+// holds within a tiny budget.
+import std.spec
+import std.os.testing
+import std.http.client.httptest
+
+fn never_true() -> int { return 0 }
+
+fn eventually_case() {
+    httptest.within(120ms)
+    httptest.eventually(never_true, "deliberate never-true predicate")
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "matchers fire on purpose") {
+        spec.it(fw, "expect_exit fires") callback {
+            testing.expect_exit(1, 0, "deliberate exit mismatch")
+        }
+        spec.it(fw, "expect_stdout_contains fires") callback {
+            testing.expect_stdout_contains("hello", "absent-needle", "deliberate stdout miss")
+        }
+    }
+
+    // eventually's negative case, outside describe/it: fail() reports
+    // through the ambient cell either way, so it still counts and still
+    // flips the exit code. (A top-level-fn predicate argument inside a
+    // trailing block trips a DSL parse quirk; called plainly it's fine.)
+    eventually_case()
+
+    spec.run_summary(fw)
+}

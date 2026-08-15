@@ -1,0 +1,339 @@
+// Smoke test for the expect_* integration-shape matchers added to
+// aeocha. Two sections, each tightly scoped per the
+// porter's "don't balloon test surface" guidance:
+//
+//   1. Process matchers — happy path against /bin/echo and
+//      /bin/sh -c, including the regex stdout matcher (std.regex)
+//      and the stderr matchers backed by os.run_full's separate
+//      stdout/stderr capture. POSIX-only; skip on Windows where
+//      os.run_capture uses POSIX-fallback shims.
+//
+//   2. HTTP matchers — happy path against a plain in-process
+//      std.http server with three hand-rolled routes (/info,
+//      /add/2/3, /missing). Aeocha is the lowest-level framework in
+//      the stack, so its own tests deliberately do NOT depend on the
+//      downstream servirtium-vcr record/replay project just to get a
+//      server — std.http (already needed for the matchers) is enough.
+//
+// Section 1 (process) is wrapped in describe/it so it registers real
+// pass/fail counts and drives the it()-closure path through the whole
+// matcher fleet. Section 2 (HTTP) stays in main()'s scope: an it()
+// callback still cannot `spawn` a top-level actor type — the closure's
+// generated function reports `unknown type name` for the actor struct
+// (verified on ae 0.324.0) — and the HTTP fixture server is a spawned
+// actor. (The older blanket claim that closures can't capture top-level
+// `const` is no longer true on 0.324.0; only the actor-spawn limit
+// remains, and it's an upstream codegen gap, not an Aeocha one.)
+//
+// Failure-path coverage is left to the porter's downstream tests
+// — that's the whole "rely on focused use to find gaps" trade.
+// What we lock in here: the matchers compile, link, run end-to-end,
+// and the canonical happy-path call site doesn't fail for the
+// porter's actual data shapes.
+
+import std.spec
+import std.os.testing
+import std.http.client.httptest
+import std.http
+import std.http.client
+import std.os
+import std.io
+import std.list
+import std.string
+
+extern exit(code: int)
+// Use raw form: actor receive handlers can't cleanly discard the
+// wrapper's string return without an unused-result warning.
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18130
+
+// Fixture HTTP server — a plain std.http server with three hand-rolled
+// routes. Aeocha is the *lowest-level* test framework in the stack, so
+// its own tests must not depend on a downstream record/replay project
+// (servirtium-vcr) just to get a server to assert against. std.http is
+// already imported for the response accessors the matchers use, so the
+// in-process server costs nothing extra and keeps this test
+// self-contained.
+//
+// Routes mirror what the HTTP matchers need to exercise:
+//   GET /info     -> 200, JSON body + X-Node-Hash header
+//   GET /add/2/3  -> 200, body exactly "5"  (the body_eq vs _contains case)
+//   GET /missing  -> 404                     (the non-200 status case)
+
+message StartSrv { raw: ptr }
+message Noop {}
+
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+}
+
+actor SchedHelper {
+    state x = 0
+    receive { Noop() -> { x = 1 } }
+}
+
+handle_info(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/json")
+    http.response_set_header(res, "X-Node-Hash", "abc123")
+    http.response_set_body(res, "{\"head\":\"3\",\"name\":\"demo\"}")
+}
+
+handle_add(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "5")
+}
+
+handle_missing(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 404)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "not found")
+}
+
+// POST routes for the POST-and-assert matchers. UI-driver style: the
+// action is in the URL, the body is empty.
+//   POST /click     -> 200  (expect_http_post_status happy path)
+//   POST /created   -> 201  (expect_http_post_ok: any 2xx, not just 200)
+//   POST /forbidden -> 403  (expect_http_post_status non-2xx; the bug the
+//                            ask names — a status-discarding helper would
+//                            assert this as a transport success)
+handle_click(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ok")
+}
+
+handle_created(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 201)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "created")
+}
+
+handle_forbidden(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 403)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "nope")
+}
+
+// Process matchers, grouped as describe/it so they register real
+// pass/fail counts and exercise the it()-closure path through the
+// matcher fleet. Each it() callback captures only `fw` and declares
+// its run_capture/run_full locals in-body — the shape that has always
+// worked across closures (and the shape downstream tests use). Locals
+// named `out` not `stdout` — Windows MinGW <stdio.h> defines `stdout`
+// as a macro, so a local with that name fails to compile.
+run_process_section(fw: ptr) {
+    spec.describe(fw, "process matchers") {
+        // /bin/echo "hello world" — note os.run_capture synthesises
+        // argv[0] from the prog string, so the list holds only the
+        // remaining args (same convention as
+        // tests/regression/test_run_capture_status.ae).
+        spec.it(fw, "captures basic echo stdout + exit") callback {
+            argv = list.new()
+            list.add(argv, "hello world")
+            out, exit_code, err = os.run_capture("/bin/echo", argv, null)
+            testing.expect_no_spawn_error(err, "spawn ok")
+            testing.expect_exit(exit_code, 0, "echo exited cleanly")
+            testing.expect_stdout_contains(out, "hello world", "stdout has greeting")
+        }
+
+        // Multi-line stdout via /bin/sh -c. The middle line is
+        // "Revision: 3" — exactly the porter's awk pattern.
+        spec.it(fw, "parses Revision-style key/value lines") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "echo Path: /home; echo Revision: 3; echo Last: now")
+            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            testing.expect_exit(exit_code, 0, "sh ran")
+            testing.expect_stdout_line_count(out, 3, "three lines")
+            testing.expect_stdout_line_field(out, "Revision:", 1, "3", "head rev")
+            testing.expect_stdout_matches(out, "Revision: *", "log entry shape")
+        }
+
+        // Column-aligned output (the actual `svn info` shape from
+        // svn-aether Round 234): four spaces between key and value.
+        // Whitespace-run splitting makes field 1 = "3" regardless of
+        // spacing — the test author needn't count spaces.
+        spec.it(fw, "splits column-aligned key/value on whitespace runs") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "printf 'URL:         http://demo\\nRevision:    3\\nAuthor:      alice\\n'")
+            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            testing.expect_exit(exit_code, 0, "sh column ran")
+            testing.expect_stdout_line_field(out, "Revision:", 1, "3", "column-aligned head rev")
+            testing.expect_stdout_line_field(out, "URL:", 1, "http://demo", "column-aligned url")
+            testing.expect_stdout_line_after(out, "Author:", "alice", "after-prefix capture")
+        }
+
+        // Multi-token value via _after: log message with embedded spaces.
+        spec.it(fw, "captures multi-token value after a prefix") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "printf 'Log: first commit message\\nDate: now\\n'")
+            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            testing.expect_exit(exit_code, 0, "sh log ran")
+            testing.expect_stdout_line_after(out, "Log:", "first commit message",
+                "_after captures multi-token value")
+        }
+
+        // Regex matcher (PCRE2 via std.regex). Pattern is unanchored and
+        // tested per-line, so `^Revision: \d+$` asserts the whole-line
+        // shape without the trailing-newline split issue glob has.
+        spec.it(fw, "matches a stdout line against a PCRE2 regex") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "echo Path: /home; echo Revision: 3; echo Last: now")
+            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            testing.expect_exit(exit_code, 0, "sh regex-fixture ran")
+            testing.expect_stdout_matches_regex(out, "^Revision: [0-9]+$",
+                "regex whole-line revision shape")
+            testing.expect_stdout_matches_regex(out, "Revision:\\s+\\d",
+                "regex with escaped class")
+        }
+
+        // Child stderr matchers via os.run_full's separate-stream
+        // capture. /bin/sh writes one line to stdout and one to stderr;
+        // run_full gives them back independently. stdin_data "" — the
+        // child reads nothing.
+        spec.it(fw, "captures child stderr separately from stdout") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "echo to-out; echo to-err 1>&2")
+            out, err, exit_code, spawn_err = os.run_full("/bin/sh", argv, null, "")
+            testing.expect_no_spawn_error(spawn_err, "run_full spawned")
+            testing.expect_exit(exit_code, 0, "run_full child exited cleanly")
+            testing.expect_stdout_contains(out, "to-out", "stdout stream captured")
+            testing.expect_stderr_contains(err, "to-err", "stderr stream captured separately")
+        }
+
+        // expect_stderr_empty — a child that writes nothing to fd 2.
+        spec.it(fw, "asserts empty stderr on a quiet child") callback {
+            argv = list.new()
+            list.add(argv, "-c")
+            list.add(argv, "echo only-stdout")
+            out, err, exit_code, spawn_err = os.run_full("/bin/sh", argv, null, "")
+            testing.expect_no_spawn_error(spawn_err, "run_full(quiet) spawned")
+            testing.expect_stderr_empty(err, "no stderr on clean run")
+        }
+
+        // Timing-budget matcher: a caller-measured monotonic-ns span vs
+        // a Duration literal. Budget is deliberately generous (500ms for
+        // a ~5ms sleep) so the test isn't flaky on a loaded CI box — we
+        // assert the matcher's plumbing (Duration param, .ns compare,
+        // pass path), not a tight latency SLA. The fail path + message
+        // formatting are covered out-of-suite.
+        spec.it(fw, "asserts a measured span is under a Duration budget") callback {
+            t0 = os.now_monotonic_ns()
+            sleep(5)
+            elapsed = os.now_monotonic_ns() - t0
+            spec.expect_elapsed_under(elapsed, 500ms, "5ms sleep under 500ms budget")
+        }
+    }
+}
+
+run_http_section(fw: ptr) {
+    println("\n=== expect_* — HTTP matchers ===\n")
+
+    srv = http.server_create(PORT)
+    if srv == 0 {
+        // Bare `return` from a non-void function is rejected by
+        // Apple Clang (non-void here because Aether codegen
+        // defaults missing return types to int). Use if/else
+        // nesting instead of early-return to keep the function
+        // single-exit.
+        spec.fail("server_create returned 0 — port ${PORT} busy?")
+    } else {
+        http.server_get(srv, "/info", handle_info, 0)
+        http.server_get(srv, "/add/2/3", handle_add, 0)
+        http.server_get(srv, "/missing", handle_missing, 0)
+        http.server_post(srv, "/click", handle_click, 0)
+        http.server_post(srv, "/created", handle_created, 0)
+        http.server_post(srv, "/forbidden", handle_forbidden, 0)
+
+        spawn(SchedHelper())
+        a = spawn(SrvActor())
+        a ! StartSrv { raw: srv }
+
+        // Wait for the server to bind via the within() floating modifier
+        // instead of a magic-number sleep(500): within(5s) retries the
+        // GET until /info responds (or 5s elapses). This both removes the
+        // guess and exercises 4f's retry-on-a-late-server against a real
+        // HTTP server. If the server never comes up, this fails loudly
+        // rather than the old sleep racing.
+        base = "http://127.0.0.1:${PORT}"
+        httptest.within(5s)
+        httptest.expect_http_get_status("${base}/info", 200, "server bound within 5s")
+        println("  ✓ within(5s) waited for the fixture server to bind")
+
+        url = "http://127.0.0.1:${PORT}/info"
+        req = client.request("GET", url)
+        resp, cerr = client.send_request(req)
+        client.request_free(req)
+        if cerr != "" {
+            spec.fail("transport error: ${cerr}")
+        } else {
+            httptest.expect_http_no_error(resp, "transport clean")
+            httptest.expect_http_status(resp, 200, "got 200")
+            httptest.expect_http_body_contains(resp, "demo", "body has demo")
+            httptest.expect_http_header(resp, "X-Node-Hash", "abc123", "node hash header")
+            httptest.expect_http_body_json_field(resp, "head", "3", "head=3 in JSON")
+            // Exact-body matcher against a resp the caller already holds.
+            // /add/2/3 below proves the GET-level twin; this proves the
+            // low-level sibling of expect_http_body_contains.
+            httptest.expect_http_body_eq(resp, "{\"head\":\"3\",\"name\":\"demo\"}",
+                "exact body equals fixture")
+            println("  ✓ all 6 low-level HTTP matchers ran against fixture server")
+            client.response_free(resp)
+        }
+
+        // --- High-level GET-and-assert matchers ---------------------
+        // These do the request/send/free lifecycle internally, so each
+        // is one line. /add/2/3 returns exactly "5" — the canonical
+        // case for body_eq over body_contains ("5" must not match "50").
+        // `base` was declared above for the within() readiness probe.
+        httptest.expect_http_get_body_eq("${base}/add/2/3", "5", "GET /add/2/3 == 5")
+        httptest.expect_http_get_body_contains("${base}/info", "demo",
+            "GET /info body has demo")
+        httptest.expect_http_get_status("${base}/missing", 404, "GET /missing is 404")
+        println("  ✓ all 3 GET-and-assert matchers ran against fixture server")
+
+        // --- High-level POST-and-assert matchers --------------------
+        // Body-less POSTs (action in the URL). /click is 200, /created is
+        // 201 (proves _ok accepts any 2xx, not just 200), /forbidden is
+        // 403 (proves _status catches the non-2xx the ask's bespoke
+        // helper silently passed).
+        httptest.expect_http_post_status("${base}/click", 200, "POST /click is 200")
+        httptest.expect_http_post_ok("${base}/click", "POST /click ok (2xx)")
+        httptest.expect_http_post_ok("${base}/created", "POST /created ok (201 is 2xx)")
+        httptest.expect_http_post_status("${base}/forbidden", 403,
+            "POST /forbidden is 403")
+        println("  ✓ both POST-and-assert matchers ran against fixture server")
+
+        // No teardown handle needed — the server runs on a detached
+        // actor thread and the process exits at the end of main().
+    }
+}
+
+main() {
+    // Skip on Windows — both sections depend on POSIX-shaped paths
+    // (/bin/echo, /bin/sh) that don't exist under MSYS2 / mingw-w64.
+    // os.run_capture itself works on Windows; only the test fixture
+    // is POSIX-shaped. Pattern matches
+    // tests/regression/test_run_capture_status.ae.
+    if os_getenv("OS") == "Windows_NT" {
+        println("  SKIP aeocha_expect_matchers: /bin/echo and /bin/sh are POSIX-shaped")
+        return
+    }
+    fw = spec.init()
+    run_process_section(fw)
+    run_http_section(fw)
+    spec.run_summary(fw)
+    // The fixture server runs on a detached actor thread that never
+    // returns, so without an explicit exit the process would hang —
+    // holding port 18130 and making the next run fail to bind.
+    // run_summary already exit(1)s on failure; force a clean 0 here.
+    exit(0)
+}

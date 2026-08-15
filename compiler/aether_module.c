@@ -1433,6 +1433,37 @@ static int collect_module_const_names(ASTNode* mod_ast, const char** names, int 
 static int name_is_module_global_var(const char* ns, const char* name) {
     if (!ns || !name) return 0;
     AetherModule* m = module_find(ns);
+    if (!m) {
+        // Modules are registered under their FULL dotted path
+        // ("std.spec", "contrib.foo", nested local "a.b"), but `ns` here
+        // is the short namespace tail ("spec") the codegen prefix is
+        // built from — so module_find(ns) misses for every dotted path.
+        // Fall back to scanning the registry for a module whose
+        // namespace tail matches `ns`. Without this the mutable-`var`
+        // write rename below never fires for a dotted-path module, and
+        // `name = expr` against a module global lowers to a shadowing
+        // local instead of a store to the shared static (a silent
+        // miscompile → NULL global → crash on the next read). Single-
+        // segment local imports (full path == namespace) already hit the
+        // exact match above and are unaffected.
+        //
+        // KNOWN LIMIT: the scan takes the FIRST module whose namespace
+        // tail matches, so two co-imported dotted modules sharing a tail
+        // ("std.spec" and "a.spec") could resolve to the wrong one —
+        // same global-namespace family as the cross-module struct-name
+        // collisions. Correct fix is plumbing the full dotted path to
+        // this call; do that if a real collision ever appears.
+        if (global_module_registry) {
+            for (int i = 0; i < global_module_registry->module_count; i++) {
+                AetherModule* cand = global_module_registry->modules[i];
+                if (cand && cand->name &&
+                    strcmp(module_get_namespace(cand->name), ns) == 0) {
+                    m = cand;
+                    break;
+                }
+            }
+        }
+    }
     if (!m || !m->ast) return 0;
     for (int i = 0; i < m->ast->child_count; i++) {
         ASTNode* decl = unwrap_export(m->ast->children[i]);

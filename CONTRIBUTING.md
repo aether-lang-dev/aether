@@ -213,6 +213,49 @@ make test-valgrind
 make test-asan
 ```
 
+### Aether-level tests (`std.spec` + `ae test`)
+
+The `TEST(...)` macros above are the C unit layer. Tests written *in
+Aether* use the `std.spec` BDD framework (`describe` / `it` /
+`before_each` / `after_each`, plus flat and fluent assertions) and are
+run by the `ae test` discovery runner. A test file is a standalone
+program whose exit code is the verdict — `0` all-passed, non-zero
+failed:
+
+```aether
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "calculator") {
+        spec.it("adds") callback {
+            spec.assert_eq(add(2, 3), 5, "2 + 3")
+        }
+        spec.it("prefers the fluent style") callback {
+            spec.expect_int(abs(-7)).to_equal(7)
+        }
+    }
+    spec.run_summary(fw)
+}
+```
+
+```bash
+ae test                    # every test_*.ae / *_test.ae under tests/
+ae test path/to/file.ae    # one file
+ae test --format=tap       # aggregated TAP v13 (or --format=aeocha-v1)
+```
+
+Name files `test_*.ae` or `*_test.ae` so `ae test` discovers them.
+Assertions are soft (a failure records and continues), so prefer several
+small checks over one compound condition. See
+[docs/testing.md](docs/testing.md) for the full assertion surface, the
+fluent chain, custom matchers, and structured reporting.
+
+The in-tree `.ae` regression suite (`tests/regression/*.ae`, run by
+`make test-ae`) predates `std.spec` and mostly uses hand-rolled
+`fail()` + `exit(1)`; that idiom still works and `ae test` reads its exit
+code the same way. New Aether-level tests should prefer `std.spec`.
+
 ## Pull Request Requirements
 
 ### Docs-only PRs: skip CI with `[skip actions]`

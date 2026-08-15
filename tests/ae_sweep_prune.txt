@@ -155,6 +155,7 @@ tests/integration/selective_import_merge_order/
 tests/integration/selective_import_shadow/
 tests/integration/source_location/
 tests/integration/source_location_default_capture/
+tests/integration/spec_format_reporting/
 tests/integration/sqlite_prepared/
 tests/integration/sqlite_roundtrip/
 tests/integration/std_dl/
@@ -163,6 +164,7 @@ tests/integration/std_ipc_roundtrip/
 tests/integration/std_mem_byte_access/
 tests/integration/std_strbuilder_csv/
 tests/integration/std_strbuilder_no_leak/
+tests/integration/std_testing_arms/
 tests/integration/string_interp_loop_alias/
 tests/integration/string_new_with_length_no_leak/
 tests/integration/string_plus_reject/

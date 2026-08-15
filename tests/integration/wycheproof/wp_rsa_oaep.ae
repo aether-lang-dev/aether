@@ -1,0 +1,156 @@
+// Wycheproof adversarial vectors — RSA-OAEP decrypt (#739).
+//
+// RsaesOaepDecrypt schema: 2048-bit key, SHA-256, MGF1-SHA256, empty
+// label. Exercises the DECRYPTION side (private key from the vector):
+// mangled padding, modified lHash/seed, ciphertext out of range —
+// Manger-attack-shaped inputs that must all fail uniformly.
+//   "valid"   -> decrypt MUST succeed and yield msg.
+//   "invalid" -> decrypt MUST fail.
+// Cases with a non-empty label are counted skipped-unsupported:
+// decrypt_oaep has no label parameter (empty lHash hardcoded) — an API
+// gap noted in #739, not silently dropped.
+
+import std.cryptography.rsa
+import std.bignum
+import std.fs
+import std.json
+import std.bytes
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+fn hexval(h: int) -> int {
+    if h >= 48 && h <= 57 { return h - 48 }
+    if h >= 97 && h <= 102 { return h - 87 }
+    if h >= 65 && h <= 70 { return h - 55 }
+    return 0
+}
+
+fn from_hex(s: string) -> ptr {
+    slen = string_length(s)
+    n = slen / 2
+    b = bytes.new(n)
+    if n == 0 { return b }
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(s, slen, i * 2))
+        lo = hexval(string_char_at_n(s, slen, i * 2 + 1))
+        bytes.set(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return b
+}
+
+// DER DigestInfo for SHA-256: 19-byte fixed prefix + 32-byte hash
+// (mirrors sha256_digestinfo in std.cryptography.tls13_cert).
+fn sha256_digestinfo(hash32: ptr) -> ptr {
+    di = bytes.new(51)
+    pfx = from_hex("3031300d060960864801650304020105000420")
+    i = 0
+    while i < 19 { bytes.set(di, i, bytes.get(pfx, i)) i = i + 1 }
+    i = 0
+    while i < 32 { bytes.set(di, 19 + i, bytes.get(hash32, i)) i = i + 1 }
+    bytes.free(pfx)
+    return di
+}
+
+main() {
+    doc, ferr = fs.read("tests/vectors/wycheproof/rsa_oaep_2048_sha256_mgf1sha256_test.json")
+    if ferr != "" {
+        println("FAIL: cannot read vector file: ${ferr}")
+        exit(1)
+    }
+    root, jerr = json.parse(doc)
+    if jerr != "" {
+        println("FAIL: vector JSON parse: ${jerr}")
+        exit(1)
+    }
+
+    groups = json.json_object_get_raw(root, "testGroups")
+    ngroups = json.array_size(groups)
+
+    passed = 0
+    rejected_invalid = 0
+    skipped_label = 0
+    failed = 0
+    gi = 0
+    while gi < ngroups {
+        g = json.array_get_raw(groups, gi)
+        pkobj = json.json_object_get_raw(g, "privateKey")
+        mod_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "modulus"))
+        exp_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "publicExponent"))
+        d_hex = json.json_get_string_raw(json.json_object_get_raw(pkobj, "privateExponent"))
+        mb = from_hex(mod_hex)
+        eb = from_hex(exp_hex)
+        db = from_hex(d_hex)
+        n = bignum.from_bytes_unsigned(mb, string_length(mod_hex) / 2)
+        e = bignum.from_bytes_unsigned(eb, string_length(exp_hex) / 2)
+        dd = bignum.from_bytes_unsigned(db, string_length(d_hex) / 2)
+        bytes.free(mb)
+        bytes.free(eb)
+        bytes.free(db)
+        k = rsa.key_from_components(n, e, dd)
+
+        tests = json.json_object_get_raw(g, "tests")
+        nt = json.array_size(tests)
+        ti = 0
+        while ti < nt {
+            t = json.array_get_raw(tests, ti)
+            tc_id = json.json_get_int(json.json_object_get_raw(t, "tcId"))
+            res = json.json_get_string_raw(json.json_object_get_raw(t, "result"))
+            msg_hex = json.json_get_string_raw(json.json_object_get_raw(t, "msg"))
+            ct_hex = json.json_get_string_raw(json.json_object_get_raw(t, "ct"))
+            label_hex = json.json_get_string_raw(json.json_object_get_raw(t, "label"))
+
+            if string_length(label_hex) > 0 {
+                skipped_label = skipped_label + 1
+                ti = ti + 1
+                continue
+            }
+
+            ct = from_hex(ct_hex)
+            pt, derr = rsa.decrypt_oaep(k, ct)
+            if res == "valid" {
+                if pt == null {
+                    println("FAIL tcId=${tc_id} (valid): decrypt rejected: ${derr}")
+                    failed = failed + 1
+                } else {
+                    want = from_hex(msg_hex)
+                    want_len = string_length(msg_hex) / 2
+                    good = 1
+                    if bytes.length(pt) != want_len { good = 0 }
+                    if good == 1 {
+                        i2 = 0
+                        while i2 < want_len {
+                            if bytes.get(pt, i2) != bytes.get(want, i2) { good = 0 }
+                            i2 = i2 + 1
+                        }
+                    }
+                    if good == 1 { passed = passed + 1 } else {
+                        println("FAIL tcId=${tc_id} (valid): plaintext mismatch")
+                        failed = failed + 1
+                    }
+                    bytes.free(want)
+                    bytes.free(pt)
+                }
+            } else {
+                if pt == null { rejected_invalid = rejected_invalid + 1 } else {
+                    println("FAIL tcId=${tc_id} (invalid): decrypt ACCEPTED mangled padding")
+                    failed = failed + 1
+                    bytes.free(pt)
+                }
+            }
+            bytes.free(ct)
+            ti = ti + 1
+        }
+        rsa.key_free(k)
+        gi = gi + 1
+    }
+
+    println("wycheproof rsa_oaep_2048_sha256: ${passed} valid ok, ${rejected_invalid} invalid rejected, ${skipped_label} skipped (label unsupported), ${failed} failed")
+    if failed > 0 { exit(1) }
+    println("ALL PASS")
+}
