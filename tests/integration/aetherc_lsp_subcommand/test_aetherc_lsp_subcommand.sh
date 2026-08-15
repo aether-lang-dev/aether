@@ -22,11 +22,12 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-# Run the subcommand from a clean cwd so the LSP's debug-log lands
-# somewhere we can inspect. EOF on stdin closes the read loop and
-# the server exits cleanly.
+# Logging is opt-in (a server that wrote a log into every project it was
+# started in was littering), so the test asks for one by path. EOF on stdin
+# closes the read loop and the server exits cleanly.
 cd "$tmpdir" || exit 1
-"$AETHERC" lsp </dev/null >"$tmpdir/lsp.stdout" 2>"$tmpdir/lsp.stderr"
+AETHER_LSP_LOG="$tmpdir/aether-lsp.log" \
+    "$AETHERC" lsp </dev/null >"$tmpdir/lsp.stdout" 2>"$tmpdir/lsp.stderr"
 rc=$?
 
 # Clean exit (EOF makes the loop's read return NULL, server breaks
@@ -43,7 +44,17 @@ fi
 # lsp_server_free were all reached — the subcommand wired the same
 # code path the standalone binary uses.
 if [ ! -f "$tmpdir/aether-lsp.log" ]; then
-    echo "  [FAIL] aetherc_lsp_subcommand: no aether-lsp.log produced; server never reached lsp_log"
+    echo "  [FAIL] aetherc_lsp_subcommand: AETHER_LSP_LOG produced no file; server never reached lsp_log"
+    exit 1
+fi
+
+# Without the variable there must be NO log: an editor's working directory is
+# not the server's to write into.
+quiet_dir="$tmpdir/quiet"
+mkdir -p "$quiet_dir"
+( cd "$quiet_dir" && "$AETHERC" lsp </dev/null >/dev/null 2>&1 )
+if [ -f "$quiet_dir/aether-lsp.log" ]; then
+    echo "  [FAIL] aetherc_lsp_subcommand: wrote a log with AETHER_LSP_LOG unset"
     exit 1
 fi
 if ! grep -q "starting" "$tmpdir/aether-lsp.log"; then

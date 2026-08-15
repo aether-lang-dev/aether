@@ -23,7 +23,11 @@ void Node_step(Node* self) {
     self->count++;
     if (self->next_id >= 0 && self->next_id < NUM_ACTORS) {
         Node** actors = (Node**)msg.payload_ptr;
-        Message forward = {1, self->id, msg.payload_int, actors};
+        Message forward = {0};
+    forward.type = 1;
+    forward.sender_id = self->id;
+    forward.payload_int = msg.payload_int;
+    forward.payload_ptr = actors;
         mailbox_send(&actors[self->next_id]->mailbox, forward);
         actors[self->next_id]->active = 1;
     }
@@ -41,7 +45,11 @@ int main() {
         actors[i]->count = 0;
     }
     
-    Message initial = {1, 0, 0, actors};
+    Message initial = {0};
+    initial.type = 1;
+    initial.sender_id = 0;
+    initial.payload_int = 0;
+    initial.payload_ptr = actors;
     mailbox_send(&actors[0]->mailbox, initial);
     actors[0]->active = 1;
     

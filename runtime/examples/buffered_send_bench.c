@@ -2,6 +2,7 @@
 // Tests the throughput improvement from batching messages before sending
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
@@ -89,7 +90,7 @@ double bench_unbuffered(int num_actors, int messages_per_actor) {
     double throughput = total_msgs / elapsed / 1e6;
     printf("Actors: %d\n", num_actors);
     printf("Messages sent: %d\n", num_actors * messages_per_actor);
-    printf("Messages received: %lu\n", total_msgs);
+    printf("Messages received: %" PRIu64 "\n", total_msgs);
     printf("Time: %.3f seconds\n", elapsed);
     printf("Throughput: %.2f M msg/sec\n", throughput);
     
@@ -157,7 +158,7 @@ double bench_buffered(int num_actors, int messages_per_actor) {
     double throughput = total_msgs / elapsed / 1e6;
     printf("Actors: %d\n", num_actors);
     printf("Messages sent: %d\n", num_actors * messages_per_actor);
-    printf("Messages received: %lu\n", total_msgs);
+    printf("Messages received: %" PRIu64 "\n", total_msgs);
     printf("Time: %.3f seconds\n", elapsed);
     printf("Throughput: %.2f M msg/sec\n", throughput);
     

@@ -1,4 +1,4 @@
-#include "test_harness.h"
+#include "../runtime/test_harness.h"
 #include "../../compiler/aether_module.h"
 #include "../../compiler/ast.h"
 

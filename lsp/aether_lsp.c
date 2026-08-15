@@ -48,9 +48,14 @@ static char* json_extract_string(const char* json, const char* key) {
 // LSP Server lifecycle
 LSPServer* lsp_server_create() {
     LSPServer* server = (LSPServer*)malloc(sizeof(LSPServer));
+    if (!server) return NULL;
     server->input = stdin;
     server->output = stdout;
-    server->log_file = fopen("aether-lsp.log", "w");
+    /* Opt-in, and to a path the caller names. An editor starts the server in
+     * whatever directory it likes, so logging unconditionally dropped
+     * `aether-lsp.log` into the user's project on every session. */
+    const char* log_path = getenv("AETHER_LSP_LOG");
+    server->log_file = (log_path && *log_path) ? fopen(log_path, "w") : NULL;
     server->running = 1;
     server->open_documents = NULL;
     server->document_contents = NULL;
@@ -732,7 +737,7 @@ void lsp_send_notification(LSPServer* server, const char* method, const char* pa
 }
 
 void lsp_log(LSPServer* server, const char* format, ...) {
-    if (!server->log_file) return;
+    if (!server || !server->log_file) return;
     
     va_list args;
     va_start(args, format);

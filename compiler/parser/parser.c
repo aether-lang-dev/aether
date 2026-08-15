@@ -3141,7 +3141,7 @@ static ASTNode* parse_one_selector(Parser* parser) {
         int inclusive = (t->type == TOKEN_DOTDOT_EQ);
         advance_token(parser);  // consume ..= / ..<
         ASTNode* hi = parse_expression(parser);
-        if (!hi) return NULL;
+        if (!hi) { free_ast_node(lo); return NULL; }
         ASTNode* range = create_ast_node(AST_MATCH_RANGE, NULL, lo->line, lo->column);
         range->annotation = strdup(inclusive ? "inclusive" : "halfopen");
         add_child(range, lo);
@@ -3166,7 +3166,7 @@ static ASTNode* parse_case_selector(Parser* parser) {
     while (peek_token(parser) && peek_token(parser)->type == TOKEN_COMMA) {
         advance_token(parser);  // consume ','
         ASTNode* nxt = parse_one_selector(parser);
-        if (!nxt) return NULL;
+        if (!nxt) { free_ast_node(alt); return NULL; }
         add_child(alt, nxt);
     }
     return alt;
@@ -3317,7 +3317,7 @@ ASTNode* parse_match_case(Parser* parser) {
         pattern = create_ast_node(AST_PATTERN_VARIABLE, bind->value,
                                   bind->line, bind->column);
         pattern->annotation = strdup("some_pattern");
-        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+        if (!expect_token(parser, TOKEN_RIGHT_PAREN)) { free_ast_node(pattern); return NULL; }
     } else {
         // Expression pattern (literal, identifier, etc.) — includes the
         // `none` arm, which parse_expression yields as AST_NONE_LITERAL.
@@ -3327,8 +3327,9 @@ ASTNode* parse_match_case(Parser* parser) {
         if (!pattern) return NULL;
     }
     
-    // Expect -> arrow
-    if (!expect_token(parser, TOKEN_ARROW)) return NULL;
+    // Expect -> arrow. The pattern is this function's until it is attached to
+    // the arm below, so an error here has to release it.
+    if (!expect_token(parser, TOKEN_ARROW)) { free_ast_node(pattern); return NULL; }
 
     // Parse the result (expression, statement, or block)
     ASTNode* result = NULL;
@@ -3345,8 +3346,8 @@ ASTNode* parse_match_case(Parser* parser) {
         result = parse_expression(parser);
     }
     
-    if (!result) return NULL;
-    
+    if (!result) { free_ast_node(pattern); return NULL; }
+
     // Optional comma or newline
     Token* separator = peek_token(parser);
     if (separator && separator->type == TOKEN_COMMA) {
@@ -3388,19 +3389,32 @@ ASTNode* parse_module_declaration(Parser* parser) {
 // Parse import statement
 // Helper: Check if token can be used as a module name part
 // Allows identifiers and type keywords (string, int, float, etc.)
+/* A segment of a module path is a NAME, not an expression, so any keyword
+ * spelled like an identifier is unambiguous there: `import std.message` has
+ * to reach std/message/module.ae even though `message` declares an actor
+ * message elsewhere. Enumerating the keywords instead, as this once did,
+ * meant such a module could only be imported by backtick-escaping it, and the
+ * parser reported the failure on whatever followed the import. */
 static int is_module_name_token(Token* token) {
-    if (!token) return 0;
+    if (!token || !token->value || !token->value[0]) return 0;
     switch (token->type) {
-        case TOKEN_IDENTIFIER:
-        case TOKEN_STRING:  // 'string' keyword
-        case TOKEN_INT:     // 'int' keyword
-        case TOKEN_FLOAT:   // 'float' keyword
-        case TOKEN_BOOL:    // 'bool' keyword
-        case TOKEN_BYTE:    // 'byte' keyword
-            return 1;
-        default:
+        /* Literals carry identifier-looking text but are not names. */
+        case TOKEN_STRING_LITERAL:
+        case TOKEN_NUMBER:
             return 0;
+        default:
+            break;
     }
+    const char* v = token->value;
+    if (!((v[0] >= 'a' && v[0] <= 'z') || (v[0] >= 'A' && v[0] <= 'Z') || v[0] == '_')) {
+        return 0;
+    }
+    for (const char* p = v; *p; p++) {
+        int ok = (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                 (*p >= '0' && *p <= '9') || *p == '_';
+        if (!ok) return 0;
+    }
+    return 1;
 }
 
 // Syntax: import module.name
@@ -5438,12 +5452,15 @@ ASTNode* parse_struct_definition(Parser* parser) {
     ASTNode* struct_def = create_ast_node(AST_STRUCT_DEFINITION, name_token->value, 
                                          struct_token->line, struct_token->column);
     
-    if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-    
+    /* Past this point the definition (and every field attached to it) belongs
+     * to this function until it is returned, so each error path releases it. */
+    if (!expect_token(parser, TOKEN_LEFT_BRACE)) { free_ast_node(struct_def); return NULL; }
+
     // Parse fields (types optional - will be inferred!)
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
         if (is_at_end(parser)) {
             parser_error(parser, "Unexpected end of struct definition");
+            free_ast_node(struct_def);
             return NULL;
         }
 
@@ -5500,6 +5517,7 @@ ASTNode* parse_struct_definition(Parser* parser) {
             field_name = expect_token(parser, TOKEN_IDENTIFIER);
             if (!field_name) {
                 if (c_type) free_type(c_type);
+                free_ast_node(struct_def);
                 return NULL;
             }
         }

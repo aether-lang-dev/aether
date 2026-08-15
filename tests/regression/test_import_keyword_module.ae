@@ -1,0 +1,24 @@
+// A module path segment that spells a keyword.
+//
+// `message` is reserved (it declares an actor message), and std.message is a
+// real stdlib module. Importing it used to require backtick-escaping the
+// segment, and the unescaped form failed with an error pointing at whatever
+// line came next. A path segment is a name, so it parses as one.
+
+import std.message(format)
+import std.map
+import std.string
+
+extern exit(code: int)
+
+main() {
+    args = map.new()
+    out = format("en", "hello", args)
+    if string.equals(out, "hello") != 1 {
+        println("FAIL: expected \"hello\", got \"${out}\"")
+        exit(1)
+    }
+    string.free(out)
+    map.free(args)
+    println("keyword module path ok")
+}

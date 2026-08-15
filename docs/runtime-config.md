@@ -139,26 +139,36 @@ See [benchmarks/cross-language](../benchmarks/cross-language/) for detailed meas
 ## Examples
 
 ### Example 1: Simple Program
+Actors are produced by the Aether compiler: an `actor` block becomes a struct
+carrying a mailbox, and the runtime flags below decide which mailbox and pool
+implementations it uses. A C program embedding the runtime configures it and
+then drives compiler-generated actors, or its own structs built on the mailbox
+API in `runtime/actors/actor_state_machine.h`.
+
 ```c
 #include "runtime/aether_runtime.h"
-#include "runtime/actors/aether_actor.h"
+#include "runtime/actors/actor_state_machine.h"
 
-void my_actor_process(Actor* self, void* msg, int size) {
-    // Process message
-}
+typedef struct Counter {
+    int id;
+    atomic_int active;
+    Mailbox mailbox;
+    int count;
+} Counter;
 
 int main() {
     // Initialize with auto-detect
     aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);
-    
-    // Create actor (automatically uses configured optimizations)
-    Actor* actor = aether_actor_create(my_actor_process);
-    aether_actor_start(actor);
-    
-    // Send messages...
-    
-    aether_actor_stop(actor);
-    aether_actor_destroy(actor);
+
+    Counter c = {0};
+    mailbox_init(&c.mailbox);
+
+    Message msg = {1, 0, 42, NULL};
+    mailbox_send(&c.mailbox, msg);
+    if (mailbox_receive(&c.mailbox, &msg)) {
+        c.count++;
+    }
+
     aether_runtime_shutdown();
     return 0;
 }
@@ -199,8 +209,9 @@ aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT | AETHER_FLAG_VERBOSE);
 
 Build and run the C example under `runtime/examples/`:
 ```bash
-cd runtime/examples
-gcc -O2 -o runtime_config runtime_config_example.c ../../runtime/*.c -I../..
+gcc -O2 -o runtime_config runtime/examples/runtime_config_example.c \
+    runtime/aether_runtime.c runtime/config/aether_optimization_config.c \
+    runtime/utils/aether_cpu_detect.c -Iruntime
 ./runtime_config
 ```
 
@@ -208,43 +219,39 @@ gcc -O2 -o runtime_config runtime_config_example.c ../../runtime/*.c -I../..
 
 ## How It Works Internally
 
-### Mailbox Selection
-```c
-// In aether_actor_create()
-Actor* actor = aether_actor_create(process_fn);
+### Where a message goes
 
-// Runtime automatically selects mailbox type:
-if (runtime_config->use_lockfree_mailbox) {
-    // Use atomic SPSC queue (no mutex)
-    lockfree_mailbox_init(&actor->mailbox.lockfree);
+Every actor carries one `Mailbox` (the ring buffer in
+[`runtime/actors/actor_state_machine.h`](../runtime/actors/actor_state_machine.h)).
+The send path in
+[`runtime/actors/aether_send_message.c`](../runtime/actors/aether_send_message.c)
+picks how it gets there:
+
+```c
+// aether_send_message(), abridged
+const int my_core = current_core_id;
+if (my_core >= 0 && my_core == atomic_load(&actor->assigned_core)) {
+    scheduler_send_local(actor, msg);     // same core: lock-free SPSC queue
 } else {
-    // Use simple ring buffer
-    mailbox_init(&actor->mailbox.simple);
+    scheduler_send_remote(actor, msg, my_core);
 }
 ```
 
-### Message Send
-```c
-// In aether_send_message()
-if (actor->use_lockfree) {
-    lockfree_mailbox_send(&actor->mailbox.lockfree, msg);  // Atomic
-} else {
-    mailbox_send(&actor->mailbox.simple, msg);  // Simple
-}
-```
+A single-actor program takes an earlier path still: main-thread mode runs
+`step()` inline on the sender's thread rather than queueing at all. The SPSC
+queue is allocated on first use (`ensure_spsc_queue` in
+[`runtime/scheduler/multicore_scheduler.c`](../runtime/scheduler/multicore_scheduler.c)),
+so an actor that never receives a same-core send does not pay for one.
 
 ### Message Pool Allocation
 ```c
-// In message_pool_alloc()
-if (pool->is_thread_local) {
-    // LOCK-FREE PATH (no mutex)
-    buffer = pool->buffers[pool->head];
-    pool->head = (pool->head + 1) % MESSAGE_POOL_SIZE;
-    return buffer;
-} else {
-    // Shared pool (with mutex)
-    pthread_mutex_lock(&pool->lock);
-    // ...
+// runtime/actors/aether_message_pool.h, per-thread pool, abridged
+static inline Message* message_pool_alloc(void) {
+    if (!g_msg_pool) message_pool_init_thread();
+    if (atomic_load_explicit(&g_msg_pool->count, memory_order_relaxed) == 0) {
+        return malloc(sizeof(Message));   // pool exhausted: fall back to heap
+    }
+    // pop an index off the thread's free list
 }
 ```
 

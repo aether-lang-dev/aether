@@ -6,21 +6,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#ifndef _WIN32
 #include <pthread.h>
+#else
+/* aether_thread.h (pulled in via the scheduler headers) provides the
+ * pthread_* surface as Win32 shims; including winpthreads' <pthread.h>
+ * alongside it redefines pthread_t and friends. */
+#endif
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
 
 #ifdef _WIN32
 #include <windows.h>
-#define get_time_ms() GetTickCount64()
+/* Signed to match the POSIX arm: every caller stores/compares via
+ * signed longs, and ULONGLONG vs long trips -Werror=sign-compare. */
+#define get_time_ms() ((long long)GetTickCount64())
 #define sleep_ms(ms) Sleep(ms)
 #else
 #include <unistd.h>
 #include <time.h>
-static long get_time_ms(void) {
+static long long get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
@@ -89,7 +97,11 @@ void bench_single_core_throughput() {
     long start = get_time_ms();
     
     for (int i = 0; i < MSGS; i++) {
-        Message msg = {1, 0, i, NULL};
+        Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
         scheduler_send_remote((ActorBase*)actor, msg, -1);
     }
     
@@ -137,7 +149,11 @@ void bench_multi_core_throughput(int cores) {
     // Send messages round-robin to all actors
     for (int i = 0; i < MSGS_PER_ACTOR * cores; i++) {
         int target = i % cores;
-        Message msg = {actors[target]->id, 0, i, NULL};
+        Message msg = {0};
+    msg.type = actors[target]->id;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
         scheduler_send_remote((ActorBase*)actors[target], msg, -1);
     }
     
@@ -206,7 +222,11 @@ actor1->count_local = 0;
     long start = get_time_ms();
     
     for (int i = 0; i < MSGS; i++) {
-        Message msg = {2, 0, i, NULL};
+        Message msg = {0};
+    msg.type = 2;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
         scheduler_send_remote((ActorBase*)actor1, msg, 0);  // From core 0 to core 3
     }
     
@@ -261,7 +281,11 @@ void bench_scalability() {
         
         for (int i = 0; i < MSGS_PER_ACTOR * cores; i++) {
             int target = i % cores;
-            Message msg = {actors[target]->id, 0, i, NULL};
+            Message msg = {0};
+    msg.type = actors[target]->id;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
             scheduler_send_remote((ActorBase*)actors[target], msg, -1);
         }
         
@@ -328,7 +352,11 @@ void bench_latency() {
         int before = atomic_load(&actor->count_visible);
         long start = get_time_ms();
         
-        Message msg = {1, 0, i, NULL};
+        Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
         scheduler_send_remote((ActorBase*)actor, msg, -1);
         
         // Wait for this specific message to be processed
@@ -379,7 +407,11 @@ void bench_contention() {
     // All senders bombard one actor from different cores
     for (int sender = 0; sender < SENDERS; sender++) {
         for (int i = 0; i < MSGS_PER_SENDER; i++) {
-            Message msg = {100, 0, sender * MSGS_PER_SENDER + i, NULL};
+            Message msg = {0};
+    msg.type = 100;
+    msg.sender_id = 0;
+    msg.payload_int = sender * MSGS_PER_SENDER + i;
+    msg.payload_ptr = NULL;
             scheduler_send_remote((ActorBase*)target, msg, sender + 1);
         }
     }
@@ -432,7 +464,11 @@ void bench_burst_patterns() {
     for (int burst = 0; burst < BURSTS; burst++) {
         // Send burst
         for (int i = 0; i < MSGS_PER_BURST; i++) {
-            Message msg = {1, 0, total_sent++, NULL};
+            Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = total_sent++;
+    msg.payload_ptr = NULL;
             scheduler_send_remote((ActorBase*)actor, msg, -1);
         }
         // Let it drain
@@ -481,7 +517,11 @@ void bench_mailbox_saturation() {
     long start = get_time_ms();
     
     for (int i = 0; i < MSGS; i++) {
-        Message msg = {1, 0, i, NULL};
+        Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = i;
+    msg.payload_ptr = NULL;
         scheduler_send_remote((ActorBase*)actor, msg, -1);
     }
     

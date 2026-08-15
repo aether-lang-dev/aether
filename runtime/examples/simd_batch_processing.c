@@ -4,7 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include "../runtime/aether_simd_vectorized.h"
+#include "../utils/aether_simd_vectorized.h"
 
 // Message structure
 typedef struct {

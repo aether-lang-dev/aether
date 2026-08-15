@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "../../runtime/actor_state_machine.h"
+#include "../../runtime/actors/actor_state_machine.h"
 
 typedef struct Counter {
     int id;
@@ -32,7 +32,11 @@ Counter* spawn_Counter() {
 
 void send_message(void* actor_ptr, int type, int payload) {
     Counter* actor = (Counter*)actor_ptr;
-    Message msg = {type, 0, payload, NULL};
+    Message msg = {0};
+    msg.type = type;
+    msg.sender_id = 0;
+    msg.payload_int = payload;
+    msg.payload_ptr = NULL;
     mailbox_send(&actor->mailbox, msg);
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
 }

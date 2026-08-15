@@ -1,6 +1,6 @@
 #include "../runtime/test_harness.h"
-#include "../../runtime/aether_arena.h"
-#include "../../runtime/aether_pool.h"
+#include "../../runtime/memory/aether_arena.h"
+#include "../../runtime/memory/aether_pool.h"
 #include <stdlib.h>
 #include <string.h>
 

@@ -23,9 +23,9 @@ int main() {
     printf("===========================\n\n");
     
     // Initialize with DEBUG level
-    aether_log_init("demo.log", LOG_LEVEL_DEBUG);
-    aether_log_set_colors(1);
-    aether_log_set_timestamps(1);
+    log_init_raw("demo.log", LOG_LEVEL_DEBUG);
+    log_set_colors(1);
+    log_set_timestamps(1);
     
     LOG_INFO("Application started");
     
@@ -35,10 +35,10 @@ int main() {
     }
     
     // Print statistics
-    aether_log_print_stats();
+    log_print_stats();
     
     LOG_INFO("Application shutting down");
-    aether_log_shutdown();
+    log_shutdown();
     
     printf("\n✅ Log file written to: demo.log\n");
     

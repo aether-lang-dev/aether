@@ -303,6 +303,23 @@ else
     fail=$((fail + 1))
 fi
 
+# Case 16: `ae help` writes nothing into the working directory. It compiles
+# the script to a sink to collect diagnostics, and passing that sink as
+# `-o <path>` (aetherc takes the output positionally) made aetherc treat the
+# flag itself as the output path: every run dropped a file named "-o" in
+# whatever directory the user happened to be in.
+probe_dir="$TMPDIR/cwd_probe"
+mkdir -p "$probe_dir"
+( cd "$probe_dir" && "$AE" help "$TMPDIR/usewidgets.ae" --lib "$TMPDIR/lib" >/dev/null 2>&1 )
+stray=$(ls -A "$probe_dir" 2>/dev/null | head -3)
+if [ -z "$stray" ]; then
+    echo "  [PASS] ae help leaves the working directory clean"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] ae help wrote into the working directory: $stray"
+    fail=$((fail + 1))
+fi
+
 echo
 echo "ae_help: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

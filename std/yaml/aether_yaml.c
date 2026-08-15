@@ -51,8 +51,17 @@ static const char *store_emit_string(char *str) {
     if (!str) return NULL;
     size_t len = strlen(str);
     if (len + 1 > g_yaml_emit_cap) {
+        /* Through a temporary: assigning realloc's result straight back would
+         * lose the old buffer when it fails, and would leave the capacity
+         * claiming a size the now-NULL buffer does not have, so every later
+         * call short of that size would skip the grow and return NULL. */
+        char *grown = realloc(g_yaml_emit_buf, len + 1024);
+        if (!grown) {
+            free(str);
+            return NULL;
+        }
+        g_yaml_emit_buf = grown;
         g_yaml_emit_cap = len + 1024;
-        g_yaml_emit_buf = realloc(g_yaml_emit_buf, g_yaml_emit_cap);
     }
     if (g_yaml_emit_buf) {
         memcpy(g_yaml_emit_buf, str, len + 1);

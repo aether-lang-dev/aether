@@ -23,8 +23,28 @@ static ASTNode* parse_code(const char* code) {
     parser->suppress_errors = 1;  // Suppress parse errors during testing
     ASTNode* ast = parse_program(parser);
     free_parser(parser);
+    /* The AST owns copies of every name it needed, so the tokens are dead
+     * here. Dropping them leaked the whole token stream of every program
+     * these tests parse (3428 allocations under LeakSanitizer). */
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
     free(tokens);
     return ast;
+}
+
+/* The generated C starts with a multi-thousand-line runtime prelude, so a
+ * fixed-size read of the first few KB never reaches the translated program:
+ * an assertion against that prefix either fails for the wrong reason or
+ * passes on prelude text. Read the whole stream. */
+static char* read_all(FILE* f) {
+    if (fseek(f, 0, SEEK_END) != 0) return NULL;
+    long size = ftell(f);
+    if (size < 0) return NULL;
+    rewind(f);
+    char* buf = (char*)malloc((size_t)size + 1);
+    if (!buf) return NULL;
+    size_t got = fread(buf, 1, (size_t)size, f);
+    buf[got] = '\0';
+    return buf;
 }
 
 TEST(switch_parse_basic) {
@@ -156,30 +176,24 @@ TEST(switch_codegen_basic) {
     ASTNode* ast = parse_code(code);
     ASSERT_NOT_NULL(ast);
     
-    // Generate code to a temp file
-    FILE* out = fopen("test_switch_output.c", "w");
+    /* tmpfile(): an assertion longjmps out of the test, so a named file
+     * would be left behind in whatever directory the suite ran in. */
+    FILE* out = tmpfile();
     ASSERT_NOT_NULL(out);
-    
+
     CodeGenerator* gen = create_code_generator(out);
     generate_program(gen, ast);
     free_code_generator(gen);
+
+    char* buffer = read_all(out);
     fclose(out);
-    
-    // Verify the output file was created
-    out = fopen("test_switch_output.c", "r");
-    ASSERT_NOT_NULL(out);
-    
-    char buffer[4096];
-    size_t bytes = fread(buffer, 1, sizeof(buffer) - 1, out);
-    buffer[bytes] = '\0';
-    fclose(out);
-    
-    // Check for switch keyword in generated code
+    ASSERT_NOT_NULL(buffer);
+
     ASSERT_TRUE(strstr(buffer, "switch") != NULL);
     ASSERT_TRUE(strstr(buffer, "case") != NULL);
-    
+
+    free(buffer);
     free_ast_node(ast);
-    remove("test_switch_output.c");
 }
 
 TEST(switch_string_cases) {

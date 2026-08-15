@@ -89,7 +89,7 @@ else
     fi
 
     # Check (g) — trailing-underscore helper is emitted as `static`.
-    if grep -qE "static (int|const char\*|void) helper_\(" "$TMPDIR/config.c"; then
+    if grep -qE "static (AETHER_MAYBE_UNUSED )?(int|const char\*|void) helper_\(" "$TMPDIR/config.c"; then
         echo "  [PASS] helper_ emitted with static linkage (#279)"
         pass=$((pass + 1))
     else

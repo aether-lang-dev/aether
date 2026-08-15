@@ -1976,25 +1976,41 @@ const char* safe_value_name(const char* name) {
  * so a diagnostic raised from inside them would print with no file or line
  * and be impossible to act on. generate_statement / generate_expression /
  * the function emitter keep this current as they walk. */
-static const char* g_diag_file = NULL;
+/* Copied, not borrowed: the names belong to AST nodes, and a caller that
+ * frees a program and compiles another in the same process (the compiler's
+ * own unit tests do exactly that) would otherwise leave these pointing into
+ * freed memory, to be read by the next diagnostic. */
+static char g_diag_file[512];
 static int g_diag_line = 0;
 static int g_diag_column = 0;
-static const char* g_diag_func = NULL;
-static char g_diag_context[160];
+static char g_diag_func[160];
+static char g_diag_context[192];
 
 void codegen_note_diag_pos(const ASTNode* node) {
     if (!node || node->line <= 0) return;
     g_diag_line = node->line;
     g_diag_column = node->column;
-    if (node->source_file) g_diag_file = node->source_file;
+    if (node->source_file) {
+        snprintf(g_diag_file, sizeof(g_diag_file), "%s", node->source_file);
+    }
 }
 
 void codegen_note_diag_func(const char* name) {
-    g_diag_func = name;
+    if (name) {
+        snprintf(g_diag_func, sizeof(g_diag_func), "%s", name);
+    } else {
+        g_diag_func[0] = '\0';
+    }
+}
+
+/* NULL rather than "" when unset: the reporter prints the filename only when
+ * it has one, and an empty string is not the same as absent. */
+static const char* codegen_diag_file(void) {
+    return g_diag_file[0] ? g_diag_file : NULL;
 }
 
 const char* codegen_diag_context(void) {
-    if (!g_diag_func) return NULL;
+    if (!g_diag_func[0]) return NULL;
     snprintf(g_diag_context, sizeof(g_diag_context), "in function %s", g_diag_func);
     return g_diag_context;
 }
@@ -2215,7 +2231,7 @@ const char* get_c_type(Type* type) {
             if (type->is_fnptr) return "void*";
             return "_AeClosure";
         case TYPE_UNKNOWN: {
-            AetherError w = {g_diag_file, NULL, g_diag_line, g_diag_column,
+            AetherError w = {codegen_diag_file(), NULL, g_diag_line, g_diag_column,
                              "unresolved type in codegen, defaulting to int",
                              "add explicit type annotation or check that the variable is initialized",
                              codegen_diag_context(), AETHER_ERR_NONE};
@@ -2225,7 +2241,7 @@ const char* get_c_type(Type* type) {
         default: {
             char wbuf[128];
             snprintf(wbuf, sizeof(wbuf), "internal: unknown type kind %d in codegen, defaulting to void", type->kind);
-            AetherError w = {g_diag_file, NULL, g_diag_line, g_diag_column, wbuf,
+            AetherError w = {codegen_diag_file(), NULL, g_diag_line, g_diag_column, wbuf,
                              "this is a compiler bug, please report it",
                              codegen_diag_context(), AETHER_ERR_NONE};
             aether_warning_report(&w);
@@ -4297,6 +4313,19 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#endif");
     }
     /* GCC/Clang vs MSVC: guards for statement expressions ({...}) and computed goto */
+    /* Imported wrappers and trailing-underscore privates are emitted with
+       internal linkage, so a translation unit that imports a module and calls
+       only part of it has unused statics left over. Downstream builds with
+       -Wall -Werror would fail on generated code they did not write, so the
+       storage class carries the attribute rather than the consumer carrying a
+       -Wno flag. */
+    print_line(gen, "#ifndef AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED __attribute__((unused))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_MAYBE_UNUSED");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     print_line(gen, "#ifndef AETHER_GCC_COMPAT");
     print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)");
     print_line(gen, "#    define AETHER_GCC_COMPAT 1");
@@ -5290,7 +5319,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // declaration follows suit. Trailing-underscore private helpers
         // (#279) match the same `static` rule.
         if (fn_has_internal_linkage(child)) {
-            fprintf(gen->output, "static ");
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
         }
 
         // Determine return type. Mirrors generate_function_definition's

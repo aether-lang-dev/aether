@@ -2,9 +2,8 @@
 // Shows how to control optimizations with flags
 
 #include <stdio.h>
-#include "runtime/aether_runtime.h"
-#include "runtime/actors/aether_actor.h"
-#include "runtime/utils/aether_cpu_detect.h"
+#include "../aether_runtime.h"
+#include "../utils/aether_cpu_detect.h"
 
 void print_examples() {
     printf("========================================\n");
@@ -72,8 +71,9 @@ int main() {
     printf("      // Initialize runtime\n");
     printf("      aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);\n");
     printf("      \n");
-    printf("      // Create actors (automatically use configured optimizations)\n");
-    printf("      Actor* actor = aether_actor_create(my_process_fn);\n");
+    printf("      // Actors come from the Aether compiler: an `actor` block\n");
+    printf("      // becomes a struct with a mailbox, and uses whichever\n");
+    printf("      // optimizations the flags above turned on.\n");
     printf("      \n");
     printf("      // ... your code ...\n");
     printf("      \n");

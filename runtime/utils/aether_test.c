@@ -10,8 +10,17 @@ static int test_capacity = 0;
 
 void aether_register_test(const char* name, void (*test_func)(void)) {
     if (test_count >= test_capacity) {
-        test_capacity = test_capacity == 0 ? 16 : test_capacity * 2;
-        tests = (AetherTest*)realloc(tests, test_capacity * sizeof(AetherTest));
+        int grown_capacity = test_capacity == 0 ? 16 : test_capacity * 2;
+        AetherTest* grown = (AetherTest*)realloc(tests, (size_t)grown_capacity * sizeof(AetherTest));
+        if (!grown) {
+            /* Registration runs from constructors before main, so there is no
+             * caller to return a failure to; carrying on would write through
+             * a null pointer one line down. */
+            fprintf(stderr, "aether_register_test: out of memory registering '%s'\n", name);
+            exit(1);
+        }
+        tests = grown;
+        test_capacity = grown_capacity;
     }
     
     tests[test_count].name = name;

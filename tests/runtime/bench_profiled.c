@@ -20,7 +20,11 @@ int main() {
     mailbox_init(&mbox);
     
     const int MESSAGES = 1000000;
-    Message msg = {1, 0, 42, NULL};
+    Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = 42;
+    msg.payload_ptr = NULL;
     
     printf("\nProcessing %d messages...\n", MESSAGES);
     

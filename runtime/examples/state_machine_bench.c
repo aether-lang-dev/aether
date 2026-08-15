@@ -120,8 +120,6 @@ int main() {
 
     // Simulation Loop
     // In a real scenario, this is the Worker Thread loop
-    int running = 1;
-    int ticks = 0;
     int total_processed = 0;
 
     // Seed messages
@@ -150,7 +148,6 @@ int main() {
             // Should not happen in this dense benchmark
             break; 
         }
-        ticks++;
     }
 
     clock_t end = clock();

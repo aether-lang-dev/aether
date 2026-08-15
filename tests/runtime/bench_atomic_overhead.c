@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <stdatomic.h>
 #include "micro_profile.h"
-// Note: Don't include actor_state_machine.h to avoid profile_reset conflict
+#include "../../runtime/actors/actor_state_machine.h"
 
 // ============================================================================
 // Test: Counter Increment Overhead
@@ -23,8 +23,8 @@ void bench_counter_overhead() {
     
     bench_atomic_overhead(&results, ITERATIONS);
     
-    double atomic_cycles = profile_avg_cycles(&results.with_atomic);
-    double plain_cycles = profile_avg_cycles(&results.without_atomic);
+    double atomic_cycles = micro_profile_avg_cycles(&results.with_atomic);
+    double plain_cycles = micro_profile_avg_cycles(&results.without_atomic);
     double overhead_cycles = atomic_cycles - plain_cycles;
     
     printf("Iterations: %d\n", ITERATIONS);
@@ -53,28 +53,32 @@ void bench_mailbox_operations() {
     Mailbox mbox;
     mailbox_init(&mbox);
     
-    Message msg = {1, 0, 42, NULL};
+    Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = 42;
+    msg.payload_ptr = NULL;
     CycleTimer send_timer = {0};
     CycleTimer receive_timer = {0};
     
     // Measure send + receive round-trip
     uint64_t start = read_cycles();
     for (int i = 0; i < ITERATIONS; i++) {
-        profile_start(&send_timer);
+        micro_profile_start(&send_timer);
         mailbox_send(&mbox, msg);
-        profile_end(&send_timer);
+        micro_profile_end(&send_timer);
         
         Message out;
-        profile_start(&receive_timer);
+        micro_profile_start(&receive_timer);
         mailbox_receive(&mbox, &out);
-        profile_end(&receive_timer);
+        micro_profile_end(&receive_timer);
     }
     uint64_t end = read_cycles();
     uint64_t total = end - start;
     
     printf("Iterations: %d\n", ITERATIONS);
-    printf("Send:       %.2f cycles/op\n", profile_avg_cycles(&send_timer));
-    printf("Receive:    %.2f cycles/op\n", profile_avg_cycles(&receive_timer));
+    printf("Send:       %.2f cycles/op\n", micro_profile_avg_cycles(&send_timer));
+    printf("Receive:    %.2f cycles/op\n", micro_profile_avg_cycles(&receive_timer));
     printf("Round-trip: %.2f cycles/op\n", (double)total / ITERATIONS);
     printf("Throughput: %.2f M msg/sec (at 3 GHz)\n\n", 
            3000.0 * ITERATIONS / total);
@@ -88,19 +92,22 @@ void bench_message_copy() {
     printf("\n=== Message Copy Overhead ===\n");
     
     const int ITERATIONS = 10000000;
-    Message src = {1, 2, 42, NULL, {NULL, 0, 0}};
-    Message dst;
+    Message src = {1, 2, 42, NULL, {NULL, 0, 0}, NULL};
+    Message dst = {0};
     
     CycleTimer timer = {0};
-    profile_start(&timer);
+    micro_profile_start(&timer);
     for (int i = 0; i < ITERATIONS; i++) {
         dst = src;  // Struct copy
     }
-    profile_end(&timer);
+    micro_profile_end(&timer);
     
     printf("Iterations: %d\n", ITERATIONS);
-    printf("Copy:       %.2f cycles/op\n", profile_avg_cycles(&timer));
+    printf("Copy:       %.2f cycles/op\n", micro_profile_avg_cycles(&timer));
     printf("Message size: %zu bytes\n", sizeof(Message));
+    /* Read the destination back: an unread copy is dead code the optimiser is
+     * free to delete, which would leave the loop above timing nothing. */
+    printf("Last payload: %lld\n", (long long)dst.payload_int);
 }
 
 // ============================================================================
@@ -125,10 +132,14 @@ void bench_actor_loop() {
     printf("\n=== Actor Message Processing Loop ===\n");
     
     const int MESSAGES = 1000000;
-    Message msg = {1, 0, 42, NULL};
+    Message msg = {0};
+    msg.type = 1;
+    msg.sender_id = 0;
+    msg.payload_int = 42;
+    msg.payload_ptr = NULL;
     
     // Test with plain int
-    PlainActor plain_actor = {1, 1, {0}, 0};
+    PlainActor plain_actor = {.id = 1, .active = 1};
     mailbox_init(&plain_actor.mailbox);
     
     uint64_t plain_start = read_cycles();
@@ -143,7 +154,7 @@ void bench_actor_loop() {
     uint64_t plain_cycles = plain_end - plain_start;
     
     // Test with atomic int
-    AtomicActor atomic_actor = {1, 1, {0}, 0};
+    AtomicActor atomic_actor = {.id = 1, .active = 1};
     mailbox_init(&atomic_actor.mailbox);
     
     uint64_t atomic_start = read_cycles();

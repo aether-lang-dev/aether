@@ -30,7 +30,9 @@ AEOF
 ./build/aetherc /tmp/test_msvc_interp.ae /tmp/test_msvc_interp.c
 force_no_gcc_compat /tmp/test_msvc_interp.c
 # Compile with strict C11 — must succeed without GCC extensions
-gcc -c -o /dev/null /tmp/test_msvc_interp.c -I. -Iruntime -Iruntime/utils -std=c11 -pedantic -Wno-unused-label -Werror 2>&1
+gcc -c -o /dev/null /tmp/test_msvc_interp.c \
+    -I. -Iruntime -Iruntime/utils -Iruntime/actors -Istd/collections \
+    -std=c11 -pedantic -Wno-unused-label -Werror 2>&1
 echo "  [PASS] Non-actor string interpolation compiles under C11 -pedantic"
 
 # Test 2: Actor program with computed goto fallback
@@ -72,7 +74,7 @@ echo "  [PASS] Actor dispatch has switch-case fallback"
 # Compile actor (syntax-check only — can't link without full runtime)
 gcc -fsyntax-only /tmp/test_msvc_actor.c \
     -I. -Iruntime -Iruntime/utils -Iruntime/actors -Iruntime/config \
-    -Iruntime/scheduler \
+    -Iruntime/scheduler -Istd/collections \
     -std=c11 -Wno-unused-label 2>&1
 echo "  [PASS] Actor program syntax-checks under C11"
 
