@@ -6,7 +6,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdatomic.h>
+#ifndef _WIN32
 #include <pthread.h>
+#else
+/* aether_thread.h (pulled in via the scheduler headers) provides the
+ * pthread_* surface as Win32 shims; including winpthreads' <pthread.h>
+ * alongside it redefines pthread_t and friends. */
+#endif
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"
 
