@@ -18,7 +18,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <intrin.h>
+#if defined(_MSC_VER)
+/* MSVC needs the intrinsic pragma; MinGW GCC declares __rdtsc via
+ * <intrin.h> and -Werror=unknown-pragmas rejects the pragma itself. */
 #pragma intrinsic(__rdtsc)
+#endif
 #elif defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
 #endif
@@ -140,6 +144,8 @@ static inline void bench_atomic_overhead(MicroBenchResults* results, int iterati
         counter++;
     }
     micro_profile_end(&results->without_atomic);
+    (void)counter; /* volatile keeps the loop honest; MinGW GCC still
+                    * flags set-but-unused under -Werror without this. */
     
     // Measure atomic increment
     micro_profile_reset(&results->with_atomic);

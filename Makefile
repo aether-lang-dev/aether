@@ -688,6 +688,13 @@ STANDALONE_SRC = $(wildcard runtime/examples/*.c) \
                  tools/profiler/profiler_demo.c \
                  std/log/demo_log.c \
                  tests/differential/driver.c
+ifneq ($(IS_WINDOWS),)
+  # POSIX-only standalone sources: the differential driver dlopen()s
+  # candidate compilers (<dlfcn.h>), and the work-stealing bench uses
+  # raw pthreads that clash with aether_thread.h's pthread_t -> HANDLE
+  # mapping on MinGW. Everything else in the gate compiles on Windows.
+  STANDALONE_SRC := $(filter-out tests/differential/driver.c runtime/examples/workstealing_bench.c,$(STANDALONE_SRC))
+endif
 
 all: compiler ae stdlib
 
