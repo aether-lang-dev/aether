@@ -120,6 +120,31 @@ for entry in "${TESTS[@]}"; do
       printf '  SKIP  %-22s (pkg-config: %s not found)\n' "$label" "$pcmods $pchdrs"
       continue
     fi
+    # pkg-config existing does NOT prove the headers are installed: split
+    # packagings ship the .pc with the loader and the headers separately
+    # (Arch: vulkan-icd-loader provides vulkan.pc, vulkan-headers the
+    # includes — every vulkan test FAILed at build on such a box instead
+    # of SKIPping). Prove an include of each module's headers actually
+    # preprocesses before committing to a build.
+    hdr_probe_ok=1
+    for m in $pcmods $pchdrs; do
+      case "$m" in
+        vulkan)        probe_inc='#include <vulkan/vulkan.h>' ;;
+        libavcodec)    probe_inc='#include <libavcodec/avcodec.h>' ;;
+        libavformat)   probe_inc='#include <libavformat/avformat.h>' ;;
+        libavutil)     probe_inc='#include <libavutil/avutil.h>' ;;
+        libswscale)    probe_inc='#include <libswscale/swscale.h>' ;;
+        libswresample) probe_inc='#include <libswresample/swresample.h>' ;;
+        *)             probe_inc='' ;;
+      esac
+      [ -n "$probe_inc" ] || continue
+      if ! printf '%s\n' "$probe_inc" |            ${CC:-cc} -E -x c - $(pkg-config --cflags "$m" 2>/dev/null) >/dev/null 2>&1; then
+        printf '  SKIP  %-22s (%s: .pc present but headers missing)\n' "$label" "$m"
+        hdr_probe_ok=0
+        break
+      fi
+    done
+    [ "$hdr_probe_ok" = "1" ] || continue
     # `ae build --extra` cannot pass -l flags, so stage a workspace whose
     # aether.toml carries them; ae threads link_flags into gcc via
     # get_link_flags(). Same shape as tests/integration/sqlite_roundtrip.
