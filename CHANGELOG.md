@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.541.0]
 
 ### Fixed
 - `--emit=lib`'s `aether_lib_meta()` catalog entry point is now emitted
