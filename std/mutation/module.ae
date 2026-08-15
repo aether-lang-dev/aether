@@ -1,0 +1,596 @@
+// std.mutation — a Tier-1 (text-based) mutation-testing driver for
+// std.spec-tested code. Adopted from aeocha's contrib/mutate as that
+// repo sunsets (github.com/aether-lang-dev/aeocha).
+//
+// Mutation testing measures how good your TESTS are: it perturbs the
+// code under test (the "SUT") one change at a time and checks whether
+// the test suite NOTICES. A mutant the tests catch is "killed"; one
+// that slips through "survived" — a survivor marks a gap in the tests.
+//
+// This is an OUTER driver, deliberately. The compiler has already run
+// by the time any test executes, so mutation can't happen in-process —
+// it must edit the SUT *source on disk*, rebuild, and re-run the suite,
+// once per mutant. std.spec is the oracle, via its STRUCTURED report
+// (not just an exit code): the driver builds the test to a binary, runs
+// it with AE_SPEC_FORMAT/AE_SPEC_REPORT set (the documented env-file
+// transport, docs/testing.md), and reads `failed=N` from the `version=1`
+// report. That lets it classify three outcomes — killed (a test
+// failed), survived (suite passed, so a test gap), and no-compile (the
+// mutation produced invalid code, excluded from the score) — so a
+// non-compiling mutant never masquerades as a kill. See `_oracle`.
+//
+// Entry point: run(sut_path, test_path, lib_dir) — see the runnable
+// front-end at examples/mutation-testing/mutate.ae:
+//   ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
+// (lib_dir "" defaults to the SUT's directory.) The `ae` used for the
+// per-mutant sub-builds is `ae` on PATH, overridable via the AE_BIN
+// environment variable (an in-tree harness points it at build/ae).
+//
+// Mutators: code-operator swaps (+/- , */ , compare flips, ==/!=, &&/||)
+// matched whitespace-padded, plus string-literal mutators (non-empty ->
+// "", "" -> sentinel). The tool is string-boundary aware — a padded
+// operator inside a "..." literal is NOT mutated as code, and the string
+// mutators touch only real literals.
+//
+// HONEST LIMITATIONS (Tier-1, text-based; docs/mutation-testing.md):
+//   - Comments are still treated as source: a "..." or padded operator
+//     written in a // comment can yield a harmless false mutant (changes
+//     nothing the suite sees -> survives). Keep them out of a SUT.
+//   - `++`, `+=`, operators abutting other chars: skipped (need padding).
+//   - No equivalent-mutant detection: a mutation that doesn't change
+//     behaviour (e.g. `<` -> `<=` on a boundary never hit) "survives"
+//     without being a real gap. Universal mutation-testing noise.
+//   - Each mutant pays a cache-clear + check + build + run. No warm
+//     cache (the stale-cache rule forces the clear), so it's SLOW on
+//     big suites. Start with a focused SUT.
+// The upgrade path out of Tier-1 is AST-level mutation — operator sites
+// from the real parser instead of padded-token scans — which is why the
+// driver now lives in the aether tree, next to the compiler.
+
+exports(run)
+
+import std.string
+import std.fs
+import std.list
+import std.os
+
+// Oracle classification codes.
+//   SURVIVED  — the mutant compiled and the suite still PASSED (a gap)
+//   KILLED    — the mutant compiled and the suite FAILED (good)
+//   NOCOMPILE — the mutant did not type-check (excluded from the score)
+const SURVIVED = 0
+const KILLED = 1
+const NOCOMPILE = 2
+
+// The `ae` driver used for per-mutant sub-builds: AE_BIN if set (an
+// in-tree test harness points it at build/ae), else `ae` from PATH.
+_ae_bin() -> string {
+    b = os.getenv("AE_BIN")
+    if b == null { return "ae" }
+    if string.equals(b, "") == 1 { return "ae" }
+    return b
+}
+
+// _oracle(test_path, incl, bin) classifies one already-written mutant by
+// running the std.spec test against it. `incl` is a module search dir
+// passed as AETHER_LIB_DIR to the sub-`ae check`/`ae build` (must hold
+// any non-std modules the test imports, the SUT itself included).
+// Three steps:
+//
+//   1. ae check — the no-compile gate. We gate on `check`, not `build`,
+//      because `ae build` currently accepts an entry program whose
+//      imported module fails to compile and links a stale/valid version
+//      (#953). `check` honestly reports the import error.
+//   2. ae build the test to a binary.
+//   3. run it with AE_SPEC_FORMAT=aeocha + AE_SPEC_REPORT=<file> set —
+//      std.spec's run_summary writes the `version=1` report to that
+//      file (the documented env-file transport, docs/testing.md). We
+//      parse `failed=N` from the header: N>0 => KILLED, N==0 =>
+//      SURVIVED. This uses the structured report rather than scraping
+//      stdout or trusting only an exit code.
+//
+// Cache is cleared first every time — an imported-module edit does not
+// invalidate ~/.aether/cache, so without this every mutant would be
+// tested against the previously compiled SUT.
+_oracle(test_path: string, incl: string, bin: string) -> int {
+    os.system("rm -rf ~/.aether/cache")
+    ae = _ae_bin()
+
+    // (1) no-compile gate. We gate on the PRESENCE OF `error[` IN OUTPUT,
+    // not the exit code: on this compiler both `ae check` and `ae build`
+    // return exit 0 even when an imported module fails to compile — they
+    // print the diagnostic to stderr but don't fail (#953). So we grep
+    // stderr for an `error[` diagnostic; grep -q exits 0 when it finds
+    // one, which means the mutant does NOT compile.
+    chk = "AETHER_LIB_DIR='${incl}' '${ae}' check '${test_path}' 2>&1 | grep -q 'error\\['"
+    if os.system(chk) == 0 {
+        return NOCOMPILE
+    }
+
+    // (2) build to a fresh binary (exit code is unreliable too; we rely
+    // on the check gate above and on whether a runnable binary appears).
+    os.system("rm -f '${bin}'")
+    bld = "AETHER_LIB_DIR='${incl}' '${ae}' build '${test_path}' -o '${bin}' >/dev/null 2>&1"
+    os.system(bld)
+    if os.system("test -x '${bin}'") != 0 {
+        return NOCOMPILE
+    }
+
+    // (3) run + read the structured report. We spawn the binary
+    // through `/bin/sh -c "... exec <bin> >/dev/null 2>&1"` so the
+    // child's own ✓/✗ test output is silenced; the AE_SPEC_* env pair
+    // (assignments before `exec` apply to the exec'd program) makes
+    // run_summary write the report to a sibling file the redirect
+    // can't touch. A mutant that crashes before run_summary leaves no
+    // file — fs.read yields "" and _report_failed returns -1, which
+    // classifies as SURVIVED, exactly as an empty report would.
+    rpt = "${bin}.report"
+    os.system("rm -f '${rpt}'")
+    argv = list.new()
+    list.add(argv, "-c")
+    list.add(argv, "AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT='${rpt}' exec '${bin}' >/dev/null 2>&1")
+    _pipe, _rc, drain_err = os.run_pipe_drain_and_wait("/bin/sh", argv, null)
+    if string.equals(drain_err, "") == 0 {
+        return NOCOMPILE
+    }
+    report, _rerr = fs.read(rpt)
+    os.system("rm -f '${rpt}'")
+    failed = _report_failed(report)
+    if failed > 0 { return KILLED }
+    return SURVIVED
+}
+
+// Parse `failed=N` from a version=1 report header. Returns -1 if absent
+// (treated by callers as "no usable report").
+_report_failed(report: string) -> int {
+    key = "failed="
+    pos = string.index_of_from(report, key, 0)
+    if pos < 0 { return -1 }
+    start = pos + string.length(key)
+    rlen = string.length(report)
+    // read digits until newline
+    end = start
+    scanning = 1
+    while scanning == 1 {
+        if end >= rlen {
+            scanning = 0
+        } else {
+            c = string.char_at_n(report, rlen, end)
+            if c >= 48 && c <= 57 {
+                end = end + 1
+            } else {
+                scanning = 0
+            }
+        }
+    }
+    if end == start { return -1 }
+    return string.get_int(string.substring(report, start, end))
+}
+
+// ---------------------------------------------------------------------------
+// String helpers — mutate exactly the Nth CODE occurrence of a token,
+// where "code" means not inside a "..." string literal.
+// ---------------------------------------------------------------------------
+
+// Is byte offset `off` inside a "..." string literal? Walk from 0
+// tracking quote state; inside a string a backslash escapes the next
+// byte (so \" does not close the string). 34 = '"', 92 = '\'.
+// This is what stops an operator (` + `) that happens to sit inside a
+// string from being mutated as if it were code — a false mutant.
+_in_string(src: string, off: int) -> int {
+    slen = string.length(src)
+    i = 0
+    instr = 0
+    while i < off {
+        c = string.char_at_n(src, slen, i)
+        if instr == 1 {
+            if c == 92 {
+                i = i + 2
+            } else {
+                if c == 34 { instr = 0 }
+                i = i + 1
+            }
+        } else {
+            if c == 34 { instr = 1 }
+            i = i + 1
+        }
+    }
+    return instr
+}
+
+// 1-based line number containing byte offset `off` (count newlines
+// before it). Used to anchor each mutant to a source location.
+_line_at(src: string, off: int) -> int {
+    slen = string.length(src)
+    line = 1
+    i = 0
+    while i < off {
+        if i < slen {
+            if string.char_at_n(src, slen, i) == 10 { line = line + 1 }
+        }
+        i = i + 1
+    }
+    return line
+}
+
+// Byte offset of the n-th CODE occurrence of `find` (string literals
+// skipped), or -1. Mirrors _replace_nth's scan so the runner can report
+// the mutation's line without re-deriving it from the mutated text.
+_offset_of_nth(src: string, find: string, n: int) -> int {
+    flen = string.length(find)
+    k = 0
+    pos = string.index_of_from(src, find, 0)
+    while pos >= 0 {
+        if _in_string(src, pos) == 0 {
+            if k == n { return pos }
+            k = k + 1
+        }
+        pos = string.index_of_from(src, find, pos + flen)
+    }
+    return -1
+}
+
+// Count occurrences of `find` that are NOT inside a string literal.
+_count(src: string, find: string) -> int {
+    flen = string.length(find)
+    n = 0
+    pos = string.index_of_from(src, find, 0)
+    while pos >= 0 {
+        if _in_string(src, pos) == 0 { n = n + 1 }
+        pos = string.index_of_from(src, find, pos + flen)
+    }
+    return n
+}
+
+// Replace the n-th (0-based) CODE occurrence of `find` with `repl`
+// (occurrences inside string literals don't count toward n and are
+// never touched). Returns "" if there is no n-th code occurrence.
+_replace_nth(src: string, find: string, repl: string, n: int) -> string {
+    slen = string.length(src)
+    flen = string.length(find)
+    k = 0
+    found = -1
+    pos = string.index_of_from(src, find, 0)
+    while pos >= 0 {
+        if _in_string(src, pos) == 0 {
+            if k == n {
+                found = pos
+                pos = -1
+            } else {
+                k = k + 1
+                pos = string.index_of_from(src, find, pos + flen)
+            }
+        } else {
+            pos = string.index_of_from(src, find, pos + flen)
+        }
+    }
+    if found < 0 { return "" }
+    head = string.substring(src, 0, found)
+    tail = string.substring(src, found + flen, slen)
+    return "${head}${repl}${tail}"
+}
+
+// ---------------------------------------------------------------------------
+// String-literal mutation. Two operators that catch tests which never
+// pin down a returned/used string:
+//   STR->EMPTY      — a non-empty "foo" becomes ""
+//   EMPTY->NONEMPTY — an empty ""     becomes a sentinel
+// Implemented on the same escape-aware scan as _in_string. We mutate
+// the literal's CONTENT, keeping the surrounding quotes.
+// ---------------------------------------------------------------------------
+
+// Count string literals whose emptiness matches want_empty (1 = only
+// "", 0 = only non-empty).
+_count_strings(src: string, want_empty: int) -> int {
+    slen = string.length(src)
+    i = 0
+    n = 0
+    while i < slen {
+        c = string.char_at_n(src, slen, i)
+        if c == 34 {
+            j = i + 1
+            scanning = 1
+            while scanning == 1 {
+                if j >= slen { scanning = 0 }
+                else {
+                    cj = string.char_at_n(src, slen, j)
+                    if cj == 92 { j = j + 2 }
+                    else { if cj == 34 { scanning = 0 } else { j = j + 1 } }
+                }
+            }
+            empty = 0
+            if j - i - 1 == 0 { empty = 1 }
+            if empty == want_empty { n = n + 1 }
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return n
+}
+
+// Byte offset (opening quote) of the n-th string literal matching
+// want_empty, or -1. Mirrors _mutate_nth_string's scan for line reporting.
+_offset_of_nth_string(src: string, n: int, want_empty: int) -> int {
+    slen = string.length(src)
+    i = 0
+    k = 0
+    while i < slen {
+        c = string.char_at_n(src, slen, i)
+        if c == 34 {
+            j = i + 1
+            scanning = 1
+            while scanning == 1 {
+                if j >= slen { scanning = 0 }
+                else {
+                    cj = string.char_at_n(src, slen, j)
+                    if cj == 92 { j = j + 2 }
+                    else { if cj == 34 { scanning = 0 } else { j = j + 1 } }
+                }
+            }
+            empty = 0
+            if j - i - 1 == 0 { empty = 1 }
+            if empty == want_empty {
+                if k == n { return i }
+                k = k + 1
+            }
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+// Replace the CONTENT of the n-th (0-based) string literal matching
+// want_empty with `content` (quotes preserved). "" if no n-th match.
+_mutate_nth_string(src: string, n: int, want_empty: int, content: string) -> string {
+    slen = string.length(src)
+    i = 0
+    k = 0
+    while i < slen {
+        c = string.char_at_n(src, slen, i)
+        if c == 34 {
+            j = i + 1
+            scanning = 1
+            while scanning == 1 {
+                if j >= slen { scanning = 0 }
+                else {
+                    cj = string.char_at_n(src, slen, j)
+                    if cj == 92 { j = j + 2 }
+                    else { if cj == 34 { scanning = 0 } else { j = j + 1 } }
+                }
+            }
+            empty = 0
+            if j - i - 1 == 0 { empty = 1 }
+            if empty == want_empty {
+                if k == n {
+                    // [i] and [j] are the opening/closing quotes; splice
+                    // new content between them.
+                    head = string.substring(src, 0, i + 1)
+                    tail = string.substring(src, j, slen)
+                    return "${head}${content}${tail}"
+                }
+                k = k + 1
+            }
+            i = j + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return ""
+}
+
+// ---------------------------------------------------------------------------
+// Mutation operator table. Each entry is a (find, repl) pair of
+// whitespace-padded tokens. Order matters for multi-char operators:
+// we mutate ">=" / "<=" / "==" / "!=" as their own padded tokens so a
+// ">" rule never half-eats a ">=".
+// ---------------------------------------------------------------------------
+
+// Final path component of `path` (the SUT's file name), for anchoring
+// mutants as `<file>:<line>` rather than a bare occurrence index.
+_basename(path: string) -> string {
+    plen = string.length(path)
+    last = -1
+    p = string.index_of_from(path, "/", 0)
+    while p >= 0 {
+        last = p
+        p = string.index_of_from(path, "/", p + 1)
+    }
+    if last < 0 { return path }
+    return string.substring(path, last + 1, plen)
+}
+
+// Classify one written mutant and report/tally it. `loc` is the source
+// anchor (`file.ae:line`); `label` is the mutation (`ADD->SUB`).
+_classify(loc: string, label: string, test_path: string, incl: string, bin: string,
+    killed: ptr, survived: ptr, nocompile: ptr, survivors: ptr) {
+    verdict = _oracle(test_path, incl, bin)
+    if verdict == SURVIVED {
+        ref_set(survived, ref_get(survived) + 1)
+        list.add(survivors, "${loc}  ${label}")
+        println("  SURVIVED   ${loc}  ${label}")
+    } else {
+        if verdict == KILLED {
+            ref_set(killed, ref_get(killed) + 1)
+            println("  killed     ${loc}  ${label}")
+        } else {
+            // NOCOMPILE — the mutation produced invalid code. Excluded
+            // from the score (never really tested), but reported so the
+            // count is honest.
+            ref_set(nocompile, ref_get(nocompile) + 1)
+            println("  no-compile ${loc}  ${label}")
+        }
+    }
+}
+
+// Run one CODE operator (find->repl) across the whole SUT: for each of
+// its N code occurrences (string literals skipped), write that
+// single-site mutant and classify it, anchored to its source line.
+_run_operator(sut_path: string, original: string, find: string, repl: string,
+    label: string, test_path: string, incl: string, bin: string,
+    killed: ptr, survived: ptr, nocompile: ptr, survivors: ptr) {
+    base = _basename(sut_path)
+    n = _count(original, find)
+    i = 0
+    while i < n {
+        mutant = _replace_nth(original, find, repl, i)
+        if string.length(mutant) > 0 {
+            line = _line_at(original, _offset_of_nth(original, find, i))
+            fs.write(sut_path, mutant)
+            _classify("${base}:${line}", label, test_path, incl, bin, killed, survived, nocompile, survivors)
+        }
+        i = i + 1
+    }
+}
+
+// Run a string-literal operator across the SUT: replace the content of
+// each literal matching want_empty (1 = only ""; 0 = only non-empty)
+// with `content`, one at a time, and classify.
+_run_string_operator(sut_path: string, original: string, want_empty: int,
+    content: string, label: string, test_path: string,
+    incl: string, bin: string, killed: ptr, survived: ptr,
+    nocompile: ptr, survivors: ptr) {
+    base = _basename(sut_path)
+    n = _count_strings(original, want_empty)
+    i = 0
+    while i < n {
+        mutant = _mutate_nth_string(original, i, want_empty, content)
+        if string.length(mutant) > 0 {
+            line = _line_at(original, _offset_of_nth_string(original, i, want_empty))
+            fs.write(sut_path, mutant)
+            _classify("${base}:${line}", label, test_path, incl, bin, killed, survived, nocompile, survivors)
+        }
+        i = i + 1
+    }
+}
+
+// run(sut_path, test_path, lib_dir) — the whole mutation run: baseline
+// sanity, every operator, restore, score report. `lib_dir` is the
+// module search dir handed to the per-mutant sub-builds via
+// AETHER_LIB_DIR (the var `ae` actually honours); pass "" to default
+// to the SUT's directory. Returns the SURVIVOR count (0 = every
+// compiling mutant was killed), or -1 on abort (unreadable/empty SUT,
+// or the unmutated suite failing/not compiling) — a front-end can gate
+// its exit code on either.
+run(sut_path: string, test_path: string, lib_dir: string) -> int {
+    incl = lib_dir
+    if string.equals(incl, "") == 1 {
+        // default lib_dir = directory of the SUT
+        last = -1
+        p = string.index_of_from(sut_path, "/", 0)
+        while p >= 0 {
+            last = p
+            p = string.index_of_from(sut_path, "/", p + 1)
+        }
+        if last >= 0 {
+            incl = string.substring(sut_path, 0, last)
+        } else {
+            incl = "."
+        }
+    }
+
+    original, rerr = fs.read(sut_path)
+    if string.equals(rerr, "") == 0 {
+        println("error: could not read SUT '${sut_path}': ${rerr}")
+        return -1
+    }
+    if string.length(original) == 0 {
+        println("error: SUT '${sut_path}' is empty")
+        return -1
+    }
+
+    // A temp binary path for the per-mutant build+drain oracle,
+    // pid-suffixed so concurrent runs can't clobber each other.
+    bin = "/tmp/ae_mutate_probe_${os.getpid()}"
+
+    println("Aether mutation testing (std.mutation)")
+    println("  SUT:  ${sut_path}")
+    println("  test: ${test_path}")
+    println("")
+
+    // Sanity: the unmutated suite must PASS (KILLED would mean it's
+    // already failing; NOCOMPILE means the test doesn't build).
+    baseline = _oracle(test_path, incl, bin)
+    if baseline != SURVIVED {
+        if baseline == NOCOMPILE {
+            println("ABORT: the unmutated test does not compile (check lib_dir / SUT)")
+        } else {
+            println("ABORT: the test suite does not pass on the unmutated SUT")
+            println("       (fix the suite first; mutation score is meaningless otherwise)")
+        }
+        fs.write(sut_path, original)
+        return -1
+    }
+    println("  baseline: suite passes on unmutated SUT ✓")
+    println("")
+
+    killed = ref(0)
+    survived = ref(0)
+    nocompile = ref(0)
+    survivors = list.new()
+
+    // Core ~6 operators. Multi-char comparisons first so single-char
+    // rules can't partially match them.
+    _run_operator(sut_path, original, " >= ", " < ", "GTE->LT", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " <= ", " > ", "LTE->GT", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " == ", " != ", "EQ->NE", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " != ", " == ", "NE->EQ", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " + ", " - ", "ADD->SUB", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " - ", " + ", "SUB->ADD", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " * ", " / ", "MUL->DIV", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " && ", " || ", "AND->OR", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " || ", " && ", "OR->AND", test_path, incl, bin, killed, survived, nocompile, survivors)
+    // Plain-`>` / plain-`<` last (after >= / <= consumed). These still
+    // can't see a bare `>` that abuts other chars, by design.
+    _run_operator(sut_path, original, " > ", " < ", "GT->LT", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_operator(sut_path, original, " < ", " > ", "LT->GT", test_path, incl, bin, killed, survived, nocompile, survivors)
+
+    // String-literal mutators. STR->EMPTY blanks a non-empty literal
+    // (catches tests that don't pin the returned string); EMPTY->NONEMPTY
+    // fills an empty one with a sentinel (catches the unchecked-empty
+    // case). Literals inside comments get mutated too — harmless (a
+    // comment change is a no-op the suite ignores → survives as a known
+    // false mutant; docs/mutation-testing.md notes this).
+    _run_string_operator(sut_path, original, 0, "", "STR->EMPTY", test_path, incl, bin, killed, survived, nocompile, survivors)
+    _run_string_operator(sut_path, original, 1, "AE_MUTANT", "EMPTY->NONEMPTY", test_path, incl, bin, killed, survived, nocompile, survivors)
+
+    // Always restore the original — even though we wrote `original`
+    // after the last mutant via the loop, make it explicit.
+    fs.write(sut_path, original)
+    os.system("rm -f '${bin}'")
+
+    k = ref_get(killed)
+    s = ref_get(survived)
+    nc = ref_get(nocompile)
+    // The score denominator is COMPILING mutants only — a mutant that
+    // doesn't type-check was never really tested, so counting it as a
+    // kill would flatter the score (and counting it as a survivor would
+    // be a false gap). Report it separately.
+    scored = k + s
+    println("")
+    if scored == 0 {
+        if nc > 0 {
+            println("  no scorable mutants (${nc} did not compile)")
+        } else {
+            println("  no mutation sites found (no padded operators in the SUT)")
+        }
+        return 0
+    }
+    score = (k * 100) / scored
+    println("  ${k}/${scored} mutants killed — mutation score ${score}%")
+    if nc > 0 {
+        println("  (${nc} excluded — did not compile)")
+    }
+    if s > 0 {
+        println("  ${s} survived (test gaps):")
+        m = list.size(survivors)
+        j = 0
+        while j < m {
+            println("    - ${list.get_raw(survivors, j)}")
+            j = j + 1
+        }
+    }
+    return s
+}

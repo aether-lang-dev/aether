@@ -9,7 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.540.0]
+
+### Added
+- `std.mutation` — Tier-1 (text-based) mutation-testing driver, adopted
+  from the sunsetting aeocha repo's `contrib/mutate` (the last real
+  technology blocking that repo's archival). One entry point,
+  `mutation.run(sut, test, lib_dir)`, plus a runnable front-end at
+  `examples/mutation-testing/mutate.ae` and a worked calc example.
+  Perturbs the SUT source one padded-operator (or string-literal) site
+  at a time, rebuilds, re-runs the suite, and classifies each mutant
+  killed / survived / no-compile via std.spec's structured report
+  (`AE_SPEC_FORMAT`/`AE_SPEC_REPORT`), so a non-compiling mutant never
+  masquerades as a kill; the SUT is restored byte-identical. Sub-builds
+  honour `AE_BIN` (in-tree harnesses point it at `build/ae`). The two
+  deterministic aeocha regression fixtures came along
+  (`tests/integration/mutation_testing/`): the operator fixture pins
+  `1/2 … 50%` with a MUL→DIV survivor + md5-identical restore, the
+  strings fixture pins the string-boundary skip (an operator inside a
+  string literal is never mutated as code). docs/mutation-testing.md
+  documents usage, the operator set, and the honest Tier-1 limits; the
+  AST-level upgrade path is the reason the tool now lives in-tree.
 
 ### Fixed
 - `--emit=lib`'s `aether_lib_meta()` catalog entry point is now emitted

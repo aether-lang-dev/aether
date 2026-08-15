@@ -1,0 +1,39 @@
+// mutate — runnable front-end for std.mutation, the Tier-1 (text-based)
+// mutation-testing driver. See docs/mutation-testing.md for the full
+// story (what mutation testing is, the operator set, honest limits).
+//
+// Usage:
+//   ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]
+//
+// lib_dir is a module search dir handed to the per-mutant sub-builds via
+// AETHER_LIB_DIR; it defaults to the SUT's directory. Exit codes:
+//   0 — run completed (survivors, if any, are listed in the output)
+//   1 — aborted (SUT unreadable, or the unmutated suite fails/no-compiles)
+//   2 — usage error
+//
+// Worked example (the same calc as docs/mutation-testing.md):
+//   ae run examples/mutation-testing/mutate.ae -- \
+//       examples/mutation-testing/lib/calc.ae \
+//       examples/mutation-testing/lib/calc_test.ae
+
+import std.mutation
+import std.os
+
+main() {
+    // os.aether_args_get(0) is the binary path; user args start at 1.
+    ac = os.aether_args_count()
+    if ac < 3 {
+        println("usage: ae run examples/mutation-testing/mutate.ae -- <sut.ae> <test.ae> [lib_dir]")
+        os.exit(2)
+    }
+    sut_path = os.aether_args_get(1)
+    test_path = os.aether_args_get(2)
+    incl = ""
+    if ac >= 4 {
+        incl = os.aether_args_get(3)
+    }
+    rc = mutation.run(sut_path, test_path, incl)
+    if rc < 0 {
+        os.exit(1)
+    }
+}
