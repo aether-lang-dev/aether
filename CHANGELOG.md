@@ -28,11 +28,6 @@ version number before tagging the release.
   `std.os.testing` + `std.http.client.httptest` are the replacements,
   and the env-file report transport replaces the old IPC-pipe
   convention for spec children.
-
-## [0.538.0]
-
-### Added
-
 - **`make check-standalone`: a compile gate for every C source with its own
   `main()`.** The runtime examples, micro-benchmarks and demos are linked by no
   target, so nothing noticed when they stopped compiling: three carried include
@@ -164,6 +159,8 @@ version number before tagging the release.
   went too: it had been broken since a source file it lists was removed, and
   the tests it compiled now run in `make test`.
 
+## [0.538.0]
+
 ### Added
 - `std.os.testing` + `std.http.client.httptest` (stage 2 of the aeocha
   tease-out): the process-shape matchers (`expect_exit`,
@@ -221,6 +218,7 @@ version number before tagging the release.
   the registry when the exact lookup misses. Surfaced by `std.spec`, the
   first stdlib module to use a top-level mutable `var`; no working module
   changes its generated C. (`compiler/aether_module.c`.)
+
 ## [0.537.0]
 
 ### Added
