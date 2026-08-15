@@ -166,9 +166,12 @@ version number before tagging the release.
   tease-out): the process-shape matchers (`expect_exit`,
   `expect_stdout_*`, `expect_stderr_*` over `os.run_capture` triples)
   and the HTTP-shape matchers (response-handle asserts, one-call
-  GET/POST conveniences, `within()`/`without()` one-shot retry budgets),
+  GET/POST conveniences, `within()`/`without()` one-shot retry budgets,
+  and the generic poll-a-predicate `eventually()`),
   ported verbatim from aeocha and reporting through `std.spec`'s ambient
-  framework cell. `httptest` is named per Go's `net/http/httptest` — and
+  framework cell. The arms are negative-fire tested: a probe
+  deliberately fails matchers and asserts the run goes red with the
+  right messages. `httptest` is named per Go's `net/http/httptest` — and
   because two co-imported modules cannot share a namespace tail.
 - **`std.spec` — a BDD test framework in the stdlib.** The pure,
   dependency-light core of the standalone
@@ -204,6 +207,13 @@ version number before tagging the release.
   standalone too.
 
 ### Fixed
+- **`std.spec` tears down its framework tree.** `run_summary` now frees
+  suites, hook closure-boxes, it-records and the fluent chain's
+  registered string copies (`expect_str`'s defensive copy is registered
+  on the framework and released at end-of-run — borrowing instead is a
+  valgrind-confirmed use-after-free). Took the spec regression test from
+  92 leaks to a capped 4 on the macOS leaks gate; the residual 4 are
+  compiler-owned closure environments, tracked in #1577.
 - **Mutable module-level `var` writes miscompiled for any dotted module
   path** (`std.*`, `contrib.*`, nested local `a.b`). A `name = expr`
   assignment to a module-scope `var` inside one of that module's own
