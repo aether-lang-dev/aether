@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.538.0]
+## [current]
 
 ### Added
 
@@ -144,6 +144,8 @@ version number before tagging the release.
   went too: it had been broken since a source file it lists was removed, and
   the tests it compiled now run in `make test`.
 
+## [0.538.0]
+
 ### Added
 - `std.os.testing` + `std.http.client.httptest` (stage 2 of the aeocha
   tease-out): the process-shape matchers (`expect_exit`,
@@ -201,6 +203,7 @@ version number before tagging the release.
   the registry when the exact lookup misses. Surfaced by `std.spec`, the
   first stdlib module to use a top-level mutable `var`; no working module
   changes its generated C. (`compiler/aether_module.c`.)
+
 ## [0.537.0]
 
 ### Added
