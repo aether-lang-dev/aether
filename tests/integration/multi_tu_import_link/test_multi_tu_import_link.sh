@@ -60,4 +60,50 @@ if command -v nm >/dev/null 2>&1; then
     fi
 fi
 
-echo "  [PASS] multi_tu_import_link: 4 TUs, no dedup flags, runs (42 43)"
+# ---- Phase 2: the SAME shape with --emit=lib TUs (#1590) ------------------
+# aeb regen TUs are emitted with --emit=lib, and every lib TU carries the
+# aether_lib_meta() reflection catalog (issue #403). Before #1590 that
+# symbol had external linkage, so this exact link died with N-1
+# "multiple definition of `aether_lib_meta'" errors — a hole the plain-
+# emission phase above cannot see. The catalog entry point is now weak.
+TMP2="$TMP/libtu"
+mkdir -p "$TMP2"
+for m in helper/module a/module b/module; do
+    out="$TMP2/$(echo "$m" | tr '/' '_').c"
+    ( cd "$SCRIPT_DIR" && "$AETHERC" --emit=lib "$m.ae" "$out" ) >"$TMP2/cc.log" 2>&1 \
+        || fail "aetherc --emit=lib failed on $m.ae" "$TMP2/cc.log"
+done
+# The driver stays plain emission (it has main()).
+( cd "$SCRIPT_DIR" && "$AETHERC" main.ae "$TMP2/main.c" ) >"$TMP2/cc.log" 2>&1 \
+    || fail "aetherc failed on main.ae (lib phase)" "$TMP2/cc.log"
+
+for c in "$TMP2"/*.c; do
+    $CC -c "$c" -o "${c%.c}.o" $CFLAGS_ALL 2>"$TMP2/gcc.log" \
+        || fail "lib-TU compile failed: $c" "$TMP2/gcc.log"
+done
+
+# Load-bearing: three catalogs, one link, still NO escape hatch.
+if ! $CC "$TMP2"/*.o -o "$TMP2/repro_lib" $LIBS_ALL 2>"$TMP2/link.log"; then
+    if grep -qi "aether_lib_meta" "$TMP2/link.log"; then
+        fail "duplicate aether_lib_meta across --emit=lib TUs (#1590 regression)" "$TMP2/link.log"
+    fi
+    if grep -qiE "duplicate symbol|multiple definition" "$TMP2/link.log"; then
+        fail "duplicate symbols across --emit=lib TUs" "$TMP2/link.log"
+    fi
+    fail "lib-TU link failed" "$TMP2/link.log"
+fi
+
+out=$("$TMP2/repro_lib" 2>&1)
+[ "$out" = "42 43" ] || fail "wrong output from lib-TU build: '$out'"
+
+# Belt: the catalog entry point is emitted weak ("W"/"w" in nm), not "T".
+if command -v nm >/dev/null 2>&1; then
+    a_lib_o=$(ls "$TMP2"/a_module.o)
+    if nm "$a_lib_o" | grep -qE " T _?aether_lib_meta"; then
+        fail "aether_lib_meta has strong external linkage in a lib TU (#1590)"
+    fi
+    nm "$a_lib_o" | grep -qE " [Ww] _?aether_lib_meta" \
+        || fail "aether_lib_meta missing/not weak in a lib TU"
+fi
+
+echo "  [PASS] multi_tu_import_link: 4 TUs, no dedup flags, runs (42 43); --emit=lib TUs link too (#1590)"

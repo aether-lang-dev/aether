@@ -3283,9 +3283,29 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * header see the canonical name; dlsym callers cast the
      * function-pointer to whatever return type they want. Either
      * works because the C linker resolves on symbol name alone,
-     * not signature. */
+     * not signature.
+     *
+     * Weak linkage (#1590): an orchestrator-driven multi-TU build
+     * (aeb's shape — one --emit=lib C per module, one final link)
+     * otherwise gets one external aether_lib_meta per TU and dies
+     * with duplicate-symbol errors, forcing back exactly the
+     * -Wl,--allow-multiple-definition escape hatch the 0.539
+     * static-clone link model retired (and which ld64 rejects).
+     * Weak keeps the lone-.so dlsym contract byte-identical (a
+     * single definition still wins) while an N-TU link resolves to
+     * the first TU's catalog and proceeds. GCC/Clang/MinGW all
+     * honour the attribute across ELF/Mach-O/COFF; the non-GNU
+     * fallback keeps the old strong emission (single-TU only). */
     fprintf(gen->output,
-        "const struct _AetherLibMeta* aether_lib_meta(void) {\n"
+        "/* Weak: N --emit=lib TUs may be linked into one artifact (#1590). */\n"
+        "#ifndef AETHER_LIB_META_WEAK\n"
+        "#  if defined(__GNUC__) || defined(__clang__)\n"
+        "#    define AETHER_LIB_META_WEAK __attribute__((weak))\n"
+        "#  else\n"
+        "#    define AETHER_LIB_META_WEAK\n"
+        "#  endif\n"
+        "#endif\n"
+        "AETHER_LIB_META_WEAK const struct _AetherLibMeta* aether_lib_meta(void) {\n"
         "    return &_aether_lib_meta;\n"
         "}\n\n");
 
