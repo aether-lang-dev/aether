@@ -1,0 +1,3 @@
+import helper(shared)
+
+a_val() { return shared() + 1 }
