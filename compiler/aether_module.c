@@ -15,6 +15,10 @@
     #include <unistd.h>
 #endif
 #include <dirent.h>
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
 #ifdef __APPLE__
     #include <mach-o/dyld.h>
 #endif
@@ -597,6 +601,16 @@ static int get_exe_directory(char* buf, size_t bufsz) {
 #elif defined(__APPLE__)
     uint32_t sz = (uint32_t)bufsz;
     if (_NSGetExecutablePath(buf, &sz) != 0) return 0;
+#elif defined(__FreeBSD__)
+    /* #1586: /proc/self/exe is Linux-only; KERN_PROC_PATHNAME is the
+     * mount-nothing FreeBSD primitive (pid -1 = current process). */
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t fb_len = bufsz;
+    if (sysctl(mib, 4, buf, &fb_len, NULL, 0) != 0 || fb_len <= 1) {
+        ssize_t pn = readlink("/proc/curproc/file", buf, bufsz - 1);
+        if (pn <= 0) return 0;
+        buf[pn] = '\0';
+    }
 #elif defined(__linux__)
     ssize_t n = readlink("/proc/self/exe", buf, bufsz - 1);
     if (n <= 0) return 0;

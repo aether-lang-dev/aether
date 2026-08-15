@@ -206,12 +206,17 @@ describe(_ctx: ptr, description: string) -> ptr {
 
 before_each(_ctx: ptr, setup: fn) {
     bl = map.get_raw(_ctx, "befores")
-    list.add(bl, box_closure(setup))
+    // Store the fn value DIRECTLY: the fn -> ptr coercion auto-boxes via
+    // list_add_closure_owned, so the list owns box AND captured env and
+    // list.free reclaims both (#1577). An explicit box_closure() here
+    // produced a plain ptr the list could not know it owned — the box
+    // and env leaked past teardown.
+    list.add(bl, setup)
 }
 
 after_each(_ctx: ptr, teardown: fn) {
     al = map.get_raw(_ctx, "afters")
-    list.add(al, box_closure(teardown))
+    list.add(al, teardown)
 }
 
 // Helper to run all before_each hooks for a suite and its ancestors,
@@ -252,8 +257,14 @@ _run_afters(s: ptr) {
 // ---------------------------------------------------------------------------
 
 it(_ctx: ptr, description: string, test_fn: fn) {
-    // budget_ns 0 = no time budget (plain it()).
-    _it_impl(_ctx, description, test_fn, 0)
+    // test_fn is CALLED here, not forwarded: a fn param that is only
+    // invoked lets the caller's codegen prove the closure never escapes
+    // and free its environment right after this call returns (#1577 —
+    // forwarding to an _it_impl suppressed that drain and leaked the
+    // env of every capturing it-callback). budget 0 = no time budget.
+    rec, old_failed, t0 = _it_begin(_ctx, description)
+    call(test_fn)
+    _it_end(_ctx, description, rec, old_failed, t0, 0)
 }
 
 // it_within(_ctx, description, budget, test_fn) — an it() that also
@@ -263,16 +274,20 @@ it(_ctx: ptr, description: string, test_fn: fn) {
 // same monotonic elapsed the report already records, so there's no
 // extra measurement. `budget` is a Duration literal (`50ms`, `2s`).
 it_within(_ctx: ptr, description: string, budget: Duration, test_fn: fn) {
-    _it_impl(_ctx, description, test_fn, budget.ns)
+    rec, old_failed, t0 = _it_begin(_ctx, description)
+    call(test_fn)
+    _it_end(_ctx, description, rec, old_failed, t0, budget.ns)
 }
 
 // Shared it() body. budget_ns > 0 adds a "ran within budget" check
 // after the body completes; 0 disables it.
-_it_impl(_ctx: ptr, description: string, test_fn: fn, budget_ns: long) {
+// First half of the old _it_impl (split so it()/it_within() can invoke
+// test_fn themselves — see it()'s comment). Returns the it-record, the
+// failed-counter snapshot, and the monotonic start. Tuple slot rule:
+// t0 is a long — the success arm returns it first so the slot pins wide.
+_it_begin(_ctx: ptr, description: string) -> (ptr, int, long) {
     fw = _fw_of(_ctx)
-    passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
-    depth_ref = map.get_raw(fw, "depth")
 
     // Run before hooks (inherited outer-to-inner)
     _run_befores(_ctx)
@@ -286,14 +301,22 @@ _it_impl(_ctx: ptr, description: string, test_fn: fn, budget_ns: long) {
     // than through ref() cells because ref_get truncates to 32 bits.
     it_rec = map.new()
     map.put_raw(it_rec, "name", description)
-    its_list = map.get_raw(fw, "its")
     map.put_raw(fw, "current_it", it_rec)
 
     // Monotonic clock for the elapsed span — only the delta matters,
     // and clock_ns() (wall clock) could jump under NTP/DST mid-test.
     t_start_ns = os.now_monotonic_ns()
     old_failed = ref_get(failed_ref)
-    call(test_fn)
+    return it_rec, old_failed, t_start_ns
+}
+
+// Second half: everything after the test body ran.
+_it_end(_ctx: ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns: long, budget_ns: long) {
+    fw = _fw_of(_ctx)
+    passed_ref = map.get_raw(fw, "passed")
+    failed_ref = map.get_raw(fw, "failed")
+    depth_ref = map.get_raw(fw, "depth")
+    its_list = map.get_raw(fw, "its")
     t_end_ns = os.now_monotonic_ns()
     elapsed_ns = t_end_ns - t_start_ns
 
@@ -756,24 +779,13 @@ fn _teardown(fw: ptr) {
     i = 0
     while i < ns {
         s = list.get_raw(suites, i)
-        bl = map.get_raw(s, "befores")
-        nb = list.size(bl)
-        j = 0
-        while j < nb {
-            libc_free(list.get_raw(bl, j))
-            list.set(bl, j, null)
-            j = j + 1
-        }
-        list.free(bl)
-        al = map.get_raw(s, "afters")
-        na = list.size(al)
-        j = 0
-        while j < na {
-            libc_free(list.get_raw(al, j))
-            list.set(al, j, null)
-            j = j + 1
-        }
-        list.free(al)
+        // Hook lists own their closures (before_each/after_each add the
+        // fn value directly, which routes through list_add_closure_owned),
+        // so list.free reclaims each box AND its captured environment.
+        // Freeing the boxes manually here would orphan the environments
+        // the owned slots were about to reclaim (#1577).
+        list.free(map.get_raw(s, "befores"))
+        list.free(map.get_raw(s, "afters"))
         map.free(s)
         list.set(suites, i, null)
         i = i + 1

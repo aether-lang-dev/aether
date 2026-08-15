@@ -31,6 +31,22 @@ version number before tagging the release.
   documents usage, the operator set, and the honest Tier-1 limits; the
   AST-level upgrade path is the reason the tool now lives in-tree.
 
+### Fixed
+- FreeBSD: the `ae` driver, `aetherc` module resolver, and `ae help` now
+  locate the running executable via the `KERN_PROC_PATHNAME` sysctl
+  (with a `/proc/curproc/file` fallback for jails that deny the sysctl)
+  instead of Linux-only `/proc/self/exe`, so `ae build`/`ae run` work on
+  a stock FreeBSD install without a mounted linprocfs (#1586). Verified
+  on GhostBSD 14 (build + `ae build` + self-path acceptance).
+- `std.spec` no longer leaks closure environments: `before_each` /
+  `after_each` store hook closures through the list-owned coercion (the
+  list reclaims box and environment at teardown), and `it` / `it_within`
+  invoke the test body themselves instead of forwarding it, so the
+  caller-side transient-callback drain frees each capturing it-callback's
+  environment (#1577). `test_spec_module` is now valgrind-clean (0
+  leaks, was 4 blocks) and its `tests/leaks_known.txt` cap is removed.
+  docs/closures-and-lifetimes.md documents both leak shapes.
+
 ## [0.539.0]
 
 ### Added
