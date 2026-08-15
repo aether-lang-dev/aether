@@ -1,0 +1,11 @@
+// Regression fixture for std.mutation. Two operator sites, chosen so
+// the mutation outcome is fully deterministic. The function `add` is
+// tested (its arithmetic mutant gets killed); the function `mul` is not
+// tested (its mutant survives). Comments here deliberately avoid any
+// whitespace-padded operator token so the text-based mutator sees only
+// the two real code sites below.
+exports(add, mul)
+
+add(a: int, b: int) -> int { return a + b }
+
+mul(a: int, b: int) -> int { return a * b }

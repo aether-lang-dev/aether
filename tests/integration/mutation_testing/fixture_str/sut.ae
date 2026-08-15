@@ -1,0 +1,14 @@
+// String-mutation regression fixture for std.mutation. Three string
+// literals in the code below: name (tested, killed), motto (untested,
+// survives), and help, whose body holds an arithmetic operator inside a
+// string that the operator mutators MUST skip. No code-level arithmetic
+// operators exist, so every mutant is a string mutant: one killed, two
+// survived. (This comment avoids quote characters on purpose, so the
+// mutator sees only the three real literals below.)
+exports(name, motto, help)
+
+name() -> string { return "alice" }
+
+motto() -> string { return "untested" }
+
+help() -> string { return "a + b" }

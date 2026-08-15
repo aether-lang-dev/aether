@@ -1,0 +1,12 @@
+// Code under test for the mutation-testing demo (docs/mutation-testing.md).
+// The point of mutation testing is to check how well calc_test.ae tests
+// this code. NB: comments in a mutated SUT deliberately avoid padded
+// operator tokens and quote characters, so the text-based mutator sees
+// only the real code sites below.
+exports(add, abs)
+
+add(a: int, b: int) -> int { return a + b }
+
+abs(n: int) -> int {
+    if n < 0 { return 0 - n } else { return n }
+}

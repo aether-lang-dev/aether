@@ -1,0 +1,14 @@
+import std.spec
+import sut
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "sut") {
+        // Only name() is pinned. motto() and help() are unchecked, so
+        // blanking their strings survives.
+        spec.it("name") callback {
+            spec.assert_str_eq(sut.name(), "alice", "name")
+        }
+    }
+    spec.run_summary(fw)
+}
