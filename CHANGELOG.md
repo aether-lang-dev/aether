@@ -25,19 +25,23 @@ version number before tagging the release.
   default, so every existing caller is unaffected. Keeps
   target-awareness at the edge: nothing in std.spec or the test sources
   knows it is running under an emulator.
-- CI fast lane `windows-cross` in windows.yml (#1593): cross-builds for
-  Windows on an ubuntu runner, verifies the artifacts really are PE,
-  warms a Wine prefix once, and runs the base of the test pyramid under
-  Wine via `AE_TEST_RUNNER=wine`. The slow MSYS2 legs now `needs:` it,
-  so a fast-lane failure skips ~20 minutes of doomed compute. Surfaces
-  Windows-only `-Werror`/MinGW breakage minutes into a PR instead of
-  ~20. It is an EARLIER signal, never a replacement: MSYS2 remains the
-  fidelity tip, and everything Wine cannot speak for honestly (fs/path
-  semantics, IOCP/TransmitFile sockets, actor timing, the LD_PRELOAD
-  containment layer) is excluded by name in
-  `tests/ae_sweep_prune_wine.txt`. `make test-ae` gained
-  `AE_SWEEP_EXTRA_PRUNE=<file>` to layer that list on top of the base
-  prune list.
+- CI fast lane `windows-cross` in windows.yml (#1593): cross-builds
+  compiler + ae + stdlib for Windows on an ubuntu runner and verifies
+  the artifacts really are PE. The slow MSYS2 legs now `needs:` it, so a
+  fast-lane failure skips ~20 minutes of doomed compute, and Windows-only
+  COMPILE breakage surfaces minutes into a PR instead of ~20. It is an
+  EARLIER signal, never a replacement: MSYS2 remains the fidelity tip and
+  the only tier that runs anything.
+  Running the suite under Wine was attempted and deferred: `ae` is a
+  compile-and-run driver, so `ae run` inside a Wine prefix wants a
+  Windows C toolchain there to compile the C it emits, and driving the
+  native `ae` via `AE_CC` needs a Windows `libaether.a` alongside the
+  native one. The analysis of what such a lane must never claim to cover
+  is kept in `tests/ae_sweep_prune_wine.txt`.
+- `make test-ae` gained `AE_SWEEP_EXTRA_PRUNE=<file>`, layering an extra
+  exclusion list over `tests/ae_sweep_prune.txt` — applied to both the
+  `.ae` and the `.sh` sweeps (the latter previously had no prune filter
+  at all).
 - A build-target stamp (`build/.build-target`): a native build after a
   cross build (or vice versa) now fails immediately with an actionable
   message instead of dying deep in the link with "unknown file type" —

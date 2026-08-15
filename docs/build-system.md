@@ -298,15 +298,22 @@ emulator — the same `describe`/`it` blocks run either way, and the
 `AE_SPEC_FORMAT`/`AE_SPEC_REPORT` structured-report contract is inherited
 straight through the wrapper.
 
-CI uses exactly this for the fast Windows lane (`windows-cross` in
-`.github/workflows/windows.yml`): cross-build on a Linux runner, then run the
-base of the test pyramid under Wine. The pyramid's upper tiers — filesystem
-and path semantics, sockets/HTTP/h2, actor-scheduler timing, and the
-LD_PRELOAD containment layer — are excluded by name in
-`tests/ae_sweep_prune_wine.txt`, because Wine cannot speak for them honestly;
-the MSYS2 jobs on real Windows remain the gate for those. Layer an extra
-exclusion list onto a sweep with
-`make test-ae AE_SWEEP_EXTRA_PRUNE=<file>`.
+Layer an extra exclusion list onto a sweep with
+`make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
+`.sh` sweeps).
+
+**Wine and the Windows cross lane.** CI's `windows-cross` job
+(`.github/workflows/windows.yml`) currently cross-builds only — it does not
+run the suite under Wine. That was attempted and deferred for a structural
+reason worth knowing before trying again: `ae` is a *compile-and-run* driver,
+so `ae run`/`ae test` inside a Wine prefix want a **Windows** C toolchain
+there to compile the C the compiler emits (the driver tries to fetch
+MinGW-w64). Driving the *native* `ae` with `AE_CC="zig cc -target
+x86_64-windows-gnu"` avoids that, but then needs a Windows `libaether.a`
+kept alongside the native one — and one `build/` tree holds exactly one
+target's archives. `tests/ae_sweep_prune_wine.txt` records which areas such
+a lane must never claim to cover (fs/path semantics, sockets/h2, actor
+timing, the LD_PRELOAD sandbox).
 
 ### Docker-Based Cross-Compilation
 

@@ -15,39 +15,40 @@ on:
 #
 # Two tiers (#1592 / #1593):
 #   1. windows-cross — a FAST lane on a Linux runner: `zig cc -target
-#      x86_64-windows-gnu` cross-build (~minutes), then the base of the test
-#      pyramid RUN under Wine. Catches Windows-only compile breakage (missing
-#      Win32 shims, MinGW-class portability bugs) while the author is still
-#      in the PR.
-#   2. build-mingw / headers-msvc — the real thing on windows-latest. These
-#      are the FIDELITY TIP and the actual gate; Wine speaks for neither
-#      NTFS path semantics, IOCP/TransmitFile sockets, nor actor timing.
+#      x86_64-windows-gnu` cross-build of compiler + ae + stdlib, in a few
+#      minutes. Catches Windows-only COMPILE breakage (missing Win32 shims,
+#      MinGW-class portability bugs) while the author is still in the PR.
+#   2. build-mingw / headers-msvc — the real thing on windows-latest, and
+#      the only tier that RUNS anything. The actual gate.
 #
-# The slow tier `needs:` the fast one, so a cross-build or Wine failure skips
-# ~20 minutes of doomed MSYS2 compute. Cost: the MSYS2 legs start a few
-# minutes later on green runs — worth it, since the actionable signal lands
-# at minute ~4 either way.
+# The slow tier `needs:` the fast one, so a cross-build failure skips ~20
+# minutes of doomed MSYS2 compute. Cost: the MSYS2 legs start a few minutes
+# later on green runs — worth it, since a compile break surfaces at minute
+# ~4 instead of ~20.
+#
+# NOT running tests under Wine here is deliberate (#1593 tried it). `ae` is a
+# compile-and-run driver: `ae run` under Wine needs a WINDOWS C toolchain
+# inside the Wine prefix to compile the C it emits — it tried to download
+# 250 MB of MinGW-w64 mid-job. Driving the native `ae` with
+# AE_CC="zig cc -target ..." instead needs a Windows libaether.a living
+# beside the native one, which one build/ tree cannot hold. Executing tests
+# on a Linux runner is therefore a separate piece of work, tracked in its
+# own issue; the compile half stands on its own.
 
 jobs:
   # ============================================================
-  # FAST LANE — cross-build for Windows on Linux, test under Wine
+  # FAST LANE — cross-build for Windows on a Linux runner
   # ============================================================
   windows-cross:
-    name: Windows / cross-build + Wine tests (x86_64)
+    name: Windows / cross-build (x86_64)
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install toolchain + Wine
-      run: |
-        sudo apt-get update
-        # Wine 9+/10's WoW64 means an x86_64-only target needs no i386
-        # multilib. Package name varies by image generation.
-        sudo apt-get install -y gcc make bc curl xz-utils wine64 || \
-          sudo apt-get install -y gcc make bc curl xz-utils wine
-        wine --version || wine64 --version
+    - name: Install toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
     # Same provisioning + cache discipline as ci.yml's FreeBSD cross leg:
     # restore on every run, save only on a main-merge miss. zig bundles the
@@ -114,39 +115,6 @@ jobs:
         file build/aetherc.exe build/ae.exe
         file build/ae.exe | grep -q 'PE32+' || { echo "ae.exe is not a PE binary"; exit 1; }
         file build/aetherc.exe | grep -q 'PE32+' || { echo "aetherc.exe is not a PE binary"; exit 1; }
-
-    # Warm the prefix ONCE — per-test wineboot costs more than the tests.
-    - name: Warm the Wine prefix
-      run: |
-        export WINEDEBUG=-all
-        wineboot --init
-        wineserver -w
-
-    # Smoke first: if ae.exe cannot build and run hello-world under Wine,
-    # every sweep failure below would be noise from one root cause.
-    - name: Smoke — hello world through ae.exe under Wine
-      run: |
-        export WINEDEBUG=-all
-        printf 'main() { println("hello from cross-built ae") }\n' > /tmp/hello.ae
-        wine build/ae.exe run /tmp/hello.ae 2>&1 | tee /tmp/hello.out
-        grep -q "hello from cross-built ae" /tmp/hello.out
-
-    # The base of the pyramid, under Wine. AE_TEST_RUNNER (#1592) prefixes
-    # each built test binary with `wine`; nothing in std.spec or the test
-    # sources knows it is running under an emulator. The exclusions are
-    # named in tests/ae_sweep_prune_wine.txt, not skipped silently.
-    - name: Run base-of-pyramid .ae tests under Wine
-      env:
-        WINEDEBUG: -all
-        AE_TEST_RUNNER: wine
-        AE_SWEEP_EXTRA_PRUNE: tests/ae_sweep_prune_wine.txt
-        # Wine adds per-process startup latency; the default 120s per-test
-        # budget is tight for the slowest compile-and-run cases.
-        AE_TEST_TIMEOUT: 300
-      run: |
-        make test-ae \
-          WINDOWS=1 \
-          ZIG="${{ steps.prov.outputs.zig }}"
 
     - name: Upload cross-built binaries
       if: always()

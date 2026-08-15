@@ -1,12 +1,19 @@
-# EXTRA prune list for the Wine cross-test lane (#1593), layered ON TOP of
+# Exclusion list for a Wine-based cross-test lane, layered ON TOP of
 # ae_sweep_prune.txt via `make test-ae AE_SWEEP_EXTRA_PRUNE=<this file>`.
 # Matched as fixed substrings of the path, same as the base list.
 #
-# These are NOT skipped because they fail — they are skipped because passing
-# or failing under Wine would tell us nothing trustworthy about Windows. The
-# MSYS2 jobs are the fidelity tip and remain the gate for every area below;
-# this lane exists only to deliver an EARLIER signal on the parts where Wine
-# is faithful (compiler, codegen, pure computation).
+# STATUS: not yet wired to CI. The #1593 attempt found that running the
+# suite under Wine needs more than Wine — `ae` is a compile-and-run driver,
+# so `ae run` inside a Wine prefix wants a WINDOWS C toolchain there to
+# compile the C it emits, and driving the native `ae` with
+# AE_CC="zig cc -target ..." needs a Windows libaether.a alongside the
+# native one. Until that is built, the CI fast lane is compile-only. The
+# file is kept because the ANALYSIS below is the durable part: it is the
+# list of areas a Wine lane must never claim to cover.
+#
+# These are not "tests that fail under Wine" — they are tests whose result
+# under Wine would tell us nothing trustworthy about Windows. The MSYS2 jobs
+# are the fidelity tip and remain the gate for every area below.
 #
 # Adding to this list is cheap; removing from it needs evidence that Wine's
 # behaviour matches real Windows for that surface.
