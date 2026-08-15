@@ -534,6 +534,15 @@ source file, source line, in a layout-stable, allocation-free form
 that any FFI consumer (Python ctypes, Java Panama, Ruby Fiddle,
 Node-API, hand-rolled `dlsym`) can walk directly.
 
+The entry point is emitted **weak** (`__attribute__((weak))` under
+GCC/Clang, #1590), so an orchestrator that links several `--emit=lib`
+TUs into one artifact (aeb's regen shape: one C per module, one final
+link) needs no `-Wl,--allow-multiple-definition` — the multi-TU
+static-clone link model of 0.539 holds for lib TUs too, on ld64 as well
+as GNU ld. In a lone `.so` nothing changes: one definition, same dlsym
+contract. In a deliberate multi-TU link the first TU's catalog wins;
+treat `aether_lib_meta` as meaningful only on single-module artifacts.
+
 ```c
 typedef struct {
     const char* aether_name;     /* "double_int", "std.fs.copy"      */
