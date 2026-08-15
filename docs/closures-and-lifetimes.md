@@ -184,6 +184,24 @@ lifetime"):
   (the `fn → ptr` coercion) and the list owns the box; `list.free` now
   reclaims the captured env as well as the box (`owned_flags == 2`).
 
+Two shapes defeat these paths and leak the env — both bit `std.spec`
+(#1577):
+
+- **Forwarding a `fn` parameter.** The transient-callback drain fires
+  only when the callee *calls* its `fn` parameter. Passing it on to
+  another function (`it(cb) { it_impl(cb) }`) is an escape from the
+  callee's point of view, so the caller keeps the env alive forever.
+  Restructure so the exported function invokes the parameter itself —
+  split the shared logic into begin/end halves around the `call()` if
+  needed (that is exactly how `std.spec`'s `it`/`it_within` are built).
+
+- **Explicit `box_closure()` into a list.** The list-owns-the-env path
+  is keyed off the `fn → ptr` coercion at the `list.add` call site.
+  `list.add(l, box_closure(f))` hands the list a raw pointer it cannot
+  know it owns; nothing reclaims box or env. Add the `fn` value
+  directly (`list.add(l, f)`) and the owned coercion does the boxing
+  and the reclamation.
+
 Still a leak (the safe side of the leak-vs-UAF trade): **L5 below**,
 reassigning a closure *variable* drops the previous env, because without
 whole-program escape analysis the codegen can't prove the old env is

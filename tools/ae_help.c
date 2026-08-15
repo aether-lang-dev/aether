@@ -43,6 +43,10 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <limits.h>
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
 
 #ifdef _WIN32
 #  include <io.h>
@@ -820,6 +824,16 @@ static int find_aetherc(char* out, size_t out_size) {
                 ae_dir[0] = '\0';
             }
         }
+    }
+#elif defined(__FreeBSD__)
+    /* #1586: same FreeBSD self-path as get_exe_path in ae.c. */
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t fb_len = sizeof(ae_dir);
+    if (sysctl(mib, 4, ae_dir, &fb_len, NULL, 0) == 0 && fb_len > 1) {
+        char* fslash = strrchr(ae_dir, '/');
+        if (fslash) *fslash = '\0';
+    } else {
+        ae_dir[0] = '\0';
     }
 #else
     ssize_t rl = readlink("/proc/self/exe", ae_dir, sizeof(ae_dir) - 1);
