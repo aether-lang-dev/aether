@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [current]
+## [0.542.0]
 
 ### Added
 - std.spec's fluent value-comparison matchers take an optional trailing
