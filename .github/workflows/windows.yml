@@ -12,8 +12,120 @@ on:
 # Build the Aether compiler and ae CLI on Windows using MinGW (GCC).
 # MinGW gives us the same GCC/Clang toolchain surface without an MSVC license,
 # while our aether_thread.h Win32 compat layer keeps the runtime fully native.
+#
+# Two tiers (#1592 / #1593):
+#   1. windows-cross — a FAST lane on a Linux runner: `zig cc -target
+#      x86_64-windows-gnu` cross-build of compiler + ae + stdlib, in a few
+#      minutes. Catches Windows-only COMPILE breakage (missing Win32 shims,
+#      MinGW-class portability bugs) while the author is still in the PR.
+#   2. build-mingw / headers-msvc — the real thing on windows-latest, and
+#      the only tier that RUNS anything. The actual gate.
+#
+# The slow tier `needs:` the fast one, so a cross-build failure skips ~20
+# minutes of doomed MSYS2 compute. Cost: the MSYS2 legs start a few minutes
+# later on green runs — worth it, since a compile break surfaces at minute
+# ~4 instead of ~20.
+#
+# NOT running tests under Wine here is deliberate (#1593 tried it). `ae` is a
+# compile-and-run driver: `ae run` under Wine needs a WINDOWS C toolchain
+# inside the Wine prefix to compile the C it emits — it tried to download
+# 250 MB of MinGW-w64 mid-job. Driving the native `ae` with
+# AE_CC="zig cc -target ..." instead needs a Windows libaether.a living
+# beside the native one, which one build/ tree cannot hold. Executing tests
+# on a Linux runner is therefore a separate piece of work, tracked in its
+# own issue; the compile half stands on its own.
 
 jobs:
+  # ============================================================
+  # FAST LANE — cross-build for Windows on a Linux runner
+  # ============================================================
+  windows-cross:
+    name: Windows / cross-build (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+
+    # Same provisioning + cache discipline as ci.yml's FreeBSD cross leg:
+    # restore on every run, save only on a main-merge miss. zig bundles the
+    # mingw-w64 headers + CRT sources, so unlike the FreeBSD leg there is NO
+    # sysroot to fetch.
+    - name: Checkout aether-crossbuild
+      uses: actions/checkout@v4
+      with:
+        repository: aether-lang-dev/aether-crossbuild
+        path: crossbuild
+        fetch-depth: 1
+
+    - name: Restore zig toolchain cache
+      id: zig_cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          crossbuild/toolchain
+          crossbuild/work/downloads
+        key: zig-only-${{ hashFiles('crossbuild/deps.lock') }}
+
+    - name: Provision zig
+      id: prov
+      run: |
+        cd crossbuild
+        ./scripts/get-zig.sh
+        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
+        test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        echo "zig=$ZIG" >> "$GITHUB_OUTPUT"
+        "$ZIG" version
+
+    - name: Save zig toolchain cache (merge to main, on miss only)
+      if: >-
+        github.event_name == 'push' && github.ref == 'refs/heads/main'
+        && steps.zig_cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          crossbuild/toolchain
+          crossbuild/work/downloads
+        key: zig-only-${{ hashFiles('crossbuild/deps.lock') }}
+
+    # The fail-fast half: Windows-only -Werror breakage, MinGW __thread
+    # traps and missing Win32 shims surface here, minutes into the PR.
+    #
+    # NB warnings here are NOT fatal (this builds the plain targets, not
+    # `make ci`). zig's bundled mingw-w64 headers are not byte-identical to
+    # MSYS2's — e.g. a couple of -Wsign-compare diagnostics originate inside
+    # Winsock's own FD_SET macro, where SOCKET is unsigned. Promoting those
+    # to errors would fail the fast lane on a third-party header and train
+    # people to ignore it. Warning-as-error enforcement stays with the MSYS2
+    # legs below, against the headers Windows users actually compile with.
+    - name: Cross-build the toolchain for Windows (WINDOWS=1)
+      run: |
+        make compiler ae stdlib \
+          WINDOWS=1 \
+          ZIG="${{ steps.prov.outputs.zig }}" \
+          -j"$(nproc)"
+
+    # A cross build that silently emitted Linux binaries would prove nothing
+    # (mirrors the FreeBSD leg's `file | grep FreeBSD` guard).
+    - name: Verify the artifacts really are PE
+      run: |
+        file build/aetherc.exe build/ae.exe
+        file build/ae.exe | grep -q 'PE32+' || { echo "ae.exe is not a PE binary"; exit 1; }
+        file build/aetherc.exe | grep -q 'PE32+' || { echo "aetherc.exe is not a PE binary"; exit 1; }
+
+    - name: Upload cross-built binaries
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: aether-windows-cross-x86_64
+        path: |
+          build/aetherc.exe
+          build/ae.exe
+        retention-days: 7
+
   # ============================================================
   # MinGW build — primary Windows target
   # Full CI suite: compiler (-Werror), ae, stdlib, unit tests,
@@ -25,6 +137,12 @@ jobs:
   build-mingw:
     name: Build + Test (Windows / ${{ matrix.msystem }})
     runs-on: windows-latest
+    # Gate on the fast lane (#1593): a cross-build or Wine failure skips
+    # ~20 minutes of doomed MSYS2 compute. `needs:`-skipped jobs report as
+    # SKIPPED, not failed — with these as required checks the PR still
+    # reads red from windows-cross's own failure, so branch protection
+    # behaves correctly.
+    needs: windows-cross
 
     strategy:
       fail-fast: false
@@ -110,6 +228,7 @@ jobs:
   headers-msvc:
     name: Header compatibility (MSVC)
     runs-on: windows-latest
+    needs: windows-cross
 
     steps:
     - name: Checkout repository

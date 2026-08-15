@@ -244,6 +244,77 @@ make stdlib EXTRA_CFLAGS="-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
 
 The Makefile auto-detects `AETHER_NO_THREADING` in `EXTRA_CFLAGS` and switches to the cooperative scheduler automatically. It also omits `-pthread` from linker flags.
 
+### Cross-building the toolchain itself (`FREEBSD=1` / `WINDOWS=1`)
+
+`PLATFORM` above selects a scheduler/feature profile. Two separate knobs
+cross-build the **`ae`/`aetherc` toolchain itself** for another OS, both via
+`zig cc`:
+
+```bash
+# FreeBSD x86_64 (needs a base sysroot: zig bundles no FreeBSD libc)
+make compiler ae stdlib FREEBSD=1 ZIG=/path/to/zig AETHER_SYSROOT=/path/to/base
+
+# Windows x86_64 — no sysroot needed: zig bundles the mingw-w64 headers + CRT
+make compiler ae stdlib WINDOWS=1 ZIG=/path/to/zig
+file build/ae.exe    # PE32+ executable (console) x86-64, for MS Windows
+```
+
+Provision `zig` with the [aether-crossbuild](https://github.com/aether-lang-dev/aether-crossbuild)
+repo's `scripts/get-zig.sh` (the same source CI uses).
+
+Both cross builds are **capability-lean**: OpenSSL, zlib, nghttp2 and YAML are
+forced off, because the host's `pkg-config` would resolve the *host's* Linux
+libraries and poison the target binary. Those std features ship as their
+"unavailable" stubs, exactly as in any build without the libraries. Vendored
+PCRE2 needs no host library, so `std.regex` survives.
+
+One `build/` tree holds one target's objects and archives — they are not
+interchangeable (ELF vs PE). The tree carries a `build/.build-target` stamp and
+a mismatching build stops immediately with an actionable error rather than
+failing deep in the link; `make clean` between targets is the fix (and `clean`
+itself is never blocked by the guard).
+
+**Testing a cross-built toolchain**: see `AE_TEST_RUNNER` in the next
+section.
+
+### Testing with a runner (`AE_TEST_RUNNER`)
+
+`ae run` and `ae test` normally exec the binary they just built. Setting
+`AE_TEST_RUNNER` makes them prefix it with a wrapper instead — the same idea as
+cargo's `CARGO_TARGET_<triple>_RUNNER`:
+
+```bash
+# Run the cross-built Windows toolchain's output under Wine
+AE_TEST_RUNNER=wine make test-ae WINDOWS=1 ZIG=/path/to/zig
+
+# Any wrapper works — qemu-user, a tracer, a timing harness
+AE_TEST_RUNNER="qemu-aarch64 -L /sysroot" ae test
+```
+
+Unset or empty means "exec directly", so it is inert by default. The value may
+carry its own arguments. Because the hook sits at the *edge*, nothing in
+`std.spec` or in your test sources needs to know it is running under an
+emulator — the same `describe`/`it` blocks run either way, and the
+`AE_SPEC_FORMAT`/`AE_SPEC_REPORT` structured-report contract is inherited
+straight through the wrapper.
+
+Layer an extra exclusion list onto a sweep with
+`make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
+`.sh` sweeps).
+
+**Wine and the Windows cross lane.** CI's `windows-cross` job
+(`.github/workflows/windows.yml`) currently cross-builds only — it does not
+run the suite under Wine. That was attempted and deferred for a structural
+reason worth knowing before trying again: `ae` is a *compile-and-run* driver,
+so `ae run`/`ae test` inside a Wine prefix want a **Windows** C toolchain
+there to compile the C the compiler emits (the driver tries to fetch
+MinGW-w64). Driving the *native* `ae` with `AE_CC="zig cc -target
+x86_64-windows-gnu"` avoids that, but then needs a Windows `libaether.a`
+kept alongside the native one — and one `build/` tree holds exactly one
+target's archives. `tests/ae_sweep_prune_wine.txt` records which areas such
+a lane must never claim to cover (fs/path semantics, sockets/h2, actor
+timing, the LD_PRELOAD sandbox).
+
 ### Docker-Based Cross-Compilation
 
 For cross-compilation without installing toolchains locally:

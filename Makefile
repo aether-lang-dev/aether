@@ -12,6 +12,17 @@
 # IS_WINDOWS is set for any Windows variant (native, MSYS2, MinGW, Cygwin).
 WINDOWS_NATIVE :=
 IS_WINDOWS :=
+# WINDOWS=1 — cross-build FOR Windows from a non-Windows host (see the
+# "Windows cross-build" block below). Declared here, ahead of host
+# detection, because every downstream conditional keys off IS_WINDOWS /
+# EXE_EXT: the cross build wants the Windows CODE PATHS with a Linux
+# host's shell utilities, so it sets those two and leaves WINDOWS_NATIVE
+# (which switches to cmd.exe-isms like `if not exist`) unset.
+ifeq ($(WINDOWS),1)
+    IS_WINDOWS := 1
+    EXE_EXT := .exe
+    DETECTED_OS := MINGW64_NT-cross
+endif
 ifeq ($(OS),Windows_NT)
     IS_WINDOWS := 1
     _UNAME_S := $(shell uname -s 2>&1)
@@ -29,7 +40,7 @@ ifeq ($(OS),Windows_NT)
         EXE_EXT := .exe
         WINDOWS_NATIVE := 1
     endif
-else
+else ifneq ($(WINDOWS),1)
     DETECTED_OS := $(shell uname -s)
     ifneq ($(findstring MINGW,$(DETECTED_OS)),)
         EXE_EXT := .exe
@@ -150,6 +161,8 @@ $(VERSION_HEADER): VERSION Makefile
 	  mv "$$tmp" "$(VERSION_HEADER)"; \
 	  echo "Generated $(VERSION_HEADER) (v$(VERSION))"; \
 	fi
+	@mkdir -p build 2>/dev/null || true
+	@echo "$(BUILD_TARGET_ID)" > "$(BUILD_TARGET_STAMP)"
 
 # Convenience phony alias for explicit regeneration (e.g. `make gen-version-header`).
 .PHONY: gen-version-header
@@ -269,6 +282,86 @@ ifeq ($(FREEBSD),1)
     $(AETHER_SYSROOT)/lib/libm.so.5 $(AETHER_SYSROOT)/usr/lib/crtn.o \
     -lcasper -lcap_pwd -lcap_sysctl -lcap_grp -lcap_dns \
     -L$(AETHER_SYSROOT)/usr/lib -L$(AETHER_SYSROOT)/lib
+endif
+
+# ---------------------------------------------------------------------------
+# Windows cross-build (WINDOWS=1) — build the ae/aetherc toolchain FOR Windows
+# from a Linux (or any) host, via `zig cc -target x86_64-windows-gnu` (#1592).
+# Companion to FREEBSD=1 above, and deliberately simpler: zig BUNDLES the
+# mingw-w64 headers and CRT sources and builds them on demand, so unlike the
+# FreeBSD leg there is NO sysroot to fetch and no -nostdlib CRT bookkeeping.
+#
+# Required input:
+#   ZIG   path to a zig binary (>= 0.13)   e.g. .../zig
+# Provision with the aether-crossbuild repo's get-zig.sh (same as FreeBSD).
+#
+# Purpose is a FAST Windows signal on a Linux runner (#1593): the MSYS2 legs
+# take ~20 minutes, so Windows-specific compile breakage is discovered long
+# after the author moved on. This lane compiles the same code
+# paths in a few minutes. It is an EARLIER signal, never a replacement — the
+# MSYS2 jobs stay the fidelity tip.
+#
+# Capability-lean by design: the optional Tier-2 libs are forced OFF, exactly
+# as the FreeBSD cross does and for the same reason — host pkg-config would
+# find the host's Linux libs and poison the Windows binary. Cross-compiling
+# OpenSSL/nghttp2 for windows-gnu is the genuinely expensive part and is out
+# of scope; std ships those features as their "unavailable" stubs. Vendored
+# PCRE2 needs no host library, so std.regex stays available.
+WINDOWS_CPU ?= x86_64
+ifeq ($(WINDOWS),1)
+  ifeq ($(ZIG),)
+    $(error WINDOWS=1 needs ZIG=<path to zig> (>= 0.13))
+  endif
+  CC := $(ZIG) cc -target $(WINDOWS_CPU)-windows-gnu
+  AR := $(ZIG) ar
+  RANLIB := $(ZIG) ranlib
+  # Host pkg-config is wrong for the target — force the optional libs off.
+  OPENSSL := 0
+  ZLIB := 0
+  NGHTTP2 := 0
+  YAML := 0
+  # PCRE2 has a vendored in-tree fallback (no host library involved), so
+  # std.regex survives the cross build.
+  PCRE2 := vendored
+  # NB __USE_MINGW_ANSI_STDIO=1 still applies (it keys off IS_WINDOWS
+  # below): zig ships mingw-w64's libmingwex, so the __mingw_* printf
+  # family resolves exactly as it does under MSYS2. Verified by a clean
+  # cross-build + link of compiler/ae/stdlib.
+endif
+
+# A cross build OWNS build/ for the duration: build/obj holds PE objects and
+# build/libaether*.a become Windows archives, so a native build afterwards
+# links host code against Windows objects and dies deep in the link with
+# confusing errors. Rather than fork the whole tree layout (dozens of rules
+# reference build/libaether.a by literal path), stamp the tree with the
+# target it was last built for and fail loudly at the START of the next
+# mismatching build. `make clean` between targets is the fix; CI runners
+# build one target per job and never hit it.
+# Literal `build/` (not $(BUILD_DIR)): this block runs ahead of the
+# BUILD_DIR assignment further down, and the version-header rule that
+# writes the stamp is earlier still.
+BUILD_TARGET_STAMP := build/.build-target
+ifeq ($(WINDOWS),1)
+  BUILD_TARGET_ID := windows-$(WINDOWS_CPU)
+else ifeq ($(FREEBSD),1)
+  BUILD_TARGET_ID := freebsd-$(FREEBSD_CPU)
+else
+  BUILD_TARGET_ID := native-$(DETECTED_OS)
+endif
+_STAMPED := $(strip $(shell cat $(BUILD_TARGET_STAMP) 2>/dev/null))
+# The check runs at PARSE time, so it must not fire for the very goals that
+# resolve it: `make clean` (and clean-ish goals) would otherwise be
+# unreachable — the guard would block the only way out of the state it is
+# complaining about. $(MAKECMDGOALS) is empty for a bare `make` (== all).
+_CLEAN_ONLY := $(if $(strip $(filter-out clean distclean help,$(or $(MAKECMDGOALS),all))),,1)
+ifneq ($(_STAMPED),)
+ifneq ($(_STAMPED),$(BUILD_TARGET_ID))
+ifneq ($(_CLEAN_ONLY),1)
+$(error build/ holds $(_STAMPED) artifacts but this is a $(BUILD_TARGET_ID) build. \
+Object and archive formats do not mix — run `make clean` first (or build the \
+other target in a separate checkout))
+endif
+endif
 endif
 
 # MinGW / MSYS2 (native Windows): bind the printf family to the
@@ -478,7 +571,12 @@ endif
 # only the loader/threads/math libs are needed at link time; macOS needs the
 # audio frameworks. Windows folds its audio into the existing WIN_LINK_LIBs.
 AUDIO_LDFLAGS :=
-ifeq ($(shell uname -s),Linux)
+# Keyed on the HOST uname, so a cross build must opt out explicitly or it
+# picks up the host's POSIX libs (zig-lld: "unable to find dynamic system
+# library 'pthread'"). Windows folds audio into WIN_LINK_LIBS either way.
+ifeq ($(WINDOWS),1)
+  AUDIO_LDFLAGS :=
+else ifeq ($(shell uname -s),Linux)
   AUDIO_LDFLAGS := -lpthread -ldl -lm
 else ifeq ($(shell uname -s),FreeBSD)
   AUDIO_LDFLAGS := -lpthread -lm
@@ -534,10 +632,12 @@ ifeq ($(HARDEN),1)
 CFLAGS += -fstack-protector-all -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security
 endif
 ifneq ($(FREEBSD),1)
+ifneq ($(WINDOWS),1)
 ifneq ($(PLATFORM),wasm)
 ifneq ($(PLATFORM),embedded)
 ifeq ($(findstring AETHER_NO_THREADING,$(EXTRA_CFLAGS)),)
 AETHER_REQUIRED_LDFLAGS += -pthread
+endif
 endif
 endif
 endif
@@ -1045,6 +1145,10 @@ test-ae: compiler ae stdlib
 	chmod +x "$$script"; \
 	root=$$(pwd); \
 	sed '/^#/d' tests/ae_sweep_prune.txt > "$$tmpdir/prune.txt"; \
+	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
+	  sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" >> "$$tmpdir/prune.txt"; \
+	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
+	fi; \
 	find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null \
 	    | grep -v -F -f "$$tmpdir/prune.txt" | sort | \
 	xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
@@ -1076,7 +1180,13 @@ test-ae: compiler ae stdlib
 	printf 'done\n'                                                                                               >> "$$sh_script"; \
 	chmod +x "$$sh_script"; \
 	sh_nproc=$${SH_NPROC:-1}; \
+	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
+	  sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" > "$$tmpdir/shprune.txt"; \
+	else \
+	  : > "$$tmpdir/shprune.txt"; \
+	fi; \
 	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
+	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
 	    | xargs -P $$sh_nproc -I{} "$$sh_script" "{}" "$$tmpdir"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \

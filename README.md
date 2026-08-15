@@ -6,13 +6,13 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20WASM%20%7C%20Embedded-lightgrey)]()
 [![Website](https://img.shields.io/badge/website-aether--lang.dev-8A2BE2)](https://aether-lang.dev/)
 
-A compiled actor language whose permissions are part of the source, enforced from compile time down to libc. No VM and no garbage collector: the compiler emits readable C.
+A compiled actor language whose permissions are part of the source, enforced from compile time down to libc (the libc layer on Linux/FreeBSD; Windows gets the compile-time and scope layers). No VM and no garbage collector: the compiler emits readable C.
 
 **Website: [aether-lang.dev](https://aether-lang.dev/)**
 
 ## Overview
 
-Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve`. See [Containment Sandbox](docs/containment-sandbox.md) for the threat model, the prior art it draws on, and the known bypass surface.
+Most languages treat "what may this program touch?" as a deployment problem. Aether makes it a language problem: code runs against an explicit grant list, enforced three times over. At compile time, `--emit=lib` starts capability-empty and the host opts modules in with `--with=fs,net,os`. At scope level, `hide` and `seal except` stop ambient names from leaking into any lexical block, a closure, a trailing-block DSL, an actor handler. At runtime, an `LD_PRELOAD` shim checks libc itself (`open*`, `connect`/`bind`, `execve`, `mmap`, `dlopen`, `getenv`) against the same grants, inherited across `execve` — this third layer is Linux/FreeBSD only (there is no `LD_PRELOAD` on Windows). See [Containment Sandbox](docs/containment-sandbox.md) for the threat model, the prior art it draws on, and the known bypass surface.
 
 Concurrency is actor-shaped: `actor`, `receive` and `!`, with automatic multi-core scheduling, lock-free mailboxes, and migration that converges chatty actors onto one core. The compiler emits readable C, not bytecode and not a VM, which is an implementation choice rather than the pitch: it buys native speed, direct linking against existing C libraries, and a runtime that ports anywhere a C toolchain reaches.
 

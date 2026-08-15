@@ -579,6 +579,21 @@ interception model requires.
 The in-process layer (module boundary, scope boundary, and the stdlib
 grant checks) is pure C and works on every platform regardless.
 
+**Windows is out by construction, not by backlog.** The interception model
+*is* `LD_PRELOAD` + `dlsym(RTLD_NEXT, ...)`; Windows has no equivalent, so
+this is not a port waiting to be written. Two consequences worth stating
+plainly:
+
+- Running Windows binaries under Wine does **not** exercise containment.
+  Preloading into the *wine* process intercepts wine's own libc calls, not
+  the guest program's — a green run there would be actively misleading.
+  Should a Wine-based test lane ever land, the sandbox suites must stay
+  excluded from it; `tests/ae_sweep_prune_wine.txt` records that.
+- README's "enforced from compile time down to libc" is therefore a
+  Linux/FreeBSD claim for the libc tier. On Windows the compile-time
+  (`--emit=lib` capability gating) and scope (`hide` / `seal except`)
+  layers apply; the runtime tier does not.
+
 ## Security review checklist
 
 Before signing off an Aether sandboxed deployment, verify:

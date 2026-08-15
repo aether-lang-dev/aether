@@ -581,6 +581,32 @@ int run_cmd_show_warnings(const char* cmd) {
 #endif
 }
 
+/* AE_TEST_RUNNER — prefix the just-built binary with a runner program
+ * instead of exec'ing it directly (#1592). Modelled on cargo's
+ * CARGO_TARGET_<triple>_RUNNER=wine64: it keeps target-awareness at the
+ * EDGE, so nothing downstream (std.spec, the test sources, the harnesses)
+ * needs to know it is running under an emulator. The motivating use is
+ * cross-testing Windows binaries under Wine on a Linux CI runner
+ * (`AE_TEST_RUNNER=wine make test-ae`), but it is a general hook — any
+ * wrapper works (qemu-user, a sudo shim, `time`, a tracing tool).
+ *
+ * Unset or empty means "exec directly", so every existing caller is
+ * byte-for-byte unaffected. The value is emitted verbatim ahead of the
+ * quoted exe path, so it may carry its own arguments
+ * ("qemu-aarch64 -L /sysroot"); it is operator-supplied configuration,
+ * exactly like CC, and is not sanitised beyond what run_cmd's tokenizer
+ * already does.
+ *
+ * Returns "" (never NULL) when no runner is configured, so callers can
+ * always splice it in unconditionally. */
+static const char* test_runner_prefix(void) {
+    const char* r = getenv("AE_TEST_RUNNER");
+    if (!r) return "";
+    while (*r == ' ' || *r == '\t') r++;   /* tolerate AE_TEST_RUNNER=" wine" */
+    if (*r == '\0') return "";             /* set-but-empty == unset */
+    return r;
+}
+
 // Validate that a path is safe for use in shell commands (no metacharacters)
 static bool is_safe_path(const char* path) {
     if (!path) return false;
@@ -3127,7 +3153,15 @@ static int cmd_run(int argc, char** argv) {
     // containing a literal double-quote aren't representable through this
     // path — rare for a build command line; build the binary and invoke
     // it directly if you need that.
-    snprintf(cmd, sizeof(cmd), "\"%s\"", exe_file);
+    //
+    // AE_TEST_RUNNER, when set, is spliced in ahead of the exe so the
+    // program runs under a wrapper (wine, qemu-user, ...). Empty by
+    // default — see test_runner_prefix().
+    {
+        const char* runner = test_runner_prefix();
+        snprintf(cmd, sizeof(cmd), "%s%s\"%s\"",
+                 runner, *runner ? " " : "", exe_file);
+    }
     if (prog_args_start >= 0) {
         size_t off = strlen(cmd);
         for (int i = prog_args_start; i < argc && off < sizeof(cmd) - 1; i++) {
@@ -5885,7 +5919,15 @@ static int cmd_test(int argc, char** argv) {
             remove(report_file);
             ae_set_env("AE_SPEC_REPORT", report_file);
         }
-        snprintf(cmd, sizeof(cmd), "\"%s\"", exe_file);
+        // AE_TEST_RUNNER, when set, wraps the test binary (wine, qemu-user,
+        // ...) — see test_runner_prefix(). The AE_SPEC_* env pair above is
+        // inherited straight through the wrapper, so structured reporting
+        // works identically under a runner.
+        {
+            const char* runner = test_runner_prefix();
+            snprintf(cmd, sizeof(cmd), "%s%s\"%s\"",
+                     runner, *runner ? " " : "", exe_file);
+        }
         int rc = run_cmd_quiet(cmd);
         child_rc[i] = rc;
         if (rc == 0) {
