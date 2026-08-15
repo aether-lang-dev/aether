@@ -18,15 +18,17 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#define get_time_ms() GetTickCount64()
+/* Signed to match the POSIX arm: every caller stores/compares via
+ * signed longs, and ULONGLONG vs long trips -Werror=sign-compare. */
+#define get_time_ms() ((long long)GetTickCount64())
 #define sleep_ms(ms) Sleep(ms)
 #else
 #include <unistd.h>
 #include <time.h>
-static long get_time_ms(void) {
+static long long get_time_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 #define sleep_ms(ms) usleep((ms) * 1000)
 #endif
