@@ -139,7 +139,7 @@ void bench_actor_loop() {
     msg.payload_ptr = NULL;
     
     // Test with plain int
-    PlainActor plain_actor = {1, 1, {0}, 0};
+    PlainActor plain_actor = {.id = 1, .active = 1};
     mailbox_init(&plain_actor.mailbox);
     
     uint64_t plain_start = read_cycles();
@@ -154,7 +154,7 @@ void bench_actor_loop() {
     uint64_t plain_cycles = plain_end - plain_start;
     
     // Test with atomic int
-    AtomicActor atomic_actor = {1, 1, {0}, 0};
+    AtomicActor atomic_actor = {.id = 1, .active = 1};
     mailbox_init(&atomic_actor.mailbox);
     
     uint64_t atomic_start = read_cycles();
