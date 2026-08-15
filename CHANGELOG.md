@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+- `--emit=lib`'s `aether_lib_meta()` catalog entry point is now emitted
+  weak (`__attribute__((weak))` under GCC/Clang), so linking N lib TUs
+  into one artifact — aeb's regen shape, one `--emit=lib` C per module
+  and one final link — no longer dies with N-1 "multiple definition of
+  `aether_lib_meta`" errors or forces `-Wl,--allow-multiple-definition`
+  back onto the link line (the GNU-only escape hatch the 0.539 multi-TU
+  static-clone model retired; ld64 rejects it) (#1590). Lone-`.so`
+  consumers are unchanged: one definition, same dlsym contract; in a
+  multi-TU link the first TU's catalog wins. The
+  `multi_tu_import_link` regression now has an `--emit=lib` phase that
+  links three catalog-bearing TUs with no escape hatch and pins the
+  weak linkage via nm.
+
 ## [0.540.0]
 
 ### Added
@@ -32,18 +48,6 @@ version number before tagging the release.
   AST-level upgrade path is the reason the tool now lives in-tree.
 
 ### Fixed
-- `--emit=lib`'s `aether_lib_meta()` catalog entry point is now emitted
-  weak (`__attribute__((weak))` under GCC/Clang), so linking N lib TUs
-  into one artifact — aeb's regen shape, one `--emit=lib` C per module
-  and one final link — no longer dies with N-1 "multiple definition of
-  `aether_lib_meta`" errors or forces `-Wl,--allow-multiple-definition`
-  back onto the link line (the GNU-only escape hatch the 0.539 multi-TU
-  static-clone model retired; ld64 rejects it) (#1590). Lone-`.so`
-  consumers are unchanged: one definition, same dlsym contract; in a
-  multi-TU link the first TU's catalog wins. The
-  `multi_tu_import_link` regression now has an `--emit=lib` phase that
-  links three catalog-bearing TUs with no escape hatch and pins the
-  weak linkage via nm.
 - FreeBSD: the `ae` driver, `aetherc` module resolver, and `ae help` now
   locate the running executable via the `KERN_PROC_PATHNAME` sysctl
   (with a `/proc/curproc/file` fallback for jails that deny the sysctl)

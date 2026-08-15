@@ -96,14 +96,26 @@ fi
 out=$("$TMP2/repro_lib" 2>&1)
 [ "$out" = "42 43" ] || fail "wrong output from lib-TU build: '$out'"
 
-# Belt: the catalog entry point is emitted weak ("W"/"w" in nm), not "T".
+# Belt: the catalog entry point is emitted weak, not strong. The nm
+# spelling is format-specific: ELF/COFF nm marks a weak definition
+# "W"/"w", but Mach-O nm prints it as a plain "T" and only `nm -m`
+# reveals the "weak external" flag — grepping for T there would
+# false-fail the exact platform this model exists for (ld64).
 if command -v nm >/dev/null 2>&1; then
     a_lib_o=$(ls "$TMP2"/a_module.o)
-    if nm "$a_lib_o" | grep -qE " T _?aether_lib_meta"; then
-        fail "aether_lib_meta has strong external linkage in a lib TU (#1590)"
-    fi
-    nm "$a_lib_o" | grep -qE " [Ww] _?aether_lib_meta" \
-        || fail "aether_lib_meta missing/not weak in a lib TU"
+    case "$(uname -s)" in
+    Darwin)
+        nm -m "$a_lib_o" | grep -q "weak external _aether_lib_meta" \
+            || fail "aether_lib_meta missing/not weak in a lib TU (nm -m)"
+        ;;
+    *)
+        if nm "$a_lib_o" | grep -qE " T _?aether_lib_meta"; then
+            fail "aether_lib_meta has strong external linkage in a lib TU (#1590)"
+        fi
+        nm "$a_lib_o" | grep -qE " [Ww] _?aether_lib_meta" \
+            || fail "aether_lib_meta missing/not weak in a lib TU"
+        ;;
+    esac
 fi
 
 echo "  [PASS] multi_tu_import_link: 4 TUs, no dedup flags, runs (42 43); --emit=lib TUs link too (#1590)"
