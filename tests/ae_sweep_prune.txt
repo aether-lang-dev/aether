@@ -134,6 +134,7 @@ tests/integration/module_name_local_shadow/
 tests/integration/module_reexport/
 tests/integration/module_token_cap/
 tests/integration/module_var_cross_import/
+tests/integration/multi_tu_import_link/
 tests/integration/namespace_
 tests/integration/optional_reject/
 tests/integration/or_block_reject/

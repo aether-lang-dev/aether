@@ -294,3 +294,54 @@ retains its own copies (and the mutation-testing facility) for
 standalone use. See `tests/integration/std_testing_arms/probe.ae` for
 an end-to-end example driving both arms against real subprocesses and
 an in-process fixture server.
+
+## Test report format (aeocha-v1) — a stable, versioned contract
+
+`std.spec`'s `run_summary` writes a machine-readable report to the path
+in `AE_SPEC_REPORT` when `AE_SPEC_FORMAT=aeocha` (or `aeocha-v1`) is
+set; `ae test --format=aeocha-v1` arranges both per child. Downstream
+tools (aeb's `aether.driver_test` reporting among them) parse this file,
+so its shape is a **contract, not an implementation detail**:
+
+```
+version=1
+total=<N>
+passed=<N>
+failed=<N>
+errored=<N>
+duration_ms=<N>
+duration_ns=<N>
+---
+<STATUS>\t<index>\t"<name>"\t<duration_ns>[\t<message>]
+...
+```
+
+The rules a consumer may rely on, and an editor must preserve:
+
+1. The header is `key=value` lines, one per line, starting with
+   `version=`. Within `version=1` the keys above keep their names and
+   meanings. **New keys may be added** (consumers must ignore unknown
+   keys); existing keys are never renamed, repurposed, or removed.
+2. The header ends at the first `---` line (`\n---\n`); rows follow.
+3. Each row is tab-separated: STATUS (`PASS`/`FAIL`), a 1-based index,
+   the double-quoted test name, a duration (nanoseconds today — treat
+   the unit as unspecified within v1 and do not compute from it), and —
+   only when present — a trailing message field.
+4. **Any change that breaks rules 1–3 bumps the leading `version=`**
+   so a pinned consumer detects v2 instead of misparsing v1.
+
+`_format_aeocha_v1` in `std/spec/module.ae` is the single producer;
+it carries a pointer back to this section.
+
+## `contrib.aeocha` is retired
+
+The aeocha framework was absorbed into the stdlib: `import std.spec`
+(core + fluent + collections + timing), `import std.os.testing`
+(process matchers), `import std.http.client.httptest` (HTTP matchers,
+`within`/`without`/`eventually`). No std or contrib module references
+`contrib.aeocha`, and nothing in a test's closure requires the aeocha
+repo or its old IPC-pipe report convention — the env-file transport
+above replaces it. Downstreams still importing `contrib.aeocha` from
+pre-spinout snapshots should migrate to the modules above; the
+standalone aeocha repo remains only as a thin compatibility facade
+plus its aeb IPC reporter and mutation-testing tool.

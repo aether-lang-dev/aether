@@ -1,0 +1,5 @@
+import a(a_val)
+import b(b_val)
+import std.io
+
+main() { println("${a_val()} ${b_val()}") }

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- Regression pin for the multi-TU link model (aeb's orchestrator shape,
+  from the aeb-line asks): four modules compiled to separate objects
+  link with NO -Wl,--allow-multiple-definition and run — imported
+  functions are cloned per-TU as `static` (landed with the #1568 audit),
+  a module's own functions stay external. Guards the macOS/ld64 story:
+  downstream multi-TU tools need no GNU-only dedup flags.
+- The `AE_SPEC_REPORT` aeocha-v1 test-report format is now a documented,
+  versioned CONTRACT (docs/testing.md): header keys, `---` separator,
+  row shape, and the incompatible-change-bumps-`version=` rule —
+  `_format_aeocha_v1` carries a producer-side pointer. Downstream
+  parsers (aeb's driver_test reporting) may depend on it deliberately.
+- docs/testing.md states `contrib.aeocha`'s retirement explicitly:
+  nothing in std/contrib references it (verified), `std.spec` +
+  `std.os.testing` + `std.http.client.httptest` are the replacements,
+  and the env-file report transport replaces the old IPC-pipe
+  convention for spec children.
+
 ## [0.538.0]
 
 ### Added

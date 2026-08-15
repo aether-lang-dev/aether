@@ -959,6 +959,12 @@ _tap_yaml_scalar(s: string) -> string {
 // 0; v1 row consumers match STATUS/index/"name"/message and ignore the
 // duration value, so this stays wire-compatible. errored is always 0 —
 // spec categorises everything as PASS or FAIL today.
+//
+// CONTRACT: this format is documented in docs/testing.md ("Test report
+// format (aeocha-v1)") and external tools (aeb's driver_test reporting)
+// parse it. Do not rename/remove header keys, change the `---`
+// separator, or reshape rows within version=1 — an incompatible change
+// MUST bump the leading `version=` line. Additive header keys are fine.
 _format_aeocha_v1(fw: ptr, passed: int, failed: int) -> string {
     its = map.get_raw(fw, "its")
     n = list.size(its)
