@@ -55,6 +55,10 @@ extern char** environ;
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
+#ifdef __FreeBSD__
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
 
 /* Shared header — AETHER_LIB_DIRS_MAX + AETHER_LIB_PATH_SEP_CHAR.
  * Pulled in early so the Toolchain struct can size its lib_dirs
@@ -744,6 +748,24 @@ bool get_exe_path(char* buf, size_t size) {
             buf[size - 1] = '\0';
             return true;
         }
+    }
+#elif defined(__FreeBSD__)
+    /* #1586: /proc/self/exe is Linux-only (FreeBSD has it only under a
+     * mounted linprocfs, and even then per-reader). The portable
+     * FreeBSD primitive is the KERN_PROC_PATHNAME sysctl (pid -1 =
+     * current process); needs nothing mounted — the libuv idiom. */
+    int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+    size_t len_fb = size;
+    if (sysctl(mib, 4, buf, &len_fb, NULL, 0) == 0 && len_fb > 1) {
+        buf[size - 1] = '\0';
+        return true;
+    }
+    /* Fallback when the sysctl is denied (e.g. hardened jails):
+     * procfs's native entry, iff mounted. */
+    ssize_t plen = readlink("/proc/curproc/file", buf, size - 1);
+    if (plen > 0) {
+        buf[plen] = '\0';
+        return true;
     }
 #elif defined(__linux__)
     ssize_t len = readlink("/proc/self/exe", buf, size - 1);
