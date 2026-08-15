@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+- codegen: a top-level function whose name is renamed — a leading
+  underscore (#279, kept out of C's reserved namespace) or a collision
+  with a declared extern (#1366) — now has its VALUE references rewritten
+  too, not just its calls (#1598). `rename_calls_to` matched only
+  `AST_FUNCTION_CALL`, so `takes_fp(_handler)` (an `AST_IDENTIFIER`) kept
+  the old spelling while the definition moved, and the emitted C named a
+  symbol that no longer existed: *"'_h_health' undeclared; did you mean
+  'ae_h_health'?"* — the compiler suggesting the definition it had just
+  renamed. This blocked aeo's HTTP route registration, which is
+  `server_get(raw, "/health", _h_health, 0)` throughout.
+  The extern-collision half failed far more quietly and was fixed with
+  it: the un-renamed reference resolved to the real libc symbol the
+  extern declared, so the program linked cleanly and SEGFAULTED at
+  runtime (verified on the pre-fix compiler), handing libc's
+  `puts(const char*)` an int.
+  The rename skips any function body that REBINDS the name, because a
+  local may legally shadow a top-level function and is emitted verbatim —
+  rewriting it would break a program that compiles today. That direction
+  is deliberate: it can only leave a reference un-renamed, never rename a
+  binding that should have stayed put.
+
 ## [0.542.0]
 
 ### Added

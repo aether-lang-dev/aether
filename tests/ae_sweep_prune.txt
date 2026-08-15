@@ -69,6 +69,7 @@ tests/integration/extern_tuple_return/
 tests/integration/extern_tuple_var_passthrough/
 tests/integration/fault_cross_module/
 tests/integration/fn_typed_local_call/
+tests/integration/fn_value_rename/
 tests/integration/fs_glob_recursive_dedupe/
 tests/integration/fs_read_binary_nul/
 tests/integration/fs_write_binary_nul/

@@ -1115,6 +1115,28 @@ function `bind(...)` and the compiler does the right thing. The only
 place you see the prefix is in the emitted C (useful if you're
 debugging with `nm`, `objdump`, or a stack trace).
 
+A renamed function is equally usable **as a value** — passing it across an
+ABI boundary as a `ptr` handler reaches the renamed definition, not a
+same-named libc symbol:
+
+```aether
+_h_health(req: ptr, res: ptr, ud: ptr) -> int { return 0 }
+server_get(raw, "/health", _h_health, 0)   // references ae_h_health
+```
+
+(Before #1598 only *calls* were rewritten, so a value reference kept the
+original spelling and either failed to compile or — for an
+extern-collision rename — silently bound to the libc symbol.)
+
+One sharp edge worth knowing: a **local variable may shadow a top-level
+function's name**, and such a local is emitted verbatim rather than
+renamed. That works on its own, but a single function that *both* shadows
+the name and passes the function as a value cannot work in either
+spelling — in the emitted C the value reference would precede the local's
+declaration. Pick one meaning per scope; the trailing-underscore
+file-local convention (`h_health_`) is the idiomatic way to keep them
+apart.
+
 ### Collisions with the Aether standard library
 
 The curated list above covers libc, but `libaether.a` exports a couple of
