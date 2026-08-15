@@ -3992,6 +3992,57 @@ static int tu_declares_extern(ASTNode* program, const char* name) {
     return 0;
 }
 
+/* #1598: a renamed function is referenced in two shapes, and both have to
+   move together or the emitted C names a symbol that no longer exists.
+
+     _h(...)              AST_FUNCTION_CALL   — the call
+     takes_fp(_h)         AST_IDENTIFIER      — the function used as a VALUE
+
+   Renaming only the first is what made `server_get(raw, "/health", _h_health, 0)`
+   fail with "'_h_health' undeclared; did you mean 'ae_h_health'?" — the
+   compiler's own suggestion naming the definition it had just moved.
+
+   The identifier half needs scope care that the call half does not: a local
+   may legally shadow a top-level function name, and it is emitted verbatim
+   (`_thing = 42` stays `_thing` while the function becomes `ae_thing`). So a
+   subtree that REBINDS the name is skipped entirely — renaming there would
+   rewrite the variable and break a program that compiles today.
+
+   Skipping the whole subtree rather than tracking a scope stack is the
+   conservative direction: it can only leave a reference un-renamed (the
+   status quo ante for that one function), never rename a binding that should
+   have stayed put. A shadowed name is also the case where passing the
+   function as a value is unreachable anyway — the name resolves to the
+   variable. */
+static int subtree_rebinds_name(ASTNode* node, const char* name) {
+    if (!node || !name) return 0;
+    if ((node->type == AST_VARIABLE_DECLARATION ||
+         node->type == AST_PATTERN_VARIABLE) &&
+        node->value && strcmp(node->value, name) == 0) {
+        return 1;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (subtree_rebinds_name(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static void rename_refs_in(ASTNode* node, const char* from, const char* to) {
+    if (!node) return;
+    if (node->type == AST_IDENTIFIER && node->value &&
+        strcmp(node->value, from) == 0) {
+        char* dup = strdup(to);
+        if (dup) {
+            free(node->value);
+            node->value = dup;
+        }
+        return;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        rename_refs_in(node->children[i], from, to);
+    }
+}
+
 static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
     if (!node) return;
     if (node->type == AST_FUNCTION_CALL && node->value &&
@@ -4004,6 +4055,23 @@ static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
     }
     for (int i = 0; i < node->child_count; i++) {
         rename_calls_to(node->children[i], from, to);
+    }
+}
+
+/* Rename every reference to a renamed top-level function: calls anywhere,
+   plus bare value references in function bodies that do not rebind the name.
+   Walks the program's top-level children so each function body is a separate
+   shadowing decision. */
+static void rename_all_refs_to(ASTNode* program, const char* from, const char* to) {
+    if (!program) return;
+    rename_calls_to(program, from, to);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        if (!top) continue;
+        /* The definition's own name lives on the node's value, not in an
+           AST_IDENTIFIER child, so bodies are all we need to walk. */
+        if (subtree_rebinds_name(top, from)) continue;
+        rename_refs_in(top, from, to);
     }
 }
 
@@ -4058,7 +4126,7 @@ static void rename_leading_underscore_functions(ASTNode* program) {
            namespace, since the leading character is no longer `_`. */
         char safe[280];
         snprintf(safe, sizeof(safe), "ae%s", fn->value);
-        rename_calls_to(program, fn->value, safe);
+        rename_all_refs_to(program, fn->value, safe);
         char* dup = strdup(safe);
         if (dup) {
             free(fn->value);
@@ -4078,7 +4146,7 @@ static void rename_extern_colliding_functions(ASTNode* program) {
 
         char safe[280];
         snprintf(safe, sizeof(safe), "ae_%s", fn->value);
-        rename_calls_to(program, fn->value, safe);
+        rename_all_refs_to(program, fn->value, safe);
         char* dup = strdup(safe);
         if (dup) {
             free(fn->value);

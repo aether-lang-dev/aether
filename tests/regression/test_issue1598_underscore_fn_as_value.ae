@@ -1,0 +1,65 @@
+// Regression: #1598 — a top-level function whose name starts with `_`,
+// passed as a VALUE rather than called, emitted an undeclared C name.
+//
+// The #279/MSVCRT pass renames such a definition (`_h` -> `ae_h`) to keep
+// Aether names out of C's reserved leading-underscore namespace, then
+// rewrote references — but only AST_FUNCTION_CALL nodes. A function used
+// as a value is an AST_IDENTIFIER, so it kept the old spelling while the
+// definition had moved:
+//
+//     error: '_h_under' undeclared; did you mean 'ae_h_under'?
+//
+// (The compiler's own suggestion naming the definition it had just
+// renamed.) Both conditions were required — calling `_h_under` was fine,
+// and passing a non-underscore function as a value was fine.
+//
+// Found on 0.541.0 upgrading aeo, where every HTTP route registration is
+// `server_get(raw, "/health", _h_health, 0)` — exactly this shape.
+//
+// This file pins the CALL and VALUE spellings staying in step. The
+// shadowing case a naive "rename every matching identifier" fix would
+// have broken — a local legally taking a function's name, emitted
+// verbatim — lives in test_issue1598_fn_name_shadowed.ae, in its own
+// file because the rename is decided per top-level function: a body
+// that rebinds the name is skipped wholesale, so the two cases cannot
+// share one main(). The extern-collision sibling pass (#1366), which
+// had the identical hole, is pinned by
+// tests/integration/fn_value_rename/.
+
+// A leading-underscore function, used both ways.
+_h_under(n: int) -> int { return n + 1 }
+
+// A plain function, as the control: this shape always worked.
+h_plain(n: int) -> int { return n + 2 }
+
+// Takes a function value. `ptr` is how a handler crosses an ABI
+// boundary — the aeo shape that surfaced this.
+takes_fp(f: ptr) -> int {
+    if f == null { return 0 }
+    return 1
+}
+
+main() {
+    // 1. VALUE use of a leading-underscore function — the bug. Before the
+    //    fix this failed to compile, so reaching runtime at all is the
+    //    assertion; the non-null check confirms a real address was passed.
+    got_under = takes_fp(_h_under)
+    if got_under != 1 {
+        println("FAIL: underscore fn passed as value did not arrive")
+        return
+    }
+
+    // 2. CALL use of the same function must still resolve.
+    if _h_under(41) != 42 {
+        println("FAIL: underscore fn call broken")
+        return
+    }
+
+    // 3. The control: a plain function as a value.
+    if takes_fp(h_plain) != 1 {
+        println("FAIL: plain fn passed as value did not arrive")
+        return
+    }
+
+    println("PASS: underscore fn as value, call, and control")
+}

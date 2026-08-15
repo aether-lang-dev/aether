@@ -1,0 +1,30 @@
+// Regression companion to test_issue1598_underscore_fn_as_value.ae.
+//
+// The #1598 fix teaches the leading-underscore rename (#279) to rewrite
+// bare VALUE references, not just calls. The hazard is that a local may
+// legally shadow a top-level function's name, and such a local is a
+// plain variable emitted verbatim — so a blanket identifier rename would
+// rewrite the variable and break a program that compiles today.
+//
+// The rename therefore skips any top-level function whose body rebinds
+// the name. This file is that skip: it compiled before the fix and must
+// keep compiling after it.
+//
+// Separate file from the value-reference test on purpose: the decision
+// is per top-level function, so a body that both rebinds the name AND
+// passes the function as a value cannot work either way — in C the
+// reference would precede the local's declaration. Aether resolves such
+// a name to the local throughout, which is what this pins.
+
+_thing() -> int { return 1 }
+
+main() {
+    // `_thing` here is a LOCAL, shadowing the function above. It must be
+    // emitted as `_thing`, while the function itself became `ae_thing`.
+    _thing = 42
+    if _thing != 42 {
+        println("FAIL: local shadowing a fn name was rewritten by the rename")
+        return
+    }
+    println("PASS: local shadowing a leading-underscore fn name is untouched")
+}

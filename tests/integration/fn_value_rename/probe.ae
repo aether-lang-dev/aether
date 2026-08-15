@@ -1,0 +1,35 @@
+// #1598 (extern-collision half): an Aether function whose name matches a
+// declared extern is renamed by rename_extern_colliding_functions (#1366)
+// to `ae_<name>`. That pass shared rename_calls_to with the
+// leading-underscore pass, so it had the identical hole: a VALUE
+// reference kept the old spelling.
+//
+// This half is nastier than the underscore one. There the mismatch was a
+// compile error; here the un-renamed reference RESOLVES — to the real
+// libc symbol the extern declared. Pre-fix this program linked cleanly
+// and SEGFAULTED at runtime, calling libc's puts(const char*) with an
+// int. A silent wrong-symbol bug, which is why it earns a runtime test
+// rather than a compile check.
+@extern("puts") puts(s: string) -> int
+@extern("reg_cb") reg_cb(h: ptr)
+@extern("run_cb") run_cb(v: int) -> int
+
+// Collides with the `puts` extern above -> renamed to ae_puts.
+puts(v: int) -> int { return v + 200 }
+
+main() {
+    // Passed as a VALUE: must reference the RENAMED definition, not the
+    // libc symbol of the same name.
+    reg_cb(puts)
+    got = run_cb(7)
+    if got != 207 {
+        println("FAIL: expected 207 from the renamed handler, got ${got}")
+        return
+    }
+    // And a direct call must reach the same function.
+    if puts(1) != 201 {
+        println("FAIL: direct call to the renamed fn is wrong")
+        return
+    }
+    println("PASS: extern-colliding fn correct as value and as call")
+}
