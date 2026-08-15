@@ -1,0 +1,29 @@
+// The std.spec suite for calc.ae. The mutation driver edits calc.ae on
+// disk and re-runs THIS unchanged file once per mutant; its structured
+// report (AE_SPEC_FORMAT/AE_SPEC_REPORT) is the oracle.
+import std.spec
+import calc
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "calc.add") {
+        spec.it("adds two positives") callback {
+            spec.assert_eq(calc.add(2, 3), 5, "2 plus 3")
+        }
+        spec.it("adds with a negative") callback {
+            spec.assert_eq(calc.add(10, -4), 6, "10 plus minus 4")
+        }
+    }
+
+    spec.describe(fw, "calc.abs") {
+        spec.it("leaves positives unchanged") callback {
+            spec.assert_eq(calc.abs(7), 7, "abs of 7")
+        }
+        spec.it("flips negatives") callback {
+            spec.assert_eq(calc.abs(-7), 7, "abs of minus 7")
+        }
+    }
+
+    spec.run_summary(fw)
+}

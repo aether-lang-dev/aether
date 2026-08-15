@@ -1,0 +1,16 @@
+// std.spec test for the regression fixture. Deliberately tests `add` but
+// NOT `mul`, so the mutation run yields exactly one killed (ADD->SUB)
+// and one survivor (MUL->DIV). The harness pins those numbers.
+import std.spec
+import sut
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "sut") {
+        spec.it("add is tested") callback {
+            spec.assert_eq(sut.add(2, 3), 5, "2 plus 3")
+        }
+        // mul is intentionally NOT tested -> MUL->DIV survives.
+    }
+    spec.run_summary(fw)
+}
