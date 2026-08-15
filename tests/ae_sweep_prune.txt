@@ -10,6 +10,7 @@
 /custom_lib_dir/
 /lib/
 tests/integration/ae_inspect/
+tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
 tests/integration/aether_string_ffi_unwrap/
 tests/integration/aether_string_to_c_extern/
@@ -158,6 +159,7 @@ tests/integration/selective_import_shadow/
 tests/integration/source_location/
 tests/integration/source_location_default_capture/
 tests/integration/spec_format_reporting/
+tests/integration/spec_why_message/
 tests/integration/sqlite_prepared/
 tests/integration/sqlite_roundtrip/
 tests/integration/std_dl/

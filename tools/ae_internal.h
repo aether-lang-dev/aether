@@ -73,6 +73,12 @@ void build_gcc_cmd(char* cmd, size_t size,
 
 /* ae_version.c — version manager (list/install/switch releases). */
 int cmd_version(int argc, char** argv);
+/* Download a URL to a path / unpack an archive into a directory. Both
+ * shell out to whatever the platform has (curl or wget; tar or
+ * Expand-Archive) and return 0 on success. Shared with `ae add`'s
+ * release-artifact path (#1360). */
+int ae_download(const char* url, const char* dest);
+int ae_extract(const char* archive, const char* dest_dir);
 int cmd_version_use(const char* version);
 int cmd_install(int argc, char** argv);
 int cmd_upgrade(void);

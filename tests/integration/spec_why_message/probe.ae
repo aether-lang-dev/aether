@@ -1,0 +1,35 @@
+// Fixture for the #1576 why-message format test. Every assertion here
+// FAILS on purpose: the harness reads the failure text, which is the
+// only way to pin formatting (a passing suite prints none).
+//
+// Deliberately avoids the em-dash in any message so the harness can
+// grep for the separator the matchers insert.
+import std.spec
+
+main() {
+    fw = spec.init()
+    spec.describe(fw, "why") {
+        spec.it("int bare") callback {
+            spec.expect_int(5).to_equal(4)
+        }
+        spec.it("int annotated") callback {
+            spec.expect_int(5).to_equal(4, "budget is never zero")
+        }
+        spec.it("short str bare") callback {
+            spec.expect_str("abc").to_equal_str("abd")
+        }
+        spec.it("short str annotated") callback {
+            spec.expect_str("abc").to_equal_str("abd", "name is exact")
+        }
+        spec.it("long str annotated uses caret diff") callback {
+            spec.expect_str("api.github.com").to_equal_str("api.github.com, api.anthropic.com", "egress set is the whitelist")
+        }
+        spec.it("contains annotated") callback {
+            spec.expect_str("shared").to_contain("internal", "peer egress to internal net")
+        }
+        spec.it("negated annotated") callback {
+            spec.expect_int(4).not_().to_equal(4, "must differ from the default")
+        }
+    }
+    spec.run_summary(fw)
+}

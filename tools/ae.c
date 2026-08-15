@@ -5996,14 +5996,206 @@ static int cmd_test(int argc, char** argv) {
     return (failed > 0) ? 1 : 0;
 }
 
+/* --- `ae add` release-artifact support (#1360) ------------------------
+ *
+ * `ae add` historically only ever git-cloned. The CONSUMING half of
+ * binary packages was already built — prepare_binary_imports() reads a
+ * `--emit=lib` artifact's aether_lib_meta() catalog and synthesizes an
+ * Aether interface stub — so only the fetch was missing.
+ *
+ * Asset naming follows the convention Aether's own releases use:
+ *   <repo>-<version>-<os>-<arch>.tar.gz
+ * e.g. mylib-v1.2.0-linux-x86_64.tar.gz. We try the tarball, then the
+ * zip, and fall back to the git clone when neither is present — so a
+ * package that publishes no artifacts behaves exactly as before.
+ */
+
+/* Host triple as the release convention spells it ("linux-x86_64",
+ * "macos-arm64"). Returns NULL when the host is one we do not publish
+ * artifacts for, which forces the git-clone path. */
+static const char* ae_host_triple(void) {
+#if defined(__linux__)
+#  if defined(__x86_64__)
+    return "linux-x86_64";
+#  elif defined(__aarch64__)
+    return "linux-arm64";
+#  else
+    return NULL;
+#  endif
+#elif defined(__APPLE__)
+#  if defined(__aarch64__)
+    return "macos-arm64";
+#  elif defined(__x86_64__)
+    return "macos-x86_64";
+#  else
+    return NULL;
+#  endif
+#elif defined(_WIN32)
+#  if defined(__x86_64__) || defined(_M_X64)
+    return "windows-x86_64";
+#  else
+    return NULL;
+#  endif
+#else
+    return NULL;
+#endif
+}
+
+/* Last path component of "github.com/user/repo" -> "repo". */
+static const char* ae_pkg_basename(const char* package) {
+    const char* slash = strrchr(package, '/');
+    return slash ? slash + 1 : package;
+}
+
+/* Verify a downloaded artifact against a `<asset>.sha256` sibling, when
+ * the publisher provides one. A released binary deserves verification a
+ * git tag does not need (#1360).
+ *
+ * Returns  1  verified,
+ *          0  no checksum published (caller decides — we warn, matching
+ *             the git path's own trust level rather than refusing),
+ *         -1  checksum published but MISMATCHED — always fatal.
+ */
+static int ae_verify_sha256(const char* archive, const char* url_base,
+                            const char* asset, const char* tmp_dir) {
+    char sum_url[2048], sum_path[1024], cmd[4096];
+    snprintf(sum_url, sizeof(sum_url), "%s/%s.sha256", url_base, asset);
+    snprintf(sum_path, sizeof(sum_path), "%s/%s.sha256", tmp_dir, asset);
+    if (ae_download(sum_url, sum_path) != 0 || !path_exists(sum_path)) {
+        return 0;   /* publisher shipped no checksum */
+    }
+    /* Read the published hex. Both sha256sum and shasum print
+     * "<hex>  <name>", so take the first whitespace-delimited field and
+     * ignore whatever path the publisher hashed. */
+    char want_hex[128] = {0};
+    FILE* sf = fopen(sum_path, "r");
+    if (!sf) { remove(sum_path); return 0; }
+    if (fscanf(sf, "%127s", want_hex) != 1) { fclose(sf); remove(sum_path); return 0; }
+    fclose(sf);
+    remove(sum_path);
+
+    /* Hash the artifact. run_cmd* exec a tokenized argv rather than a
+     * shell, so pipelines and $(...) are not available here — write the
+     * digest to a file and read it back. */
+    char got_path[1024];
+    snprintf(got_path, sizeof(got_path), "%s/.ae_sha256.out", tmp_dir);
+    remove(got_path);
+
+    const char* hashers[2] = { "sha256sum", "shasum -a 256" };
+    int hashed = 0;
+    for (int h = 0; h < 2 && !hashed; h++) {
+        snprintf(cmd, sizeof(cmd), "%s \"%s\" > \"%s\" 2>/dev/null",
+                 hashers[h], archive, got_path);
+        /* This one DOES need a shell (redirection), so go through
+         * system() rather than the tokenizing runner. */
+        if (system(cmd) == 0 && path_exists(got_path)) hashed = 1;
+    }
+    if (!hashed) {
+        fprintf(stderr, "Warning: no sha256sum/shasum available; skipping checksum verification.\n");
+        remove(got_path);
+        return 0;
+    }
+
+    char got_hex[128] = {0};
+    FILE* gf = fopen(got_path, "r");
+    if (!gf) { remove(got_path); return 0; }
+    int ok_read = (fscanf(gf, "%127s", got_hex) == 1);
+    fclose(gf);
+    remove(got_path);
+    if (!ok_read) return 0;
+
+    return (strcasecmp(want_hex, got_hex) == 0) ? 1 : -1;
+}
+
+/* Try to install <package>@<version> from a published release asset.
+ * Returns 1 when the package was installed from an artifact, 0 when no
+ * matching artifact exists (caller falls back to git). */
+static int ae_try_release_asset(const char* package, const char* version,
+                                const char* pkg_dir) {
+    const char* triple = ae_host_triple();
+    if (!triple) return 0;              /* unpublished host → clone */
+    if (!version) return 0;             /* artifacts are per-tag */
+
+    const char* repo = ae_pkg_basename(package);
+
+    /* Normalise to the tag spelling releases use (v-prefixed). */
+    char tag[128];
+    if (version[0] == 'v') snprintf(tag, sizeof(tag), "%s", version);
+    else                   snprintf(tag, sizeof(tag), "v%s", version);
+
+    /* AE_RELEASE_BASE_URL overrides the forge origin: it replaces the
+     * "https://<package>" prefix, so an internal mirror or an air-gapped
+     * file:// tree can serve the same asset layout. It is also what makes
+     * this path testable without reaching the public internet. */
+    char url_base[1536];
+    const char* origin = getenv("AE_RELEASE_BASE_URL");
+    if (origin && *origin) {
+        snprintf(url_base, sizeof(url_base),
+                 "%s/%s/releases/download/%s", origin, package, tag);
+    } else {
+        snprintf(url_base, sizeof(url_base),
+                 "https://%s/releases/download/%s", package, tag);
+    }
+
+    char tmp_dir[1024];
+    snprintf(tmp_dir, sizeof(tmp_dir), "%s/.aether/tmp", get_home_dir());
+    mkdirs(tmp_dir);
+
+    /* tar.gz first (the POSIX default), then zip (what the Windows
+     * releases publish). */
+    const char* exts[2] = { "tar.gz", "zip" };
+    for (int i = 0; i < 2; i++) {
+        char asset[512], url[2048], archive[1024];
+        snprintf(asset, sizeof(asset), "%s-%s-%s.%s", repo, tag, triple, exts[i]);
+        snprintf(url, sizeof(url), "%s/%s", url_base, asset);
+        snprintf(archive, sizeof(archive), "%s/%s", tmp_dir, asset);
+
+        if (ae_download(url, archive) != 0 || !path_exists(archive)) {
+            continue;                   /* no such asset — try the next */
+        }
+        printf("Found release artifact %s\n", asset);
+
+        int v = ae_verify_sha256(archive, url_base, asset, tmp_dir);
+        if (v < 0) {
+            fprintf(stderr, "Error: checksum MISMATCH for %s — refusing to install.\n", asset);
+            remove(archive);
+            return -1;                  /* fatal: do NOT fall back */
+        }
+        if (v == 0) {
+            fprintf(stderr, "Warning: %s publishes no .sha256 — installing unverified.\n", asset);
+        } else {
+            printf("Checksum verified.\n");
+        }
+
+        mkdirs(pkg_dir);
+        if (ae_extract(archive, pkg_dir) != 0) {
+            fprintf(stderr, "Error: could not unpack %s.\n", asset);
+            remove(archive);
+            return -1;
+        }
+        remove(archive);
+        printf("Installed %s@%s from release artifact.\n", package, tag);
+        return 1;
+    }
+    return 0;                            /* nothing published for us */
+}
+
 static int cmd_add(int argc, char** argv) {
     if (argc < 1 || argv[0][0] == '-') {
-        fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version]\n");
+        fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version] [--source]\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  ae add github.com/user/repo\n");
         fprintf(stderr, "  ae add github.com/user/repo@v1.2.0\n");
         fprintf(stderr, "  ae add gitlab.com/user/repo\n");
+        fprintf(stderr, "\nWith @version, a matching release artifact is preferred when the\n");
+        fprintf(stderr, "package publishes one; --source forces the git clone.\n");
         return 1;
+    }
+
+    /* --source forces the historical git-clone path (#1360). */
+    bool force_source = false;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--source") == 0) force_source = true;
     }
 
     // Parse package@version
@@ -6053,6 +6245,15 @@ static int cmd_add(int argc, char** argv) {
     snprintf(pkg_dir, sizeof(pkg_dir), "%.511s/%.511s", cache_dir, package);
 
     if (!dir_exists(pkg_dir)) {
+        /* Prefer a published release artifact when one matches this host
+         * (#1360): faster than a clone, needs no toolchain to consume,
+         * and pins against an immutable asset rather than a movable tag.
+         * Falls back to the clone when nothing is published. */
+        if (!force_source) {
+            int r = ae_try_release_asset(package, version, pkg_dir);
+            if (r < 0) return 1;        /* checksum mismatch — already reported */
+            if (r > 0) goto write_toml; /* installed from artifact */
+        }
         printf("Downloading...\n");
         char parent[1024];
         strncpy(parent, pkg_dir, sizeof(parent) - 1);
@@ -6094,6 +6295,7 @@ static int cmd_add(int argc, char** argv) {
         }
     }
 
+write_toml:
     // Add to aether.toml
     FILE* f = fopen("aether.toml", "r");
     if (!f) {

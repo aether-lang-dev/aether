@@ -167,7 +167,28 @@ ae add github.com/user/repo          # latest from GitHub
 ae add github.com/user/repo@v1.0.0   # specific version
 ae add gitlab.com/user/repo           # GitLab
 ae add codeberg.org/user/repo         # Codeberg
+ae add github.com/user/repo@v1.0.0 --source   # force the git clone
 ```
+
+With `@version`, `ae add` prefers a **published release artifact** when the
+package ships one for your platform, and falls back to cloning otherwise.
+The asset is expected at the same layout Aether's own releases use:
+
+```
+https://<package>/releases/download/<tag>/<repo>-<tag>-<os>-<arch>.tar.gz
+```
+
+(`.zip` is tried too; `<os>-<arch>` is `linux-x86_64`, `macos-arm64`, and
+so on.) A sibling `<asset>.sha256` is verified when present — a
+**mismatch is fatal and installs nothing**, and there is no silent
+fall-back to git, which would defeat the check. An artifact with no
+published checksum installs with a warning.
+
+Prebuilt `--emit=lib` artifacts are directly importable: the binary-import
+prepass reads the artifact's catalog and synthesizes the interface, so a
+released library needs no toolchain to consume. Set
+`AE_RELEASE_BASE_URL` to point at an internal mirror serving the same
+layout.
 
 ## Error Handling
 
