@@ -79,8 +79,6 @@ tests/integration/heap_leak_interp_as_arg/
 tests/integration/heap_new_pod/
 tests/integration/heap_tracker_nested_tuple_err_no_leak/
 tests/integration/heap_tracker_return_escape_no_leak/
-tests/integration/host_aether/
-tests/integration/host_factor/
 tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/

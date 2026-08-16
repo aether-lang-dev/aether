@@ -1,0 +1,97 @@
+// Integration spec for contrib.host.aether — co-located with the bridge,
+// written in Aether against std.spec. Companion to
+// contrib/host/ruby/test_host_ruby.ae; see that file for why these drive
+// the bridge through its `import` rather than a C harness.
+//
+// Replaces tests/integration/host_aether/, whose wrapper existed to build
+// the bridge archive, export AETHER_AE_PATH / AETHER_HOST_CHILD, and grep
+// the driver's stdout for a sentinel line. The `[3/3]` discovery phase
+// already builds `libaether_host_aether.a` on demand and skips when it
+// cannot, so the only jobs left were the two env vars and the child
+// script — both of which this spec now does itself, making it runnable
+// under a bare `ae run`.
+//
+// WHAT THIS EXERCISES: the simplest, portable rung of the
+// Aether-hosts-Aether bridge — compile a child .ae to a native binary
+// (the bridge shells out to the ae driver), then run it as a subprocess
+// and check its exit code. The sandboxed rungs (run_sandboxed and the
+// *_with_map variants) need libaether_sandbox.so plus the LD_PRELOAD
+// path, so they stay out of the portable spec exactly as the retired
+// wrapper had it.
+//
+// SKIPPING: the bridge body is `#if defined(__linux__) || defined(__APPLE__)`
+// — elsewhere the .c compiles to an empty stub with no aether_host_*
+// symbols. It also needs a built `ae` to shell out to. Both are
+// provisioning conditions rather than code defects, so they skip.
+
+import contrib.host.aether
+import std.fs
+import std.os
+import std.spec
+import std.string
+
+main() {
+    fw = spec.init()
+
+    // The bridge's compile step shells out to the ae driver, reading
+    // AETHER_AE_PATH and falling back to a bare "ae" on $PATH. The
+    // retired wrapper exported this; do it here so a bare `ae run` works.
+    ae_path = os.getenv("AETHER_AE_PATH")
+    if string.length(ae_path) == 0 {
+        if fs.exists("build/ae") == 1 {
+            os.setenv("AETHER_AE_PATH", "build/ae")
+            ae_path = "build/ae"
+        }
+    }
+    have_ae = 0
+    if string.length(ae_path) != 0 { have_ae = 1 }
+    reason = "no ae driver (set AETHER_AE_PATH, or build build/ae)"
+
+    // Stage the child script the bridge will compile and run. PID-scoped
+    // so concurrent runs cannot collide. The child is deliberately
+    // trivial: this rung proves compile + spawn worked, and the exit code
+    // is what carries that.
+    dir = string.concat("/tmp/aether_host_aether_spec_", string.from_int(os.getpid()))
+    fs.mkdir_p(dir)
+    child = string.concat(dir, "/child.ae")
+    fs.write(child, "main() {\n    println(\"child-ran-ok\")\n}\n")
+
+    spec.describe(fw, "contrib.host.aether") {
+        // The round trip: compile a real .ae to a native binary, spawn it,
+        // and get its exit status back. A bridge that resolved its symbols
+        // but never actually invoked the compiler would fail here.
+        spec.it_when(have_ae, "compiles and runs a child script", reason) callback {
+            spec.assert_eq(aether.aether_host_run_script(child), 0,
+                "run_script returns the child's exit code 0")
+        }
+
+        // A child that exits non-zero must surface as non-zero, not be
+        // flattened to success — otherwise a failing child is invisible to
+        // the host.
+        spec.it_when(have_ae, "propagates a non-zero child exit code", reason) callback {
+            bad = string.concat(dir, "/child_fails.ae")
+            fs.write(bad, "extern exit(code: int)\nmain() {\n    exit(3)\n}\n")
+            spec.assert_not_eq(aether.aether_host_run_script(bad), 0,
+                "a child exiting 3 must NOT report success")
+        }
+
+        // A script that does not compile must be reported rather than
+        // treated as a child that ran and succeeded.
+        spec.it_when(have_ae, "reports a child that fails to compile", reason) callback {
+            broken = string.concat(dir, "/child_broken.ae")
+            fs.write(broken, "main() { this is not aether ((( }\n")
+            spec.assert_not_eq(aether.aether_host_run_script(broken), 0,
+                "an uncompilable child must NOT report success")
+        }
+
+        // A missing path is the caller-error case: it must fail rather
+        // than silently succeed on nothing.
+        spec.it_when(have_ae, "reports a missing script path", reason) callback {
+            spec.assert_not_eq(
+                aether.aether_host_run_script("/nonexistent-aether-child-zzz.ae"), 0,
+                "a missing script must NOT report success")
+        }
+    }
+
+    spec.run_summary(fw)
+}

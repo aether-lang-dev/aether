@@ -1,6 +1,0 @@
-// Child script compiled + executed by uses_aether.ae through the
-// contrib.host.aether bridge. Keeping it trivial: the driver only
-// checks the child's exit code (0), proving compile + spawn worked.
-main() {
-    println("child-ran-ok")
-}

@@ -1,0 +1,124 @@
+// Integration spec for contrib.host.factor — co-located with the bridge,
+// written in Aether against std.spec. Companion to
+// contrib/host/aether/test_host_aether.ae.
+//
+// Replaces tests/integration/host_factor/, whose wrapper built the bridge
+// archive, checked two env vars, ran the driver and grepped its stdout
+// for a sentinel. The `[3/3]` discovery phase already builds
+// `libaether_host_factor.a` on demand and skips when it cannot, so the
+// only job left was the env-var gate — which it_when (#1610) expresses
+// directly.
+//
+// SKIPPING: this needs the aether-lang-dev/factor-language fork — build
+// its libfactor and bootstrap a factor.image, then point
+// AETHER_FACTOR_SONAME and AETHER_FACTOR_IMAGE at them. Absent that, the
+// specs skip rather than fail: a missing external toolchain is a
+// provisioning gap, not a code defect.
+//
+// The assertions below are the retired driver's, unchanged in substance.
+// It called `return` on the first failure, so one broken call hid every
+// later one; as independent specs each reports on its own.
+
+import contrib.host.factor
+import std.fs
+import std.os
+import std.spec
+import std.string
+
+main() {
+    fw = spec.init()
+
+    soname = os.getenv("AETHER_FACTOR_SONAME")
+    image = os.getenv("AETHER_FACTOR_IMAGE")
+    have_factor = 0
+    if string.length(soname) != 0 && string.length(image) != 0 {
+        if fs.exists(soname) == 1 && fs.exists(image) == 1 { have_factor = 1 }
+    }
+    reason = "AETHER_FACTOR_SONAME / AETHER_FACTOR_IMAGE unset or missing (needs the aether-lang-dev/factor-language fork)"
+
+    spec.describe(fw, "contrib.host.factor") {
+        // fib(10) = 55. Input and output share no digits, so this cannot
+        // be satisfied by an "echo the input back" bug the way `2 3 + -> 5`
+        // could. eval captures PRINTED output under eval>string's ( -- )
+        // effect, and defining a word inline needs an IN: vocabulary.
+        spec.it_when(have_factor, "evaluates a recursive word and returns its output", reason) callback {
+            fib_eval = <<FACTOR
+USING: math kernel prettyprint ;
+IN: scratchpad
+: fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
+10 fib pprint
+FACTOR
+            spec.assert_str_eq(factor.eval(fib_eval), "55", "fib(10) = 55")
+        }
+
+        // The failure contract: a snippet leaving a value on the stack does
+        // NOT satisfy the ( -- ) effect. eval>string's [ print-error ]
+        // recover writes Factor's own error text into the captured output,
+        // so eval returns the stack-effect diagnostic — not the value, and
+        // not silently empty. Pins the printed-output semantic against an
+        // auto-render regression.
+        spec.it_when(have_factor, "reports a stack-effect error rather than the value", reason) callback {
+            leak = factor.eval("USING: math ; 2 3 +")
+            spec.assert_contains(leak, "stack effect",
+                "a stack-leaking eval reports the effect mismatch")
+        }
+
+        // The centrepiece: a Factor script defines a recursive word,
+        // iterates, and writes ten results into the shared global
+        // namespace; Aether then reads all ten back. This proves the VM
+        // defines words, recurses, iterates, and carries the *map* across
+        // calls — far more than a toy `2 3 +`.
+        spec.it_when(have_factor, "carries a populated k-v map across calls", reason) callback {
+            fib_populate = <<FACTOR
+USING: math math.parser namespaces sequences kernel ;
+IN: scratchpad
+: fib ( n -- m ) dup 2 < [ ] [ dup 1 - fib swap 2 - fib + ] if ;
+10 <iota> [ dup fib number>string swap number>string "fib" prepend set-global ] each
+FACTOR
+            _ = factor.run(fib_populate)
+
+            i = 0
+            seq = ""
+            while i < 10 {
+                k = string.concat("fib", string.from_int(i))
+                v = factor.get(k)
+                spec.assert_not_eq(string.length(v), 0, "map key is populated")
+                if i == 0 {
+                    seq = v
+                } else {
+                    seq = string.concat(seq, string.concat(" ", v))
+                }
+                i = i + 1
+            }
+            spec.assert_str_eq(seq, "0 1 1 2 3 5 8 13 21 34",
+                "the first ten Fibonacci terms come back in order")
+        }
+
+        // Read-modify-write through the shared namespace: proves round-trip
+        // fidelity across calls, not merely write-once.
+        spec.it_when(have_factor, "lets a script read and mutate a shared key", reason) callback {
+            factor.set("acc", "10")
+            bump = <<FACTOR
+USING: namespaces math math.parser ;
+"acc" get string>number 5 + number>string "acc" set-global
+FACTOR
+            _ = factor.eval(bump)
+            spec.assert_str_eq(factor.get("acc"), "15", "10 + 5 = 15 survives the round trip")
+        }
+
+        // String values round-trip unquoted (10, not "10"), and an absent
+        // key is empty rather than an error or a stale value.
+        spec.it_when(have_factor, "round-trips a string value and returns empty for an absent key", reason) callback {
+            factor.set("name", "Aether")
+            spec.assert_str_eq(factor.get("name"), "Aether", "string value round-trips")
+            spec.assert_eq(string.length(factor.get("nope")), 0, "absent key is empty")
+        }
+
+        spec.it_when(have_factor, "run returns 0 on success", reason) callback {
+            spec.assert_eq(factor.run("USING: math prettyprint ; 1 1 + ."), 0,
+                "fire-and-forget run succeeds")
+        }
+    }
+
+    spec.run_summary(fw)
+}

@@ -11,6 +11,27 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- `contrib/host/aether` and `contrib/host/factor` gain co-located specs,
+  `test_host_aether.ae` and `test_host_factor.ae`, replacing
+  `tests/integration/host_{aether,factor}/`. These were the last two
+  contrib integration directories whose wrapper did nothing a spec cannot:
+  the `[3/3]` discovery phase already builds each bridge archive on demand
+  and skips when it cannot, leaving only env-var gating (now `it_when`)
+  and, for the aether bridge, a child script to stage — which the spec
+  writes itself under a PID-scoped temp dir, so it runs under a bare
+  `ae run`.
+  The aether spec **gains three checks**: the retired wrapper asserted only
+  the happy path, so a child that exited non-zero, failed to compile, or
+  did not exist could not be distinguished from success. The factor specs
+  are the old driver's assertions unchanged in substance, but the original
+  returned on the first failure — one broken call hid every later one.
+  The factor specs skip without the aether-lang-dev/factor-language fork.
+  To confirm that guard hides nothing broken, they were run with it forced
+  on: all 16 assertions execute and fail against the absent library, so
+  they are live code rather than text that merely compiles.
+
 ### Fixed
 
 - **CHANGELOG structure repaired.** Three `## [current]` headings were
