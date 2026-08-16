@@ -1,0 +1,12 @@
+// #1606: a closure parameter must shadow a same-named module function.
+//
+// Before the fix this printed the raw machine code of `uix_item` — the
+// function's address was passed where the row pointer belonged, then read
+// as a string. In aether-ui the same defect segfaulted table_demo at
+// startup inside aether_string_data.
+import uix
+
+main() {
+    s = "REAL-ROW"
+    uix.drive(| item: ptr, c: int | { return item }, s)
+}

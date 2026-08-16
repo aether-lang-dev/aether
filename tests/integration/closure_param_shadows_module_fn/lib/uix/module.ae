@@ -1,0 +1,21 @@
+// #1606 fixture. This module defines a function `item` AND a closure whose
+// PARAMETER is named `item`. The closure passes that parameter onward as an
+// argument — the shape that used to emit the module function's ADDRESS
+// (`uix_item`) in place of the parameter's value.
+exports(item, invoke_cell, drive)
+
+// The colliding module-level function.
+item(_ctx: ptr, label: string) { println("GLOBAL item(${label})") }
+
+invoke_cell(cb: fn, it: ptr, c: int) -> string { return call(cb, it, c) }
+
+each_row(f: fn, r: ptr) { call(f, r, 0, 0) }
+
+// The closure's `item` must win over the module's `item` throughout the body.
+drive(cell: fn, rows: ptr) {
+    each_row(| item: ptr, i: int, row: int | {
+            // Argument position: the bug lived here.
+            s = invoke_cell(cell, item, 0)
+            println("cell -> ${s}")
+        }, rows)
+}
