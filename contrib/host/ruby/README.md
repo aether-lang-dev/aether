@@ -128,10 +128,78 @@ main() {
   immediately after `#include <ruby.h>` — the bridge uses libc
   snprintf for plain string assembly, not Ruby's format extensions.
 
+## Ruby stdout is buffered — `puts` output can vanish
+
+libruby buffers `$stdout`, and **nothing flushes it when an Aether program
+exits**. So this prints `done` and nothing else:
+
+```aether
+import contrib.host.ruby
+
+main() {
+    _ = ruby.ruby_init_host()
+    _ = ruby.ruby_run("puts 'hello from ruby'")   // never appears!
+    println("done")
+}
+```
+
+The script *did* run — only the buffered output is lost. Confirmed by having
+Ruby write a file instead: the file appears with the right contents while the
+`puts` does not.
+
+Two ways to get the output:
+
+```aether
+// 1. Finalize before exit — flushes as part of VM teardown.
+ruby.ruby_finalize_host()
+
+// 2. Or make Ruby's stdout unbuffered, if you need output as it happens.
+_ = ruby.ruby_run("$stdout.sync = true")
+```
+
+This is why [`test_host_ruby.ae`](test_host_ruby.ae) asserts on **return
+codes and Ruby-side state**, never on the bridge's stdout — a test that
+grepped for `puts` output would be asserting on flush timing rather than on
+the bridge.
+
+## Lifecycle: finalize is terminal
+
+`ruby_init_host()` is idempotent while the VM is live — call it defensively
+before an eval and it is a no-op. But `ruby_finalize_host()` calls CRuby's
+`ruby_finalize()`, which tears the VM down **permanently**: `ruby_init()`
+cannot be called again in the same process.
+
+The bridge does not currently enforce that. A post-finalize
+`ruby_init_host()` returns **0**, and the next `ruby_run()` segfaults inside
+libruby:
+
+```
+eval:1: [BUG] Segmentation fault at 0x0000000000000000
+c:0003 p:---- s:0011 e:000010 CFUNC  :puts
+```
+
+So: **call `ruby_finalize_host()` once, at shutdown, or not at all.** A
+long-running host that wants to reset script state should do it in Ruby
+rather than by cycling the VM. `test_host_ruby.ae` pins the supported
+lifecycle and deliberately does not exercise the unsupported one, leaving a
+baseline for a future fix.
+
 ## Testing
 
-Three tests exercise the Ruby host; all SKIP cleanly when Ruby isn't
+Four tests exercise the Ruby host; all SKIP cleanly when Ruby isn't
 installed, so they no-op on hosts without it.
+
+- **Embedding lifecycle (co-located)** — [`test_host_ruby.ae`](test_host_ruby.ae),
+  next to the bridge, written in Aether against `std.spec`. Drives the
+  bridge through `import contrib.host.ruby` — the path a real user takes, so
+  it covers the module declarations and contrib-link plumbing as well as the
+  C shim. Covers evaluation, that the interpreter *really* runs (Ruby
+  computes a value and a second eval asserts on it Ruby-side), exceptions and
+  syntax errors propagating as failures rather than being swallowed, and init
+  idempotence while the VM is live. Uses `spec.it_when` (#1610) so a box
+  without Ruby reports **skipped**, not passed and not failed. Run by
+  `make contrib-host-check`'s `[3/3]` phase, which performs the `LIBRUBY_SO`
+  probe first.
 
 - **Namespace / FFI SDK** —
   [`tests/integration/namespace_ruby/`](../../../tests/integration/namespace_ruby/).

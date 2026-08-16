@@ -69,6 +69,11 @@ import std.file
 exports(
     init,
     describe, it, it_within,
+    // Skip verbs (#1610). A dependency-gated test must be able to say
+    // "not run here" without either failing (a provisioning gap is not a
+    // code defect) or passing silently (which is how three separate
+    // silently-degraded boxes went unnoticed).
+    it_when, skip_it, skip_all_if,
     before_each, after_each,
     fail, assert_true, assert_false,
     assert_eq, assert_str_eq, assert_str_eq_diff, assert_not_eq, assert_gt,
@@ -121,6 +126,7 @@ init() -> ptr {
     fw = map.new()
     map.put_raw(fw, "passed", ref(0))
     map.put_raw(fw, "failed", ref(0))
+    map.put_raw(fw, "skipped", ref(0))
     map.put_raw(fw, "depth", ref(0))
     // Per-it() telemetry (for the structured report path).
     // "current_it" stores the in-flight it-record map directly (or null
@@ -265,6 +271,108 @@ it(_ctx: ptr, description: string, test_fn: fn) {
     rec, old_failed, t0 = _it_begin(_ctx, description)
     call(test_fn)
     _it_end(_ctx, description, rec, old_failed, t0, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Skip verbs (#1610)
+//
+// A test whose subject may be absent from the host — a host-language
+// bridge, a driver, a daemon, a system library — needs a third outcome
+// besides pass and fail. Failing presents a PROVISIONING gap as a code
+// defect (and gets the test deleted from the sweep); passing silently is
+// worse, and is exactly how nine contrib/vulkan tests, a mis-scoped
+// cross-compile probe, and `ruby SKIP (no demo)` all went unnoticed on a
+// live box. A skip that reports as a pass is worse than no skip at all.
+//
+// A skipped it() does NOT run its body, counts in neither passed nor
+// failed, and is reported distinctly (⊘) with its reason.
+// ---------------------------------------------------------------------------
+
+// Record a skip: print the line, bump the counter, and stamp a record so
+// the structured report carries it. Mirrors _it_end's bookkeeping minus
+// the timing and the hooks — a body that never ran has no duration, and
+// before/after hooks exist to set up a body that is not going to run.
+_record_skip(_ctx: ptr, description: string, reason: string) {
+    fw = _fw_of(_ctx)
+    skipped_ref = map.get_raw(fw, "skipped")
+    depth_ref = map.get_raw(fw, "depth")
+    its_list = map.get_raw(fw, "its")
+
+    d = ref_get(depth_ref)
+    for (i = 0; i < d; i ++) { print("  ") }
+    if string.equals(reason, "") == 1 {
+        print("\x1b[33m  ⊘\x1b[0m ${description}\n")
+    } else {
+        print("\x1b[33m  ⊘\x1b[0m ${description}  \x1b[33m(skipped: ${reason})\x1b[0m\n")
+    }
+    ref_set(skipped_ref, ref_get(skipped_ref) + 1)
+
+    rec = map.new()
+    map.put_raw(rec, "name", description)
+    map.put_raw(rec, "status", "SKIP")
+    map.put_raw(rec, "duration_ns_str", "0")
+    if string.equals(reason, "") == 0 { map.put_raw(rec, "message", reason) }
+    list.add(its_list, rec)
+}
+
+// it_when(cond, description, reason, test_fn) — run the body only when
+// `cond` is non-zero; otherwise report a skip carrying `reason`.
+//
+// The condition is a plain int the caller computes, so the probe stays
+// visible at the call site rather than hidden behind a predicate:
+//
+//     have_ruby = ruby.ruby_init_host() == 0
+//     spec.it_when(have_ruby, "evaluates", "libruby not loadable") callback {
+//         ...
+//     }
+//
+// `reason` is REQUIRED even on the true path, where it is unused: Aether
+// cannot give it a default because a defaulted parameter may not precede a
+// non-defaulted one, and the trailing-block `callback` always occupies the
+// last slot. Pass "" when the condition is a constant true.
+//
+// test_fn is CALLED here rather than forwarded, for the closure-env
+// reason documented on it().
+it_when(_ctx: ptr, cond: int, description: string, reason: string, test_fn: fn) {
+    if cond == 0 {
+        _record_skip(_ctx, description, reason)
+        return
+    }
+    rec, old_failed, t0 = _it_begin(_ctx, description)
+    call(test_fn)
+    _it_end(_ctx, description, rec, old_failed, t0, 0)
+}
+
+// skip_it(description, reason, test_fn) — an it() that never runs.
+// For a PERMANENT exclusion (a known-broken path, an unsupported
+// platform) where the body is kept for the day it is re-enabled. Use
+// it_when for dependency gating; an unconditional skip that is really a
+// missing dependency hides the provisioning gap.
+skip_it(_ctx: ptr, description: string, reason: string, test_fn: fn) {
+    // test_fn is deliberately unused — the body does not run. It stays in
+    // the signature so re-enabling is a one-word edit (skip_it -> it).
+    _ = test_fn
+    _record_skip(_ctx, description, reason)
+}
+
+// skip_all_if(fw, cond, reason) — file-level bail-out. Returns 1 when the
+// caller should stop (and has already printed the notice), 0 to proceed:
+//
+//     if spec.skip_all_if(fw, have_ruby == 0, "libruby not loadable") == 1 {
+//         return
+//     }
+//
+// NB `cond` is evaluated eagerly by the caller, so an expensive probe
+// still runs. When the probe IS the dependency check that is exactly
+// right; when it is costly, guard the probe itself.
+skip_all_if(fw: ptr, cond: int, reason: string) -> int {
+    if cond == 0 { return 0 }
+    if string.equals(reason, "") == 1 {
+        println("\x1b[33m  ⊘ suite skipped\x1b[0m")
+    } else {
+        println("\x1b[33m  ⊘ suite skipped: ${reason}\x1b[0m")
+    }
+    return 1
 }
 
 // it_within(_ctx, description, budget, test_fn) — an it() that also
@@ -855,9 +963,11 @@ fn _teardown(fw: ptr) {
 run_summary(fw: ptr) {
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
+    skipped_ref = map.get_raw(fw, "skipped")
     depth_ref = map.get_raw(fw, "depth")
     passed = ref_get(passed_ref)
     failed = ref_get(failed_ref)
+    skipped = ref_get(skipped_ref)
 
     println("")
     if failed == 0 {
@@ -866,6 +976,13 @@ run_summary(fw: ptr) {
         println("\x1b[32m  ${passed} passing\x1b[0m")
         println("\x1b[31m  ${failed} failing\x1b[0m")
     }
+    // Skips are ALWAYS reported when non-zero (#1610): a run that skipped
+    // everything must not look like a run that passed everything. This is
+    // the line that distinguishes "green because it ran" from "green
+    // because it did not".
+    if skipped > 0 {
+        println("\x1b[33m  ${skipped} skipped\x1b[0m")
+    }
     println("")
 
     // Structured report — opt-in, off by default. Emitted only when the
@@ -873,10 +990,11 @@ run_summary(fw: ptr) {
     // (AE_SPEC_REPORT). `ae test --format=<fmt>` sets both per child and
     // aggregates; a plain `ae run foo.ae` from a terminal sets neither,
     // so this block is skipped and human output is the only output.
-    _emit_report(fw, passed, failed)
+    _emit_report(fw, passed, failed, skipped)
 
     ref_free(passed_ref)
     ref_free(failed_ref)
+    ref_free(skipped_ref)
     ref_free(depth_ref)
     _teardown(fw)
 
@@ -893,7 +1011,7 @@ run_summary(fw: ptr) {
 // An unrecognised or empty format is a no-op (human output already
 // printed). Writing to a file (not a pipe) means no 64K pipe-buffer
 // deadlock, so the report is emitted in full.
-_emit_report(fw: ptr, passed: int, failed: int) {
+_emit_report(fw: ptr, passed: int, failed: int, skipped: int) {
     // os.getenv returns a null pointer (== 0) for an unset variable, so
     // null-check BEFORE any string.* call (which would deref it). An
     // empty value counts as "not set" too.
@@ -909,10 +1027,10 @@ _emit_report(fw: ptr, passed: int, failed: int) {
         report = _format_tap(fw)
     } else {
         if string.equals(fmt, "aeocha") == 1 {
-            report = _format_aeocha_v1(fw, passed, failed)
+            report = _format_aeocha_v1(fw, passed, failed, skipped)
         } else {
             if string.equals(fmt, "aeocha-v1") == 1 {
-                report = _format_aeocha_v1(fw, passed, failed)
+                report = _format_aeocha_v1(fw, passed, failed, skipped)
             } else {
                 // Unknown format — nothing to write.
                 return
@@ -1019,7 +1137,7 @@ _tap_yaml_scalar(s: string) -> string {
 // parse it. Do not rename/remove header keys, change the `---`
 // separator, or reshape rows within version=1 — an incompatible change
 // MUST bump the leading `version=` line. Additive header keys are fine.
-_format_aeocha_v1(fw: ptr, passed: int, failed: int) -> string {
+_format_aeocha_v1(fw: ptr, passed: int, failed: int, skipped: int) -> string {
     its = map.get_raw(fw, "its")
     n = list.size(its)
     t_start_str = map.get_raw(fw, "t_start_ns_str")
@@ -1029,8 +1147,13 @@ _format_aeocha_v1(fw: ptr, passed: int, failed: int) -> string {
     total_duration_ns = os.now_monotonic_ns() - t_start_ns
     total_duration_ms = total_duration_ns / 1000000
 
+    // `total` stays passed+failed DELIBERATELY. docs/testing.md's contract
+    // permits ADDING keys (consumers ignore unknown ones) but forbids
+    // repurposing existing ones, and folding skips into `total` would
+    // silently change what every current consumer already parses.
+    // `skipped` rides alongside as a new key — additive, no version bump.
     total = passed + failed
-    header = "version=1\ntotal=${total}\npassed=${passed}\nfailed=${failed}\nerrored=0\nduration_ms=${total_duration_ms}\nduration_ns=${total_duration_ns}\n---\n"
+    header = "version=1\ntotal=${total}\npassed=${passed}\nfailed=${failed}\nskipped=${skipped}\nerrored=0\nduration_ms=${total_duration_ms}\nduration_ns=${total_duration_ns}\n---\n"
 
     rows = _build_rows(its, n)
     return string.concat(header, rows)

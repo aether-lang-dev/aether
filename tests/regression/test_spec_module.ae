@@ -77,6 +77,20 @@ main() {
             // through UFCS chaining; the failure-text formatting is
             // pinned by tests/integration/spec_why_message/, which can
             // observe output a green suite cannot.
+            // #1610: skip verbs. it_when(0,...) and skip_it must NOT run
+            // their bodies — each body below asserts something FALSE, so a
+            // verb that ran it would turn this suite red. That is the whole
+            // check: a skip that silently runs (or silently passes) is the
+            // failure mode the feature exists to prevent.
+            spec.it_when(0, "it_when(false) does not run its body", "deliberate") callback {
+                spec.assert_eq(0, 1, "MUST NOT RUN")
+            }
+            spec.skip_it("skip_it never runs its body", "deliberate") callback {
+                spec.assert_eq(0, 1, "MUST NOT RUN")
+            }
+            spec.it_when(1, "it_when(true) runs normally", "") callback {
+                spec.assert_eq(3, 3, "three")
+            }
             spec.it("optional why-message on every matcher") callback {
                 spec.expect_int(7).to_equal(7, "int equality carries intent")
                 spec.expect_int(7).to_be_gt(0, "budget is never zero")
