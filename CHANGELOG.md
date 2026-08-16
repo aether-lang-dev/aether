@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+- Module namespacing: a **closure parameter** now shadows a same-named
+  module-level function or const (#1606). `rename_intra_module_refs`
+  skips its `<ns>_<name>` rewrite for locally-bound names, but
+  `collect_local_names` recognised only `AST_PATTERN_VARIABLE` /
+  `AST_VARIABLE_DECLARATION` / `AST_CONST_DECLARATION` — a closure
+  parameter is an `AST_CLOSURE_PARAM`, and closures established no scope
+  of their own. So inside a module defining `item()`, the closure
+  `|item: ptr| { f(item) }` had its `item` rewritten to `<ns>_item`,
+  passing **the address of the function** where the parameter's value
+  belonged. The C compiled and type-checked cleanly, and the callee then
+  read a function pointer as data.
+  Found via aether-ui, where it segfaulted `table_demo` at startup inside
+  `aether_string_data`; verified A/B on the reporting commit (`e6feacc`):
+  SIGSEGV with the unfixed compiler, runs clean with the fix, from an
+  identical source tree. Reduced to a 16-line fixture that printed the
+  raw machine code of the shadowed function instead of its data.
+  Closures now establish a scope that EXTENDS the enclosing one, so a
+  closure can still read enclosing locals and still resolve non-shadowed
+  module functions and consts normally.
+
 ## [0.543.0]
 
 ### Fixed

@@ -1628,8 +1628,16 @@ static int name_in_list(const char* name, const char** list, int count) {
 // Recursively walks blocks to find all AST_VARIABLE_DECLARATION and AST_CONST_DECLARATION names.
 static void collect_local_names(ASTNode* node, const char** names, int* count, int max) {
     if (!node || *count >= max) return;
+    /* #1606: AST_CLOSURE_PARAM belongs here alongside AST_PATTERN_VARIABLE.
+       A closure parameter binds a name exactly as a function parameter does,
+       so it must shadow a same-named module function or const. Without it,
+       `|item: ptr| { f(item) }` inside a module that also defines `item()`
+       had its `item` rewritten to `<ns>_item` — the ADDRESS OF THE FUNCTION
+       passed where the parameter's value belonged. That compiled, and the
+       callee then read a function pointer as data. */
     if ((node->type == AST_PATTERN_VARIABLE || node->type == AST_VARIABLE_DECLARATION ||
-         node->type == AST_CONST_DECLARATION) && node->value) {
+         node->type == AST_CONST_DECLARATION || node->type == AST_CLOSURE_PARAM) &&
+        node->value) {
         if (!name_in_list(node->value, names, *count)) {
             names[(*count)++] = node->value;
         }
@@ -1736,6 +1744,45 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
                 }
             }
         }
+    }
+
+    /* #1606: a closure introduces its own scope, so its parameters (and the
+       locals in its body) shadow module functions/consts for the whole body.
+       Previously only AST_FUNCTION_DEFINITION established a scope, so a
+       closure parameter never made it into local_names and a same-named
+       module function won the rename — silently substituting the function's
+       address for the parameter's value in argument position.
+
+       The enclosing scope's names stay in effect (a closure can read them),
+       so this EXTENDS local_names rather than replacing it: parameters and
+       body-locals of the closure are appended to whatever the enclosing
+       function already contributed. */
+    if (node->type == AST_CLOSURE) {
+        const char* clo_locals[128];
+        int clo_local_count = 0;
+        /* The closure's OWN bindings go in first. The list is capped, and if
+           a large enclosing scope filled it the parameters would be the names
+           dropped — which is precisely the bug this branch exists to prevent.
+           Enclosing names are appended after, and merely losing one of those
+           costs a missed rename-suppression, not a wrong symbol. */
+        collect_local_names(node, clo_locals, &clo_local_count, 128);
+        for (int i = 0; i < local_count && clo_local_count < 128; i++) {
+            if (!name_in_list(local_names[i], clo_locals, clo_local_count)) {
+                clo_locals[clo_local_count++] = local_names[i];
+            }
+        }
+        int kept_c = 0;
+        for (int i = 0; i < clo_local_count; i++) {
+            if (!name_is_module_global_var(prefix, clo_locals[i])) {
+                clo_locals[kept_c++] = clo_locals[i];
+            }
+        }
+        clo_local_count = kept_c;
+        for (int i = 0; i < node->child_count; i++) {
+            rename_intra_module_refs(node->children[i], prefix, func_names, func_count,
+                                     const_names, const_count, clo_locals, clo_local_count);
+        }
+        return;
     }
 
     // When entering a function definition, collect its local names for shadowing checks.
