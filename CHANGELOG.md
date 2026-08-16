@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- Three specs closing coverage gaps left when `contrib/sqlite`'s tests were
+  co-located (#1614): `step()`, `bind_i64`/`column_i64`, and
+  `bind_blob`/`column_blob`. The retired `tests/integration/sqlite_prepared/`
+  touched these and the replacement did not — a reduction found by diffing
+  the two API surfaces rather than by anything failing, since a missing test
+  is silent by construction.
+  Each pins the property that makes the API worth having: `step()` returns
+  the raw `SQLITE_ROW`/`SQLITE_DONE` codes that `while step() == SQLITE_ROW`
+  callers depend on (the `next_row()` wrapper collapses them to 1/0, so
+  testing only the wrapper leaves the documented codes unpinned); the i64
+  round-trip uses a value above 2^32, the only kind that proves both halves
+  of the (hi, lo) pair survive; and the blob test embeds a NUL, which is the
+  entire reason blob binding exists rather than reusing `bind_text`.
+  The blob assertion was verified to be able to fail — sabotaged to expect
+  the wrong length, it reports the real one (5) rather than passing
+  vacuously.
+
 ## [0.545.0]
 
 ### Added

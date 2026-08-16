@@ -137,6 +137,77 @@ main() {
             _r = sqlite.exec(db, "UPDATE t SET name = 'ada' WHERE id = 1")
         }
 
+        // step() is the LOWER-LEVEL contract next_row() wraps: it returns
+        // sqlite's raw code, and callers written as
+        // `while step() == SQLITE_ROW { ... }` depend on those exact
+        // values. next_row() collapses them to 1/0, so testing only the
+        // wrapper would leave the documented codes unpinned.
+        spec.it_when(have_sqlite, "step returns SQLITE_ROW then SQLITE_DONE", reason) callback {
+            st, perr = sqlite.prepare(db, "SELECT id FROM t ORDER BY id")
+            spec.assert_str_eq(perr, "", "prepare succeeds")
+
+            rc1, e1 = sqlite.step(st, db)
+            spec.assert_eq(rc1, sqlite.SQLITE_ROW, "first step yields SQLITE_ROW")
+            spec.assert_str_eq(e1, "", "no error on a row")
+
+            rc2, _e2 = sqlite.step(st, db)
+            spec.assert_eq(rc2, sqlite.SQLITE_ROW, "second step yields SQLITE_ROW")
+
+            rc3, e3 = sqlite.step(st, db)
+            spec.assert_eq(rc3, sqlite.SQLITE_DONE, "third step yields SQLITE_DONE")
+            spec.assert_str_eq(e3, "", "exhaustion is not an error")
+
+            _f = sqlite.finalize(st)
+        }
+
+        // 64-bit values cross the boundary as a (hi, lo) pair because
+        // Aether's int is 32-bit at this ABI. A value above 2^32 is the
+        // only way to prove both halves survive — a small number would
+        // pass even if `hi` were dropped.
+        spec.it_when(have_sqlite, "bind_i64 / column_i64 round-trip a large value", reason) callback {
+            cerr = sqlite.exec(db, "CREATE TABLE big (v INTEGER)")
+            spec.assert_str_eq(cerr, "", "CREATE TABLE big succeeds")
+
+            ist, iperr = sqlite.prepare(db, "INSERT INTO big VALUES (?)")
+            spec.assert_str_eq(iperr, "", "prepare insert succeeds")
+            // 0x0000000B_00000007 = 47244640263, well beyond 32 bits.
+            spec.assert_str_eq(sqlite.bind_i64(ist, 1, 11, 7), "", "bind_i64 succeeds")
+            _s = sqlite.next_row(ist, db)
+            _f1 = sqlite.finalize(ist)
+
+            sst, sperr = sqlite.prepare(db, "SELECT v FROM big")
+            spec.assert_str_eq(sperr, "", "prepare select succeeds")
+            spec.assert_eq(sqlite.next_row(sst, db), 1, "the row is there")
+            hi, lo = sqlite.column_i64(sst, 0)
+            spec.assert_eq(hi, 11, "high half survives")
+            spec.assert_eq(lo, 7, "low half survives")
+            _f2 = sqlite.finalize(sst)
+        }
+
+        // Blobs are the path where a NUL byte must NOT terminate the
+        // value — the whole reason blob binding exists rather than
+        // reusing bind_text.
+        spec.it_when(have_sqlite, "bind_blob / column_blob preserve embedded NULs", reason) callback {
+            cerr = sqlite.exec(db, "CREATE TABLE b (v BLOB)")
+            spec.assert_str_eq(cerr, "", "CREATE TABLE b succeeds")
+
+            payload = "ab\x00cd"
+            ist, iperr = sqlite.prepare(db, "INSERT INTO b VALUES (?)")
+            spec.assert_str_eq(iperr, "", "prepare insert succeeds")
+            spec.assert_str_eq(sqlite.bind_blob(ist, 1, payload, 5), "",
+                "bind_blob succeeds")
+            _s = sqlite.next_row(ist, db)
+            _f1 = sqlite.finalize(ist)
+
+            sst, sperr = sqlite.prepare(db, "SELECT v FROM b")
+            spec.assert_str_eq(sperr, "", "prepare select succeeds")
+            spec.assert_eq(sqlite.next_row(sst, db), 1, "the row is there")
+            _data, n, berr = sqlite.column_blob(sst, 0)
+            spec.assert_str_eq(berr, "", "column_blob succeeds")
+            spec.assert_eq(n, 5, "all 5 bytes come back — the NUL did not truncate")
+            _f2 = sqlite.finalize(sst)
+        }
+
         spec.it_when(have_sqlite, "prepare rejects malformed SQL", reason) callback {
             _st, perr = sqlite.prepare(db, "SELECT FROM WHERE")
             spec.assert_not_eq(string.length(perr), 0,
