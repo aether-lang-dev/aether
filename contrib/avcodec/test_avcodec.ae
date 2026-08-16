@@ -1,21 +1,37 @@
-// test_avcodec.ae — contrib/avcodec runtime gate.
+// Spec for contrib.avcodec — the FFmpeg decode shim — written against
+// std.spec.
 //
-// Generates its own clip with ffmpeg so the test carries no fixture, and
-// SKIPS cleanly when ffmpeg is absent -- the shim needs FFmpeg's libraries
-// to build at all, but the ffmpeg BINARY is only needed to make test input.
+// Generates its own clips with the ffmpeg BINARY so the repo carries no
+// media fixture, and skips when that binary is absent. The shim needs
+// FFmpeg's LIBRARIES to build at all; the binary is only needed to make
+// test input, so those are separate conditions and only the latter is
+// skippable here.
+//
+// The original ran as one straight-line driver that called exit(1) on the
+// first failure, so a broken geometry read hid every later check —
+// including the audio surface at the far end of the file. As specs each
+// case reports independently.
+
 import contrib.avcodec
-import std.string
 import std.bytes
-import std.os
-import std.list
 import std.fs
+import std.list
+import std.os
+import std.spec
+import std.string
 
-extern exit(code: int)
-
-fail(msg: string) { println("  FAIL: ${msg}"); exit(1) }
-pass(msg: string) { println("  PASS: ${msg}") }
+// Make a clip with ffmpeg. Returns 1 when the clip exists afterwards.
+fn make_clip(args: ptr) -> int {
+    _o, st, _e = os.run_capture("ffmpeg", args, null)
+    if st != 0 { return 0 }
+    return 1
+}
 
 main() {
+    fw = spec.init()
+
+    // Video-only clip: 2s of testsrc at 10fps, 64x48. Being video-only
+    // makes it double as the no-audio case further down.
     clip = "/tmp/_avc_test_clip.mp4"
     av = list.new()
     _ = list.add(av, "-y")
@@ -26,116 +42,147 @@ main() {
     _ = list.add(av, "-pix_fmt")
     _ = list.add(av, "yuv420p")
     _ = list.add(av, clip)
-    _o, st, e = os.run_capture("ffmpeg", av, null)
+    have = make_clip(av)
     list.free(av)
-    if st != 0 {
-        println("  SKIP: ffmpeg not available to generate test input")
-        return
+    reason = "ffmpeg not available to generate test input"
+
+    // A/V clip: same video plus a 2s 440Hz sine, for the audio surface.
+    aclip = "/tmp/_avc_test_av.mp4"
+    have_av = 0
+    if have == 1 {
+        av2 = list.new()
+        _ = list.add(av2, "-y")
+        _ = list.add(av2, "-f")
+        _ = list.add(av2, "lavfi")
+        _ = list.add(av2, "-i")
+        _ = list.add(av2, "testsrc=size=64x48:rate=10:duration=2")
+        _ = list.add(av2, "-f")
+        _ = list.add(av2, "lavfi")
+        _ = list.add(av2, "-i")
+        _ = list.add(av2, "sine=frequency=440:sample_rate=22050:duration=2")
+        _ = list.add(av2, "-pix_fmt")
+        _ = list.add(av2, "yuv420p")
+        _ = list.add(av2, "-c:a")
+        _ = list.add(av2, "aac")
+        _ = list.add(av2, "-shortest")
+        _ = list.add(av2, aclip)
+        have_av = make_clip(av2)
+        list.free(av2)
     }
+    av_reason = "ffmpeg cannot make the A/V clip"
 
-    d, err = avcodec.open(clip, 64, 48)
-    if string.length(err) > 0 { fail("open: ${err}") }
-    if avcodec.width(d) != 64 { fail("width ${avcodec.width(d)} want 64") }
-    if avcodec.height(d) != 48 { fail("height ${avcodec.height(d)} want 48") }
-    pass("open + geometry")
+    frame_bytes = 64 * 48 * 4
 
-    fb = avcodec.frame_bytes(d)
-    if fb != 64 * 48 * 4 { fail("frame_bytes ${fb} want ${64 * 48 * 4}") }
-    pass("frame_bytes is w*h*4")
+    spec.describe(fw, "avcodec: open and geometry") {
+        spec.it_when(have, "opens a clip and reports its dimensions", reason) callback {
+            d, err = avcodec.open(clip, 64, 48)
+            spec.assert_str_eq(err, "", "open reports no error")
+            spec.assert_eq(avcodec.width(d), 64, "width")
+            spec.assert_eq(avcodec.height(d), 48, "height")
+            avcodec.close(d)
+        }
 
-    num, den = avcodec.fps(d)
-    if num <= 0 { fail("fps num ${num}") }
-    if den <= 0 { fail("fps den ${den}") }
-    pass("fps ratio ${num}/${den}")
+        // The frame size is the contract a caller sizes its buffer from,
+        // so it is pinned explicitly rather than inferred.
+        spec.it_when(have, "reports frame_bytes as w*h*4 (RGBA)", reason) callback {
+            d, _e = avcodec.open(clip, 64, 48)
+            spec.assert_eq(avcodec.frame_bytes(d), frame_bytes, "frame_bytes is w*h*4")
+            avcodec.close(d)
+        }
 
-    // Allocation path.
-    px, n, ferr = avcodec.next_frame(d)
-    if n != fb { fail("next_frame n=${n} want ${fb}") }
-    if string.length(ferr) > 0 { fail("next_frame err ${ferr}") }
-    pass("next_frame returns a full RGBA frame")
-
-    // Zero-allocation path, one buffer reused to EOF. Counting to the end
-    // also proves EOF is reported as n==0 rather than looping forever.
-    buf = bytes.new(fb)
-    count = 1
-    guard = 0
-    while guard < 400 {
-        m, e2 = avcodec.next_frame_into(d, bytes.data(buf), fb)
-        if m == 0 { guard = 400 }
-        else {
-            if m != fb { fail("next_frame_into m=${m} want ${fb}") }
-            count = count + 1
-            guard = guard + 1
+        spec.it_when(have, "reports a usable fps ratio", reason) callback {
+            d, _e = avcodec.open(clip, 64, 48)
+            num, den = avcodec.fps(d)
+            spec.assert_gt(num, 0, "fps numerator is positive")
+            spec.assert_gt(den, 0, "fps denominator is positive")
+            avcodec.close(d)
         }
     }
-    // 2s at 10fps: expect ~20 frames. Assert a RANGE, not an exact count --
-    // encoders round duration differently and an exact number would be a
-    // flake waiting to happen.
-    if count < 15 { fail("decoded only ${count} frames, want ~20") }
-    if count > 25 { fail("decoded ${count} frames, want ~20") }
-    pass("decoded ${count} frames to EOF via the reused buffer")
 
-    // A buffer that is too small must be refused, not overrun.
-    //
-    // On a FRESH decoder: the loop above ran `d` to EOF, and at EOF
-    // next_frame_into returns 0 whatever the capacity -- so asserting here
-    // against `d` passed even with BOTH capacity guards deleted. Testing a
-    // refusal needs a decoder that would otherwise have succeeded.
-    d2, err2 = avcodec.open(clip, 64, 48)
-    if string.length(err2) > 0 { fail("reopen: ${err2}") }
-    small = bytes.new(16)
-    m2, e3 = avcodec.next_frame_into(d2, bytes.data(small), 16)
-    if m2 != 0 { fail("undersized buffer accepted (m2=${m2})") }
-    if string.length(e3) == 0 { fail("undersized buffer gave no error") }
-    // ...and the same decoder still works with a correct buffer, proving
-    // the refusal did not consume the frame or wedge the decoder.
-    ok_buf = bytes.new(fb)
-    m3, e4 = avcodec.next_frame_into(d2, bytes.data(ok_buf), fb)
-    if m3 != fb { fail("decoder unusable after a refused read (m3=${m3})") }
-    avcodec.close(d2)
-    pass("undersized buffer is refused, decoder still usable")
+    spec.describe(fw, "avcodec: frame decoding") {
+        spec.it_when(have, "returns a full RGBA frame from the allocating path", reason) callback {
+            d, _e = avcodec.open(clip, 64, 48)
+            _px, n, ferr = avcodec.next_frame(d)
+            spec.assert_str_eq(ferr, "", "next_frame reports no error")
+            spec.assert_eq(n, frame_bytes, "a whole frame comes back")
+            avcodec.close(d)
+        }
 
-    // ── audio_pcm ────────────────────────────────────────────────────
-    // The test clip is testsrc-only, so it is ALSO the no-audio case:
-    // audio_pcm must report an error there, not hand back garbage.
-    _ap, _an, _ar, _ac, aerr = avcodec.audio_pcm(clip)
-    if string.length(aerr) == 0 { fail("no-audio clip decoded to something") }
-    pass("a clip without audio reports an error")
+        // The zero-allocation path, one buffer reused to EOF. Running to
+        // the end also proves EOF is reported as n==0 rather than looping
+        // forever. The count is asserted as a RANGE: 2s at 10fps is ~20
+        // frames, but encoders round duration differently and an exact
+        // number would be a flake waiting to happen.
+        spec.it_when(have, "decodes to EOF through one reused buffer", reason) callback {
+            d, _e = avcodec.open(clip, 64, 48)
+            buf = bytes.new(frame_bytes)
+            count = 0
+            guard = 0
+            while guard < 400 {
+                m, _e2 = avcodec.next_frame_into(d, bytes.data(buf), frame_bytes)
+                if m == 0 {
+                    guard = 400
+                } else {
+                    spec.assert_eq(m, frame_bytes, "each frame fills the buffer")
+                    count = count + 1
+                    guard = guard + 1
+                }
+            }
+            spec.assert_gt(count, 14, "decoded at least ~15 frames")
+            spec.assert_eq(count < 26, 1, "decoded no more than ~25 frames")
+            avcodec.close(d)
+        }
 
-    // And a clip WITH audio: a 2s sine at 22050 Hz mono in the container.
-    aclip = "/tmp/_avc_test_av.mp4"
-    av2 = list.new()
-    _ = list.add(av2, "-y")
-    _ = list.add(av2, "-f")
-    _ = list.add(av2, "lavfi")
-    _ = list.add(av2, "-i")
-    _ = list.add(av2, "testsrc=size=64x48:rate=10:duration=2")
-    _ = list.add(av2, "-f")
-    _ = list.add(av2, "lavfi")
-    _ = list.add(av2, "-i")
-    _ = list.add(av2, "sine=frequency=440:sample_rate=22050:duration=2")
-    _ = list.add(av2, "-pix_fmt")
-    _ = list.add(av2, "yuv420p")
-    _ = list.add(av2, "-c:a")
-    _ = list.add(av2, "aac")
-    _ = list.add(av2, "-shortest")
-    _ = list.add(av2, aclip)
-    _o2, st2, _e9 = os.run_capture("ffmpeg", av2, null)
-    if st2 != 0 { println("  SKIP: ffmpeg cannot make the A/V clip"); return }
+        // A buffer that is too small must be REFUSED, not overrun.
+        //
+        // This needs a FRESH decoder, and that is not incidental: on a
+        // decoder already run to EOF, next_frame_into returns 0 whatever
+        // the capacity — so asserting against a drained decoder passed
+        // even with BOTH capacity guards deleted. Testing a refusal
+        // requires a decoder that would otherwise have succeeded.
+        spec.it_when(have, "refuses an undersized buffer without wedging", reason) callback {
+            d2, err2 = avcodec.open(clip, 64, 48)
+            spec.assert_str_eq(err2, "", "reopen succeeds")
 
-    pcm, pn, prate, pch, perr = avcodec.audio_pcm(aclip)
-    if string.length(perr) > 0 { fail("audio_pcm: ${perr}") }
-    if prate != 22050 { fail("rate ${prate} want 22050") }
-    if pch != 2 { fail("channels ${pch} want 2 (downmix contract)") }
-    // ~2s at 22050 Hz stereo s16 = ~176400 bytes; AAC padding varies, so a
-    // range. The LOWER bound is the real assertion -- an empty or truncated
-    // decode is the failure this guards.
-    if pn < 150000 { fail("pcm ${pn} bytes, want ~176400") }
-    if pn > 220000 { fail("pcm ${pn} bytes, want ~176400") }
-    pass("audio_pcm: ${pn} bytes @ ${prate} Hz x${pch}")
-    _e10 = fs.delete(aclip)
+            small = bytes.new(16)
+            m2, e3 = avcodec.next_frame_into(d2, bytes.data(small), 16)
+            spec.assert_eq(m2, 0, "an undersized buffer decodes nothing")
+            spec.assert_not_eq(string.length(e3), 0, "and says why")
 
-    avcodec.close(d)
-    _e = fs.delete(clip)
-    println("=== test_avcodec passed ===")
+            // The refusal must not have consumed the frame or wedged the
+            // decoder — the same handle still works with a correct buffer.
+            ok_buf = bytes.new(frame_bytes)
+            m3, _e4 = avcodec.next_frame_into(d2, bytes.data(ok_buf), frame_bytes)
+            spec.assert_eq(m3, frame_bytes, "decoder still usable after a refused read")
+            avcodec.close(d2)
+        }
+    }
+
+    spec.describe(fw, "avcodec: audio") {
+        // The video-only clip doubles as the no-audio case: audio_pcm must
+        // report an error there rather than handing back garbage a caller
+        // would treat as silence.
+        spec.it_when(have, "errors on a clip that has no audio", reason) callback {
+            _ap, _an, _ar, _ac, aerr = avcodec.audio_pcm(clip)
+            spec.assert_not_eq(string.length(aerr), 0,
+                "a video-only clip must not decode to audio")
+        }
+
+        spec.it_when(have_av, "decodes PCM with the documented rate and downmix", av_reason) callback {
+            _pcm, pn, prate, pch, perr = avcodec.audio_pcm(aclip)
+            spec.assert_str_eq(perr, "", "audio_pcm reports no error")
+            spec.assert_eq(prate, 22050, "sample rate is preserved")
+            spec.assert_eq(pch, 2, "channels is 2 — the downmix contract")
+            // ~2s at 22050 Hz stereo s16 is ~176400 bytes; AAC padding
+            // varies, so a range. The LOWER bound is the real assertion —
+            // an empty or truncated decode is what this guards.
+            spec.assert_gt(pn, 149999, "at least ~150k of PCM came back")
+            spec.assert_eq(pn < 220001, 1, "and no more than ~220k")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    if have == 1 { _d1 = fs.delete(clip) }
+    if have_av == 1 { _d2 = fs.delete(aclip) }
 }

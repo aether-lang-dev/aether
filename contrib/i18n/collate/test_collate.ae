@@ -1,4 +1,5 @@
-// Regression test for contrib.i18n.collate (UCA/DUCET collation).
+// Spec for contrib.i18n.collate (UCA/DUCET collation), written against
+// std.spec.
 //
 // Build/run (needs the three C backing files):
 //   ae run contrib/i18n/collate/test_collate.ae \
@@ -6,16 +7,32 @@
 //     --extra contrib/i18n/utf8proc/utf8proc.c \
 //     --extra contrib/i18n/ducet/ducet_data.c
 //
-// Not in the `make test-ae` CI glob (contrib is not auto-discovered, and this
-// needs --extra), so it can't affect the CI matrix. Exercised by the contrib
-// nightly / manually and under valgrind.
+// Normally driven by contrib_check.sh, whose entry compiles those three C
+// sources — this module has no veneer archive, so a bare `ae run` cannot
+// link it.
+//
+// LEAK-GATED. contrib_check.sh runs this entry under the leak checker
+// ("i18n/collate was written leak-clean by design"), which constrains how
+// it may exit: the process must return from main normally so the
+// heap-string tracker performs its scope-end cleanup. Calling exit() would
+// bypass that and the still-live sort keys would be reported as leaks.
+// std.spec's run_summary returns normally when everything passes and only
+// calls exit(1) on failure, so that property survives this conversion —
+// on the green path, which is the path the leak gate measures, nothing
+// exits early.
+//
+// The original accumulated a failure count and reported at the end, so it
+// did run every check; what it could not do is attribute them. As specs
+// each case reports independently.
 
 import contrib.i18n.collate
-import std.string
 import std.list
 import std.list(list_free)
+import std.spec
+import std.string
 
-// sign-normalized compare to -1/0/1
+// Sign-normalised compare, so assertions read as -1/0/1 rather than
+// depending on the magnitude the backend happens to return.
 fn cmp(a: string, b: string) -> int {
     r = collate.compare("en", a, b)
     if r < 0 { return -1 }
@@ -23,119 +40,134 @@ fn cmp(a: string, b: string) -> int {
     return 0
 }
 
-// Returns 0 on pass, 1 on fail (caller accumulates).
-fn expect(label: string, got: int, want: int) -> int {
-    if got == want {
-        println("PASS: ${label}")
-        return 0
-    }
-    println("FAIL: ${label} - got ${got}, want ${want}")
-    return 1
-}
-
 main() {
-    fails = 0
+    fw = spec.init()
 
-    // ---- primary ordering (letters) ----
-    fails = fails + expect("apple < banana", cmp("apple", "banana"), -1)
-    fails = fails + expect("banana > apple", cmp("banana", "apple"), 1)
-    fails = fails + expect("abc == abc", cmp("abc", "abc"), 0)
-    fails = fails + expect("empty < a", cmp("", "a"), -1)
-    fails = fails + expect("a > empty", cmp("a", ""), 1)
-    fails = fails + expect("empty == empty", cmp("", ""), 0)
+    spec.describe(fw, "collate: primary ordering") {
+        spec.it(fw, "orders letters") callback {
+            spec.assert_eq(cmp("apple", "banana"), -1, "apple < banana")
+            spec.assert_eq(cmp("banana", "apple"), 1, "banana > apple")
+        }
 
-    // ---- prefix rule (shorter sorts first) ----
-    fails = fails + expect("app < apple", cmp("app", "apple"), -1)
+        spec.it(fw, "reports equality for identical strings") callback {
+            spec.assert_eq(cmp("abc", "abc"), 0, "abc == abc")
+        }
 
-    // ---- case tie-break (tertiary): lowercase before uppercase in DUCET ----
-    fails = fails + expect("apple < Apple (case tertiary)", cmp("apple", "Apple"), -1)
-    fails = fails + expect("a < A", cmp("a", "A"), -1)
+        spec.it(fw, "handles the empty string") callback {
+            spec.assert_eq(cmp("", "a"), -1, "empty < a")
+            spec.assert_eq(cmp("a", ""), 1, "a > empty")
+            spec.assert_eq(cmp("", ""), 0, "empty == empty")
+        }
 
-    // ---- accent tie-break (secondary): unaccented before accented ----
-    fails = fails + expect("cafe < café (accent secondary)", cmp("cafe", "café"), -1)
-    fails = fails + expect("resume < résumé", cmp("resume", "résumé"), -1)
-
-    // ---- canonical equivalence: precomposed == decomposed ----
-    // "café" written precomposed vs "e"+combining-acute must compare EQUAL.
-    fails = fails + expect("precomposed == decomposed", cmp("café", "café"), 0)
-
-    // ---- primary dominates: accented 'a' still sorts before 'z' ----
-    fails = fails + expect("ä < z (a-family before z)", cmp("ä", "z"), -1)
-    fails = fails + expect("z > ä", cmp("z", "ä"), 1)
-
-    // ---- sort_key is order-preserving and stable ----
-    ka = collate.sort_key("en", "apple")
-    kb = collate.sort_key("en", "banana")
-    if string_length(ka) > 0 && string_length(kb) > 0 && string_compare(ka, kb) < 0 {
-        println("PASS: sort_key order matches compare")
-    } else {
-        println("FAIL: sort_key order does not match compare")
-        fails = fails + 1
-    }
-    ka2 = collate.sort_key("en", "apple")
-    if string_equals(ka, ka2) == 1 {
-        println("PASS: sort_key is stable for identical input")
-    } else {
-        println("FAIL: sort_key not stable")
-        fails = fails + 1
+        // A prefix sorts before the longer string that extends it.
+        spec.it(fw, "sorts a prefix before its extension") callback {
+            spec.assert_eq(cmp("app", "apple"), -1, "app < apple")
+        }
     }
 
-    // ---- sort() over a list; expected UCA order: apple, Apple, banana, cafe, café ----
-    // (b < c at the primary level, so banana precedes the cafe pair; cafe < café
-    // is the accent tie-break at the secondary level.)
-    items = list.new()
-    list.add(items, "banana")
-    list.add(items, "Apple")
-    list.add(items, "apple")
-    list.add(items, "café")
-    list.add(items, "cafe")
-    collate.sort("en", items)
-    exp = list.new()
-    list.add(exp, "apple")
-    list.add(exp, "Apple")
-    list.add(exp, "banana")
-    list.add(exp, "cafe")
-    list.add(exp, "café")
-    ok = 1
-    n = list.size(items)
-    i = 0
-    while i < n {
-        gi, _ = list.get(items, i)
-        ei, _ = list.get(exp, i)
-        if string_equals(gi, ei) != 1 { ok = 0 }
-        i = i + 1
-    }
-    if ok == 1 {
-        println("PASS: sort() produces UCA order")
-    } else {
-        print("FAIL: sort() order = ")
-        i = 0
-        while i < n { gi, _ = list.get(items, i); print("${gi} "); i = i + 1 }
-        println("")
-        fails = fails + 1
+    // The tie-break levels are what distinguish UCA from a byte compare:
+    // case and accent differences must not disturb primary order, but must
+    // still break ties deterministically.
+    spec.describe(fw, "collate: tie-break levels") {
+        spec.it(fw, "breaks a case tie with lowercase first (tertiary)") callback {
+            spec.assert_eq(cmp("apple", "Apple"), -1, "apple < Apple")
+            spec.assert_eq(cmp("a", "A"), -1, "a < A")
+        }
+
+        spec.it(fw, "breaks an accent tie with unaccented first (secondary)") callback {
+            spec.assert_eq(cmp("cafe", "café"), -1, "cafe < café")
+            spec.assert_eq(cmp("resume", "résumé"), -1, "resume < résumé")
+        }
+
+        // Canonical equivalence: the same text written precomposed or as
+        // base + combining mark must compare EQUAL, not merely adjacent.
+        spec.it(fw, "treats precomposed and decomposed forms as equal") callback {
+            spec.assert_eq(cmp("café", "café"), 0, "precomposed == decomposed")
+        }
+
+        // The ordering is level-by-level: an accent difference must never
+        // outrank a primary-letter difference.
+        spec.it(fw, "lets the primary level dominate an accent difference") callback {
+            spec.assert_eq(cmp("ä", "z"), -1, "ä < z (a-family before z)")
+            spec.assert_eq(cmp("z", "ä"), 1, "z > ä")
+        }
     }
 
-    list_free(items)
-    list_free(exp)
+    spec.describe(fw, "collate: sort keys") {
+        // A sort key is only useful if its byte order reproduces compare()'s
+        // ordering — that is the whole point of precomputing one.
+        spec.it(fw, "produces keys whose order matches compare") callback {
+            ka = collate.sort_key("en", "apple")
+            kb = collate.sort_key("en", "banana")
+            spec.assert_not_eq(string_length(ka), 0, "key for apple is non-empty")
+            spec.assert_not_eq(string_length(kb), 0, "key for banana is non-empty")
+            spec.assert_eq(string_compare(ka, kb) < 0, 1,
+                "key(apple) sorts before key(banana), matching compare")
+        }
 
-    // ---- leak-check loop ----
-    i = 0
-    while i < 500 {
-        r = collate.compare("en", "straße", "strasse")
-        kk = collate.sort_key("en", "naïve")
-        i = i + 1
+        // Stability matters because keys get persisted: the same input must
+        // yield the same bytes across calls, or a stored index goes stale.
+        spec.it(fw, "produces a stable key for identical input") callback {
+            ka = collate.sort_key("en", "apple")
+            ka2 = collate.sort_key("en", "apple")
+            spec.assert_str_eq(ka, ka2, "sort_key is stable")
+        }
     }
-    println("PASS: leak-check loop")
 
-    if fails == 0 {
-        println("")
-        println("All PASS")
-        // Return normally (no exit(0)) so the heap-string tracker runs its
-        // scope-end cleanup — exit() would bypass it and valgrind would see the
-        // still-live sort keys as leaks.
-        return
+    spec.describe(fw, "collate: sort") {
+        // Expected UCA order: apple, Apple, banana, cafe, café.
+        // b < c at the primary level puts banana before the cafe pair;
+        // cafe < café is the secondary (accent) tie-break; apple < Apple
+        // is the tertiary (case) one. One list exercises all three levels.
+        spec.it(fw, "orders a list by the full UCA rules") callback {
+            items = list.new()
+            list.add(items, "banana")
+            list.add(items, "Apple")
+            list.add(items, "apple")
+            list.add(items, "café")
+            list.add(items, "cafe")
+            collate.sort("en", items)
+
+            exp = list.new()
+            list.add(exp, "apple")
+            list.add(exp, "Apple")
+            list.add(exp, "banana")
+            list.add(exp, "cafe")
+            list.add(exp, "café")
+
+            spec.assert_eq(list.size(items), list.size(exp), "length is unchanged")
+            n = list.size(items)
+            i = 0
+            while i < n {
+                gi, _ = list.get(items, i)
+                ei, _ = list.get(exp, i)
+                spec.assert_str_eq(gi, ei, "position ${i}")
+                i = i + 1
+            }
+
+            list_free(items)
+            list_free(exp)
+        }
     }
-    println("")
-    println("${fails} FAILED")
-    exit(1)
+
+    // Repeated calls under the leak gate: compare and sort_key each
+    // allocate, so a per-call leak shows up here as 500x rather than once.
+    // The assertions are incidental — the loop exists for what the leak
+    // checker observes around it.
+    spec.describe(fw, "collate: repeated allocation") {
+        spec.it(fw, "stays leak-clean across many calls") callback {
+            i = 0
+            while i < 500 {
+                // ß vs ss is a real expansion in DUCET, so this is not a
+                // trivial early-out path — it allocates on every call.
+                _r = collate.compare("en", "straße", "strasse")
+                _kk = collate.sort_key("en", "naïve")
+                i = i + 1
+            }
+            spec.assert_eq(i, 500, "the loop ran to completion")
+        }
+    }
+
+    // Returns normally on success — see the leak-gate note in the header.
+    spec.run_summary(fw)
 }

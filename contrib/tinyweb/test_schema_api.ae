@@ -1,25 +1,74 @@
-// Integration test for tinyweb.schema_api — declarative JSON API validation.
+// Spec for tinyweb.schema_api — declarative JSON API validation — written
+// against std.spec.
 //
-// Mounts a resource with a std.schema definition and drives real HTTP requests
-// through the validating filter: a valid body reaches the handler (201), an
-// invalid body is rejected with a JSON:API 422 before the handler runs, and a
-// malformed body gets a 400. Proves the tinyweb (router) + std.schema
-// (validator) bridge end to end.
+// Mounts a resource with a std.schema definition and drives REAL HTTP
+// requests through the validating filter: a valid body reaches the
+// handler, an invalid one is rejected with a JSON:API 422 before the
+// handler runs, and malformed JSON gets a 400. This is the tinyweb
+// (router) + std.schema (validator) bridge end to end, not a unit test of
+// either half.
+//
+// COVERAGE GAP CLOSED. The original mounted only `create`, so four of the
+// module's seven exports — index, show, update and destroy — were never
+// exercised despite the module being wired into CI. All four are mounted
+// and driven here. `update` matters most of the group: it is the other
+// VALIDATED verb, so a regression in validation on the PUT path was
+// previously invisible.
+//
+// The original called exit(1) on the first mismatch, so one bad status
+// code hid every later case — including the OpenAPI document at the end.
+// As specs each reports independently.
 
 import contrib.tinyweb
 import contrib.tinyweb.schema_api
-import std.schema
-import std.http(http_post_raw, http_get_raw, http_response_status_code,
-    http_response_body_str, http_response_free)
+import std.http(http_post_raw, http_get_raw, http_put_raw, http_delete_raw,
+    http_response_status_code, http_response_body_str, http_response_free)
 import std.list
+import std.schema
+import std.spec
 import std.string(string_contains)
 
 extern exit(code: int)
 extern sleep(ms: int)
 
-// Handler only runs on a validated body — it can assume the happy path.
+// schema_api mounts its member routes (show/update/destroy) as the regex
+// "/(\\w+)". The tinyweb router does not do regex — http_route_matches in
+// std/net/aether_http_server.c supports exact segments, Express-style
+// ":param", and a "*" wildcard, and treats anything else as a literal. So
+// those three routes can only match a URL that literally contains
+// "/(\\w+)", and every real member request 404s.
+//
+// This is why the gap mattered: the routes have never worked, and nothing
+// noticed, because nothing exercised them. The specs are written out in
+// full and skipped rather than deleted — they pass as-is once the module
+// registers a pattern the router understands (verified locally by
+// switching the three patterns to "/:id": all three then pass).
+//
+// Filed as #1625. Not fixed here: that edit belongs to the module, not to a test
+// conversion, and it needs a companion change — with ":id" live, the
+// auto-mounted GET {prefix}/schema is shadowed by show(), because the
+// user's trailing block registers before json_api's own route and first
+// match wins. The module comment claims /schema is "registered before the
+// user's show() route", which the observed 404 disproves.
+const MEMBER_ROUTE_BUG = "#1625 — schema_api member routes use regex; the tinyweb router does not support it"
+
+// Handlers only run on a validated body, so they can assume the happy
+// path. Each echoes something distinctive so the spec can prove the
+// request reached THIS handler rather than another route.
 handle_create(req: ptr, res: ptr, ctx: ptr) {
     tinyweb.response_write_status(res, "{\"data\":{\"type\":\"users\",\"ok\":true}}", 201)
+}
+handle_index(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"data\":[],\"via\":\"index\"}", 200)
+}
+handle_show(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"data\":{\"via\":\"show\"}}", 200)
+}
+handle_update(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"data\":{\"via\":\"update\"}}", 200)
+}
+handle_destroy(req: ptr, res: ptr, ctx: ptr) {
+    tinyweb.response_write_status(res, "{\"via\":\"destroy\"}", 204)
 }
 
 // ---- server actor (run the blocking accept loop off the main thread) ----
@@ -40,43 +89,21 @@ actor SchedHelper {
 }
 message Ping {}
 
-fn chk(resp: ptr, want: int, label: string) {
-    got = http_response_status_code(resp)
-    if got != want {
-        print("FAIL: ${label} — expected ${want}, got ${got}\n")
-        http_response_free(resp)
-        exit(1)
-    }
-    print("PASS: ${label} (${got})\n")
-    http_response_free(resp)
-}
-
-fn chk_body(resp: ptr, needle: string, want: int, label: string) {
-    got = http_response_status_code(resp)
-    body = http_response_body_str(resp)
-    if got != want {
-        print("FAIL: ${label} — expected ${want}, got ${got}; body=${body}\n")
-        http_response_free(resp)
-        exit(1)
-    }
-    if string_contains(body, needle) != 1 {
-        print("FAIL: ${label} — body missing '${needle}'; body=${body}\n")
-        http_response_free(resp)
-        exit(1)
-    }
-    print("PASS: ${label} (${got}, body ok)\n")
-    http_response_free(resp)
-}
-
 fn post(path: string, body: string) -> ptr {
     return http_post_raw("http://127.0.0.1:18092${path}", body, "application/json")
+}
+fn put(path: string, body: string) -> ptr {
+    return http_put_raw("http://127.0.0.1:18092${path}", body, "application/json")
 }
 fn get(path: string) -> ptr {
     return http_get_raw("http://127.0.0.1:18092${path}")
 }
+fn del(path: string) -> ptr {
+    return http_delete_raw("http://127.0.0.1:18092${path}")
+}
 
 main() {
-    print("=== tinyweb.schema_api ===\n\n")
+    fw = spec.init()
 
     user = schema.record() {
         schema.field("age", schema.INT) {
@@ -94,6 +121,18 @@ main() {
             schema_api.create() | req: ptr, res: ptr, ctx: ptr | {
                 handle_create(req, res, ctx)
             }
+            schema_api.index() | req: ptr, res: ptr, ctx: ptr | {
+                handle_index(req, res, ctx)
+            }
+            schema_api.show() | req: ptr, res: ptr, ctx: ptr | {
+                handle_show(req, res, ctx)
+            }
+            schema_api.update() | req: ptr, res: ptr, ctx: ptr | {
+                handle_update(req, res, ctx)
+            }
+            schema_api.destroy() | req: ptr, res: ptr, ctx: ptr | {
+                handle_destroy(req, res, ctx)
+            }
         }
         list.add(registry, u)
         schema_api.openapi_route("/openapi.json", registry)
@@ -104,25 +143,120 @@ main() {
     a ! StartSrv { srv: server }
     sleep(500)
 
-    // 1. valid -> handler runs -> 201
-    chk_body(post("/users/", "{\"age\":25,\"name\":\"Ada\"}"), "ok", 201, "valid POST reaches handler")
+    spec.describe(fw, "schema_api: validated writes") {
+        spec.it(fw, "lets a valid body through to the handler") callback {
+            r = post("/users/", "{\"age\":25,\"name\":\"Ada\"}")
+            spec.assert_eq(http_response_status_code(r), 201, "handler ran, 201")
+            spec.assert_eq(string_contains(http_response_body_str(r), "ok"), 1,
+                "the handler's own body came back")
+            http_response_free(r)
+        }
 
-    // 2. invalid (age < 18) -> 422 JSON:API, handler NOT reached
-    chk_body(post("/users/", "{\"age\":12,\"name\":\"Bob\"}"), "too_small", 422, "invalid POST -> 422 with code")
+        // The point of validating at the edge: the handler must NOT run.
+        // The 422 body carries a machine-readable code, so a client can
+        // branch on the reason rather than parsing prose.
+        spec.it(fw, "rejects a value outside its range with a coded 422") callback {
+            r = post("/users/", "{\"age\":12,\"name\":\"Bob\"}")
+            spec.assert_eq(http_response_status_code(r), 422, "422 not 201")
+            spec.assert_eq(string_contains(http_response_body_str(r), "too_small"), 1,
+                "the error code names the constraint")
+            http_response_free(r)
+        }
 
-    // 3. missing required name -> 422
-    chk_body(post("/users/", "{\"age\":30}"), "missing", 422, "missing field -> 422")
+        spec.it(fw, "rejects a missing required field") callback {
+            r = post("/users/", "{\"age\":30}")
+            spec.assert_eq(http_response_status_code(r), 422, "422 for a missing field")
+            spec.assert_eq(string_contains(http_response_body_str(r), "missing"), 1,
+                "the error says what is missing")
+            http_response_free(r)
+        }
 
-    // 4. malformed JSON -> 400
-    chk(post("/users/", "{\"age\":"), 400, "malformed JSON -> 400")
+        // Unparseable JSON is a DIFFERENT failure from a well-formed body
+        // that violates the schema: 400 versus 422. Collapsing the two
+        // would tell a client to fix its data when the real fault is its
+        // serialiser.
+        spec.it(fw, "distinguishes malformed JSON with a 400") callback {
+            r = post("/users/", "{\"age\":")
+            spec.assert_eq(http_response_status_code(r), 400, "400 not 422")
+            http_response_free(r)
+        }
 
-    // 5. auto-served draft-07 JSON Schema for the resource
-    chk_body(get("/users/schema"), "\"$schema\"", 200, "GET /schema -> draft-07 JSON Schema")
+        // update is the other VALIDATED verb, so a validation regression on
+        // the PUT path would otherwise be invisible. Skipped pending the
+        // dead-member-route bug below — the route never matches, so this
+        // asserts nothing until schema_api registers a pattern the router
+        // understands.
+        spec.skip_it(fw, "validates the update path too", MEMBER_ROUTE_BUG) callback {
+            ok = put("/users/7", "{\"age\":40,\"name\":\"Grace\"}")
+            spec.assert_eq(http_response_status_code(ok), 200, "a valid PUT reaches the handler")
+            spec.assert_eq(string_contains(http_response_body_str(ok), "update"), 1,
+                "and it is the update handler that ran")
+            http_response_free(ok)
 
-    // 6. aggregate OpenAPI 3.0 document
-    chk_body(get("/openapi.json"), "\"openapi\":\"3.0.3\"", 200, "GET /openapi.json -> OpenAPI doc")
+            bad = put("/users/7", "{\"age\":5,\"name\":\"Tiny\"}")
+            spec.assert_eq(http_response_status_code(bad), 422,
+                "an invalid PUT is rejected like an invalid POST")
+            http_response_free(bad)
+        }
+    }
+
+    // The read and delete verbs take no body, so they are routed but not
+    // validated. What matters is that each reaches its own handler —
+    // index and show share a prefix and differ only by the path segment,
+    // which is exactly where a routing regression would show up.
+    spec.describe(fw, "schema_api: unvalidated verbs") {
+        spec.it(fw, "routes index to the collection handler") callback {
+            r = get("/users/")
+            spec.assert_eq(http_response_status_code(r), 200, "index responds 200")
+            spec.assert_eq(string_contains(http_response_body_str(r), "index"), 1,
+                "the index handler ran, not show")
+            http_response_free(r)
+        }
+
+        spec.skip_it(fw, "routes show to the member handler", MEMBER_ROUTE_BUG) callback {
+            r = get("/users/42")
+            spec.assert_eq(http_response_status_code(r), 200, "show responds 200")
+            spec.assert_eq(string_contains(http_response_body_str(r), "show"), 1,
+                "the show handler ran, not index")
+            http_response_free(r)
+        }
+
+        spec.skip_it(fw, "routes destroy and preserves its status", MEMBER_ROUTE_BUG) callback {
+            r = del("/users/42")
+            spec.assert_eq(http_response_status_code(r), 204,
+                "the handler's 204 is not rewritten")
+            http_response_free(r)
+        }
+    }
+
+    // Both documents are derived from the same schema declaration — the
+    // "one declaration, many projections" property the module exists for.
+    spec.describe(fw, "schema_api: generated documents") {
+        spec.it(fw, "serves a draft-07 JSON Schema for the resource") callback {
+            r = get("/users/schema")
+            spec.assert_eq(http_response_status_code(r), 200, "schema route responds")
+            spec.assert_eq(string_contains(http_response_body_str(r), "\"$schema\""), 1,
+                "the document declares its dialect")
+            http_response_free(r)
+        }
+
+        spec.it(fw, "serves an aggregate OpenAPI 3.0 document") callback {
+            r = get("/openapi.json")
+            spec.assert_eq(http_response_status_code(r), 200, "openapi route responds")
+            spec.assert_eq(
+                string_contains(http_response_body_str(r), "\"openapi\":\"3.0.3\""), 1,
+                "the document declares its OpenAPI version")
+            http_response_free(r)
+        }
+    }
+
+    spec.run_summary(fw)
 
     schema.schema_free(user)
-    print("\nAll PASS\n")
+
+    // The server actor keeps the process alive after the specs finish, so
+    // exit explicitly — as the original driver did. run_summary has
+    // already exited non-zero if anything failed, so reaching here means
+    // the run was green.
     exit(0)
 }
