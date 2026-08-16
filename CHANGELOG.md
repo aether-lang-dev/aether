@@ -13,6 +13,34 @@ version number before tagging the release.
 
 ### Changed
 
+- **All 13 co-located `contrib/` tests now use `std.spec`.** They were
+  already beside the modules they test, but were still straight-line
+  drivers that called `exit(1)` (or accumulated a failure count) on the
+  first mismatch, so one broken assertion hid every later one in the same
+  file. Each case now reports independently:
+  `i18n/collate` (12), `avcodec` (8), `tinyweb/spec` (13),
+  `tinyweb/inventory` (11), `tinyweb/integration` (8),
+  `tinyweb/websocket` (3), `tinyweb/schema_api` (7 + 3 skipped), and the
+  six `vulkan` specs (159 assertions).
+  Assertion preservation was verified per file by comparing call-site
+  counts *and* diffing the sorted set of assertion label strings, so a
+  renamed or silently dropped check would surface. GPU and
+  external-dependency cases use `it_when`, matching each original's
+  "print SKIP, exit 0" path.
+- `tinyweb/schema_api` gains coverage for `index`, `show`, `update` and
+  `destroy` — four of the module's seven exports had never been driven.
+  Closing that gap exposed #1625.
+
+### Fixed
+
+- `contrib/vulkan/test_vulkan_resources` no longer leaks the four SPIR-V
+  blobs it loads; the original freed none of them.
+- `contrib/vulkan/test_vulkan_frames` asserts the failed-submit count its
+  slot-recycling loop was already computing but never checking.
+
+
+### Changed
+
 - `contrib/host/aether` and `contrib/host/factor` gain co-located specs,
   `test_host_aether.ae` and `test_host_factor.ae`, replacing
   `tests/integration/host_{aether,factor}/`. These were the last two
