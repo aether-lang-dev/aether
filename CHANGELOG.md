@@ -12,6 +12,33 @@ version number before tagging the release.
 ## [current]
 
 ### Added
+- Co-located embedding specs for four more host bridges —
+  `contrib/host/{duktape,lua,perl,python}/test_host_*.ae` — following the
+  pattern established for Ruby. Each drives its bridge through
+  `import contrib.host.<lang>`, the path a real user takes, so the specs
+  cover module.ae's declarations and the contrib-link plumbing rather
+  than only the C shim.
+  Each asserts five properties: a script evaluates; the interpreter
+  **genuinely runs** (the language computes a value and a second eval
+  asserts on it language-side, so a bridge that loaded the library but
+  never evaluated would not pass); runtime errors propagate as failures;
+  syntax errors propagate as failures (a different path through most
+  loaders); and `init` is idempotent while the VM is live.
+  All five bridges now have runnable coverage — 25 specs, all passing
+  locally. Previously these bridges had only a `~7ms ae check` of
+  module.ae and a `-fsyntax-only` of the C shim; nothing executed them.
+- `make contrib-host-check`'s `[3/3]` phase resolves each runtime's
+  soname the way that ecosystem documents it — `RbConfig::CONFIG`
+  for Ruby, `sysconfig` for Python, `Config{archlibexp}` for Perl, and a
+  filesystem probe for Lua. Without this the Debian-style packagings
+  fail to dlopen: the bridges fall back to unversioned names
+  (`libpython3.so`, `libruby.so`) that several distributions do not ship.
+  A runtime that cannot be resolved yields **skipped** specs, not
+  failures.
+
+## [current]
+
+### Added
 - `std.spec` gained skip verbs (#1610): `it_when(cond, desc, reason)` for
   dependency gating, `skip_it(desc, reason)` for a permanent exclusion, and
   `skip_all_if(fw, cond, reason)` for a file-level bail-out. A skipped test
