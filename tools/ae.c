@@ -18,6 +18,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <limits.h>
+#include <errno.h>
 #include <sys/stat.h>
 #include <time.h>     // gc_stale_cache_tmp age gate (#1032)
 
@@ -42,6 +43,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <spawn.h>
 #include <libgen.h>
 #include <dirent.h>
@@ -578,6 +580,97 @@ int run_cmd_show_warnings(const char* cmd) {
     return posix_run(cmd, 2);
 #else
     return win_run(cmd, 2);
+#endif
+}
+
+#ifndef _WIN32
+/* The pid of the program `ae run` launched, for the signal forwarder.
+ * volatile sig_atomic_t because the handler reads it. 0 = nothing running. */
+static volatile sig_atomic_t g_child_pid = 0;
+
+/* Forward a terminating signal to the child, then re-raise it so `ae`
+ * dies of the same signal it was sent (correct $? for the shell).
+ *
+ * WHY THIS EXISTS: `ae run` builds, then SPAWNS the built binary and
+ * waits — it does not exec it, because it still has work to do afterwards
+ * (evict a crashed binary from the cache, delete a non-cached temp exe).
+ * That means `ae run server.ae & ; kill $!` killed only the wrapper and
+ * ORPHANED the server, which kept its listening socket. On an ephemeral
+ * CI runner nobody notices; on a persistent box the orphan squats the
+ * port and the NEXT run of the same test fails to bind — a green run
+ * poisoning the one after it, with no code change in between.
+ *
+ * Forwarding rather than exec'ing keeps the post-run cleanup intact. */
+static void forward_signal_to_child(int sig) {
+    if (g_child_pid > 0) kill((pid_t)g_child_pid, sig);
+    /* Restore the default and re-raise so we report death-by-signal
+     * rather than exiting 0 out of a handler. */
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+
+/* Run the just-built program, forwarding termination signals to it.
+ * Used ONLY for the program `ae run` launches — build steps (aetherc,
+ * gcc) keep the plain run_cmd path, where forwarding would be wrong. */
+int run_cmd_forwarding(const char* cmd) {
+#ifdef _WIN32
+    /* Windows has no SIGTERM-to-child model that matches this; the
+     * orphaning report is POSIX-specific (kill $! in a shell test). */
+    return win_run(cmd, 0);
+#else
+    if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
+    char buf[AE_CMD_BUF];
+    strncpy(buf, cmd, sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = '\0';
+
+    char* toks[512];
+    int n = 0;
+    for (char* p = buf; *p && n < 511; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        if (*p == '"') {
+            p++;
+            toks[n++] = p;
+            while (*p && *p != '"') p++;
+            if (*p) *p++ = '\0';
+        } else {
+            toks[n++] = p;
+            while (*p && *p != ' ') p++;
+            if (*p) *p++ = '\0';
+        }
+    }
+    toks[n] = NULL;
+    if (n == 0) return 0;
+
+    pid_t pid;
+    if (posix_spawnp(&pid, toks[0], NULL, NULL, toks, environ) != 0) return -1;
+    g_child_pid = (sig_atomic_t)pid;
+
+    /* Install forwarders only while the child is alive, and keep the
+     * previous dispositions so `ae` is unchanged for every other path. */
+    struct sigaction sa;
+    struct sigaction old_term, old_int, old_hup;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = forward_signal_to_child;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, &old_term);
+    sigaction(SIGINT,  &sa, &old_int);
+    sigaction(SIGHUP,  &sa, &old_hup);
+
+    int status = 0;
+    /* EINTR: a forwarded signal interrupts waitpid; resume rather than
+     * abandoning the child (which would orphan it — the very bug). */
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+
+    sigaction(SIGTERM, &old_term, NULL);
+    sigaction(SIGINT,  &old_int,  NULL);
+    sigaction(SIGHUP,  &old_hup,  NULL);
+    g_child_pid = 0;
+
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    return -1;
 #endif
 }
 
@@ -3170,7 +3263,7 @@ static int cmd_run(int argc, char** argv) {
             off += (size_t)w;
         }
     }
-    int rc = run_cmd(cmd);
+    int rc = run_cmd_forwarding(cmd);
 
     if (rc < 0) {
         fprintf(stderr, "Program crashed (signal %d", -rc);
