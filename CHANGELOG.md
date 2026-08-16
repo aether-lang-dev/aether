@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+- `contrib/parsers/xml_expat` gains a co-located spec,
+  `contrib/parsers/xml_expat/test_xml_expat.ae`, replacing
+  `tests/integration/contrib_xml_expat/`. The highest-risk co-location so
+  far: SAX handler registration through `as fn(...)`, user-data pointer
+  arithmetic, multi-chunk streaming and a closure-builder veneer. The
+  probe's strbuilder captures stay at `main()` scope, outside the
+  describe/it closures — the original documents an Aether codegen bug
+  where a strbuilder captured inside a nested block dangles at block exit,
+  and that constraint had to survive the move. 16 specs, `xml_expat.*` API
+  surface identical.
+- `contrib/templating/liquid` gains five co-located specs —
+  `test_syntax`, `test_values`, `test_tags`, `test_filters` and
+  `test_inheritance` — replacing 22 `tests/integration/liquid_*/`
+  directories. 293 passing. Grouped by feature rather than one file per
+  retired directory, so comments and raw sit in `test_syntax` (they are
+  lexical) and Shopify's `{% liquid %}` tag in `test_tags`.
+  `test_inheritance.ae` writes its own partial fixtures at startup under a
+  PID-scoped temp root, because liquid resolves partials from the
+  filesystem and has no in-memory registry; that also retires the
+  `LIQUID_PARTIAL_ROOT` env-var coupling, so the suite runs under a bare
+  `ae run`. The fixtures keep per-suite subdirectories: the former
+  `layout_block` and `extends_super` both ship a `base.liquid` and the two
+  differ, so flattening them would silently assert against the wrong
+  parent. `liquid_sandbox_gate` stays a `.sh` — it drives `aetherc` over
+  generated source and asserts on compiler diagnostics.
+  Coverage was verified by diffing every single-line string literal in
+  every retired probe against the new specs (954 of 955 present; the one
+  absence is dead code the original never used). That check caught
+  `liquid_block_tag`, whose 14 assertions an earlier pass had stranded by
+  misreading the directory name.
+
 ## [0.546.0]
 
 ### Changed

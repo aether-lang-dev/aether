@@ -1,0 +1,272 @@
+// Value-model spec for contrib.templating.liquid — co-located with the
+// module it exercises, written in Aether against std.spec.
+//
+// Replaces tests/integration/liquid_{value_basics,assign,capture}/. See
+// test_syntax.ae for why the shell wrappers were retired.
+//
+// This file is the "what a variable holds and how it gets bound" half:
+// the typed value constructors, the `{% assign %}` tag, and `{% capture %}`.
+
+import contrib.templating.liquid
+import std.spec
+import std.string
+
+render_one(src: string, ctx: ptr) -> string {
+    t, _ = liquid.parse_string(src)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+render_bare(src: string) -> string {
+    t, _ = liquid.parse_string(src)
+    out, _ = liquid.render(t, liquid.context_new())
+    return out
+}
+
+// Render `src` and return only the error, for the cases that assert a
+// template is rejected.
+render_err(src: string) -> string {
+    t, _ = liquid.parse_string(src)
+    _, e = liquid.render(t, liquid.context_new())
+    return e
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "liquid: typed context values") {
+        spec.it(fw, "renders an int") callback {
+            ctx1 = liquid.context_new()
+            liquid.context_put_int(ctx1, "n", 42)
+            spec.assert_str_eq(render_one("{{ n }}", ctx1), "42", "1 int")
+        }
+
+        // Asserted by substring rather than equality: how many decimal
+        // places a float renders with is not what this case is pinning.
+        spec.it(fw, "renders a float") callback {
+            ctx2 = liquid.context_new()
+            liquid.context_put_float(ctx2, "pi", 3.14)
+            out2 = render_one("{{ pi }}", ctx2)
+            spec.assert_contains(out2, "3.14", "2 float")
+        }
+
+        spec.it(fw, "renders bool true as `true`") callback {
+            ctx3 = liquid.context_new()
+            liquid.context_put_bool(ctx3, "b", 1)
+            spec.assert_str_eq(render_one("{{ b }}", ctx3), "true", "3 bool true")
+        }
+
+        spec.it(fw, "renders bool false as `false`") callback {
+            ctx4 = liquid.context_new()
+            liquid.context_put_bool(ctx4, "b", 0)
+            spec.assert_str_eq(render_one("{{ b }}", ctx4), "false", "4 bool false")
+        }
+
+        spec.it(fw, "renders nil as the empty string") callback {
+            ctx5 = liquid.context_new()
+            liquid.context_put_nil(ctx5, "x")
+            spec.assert_str_eq(render_one("[{{ x }}]", ctx5), "[]", "5 nil empty")
+        }
+
+        // The typed binding must win over the older untyped string one no
+        // matter which was bound last — otherwise the result depends on
+        // caller ordering.
+        spec.it(fw, "lets a typed value shadow a legacy string binding") callback {
+            ctx6 = liquid.context_new()
+            liquid.context_put_string(ctx6, "x", "legacy")
+            liquid.context_put_int(ctx6, "x", 99)
+            spec.assert_str_eq(render_one("{{ x }}", ctx6), "99",
+                "6 typed shadows legacy")
+        }
+
+        spec.it(fw, "keeps the typed value even when legacy is bound after") callback {
+            ctx9 = liquid.context_new()
+            liquid.context_put_int(ctx9, "y", 7)
+            liquid.context_put_string(ctx9, "y", "legacy_after")
+            spec.assert_str_eq(render_one("{{ y }}", ctx9), "7",
+                "9 typed wins after legacy")
+        }
+
+        spec.it(fw, "renders a negative int") callback {
+            ctx7 = liquid.context_new()
+            liquid.context_put_int(ctx7, "n", -17)
+            spec.assert_str_eq(render_one("{{ n }}", ctx7), "-17", "7 neg int")
+        }
+
+        spec.it(fw, "renders zero") callback {
+            ctx8 = liquid.context_new()
+            liquid.context_put_int(ctx8, "n", 0)
+            spec.assert_str_eq(render_one("{{ n }}", ctx8), "0", "8 zero int")
+        }
+
+        spec.it(fw, "stringifies values built directly") callback {
+            spec.assert_str_eq(liquid.value_to_string(liquid.value_str("hello")),
+                "hello", "10 value_str round-trip")
+            spec.assert_str_eq(liquid.value_to_string(liquid.value_nil()),
+                "", "11 nil stringifies empty")
+            spec.assert_str_eq(liquid.value_to_string(liquid.value_bool(1)),
+                "true", "12a bool true str")
+            spec.assert_str_eq(liquid.value_to_string(liquid.value_bool(0)),
+                "false", "12b bool false str")
+        }
+    }
+
+    spec.describe(fw, "liquid: assign") {
+        spec.it(fw, "binds a double-quoted literal") callback {
+            spec.assert_str_eq(render_bare("{% assign x = \"hello\" %}{{ x }}"),
+                "hello", "1 assign double-quoted literal")
+        }
+
+        spec.it(fw, "binds a single-quoted literal") callback {
+            spec.assert_str_eq(render_bare("{% assign x = 'world' %}{{ x }}"),
+                "world", "2 assign single-quoted literal")
+        }
+
+        spec.it(fw, "copies one binding to another") callback {
+            ctx3 = liquid.context_new()
+            liquid.context_put_string(ctx3, "name", "alice")
+            spec.assert_str_eq(
+                render_one("{% assign greeting = name %}Hi, {{ greeting }}!", ctx3),
+                "Hi, alice!", "3 assign from variable")
+        }
+
+        spec.it(fw, "re-binds, so the second assign wins") callback {
+            spec.assert_str_eq(
+                render_bare("{% assign x = \"first\" %}{% assign x = \"second\" %}{{ x }}"),
+                "second", "4 assign rebinds")
+        }
+
+        spec.it(fw, "applies a filter chain to a literal") callback {
+            spec.assert_str_eq(
+                render_bare("{% assign x = \"hi\" | upcase | append:\"!\" %}{{ x }}"),
+                "HI!", "5 assign literal + filters")
+        }
+
+        // The filtered copy must not write back through to the source
+        // binding — `name` still reads as it was bound.
+        spec.it(fw, "filters a variable without mutating the original") callback {
+            ctx6 = liquid.context_new()
+            liquid.context_put_string(ctx6, "name", "alice")
+            spec.assert_str_eq(
+                render_one("{% assign loud = name | upcase %}{{ loud }} / {{ name }}", ctx6),
+                "ALICE / alice", "6 assign var + filter, original kept")
+        }
+
+        // assign takes effect at its position in the template, not for the
+        // whole render — a reference above it still sees the old value.
+        spec.it(fw, "takes effect from its position onward") callback {
+            ctx7 = liquid.context_new()
+            liquid.context_put_string(ctx7, "x", "old")
+            spec.assert_str_eq(
+                render_one("{{ x }}{% assign x = \"new\" %}-{{ x }}", ctx7),
+                "old-new", "7 assign mid-template")
+        }
+
+        spec.it(fw, "rejects a missing `=`") callback {
+            spec.assert_not_eq(string.length(render_err("{% assign x \"hi\" %}")), 0,
+                "8 missing `=`: expected error")
+        }
+
+        spec.it(fw, "rejects a missing name") callback {
+            spec.assert_not_eq(string.length(render_err("{% assign  = \"hi\" %}")), 0,
+                "9 missing name: expected error")
+        }
+
+        spec.it(fw, "still errors on an unsupported tag") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% for x in coll %}b{% endfor %}")), 0,
+                "10 unsupported tag: expected error")
+        }
+    }
+
+    spec.describe(fw, "liquid: capture") {
+        spec.it(fw, "captures literal text into a binding") callback {
+            spec.assert_str_eq(
+                render_bare("{% capture msg %}hello{% endcapture %}>{{ msg }}<"),
+                ">hello<", "1 bare capture")
+        }
+
+        spec.it(fw, "interpolates the surrounding context into the body") callback {
+            ctx2 = liquid.context_new()
+            liquid.context_put_string(ctx2, "name", "alice")
+            spec.assert_str_eq(
+                render_one("{% capture greet %}Hi {{ name }}{% endcapture %}>>{{ greet }}<<", ctx2),
+                ">>Hi alice<<", "2 capture interpolates var")
+        }
+
+        spec.it(fw, "runs a filter chain inside the body") callback {
+            ctx3 = liquid.context_new()
+            liquid.context_put_string(ctx3, "name", "alice")
+            spec.assert_str_eq(
+                render_one("{% capture loud %}{{ name | upcase | append:\"!\" }}{% endcapture %}{{ loud }}", ctx3),
+                "ALICE!", "3 capture body uses filters")
+        }
+
+        // Shopify semantics: variables are global, so an assign inside a
+        // capture body is visible after the block. Deliberate, not a leak.
+        spec.it(fw, "lets an assign inside the body escape to the parent") callback {
+            spec.assert_str_eq(
+                render_bare("{% capture _ %}{% assign x = \"set\" %}{% endcapture %}{{ x }}"),
+                "set", "4 capture-internal assign leaks")
+        }
+
+        spec.it(fw, "lets a later capture reference an earlier one") callback {
+            spec.assert_str_eq(
+                render_bare("{% capture a %}AA{% endcapture %}{% capture b %}{{ a }}-BB{% endcapture %}{{ b }}"),
+                "AA-BB", "5 second capture uses first")
+        }
+
+        spec.it(fw, "shadows an outer binding from its position onward") callback {
+            ctx6 = liquid.context_new()
+            liquid.context_put_string(ctx6, "x", "OLD")
+            spec.assert_str_eq(
+                render_one("[{{ x }}]{% capture x %}NEW{% endcapture %}[{{ x }}]", ctx6),
+                "[OLD][NEW]", "6 capture shadows ctx")
+        }
+
+        spec.it(fw, "nests, with the inner name also visible outside") callback {
+            spec.assert_str_eq(
+                render_bare("{% capture outer %}({% capture inner %}IN{% endcapture %}{{ inner }}){% endcapture %}[{{ outer }}][{{ inner }}]"),
+                "[(IN)][IN]", "7 nested captures")
+        }
+
+        // A capture under a comment must not bind: the comment wins, so
+        // `m` stays unbound and renders empty.
+        spec.it(fw, "does not bind when the capture sits inside a comment") callback {
+            spec.assert_str_eq(
+                render_bare("a{% comment %}{% capture m %}never{% endcapture %}{% endcomment %}b<{{ m }}>"),
+                "ab<>", "8 capture under comment dropped")
+        }
+
+        spec.it(fw, "binds the empty string for an empty body") callback {
+            spec.assert_str_eq(render_bare("{% capture m %}{% endcapture %}[{{ m }}]"),
+                "[]", "9 empty capture body")
+        }
+
+        spec.it(fw, "rejects a missing name") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% capture %}body{% endcapture %}")), 0,
+                "10 missing name: expected error")
+        }
+
+        spec.it(fw, "rejects an unclosed capture") callback {
+            spec.assert_not_eq(
+                string.length(render_err("before {% capture m %}body never closed")), 0,
+                "11 unmatched capture: expected error")
+        }
+
+        spec.it(fw, "rejects a stray endcapture") callback {
+            spec.assert_not_eq(
+                string.length(render_err("hi {% endcapture %} bye")), 0,
+                "12 stray endcapture: expected error")
+        }
+
+        spec.it(fw, "honours whitespace control on the capture tags") callback {
+            spec.assert_str_eq(
+                render_bare("a   {%- capture m -%}   body   {%- endcapture -%}   b{{ m }}"),
+                "abbody", "13 whitespace control around capture")
+        }
+    }
+
+    spec.run_summary(fw)
+}

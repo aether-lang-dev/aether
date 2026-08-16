@@ -1,0 +1,500 @@
+// Filter spec for contrib.templating.liquid — co-located with the module it
+// exercises, written in Aether against std.spec.
+//
+// Replaces tests/integration/liquid_{filters_basic,filters_more,
+// filters_math_and_html,filters_hash_b64_xml,filter_polish}/. See
+// test_syntax.ae for why the shell wrappers were retired.
+//
+// This file is the `{{ value | filter }}` half: the string filters, the
+// escaping/encoding family, integer arithmetic, the hash and base64
+// filters, and truncate/default's argument handling.
+
+import contrib.templating.liquid
+import std.spec
+import std.string
+
+// Render `src` with one binding. The filter probes are all single-value.
+render_with(src: string, key: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, key, val)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+render_x(src: string, val: string) -> string {
+    return render_with(src, "x", val)
+}
+
+render_s(src: string, val: string) -> string {
+    return render_with(src, "s", val)
+}
+
+// Render with `s` bound and return only the error.
+render_s_err(src: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, "s", val)
+    _, e = liquid.render(t, ctx)
+    return e
+}
+
+render_x_err(src: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, "x", val)
+    _, e = liquid.render(t, ctx)
+    return e
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "liquid: string filters") {
+        spec.it(fw, "changes case") callback {
+            spec.assert_str_eq(render_s("{{ s | upcase }}", "hi there"), "HI THERE", "1a upcase")
+            spec.assert_str_eq(render_s("{{ s | downcase }}", "HI There"), "hi there", "1b downcase")
+            spec.assert_str_eq(render_s("{{ s | capitalize }}", "hELLO"), "Hello", "1c capitalize")
+        }
+
+        spec.it(fw, "strips whitespace from either or both ends") callback {
+            spec.assert_str_eq(render_s("[{{ s | strip }}]", "   hi   "), "[hi]", "2a strip")
+            spec.assert_str_eq(render_s("[{{ s | lstrip }}]", "   hi   "), "[hi   ]", "2b lstrip")
+            spec.assert_str_eq(render_s("[{{ s | rstrip }}]", "   hi   "), "[   hi]", "2c rstrip")
+        }
+
+        spec.it(fw, "reports size as the byte length") callback {
+            spec.assert_str_eq(render_s("{{ s | size }}", "abcde"), "5", "3 size")
+        }
+
+        spec.it(fw, "reverses a string") callback {
+            spec.assert_str_eq(render_s("{{ s | reverse }}", "abcd"), "dcba", "4 reverse")
+        }
+
+        spec.it(fw, "appends and prepends") callback {
+            spec.assert_str_eq(render_s("{{ s | append:\"!\" }}", "hi"), "hi!", "5 append")
+            spec.assert_str_eq(render_s("{{ s | prepend:\">> \" }}", "hi"), ">> hi", "6 prepend")
+        }
+
+        spec.it(fw, "substitutes default only for an empty value") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\" }}", ""), "alt", "7 default fires")
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\" }}", "real"), "real",
+                "8 default skipped")
+        }
+
+        spec.it(fw, "truncates to the cap, counting the ellipsis") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"10\" }}", "abcdefghijklmnop"),
+                "abcdefg...", "9 truncate cuts")
+        }
+
+        spec.it(fw, "leaves a short string untruncated") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"5\" }}", "abc"), "abc",
+                "10 truncate identity")
+        }
+
+        spec.it(fw, "replaces every occurrence") callback {
+            spec.assert_str_eq(render_s("{{ s | replace:\"foo\",\"bar\" }}", "foo foo foo"),
+                "bar bar bar", "11 replace multi")
+        }
+
+        spec.it(fw, "applies a chain left to right") callback {
+            spec.assert_str_eq(
+                render_s("{{ s | upcase | append:\"!\" | prepend:\"<<\" }}", "hi"),
+                "<<HI!", "12 chain upcase|append|prepend")
+        }
+
+        // A `|` inside a quoted argument is data, not a pipeline separator.
+        spec.it(fw, "does not split the pipeline on a quoted pipe") callback {
+            spec.assert_str_eq(render_s("{{ s | append:\"|END\" }}", "hi"), "hi|END",
+                "13 quoted pipe in arg")
+        }
+
+        spec.it(fw, "accepts single-quoted arguments") callback {
+            spec.assert_str_eq(render_s("{{ s | append:'!' }}", "hi"), "hi!",
+                "14 single-quoted arg")
+        }
+
+        // Shopify behaviour: an unknown filter is a no-op, NOT an error.
+        // Asserted with the error checked too, so a future change to
+        // erroring cannot pass by rendering the value unchanged.
+        spec.it(fw, "passes the value through an unknown filter") callback {
+            spec.assert_str_eq(render_s_err("{{ s | nosuchfilter }}", "x"), "",
+                "15 unknown filter: no error")
+            spec.assert_str_eq(render_s("{{ s | nosuchfilter }}", "x"), "x",
+                "15 unknown filter passes through")
+        }
+
+        // A KNOWN filter called wrongly is a different case, and must error
+        // rather than silently no-op.
+        spec.it(fw, "errors when a known filter is missing its argument") callback {
+            spec.assert_not_eq(string.length(render_s_err("{{ s | append }}", "x")), 0,
+                "16 missing arg: expected error")
+        }
+    }
+
+    spec.describe(fw, "liquid: replace, remove and escaping") {
+        spec.it(fw, "replaces only the first occurrence with replace_first") callback {
+            spec.assert_str_eq(render_s("{{ s | replace_first:\"foo\",\"bar\" }}", "foo foo foo"),
+                "bar foo foo", "1 replace_first")
+        }
+
+        spec.it(fw, "removes every occurrence") callback {
+            spec.assert_str_eq(render_s("{{ s | remove:\"x\" }}", "xaxbxcx"), "abc",
+                "2 remove all")
+        }
+
+        spec.it(fw, "removes only the first occurrence with remove_first") callback {
+            spec.assert_str_eq(render_s("{{ s | remove_first:\"x\" }}", "xaxbxcx"), "axbxcx",
+                "3 remove_first")
+        }
+
+        spec.it(fw, "escapes the full HTML special set") callback {
+            spec.assert_str_eq(render_s("{{ s | escape }}", "<a href=\"x\">'a'&b</a>"),
+                "&lt;a href=&quot;x&quot;&gt;&#39;a&#39;&amp;b&lt;/a&gt;",
+                "4 escape full set")
+        }
+
+        spec.it(fw, "leaves plain text alone when escaping") callback {
+            spec.assert_str_eq(render_s("{{ s | escape }}", "hello world"), "hello world",
+                "5 escape identity")
+        }
+
+        // escape_once exists so re-escaping a partly-escaped string does not
+        // double up: `&amp;` must stay itself, not become `&amp;amp;`.
+        spec.it(fw, "preserves an existing entity under escape_once") callback {
+            spec.assert_str_eq(render_s("{{ s | escape_once }}", "a &amp; b < c"),
+                "a &amp; b &lt; c", "6 escape_once preserves entity")
+        }
+
+        spec.it(fw, "escapes a bare ampersand but not an encoded one") callback {
+            spec.assert_str_eq(render_s("{{ s | escape_once }}", "& and &amp;"),
+                "&amp; and &amp;", "7 escape_once idempotent")
+        }
+
+        spec.it(fw, "percent-encodes for URLs") callback {
+            spec.assert_str_eq(render_s("{{ s | url_encode }}", "a b/c=1"), "a+b%2Fc%3D1",
+                "8 url_encode")
+        }
+
+        spec.it(fw, "decodes back to the original") callback {
+            spec.assert_str_eq(render_s("{{ s | url_decode }}", "a+b%2Fc%3D1"), "a b/c=1",
+                "9 url_decode inverse")
+        }
+
+        // Malformed input passes through rather than erroring — a truncated
+        // percent escape in user data must not take the whole page down.
+        spec.it(fw, "leaves a malformed percent escape untouched") callback {
+            spec.assert_str_eq(render_s("{{ s | url_decode }}", "a%ZZb"), "a%ZZb",
+                "10 url_decode malformed")
+        }
+
+        spec.it(fw, "truncates to a word count") callback {
+            spec.assert_str_eq(render_s("{{ s | truncatewords:\"3\" }}", "one two three four five"),
+                "one two three...", "11 truncatewords cuts")
+        }
+
+        spec.it(fw, "leaves a short string alone under truncatewords") callback {
+            spec.assert_str_eq(render_s("{{ s | truncatewords:\"10\" }}", "a b c"), "a b c",
+                "12 truncatewords identity")
+        }
+
+        // Runs of whitespace count as one separator, so tabs and multiple
+        // spaces do not inflate the word count.
+        spec.it(fw, "collapses whitespace runs when counting words") callback {
+            spec.assert_str_eq(render_s("{{ s | truncatewords:\"3\" }}", "one   two\t\tthree four"),
+                "one two three...", "13 truncatewords collapses whitespace")
+        }
+
+        // The newline is KEPT alongside the inserted tag — the source stays
+        // readable and the rendered output still breaks.
+        spec.it(fw, "inserts a break tag before each newline") callback {
+            spec.assert_str_eq(render_s("{{ s | newline_to_br }}", "a\nb\nc"),
+                "a<br />\nb<br />\nc", "14 newline_to_br lf")
+        }
+
+        spec.it(fw, "treats CRLF as a single line break") callback {
+            spec.assert_str_eq(render_s("{{ s | newline_to_br }}", "a\r\nb"), "a<br />\nb",
+                "15 newline_to_br crlf")
+        }
+
+        spec.it(fw, "chains escape into upcase") callback {
+            spec.assert_str_eq(render_s("{{ s | escape | upcase }}", "a<b"), "A&LT;B",
+                "16 escape | upcase")
+        }
+
+        spec.it(fw, "chains url_encode into append") callback {
+            spec.assert_str_eq(render_s("{{ s | url_encode | append:\"&z=1\" }}", "key=val"),
+                "key%3Dval&z=1", "17 url_encode | append")
+        }
+
+        spec.it(fw, "passes the value through an unknown filter") callback {
+            spec.assert_str_eq(render_s_err("{{ s | bogosity }}", "x"), "",
+                "18 unknown filter: no error")
+            spec.assert_str_eq(render_s("{{ s | bogosity }}", "x"), "x",
+                "18 unknown filter passes through")
+        }
+    }
+
+    spec.describe(fw, "liquid: arithmetic filters") {
+        spec.it(fw, "adds, subtracts and multiplies") callback {
+            spec.assert_str_eq(render_x("{{ x | plus:\"3\" }}", "10"), "13", "1 plus")
+            spec.assert_str_eq(render_x("{{ x | minus:\"4\" }}", "10"), "6", "2 minus")
+            spec.assert_str_eq(render_x("{{ x | times:\"5\" }}", "6"), "30", "3 times")
+        }
+
+        // Integer division: 10/3 is 3, not 3.33 — the arithmetic stays in
+        // integers throughout.
+        spec.it(fw, "divides with truncation toward zero") callback {
+            spec.assert_str_eq(render_x("{{ x | divided_by:\"3\" }}", "10"), "3",
+                "4 divided_by truncates")
+        }
+
+        spec.it(fw, "errors on division by zero") callback {
+            spec.assert_not_eq(string.length(render_x_err("{{ x | divided_by:\"0\" }}", "10")), 0,
+                "5 divided_by:0: expected error")
+        }
+
+        spec.it(fw, "takes a modulo") callback {
+            spec.assert_str_eq(render_x("{{ x | modulo:\"3\" }}", "10"), "1", "6 modulo")
+        }
+
+        spec.it(fw, "errors on modulo by zero") callback {
+            spec.assert_not_eq(string.length(render_x_err("{{ x | modulo:\"0\" }}", "10")), 0,
+                "7 modulo:0: expected error")
+        }
+
+        spec.it(fw, "clamps upward with at_least") callback {
+            spec.assert_str_eq(render_x("{{ x | at_least:\"10\" }}", "3"), "10",
+                "8 at_least clamps")
+            spec.assert_str_eq(render_x("{{ x | at_least:\"10\" }}", "20"), "20",
+                "9 at_least identity")
+        }
+
+        spec.it(fw, "clamps downward with at_most") callback {
+            spec.assert_str_eq(render_x("{{ x | at_most:\"10\" }}", "20"), "10",
+                "10 at_most clamps")
+            spec.assert_str_eq(render_x("{{ x | at_most:\"10\" }}", "3"), "3",
+                "11 at_most identity")
+        }
+
+        // An unbound or empty value reads as 0 rather than erroring, so a
+        // missing count still renders a number.
+        spec.it(fw, "treats an empty value as zero") callback {
+            spec.assert_str_eq(render_x("{{ x | plus:\"7\" }}", ""), "7", "12 plus on empty")
+        }
+
+        spec.it(fw, "stays integral across a chain") callback {
+            spec.assert_str_eq(render_x("{{ x | plus:\"3\" | times:\"2\" | minus:\"1\" }}", "5"),
+                "15", "13 chain plus|times|minus")
+        }
+    }
+
+    spec.describe(fw, "liquid: html and slicing filters") {
+        spec.it(fw, "drops tags but keeps their text") callback {
+            spec.assert_str_eq(render_x("{{ x | strip_html }}", "a<b>bold</b>c<br/>d"),
+                "aboldcd", "14 strip_html")
+        }
+
+        // An unterminated `<` swallows the rest: erring toward dropping
+        // markup rather than emitting a half-tag into the page.
+        spec.it(fw, "swallows an unterminated tag") callback {
+            spec.assert_str_eq(render_x("{{ x | strip_html }}", "ok<oops"), "ok",
+                "15 strip_html unterminated")
+        }
+
+        spec.it(fw, "removes both carriage returns and newlines") callback {
+            spec.assert_str_eq(render_x("{{ x | strip_newlines }}", "a\nb\r\nc\rd"), "abcd",
+                "16 strip_newlines")
+        }
+
+        spec.it(fw, "slices one byte with a single argument") callback {
+            spec.assert_str_eq(render_x("{{ x | slice:\"1\" }}", "abcdef"), "b", "17 slice 1-arg")
+        }
+
+        spec.it(fw, "slices a run with start and length") callback {
+            spec.assert_str_eq(render_x("{{ x | slice:\"1\",\"3\" }}", "abcdef"), "bcd",
+                "18 slice 2-arg")
+        }
+
+        spec.it(fw, "counts a negative start from the end") callback {
+            spec.assert_str_eq(render_x("{{ x | slice:\"-2\",\"2\" }}", "abcdef"), "ef",
+                "19 slice negative start")
+        }
+
+        // Out-of-range slices clamp instead of erroring or reading past the
+        // end of the string.
+        spec.it(fw, "clamps a length that runs past the end") callback {
+            spec.assert_str_eq(render_x("{{ x | slice:\"4\",\"10\" }}", "abcdef"), "ef",
+                "20 slice past-end clamp")
+        }
+
+        spec.it(fw, "yields nothing for a negative length") callback {
+            spec.assert_str_eq(render_x("{{ x | slice:\"0\",\"-1\" }}", "abcdef"), "",
+                "21 slice negative len")
+        }
+    }
+
+    spec.describe(fw, "liquid: xml, json, base64 and hash filters") {
+        spec.it(fw, "escapes the full XML special set") callback {
+            spec.assert_str_eq(render_s("{{ s | escape_xml }}", "<a href=\"x\">'b'&c</a>"),
+                "&lt;a href=&quot;x&quot;&gt;&apos;b&apos;&amp;c&lt;/a&gt;",
+                "1 escape_xml full set")
+        }
+
+        // The one place escape_xml and escape differ: XML wants &apos; for
+        // an apostrophe where HTML escaping emits &#39;.
+        spec.it(fw, "uses &apos; where HTML escaping uses &#39;") callback {
+            spec.assert_str_eq(render_s("{{ s | escape_xml }}", "it's"), "it&apos;s",
+                "2 apos vs #39")
+        }
+
+        spec.it(fw, "escapes backslash and quote for JSON") callback {
+            spec.assert_str_eq(render_s("{{ s | json_escape }}", "a\"b\\c"), "a\\\"b\\\\c",
+                "3 json backslash + quote")
+        }
+
+        spec.it(fw, "escapes the common JSON control characters") callback {
+            spec.assert_str_eq(render_s("{{ s | json_escape }}", "a\nb\tc\rd"), "a\\nb\\tc\\rd",
+                "4 json common controls")
+        }
+
+        // A control byte with no short escape must become a \u sequence:
+        // emitting it raw would produce invalid JSON.
+        spec.it(fw, "escapes an arbitrary control byte as \\u") callback {
+            spec.assert_str_eq(render_s("{{ s | json_escape }}", "xy"),
+                "x\\u0001y", "5 json arbitrary control")
+        }
+
+        spec.it(fw, "base64-encodes with padding") callback {
+            spec.assert_str_eq(render_s("{{ s | base64_encode }}", "hello"), "aGVsbG8=",
+                "6 base64 hello padded")
+            spec.assert_str_eq(render_s("{{ s | base64_encode }}", "hi"), "aGk=", "7 base64 hi")
+        }
+
+        spec.it(fw, "base64-decodes back to the original") callback {
+            spec.assert_str_eq(render_s("{{ s | base64_decode }}", "aGVsbG8="), "hello",
+                "8 base64_decode round-trip")
+        }
+
+        spec.it(fw, "base64-encodes the empty string as empty") callback {
+            spec.assert_str_eq(render_s("{{ s | base64_encode }}", ""), "", "9 base64 empty")
+        }
+
+        // Known-answer values, not self-consistency: a hash that agreed with
+        // itself but not with the rest of the world would still pass a
+        // round-trip check.
+        spec.it(fw, "computes md5, sha1 and sha256 known answers") callback {
+            spec.assert_str_eq(render_s("{{ s | md5 }}", "hello"),
+                "5d41402abc4b2a76b9719d911017c592", "10 md5 hello")
+            spec.assert_str_eq(render_s("{{ s | sha1 }}", "hello"),
+                "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", "11 sha1 hello")
+            spec.assert_str_eq(render_s("{{ s | sha256 }}", "hello"),
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+                "12 sha256 hello")
+        }
+
+        // Proves the chain feeds the FILTERED value to the hash: this is
+        // sha256("HELLO"), which differs from sha256("hello") above.
+        spec.it(fw, "hashes the filtered value, not the original") callback {
+            spec.assert_str_eq(render_s("{{ s | upcase | sha256 }}", "hello"),
+                "3733cd977ff8eb18b987357e22ced99f46097f31ecb239e878ae63760e83e4d5",
+                "13 chain upcase | sha256")
+        }
+
+        spec.it(fw, "round-trips base64 through a chain") callback {
+            spec.assert_str_eq(render_s("{{ s | base64_encode | base64_decode }}", "round-trip"),
+                "round-trip", "14 chain b64 encode|decode")
+        }
+
+        spec.it(fw, "passes the value through an unknown filter") callback {
+            spec.assert_str_eq(render_s_err("{{ s | nosuchfilter }}", "x"), "",
+                "15 unknown filter: no error")
+            spec.assert_str_eq(render_s("{{ s | nosuchfilter }}", "x"), "x",
+                "15 unknown filter passes through")
+        }
+    }
+
+    // truncate's cap counts the ellipsis, so the result is never longer than
+    // the cap in BYTES. These pin the arithmetic at the boundaries, where an
+    // off-by-one would otherwise show up only on multi-byte input.
+    spec.describe(fw, "liquid: truncate and default arguments") {
+        spec.it(fw, "uses `...` as the default ellipsis") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"10\" }}", "abcdefghijklmnop"),
+                "abcdefg...", "1 truncate default ellipsis")
+        }
+
+        // A 3-byte UTF-8 ellipsis leaves 7 body bytes under a cap of 10 —
+        // the budget is bytes, not characters.
+        spec.it(fw, "counts a multi-byte ellipsis in bytes") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"10\",\"…\" }}", "abcdefghijklmnop"),
+                "abcdefg…", "2 truncate unicode ellipsis")
+        }
+
+        spec.it(fw, "accepts a custom single-character ellipsis") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"5\",\"-\" }}", "abcdefghij"), "abcd-",
+                "3 truncate custom 1-char ellipsis")
+        }
+
+        // When the cap cannot fit the ellipsis, the ellipsis is dropped
+        // rather than overrunning the cap.
+        spec.it(fw, "drops the ellipsis when the cap equals its length") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"3\",\"...\" }}", "abcdefghij"), "abc",
+                "4 cap equals ellipsis length")
+        }
+
+        spec.it(fw, "keeps one body byte when the cap is one larger") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"4\",\"...\" }}", "abcdefghij"), "a...",
+                "5 cap one bigger than ellipsis")
+        }
+
+        spec.it(fw, "hard-cuts with an empty ellipsis") callback {
+            spec.assert_str_eq(render_s("{{ s | truncate:\"7\",\"\" }}", "abcdefghij"), "abcdefg",
+                "6 empty ellipsis hard cut")
+        }
+
+        spec.it(fw, "fires default on an empty value") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\" }}", ""), "alt",
+                "7 default fires on empty")
+        }
+
+        // Without allow_false, the STRING "false" is an ordinary value and
+        // must survive — only emptiness triggers the default.
+        spec.it(fw, "leaves the string `false` alone by default") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\" }}", "false"), "false",
+                "8 default skips false without allow_false")
+        }
+
+        spec.it(fw, "fires on `false` when allow_false is set") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\",\"true\" }}", "false"), "alt",
+                "9a default fires on false with allow_false")
+            spec.assert_str_eq(
+                render_s("{{ s | default:\"alt\",allow_false:\"true\" }}", "false"), "alt",
+                "9b default fires on false with allow_false: prefix")
+        }
+
+        spec.it(fw, "fires on nil and null when allow_false is set") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\",\"true\" }}", "nil"), "alt",
+                "10 default fires on nil with allow_false")
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\",\"true\" }}", "null"), "alt",
+                "11 default fires on null with allow_false")
+        }
+
+        spec.it(fw, "still leaves a real value alone with allow_false") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\",\"true\" }}", "real"), "real",
+                "12 default skips real value with allow_false")
+        }
+
+        spec.it(fw, "honours allow_false explicitly turned off") callback {
+            spec.assert_str_eq(render_s("{{ s | default:\"alt\",\"false\" }}", "false"), "false",
+                "13 default skips false with allow_false=false")
+        }
+
+        spec.it(fw, "recognises the long-form allow_false: prefix") callback {
+            spec.assert_str_eq(
+                render_s("{{ s | default:\"alt\",allow_false:\"true\" }}", "nil"), "alt",
+                "14 allow_false: prefix recognised")
+        }
+    }
+
+    spec.run_summary(fw)
+}
