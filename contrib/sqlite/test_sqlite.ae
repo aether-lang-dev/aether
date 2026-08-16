@@ -1,0 +1,150 @@
+// Integration spec for contrib.sqlite — co-located with the module it
+// exercises, written in Aether against std.spec.
+//
+// Replaces tests/integration/sqlite_roundtrip/ and sqlite_prepared/, whose
+// shell wrappers existed almost entirely to probe for libsqlite3 and skip
+// when absent. std.spec's it_when (#1610) expresses that directly, so the
+// wrapper has nothing left to do and the assertions move next to the module
+// they describe.
+//
+// The two former probes hand-rolled their checks with `exit(1)` on the first
+// failure, which stops at the first problem and reports no others. As specs
+// each check is independent, so one broken query no longer masks the rest.
+//
+// DEPENDENCY: contrib.sqlite links libsqlite3. contrib_check.sh names
+// `sqlite3` in the entry's pkg-config column and SKIPS the whole entry when
+// it is absent, so this file only runs where the library exists — the
+// it_when guard below is belt-and-braces for a direct `ae run`.
+
+import contrib.sqlite
+import std.spec
+import std.string
+
+main() {
+    fw = spec.init()
+
+    // Probe: an in-memory database needs no filesystem and proves the
+    // library is both linked and callable.
+    db, operr = sqlite.open(":memory:")
+    have_sqlite = 0
+    if string.equals(operr, "") == 1 { have_sqlite = 1 }
+    reason = "libsqlite3 not available"
+
+    spec.describe(fw, "contrib.sqlite") {
+        spec.it_when(have_sqlite, "opens an in-memory database", reason) callback {
+            spec.assert_str_eq(operr, "", "open(:memory:) reports no error")
+            spec.assert_not_null(db, "a handle comes back")
+        }
+
+        spec.it_when(have_sqlite, "creates a table and inserts rows", reason) callback {
+            cerr = sqlite.exec(db, "CREATE TABLE t (id INTEGER, name TEXT)")
+            spec.assert_str_eq(cerr, "", "CREATE TABLE succeeds")
+            e1 = sqlite.exec(db, "INSERT INTO t VALUES (1, 'ada')")
+            spec.assert_str_eq(e1, "", "first insert succeeds")
+            e2 = sqlite.exec(db, "INSERT INTO t VALUES (2, 'grace')")
+            spec.assert_str_eq(e2, "", "second insert succeeds")
+        }
+
+        // The round trip: what went in must come back, with the shape
+        // (row/column counts) the caller relies on to iterate.
+        spec.it_when(have_sqlite, "reads rows back with the right shape", reason) callback {
+            rs, qerr = sqlite.query(db, "SELECT id, name FROM t ORDER BY id")
+            spec.assert_str_eq(qerr, "", "SELECT succeeds")
+            spec.assert_eq(sqlite.row_count(rs), 2, "two rows")
+            spec.assert_eq(sqlite.col_count(rs), 2, "two columns")
+            spec.assert_str_eq(sqlite.col_name(rs, 0), "id", "first column is id")
+            spec.assert_str_eq(sqlite.col_name(rs, 1), "name", "second column is name")
+            spec.assert_str_eq(sqlite.cell(rs, 0, 1), "ada", "row 0 name")
+            spec.assert_str_eq(sqlite.cell(rs, 1, 1), "grace", "row 1 name")
+            sqlite.free(rs)
+        }
+
+        // A WHERE clause proves the query text reaches sqlite rather than
+        // the module returning a cached or whole-table result.
+        spec.it_when(have_sqlite, "honours a WHERE clause", reason) callback {
+            rs, qerr = sqlite.query(db, "SELECT name FROM t WHERE id = 2")
+            spec.assert_str_eq(qerr, "", "filtered SELECT succeeds")
+            spec.assert_eq(sqlite.row_count(rs), 1, "one row matches")
+            spec.assert_str_eq(sqlite.cell(rs, 0, 0), "grace", "the right row")
+            sqlite.free(rs)
+        }
+
+        // A malformed statement must report an error rather than returning
+        // an empty result set: a caller that cannot distinguish "no rows"
+        // from "your SQL was wrong" will silently do the wrong thing.
+        spec.it_when(have_sqlite, "reports a SQL error rather than empty success", reason) callback {
+            _rs, qerr = sqlite.query(db, "SELECT nosuchcol FROM t")
+            spec.assert_not_eq(string.length(qerr), 0,
+                "a bad column name yields a non-empty error")
+        }
+
+        spec.it_when(have_sqlite, "reports an error for a missing table", reason) callback {
+            eerr = sqlite.exec(db, "INSERT INTO nosuchtable VALUES (1)")
+            spec.assert_not_eq(string.length(eerr), 0,
+                "writing to a missing table errors")
+        }
+
+        // ---- prepared statements ------------------------------------
+        // The surface tests/integration/sqlite_prepared/ covered: prepare
+        // once, bind, step, read columns, reset and re-use, finalize.
+        // Kept here so retiring that directory loses nothing.
+
+        spec.it_when(have_sqlite, "binds and reads back through a prepared statement", reason) callback {
+            st, perr = sqlite.prepare(db, "SELECT name FROM t WHERE id = ?")
+            spec.assert_str_eq(perr, "", "prepare succeeds")
+            spec.assert_str_eq(sqlite.bind_int(st, 1, 2), "", "bind_int succeeds")
+            spec.assert_eq(sqlite.next_row(st, db), 1, "a row is available")
+            spec.assert_str_eq(sqlite.column_text(st, 0), "grace", "the bound id selected row 2")
+            spec.assert_eq(sqlite.next_row(st, db), 0, "no second row")
+            spec.assert_str_eq(sqlite.finalize(st), "", "finalize succeeds")
+        }
+
+        // reset() is what makes a prepared statement worth preparing: the
+        // same handle re-bound and re-run must yield the OTHER row, not a
+        // cached copy of the first result.
+        spec.it_when(have_sqlite, "reset re-runs a statement with new bindings", reason) callback {
+            st, perr = sqlite.prepare(db, "SELECT name FROM t WHERE id = ?")
+            spec.assert_str_eq(perr, "", "prepare succeeds")
+
+            _b1 = sqlite.bind_int(st, 1, 1)
+            spec.assert_eq(sqlite.next_row(st, db), 1, "first run has a row")
+            spec.assert_str_eq(sqlite.column_text(st, 0), "ada", "id 1 -> ada")
+
+            spec.assert_str_eq(sqlite.reset(st), "", "reset succeeds")
+            _b2 = sqlite.bind_int(st, 1, 2)
+            spec.assert_eq(sqlite.next_row(st, db), 1, "second run has a row")
+            spec.assert_str_eq(sqlite.column_text(st, 0), "grace",
+                "id 2 -> grace, so the re-bind really took")
+
+            _f = sqlite.finalize(st)
+        }
+
+        spec.it_when(have_sqlite, "bind_text and column_int round-trip", reason) callback {
+            st, perr = sqlite.prepare(db, "SELECT id FROM t WHERE name = ?")
+            spec.assert_str_eq(perr, "", "prepare succeeds")
+            spec.assert_str_eq(sqlite.bind_text(st, 1, "ada"), "", "bind_text succeeds")
+            spec.assert_eq(sqlite.next_row(st, db), 1, "a row matches")
+            spec.assert_eq(sqlite.column_int(st, 0), 1, "column_int returns 1")
+            _f = sqlite.finalize(st)
+        }
+
+        // changes() reports rows affected by the last write — the only way
+        // a caller knows an UPDATE matched anything.
+        spec.it_when(have_sqlite, "changes() reports rows affected", reason) callback {
+            uerr = sqlite.exec(db, "UPDATE t SET name = 'ada2' WHERE id = 1")
+            spec.assert_str_eq(uerr, "", "UPDATE succeeds")
+            spec.assert_eq(sqlite.changes(db), 1, "one row changed")
+            _r = sqlite.exec(db, "UPDATE t SET name = 'ada' WHERE id = 1")
+        }
+
+        spec.it_when(have_sqlite, "prepare rejects malformed SQL", reason) callback {
+            _st, perr = sqlite.prepare(db, "SELECT FROM WHERE")
+            spec.assert_not_eq(string.length(perr), 0,
+                "unparseable SQL yields a non-empty error")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    if have_sqlite == 1 { sqlite.close(db) }
+}
