@@ -9,9 +9,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- `contrib/host/aether` and `contrib/host/factor` gain co-located specs,
+  `test_host_aether.ae` and `test_host_factor.ae`, replacing
+  `tests/integration/host_{aether,factor}/`. These were the last two
+  contrib integration directories whose wrapper did nothing a spec cannot:
+  the `[3/3]` discovery phase already builds each bridge archive on demand
+  and skips when it cannot, leaving only env-var gating (now `it_when`)
+  and, for the aether bridge, a child script to stage — which the spec
+  writes itself under a PID-scoped temp dir, so it runs under a bare
+  `ae run`.
+  The aether spec **gains three checks**: the retired wrapper asserted only
+  the happy path, so a child that exited non-zero, failed to compile, or
+  did not exist could not be distinguished from success. The factor specs
+  are the old driver's assertions unchanged in substance, but the original
+  returned on the first failure — one broken call hid every later one.
+  The factor specs skip without the aether-lang-dev/factor-language fork.
+  To confirm that guard hides nothing broken, they were run with it forced
+  on: all 16 assertions execute and fail against the absent library, so
+  they are live code rather than text that merely compiles.
+
+### Fixed
+
+- **CHANGELOG structure repaired.** Three `## [current]` headings were
+  stranded inside released history (between 0.546.0/0.545.0,
+  0.545.0/0.544.0 and 0.542.0/0.541.0), and four version headings were
+  duplicated — `0.546.0`, `0.547.0`, and the `0.435.0`/`0.497.0` pair the
+  release workflow's own guard already names as known-bad. Each stray
+  section held entries that really shipped; only the heading was never
+  renamed, so the file misreported which release contained what, and one
+  section carried untagged work under an already-released number.
+  Each orphan was reattributed from the release tag containing the commit
+  that introduced its text (`git tag --contains`), not from its position
+  in the file: the three resolve to 0.546.0, 0.545.0 and 0.542.0
+  respectively. Sections sharing a version were then merged and the whole
+  file ordered strictly descending, so every version now appears exactly
+  once.
+  **No entry was edited, added or removed** — verified by diffing the
+  sorted set of every non-heading line before and after (identical; 462
+  entries both sides). Only headings moved.
+  Cause is the catch-up-merge fold: merging main across a release folds a
+  PR's `[current]` into the released section above it with no conflict
+  marker, so it silently survives as a second heading.
+
+
 ## [0.547.0]
 
 ### Changed
+
 - `contrib/parsers/xml_expat` gains a co-located spec,
   `contrib/parsers/xml_expat/test_xml_expat.ae`, replacing
   `tests/integration/contrib_xml_expat/`. The highest-risk co-location so
@@ -43,9 +91,6 @@ version number before tagging the release.
   `liquid_block_tag`, whose 14 assertions an earlier pass had stranded by
   misreading the directory name.
 
-## [0.546.0]
-
-### Changed
 - `contrib/templating/native` gains a co-located spec,
   `contrib/templating/native/test_native.ae`, replacing the four
   `tests/integration/native_templating_{dsl,pretty,skeleton,xml}/`
@@ -62,7 +107,7 @@ version number before tagging the release.
   type-checked and never executed. It now appears as
   `PASS templating/native (run)`.
 
-## [current]
+## [0.546.0]
 
 ### Added
 - Three specs closing coverage gaps left when `contrib/sqlite`'s tests were
@@ -82,9 +127,32 @@ version number before tagging the release.
   the wrong length, it reports the real one (5) rather than passing
   vacuously.
 
+
+### Changed
+- `contrib/sqlite` gains a co-located spec, `contrib/sqlite/test_sqlite.ae`,
+  replacing `tests/integration/sqlite_roundtrip/` and
+  `tests/integration/sqlite_prepared/`. Those shell wrappers existed almost
+  entirely to probe for libsqlite3 and skip when absent — std.spec's
+  `it_when` (#1610) expresses that directly, so the wrapper had nothing left
+  to do and the assertions move next to the module they describe.
+  **Coverage grew rather than moved.** The old probes hand-rolled their
+  checks and called `exit(1)` on the first failure, so one broken query
+  masked every later one; as independent specs all 11 report. Four checks
+  are new: a SQL error must be distinguishable from an empty result set (a
+  caller that cannot tell "no rows" from "your SQL was wrong" will silently
+  do the wrong thing), writing to a missing table must error, `reset()` must
+  really re-bind rather than replay a cached result, and `prepare` must
+  reject malformed SQL. The whole prepared-statement surface the old
+  `sqlite_prepared` covered — prepare/bind/step/column/reset/finalize/changes
+  — is retained.
+  Wired into `contrib_check.sh`, which already had a pkg-config column that
+  SKIPs an entry when the system library is absent, so the spec runs only
+  where sqlite3 exists.
+
 ## [0.545.0]
 
 ### Added
+
 - Co-located embedding specs for four more host bridges —
   `contrib/host/{duktape,lua,perl,python}/test_host_*.ae` — following the
   pattern established for Ruby. Each drives its bridge through
@@ -109,32 +177,7 @@ version number before tagging the release.
   A runtime that cannot be resolved yields **skipped** specs, not
   failures.
 
-## [0.546.0]
 
-### Changed
-- `contrib/sqlite` gains a co-located spec, `contrib/sqlite/test_sqlite.ae`,
-  replacing `tests/integration/sqlite_roundtrip/` and
-  `tests/integration/sqlite_prepared/`. Those shell wrappers existed almost
-  entirely to probe for libsqlite3 and skip when absent — std.spec's
-  `it_when` (#1610) expresses that directly, so the wrapper had nothing left
-  to do and the assertions move next to the module they describe.
-  **Coverage grew rather than moved.** The old probes hand-rolled their
-  checks and called `exit(1)` on the first failure, so one broken query
-  masked every later one; as independent specs all 11 report. Four checks
-  are new: a SQL error must be distinguishable from an empty result set (a
-  caller that cannot tell "no rows" from "your SQL was wrong" will silently
-  do the wrong thing), writing to a missing table must error, `reset()` must
-  really re-bind rather than replay a cached result, and `prepare` must
-  reject malformed SQL. The whole prepared-statement surface the old
-  `sqlite_prepared` covered — prepare/bind/step/column/reset/finalize/changes
-  — is retained.
-  Wired into `contrib_check.sh`, which already had a pkg-config column that
-  SKIPs an entry when the system library is absent, so the spec runs only
-  where sqlite3 exists.
-
-## [current]
-
-### Added
 - `std.spec` gained skip verbs (#1610): `it_when(cond, desc, reason)` for
   dependency gating, `skip_it(desc, reason)` for a permanent exclusion, and
   `skip_all_if(fw, cond, reason)` for a file-level bail-out. A skipped test
@@ -169,6 +212,7 @@ version number before tagging the release.
   is picked up with no Makefile change.
 
 ### Fixed
+
 - Documented two `contrib.host.ruby` behaviours that cost real debugging
   time (contrib/host/ruby/README.md): **Ruby's `puts` output is buffered and
   silently vanishes** unless `ruby_finalize_host()` runs or the script sets
@@ -228,6 +272,7 @@ version number before tagging the release.
 ## [0.542.0]
 
 ### Added
+
 - std.spec's fluent value-comparison matchers take an optional trailing
   intent message (#1576): `to_equal`, `to_be_gt`, `to_be_lt`,
   `to_be_truthy`, `to_be_falsy`, `to_equal_str`, `to_contain` and
@@ -259,9 +304,6 @@ version number before tagging the release.
   binary-import prepass reads a `--emit=lib` artifact's catalog and
   synthesizes its interface — so this closes the fetch gap only.
 
-## [current]
-
-### Added
 - `WINDOWS=1` cross-build knob: build the `ae`/`aetherc` toolchain FOR
   Windows from a Linux host with `zig cc -target x86_64-windows-gnu`
   (#1592). Companion to `FREEBSD=1`, and simpler — zig bundles the
@@ -300,6 +342,7 @@ version number before tagging the release.
   remedy.
 
 ### Fixed
+
 - README's "enforced from compile time down to libc" now names the
   platform boundary: the libc (LD_PRELOAD) tier is Linux/FreeBSD only,
   and Windows gets the compile-time and scope layers (#1594).
@@ -1795,47 +1838,6 @@ version number before tagging the release.
   runs the matched filter chain (honoring `STOP`) then the endpoint handler, so
   every builder-DSL route and its filters now work.
 
-## [0.496.0]
-
-### Fixed
-
-- **The HTTP client and server public headers can be included together**
-  (#1433). Both published a type named `HttpRequest`, and they were different
-  structs: `std/net/aether_http.h` an opaque handle for an *outgoing* request,
-  `std/net/aether_http_server.h` a full struct for an *incoming* one. Any
-  translation unit including both failed to compile, so a C consumer could not
-  serve HTTP and make HTTP calls. The proxy had been working around it by
-  hand-declaring the client prototypes under different type names, which is
-  worse than the collision it dodged: duplicated signatures the compiler can no
-  longer check against the real definitions, the same hazard `@c_import`
-  (#1239) exists to remove for user code. The client type is now
-  `HttpClientRequest`, the name the workaround had already chosen; the server
-  keeps `HttpRequest` (its tinyweb-compatible surface, and the far more widely
-  used of the two, mirroring how its response type is already
-  `HttpServerResponse`). Both workarounds are deleted in favour of including the
-  header. The Aether-level API is untouched: `std.http.client` passes these as
-  `ptr`.
-
-### Removed
-
-- **`std/aether_std.h`**, an umbrella header that shipped in every install and
-  was included by nothing. It listed 7 of the 44 std headers, appeared in no
-  documentation, and had not been touched since it was added. Anyone who found
-  it got a misleading tenth of the standard library. It could not simply be
-  completed, either: including all std headers in one translation unit is a
-  compile error (#1433 is why), which is how that bug was found. The public
-  entry points remain the per-module headers, all of which are self-contained,
-  and `include/libaether.h` for embedders.
-
-### Added
-
-- **A guard that every public header compiles standalone**
-  (`tests/integration/public_headers`). Nothing checked this: the MSVC job
-  probes a handful of runtime headers under `cl.exe` and stops there. All 45
-  std and embedder headers pass today, and the check now also pins the
-  client/server pair from #1433 in both include orders, since an
-  order-dependent fix would not be one.
-
 ## [0.497.0]
 
 ### Fixed
@@ -1856,9 +1858,6 @@ version number before tagging the release.
   fiction rather than a fix. `tests/integration/canonical_repo_url` fails the
   build if the stale path returns.
 
-## [0.497.0]
-
-### Fixed
 
 - **The cross-language benchmark suite excluded Aether, and said so quietly.**
   Every run printed `Aether... [SKIP] Build failed` for all five benchmarks
@@ -1932,6 +1931,47 @@ version number before tagging the release.
   checksum validation, and bounded payload streaming. The high-level extractor
   rejects traversal, unsafe symlinks, unsupported entry kinds, and configurable
   entry/size limit violations. Compression remains a separate layer.
+
+## [0.496.0]
+
+### Fixed
+
+- **The HTTP client and server public headers can be included together**
+  (#1433). Both published a type named `HttpRequest`, and they were different
+  structs: `std/net/aether_http.h` an opaque handle for an *outgoing* request,
+  `std/net/aether_http_server.h` a full struct for an *incoming* one. Any
+  translation unit including both failed to compile, so a C consumer could not
+  serve HTTP and make HTTP calls. The proxy had been working around it by
+  hand-declaring the client prototypes under different type names, which is
+  worse than the collision it dodged: duplicated signatures the compiler can no
+  longer check against the real definitions, the same hazard `@c_import`
+  (#1239) exists to remove for user code. The client type is now
+  `HttpClientRequest`, the name the workaround had already chosen; the server
+  keeps `HttpRequest` (its tinyweb-compatible surface, and the far more widely
+  used of the two, mirroring how its response type is already
+  `HttpServerResponse`). Both workarounds are deleted in favour of including the
+  header. The Aether-level API is untouched: `std.http.client` passes these as
+  `ptr`.
+
+### Removed
+
+- **`std/aether_std.h`**, an umbrella header that shipped in every install and
+  was included by nothing. It listed 7 of the 44 std headers, appeared in no
+  documentation, and had not been touched since it was added. Anyone who found
+  it got a misleading tenth of the standard library. It could not simply be
+  completed, either: including all std headers in one translation unit is a
+  compile error (#1433 is why), which is how that bug was found. The public
+  entry points remain the per-module headers, all of which are self-contained,
+  and `include/libaether.h` for embedders.
+
+### Added
+
+- **A guard that every public header compiles standalone**
+  (`tests/integration/public_headers`). Nothing checked this: the MSVC job
+  probes a handful of runtime headers under `cl.exe` and stops there. All 45
+  std and embedder headers pass today, and the check now also pins the
+  client/server pair from #1433 in both include orders, since an
+  order-dependent fix would not be one.
 
 ## [0.495.0]
 
@@ -2678,6 +2718,22 @@ version number before tagging the release.
   certificate + CertificateVerify on a server CertificateRequest; `connect()`
   otherwise declines with an empty Certificate.
 
+
+- **`string.replace(s, old, new)` and `string.replace_all(s, old, new)`**
+  (#1331). Non-overlapping left-to-right matches, byte-exact and binary-safe;
+  `new` may be empty (deletion) or longer than `old`; empty `old` returns a
+  copy unchanged (Go's `strings.Replace` guard). Single exact-size allocation
+  regardless of match count; results are heap-tracked like `substring`.
+  Regression: `tests/regression/test_std_string_replace.ae`.
+- **`ae fmt` CI gate** (#1302). `tests/integration/fmt_gate/` enforces the
+  formatter's documented safety properties on every CI run: all checked-in
+  `.ae` sources under `std/`, `examples/`, and `tests/` are canonically
+  formatted (`ae fmt --check`), formatting is idempotent, and a formatted
+  file's generated C is byte-identical to the original's (modulo `#line`).
+  The whole tree was formatted in this change (595 files, whitespace-only);
+  the IR-preservation property was verified on all 443 compiling program
+  files before and after: zero differences.
+
 ### Fixed
 
 - **Actor `?` ask answered 0 and leaked a 5s timeout when the handler used
@@ -2707,23 +2763,6 @@ version number before tagging the release.
   construction) and keeps only valid UTF-8 sequences raw, so generated C is
   always valid text. Regression:
   `tests/regression/test_string_escape_bytes.ae`.
-
-### Added
-
-- **`string.replace(s, old, new)` and `string.replace_all(s, old, new)`**
-  (#1331). Non-overlapping left-to-right matches, byte-exact and binary-safe;
-  `new` may be empty (deletion) or longer than `old`; empty `old` returns a
-  copy unchanged (Go's `strings.Replace` guard). Single exact-size allocation
-  regardless of match count; results are heap-tracked like `substring`.
-  Regression: `tests/regression/test_std_string_replace.ae`.
-- **`ae fmt` CI gate** (#1302). `tests/integration/fmt_gate/` enforces the
-  formatter's documented safety properties on every CI run: all checked-in
-  `.ae` sources under `std/`, `examples/`, and `tests/` are canonically
-  formatted (`ae fmt --check`), formatting is idempotent, and a formatted
-  file's generated C is byte-identical to the original's (modulo `#line`).
-  The whole tree was formatted in this change (595 files, whitespace-only);
-  the IR-preservation property was verified on all 443 compiling program
-  files before and after: zero differences.
 
 ## [0.462.0]
 
@@ -3186,18 +3225,6 @@ version number before tagging the release.
   accepted an `offset` parameter and ignored it, so every page repeated
   the same events; it now pages back from the newest event.
 
-### Changed
-
-- **`std.list`'s owned-flag lazy allocation is one helper again.** The
-  helper existed but its logic had been open-coded four times at the two
-  owned-add call sites; they now call it. Also dropped a dead djb2 hash
-  twin and two rwlock-init shims left over after the lazy-lock-init
-  removal, and cleaned the last hidden unused-variable and unused-parameter
-  warnings in the profiler tools.
-
-## [0.435.0]
-
-### Fixed
 
 - **String-literal argument to a call inside `${...}` interpolation.**
   `${id("hi")}` used to be a parse error (the `"` ended the *outer*
@@ -3229,6 +3256,15 @@ version number before tagging the release.
   small test values by calling-convention luck. The C side now uses
   `long long`, matching the `string_to_long_raw` convention; the
   Aether-facing API is unchanged.
+
+### Changed
+
+- **`std.list`'s owned-flag lazy allocation is one helper again.** The
+  helper existed but its logic had been open-coded four times at the two
+  owned-add call sites; they now call it. Also dropped a dead djb2 hash
+  twin and two rwlock-init shims left over after the lazy-lock-init
+  removal, and cleaned the last hidden unused-variable and unused-parameter
+  warnings in the profiler tools.
 
 ## [0.434.0]
 
@@ -6150,22 +6186,6 @@ those sections for the real 0.311–0.316 notes._
   uppercase-leading identifier); the unwrap reading applies everywhere
   else. A non-tuple or string-less-final-slot operand is a compile error.
 
-### Fixed
-
-- **`import std.fs (*)` (glob import) now carries the real tuple return
-  types of `(value, err)` wrappers** (`compiler/analysis/typechecker.c`).
-  A glob import registered each short alias by cloning the full symbol's
-  type *before* return-type inference ran, so a wrapper whose return type
-  is inferred (e.g. `fs.list_dir`'s `(ptr, string)` tuple) left the bare
-  alias `list_dir` stuck on a pre-inference `int` placeholder. A
-  `list, err = list_dir(...)` then stamped the call's return type as
-  `int` and codegen emitted `int _tup0 = fs_list_dir(...)` — a C type
-  error. Namespaced (`fs.list_dir`) and selective imports already worked;
-  the glob form did not. Import-alias short symbols are now re-synced from
-  their inferred full symbols after type inference, so all three import
-  forms agree. (fbs-core ask #1.)
-
-### Added
 
 - **Streaming (incremental) digest context in `std.cryptography`**
   (`std/cryptography/`). `digest_new(algo)` returns an opaque context;
@@ -6189,6 +6209,21 @@ those sections for the real 0.311–0.316 notes._
   returns the leading cleaned path component (`fs.first_element("/a/b")`
   → `"a"`). Together they let downstream blob-store code drop its
   hand-rolled `pathutil.join` wrapper.
+
+### Fixed
+
+- **`import std.fs (*)` (glob import) now carries the real tuple return
+  types of `(value, err)` wrappers** (`compiler/analysis/typechecker.c`).
+  A glob import registered each short alias by cloning the full symbol's
+  type *before* return-type inference ran, so a wrapper whose return type
+  is inferred (e.g. `fs.list_dir`'s `(ptr, string)` tuple) left the bare
+  alias `list_dir` stuck on a pre-inference `int` placeholder. A
+  `list, err = list_dir(...)` then stamped the call's return type as
+  `int` and codegen emitted `int _tup0 = fs_list_dir(...)` — a C type
+  error. Namespaced (`fs.list_dir`) and selective imports already worked;
+  the glob form did not. Import-alias short symbols are now re-synced from
+  their inferred full symbols after type inference, so all three import
+  forms agree. (fbs-core ask #1.)
 
 ## [0.277.0]
 
