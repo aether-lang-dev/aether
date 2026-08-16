@@ -25,6 +25,7 @@
 import std.string
 import std.fs
 import contrib.vulkan
+import std.spec
 
 message Start { dev: ptr, tag: int, reps: int }
 message Poll {}
@@ -134,19 +135,13 @@ actor Painter {
     }
 }
 
-main() {
-    println("=== contrib.vulkan actors ===")
-
-    if vulkan.available() != 1 {
-        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
-        return
-    }
-    dev = vulkan.device_create()
-    if dev == null {
-        println("SKIP: device_create failed (${vulkan.last_error()})")
-        return
-    }
-
+// The whole two-actor exchange, in one function, returning the four verdicts.
+// It lives outside the it() block below for two compiler reasons: an ask
+// (`a ? Poll {}`) does not lower inside a closure body, and an actor handle
+// captured by a closure is emitted without its `struct` keyword. Both are
+// pre-existing gaps, so the ordering-sensitive sequence stays here intact and
+// the it() block only asserts on what it returns.
+run_painters(dev: ptr) -> (int, int, int, int) {
     a = spawn(Painter())
     b = spawn(Painter())
 
@@ -165,32 +160,57 @@ main() {
     pa = a ? Poll {}
     pb = b ? Poll {}
 
-    failures = 0
-    if ra != 1 {
-        println("  FAIL painter 0 reported a bad frame")
-        failures = failures + 1
+    return (ra, rb, pa, pb)
+}
+
+main() {
+    fw = spec.init()
+
+    // The device is created once and shared by both painters — that sharing is
+    // the whole point of the test, and device creation is expensive besides.
+    //
+    // With no driver, or no device, there is nothing to race and nothing to
+    // assert against, so the cases below skip rather than fail: a machine
+    // without a GPU is a provisioning condition, exactly as the original's
+    // SKIP-and-exit-0 path treated it.
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+
+    if vulkan.available() == 1 {
+        dev = vulkan.device_create()
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else {
+            ready = 1
+        }
     } else {
-        println("  PASS painter 0 rendered its own colour every frame")
-    }
-    if rb != 1 {
-        println("  FAIL painter 1 reported a bad frame")
-        failures = failures + 1
-    } else {
-        println("  PASS painter 1 rendered its own colour every frame")
+        reason = "no Vulkan driver (${vulkan.last_error()})"
     }
 
-    if pa != 1 || pb != 1 {
-        println("  FAIL concurrent available()/device_name() disagreed")
-        failures = failures + 1
-    } else {
-        println("  PASS concurrent probe reads agree and are non-empty")
+    // The two painters and the two probes share one pair of actors and one
+    // mailbox ordering, so the whole exchange stays in one it(): both Starts
+    // must be in flight before either Poll, and the Probes must follow the
+    // Polls that drained the renders. Splitting on the assertion boundaries
+    // would serialise the actors and the test would pass with no locking at
+    // all.
+    spec.describe(fw, "vulkan: two actors on one device") {
+        spec.it_when(ready, "runs both painters and both probes concurrently", reason) callback {
+            ra, rb, pa, pb = run_painters(dev)
+
+            spec.assert_eq(ra, 1, "painter 0 rendered its own colour every frame")
+            spec.assert_eq(rb, 1, "painter 1 rendered its own colour every frame")
+            spec.assert_true(pa == 1 && pb == 1,
+                "concurrent probe reads agree and are non-empty")
+        }
     }
 
-    vulkan.device_destroy(dev)
+    spec.run_summary(fw)
 
-    if failures != 0 {
-        println("${failures} FAILURE(S)")
-        exit(1)
-    }
-    println("=== contrib.vulkan actors passed ===")
+    if dev != null { vulkan.device_destroy(dev) }
+
+    // The two painters are still alive with nothing left to receive, and a
+    // process kept alive by idle actors is a quiet one — the sandbox watchdog
+    // reaps it before the summary reaches the terminal. Leave deliberately.
+    exit(0)
 }

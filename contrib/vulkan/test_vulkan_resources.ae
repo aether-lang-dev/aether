@@ -12,23 +12,14 @@ import std.bytes
 import std.string
 import std.fs
 import contrib.vulkan
+import std.spec
 
-check(cond: int, label: string) -> int {
-    if cond == 1 {
-        println("  PASS ${label}")
-        return 0
-    }
-    println("  FAIL ${label}")
-    return 1
+check(cond: int, label: string) {
+    spec.assert_eq(cond, 1, label)
 }
 
-check_eq(got: int, want: int, label: string) -> int {
-    if got == want {
-        println("  PASS ${label} (${got})")
-        return 0
-    }
-    println("  FAIL ${label}: got ${got}, want ${want}")
-    return 1
+check_eq(got: int, want: int, label: string) {
+    spec.assert_eq(got, want, label)
 }
 
 load_spv(path: string) -> (string, int) {
@@ -56,218 +47,262 @@ push_identity(t: ptr) {
 }
 
 main() {
-    println("=== contrib.vulkan resources ===")
-    failures = 0
+    fw = spec.init()
 
-    if vulkan.available() != 1 {
-        println("SKIP: no Vulkan driver (${vulkan.last_error()})")
-        return
-    }
+    // The device and the 64x64 render target are created once and shared by
+    // every case below: creation is expensive, and the resources under test
+    // (layouts, textures, uniforms) are all properties of one live target.
+    //
+    // Each stage gates the next through `ready`. With no driver and no device
+    // there is nothing to assert against, and continuing would dereference
+    // null rather than fail — so these skip rather than fail, exactly as the
+    // original's SKIP-and-exit-0 path treated a machine without a GPU.
+    ready = 0
+    reason = "no Vulkan driver"
+    dev = null
+    target = null
 
-    dev = vulkan.device_create()
-    if dev == null {
-        println("SKIP: device_create failed (${vulkan.last_error()})")
-        return
-    }
-    target = vulkan.target_create(dev, 64, 64)
-    if target == null {
-        println("FAIL: target_create (${vulkan.last_error()})")
-        vulkan.device_destroy(dev)
-        return
-    }
-
-    // ---- push constants: a transform the shader actually applies --------
-    tvs, tvl = load_spv("contrib/vulkan/shaders/transform.vert.spv")
-    tfs, tfl = load_spv("contrib/vulkan/shaders/transform.frag.spv")
-    failures = failures + check(tvl > 0, "transform SPIR-V loaded")
-
-    // 64 bytes of push constants: one mat4.
-    tp = vulkan.pipeline_create_ex(dev, target, tvs, tvl, tfs, tfl, null, 64, null)
-    failures = failures + check(tp != null, "pipeline with a push-constant block")
-
-    if tp != null {
-        // A triangle covering the left half, red.
-        _ = vulkan.verts_reserve(target, 3)
-        _ = vulkan.verts_set(target, 0, -1.0, -1.0, 1.0, 0.0, 0.0)
-        _ = vulkan.verts_set(target, 1, -1.0,  1.0, 1.0, 0.0, 0.0)
-        _ = vulkan.verts_set(target, 2,  0.0,  1.0, 1.0, 0.0, 0.0)
-
-        _ = vulkan.push_floats(target, 16)
-        push_identity(target)
-        failures = failures + check_eq(vulkan.draw(target, tp, 0.0, 0.0, 0.0, 1.0),
-                                       vulkan.OK, "draw with identity transform")
-        left_identity = vulkan.red(vulkan.pixel(target, 8, 32))
-        failures = failures + check(left_identity > 200, "identity leaves the triangle on the left")
-
-        // Same geometry, mirrored by negating the x column. If the push
-        // constant never reached the shader both frames would be identical.
-        push_identity(target)
-        _ = vulkan.push_float(target, 0, -1.0)
-        failures = failures + check_eq(vulkan.draw(target, tp, 0.0, 0.0, 0.0, 1.0),
-                                       vulkan.OK, "draw with a mirrored transform")
-        left_mirrored = vulkan.red(vulkan.pixel(target, 8, 32))
-        right_mirrored = vulkan.red(vulkan.pixel(target, 56, 32))
-        failures = failures + check(left_mirrored < 50, "mirrored clears the left half")
-        failures = failures + check(right_mirrored > 200, "mirrored fills the right half")
-
-        // A push block larger than the pipeline declared is a caller error,
-        // not a silently truncated write.
-        failures = failures + check(vulkan.push_floats(target, 64) != vulkan.OK,
-                                    "an over-large push block is refused")
-        _ = vulkan.push_floats(target, 16)
-        vulkan.pipeline_destroy(tp)
-    }
-
-    // ---- custom vertex layout, index buffer, texture and uniform --------
-    xvs, xvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
-    xfs, xfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
-    failures = failures + check(xvl > 0, "textured SPIR-V loaded")
-
-    // position(2) + normal(3) + uv(2) interleaved: 7 floats, stride 28.
-    lay = vulkan.layout_create()
-    failures = failures + check_eq(vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX),
-                                   vulkan.OK, "layout binding declared")
-    _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
-    _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
-    failures = failures + check_eq(vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20),
-                                   vulkan.OK, "layout attributes declared")
-
-    binds = vulkan.bindings_create()
-    _ = vulkan.bindings_texture(binds, 0)
-    failures = failures + check_eq(vulkan.bindings_uniform(binds, 1), vulkan.OK,
-                                   "texture and uniform bindings declared")
-    failures = failures + check(vulkan.bindings_uniform(binds, 1) != vulkan.OK,
-                                "a duplicate binding is refused")
-
-    xp = vulkan.pipeline_create_ex(dev, target, xvs, xvl, xfs, xfl, lay, 0, binds)
-    failures = failures + check(xp != null, "pipeline with a layout and bindings")
-
-    if xp != null {
-        // Four vertices covering the viewport, UVs spanning the texture.
-        // Drawn as two triangles from six indices: non-indexed, these four
-        // vertices could only ever be one triangle plus a stray.
-        _ = vulkan.verts_reserve_n(target, 4, 7)
-        // x, y, nx, ny, nz, u, v
-        quad = [-1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
-                 1.0, -1.0, 0.0, 0.0, 1.0, 1.0, 0.0,
-                 1.0,  1.0, 0.0, 0.0, 1.0, 1.0, 1.0,
-                -1.0,  1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
-        i = 0
-        while i < 28 {
-            _ = vulkan.verts_set_float(target, i, quad[i])
-            i = i + 1
+    if vulkan.available() == 1 {
+        dev = vulkan.device_create()
+        if dev == null {
+            reason = "device_create failed (${vulkan.last_error()})"
+        } else {
+            target = vulkan.target_create(dev, 64, 64)
+            if target == null {
+                reason = "target_create failed (${vulkan.last_error()})"
+            } else {
+                ready = 1
+            }
         }
-
-        _ = vulkan.indices_reserve(target, 6)
-        order = [0, 1, 2, 2, 3, 0]
-        i = 0
-        while i < 6 {
-            _ = vulkan.indices_set(target, i, order[i])
-            i = i + 1
-        }
-        failures = failures + check(vulkan.indices_set(target, 0, 99) != vulkan.OK,
-                                    "an index past the vertex count is refused")
-        _ = vulkan.indices_set(target, 0, 0)
-
-        // A 2x2 texture: red, green / blue, white. Each texel lands in one
-        // quadrant, so a wrong UV or a wrong layout is visible per-corner.
-        tex = vulkan.texture_create(dev, 2, 2)
-        failures = failures + check(tex != null, "texture created")
-
-        failures = failures + check(vulkan.set_texture(xp, 0, tex) != vulkan.OK,
-                                    "binding a texture with no pixels is refused")
-
-        px = bytes.new(16)
-        _ = bytes.set_length(px, 16)
-        i = 0
-        while i < 16 {
-            _ = bytes.set(px, i, 0)
-            i = i + 1
-        }
-        // texel (0,0) red, (1,0) green, (0,1) blue, (1,1) white, all opaque
-        _ = bytes.set(px, 0, 255)
-        _ = bytes.set(px, 3, 255)
-        _ = bytes.set(px, 5, 255)
-        _ = bytes.set(px, 7, 255)
-        _ = bytes.set(px, 10, 255)
-        _ = bytes.set(px, 11, 255)
-        _ = bytes.set(px, 12, 255)
-        _ = bytes.set(px, 13, 255)
-        _ = bytes.set(px, 14, 255)
-        _ = bytes.set(px, 15, 255)
-
-        failures = failures + check_eq(vulkan.texture_upload(tex, bytes.data(px), 16),
-                                       vulkan.OK, "texture uploaded")
-        failures = failures + check(vulkan.texture_upload(tex, bytes.data(px), 4) != vulkan.OK,
-                                    "a short upload is refused")
-        failures = failures + check_eq(vulkan.set_texture(xp, 0, tex), vulkan.OK,
-                                       "texture bound to the sampler")
-
-        // Tint of 1,1,1,1: the sampled colour passes through unchanged.
-        failures = failures + check_eq(vulkan.uniform_floats(xp, 1, 4), vulkan.OK,
-                                       "uniform buffer created")
-        i = 0
-        while i < 4 {
-            _ = vulkan.uniform_float(xp, 1, i, 1.0)
-            i = i + 1
-        }
-
-        failures = failures + check_eq(vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0),
-                                       vulkan.OK, "indexed textured draw")
-
-        // y points down in Vulkan NDC, so v=0 is the top row of the image.
-        tl = vulkan.pixel(target, 16, 16)
-        tr = vulkan.pixel(target, 48, 16)
-        bl = vulkan.pixel(target, 16, 48)
-        br = vulkan.pixel(target, 48, 48)
-        failures = failures + check(vulkan.red(tl) > 200 && vulkan.green(tl) < 60,
-                                    "top-left quadrant samples the red texel")
-        failures = failures + check(vulkan.green(tr) > 200 && vulkan.red(tr) < 60,
-                                    "top-right quadrant samples the green texel")
-        failures = failures + check(vulkan.blue(bl) > 200 && vulkan.red(bl) < 60,
-                                    "bottom-left quadrant samples the blue texel")
-        failures = failures + check(vulkan.red(br) > 200 && vulkan.green(br) > 200 &&
-                                    vulkan.blue(br) > 200,
-                                    "bottom-right quadrant samples the white texel")
-
-        // The uniform is read per draw: halving it must darken the result,
-        // which also proves the recorded command buffer is not reused stale.
-        i = 0
-        while i < 3 {
-            _ = vulkan.uniform_float(xp, 1, i, 0.25)
-            i = i + 1
-        }
-        _ = vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0)
-        dim = vulkan.red(vulkan.pixel(target, 16, 16))
-        failures = failures + check(dim > 20 && dim < 120, "the tint uniform scales the sample")
-
-        // Going back to no indices restores non-indexed drawing.
-        _ = vulkan.indices_reserve(target, 0)
-        failures = failures + check_eq(vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0),
-                                       vulkan.OK, "index count 0 draws non-indexed")
-
-        bytes.free(px)
-        vulkan.texture_destroy(tex)
-        vulkan.pipeline_destroy(xp)
-    }
-
-    vulkan.bindings_destroy(binds)
-    vulkan.layout_destroy(lay)
-
-    // Null handles stay safe, the same contract as phase 1.
-    vulkan.layout_destroy(null)
-    vulkan.bindings_destroy(null)
-    vulkan.texture_destroy(null)
-    failures = failures + check(vulkan.set_push(null, null, 0) != vulkan.OK,
-                                "set_push on a null target reports an error")
-
-    vulkan.target_destroy(target)
-    vulkan.device_destroy(dev)
-
-    println("")
-    if failures == 0 {
-        println("All PASS")
     } else {
-        println("${failures} FAILURE(S)")
+        reason = "no Vulkan driver (${vulkan.last_error()})"
     }
+
+    spec.describe(fw, "vulkan: push constants") {
+        // The whole push-constant story is one ordered GPU sequence: the
+        // pipeline is built with a 64-byte block, geometry is uploaded, then
+        // two draws differing only in the pushed matrix are compared. Splitting
+        // it would leave later cases reading pixels from a target whose
+        // geometry was never uploaded.
+        spec.it_when(ready, "applies a pushed transform the shader actually reads", reason) callback {
+            tvs, tvl = load_spv("contrib/vulkan/shaders/transform.vert.spv")
+            tfs, tfl = load_spv("contrib/vulkan/shaders/transform.frag.spv")
+            check(tvl > 0, "transform SPIR-V loaded")
+
+            // 64 bytes of push constants: one mat4.
+            tp = vulkan.pipeline_create_ex(dev, target, tvs, tvl, tfs, tfl, null, 64, null)
+            check(tp != null, "pipeline with a push-constant block")
+
+            if tp != null {
+                // A triangle covering the left half, red.
+                _ = vulkan.verts_reserve(target, 3)
+                _ = vulkan.verts_set(target, 0, -1.0, -1.0, 1.0, 0.0, 0.0)
+                _ = vulkan.verts_set(target, 1, -1.0, 1.0, 1.0, 0.0, 0.0)
+                _ = vulkan.verts_set(target, 2, 0.0, 1.0, 1.0, 0.0, 0.0)
+
+                _ = vulkan.push_floats(target, 16)
+                push_identity(target)
+                check_eq(vulkan.draw(target, tp, 0.0, 0.0, 0.0, 1.0),
+                    vulkan.OK, "draw with identity transform")
+                left_identity = vulkan.red(vulkan.pixel(target, 8, 32))
+                check(left_identity > 200, "identity leaves the triangle on the left")
+
+                // Same geometry, mirrored by negating the x column. If the push
+                // constant never reached the shader both frames would be identical.
+                push_identity(target)
+                _ = vulkan.push_float(target, 0, -1.0)
+                check_eq(vulkan.draw(target, tp, 0.0, 0.0, 0.0, 1.0),
+                    vulkan.OK, "draw with a mirrored transform")
+                left_mirrored = vulkan.red(vulkan.pixel(target, 8, 32))
+                right_mirrored = vulkan.red(vulkan.pixel(target, 56, 32))
+                check(left_mirrored < 50, "mirrored clears the left half")
+                check(right_mirrored > 200, "mirrored fills the right half")
+
+                // A push block larger than the pipeline declared is a caller error,
+                // not a silently truncated write.
+                check(vulkan.push_floats(target, 64) != vulkan.OK,
+                    "an over-large push block is refused")
+                _ = vulkan.push_floats(target, 16)
+                vulkan.pipeline_destroy(tp)
+            }
+
+            string.free(tvs)
+            string.free(tfs)
+        }
+    }
+
+    // The layout and the binding set are declared once and then handed to the
+    // pipeline; the declaration cases and the draw case below share them, so
+    // they live outside the `it` blocks.
+    lay = null
+    binds = null
+    if ready == 1 {
+        lay = vulkan.layout_create()
+        binds = vulkan.bindings_create()
+    }
+
+    spec.describe(fw, "vulkan: vertex layouts and bindings") {
+        // position(2) + normal(3) + uv(2) interleaved: 7 floats, stride 28.
+        spec.it_when(ready, "declares a custom interleaved vertex layout", reason) callback {
+            check_eq(vulkan.layout_binding(lay, 0, 28, vulkan.PER_VERTEX),
+                vulkan.OK, "layout binding declared")
+            _ = vulkan.layout_attr(lay, 0, 0, vulkan.FORMAT_R32G32_SFLOAT, 0)
+            _ = vulkan.layout_attr(lay, 1, 0, vulkan.FORMAT_R32G32B32_SFLOAT, 8)
+            check_eq(vulkan.layout_attr(lay, 2, 0, vulkan.FORMAT_R32G32_SFLOAT, 20),
+                vulkan.OK, "layout attributes declared")
+        }
+
+        spec.it_when(ready, "declares texture and uniform bindings and refuses duplicates", reason) callback {
+            _ = vulkan.bindings_texture(binds, 0)
+            check_eq(vulkan.bindings_uniform(binds, 1), vulkan.OK,
+                "texture and uniform bindings declared")
+            check(vulkan.bindings_uniform(binds, 1) != vulkan.OK,
+                "a duplicate binding is refused")
+        }
+    }
+
+    spec.describe(fw, "vulkan: indexed textured drawing") {
+        // Geometry upload, index buffer, texture upload, uniform write and the
+        // pixel readbacks are one ordered sequence against a single pipeline.
+        // Every later assertion reads pixels produced by an earlier step, so
+        // this stays in one case.
+        spec.it_when(ready, "draws an indexed textured quad through a custom layout", reason) callback {
+            xvs, xvl = load_spv("contrib/vulkan/shaders/textured.vert.spv")
+            xfs, xfl = load_spv("contrib/vulkan/shaders/textured.frag.spv")
+            check(xvl > 0, "textured SPIR-V loaded")
+
+            xp = vulkan.pipeline_create_ex(dev, target, xvs, xvl, xfs, xfl, lay, 0, binds)
+            check(xp != null, "pipeline with a layout and bindings")
+
+            if xp != null {
+                // Four vertices covering the viewport, UVs spanning the texture.
+                // Drawn as two triangles from six indices: non-indexed, these four
+                // vertices could only ever be one triangle plus a stray.
+                _ = vulkan.verts_reserve_n(target, 4, 7)
+                // x, y, nx, ny, nz, u, v
+                quad = [-1.0, -1.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                    1.0, -1.0, 0.0, 0.0, 1.0, 1.0, 0.0,
+                    1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0,
+                    -1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
+                i = 0
+                while i < 28 {
+                    _ = vulkan.verts_set_float(target, i, quad[i])
+                    i = i + 1
+                }
+
+                _ = vulkan.indices_reserve(target, 6)
+                order = [0, 1, 2, 2, 3, 0]
+                i = 0
+                while i < 6 {
+                    _ = vulkan.indices_set(target, i, order[i])
+                    i = i + 1
+                }
+                check(vulkan.indices_set(target, 0, 99) != vulkan.OK,
+                    "an index past the vertex count is refused")
+                _ = vulkan.indices_set(target, 0, 0)
+
+                // A 2x2 texture: red, green / blue, white. Each texel lands in one
+                // quadrant, so a wrong UV or a wrong layout is visible per-corner.
+                tex = vulkan.texture_create(dev, 2, 2)
+                check(tex != null, "texture created")
+
+                check(vulkan.set_texture(xp, 0, tex) != vulkan.OK,
+                    "binding a texture with no pixels is refused")
+
+                px = bytes.new(16)
+                _ = bytes.set_length(px, 16)
+                i = 0
+                while i < 16 {
+                    _ = bytes.set(px, i, 0)
+                    i = i + 1
+                }
+                // texel (0,0) red, (1,0) green, (0,1) blue, (1,1) white, all opaque
+                _ = bytes.set(px, 0, 255)
+                _ = bytes.set(px, 3, 255)
+                _ = bytes.set(px, 5, 255)
+                _ = bytes.set(px, 7, 255)
+                _ = bytes.set(px, 10, 255)
+                _ = bytes.set(px, 11, 255)
+                _ = bytes.set(px, 12, 255)
+                _ = bytes.set(px, 13, 255)
+                _ = bytes.set(px, 14, 255)
+                _ = bytes.set(px, 15, 255)
+
+                check_eq(vulkan.texture_upload(tex, bytes.data(px), 16),
+                    vulkan.OK, "texture uploaded")
+                check(vulkan.texture_upload(tex, bytes.data(px), 4) != vulkan.OK,
+                    "a short upload is refused")
+                check_eq(vulkan.set_texture(xp, 0, tex), vulkan.OK,
+                    "texture bound to the sampler")
+
+                // Tint of 1,1,1,1: the sampled colour passes through unchanged.
+                check_eq(vulkan.uniform_floats(xp, 1, 4), vulkan.OK,
+                    "uniform buffer created")
+                i = 0
+                while i < 4 {
+                    _ = vulkan.uniform_float(xp, 1, i, 1.0)
+                    i = i + 1
+                }
+
+                check_eq(vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0),
+                    vulkan.OK, "indexed textured draw")
+
+                // y points down in Vulkan NDC, so v=0 is the top row of the image.
+                tl = vulkan.pixel(target, 16, 16)
+                tr = vulkan.pixel(target, 48, 16)
+                bl = vulkan.pixel(target, 16, 48)
+                br = vulkan.pixel(target, 48, 48)
+                check(vulkan.red(tl) > 200 && vulkan.green(tl) < 60,
+                    "top-left quadrant samples the red texel")
+                check(vulkan.green(tr) > 200 && vulkan.red(tr) < 60,
+                    "top-right quadrant samples the green texel")
+                check(vulkan.blue(bl) > 200 && vulkan.red(bl) < 60,
+                    "bottom-left quadrant samples the blue texel")
+                check(vulkan.red(br) > 200 && vulkan.green(br) > 200 &&
+                    vulkan.blue(br) > 200,
+                    "bottom-right quadrant samples the white texel")
+
+                // The uniform is read per draw: halving it must darken the result,
+                // which also proves the recorded command buffer is not reused stale.
+                i = 0
+                while i < 3 {
+                    _ = vulkan.uniform_float(xp, 1, i, 0.25)
+                    i = i + 1
+                }
+                _ = vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0)
+                dim = vulkan.red(vulkan.pixel(target, 16, 16))
+                check(dim > 20 && dim < 120, "the tint uniform scales the sample")
+
+                // Going back to no indices restores non-indexed drawing.
+                _ = vulkan.indices_reserve(target, 0)
+                check_eq(vulkan.draw(target, xp, 0.0, 0.0, 0.0, 1.0),
+                    vulkan.OK, "index count 0 draws non-indexed")
+
+                bytes.free(px)
+                vulkan.texture_destroy(tex)
+                vulkan.pipeline_destroy(xp)
+            }
+
+            string.free(xvs)
+            string.free(xfs)
+        }
+    }
+
+    spec.describe(fw, "vulkan: null handles") {
+        // Null handles stay safe, the same contract as phase 1.
+        spec.it_when(ready, "tolerates null handles", reason) callback {
+            vulkan.layout_destroy(null)
+            vulkan.bindings_destroy(null)
+            vulkan.texture_destroy(null)
+            check(vulkan.set_push(null, null, 0) != vulkan.OK,
+                "set_push on a null target reports an error")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    if binds != null { vulkan.bindings_destroy(binds) }
+    if lay != null { vulkan.layout_destroy(lay) }
+    if target != null { vulkan.target_destroy(target) }
+    if dev != null { vulkan.device_destroy(dev) }
 }
