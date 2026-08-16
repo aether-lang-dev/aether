@@ -11,6 +11,28 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`ae run` now forwards `SIGTERM`/`SIGINT`/`SIGHUP` to the program it
+  launched.** `ae run prog.ae & ; kill $!` killed only the wrapper and
+  orphaned the program, which kept whatever socket it had bound: `ae run`
+  builds and then *spawns* the binary (it cannot `exec` it — it still has
+  to evict a crashed binary from the cache and delete a non-cached temp
+  exe), so the wrapper was always a separate process.
+  Ephemeral CI cannot catch this, because the runner is discarded with its
+  orphans. On a persistent box the orphan squats its port and the next run
+  of the same test fails to bind, so a green run poisons the one after it
+  with no code change in between. 25 integration tests background `ae run`
+  and kill `$!`, so this is fixed once in the driver rather than 25 times
+  in the tests.
+  Scoped to the program run: build steps keep the plain path, handlers are
+  installed only while the child is alive and the previous dispositions
+  restored after, and `waitpid` resumes on `EINTR` (abandoning it there
+  would orphan the child — the bug itself). Windows is unchanged; the
+  report is POSIX-specific.
+  Regression test in `tests/integration/ae_run_signal_forwarding/`,
+  verified to FAIL against an `ae` built without the fix.
+
 ### Changed
 
 - `contrib/host/aether` and `contrib/host/factor` gain co-located specs,
