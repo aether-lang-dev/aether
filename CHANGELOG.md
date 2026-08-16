@@ -56,7 +56,7 @@ version number before tagging the release.
   A runtime that cannot be resolved yields **skipped** specs, not
   failures.
 
-## [current]
+## [0.546.0]
 
 ### Changed
 - `contrib/sqlite` gains a co-located spec, `contrib/sqlite/test_sqlite.ae`,
