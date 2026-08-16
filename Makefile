@@ -2609,8 +2609,17 @@ contrib-host-check: compiler ae stdlib
 	echo "  $$pass passed, $$fail failed (stub mode)"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[2/2] Link + run — demos for bridges with dev libs available..."
+	@echo "[2/3] Link + run — demos for bridges with dev libs available..."
 	@bash tests/scripts/contrib_host_demos.sh || exit 1
+	@echo ""
+	@echo "[3/3] Co-located bridge tests (contrib/host/*/test_*.sh)..."
+	@rc=0; found=0; \
+	for t in $$(find contrib/host -maxdepth 2 -name 'test_*.sh' 2>/dev/null | sort); do \
+	  found=$$((found + 1)); \
+	  bash "$$t" || rc=1; \
+	done; \
+	if [ "$$found" -eq 0 ]; then echo "  (none yet)"; fi; \
+	exit $$rc
 	@echo ""
 	@echo "==================================="
 	@echo "  contrib/host check PASSED"

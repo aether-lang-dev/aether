@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- `contrib/host/ruby/test_host_ruby.sh` — the first **co-located** contrib
+  test, sitting next to the bridge it exercises rather than under
+  `tests/integration/` (the direction argued in #1584). Drives
+  `ruby_init_host` / `ruby_run` / `ruby_finalize_host` directly: evaluation,
+  Ruby-side computation reaching stdout, a raised exception propagating as a
+  non-zero return rather than being swallowed, and init idempotence while the
+  VM is live. Performs the bridge's own documented `LIBRUBY_SO` probe so it
+  works on both Debian-style and Fedora-style packagings, and SKIPs cleanly
+  without Ruby.
+  Ruby was not uncovered before this — `namespace_ruby` and the shared-map
+  test both drive it from outside — but nothing exercised the embedding
+  lifecycle directly, which is how the finalize defect below went unnoticed.
+- `make contrib-host-check` gained a third phase that auto-discovers
+  `contrib/host/*/test_*.sh` and runs them, so a bridge that adds a
+  co-located test is picked up with no Makefile change. Verified that a
+  failing co-located test fails the target.
+
+### Fixed
+- Documented that `ruby_finalize_host()` is **terminal**
+  (contrib/host/ruby/README.md). CRuby's `ruby_finalize()` tears the VM down
+  permanently, but the bridge's post-finalize `ruby_init_host()` still
+  returns 0 and the next `ruby_run()` segfaults inside libruby. Call it once
+  at shutdown, or not at all. The new test pins the supported lifecycle and
+  deliberately does not exercise the unsupported one, so a future fix has a
+  baseline to change.
+
 ## [0.543.0]
 
 ### Fixed

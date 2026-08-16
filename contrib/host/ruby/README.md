@@ -128,10 +128,40 @@ main() {
   immediately after `#include <ruby.h>` — the bridge uses libc
   snprintf for plain string assembly, not Ruby's format extensions.
 
+## Lifecycle: finalize is terminal
+
+`ruby_init_host()` is idempotent while the VM is live — call it defensively
+before an eval and it is a no-op. But `ruby_finalize_host()` calls CRuby's
+`ruby_finalize()`, which tears the VM down **permanently**: `ruby_init()`
+cannot be called again in the same process.
+
+The bridge does not currently enforce that. A post-finalize
+`ruby_init_host()` returns **0**, and the next `ruby_run()` segfaults inside
+libruby:
+
+```
+eval:1: [BUG] Segmentation fault at 0x0000000000000000
+c:0003 p:---- s:0011 e:000010 CFUNC  :puts
+```
+
+So: **call `ruby_finalize_host()` once, at shutdown, or not at all.** A
+long-running host that wants to reset script state should do it in Ruby
+rather than by cycling the VM. See the note in
+[`test_host_ruby.sh`](test_host_ruby.sh), which pins the supported lifecycle
+and deliberately does not exercise the unsupported one.
+
 ## Testing
 
-Three tests exercise the Ruby host; all SKIP cleanly when Ruby isn't
+Four tests exercise the Ruby host; all SKIP cleanly when Ruby isn't
 installed, so they no-op on hosts without it.
+
+- **Embedding lifecycle (co-located)** — [`test_host_ruby.sh`](test_host_ruby.sh),
+  next to the bridge it tests. Drives `ruby_init_host` / `ruby_run` /
+  `ruby_finalize_host` directly from C: evaluation, Ruby-side computation
+  reaching stdout, a raised exception propagating as a non-zero return
+  (rather than being swallowed), and init idempotence while the VM is live.
+  Performs the bridge's own documented `LIBRUBY_SO` probe, so it works on
+  both Debian-style (unversioned symlink) and Fedora-style packagings.
 
 - **Namespace / FFI SDK** —
   [`tests/integration/namespace_ruby/`](../../../tests/integration/namespace_ruby/).
