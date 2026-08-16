@@ -2622,6 +2622,13 @@ contrib-host-check: compiler ae stdlib
 	    AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
 	    export AETHER_RUBY_SONAME; \
 	  fi; \
+	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
+	    MODULES="$$lang" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true; \
+	  fi; \
+	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
+	    echo "    SKIP: libaether_host_$$lang.a unavailable (bridge deps not installed)"; \
+	    continue; \
+	  fi; \
 	  out="$$(./build/ae$(EXE_EXT) run "$$t" 2>&1)"; trc=$$?; \
 	  echo "$$out" | sed 's/^/  /'; \
 	  if [ "$$trc" -ne 0 ]; then rc=1; fi; \
