@@ -1,17 +1,21 @@
-// Tests for example_inventory — validates domain logic, route registration,
-// and handler behavior through simulated requests.
+// Spec for example_inventory — domain logic, route registration and
+// handler behaviour, driven through simulated requests. Written against
+// std.spec.
 //
-// Uses _chk() pattern (same as test_spec.ae).
+// The handlers are called directly with map-shaped req/res rather than
+// over a socket, so this is fast and needs no port. The original called
+// exit(1) on the first failure; as specs each case reports on its own.
 
 import std.list
 import std.map
+import std.spec
 import std.string
 
 // ---- TinyWeb DSL subset (inline) ----
 
-const GET     = 1
-const POST    = 2
-const DELETE  = 4
+const GET = 1
+const POST = 2
+const DELETE = 4
 
 route_entry(method: int, pp: string, handler: fn) {
     e = map_new()
@@ -88,7 +92,7 @@ do_cart_list(res: ptr, cart: ptr, inventory: ptr) {
         response_json(res, "[]")
     } else {
         out = "["
-        for (i = 0; i < n; i++) {
+        for (i = 0; i < n; i ++) {
             if i > 0 { out = "${out}," }
             item, _ = list.get(cart, i)
             out = "${out}\"${item}\""
@@ -114,7 +118,7 @@ do_inv_list(res: ptr, inventory: ptr) {
 
 do_inv_lookup(req: ptr, res: ptr, inventory: ptr) {
     seal except req, res, inventory, response_json, response_write_status,
-                request_get_query_param, inventory_lookup, str_eq
+    request_get_query_param, inventory_lookup, str_eq
     sku = request_get_query_param(req, "sku")
     info = inventory_lookup(inventory, sku)
     if str_eq(info, "") == 1 {
@@ -127,7 +131,7 @@ do_inv_lookup(req: ptr, res: ptr, inventory: ptr) {
 // ---- Test helper ----
 
 _chk(cond: int, msg: string) {
-    if cond == 0 { print("FAIL: ${msg}\n"); exit(1) }
+    spec.assert_eq(cond, 1, msg)
 }
 
 _new_inventory() {
@@ -138,179 +142,181 @@ _new_inventory() {
     return inv
 }
 
-// ---- Tests ----
+// ---- Specs ----
 
 main() {
-    print("=== Inventory + Cart Tests ===\n\n")
+    fw = spec.init()
 
-    // --- Domain ---
-
-    print("inventory_lookup known SKU: ")
-    inv = _new_inventory()
-    info = inventory_lookup(inv, "WIDGET-1")
-    _chk(str_eq(info, "") == 0, "not empty")
-    _chk(string.contains(info, "Widget Alpha"), "content")
-    println("PASS")
-
-    print("inventory_lookup unknown SKU: ")
-    info = inventory_lookup(inv, "NOPE")
-    _chk(str_eq(info, ""), "empty")
-    println("PASS")
-
-    // --- Route registration ---
-
-    print("Registers 5 routes via DSL: ")
-    inventory = _new_inventory()
-    cart = list.new()
-    server = web_server(8080) {
-        tw_path("/api/inventory") {
-            end_point(GET, "/list") |req: ptr, res: ptr, ctx: ptr| {
-                do_inv_list(res, inventory)
-            }
-            end_point(GET, "/lookup") |req: ptr, res: ptr, ctx: ptr| {
-                do_inv_lookup(req, res, inventory)
-            }
+    spec.describe(fw, "inventory: domain lookup") {
+        spec.it(fw, "finds a known SKU") callback {
+            inv = _new_inventory()
+            info = inventory_lookup(inv, "WIDGET-1")
+            _chk(str_eq(info, "") == 0, "not empty")
+            _chk(string.contains(info, "Widget Alpha"), "content")
         }
-        tw_path("/api/cart") {
-            end_point(POST, "/add") |req: ptr, res: ptr, ctx: ptr| {
-                do_cart_add(req, res, cart, inventory)
-            }
-            end_point(GET, "/list") |req: ptr, res: ptr, ctx: ptr| {
-                do_cart_list(res, cart, inventory)
-            }
-            end_point(DELETE, "/remove") |req: ptr, res: ptr, ctx: ptr| {
-                do_cart_remove(req, res, cart, inventory)
-            }
+
+        // An unknown SKU yields the empty string rather than a partial or
+        // stale record — callers branch on emptiness.
+        spec.it(fw, "returns empty for an unknown SKU") callback {
+            inv = _new_inventory()
+            info = inventory_lookup(inv, "NOPE")
+            _chk(str_eq(info, ""), "empty")
         }
     }
-    srv_routes, _ = map.get(server, "routes")
-    _chk(list.size(srv_routes) == 5, "count")
-    println("PASS")
 
-    // --- Handler: inventory list (seal except) ---
+    spec.describe(fw, "inventory: route registration") {
+        spec.it(fw, "registers all five routes through the DSL") callback {
+            inventory = _new_inventory()
+            cart = list.new()
+            server = web_server(8080) {
+                tw_path("/api/inventory") {
+                    end_point(GET, "/list") | req: ptr, res: ptr, ctx: ptr | {
+                        do_inv_list(res, inventory)
+                    }
+                    end_point(GET, "/lookup") | req: ptr, res: ptr, ctx: ptr | {
+                        do_inv_lookup(req, res, inventory)
+                    }
+                }
+                tw_path("/api/cart") {
+                    end_point(POST, "/add") | req: ptr, res: ptr, ctx: ptr | {
+                        do_cart_add(req, res, cart, inventory)
+                    }
+                    end_point(GET, "/list") | req: ptr, res: ptr, ctx: ptr | {
+                        do_cart_list(res, cart, inventory)
+                    }
+                    end_point(DELETE, "/remove") | req: ptr, res: ptr, ctx: ptr | {
+                        do_cart_remove(req, res, cart, inventory)
+                    }
+                }
+            }
+            rts, _ = map.get(server, "routes")
+            _chk(list.size(rts) == 5, "five routes registered")
+        }
+    }
 
-    print("inv list returns 200: ")
-    inv = _new_inventory()
-    res = map_new()
-    do_inv_list(res, inv)
-    st1, _ = map.get(res, "status")
-    _chk(st1 == 200, "status")
-    bd1, _ = map.get(res, "body")
-    _chk(string.contains(bd1, "has_widget"), "body")
-    println("PASS")
+    spec.describe(fw, "inventory handlers") {
+        spec.it(fw, "lists inventory with a 200") callback {
+            inv = _new_inventory()
+            res = map_new()
+            do_inv_list(res, inv)
+            st1, _ = map.get(res, "status")
+            _chk(st1 == 200, "status")
+            bd1, _ = map.get(res, "body")
+            _chk(string.contains(bd1, "has_widget"), "body")
+        }
 
-    // --- Handler: inventory lookup (seal except) ---
+        spec.it(fw, "looks up a known SKU with a 200") callback {
+            inv = _new_inventory()
+            req = map_new()
+            map_put(req, "sku", "WIDGET-1")
+            res = map_new()
+            do_inv_lookup(req, res, inv)
+            st2, _ = map.get(res, "status")
+            _chk(st2 == 200, "status")
+            bd2, _ = map.get(res, "body")
+            _chk(string.contains(bd2, "Widget Alpha"), "body")
+        }
 
-    print("inv lookup known SKU 200: ")
-    inv = _new_inventory()
-    req = map_new()
-    map_put(req, "sku", "WIDGET-1")
-    res = map_new()
-    do_inv_lookup(req, res, inv)
-    st2, _ = map.get(res, "status")
-    _chk(st2 == 200, "status")
-    bd2, _ = map.get(res, "body")
-    _chk(string.contains(bd2, "Widget Alpha"), "body")
-    println("PASS")
+        // A miss must be a 404, not a 200 with an empty body — the status
+        // is what a client branches on.
+        spec.it(fw, "returns 404 for an unknown SKU") callback {
+            inv = _new_inventory()
+            req = map_new()
+            map_put(req, "sku", "NOPE")
+            res = map_new()
+            do_inv_lookup(req, res, inv)
+            st3, _ = map.get(res, "status")
+            _chk(st3 == 404, "status")
+        }
+    }
 
-    print("inv lookup unknown SKU 404: ")
-    inv = _new_inventory()
-    req = map_new()
-    map_put(req, "sku", "NOPE")
-    res = map_new()
-    do_inv_lookup(req, res, inv)
-    st3, _ = map.get(res, "status")
-    _chk(st3 == 404, "status")
-    println("PASS")
+    spec.describe(fw, "cart handlers") {
+        spec.it(fw, "adds a SKU to the cart") callback {
+            cart = list.new()
+            inv = _new_inventory()
+            req = map_new()
+            map_put(req, "sku", "WIDGET-1")
+            res = map_new()
+            do_cart_add(req, res, cart, inv)
+            st4, _ = map.get(res, "status")
+            _chk(st4 == 200, "status")
+            _chk(list.size(cart) == 1, "cart size")
+            item0, _ = list.get(cart, 0)
+            _chk(str_eq(item0, "WIDGET-1"), "item")
+        }
 
-    // --- Handler: cart add (hides inventory) ---
+        // An empty cart renders as "[]" rather than an empty body, so the
+        // client always gets valid JSON.
+        spec.it(fw, "renders an empty cart as an empty array") callback {
+            cart = list.new()
+            res = map_new()
+            do_cart_list(res, cart, _new_inventory())
+            bd3, _ = map.get(res, "body")
+            _chk(str_eq(bd3, "[]"), "empty")
+        }
 
-    print("cart add stores SKU: ")
-    cart = list.new()
-    inv = _new_inventory()
-    req = map_new()
-    map_put(req, "sku", "WIDGET-1")
-    res = map_new()
-    do_cart_add(req, res, cart, inv)
-    st4, _ = map.get(res, "status")
-    _chk(st4 == 200, "status")
-    _chk(list.size(cart) == 1, "cart size")
-    item0, _ = list.get(cart, 0)
-    _chk(str_eq(item0, "WIDGET-1"), "item")
-    println("PASS")
+        spec.it(fw, "renders every item in a populated cart") callback {
+            cart = list.new()
+            list.add(cart, "WIDGET-1")
+            list.add(cart, "GADGET-1")
+            res = map_new()
+            do_cart_list(res, cart, _new_inventory())
+            body, _ = map.get(res, "body")
+            _chk(string.contains(body, "WIDGET-1"), "WIDGET-1")
+            _chk(string.contains(body, "GADGET-1"), "GADGET-1")
+        }
 
-    // --- Handler: cart list (hides inventory) ---
+        // Remove drops the FIRST item, so the assertion checks which one
+        // survived — a remove that cleared the list would also leave a
+        // size that a count-only check might accept.
+        spec.it(fw, "removes the first item and keeps the rest") callback {
+            cart = list.new()
+            list.add(cart, "WIDGET-1")
+            list.add(cart, "GADGET-1")
+            res = map_new()
+            req = map_new()
+            do_cart_remove(req, res, cart, _new_inventory())
+            _chk(list.size(cart) == 1, "size after remove")
+            item1, _ = list.get(cart, 0)
+            _chk(str_eq(item1, "GADGET-1"), "remaining item")
+        }
+    }
 
-    print("cart list empty: ")
-    cart = list.new()
-    res = map_new()
-    do_cart_list(res, cart, _new_inventory())
-    bd3, _ = map.get(res, "body")
-    _chk(str_eq(bd3, "[]"), "empty")
-    println("PASS")
+    // The handlers share mutable cart state, so the sequence matters: this
+    // is the only case that would catch a handler which works in isolation
+    // but corrupts the cart for the next call.
+    spec.describe(fw, "cart round-trip") {
+        spec.it(fw, "survives add, list, remove and list again") callback {
+            inv = _new_inventory()
+            cart = list.new()
 
-    print("cart list with items: ")
-    cart = list.new()
-    list.add(cart, "WIDGET-1")
-    list.add(cart, "GADGET-1")
-    res = map_new()
-    do_cart_list(res, cart, _new_inventory())
-    body, _ = map.get(res, "body")
-    _chk(string.contains(body, "WIDGET-1"), "WIDGET-1")
-    _chk(string.contains(body, "GADGET-1"), "GADGET-1")
-    println("PASS")
+            req = map_new()
+            map_put(req, "sku", "WIDGET-1")
+            res = map_new()
+            do_cart_add(req, res, cart, inv)
+            req = map_new()
+            map_put(req, "sku", "GADGET-1")
+            res = map_new()
+            do_cart_add(req, res, cart, inv)
+            _chk(list.size(cart) == 2, "2 items")
 
-    // --- Handler: cart remove (hides inventory) ---
+            res = map_new()
+            do_cart_list(res, cart, inv)
+            bd4, _ = map.get(res, "body")
+            _chk(string.contains(bd4, "WIDGET-1"), "has W1")
+            _chk(string.contains(bd4, "GADGET-1"), "has G1")
 
-    print("cart remove drops first item: ")
-    cart = list.new()
-    list.add(cart, "WIDGET-1")
-    list.add(cart, "GADGET-1")
-    res = map_new()
-    req = map_new()
-    do_cart_remove(req, res, cart, _new_inventory())
-    _chk(list.size(cart) == 1, "size after remove")
-    item1, _ = list.get(cart, 0)
-    _chk(str_eq(item1, "GADGET-1"), "remaining item")
-    println("PASS")
+            req = map_new()
+            res = map_new()
+            do_cart_remove(req, res, cart, inv)
+            _chk(list.size(cart) == 1, "1 item")
 
-    // --- Full round-trip: add → list → remove → list ---
+            res = map_new()
+            do_cart_list(res, cart, inv)
+            bd6, _ = map.get(res, "body")
+            _chk(string.contains(bd6, "GADGET-1"), "G1 remains")
+        }
+    }
 
-    print("Round-trip add/list/remove/list: ")
-    inv = _new_inventory()
-    cart = list.new()
-
-    // Add two items
-    req = map_new()
-    map_put(req, "sku", "WIDGET-1")
-    res = map_new()
-    do_cart_add(req, res, cart, inv)
-    req = map_new()
-    map_put(req, "sku", "GADGET-1")
-    res = map_new()
-    do_cart_add(req, res, cart, inv)
-    _chk(list.size(cart) == 2, "2 items")
-
-    // List
-    res = map_new()
-    do_cart_list(res, cart, inv)
-    bd4, _ = map.get(res, "body")
-    _chk(string.contains(bd4, "WIDGET-1"), "has W1")
-    bd5, _ = map.get(res, "body")
-    _chk(string.contains(bd5, "GADGET-1"), "has G1")
-
-    // Remove first
-    req = map_new()
-    res = map_new()
-    do_cart_remove(req, res, cart, inv)
-    _chk(list.size(cart) == 1, "1 item")
-
-    // List again
-    res = map_new()
-    do_cart_list(res, cart, inv)
-    bd6, _ = map.get(res, "body")
-    _chk(string.contains(bd6, "GADGET-1"), "G1 remains")
-    println("PASS")
-
-    print("\n=== All Tests Passed ===\n")
+    spec.run_summary(fw)
 }

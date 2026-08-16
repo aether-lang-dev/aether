@@ -1,4 +1,5 @@
-// TinyWeb WebSocket codec + roundtrip tests — guards the frame/lifetime fixes.
+// TinyWeb WebSocket codec + roundtrip spec — guards the frame/lifetime
+// fixes. Written against std.spec.
 //
 // Exercises the REAL contrib.tinyweb WebSocket path end to end over a loopback
 // TCP connection (server accept loop in an actor; client in main):
@@ -28,6 +29,7 @@ import std.map
 import std.map(map_new)
 import std.string
 import std.bytes
+import std.spec
 
 const PORT = 8231
 
@@ -130,17 +132,8 @@ fn recv_server_frame(sock: ptr) -> string {
     return read_exact(sock, plen)
 }
 
-fn assert_eq(label: string, got: string, want: string) -> int {
-    if got == want {
-        println("  [OK] ${label}")
-        return 0
-    }
-    println("  [FAIL] ${label}: got [${got}] want [${want}]")
-    return 1
-}
-
 main() {
-    println("=== TinyWeb WebSocket codec roundtrip ===")
+    fw = spec.init()
 
     // Register a /ws handler using the module's real ws_entry shape.
     handlers = list_new()
@@ -152,58 +145,77 @@ main() {
     list.add(handlers, entry)
 
     ws_tcp, err = tcp.listen(PORT)
-    if err != "" {
-        println("FAIL: bind ${PORT}: ${err}")
-        return
-    }
-    srv = map_new()
-    map.put(srv, "tcp", ws_tcp)
-    map.put(srv, "handlers", handlers)
-    spawn(SchedHelper())
-    a = spawn(WsActor())
-    a ! StartWs { srv: srv }
-    sleep(500) // let the accept loop come up before we connect
+    have_port = 0
+    if err == "" { have_port = 1 }
+    port_reason = "cannot bind port ${PORT}: ${err}"
 
-    // ---- client: connect + handshake ----
-    sock, cerr = tcp.connect("127.0.0.1", PORT)
-    if cerr != "" {
-        println("FAIL: connect: ${cerr}")
-        return
+    sock = null
+    connected = 0
+    handshake = ""
+    if have_port == 1 {
+        srv = map_new()
+        map.put(srv, "tcp", ws_tcp)
+        map.put(srv, "handlers", handlers)
+        spawn(SchedHelper())
+        a = spawn(WsActor())
+        a ! StartWs { srv: srv }
+        sleep(500) // let the accept loop come up before we connect
+
+        s2, cerr = tcp.connect("127.0.0.1", PORT)
+        if cerr == "" {
+            sock = s2
+            connected = 1
+            // Minimal upgrade request. The key is arbitrary — the server
+            // echoes an accept, and reaching the message loop at all is
+            // what proves the handshake worked.
+            req = "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            tcp.write(sock, req)
+            handshake, _ = tcp.read(sock, 4096)
+        }
     }
-    // Minimal upgrade request. The key is arbitrary; the server echoes an
-    // accept but we don't validate it here (handshake success == 101 + frames).
-    req = "GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
-    tcp.write(sock, req)
-    resp, _ = tcp.read(sock, 4096)
-    fails = 0
-    if string.contains(resp, "101") == 1 {
-        println("  [OK] handshake returned 101")
-    } else {
-        println("  [FAIL] handshake: ${resp}")
-        fails = fails + 1
+    conn_reason = "no websocket connection to the test server"
+
+    // The frames below travel over ONE socket in order, so each `it` runs a
+    // complete send/receive exchange rather than splitting one exchange
+    // across cases — a half-consumed frame would desynchronise every
+    // later read.
+    spec.describe(fw, "tinyweb websocket") {
+        // Reaching the message loop also proves path routing: a garbage
+        // request path (the array_get borrowed-pointer use-after-free)
+        // would 404 and no echo would come back.
+        spec.it_when(connected, "completes the upgrade handshake with 101", conn_reason) callback {
+            spec.assert_contains(handshake, "101", "server returned 101 Switching Protocols")
+        }
+
+        // A masked client frame must be UNMASKED (RFC 6455 §5.3) and echoed
+        // back in a 2-byte-header server frame. Asserting the exact echoed
+        // text proves the unmasking produced the right bytes, not merely a
+        // frame of the right length.
+        spec.it_when(connected, "unmasks a small client frame and echoes it", conn_reason) callback {
+            send_client_frame(sock, "small")
+            spec.assert_str_eq(recv_server_frame(sock), "echo:small",
+                "small frame roundtrip (unmask + 2-byte header)")
+        }
+
+        // THE CORE REGRESSION: a >=126-byte reply uses the 4-byte extended
+        // header, and a length high-byte of 0 must NOT truncate the frame.
+        // That was the string.concat/NUL bug which corrupted every big
+        // frame — it is invisible at small sizes, so this case is the one
+        // that matters.
+        spec.it_when(connected, "sends a large frame without NUL truncation", conn_reason) callback {
+            send_client_frame(sock, "big")
+            big = recv_server_frame(sock)
+            spec.assert_eq(string.length(big), 200,
+                "large frame length 200 (extended header, no NUL truncation)")
+        }
     }
 
-    // ---- test 1: small masked frame -> server unmasks -> echoes ----
-    send_client_frame(sock, "small")
-    fails = fails + assert_eq("small frame roundtrip (unmask + 2-byte header)", recv_server_frame(sock), "echo:small")
+    if connected == 1 { tcp.close(sock) }
 
-    // ---- test 2: LARGE reply -> extended-length header, no NUL truncation ----
-    send_client_frame(sock, "big")
-    big = recv_server_frame(sock)
-    if string.length(big) == 200 {
-        println("  [OK] large frame length 200 (extended header, no NUL truncation)")
-    } else {
-        println("  [FAIL] large frame length: got ${string.length(big)} want 200")
-        fails = fails + 1
-    }
+    spec.run_summary(fw)
 
-    tcp.close(sock)
-
-    if fails == 0 {
-        println("ALL PASS")
-        exit(0)
-    } else {
-        println("${fails} FAILED")
-        exit(1)
-    }
+    // The accept-loop actor keeps the process alive once the specs finish,
+    // so exit explicitly — run_summary has already exited non-zero if
+    // anything failed.
+    exit(0)
 }

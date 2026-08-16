@@ -1,10 +1,16 @@
-// TinyWeb Integration Tests — real HTTP server + client round-trips
+// TinyWeb integration spec — real HTTP server + client round-trips,
+// written against std.spec.
 //
-// Uses a single server instance with all routes registered upfront,
-// since stopping and restarting on the same port between tests is
-// unreliable due to socket TIME_WAIT.
+// One server instance with all routes registered upfront: stopping and
+// restarting on the same port between cases is unreliable because of
+// socket TIME_WAIT, so the server outlives the whole run.
+//
+// The original called exit(1) on the first mismatch, so a broken route
+// hid every later one — including the path-parameter cases at the end.
+// As specs each reports independently.
 
 import std.http
+import std.spec
 
 // ---- Handlers ----
 
@@ -44,8 +50,8 @@ actor SrvActor {
     receive {
         StartSrv(raw) -> {
             s = raw
-            // http.server_start is now a Go-style wrapper returning an error
-            // string; we want the raw int-returning extern that actually
+            // http.server_start is a Go-style wrapper returning an error
+            // string; this is the raw int-returning extern that actually
             // runs the accept loop.
             http_server_start_raw(raw)
         }
@@ -57,11 +63,12 @@ actor SchedHelper {
     receive { Noop() -> { x = 1 } }
 }
 
-// ---- Test helpers ----
+// ---- Helpers ----
 
-// _get / _post return the raw HttpResponse ptr so tests can assert on
-// status codes distinct from body (the Go-style http.get/http.post wrappers
-// collapse non-2xx into an error string with no status access).
+// Return the raw HttpResponse so specs can assert on status separately
+// from body — the Go-style http.get/http.post wrappers collapse non-2xx
+// into an error string with no status access, which would make the 404
+// case untestable.
 _get(path: string) {
     return http_get_raw("http://127.0.0.1:8080${path}")
 }
@@ -70,48 +77,22 @@ _post(path: string, body: string) {
     return http_post_raw("http://127.0.0.1:8080${path}", body, "text/plain")
 }
 
-_chk_resp(resp: ptr, code: int, body: string, msg: string) {
-    ac = http.response_status_code(resp)
-    ab = http.response_body_str(resp)
-    if ac != code {
-        print("FAIL: ${msg} — expected status ${code}, got "); print(ac); println("")
-        http.response_free(resp)
-        exit(1)
-    }
-    if str_eq(ab, body) == 0 {
-        println("FAIL: ${msg} — expected '${body}', got '${ab}'")
-        http.response_free(resp)
-        exit(1)
-    }
+// Assert status + exact body, then free. Freeing here rather than at each
+// call site is what keeps the specs readable.
+_expect(resp: ptr, code: int, body: string, msg: string) {
+    spec.assert_eq(http.response_status_code(resp), code, "${msg}: status")
+    spec.assert_str_eq(http.response_body_str(resp), body, "${msg}: body")
     http.response_free(resp)
 }
 
-_chk_code(resp: ptr, code: int, msg: string) {
-    ac = http.response_status_code(resp)
-    if ac != code {
-        print("FAIL: ${msg} — expected ${code}, got "); print(ac); println("")
-        http.response_free(resp)
-        exit(1)
-    }
+_expect_code(resp: ptr, code: int, msg: string) {
+    spec.assert_eq(http.response_status_code(resp), code, "${msg}: status")
     http.response_free(resp)
 }
-
-_chk_body_contains(resp: ptr, needle: string, msg: string) {
-    ab = http.response_body_str(resp)
-    if str_eq(ab, "") == 1 {
-        println("FAIL: ${msg} — empty body")
-        http.response_free(resp)
-        exit(1)
-    }
-    http.response_free(resp)
-}
-
-// ---- Tests ----
 
 main() {
-    println("=== TinyWeb Integration Tests ===\n")
+    fw = spec.init()
 
-    // Set up server with all routes
     raw = http.server_create(8080)
     http.server_get(raw, "/hello", handle_hello, 0)
     http.server_get(raw, "/json", handle_json, 0)
@@ -119,58 +100,68 @@ main() {
     http.server_post(raw, "/echo", handle_echo, 0)
     http.server_get(raw, "/users/:id", handle_param, 0)
 
-    // Start server in background
     spawn(SchedHelper())
     a = spawn(SrvActor())
     a ! StartSrv { raw: raw }
     sleep(500)
 
-    // Test 1: Basic GET
-    print("Test 1: GET /hello... ")
-    _chk_resp(_get("/hello"), 200, "Hello, World!", "GET /hello")
-    println("PASS")
+    spec.describe(fw, "tinyweb: request round-trips") {
+        spec.it(fw, "serves a plain GET") callback {
+            _expect(_get("/hello"), 200, "Hello, World!", "GET /hello")
+        }
 
-    // Test 2: JSON response
-    print("Test 2: GET /json... ")
-    _chk_resp(_get("/json"), 200, "{\"status\":\"ok\"}", "GET /json")
-    println("PASS")
+        spec.it(fw, "serves a JSON response") callback {
+            _expect(_get("/json"), 200, "{\"status\":\"ok\"}", "GET /json")
+        }
 
-    // Test 3: GET /health
-    print("Test 3: GET /health... ")
-    _chk_resp(_get("/health"), 200, "ok", "GET /health")
-    println("PASS")
+        spec.it(fw, "serves a second distinct route") callback {
+            _expect(_get("/health"), 200, "ok", "GET /health")
+        }
 
-    // Test 4: POST echo
-    print("Test 4: POST /echo... ")
-    _chk_resp(_post("/echo", "test data"), 200, "echo: test data", "POST /echo")
-    println("PASS")
+        // The POST body must reach the handler intact — the handler echoes
+        // it back, so a body that arrived empty or truncated shows up here
+        // rather than as a status-only pass.
+        spec.it(fw, "passes a POST body through to the handler") callback {
+            _expect(_post("/echo", "test data"), 200, "echo: test data", "POST /echo")
+        }
+    }
 
-    // Test 5: Path parameters
-    print("Test 5: GET /users/alice... ")
-    _chk_resp(_get("/users/alice"), 200, "user: alice", "GET /users/alice")
-    println("PASS")
+    // ":id" is the router's parameter syntax (http_route_matches in
+    // std/net/aether_http_server.c). Two different values are asserted
+    // because a handler that ignored the parameter and returned a constant
+    // would satisfy a single case.
+    spec.describe(fw, "tinyweb: path parameters") {
+        spec.it(fw, "binds a path parameter") callback {
+            _expect(_get("/users/alice"), 200, "user: alice", "GET /users/alice")
+        }
 
-    // Test 6: Different path param
-    print("Test 6: GET /users/bob... ")
-    _chk_resp(_get("/users/bob"), 200, "user: bob", "GET /users/bob")
-    println("PASS")
+        spec.it(fw, "binds a different value for the same route") callback {
+            _expect(_get("/users/bob"), 200, "user: bob", "GET /users/bob")
+        }
+    }
 
-    // Test 7: 404 for unknown path
-    print("Test 7: 404 for /nonexistent... ")
-    _chk_code(_get("/nonexistent"), 404, "GET /nonexistent")
-    println("PASS")
+    spec.describe(fw, "tinyweb: routing misses") {
+        // An unrouted path must 404 rather than falling through to another
+        // handler or hanging the connection.
+        spec.it(fw, "returns 404 for an unknown path") callback {
+            _expect_code(_get("/nonexistent"), 404, "GET /nonexistent")
+        }
+    }
 
-    // Test 8: Multiple requests
-    print("Test 8: Multiple sequential requests... ")
-    _chk_resp(_get("/hello"), 200, "Hello, World!", "multi 1")
-    _chk_resp(_get("/health"), 200, "ok", "multi 2")
-    _chk_resp(_post("/echo", "again"), 200, "echo: again", "multi 3")
-    println("PASS")
+    // The server must stay usable across requests — a per-request leak or
+    // a socket left in a bad state shows up as the second or third call
+    // failing where the first succeeded.
+    spec.describe(fw, "tinyweb: sequential requests") {
+        spec.it(fw, "handles several requests on one server") callback {
+            _expect(_get("/hello"), 200, "Hello, World!", "multi 1")
+            _expect(_get("/health"), 200, "ok", "multi 2")
+            _expect(_post("/echo", "again"), 200, "echo: again", "multi 3")
+        }
+    }
 
-    // Shutdown
+    spec.run_summary(fw)
+
     http.server_stop(raw)
     sleep(200)
     http.server_free(raw)
-
-    println("\n=== All Integration Tests Passed ===")
 }

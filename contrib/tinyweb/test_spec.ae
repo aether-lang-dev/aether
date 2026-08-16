@@ -134,184 +134,190 @@ web_server(port: int) {
 
 compose(_srv: ptr) { return _srv }
 
+// The DSL is pure construction — no server, no sockets — so every case
+// below is a straight assertion on the structure web_server() builds.
 _chk(cond: int, msg: string) {
-    if cond == 0 { print("FAIL: ${msg}\n"); exit(1) }
+    spec.assert_eq(cond, 1, msg)
 }
+import std.spec
 
 main() {
-    print("=== TinyWeb Unit Tests ===\n\n")
+    fw = spec.init()
 
-    // Config defaults
-    print("Config defaults: ")
-    srv = web_server(8080)
-    cfg_port, _ = map.get(srv, "port")
-    _chk(cfg_port == 8080, "port")
-    cfg_host, _ = map.get(srv, "host")
-    _chk(str_eq(cfg_host, "127.0.0.1"), "host")
-    cfg_to, _ = map.get(srv, "socket_timeout_ms")
-    _chk(cfg_to == 30000, "timeout")
-    cfg_ka, _ = map.get(srv, "keep_alive")
-    _chk(cfg_ka == 1, "keep_alive")
-    println("PASS")
+    spec.describe(fw, "tinyweb DSL: configuration") {
+        spec.it(fw, "applies documented config defaults") callback {
+            srv = web_server(8080)
+            cfg_port, _ = map.get(srv, "port")
+            _chk(cfg_port == 8080, "port")
+            cfg_host, _ = map.get(srv, "host")
+            _chk(str_eq(cfg_host, "127.0.0.1"), "host")
+            cfg_to, _ = map.get(srv, "socket_timeout_ms")
+            _chk(cfg_to == 30000, "timeout")
+            cfg_ka, _ = map.get(srv, "keep_alive")
+            _chk(cfg_ka == 1, "keep_alive")
+        }
 
-    // Method constants
-    print("Method constants: ")
-    _chk(GET == 1, "GET")
-    _chk(POST == 2, "POST")
-    _chk(PUT == 3, "PUT")
-    _chk(DELETE == 4, "DELETE")
-    _chk(ALL == 0, "ALL")
-    _chk(CONTINUE == 1, "CONTINUE")
-    _chk(STOP == 0, "STOP")
-    println("PASS")
+        // The method constants are a wire contract — routes are registered
+        // and matched by these integers, so a renumbering would silently
+        // reroute every request.
+        spec.it(fw, "pins the method and filter-result constants") callback {
+            _chk(GET == 1, "GET")
+            _chk(POST == 2, "POST")
+            _chk(PUT == 3, "PUT")
+            _chk(DELETE == 4, "DELETE")
+            _chk(ALL == 0, "ALL")
+            _chk(CONTINUE == 1, "CONTINUE")
+            _chk(STOP == 0, "STOP")
+        }
 
-    // method_to_string
-    print("method_to_string: ")
-    _chk(str_eq(method_to_string(GET), "GET"), "GET")
-    _chk(str_eq(method_to_string(POST), "POST"), "POST")
-    _chk(str_eq(method_to_string(PATCH), "PATCH"), "PATCH")
-    _chk(str_eq(method_to_string(LOCK), "LOCK"), "LOCK")
-    _chk(str_eq(method_to_string(COPY), "COPY"), "COPY")
-    println("PASS")
-
-    // Route registration
-    print("Route registration: ")
-    srv = web_server(8080) {
-        end_point(GET, "/hello") |req: ptr, res: ptr, rctx: ptr| { }
+        spec.it(fw, "renders method constants back to their names") callback {
+            _chk(str_eq(method_to_string(GET), "GET"), "GET")
+            _chk(str_eq(method_to_string(POST), "POST"), "POST")
+            _chk(str_eq(method_to_string(PATCH), "PATCH"), "PATCH")
+            _chk(str_eq(method_to_string(LOCK), "LOCK"), "LOCK")
+            _chk(str_eq(method_to_string(COPY), "COPY"), "COPY")
+        }
     }
-    rts, _ = map.get(srv, "routes")
-    print("(routes="); print(list.size(rts)); print(") ")
-    _chk(list.size(rts) == 1, "count")
-    e, _ = list.get(rts, 0)
-    e_path, _ = map.get(e, "path")
-    _chk(str_eq(e_path, "/hello"), "path")
-    e_method, _ = map.get(e, "method")
-    _chk(e_method == GET, "method")
-    println("PASS")
 
-    // Nested paths
-    print("Nested paths: ")
-    srv = web_server(8080) {
-        tw_path("/api") {
-            tw_path("/v1") {
-                end_point(GET, "/users") |req: ptr, res: ptr, rctx: ptr| { }
+    spec.describe(fw, "tinyweb DSL: routing structure") {
+        spec.it(fw, "records a route's path and method") callback {
+            srv = web_server(8080) {
+                end_point(GET, "/hello") | req: ptr, res: ptr, rctx: ptr | {}
             }
+            rts, _ = map.get(srv, "routes")
+            _chk(list.size(rts) == 1, "count")
+            e, _ = list.get(rts, 0)
+            e_path, _ = map.get(e, "path")
+            _chk(str_eq(e_path, "/hello"), "path")
+            e_method, _ = map.get(e, "method")
+            _chk(e_method == GET, "method")
+        }
+
+        // Nested groups must CONCATENATE into one flat path, not nest
+        // structurally — "/api" + "/v1" + "/users" is a single route.
+        spec.it(fw, "flattens nested path groups into one route") callback {
+            srv = web_server(8080) {
+                tw_path("/api") {
+                    tw_path("/v1") {
+                        end_point(GET, "/users") | req: ptr, res: ptr, rctx: ptr | {}
+                    }
+                }
+            }
+            srv_rts, _ = map.get(srv, "routes")
+            _chk(list.size(srv_rts) == 1, "count")
+            e, _ = list.get(srv_rts, 0)
+            e_path, _ = map.get(e, "path")
+            _chk(str_eq(e_path, "/users"), "path")
+        }
+
+        spec.it(fw, "keeps sibling path groups independent") callback {
+            srv = web_server(8080) {
+                tw_path("/foo") {
+                    end_point(GET, "/bar") | req: ptr, res: ptr, rctx: ptr | {}
+                }
+                tw_path("/alpha") {
+                    end_point(GET, "/gamma") | req: ptr, res: ptr, rctx: ptr | {}
+                }
+            }
+            mp_rts, _ = map.get(srv, "routes")
+            _chk(list.size(mp_rts) == 2, "count")
+        }
+
+        // compose() adds to an ALREADY-BUILT server, which is what lets an
+        // app be assembled from several modules.
+        spec.it(fw, "appends routes to an existing server via compose") callback {
+            srv = web_server(8080) {
+                end_point(GET, "/orig") | req: ptr, res: ptr, rctx: ptr | {}
+            }
+            compose(srv) {
+                end_point(GET, "/added") | req: ptr, res: ptr, rctx: ptr | {}
+            }
+            comp_rts, _ = map.get(srv, "routes")
+            _chk(list.size(comp_rts) == 2, "count")
         }
     }
-    srv_rts, _ = map.get(srv, "routes")
-    _chk(list.size(srv_rts) == 1, "count")
-    e, _ = list.get(srv_rts, 0)
-    e_path, _ = map.get(e, "path")
-    _chk(str_eq(e_path, "/users"), "path")
-    println("PASS")
 
-    // Multiple paths
-    print("Multiple paths: ")
-    srv = web_server(8080) {
-        tw_path("/foo") {
-            end_point(GET, "/bar") |req: ptr, res: ptr, rctx: ptr| { }
+    spec.describe(fw, "tinyweb DSL: other registrations") {
+        spec.it(fw, "records filters separately from routes") callback {
+            srv = web_server(8080) {
+                web_filter(GET, "/.*") | req: ptr, res: ptr, rctx: ptr | { return 1 }
+            }
+            flt_list, _ = map.get(srv, "filters")
+            _chk(list.size(flt_list) == 1, "count")
+            fe, _ = list.get(flt_list, 0)
+            fe_method, _ = map.get(fe, "method")
+            _chk(fe_method == GET, "method")
         }
-        tw_path("/alpha") {
-            end_point(GET, "/gamma") |req: ptr, res: ptr, rctx: ptr| { }
+
+        spec.it(fw, "stores request attributes with last-write-wins") callback {
+            attrs = map_new()
+            map_put(attrs, "user", "alice")
+            attr_user, _ = map.get(attrs, "user")
+            _chk(str_eq(attr_user, "alice"), "get")
+            _chk(map_has(attrs, "nope") == 0, "missing")
+            map_put(attrs, "r", "user")
+            map_put(attrs, "r", "admin")
+            attr_r, _ = map.get(attrs, "r")
+            _chk(str_eq(attr_r, "admin"), "overwrite")
+        }
+
+        spec.it(fw, "records websocket handlers in their own list") callback {
+            srv = web_server(8080) {
+                web_socket("/echo") | msg: string, s: ptr, rctx: ptr | {}
+            }
+            ws_list, _ = map.get(srv, "ws_handlers")
+            _chk(list.size(ws_list) == 1, "count")
+            ws_first, _ = list.get(ws_list, 0)
+            ws_first_path, _ = map.get(ws_first, "path")
+            _chk(str_eq(ws_first_path, "/echo"), "path")
+        }
+
+        spec.it(fw, "records SSE endpoints in their own list") callback {
+            srv = web_server(8080) {
+                sse_endpoint("/events") | stream: ptr | {}
+            }
+            sse_list, _ = map.get(srv, "sse_handlers")
+            _chk(list.size(sse_list) == 1, "count")
+        }
+
+        spec.it(fw, "records a static mount's base path and directory") callback {
+            srv = web_server(8080) {
+                serve_static("/static", "/var/www")
+            }
+            stat_list, _ = map.get(srv, "statics")
+            _chk(list.size(stat_list) == 1, "count")
+            se, _ = list.get(stat_list, 0)
+            se_base, _ = map.get(se, "base_path")
+            _chk(str_eq(se_base, "/static"), "base")
+            se_dir, _ = map.get(se, "directory")
+            _chk(str_eq(se_dir, "/var/www"), "dir")
         }
     }
-    mp_rts, _ = map.get(srv, "routes")
-    _chk(list.size(mp_rts) == 2, "count")
-    println("PASS")
 
-    // Compose
-    print("Compose: ")
-    srv = web_server(8080) {
-        end_point(GET, "/orig") |req: ptr, res: ptr, rctx: ptr| { }
+    // Everything at once: each registration kind must land in its OWN
+    // list rather than a shared one, which a single-kind test cannot show.
+    spec.describe(fw, "tinyweb DSL: full composition") {
+        spec.it(fw, "keeps each registration kind in its own list") callback {
+            srv = web_server(8080) {
+                web_filter(GET, "/.*") | req: ptr, res: ptr, rctx: ptr | { return 1 }
+                end_point(GET, "/bar") | req: ptr, res: ptr, rctx: ptr | {}
+                web_socket("/eee") | msg: string, s: ptr, rctx: ptr | {}
+                serve_static("/static", ".")
+                end_point(GET, "/users") | req: ptr, res: ptr, rctx: ptr | {}
+                end_point(POST, "/echo") | req: ptr, res: ptr, rctx: ptr | {}
+                end_point(PUT, "/update") | req: ptr, res: ptr, rctx: ptr | {}
+                end_point(GET, "/test") | req: ptr, res: ptr, rctx: ptr | {}
+            }
+            all_rts, _ = map.get(srv, "routes")
+            _chk(list.size(all_rts) == 5, "routes")
+            all_flts, _ = map.get(srv, "filters")
+            _chk(list.size(all_flts) == 1, "filters")
+            all_ws, _ = map.get(srv, "ws_handlers")
+            _chk(list.size(all_ws) == 1, "ws")
+            all_stats, _ = map.get(srv, "statics")
+            _chk(list.size(all_stats) == 1, "statics")
+        }
     }
-    compose(srv) {
-        end_point(GET, "/added") |req: ptr, res: ptr, rctx: ptr| { }
-    }
-    comp_rts, _ = map.get(srv, "routes")
-    _chk(list.size(comp_rts) == 2, "count")
-    println("PASS")
 
-    // Filters
-    print("Filters: ")
-    srv = web_server(8080) {
-        web_filter(GET, "/.*") |req: ptr, res: ptr, rctx: ptr| { return 1 }
-    }
-    flt_list, _ = map.get(srv, "filters")
-    _chk(list.size(flt_list) == 1, "count")
-    fe, _ = list.get(flt_list, 0)
-    fe_method, _ = map.get(fe, "method")
-    _chk(fe_method == GET, "method")
-    println("PASS")
-
-    // Attributes
-    print("Attributes: ")
-    attrs = map_new()
-    map_put(attrs, "user", "alice")
-    attr_user, _ = map.get(attrs, "user")
-    _chk(str_eq(attr_user, "alice"), "get")
-    _chk(map_has(attrs, "nope") == 0, "missing")
-    map_put(attrs, "r", "user")
-    map_put(attrs, "r", "admin")
-    attr_r, _ = map.get(attrs, "r")
-    _chk(str_eq(attr_r, "admin"), "overwrite")
-    println("PASS")
-
-    // WebSocket
-    print("WebSocket: ")
-    srv = web_server(8080) {
-        web_socket("/echo") |msg: string, s: ptr, rctx: ptr| { }
-    }
-    ws_list, _ = map.get(srv, "ws_handlers")
-    _chk(list.size(ws_list) == 1, "count")
-    ws_first, _ = list.get(ws_list, 0)
-    ws_first_path, _ = map.get(ws_first, "path")
-    _chk(str_eq(ws_first_path, "/echo"), "path")
-    println("PASS")
-
-    // SSE
-    print("SSE: ")
-    srv = web_server(8080) {
-        sse_endpoint("/events") |stream: ptr| { }
-    }
-    sse_list, _ = map.get(srv, "sse_handlers")
-    _chk(list.size(sse_list) == 1, "count")
-    println("PASS")
-
-    // Static files
-    print("Static files: ")
-    srv = web_server(8080) {
-        serve_static("/static", "/var/www")
-    }
-    stat_list, _ = map.get(srv, "statics")
-    _chk(list.size(stat_list) == 1, "count")
-    se, _ = list.get(stat_list, 0)
-    se_base, _ = map.get(se, "base_path")
-    _chk(str_eq(se_base, "/static"), "base")
-    se_dir, _ = map.get(se, "directory")
-    _chk(str_eq(se_dir, "/var/www"), "dir")
-    println("PASS")
-
-    // Full composition
-    print("Full ExampleApp: ")
-    srv = web_server(8080) {
-        web_filter(GET, "/.*") |req: ptr, res: ptr, rctx: ptr| { return 1 }
-        end_point(GET, "/bar") |req: ptr, res: ptr, rctx: ptr| { }
-        web_socket("/eee") |msg: string, s: ptr, rctx: ptr| { }
-        serve_static("/static", ".")
-        end_point(GET, "/users") |req: ptr, res: ptr, rctx: ptr| { }
-        end_point(POST, "/echo") |req: ptr, res: ptr, rctx: ptr| { }
-        end_point(PUT, "/update") |req: ptr, res: ptr, rctx: ptr| { }
-        end_point(GET, "/test") |req: ptr, res: ptr, rctx: ptr| { }
-    }
-    all_rts, _ = map.get(srv, "routes")
-    _chk(list.size(all_rts) == 5, "routes")
-    all_flts, _ = map.get(srv, "filters")
-    _chk(list.size(all_flts) == 1, "filters")
-    all_ws, _ = map.get(srv, "ws_handlers")
-    _chk(list.size(all_ws) == 1, "ws")
-    all_stats, _ = map.get(srv, "statics")
-    _chk(list.size(all_stats) == 1, "statics")
-    println("PASS")
-
-    print("\n=== All TinyWeb Tests Passed ===\n")
+    spec.run_summary(fw)
 }
