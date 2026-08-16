@@ -190,12 +190,34 @@ probe_python() {
 }
 
 probe_ruby() {
-    for v in ruby-3.2 ruby-3.1 ruby-3.0 ruby; do
+    # pkg-config first, when the distro ships a .pc.
+    for v in ruby-3.4 ruby-3.3 ruby-3.2 ruby-3.1 ruby-3.0 ruby; do
         if pkg-config --exists "$v" 2>/dev/null; then
             pkg-config --cflags-only-I "$v"
             return 0
         fi
     done
+    # Fall back to asking RUBY ITSELF. Several distributions (CachyOS/Arch
+    # among them) install the headers with NO ruby.pc at all, so every
+    # pkg-config branch above fails and the bridge silently never builds —
+    # observed on the nightly box, where ruby 3.4.10 was installed and
+    # `contrib-host-check` still reported "libaether_host_ruby.a
+    # unavailable". A hardcoded version list also ages badly: this one
+    # stopped at 3.2 while the box had 3.4.
+    #
+    # rubyhdrdir + rubyarchhdrdir are what ruby's own extension builds use,
+    # so they are correct wherever ruby runs. Same principle as the soname
+    # probes in the [3/3] spec phase: ask the runtime, do not guess at the
+    # packaging.
+    if command -v ruby >/dev/null 2>&1; then
+        rb_inc="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["rubyhdrdir"]' 2>/dev/null)"
+        rb_arch="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["rubyarchhdrdir"]' 2>/dev/null)"
+        if [ -n "$rb_inc" ] && [ -f "$rb_inc/ruby.h" ]; then
+            printf -- '-I%s' "$rb_inc"
+            [ -n "$rb_arch" ] && printf -- ' -I%s' "$rb_arch"
+            return 0
+        fi
+    fi
     return 1
 }
 
