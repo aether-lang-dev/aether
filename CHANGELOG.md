@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+- `contrib/templating/native` gains a co-located spec,
+  `contrib/templating/native/test_native.ae`, replacing the four
+  `tests/integration/native_templating_{dsl,pretty,skeleton,xml}/`
+  directories. Unlike the sqlite and expat cases, those shell wrappers had
+  no dependency probe to justify them — this module needs no system
+  library, so each `.sh` did nothing but run its probe and check the exit
+  code.
+  **All 29 assertions carried over verbatim**; the only change is
+  `expect_eq()` -> `spec.assert_str_eq()`. That is not cosmetic: the
+  originals called `exit(1)` on the first failure, so one broken escape
+  rule masked every later assertion in the same file.
+  The module also gains **runtime coverage in the nightly for the first
+  time** — `templating/native` had no `contrib_check.sh` entry, so it was
+  type-checked and never executed. It now appears as
+  `PASS templating/native (run)`.
+
+## [current]
+
 ### Added
 - Three specs closing coverage gaps left when `contrib/sqlite`'s tests were
   co-located (#1614): `step()`, `bind_i64`/`column_i64`, and

@@ -1,0 +1,265 @@
+// Consolidated spec for contrib.templating.native — co-located with the
+// module it exercises, written in Aether against std.spec.
+//
+// Replaces four integration directories:
+//   tests/integration/native_templating_dsl/
+//   tests/integration/native_templating_pretty/
+//   tests/integration/native_templating_skeleton/
+//   tests/integration/native_templating_xml/
+//
+// Each was a probe.ae plus a shell wrapper that did nothing but run it and
+// check the exit code — this module needs no system library, so unlike the
+// sqlite and expat ones those wrappers had no dependency probe to justify
+// them either.
+//
+// All 29 assertions from the four probes are carried over verbatim; the
+// only change is expect_eq() -> spec.assert_str_eq(), so a failure now
+// reports through the framework instead of exit(1). That matters here:
+// the originals stopped at the FIRST failure, so one broken escape rule
+// masked every later assertion in the same file.
+//
+// Grouped by the surface each probe covered, so `describe` output still
+// tells you which area broke.
+//
+// COVERAGE NOTE: templating/native had NO contrib-check entry before this,
+// so the nightly type-checked it and ran nothing. The entry added
+// alongside this file is what gives it runtime coverage.
+
+import contrib.templating.native
+import std.spec
+import std.string
+import std.strbuilder
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "contrib.templating.native") {
+        // ---- builder DSL (was native_templating_dsl) ----------------
+        spec.it("html builder DSL: nesting, escaping, raw, loops, interpolation") callback {
+            // (1) Basic tag wrap.
+            out1 = native.render_html() {
+                native.tag("p") { native.text("hello") }
+            }
+            spec.assert_str_eq(out1, "<p>hello</p>", "1 basic tag wrap")
+
+            // (2) Nested tags compose.
+            out2 = native.render_html() {
+                native.tag("div") {
+                    native.tag("span") { native.text("deep") }
+                }
+            }
+            spec.assert_str_eq(out2, "<div><span>deep</span></div>", "2 nested tags")
+
+            // (3) text() HTML-escapes the five canonical metas.
+            out3 = native.render_html() {
+                native.tag("a") { native.text("<x&y>'q\"") }
+            }
+            spec.assert_str_eq(out3, "<a>&lt;x&amp;y&gt;&#39;q&quot;</a>", "3 text escapes")
+
+            // (4) raw() bypasses escaping (trusted markup).
+            out4 = native.render_html() {
+                native.raw("<br>")
+            }
+            spec.assert_str_eq(out4, "<br>", "4 raw bypasses")
+
+            // (5) for-loop inside a tag's block — the actual pitch. Each
+            //     iteration's body runs against the SAME enclosing tag's
+            //     emitter (the `for` is a real Aether statement, not a
+            //     template-language reimplementation).
+            items = ["alpha", "beta", "<gamma>"]
+            out5 = native.render_html() {
+                native.tag("ul") {
+                    for i in 0..3 {
+                        native.tag("li") { native.text(items[i]) }
+                    }
+                }
+            }
+            spec.assert_str_eq(out5,
+                "<ul><li>alpha</li><li>beta</li><li>&lt;gamma&gt;</li></ul>",
+                "5 for loop inside tag block")
+
+            // (6) Aether ${...} interpolation: a captured user value with HTML
+            //     metas, interpolated into a literal, then handed to text() —
+            //     the result is escape-correct because the captured-and-
+            //     interpolated string still flows through text().
+            user_name = "Alice <script>"
+            out6 = native.render_html() {
+                native.tag("p") { native.text("Hello ${user_name}") }
+            }
+            spec.assert_str_eq(out6, "<p>Hello Alice &lt;script&gt;</p>",
+                "6 interp escapes captured user value")
+        }
+
+        // ---- pretty printers (was native_templating_pretty) ---------
+        spec.it("pretty printers: indentation, pre/script carve-outs, prolog, indent size") callback {
+            // (1) Flat element with text body — stays on one line.
+            out1 = native.pretty_print_html("<p>hello</p>", 2)
+            spec.assert_str_eq(out1, "<p>hello</p>", "1 flat text body")
+
+            // (2) Nested elements get indented.
+            out2 = native.pretty_print_html("<ul><li>a</li><li>b</li></ul>", 2)
+            spec.assert_str_eq(out2,
+                "<ul>\n  <li>a</li>\n  <li>b</li>\n</ul>",
+                "2 nested list")
+
+            // (3) <pre> carve-out — internal whitespace preserved verbatim,
+            //     no indent added inside.
+            out3 = native.pretty_print_html("<div><pre>line1\nline2</pre></div>", 2)
+            spec.assert_str_eq(out3,
+                "<div>\n  <pre>line1\nline2</pre>\n</div>",
+                "3 pre carve-out")
+
+            // (4) <script> also carved out (same whitelist).
+            out4 = native.pretty_print_html("<head><script>var x = 1;\nvar y = 2;</script></head>", 2)
+            spec.assert_str_eq(out4,
+                "<head>\n  <script>var x = 1;\nvar y = 2;</script>\n</head>",
+                "4 script carve-out")
+
+            // (5) pretty_print_xml on nested elements.
+            out5 = native.pretty_print_xml("<rss><channel><title>Hi</title></channel></rss>", 2)
+            spec.assert_str_eq(out5,
+                "<rss>\n  <channel>\n    <title>Hi</title>\n  </channel>\n</rss>",
+                "5 nested XML")
+
+            // (6) Prolog on its own line; root on the next.
+            out6 = native.pretty_print_xml("<?xml version=\"1.0\" encoding=\"UTF-8\"?><doc><a>hi</a></doc>", 2)
+            spec.assert_str_eq(out6,
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<doc>\n  <a>hi</a>\n</doc>",
+                "6 XML prolog newline")
+
+            // (7) Self-close in XML.
+            out7 = native.pretty_print_xml("<doc><a/><b><c/></b></doc>", 2)
+            spec.assert_str_eq(out7,
+                "<doc>\n  <a/>\n  <b>\n    <c/>\n  </b>\n</doc>",
+                "7 self-close")
+
+            // (8) Indent size 4 honoured; 0 (out of range) falls back to 2.
+            out8a = native.pretty_print_xml("<a><b>x</b></a>", 4)
+            spec.assert_str_eq(out8a, "<a>\n    <b>x</b>\n</a>", "8a indent 4")
+            out8b = native.pretty_print_xml("<a><b>x</b></a>", 0)
+            spec.assert_str_eq(out8b, "<a>\n  <b>x</b>\n</a>", "8b indent 0 falls back to 2")
+
+            // (9) End-to-end: render_html DSL output → pretty_print_html.
+            items = ["alpha", "beta", "<gamma>"]
+            tight = native.render_html() {
+                native.tag("ul") {
+                    for i in 0..3 {
+                        native.tag("li") { native.text(items[i]) }
+                    }
+                }
+            }
+            pretty = native.pretty_print_html(tight, 2)
+            spec.assert_str_eq(pretty,
+                "<ul>\n  <li>alpha</li>\n  <li>beta</li>\n  <li>&lt;gamma&gt;</li>\n</ul>",
+                "9 end-to-end DSL → pretty")
+        }
+
+        // ---- strbuilder skeleton API (was native_templating_skeleton) -
+        spec.it("strbuilder skeleton: text/raw/tag/open-close and escaping") callback {
+            // (1) Plain text passthrough.
+            sb1 = strbuilder.new(16)
+            native.html_text(sb1, "hello")
+            spec.assert_str_eq(strbuilder.finish(sb1), "hello", "1 plain text")
+
+            // (2) HTML escaping of all five metacharacters.
+            sb2 = strbuilder.new(64)
+            native.html_text(sb2, "<a href=\"x\">'&'</a>")
+            spec.assert_str_eq(strbuilder.finish(sb2),
+                "&lt;a href=&quot;x&quot;&gt;&#39;&amp;&#39;&lt;/a&gt;",
+                "2 text escapes")
+
+            // (3) html_raw bypasses escaping.
+            sb3 = strbuilder.new(16)
+            native.html_raw(sb3, "<br>")
+            spec.assert_str_eq(strbuilder.finish(sb3), "<br>", "3 raw bypasses")
+
+            // (4) html_tag wraps body in <name>...</name> with body escaped.
+            sb4 = strbuilder.new(32)
+            native.html_tag(sb4, "b", "<bold>")
+            spec.assert_str_eq(strbuilder.finish(sb4), "<b>&lt;bold&gt;</b>", "4 tag with body")
+
+            // (5) Nested tags via open/close: <div><span>deep</span></div>.
+            sb5 = strbuilder.new(64)
+            native.html_tag_open(sb5, "div")
+            native.html_tag_open(sb5, "span")
+            native.html_text(sb5, "deep")
+            native.html_tag_close(sb5, "span")
+            native.html_tag_close(sb5, "div")
+            spec.assert_str_eq(strbuilder.finish(sb5),
+                "<div><span>deep</span></div>",
+                "5 nested tags via open/close")
+
+            // (6) Captured user value with HTML metas: interpolation produces
+            //     a string, html_text escapes it. Template author did NOT
+            //     need to remember to escape.
+            user_name = "Alice <script>"
+            sb6 = strbuilder.new(64)
+            native.html_text(sb6, "Hello ${user_name}")
+            spec.assert_str_eq(strbuilder.finish(sb6),
+                "Hello Alice &lt;script&gt;",
+                "6 interp escapes captured user value")
+        }
+
+        // ---- XML builder (was native_templating_xml) ----------------
+        spec.it("xml builder: prolog, self-close, XML-specific escapes, CDATA, loops") callback {
+            prolog = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+
+            // (1) Prolog + empty block.
+            out1 = native.render_xml() {}
+            spec.assert_str_eq(out1, prolog, "1 prolog only")
+
+            // (2) Basic tag wrap.
+            out2 = native.render_xml() {
+                native.xml_tag("greeting") { native.xml_text("hi") }
+            }
+            spec.assert_str_eq(out2, "${prolog}<greeting>hi</greeting>", "2 basic tag wrap")
+
+            // (3) Self-closing element.
+            out3 = native.render_xml() {
+                native.xml_self_close("empty")
+            }
+            spec.assert_str_eq(out3, "${prolog}<empty/>", "3 self-close")
+
+            // (4) XML escape — NB. ' escapes to &apos; not &#39;.
+            out4 = native.render_xml() {
+                native.xml_tag("q") { native.xml_text("<x>&y\"z'") }
+            }
+            spec.assert_str_eq(out4, "${prolog}<q>&lt;x&gt;&amp;y&quot;z&apos;</q>", "4 xml_text escapes")
+
+            // (5) xml_raw bypasses escaping (e.g. for CDATA).
+            out5 = native.render_xml() {
+                native.xml_tag("doc") {
+                    native.xml_raw("<![CDATA[ <not escaped> ]]>")
+                }
+            }
+            spec.assert_str_eq(out5, "${prolog}<doc><![CDATA[ <not escaped> ]]></doc>", "5 xml_raw bypasses")
+
+            // (6) For loop inside xml_tag — same pitch as the HTML side:
+            //     Aether's own `for`, not a template-language reimplementation.
+            titles = ["First", "Second", "Third & last"]
+            out6 = native.render_xml() {
+                native.xml_tag("channel") {
+                    for i in 0..3 {
+                        native.xml_tag("item") {
+                            native.xml_tag("title") { native.xml_text(titles[i]) }
+                        }
+                    }
+                }
+            }
+            spec.assert_str_eq(out6,
+                "${prolog}<channel><item><title>First</title></item><item><title>Second</title></item><item><title>Third &amp; last</title></item></channel>",
+                "6 for loop inside xml_tag")
+
+            // (7) ${...} interpolation flows through xml_text with XML escape.
+            user_input = "<script>alert('xss')</script>"
+            out7 = native.render_xml() {
+                native.xml_tag("comment") { native.xml_text("user said: ${user_input}") }
+            }
+            spec.assert_str_eq(out7,
+                "${prolog}<comment>user said: &lt;script&gt;alert(&apos;xss&apos;)&lt;/script&gt;</comment>",
+                "7 interp escapes captured user value")
+        }
+    }
+
+    spec.run_summary(fw)
+}

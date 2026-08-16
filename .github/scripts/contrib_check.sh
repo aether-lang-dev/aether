@@ -43,6 +43,7 @@ TW="contrib/tinyweb"
 I18N="contrib/i18n"
 VK="contrib/vulkan"
 SQL="contrib/sqlite"
+NT="contrib/templating/native"
 # <label>|<test .ae>|<extra C sources>|<leakgate>|<pkg-config link>|<pkg-config headers>
 #
 # Column 5 is optional and names the pkg-config modules the test needs to
@@ -62,6 +63,10 @@ TESTS=(
   # and skip). Column 5 makes the runner stage a workspace so -I/-l reach
   # gcc, and SKIP the entry when pkg-config cannot find sqlite3.
   "sqlite/roundtrip|$SQL/test_sqlite.ae|$SQL/aether_sqlite.c|run|sqlite3"
+  # templating/native: co-located spec (replaces the four
+  # tests/integration/native_templating_* dirs). Pure Aether — no system
+  # library, so no pkg-config column and nothing to skip on.
+  "templating/native|$NT/test_native.ae||run|"
   "tinyweb/spec|$TW/test_spec.ae||run|"
   "tinyweb/inventory|$TW/test_inventory.ae|$TW/ws_handshake.c|run|"
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run|"
