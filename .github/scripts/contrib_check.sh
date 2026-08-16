@@ -42,6 +42,7 @@ AVC="contrib/avcodec"
 TW="contrib/tinyweb"
 I18N="contrib/i18n"
 VK="contrib/vulkan"
+SQL="contrib/sqlite"
 # <label>|<test .ae>|<extra C sources>|<leakgate>|<pkg-config link>|<pkg-config headers>
 #
 # Column 5 is optional and names the pkg-config modules the test needs to
@@ -49,13 +50,18 @@ VK="contrib/vulkan"
 # foo.c` compiles the shim but has no way to pass -I or -l flags, so a module
 # needing a system library compiles and then dies at link. When either column
 # is set the runner stages an aether.toml workspace (the shape
-# tests/integration/sqlite_roundtrip uses) so the flags reach gcc, and SKIPS
+# contrib/sqlite/test_sqlite.ae needs) so the flags reach gcc, and SKIPS
 # the entry when pkg-config cannot find the modules: an absent system library
 # is a provisioning gap, not a test failure.
 TESTS=(
   # avcodec: needs FFmpeg's dev libraries to LINK and the ffmpeg BINARY to
   # generate its clip; the test itself SKIPs cleanly without the latter.
   "avcodec/decode|$AVC/test_avcodec.ae|$AVC/aether_avcodec.c|run|libavcodec libavformat libavutil libswscale libswresample"
+  # sqlite: co-located spec (replaces tests/integration/sqlite_{roundtrip,
+  # prepared}/, whose shell wrappers existed mainly to probe for libsqlite3
+  # and skip). Column 5 makes the runner stage a workspace so -I/-l reach
+  # gcc, and SKIP the entry when pkg-config cannot find sqlite3.
+  "sqlite/roundtrip|$SQL/test_sqlite.ae|$SQL/aether_sqlite.c|run|sqlite3"
   "tinyweb/spec|$TW/test_spec.ae||run|"
   "tinyweb/inventory|$TW/test_inventory.ae|$TW/ws_handshake.c|run|"
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run|"
@@ -147,7 +153,18 @@ for entry in "${TESTS[@]}"; do
     [ "$hdr_probe_ok" = "1" ] || continue
     # `ae build --extra` cannot pass -l flags, so stage a workspace whose
     # aether.toml carries them; ae threads link_flags into gcc via
-    # get_link_flags(). Same shape as tests/integration/sqlite_roundtrip.
+    # get_link_flags(). This is what the sqlite entry relies on.
+    # A module whose module.ae carries `@link("-laether_<mod> ...")` needs
+    # that veneer archive on the link line — `make contrib` normally builds
+    # it, but this script may run without one (CI does). Build it on demand
+    # so the entry does not depend on a leftover artifact. Failure is not
+    # fatal here: the link below reports it properly if the archive really
+    # was required.
+    veneer="$(sed -n 's/.*@link("-laether_\([a-z0-9_]*\).*/\1/p' \
+              "$(dirname "$src")/module.ae" 2>/dev/null | head -1)"
+    if [ -n "$veneer" ] && [ ! -f "build/contrib/libaether_$veneer.a" ]; then
+      MODULES="$veneer" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true
+    fi
     work="$run_dir/${safe}.work"
     rm -rf "$work"; mkdir -p "$work"
     ln -s "$(pwd)/contrib" "$work/contrib"

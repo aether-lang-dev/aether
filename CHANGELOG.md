@@ -38,6 +38,29 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+- `contrib/sqlite` gains a co-located spec, `contrib/sqlite/test_sqlite.ae`,
+  replacing `tests/integration/sqlite_roundtrip/` and
+  `tests/integration/sqlite_prepared/`. Those shell wrappers existed almost
+  entirely to probe for libsqlite3 and skip when absent — std.spec's
+  `it_when` (#1610) expresses that directly, so the wrapper had nothing left
+  to do and the assertions move next to the module they describe.
+  **Coverage grew rather than moved.** The old probes hand-rolled their
+  checks and called `exit(1)` on the first failure, so one broken query
+  masked every later one; as independent specs all 11 report. Four checks
+  are new: a SQL error must be distinguishable from an empty result set (a
+  caller that cannot tell "no rows" from "your SQL was wrong" will silently
+  do the wrong thing), writing to a missing table must error, `reset()` must
+  really re-bind rather than replay a cached result, and `prepare` must
+  reject malformed SQL. The whole prepared-statement surface the old
+  `sqlite_prepared` covered — prepare/bind/step/column/reset/finalize/changes
+  — is retained.
+  Wired into `contrib_check.sh`, which already had a pkg-config column that
+  SKIPs an entry when the system library is absent, so the spec runs only
+  where sqlite3 exists.
+
+## [current]
+
 ### Added
 - `std.spec` gained skip verbs (#1610): `it_when(cond, desc, reason)` for
   dependency gating, `skip_it(desc, reason)` for a permanent exclusion, and
