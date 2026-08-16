@@ -2618,10 +2618,19 @@ contrib-host-check: compiler ae stdlib
 	  found=$$((found + 1)); \
 	  lang=$$(basename $$(dirname "$$t")); \
 	  echo "  --- $$lang ---"; \
-	  if [ "$$lang" = "ruby" ] && command -v ruby >/dev/null 2>&1; then \
-	    AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
-	    export AETHER_RUBY_SONAME; \
-	  fi; \
+	  case "$$lang" in \
+	    ruby) command -v ruby >/dev/null 2>&1 && { \
+	      AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
+	      export AETHER_RUBY_SONAME; }; ;; \
+	    python) command -v python3 >/dev/null 2>&1 && { \
+	      AETHER_PYTHON_SONAME="$$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"; \
+	      export AETHER_PYTHON_SONAME; }; ;; \
+	    lua) for so in /usr/lib/*/liblua5.4.so /usr/lib/*/liblua5.3.so /usr/lib/liblua5.4.so; do \
+	      [ -f "$$so" ] && { AETHER_LUA_SONAME="$$so"; export AETHER_LUA_SONAME; break; }; done; ;; \
+	    perl) command -v perl >/dev/null 2>&1 && { \
+	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
+	      export AETHER_PERL_SONAME; }; ;; \
+	  esac; \
 	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
 	    MODULES="$$lang" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true; \
 	  fi; \

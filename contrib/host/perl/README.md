@@ -108,3 +108,24 @@ shared-map test plus a contrib-build smoke check:
   (`libaether_host_perl.a`). It SKIPs the perl module when `perl
   -MExtUtils::Embed` isn't usable, and hard-fails it only under
   `make contrib MODULES=perl` (the explicit `--with=perl` path).
+
+## Testing — co-located embedding spec
+
+[`test_host_perl.ae`](test_host_perl.ae) sits next to this bridge and drives it
+through `import contrib.host.perl` — the path a real user takes, so it covers
+module.ae's declarations and the contrib-link plumbing as well as the C shim.
+
+It asserts that a script evaluates; that the interpreter **genuinely runs**
+(Perl computes a value and a second eval asserts on it Perl-side, so a
+bridge that loaded `libperl` but never evaluated would not pass); that runtime
+errors *and* syntax errors propagate as failures rather than being swallowed;
+and that `init` is idempotent while the VM is live.
+
+Run by `make contrib-host-check`'s `[3/3]` phase, which resolves this
+runtime's soname first. Without Perl installed the specs report **skipped**
+(#1610's `it_when`) rather than failing — an absent runtime is a provisioning
+gap, not a code defect.
+
+Assertions are on **return codes and Perl-side state, never on the bridge's
+stdout**: the embedded interpreter buffers its own output and it is not
+reliably flushed when an Aether program exits.

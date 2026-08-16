@@ -1,0 +1,74 @@
+// Integration tests for contrib.host.lua — co-located with the bridge,
+// written in Aether against std.spec. Companion to
+// contrib/host/ruby/test_host_ruby.ae; see that file for the reasoning
+// behind co-locating and for driving the bridge through its `import`
+// rather than a C harness (it covers module.ae's declarations and the
+// contrib-link plumbing, not just the C shim).
+//
+// SKIPPING: the bridge dlopens liblua at runtime, so a box without Lua
+// cannot run these. That is a provisioning gap, not a code defect, so
+// they skip (#1610's it_when) rather than fail. The probe is lua_init()
+// itself — it returns non-zero when liblua cannot be loaded, which is
+// exactly the condition that matters.
+//
+// STDOUT: as with Ruby, the embedded interpreter's own print output is
+// buffered by its runtime and is not reliably flushed when an Aether
+// program exits. These tests therefore assert on RETURN CODES and on
+// state observed back through Lua, never on the bridge's stdout.
+
+import contrib.host.lua
+import std.spec
+
+main() {
+    fw = spec.init()
+
+    have_lua = 0
+    if lua.lua_init() == 0 { have_lua = 1 }
+    reason = "liblua not loadable (set AETHER_LUA_SONAME)"
+
+    spec.describe(fw, "contrib.host.lua") {
+        spec.it_when(have_lua, "evaluates a script and reports success", reason) callback {
+            spec.assert_eq(lua.lua_run("aether_probe = 1"), 0,
+                "a valid script returns 0")
+        }
+
+        // A bridge that loads liblua and resolves its symbols but never
+        // evaluates would satisfy the return-code check above. This can
+        // only pass if the interpreter really ran: Lua computes a value,
+        // and a second eval asserts on it Lua-side, erroring when the
+        // arithmetic did not happen.
+        spec.it_when(have_lua, "really executes — Lua-side state persists", reason) callback {
+            spec.assert_eq(lua.lua_run("aether_sum = (2 + 3) * 7"), 0,
+                "computation evaluates")
+            spec.assert_eq(lua.lua_run("if aether_sum ~= 35 then error('wrong') end"), 0,
+                "Lua sees 35 — the interpreter genuinely ran")
+        }
+
+        // A bridge that swallows script errors is worse than one that
+        // cannot run at all: the caller believes the script worked.
+        // Asserted negatively so the bridge may change its error code.
+        spec.it_when(have_lua, "propagates a runtime error as failure", reason) callback {
+            spec.assert_not_eq(lua.lua_run("error('deliberate')"), 0,
+                "an erroring script must NOT report success")
+        }
+
+        // A syntax error takes a different path through the Lua loader
+        // than a runtime error, and must also be reported.
+        spec.it_when(have_lua, "reports a syntax error as failure", reason) callback {
+            spec.assert_not_eq(lua.lua_run("function ("), 0,
+                "unparseable code must NOT report success")
+        }
+
+        // A host that defensively calls init before each eval must not
+        // pay for it or crash: while the VM is live, init is a no-op.
+        spec.it_when(have_lua, "init is idempotent while the VM is live", reason) callback {
+            spec.assert_eq(lua.lua_init(), 0, "second init returns 0")
+            spec.assert_eq(lua.lua_run("aether_probe = 2"), 0,
+                "the VM still evaluates afterwards")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    if have_lua == 1 { lua.lua_finalize() }
+}

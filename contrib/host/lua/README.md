@@ -219,3 +219,24 @@ The fire-and-forget surface is covered by two cross-cutting tests:
   `aether_host_lua.c`. SKIPs the module when `pkg-config` finds no
   `lua5.4` / `lua5.3` / `lua` dev kit (hard-fails only in explicit
   `MODULES=lua` mode).
+
+## Testing — co-located embedding spec
+
+[`test_host_lua.ae`](test_host_lua.ae) sits next to this bridge and drives it
+through `import contrib.host.lua` — the path a real user takes, so it covers
+module.ae's declarations and the contrib-link plumbing as well as the C shim.
+
+It asserts that a script evaluates; that the interpreter **genuinely runs**
+(Lua computes a value and a second eval asserts on it Lua-side, so a
+bridge that loaded `liblua` but never evaluated would not pass); that runtime
+errors *and* syntax errors propagate as failures rather than being swallowed;
+and that `init` is idempotent while the VM is live.
+
+Run by `make contrib-host-check`'s `[3/3]` phase, which resolves this
+runtime's soname first. Without Lua installed the specs report **skipped**
+(#1610's `it_when`) rather than failing — an absent runtime is a provisioning
+gap, not a code defect.
+
+Assertions are on **return codes and Lua-side state, never on the bridge's
+stdout**: the embedded interpreter buffers its own output and it is not
+reliably flushed when an Aether program exits.

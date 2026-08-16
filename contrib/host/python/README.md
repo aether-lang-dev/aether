@@ -162,3 +162,24 @@ Three tests exercise this host, each covering a different facet:
   `build/contrib/libaether_host_python.a` (the `python` catalogue entry).
   In the default build-all mode a missing dep is a silent SKIP; under
   `make contrib MODULES=python` it's a hard failure.
+
+## Testing — co-located embedding spec
+
+[`test_host_python.ae`](test_host_python.ae) sits next to this bridge and drives it
+through `import contrib.host.python` — the path a real user takes, so it covers
+module.ae's declarations and the contrib-link plumbing as well as the C shim.
+
+It asserts that a script evaluates; that the interpreter **genuinely runs**
+(Python computes a value and a second eval asserts on it Python-side, so a
+bridge that loaded `libpython` but never evaluated would not pass); that runtime
+errors *and* syntax errors propagate as failures rather than being swallowed;
+and that `init` is idempotent while the VM is live.
+
+Run by `make contrib-host-check`'s `[3/3]` phase, which resolves this
+runtime's soname first. Without Python installed the specs report **skipped**
+(#1610's `it_when`) rather than failing — an absent runtime is a provisioning
+gap, not a code defect.
+
+Assertions are on **return codes and Python-side state, never on the bridge's
+stdout**: the embedded interpreter buffers its own output and it is not
+reliably flushed when an Aether program exits.
