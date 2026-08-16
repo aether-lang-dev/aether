@@ -1,0 +1,464 @@
+// Include / render / layout / block spec for contrib.templating.liquid —
+// co-located with the module it exercises, written in Aether against
+// std.spec.
+//
+// Replaces tests/integration/liquid_{include_render,layout_block,
+// extends_super,api_extras}/. Unlike the other four liquid specs, these
+// wrappers did real work: each staged a `partials/` fixture directory and
+// passed its absolute path in through LIQUID_PARTIAL_ROOT, because liquid
+// resolves partials from the FILESYSTEM (context_set_include_root) and has
+// no in-memory partial registry.
+//
+// So the fixtures could not simply be deleted with the wrappers. This spec
+// writes them itself, at startup, under a temp root — which also removes
+// the env-var coupling: the suite is now self-contained and runs under a
+// bare `ae run` with no wrapper to set anything up.
+//
+// PER-SUITE SUBDIRECTORIES ARE LOAD-BEARING. The former layout_block and
+// extends_super directories BOTH ship a `base.liquid`, and they differ
+// (lower-case "default title" vs upper-case "DEFAULT TITLE"). Flattening
+// the fixtures into one directory would let one silently overwrite the
+// other, and because both are valid templates the tests would not crash —
+// they would assert against the wrong parent. Each suite therefore keeps
+// its own subdirectory, exactly as the original layout had it.
+
+import contrib.templating.liquid
+import std.fs
+import std.os
+import std.spec
+import std.strbuilder
+import std.string
+
+// Write one fixture, creating its directory first.
+put_fixture(dir: string, name: string, content: string) {
+    fs.mkdir_p(dir)
+    fs.write(string.concat(dir, string.concat("/", name)), content)
+}
+
+// Recreate the fixture tree the retired wrappers used to ship, under
+// `root`. Contents are byte-for-byte what the `partials/` directories
+// held — including the absence of a trailing newline on several, which
+// matters because a partial's bytes are inlined into the output.
+stage_fixtures(root: string) -> (string, string, string, string) {
+    inc = string.concat(root, "/include_render")
+    put_fixture(inc, "greeting.liquid", "Hello {{ name }}!")
+    put_fixture(inc, "inner.liquid", "INNER")
+    put_fixture(inc, "leak.liquid", "{% assign x = \"AFTER\" %}")
+    put_fixture(inc, "list_item.liquid", "[{{ item }}]")
+    put_fixture(inc, "loop.liquid", "x{% include 'loop' %}")
+    put_fixture(inc, "outer.liquid", "outer-start {% include 'inner' %} outer-end")
+    put_fixture(inc, "pair.liquid", "a={{ a }}|b={{ b }}")
+
+    lay = string.concat(root, "/layout_block")
+    put_fixture(lay, "base.liquid",
+        "<html>\n<head><title>{% block title %}default title{% endblock %}</title></head>\n<body>\n{% block content %}default content{% endblock %}\n</body>\n</html>\n")
+    put_fixture(lay, "middle.liquid",
+        "{% layout 'base' %}\n{% block content %}middle content{% endblock %}")
+    put_fixture(lay, "simple.liquid", "<wrap>{% block body %}DEFAULT{% endblock %}</wrap>")
+
+    // Deliberately upper-case, and deliberately NOT the same file as
+    // layout_block/base.liquid — see the header note.
+    ext = string.concat(root, "/extends_super")
+    put_fixture(ext, "base.liquid",
+        "<html>\n<head><title>{% block title %}DEFAULT TITLE{% endblock %}</title></head>\n<body>\n{% block content %}DEFAULT CONTENT{% endblock %}\n</body>\n</html>\n")
+    put_fixture(ext, "wrap.liquid", "<wrap>{% block body %}WRAP DEFAULT{% endblock %}</wrap>\n")
+
+    api = string.concat(root, "/api_extras")
+    put_fixture(api, "hello.liquid", "Hello, {{ who }}!")
+
+    return inc, lay, ext, api
+}
+
+// Render `src` with the include-root set — the shape nearly every case
+// below needs.
+render_rooted(src: string, root: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_set_include_root(ctx, root)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+// As above, returning the error instead of the output.
+render_rooted_err(src: string, root: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_set_include_root(ctx, root)
+    _, e = liquid.render(t, ctx)
+    return e
+}
+
+// Render with the include-root AND one binding.
+render_rooted_with(src: string, root: string, key: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_set_include_root(ctx, root)
+    liquid.context_put_string(ctx, key, val)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+main() {
+    fw = spec.init()
+
+    // PID-scoped so two concurrent runs cannot fight over the tree.
+    root = string.concat("/tmp/aether_liquid_spec_", string.from_int(os.getpid()))
+    inc, lay, ext, api = stage_fixtures(root)
+
+    spec.describe(fw, "liquid: include") {
+        spec.it(fw, "renders a partial that reads the outer context") callback {
+            spec.assert_str_eq(
+                render_rooted_with("{% include 'greeting' %}", inc, "name", "alice"),
+                "Hello alice!", "1 include sees outer var")
+        }
+
+        spec.it(fw, "resolves a name without the .liquid suffix") callback {
+            spec.assert_str_eq(
+                render_rooted_with("[{% include 'greeting' %}]", inc, "name", "bob"),
+                "[Hello bob!]", "2 no suffix")
+        }
+
+        spec.it(fw, "also accepts an explicit .liquid suffix") callback {
+            spec.assert_str_eq(
+                render_rooted_with("{% include 'greeting.liquid' %}", inc, "name", "carol"),
+                "Hello carol!", "3 explicit suffix")
+        }
+
+        // include shares the caller's context, so an assign inside the
+        // partial is visible afterwards. This is what distinguishes it from
+        // render — see the render suite below for the mirror case.
+        spec.it(fw, "lets a partial's assign leak into the caller") callback {
+            spec.assert_str_eq(
+                render_rooted("{% assign x = \"BEFORE\" %}{% include 'leak' %}/{{ x }}", inc),
+                "/AFTER", "4 include assigns leak (and run first emits nothing)")
+        }
+
+        spec.it(fw, "nests one include inside another") callback {
+            spec.assert_str_eq(render_rooted("{% include 'outer' %}", inc),
+                "outer-start INNER outer-end", "5 nested include")
+        }
+
+        spec.it(fw, "errors on a missing partial") callback {
+            spec.assert_not_eq(string.length(render_rooted_err("{% include 'nope' %}", inc)), 0,
+                "6 missing partial: expected error")
+        }
+
+        // No include-root configured is a caller error, not a silent empty
+        // render — otherwise a mis-wired context drops content with no clue.
+        spec.it(fw, "errors when no include-root is set") callback {
+            t7, _ = liquid.parse_string("{% include 'greeting' %}")
+            _, e7 = liquid.render(t7, liquid.context_new())
+            spec.assert_not_eq(string.length(e7), 0, "7 no root: expected error")
+        }
+
+        // The include-root is a security boundary: a partial name must not
+        // be able to climb out of it and read arbitrary files.
+        spec.it(fw, "refuses to escape the include-root via ..") callback {
+            spec.assert_not_eq(
+                string.length(render_rooted_err("{% include '../escape' %}", inc)), 0,
+                "8 traversal: expected error")
+        }
+
+        // loop.liquid includes itself; the depth cap is what stops this
+        // from running until the stack dies.
+        spec.it(fw, "caps recursive includes") callback {
+            spec.assert_not_eq(string.length(render_rooted_err("{% include 'loop' %}", inc)), 0,
+                "9 recursion cap: expected error")
+        }
+
+        spec.it(fw, "works inside a for-loop, once per iteration") callback {
+            spec.assert_str_eq(
+                render_rooted("{% for i in (1..3) %}{% assign item = i %}{% include 'list_item' %}{% endfor %}", inc),
+                "[1][2][3]", "16 include in for-loop")
+        }
+    }
+
+    // render is include's isolated counterpart: the partial gets a fresh
+    // context, so nothing flows in implicitly and nothing flows back out.
+    spec.describe(fw, "liquid: render") {
+        spec.it(fw, "hides the outer context from the partial") callback {
+            spec.assert_str_eq(
+                render_rooted_with("[{% render 'greeting' %}]", inc, "name", "alice"),
+                "[Hello !]", "10 render hides outer ctx")
+        }
+
+        spec.it(fw, "passes explicitly named arguments through") callback {
+            spec.assert_str_eq(
+                render_rooted("{% render 'greeting', name: \"explicit\" %}", inc),
+                "Hello explicit!", "11 render explicit args")
+        }
+
+        spec.it(fw, "does not let the partial's assigns escape") callback {
+            spec.assert_str_eq(
+                render_rooted("{% assign x = \"OUTER\" %}{% render 'leak' %}/{{ x }}", inc),
+                "/OUTER", "12 render isolates assigns")
+        }
+
+        spec.it(fw, "passes several arguments read from outer variables") callback {
+            t13, _ = liquid.parse_string("{% render 'pair', a: x, b: y %}")
+            ctx13 = liquid.context_new()
+            liquid.context_set_include_root(ctx13, inc)
+            liquid.context_put_string(ctx13, "x", "X-val")
+            liquid.context_put_string(ctx13, "y", "Y-val")
+            out13, _ = liquid.render(t13, ctx13)
+            spec.assert_str_eq(out13, "a=X-val|b=Y-val", "13 render multi-arg")
+        }
+
+        spec.it(fw, "accepts a quoted literal argument") callback {
+            spec.assert_str_eq(render_rooted("{% render 'greeting', name: 'lit' %}", inc),
+                "Hello lit!", "14 render quoted literal")
+        }
+
+        spec.it(fw, "errors on a missing partial") callback {
+            spec.assert_not_eq(string.length(render_rooted_err("{% render 'nope' %}", inc)), 0,
+                "15 missing render partial: expected error")
+        }
+
+        spec.it(fw, "caps recursion the same way include does") callback {
+            spec.assert_not_eq(string.length(render_rooted_err("{% render 'loop' %}", inc)), 0,
+                "17 render recursion cap: expected error")
+        }
+    }
+
+    spec.describe(fw, "liquid: layout and block") {
+        spec.it(fw, "overrides a single block in the parent") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'simple' %}\n{% block body %}OVERRIDE{% endblock %}", lay),
+                "<wrap>OVERRIDE</wrap>", "1 single block override")
+        }
+
+        spec.it(fw, "overrides several blocks at once") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'base' %}{% block title %}T{% endblock %}{% block content %}C{% endblock %}", lay),
+                "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
+                "2 multiple blocks")
+        }
+
+        // A block the child does not override keeps the parent's default
+        // body, rather than rendering empty.
+        spec.it(fw, "falls back to the parent default for an unoverridden block") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'base' %}{% block title %}T{% endblock %}", lay),
+                "<html>\n<head><title>T</title></head>\n<body>\ndefault content\n</body>\n</html>\n",
+                "3 missing override uses parent default")
+        }
+
+        // In a layout-using child, only block contents survive — stray text
+        // outside any block is dropped, not appended to the parent output.
+        spec.it(fw, "drops child text outside any block") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'simple' %}\nNOISE BEFORE\n{% block body %}OK{% endblock %}\nNOISE AFTER", lay),
+                "<wrap>OK</wrap>", "4 child noise dropped")
+        }
+
+        spec.it(fw, "interpolates a variable inside an override") callback {
+            spec.assert_str_eq(
+                render_rooted_with("{% layout 'simple' %}{% block body %}Hi {{ name }}{% endblock %}",
+                    lay, "name", "alice"),
+                "<wrap>Hi alice</wrap>", "5 block interpolates var")
+        }
+
+        spec.it(fw, "runs filters inside an override") callback {
+            spec.assert_str_eq(
+                render_rooted_with("{% layout 'simple' %}{% block body %}{{ name | upcase | append:\"!\" }}{% endblock %}",
+                    lay, "name", "alice"),
+                "<wrap>ALICE!</wrap>", "6 block uses filters")
+        }
+
+        spec.it(fw, "runs a for-loop inside an override") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'simple' %}{% block body %}{% for i in (1..3) %}[{{ i }}]{% endfor %}{% endblock %}", lay),
+                "<wrap>[1][2][3]</wrap>", "7 for-loop inside block")
+        }
+
+        spec.it(fw, "runs a conditional inside an override") callback {
+            spec.assert_str_eq(
+                render_rooted_with("{% layout 'base' %}{% block content %}{% if name %}Hi {{ name }}{% else %}Hi anon{% endif %}{% endblock %}",
+                    lay, "name", "bob"),
+                "<html>\n<head><title>default title</title></head>\n<body>\nHi bob\n</body>\n</html>\n",
+                "8 if/else inside block")
+        }
+
+        // middle.liquid is itself a layout-using template, parsed from disk
+        // rather than a string. Single-level inheritance only — a child
+        // layout-ing middle (which layouts base) is not supported in this
+        // slice and is tracked in the module's TODO.
+        spec.it(fw, "inherits one level from a file parsed off disk") callback {
+            t9, p9err = liquid.parse_file(string.concat(lay, "/middle.liquid"))
+            spec.assert_str_eq(p9err, "", "9 parse_file")
+            ctx9 = liquid.context_new()
+            liquid.context_set_include_root(ctx9, lay)
+            out9, _ = liquid.render(t9, ctx9)
+            spec.assert_str_eq(out9,
+                "<html>\n<head><title>default title</title></head>\n<body>\nmiddle content\n</body>\n</html>\n",
+                "9 single-level inherit via parse_file")
+        }
+
+        spec.it(fw, "errors when no include-root is set") callback {
+            t10, _ = liquid.parse_string("{% layout 'simple' %}{% block body %}x{% endblock %}")
+            _, e10 = liquid.render(t10, liquid.context_new())
+            spec.assert_not_eq(string.length(e10), 0, "10 no root: expected error")
+        }
+
+        spec.it(fw, "errors on a missing parent template") callback {
+            spec.assert_not_eq(
+                string.length(render_rooted_err("{% layout 'nope' %}{% block body %}x{% endblock %}", lay)), 0,
+                "11 missing parent: expected error")
+        }
+
+        spec.it(fw, "errors on a stray endblock with no layout") callback {
+            t12, _ = liquid.parse_string("hi {% endblock %} bye")
+            _, e12 = liquid.render(t12, liquid.context_new())
+            spec.assert_not_eq(string.length(e12), 0, "12 stray endblock: expected error")
+        }
+
+        spec.it(fw, "errors on a block with no name") callback {
+            spec.assert_not_eq(
+                string.length(render_rooted_err("{% layout 'simple' %}{% block %}x{% endblock %}", lay)), 0,
+                "13 missing block name: expected error")
+        }
+
+        // An empty override is a real override — it blanks the parent
+        // default rather than falling through to it.
+        spec.it(fw, "treats an empty override as an override") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'simple' %}{% block body %}{% endblock %}", lay),
+                "<wrap></wrap>", "14 empty override")
+        }
+    }
+
+    spec.describe(fw, "liquid: extends and block.super") {
+        spec.it(fw, "accepts extends as an alias for layout") callback {
+            spec.assert_str_eq(
+                render_rooted("{% extends 'wrap' %}\n{% block body %}HI{% endblock %}", ext),
+                "<wrap>HI</wrap>\n", "1 extends alias single block")
+        }
+
+        spec.it(fw, "overrides several blocks through extends") callback {
+            spec.assert_str_eq(
+                render_rooted("{% extends 'base' %}{% block title %}T{% endblock %}{% block content %}C{% endblock %}", ext),
+                "<html>\n<head><title>T</title></head>\n<body>\nC\n</body>\n</html>\n",
+                "2 extends multiple blocks")
+        }
+
+        spec.it(fw, "errors when extends has no parent name") callback {
+            spec.assert_not_eq(string.length(render_rooted_err("{% extends %}", ext)), 0,
+                "3 extends missing name: expected error")
+        }
+
+        // block.super is how an override extends the parent's default
+        // instead of replacing it.
+        spec.it(fw, "expands block.super to the parent default") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'wrap' %}{% block body %}{{ block.super }}{% endblock %}", ext),
+                "<wrap>WRAP DEFAULT</wrap>\n", "4 block.super expands to parent default")
+        }
+
+        spec.it(fw, "concatenates block.super with the child's own text") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'wrap' %}{% block body %}{{ block.super }}/EXTRA{% endblock %}", ext),
+                "<wrap>WRAP DEFAULT/EXTRA</wrap>\n", "5 block.super + extra")
+        }
+
+        spec.it(fw, "expands block.super more than once in a block") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'wrap' %}{% block body %}{{ block.super }}|{{ block.super }}{% endblock %}", ext),
+                "<wrap>WRAP DEFAULT|WRAP DEFAULT</wrap>\n", "6 block.super twice")
+        }
+
+        spec.it(fw, "renders block.super as empty outside any override") callback {
+            t7, _ = liquid.parse_string("before {{ block.super }} after")
+            out7, _ = liquid.render(t7, liquid.context_new())
+            spec.assert_str_eq(out7, "before  after",
+                "7 block.super outside override = empty")
+        }
+
+        // Each block's super must resolve to ITS OWN parent default — the
+        // super state has to reset between blocks rather than leaking the
+        // previous block's text.
+        spec.it(fw, "resolves block.super per block") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'base' %}{% block title %}{{ block.super }}-X{% endblock %}{% block content %}{{ block.super }}-Y{% endblock %}", ext),
+                "<html>\n<head><title>DEFAULT TITLE-X</title></head>\n<body>\nDEFAULT CONTENT-Y\n</body>\n</html>\n",
+                "8 two blocks both call super")
+        }
+
+        spec.it(fw, "pipes block.super through a filter") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'wrap' %}{% block body %}{{ block.super | upcase }}{% endblock %}", ext),
+                "<wrap>WRAP DEFAULT</wrap>\n", "9 block.super | upcase")
+        }
+
+        // One block calls super while its sibling is not overridden at all:
+        // the sibling must still get the parent default.
+        spec.it(fw, "mixes a super-calling block with a fallthrough sibling") callback {
+            spec.assert_str_eq(
+                render_rooted("{% layout 'base' %}{% block content %}{{ block.super }}{% endblock %}", ext),
+                "<html>\n<head><title>DEFAULT TITLE</title></head>\n<body>\nDEFAULT CONTENT\n</body>\n</html>\n",
+                "10 super in one block, default fallthrough in other")
+        }
+    }
+
+    spec.describe(fw, "liquid: parse_file and render_to_strbuilder") {
+        spec.it(fw, "parses a template from a file and renders it") callback {
+            t1, e1 = liquid.parse_file(string.concat(api, "/hello.liquid"))
+            spec.assert_str_eq(e1, "", "1 parse_file")
+            ctx1 = liquid.context_new()
+            liquid.context_put_string(ctx1, "who", "world")
+            out1, _ = liquid.render(t1, ctx1)
+            spec.assert_str_eq(out1, "Hello, world!", "1 parse_file + render")
+        }
+
+        spec.it(fw, "errors on a missing file") callback {
+            _, e2 = liquid.parse_file("/nonexistent-liquid-file-zzz.liquid")
+            spec.assert_not_eq(string.length(e2), 0, "2 missing file: expected error")
+        }
+
+        // The original suite had a case 3 that only printed PASS with a note
+        // saying the parse-error path was covered elsewhere, and a case 5
+        // that deferred to case 4. Neither asserted anything, so neither
+        // carries over as a spec — case 3's ground IS covered, by the lex
+        // error suite in test_syntax.ae.
+
+        spec.it(fw, "appends into a caller's strbuilder") callback {
+            t4, _ = liquid.parse_string("Hi {{ name }}")
+            ctx4 = liquid.context_new()
+            liquid.context_put_string(ctx4, "name", "alice")
+            sb4 = strbuilder.new(16)
+            strbuilder.append(sb4, "BEFORE/")
+            err4 = liquid.render_to_strbuilder(t4, ctx4, sb4)
+            spec.assert_str_eq(err4, "", "4 render_to_strbuilder returns no error")
+            strbuilder.append(sb4, "/AFTER")
+            spec.assert_str_eq(strbuilder.finish(sb4), "BEFORE/Hi alice/AFTER",
+                "4 render_to_strbuilder appends")
+        }
+
+        spec.it(fw, "accumulates across two calls") callback {
+            t6a, _ = liquid.parse_string("[{{ a }}]")
+            t6b, _ = liquid.parse_string("[{{ b }}]")
+            ctx6 = liquid.context_new()
+            liquid.context_put_string(ctx6, "a", "A")
+            liquid.context_put_string(ctx6, "b", "B")
+            sb6 = strbuilder.new(16)
+            err6a = liquid.render_to_strbuilder(t6a, ctx6, sb6)
+            err6b = liquid.render_to_strbuilder(t6b, ctx6, sb6)
+            spec.assert_str_eq(err6a, "", "6 first call succeeds")
+            spec.assert_str_eq(err6b, "", "6 second call succeeds")
+            spec.assert_str_eq(strbuilder.finish(sb6), "[A][B]", "6 two calls accumulate")
+        }
+
+        // On failure the caller keeps whatever rendered before the error,
+        // rather than getting an empty buffer — matches `render`'s
+        // partial-output contract.
+        spec.it(fw, "returns an error and keeps the partial output") callback {
+            t7, _ = liquid.parse_string("OK {% xyz_unknown %} REST")
+            sb7 = strbuilder.new(16)
+            err7 = liquid.render_to_strbuilder(t7, liquid.context_new(), sb7)
+            spec.assert_not_eq(string.length(err7), 0, "7 error path: expected non-empty error")
+            spec.assert_contains(strbuilder.finish(sb7), "OK",
+                "7 partial output retained up to the failure")
+        }
+    }
+
+    spec.run_summary(fw)
+}

@@ -1,0 +1,686 @@
+// Control-flow tag spec for contrib.templating.liquid — co-located with the
+// module it exercises, written in Aether against std.spec.
+//
+// Replaces tests/integration/liquid_{for_range,if_unless_case,tablerow,
+// counters_cycle}/. See test_syntax.ae for why the shell wrappers were
+// retired.
+//
+// This file is the "tags that decide what renders and how often" half:
+// `{% for %}` over ranges (with forloop.*, limit/offset/reversed,
+// break/continue), the conditionals, `{% tablerow %}`, and the stateful
+// `{% increment %}` / `{% decrement %}` / `{% cycle %}` tags.
+//
+// The comment and raw tags live in test_syntax.ae instead — they are
+// lexical, resolved before any of this runs.
+
+import contrib.templating.liquid
+import std.spec
+import std.string
+
+render_empty(src: string) -> string {
+    t, _ = liquid.parse_string(src)
+    out, _ = liquid.render(t, liquid.context_new())
+    return out
+}
+
+render_with(src: string, key: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, key, val)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+// Render `src` and return only the error, for cases asserting rejection.
+render_err(src: string) -> string {
+    t, _ = liquid.parse_string(src)
+    _, e = liquid.render(t, liquid.context_new())
+    return e
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "liquid: for over a range") {
+        spec.it(fw, "iterates a bare range") callback {
+            spec.assert_str_eq(render_empty("{% for i in (1..3) %}{{ i }}{% endfor %}"),
+                "123", "1 bare range 1..3")
+        }
+
+        spec.it(fw, "repeats the text between iterations") callback {
+            spec.assert_str_eq(render_empty("[{% for i in (1..3) %}{{ i }};{% endfor %}]"),
+                "[1;2;3;]", "2 range with separator")
+        }
+
+        // A backwards range is empty, not an error and not a single pass.
+        spec.it(fw, "renders nothing when HI is below LO") callback {
+            spec.assert_str_eq(render_empty("[{% for i in (5..1) %}{{ i }}{% endfor %}]"),
+                "[]", "3 empty range")
+        }
+
+        spec.it(fw, "runs once when LO equals HI") callback {
+            spec.assert_str_eq(render_empty("{% for i in (4..4) %}{{ i }}{% endfor %}"),
+                "4", "4 single-element range")
+        }
+
+        spec.it(fw, "exposes forloop.index as 1-based") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (10..12) %}{{ forloop.index }};{% endfor %}"),
+                "1;2;3;", "5 forloop.index")
+        }
+
+        spec.it(fw, "exposes forloop.index0 as 0-based") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (10..12) %}{{ forloop.index0 }};{% endfor %}"),
+                "0;1;2;", "6 forloop.index0")
+        }
+
+        spec.it(fw, "exposes forloop.first") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{{ forloop.first }};{% endfor %}"),
+                "true;false;false;", "7 forloop.first")
+        }
+
+        spec.it(fw, "exposes forloop.last") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{{ forloop.last }};{% endfor %}"),
+                "false;false;true;", "8 forloop.last")
+        }
+
+        spec.it(fw, "exposes forloop.length as the total, not the position") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{{ forloop.length }};{% endfor %}"),
+                "3;3;3;", "9 forloop.length")
+        }
+
+        spec.it(fw, "exposes forloop.rindex and rindex0 counting down") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{{ forloop.rindex }}/{{ forloop.rindex0 }};{% endfor %}"),
+                "3/2;2/1;1/0;", "10 forloop.rindex/rindex0")
+        }
+
+        spec.it(fw, "nests, running the inner loop per outer iteration") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..2) %}{% for j in (1..2) %}({{ i }},{{ j }}){% endfor %}{% endfor %}"),
+                "(1,1)(1,2)(2,1)(2,2)", "11 nested for")
+        }
+
+        // forloop inside a nested loop must describe the INNER loop —
+        // otherwise a nested `forloop.first` separator emits in the wrong
+        // places.
+        spec.it(fw, "scopes forloop to the innermost loop") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..2) %}{% for j in (1..2) %}{{ forloop.first }};{% endfor %}|{% endfor %}"),
+                "true;false;|true;false;|", "12 inner forloop.first")
+        }
+
+        // The loop variable is scoped to the loop: an outer binding of the
+        // same name survives it unchanged.
+        spec.it(fw, "restores an outer binding of the loop variable") callback {
+            spec.assert_str_eq(
+                render_with("[{{ i }}]{% for i in (1..2) %}{% endfor %}[{{ i }}]", "i", "PRE"),
+                "[PRE][PRE]", "13 loop var restored")
+        }
+
+        spec.it(fw, "caps iterations with limit") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..10) limit:3 %}{{ i }};{% endfor %}"),
+                "1;2;3;", "14 limit caps")
+        }
+
+        spec.it(fw, "skips the front with offset") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..5) offset:2 %}{{ i }};{% endfor %}"),
+                "3;4;5;", "15 offset skips front")
+        }
+
+        spec.it(fw, "combines offset and limit") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..10) offset:2 limit:3 %}{{ i }};{% endfor %}"),
+                "3;4;5;", "16 limit+offset")
+        }
+
+        spec.it(fw, "flips the order with reversed") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) reversed %}{{ i }};{% endfor %}"),
+                "3;2;1;", "17 reversed")
+        }
+
+        // Order of operations: limit selects the window FIRST, then
+        // reversed flips it. (1..10) limit:3 -> [1,2,3] -> [3,2,1], not
+        // the last three of the range.
+        spec.it(fw, "applies limit before reversed") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..10) limit:3 reversed %}{{ i }};{% endfor %}"),
+                "3;2;1;", "18 reversed + limit")
+        }
+
+        spec.it(fw, "exits the loop on break") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..5) %}{% if i == \"3\" %}{% break %}{% endif %}{{ i }};{% endfor %}"),
+                "1;2;", "19 break")
+        }
+
+        spec.it(fw, "skips the rest of the iteration on continue") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..5) %}{% if i == \"3\" %}{% continue %}{% endif %}{{ i }};{% endfor %}"),
+                "1;2;4;5;", "20 continue")
+        }
+
+        spec.it(fw, "rejects a break outside any loop") callback {
+            spec.assert_not_eq(string.length(render_err("plain {% break %} text")), 0,
+                "21 stray break: expected error")
+        }
+
+        // break in a nested loop exits only the inner one — the outer keeps
+        // going, which is what makes it usable inside a table body.
+        spec.it(fw, "breaks only the innermost loop") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}[{% for j in (1..5) %}{% if j == \"3\" %}{% break %}{% endif %}{{ j }}{% endfor %}]{% endfor %}"),
+                "[12][12][12]", "30 break in inner only")
+        }
+
+        spec.it(fw, "evaluates a conditional in the body") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..4) %}{% if i == \"2\" or i == \"4\" %}{{ i }};{% endif %}{% endfor %}"),
+                "2;4;", "22 if inside for")
+        }
+
+        spec.it(fw, "supports the forloop.first comma idiom") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{% unless forloop.first %},{% endunless %}{{ i }}{% endfor %}"),
+                "1,2,3", "23 comma via forloop.first")
+        }
+
+        // A capture in the body re-binds each pass, so the value visible
+        // after the loop is the last iteration's.
+        spec.it(fw, "leaves the last iteration's capture bound after the loop") callback {
+            spec.assert_str_eq(
+                render_empty("{% for i in (1..3) %}{% capture last %}I{{ i }}{% endcapture %}{% endfor %}[{{ last }}]"),
+                "[I3]", "24 capture inside body, last wins")
+        }
+
+        spec.it(fw, "takes its bounds from variables") callback {
+            t25, _ = liquid.parse_string("{% for i in (lo..hi) %}{{ i }};{% endfor %}")
+            ctx25 = liquid.context_new()
+            liquid.context_put_string(ctx25, "lo", "5")
+            liquid.context_put_string(ctx25, "hi", "7")
+            out25, _ = liquid.render(t25, ctx25)
+            spec.assert_str_eq(out25, "5;6;7;", "25 LO/HI from variables")
+        }
+
+        spec.it(fw, "honours whitespace control on the loop tags") callback {
+            spec.assert_str_eq(
+                render_empty("a   {%- for i in (1..2) -%}   {{ i }}   {%- endfor -%}   b"),
+                "a12b", "26 whitespace control around for")
+        }
+
+        spec.it(fw, "rejects an unclosed for") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% for i in (1..3) %}body never closed")), 0,
+                "27 unmatched for: expected error")
+        }
+
+        spec.it(fw, "rejects a stray endfor") callback {
+            spec.assert_not_eq(string.length(render_err("hi {% endfor %} bye")), 0,
+                "28 stray endfor: expected error")
+        }
+
+        // Only ranges are iterable in this slice; anything else must say so
+        // rather than silently rendering an empty body.
+        spec.it(fw, "rejects a non-range iterable") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% for x in mylist %}{{ x }}{% endfor %}")), 0,
+                "29 non-range iterable: expected error")
+        }
+    }
+
+    spec.describe(fw, "liquid: if / unless / case") {
+        spec.it(fw, "emits the body for a bound variable") callback {
+            spec.assert_str_eq(render_with("{% if name %}YES{% endif %}", "name", "alice"),
+                "YES", "1 if true branch on bound var")
+        }
+
+        spec.it(fw, "skips the body for an unbound variable") callback {
+            spec.assert_str_eq(render_empty("[{% if missing %}YES{% endif %}]"),
+                "[]", "2 if false on unbound var")
+        }
+
+        spec.it(fw, "accepts the literal true") callback {
+            spec.assert_str_eq(render_empty("{% if true %}A{% endif %}"), "A",
+                "3 if true literal")
+        }
+
+        spec.it(fw, "accepts the literal false") callback {
+            spec.assert_str_eq(render_empty("[{% if false %}A{% endif %}]"), "[]",
+                "4 if false literal")
+        }
+
+        spec.it(fw, "takes the else branch") callback {
+            spec.assert_str_eq(render_empty("{% if false %}A{% else %}B{% endif %}"),
+                "B", "5 if/else")
+        }
+
+        spec.it(fw, "takes a matching elsif before else") callback {
+            spec.assert_str_eq(
+                render_empty("{% if false %}A{% elsif true %}B{% else %}C{% endif %}"),
+                "B", "6 elsif wins")
+        }
+
+        spec.it(fw, "falls through to else when no elsif matches") callback {
+            spec.assert_str_eq(
+                render_empty("{% if false %}A{% elsif false %}B{% else %}C{% endif %}"),
+                "C", "7 else wins")
+        }
+
+        spec.it(fw, "compares for equality") callback {
+            spec.assert_str_eq(
+                render_with("{% if name == \"alice\" %}HI{% else %}NO{% endif %}", "name", "alice"),
+                "HI", "8 equality true")
+        }
+
+        spec.it(fw, "compares for inequality") callback {
+            spec.assert_str_eq(
+                render_with("{% if name != \"bob\" %}HI{% else %}NO{% endif %}", "name", "alice"),
+                "HI", "9 inequality")
+        }
+
+        // Ordering compares numerically, so "10" > "5" — a lexicographic
+        // comparison would get this backwards.
+        spec.it(fw, "orders numeric strings by value") callback {
+            spec.assert_str_eq(
+                render_with("{% if x > \"5\" %}BIG{% else %}small{% endif %}", "x", "10"),
+                "BIG", "10 ordering int")
+        }
+
+        spec.it(fw, "tests substrings with contains") callback {
+            spec.assert_str_eq(
+                render_with("{% if name contains \"li\" %}Y{% endif %}", "name", "alice"),
+                "Y", "11 contains")
+        }
+
+        spec.it(fw, "requires both sides of and") callback {
+            spec.assert_str_eq(
+                render_with("{% if name and tag %}Y{% else %}N{% endif %}", "name", "alice"),
+                "N", "12a and both required (tag unbound)")
+        }
+
+        spec.it(fw, "accepts either side of or") callback {
+            spec.assert_str_eq(
+                render_with("{% if missing or name %}Y{% else %}N{% endif %}", "name", "alice"),
+                "Y", "13 or one suffices")
+        }
+
+        // Liquid has no operator precedence here: `a and b or c` groups
+        // strictly left to right as `(a and b) or c`.
+        spec.it(fw, "groups and/or flat, left to right") callback {
+            spec.assert_str_eq(
+                render_empty("{% assign name = \"alice\" %}{% assign fallback = \"x\" %}{% if name and tag or fallback %}Y{% else %}N{% endif %}"),
+                "Y", "14 a and b or c flat")
+        }
+
+        spec.it(fw, "nests when both conditions hold") callback {
+            spec.assert_str_eq(
+                render_empty("{% if true %}{% if true %}YES{% endif %}{% endif %}"),
+                "YES", "15 nested true/true")
+        }
+
+        // A false INNER if does not divert to the OUTER else — the outer
+        // body keeps rendering, minus the inner block.
+        spec.it(fw, "does not let a false inner if trigger the outer else") callback {
+            spec.assert_str_eq(
+                render_empty("[{% if true %}{% if false %}A{% endif %}B{% else %}C{% endif %}]"),
+                "[B]", "16 nested outer-T inner-F still falls to outer body")
+        }
+
+        spec.it(fw, "skips an unless body when the condition is truthy") callback {
+            spec.assert_str_eq(
+                render_with("[{% unless name %}HIDDEN{% endunless %}]", "name", "alice"),
+                "[]", "17 unless truthy skips")
+        }
+
+        spec.it(fw, "emits an unless body when the condition is falsy") callback {
+            spec.assert_str_eq(render_empty("[{% unless missing %}SHOWN{% endunless %}]"),
+                "[SHOWN]", "18 unless falsy emits")
+        }
+
+        spec.it(fw, "supports else on unless") callback {
+            spec.assert_str_eq(
+                render_with("{% unless name %}A{% else %}B{% endunless %}", "name", "alice"),
+                "B", "19 unless else branch")
+        }
+
+        spec.it(fw, "matches a when arm in case") callback {
+            spec.assert_str_eq(
+                render_with("{% case x %}{% when \"1\" %}ONE{% when \"2\" %}TWO{% else %}OTHER{% endcase %}", "x", "2"),
+                "TWO", "20 case/when match")
+        }
+
+        spec.it(fw, "matches any of a when arm's alternatives") callback {
+            spec.assert_str_eq(
+                render_with("{% case x %}{% when \"a\", \"b\", \"c\" %}LO{% when \"X\" %}HI{% endcase %}", "x", "b"),
+                "LO", "21 case multi-alternative")
+        }
+
+        spec.it(fw, "falls through to the case else") callback {
+            spec.assert_str_eq(
+                render_with("{% case x %}{% when \"1\" %}A{% else %}DEFAULT{% endcase %}", "x", "99"),
+                "DEFAULT", "22 case else")
+        }
+
+        // No C-style fallthrough: the first matching arm wins and the rest
+        // are not evaluated, even when they would also match.
+        spec.it(fw, "stops at the first matching when arm") callback {
+            spec.assert_str_eq(
+                render_with("{% case x %}{% when \"a\" %}FIRST{% when \"a\" %}SECOND{% endcase %}", "x", "a"),
+                "FIRST", "23 case first match wins")
+        }
+
+        spec.it(fw, "honours whitespace control on the if tags") callback {
+            spec.assert_str_eq(render_empty("a   {%- if true -%}   X   {%- endif -%}   b"),
+                "aXb", "24 whitespace control around if")
+        }
+
+        spec.it(fw, "rejects an unclosed if") callback {
+            spec.assert_not_eq(string.length(render_err("a {% if true %}b no end")), 0,
+                "25 unmatched if: expected error")
+        }
+
+        spec.it(fw, "rejects a stray endif") callback {
+            spec.assert_not_eq(string.length(render_err("ok {% endif %}")), 0,
+                "26 stray endif: expected error")
+        }
+
+        spec.it(fw, "sees a name bound by capture") callback {
+            spec.assert_str_eq(
+                render_empty("{% capture s %}set{% endcapture %}{% if s == \"set\" %}HIT{% endif %}"),
+                "HIT", "27 if sees captured var")
+        }
+    }
+
+    // tablerow's whole contract is the exact HTML it emits — the row/col
+    // class names and newline placement are what a stylesheet targets, so
+    // these assert the full markup rather than a substring.
+    spec.describe(fw, "liquid: tablerow") {
+        spec.it(fw, "wraps a range in one row of cells") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..3) %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td><td class=\"col3\">3</td></tr>\n",
+                "1 basic single row")
+        }
+
+        spec.it(fw, "breaks into rows at cols") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..4) cols:2 %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n",
+                "2 cols:2 over 4")
+        }
+
+        spec.it(fw, "leaves the last row short when it does not divide") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..3) cols:2 %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
+                "3 uneven last row")
+        }
+
+        // Even with nothing to emit, the opening row still appears — the
+        // table structure does not collapse.
+        spec.it(fw, "emits an empty row1 for an empty range") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (5..1) %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n</tr>\n", "4 empty range emits row1")
+        }
+
+        spec.it(fw, "interpolates the cell body") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..2) %}[{{ i }}]{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">[1]</td><td class=\"col2\">[2]</td></tr>\n",
+                "5 body interpolates")
+        }
+
+        spec.it(fw, "exposes forloop.first and forloop.last in cells") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..3) %}{{ forloop.first }}/{{ forloop.last }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">true/false</td><td class=\"col2\">false/false</td><td class=\"col3\">false/true</td></tr>\n",
+                "6 forloop.first/last")
+        }
+
+        spec.it(fw, "combines limit with cols") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..10) limit:3 cols:2 %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">3</td></tr>\n",
+                "7 limit+cols")
+        }
+
+        spec.it(fw, "combines offset with cols") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..5) offset:2 cols:2 %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">4</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">5</td></tr>\n",
+                "8 offset+cols")
+        }
+
+        spec.it(fw, "combines reversed with cols") callback {
+            spec.assert_str_eq(
+                render_empty("{% tablerow i in (1..3) reversed cols:2 %}{{ i }}{% endtablerow %}"),
+                "<tr class=\"row1\">\n<td class=\"col1\">3</td><td class=\"col2\">2</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">1</td></tr>\n",
+                "9 reversed+cols")
+        }
+
+        spec.it(fw, "takes its bounds from variables") callback {
+            t10, _ = liquid.parse_string("{% tablerow i in (lo..hi) cols:2 %}{{ i }}{% endtablerow %}")
+            ctx10 = liquid.context_new()
+            liquid.context_put_string(ctx10, "lo", "10")
+            liquid.context_put_string(ctx10, "hi", "12")
+            out10, _ = liquid.render(t10, ctx10)
+            spec.assert_str_eq(out10,
+                "<tr class=\"row1\">\n<td class=\"col1\">10</td><td class=\"col2\">11</td></tr>\n<tr class=\"row2\">\n<td class=\"col1\">12</td></tr>\n",
+                "10 vars as bounds")
+        }
+
+        spec.it(fw, "restores an outer binding of the loop variable") callback {
+            spec.assert_str_eq(
+                render_with("[{{ i }}]{% tablerow i in (1..2) %}{{ i }}{% endtablerow %}[{{ i }}]", "i", "PRE"),
+                "[PRE]<tr class=\"row1\">\n<td class=\"col1\">1</td><td class=\"col2\">2</td></tr>\n[PRE]",
+                "11 var restored")
+        }
+
+        spec.it(fw, "rejects a non-range iterable") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% tablerow x in mylist %}{{ x }}{% endtablerow %}")), 0,
+                "12 non-range iterable: expected error")
+        }
+
+        spec.it(fw, "rejects an unclosed tablerow") callback {
+            spec.assert_not_eq(
+                string.length(render_err("{% tablerow i in (1..3) %}body never closed")), 0,
+                "13 unmatched: expected error")
+        }
+
+        spec.it(fw, "rejects a stray endtablerow") callback {
+            spec.assert_not_eq(string.length(render_err("hi {% endtablerow %}")), 0,
+                "14 stray: expected error")
+        }
+    }
+
+    spec.describe(fw, "liquid: increment / decrement / cycle") {
+        // increment emits BEFORE storing, so the first call shows 0.
+        spec.it(fw, "emits 0 on the first increment") callback {
+            spec.assert_str_eq(render_empty("{% increment x %}"), "0", "1 first increment")
+        }
+
+        spec.it(fw, "advances on each further increment") callback {
+            spec.assert_str_eq(render_empty("{% increment x %}{% increment x %}"),
+                "01", "2 two increments")
+            spec.assert_str_eq(
+                render_empty("{% increment x %}-{% increment x %}-{% increment x %}"),
+                "0-1-2", "3 three increments")
+        }
+
+        // decrement stores BEFORE emitting, which is why it starts at -1
+        // rather than mirroring increment's 0.
+        spec.it(fw, "emits -1 on the first decrement") callback {
+            spec.assert_str_eq(render_empty("{% decrement x %}"), "-1", "4 first decrement")
+        }
+
+        spec.it(fw, "descends on each further decrement") callback {
+            spec.assert_str_eq(render_empty("{% decrement x %}/{% decrement x %}"),
+                "-1/-2", "5 two decrements")
+        }
+
+        // The two tags share one counter per name: increment emits 0 and
+        // leaves 1 stored; decrement then stores 0 and emits it.
+        spec.it(fw, "shares a counter between increment and decrement") callback {
+            spec.assert_str_eq(render_empty("{% increment x %}/{% decrement x %}"),
+                "0/0", "6 inc then dec same name")
+        }
+
+        // The counter namespace is separate from ordinary variables —
+        // `{% assign x %}` does not seed the counter, and the counter does
+        // not overwrite the variable.
+        spec.it(fw, "keeps counters independent of assigned variables") callback {
+            spec.assert_str_eq(
+                render_empty("{% assign x = \"hi\" %}|{% increment x %}|{{ x }}"),
+                "|0|hi", "7 assign x and increment x independent")
+        }
+
+        spec.it(fw, "tracks each counter name separately") callback {
+            spec.assert_str_eq(
+                render_empty("{% increment a %}{% increment b %}{% increment a %}{% increment a %}"),
+                "0012", "8 two counters")
+        }
+
+        spec.it(fw, "walks a cycle's arguments in order") callback {
+            spec.assert_str_eq(
+                render_empty("{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}"),
+                "a-b-c", "9 cycle abc")
+        }
+
+        spec.it(fw, "wraps a cycle back to the start") callback {
+            spec.assert_str_eq(
+                render_empty("{% cycle 'a','b' %}{% cycle 'a','b' %}{% cycle 'a','b' %}{% cycle 'a','b' %}"),
+                "abab", "10 cycle wrap")
+        }
+
+        // Cycles with identical arguments share one position, so textually
+        // repeated tags advance in lockstep rather than each restarting.
+        spec.it(fw, "shares position between identical cycles") callback {
+            spec.assert_str_eq(
+                render_empty("[{% cycle 'a','b' %}][{% cycle 'a','b' %}][{% cycle 'a','b' %}][{% cycle 'a','b' %}]"),
+                "[a][b][a][b]", "11 lockstep cycles")
+        }
+
+        // Naming a cycle is how you opt OUT of that sharing.
+        spec.it(fw, "advances named cycles independently") callback {
+            spec.assert_str_eq(
+                render_empty("{% cycle 'g1': 'a','b' %}{% cycle 'g2': 'X','Y' %}{% cycle 'g1': 'a','b' %}{% cycle 'g2': 'X','Y' %}"),
+                "aXbY", "12 named cycles independent")
+        }
+
+        spec.it(fw, "rejects increment with no name") callback {
+            spec.assert_not_eq(string.length(render_err("{% increment %}")), 0,
+                "13 increment missing name: expected error")
+        }
+
+        spec.it(fw, "rejects decrement with no name") callback {
+            spec.assert_not_eq(string.length(render_err("{% decrement %}")), 0,
+                "14 decrement missing name: expected error")
+        }
+
+        spec.it(fw, "rejects cycle with no arguments") callback {
+            spec.assert_not_eq(string.length(render_err("{% cycle %}")), 0,
+                "15 cycle empty: expected error")
+        }
+    }
+
+    // Shopify's `{% liquid %}` block: one statement per line, with the
+    // `{% %}` wrapper written once instead of around every tag. The tags
+    // themselves are the same ones tested above — what these pin is the
+    // line-oriented parsing and that state crosses the block boundary.
+    spec.describe(fw, "liquid: the {% liquid %} block tag") {
+        spec.it(fw, "runs a single assign") callback {
+            spec.assert_str_eq(render_empty("{% liquid\n  assign x = \"hi\"\n%}{{ x }}"),
+                "hi", "1 single assign")
+        }
+
+        spec.it(fw, "emits with echo") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  assign x = \"hello\"\n  echo x\n%}"),
+                "hello", "2 echo emits")
+        }
+
+        spec.it(fw, "applies filters to an echo") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  assign x = \"hi\"\n  echo x | upcase | append:\"!\"\n%}"),
+                "HI!", "3 echo + filters")
+        }
+
+        spec.it(fw, "lets a later assign win") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  assign x = \"first\"\n  assign x = \"second\"\n%}{{ x }}"),
+                "second", "4 later assign wins")
+        }
+
+        // Inside a liquid block `#` starts a comment — the only place that
+        // syntax is available.
+        spec.it(fw, "ignores # comment lines") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  # this is a comment\n  assign x = \"ok\"\n  # another comment\n%}{{ x }}"),
+                "ok", "5 # comments ignored")
+        }
+
+        spec.it(fw, "ignores blank lines") callback {
+            spec.assert_str_eq(render_empty("{% liquid\n\n\n  assign x = \"ok\"\n\n%}{{ x }}"),
+                "ok", "6 blank lines ignored")
+        }
+
+        spec.it(fw, "interleaves assigns and echoes in order") callback {
+            spec.assert_str_eq(
+                render_empty("[{% liquid\n  assign x = \"A\"\n  echo x\n  assign x = \"B\"\n  echo x\n%}]"),
+                "[AB]", "7 mixed assign + echo")
+        }
+
+        spec.it(fw, "runs a conditional across lines") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  assign n = \"2\"\n  if n == \"1\"\n    echo \"one\"\n  elsif n == \"2\"\n    echo \"two\"\n  else\n    echo \"other\"\n  endif\n%}"),
+                "two", "8 if/elsif/else inside liquid")
+        }
+
+        spec.it(fw, "runs a for-loop across lines") callback {
+            spec.assert_str_eq(render_empty("{% liquid\n  for i in (1..3)\n    echo i\n  endfor\n%}"),
+                "123", "9 for inside liquid")
+        }
+
+        // A capture can OPEN in one liquid block and CLOSE in another, with
+        // ordinary template text in between becoming the captured body.
+        spec.it(fw, "captures across a block boundary") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  capture msg\n%}HELLO{% liquid\n  endcapture\n  echo msg\n%}"),
+                "HELLO", "10 capture inside liquid (mixed with outer text)")
+        }
+
+        spec.it(fw, "leaves ordinary cycle tags working afterwards") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  echo \"\" | append: \"\"\n%}{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}-{% cycle 'a','b','c' %}"),
+                "a-b-c", "11 cycle outside still works after liquid block")
+        }
+
+        // increment emits inline here (every line is a tag), and the
+        // counter carries on past the end of the block.
+        spec.it(fw, "emits from increment and keeps the counter afterwards") callback {
+            spec.assert_str_eq(
+                render_empty("{% liquid\n  increment c\n  increment c\n  increment c\n%}{% increment c %}"),
+                "0123", "12 increment inside liquid emits + persists")
+        }
+
+        spec.it(fw, "honours whitespace control on the wrapper") callback {
+            spec.assert_str_eq(render_empty("a   {%- liquid\n  assign x = \"X\"\n-%}   {{ x }}"),
+                "aX", "13 whitespace control on outer liquid")
+        }
+
+        spec.it(fw, "is a no-op when empty") callback {
+            spec.assert_str_eq(render_empty("a{% liquid\n%}b"), "ab", "14 empty liquid is no-op")
+        }
+    }
+
+    spec.run_summary(fw)
+}

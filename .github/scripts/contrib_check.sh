@@ -45,6 +45,7 @@ VK="contrib/vulkan"
 SQL="contrib/sqlite"
 NT="contrib/templating/native"
 XE="contrib/parsers/xml_expat"
+LQ="contrib/templating/liquid"
 # <label>|<test .ae>|<extra C sources>|<leakgate>|<pkg-config link>|<pkg-config headers>
 #
 # Column 5 is optional and names the pkg-config modules the test needs to
@@ -72,6 +73,15 @@ TESTS=(
   # tests/integration/contrib_xml_expat/). Needs libexpat to link, so
   # column 5 stages the workspace and SKIPs when pkg-config cannot find it.
   "parsers/xml_expat|$XE/test_xml_expat.ae|$XE/aether_xml_expat.c|run|expat"
+  # templating/liquid: five co-located specs grouped by feature, replacing
+  # 22 tests/integration/liquid_*/ dirs. Pure Aether, no system library.
+  # (liquid_sandbox_gate stays a .sh — it drives aetherc and asserts on
+  # compiler diagnostics, which a spec cannot do.)
+  "templating/liquid/syntax|$LQ/test_syntax.ae||run|"
+  "templating/liquid/values|$LQ/test_values.ae||run|"
+  "templating/liquid/tags|$LQ/test_tags.ae||run|"
+  "templating/liquid/filters|$LQ/test_filters.ae||run|"
+  "templating/liquid/inheritance|$LQ/test_inheritance.ae||run|"
   "tinyweb/spec|$TW/test_spec.ae||run|"
   "tinyweb/inventory|$TW/test_inventory.ae|$TW/ws_handshake.c|run|"
   "tinyweb/integration|$TW/test_integration.ae|$TW/ws_handshake.c|run|"

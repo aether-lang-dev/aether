@@ -1,0 +1,340 @@
+// Lexer/syntax spec for contrib.templating.liquid — co-located with the
+// module it exercises, written in Aether against std.spec.
+//
+// Replaces tests/integration/liquid_{basics,lex_errors,whitespace_control,
+// inline_comment,tags_simple}/. Those five wrappers ran a probe and grepped
+// its output for "All PASS"; none of them probed for a dependency, because
+// this module links nothing — so the wrapper had no job the runner does not
+// already do.
+//
+// Every check carries over. The originals called exit(1) on the first
+// failure, so a broken lexer rule masked every later case in the same file;
+// as specs each `it` reports independently.
+//
+// GROUPING: one file per feature area rather than one per former directory
+// (22 dirs -> 5 specs). This file is the "how templates are read" half:
+// passthrough, output tags, whitespace control, comments, and the line
+// numbers reported in lex errors.
+
+import contrib.templating.liquid
+import std.spec
+import std.string
+
+// Render `src` with `x` bound to `val`. From the whitespace_control probe,
+// where nearly every case needs exactly one variable.
+render_x(src: string, val: string) -> string {
+    t, _ = liquid.parse_string(src)
+    ctx = liquid.context_new()
+    liquid.context_put_string(ctx, "x", val)
+    out, _ = liquid.render(t, ctx)
+    return out
+}
+
+// Render `src` against an empty context. From the inline_comment probe.
+render_empty(src: string) -> string {
+    t, _ = liquid.parse_string(src)
+    out, _ = liquid.render(t, liquid.context_new())
+    return out
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "liquid: text and output tags") {
+        spec.it(fw, "passes plain text through verbatim") callback {
+            t1, e1 = liquid.parse_string("just words")
+            spec.assert_str_eq(e1, "", "1 parse")
+            out1, _ = liquid.render(t1, liquid.context_new())
+            spec.assert_str_eq(out1, "just words", "1 plain text")
+        }
+
+        spec.it(fw, "substitutes a variable from the context") callback {
+            t2, _ = liquid.parse_string("Hello {{ name }}!")
+            ctx2 = liquid.context_new()
+            liquid.context_put_string(ctx2, "name", "alice")
+            out2, _ = liquid.render(t2, ctx2)
+            spec.assert_str_eq(out2, "Hello alice!", "2 variable substitution")
+        }
+
+        // Shopify Liquid's documented behaviour: an unbound variable is
+        // empty, not an error and not the literal name.
+        spec.it(fw, "renders an unbound variable as the empty string") callback {
+            t3, _ = liquid.parse_string("Hi {{ missing }}!")
+            out3, _ = liquid.render(t3, liquid.context_new())
+            spec.assert_str_eq(out3, "Hi !", "3 unbound variable")
+        }
+
+        spec.it(fw, "handles multiple outputs in one template") callback {
+            t4, _ = liquid.parse_string("{{ a }}-{{ b }}-{{ c }}")
+            ctx4 = liquid.context_new()
+            liquid.context_put_string(ctx4, "a", "1")
+            liquid.context_put_string(ctx4, "b", "2")
+            liquid.context_put_string(ctx4, "c", "3")
+            out4, _ = liquid.render(t4, ctx4)
+            spec.assert_str_eq(out4, "1-2-3", "4 multiple outputs")
+        }
+
+        spec.it(fw, "trims whitespace inside the output tag") callback {
+            t5, _ = liquid.parse_string("[{{   name   }}]")
+            ctx5 = liquid.context_new()
+            liquid.context_put_string(ctx5, "name", "bob")
+            out5, _ = liquid.render(t5, ctx5)
+            spec.assert_str_eq(out5, "[bob]", "5 whitespace trim in output tag")
+        }
+
+        spec.it(fw, "reports an unterminated output tag") callback {
+            _, e6 = liquid.parse_string("oops {{ name")
+            spec.assert_not_eq(string.length(e6), 0,
+                "6 unterminated: expected a non-empty error")
+        }
+
+        spec.it(fw, "handles an output adjacent to text on both sides") callback {
+            t7, _ = liquid.parse_string("pre{{x}}post")
+            ctx7 = liquid.context_new()
+            liquid.context_put_string(ctx7, "x", "MID")
+            out7, _ = liquid.render(t7, ctx7)
+            spec.assert_str_eq(out7, "preMIDpost", "7 no-space adjacency")
+        }
+    }
+
+    // Line numbers in lex errors: a template author reading "unterminated
+    // tag" with no location has to bisect the file by hand, so the reported
+    // line is part of the contract, not a nicety.
+    spec.describe(fw, "liquid: lex error locations") {
+        spec.it(fw, "reports line 1 for an unterminated output tag") callback {
+            _, e1 = liquid.parse_string("{{ x")
+            spec.assert_contains(e1, "at line 1", "1 `{{` on line 1")
+        }
+
+        spec.it(fw, "counts lines to report an later output tag") callback {
+            src2 = "ok line 1\nok line 2\n{{ x"
+            _, e2 = liquid.parse_string(src2)
+            spec.assert_contains(e2, "at line 3", "2 `{{` on line 3")
+        }
+
+        spec.it(fw, "reports line 1 for an unterminated statement tag") callback {
+            _, e3 = liquid.parse_string("{% if x")
+            spec.assert_contains(e3, "at line 1", "3 `{%` on line 1")
+        }
+
+        spec.it(fw, "counts lines to report a later statement tag") callback {
+            src4 = "l1\nl2\nl3\nl4\n{% if x"
+            _, e4 = liquid.parse_string(src4)
+            spec.assert_contains(e4, "at line 5", "4 `{%` on line 5")
+        }
+
+        // The reported line is the tag's OPENING line, not where the
+        // scanner gave up at end-of-input — that is what points the author
+        // at the tag they failed to close.
+        spec.it(fw, "names the construct and its opening line for a comment") callback {
+            src5 = "head\n{% comment %}\nnever closed"
+            _, e5 = liquid.parse_string(src5)
+            spec.assert_contains(e5, "comment", "5 comment error mentions comment")
+            spec.assert_contains(e5, "at line 2", "5b comment error line 2")
+        }
+
+        spec.it(fw, "names the construct and its opening line for raw") callback {
+            src6 = "x\ny\n{% raw %}\nbody never closed"
+            _, e6 = liquid.parse_string(src6)
+            spec.assert_contains(e6, "raw", "6 raw error mentions raw")
+            spec.assert_contains(e6, "at line 3", "6b raw error line 3")
+        }
+
+        // CRLF input must not double-count: `\n` is the line bumper, so a
+        // stray `\r` leaves the number alone.
+        spec.it(fw, "counts only \\n, so CRLF does not inflate the line") callback {
+            src7 = "l1\r\nl2\r\n{{ x"
+            _, e7 = liquid.parse_string(src7)
+            spec.assert_contains(e7, "at line 3", "7 CRLF still counts \\n only")
+        }
+
+        spec.it(fw, "always includes the `at line` marker") callback {
+            _, e8 = liquid.parse_string("{% if y")
+            spec.assert_contains(e8, "at line ", "8 `at line` substring present")
+        }
+    }
+
+    spec.describe(fw, "liquid: whitespace control") {
+        spec.it(fw, "left-strips trailing whitespace of the preceding text") callback {
+            spec.assert_str_eq(render_x("hi   {{- x }}", "X"), "hiX",
+                "1 left-strip preceding text")
+        }
+
+        spec.it(fw, "right-strips leading whitespace of the next text") callback {
+            spec.assert_str_eq(render_x("{{ x -}}   END", "X"), "XEND",
+                "2 right-strip next text")
+        }
+
+        spec.it(fw, "strips both sides at once") callback {
+            spec.assert_str_eq(render_x("hi   {{- x -}}   END", "X"), "hiXEND",
+                "3 both sides")
+        }
+
+        spec.it(fw, "is a no-op when there is no whitespace to take") callback {
+            spec.assert_str_eq(render_x("hi{{- x -}}END", "X"), "hiXEND",
+                "4 no-op when no ws")
+        }
+
+        spec.it(fw, "applies the dash form to a statement tag") callback {
+            t5, _ = liquid.parse_string("a   {%- assign x = \"X\" -%}   {{ x }}")
+            out5, _ = liquid.render(t5, liquid.context_new())
+            spec.assert_str_eq(out5, "aX", "5 tag form on assign")
+        }
+
+        spec.it(fw, "trims whitespace outside a comment block") callback {
+            spec.assert_str_eq(
+                render_x("a   {%- comment %}hidden{% endcomment -%}   b", "ignored"),
+                "ab", "6 comment outer trim")
+        }
+
+        // For raw, the dashes act on both the block's own body and the text
+        // around it: opener-right trims the body's leading whitespace,
+        // closer-left its trailing, closer-right the following text.
+        spec.it(fw, "trims inside and outside a raw block") callback {
+            spec.assert_str_eq(
+                render_x("a {%- raw -%}   inside   {%- endraw -%}   b", "ignored"),
+                "ainsideb", "7 raw inner + outer trim")
+        }
+
+        // The counterpart: without dashes, raw is verbatim. This is what
+        // stops case 7 from being read as "raw trims its body".
+        spec.it(fw, "preserves whitespace in a dash-less raw block") callback {
+            spec.assert_str_eq(
+                render_x("{% raw %}   keep   {% endraw %}", "ignored"),
+                "   keep   ", "8 raw without dashes preserves")
+        }
+
+        spec.it(fw, "consumes multi-line whitespace with a single dash") callback {
+            spec.assert_str_eq(render_x("hi\n\n   {{- x }}", "X"), "hiX",
+                "9 multi-line ws strip")
+        }
+
+        spec.it(fw, "collapses whitespace between two stripping tags") callback {
+            t10, _ = liquid.parse_string(
+                "a   {%- assign x = \"X\" -%}   {%- assign y = \"Y\" -%}   {{ x }}{{ y }}")
+            out10, _ = liquid.render(t10, liquid.context_new())
+            spec.assert_str_eq(out10, "aXY", "10 two stripping tags in a row")
+        }
+
+        // Stripping at the template edges must not underflow into anything.
+        spec.it(fw, "left-strip at the start of a template is a no-op") callback {
+            spec.assert_str_eq(render_x("{{- x }}", "X"), "X",
+                "11 leading left-strip no-op")
+        }
+
+        spec.it(fw, "right-strip at the end of a template is a no-op") callback {
+            spec.assert_str_eq(render_x("{{ x -}}", "X"), "X",
+                "12 trailing right-strip no-op")
+        }
+    }
+
+    spec.describe(fw, "liquid: comments and raw") {
+        spec.it(fw, "renders a bare comment to nothing") callback {
+            t1, _ = liquid.parse_string("{% comment %}hidden{% endcomment %}")
+            out1, _ = liquid.render(t1, liquid.context_new())
+            spec.assert_str_eq(out1, "", "1 bare comment")
+        }
+
+        spec.it(fw, "keeps the text around a comment") callback {
+            t2, _ = liquid.parse_string("pre{% comment %}hidden{% endcomment %}post")
+            out2, _ = liquid.render(t2, liquid.context_new())
+            spec.assert_str_eq(out2, "prepost", "2 text around comment")
+        }
+
+        // The point of raw: the output tag inside must survive as source
+        // text even though `x` IS bound in the context.
+        spec.it(fw, "passes an output tag through raw verbatim") callback {
+            t3, _ = liquid.parse_string("{% raw %}{{ x }}{% endraw %}")
+            ctx3 = liquid.context_new()
+            liquid.context_put_string(ctx3, "x", "WOULD_HAVE_BEEN_INTERPOLATED")
+            out3, _ = liquid.render(t3, ctx3)
+            spec.assert_str_eq(out3, "{{ x }}", "3 raw preserves output tag")
+        }
+
+        spec.it(fw, "preserves newlines and nested tags inside raw") callback {
+            t4, _ = liquid.parse_string("[{% raw %}line1\nline2 {% if %}{% endraw %}]")
+            out4, _ = liquid.render(t4, liquid.context_new())
+            spec.assert_str_eq(out4, "[line1\nline2 {% if %}]",
+                "4 raw multi-line + nested tags")
+        }
+
+        spec.it(fw, "reports an unterminated comment") callback {
+            _, e5 = liquid.parse_string("oops {% comment %}never ends")
+            spec.assert_not_eq(string.length(e5), 0,
+                "5 unterminated comment: expected error")
+        }
+
+        spec.it(fw, "reports an unterminated raw") callback {
+            _, e6 = liquid.parse_string("oops {% raw %}never ends")
+            spec.assert_not_eq(string.length(e6), 0,
+                "6 unterminated raw: expected error")
+        }
+
+        spec.it(fw, "interleaves a comment with a substitution") callback {
+            t8, _ = liquid.parse_string(
+                "Hi {{ name }}{% comment %} silenced {% endcomment %}!")
+            ctx8 = liquid.context_new()
+            liquid.context_put_string(ctx8, "name", "alice")
+            out8, _ = liquid.render(t8, ctx8)
+            spec.assert_str_eq(out8, "Hi alice!", "8 comment + substitution interleaved")
+        }
+    }
+
+    spec.describe(fw, "liquid: inline comments") {
+        spec.it(fw, "renders a bare inline comment to nothing") callback {
+            spec.assert_str_eq(render_empty("{%# hidden %}"), "",
+                "1 bare inline comment")
+        }
+
+        spec.it(fw, "keeps the text around an inline comment") callback {
+            spec.assert_str_eq(render_empty("hi{%# secret %}there"), "hithere",
+                "2 between text")
+        }
+
+        spec.it(fw, "leaves a following substitution intact") callback {
+            t3, _ = liquid.parse_string("{%# author %}Hi {{ name }}!")
+            ctx3 = liquid.context_new()
+            liquid.context_put_string(ctx3, "name", "alice")
+            out3, _ = liquid.render(t3, ctx3)
+            spec.assert_str_eq(out3, "Hi alice!", "3 inline comment + var")
+        }
+
+        spec.it(fw, "spans multiple lines") callback {
+            spec.assert_str_eq(render_empty("a{%# this\nspans\nmany\nlines %}b"),
+                "ab", "4 multi-line inline comment")
+        }
+
+        // The dash sits BEFORE the `#`: the leading dash is the whitespace
+        // modifier on `{%`, and `#` is what marks the tag as an inline
+        // comment. `{%#- ... %}` is a different (wrong) thing.
+        spec.it(fw, "accepts whitespace control as `{%-# ... -%}`") callback {
+            spec.assert_str_eq(render_empty("a   {%-# gone -%}   b"), "ab",
+                "5 ws-control inline comment")
+        }
+
+        spec.it(fw, "leaves the older block comment form working") callback {
+            spec.assert_str_eq(render_empty("a{% comment %}old form{% endcomment %}b"),
+                "ab", "6 block comment unaffected")
+        }
+    }
+
+    // An unimplemented tag must be REPORTED rather than silently rendering
+    // as empty — the failure mode that quietly drops a whole loop body from
+    // a page. Either the lexer or the renderer may be the one to object,
+    // so this accepts a clear error from either.
+    spec.describe(fw, "liquid: unsupported tags") {
+        spec.it(fw, "reports an unsupported tag at lex or render time") callback {
+            t7, e7 = liquid.parse_string("a {% for x in coll %}b{% endfor %} c")
+            if string.length(e7) != 0 {
+                spec.assert_not_eq(string.length(e7), 0,
+                    "7 unsupported tag reported at lex time")
+            } else {
+                _, rerr = liquid.render(t7, liquid.context_new())
+                spec.assert_not_eq(string.length(rerr), 0,
+                    "7 unsupported tag reported at render time")
+            }
+        }
+    }
+
+    spec.run_summary(fw)
+}
