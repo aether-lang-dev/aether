@@ -42,7 +42,6 @@ tests/integration/closure_builder_ctx_inject_no_uaf/
 tests/integration/closure_extern_retains_no_uaf/
 tests/integration/closure_qualified_ctx_inject_no_uaf/
 tests/integration/contract_fold_reject/
-tests/integration/contrib_xml_expat/
 tests/integration/cross_module_actor/
 tests/integration/cryptography_random_hex/
 tests/integration/cryptography_sha/
