@@ -154,6 +154,17 @@ for entry in "${TESTS[@]}"; do
     # `ae build --extra` cannot pass -l flags, so stage a workspace whose
     # aether.toml carries them; ae threads link_flags into gcc via
     # get_link_flags(). This is what the sqlite entry relies on.
+    # A module whose module.ae carries `@link("-laether_<mod> ...")` needs
+    # that veneer archive on the link line — `make contrib` normally builds
+    # it, but this script may run without one (CI does). Build it on demand
+    # so the entry does not depend on a leftover artifact. Failure is not
+    # fatal here: the link below reports it properly if the archive really
+    # was required.
+    veneer="$(sed -n 's/.*@link("-laether_\([a-z0-9_]*\).*/\1/p' \
+              "$(dirname "$src")/module.ae" 2>/dev/null | head -1)"
+    if [ -n "$veneer" ] && [ ! -f "build/contrib/libaether_$veneer.a" ]; then
+      MODULES="$veneer" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true
+    fi
     work="$run_dir/${safe}.work"
     rm -rf "$work"; mkdir -p "$work"
     ln -s "$(pwd)/contrib" "$work/contrib"
