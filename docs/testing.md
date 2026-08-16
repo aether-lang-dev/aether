@@ -218,6 +218,47 @@ spec.expect_elapsed_under(os.now_monotonic_ns() - t0, 50ms, "fast path")
 Use monotonic-clock deltas (not wall-clock) — only the delta is
 meaningful and a wall jump would corrupt it.
 
+### Skipping a test whose dependency may be absent
+
+A spec whose subject may not exist on the host — a host-language bridge, a
+driver, a daemon, a system library — needs a third outcome besides pass and
+fail. Failing presents a *provisioning* gap as a code defect (and gets the
+test deleted from the sweep); passing silently is worse, because a box that
+skips everything then looks exactly like a box that passes everything.
+
+```aether
+have_ruby = 0
+if ruby.ruby_init_host() == 0 { have_ruby = 1 }
+
+spec.describe(fw, "contrib.host.ruby") {
+    spec.it_when(have_ruby, "evaluates a script", "libruby not loadable") callback {
+        spec.assert_eq(ruby.ruby_run("$x = 1"), 0, "eval")
+    }
+}
+```
+
+```
+contrib.host.ruby
+  ⊘ evaluates a script  (skipped: libruby not loadable)
+
+  0 passing
+  5 skipped
+```
+
+Exit status is 0 — a skip is not a failure — but the count is on stdout and
+`skipped=N` is in the structured report, so a degraded box is visible rather
+than quietly green.
+
+| verb | use for |
+|---|---|
+| `it_when(cond, desc, reason)` | dependency gating — the common case. `cond` is a plain int the caller computes, keeping the probe visible at the call site. |
+| `skip_it(desc, reason)` | a **permanent** exclusion (known-broken path, unsupported platform) where the body is kept for the day it is re-enabled. |
+| `skip_all_if(fw, cond, reason)` | file-level bail-out; returns 1 when the caller should `return`. The condition is evaluated eagerly, so guard an expensive probe yourself. |
+
+Prefer `it_when` for anything that is really a missing dependency:
+an unconditional `skip_it` hides *why* it is skipped, which is the
+information a provisioning fix needs.
+
 ## Structured reporting
 
 By default `ae test` prints human progress and a `PASS`/`FAIL` line per
@@ -339,6 +380,7 @@ version=1
 total=<N>
 passed=<N>
 failed=<N>
+skipped=<N>
 errored=<N>
 duration_ms=<N>
 duration_ns=<N>
@@ -346,6 +388,13 @@ duration_ns=<N>
 <STATUS>\t<index>\t"<name>"\t<duration_ns>[\t<message>]
 ...
 ```
+
+`skipped=` was **added** under `version=1` (#1610), which the additive rule
+below permits — no version bump, and a consumer that does not know the key
+ignores it. Note `total` deliberately remains `passed + failed`: folding
+skips into it would *repurpose* an existing key, which the rules forbid.
+Rows for skipped tests carry `SKIP` as their `<STATUS>` and a duration of
+`0`, with the skip reason in the optional `<message>` field.
 
 The rules a consumer may rely on, and an editor must preserve:
 

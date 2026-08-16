@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+- `std.spec` gained skip verbs (#1610): `it_when(cond, desc, reason)` for
+  dependency gating, `skip_it(desc, reason)` for a permanent exclusion, and
+  `skip_all_if(fw, cond, reason)` for a file-level bail-out. A skipped test
+  does not run its body, counts in neither passed nor failed, and prints a
+  distinct `⊘` line carrying its reason plus an `N skipped` summary.
+  Until now a spec whose subject might be absent from the host — a
+  host-language bridge, a driver, a system library — had to fail (presenting
+  a *provisioning* gap as a code defect), pass dishonestly, or bail out
+  before `spec.init()` where the framework could not see it. The dishonest
+  option is the one that bites: a box that skips everything looked exactly
+  like a box that passes everything, which is how nine silently-skipping
+  contrib/vulkan tests and `ruby SKIP (no demo)` went unnoticed on the
+  nightly.
+- The aeocha-v1 structured report carries `skipped=N`, and skipped tests
+  emit rows with a `SKIP` status and their reason as the message. This is
+  **additive** — docs/testing.md's contract already permits new keys and
+  requires consumers to ignore unknown ones, so there is no `version=` bump.
+  `total` deliberately remains `passed + failed`: folding skips in would
+  *repurpose* an existing key, which the contract forbids.
+- `contrib/host/ruby/test_host_ruby.ae` — the first **co-located** contrib
+  test, written in Aether against `std.spec` rather than as a shell harness.
+  It drives the bridge through `import contrib.host.ruby`, the path a real
+  user takes, so it covers the module declarations and contrib-link plumbing
+  as well as the C shim. Covers evaluation, that the interpreter genuinely
+  runs (Ruby computes a value and a second eval asserts on it Ruby-side),
+  exceptions *and* syntax errors propagating as failures rather than being
+  swallowed, and init idempotence while the VM is live. Uses `it_when`, so a
+  box without Ruby reports skipped rather than failed.
+- `make contrib-host-check` gained a `[3/3]` phase that auto-discovers
+  `contrib/host/*/test_*.ae` and runs them, performing the bridge's
+  documented `LIBRUBY_SO` probe first. A bridge that adds a co-located spec
+  is picked up with no Makefile change.
+
+### Fixed
+- Documented two `contrib.host.ruby` behaviours that cost real debugging
+  time (contrib/host/ruby/README.md): **Ruby's `puts` output is buffered and
+  silently vanishes** unless `ruby_finalize_host()` runs or the script sets
+  `$stdout.sync = true` — the script *did* execute, only the output was
+  lost; and **`ruby_finalize_host()` is terminal** — CRuby's
+  `ruby_finalize()` destroys the VM permanently, yet a post-finalize
+  `ruby_init_host()` still returns 0 and the next `ruby_run()` segfaults
+  inside libruby. Call it once at shutdown, or not at all.
+
 ## [0.544.0]
 
 ### Fixed

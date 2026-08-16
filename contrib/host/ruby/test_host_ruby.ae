@@ -1,0 +1,93 @@
+// Integration tests for contrib.host.ruby — CO-LOCATED with the bridge they
+// exercise rather than under tests/integration/ (the direction argued in
+// #1584), and written in Aether against std.spec rather than as a shell
+// harness wrapping a C heredoc.
+//
+// Writing it in Aether is not just brevity. This drives the bridge through
+// `import contrib.host.ruby` — the path a REAL USER takes — so it covers the
+// module declarations and the contrib-link plumbing as well as the C shim.
+// A C harness tests aether_host_ruby.c directly and would pass even if
+// module.ae's extern declarations had drifted from it.
+//
+// SKIPPING: the bridge dlopens libruby at runtime, so a box without Ruby
+// cannot run these. That is a provisioning gap, not a code defect, so the
+// tests skip rather than fail (#1610's it_when). The probe is
+// ruby_init_host() itself: it returns non-zero when libruby cannot be
+// dlopened, which is exactly the condition that matters.
+//
+// SONAME: the bridge tries $AETHER_RUBY_SONAME then a bare "libruby.so".
+// Debian ships that unversioned symlink; Fedora/Bazzite do not, and there
+// the caller must pass the exact soname from
+//   ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]'
+// The Makefile's contrib-host-check phase performs that probe and exports
+// the variable before running this file.
+//
+// STDOUT: Ruby's own `puts` output is buffered by libruby and is NOT flushed
+// when an Aether program exits — it appears only after ruby_finalize_host()
+// (or with `$stdout.sync = true`). These tests therefore assert on RETURN
+// CODES and on state observed back through Ruby, never on the bridge's
+// stdout. See the README's "Ruby stdout is buffered" section.
+
+import contrib.host.ruby
+import std.spec
+
+main() {
+    fw = spec.init()
+
+    // The dependency probe. Non-zero means libruby could not be dlopened.
+    have_ruby = 0
+    if ruby.ruby_init_host() == 0 { have_ruby = 1 }
+    reason = "libruby not loadable (set AETHER_RUBY_SONAME)"
+
+    spec.describe(fw, "contrib.host.ruby") {
+        spec.it_when(have_ruby, "evaluates a script and reports success", reason) callback {
+            spec.assert_eq(ruby.ruby_run("$aether_probe = 1"), 0,
+                "a valid script returns 0")
+        }
+
+        // A bridge that dlopens libruby and resolves its symbols but never
+        // actually evaluates would satisfy the return-code check above. This
+        // one can only pass if the interpreter really ran: Ruby computes a
+        // value, and a second eval asserts on it Ruby-side, raising when the
+        // arithmetic did not happen.
+        spec.it_when(have_ruby, "really executes — Ruby-side state persists", reason) callback {
+            spec.assert_eq(ruby.ruby_run("$aether_sum = (2 + 3) * 7"), 0,
+                "computation evaluates")
+            spec.assert_eq(ruby.ruby_run("raise 'wrong' unless $aether_sum == 35"), 0,
+                "Ruby sees 35 — the interpreter genuinely ran")
+        }
+
+        // A bridge that swallows script errors is worse than one that cannot
+        // run at all: the caller believes the script worked. Asserted
+        // negatively so the bridge may change its error code freely.
+        spec.it_when(have_ruby, "propagates a raised exception as failure", reason) callback {
+            spec.assert_not_eq(ruby.ruby_run("raise 'deliberate'"), 0,
+                "a raising script must NOT report success")
+        }
+
+        // A syntax error is a different path through rb_eval_string_protect
+        // than a raise, and must also be reported.
+        spec.it_when(have_ruby, "reports a syntax error as failure", reason) callback {
+            spec.assert_not_eq(ruby.ruby_run("def ("), 0,
+                "unparseable code must NOT report success")
+        }
+
+        // A host that defensively calls init before each eval must not pay
+        // for it or crash: while the VM is live, init is a no-op.
+        spec.it_when(have_ruby, "init is idempotent while the VM is live", reason) callback {
+            spec.assert_eq(ruby.ruby_init_host(), 0, "second init returns 0")
+            spec.assert_eq(ruby.ruby_run("$aether_probe = 2"), 0,
+                "the VM still evaluates afterwards")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    // Finalize ONCE, after the suite. Deliberately not followed by another
+    // init: CRuby's ruby_finalize() tears the VM down permanently, and the
+    // bridge currently returns 0 from a post-finalize ruby_init_host() and
+    // then segfaults on the next eval. That unsupported path is documented
+    // in the README and left untested on purpose, so a future fix has a
+    // baseline to change rather than a test to fight.
+    if have_ruby == 1 { ruby.ruby_finalize_host() }
+}

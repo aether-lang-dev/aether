@@ -2609,8 +2609,25 @@ contrib-host-check: compiler ae stdlib
 	echo "  $$pass passed, $$fail failed (stub mode)"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[2/2] Link + run — demos for bridges with dev libs available..."
+	@echo "[2/3] Link + run — demos for bridges with dev libs available..."
 	@bash tests/scripts/contrib_host_demos.sh || exit 1
+	@echo ""
+	@echo "[3/3] Co-located bridge specs (contrib/host/*/test_*.ae)..."
+	@rc=0; found=0; \
+	for t in $$(find contrib/host -maxdepth 2 -name 'test_*.ae' 2>/dev/null | sort); do \
+	  found=$$((found + 1)); \
+	  lang=$$(basename $$(dirname "$$t")); \
+	  echo "  --- $$lang ---"; \
+	  if [ "$$lang" = "ruby" ] && command -v ruby >/dev/null 2>&1; then \
+	    AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
+	    export AETHER_RUBY_SONAME; \
+	  fi; \
+	  out="$$(./build/ae$(EXE_EXT) run "$$t" 2>&1)"; trc=$$?; \
+	  echo "$$out" | sed 's/^/  /'; \
+	  if [ "$$trc" -ne 0 ]; then rc=1; fi; \
+	done; \
+	if [ "$$found" -eq 0 ]; then echo "  (none yet)"; fi; \
+	exit $$rc
 	@echo ""
 	@echo "==================================="
 	@echo "  contrib/host check PASSED"
