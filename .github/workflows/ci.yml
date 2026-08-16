@@ -364,10 +364,17 @@ jobs:
       run: |
         out="$(./build/contrib-check/vulkan_offscreen 2>&1 || true)"
         echo "$out"
-        echo "$out" | grep -q 'All PASS' || {
+        # The spec must PASS cases, not skip them. std.spec prints
+        # "N passing" and, separately, "N skipped" — so grepping only for
+        # "passing" would accept a run of 0. Require a non-zero pass count
+        # AND no skips: with a driver installed, every case must render.
+        passing="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) passing.*/\1/p' | head -1)"
+        skipped="$(printf '%s' "$out" | sed -n 's/.*[^0-9]\([0-9][0-9]*\) skipped.*/\1/p' | head -1)"
+        if [ -z "$passing" ] || [ "$passing" -eq 0 ] || [ -n "$skipped" ]; then
           echo "contrib/vulkan did not render; lavapipe should be present on this leg"
+          echo "  passing=${passing:-none} skipped=${skipped:-0}"
           exit 1
-        }
+        fi
 
   # ============================================================
   # Windows CI — MinGW via MSYS2
