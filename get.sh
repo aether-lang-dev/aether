@@ -71,12 +71,21 @@ make -C "$src" install PREFIX="$PREFIX" CC="$CC"
 bin="$PREFIX/bin/ae"
 [ -x "$bin" ] || die "install finished but $bin is missing."
 say "installed: $bin"
-"$bin" version || true
+"$bin" --version || true
 
 case ":$PATH:" in
     *":$PREFIX/bin:"*) ;;
     *) say "note: $PREFIX/bin is not on your PATH — add it to use 'ae' directly." ;;
 esac
+
+# Which ae does the shell reach? A second install (install.sh defaults to
+# ~/.aether/bin, this one to ~/.local/bin) earlier on PATH keeps winning, and
+# nothing used to say so: that is the second half of issue #1602.
+other=$(command -v ae 2>/dev/null || true)
+if [ -n "$other" ] && [ "$other" != "$bin" ]; then
+    say "note: PATH finds a different ae first: $other"
+    say "      put $PREFIX/bin ahead of it, or remove the other install."
+fi
 
 say "optional: native contrib modules (sqlite, host_python, …) — from a"
 say "          checkout run 'make contrib && make install-contrib PREFIX=$PREFIX'"

@@ -20,22 +20,48 @@ command -v "$CC_WIN" >/dev/null 2>&1 || {
     exit 0
 }
 
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+
 # The Vulkan headers are header-only and platform-independent, so the host's
-# copy is what the cross compile reads.
-INC=""
-if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists vulkan 2>/dev/null; then
-    INC="$(pkg-config --cflags vulkan)"
-elif [ -f /opt/homebrew/include/vulkan/vulkan.h ]; then
-    INC="-I/opt/homebrew/include"
-elif [ -f /usr/include/vulkan/vulkan.h ]; then
-    INC="-I/usr/include"
-else
+# copy is what the cross compile reads. Two things make "just use the host's
+# include flags" wrong here:
+#
+#   - `pkg-config --cflags vulkan` is EMPTY when the headers sit in the default
+#     system include directory, which is right for a native compile and useless
+#     for a cross one: the MinGW compiler does not search /usr/include.
+#   - pointing the cross compiler at /usr/include instead puts glibc on its
+#     include path, and it fails in bits/libc-header-start.h.
+#
+# So the header trees are copied into a scratch directory that holds nothing
+# else. vk_video/ is needed as well as vulkan/: vulkan_core.h includes
+# vk_video/vulkan_video_codec_h264std.h.
+VK_INC_ROOT=""
+# pkg-config knows the header directory even when --cflags is empty (which it
+# is whenever the headers are in a default system path).
+if command -v pkg-config >/dev/null 2>&1; then
+    pc_inc="$(pkg-config --variable=includedir vulkan 2>/dev/null)"
+    [ -n "$pc_inc" ] && [ -f "$pc_inc/vulkan/vulkan.h" ] && VK_INC_ROOT="$pc_inc"
+fi
+if [ -z "$VK_INC_ROOT" ]; then
+    for d in /opt/homebrew/include /usr/local/include /usr/include; do
+        if [ -f "$d/vulkan/vulkan.h" ]; then VK_INC_ROOT="$d"; break; fi
+    done
+fi
+if [ -z "$VK_INC_ROOT" ]; then
     echo "  [SKIP] contrib_vulkan_portability: Vulkan headers not installed"
     exit 0
 fi
 
-TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# -L dereferences: a package manager may expose the include dir as a symlink
+# into its own store, and copying the link alone would stage nothing.
+mkdir -p "$TMP/inc"
+if ! cp -RL "$VK_INC_ROOT/vulkan" "$TMP/inc/" 2>/dev/null; then
+    echo "  [SKIP] contrib_vulkan_portability: cannot stage $VK_INC_ROOT/vulkan"
+    exit 0
+fi
+[ -d "$VK_INC_ROOT/vk_video" ] && cp -RL "$VK_INC_ROOT/vk_video" "$TMP/inc/" 2>/dev/null
+INC="-I$TMP/inc"
 
 if ! $CC_WIN -std=c99 -O2 -Wall -Wextra -Werror $INC -Icontrib/vulkan \
         -c "$SRC" -o "$TMP/win.o" 2>"$TMP/err"; then

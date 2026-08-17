@@ -131,7 +131,10 @@ Passing a null material uses the pipeline's own set, so `set_texture`,
 
 Materials cost one descriptor set each, allocated from pools of 16 that the
 pipeline grows on demand, plus one host-mapped uniform buffer per uniform
-binding written. A material a batch refers to has to outlive the draws that use
+binding written. A set is bound only once something has been written into it: a
+set straight out of the pool holds no descriptors, and a software rasteriser
+walks a set as it is bound, so binding an empty one crashed Mesa 22.3 inside
+the driver. A material a batch refers to has to outlive the draws that use
 it: destroy one without resetting the batch and the next frame reads freed
 memory, the same contract Vulkan gives for any resource bound to a set.
 
@@ -163,8 +166,9 @@ vulkan.texture_mip_levels(tex)                          // 8
 ```
 
 The chain is generated on upload with `vkCmdBlitImage`, level by level, so the
-pixels come from the same call that already staged them. Mipmaps need the
-device to advertise linear blitting for `R8G8B8A8_UNORM`; where it does not,
+pixels come from the same call that already staged them. That needs the device
+to advertise all three features the blit requires for `R8G8B8A8_UNORM`,
+`BLIT_SRC`, `BLIT_DST` and `SAMPLED_IMAGE_FILTER_LINEAR`; where it does not,
 creation fails with that reason rather than handing back a texture whose lower
 levels are empty.
 
