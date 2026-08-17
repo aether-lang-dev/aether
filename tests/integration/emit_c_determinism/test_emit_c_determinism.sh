@@ -28,8 +28,8 @@ examples/basics/string-processing.ae
 examples/actors/ask-pattern.ae
 examples/applications/chat-room.ae
 examples/applications/task-queue.ae
-tests/regression/test_std_set.ae
-tests/regression/test_std_pqueue.ae"
+std/set/test_set.ae
+std/pqueue/test_pqueue.ae"
 
 i=0
 for src in $CORPUS; do
