@@ -5471,6 +5471,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, ");\n");
     }
 
+    /* Forward typedef for each actor, so the BARE name is usable before the
+     * actor's own `typedef struct X { ... } X;` is emitted.
+     *
+     * A closure that captures an actor handle gets an env slot typed from
+     * lookup_var_c_type, which yields the bare "X" — but the closure env
+     * typedef is emitted well before the actor struct, so the slot read as
+     * an implicit int and the C compiler reported "initialization of 'X *'
+     * from incompatible pointer type 'int *'". C allows repeating a
+     * typedef with the same definition, so the later full definition is
+     * unaffected. (#1626) */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (!child || child->type != AST_ACTOR_DEFINITION || !child->value) continue;
+        fprintf(gen->output, "typedef struct %s %s;\n", child->value, child->value);
+    }
+
     // Forward declarations for actor spawn functions (actors can spawn other actors
     // from within receive handlers, which appear before the spawn function definition)
     for (int i = 0; i < program->child_count; i++) {
@@ -5539,8 +5555,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_bare_fn_adapter_decls(gen);
 
     if (gen->closure_count > 0) {
-        print_line(gen, "// Closure definitions");
-        emit_closure_definitions(gen);
+        print_line(gen, "// Closure declarations");
+        emit_closure_declarations(gen);
     }
 
     emit_bare_fn_adapters(gen);
@@ -5896,6 +5912,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             default:
                 break;
         }
+    }
+
+    /* Closure BODIES, after the loop above has emitted the message
+     * definitions (and so registered them with gen->message_registry).
+     * A body containing `a ? Msg {}` needs that registry populated; the
+     * forward declarations went out early, before this loop. (#1626) */
+    if (gen->closure_count > 0) {
+        print_line(gen, "// Closure definitions");
+        emit_closure_definitions(gen);
     }
 
     // --emit=lib / --emit=both: append aether_<name> alias stubs that form

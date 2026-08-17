@@ -1748,8 +1748,18 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
 // (e.g. when an inline `|a,b| { ... }` lambda is passed as an argument
 // inside the outer closure's body). Pass 2 emits bodies + MSVC
 // constructor helpers.
-void emit_closure_definitions(CodeGenerator* gen) {
-    // Pass 1: forward declarations.
+/* Pass 1 only: env typedefs + forward declarations.
+ *
+ * Split out from the bodies so the two halves can straddle the message
+ * definitions. A closure body containing `a ? Msg {}` lowers through the
+ * codegen message registry, which is not populated until the
+ * AST_MESSAGE_DEFINITION arm runs — so emitting bodies before that arm
+ * produced an "unknown message type" error comment where the expression
+ * belonged, and the C compiler stopped at "expected expression before
+ * ';'". The declarations
+ * have no such dependency, so they stay early (other emitted code
+ * references them) while the bodies move after the messages. (#1626) */
+void emit_closure_declarations(CodeGenerator* gen) {
     for (int ci = 0; ci < gen->closure_count; ci++) {
         emit_closure_env_typedef(gen, ci);
         const char* ret_type = resolve_closure_return_type(gen, ci);
@@ -1757,6 +1767,22 @@ void emit_closure_definitions(CodeGenerator* gen) {
         fprintf(gen->output, ";\n");
     }
     if (gen->closure_count > 0) fprintf(gen->output, "\n");
+}
+
+void emit_closure_definitions(CodeGenerator* gen) {
+    /* A closure body is not a continuation of whatever function was
+     * emitted last, so it must not inherit that function's return type.
+     * gen->current_func_return_type feeds the `_builder_ret` type in
+     * return lowering; leaving a stale value there made a closure that
+     * `return 0`s emit `_tuple_int_string _builder_ret = 0;` when the
+     * previously-emitted function happened to return a tuple.
+     *
+     * This was latent while bodies were emitted before the top-level
+     * function loop (the field was still NULL then). Moving them after
+     * the message definitions for #1626 exposed it, so it is saved and
+     * cleared here rather than relying on emission position. */
+    Type* saved_ret = gen->current_func_return_type;
+    gen->current_func_return_type = NULL;
 
     // Pass 2: bodies and constructors.
     for (int ci = 0; ci < gen->closure_count; ci++) {
@@ -2007,6 +2033,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
             fprintf(gen->output, "#endif\n\n");
         }
     }
+
+    gen->current_func_return_type = saved_ret;
 }
 
 // Look up a message field definition by name. Returns NULL if missing.

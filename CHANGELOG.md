@@ -13,6 +13,33 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Actors are usable from inside closures (#1626).** Two codegen gaps hit
+  any actor used from a closure or trailing block — e.g. a `std.spec` `it`
+  block. `a ? Msg {}` lowered to nothing, because closure BODIES were
+  emitted before the message types had been registered, so the ask could
+  not resolve the message and emitted an error comment where the
+  expression belonged. And a captured actor handle got an env slot typed
+  with the bare actor name before that name was typedef'd, so it read as
+  an implicit `int`. Closure declarations now emit early (other code
+  references them) while bodies emit after the message definitions, and
+  each actor gets a forward `typedef struct X X;`. Actor specs no longer
+  need the hoist-the-exchange-into-a-helper workaround.
+- **`tinyweb.schema_api` member routes now match (#1625).**
+  `show`/`update`/`destroy` were registered as the regex `"/(\w+)"`, but
+  the tinyweb router does not do regex — it supports exact segments,
+  Express-style `:param`, and `*`. Every real member request 404'd, and
+  had since they were written; `update` is the costly one, being the other
+  validated verb. They now use `/:id`.
+  The auto-mounted `GET {prefix}/schema` also had to move. The router
+  matches in REVERSE registration order (tinyweb walks its list forward
+  while `http_server_add_route` prepends), so `json_api()`'s own route was
+  tried *after* everything the user declared and `show()` answered
+  `/schema` with `"schema"` as the id. Each leaf builder now mounts
+  `/schema` after registering its own route.
+
+
+### Fixed
+
 - **`ae run` now forwards `SIGTERM`/`SIGINT`/`SIGHUP` to the program it
   launched.** `ae run prog.ae & ; kill $!` killed only the wrapper and
   orphaned the program, which kept whatever socket it had bound: `ae run`

@@ -10,10 +10,15 @@
 //
 // COVERAGE GAP CLOSED. The original mounted only `create`, so four of the
 // module's seven exports — index, show, update and destroy — were never
-// exercised despite the module being wired into CI. All four are mounted
-// and driven here. `update` matters most of the group: it is the other
-// VALIDATED verb, so a regression in validation on the PUT path was
+// exercised despite the module being wired into CI. All five verbs are
+// mounted and driven here. `update` matters most of the group: it is the
+// other VALIDATED verb, so a regression in validation on the PUT path was
 // previously invisible.
+//
+// Closing that gap is what surfaced #1625 — the member routes had never
+// matched a request, because they were registered as a regex against a
+// router that does not do regex. Fixed in the module; these specs are the
+// ones that were skipped against it.
 //
 // The original called exit(1) on the first mismatch, so one bad status
 // code hid every later case — including the OpenAPI document at the end.
@@ -30,27 +35,6 @@ import std.string(string_contains)
 
 extern exit(code: int)
 extern sleep(ms: int)
-
-// schema_api mounts its member routes (show/update/destroy) as the regex
-// "/(\\w+)". The tinyweb router does not do regex — http_route_matches in
-// std/net/aether_http_server.c supports exact segments, Express-style
-// ":param", and a "*" wildcard, and treats anything else as a literal. So
-// those three routes can only match a URL that literally contains
-// "/(\\w+)", and every real member request 404s.
-//
-// This is why the gap mattered: the routes have never worked, and nothing
-// noticed, because nothing exercised them. The specs are written out in
-// full and skipped rather than deleted — they pass as-is once the module
-// registers a pattern the router understands (verified locally by
-// switching the three patterns to "/:id": all three then pass).
-//
-// Filed as #1625. Not fixed here: that edit belongs to the module, not to a test
-// conversion, and it needs a companion change — with ":id" live, the
-// auto-mounted GET {prefix}/schema is shadowed by show(), because the
-// user's trailing block registers before json_api's own route and first
-// match wins. The module comment claims /schema is "registered before the
-// user's show() route", which the observed 404 disproves.
-const MEMBER_ROUTE_BUG = "#1625 — schema_api member routes use regex; the tinyweb router does not support it"
 
 // Handlers only run on a validated body, so they can assume the happy
 // path. Each echoes something distinctive so the spec can prove the
@@ -186,7 +170,7 @@ main() {
         // dead-member-route bug below — the route never matches, so this
         // asserts nothing until schema_api registers a pattern the router
         // understands.
-        spec.skip_it(fw, "validates the update path too", MEMBER_ROUTE_BUG) callback {
+        spec.it(fw, "validates the update path too") callback {
             ok = put("/users/7", "{\"age\":40,\"name\":\"Grace\"}")
             spec.assert_eq(http_response_status_code(ok), 200, "a valid PUT reaches the handler")
             spec.assert_eq(string_contains(http_response_body_str(ok), "update"), 1,
@@ -213,7 +197,7 @@ main() {
             http_response_free(r)
         }
 
-        spec.skip_it(fw, "routes show to the member handler", MEMBER_ROUTE_BUG) callback {
+        spec.it(fw, "routes show to the member handler") callback {
             r = get("/users/42")
             spec.assert_eq(http_response_status_code(r), 200, "show responds 200")
             spec.assert_eq(string_contains(http_response_body_str(r), "show"), 1,
@@ -221,7 +205,7 @@ main() {
             http_response_free(r)
         }
 
-        spec.skip_it(fw, "routes destroy and preserves its status", MEMBER_ROUTE_BUG) callback {
+        spec.it(fw, "routes destroy and preserves its status") callback {
             r = del("/users/42")
             spec.assert_eq(http_response_status_code(r), 204,
                 "the handler's 204 is not rewritten")

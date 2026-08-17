@@ -56,6 +56,7 @@ struct ApiGroup {
     ctx: ptr // the underlying tinyweb path/context map
     resource: ptr // *std.schema.Schema (opaque ptr here)
     prefix: string
+    schema_mounted: int // guards the lazy GET {prefix}/schema mount
 }
 
 // An ApiGroup carries the mount prefix + resource, so a list of the groups
@@ -74,6 +75,7 @@ json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
     g.ctx = grp_ctx
     g.resource = resource
     g.prefix = prefix
+    g.schema_mounted = 0
 
     // Mount the validating filter for all write methods on this path subtree.
     // The filter closure captures `resource`; on failure it writes the response
@@ -88,19 +90,44 @@ json_api(_ctx: ptr, prefix: string, resource: ptr) -> ptr {
         return validate_body(res, req, resource)
     }
 
-    // Auto-mount GET {prefix}/schema — the resource's own draft-07 JSON Schema
-    // (std.schema.to_json_schema). "A declarative resource is a projectable
-    // artifact": the same declaration that validates requests also serves its
-    // contract. Registered before the user's show() route so /schema isn't
-    // swallowed by a GET /(\w+) id matcher.
-    end_point(grp_ctx, GET, "/schema") | req: ptr, res: ptr, ctx: ptr | {
+    // GET {prefix}/schema is NOT mounted here — see mount_schema_route().
+
+    return g
+}
+
+// Auto-mount GET {prefix}/schema — the resource's own draft-07 JSON Schema
+// (std.schema.to_json_schema). "A declarative resource is a projectable
+// artifact": the same declaration that validates requests also serves its
+// contract.
+//
+// ORDERING IS WHY THIS IS NOT IN json_api(). The router matches routes in
+// REVERSE registration order: tinyweb walks its route list forward, but
+// http_server_add_route PREPENDS each one
+// (`route->next = server->routes; server->routes = route`), so the
+// LAST route registered is the FIRST one tried.
+//
+// json_api()'s body runs BEFORE its trailing block, so anything it
+// registers is tried AFTER everything the user declares — the opposite of
+// what a literal reading suggests. Mounting /schema there put it behind
+// the user's show() route, so `GET {prefix}/schema` was answered by
+// show() with "schema" as the id.
+//
+// Every leaf builder therefore calls this AFTER registering its own
+// route. create()/index() cover a resource that declares no member verb;
+// show()/update()/destroy() re-mount it after theirs, and because a later
+// registration is tried earlier, that last mount is the one that wins
+// over `/:id`. Re-mounting is deliberate — the duplicate route is
+// unreachable and costs one list node, which is the cheap way to get the
+// ordering right without knowing what the user will declare next.
+fn mount_schema_route(g: *ApiGroup) {
+    g.schema_mounted = 1
+    resource = g.resource
+    end_point(g.ctx, GET, "/schema") | req: ptr, res: ptr, ctx: ptr | {
         js = schema.to_json_schema(resource)
         response_set_header(res, "Content-Type", "application/schema+json")
         response_json(res, js)
         string.string_free(js)
     }
-
-    return g
 }
 
 // Parse the request body as JSON, coerce it into a schema-input map, and run
@@ -249,30 +276,41 @@ fn write_validation_errors(res: ptr, errors: ptr) {
 create(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, POST, "/", handler)
+    // Covers a resource that declares no member verb at all. If a member
+    // verb IS declared later it re-mounts /schema after its own route, and
+    // that later registration is the one that wins — see
+    // mount_schema_route().
+    mount_schema_route(g)
 }
 
 // index -> GET {prefix}/  (list; not validated — no body)
 index(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
     end_point(g.ctx, GET, "/", handler)
+    mount_schema_route(g)
 }
 
-// show -> GET {prefix}/(\w+)
+// show -> GET {prefix}/:id
 show(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
-    end_point(g.ctx, GET, "/(\\w+)", handler)
+    end_point(g.ctx, GET, "/:id", handler)
+    // Registered AFTER the member route so it outranks it — see
+    // mount_schema_route()'s note on reverse match order.
+    mount_schema_route(g)
 }
 
-// update -> PUT {prefix}/(\w+)  (validated)
+// update -> PUT {prefix}/:id  (validated)
 update(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
-    end_point(g.ctx, PUT, "/(\\w+)", handler)
+    end_point(g.ctx, PUT, "/:id", handler)
+    mount_schema_route(g)
 }
 
-// destroy -> DELETE {prefix}/(\w+)
+// destroy -> DELETE {prefix}/:id
 destroy(_ctx: ptr, handler: fn) {
     g = _ctx as *ApiGroup
-    end_point(g.ctx, DELETE, "/(\\w+)", handler)
+    end_point(g.ctx, DELETE, "/:id", handler)
+    mount_schema_route(g)
 }
 
 // ---- OpenAPI aggregate (FastAPI-style /openapi.json) ----

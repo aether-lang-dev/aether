@@ -367,6 +367,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main);
 
 /* Closure support (codegen_expr.c) */
 void discover_closures(CodeGenerator* gen, ASTNode* node);
+void emit_closure_declarations(CodeGenerator* gen);
 void emit_closure_definitions(CodeGenerator* gen);
 /* L4 validation: reject closures inside actor handlers that write to
    actor state fields. Run after discover_closures, before codegen.
