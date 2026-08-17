@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.548.0]
+## [current]
 
 ### Fixed
 
@@ -68,6 +68,8 @@ version number before tagging the release.
   directly by a declaration, which C11 does not allow (C23 relaxes it and gcc
   takes it as an extension), so `make` failed on Apple clang while CI's gcc
   stayed green. The declaration is hoisted above the label.
+
+## [0.548.0]
 
 ### Fixed
 
@@ -189,7 +191,6 @@ version number before tagging the release.
   Cause is the catch-up-merge fold: merging main across a release folds a
   PR's `[current]` into the released section above it with no conflict
   marker, so it silently survives as a second heading.
-
 
 ## [0.547.0]
 
