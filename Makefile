@@ -1149,7 +1149,7 @@ test-ae: compiler ae stdlib
 	  sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" >> "$$tmpdir/prune.txt"; \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null \
+	{ find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null; find std -name 'test_*.ae' -print 2>/dev/null; } \
 	    | grep -v -F -f "$$tmpdir/prune.txt" | sort | \
 	xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$tmpdir/run_sh_dir.sh"; \
