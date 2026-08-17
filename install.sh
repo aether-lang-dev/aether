@@ -35,6 +35,47 @@ else
     INSTALL_DIR="${1:-$HOME/.aether}"
 fi
 BIN_DIR="$INSTALL_DIR/bin"
+
+# Verify the binary we just installed is the one it claims to be, and that the
+# operator's PATH actually reaches it. `ae version` succeeding proves neither:
+# it exits 0 on a stale install, and a second install earlier on PATH keeps
+# winning silently. Both were real (see issue #1602).
+verify_installed_toolchain() {
+    _vbin="$1"
+    if ! _vout="$("$_vbin" --version 2>&1)"; then
+        error "  binary at $_vbin did not respond to '--version'"
+        return 1
+    fi
+    _vgot=$(printf '%s\n' "$_vout" | sed -n 's/^ae \([0-9][0-9.]*\).*/\1/p' | head -1)
+    if [ -z "$_vgot" ]; then
+        error "  binary at $_vbin printed no parsable version:"
+        printf '%s\n' "$_vout" | sed 's/^/      /' | head -3
+        return 1
+    fi
+    # INSTALLED_VER is the VERSION file of the tree that was just built, set
+    # before the version is registered under ~/.aether/versions.
+    _vwant="${INSTALLED_VER:-}"
+    if [ -n "$_vwant" ] && [ "$_vwant" != "0.0.0-dev" ] && [ "$_vgot" != "$_vwant" ]; then
+        error "  installed $_vwant but $_vbin reports $_vgot"
+        error "  the install did not replace what was already there"
+        return 1
+    fi
+    # A mismatched aetherc is reported by `ae --version` itself; surface it.
+    if printf '%s\n' "$_vout" | grep -q "^WARNING:"; then
+        printf '%s\n' "$_vout" | sed -n '/^WARNING:/,$p' | sed 's/^/  /'
+    fi
+    ok "  $_vbin reports $_vgot"
+
+    # Which ae does the operator's PATH find? If it is a different file, say so
+    # here rather than letting them debug it later.
+    _vpath="$(command -v ae 2>/dev/null || true)"
+    if [ -n "$_vpath" ] && [ "$_vpath" != "$_vbin" ]; then
+        _vother=$("$_vpath" --version 2>/dev/null | sed -n 's/^ae \([0-9][0-9.]*\).*/\1/p' | head -1)
+        warn "  PATH finds a different ae first: $_vpath${_vother:+ ($_vother)}"
+        echo "         Put $(dirname "$_vbin") ahead of it, or remove the other install."
+    fi
+    return 0
+}
 LIB_DIR="$INSTALL_DIR/lib/aether"
 
 # Touching the user's shell rc files (`~/.zshrc`, `~/.bashrc`, etc.)
@@ -436,12 +477,7 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         # operator's next shell sees the new binary, and that's the
         # contract `info "Verifying installation..."` implies. Do a
         # quiet probe instead.
-        if "$BIN_DIR/ae" version >/dev/null 2>&1; then
-            ok "  binary verified at $BIN_DIR/ae"
-        else
-            error "  binary at $BIN_DIR/ae did not respond to 'version'"
-            exit 1
-        fi
+        verify_installed_toolchain "$BIN_DIR/ae" || exit 1
         echo ""
         echo "========================================="
         ok "  Aether installed successfully (no shell rc touched)!"
@@ -592,13 +628,7 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
 
     # Verify
     info "Verifying installation..."
-    if "$BIN_DIR/ae" version >/dev/null 2>&1; then
-        VERSION=$("$BIN_DIR/ae" version 2>&1)
-        ok "  $VERSION"
-    else
-        error "  Verification failed"
-        exit 1
-    fi
+    verify_installed_toolchain "$BIN_DIR/ae" || exit 1
 
     echo ""
     echo "========================================="

@@ -995,7 +995,7 @@ static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_siz
     return 1;
 }
 
-static void discover_toolchain(void) {
+void discover_toolchain(void) {
     char exe_dir[1024] = {0};
     bool found_exe_dir = get_exe_dir(exe_dir, sizeof(exe_dir));
 
@@ -6388,9 +6388,13 @@ static int cmd_add(int argc, char** argv) {
         }
     }
 
+    /* Declared before the label: a declaration may not directly follow one in
+     * C11 (it is a C23 relaxation that gcc takes as an extension), so
+     * `write_toml: FILE* f = ...` failed to compile on clang. */
+    FILE* f = NULL;
 write_toml:
     // Add to aether.toml
-    FILE* f = fopen("aether.toml", "r");
+    f = fopen("aether.toml", "r");
     if (!f) {
         fprintf(stderr, "Error: Could not read aether.toml\n");
         return 1;

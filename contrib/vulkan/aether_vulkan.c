@@ -404,6 +404,12 @@ struct AevkTexture {
 struct AevkMaterial {
     AevkPipeline*   pipe;
     VkDescriptorSet set;
+    /* Descriptors actually written into `set`. A set straight out of the pool
+     * holds nothing, and binding one is what crashed lavapipe 22.3 from inside
+     * the driver: a software rasteriser walks the set as it is bound, so the
+     * unwritten image/buffer descriptors are dereferenced there and then.
+     * Nothing is bound until it has contents. */
+    int             writes;
     struct {
         VkBuffer       buf;
         VkDeviceMemory mem;
@@ -1554,14 +1560,22 @@ AevkTexture* aevk_texture_create_ex(AevkDevice* d, int width, int height,
 
     uint32_t levels = 1;
     if (mipmapped) {
-        /* Generating the chain is a chain of blits, which the driver only has
-         * to support for formats advertising SAMPLED_IMAGE_FILTER_LINEAR.
-         * Refusing beats generating a black chain nobody notices. */
+        /* Generating the chain is a chain of blits, and vkCmdBlitImage names
+         * three format features as required: BLIT_SRC on the source, BLIT_DST
+         * on the destination (the same image, different levels), and
+         * SAMPLED_IMAGE_FILTER_LINEAR on the source for VK_FILTER_LINEAR.
+         * Checking only the filter bit, as this did, left the blit itself
+         * unchecked. Refusing beats generating a black chain nobody notices. */
         VkFormatProperties fp;
         d->ia.vkGetPhysicalDeviceFormatProperties(d->phys, VK_FORMAT_R8G8B8A8_UNORM, &fp);
-        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+                                          VK_FORMAT_FEATURE_BLIT_DST_BIT |
+                                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        if ((fp.optimalTilingFeatures & need) != need) {
             aevk_fail(AEVK_ERR_UNSUPPORTED,
-                      "device cannot linear-filter R8G8B8A8_UNORM, so it cannot build mipmaps");
+                      "device cannot linear-blit R8G8B8A8_UNORM (features 0x%x), "
+                      "so it cannot build mipmaps",
+                      (unsigned)fp.optimalTilingFeatures);
             return NULL;
         }
         levels = aevk_mip_levels_for(width, height);
@@ -2165,6 +2179,7 @@ int aevk_material_set_uniform(AevkMaterial* m, int binding,
         w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         w.pBufferInfo = &bi;
         d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
+        m->writes++;
     }
 
     /* Host-coherent, so the write is visible without a flush. The descriptor
@@ -2204,6 +2219,7 @@ int aevk_material_set_texture(AevkMaterial* m, int binding, AevkTexture* tex) {
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &ii;
     d->da.vkUpdateDescriptorSets(d->device, 1, &w, 0, NULL);
+    m->writes++;
     return AEVK_OK;
 }
 /* The pipeline-level writers address its default material, so callers that
@@ -2308,7 +2324,9 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
          * default is used, which is what a caller that never asked for
          * materials has. */
         AevkMaterial* bind_mat = mat ? mat : p->def;
-        if (bind_mat && bind_mat->set) {
+        /* `writes`, not just a non-null handle: a set fresh out of the pool has
+         * no descriptors, and lavapipe walks a set as it is bound. */
+        if (t->batch_count == 0 && bind_mat && bind_mat->set && bind_mat->writes > 0) {
             d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                           p->layout, 0, 1, &bind_mat->set, 0, NULL);
         }
@@ -2338,7 +2356,7 @@ static int aevk_record(AevkTarget* t, AevkFrame* fr, AevkPipeline* p, AevkMateri
             for (int i = 0; i < t->batch_count; i++) {
                 AevkDrawItem* it = &t->batch[i];
                 AevkMaterial* im = it->mat ? it->mat : bind_mat;
-                if (im && im->set) {
+                if (im && im->set && im->writes > 0) {
                     d->da.vkCmdBindDescriptorSets(fr->cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                   p->layout, 0, 1, &im->set, 0, NULL);
                 }

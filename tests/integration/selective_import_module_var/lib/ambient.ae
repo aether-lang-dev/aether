@@ -1,0 +1,14 @@
+// A module whose exported functions close over a module-level `var` (#701):
+// the shape std.spec uses (an ambient cell set by init(), read by every
+// assertion). The cell itself is private — it is not in `exports`, and a
+// caller has no name for it.
+exports(init, bump, current)
+
+var cur = 0
+
+init(v: int) { cur = v }
+bump() -> int {
+    cur = cur + 1
+    return cur
+}
+current() -> int { return cur }

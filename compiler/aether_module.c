@@ -2435,8 +2435,19 @@ void module_merge_into_program(ASTNode* program) {
                 clone->value = strdup(prefixed);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
+                /* A module-level `var` (#701) is this node with a `global_var`
+                 * annotation, and it is module-private STATE, not part of the
+                 * import surface: the module's own functions read and write it.
+                 * A selectively imported function carries a renamed reference
+                 * to it, so the cell has to come along or that reference
+                 * dangles (#1573: `import std.spec (fail)` failed with
+                 * "Undefined variable 'spec_current_fw'"). Selection filters
+                 * the surface a caller names; it does not filter the state the
+                 * selected code closes over. */
+                int is_module_var = (decl->annotation &&
+                                     strcmp(decl->annotation, "global_var") == 0);
                 // Skip if not in selective import list
-                if (has_selection) {
+                if (has_selection && !is_module_var) {
                     int selected = 0;
                     for (int k = 0; k < child->child_count; k++) {
                         ASTNode* sel = child->children[k];

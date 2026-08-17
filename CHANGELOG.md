@@ -13,6 +13,64 @@ version number before tagging the release.
 
 ### Fixed
 
+- **contrib/vulkan bound descriptor sets that had nothing written into them,
+  and lavapipe crashed inside the driver** (#1580). Drawing with a batch and no
+  explicit material bound the pipeline's DEFAULT set, which a caller that only
+  uses per-draw materials never writes; a software rasteriser walks a set as it
+  is bound, so Mesa 22.3.6 dereferenced the unwritten image and buffer
+  descriptors on its own worker thread. Reproduced 6/6 in a Debian 12 container
+  on that exact driver, and fixed at the source: a material tracks whether any
+  descriptor has been written and nothing is bound until it has contents (the
+  redundant pre-loop bind on the batched path is gone too). All nine vulkan
+  tests and examples now pass on Mesa 22.3.6, where two of them segfaulted.
+
+- **Mipmap creation checked one of the three format features `vkCmdBlitImage`
+  requires.** It tested `SAMPLED_IMAGE_FILTER_LINEAR` (needed for a LINEAR
+  filter) but not `BLIT_SRC`/`BLIT_DST`, so on a device advertising linear
+  filtering without blit support the chain generation would have been invalid
+  API use rather than a clean refusal.
+
+- **`tests/integration/contrib_vulkan_portability` failed permanently on
+  Debian-family hosts** (#1605). It took the host's `pkg-config --cflags
+  vulkan`, which is correctly EMPTY when the headers sit in a default system
+  directory, and handed that to a MinGW cross compiler that does not search
+  `/usr/include`; the `-I/usr/include` fallback put glibc on the cross include
+  path instead. It now stages just the `vulkan/` and `vk_video/` trees into a
+  scratch directory (dereferencing symlinks, which is what a Homebrew include
+  dir is) and points the cross compiler there. Verified on Debian 12 and macOS.
+
+- **`ae --version` reported the pinned release, not the binary** (#1602). It
+  printed `~/.aether/active_version`, so a stale binary claimed whatever the pin
+  said: an operator saw `ae --version` report 0.543.0 while the `aetherc` beside
+  it, which is what performs codegen, was 0.541.0. It now reports the version
+  the binary was compiled from, its own path, and the `aetherc` it resolves with
+  that one's version, and warns when those two disagree or when a pin points
+  somewhere else. `install.sh` and `get.sh` check the installed binary reports
+  the version just installed (`ae version` exits 0 on a stale install, so it
+  proved nothing) and name the `ae` that PATH finds first when it is a
+  different file: `install.sh` defaults to `~/.aether/bin` and `get.sh` to
+  `~/.local/bin`, and neither used to mention the other.
+
+  This also makes `tests/integration/version_stamp` meaningful off CI: it
+  asserts `ae --version` matches the `VERSION` file, and any machine with a pin
+  set was failing it for the reason above rather than for a stale build.
+
+- **A selectively imported function lost the module `var` it reads** (#1573).
+  `import std.spec (fail)` failed to typecheck with "Undefined variable
+  'spec_current_fw'": the merge filtered module-level declarations by the
+  caller's selection list, which is right for the import surface and wrong for
+  module state. A `var` (#701) is private, so it can never appear in a selection
+  list, yet every selected function that touches it carries a renamed reference
+  to it. Module cells now come along with the functions that close over them,
+  which is what whole-module import already did.
+
+- **`tools/ae.c` did not compile with clang.** `write_toml:` was followed
+  directly by a declaration, which C11 does not allow (C23 relaxes it and gcc
+  takes it as an extension), so `make` failed on Apple clang while CI's gcc
+  stayed green. The declaration is hoisted above the label.
+
+### Fixed
+
 - **Actors are usable from inside closures (#1626).** Two codegen gaps hit
   any actor used from a closure or trailing block — e.g. a `std.spec` `it`
   block. `a ? Msg {}` lowered to nothing, because closure BODIES were

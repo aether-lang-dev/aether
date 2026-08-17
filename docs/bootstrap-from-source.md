@@ -203,9 +203,15 @@ sudo make install
 make contrib && sudo make install-contrib   # if you use contrib
 ```
 
-The version (`ae version`) is derived from the highest `v*.*.*` git tag,
-falling back to the `VERSION` file. After a `git pull` that introduced a
-new tag, a `make clean` ensures the stamp isn't stale.
+`ae --version` describes the binary in front of you: the version it was
+compiled from, its own path, and the `aetherc` it will actually run with that
+one's version. It says so because the two can differ, and `aetherc` is what
+performs codegen; a mismatch is printed as a warning rather than left to be
+discovered later. A pinned release (`~/.aether/active_version`, written by
+`ae version use`) is reported as a pin and never as the binary's version.
+
+The version stamp itself comes from the `VERSION` file in the tree. After a
+`git pull`, a `make clean` ensures it isn't stale.
 
 ---
 
@@ -250,9 +256,12 @@ Rules of thumb:
   `$(PREFIX)/bin` is on `PATH` (or invoke `ae` by absolute path as
   above). The default `PREFIX` is `/usr/local`.
 - A `--emit=lib` link error mentioning `recompile with -fPIC` means a
-  stale pre-0.181 `libaether.a`; rebuild from current `HEAD`. A version
-  mismatch between `ae version` and the CHANGELOG/`VERSION` usually means
-  stale git tags: `git fetch --tags` then `make clean && make ae`.
+  stale pre-0.181 `libaether.a`; rebuild from current `HEAD`.
+- If `ae --version` and the `VERSION` file disagree, the binary is stale:
+  `make clean && make ae`. If it warns that its `aetherc` is a different
+  version, two installs are mixed; `install.sh` defaults to `~/.aether/bin`
+  and `get.sh` to `~/.local/bin`, and whichever is earlier on `PATH` wins.
+  Both installers now name the shadowing binary when they see one.
 
 ---
 

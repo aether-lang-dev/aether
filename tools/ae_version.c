@@ -930,10 +930,89 @@ int cmd_upgrade(void) {
     return cmd_version_use(latest);
 }
 
+/* The version of the aetherc this ae would actually run, or NULL when it
+ * cannot be asked. Reading it matters because aetherc is what performs the
+ * codegen: an `ae` from one install beside an `aetherc` from another is the
+ * failure #1602 describes, and nothing in the CLI used to reveal it. */
+static const char* probe_compiler_version(const char* aetherc_path) {
+    static char ver[64];
+    ver[0] = '\0';
+    if (!aetherc_path || !aetherc_path[0]) return NULL;
+
+    /* The null device and the pipe API are both platform-spelled: on Windows
+     * popen() goes through cmd.exe, which does not know `/dev/null` and prints
+     * "The system cannot find the path specified." onto our own output. */
+    char cmd[2200];
+#ifdef _WIN32
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>NUL", aetherc_path);
+    FILE* pipe = _popen(cmd, "r");
+#else
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", aetherc_path);
+    FILE* pipe = popen(cmd, "r");
+#endif
+    if (!pipe) return NULL;
+    char line[256];
+    if (fgets(line, sizeof(line), pipe)) {
+        /* "Aether Compiler v0.547.0" */
+        const char* v = strchr(line, 'v');
+        while (v && !(v[1] >= '0' && v[1] <= '9')) v = strchr(v + 1, 'v');
+        if (v) {
+            size_t n = 0;
+            v++;
+            while (v[n] && (v[n] == '.' || (v[n] >= '0' && v[n] <= '9')) && n + 1 < sizeof(ver)) {
+                ver[n] = v[n];
+                n++;
+            }
+            ver[n] = '\0';
+        }
+    }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
+    pclose(pipe);
+#endif
+    return ver[0] ? ver : NULL;
+}
+
 int cmd_version(int argc, char** argv) {
     if (argc == 0) {
-        printf("ae %s (Aether Language)\n", get_active_version());
+        /* The BINARY's own version, compiled in. Printing the pin here (what
+         * ~/.aether/active_version says) made a stale binary report whatever
+         * the pin claimed, which is the whole of #1602's first defect. */
+        printf("ae %s (Aether Language)\n", AE_VERSION);
         printf("Platform: " AE_PLATFORM "\n");
+
+        char self[2048];
+        if (get_exe_path(self, sizeof(self))) {
+            printf("Binary:   %s\n", self);
+        }
+
+        /* The compiler this ae resolves, and its version: that is the half
+         * that does the codegen. */
+        discover_toolchain();
+        if (tc.compiler[0]) {
+            const char* cver = probe_compiler_version(tc.compiler);
+            printf("aetherc:  %s%s%s%s\n", tc.compiler,
+                   cver ? " (" : "", cver ? cver : "", cver ? ")" : "");
+            if (cver && strcmp(cver, AE_VERSION) != 0) {
+                printf("\nWARNING: this ae is %s but the aetherc it would run is %s.\n",
+                       AE_VERSION, cver);
+                printf("         aetherc does the codegen, so the compiler in effect is %s.\n", cver);
+                printf("         Reinstall so both come from one build.\n");
+            }
+        } else {
+            printf("aetherc:  not found (ae cannot compile until it is installed)\n");
+        }
+
+        /* The pin, named as a pin and only when it disagrees. */
+        const char* pinned = get_active_version();
+        if (pinned && pinned[0] && strcmp(pinned, AE_VERSION) != 0) {
+            printf("\nWARNING: ~/.aether/active_version pins %s, which is not this binary.\n",
+                   pinned);
+            printf("         `ae version use %s` switches the pinned install; this\n", pinned);
+            printf("         binary keeps reporting and behaving as %s.\n", AE_VERSION);
+        }
+
         printf("\nSubcommands:\n");
         printf("  ae version list              List all available releases\n");
         printf("  ae version install <v>       Download and install a release\n");

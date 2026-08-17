@@ -46,6 +46,10 @@ typedef struct {
 } Toolchain;
 
 extern Toolchain tc;
+
+/* Resolves `tc` (root, compiler path, include flags). Exported so
+ * `ae --version` can report the aetherc it would actually run. */
+void discover_toolchain(void);
 extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) */
 
 /* ae.c helpers shared across TUs. */
