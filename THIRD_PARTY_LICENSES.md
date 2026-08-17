@@ -27,8 +27,8 @@ Ported so far:
   and `crypto/src/util/Longs.cs` (rotate / leading-zeros / popcount).
 - `std/bytes/` big-endian accessors (`set_be16/32/64`, `get_be16/32/64`) —
   modelled on `crypto/src/crypto/util/Pack.cs`.
-- `tests/regression/test_bits.ae`, `test_bytes_be.ae` — test vectors ported
-  from `crypto/test/src/util/utiltest/{IntegersTest,LongsTest}.cs`.
+- `std/bits/test_bits.ae`, `tests/regression/test_bytes_be.ae` — test vectors
+  ported from `crypto/test/src/util/utiltest/{IntegersTest,LongsTest}.cs`.
 
 ### License text
 
