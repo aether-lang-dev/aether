@@ -28,7 +28,8 @@ case "$out" in *"aetherc:"*) echo "  [PASS] names the aetherc it would run"; pas
 
 # A pin that disagrees is reported as a pin, not as the version.
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-HOME="$tmp" ; export HOME
+# Both: the home directory is USERPROFILE on Windows and HOME elsewhere.
+HOME="$tmp"; USERPROFILE="$tmp"; export HOME USERPROFILE
 mkdir -p "$tmp/.aether"
 echo "0.0.1" > "$tmp/.aether/active_version"
 pinned_out="$("$AE" --version 2>&1)"

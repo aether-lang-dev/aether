@@ -939,9 +939,17 @@ static const char* probe_compiler_version(const char* aetherc_path) {
     ver[0] = '\0';
     if (!aetherc_path || !aetherc_path[0]) return NULL;
 
+    /* The null device and the pipe API are both platform-spelled: on Windows
+     * popen() goes through cmd.exe, which does not know `/dev/null` and prints
+     * "The system cannot find the path specified." onto our own output. */
     char cmd[2200];
+#ifdef _WIN32
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>NUL", aetherc_path);
+    FILE* pipe = _popen(cmd, "r");
+#else
     snprintf(cmd, sizeof(cmd), "\"%s\" --version 2>/dev/null", aetherc_path);
     FILE* pipe = popen(cmd, "r");
+#endif
     if (!pipe) return NULL;
     char line[256];
     if (fgets(line, sizeof(line), pipe)) {
@@ -958,7 +966,11 @@ static const char* probe_compiler_version(const char* aetherc_path) {
             ver[n] = '\0';
         }
     }
+#ifdef _WIN32
+    _pclose(pipe);
+#else
     pclose(pipe);
+#endif
     return ver[0] ? ver : NULL;
 }
 

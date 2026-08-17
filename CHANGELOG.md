@@ -55,6 +55,15 @@ version number before tagging the release.
   asserts `ae --version` matches the `VERSION` file, and any machine with a pin
   set was failing it for the reason above rather than for a stale build.
 
+- **A selectively imported function lost the module `var` it reads** (#1573).
+  `import std.spec (fail)` failed to typecheck with "Undefined variable
+  'spec_current_fw'": the merge filtered module-level declarations by the
+  caller's selection list, which is right for the import surface and wrong for
+  module state. A `var` (#701) is private, so it can never appear in a selection
+  list, yet every selected function that touches it carries a renamed reference
+  to it. Module cells now come along with the functions that close over them,
+  which is what whole-module import already did.
+
 - **`tools/ae.c` did not compile with clang.** `write_toml:` was followed
   directly by a declaration, which C11 does not allow (C23 relaxes it and gcc
   takes it as an extension), so `make` failed on Apple clang while CI's gcc

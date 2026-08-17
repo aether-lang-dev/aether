@@ -1,0 +1,12 @@
+// Selective import of functions that read and write their module's private
+// `var`. The merge used to pull the functions and leave the cell behind, so
+// the renamed reference dangled and typechecking failed with
+// "Undefined variable 'ambient_cur'" (#1573).
+import ambient(init, bump, current)
+
+main() {
+    init(10)
+    println("${bump()}") // 11
+    println("${bump()}") // 12
+    println("${current()}") // 12 — the same cell, not a per-call local
+}
