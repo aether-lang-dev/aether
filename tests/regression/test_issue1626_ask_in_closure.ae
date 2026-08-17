@@ -1,0 +1,75 @@
+// #1626 — actor `ask` inside a closure body, and an actor handle captured
+// by a closure.
+//
+// Two codegen gaps, both triggered by using an actor from inside a
+// closure / trailing block (e.g. a std.spec `it` block):
+//
+//   1. `a ? Msg {}` lowered to nothing inside a closure. Closure BODIES
+//      were emitted before the AST_MESSAGE_DEFINITION arm had registered
+//      the message types, so the ask lowering could not resolve `Msg` and
+//      emitted `/* ERROR: unknown message type Msg */` where the
+//      expression belonged — the C compiler then reported "expected
+//      expression before ';'".
+//
+//   2. A captured actor handle got an env slot typed with the BARE actor
+//      name, but that name was not typedef'd until the actor struct was
+//      emitted much later, so the slot read as an implicit int
+//      ("initialization of 'Counter *' from incompatible pointer type
+//      'int *'").
+//
+// The contrast that isolates both: the SAME ask compiles at main scope
+// and used to fail inside the closure.
+
+import std.spec
+
+message Poll {}
+message Add { n: int }
+
+actor Counter {
+    state total = 0
+    receive {
+        Add(n) -> { total = total + n }
+        Poll() -> { reply total }
+    }
+}
+
+main() {
+    fw = spec.init()
+
+    // Baseline: an ask at main scope always worked. Kept so a regression
+    // here is distinguishable from a regression in the closure path.
+    outer = spawn(Counter())
+    outer ! Add { n: 5 }
+    base = outer ? Poll {}
+
+    spec.describe(fw, "issue 1626: actors inside closures") {
+        spec.it(fw, "asks at main scope (baseline)") callback {
+            spec.assert_eq(base, 5, "main-scope ask still returns the reply")
+        }
+
+        // Bug 2: `outer` is CAPTURED by this closure.
+        spec.it(fw, "asks through a captured actor handle") callback {
+            spec.assert_eq(outer ? Poll {}, 5, "captured handle is usable")
+        }
+
+        // Bug 1: the ask is lowered inside the closure body.
+        spec.it(fw, "spawns and asks entirely inside the block") callback {
+            c = spawn(Counter())
+            c ! Add { n: 9 }
+            spec.assert_eq(c ? Poll {}, 9, "spawn + send + ask all inside a closure")
+        }
+
+        // Sends and asks interleaved, so the reply is not a constant the
+        // lowering could have folded.
+        spec.it(fw, "sees each send's effect through successive asks") callback {
+            c = spawn(Counter())
+            c ! Add { n: 2 }
+            spec.assert_eq(c ? Poll {}, 2, "after one send")
+            c ! Add { n: 3 }
+            spec.assert_eq(c ? Poll {}, 5, "after a second send")
+        }
+    }
+
+    spec.run_summary(fw)
+    exit(0)
+}

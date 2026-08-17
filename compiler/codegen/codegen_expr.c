@@ -1748,8 +1748,17 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
 // (e.g. when an inline `|a,b| { ... }` lambda is passed as an argument
 // inside the outer closure's body). Pass 2 emits bodies + MSVC
 // constructor helpers.
-void emit_closure_definitions(CodeGenerator* gen) {
-    // Pass 1: forward declarations.
+/* Pass 1 only: env typedefs + forward declarations.
+ *
+ * Split out from the bodies so the two halves can straddle the message
+ * definitions. A closure body containing `a ? Msg {}` lowers through the
+ * codegen message registry, which is not populated until the
+ * AST_MESSAGE_DEFINITION arm runs — so emitting bodies before that arm
+ * produced `int r = /* ERROR: unknown message type Msg *\/;` and the C
+ * compiler stopped at "expected expression before ';'". The declarations
+ * have no such dependency, so they stay early (other emitted code
+ * references them) while the bodies move after the messages. (#1626) */
+void emit_closure_declarations(CodeGenerator* gen) {
     for (int ci = 0; ci < gen->closure_count; ci++) {
         emit_closure_env_typedef(gen, ci);
         const char* ret_type = resolve_closure_return_type(gen, ci);
@@ -1757,7 +1766,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
         fprintf(gen->output, ";\n");
     }
     if (gen->closure_count > 0) fprintf(gen->output, "\n");
+}
 
+void emit_closure_definitions(CodeGenerator* gen) {
     // Pass 2: bodies and constructors.
     for (int ci = 0; ci < gen->closure_count; ci++) {
         int id = gen->closures[ci].id;
