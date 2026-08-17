@@ -1754,8 +1754,9 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
  * definitions. A closure body containing `a ? Msg {}` lowers through the
  * codegen message registry, which is not populated until the
  * AST_MESSAGE_DEFINITION arm runs — so emitting bodies before that arm
- * produced `int r = /* ERROR: unknown message type Msg *\/;` and the C
- * compiler stopped at "expected expression before ';'". The declarations
+ * produced an "unknown message type" error comment where the expression
+ * belonged, and the C compiler stopped at "expected expression before
+ * ';'". The declarations
  * have no such dependency, so they stay early (other emitted code
  * references them) while the bodies move after the messages. (#1626) */
 void emit_closure_declarations(CodeGenerator* gen) {
