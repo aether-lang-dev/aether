@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **`std` module tests are co-located** in `std/<module>/test_<module>.ae`,
+  matching the shape `contrib/` already uses. Ten specs move out of
+  `tests/regression/` (bits, deque, floatarr, intarr, longarr, plural,
+  pqueue, set, sort, tar), and `make test-ae` now discovers
+  `std/**/test_*.ae` alongside the existing test trees — the sweep total
+  rises rather than the tests going quiet in their new home.
+  `make install` also trims `test_*.ae` out of `std/`, as it already did
+  for `contrib/`. Without that, co-locating would ship all ten specs to
+  every user with the toolchain.
+
 ## [0.549.0]
 
 ### Fixed

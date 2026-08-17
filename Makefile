@@ -1149,7 +1149,7 @@ test-ae: compiler ae stdlib
 	  sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" >> "$$tmpdir/prune.txt"; \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null \
+	{ find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null; find std -name 'test_*.ae' -print 2>/dev/null; } \
 	    | grep -v -F -f "$$tmpdir/prune.txt" | sort | \
 	xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$tmpdir/run_sh_dir.sh"; \
@@ -1997,6 +1997,10 @@ install: $(VERSION_HEADER) release ae stdlib
 	@find $(PREFIX)/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'test_*.ae' -delete 2>/dev/null || true
+	@# std module specs are co-located beside the modules they cover, so the
+	@# install has to trim them the same way it trims contrib's — otherwise
+	@# every user gets std/<mod>/test_<mod>.ae shipped with the toolchain.
+	@find $(PREFIX)/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
@@ -2161,6 +2165,10 @@ install-contrib: contrib
 	@find $(PREFIX)/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'test_*.ae' -delete 2>/dev/null || true
+	@# std module specs are co-located beside the modules they cover, so the
+	@# install has to trim them the same way it trims contrib's — otherwise
+	@# every user gets std/<mod>/test_<mod>.ae shipped with the toolchain.
+	@find $(PREFIX)/share/aether/std -type f -name 'test_*.ae' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'test_*.sh' -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'build.sh'  -delete 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'ci.sh'     -delete 2>/dev/null || true
