@@ -136,11 +136,14 @@ actor Painter {
 }
 
 // The whole two-actor exchange, in one function, returning the four verdicts.
-// It lives outside the it() block below for two compiler reasons: an ask
-// (`a ? Poll {}`) does not lower inside a closure body, and an actor handle
-// captured by a closure is emitted without its `struct` keyword. Both are
-// pre-existing gaps, so the ordering-sensitive sequence stays here intact and
-// the it() block only asserts on what it returns.
+//
+// It originally sat outside the it() block to work around #1626 — an ask did
+// not lower inside a closure body, and a captured actor handle lost its
+// `struct` keyword. Both are fixed, so this COULD now be inlined into the
+// block. It stays a named function because the sequence is
+// ordering-sensitive: both actors must be started before either is polled
+// (see the note below), and keeping it whole in one place makes that
+// constraint legible rather than something to re-derive from an it() body.
 run_painters(dev: ptr) -> (int, int, int, int) {
     a = spawn(Painter())
     b = spawn(Painter())
