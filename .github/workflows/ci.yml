@@ -167,6 +167,31 @@ jobs:
 
         if printf '%s\n' "$changed" | grep -q '^CHANGELOG\.md$'; then
           echo "CHANGELOG.md is updated."
+
+          # ... and the entry has to be somewhere the release can find it.
+          # The release job renames the FIRST '## [current]' into the version
+          # heading, so an entry that is not under one ships nowhere.
+          #
+          # This is not hypothetical, and it is not about forgetting the
+          # heading either. When main cuts a release while a branch is open,
+          # main's '## [current]' becomes '## [0.N.0]'; merging the branch
+          # then folds its entry under that already-tagged heading and leaves
+          # the file with no '[current]' at all. That has now happened twice
+          # (0.539.0 and 0.549.0 both failed to bump), each time discovered
+          # only when the release broke. Checking it here moves the discovery
+          # to the PR that causes it.
+          if ! grep -q '^## \[current\]$' CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [current]' section."
+            echo ""
+            echo "The release job renames the first '## [current]' heading into"
+            echo "the new version, so an entry outside one is not released."
+            echo "If main cut a release while this branch was open, the merge"
+            echo "folded your entry under that version's heading: move it back"
+            echo "under a fresh '## [current]' and leave the tagged section as"
+            echo "it shipped (compare with \`git show vX.Y.Z:CHANGELOG.md\`)."
+            exit 1
+          fi
+          echo "The entry is under '## [current]'."
           exit 0
         fi
 
