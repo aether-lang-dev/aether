@@ -455,13 +455,13 @@ void aether_panic(const char* reason) {
 // for memory safety.
 //
 // Windows has no sigaction / SA_SIGINFO / SIGBUS; Win32 uses SEH for native
-// faults, a different recovery model entirely. Emscripten's wasm target
-// doesn't expose POSIX signal delivery at all. Freestanding / bare-metal
+// faults, a different recovery model entirely. Emscripten and WASI wasm
+// targets don't expose POSIX signal delivery at all. Freestanding / bare-metal
 // targets (arm-none-eabi newlib under -ffreestanding) have no POSIX signal
-// surface either. On all three, the installer is a no-op stub so the rest
+// surface either. On all four, the installer is a no-op stub so the rest
 // of the panic path (panic()/try/catch via setjmp) still works; only the
 // "convert SIGSEGV into a panic" feature is POSIX-only.
-#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && !(defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__) && !defined(__wasi__) && !(defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
 
 static void aether_sig_handler(int sig, siginfo_t* info, void* ucontext) {
     (void)info;
@@ -516,17 +516,17 @@ void aether_panic_install_signal_handlers(void) {
     sigaction(SIGBUS,  &sa, NULL);
 }
 
-#else  // Windows / Emscripten / freestanding: no POSIX signal installer.
+#else  // Windows / Emscripten / WASI / freestanding: no POSIX signal installer.
 
 void aether_panic_install_signal_handlers(void) {
     // Intentional no-op. On Windows the SIGSEGV-to-panic conversion path
-    // would require SEH/__try, which is a separate design. Emscripten
+    // would require SEH/__try, which is a separate design. Emscripten/WASI
     // wasm and freestanding bare-metal targets have no POSIX signal
     // delivery at all. Callers that use plain panic() / try / catch
-    // still work unchanged on all three.
+    // still work unchanged on all four.
 }
 
-#endif  // !_WIN32 && !__EMSCRIPTEN__ && hosted
+#endif  // !_WIN32 && !__EMSCRIPTEN__ && !__wasi__ && hosted
 
 // ---------------------------------------------------------------------------
 // Death hook

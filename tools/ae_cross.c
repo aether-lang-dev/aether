@@ -58,18 +58,16 @@ const char* cross_target_to_zig(const char* t) {
      * mingw-w64 bundle. cross_target_needs_sysroot stays false for windows. */
     if (!strcmp(t, "x86_64-windows")  || !strcmp(t, "amd64-windows")) return "x86_64-windows-gnu";
     if (!strcmp(t, "aarch64-windows") || !strcmp(t, "arm64-windows")) return "aarch64-windows-gnu";
-    /* FreeBSD (Tier B): zig cc does NOT bundle a FreeBSD libc, so these
-     * additionally require a base sysroot (headers + libc) provided via
-     * AETHER_SYSROOT — see cross_target_needs_sysroot() and the
-     * aether-crossbuild repo (scripts/fetch-freebsd-base.sh). The zig target
-     * has no OS-version; the base sysroot carries FreeBSD 14 vs 15. */
-    if (!strcmp(t, "aarch64-freebsd") || !strcmp(t, "arm64-freebsd")) return "aarch64-freebsd";
-    if (!strcmp(t, "x86_64-freebsd")  || !strcmp(t, "amd64-freebsd")) return "x86_64-freebsd";
+    /* FreeBSD (Tier B): Zig 0.16 supplies its CRT/libc, but the remaining
+     * system headers and libraries come from the FreeBSD 15 base sysroot.
+     * State the ABI version so Zig's startup objects match that base. */
+    if (!strcmp(t, "aarch64-freebsd") || !strcmp(t, "arm64-freebsd")) return "aarch64-freebsd.15.0";
+    if (!strcmp(t, "x86_64-freebsd")  || !strcmp(t, "amd64-freebsd")) return "x86_64-freebsd.15.0";
     return NULL;
 }
 
-/* True if `t` is a cross target whose libc zig cc does NOT bundle, so a base
- * sysroot must be supplied (via AETHER_SYSROOT). Tier A (macos/linux) is
+/* True if `t` is a cross target that needs a base sysroot for system headers
+ * and platform libraries (via AETHER_SYSROOT). Tier A (macos/linux) is
  * self-contained; Tier B (freebsd) is not. */
 static bool cross_target_needs_sysroot(const char* t) {
     if (!t) return false;
@@ -262,15 +260,15 @@ int run_cross_build(const char* c_file, const char* out_file,
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
-    /* Tier-B (FreeBSD) targets need a base sysroot zig cc doesn't bundle;
+    /* Tier-B (FreeBSD) targets need a base sysroot for headers and libraries;
      * AETHER_SYSROOT points at it (bases/<cpu>-freebsd[ver]/ from
      * aether-crossbuild). Applied to BOTH compile and link. Empty for the
      * self-contained Tier-A targets. NB: for a FreeBSD target, `--sysroot`
      * ALONE does not make zig cc search the sysroot's usr/include and
      * usr/lib (unlike its bundled targets) — the -I/-L must be explicit
-     * (verified with zig 0.13). */
+     * (verified with the repository-pinned Zig). */
     char sysroot_flag[3200];   /* COMPILE flags: --sysroot + -I/-L */
-    char fbsd_link[4096];      /* LINK tail: CRT objects + the real libc.so.7 */
+    char fbsd_link[4096];      /* LINK tail: FreeBSD threading library */
     char fbsd_platform_libs[2048]; /* LINK tail: FreeBSD platform -l names */
     char win_platform_libs[512];   /* LINK tail: Windows system -l names */
     sysroot_flag[0] = '\0';
@@ -292,36 +290,20 @@ int run_cross_build(const char* c_file, const char* out_file,
         if (!sr || !*sr) {
             fprintf(stderr,
                 "Error: target %s needs a FreeBSD base sysroot, but AETHER_SYSROOT is unset.\n"
-                "  zig cc does not bundle a FreeBSD libc. Provision one with aether-crossbuild:\n"
+                "  Provision the FreeBSD system headers and libraries with aether-crossbuild:\n"
                 "    ./scripts/fetch-freebsd-base.sh <cpu> [major]   # e.g. x86_64 15\n"
                 "  then: AETHER_SYSROOT=<crossbuild>/bases/<cpu>-freebsd[ver] ae build ... --target=%s\n",
                 ztriple, ztriple);
             return 1;
         }
+        /* Zig 0.16 resolves target-root -L paths beneath --sysroot. Supplying
+         * already-prefixed host paths makes it prefix the sysroot twice. Zig
+         * now supplies the CRT/libc itself; adding the base startup objects
+         * duplicates `_start`. libthr remains an explicit platform dependency
+         * of the scheduler and actor runtime. */
         snprintf(sysroot_flag, sizeof(sysroot_flag),
-                 "--sysroot=%s -I%s/usr/include -L%s/usr/lib -L%s/lib",
-                 sr, sr, sr, sr);
-        /* zig cc can't provide a FreeBSD libc ("error: libc not available"),
-         * and the sysroot's usr/lib/libc.so is a GROUP linker script naming
-         * ABSOLUTE /lib paths that don't exist on this build host. So link
-         * FreeBSD explicitly: -nostdlib + the base's CRT startup objects
-         * (crt1/crti/crtn — crt1 pulls __libc_start1, a FreeBSD-15 symbol) +
-         * the real versioned libc.so.7. Verified end-to-end with zig 0.13
-         * against a FreeBSD-15 base sysroot. */
-        /* libthr.so.3 (POSIX threads) BY EXPLICIT PATH, next to libc.so.7. The
-         * Aether runtime (scheduler, actor threads) and std.http's server call
-         * pthread_create/mutex/cond, so a FreeBSD cross-link fails `undefined
-         * symbol: pthread_create` regardless of what the app imports (the native
-         * FreeBSD build gets this via -pthread, ae.c ~2367). It MUST be a path,
-         * not `-lpthread`: base/usr/lib/libpthread.so is a symlink onto libthr,
-         * and -lthr/-lpthread does NOT resolve under zig-lld + -nostdlib against
-         * this split base (verified: the -l form leaves pthread_create undefined,
-         * the explicit libthr.so.3 path links clean). Versioned .so.3 like
-         * libc.so.7 above. */
-        snprintf(fbsd_link, sizeof(fbsd_link),
-                 "-nostdlib \"%s/usr/lib/crt1.o\" \"%s/usr/lib/crti.o\" "
-                 "\"%s/lib/libc.so.7\" \"%s/lib/libthr.so.3\" \"%s/usr/lib/crtn.o\"",
-                 sr, sr, sr, sr, sr);
+                 "--sysroot=%s -I%s/usr/include -L/usr/lib -L/lib", sr, sr);
+        snprintf(fbsd_link, sizeof(fbsd_link), "-lthr");
 
         /* Platform libs the FreeBSD link needs, mirroring the NATIVE FreeBSD
          * build (ae.c ~2368). The base sysroot's -L (from sysroot_flag) already
@@ -533,11 +515,8 @@ int run_cross_build(const char* c_file, const char* out_file,
          * success signal below can't be fooled by a prior build's binary. */
         remove(out_file);
 
-        /* 3. Link the program against the archive. FreeBSD (Tier B) needs the
-         *    explicit CRT objects + real libc.so.7 (fbsd_link); zig's bundled
-         *    FreeBSD-14 libc can't satisfy a 15 base's __libc_start1. The CRT
-         *    objects bracket the program/runtime; libm comes from the sysroot
-         *    -L. Tier A keeps the compact -lm form. */
+        /* 3. Link the program against the archive. FreeBSD adds libthr and its
+         *    platform libraries from the base sysroot. */
         if (fbsd_link[0]) {
             /* Platform -l names go AFTER libaether.a — it references their
              * symbols (casper's cap_*, openssl's SSL_*, …), so they must
@@ -559,19 +538,8 @@ int run_cross_build(const char* c_file, const char* out_file,
             break;
         }
         if (run_cmd_show_warnings(cmd) != 0) {
-            /* zig cc exits nonzero on a FreeBSD -nostdlib link with a COSMETIC
-             * "error: libc not available" note, even though clang+lld produced
-             * a valid binary (zig reserves that message for targets it can't
-             * supply a libc for — which is exactly why we bring our own). A
-             * GENUINE link failure (undefined symbol) leaves NO output file, so
-             * "the output exists and is non-empty" cleanly separates the two.
-             * Verified with zig 0.13 against a FreeBSD-15 base sysroot. */
-            if (!(fbsd_link[0] && path_exists(out_file))) {
-                fprintf(stderr, "Error: cross-linking for %s failed.\n", ztriple);
-                break;
-            }
-            fprintf(stderr, "note: zig cc reported \"libc not available\" for %s; "
-                            "the FreeBSD binary linked correctly regardless.\n", ztriple);
+            fprintf(stderr, "Error: cross-linking for %s failed.\n", ztriple);
+            break;
         }
         rc = 0;
     } while (0);

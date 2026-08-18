@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The panic runtime now compiles for `wasm32-wasi`**: WASI has no POSIX
+  `sigaction` API, so its signal-handler installer is now the same no-op stub
+  used by Windows, Emscripten, and freestanding targets. Cross-build CI and
+  release workflows now use the repository-pinned Zig 0.16.0 toolchain, the
+  first release with the WASI `setjmp` headers needed to compile this runtime.
+
 ## [0.551.0]
 
 ### Added

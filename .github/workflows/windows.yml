@@ -50,33 +50,22 @@ jobs:
     - name: Install toolchain
       run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
-    # Same provisioning + cache discipline as ci.yml's FreeBSD cross leg:
-    # restore on every run, save only on a main-merge miss. zig bundles the
-    # mingw-w64 headers + CRT sources, so unlike the FreeBSD leg there is NO
-    # sysroot to fetch.
-    - name: Checkout aether-crossbuild
-      uses: actions/checkout@v4
-      with:
-        repository: aether-lang-dev/aether-crossbuild
-        path: crossbuild
-        fetch-depth: 1
-
+    # Restore on every run, save only on a main-merge miss. Zig bundles the
+    # mingw-w64 headers + CRT sources, so there is no sysroot to fetch.
     - name: Restore zig toolchain cache
       id: zig_cache
       uses: actions/cache/restore@v4
       with:
         path: |
-          crossbuild/toolchain
-          crossbuild/work/downloads
-        key: zig-only-${{ hashFiles('crossbuild/deps.lock') }}
+          .zig
+        key: zig-only-${{ hashFiles('scripts/get-zig.sh') }}
 
     - name: Provision zig
       id: prov
       run: |
-        cd crossbuild
-        ./scripts/get-zig.sh
-        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
+        ZIG="$($GITHUB_WORKSPACE/scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")"
         test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        test "$("$ZIG" version)" = 0.16.0 || { echo "expected zig 0.16.0"; exit 1; }
         echo "zig=$ZIG" >> "$GITHUB_OUTPUT"
         "$ZIG" version
 
@@ -87,9 +76,8 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: |
-          crossbuild/toolchain
-          crossbuild/work/downloads
-        key: zig-only-${{ hashFiles('crossbuild/deps.lock') }}
+          .zig
+        key: zig-only-${{ hashFiles('scripts/get-zig.sh') }}
 
     # The fail-fast half: Windows-only -Werror breakage, MinGW __thread
     # traps and missing Win32 shims surface here, minutes into the PR.
