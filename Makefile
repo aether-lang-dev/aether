@@ -243,10 +243,8 @@ endif
 # aether-crossbuild's fetch-freebsd-base.sh.
 #
 # Notes:
-#   - zig cc does NOT bundle a FreeBSD libc, so we link -nostdlib against the
-#     base's CRT objects + versioned libc.so.7 / libthr.so.3 / libm.so.5 BY
-#     PATH (the .so symlinks point at absolute /lib paths that don't exist on
-#     the build host; -lthr/-lpthread/-lm don't resolve under zig-lld here).
+#   - Zig 0.16 supplies the FreeBSD CRT/libc. The base sysroot supplies system
+#     headers and FreeBSD-only libraries such as Casper and libthr.
 #   - casper libs are ALWAYS needed: std/casper/aether_casper.c is
 #     unconditionally in the build and references cap_*; the base ships them.
 #   - Optional Tier-2 libs (OpenSSL/zlib/nghttp2/PCRE2/YAML) are forced OFF
@@ -255,6 +253,7 @@ endif
 #     features as their "unavailable" stubs (same as any build without them);
 #     a future crossbuild-sysroot-staged variant can re-enable them.
 FREEBSD_CPU ?= x86_64
+FREEBSD_ABI ?= 15.0
 ifeq ($(FREEBSD),1)
   ifeq ($(ZIG),)
     $(error FREEBSD=1 needs ZIG=<path to zig> (>= 0.16.0))
@@ -262,27 +261,22 @@ ifeq ($(FREEBSD),1)
   ifeq ($(AETHER_SYSROOT),)
     $(error FREEBSD=1 needs AETHER_SYSROOT=<FreeBSD base sysroot>)
   endif
-  # Route through the zigcc-freebsd wrapper: on a FreeBSD -nostdlib link zig cc
-  # prints a COSMETIC "libc not available" and exits nonzero even though a valid
-  # binary was produced (see the wrapper + tools/ae_cross.c). The wrapper
-  # forgives that ONLY when the link's -o output actually exists; real compile/
-  # link errors still fail. `$(ZIG)` is passed as the wrapper's first arg.
-  CC := $(CURDIR)/scripts/zigcc-freebsd.sh $(ZIG) -target $(FREEBSD_CPU)-freebsd --sysroot=$(AETHER_SYSROOT) -I$(AETHER_SYSROOT)/usr/include
+  # Zig 0.16 supplies the FreeBSD CRT/libc. State the ABI version explicitly so
+  # its startup objects match the FreeBSD 15 base used for the remaining system
+  # libraries. Target-root -L paths are resolved beneath --sysroot; passing the
+  # already-prefixed host paths makes Zig prefix the sysroot a second time.
+  CC := $(ZIG) cc -target $(FREEBSD_CPU)-freebsd.$(FREEBSD_ABI) --sysroot=$(AETHER_SYSROOT) -I$(AETHER_SYSROOT)/usr/include
   # Host pkg-config is wrong for the target — force the optional libs off.
   OPENSSL := 0
   ZLIB := 0
   NGHTTP2 := 0
   PCRE2 := 0
   YAML := 0
-  # Link tail (mirrors tools/ae_cross.c): -nostdlib + CRT + versioned base
-  # libs by path + casper, and the base -L dirs. Overrides the native LDFLAGS
-  # assembly below (guarded by ifneq ($(FREEBSD),1)).
-  FREEBSD_LDFLAGS := -nostdlib \
-    $(AETHER_SYSROOT)/usr/lib/crt1.o $(AETHER_SYSROOT)/usr/lib/crti.o \
-    $(AETHER_SYSROOT)/lib/libc.so.7 $(AETHER_SYSROOT)/lib/libthr.so.3 \
-    $(AETHER_SYSROOT)/lib/libm.so.5 $(AETHER_SYSROOT)/usr/lib/crtn.o \
-    -lcasper -lcap_pwd -lcap_sysctl -lcap_grp -lcap_dns \
-    -L$(AETHER_SYSROOT)/usr/lib -L$(AETHER_SYSROOT)/lib
+  # Link the FreeBSD-only libraries from the base sysroot. Zig supplies the
+  # CRT and libc for this target; adding the base's startup objects as well
+  # would duplicate `_start`. Overrides the native LDFLAGS assembly below.
+  FREEBSD_LDFLAGS := -L/usr/lib -L/lib -lthr -lm \
+    -lcasper -lcap_pwd -lcap_sysctl -lcap_grp -lcap_dns
 endif
 
 # ---------------------------------------------------------------------------
