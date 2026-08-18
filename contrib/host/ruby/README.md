@@ -116,9 +116,15 @@ main() {
 - `RUBY_INIT_STACK` macro replaced with an explicit
   `g_rb.ruby_init_stack(&local_volatile_VALUE)` call on the main
   thread before `g_rb.ruby_init()`. Same effect, no macro.
-- `Qnil` baked as `(VALUE)0x08` — the modern Ruby `USE_FLONUM=1`
-  default constant (in effect since Ruby 2.0 / 2013). NIL_P
-  comparisons use direct equality.
+- `Qnil` is read from the interpreter, not baked in: init evaluates
+  `nil` once and keeps the VALUE it gets back. It used to be hardcoded
+  as `(VALUE)0x08`, which was right from Ruby 2.0 to 3.3 and wrong on
+  3.4, where the special-constant encoding moved nil to `0x04`. The
+  bridge then compared errinfo against a value nil never has and
+  passed `0x08` to `rb_set_errinfo`, which 3.4 dereferences: `[BUG]
+  Segmentation fault at 0x10` (#1618). Asking the loaded libruby costs
+  one eval at startup and is correct for any version and any
+  `USE_FLONUM` setting.
 - `rb_intern` and `rb_funcall` are `#define`d as macros in
   `ruby/ruby.h` (rb_funcall expands to a GCC statement-expr block).
   The dlopen table fields are named `f_rb_intern` and `f_rb_funcall`
