@@ -13,6 +13,60 @@ version number before tagging the release.
 
 ### Added
 
+- **`ae build --target=<triple> --emit=csrc` is now allowed** (#1648). The
+  cross guard rejected every library-shaped emit mode, justified by a comment
+  about "library-shaped C that the executable link rejects" — but `--emit=csrc`
+  never links: it writes the portable C, its catalog header and the JSON
+  catalog, and stops. The rationale simply did not apply to it, and the guard
+  was over-broad. This makes csrc the route to a **cross-compiled linkable
+  library without cross-link support**: emit the C here, and the consumer
+  compiles it for their target into the `.so`/`.a`/`.wasm` they need. The
+  emitted C is target-*neutral* rather than target-parameterised — platform
+  selection stays in `#if __linux__`/`__APPLE__`/`__wasi__` and is resolved by
+  the consumer's compiler — verified byte-identical across four targets in
+  `tests/integration/emit_csrc_cross/`. csrc under `--target` also no longer
+  requires `zig` on PATH, since nothing is compiled or linked.
+
+- **`ae build --target=<triple> --emit=obj` is now allowed** (#1648), producing
+  a real target-format object via `zig cc -target <triple> -c`: ELF/aarch64 for
+  `aarch64-linux`, COFF/amd64 for `x86_64-windows`, Mach-O for `x86_64-macos`,
+  each verified by `file` and asserted to differ from the host object. obj is
+  the other **non-linking** mode, so the guard's "the executable link rejects
+  it" rationale never applied to it either; it stops at `-c`. Unlike csrc it
+  emits machine code rather than portable source, so it does need `zig`.
+  `AE_CC`/`CC` are deliberately not consulted on the cross object path — they
+  name a host compiler, and honouring them would silently produce a host object
+  for a command that asked for a cross one. `--emit=lib` and `--emit=both`
+  remain rejected: they link a shared library, which the cross path does not
+  yet produce.
+
+- **`ae build --target=wasm32-wasi` works, with no hand-passed defines**
+  (#1648). `wasm32-wasi` now maps to a zig triple like every other target, so
+  it routes through the same cross machinery: `--emit=obj` produces a real
+  `WebAssembly (wasm) binary module`. The two defines WASI needs are injected
+  by the build rather than left to the caller — without
+  `-D__wasm_exception_handling__=1` its `setjmp.h` refuses to compile
+  ("Setjmp/longjmp support requires Exception handling support"), and without
+  `-D_WASI_EMULATED_SIGNAL` there is no POSIX signal API. CI passed both by
+  hand; now only the build knows them.
+
+  This is the **zig** wasm path and is distinct from `--target=wasm`, which
+  stays on Emscripten: emcc supplies a JS host, a DOM/filesystem shim and its
+  own pthread emulation, which is a different product from a self-contained
+  object a WASI runtime loads. Neither supersedes the other, so they are
+  selected by target name rather than one silently switching backend.
+
+  Two limits found by testing and stated rather than papered over. A full
+  executable link for `wasm32-wasi` is **rejected up front**:
+  `multicore_scheduler.c` asserts `sizeof(Mailbox) % 8 == 0` with no 64-bit
+  guard — unlike the `sizeof(Message) == 48` assertion beside it, which has one
+  — so it fails on any 32-bit target. That is a pre-existing runtime
+  portability gap (#1652), and the error names it instead of surfacing a static-assert
+  deep in a scheduler translation unit. And `wasm32-freestanding` is
+  deliberately not offered: with no libc the generated C's `#include <stdio.h>`
+  cannot resolve, so its only working mode would be `--emit=csrc`, which emits
+  the same target-neutral bytes as every other target anyway.
+
 - **`make contrib-check-lsan`: contrib/vulkan is leak-gated in CI** (#1507).
   The module rendered on the Linux leg for correctness only, because the CI
   driver is lavapipe and valgrind cannot follow its LLVM JIT: one render
@@ -33,6 +87,13 @@ version number before tagging the release.
   driver's frames to `<unknown module>` that no module suppression can match.
 
 ### Fixed
+
+- **`ae build --target=<triple> --emit=both` now reports the same up-front
+  error as `--emit=lib`** instead of dying at the cross linker. `--emit=both`
+  re-dispatches as an exe pass followed by a lib pass, so it never reached the
+  cross guard with the lib flag set: the exe pass ran and failed with
+  `ld.lld: error: undefined symbol: main` on a source that has no `main` by
+  design. Pre-existing, and found while unblocking csrc for #1648.
 
 - **`string.compare` returned `strcmp`'s byte difference, not the documented
   `-1, 0, 1`** (#1640). Two doc pages state the contract; the implementation
@@ -87,11 +148,50 @@ version number before tagging the release.
   side effect still runs in order. The test covering the parse asserted on the
   emitted text and never built it, which is how a program that cannot compile
   passed; it builds and runs the program now.
+
 - **The panic runtime now compiles for `wasm32-wasi`**: WASI has no POSIX
   `sigaction` API, so its signal-handler installer is now the same no-op stub
   used by Windows, Emscripten, and freestanding targets. Cross-build CI and
   release workflows now use the repository-pinned Zig 0.16.0 toolchain, the
   first release with the WASI `setjmp` headers needed to compile this runtime.
+
+### Changed
+
+- **The CachyOS nightly now records the version of every dependency it tested
+  against.** Nothing in the repo pins these, and pinning would be the wrong fix
+  — the box is rolling-release precisely so it runs ahead of CI and finds
+  breakage early. What was missing was the record: without it a green run does
+  not say what it tested, and a red run the morning after `pacman -Syu` reads
+  as a code regression rather than an upstream bump. Each run now writes
+  `deps_<stamp>.tsv` and publishes it beside the step timings — interpreter
+  versions, `pacman -Q` for the libraries that have no `--version`, and the
+  Factor fork's commit, since it is built from source. Measured on the box:
+  Racket 9.2, Lua 5.5.0, Python 3.14.6, Node 26.4.0, OpenJDK 26.0.2, Go 1.26.5.
+  Racket 9.3 shipped 2026-08-13 while the box was on 9.2, and the Racket CS
+  embedding surface the bridge compiles against is macro-based and has moved
+  across majors — exactly the upgrade this table makes legible. Reporting is
+  all the step does; whether a missing dep is fatal remains the dep gate's
+  decision.
+
+- **The CachyOS nightly now fails hard on every contrib skip.** The box is
+  provisioned with every contrib dependency, so a step that SKIPs there is a
+  silently shrinking test surface rather than an honest report of an absent
+  library. Three layers each hid the one below it and are now closed:
+  `make contrib` runs in `contrib_build.sh`'s explicit `MODULES=` mode (fail-hard
+  by design) with the list derived from that script's own `CATALOGUE`, so a
+  module that no longer *builds* is a failure rather than a skip — the class of
+  breakage a GCC 16 / Clang 22 box exists to find, which the dependency gate
+  cannot catch because the library is present; `make contrib-host-check` gains
+  `CONTRIB_HOST_STRICT=1`, turning a missing bridge archive into a FAIL; and a
+  new step asserts that no host spec skipped any of its cases. That last one was
+  found by testing rather than reasoning — `contrib/host/factor` builds its
+  archive with no Factor installed (the bridge is pure `dlopen`), passes both
+  earlier layers, and then skips all six cases at runtime with
+  `AETHER_FACTOR_SONAME` unset, reporting `0 passing / 6 skipped` and exiting 0.
+  The gate reads `std.spec`'s machine-readable `AE_SPEC_FORMAT=aeocha` report
+  (`skipped=<n>`) rather than parsing the ANSI-coloured human output.
+  `CONTRIB_HOST_STRICT` defaults to `0`, so GitHub CI and dev boxes are
+  unaffected.
 
 ## [0.551.0]
 

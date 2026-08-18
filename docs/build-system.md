@@ -414,10 +414,85 @@ no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
 upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
 regex-using program cross-builds self-contained for every target. A
 CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
-vendored copy. Executables only
-(`--emit=lib`/`--emit=both` are rejected for now), and the host must be POSIX
+vendored copy. Executables, **`--emit=csrc` and `--emit=obj`** (`--emit=lib`
+and `--emit=both` are rejected for now — they link a shared library, which the
+cross link path does not yet produce), and the host must be POSIX
 (Linux/macOS). The generated binary targets another platform, so it is not
 runnable on the build host; copy it to a matching machine (or an emulator).
+
+`--emit=csrc` is allowed under `--target` because it never links: it writes
+the portable C, its catalog header and the JSON catalog, and stops (#1648).
+That makes it the route to a **cross-compiled linkable library without
+cross-link support** — emit the C here, and let the consumer compile it for
+their target into the `.so` / `.a` / `.wasm` they need.
+
+The emitted C is **target-neutral**, not target-parameterised: platform
+selection stays in `#if __linux__` / `__APPLE__` / `__wasi__` and is resolved
+by the consumer's compiler, which defines those macros for whatever target it
+builds. `--target` therefore does not change the bytes emitted (asserted by
+`tests/integration/emit_csrc_cross/`); it is accepted so one command line
+works for both native and cross consumers. For the same reason csrc under
+`--target` does **not** require `zig` on PATH — nothing is compiled or linked.
+
+`--emit=obj` is the other non-linking mode, and is allowed under `--target` for
+the same reason: it stops at `zig cc -target <triple> -c`. Unlike csrc it emits
+a **target-format object** — real machine code for the triple — so it *does*
+need `zig`:
+
+```
+$ ae build --target=aarch64-linux  --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: ELF 64-bit LSB relocatable, ARM aarch64
+$ ae build --target=x86_64-windows --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: Intel amd64 COFF object file
+$ ae build --target=x86_64-macos   --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: Mach-O 64-bit x86_64 object
+```
+
+`AE_CC`/`CC` are deliberately **not** consulted on the cross object path: they
+name a host compiler, and honouring them would silently produce a host object
+for a command that asked for a cross one. The consumer links the object with
+their own `libaether.a` and system libraries for the target, exactly as they do
+for a native `--emit=obj`.
+
+### WebAssembly: two backends, selected by target name
+
+There are **two** wasm paths, and they are not interchangeable:
+
+| Target | Backend | Produces | Supported modes |
+|---|---|---|---|
+| `--target=wasm` | Emscripten (`emcc`) | `.js` + `.wasm` bundle | executables |
+| `--target=wasm32-wasi` | `zig cc` | a self-contained wasm object | `--emit=csrc`, `--emit=obj` |
+
+Emscripten supplies a JS host, a DOM/filesystem shim and its own pthread
+emulation; the zig path produces a plain object a WASI runtime (or someone
+else's wasm link) consumes. Neither supersedes the other, so they are chosen by
+different target names rather than one silently switching backend.
+
+`wasm32-wasi` goes through the same cross machinery as every other triple, so
+`--emit=obj` yields a real module:
+
+```
+$ ae build --target=wasm32-wasi --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: WebAssembly (wasm) binary module version 0x1 (MVP)
+```
+
+**The two WASI defines are injected automatically.** WASI's `setjmp.h` refuses
+to compile without `-D__wasm_exception_handling__=1` (*"Setjmp/longjmp support
+requires Exception handling support"*), and WASI has no POSIX signal API
+without `-D_WASI_EMULATED_SIGNAL`. `ae build` adds both when the target
+resolves to a WASI triple, so nothing needs passing by hand.
+
+**A full executable link for `wasm32-wasi` is not supported**, and is rejected
+up front rather than failing deep in a compile:
+`runtime/scheduler/multicore_scheduler.c` asserts
+`sizeof(Mailbox) % 8 == 0` with no 64-bit guard (unlike the
+`sizeof(Message) == 48` assertion beside it, which has one), so it fails on any
+32-bit target. Use `--target=wasm` for a runnable bundle.
+
+`wasm32-freestanding` is deliberately **not** offered: it ships no libc, so the
+generated C's `#include <stdio.h>` cannot resolve and `--emit=obj` fails
+outright. Its only working mode would be `--emit=csrc`, which emits the same
+target-neutral bytes as every other target anyway.
 
 The same vendored engine backs two native cases: a build box with no system
 libpcre2-8 (`make` compiles the vendored copy instead of stubbing
@@ -437,7 +512,8 @@ so an installed toolchain never ships a silently-stubbed regex.
 | Hardened | `HARDEN=1` | See "Hardening" section below |
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
-| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables |
+| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
+| Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend, `--emit=csrc`/`--emit=obj` only |
 
 ## Hardening (`HARDEN=1`)
 

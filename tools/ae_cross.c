@@ -63,7 +63,40 @@ const char* cross_target_to_zig(const char* t) {
      * State the ABI version so Zig's startup objects match that base. */
     if (!strcmp(t, "aarch64-freebsd") || !strcmp(t, "arm64-freebsd")) return "aarch64-freebsd.15.0";
     if (!strcmp(t, "x86_64-freebsd")  || !strcmp(t, "amd64-freebsd")) return "x86_64-freebsd.15.0";
+    /* WebAssembly (Tier A — self-contained): zig bundles wasi-libc, so no
+     * sysroot. NOTE this is the ZIG wasm path, and is deliberately distinct
+     * from bare `--target=wasm`, which routes to Emscripten (`emcc`) and stays
+     * as it is: emcc supplies a JS host, a DOM/filesystem shim and its own
+     * pthread emulation, which is a different product from a self-contained
+     * `.wasm` a WASI runtime loads. Neither supersedes the other, so they are
+     * selected by different target names rather than one silently changing
+     * backend.
+     *
+     * wasm32-freestanding is deliberately NOT mapped. It ships no libc, so
+     * the emitted C cannot even be compiled to an object: `--emit=obj` dies on
+     * `fatal error: 'stdio.h' file not found` (the generated C includes it
+     * unconditionally). Offering a target whose only working mode is
+     * `--emit=csrc` — which produces the same target-neutral bytes as every
+     * other target anyway — would advertise support that does not exist. */
+    if (!strcmp(t, "wasm32-wasi")   || !strcmp(t, "wasm-wasi"))  return "wasm32-wasi";
     return NULL;
+}
+
+/* The two defines every WASI compile needs, as one string so the obj and exe
+ * paths cannot drift apart.
+ *
+ * WASI's setjmp.h #errors out unless exception handling is declared
+ * ("Setjmp/longjmp support requires Exception handling support"), and the
+ * runtime's panic path includes it unconditionally. _WASI_EMULATED_SIGNAL is
+ * needed for the same reason the panic guard exists: WASI has no POSIX signal
+ * API. CI passed both by hand (ci.yml "Verify WASI panic runtime"); the build
+ * now supplies them itself, so `ae build --target=wasm32-wasi` needs nothing
+ * on the command line. */
+#define AETHER_WASI_DEFINES "-D_WASI_EMULATED_SIGNAL -D__wasm_exception_handling__=1"
+
+/* True if the resolved zig triple is a WASI target. */
+static bool cross_target_is_wasi(const char* ztriple) {
+    return ztriple && strstr(ztriple, "wasi") != NULL;
 }
 
 /* True if `t` is a cross target that needs a base sysroot for system headers
@@ -215,6 +248,85 @@ static bool cross_cmd_fmt(char** buf, size_t* cap, const char* fmt, ...) {
     }
 }
 
+/* #1648 part (2), obj slice: compile ONE generated .c to a target-format
+ * object with `zig cc -target <t> -c`, and stop.
+ *
+ * Deliberately not run_cross_build with a flag. That function assembles the
+ * whole runtime+stdlib source set, archives it into libaether.a and LINKS an
+ * executable; --emit=obj wants none of that — the caller drops the .o into
+ * their own build and links it themselves. What the two DO share is the
+ * compile-side flag shape, so this mirrors it exactly: the same --sysroot
+ * handling for Tier-B targets, the same -DMA_NO_COREAUDIO workaround for
+ * macos, and the same include flags.
+ *
+ * What it deliberately omits is the link tail (fbsd_link, *_platform_libs,
+ * crossbuild_libs): those name libraries, and nothing is being linked. The
+ * Tier-2 CROSSBUILD_SYSROOT probe is likewise skipped — it exists to decide
+ * which -l names the LINK gets. A consumer linking this object supplies its
+ * own libaether.a and system libraries for the target, exactly as they do for
+ * a native --emit=obj.
+ */
+int run_cross_compile_obj(const char* c_file, const char* obj_file,
+                          bool optimize, const char* ztriple) {
+    const char* user_cflags = get_cflags();
+    const char* opt = optimize ? "-O2" : "-O0 -g";
+
+    /* Same macos workaround as the link path: zig's bundled macOS SDK stubs
+     * do not ship the Apple-licensed CoreAudio framework headers, so
+     * miniaudio (always compiled into the runtime) must fall back to its null
+     * backend or ANY macos cross-compile fails. */
+    char feature_defs[512] = "-DAETHER_HAS_SANDBOX";
+    if (strstr(ztriple, "macos")) {
+        strncat(feature_defs, " -DMA_NO_COREAUDIO",
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
+    if (cross_target_is_wasi(ztriple)) {
+        strncat(feature_defs, " " AETHER_WASI_DEFINES,
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
+
+    /* Tier-B (FreeBSD) targets need the base sysroot for HEADERS here (the
+     * -L is link-side, but harmless and kept so the flag string matches the
+     * link path's shape). Same explicit -I as run_cross_build: for a FreeBSD
+     * target `--sysroot` alone does not make zig cc search usr/include. */
+    char sysroot_flag[3200];
+    sysroot_flag[0] = '\0';
+    if (cross_target_needs_sysroot(ztriple)) {
+        const char* sr = getenv("AETHER_SYSROOT");
+        if (!sr || !*sr) {
+            fprintf(stderr,
+                "Error: target %s needs a FreeBSD base sysroot, but AETHER_SYSROOT is unset.\n"
+                "  Provision the FreeBSD system headers with aether-crossbuild:\n"
+                "    ./scripts/fetch-freebsd-base.sh <cpu> [major]   # e.g. x86_64 15\n"
+                "  then: AETHER_SYSROOT=<crossbuild>/bases/<cpu>-freebsd[ver] ae build ... --target=%s\n",
+                ztriple, ztriple);
+            return 1;
+        }
+        snprintf(sysroot_flag, sizeof(sysroot_flag),
+                 "--sysroot=%s -I%s/usr/include", sr, sr);
+    }
+
+    char* cmd = NULL;
+    size_t cmd_cap = 0;
+    if (!cross_cmd_fmt(&cmd, &cmd_cap,
+            "zig cc -target %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+            ztriple, sysroot_flag, opt, feature_defs, user_cflags,
+            tc.include_flags ? tc.include_flags : "",
+            c_file, obj_file)) {
+        fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
+        free(cmd);
+        return 1;
+    }
+    if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
+    int rc = run_cmd_show_warnings(cmd);
+    free(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "Error: cross-compiling %s for %s failed.\n", c_file, ztriple);
+        return 1;
+    }
+    return 0;
+}
+
 int run_cross_build(const char* c_file, const char* out_file,
                            bool optimize, const char* extra,
                            const char* ztriple) {
@@ -258,6 +370,10 @@ int run_cross_build(const char* c_file, const char* out_file,
     char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
     if (strstr(ztriple, "macos")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
+    if (cross_target_is_wasi(ztriple)) {
+        strncat(feature_defs, " " AETHER_WASI_DEFINES,
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
     /* Tier-B (FreeBSD) targets need a base sysroot for headers and libraries;

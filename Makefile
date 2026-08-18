@@ -2593,6 +2593,17 @@ test-differential: ae
 # dirs).
 CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket
 
+# CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
+# FAILURE in the co-located-spec phase of contrib-host-check.
+#
+# The default (0) is right for portable CI runners and dev boxes, which cannot
+# be expected to have every language's dev kit installed — there, a missing
+# bridge genuinely is nothing to report. It is wrong for a dedicated build box
+# that has been provisioned with all of them: a spec that silently does not run
+# is indistinguishable from one that passes, so the coverage quietly shrinks
+# without turning anything red. The CachyOS nightly sets this to 1.
+CONTRIB_HOST_STRICT ?= 0
+
 # Documentation examples that are supposed to work (#1500, #1522).
 #
 # Two gates, both cheap. `check_doc_examples.py` reads the stdlib module doc
@@ -2709,7 +2720,12 @@ contrib-host-check: compiler ae stdlib
 	    MODULES="$$lang" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true; \
 	  fi; \
 	  if [ ! -f "build/contrib/libaether_host_$$lang.a" ]; then \
-	    echo "    SKIP: libaether_host_$$lang.a unavailable (bridge deps not installed)"; \
+	    if [ "$(CONTRIB_HOST_STRICT)" = "1" ]; then \
+	      echo "    FAIL: libaether_host_$$lang.a unavailable (CONTRIB_HOST_STRICT=1)"; \
+	      rc=1; \
+	    else \
+	      echo "    SKIP: libaether_host_$$lang.a unavailable (bridge deps not installed)"; \
+	    fi; \
 	    continue; \
 	  fi; \
 	  out="$$(./build/ae$(EXE_EXT) run "$$t" 2>&1)"; trc=$$?; \

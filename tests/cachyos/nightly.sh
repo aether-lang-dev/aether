@@ -43,6 +43,10 @@ LOG="$OUTDIR/nightly_${STAMP}.log"
 SUMMARY="$OUTDIR/nightly_${STAMP}.summary.txt"
 RESULTS_TSV="$OUTDIR/results_${STAMP}.tsv"
 STEPS_TSV="$OUTDIR/steps_${STAMP}.tsv"
+# Versions of the third-party deps this run built and tested against. Nothing
+# pins them (see capture_dep_versions), so recording them is what makes an
+# upstream bump distinguishable from a code regression.
+DEPS_TSV="$OUTDIR/deps_${STAMP}.tsv"
 # Orphan branch (no shared history, no CI) used purely to publish topline
 # results. Set AETHER_NIGHTLY_PUBLISH=0 to skip the push.
 RESULTS_BRANCH="${AETHER_NIGHTLY_BRANCH:-nightly-results}"
@@ -246,6 +250,74 @@ render_row() { # <name> <PASS|FAIL> <ms>
     fi
 }
 
+# Capture the version of every third-party dependency the contrib modules
+# build and test against, one "<name>\t<version>" line per dep.
+#
+# Why this exists: nothing in the repo PINS any of these, and pinning would be
+# the wrong fix — the box is rolling-release precisely so it runs AHEAD of CI
+# and finds breakage early (the same rationale as its GCC 16 vs CI's GCC 11).
+# What was missing is the RECORD. Without it a green run does not say what it
+# tested, and a red run the morning after `pacman -Syu` looks like a code
+# regression rather than an upstream bump — which is a bisect nobody should
+# have to do.
+#
+# Live example: Racket 9.3 shipped 2026-08-13 while this box was on 9.2. The
+# Racket CS embedding surface the bridge compiles against (chezscheme.h's
+# Snil / Scons / Smake_bytevector) is macro-based and has moved across majors,
+# so that upgrade is exactly the kind this table makes legible.
+#
+# Every probe is guarded: a dep that is absent records "(absent)" rather than
+# failing. Reporting is this function's whole job — the dep GATE (step 1) is
+# what decides whether missing is fatal, and duplicating that verdict here
+# would just give two sources of truth for one condition.
+dep_version() {
+    name="$1"; shift
+    v="$("$@" 2>/dev/null | head -1)"
+    [ -n "$v" ] || v="(absent)"
+    printf '%s\t%s\n' "$name" "$v"
+}
+
+capture_dep_versions() {
+    : > "$DEPS_TSV"
+    {
+        # `racket --version` greets rather than reports ("Welcome to Racket
+        # v9.2 [cs]."); (version) prints the bare number.
+        dep_version "racket"   racket -e '(display (version))'
+        dep_version "tclsh"    sh -c 'echo "puts [info patchlevel]" | tclsh'
+        dep_version "go"       go version
+        dep_version "tinygo"   tinygo version
+        dep_version "python"   python3 --version
+        dep_version "ruby"     ruby --version
+        dep_version "perl"     sh -c 'perl -e "print \$^V"'
+        dep_version "lua"      sh -c 'lua -v 2>&1'
+        dep_version "node"     node --version
+        dep_version "java"     sh -c 'java -version 2>&1'
+        # Libraries have no --version; take the package manager's record. Also
+        # covers the two the bridges dlopen rather than link (duktape, expat).
+        if command -v pacman >/dev/null 2>&1; then
+            for pkg in sqlite expat duktape ffmpeg racket tcl; do
+                v="$(pacman -Q "$pkg" 2>/dev/null | awk '{print $2}')"
+                [ -n "$v" ] || v="(absent)"
+                printf 'pkg:%s\t%s\n' "$pkg" "$v"
+            done
+        fi
+        # The Factor fork is built from source, so its identity is a commit,
+        # not a version. AETHER_FACTOR_SONAME points into that tree.
+        if [ -n "${AETHER_FACTOR_SONAME:-}" ] && [ -e "${AETHER_FACTOR_SONAME}" ]; then
+            fdir="$(dirname "$AETHER_FACTOR_SONAME")"
+            fv="$(git -C "$fdir" log --oneline -1 2>/dev/null)"
+            [ -n "$fv" ] || fv="(present, not a git tree)"
+            printf 'factor-fork\t%s\n' "$fv"
+        else
+            printf 'factor-fork\t%s\n' "(absent)"
+        fi
+    } >> "$DEPS_TSV" 2>/dev/null
+    # Echo into the log so the versions are visible in the run output too, not
+    # only in the published table.
+    sed 's/^/  /' "$DEPS_TSV"
+    return 0
+}
+
 publish_results() {
     [ "${AETHER_NIGHTLY_PUBLISH:-1}" = "0" ] && { echo "  (publish skipped)"; return 0; }
 
@@ -279,6 +351,23 @@ publish_results() {
                 [ -z "$n" ] && continue
                 render_row "$n" "$s" "$t"
             done < "$STEPS_TSV"
+        fi
+        echo ""
+        echo "### Dependency versions"
+        echo ""
+        echo "Nothing pins these — the box is rolling-release on purpose, so it"
+        echo "runs ahead of CI. Recorded so an upstream bump is distinguishable"
+        echo "from a code regression."
+        echo ""
+        echo "| dependency | version |"
+        echo "|------------|---------|"
+        if [ -s "$DEPS_TSV" ]; then
+            while IFS="$(printf '\t')" read -r n v; do
+                [ -z "$n" ] && continue
+                echo "| \`$n\` | $v |"
+            done < "$DEPS_TSV"
+        else
+            echo "| _(not captured)_ | — |"
         fi
         echo ""
         echo "### Contrib module type-check (\`ae check\`)"
@@ -348,8 +437,111 @@ run_and_record() {
 
 # Thin wrappers so make steps are named commands run_and_record can invoke.
 make_ci_step() { make ci; }
-make_contrib_step() { make contrib; }
-make_host_check_step() { make contrib-host-check; }
+
+# Build EVERY contrib module by name, fail-hard.
+#
+# `make contrib` with MODULES unset is contrib_build.sh's probe-and-skip mode:
+# it tallies anything whose dep is absent as a SKIP and still exits 0. That is
+# right for portable CI runners, which cannot have every language installed —
+# and wrong here. This box is provisioned for the purpose and its dep gate
+# (step 1) has already turned the run RED if anything is missing, so by the
+# time we reach step 5 every dep IS present and a module that does not build
+# is a genuine break, not an absent library.
+#
+# The distinction matters because the two failures are not the same. The dep
+# gate catches "the library is gone"; it cannot catch "the library is here and
+# the module no longer compiles against it" — which is precisely the class of
+# breakage this box exists to find, given it runs GCC 16 / Clang 22 against
+# CI's GCC 11. In probe-and-skip mode such a break is reported as a skip and
+# the nightly stays green.
+#
+# MODULES=<list> is contrib_build.sh's explicit mode, documented there as
+# "fail-hard: any requested module that can't compile is a hard failure (exit
+# 1), not a silent skip". The list is derived from the script's own CATALOGUE
+# rather than hardcoded, so a module added there is covered here automatically
+# and cannot be forgotten.
+contrib_modules_all() {
+    sed -n 's/^[[:space:]]*"\([a-z_]*\)|.*/\1/p' "$REPO/tests/scripts/contrib_build.sh" \
+        | sort -u | paste -sd,
+}
+make_contrib_step() {
+    mods="$(contrib_modules_all)"
+    if [ -z "$mods" ]; then
+        echo "  contrib: could not derive the module list from contrib_build.sh"
+        return 1
+    fi
+    echo "  building (fail-hard): $mods"
+    make contrib MODULES="$mods"
+}
+
+# CONTRIB_HOST_STRICT=1: on this box a bridge whose archive is unavailable is a
+# provisioning failure, not a skip. Without it a spec that never runs is
+# indistinguishable from one that passes (see the Makefile comment).
+make_host_check_step() { make contrib-host-check CONTRIB_HOST_STRICT=1; }
+
+# Assert that no host spec SKIPPED any of its cases.
+#
+# CONTRIB_HOST_STRICT catches a bridge whose ARCHIVE is missing, but not the
+# layer below it: a spec whose archive built fine and which then skips every
+# case at RUNTIME because a runtime dependency is unset. contrib/host/factor is
+# the live example — with AETHER_FACTOR_SONAME unset it reports
+#
+#     0 passing
+#     6 skipped
+#
+# and exits 0, so the step passes while testing nothing. std.spec puts the
+# principle plainly (std/spec/module.ae): "A skip that reports as a pass is
+# worse than no skip at all." On a portable runner a skip is honest; on a box
+# provisioned for the purpose it is a provisioning failure.
+#
+# Rather than parse the human output (whose ⊘ lines carry ANSI colour and
+# would break the moment the renderer changes), this uses the machine-readable
+# contract std.spec already exposes: AE_SPEC_FORMAT=aeocha + AE_SPEC_REPORT
+# make each run write "skipped=<n>" to a file. Summing that key across every
+# host spec is exact and renderer-independent.
+host_specs_no_skips() {
+    rc=0
+    total_skipped=0
+    rpt="$OUTDIR/spec_report_$$.txt"
+    for t in $(find "$REPO/contrib/host" -maxdepth 2 -name 'test_*.ae' | sort); do
+        lang="$(basename "$(dirname "$t")")"
+        rm -f "$rpt"
+        # Mirror the per-language SONAME discovery `make contrib-host-check`
+        # does before running each spec (Makefile, phase [3/3]). Without it the
+        # bridges cannot dlopen their runtime and every case skips — which
+        # would make this gate fire on a correctly provisioned box.
+        case "$lang" in
+            ruby)   AETHER_RUBY_SONAME="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"
+                    export AETHER_RUBY_SONAME ;;
+            python) AETHER_PYTHON_SONAME="$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"
+                    export AETHER_PYTHON_SONAME ;;
+            perl)   AETHER_PERL_SONAME="$(perl -MConfig -e 'print "$Config{archlibexp}/CORE/$Config{libperl}"' 2>/dev/null)"
+                    export AETHER_PERL_SONAME ;;
+            lua)    for so in /usr/lib/*/liblua5.4.so /usr/lib/*/liblua5.3.so /usr/lib/liblua5.4.so; do
+                        [ -f "$so" ] && { AETHER_LUA_SONAME="$so"; export AETHER_LUA_SONAME; break; }
+                    done ;;
+        esac
+        AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT="$rpt" \
+            "$REPO/build/ae" run "$t" >/dev/null 2>&1
+        if [ ! -f "$rpt" ]; then
+            echo "  $lang: no spec report written (spec did not reach run_summary)"
+            rc=1
+            continue
+        fi
+        n="$(sed -n 's/^skipped=//p' "$rpt" | head -1)"
+        [ -n "$n" ] || n=0
+        if [ "$n" -gt 0 ]; then
+            echo "  $lang: $n skipped case(s) — a runtime dep is unset on this box"
+            total_skipped=$((total_skipped + n))
+            rc=1
+        else
+            echo "  $lang: no skips"
+        fi
+    done
+    rm -f "$rpt"
+    [ "$rc" -eq 0 ] || echo "  => $total_skipped skipped host-spec case(s); provisioning failure"
+    return $rc
+}
 # Build + RUN every contrib test_*.ae, under valgrind where the test is
 # leak-clean by design (see .github/scripts/contrib_check.sh). This is the
 # RUNTIME coverage the type-check sweep can't provide — the class of bug that
@@ -435,6 +627,9 @@ fails=0
     # per-module sweep. (A failed dependency gate must turn the dashboard red.)
     : > "$STEPS_TSV"
     run_and_record "contrib dependency gate" require_deps
+    # Recorded right after the gate, so the versions are captured even if a
+    # later step fails — that is exactly the run where you want to know them.
+    run_and_record "dep versions" capture_dep_versions
     run_and_record "make ci" make_ci_step
     # Refresh $HOME/.local from the tree we just built, then prove it took.
     # Runs AFTER `make ci` (which builds everything) and BEFORE the sweeps, so
@@ -444,6 +639,7 @@ fails=0
     run_and_record "install freshness check" verify_install_step
     run_and_record "make contrib" make_contrib_step
     run_and_record "make contrib-host-check" make_host_check_step
+    run_and_record "host specs: no skipped cases" host_specs_no_skips
     # `make ci` and `make contrib` never compile the contrib Aether code
     # (test-ae globs only tests/*, `make contrib` builds C shims). This sweep
     # type-checks every contrib module under the newer toolchain — the gap that

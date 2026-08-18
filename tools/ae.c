@@ -5116,7 +5116,26 @@ static int cmd_build(int argc, char** argv) {
                  *
                  * If the exe pass fails the lib pass is skipped and
                  * the exe's exit code is returned so the user sees
-                 * the precise error.  */
+                 * the precise error.
+                 *
+                 * Because it re-dispatches, --emit=both never reaches the
+                 * is_cross guard further down with g_emit_lib set: under
+                 * --target the exe pass runs first and dies at the cross
+                 * LINKER with "undefined symbol: main" on a library-shaped
+                 * source. Reject it here instead, where the flag is still
+                 * visible, so the user gets the same up-front diagnostic as
+                 * --emit=lib rather than an ld.lld error naming a symbol they
+                 * never wrote. (Pre-existing; #1648 only unblocks csrc.)  */
+                for (int j = 0; j < argc; j++) {
+                    if (strncmp(argv[j], "--target=", 9) == 0 &&
+                        strcmp(argv[j] + 9, "native") != 0) {
+                        fprintf(stderr,
+                            "Error: cross-compilation (%s) supports executables, "
+                            "--emit=csrc and --emit=obj; --emit=lib and --emit=both "
+                            "are not supported yet.\n", argv[j]);
+                        return 1;
+                    }
+                }
                 int o_idx = -1;
                 for (int j = 0; j < argc - 1; j++) {
                     if (strcmp(argv[j], "-o") == 0) { o_idx = j + 1; break; }
@@ -5221,10 +5240,10 @@ static int cmd_build(int argc, char** argv) {
     const char* ztriple = cross_target_to_zig(target);
     if (target && strcmp(target, "wasm") != 0 && strcmp(target, "native") != 0 && !ztriple) {
         fprintf(stderr, "Error: Unknown target '%s'.\n", target);
-        fprintf(stderr, "Valid targets: native, wasm, or a cross triple "
+        fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
                         "aarch64-freebsd, x86_64-freebsd, x86_64-windows, "
-                        "aarch64-windows).\n");
+                        "aarch64-windows, wasm32-wasi).\n");
         return 1;
     }
     int is_wasm = target && strcmp(target, "wasm") == 0;
@@ -5387,16 +5406,68 @@ static int cmd_build(int argc, char** argv) {
     // Pre-flight for cross builds: zig provides the backend compiler +
     // target libc/linker, and the program must be dependency-free (PR 1).
     if (is_cross) {
-        // Cross builds produce executables only for now; --emit=lib /
-        // --emit=both would emit library-shaped C (no main) that the
-        // executable link rejects. Reject up front, like unknown targets.
-        if (g_emit_lib) {
+        // Cross builds produce executables or portable C source. --emit=lib /
+        // --emit=both / --emit=obj would emit library-shaped C (no main) and
+        // then LINK it, which the executable link rejects. Reject those up
+        // front, like unknown targets.
+        //
+        // --emit=csrc and --emit=obj are deliberately allowed through
+        // (#1648). Both set g_emit_lib for their codegen shape (the same
+        // aether_<name> catalog as --emit=lib), but NEITHER LINKS: csrc
+        // returns as soon as the .c/.h/catalog are written, and obj stops at
+        // `zig cc -c`. The "executable link rejects it" rationale therefore
+        // does not apply to either — there is no link to reject anything.
+        //
+        // They differ in what they produce, which is why csrc needs no zig
+        // and obj does: csrc emits portable SOURCE (target-neutral, compiled
+        // later by the consumer), while obj emits a target-FORMAT object
+        // (real machine code for the triple), so it genuinely needs the cross
+        // toolchain.
+        //
+        // The emitted C is target-NEUTRAL, not target-parameterised: platform
+        // selection stays in #if __linux__ / __APPLE__ / __wasi__ and is
+        // resolved by the consumer's own compiler, which defines those macros
+        // for whatever target it builds. That is what makes csrc the
+        // cross-linkable-lib path that needs no cross-link support — the
+        // consumer compiles the .so/.a/.wasm themselves. --target therefore
+        // does not change the bytes emitted; it is accepted so one command
+        // line works for both native and cross consumers.
+        /* The wasm triples are wired for the NON-LINKING emit modes only.
+         * `--emit=csrc` and `--emit=obj` are proven end to end (a real
+         * `WebAssembly (wasm) binary module` object), but a full executable
+         * link is not: runtime/scheduler/multicore_scheduler.c carries
+         *
+         *     _Static_assert(sizeof(Mailbox) % 8 == 0, ...)
+         *
+         * with no 64-bit guard (unlike the `sizeof(Message) == 48` assertion
+         * directly above it, which has one), so it fails on any 32-bit target
+         * including wasm32. That is a pre-existing runtime portability gap
+         * (filed as #1652), not something this path introduces, and it wants
+         * its own change rather than a workaround here. Reject up front so the
+         * user gets one line instead of a static-assert deep in a scheduler
+         * TU. */
+        if (strstr(ztriple, "wasm") && g_emit_exe && !g_emit_csrc && !g_emit_obj) {
             fprintf(stderr,
-                "Error: cross-compilation (--target=%s) supports executables only; "
-                "--emit=lib and --emit=both are not supported yet.\n", target);
+                "Error: --target=%s supports --emit=csrc and --emit=obj; a full "
+                "executable link is not supported yet (the runtime scheduler's "
+                "layout assertions assume a 64-bit target).\n"
+                "  For a runnable wasm bundle use --target=wasm (Emscripten).\n",
+                target);
             return 1;
         }
-        if (run_cmd_quiet("zig version") != 0) {
+        if (g_emit_lib && !g_emit_csrc && !g_emit_obj) {
+            fprintf(stderr,
+                "Error: cross-compilation (--target=%s) supports executables, "
+                "--emit=csrc and --emit=obj; --emit=lib and --emit=both are not "
+                "supported yet.\n", target);
+            return 1;
+        }
+        /* --emit=csrc never invokes zig at all: it emits portable C and
+         * stops, so requiring zig would invent a dependency the build does
+         * not have — and would block the very case csrc exists to serve,
+         * emitting portable C on a machine with no cross toolchain. Every
+         * other mode (exe, and --emit=obj's `zig cc -c`) does need it. */
+        if (!g_emit_csrc && run_cmd_quiet("zig version") != 0) {
             fprintf(stderr, "Error: zig not found on PATH (required to cross-compile for %s).\n",
                     target);
             fprintf(stderr, "Install zig 0.16.0+: https://ziglang.org/download/  (macOS: brew install zig)\n");
@@ -5539,6 +5610,21 @@ static int cmd_build(int argc, char** argv) {
             } else {
                 snprintf(obj_file + ol, sizeof(obj_file) - ol, ".o");
             }
+        }
+        /* #1648: under --target the object must be in the TARGET's format,
+         * so it goes through `zig cc -target <t> -c` rather than the host CC.
+         * AE_CC/CC are deliberately not consulted on this path — they name a
+         * host compiler, and honouring them would silently produce a host
+         * object for a command that asked for a cross one. */
+        if (is_cross) {
+            if (run_cross_compile_obj(c_file, obj_file, !quick, ztriple) != 0) {
+                fprintf(stderr, "Failed to compile the generated C to an object.\n");
+                return 1;
+            }
+            printf("Built object: %s\n", obj_file);
+            printf("       target %s: link it on a matching host, or with the same "
+                   "zig target.\n", target);
+            return 0;
         }
         const char* objcc = getenv("AE_CC");
         if (!objcc || !*objcc) objcc = getenv("CC");

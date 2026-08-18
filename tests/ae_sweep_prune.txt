@@ -55,6 +55,7 @@ tests/integration/dsl_receiver_scoping_edge/
 tests/integration/dsl_receiver_scoping_nested/
 tests/integration/effect_tags/
 tests/integration/emit_csrc/
+tests/integration/emit_csrc_cross/
 tests/integration/emit_lib_const/
 tests/integration/emit_lib_deadline/
 tests/integration/emit_lib_net/
