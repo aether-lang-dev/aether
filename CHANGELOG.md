@@ -88,6 +88,28 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`multicore_scheduler.c` now compiles for 32-bit targets** (#1652). The
+  `Message` layout assertion was guarded by `#if INTPTR_MAX == INT64_MAX`; the
+  `Mailbox` one directly below it was not, so every ILP32 triple failed to
+  compile the translation unit. The check was also not doing what its comment
+  claimed: `sizeof(Mailbox) % 8 == 0` is vacuously **true** on LP64 (Mailbox
+  contains pointers, so its size is necessarily a multiple of 8) and vacuously
+  **false** on ILP32 (1036 % 8 == 4) — it asserted a property no conforming ABI
+  can violate, and the only thing it ever detected was the pointer width.
+  Replaced with the invariant the derived-actor cast actually depends on: that
+  `sizeof(Mailbox)` equals the ring buffer plus its three counters rounded to
+  the struct's alignment, stated per pointer width. That fires when a layout
+  change would genuinely shift the fields after `mailbox` in
+  `AETHER_ACTOR_BASE_FIELDS`, and now does so on both widths instead of being
+  switched off on one. Guarded against `AETHER_DEBUG_MAILBOX`, which is itself
+  an instance of the hazard: it changes `sizeof(Mailbox)` on ILP32 (1036 →
+  1040) but vanishes into tail padding on LP64, so defining it for some
+  translation units and not others corrupts derived-actor layout on 32-bit
+  targets while silently getting away with it on 64-bit ones. New
+  `tests/integration/scheduler_ilp32/` compiles the TU for `arm64_32` and
+  asserts the target really is ILP32, since nothing else in CI builds a 32-bit
+  multicore scheduler.
+
 - **`ae build --target=<triple> --emit=both` now reports the same up-front
   error as `--emit=lib`** instead of dying at the cross linker. `--emit=both`
   re-dispatches as an exe pass followed by a lib pass, so it never reached the

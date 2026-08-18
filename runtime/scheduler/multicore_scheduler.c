@@ -162,11 +162,50 @@ static inline void aether_step_safe(ActorBase* actor) {
     aether_fire_death_hook(actor->id, reason);
 }
 
-// Layout assertions to catch struct padding/size mismatches between translation units
+/* Layout assertions to catch struct padding/size mismatches between
+ * translation units. A derived actor is cast to ActorBase*, and both mirror
+ * AETHER_ACTOR_BASE_FIELDS, so any disagreement about Mailbox's layout
+ * silently shifts every field after it.
+ *
+ * Both sizes are pointer-width dependent (Message carries an intptr_t and
+ * three pointers), so each width states its own expectation. The previous
+ * `sizeof(Mailbox) % 8 == 0` spelling could not: on LP64 it was vacuously
+ * TRUE (Mailbox contains pointers, so its size is necessarily a multiple of
+ * 8) and on ILP32 vacuously FALSE (1036 % 8 == 4) — which is why every
+ * 32-bit target failed to compile this TU rather than being checked by it
+ * (#1652). It asserted a property no conforming ABI can violate, and the
+ * only thing it ever detected was the pointer width.
+ *
+ * The Mailbox check below is the one the comment always claimed: the ring
+ * buffer plus its three counters, with no interior padding and only natural
+ * tail padding.
+ *
+ * It is deliberately a size check rather than a field inventory, because size
+ * is exactly what the derived-actor cast depends on: the fields after
+ * `mailbox` shift if and only if sizeof(Mailbox) shifts. A field small enough
+ * to land in existing tail padding therefore does NOT trip it — correctly, as
+ * it moves nothing. That is width-dependent: on LP64 there are 4 bytes of tail
+ * padding to absorb an int, on ILP32 there are none, so the same edit fires
+ * there and not here.
+ *
+ * AETHER_DEBUG_MAILBOX adds _send_guard and is therefore excluded. Note that
+ * flag is itself the hazard this block guards against: on ILP32 it changes
+ * sizeof(Mailbox) (1036 -> 1040), while on LP64 it disappears into existing
+ * tail padding. Defining it for some translation units but not all corrupts
+ * derived-actor layout on 32-bit targets and silently gets away with it on
+ * 64-bit ones. */
+#define AETHER_ROUND_UP(n, a) (((n) + (a) - 1) / (a) * (a))
 #if INTPTR_MAX == INT64_MAX
 _Static_assert(sizeof(Message) == 48, "Message size changed, update tests");
+#elif INTPTR_MAX == INT32_MAX
+_Static_assert(sizeof(Message) == 32, "Message size changed, update tests");
 #endif
-_Static_assert(sizeof(Mailbox) % 8 == 0, "Mailbox not 8-byte aligned");
+#ifndef AETHER_DEBUG_MAILBOX
+_Static_assert(sizeof(Mailbox) == AETHER_ROUND_UP(sizeof(Message) * MAILBOX_SIZE
+                                                  + 3 * sizeof(int),
+                                                  _Alignof(Mailbox)),
+               "Mailbox layout changed (unexpected padding or a new field)");
+#endif
 
 Scheduler schedulers[MAX_CORES];
 int num_cores = 0;
