@@ -237,9 +237,10 @@ endif
 # but applied to the compiler's own C sources through the Makefile's CC/LDFLAGS.
 #
 # Required inputs:
-#   ZIG            path to a zig binary (>= 0.13)         e.g. .../zig
+#   ZIG            path to a zig 0.16.0+ binary           e.g. .../zig
 #   AETHER_SYSROOT FreeBSD base sysroot (headers + libc)  e.g. .../bases/x86_64-freebsd15
-# Provision both with the aether-crossbuild repo (get-zig.sh / fetch-freebsd-base.sh).
+# Provision Zig with this repo's scripts/get-zig.sh and the FreeBSD base with
+# aether-crossbuild's fetch-freebsd-base.sh.
 #
 # Notes:
 #   - zig cc does NOT bundle a FreeBSD libc, so we link -nostdlib against the
@@ -256,7 +257,7 @@ endif
 FREEBSD_CPU ?= x86_64
 ifeq ($(FREEBSD),1)
   ifeq ($(ZIG),)
-    $(error FREEBSD=1 needs ZIG=<path to zig> (>= 0.13))
+    $(error FREEBSD=1 needs ZIG=<path to zig> (>= 0.16.0))
   endif
   ifeq ($(AETHER_SYSROOT),)
     $(error FREEBSD=1 needs AETHER_SYSROOT=<FreeBSD base sysroot>)
@@ -292,8 +293,8 @@ endif
 # FreeBSD leg there is NO sysroot to fetch and no -nostdlib CRT bookkeeping.
 #
 # Required input:
-#   ZIG   path to a zig binary (>= 0.13)   e.g. .../zig
-# Provision with the aether-crossbuild repo's get-zig.sh (same as FreeBSD).
+#   ZIG   path to a zig 0.16.0+ binary     e.g. .../zig
+# Provision with this repo's scripts/get-zig.sh (same as FreeBSD CI).
 #
 # Purpose is a FAST Windows signal on a Linux runner (#1593): the MSYS2 legs
 # take ~20 minutes, so Windows-specific compile breakage is discovered long
@@ -310,7 +311,7 @@ endif
 WINDOWS_CPU ?= x86_64
 ifeq ($(WINDOWS),1)
   ifeq ($(ZIG),)
-    $(error WINDOWS=1 needs ZIG=<path to zig> (>= 0.13))
+    $(error WINDOWS=1 needs ZIG=<path to zig> (>= 0.16.0))
   endif
   CC := $(ZIG) cc -target $(WINDOWS_CPU)-windows-gnu
   AR := $(ZIG) ar

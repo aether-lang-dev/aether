@@ -41,7 +41,7 @@ STUB="$_fbtmp/stubzig"; mkdir -p "$STUB"
 cat > "$STUB/zig" <<'STUBEOF'
 #!/bin/sh
 case "$1" in
-  version) echo "0.13.0" ;;
+  version) echo "0.16.0" ;;
   cc)  echo "ZIGCC: $*" >&2
        out=""; prev=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
        [ -n "$out" ] && : > "$out"; exit 0 ;;

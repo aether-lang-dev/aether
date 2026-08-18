@@ -245,19 +245,20 @@ jobs:
       uses: actions/cache/restore@v4
       with:
         path: |
+          .zig
           crossbuild/toolchain
           crossbuild/work/downloads
-        key: freebsd-cross-${{ hashFiles('crossbuild/deps.lock') }}
+        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'crossbuild/deps.lock') }}
 
     - name: Provision zig + FreeBSD base sysroot
       id: prov
       run: |
+        ZIG="$($GITHUB_WORKSPACE/scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")"
         cd crossbuild
-        ./scripts/get-zig.sh
         ./scripts/fetch-freebsd-base.sh x86_64 15
-        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
         SR="$PWD/bases/x86_64-freebsd15"
         test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        test "$("$ZIG" version)" = 0.16.0 || { echo "expected zig 0.16.0"; exit 1; }
         test -f "$SR/lib/libc.so.7" || { echo "FreeBSD base sysroot missing libc.so.7"; exit 1; }
         echo "zig=$ZIG"    >> "$GITHUB_OUTPUT"
         echo "sysroot=$SR" >> "$GITHUB_OUTPUT"
@@ -269,9 +270,10 @@ jobs:
       uses: actions/cache/save@v4
       with:
         path: |
+          .zig
           crossbuild/toolchain
           crossbuild/work/downloads
-        key: freebsd-cross-${{ hashFiles('crossbuild/deps.lock') }}
+        key: freebsd-cross-${{ hashFiles('scripts/get-zig.sh', 'crossbuild/deps.lock') }}
 
     - name: Cross-build for FreeBSD (FREEBSD=1)
       run: |
@@ -510,7 +512,15 @@ jobs:
         version: 3.1.51
 
     - name: Install native GCC
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc
+      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+
+    - name: Verify WASI panic runtime with Zig 0.16.0
+      run: |
+        ZIG="$(./scripts/get-zig.sh "$RUNNER_TEMP/zig")"
+        "$ZIG" cc -target wasm32-wasi -c runtime/actors/aether_panic.c \
+          -D_WASI_EMULATED_SIGNAL -D__wasm_exception_handling__=1 \
+          -Iruntime -Iruntime/actors -Istd/string \
+          -o "$RUNNER_TEMP/aether_panic_wasi.o"
 
     - name: Run WASM CI
       run: make ci-wasm
