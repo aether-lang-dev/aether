@@ -11,8 +11,82 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`make contrib-check-lsan`: contrib/vulkan is leak-gated in CI** (#1507).
+  The module rendered on the Linux leg for correctness only, because the CI
+  driver is lavapipe and valgrind cannot follow its LLVM JIT: one render
+  reports around 13,000 errors from about 1,000 contexts, none of them this
+  repo's. LeakSanitizer suppresses by *module*, so
+  `.github/scripts/lsan-contrib.supp` excludes the graphics stack by object
+  and leaves every allocation the module makes gated. All six tests and all
+  three examples run under it. Measured in an ubuntu:22.04 container with
+  lavapipe: 464 bytes of driver noise, and a deliberate `malloc` in
+  `aether_vulkan.c` fails the leg with the function and line named.
+
+  Two findings are written down where they will be needed again. ASan is not
+  usable here at all: its `memcpy` interceptor consults a shadow map that the
+  JIT-mapped code sits outside of, and the process dies with a SEGV inside
+  LLVM's `RuntimeDyld` before the first draw. And the gate preloads a no-op
+  `dlclose` (`.github/scripts/lsan_keep_modules.c`), because LSan symbolizes
+  at exit while the loader unloads the ICD before then, which resolves the
+  driver's frames to `<unknown module>` that no module suppression can match.
+
 ### Fixed
 
+- **`string.compare` returned `strcmp`'s byte difference, not the documented
+  `-1, 0, 1`** (#1640). Two doc pages state the contract; the implementation
+  was `return strcmp(...)`, whose magnitude C leaves unspecified. So
+  `compare("b", "a")` was 1 and `compare("c", "a")` was 2, and a caller
+  writing the documented `== 1` test was right about adjacent characters and
+  wrong about everything else, silently, with the shape that the first thing
+  anyone tries passes. It now returns the sign only, and compares with
+  `memcmp` over the shorter run rather than `strcmp`: an `AetherString` can
+  carry embedded NULs, which `strcmp` stopped at, reporting two different
+  strings equal. A null operand sorts before any string instead of reading as
+  equal to everything.
+
+- **`fs.walk`'s documentation named `list add` as a way to keep the borrowed
+  `path`** (#1641). It is the opposite of true: `list.add` stores the pointer
+  verbatim, and the callback's `path` points into the one buffer the walk
+  rewrites for the next entry, so a collected path read as garbage long after
+  the walk returned. The doc now says what `path` is, what happens if you
+  store it, and gives the copy at the boundary
+  (`list.add(paths, string.copy(path))`); a regression test collects during a
+  walk and reads the paths back afterwards.
+
+- **A changed `[build] cflags` / `link_flags` served a stale binary.** The
+  build cache key covered the source tree, the `-D` symbols and `--trace`, but
+  not the manifest's toolchain flags, which go straight onto the gcc line.
+  Found while staging the sanitizer workspace for the leak gate above: `ae
+  build` printed "Built (cache hit)" and handed back the uninstrumented
+  binary, so the sanitizer run measured nothing. Same silent-staleness shape
+  as #1421 and #1333, and the flags now reach the key.
+
+- **Generated C compiled without warnings in the user's own build.** Ordinary
+  code produced four kinds of warning, each one a construct the compiler
+  emitted rather than anything the program did: `list.add(l, string.copy(p))`
+  built the string-return contract inline as a ternary that every
+  statement-position call then discarded (`-Wunused-value`, now a prelude
+  helper); a statement calling a string-returning function with a heap
+  argument yielded from its lifetime wrap into nothing (now cast away, since
+  the statement position is already known there); a re-declaration with no
+  initializer of an already-hoisted name emitted the bare name as a statement
+  (`byte[8] scratch` inside a loop); and the argument-lifetime temporaries
+  were `const char*`, so passing one to a `void*` parameter discarded
+  qualifiers. A statement that is not a call is now cast to `void`, which also
+  covers a line-leading `- b`. Verified by compiling every `.ae` under
+  `tests/` and grepping the emitted C: 7 files warned, 5 are clear, and the
+  remaining 2 are the pre-existing `%d`-for-64-bit truncation now tracked in
+  #1643.
+
+- **A bare array-literal statement emitted C that did not compile.** `[1 + 1,
+  99]` on its own line lowered to `{2, 99};`, a braced initializer where a
+  statement belongs, which clang rejects outright. The elements are now
+  emitted as discarded expressions, one statement each, so anything with a
+  side effect still runs in order. The test covering the parse asserted on the
+  emitted text and never built it, which is how a program that cannot compile
+  passed; it builds and runs the program now.
 - **The panic runtime now compiles for `wasm32-wasi`**: WASI has no POSIX
   `sigaction` API, so its signal-handler installer is now the same no-op stub
   used by Windows, Emscripten, and freestanding targets. Cross-build CI and

@@ -582,9 +582,19 @@ glob_multi(patterns: ptr) -> {
 //
 // One readdir sweep per directory — entry kinds come from d_type (#966), so
 // nothing is stat'ed unless the filesystem doesn't report a type. Symlinks
-// are reported but never followed (no cycles). `path` is borrowed inside the
-// callback — copy it (string.copy / list add) to keep it. Traversal order
-// within a directory is the platform's readdir order (unspecified).
+// are reported but never followed (no cycles).
+//
+// `path` is BORROWED. It points into the one buffer the walk rewrites for the
+// next entry, so it is only valid until the callback returns. Storing it
+// directly keeps the pointer, not the bytes: `list.add(paths, path)` leaves a
+// dangling pointer that reads as garbage long after the walk finished, and
+// the corruption surfaces wherever the string is finally used rather than
+// here. Copy at the boundary to keep a path:
+//
+//     list.add(paths, string.copy(path))
+//
+// Traversal order within a directory is the platform's readdir order
+// (unspecified).
 // Returns (entries visited, "") or (0, error) when `path` can't be read.
 walk(path: string, cb: ptr) -> {
     n = fs_walk_raw(path, cb)

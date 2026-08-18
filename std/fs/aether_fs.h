@@ -287,8 +287,9 @@ DirList* fs_glob_multi_raw(void* pattern_list);
 
 // #977: recursive directory walk. Visits `root` first (depth 0), then every
 // entry beneath it, invoking the boxed Aether closure per entry as
-// `cb(path, kind, depth)` where `path` is the full joined path (borrowed —
-// copy it to keep it), `kind` is the fs_stat_raw encoding (1 file / 2 dir /
+// `cb(path, kind, depth)` where `path` is the full joined path (borrowed: it
+// points into the one path buffer this rewrites per entry, so a callback that
+// keeps it must copy the bytes), `kind` is the fs_stat_raw encoding (1 file / 2 dir /
 // 3 symlink / 4 other; resolved via lstat only when readdir's d_type doesn't
 // report one), and `depth` is 0 for the root, 1 for its entries, ….
 // The callback's return value steers the walk: 0 = continue, 1 = don't

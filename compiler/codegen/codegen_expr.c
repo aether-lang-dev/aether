@@ -4531,20 +4531,25 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 val->node_type->kind == TYPE_FUNCTION &&
                                 !val->node_type->is_fnptr;
                             if (val_is_heap) {
-                                if (is_wrapper) {
-                                    fprintf(gen->output, "(");
-                                }
                                 if (is_list_shape) {
-                                    fprintf(gen->output, "list_add_string_adopted(");
+                                    /* The wrapper shape returns `string`, so
+                                     * it goes through the prelude helper that
+                                     * converts the int result. Emitting the
+                                     * conversion inline would leave every
+                                     * statement-position add discarding a
+                                     * ternary, which is -Wunused-value in the
+                                     * user's own build. */
+                                    fprintf(gen->output, is_wrapper
+                                            ? "_aether_list_add_adopted("
+                                            : "list_add_string_adopted(");
                                     generate_expression(gen, expr->children[0]);
                                     fprintf(gen->output, ", (void*)");
                                     generate_expression(gen, val);
                                     fprintf(gen->output, ")");
-                                    if (is_wrapper) {
-                                        fprintf(gen->output, " ? \"\" : \"list.add failed\")");
-                                    }
                                 } else {
-                                    fprintf(gen->output, "map_put_string_adopted(");
+                                    fprintf(gen->output, is_wrapper
+                                            ? "_aether_map_put_adopted("
+                                            : "map_put_string_adopted(");
                                     generate_expression(gen, expr->children[0]);
                                     /* Key may now be a magic AetherString
                                      * (string ops return magic); route the
@@ -4558,9 +4563,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     fprintf(gen->output, "), (void*)");
                                     generate_expression(gen, val);
                                     fprintf(gen->output, ")");
-                                    if (is_wrapper) {
-                                        fprintf(gen->output, " ? \"\" : \"map.put failed\")");
-                                    }
                                 }
                                 break;
                             }
@@ -4585,17 +4587,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * `ptr` slot — closures stored in maps are rare
                              * and keep the existing raw path.) */
                             if (val_is_closure && is_list_shape) {
-                                if (is_wrapper) fprintf(gen->output, "(");
                                 /* list_add_closure_owned tags the slot as an
                                  * owned closure box (owned_flags == 2) so
                                  * list_free reclaims the box AND its captured
-                                 * env — not just the box. */
-                                fprintf(gen->output, "list_add_closure_owned(");
+                                 * env, not just the box. */
+                                fprintf(gen->output, is_wrapper
+                                        ? "_aether_list_add_closure("
+                                        : "list_add_closure_owned(");
                                 generate_expression(gen, expr->children[0]);
                                 fprintf(gen->output, ", (void*)_aether_box_closure(");
                                 generate_expression(gen, val);
                                 fprintf(gen->output, "))");
-                                if (is_wrapper) fprintf(gen->output, " ? \"\" : \"list.add failed\")");
                                 break;
                             }
                         }
@@ -4753,7 +4755,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * the counter advanced. */
                         for (int h = 0; h < ad_arg_count; h++) {
                             ASTNode* arg = expr->children[ad_arg_idx[h]];
-                            fprintf(gen->output, "const char* %s = (const char*)(", ad_names[h]);
+                            /* Non-const: the temp stands in for the argument
+                             * at whatever parameter it feeds, and a callee
+                             * taking `void*` (or `char*`) got
+                             * -Wincompatible-pointer-types-discards-qualifiers
+                             * from a `const char*` temp. The value is a fresh
+                             * heap string this wrap owns and frees, so there
+                             * is nothing const about it. */
+                            fprintf(gen->output, "char* %s = (char*)(", ad_names[h]);
                             generate_expression(gen, arg);
                             fprintf(gen->output, "); ");
                         }
@@ -5182,7 +5191,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
                         if (ad_have_value) {
-                            fprintf(gen->output, "_ad_r; })");
+                            /* In statement position the yield is discarded, and
+                             * a bare `_ad_r;` there is -Wunused-value in the
+                             * user's own build (`fs.delete("${dir}/f")` warned).
+                             * Cast it away: the wrap then yields void, which is
+                             * all a statement wants. */
+                            fprintf(gen->output, ad_call_discarded
+                                    ? "(void)_ad_r; })" : "_ad_r; })");
                         } else {
                             /* void parent: the trailing free is the last
                              * statement, so the ({...}) yields void. */

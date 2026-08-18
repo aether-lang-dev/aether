@@ -325,14 +325,31 @@ Three things the design does to earn those numbers:
 `leaks -atExit` reports 0 leaks for the example, the test and the C-level smoke
 test, against a real driver.
 
-The Linux CI leg runs the test for correctness but does **not** leak-gate it.
-That is a measurement decision: the CI driver is lavapipe, whose LLVM JIT
-valgrind cannot follow. One render reports around 13,000 errors from about
-1,000 contexts, all inside libvulkan and the driver's worker threads, and the
-"definitely lost" total moves between runs because the driver is `dlclose`d
-before exit and valgrind then loses the pointers into it. Gating on that would
-measure Mesa rather than this module. The eight create/draw/destroy cycles in
-the test are what would surface accumulation on that leg.
+The Linux CI leg leak-gates every test and example here with **LeakSanitizer**
+(`make contrib-check-lsan`), not valgrind. Valgrind cannot measure this: the CI
+driver is lavapipe, whose LLVM JIT it cannot follow, so one render reports
+around 13,000 errors from about 1,000 contexts, all inside libvulkan and the
+driver's worker threads, and the "definitely lost" total moves between runs.
+Gating on that would measure Mesa rather than this module.
+
+LSan suppresses by **module**, which is what makes the distinction possible:
+`.github/scripts/lsan-contrib.supp` excludes the graphics stack by object
+(`leak:libvulkan_lvp`, `leak:libLLVM`, …) and leaves every allocation this
+module makes gated. A deliberate `malloc` in `aether_vulkan.c` fails the leg
+with the function and line named; the driver's own 352-byte instance
+allocation does not.
+
+One piece of the gate is load-bearing and worth knowing about: the leg runs
+with `.github/scripts/lsan_keep_modules.c` preloaded, a no-op `dlclose`. LSan
+symbolizes at exit, and the loader unloads the ICD before then, so without it
+the driver's frames resolve to `<unknown module>` and no module suppression can
+match them. ASan is not used: its `memcpy` interceptor consults a shadow map
+that lavapipe's JIT-mapped code sits outside of, and the process dies with a
+SEGV inside LLVM's `RuntimeDyld` before the first draw.
+
+`leaks -atExit` against a real driver remains the macOS-side check (0 leaks for
+the example, the test and the C smoke test), and the eight create/draw/destroy
+cycles in the test are what surface accumulation on either.
 
 ## Building against it
 
@@ -438,7 +455,6 @@ plan in someone's head.
 |---|---|---|
 | Surfaces, swapchains, presenting to a window, and the aether-ui handle seam | #1505 | P1 |
 | Generating declarations from `vk.xml` rather than by hand | #1506 | P1 |
-| A CI leak gate (lavapipe's JIT defeats valgrind; LSan module suppressions are the route) | #1507 | P1 |
 | Building and running contrib on Windows (the `_WIN32` branch is compiled, never run) | #1511 | P2 |
 | More colour formats, and PNG output rather than PPM | #1514 | P3 |
 | Compute pipelines | #1515 | P3 |

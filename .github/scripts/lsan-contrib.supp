@@ -1,0 +1,32 @@
+# LeakSanitizer suppressions for the contrib leak gate.
+#
+# Suppression is by MODULE, which is the whole reason this gate uses LSan
+# rather than valgrind: the CI driver is lavapipe, and valgrind cannot follow
+# its LLVM JIT (one render reports ~13k errors from ~1000 contexts, all inside
+# the loader or the driver's worker threads). LSan matches these patterns
+# against the module each frame resolves to, so allocations owned by the
+# graphics stack are excluded by object while every allocation this repo makes
+# is still gated.
+#
+# Keep this list minimal and module-shaped. A pattern naming a function in our
+# own code would hide a real leak.
+
+# Mesa's software Vulkan driver (lavapipe). Keeps one allocation per process
+# alive past exit: its instance dispatch is torn down after the last
+# vkDestroyInstance returns.
+leak:libvulkan_lvp
+
+# The Vulkan loader itself, and the ICDs it may load on a machine with real
+# hardware (the gate must behave the same on a developer box).
+leak:libvulkan.so
+leak:libvulkan_radeon
+leak:libvulkan_intel
+leak:libvulkan_virtio
+
+# LLVM, which lavapipe JITs through.
+leak:libLLVM
+
+# The GL/DRM stack the drivers pull in.
+leak:libdrm
+leak:libgallium
+leak:libglapi

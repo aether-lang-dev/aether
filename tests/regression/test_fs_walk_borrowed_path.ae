@@ -1,0 +1,105 @@
+// Regression: the paths a fs.walk callback collects with string.copy survive
+// the walk (#1641).
+//
+// The callback's `path` points into the single buffer the walk rewrites per
+// entry, so `list.add(paths, path)` stores a pointer whose bytes are gone by
+// the time anything reads them. std/fs/module.ae used to name `list add` as a
+// way to keep a path, which is the opposite of true. This pins the recipe the
+// doc now gives: copy at the boundary, and every stored path still names the
+// file it named inside the callback once the walk has returned.
+
+import std.fs
+import std.list
+import std.string
+import std.io
+
+extern exit(code: int)
+
+main() {
+    println("=== fs.walk: copied paths outlive the walk ===")
+    failures = 0
+
+    tmp = io.getenv("TMPDIR")
+    if tmp == 0 { tmp = io.getenv("TEMP") }
+    if tmp == 0 { tmp = "/tmp" }
+
+    root = "${tmp}/aether_walk_borrow_test"
+    sub = "${root}/nested"
+    e = fs.mkdir_p(sub)
+    if e != "" {
+        println("  FAIL cannot create ${sub}: ${e}")
+        exit(1)
+    }
+
+    // Distinct lengths and contents so a stale pointer cannot pass by luck.
+    we1 = fs.write("${root}/a.txt", "a")
+    we2 = fs.write("${root}/bbbbbbbbbbbb.txt", "b")
+    we3 = fs.write("${sub}/cccccccccccccccccccccccc.txt", "c")
+    if we1 != "" || we2 != "" || we3 != "" {
+        println("  FAIL cannot write the fixture files")
+        exit(1)
+    }
+
+    found = list.new()
+    n, err = fs.walk(root) | path: string, kind: int, depth: int | {
+        if kind == 1 {
+            list.add(found, string.copy(path))
+        }
+        return 0
+    }
+
+    if err != "" {
+        println("  FAIL walk reported: ${err}")
+        exit(1)
+    }
+    println("  PASS walk visited ${n} entries")
+
+    count = list.size(found)
+    if count != 3 {
+        println("  FAIL collected ${count} files, expected 3")
+        failures = failures + 1
+    } else {
+        println("  PASS collected 3 files")
+    }
+
+    // Read the copies only now: the buffer the callback saw is gone, so a
+    // stored borrow reads as garbage (or as the last entry) right here.
+    i = 0
+    while i < count {
+        p, gerr = list.get(found, i)
+        if gerr != "" {
+            println("  FAIL list.get(${i}): ${gerr}")
+            failures = failures + 1
+        } else {
+            path = p
+            if string.starts_with(path, root) == 0 {
+                println("  FAIL entry ${i} is not under the root: '${path}'")
+                failures = failures + 1
+            } else {
+                if fs.exists(path) == 0 {
+                    println("  FAIL entry ${i} no longer names a file: '${path}'")
+                    failures = failures + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if failures == 0 {
+        println("  PASS every copied path still resolves after the walk")
+    }
+
+    list.free(found)
+    fs.delete("${root}/a.txt")
+    fs.delete("${root}/bbbbbbbbbbbb.txt")
+    fs.delete("${sub}/cccccccccccccccccccccccc.txt")
+    fs.delete_dir(sub)
+    fs.delete_dir(root)
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}

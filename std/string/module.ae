@@ -92,6 +92,10 @@ extern string_concat_wrapped(a: string, b: string) -> string
 extern string_length(str: string) -> int
 extern string_char_at(str: string, index: int) -> int
 extern string_equals(a: string, b: string) -> int
+// Lexicographic byte order, sign only: -1 when a sorts before b, 0 when
+// they are equal, 1 when a sorts after. Never a raw byte difference, so
+// `string.compare(x, y) == 1` is a valid test. Binary-safe: embedded NULs
+// take part in the comparison.
 extern string_compare(a: string, b: string) -> int
 
 // String methods
