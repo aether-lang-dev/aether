@@ -170,7 +170,8 @@ void aether_print_config(void) {
     printf("  SIMD:       %s\n", AETHER_HAS_SIMD       ? "YES" : "NO");
     printf("  Affinity:   %s\n", AETHER_HAS_AFFINITY   ? "YES" : "NO");
     printf("  getenv:     %s\n", AETHER_HAS_GETENV     ? "YES" : "NO");
-    printf("  malloc:     %s\n\n", AETHER_HAS_MALLOC   ? "YES" : "NO");
+    printf("  malloc:     %s\n", AETHER_HAS_MALLOC     ? "YES" : "NO");
+    printf("  shell:      %s\n\n", AETHER_HAS_SHELL    ? "YES" : "NO");
 
     printf("PROFILE: %s (msg_pool=%d)\n",
            aether_profile_name(g_aether_config.profile),

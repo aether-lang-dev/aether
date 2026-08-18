@@ -33,6 +33,13 @@
 #include <stdlib.h>
 #include "../utils/aether_compiler.h"
 
+// TargetConditionals.h is what distinguishes iOS/tvOS/watchOS from macOS:
+// every Apple platform defines __APPLE__, so __APPLE__ alone cannot tell a
+// Mac from an iPhone. Needed by AETHER_HAS_SHELL below.
+#if defined(__APPLE__)
+#  include <TargetConditionals.h>
+#endif
+
 // ============================================================================
 // TIER 0: PLATFORM CAPABILITIES (compile-time detection)
 // Auto-detected from target platform. Override with -DAETHER_NO_<FEATURE>.
@@ -64,6 +71,22 @@
 #    define AETHER_HAS_FILESYSTEM 0
 #  else
 #    define AETHER_HAS_FILESYSTEM 1
+#  endif
+#endif
+
+// --- Shell-out (system(3)) ---
+// iOS/tvOS/watchOS mark system() __API_UNAVAILABLE, so referencing it is a
+// hard compile error, not a link-time or runtime failure — the whole
+// translation unit fails. Sandboxed Apple platforms have no shell to exec
+// into, so this is a real capability axis, not a portability wart. popen()
+// and the fork/exec path are NOT affected and stay available.
+#ifndef AETHER_HAS_SHELL
+#  if defined(AETHER_NO_SHELL)
+#    define AETHER_HAS_SHELL 0
+#  elif defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#    define AETHER_HAS_SHELL 0
+#  else
+#    define AETHER_HAS_SHELL 1
 #  endif
 #endif
 
@@ -202,6 +225,7 @@ typedef struct {
     bool has_affinity;
     bool has_getenv;
     bool has_malloc;
+    bool has_shell;
 } AetherPlatformCaps;
 
 static inline AetherPlatformCaps aether_platform_caps(void) {
@@ -215,6 +239,7 @@ static inline AetherPlatformCaps aether_platform_caps(void) {
         .has_affinity   = AETHER_HAS_AFFINITY,
         .has_getenv     = AETHER_HAS_GETENV,
         .has_malloc     = AETHER_HAS_MALLOC,
+        .has_shell      = AETHER_HAS_SHELL,
     };
 }
 

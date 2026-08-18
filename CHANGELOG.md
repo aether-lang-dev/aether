@@ -13,6 +13,29 @@ version number before tagging the release.
 
 ### Added
 
+- **iOS arm64 cross-compilation** — `ae build --target=aarch64-ios`, plus
+  `aarch64-ios-simulator` and `x86_64-ios-simulator`. iOS is the first cross
+  target NOT served by `zig cc`: Apple's SDKs are Xcode-licensed and cannot be
+  redistributed the way zig's musl/mingw bundles are, so these triples shell to
+  `xcrun clang` against the SDK `xcrun` reports (which keeps a relocated Xcode,
+  a beta Xcode, and `DEVELOPER_DIR` all working). The backend is selected off
+  the `-apple-` in the resolved triple, so the object loop, archive step and
+  link step stay shared with the zig path rather than forking into a second
+  pipeline. Requires a macOS host with Xcode; the Command Line Tools alone
+  carry no iPhoneOS SDK and the build says so up front.
+
+  **`--emit=lib` is supported here**, unlike on the zig cross targets, and is
+  the point of the feature: iOS does not run loose executables, so an app built
+  by Xcode wants a loadable library from Aether, not a standalone binary. The
+  dylib is linked `-install_name @rpath/<leaf>` so it loads from inside an
+  `.app` bundle instead of recording the build machine's path. `--emit=obj` and
+  `--emit=csrc` work too (csrc needs no Xcode at all, since it never invokes a
+  toolchain). Device and simulator are separate targets, not a flag on one:
+  same arch, different Mach-O platform (`IOS` vs `IOSSIMULATOR`), and a binary
+  for one will not load on the other. The deployment target is part of the
+  clang triple and defaults to iOS 15.0; `AETHER_IOS_MIN` overrides it. See
+  `docs/cross-ios.md`, tested in `tests/integration/cross_ios/`.
+
 - **`ae build --target=<triple> --emit=csrc` is now allowed** (#1648). The
   cross guard rejected every library-shaped emit mode, justified by a comment
   about "library-shaped C that the executable link rejects" — but `--emit=csrc`
@@ -87,6 +110,18 @@ version number before tagging the release.
   driver's frames to `<unknown module>` that no module suppression can match.
 
 ### Fixed
+
+- **`std.os` now compiles for iOS.** iOS marks `system(3)`
+  `__API_UNAVAILABLE`, so merely naming it failed the compile and took the
+  whole of `std/os/aether_os.c` — and therefore any iOS build of the runtime —
+  down with it. `os.system` now returns `-1` there, the same value the
+  sandbox-denied and spawn-failure paths already use, instead of the module
+  being dropped from the build. Gated on a new Tier-0 platform capability
+  `AETHER_HAS_SHELL` (`runtime/config/aether_optimization_config.h`), which
+  sits alongside `AETHER_HAS_FILESYSTEM` and friends, is 0 on
+  iOS/tvOS/watchOS, and can be forced off anywhere with `-DAETHER_NO_SHELL`.
+  `os.run` / `os.run_capture` (fork+exec, argv-based) are unaffected — only the
+  legacy shell-out is.
 
 - **`ae build --target=<triple> --emit=both` now reports the same up-front
   error as `--emit=lib`** instead of dying at the cross linker. `--emit=both`

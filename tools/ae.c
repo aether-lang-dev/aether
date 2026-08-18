@@ -5243,7 +5243,8 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
                         "aarch64-freebsd, x86_64-freebsd, x86_64-windows, "
-                        "aarch64-windows, wasm32-wasi).\n");
+                        "aarch64-windows, wasm32-wasi, aarch64-ios, "
+                        "aarch64-ios-simulator, x86_64-ios-simulator).\n");
         return 1;
     }
     int is_wasm = target && strcmp(target, "wasm") == 0;
@@ -5285,6 +5286,9 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "             aarch64-linux, x86_64-linux, aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
         fprintf(stderr, "             (freebsd needs AETHER_SYSROOT=<base sysroot>; see aether-crossbuild)\n");
+        fprintf(stderr, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator\n");
+        fprintf(stderr, "             (iOS uses Xcode/xcrun, not zig; macOS host only, --emit=lib ok;\n");
+        fprintf(stderr, "              AETHER_IOS_MIN sets the deployment target, default 15.0)\n");
         return 1;
     }
 
@@ -5406,6 +5410,9 @@ static int cmd_build(int argc, char** argv) {
     // Pre-flight for cross builds: zig provides the backend compiler +
     // target libc/linker, and the program must be dependency-free (PR 1).
     if (is_cross) {
+        // Apple targets (iOS) are driven by Xcode/xcrun rather than zig;
+        // the checks below fork on this.
+        int is_apple_target = cross_target_is_apple(ztriple);
         // Cross builds produce executables or portable C source. --emit=lib /
         // --emit=both / --emit=obj would emit library-shaped C (no main) and
         // then LINK it, which the executable link rejects. Reject those up
@@ -5455,19 +5462,44 @@ static int cmd_build(int argc, char** argv) {
                 target);
             return 1;
         }
-        if (g_emit_lib && !g_emit_csrc && !g_emit_obj) {
+        // --emit=lib/--emit=both link, so they are rejected on the zig
+        // targets. Apple targets DO support them: the link there produces a
+        // Mach-O dylib, which is the primary iOS use case (an iOS app is built
+        // by Xcode, so Aether's job is to hand it a loadable library rather
+        // than a standalone binary iOS would not let you run anyway).
+        if (g_emit_lib && !g_emit_csrc && !g_emit_obj && !is_apple_target) {
             fprintf(stderr,
                 "Error: cross-compilation (--target=%s) supports executables, "
                 "--emit=csrc and --emit=obj; --emit=lib and --emit=both are not "
                 "supported yet.\n", target);
             return 1;
         }
-        /* --emit=csrc never invokes zig at all: it emits portable C and
-         * stops, so requiring zig would invent a dependency the build does
-         * not have — and would block the very case csrc exists to serve,
-         * emitting portable C on a machine with no cross toolchain. Every
-         * other mode (exe, and --emit=obj's `zig cc -c`) does need it. */
-        if (!g_emit_csrc && run_cmd_quiet("zig version") != 0) {
+        /* --emit=csrc never invokes the cross toolchain at all: it emits
+         * portable C and stops, so requiring zig (or Xcode) would invent a
+         * dependency the build does not have — and would block the very case
+         * csrc exists to serve, emitting portable C on a machine with no cross
+         * toolchain. Every other mode (exe, and --emit=obj's `cc -c`) needs it. */
+        if (is_apple_target) {
+            /* The Apple SDKs are Xcode-licensed and not redistributable, so
+             * there is no bundled-toolchain path here: the host must be a Mac
+             * with Xcode. Checking xcrun up front turns "no iOS SDK" into one
+             * clear message rather than a wall of missing-header errors. */
+#ifndef __APPLE__
+            if (!g_emit_csrc) {
+                fprintf(stderr,
+                    "Error: --target=%s requires a macOS host with Xcode installed "
+                    "(the iOS SDK is not redistributable, so it cannot be bundled).\n", target);
+                return 1;
+            }
+#else
+            if (!g_emit_csrc && run_cmd_quiet("xcrun --version") != 0) {
+                fprintf(stderr, "Error: xcrun not found (required to cross-compile for %s).\n",
+                        target);
+                fprintf(stderr, "Install Xcode, then: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer\n");
+                return 1;
+            }
+#endif
+        } else if (!g_emit_csrc && run_cmd_quiet("zig version") != 0) {
             fprintf(stderr, "Error: zig not found on PATH (required to cross-compile for %s).\n",
                     target);
             fprintf(stderr, "Install zig 0.16.0+: https://ziglang.org/download/  (macOS: brew install zig)\n");
@@ -5623,7 +5655,7 @@ static int cmd_build(int argc, char** argv) {
             }
             printf("Built object: %s\n", obj_file);
             printf("       target %s: link it on a matching host, or with the same "
-                   "zig target.\n", target);
+                   "cross target.\n", target);
             return 0;
         }
         const char* objcc = getenv("AE_CC");
@@ -5674,7 +5706,7 @@ static int cmd_build(int argc, char** argv) {
     int build_ret;
     if (is_cross) {
         const char* extra = extra_files[0] ? extra_files : NULL;
-        build_ret = run_cross_build(c_file, exe_file, !quick, extra, ztriple);
+        build_ret = run_cross_build(c_file, exe_file, !quick, extra, ztriple, g_emit_lib != 0);
         if (build_ret != 0) {
             fprintf(stderr, "Build failed.\n");
             return 1;
