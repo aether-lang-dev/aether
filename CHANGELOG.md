@@ -87,6 +87,11 @@ version number before tagging the release.
   side effect still runs in order. The test covering the parse asserted on the
   emitted text and never built it, which is how a program that cannot compile
   passed; it builds and runs the program now.
+- **The panic runtime now compiles for `wasm32-wasi`**: WASI has no POSIX
+  `sigaction` API, so its signal-handler installer is now the same no-op stub
+  used by Windows, Emscripten, and freestanding targets. Cross-build CI and
+  release workflows now use the repository-pinned Zig 0.16.0 toolchain, the
+  first release with the WASI `setjmp` headers needed to compile this runtime.
 
 ## [0.551.0]
 

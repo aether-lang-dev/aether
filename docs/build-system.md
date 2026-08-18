@@ -389,9 +389,9 @@ ae build --target=aarch64-macos hello.ae -o hello      # Mach-O arm64
 ```
 
 Supported triples: `aarch64-macos`, `x86_64-macos`, `aarch64-linux`,
-`x86_64-linux` (the `arm64-`/`amd64-` spellings are accepted too). `zig` must
-be on `PATH` (`brew install zig`, or <https://ziglang.org/download/>); the
-build fails fast with an install hint otherwise.
+`x86_64-linux` (the `arm64-`/`amd64-` spellings are accepted too). Zig 0.16.0
+or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
+`scripts/get-zig.sh`); the build fails fast with an install hint otherwise.
 
 **How it links.** The full runtime and standard library are compiled from
 source for the target and archived, then the program links against that

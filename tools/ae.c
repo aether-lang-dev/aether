@@ -5399,7 +5399,7 @@ static int cmd_build(int argc, char** argv) {
         if (run_cmd_quiet("zig version") != 0) {
             fprintf(stderr, "Error: zig not found on PATH (required to cross-compile for %s).\n",
                     target);
-            fprintf(stderr, "Install zig 0.11+: https://ziglang.org/download/  (macOS: brew install zig)\n");
+            fprintf(stderr, "Install zig 0.16.0+: https://ziglang.org/download/  (macOS: brew install zig)\n");
             return 1;
         }
         char mod[64];

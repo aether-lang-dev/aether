@@ -527,10 +527,9 @@ jobs:
     - name: Setup
       run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
-    # The cross toolchain (pinned zig) + FreeBSD base sysroot (headers + libc)
-    # live in the sibling aether-crossbuild repo, which encodes the provenance-
-    # clean provisioning (zig from its pinned upstream; FreeBSD base from
-    # FreeBSD's published base.txz — BSD-licensed, freely redistributable).
+    # Zig is checksum-pinned by this repo; the FreeBSD base sysroot (headers +
+    # libc) comes from the sibling aether-crossbuild repo, which fetches
+    # FreeBSD's published base.txz (BSD-licensed, freely redistributable).
     - name: Checkout aether-crossbuild
       uses: actions/checkout@v4
       with:
@@ -541,12 +540,12 @@ jobs:
     - name: Provision zig + FreeBSD base sysroot
       id: prov
       run: |
+        ZIG="$($GITHUB_WORKSPACE/scripts/get-zig.sh "$GITHUB_WORKSPACE/.zig")"
         cd crossbuild
-        ./scripts/get-zig.sh
         ./scripts/fetch-freebsd-base.sh x86_64 15
-        ZIG="$(find "$PWD/toolchain" -maxdepth 2 -name zig -type f | head -1)"
         SR="$PWD/bases/x86_64-freebsd15"
         test -x "$ZIG" || { echo "zig not provisioned"; exit 1; }
+        test "$("$ZIG" version)" = 0.16.0 || { echo "expected zig 0.16.0"; exit 1; }
         test -f "$SR/lib/libc.so.7" || { echo "FreeBSD base sysroot missing libc.so.7"; exit 1; }
         echo "zig=$ZIG"       >> "$GITHUB_OUTPUT"
         echo "sysroot=$SR"    >> "$GITHUB_OUTPUT"
@@ -664,4 +663,3 @@ jobs:
           aether-*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
