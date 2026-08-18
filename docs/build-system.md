@@ -414,10 +414,25 @@ no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
 upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
 regex-using program cross-builds self-contained for every target. A
 CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
-vendored copy. Executables only
-(`--emit=lib`/`--emit=both` are rejected for now), and the host must be POSIX
-(Linux/macOS). The generated binary targets another platform, so it is not
-runnable on the build host; copy it to a matching machine (or an emulator).
+vendored copy. Executables **and `--emit=csrc`** (`--emit=lib`, `--emit=both`
+and `--emit=obj` are rejected for now — they link, and the cross link path
+produces executables only), and the host must be POSIX (Linux/macOS). The
+generated binary targets another platform, so it is not runnable on the build
+host; copy it to a matching machine (or an emulator).
+
+`--emit=csrc` is allowed under `--target` because it never links: it writes
+the portable C, its catalog header and the JSON catalog, and stops (#1648).
+That makes it the route to a **cross-compiled linkable library without
+cross-link support** — emit the C here, and let the consumer compile it for
+their target into the `.so` / `.a` / `.wasm` they need.
+
+The emitted C is **target-neutral**, not target-parameterised: platform
+selection stays in `#if __linux__` / `__APPLE__` / `__wasi__` and is resolved
+by the consumer's compiler, which defines those macros for whatever target it
+builds. `--target` therefore does not change the bytes emitted (asserted by
+`tests/integration/emit_csrc_cross/`); it is accepted so one command line
+works for both native and cross consumers. For the same reason csrc under
+`--target` does **not** require `zig` on PATH — there is no link to perform.
 
 The same vendored engine backs two native cases: a build box with no system
 libpcre2-8 (`make` compiles the vendored copy instead of stubbing
@@ -437,7 +452,7 @@ so an installed toolchain never ships a silently-stubbed regex.
 | Hardened | `HARDEN=1` | See "Hardening" section below |
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
-| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables |
+| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc` |
 
 ## Hardening (`HARDEN=1`)
 

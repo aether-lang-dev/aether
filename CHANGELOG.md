@@ -11,7 +11,30 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ae build --target=<triple> --emit=csrc` is now allowed** (#1648). The
+  cross guard rejected every library-shaped emit mode, justified by a comment
+  about "library-shaped C that the executable link rejects" — but `--emit=csrc`
+  never links: it writes the portable C, its catalog header and the JSON
+  catalog, and stops. The rationale simply did not apply to it, and the guard
+  was over-broad. This makes csrc the route to a **cross-compiled linkable
+  library without cross-link support**: emit the C here, and the consumer
+  compiles it for their target into the `.so`/`.a`/`.wasm` they need. The
+  emitted C is target-*neutral* rather than target-parameterised — platform
+  selection stays in `#if __linux__`/`__APPLE__`/`__wasi__` and is resolved by
+  the consumer's compiler — verified byte-identical across four targets in
+  `tests/integration/emit_csrc_cross/`. csrc under `--target` also no longer
+  requires `zig` on PATH, since there is no link to perform.
+
 ### Fixed
+
+- **`ae build --target=<triple> --emit=both` now reports the same up-front
+  error as `--emit=lib`** instead of dying at the cross linker. `--emit=both`
+  re-dispatches as an exe pass followed by a lib pass, so it never reached the
+  cross guard with the lib flag set: the exe pass ran and failed with
+  `ld.lld: error: undefined symbol: main` on a source that has no `main` by
+  design. Pre-existing, and found while unblocking csrc for #1648.
 
 - **The panic runtime now compiles for `wasm32-wasi`**: WASI has no POSIX
   `sigaction` API, so its signal-handler installer is now the same no-op stub

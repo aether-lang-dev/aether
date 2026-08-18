@@ -5107,7 +5107,26 @@ static int cmd_build(int argc, char** argv) {
                  *
                  * If the exe pass fails the lib pass is skipped and
                  * the exe's exit code is returned so the user sees
-                 * the precise error.  */
+                 * the precise error.
+                 *
+                 * Because it re-dispatches, --emit=both never reaches the
+                 * is_cross guard further down with g_emit_lib set: under
+                 * --target the exe pass runs first and dies at the cross
+                 * LINKER with "undefined symbol: main" on a library-shaped
+                 * source. Reject it here instead, where the flag is still
+                 * visible, so the user gets the same up-front diagnostic as
+                 * --emit=lib rather than an ld.lld error naming a symbol they
+                 * never wrote. (Pre-existing; #1648 only unblocks csrc.)  */
+                for (int j = 0; j < argc; j++) {
+                    if (strncmp(argv[j], "--target=", 9) == 0 &&
+                        strcmp(argv[j] + 9, "native") != 0) {
+                        fprintf(stderr,
+                            "Error: cross-compilation (%s) supports executables and "
+                            "--emit=csrc only; --emit=lib, --emit=both and --emit=obj "
+                            "are not supported yet.\n", argv[j]);
+                        return 1;
+                    }
+                }
                 int o_idx = -1;
                 for (int j = 0; j < argc - 1; j++) {
                     if (strcmp(argv[j], "-o") == 0) { o_idx = j + 1; break; }
@@ -5378,16 +5397,37 @@ static int cmd_build(int argc, char** argv) {
     // Pre-flight for cross builds: zig provides the backend compiler +
     // target libc/linker, and the program must be dependency-free (PR 1).
     if (is_cross) {
-        // Cross builds produce executables only for now; --emit=lib /
-        // --emit=both would emit library-shaped C (no main) that the
-        // executable link rejects. Reject up front, like unknown targets.
-        if (g_emit_lib) {
+        // Cross builds produce executables or portable C source. --emit=lib /
+        // --emit=both / --emit=obj would emit library-shaped C (no main) and
+        // then LINK it, which the executable link rejects. Reject those up
+        // front, like unknown targets.
+        //
+        // --emit=csrc is deliberately allowed through (#1648). It sets
+        // g_emit_lib for its codegen shape (the same aether_<name> catalog as
+        // --emit=lib), but it never invokes gcc: the build path returns as soon
+        // as the .c/.h/catalog are written. The "executable link rejects it"
+        // rationale therefore does not apply — there is no link.
+        //
+        // The emitted C is target-NEUTRAL, not target-parameterised: platform
+        // selection stays in #if __linux__ / __APPLE__ / __wasi__ and is
+        // resolved by the consumer's own compiler, which defines those macros
+        // for whatever target it builds. That is what makes csrc the
+        // cross-linkable-lib path that needs no cross-link support — the
+        // consumer compiles the .so/.a/.wasm themselves. --target therefore
+        // does not change the bytes emitted; it is accepted so one command
+        // line works for both native and cross consumers.
+        if (g_emit_lib && !g_emit_csrc) {
             fprintf(stderr,
-                "Error: cross-compilation (--target=%s) supports executables only; "
-                "--emit=lib and --emit=both are not supported yet.\n", target);
+                "Error: cross-compilation (--target=%s) supports executables and "
+                "--emit=csrc only; --emit=lib, --emit=both and --emit=obj are not "
+                "supported yet.\n", target);
             return 1;
         }
-        if (run_cmd_quiet("zig version") != 0) {
+        /* zig is the cross LINKER. --emit=csrc never links, so requiring zig
+         * for it would invent a dependency the build does not have — and one
+         * that would block the very case csrc exists to serve: emitting
+         * portable C on a machine that has no cross toolchain at all. */
+        if (!g_emit_csrc && run_cmd_quiet("zig version") != 0) {
             fprintf(stderr, "Error: zig not found on PATH (required to cross-compile for %s).\n",
                     target);
             fprintf(stderr, "Install zig 0.16.0+: https://ziglang.org/download/  (macOS: brew install zig)\n");
