@@ -9,28 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.551.0]
+## [current]
 
 ### Added
-
-- **`make check-docs`: the documentation's examples are compiled** (#1500,
-  #1522). Every ```aether block in `docs/` and the README now says what it is:
-  bare means a complete program and CI compiles it, `,fragment` means an
-  excerpt (no `main`, or it uses names an earlier block introduced, or it
-  contains a literal `...`), `,fails` means a deliberate counter-example that
-  CI asserts still does not compile. 170 complete blocks, 3 counter-examples,
-  465 fragments. Reintroducing `http.server_listen` into a doc now fails the
-  build, which is the acceptance test #1522 asked for.
-
-  Stdlib module doc comments cannot be compiled (they are fragments by
-  design), so they get two static checks instead: a block introduced by a word
-  that is not a keyword (`loop { ... }` is not Aether), and a documented
-  `mod.fn(` the module does not have. The false-positive rules matter more
-  than the checks and are written down in the script: the module-prefix
-  convention (`string.concat` is `string_concat`), every definition form
-  (plain, `fn`, `builder`, `@extern`), comments stripped from inside
-  `exports(...)`, and lower-case-only call names so a metavariable like
-  `string.seq_X(...)` is not read as a function.
 
 - **`make contrib-check-lsan`: contrib/vulkan is leak-gated in CI** (#1507).
   The module rendered on the Linux leg for correctness only, because the CI
@@ -51,37 +32,7 @@ version number before tagging the release.
   at exit while the loader unloads the ICD before then, which resolves the
   driver's frames to `<unknown module>` that no module suppression can match.
 
-- **`make check-contrib-modules`: every non-host contrib module is
-  type-checked** (#1442). `make contrib` build-probes the C shims and
-  `contrib-check` runs the modules that have tests, but a module whose native
-  library is absent skips both, and nothing else fed its `module.ae` to the
-  compiler: tinyweb's builder-DSL serving path was broken for a long stretch
-  with CI green throughout. Type checking needs no native library, so all nine
-  modules are covered on every box.
-
-### Changed
-
-- **17 more `std` module tests co-located** in
-  `std/<module>/test_<module>.ae`, continuing the move started in the
-  previous release: audio, bytes, cbor, clapae, config, encoding, hash,
-  language, message, msgpack, number, regex, schema, strbuilder, time,
-  url, worker. All are pure renames — no test content changed — and each
-  was selected by checking it actually imports its namesake module rather
-  than by filename alone.
-  Compiler and codegen regressions that merely *use* a std module (the
-  `test_string_leak_*` and `test_return_escape_*` families, for instance)
-  stay in `tests/regression/`: they exercise the heap tracker and closure
-  lowering, not the module's API.
-
 ### Fixed
-- **Documentation that does not compile**, found by the new gates rather than
-  by hand: `std.http.client`'s header documented `client.send(...)` when the
-  function is `send_request` (the same file says so 245 lines further down);
-  the language reference taught 25 top-level clauses and externs with trailing
-  semicolons, which the parser rejects (`factorial(0) -> 1;`); and
-  `std.cas`'s example used `if cas.has(digest)` where `has` returns `int`,
-  the non-boolean-`if` mistake a previous PR fixed one instance of.
-
 
 - **`string.compare` returned `strcmp`'s byte difference, not the documented
   `-1, 0, 1`** (#1640). Two doc pages state the contract; the implementation
@@ -136,6 +87,61 @@ version number before tagging the release.
   side effect still runs in order. The test covering the parse asserted on the
   emitted text and never built it, which is how a program that cannot compile
   passed; it builds and runs the program now.
+
+## [0.551.0]
+
+### Added
+
+- **`make check-docs`: the documentation's examples are compiled** (#1500,
+  #1522). Every ```aether block in `docs/` and the README now says what it is:
+  bare means a complete program and CI compiles it, `,fragment` means an
+  excerpt (no `main`, or it uses names an earlier block introduced, or it
+  contains a literal `...`), `,fails` means a deliberate counter-example that
+  CI asserts still does not compile. 170 complete blocks, 3 counter-examples,
+  465 fragments. Reintroducing `http.server_listen` into a doc now fails the
+  build, which is the acceptance test #1522 asked for.
+
+  Stdlib module doc comments cannot be compiled (they are fragments by
+  design), so they get two static checks instead: a block introduced by a word
+  that is not a keyword (`loop { ... }` is not Aether), and a documented
+  `mod.fn(` the module does not have. The false-positive rules matter more
+  than the checks and are written down in the script: the module-prefix
+  convention (`string.concat` is `string_concat`), every definition form
+  (plain, `fn`, `builder`, `@extern`), comments stripped from inside
+  `exports(...)`, and lower-case-only call names so a metavariable like
+  `string.seq_X(...)` is not read as a function.
+
+- **`make check-contrib-modules`: every non-host contrib module is
+  type-checked** (#1442). `make contrib` build-probes the C shims and
+  `contrib-check` runs the modules that have tests, but a module whose native
+  library is absent skips both, and nothing else fed its `module.ae` to the
+  compiler: tinyweb's builder-DSL serving path was broken for a long stretch
+  with CI green throughout. Type checking needs no native library, so all nine
+  modules are covered on every box.
+
+### Changed
+
+- **17 more `std` module tests co-located** in
+  `std/<module>/test_<module>.ae`, continuing the move started in the
+  previous release: audio, bytes, cbor, clapae, config, encoding, hash,
+  language, message, msgpack, number, regex, schema, strbuilder, time,
+  url, worker. All are pure renames — no test content changed — and each
+  was selected by checking it actually imports its namesake module rather
+  than by filename alone.
+  Compiler and codegen regressions that merely *use* a std module (the
+  `test_string_leak_*` and `test_return_escape_*` families, for instance)
+  stay in `tests/regression/`: they exercise the heap tracker and closure
+  lowering, not the module's API.
+
+### Fixed
+- **Documentation that does not compile**, found by the new gates rather than
+  by hand: `std.http.client`'s header documented `client.send(...)` when the
+  function is `send_request` (the same file says so 245 lines further down);
+  the language reference taught 25 top-level clauses and externs with trailing
+  semicolons, which the parser rejects (`factorial(0) -> 1;`); and
+  `std.cas`'s example used `if cas.has(digest)` where `has` returns `int`,
+  the non-boolean-`if` mistake a previous PR fixed one instance of.
+
 
 - **contrib.host.ruby segfaulted inside libruby on Ruby 3.4** (#1618). The
   bridge baked `Qnil` in as `(VALUE)0x08` with a note that a change was
