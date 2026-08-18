@@ -21,6 +21,22 @@ version number before tagging the release.
 
 ### Changed
 
+- **The CachyOS nightly now records the version of every dependency it tested
+  against.** Nothing in the repo pins these, and pinning would be the wrong fix
+  — the box is rolling-release precisely so it runs ahead of CI and finds
+  breakage early. What was missing was the record: without it a green run does
+  not say what it tested, and a red run the morning after `pacman -Syu` reads
+  as a code regression rather than an upstream bump. Each run now writes
+  `deps_<stamp>.tsv` and publishes it beside the step timings — interpreter
+  versions, `pacman -Q` for the libraries that have no `--version`, and the
+  Factor fork's commit, since it is built from source. Measured on the box:
+  Racket 9.2, Lua 5.5.0, Python 3.14.6, Node 26.4.0, OpenJDK 26.0.2, Go 1.26.5.
+  Racket 9.3 shipped 2026-08-13 while the box was on 9.2, and the Racket CS
+  embedding surface the bridge compiles against is macro-based and has moved
+  across majors — exactly the upgrade this table makes legible. Reporting is
+  all the step does; whether a missing dep is fatal remains the dep gate's
+  decision.
+
 - **The CachyOS nightly now fails hard on every contrib skip.** The box is
   provisioned with every contrib dependency, so a step that SKIPs there is a
   silently shrinking test surface rather than an honest report of an absent

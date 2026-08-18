@@ -21,12 +21,15 @@ half of the coverage gap that actually catches that class of bug.
 2. A **fail-on-missing-deps** gate — a dedicated build box should test
    everything, so an absent contrib dependency is a provisioning bug that turns
    the run RED (the opposite of `contrib_build.sh`'s probe-and-skip).
-3. `make ci` → **`make install` + a freshness check** → `make contrib` → `make
+3. **Records the version of every third-party dependency** it built and tested
+   against (see below) — captured right after the gate, so a run that later
+   fails still says what it was running.
+4. `make ci` → **`make install` + a freshness check** → `make contrib` → `make
    contrib-host-check` → **a no-skipped-cases gate over the host specs** → a
    `contrib` `ae check` sweep → `make contrib-check-valgrind` (build + run
    every contrib `test_*.ae`, valgrind-gating the leak-clean ones), each timed
    (ms) and recorded.
-4. Publishes a topline pass/fail table to the **`nightly-results`** orphan
+5. Publishes a topline pass/fail table to the **`nightly-results`** orphan
    branch (no shared history, no CI triggered) and writes a dated summary + log
    locally (last 14 kept).
 
@@ -78,6 +81,46 @@ is covered here automatically and cannot be forgotten.
 
 `CONTRIB_HOST_STRICT` defaults to `0`, so GitHub CI and dev boxes are
 unaffected — only this nightly sets it.
+
+### Dependency versions: recorded, not pinned
+
+Nothing in the repo pins any contrib dependency. `probe_racket` checks only
+that `chezscheme.h` and `racketcs.h` *exist*; the dep gate checks
+`command -v racket`; the `pacman -S` line in the header is unversioned.
+
+**That is deliberate.** This box is rolling-release precisely so it runs
+*ahead* of CI and finds breakage early — the same rationale as its GCC 16
+against CI's GCC 11. Pinning Racket would mean never learning that a new
+Racket broke the embedding surface.
+
+What was missing is the **record**. Without it a green run does not say what
+it tested, and a red run the morning after `pacman -Syu` reads as a code
+regression rather than an upstream bump — a bisect nobody should have to do.
+So each run writes `deps_<stamp>.tsv` and publishes it as a table beside the
+step timings.
+
+Measured on the box (2026-08-18), which shows why this matters:
+
+| dependency | version |
+|---|---|
+| `racket` | 9.2 |
+| `lua` | 5.5.0 |
+| `python` | 3.14.6 |
+| `node` | 26.4.0 |
+| `java` | openjdk 26.0.2 |
+| `go` | 1.26.5 |
+| `tinygo` | 0.41.1 (LLVM 20.1.1) |
+| `factor-fork` | `91a3639cf6` (a commit — it is built from source) |
+
+Racket 9.3 shipped 2026-08-13 while the box was on 9.2. The Racket CS
+embedding surface the bridge compiles against (`chezscheme.h`'s `Snil`,
+`Scons`, `Smake_bytevector`) is macro-based and has moved across majors, so
+that upgrade is exactly the kind this table makes legible.
+
+Reporting is all this step does. Whether a missing dep is fatal stays the dep
+gate's decision — duplicating that verdict here would give two sources of
+truth for one condition. A dep that is absent records `(absent)` and the step
+still passes.
 
 ### Why the nightly installs, and why it fetches tags
 

@@ -43,6 +43,10 @@ LOG="$OUTDIR/nightly_${STAMP}.log"
 SUMMARY="$OUTDIR/nightly_${STAMP}.summary.txt"
 RESULTS_TSV="$OUTDIR/results_${STAMP}.tsv"
 STEPS_TSV="$OUTDIR/steps_${STAMP}.tsv"
+# Versions of the third-party deps this run built and tested against. Nothing
+# pins them (see capture_dep_versions), so recording them is what makes an
+# upstream bump distinguishable from a code regression.
+DEPS_TSV="$OUTDIR/deps_${STAMP}.tsv"
 # Orphan branch (no shared history, no CI) used purely to publish topline
 # results. Set AETHER_NIGHTLY_PUBLISH=0 to skip the push.
 RESULTS_BRANCH="${AETHER_NIGHTLY_BRANCH:-nightly-results}"
@@ -246,6 +250,74 @@ render_row() { # <name> <PASS|FAIL> <ms>
     fi
 }
 
+# Capture the version of every third-party dependency the contrib modules
+# build and test against, one "<name>\t<version>" line per dep.
+#
+# Why this exists: nothing in the repo PINS any of these, and pinning would be
+# the wrong fix — the box is rolling-release precisely so it runs AHEAD of CI
+# and finds breakage early (the same rationale as its GCC 16 vs CI's GCC 11).
+# What was missing is the RECORD. Without it a green run does not say what it
+# tested, and a red run the morning after `pacman -Syu` looks like a code
+# regression rather than an upstream bump — which is a bisect nobody should
+# have to do.
+#
+# Live example: Racket 9.3 shipped 2026-08-13 while this box was on 9.2. The
+# Racket CS embedding surface the bridge compiles against (chezscheme.h's
+# Snil / Scons / Smake_bytevector) is macro-based and has moved across majors,
+# so that upgrade is exactly the kind this table makes legible.
+#
+# Every probe is guarded: a dep that is absent records "(absent)" rather than
+# failing. Reporting is this function's whole job — the dep GATE (step 1) is
+# what decides whether missing is fatal, and duplicating that verdict here
+# would just give two sources of truth for one condition.
+dep_version() {
+    name="$1"; shift
+    v="$("$@" 2>/dev/null | head -1)"
+    [ -n "$v" ] || v="(absent)"
+    printf '%s\t%s\n' "$name" "$v"
+}
+
+capture_dep_versions() {
+    : > "$DEPS_TSV"
+    {
+        # `racket --version` greets rather than reports ("Welcome to Racket
+        # v9.2 [cs]."); (version) prints the bare number.
+        dep_version "racket"   racket -e '(display (version))'
+        dep_version "tclsh"    sh -c 'echo "puts [info patchlevel]" | tclsh'
+        dep_version "go"       go version
+        dep_version "tinygo"   tinygo version
+        dep_version "python"   python3 --version
+        dep_version "ruby"     ruby --version
+        dep_version "perl"     sh -c 'perl -e "print \$^V"'
+        dep_version "lua"      sh -c 'lua -v 2>&1'
+        dep_version "node"     node --version
+        dep_version "java"     sh -c 'java -version 2>&1'
+        # Libraries have no --version; take the package manager's record. Also
+        # covers the two the bridges dlopen rather than link (duktape, expat).
+        if command -v pacman >/dev/null 2>&1; then
+            for pkg in sqlite expat duktape ffmpeg racket tcl; do
+                v="$(pacman -Q "$pkg" 2>/dev/null | awk '{print $2}')"
+                [ -n "$v" ] || v="(absent)"
+                printf 'pkg:%s\t%s\n' "$pkg" "$v"
+            done
+        fi
+        # The Factor fork is built from source, so its identity is a commit,
+        # not a version. AETHER_FACTOR_SONAME points into that tree.
+        if [ -n "${AETHER_FACTOR_SONAME:-}" ] && [ -e "${AETHER_FACTOR_SONAME}" ]; then
+            fdir="$(dirname "$AETHER_FACTOR_SONAME")"
+            fv="$(git -C "$fdir" log --oneline -1 2>/dev/null)"
+            [ -n "$fv" ] || fv="(present, not a git tree)"
+            printf 'factor-fork\t%s\n' "$fv"
+        else
+            printf 'factor-fork\t%s\n' "(absent)"
+        fi
+    } >> "$DEPS_TSV" 2>/dev/null
+    # Echo into the log so the versions are visible in the run output too, not
+    # only in the published table.
+    sed 's/^/  /' "$DEPS_TSV"
+    return 0
+}
+
 publish_results() {
     [ "${AETHER_NIGHTLY_PUBLISH:-1}" = "0" ] && { echo "  (publish skipped)"; return 0; }
 
@@ -279,6 +351,23 @@ publish_results() {
                 [ -z "$n" ] && continue
                 render_row "$n" "$s" "$t"
             done < "$STEPS_TSV"
+        fi
+        echo ""
+        echo "### Dependency versions"
+        echo ""
+        echo "Nothing pins these — the box is rolling-release on purpose, so it"
+        echo "runs ahead of CI. Recorded so an upstream bump is distinguishable"
+        echo "from a code regression."
+        echo ""
+        echo "| dependency | version |"
+        echo "|------------|---------|"
+        if [ -s "$DEPS_TSV" ]; then
+            while IFS="$(printf '\t')" read -r n v; do
+                [ -z "$n" ] && continue
+                echo "| \`$n\` | $v |"
+            done < "$DEPS_TSV"
+        else
+            echo "| _(not captured)_ | — |"
         fi
         echo ""
         echo "### Contrib module type-check (\`ae check\`)"
@@ -538,6 +627,9 @@ fails=0
     # per-module sweep. (A failed dependency gate must turn the dashboard red.)
     : > "$STEPS_TSV"
     run_and_record "contrib dependency gate" require_deps
+    # Recorded right after the gate, so the versions are captured even if a
+    # later step fails — that is exactly the run where you want to know them.
+    run_and_record "dep versions" capture_dep_versions
     run_and_record "make ci" make_ci_step
     # Refresh $HOME/.local from the tree we just built, then prove it took.
     # Runs AFTER `make ci` (which builds everything) and BEFORE the sweeps, so
