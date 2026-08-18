@@ -215,7 +215,7 @@ Plain string literals pass through unchanged, `string_retain` is a no-op on valu
 
 Both sorts reorder the backing slots only, no element is copied or freed, so they sidestep the get/set aliasing trap of a hand-rolled swap (`string_list_get` returns the slot's internal pointer; a naive adjacent swap would free a slot another borrowed pointer still aliases).
 
-```aether
+```aether,fragment
 names = string_list_new()
 string_list_add(names, "Charlie")
 string_list_add(names, "alice")
@@ -456,7 +456,7 @@ main() {
 
 The headline use case is the RLE-overlap pattern that immutable concat can't express:
 
-```aether
+```aether,fragment
 // Pre-fill with [A, B], then expand to [A, B, A, B, A, B] in one call.
 b = bytes.new(8)
 bytes.set(b, 0, 65)
@@ -497,7 +497,7 @@ out = bytes.finish(b, 6)                  // "ABABAB"
 
 The build-then-walk pattern needed by binary-codec encoders (svndiff and similar) is what `bytes.get` / `bytes.{set,get}_le32` are for, accumulate packed-int ops into the same buffer via `set_le32` at known offsets, then walk and read each back at finish time:
 
-```aether
+```aether,fragment
 b = bytes.new(0)
 bytes.set_le32(b, 0,  action)    // op0
 bytes.set_le32(b, 4,  length)
@@ -678,7 +678,7 @@ main() {
 
 Pattern-match `[]` and `[h|t]` arms work directly against `*StringSeq` matched expressions:
 
-```aether
+```aether,fragment
 match s {
     []      -> { /* end of list */ }
     [h | t] -> { println(h); walk(t) }   // h: string, t: *StringSeq
@@ -724,7 +724,7 @@ Self-append accumulation re-copies everything you have built so far on
 every iteration, so a loop that appends `n` pieces costs O(n²) in total
 bytes copied:
 
-```aether
+```aether,fragment
 // SLOW: quadratic. Each iteration allocates a fresh buffer and copies
 // the entire accumulation into it.
 d = ""
@@ -744,7 +744,7 @@ Two linear-cost escapes, pick by shape.
 **Appending piece by piece**: use `std.strbuilder`, which grows one
 buffer with amortized doubling:
 
-```aether
+```aether,fragment
 import std.strbuilder
 
 b = strbuilder.new(0)            // 0 = default capacity hint
@@ -763,7 +763,7 @@ doesn't route through an intermediate string.
 **Joining a sequence you already have**: use `string.join`, which
 sizes one exact buffer in a first pass and fills it in a second:
 
-```aether
+```aether,fragment
 d = string.join(parts, ", ")     // parts: *StringSeq
 ```
 
@@ -779,7 +779,7 @@ Both the **stdlib** functions in the table above (`string.concat`, `string.subst
 
 A **user-defined `-> string` function** is recognised as heap-allocated iff every return statement in its body yields a heap-string-expression (recursive structural check with cycle detection):
 
-```aether
+```aether,fragment
 my_concat(a: string, b: string) -> string {
     return string.concat(a, b)        // RHS is heap → my_concat is heap-returning
 }
@@ -896,7 +896,7 @@ Raw externs: `dir_create_raw`, `dir_delete_raw`, `dir_list_raw`, `dir_list_count
 
 The building blocks beyond one-level listing: visit a whole tree, and learn when a directory changes underneath you.
 
-```aether
+```aether,fragment
 import std.fs
 
 // Walk: the callback sees every entry with its kind and depth.
@@ -962,7 +962,7 @@ main() {
 them and adds the accessors that need a bit more plumbing, durable
 writes, atomic rename, one-shot stat, binary-safe read.
 
-```aether
+```aether,fragment
 import std.fs
 
 main() {
@@ -996,7 +996,7 @@ main() {
 
 The four wrappers below return a three-element tuple `(value, kind: int, message: string)` instead of the usual `(value, err)` shape. `kind` is one of the `KIND_*` constants exported from `std.fs`; switch on it to discriminate failure modes programmatically without parsing English. `kind == fs.KIND_OK` (the integer `0`) means success; the message stays empty.
 
-```aether
+```aether,fragment
 import std.fs
 
 bytes, kind, msg = fs.copy("a.bin", "b.bin")
@@ -1051,7 +1051,7 @@ CGI-style ergonomics, one `.ae` script file per route, without paying the per-re
 
 The script must export an `aether_script_handle` symbol with the canonical `HttpHandler` signature, marked `@c_callback` so the emitted C uses the unmangled name:
 
-```aether
+```aether,fragment
 // greeting.ae
 import std.http
 
@@ -1204,7 +1204,7 @@ Raw extern: `json_parse_raw`.
 | `KIND_OUT_OF_MEMORY` | 2 | arena allocation failed during parse |
 | `KIND_INVALID_INPUT` | 3 | NULL / empty input handed to `parse_strict` |
 
-```aether
+```aether,fragment
 import std.json
 
 main() {
@@ -1678,7 +1678,7 @@ function-pointer chain, no Aether-side dispatch overhead in the
 hot path. Aether-side factory wrappers allocate the per-middleware
 config struct and register it.
 
-```aether
+```aether,fragment
 import std.http
 import std.http.middleware
 
@@ -1726,7 +1726,7 @@ semantics, per-upstream token-bucket rate limit, active drain,
 W3C Trace-Context propagation, Prometheus 0.0.4 metrics, and
 Hop-by-Hop header handling per RFC 7230.
 
-```aether
+```aether,fragment
 import std.http
 import std.http.proxy
 
@@ -1857,7 +1857,7 @@ in. These knobs relax that per request; precedence for proxy is
 
 **Streaming large response bodies:** `send_request` materialises the whole body into one `AetherString`, fine for JSON APIs, but for a multi-megabyte download that is O(Content-Length) memory. `send_stream` instead reads only the header block, keeps the connection open, and hands back a response you drain window-by-window with `response_read`, so peak memory is one window regardless of body size. `Content-Length` and `Transfer-Encoding: chunked` bodies are both decoded transparently (you always see payload bytes, never chunk framing). Redirects are still followed if enabled; only the final hop streams. Always `response_free` the response when done (it closes the connection), even if you stop reading early.
 
-```aether
+```aether,fragment
 import std.http
 import std.http.client
 
@@ -1952,7 +1952,7 @@ reactor to Aether code so an actor can suspend on a file descriptor
 the scheduler delivers an `IoReady { fd, events }` message to the
 actor's mailbox and resumes it on any available core.
 
-```aether
+```aether,fragment
 import std.net
 
 message IoReady { fd: int, events: int }
@@ -2297,7 +2297,7 @@ cooperative builds, pool sizing) is documented at the top of
 - `worker.drain(max)` / `worker.pending()` - Manual pump and outstanding
   count, for hosts driving their own loop.
 
-```aether
+```aether,fragment
 lengths = worker.map(paths, |p: ptr| { return measure(p) })
 ```
 
@@ -2359,7 +2359,7 @@ main() {
     if err != "" { return }
     println("published: ${digest}")           // hex sha256
 
-    if cas.has(digest) {
+    if cas.has(digest) == 1 {
         gerr = cas.get(digest, "./fetched.so")
         // fetched.so's bytes hash to `digest`, verified on the way out.
     }
@@ -2415,7 +2415,7 @@ Storage: a single process-global hashmap protected by a reader/writer lock. Impl
 
 ### `std.actors` name → actor_ref registry
 
-```aether
+```aether,fragment
 import std.actors
 
 actor Auditor {

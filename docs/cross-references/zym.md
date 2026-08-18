@@ -374,7 +374,7 @@ hosting Aether currently requires a separate process. The README and
 Lifting Zym's pattern would give you **in-process aether-in-aether** with
 the same value-only isolation. Concretely:
 
-```aether
+```aether,fragment
 // Hypothetical Aether API
 import std.sandbox
 

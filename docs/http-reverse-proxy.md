@@ -88,7 +88,7 @@ execution order; a mount whose method or path pattern does not match
 passes through to the next middleware, so narrower carve-outs should
 be registered first.
 
-```aether
+```aether,fragment
 proxy.mount_match(server, "/repos/:repo/info", primary_pool, primary_opts, "GET,HEAD")
 proxy.mount_methods(server, "/repos", primary_pool, write_opts, "POST,PUT,DELETE")
 proxy.mount_methods(server, "/repos", replica_pool, read_opts, "GET,HEAD")
@@ -111,7 +111,7 @@ to a primary while other reads fan out to replicas.
 
 "Eligible" means: `healthy && !draining && breaker not OPEN && inflight < max_inflight_per_up && rate_limit admits`.
 
-```aether
+```aether,fragment
 // cookie-hash sticky: bind requests carrying SESSIONID=foo to the
 // same upstream every time. Different cookie values may hash to
 // different upstreams; identical values are deterministic.
@@ -191,7 +191,7 @@ hour for v1 conservatism), else `default_ttl_sec`. `s-maxage` and
 
 Off by default. Opt in with:
 
-```aether
+```aether,fragment
 proxy.opts_set_retry_policy(opts, 3, 100)   // max_retries=3, backoff_base_ms=100
 ```
 
@@ -218,7 +218,7 @@ no eligible upstream remains, the proxy returns 503 with
 
 Off by default. Configure once on the pool:
 
-```aether
+```aether,fragment
 proxy.rate_limit_set(pool, 200, 50)   // max_rps=200, burst=50
 ```
 
@@ -237,7 +237,7 @@ connection bursts (a small multiple of `max_rps` is conservative).
 
 Take a host out of rotation without removing it from the pool:
 
-```aether
+```aether,fragment
 proxy.upstream_drain(pool,   "http://10.0.0.1:8080")   // stop sending new requests
 proxy.upstream_undrain(pool, "http://10.0.0.1:8080")   // re-admit
 ```
@@ -252,7 +252,7 @@ health-check thread owns).
 
 Two modes per mount:
 
-```aether
+```aether,fragment
 proxy.opts_set_trace_inject(opts, 0)   // default, passthrough
 proxy.opts_set_trace_inject(opts, 1)   // generate when missing
 ```
@@ -271,13 +271,13 @@ trace context even from trace-naïve clients.
 
 ## Prometheus metrics
 
-```aether
+```aether,fragment
 proxy.pool_metrics_text(pool) -> string    // 0.0.4 exposition
 ```
 
 Wire it to a route to expose Grafana-scrapable metrics:
 
-```aether
+```aether,fragment
 handle_metrics(req: ptr, res: ptr, ud: ptr) {
     body = proxy.pool_metrics_text(ud)
     http.response_set_status(res, 200)
@@ -385,7 +385,7 @@ Each carries an `X-Aether-Proxy-Error` header for log aggregators:
 
 ## Reference
 
-```aether
+```aether,fragment
 import std.http.proxy
 
 // ---- Pool + upstream lifecycle

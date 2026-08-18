@@ -47,7 +47,7 @@ Functions are called using **namespace-style syntax**: `namespace.function()`
 
 Import modules with the `import` statement:
 
-```aether
+```aether,fragment
 import std.string       // String functions
 import std.file         // File operations
 import std.dir          // Directory operations
@@ -85,7 +85,7 @@ main() {
 
 Or use `extern` for direct C bindings:
 
-```aether
+```aether,fragment
 extern my_c_function(x: int) -> ptr
 ```
 
@@ -147,7 +147,7 @@ typedef struct AetherString {
 
 All parsers return `(value, err)` tuples. Empty `err` means success.
 
-```aether
+```aether,fragment
 n, err = string.to_int("42")
 if err != "" { println("bad: ${err}"); return }
 println(n)
@@ -252,7 +252,7 @@ Raw externs: `dir_create_raw`, `dir_delete_raw`, `dir_list_raw`.
 
 The primary I/O functions in Aether are `print()` and `println()`:
 
-```aether
+```aether,fragment
 print("Hello, World!\n")
 println("Hello, World!")       // same, with automatic newline
 println("Value: ${x}")         // string interpolation
@@ -270,7 +270,7 @@ println("Float: ${pi}")
 
 All operations that can fail return an error string ("" on success).
 
-```aether
+```aether,fragment
 content, err = io.read_file("data.txt")
 if err != "" { println("failed: ${err}"); return }
 
@@ -629,7 +629,7 @@ See `examples/stdlib/http-client.ae` for a runnable version.
 
 All wrappers return `("", err)` for transport failures and for any non-2xx HTTP status. If you need status codes or headers, use the raw extern + accessor pattern:
 
-```aether
+```aether,fragment
 response = http.get_raw(url)
 status = http.response_status(response)
 body = http.response_body(response)
@@ -855,7 +855,7 @@ descriptor without blocking any OS thread. When the fd becomes ready,
 the scheduler delivers an `IoReady` message to the actor's mailbox
 and resumes it on any available core.
 
-```aether
+```aether,fragment
 import std.net
 
 message IoReady { fd: int, events: int }
@@ -907,7 +907,7 @@ to get a current figure for your environment.
 
 ### ArrayList
 
-```aether
+```aether,fragment
 import std.list
 
 main() {
@@ -935,7 +935,7 @@ Raw extern: `list_add_raw` (returns 1/0).
 
 ### HashMap
 
-```aether
+```aether,fragment
 import std.map
 
 main() {
@@ -966,7 +966,7 @@ Raw extern: `map_put_raw` (returns 1/0).
 Unique strings, backed by the `std.map` hash table. Items are copied on
 insert. O(1) average lookup.
 
-```aether
+```aether,fragment
 import std.set
 
 visited = set.new()
@@ -993,7 +993,7 @@ Binary heap over `(priority, item)` pairs; lowest priority pops first.
 Push/pop are O(log n), peek/size O(1). The queue does **not** own items,
 it never frees them.
 
-```aether
+```aether,fragment
 import std.pqueue
 
 jobs = pqueue.new()

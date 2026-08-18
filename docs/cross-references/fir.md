@@ -457,7 +457,7 @@ type Point(x: I32, y: I32)` synthesises a `Point_eq(a: Point, b: Point) bool`. T
   obvious starter set).
 
 **Concrete API shape for Aether (suggested).**
-```aether
+```aether,fragment
 #[derive(eq, format)]
 struct Point { x: int, y: int }
 

@@ -146,7 +146,7 @@ main() {
 
 ### Array Types
 
-```aether
+```aether,fragment
 int[10] numbers;           // Array of 10 integers
 string[5] names;           // Array of 5 strings
 float[100] values;         // Array of 100 floats
@@ -154,7 +154,7 @@ float[100] values;         // Array of 100 floats
 
 **Array-to-pointer decay.** A named fixed-size array decays to a pointer to its first element in pointer context, when assigned to an inferred binding, passed as a `ptr`-typed argument, or compared against a pointer (the same rule C uses):
 
-```aether
+```aether,fragment
 byte[128] static_ids
 ids = static_ids           // `ids` is inferred as a `ptr` (decays), not an array
 heap = null
@@ -203,7 +203,7 @@ Integer literals support hex, octal, and binary notation. Underscore separators 
 | Octal | `0o` / `0O` | `0o377` | 255 |
 | Binary | `0b` / `0B` | `0b1111_1111` | 255 |
 
-```aether
+```aether,fragment
 mask = 0xFF
 flags = 0b1010_0101
 perms = 0o755
@@ -218,7 +218,7 @@ All numeric literal formats work with bitwise operators and in any expression co
 
 Variables support both explicit types and automatic type inference:
 
-```aether
+```aether,fragment
 // Type inference (recommended), bare assignment is the canonical form
 x = 10
 y = 20
@@ -260,7 +260,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 
 The `null` keyword represents a null pointer, typed as `ptr`:
 
-```aether
+```aether,fragment
 x = null             // inferred: ptr
 if x == null {
     println("no value")
@@ -288,7 +288,7 @@ Constants are emitted as `#define` in generated C, zero runtime cost.
 
 A `const` array lowers to a file-scope `static const` table, allocated once and shared across every call (not re-initialised per call), the right shape for a table-driven algorithm:
 
-```aether
+```aether,fragment
 const PRIMES[] = [2, 3, 5, 7, 11]          // element type inferred (int)
 const CRC16TAB: uint16[256] = [ 0x0000, 0x1021, /* ... */ ]   // element type pinned
 ```
@@ -298,7 +298,7 @@ const CRC16TAB: uint16[256] = [ 0x0000, 0x1021, /* ... */ ]   // element type pi
 
 **The RHS of `const` must be a compile-time constant expression.** Allowed forms: literals (int / float / bool / string / null), other consts referenced by name, unary / binary expressions over those, and string interpolation where every interpolated value is itself const. **Function calls are rejected** at typecheck time:
 
-```aether
+```aether,fragment
 const G_BUF = malloc(64)        // ERROR: const initializer must be a
                                  // compile-time constant expression
 ```
@@ -307,7 +307,7 @@ The reason is `const`'s substitution-at-each-use semantics: the compiler inlines
 
 **Exception, `sizeof` / `offsetof`.** The two layout builtins `sizeof(T)` and `offsetof(T, field)` *are* allowed in a `const` initializer (and arithmetic over them), even though they are spelled with call syntax. They lower to C compile-time constant expressions (`(int)sizeof(struct T)` / `(int)offsetof(struct T, field)`), no evaluation, allocation, or side effect, so the substitution-at-each-use semantics are harmless:
 
-```aether
+```aether,fragment
 extern struct JSString { gc_mark: uint64 : 1  len: uint64 : 60  buf: byte[] }
 
 const SIZEOF_JSSTRING = sizeof(JSString)          // ok, folds to a C constant
@@ -321,7 +321,7 @@ This lets a port that mirrors C structs as `extern struct` overlays centralise i
 
 Where a `const` is a fixed value, a module-level `var` is **one persistent, mutable word of state** shared by every function in the module, a PRNG seed, a monotonic counter, a one-slot cache:
 
-```aether
+```aether,fragment
 var rand48_x: uint64 = 0x1234ABCD330E      // module scope, mutable
 
 next_rand() -> uint64 {
@@ -341,7 +341,7 @@ next_rand() -> uint64 {
 
 Aether functions have **two canonical declaration forms**, pick by whether you want explicit types:
 
-```aether
+```aether,fragment
 // 1. Inferred (no type annotations), the most compact form
 add(a, b) {
     return a + b
@@ -368,7 +368,7 @@ Both forms parse cleanly. The `name(params) -> ReturnType { … }` shape is what
 
 **Void functions** simply omit the `-> Type` annotation:
 
-```aether
+```aether,fragment
 print_hello() {
     println("Hello")
 }
@@ -397,7 +397,7 @@ main() {
 
 Parameters can carry a default expression:
 
-```aether
+```aether,fragment
 greet(name: string, greeting: string = "Hello") -> string {
     return "${greeting}, ${name}!"
 }
@@ -474,44 +474,44 @@ argument, with guards to narrow a clause further:
 
 ### Basic Pattern Matching
 
-```aether
+```aether,fragment
 // Match on literal values
-factorial(0) -> 1;
-factorial(n) -> n * factorial(n - 1);
+factorial(0) -> 1
+factorial(n) -> n * factorial(n - 1)
 
 // Fibonacci with multiple clauses
-fib(0) -> 0;
-fib(1) -> 1;
-fib(n) -> fib(n - 1) + fib(n - 2);
+fib(0) -> 0
+fib(1) -> 1
+fib(n) -> fib(n - 1) + fib(n - 2)
 ```
 
 ### Guard Clauses
 
 Guards add conditions using the `when` keyword:
 
-```aether
+```aether,fragment
 // Classify numbers using guards
-classify(x) when x < 0 -> print("negative\n");
-classify(x) when x == 0 -> print("zero\n");
-classify(x) when x > 0 -> print("positive\n");
+classify(x) when x < 0 -> print("negative\n")
+classify(x) when x == 0 -> print("zero\n")
+classify(x) when x > 0 -> print("positive\n")
 
 // Factorial with guard
-factorial(0) -> 1;
-factorial(n) when n > 0 -> n * factorial(n - 1);
+factorial(0) -> 1
+factorial(n) when n > 0 -> n * factorial(n - 1)
 
 // Grade calculation with multiple ranges
-grade(score) when score >= 90 -> "A";
-grade(score) when score >= 80 -> "B";
-grade(score) when score >= 70 -> "C";
-grade(score) when score >= 60 -> "D";
-grade(score) when score < 60 -> "F";
+grade(score) when score >= 90 -> "A"
+grade(score) when score >= 80 -> "B"
+grade(score) when score >= 70 -> "C"
+grade(score) when score >= 60 -> "D"
+grade(score) when score < 60 -> "F"
 ```
 
 ### Multi-Statement Arrow Bodies
 
 Arrow functions can have block bodies with `-> { ... }`. The last expression is the implicit return value:
 
-```aether
+```aether,fragment
 // Single expression (existing)
 twice(x) -> x * 2
 
@@ -538,24 +538,24 @@ This allows complex logic in arrow-style functions without switching to block sy
 
 ### Multi-parameter Guards
 
-```aether
+```aether,fragment
 // Max of two numbers
-max(a, b) when a >= b -> a;
-max(a, b) when a < b -> b;
+max(a, b) when a >= b -> a
+max(a, b) when a < b -> b
 
 // GCD with pattern matching
-gcd(a, 0) -> a;
-gcd(a, b) when b > 0 -> gcd(b, a - (a / b) * b);
+gcd(a, 0) -> a
+gcd(a, b) when b > 0 -> gcd(b, a - (a / b) * b)
 ```
 
 ### Mutual Recursion with Guards
 
-```aether
-is_even(n) when n == 0 -> 1;
-is_even(n) when n > 0 -> is_odd(n - 1);
+```aether,fragment
+is_even(n) when n == 0 -> 1
+is_even(n) when n > 0 -> is_odd(n - 1)
 
-is_odd(n) when n == 0 -> 0;
-is_odd(n) when n > 0 -> is_even(n - 1);
+is_odd(n) when n == 0 -> 0
+is_odd(n) when n > 0 -> is_even(n - 1)
 ```
 
 ---
@@ -564,7 +564,7 @@ is_odd(n) when n > 0 -> is_even(n - 1);
 
 ### If Statements
 
-```aether
+```aether,fragment
 if (x > 0) {
     print("Positive\n");
 } else if (x < 0) {
@@ -578,7 +578,7 @@ if (x > 0) {
 
 `if`/`else` can be used as an expression that produces a value (like a ternary operator):
 
-```aether
+```aether,fragment
 // Assign based on condition
 max = if a > b { a } else { b }
 
@@ -593,7 +593,7 @@ Both branches must produce a value of the same type. The `else` branch is requir
 
 ### While Loops
 
-```aether
+```aether,fragment
 i = 0;
 while (i < 10) {
     print(i);
@@ -604,7 +604,7 @@ while (i < 10) {
 
 ### For Loops
 
-```aether
+```aether,fragment
 for (i = 0; i < 10; i = i + 1) {
     print(i);
     print("\n");
@@ -615,7 +615,7 @@ for (i = 0; i < 10; i = i + 1) {
 
 Iterate over a range with `for VAR in START..END`:
 
-```aether
+```aether,fragment
 // Prints 0 1 2 3 4
 for i in 0..5 {
     print(i)
@@ -633,7 +633,7 @@ The range `start..end` is exclusive of `end` (like Python's `range(start, end)`)
 
 ### Loop Control
 
-```aether
+```aether,fragment
 // Break - exit loop early
 for (i = 0; i < 100; i = i + 1) {
     if (i == 50) {
@@ -654,7 +654,7 @@ for (i = 0; i < 10; i = i + 1) {
 
 A `while` or `for` loop may carry a label (`label: while ...`), and `break label` / `continue label` then target that loop from inside a nested loop, `break label` exits the labeled loop, `continue label` jumps to its next iteration. This replaces the boolean-flag dance a C port would otherwise need for a nested-loop early exit (the C `goto cleanup` / labeled-break idiom):
 
-```aether
+```aether,fragment
 outer: while have_more() {
     while scan_row() {
         if found_match() {
@@ -680,7 +680,7 @@ Match statements provide pattern-based dispatch:
 
 ### Integer Matching
 
-```aether
+```aether,fragment
 match (value) {
     0 -> { print("zero\n"); }
     1 -> { print("one\n"); }
@@ -693,7 +693,7 @@ match (value) {
 
 Strings are compared by content (via `strcmp`), so string literal arms work correctly:
 
-```aether
+```aether,fragment
 match (command) {
     "start" -> { println("starting...") }
     "stop" -> { println("stopping...") }
@@ -707,7 +707,7 @@ match (command) {
 A `match` arm (and a `switch` case) can match a **range** of ordinal values or a
 **comma-separated list** of values and ranges, instead of a single literal:
 
-```aether
+```aether,fragment
 grade = match score {
     90..=100   -> "A"     // ..= inclusive:  90 through 100
     80..<90    -> "B"     // ..< half-open:  80 through 89 (excludes 90)
@@ -725,7 +725,7 @@ grade = match score {
   character literals, so a character class matches the byte's integer value,
   e.g. from `string.char_at`:
 
-```aether
+```aether,fragment
 kind = match string.char_at(s, i) {
     97..=122, 65..=90 -> "letter"   // a-z, A-Z
     48..=57           -> "digit"    // 0-9
@@ -741,7 +741,7 @@ are unaffected.
 
 Arrays can be matched with list patterns. Requires a corresponding `_len` variable:
 
-```aether
+```aether,fragment
 nums = [1, 2, 3];
 nums_len = 3;
 
@@ -783,7 +783,7 @@ match (nums) {
 
 C-style switch for simple value dispatch:
 
-```aether
+```aether,fragment
 switch (month) {
     case 1: name = "January";
     case 2: name = "February";
@@ -796,7 +796,7 @@ switch (month) {
 Aether's `switch` has **no fall-through**: each case auto-breaks after its body.
 Cases also accept comma-lists and ranges, the same as `match` arms:
 
-```aether
+```aether,fragment
 switch code {
 case 200, 201, 204: kind = "success";
 case 300..<400:     kind = "redirect";   // ranged case (lowered to an if-chain)
@@ -823,7 +823,7 @@ because there is no fall-through to preserve).
 
 The `defer` statement schedules code to run when leaving the current scope:
 
-```aether
+```aether,fragment
 process_file() {
     handle = open_resource();
     defer close_resource(handle);  // Runs when function exits
@@ -838,7 +838,7 @@ process_file() {
 
 Multiple defers execute in Last-In-First-Out order:
 
-```aether
+```aether,fragment
 example() {
     defer print("First\n");   // Runs third
     defer print("Second\n");  // Runs second
@@ -851,7 +851,7 @@ example() {
 
 A plain `defer` runs on **every** exit. Two qualified forms run on only one:
 
-```aether
+```aether,fragment
 defer       cleanup()    // always — on every exit
 defer try   commit()     // only when the function returns SUCCESSFULLY
 defer catch rollback()   // only when the function returns an ERROR
@@ -864,7 +864,7 @@ Together they give you the transactional shape in three lines: acquire, register
 the rollback, register the commit, and then let any error path bail out without
 the acquire leaking and without a half-built result being published.
 
-```aether
+```aether,fragment
 acquire(path: string) -> (ptr, string) {
     p = malloc(SIZE)
     defer catch free(p)              // we bailed — release it
@@ -882,7 +882,7 @@ Ordering is unchanged: **all** defers still run in LIFO order, and the
 conditional ones interleave with the unconditional ones by registration order
 they are not hoisted into separate groups. In
 
-```aether
+```aether,fragment
 defer       log("A")
 defer catch log("C")
 defer try   log("T")
@@ -922,7 +922,7 @@ Two scope-level directives let a block decline to see selected names from its en
 
 ### `hide` blacklist specific names
 
-```aether
+```aether,fragment
 {
     hide secret_token, db_handle
     // secret_token and db_handle from outer scopes are invisible here.
@@ -932,7 +932,7 @@ Two scope-level directives let a block decline to see selected names from its en
 
 ### `seal except` whitelist
 
-```aether
+```aether,fragment
 handler(req, res) {
     seal except req, res, inventory, response_write
     // Every outer name is invisible EXCEPT the four listed.
@@ -1044,7 +1044,7 @@ Tuple destructuring creates typed local variables. The compiler generates C stru
 
 The compiler infers the return tuple from `return a, b` statements in the body, but you can also declare it up front using the same parenthesised form accepted on `extern`:
 
-```aether
+```aether,fragment
 safe_divide(a: int, b: int) -> (int, string) {
     if b == 0 { return 0, "division by zero" }
     return a / b, ""
@@ -1055,7 +1055,7 @@ Stating the return type at the signature is preferred when the function is part 
 
 Error propagation across function boundaries works correctly:
 
-```aether
+```aether,fragment
 checked_op(x: int) -> {
     val, err = safe_divide(x, 2)
     if err != "" {
@@ -1073,7 +1073,7 @@ fallible call. There is no hidden machinery: `T!` is the same tuple you can
 always destructure by hand, so the sugar and the manual form interoperate
 freely.
 
-```aether
+```aether,fragment
 // `return v` auto-wraps to (v, ""); the error path is explicit.
 safe_divide(a: int, b: int) -> int! {
     if b == 0 { return 0, "division by zero" }
@@ -1083,7 +1083,7 @@ safe_divide(a: int, b: int) -> int! {
 
 **`expr or default` use the value, or a fallback on error:**
 
-```aether
+```aether,fragment
 q = safe_divide(10, 0) or -1      // q == -1
 ```
 
@@ -1092,7 +1092,7 @@ The block's **last statement is its value**, so a handler can log, compute,
 and still yield a fallback, or the block exits (`return`, `break`,
 `continue`, `panic`) and never falls through:
 
-```aether
+```aether,fragment
 q = safe_divide(x, y) or {
     println("math failed: ${err}")   // `err` is the error string
     return
@@ -1112,7 +1112,7 @@ that shape compiled and read an **uninitialized** result on the error path.
 `!` returns `(zero, err)` to the caller when the error slot is non-empty, so an
 inner failure short-circuits without manual `if err != ""` plumbing:
 
-```aether
+```aether,fragment
 checked_divide(x: int, d: int) -> int! {
     return safe_divide(x, d)!   // forwards safe_divide's error unchanged
 }
@@ -1126,7 +1126,7 @@ any `(value, err)` tuple, not just `T!` returns.
 
 Eiffel-style runtime-checked preconditions and postconditions. Clauses appear after the typed return arrow and before the body; each is a single boolean expression, panic on violation.
 
-```aether
+```aether,fragment
 add(a: int, b: int) -> int
     requires a >= 0
     requires b >= 0
@@ -1230,7 +1230,7 @@ Strings are special-cased in the memory model: every reassignment to a string va
 
 A user-defined function declared `-> string` is treated as **heap-returning** iff every return statement in its body yields a heap-string-expression (recursive structural escape analysis):
 
-```aether
+```aether,fragment
 my_concat(a: string, b: string) -> string {
     return string.concat(a, b)        // heap-string-expr return → my_concat is heap-returning
 }
@@ -1245,7 +1245,7 @@ while i < 1000000 {
 
 A function returning a string literal, or whose returns mix heap and literal sources, is **not** recognised. The wrapper won't try to free its result. This is the conservative stance taken to avoid free-of-literal aborts:
 
-```aether
+```aether,fragment
 banner(name: string) -> string {
     if string.length(name) == 0 {
         return "guest"                 // literal, banner is NOT heap-returning
@@ -1264,7 +1264,7 @@ See [examples/basics/string-ownership.ae](../examples/basics/string-ownership.ae
 
 An optional type `T?` holds either a value of type `T` or the empty sentinel `none`. It is the type for "maybe a value", distinct from the `(value, err)` result convention, which is for *fallible* operations. Use `(value, err)` when an operation can fail and you want to say why; use `T?` when a value is simply present or absent (a missing map key, an empty list's first element, a search that found nothing).
 
-```aether
+```aether,fragment
 let maybe: int? = 69        // a present value, implicitly wrapped
 let empty: int? = none      // the absent sentinel
 ```
@@ -1275,7 +1275,7 @@ let empty: int? = none      // the absent sentinel
 
 `none` is a reserved literal (like `true`, `false`, and `null`), it cannot be used as a variable name. Compare against it with `==` / `!=`:
 
-```aether
+```aether,fragment
 if empty == none {
     println("absent")
 }
@@ -1298,7 +1298,7 @@ which composes from a result and an optional rather than nesting two optionals.
 
 Postfix `!` yields the wrapped value, or panics if the optional is `none`:
 
-```aether
+```aether,fragment
 let n: int = maybe!         // 69
 let boom: int = empty!      // panics: "forced unwrap of `none`"
 ```
@@ -1309,7 +1309,7 @@ Use it only where absence is a programmer error. For a safe default, prefer `??`
 
 `opt ?? default` yields the wrapped value when present, otherwise `default`. It binds tighter than arithmetic, so `5 + (opt ?? 7)` groups as expected:
 
-```aether
+```aether,fragment
 let a: int = maybe ?? 0     // 69
 let b: int = empty ?? 0     // 0
 let c: int = 5 + (empty ?? 7)   // 12
@@ -1319,7 +1319,7 @@ let c: int = 5 + (empty ?? 7)   // 12
 
 `opt?.field` reads a field through an optional struct and is *none-propagating*: it yields `fieldT?`, which is `none` when the receiver is `none`. Combine with `??` to default the result:
 
-```aether
+```aether,fragment
 struct Vec2 { x: int  y: int }
 
 let v: Vec2? = Vec2 { x: 7, y: 8 }
@@ -1332,7 +1332,7 @@ let zm: int? = nv?.x         // none, short-circuited
 
 Chain *assignment* is a no-op when the receiver is `none`:
 
-```aether
+```aether,fragment
 v?.x  = 42                   // writes, v is present
 nv?.x = 99                   // skipped, nv is none, no crash
 ```
@@ -1341,7 +1341,7 @@ nv?.x = 99                   // skipped, nv is none, no crash
 
 `match` destructures an optional with the `none` and `some(binding)` arms, as a statement or as an expression:
 
-```aether
+```aether,fragment
 match maybe {
     none    -> println("missing")
     some(v) -> println("got ${v}")
@@ -1361,7 +1361,7 @@ A none-check on an optional variable **narrows** it in the guarded branch: insid
 Presence is proven by the guard, so the runtime none-check is elided, this is a
 compile-time analysis with zero runtime cost:
 
-```aether
+```aether,fragment
 find(id: int) -> User?
 
 let u: User? = find(42)
@@ -1420,7 +1420,7 @@ A value optional lowers to `typedef struct { int has; T val; } ae_opt_<T>` (one 
 An **enum** is a named set of integer constants, a distinct type over `int` with
 named members. It lowers to a C `typedef enum` with zero runtime cost.
 
-```aether
+```aether,fragment
 enum Direction { North, East, South, West }        // implicit 0, 1, 2, 3
 enum Errno { Ok = 0, NotFound = 2, Perm = 13 }      // explicit values
 ```
@@ -1430,7 +1430,7 @@ defaults to `0`), matching C. Members are separated by commas and/or newlines.
 
 Members are referenced by their **qualified name**, `EnumName.Member`:
 
-```aether
+```aether,fragment
 d = Direction.East              // d has type Direction
 if d == Direction.East { ... }  // compare (nominal: same enum only)
 ```
@@ -1440,7 +1440,7 @@ matched with member arms. Inside a `match` on an enum the member may be written
 qualified (`Direction.North`) or bare (`North`), since the scrutinee already
 fixes the enum:
 
-```aether
+```aether,fragment
 label(d: Direction) -> string {
     return match d {
         North -> "N"
@@ -1464,7 +1464,7 @@ Where the expected type is already a known enum, a member may be written **bare*
 without the enum prefix. This applies to a function argument, a typed
 initializer, an assignment, a return, and either side of an enum comparison:
 
-```aether
+```aether,fragment
 paint(c: Color) -> string { ... }
 
 paint(North)                 // function argument
@@ -1484,7 +1484,7 @@ enum stays an ordinary "undefined variable" error.
 an `E` value rather than a raw integer. It is sized at compile time to the enum's
 member range and lowers to a plain C array (zero runtime cost):
 
-```aether
+```aether,fragment
 enum Dir { N, E, S, W }
 const LABELS: [Dir]string = ["north", "east", "south", "west"]  // one per member
 
@@ -1506,7 +1506,7 @@ A **bit set** is a set of members of an enum, `bit_set[E]`. It is backed by a
 single unsigned 64-bit word (one bit per member, at the member's enum value), so
 every set operation is a bitwise operation with zero runtime cost.
 
-```aether
+```aether,fragment
 enum Perm { Read, Write, Exec }
 
 let a = bit_set[Perm]{ Perm.Read, Perm.Write }   // a two-member set
@@ -1519,7 +1519,7 @@ qualified (`Perm.Read`) or bare (`Read`). The type is written the same way it is
 constructed, so a set is used like any other type, on locals, parameters, return
 types, and struct fields:
 
-```aether
+```aether,fragment
 grant(base: bit_set[Perm]) -> bit_set[Perm] {
     return base + bit_set[Perm]{ Perm.Exec }
 }
@@ -1539,7 +1539,7 @@ The operators:
 | equality       | `a == b` / `!=`   | `bool`       | `a == b`         |
 | cardinality    | `card(a)`         | `int`        | `popcount(a)`    |
 
-```aether
+```aether,fragment
 let u = a + b                         // union
 let d = a - b                         // difference (members of a not in b)
 if Perm.Exec in u { ... }             // membership test
@@ -1557,7 +1557,7 @@ is a reserved call form, like `sizeof`, and applies only to a bit set.
 A **bitstruct** is a named bit layout over a single unsigned integer. It is the
 tool for packed headers, hardware registers, and wire formats.
 
-```aether
+```aether,fragment
 bitstruct DnsFlags : uint16_t {
     qr:     bool 15          // a single bit
     opcode: int  11..=14     // an inclusive range: bits 11,12,13,14
@@ -1609,7 +1609,7 @@ order**, there is no `@bigendian` annotation, and no hidden byte-swapping on
 field access. Byte order is a property of *serialisation*, not of the layout, and
 Aether already has endian-explicit accessors for it in [`std.mem`](../std/mem/):
 
-```aether
+```aether,fragment
 import std.mem
 
 // Read a big-endian word off the wire, then interpret its bits.
@@ -1631,7 +1631,7 @@ bitfields untrustworthy in the first place.
 
 A **sum type** is a value that is exactly one of N named struct variants:
 
-```aether
+```aether,fragment
 struct Circle { r: float }
 struct Rect   { w: float  h: float }
 struct Empty  {}
@@ -1647,7 +1647,7 @@ A variant struct value flows into a `Shape` slot directly; there is no
 `some(...)`-style constructor. The wrap happens at `let` bindings, function
 parameters, return values, and call arguments:
 
-```aether
+```aether,fragment
 let s: Shape = Circle { r: 2.0 }      // Circle wraps into Shape
 draw(Rect { w: 3.0, h: 4.0 })         // wraps at the argument
 make() -> Shape { return Empty {} }   // wraps at the return
@@ -1658,7 +1658,7 @@ make() -> Shape { return Empty {} }   // wraps at the return
 `match` over a sum dispatches on the variant and **narrows** the scrutinee to
 that variant struct inside the arm, so `s.field` reads the right member:
 
-```aether
+```aether,fragment
 area(s: Shape) -> float {
     let a: float = match s {
         Circle -> 3.14159 * s.r * s.r   // here `s` is a Circle
@@ -1679,7 +1679,7 @@ when the scrutinee is a plain variable (`match s { … }`).
 
 Self-referential shapes (trees, ASTs, JSON values) use explicit pointer fields:
 
-```aether
+```aether,fragment
 struct Leaf { v: int }
 struct Pair { left: *Tree  right: *Tree }
 type Tree = Leaf | Pair
@@ -1724,7 +1724,7 @@ main() {
 
 ### Explicit Field Types
 
-```aether
+```aether,fragment
 struct Point {
     int x,
     int y
@@ -1743,7 +1743,7 @@ A field declared `using embed: Sub` embeds a sub-struct and **promotes its
 fields** into the outer struct's namespace. This is composition-over-inheritance
 without method sets or vtables, a pure compile-time member-access rewrite:
 
-```aether
+```aether,fragment
 struct Entity { x: int, y: int }
 
 struct Frog {
@@ -1770,7 +1770,7 @@ is a readability footgun.
 
 A struct field can be a function pointer (`fn(T1, T2) -> R`), the `dictType`-style vtable. The field emits as the C function-pointer member `R (*name)(T1, T2)`, and a call through it is a real indirect call:
 
-```aether
+```aether,fragment
 struct Ops {
     hash:    fn(int) -> int
     combine: fn(int, int) -> int
@@ -1828,7 +1828,7 @@ The `as` keyword is the same token used for `import x as y` aliasing; the two pa
 
 The constructor shape, allocate raw storage, overlay the struct, initialise the fields, return the typed view, is the natural way to retire C "container holder" shims to Aether:
 
-```aether
+```aether,fragment
 struct Txn {
     revision: int
     paths: ptr
@@ -1851,7 +1851,7 @@ The pointer-to-struct type is accepted in every type position, including the ret
 
 Pointer-to-struct fields may point back at the enclosing struct, which is how recursive shapes (linked-list cells, error chains, n-ary tree nodes, dependency graphs) are spelled:
 
-```aether
+```aether,fragment
 struct ErrChain {
     code:  int
     msg:   string
@@ -1880,7 +1880,7 @@ walk(e: *ErrChain) {
 
 The recursion above reads naturally and is fine for the short chains errors usually form. But Aether does **not** turn tail calls into loops, so each cell costs one C stack frame: walking (or freeing) a `*Struct` chain that can grow without bound, a long linked list, a deep tree assembled from untrusted input, an error chain accumulated in a hot retry loop, risks a stack overflow. For unbounded shapes, walk the spine iteratively instead, which is O(1) stack at any depth, exactly as the refcounted `*StringSeq` does internally ([sequences.md](sequences.md) documents "O(n) time, O(1) stack" for 10k+ cells):
 
-```aether
+```aether,fragment
 // Iterative traversal: O(1) stack regardless of depth.
 cur = e
 while cur != 0 {
@@ -1891,7 +1891,7 @@ while cur != 0 {
 
 Lifetime is the operand's, `mk_err` owns the raw allocation it returned, and the caller is responsible for freeing the chain. Free it with the same iterative spine walk, capturing each cell's successor *before* freeing it so the walk never dereferences freed memory:
 
-```aether
+```aether,fragment
 // Iterative free: capture next before freeing the current cell.
 cur = e
 while cur != 0 {
@@ -1909,7 +1909,7 @@ There is no generic library helper for this: each user shape names its link fiel
 
 Messages define structured data for actor communication:
 
-```aether
+```aether,fragment
 message Increment {
     amount: int
 }
@@ -1934,7 +1934,7 @@ Actors are the core concurrency primitive with encapsulated state and message ha
 
 ### Actor Definition
 
-```aether
+```aether,fragment
 actor Counter {
     state count = 0;
 
@@ -1957,7 +1957,7 @@ actor Counter {
 
 The `after` clause fires a handler if no message arrives within N milliseconds:
 
-```aether
+```aether,fragment
 actor Monitor {
     state alive = 1
 
@@ -1976,7 +1976,7 @@ The timeout is one-shot: it is cancelled when any message is received. The count
 
 State persists across messages:
 
-```aether
+```aether,fragment
 actor BankAccount {
     state balance = 0;
     state transactions = 0;
@@ -1986,14 +1986,14 @@ actor BankAccount {
 
 ### Spawning Actors
 
-```aether
+```aether,fragment
 counter = spawn(Counter());
 calculator = spawn(Calculator());
 ```
 
 ### Sending Messages (Fire-and-Forget)
 
-```aether
+```aether,fragment
 counter ! Increment { amount: 10 };
 counter ! Reset {};
 ```
@@ -2005,7 +2005,7 @@ infers the reply type from the actor's receive handler, so the result is typed
 without an annotation. Multiple concurrent asks to the same actor are supported,
 each message carries its own reply slot.
 
-```aether
+```aether,fragment
 // Synchronous request-reply, result is an int (from Result.value)
 result = calculator ? Add { a: 5, b: 3 };
 ```
@@ -2013,7 +2013,7 @@ result = calculator ? Add { a: 5, b: 3 };
 A handler replies in one of two ways, and the ask takes its type from whichever
 it used:
 
-```aether
+```aether,fragment
 message GetName {}
 message GetSize {}
 message SizeReply { bytes: int }
@@ -2046,7 +2046,7 @@ The `reply` statement sends a response back to the waiting `?` caller. Omitting
 
 Actors respond using the `reply` statement:
 
-```aether
+```aether,fragment
 actor Calculator {
     receive {
         Add(a, b) -> {
@@ -2061,7 +2061,7 @@ actor Calculator {
 
 The `_` pattern catches unmatched messages:
 
-```aether
+```aether,fragment
 receive {
     Known() -> { /* handle */ }
     _ -> { print("Unknown message\n"); }
@@ -2108,7 +2108,7 @@ receive {
 
 Bitwise operators work on `int` and `long` values and map directly to C operators (zero runtime cost).
 
-```aether
+```aether,fragment
 flags = 255
 mask = flags & 15       // 15
 set = flags | 256       // 511
@@ -2184,7 +2184,7 @@ shifted = 1 << 4        // 16
 
 ### Standard Library Imports
 
-```aether
+```aether,fragment
 import std.file;         // File operations
 import std.string;       // String utilities
 import std.list;         // ArrayList
@@ -2221,7 +2221,7 @@ outside the module via either qualified (`mod.name(…)`) or short-alias
 callable from inside the module's own functions, but rejected at
 qualified-call sites from outside.
 
-```aether
+```aether,fragment
 // At the top of greeter/module.ae:
 exports (say_hello, greet_world, GREETING)
 
@@ -2328,7 +2328,7 @@ the alias prefix (`str.new(...)`) do not currently resolve, the aliased name is
 not wired into namespace lookup, so the call fails typechecking. Until that lands,
 use the module's own namespace directly:
 
-```aether
+```aether,fragment
 // Aliased-call form parses but does not yet resolve:
 // import std.string as str
 // s = str.new("hello")            // typecheck error: undefined function
@@ -2342,7 +2342,7 @@ string.release(s)
 
 ### Local Module Imports
 
-```aether
+```aether,fragment
 import utils;           // Loads lib/utils/module.ae
 import helpers;         // Loads lib/helpers/module.ae
 
@@ -2375,12 +2375,12 @@ result = utils.double_value(21);
 Declare external C functions:
 
 ```aether
-extern puts(s: string) -> int;
-extern malloc(size: int) -> ptr;
-extern free(p: ptr) -> void;
+extern puts(s: string) -> int
+extern malloc(size: int) -> ptr
+extern free(p: ptr) -> void
 
 main() {
-    puts("Direct C call!");
+    puts("Direct C call!")
 }
 ```
 
@@ -2402,7 +2402,7 @@ Plain `ptr` lowers to C `void *`. C headers use richer pointer spellings, and wh
 | `const *T` | `const T*` | a const pointer to `T` |
 | `const string` | `const char*` | qualified string |
 
-```aether
+```aether,fragment
 extern type dictEntry                              // opaque header-defined C type
 extern dictGenHashFunction(key: const ptr, len: size_t) -> uint64_t
 extern strlen(s: cstring_const) -> size_t
@@ -2418,7 +2418,7 @@ Passing a plain `ptr` where the C conversion is safe stays allowed at call sites
 
 When the Aether-side name should differ from the C symbol (for example, to expose a clean module surface without trailing `_raw` suffixes), prefix the declaration with `@extern("c_symbol")`:
 
-```aether
+```aether,fragment
 @extern("EVP_MD_CTX_new") md_ctx_new() -> ptr
 @extern("strerror") describe_errno(errno: int) -> string
 ```
@@ -2429,7 +2429,7 @@ The Aether-side name is what callers write; the annotated C symbol is what the l
 
 Object-like C macros (`EAGAIN`, `O_NONBLOCK`, `LLONG_MAX`, a generated `REDIS_GIT_SHA1`, …) are invisible to Aether, there is no symbol to link against. `extern const … @c_import` makes one usable by **name**:
 
-```aether
+```aether,fragment
 extern const EAGAIN: int @c_import
 extern const O_NONBLOCK: int @c_import
 extern const REDIS_GIT_SHA1: ptr @c_import   // string macro -> const char *
@@ -2448,7 +2448,7 @@ By default Aether emits its own forward declaration for every `extern`. That dec
 
 `@c_import` after the signature says the header owns the prototype, so Aether emits **none**:
 
-```aether
+```aether,fragment
 extern type blob
 
 extern api_scale(v: int) -> int          @c_import   // header: uint8_t api_scale(uint8_t)
@@ -2467,7 +2467,7 @@ extern api_inline_twice(v: int) -> int   @c_import   // static inline in the hea
 
 A function declared with a trailing `...` can open its variadic tail and hand it to the `v*` half of a printf-style C pair:
 
-```aether
+```aether,fragment
 extern vsnprintf(buf: ptr, n: int, fmt: ptr, ap: va_list) -> int
 
 format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
@@ -2487,7 +2487,7 @@ See [`docs/c-interop.md`](c-interop.md#forwarding-a-variadic-tail-to-c-va_list) 
 
 The inverse of `@extern`. Marks an Aether function as having a stable, externally-visible C symbol so it can be passed across the linkage boundary as a function pointer to C externs that take callbacks (HTTP route handlers, signal handlers, `qsort` comparators, libcurl write callbacks, sqlite hooks):
 
-```aether
+```aether,fragment
 extern http_server_add_route(server: ptr, method: string, path: string, handler: ptr, user_data: ptr)
 
 @c_callback
@@ -2506,7 +2506,7 @@ By default the C symbol matches the Aether-side name (or its namespace-prefixed 
 
 A parameter typed `fn(T1, T2) -> R` is a typed C function pointer: it emits the exact `R (*name)(T1, T2)` in the generated prototype and is directly callable in the body, so callback-taking functions port cleanly:
 
-```aether
+```aether,fragment
 walk(cb: fn(ptr, ptr) -> void, a: ptr, b: ptr) {
     cb(a, b)                       // a real indirect call
 }
@@ -2552,7 +2552,7 @@ Supported field types in v1: primitive numeric (`int`, `long`, `float`, `byte`, 
 
 String interpolation is supported inside double-quoted strings using `${expr}`:
 
-```aether
+```aether,fragment
 name = "Alice"
 age = 30
 println("Hello, ${name}! You are ${age} years old.")
@@ -2560,7 +2560,7 @@ println("Hello, ${name}! You are ${age} years old.")
 
 Interpolated strings produce a `ptr` (heap-allocated C string) when used as values:
 
-```aether
+```aether,fragment
 msg = "Hello, ${name}!"         // msg is a ptr (char*), not an int
 tcp_send_raw(conn, msg)          // can be passed to any function expecting ptr
 ```
@@ -2575,7 +2575,7 @@ language's source verbatim (SQL, a `contrib.host.*` snippet) without escaping
 the guest's own quotes. The heredoc only triggers when `<<` is immediately
 followed by an identifier; `1 << 4` stays the left-shift operator.
 
-```aether
+```aether,fragment
 sql = <<SQL
 SELECT id, name
 FROM users
@@ -2604,7 +2604,7 @@ always closes.) The marker must also be alone on its line: `done MARKER` and
 *non-blank* line is stripped, so a heredoc can be indented to match its
 surrounding code without that indentation leaking into the string:
 
-```aether
+```aether,fragment
 fn describe() -> string {
     return <<TEXT
         line one
@@ -2671,7 +2671,7 @@ main() {
 
 Code after `return`, `exit()`, or exhaustive `if`/`else` blocks is flagged:
 
-```aether
+```aether,fragment
 check(x: int) -> {
     if x > 0 { return 1 }
     else { return 0 }
@@ -2699,7 +2699,7 @@ variables would disagree, and the literal form (the one you reach for
 while developing) would look correct while production code silently
 overflowed. Widen a term to keep the value:
 
-```aether
+```aether,fragment
 long span = 250000000 - 200000000
 cv = span * 50 / 225000000          // 11, no warning
 ```
@@ -2732,7 +2732,7 @@ The check reports only where the shadowing is certain. A bare
 identifier arm binds the value rather than naming a case, so it matches
 anything and is never compared against other arms:
 
-```aether
+```aether,fragment
 match x {
     1 -> { println("one") }
     n -> { println("got ${n}") }   // a binding, not a duplicate: no warning
@@ -2742,7 +2742,7 @@ match x {
 A third shape is the mirror of the exhaustiveness check: a `_` arm on a
 `match` over a sum type or enum where every case is already handled.
 
-```aether
+```aether,fragment
 enum Direction { North, East, South, West }
 
 match d {
@@ -2768,7 +2768,7 @@ direction, a `match` over a sum type or enum that is missing a case.
 
 `match` can be used as a statement or as an expression:
 
-```aether
+```aether,fragment
 // Statement, executes the matching arm
 match status {
     0 -> println("ok")
@@ -2833,7 +2833,7 @@ identifier, bypassing keyword reservation. This lets a reserved word be used
 verbatim wherever an identifier is expected, parameter, local, struct-field,
 message-field, or function name:
 
-```aether
+```aether,fragment
 struct Robj {
     `reply`: int        // `reply` is a keyword; the backtick escape keeps it
     `message`: int
@@ -2865,7 +2865,7 @@ Module paths are the exception: a segment there is a name and nothing else, so
 still would (`message.format(...)` puts a keyword in expression position), so
 import the symbols you need by name:
 
-```aether
+```aether,fragment
 import std.message (format, catalog_new)   // format(...), catalog_new(...)
 ```
 
@@ -2876,7 +2876,7 @@ not resolve yet, see [Import with Alias](#import-with-alias).)
 
 ## Comments
 
-```aether
+```aether,fragment
 // Single-line comment
 
 /* Multi-line
@@ -2933,7 +2933,7 @@ main() {
 
 Conditions combine with `!`, `&&`, `||` and parentheses:
 
-```aether
+```aether,fragment
 when defined(A) && !defined(B) { … }
 when (defined(A) || defined(B)) && !defined(C) { … }
 ```
@@ -2950,7 +2950,7 @@ not limited to your own symbols. A module declares its native libraries with
 resolved import closure — so guarding the `import` removes the C library too,
 transitively and at any depth:
 
-```aether
+```aether,fragment
 when defined(WITH_SQLITE) {
     import contrib.sqlite
     ...
@@ -2971,7 +2971,7 @@ configuration will rot. Build each configuration you ship.
 `select` chooses a value rather than a region. Its keys are the platforms plus
 any build symbol:
 
-```aether
+```aether,fragment
 port = select(DEV_MODE: 8080, other: 80)
 tag  = select(linux: "linux", macos: "macos", windows: "windows", other: "other")
 ```
@@ -3040,7 +3040,7 @@ Aether uses static typing with full type inference, explicit annotations are nev
 
 ### Type annotations are optional
 
-```aether
+```aether,fragment
 // All three are equivalent:
 add(a, b) { return a + b; }          // fully inferred from call sites
 add(a: int, b: int) { return a + b; } // explicit
@@ -3053,14 +3053,14 @@ Annotations are useful for documentation or when the type cannot be determined f
 
 The compiler cannot infer types of external C functions, parameter types must be declared explicitly:
 
-```aether
+```aether,fragment
 extern malloc(n: int) -> ptr
 extern free(p: ptr) -> void
 ```
 
 Explicit types are optional but can improve clarity:
 
-```aether
+```aether,fragment
 // Both are valid:
 x = 42;
 int y = 42;
@@ -3081,11 +3081,11 @@ main() {
 ### Factorial with Pattern Matching
 
 ```aether
-factorial(0) -> 1;
-factorial(n) when n > 0 -> n * factorial(n - 1);
+factorial(0) -> 1
+factorial(n) when n > 0 -> n * factorial(n - 1)
 
 main() {
-    print(factorial(10));  // 3628800
+    print(factorial(10))  // 3628800
 }
 ```
 
@@ -3120,9 +3120,9 @@ main() {
 
 ### Resource Management with Defer
 
-```aether
-extern fopen(path: string, mode: string) -> ptr;
-extern fclose(file: ptr) -> int;
+```aether,fragment
+extern fopen(path: string, mode: string) -> ptr
+extern fclose(file: ptr) -> int
 
 process_file(path) {
     file = fopen(path, "r");

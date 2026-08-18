@@ -24,7 +24,7 @@ the regression test under
 The obvious way to "make a map thread-safe with actors" is to wrap it in
 one actor:
 
-```aether
+```aether,fragment
 actor MapOwner {
     state store = map_new()
     receive {
@@ -79,7 +79,7 @@ that hash to different shards run on **different mailboxes, on different
 cores, at the same time**. The serial bottleneck is gone; what remains is
 `N` independent small bottlenecks, which is the point.
 
-```aether
+```aether,fragment
 // Route, then talk only to the owning shard.
 idx = shard_for(key, nshards)   //  hash(key) % nshards
 shards[idx] ! Set { key: key, val: v }     // write: fire-and-forget
@@ -99,7 +99,7 @@ distribution and speed matter, collision-resistance does not. The example
 uses **FNV-1a** over the key's bytes, masked to a non-negative 31-bit
 value so the `% N` stays in range:
 
-```aether
+```aether,fragment
 shard_for(key: string, nshards: int) -> int {
     h = 2166136261                      // FNV offset basis
     n = string.length(key)
@@ -206,7 +206,7 @@ idiom for "absent" is a sentinel in that field (the example uses `-1`).
 Compute the result into a local and issue **one** `reply` at the end of the
 handler:
 
-```aether
+```aether,fragment
 Get(key) -> {
     result = 0 - 1                  // ABSENT
     v = map_get_raw(store, key)

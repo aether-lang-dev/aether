@@ -11,7 +11,7 @@ but also on the way *out* (via name denial).
 
 ### `hide` blacklist
 
-```aether
+```aether,fragment
 {
     hide secret_token, db_handle
     // From here on, `secret_token` and `db_handle` are not in scope, even
@@ -23,7 +23,7 @@ but also on the way *out* (via name denial).
 
 ### `seal except` whitelist
 
-```aether
+```aether,fragment
 {
     seal except req, res, inventory, response_write, response_write_status
     // Every name from every outer scope is now invisible EXCEPT the five
@@ -43,7 +43,7 @@ even see?". The whitelist is the dependency surface.
 The position of a `hide` directive within its block does not matter.
 Either of these is valid and equivalent:
 
-```aether
+```aether,fragment
 {
     fooStr = "abc"
     hide fooStr        // hide appears AFTER the declaration
@@ -51,7 +51,7 @@ Either of these is valid and equivalent:
 }
 ```
 
-```aether
+```aether,fragment
 {
     hide fooStr        // hide appears FIRST
     fooStr = "abc"     // ERROR: cannot declare 'fooStr', it is hidden
@@ -103,7 +103,7 @@ doesn't claim to have one.
 
 The same caveat applies to closures captured into local variables:
 
-```aether
+```aether,fragment
 {
     secret = 42
     incr = || { secret = secret + 1 }     // closure captures `secret`
@@ -123,7 +123,7 @@ closure into the hiding scope.
 `hide` and `seal except` apply to the prefix of qualified names. If you
 hide a namespace, all member access through that namespace is blocked:
 
-```aether
+```aether,fragment
 import std.http
 {
     hide http
@@ -146,7 +146,7 @@ keyword and can't be used as an identifier at all.)
 Receive handler bodies are block scopes, so `hide` and `seal except`
 work exactly as in any other block:
 
-```aether
+```aether,fragment
 actor Server {
     state secret = "do not touch"
     state public_val = "ok"
@@ -175,7 +175,7 @@ where individual receive arms should only touch a subset of state.
 parent scope. A local binding declared inside the hiding block is
 always visible inside that block, regardless of what's hidden:
 
-```aether
+```aether,fragment
 {
     seal except println
     local_thing = "fresh"
@@ -234,7 +234,7 @@ declare a hidden name produces the same code with the message
 You may NOT declare a variable in the same scope where its name is
 hidden:
 
-```aether
+```aether,fragment
 {
     hide x
     var x = 5     // E0304: cannot declare 'x', it is hidden
@@ -244,7 +244,7 @@ hidden:
 You MAY declare it in a nested child block, that's a fresh binding in
 the child's own scope, lexically unrelated to the hidden outer one:
 
-```aether
+```aether,fragment
 {
     hide x
     {
@@ -331,7 +331,7 @@ feature. The "container" is just ~80 lines of map plumbing.
 
 Registration at server-build time:
 
-```aether
+```aether,fragment
 srv = web_server(8080) {
 
     // Three scopes, the factory's scope determines its cache lifetime.
@@ -389,7 +389,7 @@ directly, the compiler refuses.
 The biggest real loss is **type safety on lookups**. The fix is one
 wrapper function per type:
 
-```aether
+```aether,fragment
 inventory(ctx) { return dep(ctx, "inventory") }   // returns ptr but named-as-inventory
 cart(ctx)      { return dep(ctx, "cart") }
 db(ctx)        { return dep(ctx, "db") }

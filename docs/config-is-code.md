@@ -100,7 +100,7 @@ type annotations.
 
 ### Level 4, Closure-DSL: config IS code, *and reads like config*
 
-```aether
+```aether,fragment
 import my_server (serve, host, port, superuser_token, repo)
 import std.os (os_getenv)
 
@@ -175,7 +175,7 @@ shared; only the outer entry point differs.
 To expose your library's start surface as a closure-DSL, follow the
 standard three-layer split:
 
-```aether
+```aether,fragment
 // 1. Opts construction, explicit API. The base everything else
 //    funnels into.
 export opts_new() -> ptr {
@@ -215,7 +215,7 @@ builder serve(_ctx: ptr) -> int {
 
 The user's three options stay 1:1 equivalent:
 
-```aether
+```aether,fragment
 // (a) Closure-DSL block, the recommended surface.
 my_lib.serve {
     host("127.0.0.1")

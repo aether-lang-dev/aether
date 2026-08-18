@@ -570,6 +570,18 @@ Prefer the **dlopen** shape for any new interpreter bridge:
    - Update docs/ if changing language behavior
    - Update CHANGELOG.md under `[current]`
 
+   Every ```aether block in `docs/` and the README says what it is, and
+   `make check-docs` holds it to that:
+
+   | fence | meaning |
+   |---|---|
+   | ```` ```aether ```` | a complete program. **Compiled by CI**, so it cannot rot. |
+   | ```` ```aether,fragment ```` | an excerpt: no `main`, or it uses names an earlier block introduced, or it contains a literal `...`. Not compiled. |
+   | ```` ```aether,fails ```` | a deliberate counter-example. CI asserts it still does **not** compile. |
+
+   `fragment` is not a way to park a broken example. If a block has a `main()`
+   and is meant to work, leave the fence bare so it gets compiled.
+
 ### PR Template
 
 ```markdown

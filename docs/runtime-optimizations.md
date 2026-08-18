@@ -483,7 +483,7 @@ When the codegen is in a main-function context (`gen->current_actor == NULL`), i
 
 Detects `while` loops of the form:
 
-```aether
+```aether,fragment
 while counter < N {
     acc1 = acc1 + C1   // loop-invariant addend
     acc2 = acc2 + C2
@@ -523,7 +523,7 @@ For constant-bound loops the Aether collapse is redundant with clang's scalar ev
 
 **Pure counter elimination** is a subcase handled automatically (zero accumulators):
 
-```aether
+```aether,fragment
 i = 0
 while i < n { i = i + 1 }   // n can be a runtime variable
 ```
@@ -541,7 +541,7 @@ Optimization Statistics:
 
 Detects loops where an accumulator adds the **counter variable itself** (or a scaled version of it):
 
-```aether
+```aether,fragment
 j = 0
 total = 0
 while j < N {

@@ -270,7 +270,7 @@ function used as a bare expression statement must be consumed: destructured,
 
 ### Phase 3, identity: declared faults over `const char*`
 
-```aether
+```aether,fragment
 // std/fs/module.ae
 fault NotFound, PermissionDenied, IsDirectory
 

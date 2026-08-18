@@ -342,6 +342,9 @@ jobs:
     - name: Run contrib/host check
       run: make contrib-host-check
 
+    - name: Type-check every non-host contrib module
+      run: make check-contrib-modules
+
   # ============================================================
   # contrib runtime check — build + RUN every contrib test_*.ae
   # (tinyweb, i18n/collation, …), not just type-check them. This

@@ -343,7 +343,7 @@ String interpolation works with `println` and any function that accepts a string
 
 Interpolated strings produce a real string value when assigned to a variable, so they can be passed to any function:
 
-```aether
+```aether,fragment
 msg = "Hello, ${name}!"     // msg is a string pointer
 ```
 

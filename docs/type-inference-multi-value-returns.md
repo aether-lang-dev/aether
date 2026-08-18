@@ -22,7 +22,7 @@ This doc covers only multi-value-return-specific edge cases.
 
 ## The shape that triggers the cluster
 
-```aether
+```aether,fragment
 import std.fs
 import std.cryptography
 
@@ -130,7 +130,7 @@ UNKNOWN) loops forever and exhausts `MAX_INFERENCE_ITERATIONS`.
 body can't see locals defined by destructure in the surrounding block.
 Specifically, in:
 
-```aether
+```aether,fragment
 hash_file(p: string) {
     bytes, length, rerr = fs.read_binary(p)
     if string.length(rerr) > 0 {

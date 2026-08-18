@@ -4,7 +4,7 @@
 // http.put / http.delete plus the server-side bits tinyweb consumes).
 //
 // Import with: import std.http.client
-//             // call sites then write client.request(...), client.send(...)
+//             // call sites then write client.request(...), client.send_request(...)
 //
 // The split exists because the v2 surface adds new request- and
 // response-side names (request, send, response_status, response_body,

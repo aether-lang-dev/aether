@@ -302,7 +302,7 @@ static void _closure_fn_N(_closure_env_N* _env, void* perms) {
 
 Sandboxes can nest, and each level can only narrow permissions:
 
-```aether
+```aether,fragment
 outer = sandbox("outer") {
     grant_tcp("*", 0)        // any TCP
     grant_fs_read("*")       // any file read
@@ -381,7 +381,7 @@ The sandbox and `--with=fs,net,os` gate the *whole program*. Effect tags add a
 **finer, per-function** capability axis, checked statically at compile time
 (zero runtime cost):
 
-```aether
+```aether,fragment
 @pure
 parse_config(text: string) -> Config { ... }   // must touch no fs/net/os
 
@@ -438,7 +438,7 @@ The sandbox mediates stdlib I/O only. These are the places its enforcement line 
 
 Aether's `extern` keyword lets code call raw C functions directly. If contained code declares:
 
-```aether
+```aether,fragment
 extern fopen(path: string, mode: string) -> ptr
 ```
 
@@ -544,7 +544,7 @@ prefix the rest of the tooling greps for; allowed checks get a parallel
 The last 256 checks are also held in an in-memory ring buffer that the
 program can read back through the `std.audit` module:
 
-```aether
+```aether,fragment
 import std.audit
 
 // ... run sandboxed work ...
@@ -617,7 +617,7 @@ the launch script must set `LD_PRELOAD=libaether_sandbox.so`.
 `grant_exec("*")` allows executing any binary, including statically
 linked ones that bypass LD_PRELOAD. Exec grants should be specific:
 
-```aether
+```aether,fragment
 // Bad:
 grant_exec("*")
 
@@ -657,7 +657,7 @@ Don't grant it unless necessary. Without it:
 
 Review grants like you'd review Docker capabilities:
 
-```aether
+```aether,fragment
 // Each grant should be justified
 worker = sandbox("worker") {
     grant_env("DATABASE_URL")       // needs DB connection string
@@ -851,7 +851,7 @@ but with an important caveat.
 Aether is the guard. Bash is the tool. Each bash invocation gets
 specific grants for that step:
 
-```aether
+```aether,fragment
 compile_sandbox = sandbox("compile") {
     grant_fs_read("src/*")
     grant_fs_write("build/*")
@@ -996,7 +996,7 @@ This technique is proven in production:
 
 ### What it looks like in Aether
 
-```aether
+```aether,fragment
 worker = sandbox("python-worker") {
     grant_tcp("*.internal")
     grant_tcp("api.example.com")
@@ -1112,7 +1112,7 @@ unveil("/tmp", "rwc");             // /tmp read-write-create
 unveil(NULL, NULL);                // lock it down, no more unveil calls
 ```
 
-```aether
+```aether,fragment
 // Aether equivalent
 worker = sandbox("worker") {
     grant_fs_read("/etc/*")
@@ -1148,7 +1148,7 @@ contained code uses normal APIs.
 deno run --allow-net=api.example.com --allow-read=/tmp --allow-env=HOME app.ts
 ```
 
-```aether
+```aether,fragment
 // Aether equivalent
 app = sandbox("app") {
     grant_tcp("api.example.com")
@@ -1248,7 +1248,7 @@ a constructor argument, a closure parameter, or a service interface.
 The injected dependency isn't limited to read-only data. It can be a
 service with full business logic, including mutation:
 
-```aether
+```aether,fragment
 // Container: has full access, creates a database service
 db = connect_database("/etc/app/db-config.yaml")
 
@@ -1365,7 +1365,7 @@ the expected result, since interception is on the call, not the load.
 
 All host modules follow the same pattern:
 
-```aether
+```aether,fragment
 import std.list
 import contrib.host.python   // or lua, js, perl, ruby, tcl
 
@@ -1453,7 +1453,7 @@ Each host module provides two bindings to the hosted language:
 
 ### Example
 
-```aether
+```aether,fragment
 import contrib.host.python
 
 worker = sandbox("worker") {
@@ -1486,7 +1486,7 @@ shared_map_free(map)
 All values are strings. Numbers, booleans, and other types are
 encoded as strings by the sender and parsed by the receiver:
 
-```aether
+```aether,fragment
 shared_map_put(map, "threshold", "42")      // int
 shared_map_put(map, "rate", "3.14")         // float
 shared_map_put(map, "enabled", "true")      // bool

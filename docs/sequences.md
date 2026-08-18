@@ -90,7 +90,7 @@ A `*StringSeq` local is reclaimed **automatically**, the compiler frees
 it on reassignment and at scope exit, so the explicit `string.seq_free(s)`
 above is optional. This mirrors the heap-string ownership model:
 
-```aether
+```aether,fragment
 deep = string.seq_empty()
 i = 0
 while i < 1000 {
@@ -137,7 +137,7 @@ stays simple. The five **closure-bearing** combinators (`each` / `map`
 / `filter` / `reduce` / `zip_each`, see the next section) take an
 Aether closure as the per-element callback.
 
-```aether
+```aether,fragment
 import std.string
 
 s = string.split_to_seq("a,b,c,d,e", ",")
@@ -200,7 +200,7 @@ the O(n²)→O(n) point of the design):
 | `string.seq_reduce(s, init, f)` | `\|acc, x\| { ... }` (`(ptr, string) -> ptr`) | the final accumulator (`ptr`) |
 | `string.seq_zip_each(a, b, f)` | `\|x, y\| { ... }` (side effects) | nothing |
 
-```aether
+```aether,fragment
 import std.string
 
 s = string.split_to_seq("alpha,beta,gamma,delta", ",")
@@ -269,7 +269,7 @@ captured environment) when the walk completes, so a one-shot
 shape, backwards-compatible with every caller. Two paths to migrate
 to a `*StringSeq`:
 
-```aether
+```aether,fragment
 // (a) Direct: split into a seq from the start.
 sites = string.split_to_seq(csv, ",")
 
@@ -290,7 +290,7 @@ pointer is freed with `string.array_free`.
 
 A `*StringSeq` field on a message is sent as-is:
 
-```aether
+```aether,fragment
 message AnalyzeBatch {
     sites: *StringSeq
     poller_id: int
@@ -330,7 +330,7 @@ Both shapes are first-class; pick by what the receiver wants.
 `string_retain` is a no-op on plain `char*` literals) and `t` (via
 `string.seq_retain`). So:
 
-```aether
+```aether,fragment
 shared = string.seq_cons("y", string.seq_cons("z", string.seq_empty()))
 
 a = string.seq_cons("a", string.seq_retain(shared))   // a = a -> y -> z

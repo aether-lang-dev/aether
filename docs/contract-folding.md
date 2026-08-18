@@ -44,7 +44,7 @@ So this design is **not** "add contract folding." It is two smaller things:
    predicate at each call site and error when it is decidably false. This is
    the concepts-like payoff and the genuinely new machinery.
 
-```aether
+```aether,fragment
 divide(a: int, b: int where b != 0) -> int { return a / b }
 
 x = divide(10, 0)     // Tier 2: compile error, today a runtime panic
@@ -138,7 +138,7 @@ predicate under it:
 | **true** | nothing (the runtime check still exists at function entry; see §4.4) |
 | **unknown** (any operand not compile-time-known) | nothing, runtime check as today |
 
-```aether
+```aether,fragment
 divide(a: int, b: int where b != 0) -> int { … }
 
 divide(10, 0)        // error: precondition b != 0 of divide is violated:
@@ -150,7 +150,7 @@ divide(10, 5)        // true → fine (runtime check folds per §4.4 note)
 Multi-parameter predicates work with the same env, `requires a < b` folds
 when *both* arguments are constants, else UNKNOWN:
 
-```aether
+```aether,fragment
 clamp(lo: int, hi: int) -> int
     requires lo <= hi { … }
 
@@ -228,7 +228,7 @@ than duplicate an escaping-sensitive renderer.
 Code that **compiles today and panics at runtime** (or never executes) will
 **fail to build**:
 
-```aether
+```aether,fragment
 if never_true() { r = divide(x, 0) }    // compiles today; rejected after Tier 2
 ```
 
