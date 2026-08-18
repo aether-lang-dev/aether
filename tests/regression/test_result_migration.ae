@@ -67,7 +67,7 @@ main() {
     // --- regex.compile : ptr! + matches_lit : int! ---
     // Only meaningful when the build linked libpcre2-8 (Windows CI does
     // not); probe first and skip the regex assertions otherwise, matching
-    // tests/regression/test_regex.ae. The migration itself is already
+    // std/regex/test_regex.ae. The migration itself is already
     // proven by string/json above — regex here is extra coverage.
     probe, perr = regex.compile("a")
     if probe == null {

@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **17 more `std` module tests co-located** in
+  `std/<module>/test_<module>.ae`, continuing the move started in the
+  previous release: audio, bytes, cbor, clapae, config, encoding, hash,
+  language, message, msgpack, number, regex, schema, strbuilder, time,
+  url, worker. All are pure renames — no test content changed — and each
+  was selected by checking it actually imports its namesake module rather
+  than by filename alone.
+  Compiler and codegen regressions that merely *use* a std module (the
+  `test_string_leak_*` and `test_return_escape_*` families, for instance)
+  stay in `tests/regression/`: they exercise the heap tracker and closure
+  lowering, not the module's API.
+
 ## [0.550.0]
 
 ### Changed

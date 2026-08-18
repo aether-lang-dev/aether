@@ -219,7 +219,7 @@ JSON Schema; it does not consume external JSON Schema documents.
 
 Every `parse` result must be released with `values_free` **and** `errors_free`.
 `std.schema` is manual-memory and leak-clean under valgrind; the regression
-suite (`tests/regression/test_schema.ae`) runs zero-leak.
+suite (`std/schema/test_schema.ae`) runs zero-leak.
 
 ## Design credits
 

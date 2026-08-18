@@ -3,7 +3,7 @@
  * C-FFI primitive (no Aether-side wrapper, since va_list does not
  * cross the Aether boundary), so it can only be exercised from C:
  * the Aether-side strbuilder surface is covered separately in
- * tests/regression/test_std_strbuilder.ae.
+ * std/strbuilder/test_strbuilder.ae.
  *
  * Five cases, mirroring the ask in new_stringbuilder_ask.md:
  *   1. byte-identical to append_format across the conversion set
