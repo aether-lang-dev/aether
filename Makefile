@@ -2608,8 +2608,24 @@ check-docs: compiler ae stdlib
 	@echo "==================================="
 	@echo "  documentation examples"
 	@echo "==================================="
-	@python3 tests/scripts/check_doc_examples.py
-	@python3 tests/scripts/check_doc_blocks.py
+	@# The two checkers are Python, and MSYS2 on the Windows runners has no
+	@# python3 — `make ci` calls this target on every platform, so without a
+	@# guard the whole Windows build dies with "python3: No such file or
+	@# directory" (exit 127) before it reaches anything Aether.
+	@#
+	@# Skipping there costs nothing: what these check is whether a
+	@# documentation block still compiles, which does not vary by platform.
+	@# A block that compiles on the Linux and macOS legs compiles anywhere,
+	@# and those legs run the same `make ci`. The skip is announced rather
+	@# than silent, so a box that has quietly lost python3 is visible in the
+	@# log instead of reading as a pass.
+	@if command -v python3 >/dev/null 2>&1; then \
+	    python3 tests/scripts/check_doc_examples.py && \
+	    python3 tests/scripts/check_doc_blocks.py; \
+	else \
+	    echo "  [SKIP] documentation examples — python3 not found"; \
+	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
+	fi
 
 # Every non-host contrib module's Aether surface, type-checked (#1442).
 #
