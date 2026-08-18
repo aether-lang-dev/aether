@@ -97,6 +97,34 @@ else
     echo "  [skip] --emit=obj cross checks: zig not on PATH"
 fi
 
+# --- 3b. wasm32-wasi routes through zig and needs no hand-passed defines ---
+# WASI's setjmp.h #errors without -D__wasm_exception_handling__=1, and WASI has
+# no POSIX signal API without -D_WASI_EMULATED_SIGNAL. CI passed both by hand
+# ("Verify WASI panic runtime"); `ae build` now supplies them itself, so the
+# whole point of this case is that NOTHING is passed on the command line here.
+if command -v zig >/dev/null 2>&1; then
+    "$AE" build --target=wasm32-wasi --emit=csrc "$SRC" -o "$TMP/wasi"         >"$TMP/wasilog" 2>&1 || { cat "$TMP/wasilog"; fail "wasm32-wasi --emit=csrc was rejected"; }
+    [ -s "$TMP/wasi.c" ] || fail "no C emitted for wasm32-wasi"
+    cmp -s "$TMP/wasi.c" "$TMP/out.c"         || fail "wasm32-wasi csrc differs; csrc is meant to be target-neutral"
+
+    "$AE" build --target=wasm32-wasi --emit=obj "$SRC" -o "$TMP/wasi.o"         >"$TMP/wasiobj" 2>&1 || { cat "$TMP/wasiobj"; fail "wasm32-wasi --emit=obj was rejected"; }
+    case "$(file "$TMP/wasi.o")" in
+        *WebAssembly*) ;;
+        *) fail "wasm32-wasi object is not a wasm module: $(file "$TMP/wasi.o")" ;;
+    esac
+
+    # A full executable link is NOT supported for wasm32 (the runtime
+    # scheduler's layout assertions assume 64-bit pointers). It must fail with
+    # our one-line diagnostic, not a static_assert deep in a scheduler TU.
+    printf 'main() {\n    println("hi")\n}\n' > "$TMP/app.ae"
+    if "$AE" build --target=wasm32-wasi "$TMP/app.ae" -o "$TMP/app.wasm"             >"$TMP/wasiexe" 2>&1; then
+        fail "wasm32-wasi executable link should be rejected but succeeded"
+    fi
+    grep -q 'executable link is not supported yet' "$TMP/wasiexe"         || fail "wasm32-wasi exe gave the wrong diagnostic: $(head -1 "$TMP/wasiexe")"
+else
+    echo "  [skip] wasm32-wasi checks: zig not on PATH"
+fi
+
 # --- 4. the linking emit modes are still rejected, up front ---
 # Up front matters: --emit=both re-dispatches as exe, and without an explicit
 # check it reaches the cross LINKER and dies with "undefined symbol: main" on
@@ -110,4 +138,4 @@ for mode in lib both; do
         || fail "--emit=$mode gave the wrong diagnostic: $(head -1 "$TMP/err")"
 done
 
-echo "  PASS: --emit=csrc + --emit=obj work under --target; lib/both still rejected"
+echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); lib/both still rejected"

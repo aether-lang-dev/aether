@@ -454,6 +454,46 @@ for a command that asked for a cross one. The consumer links the object with
 their own `libaether.a` and system libraries for the target, exactly as they do
 for a native `--emit=obj`.
 
+### WebAssembly: two backends, selected by target name
+
+There are **two** wasm paths, and they are not interchangeable:
+
+| Target | Backend | Produces | Supported modes |
+|---|---|---|---|
+| `--target=wasm` | Emscripten (`emcc`) | `.js` + `.wasm` bundle | executables |
+| `--target=wasm32-wasi` | `zig cc` | a self-contained wasm object | `--emit=csrc`, `--emit=obj` |
+
+Emscripten supplies a JS host, a DOM/filesystem shim and its own pthread
+emulation; the zig path produces a plain object a WASI runtime (or someone
+else's wasm link) consumes. Neither supersedes the other, so they are chosen by
+different target names rather than one silently switching backend.
+
+`wasm32-wasi` goes through the same cross machinery as every other triple, so
+`--emit=obj` yields a real module:
+
+```
+$ ae build --target=wasm32-wasi --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: WebAssembly (wasm) binary module version 0x1 (MVP)
+```
+
+**The two WASI defines are injected automatically.** WASI's `setjmp.h` refuses
+to compile without `-D__wasm_exception_handling__=1` (*"Setjmp/longjmp support
+requires Exception handling support"*), and WASI has no POSIX signal API
+without `-D_WASI_EMULATED_SIGNAL`. `ae build` adds both when the target
+resolves to a WASI triple, so nothing needs passing by hand.
+
+**A full executable link for `wasm32-wasi` is not supported**, and is rejected
+up front rather than failing deep in a compile:
+`runtime/scheduler/multicore_scheduler.c` asserts
+`sizeof(Mailbox) % 8 == 0` with no 64-bit guard (unlike the
+`sizeof(Message) == 48` assertion beside it, which has one), so it fails on any
+32-bit target. Use `--target=wasm` for a runnable bundle.
+
+`wasm32-freestanding` is deliberately **not** offered: it ships no libc, so the
+generated C's `#include <stdio.h>` cannot resolve and `--emit=obj` fails
+outright. Its only working mode would be `--emit=csrc`, which emits the same
+target-neutral bytes as every other target anyway.
+
 The same vendored engine backs two native cases: a build box with no system
 libpcre2-8 (`make` compiles the vendored copy instead of stubbing
 `std.regex` out — `PCRE2=0` restores the stub, `PCRE2=vendored` forces the
@@ -472,7 +512,8 @@ so an installed toolchain never ships a silently-stubbed regex.
 | Hardened | `HARDEN=1` | See "Hardening" section below |
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
-| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc` |
+| Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
+| Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend, `--emit=csrc`/`--emit=obj` only |
 
 ## Hardening (`HARDEN=1`)
 

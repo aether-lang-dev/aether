@@ -63,7 +63,40 @@ const char* cross_target_to_zig(const char* t) {
      * State the ABI version so Zig's startup objects match that base. */
     if (!strcmp(t, "aarch64-freebsd") || !strcmp(t, "arm64-freebsd")) return "aarch64-freebsd.15.0";
     if (!strcmp(t, "x86_64-freebsd")  || !strcmp(t, "amd64-freebsd")) return "x86_64-freebsd.15.0";
+    /* WebAssembly (Tier A — self-contained): zig bundles wasi-libc, so no
+     * sysroot. NOTE this is the ZIG wasm path, and is deliberately distinct
+     * from bare `--target=wasm`, which routes to Emscripten (`emcc`) and stays
+     * as it is: emcc supplies a JS host, a DOM/filesystem shim and its own
+     * pthread emulation, which is a different product from a self-contained
+     * `.wasm` a WASI runtime loads. Neither supersedes the other, so they are
+     * selected by different target names rather than one silently changing
+     * backend.
+     *
+     * wasm32-freestanding is deliberately NOT mapped. It ships no libc, so
+     * the emitted C cannot even be compiled to an object: `--emit=obj` dies on
+     * `fatal error: 'stdio.h' file not found` (the generated C includes it
+     * unconditionally). Offering a target whose only working mode is
+     * `--emit=csrc` — which produces the same target-neutral bytes as every
+     * other target anyway — would advertise support that does not exist. */
+    if (!strcmp(t, "wasm32-wasi")   || !strcmp(t, "wasm-wasi"))  return "wasm32-wasi";
     return NULL;
+}
+
+/* The two defines every WASI compile needs, as one string so the obj and exe
+ * paths cannot drift apart.
+ *
+ * WASI's setjmp.h #errors out unless exception handling is declared
+ * ("Setjmp/longjmp support requires Exception handling support"), and the
+ * runtime's panic path includes it unconditionally. _WASI_EMULATED_SIGNAL is
+ * needed for the same reason the panic guard exists: WASI has no POSIX signal
+ * API. CI passed both by hand (ci.yml "Verify WASI panic runtime"); the build
+ * now supplies them itself, so `ae build --target=wasm32-wasi` needs nothing
+ * on the command line. */
+#define AETHER_WASI_DEFINES "-D_WASI_EMULATED_SIGNAL -D__wasm_exception_handling__=1"
+
+/* True if the resolved zig triple is a WASI target. */
+static bool cross_target_is_wasi(const char* ztriple) {
+    return ztriple && strstr(ztriple, "wasi") != NULL;
 }
 
 /* True if `t` is a cross target that needs a base sysroot for system headers
@@ -247,6 +280,10 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
+    if (cross_target_is_wasi(ztriple)) {
+        strncat(feature_defs, " " AETHER_WASI_DEFINES,
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
 
     /* Tier-B (FreeBSD) targets need the base sysroot for HEADERS here (the
      * -L is link-side, but harmless and kept so the flag string matches the
@@ -333,6 +370,10 @@ int run_cross_build(const char* c_file, const char* out_file,
     char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
     if (strstr(ztriple, "macos")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
+    if (cross_target_is_wasi(ztriple)) {
+        strncat(feature_defs, " " AETHER_WASI_DEFINES,
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
     /* Tier-B (FreeBSD) targets need a base sysroot for headers and libraries;

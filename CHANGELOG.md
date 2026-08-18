@@ -40,6 +40,33 @@ version number before tagging the release.
   remain rejected: they link a shared library, which the cross path does not
   yet produce.
 
+- **`ae build --target=wasm32-wasi` works, with no hand-passed defines**
+  (#1648). `wasm32-wasi` now maps to a zig triple like every other target, so
+  it routes through the same cross machinery: `--emit=obj` produces a real
+  `WebAssembly (wasm) binary module`. The two defines WASI needs are injected
+  by the build rather than left to the caller — without
+  `-D__wasm_exception_handling__=1` its `setjmp.h` refuses to compile
+  ("Setjmp/longjmp support requires Exception handling support"), and without
+  `-D_WASI_EMULATED_SIGNAL` there is no POSIX signal API. CI passed both by
+  hand; now only the build knows them.
+
+  This is the **zig** wasm path and is distinct from `--target=wasm`, which
+  stays on Emscripten: emcc supplies a JS host, a DOM/filesystem shim and its
+  own pthread emulation, which is a different product from a self-contained
+  object a WASI runtime loads. Neither supersedes the other, so they are
+  selected by target name rather than one silently switching backend.
+
+  Two limits found by testing and stated rather than papered over. A full
+  executable link for `wasm32-wasi` is **rejected up front**:
+  `multicore_scheduler.c` asserts `sizeof(Mailbox) % 8 == 0` with no 64-bit
+  guard — unlike the `sizeof(Message) == 48` assertion beside it, which has one
+  — so it fails on any 32-bit target. That is a pre-existing runtime
+  portability gap (#1652), and the error names it instead of surfacing a static-assert
+  deep in a scheduler translation unit. And `wasm32-freestanding` is
+  deliberately not offered: with no libc the generated C's `#include <stdio.h>`
+  cannot resolve, so its only working mode would be `--emit=csrc`, which emits
+  the same target-neutral bytes as every other target anyway.
+
 - **`make contrib-check-lsan`: contrib/vulkan is leak-gated in CI** (#1507).
   The module rendered on the Linux leg for correctness only, because the CI
   driver is lavapipe and valgrind cannot follow its LLVM JIT: one render

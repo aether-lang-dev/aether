@@ -525,6 +525,14 @@ jobs:
     - name: Install native GCC
       run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
+    # Still needed after #1648 wired wasm32-wasi into `ae build`, and worth
+    # saying why: `ae build --target=wasm32-wasi --emit=obj` compiles the
+    # user's generated C only — it never touches the runtime. This step is the
+    # sole thing that compiles aether_panic.c for WASI, which is exactly the
+    # regression #1645 fixed. It keeps the hand-passed defines deliberately:
+    # `ae build` now injects the same two itself, so if this bare invocation
+    # ever needs a third, the divergence surfaces here rather than silently
+    # inside the build.
     - name: Verify WASI panic runtime with Zig 0.16.0
       run: |
         ZIG="$(./scripts/get-zig.sh "$RUNNER_TEMP/zig")"

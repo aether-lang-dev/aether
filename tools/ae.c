@@ -5240,10 +5240,10 @@ static int cmd_build(int argc, char** argv) {
     const char* ztriple = cross_target_to_zig(target);
     if (target && strcmp(target, "wasm") != 0 && strcmp(target, "native") != 0 && !ztriple) {
         fprintf(stderr, "Error: Unknown target '%s'.\n", target);
-        fprintf(stderr, "Valid targets: native, wasm, or a cross triple "
+        fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
                         "aarch64-freebsd, x86_64-freebsd, x86_64-windows, "
-                        "aarch64-windows).\n");
+                        "aarch64-windows, wasm32-wasi).\n");
         return 1;
     }
     int is_wasm = target && strcmp(target, "wasm") == 0;
@@ -5432,6 +5432,29 @@ static int cmd_build(int argc, char** argv) {
         // consumer compiles the .so/.a/.wasm themselves. --target therefore
         // does not change the bytes emitted; it is accepted so one command
         // line works for both native and cross consumers.
+        /* The wasm triples are wired for the NON-LINKING emit modes only.
+         * `--emit=csrc` and `--emit=obj` are proven end to end (a real
+         * `WebAssembly (wasm) binary module` object), but a full executable
+         * link is not: runtime/scheduler/multicore_scheduler.c carries
+         *
+         *     _Static_assert(sizeof(Mailbox) % 8 == 0, ...)
+         *
+         * with no 64-bit guard (unlike the `sizeof(Message) == 48` assertion
+         * directly above it, which has one), so it fails on any 32-bit target
+         * including wasm32. That is a pre-existing runtime portability gap
+         * (filed as #1652), not something this path introduces, and it wants
+         * its own change rather than a workaround here. Reject up front so the
+         * user gets one line instead of a static-assert deep in a scheduler
+         * TU. */
+        if (strstr(ztriple, "wasm") && g_emit_exe && !g_emit_csrc && !g_emit_obj) {
+            fprintf(stderr,
+                "Error: --target=%s supports --emit=csrc and --emit=obj; a full "
+                "executable link is not supported yet (the runtime scheduler's "
+                "layout assertions assume a 64-bit target).\n"
+                "  For a runnable wasm bundle use --target=wasm (Emscripten).\n",
+                target);
+            return 1;
+        }
         if (g_emit_lib && !g_emit_csrc && !g_emit_obj) {
             fprintf(stderr,
                 "Error: cross-compilation (--target=%s) supports executables, "
