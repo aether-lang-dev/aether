@@ -910,6 +910,16 @@ n, err = fs.walk(root, |path: string, kind: int, depth: int| {
     return 0                     // 0 continue · 1 skip subtree · 2 stop walk
 })
 
+// Collecting paths: `path` is borrowed, so copy the bytes at the boundary.
+// Adding `path` itself would store a pointer the next entry overwrites.
+found = list.new()
+n2, err2 = fs.walk(root, |path: string, kind: int, depth: int| {
+    if kind == 1 && string.ends_with(path, ".md") == 1 {
+        list.add(found, string.copy(path))
+    }
+    return 0
+})
+
 // Watch: coarse change ping, re-list to see what changed.
 w, werr = fs.watch_open(dir)
 changed = fs.watch_wait(w, 1000)   // 1 changed / 0 timeout / -1 error
@@ -917,7 +927,7 @@ fs.watch_close(w)
 ```
 
 **Functions:**
-- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type`, one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is borrowed, copy it to keep it. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
+- `fs.walk(path, cb)` → `(int, string)` - Visit `path` (depth 0) and every entry beneath it. Entry kinds come from readdir's `d_type`, one sweep per directory, no per-entry `stat(2)`. Symlinks are reported (kind 3) but never followed, so cycles are impossible. `path` inside the callback is **borrowed**: it points into the buffer the walk rewrites for the next entry and is valid only until the callback returns. Storing it directly (`list.add(paths, path)`) keeps the pointer, not the bytes, so the entry reads as garbage after the walk; copy at the boundary with `list.add(paths, string.copy(path))`. Traversal order within a directory is the platform's readdir order (unspecified). Returns (entries visited, `""`), or (0, error) when `path` can't be read.
 - `fs.watch_open(path)` → `(ptr, string)` - Watch one directory (or file), non-recursive, over the platform primitive: kqueue `EVFILT_VNODE` (macOS/BSD), inotify (Linux), `FindFirstChangeNotification` (Windows). The handle is single-threaded.
 - `fs.watch_wait(watch, timeout_ms)` → `int` - Block up to `timeout_ms` (negative = forever): 1 = something changed (create/delete/modify/rename inside the watched directory), 0 = timeout, -1 = error. Changes made **between** `watch_open` and `watch_wait` are queued, not lost, and a burst of changes reports once (pending events are drained).
 - `fs.watch_close(watch)` - Release the handle. Safe on null.

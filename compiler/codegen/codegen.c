@@ -4676,6 +4676,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * refcount per add. */
     print_line(gen, "extern int list_add_string_adopted(void* list, void* item);");
     print_line(gen, "extern int map_put_string_adopted(void* map, const char* key, void* value);");
+    /* The adopting rewrite has to preserve `list.add` / `map.put`'s
+     * string-return contract while calling an int-returning entry. Doing that
+     * inline as `(adopted(...) ? "" : "...")` builds an expression whose value
+     * every statement-position call then discards, and a discarded ternary is
+     * -Wunused-value: `list.add(l, string.copy(p))` warned in ordinary user
+     * code. A function call discards its result silently, so the conversion
+     * lives in these helpers instead. */
+    print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
+    print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
+    print_line(gen, "}");
+    print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
+    print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
+    print_line(gen, "}");
+    print_line(gen, "static inline const char* _aether_list_add_closure(void* list, void* box) {");
+    print_line(gen, "    return list_add_closure_owned(list, box) ? \"\" : \"list.add failed\";");
+    print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_safe_str(const void* s) {");
     print_line(gen, "    if (!s) return \"(null)\";");
     print_line(gen, "    return aether_string_data(s);");

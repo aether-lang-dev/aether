@@ -171,3 +171,63 @@ TEST_CATEGORY(is_aether_string_short_alloc_safe, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(1, is_aether_string(s));
     string_free(s);
 }
+
+/* #1640: the contract is the sign, and only the sign. `return strcmp(...)`
+ * satisfied it for adjacent characters and nothing else, so a caller writing
+ * the documented `compare(a, b) == 1` was right about "b" vs "a" and wrong
+ * about "c" vs "a". strcmp's magnitude is unspecified by C, so the old
+ * behaviour was not even stable across libcs. */
+TEST_CATEGORY(string_compare_sign_only, TEST_CATEGORY_STDLIB) {
+    AetherString* a = string_from_cstr("a");
+    AetherString* c = string_from_cstr("c");
+    AetherString* z = string_from_cstr("z");
+
+    ASSERT_EQ(1,  string_compare(c, a));
+    ASSERT_EQ(-1, string_compare(a, c));
+    ASSERT_EQ(1,  string_compare(z, a));
+    ASSERT_EQ(-1, string_compare(a, z));
+    ASSERT_EQ(0,  string_compare(a, a));
+
+    /* A prefix sorts before the longer string it prefixes. */
+    AetherString* ab  = string_from_cstr("ab");
+    AetherString* abc = string_from_cstr("abc");
+    ASSERT_EQ(-1, string_compare(ab, abc));
+    ASSERT_EQ(1,  string_compare(abc, ab));
+
+    /* Bytes order as unsigned, so a high byte sorts after ASCII rather than
+     * before it (the same signedness trap string_char_at hit in #1516). */
+    const char high[] = { (char)0x82, 0 };
+    AetherString* hb = string_new_with_length(high, 1);
+    ASSERT_EQ(1,  string_compare(hb, a));
+    ASSERT_EQ(-1, string_compare(a, hb));
+
+    string_free(a);
+    string_free(c);
+    string_free(z);
+    string_free(ab);
+    string_free(abc);
+    string_release(hb);
+}
+
+/* Binary-safe: an AetherString carries its length, so bytes past an embedded
+ * NUL take part. strcmp stopped at the NUL and called these two equal. */
+TEST_CATEGORY(string_compare_embedded_nul, TEST_CATEGORY_STDLIB) {
+    AetherString* ab = string_new_with_length("a\0b", 3);
+    AetherString* ac = string_new_with_length("a\0c", 3);
+    AetherString* a  = string_new_with_length("a\0", 2);
+
+    ASSERT_EQ(-1, string_compare(ab, ac));
+    ASSERT_EQ(1,  string_compare(ac, ab));
+    ASSERT_EQ(0,  string_compare(ab, ab));
+    ASSERT_EQ(-1, string_compare(a, ab));
+
+    /* A null operand sorts first instead of reading as equal to everything,
+     * so a missing string cannot silently satisfy an equality test. */
+    ASSERT_EQ(-1, string_compare(NULL, ab));
+    ASSERT_EQ(1,  string_compare(ab, NULL));
+    ASSERT_EQ(0,  string_compare(NULL, NULL));
+
+    string_release(ab);
+    string_release(ac);
+    string_release(a);
+}
