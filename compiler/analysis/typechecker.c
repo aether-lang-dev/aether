@@ -2421,6 +2421,20 @@ static void iso_check_function(ASTNode* fn, ASTNode* body);
 // #481: validate `@pure`/`@no_fs`/`@no_net`/`@no_os` effect tags.
 static void check_effect_tags(ASTNode* program);
 // #522: fold `__pure(fn)` queries to compile-time bool constants.
+/* Replace a node's type, releasing the one it already had.
+ *
+ * Inference runs before this walk and leaves most expressions already typed,
+ * so a plain `expr->node_type = clone_type(...)` orphans that first type: four
+ * of them per trivial program, which is what kept the typechecker out of the
+ * LeakSanitizer job (#1575). The new type is always freshly created or cloned
+ * at these sites, so freeing first cannot free what is being assigned. */
+static void set_node_type(ASTNode* node, Type* fresh) {
+    if (!node) { if (fresh) free_type(fresh); return; }
+    if (node->node_type == fresh) return;
+    if (node->node_type) free_type(node->node_type);
+    node->node_type = fresh;
+}
+
 static void resolve_purity_queries(ASTNode* node, ASTNode* program,
                                    const char** globals, int nglobals);
 // #480: resolve `type X = distinct Y` placeholders into distinct Types.
@@ -6437,7 +6451,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 type_error(error_msg, expr->line, expr->column);
                 return 0;
             }
-            expr->node_type = symbol->type ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
+            set_node_type(expr, symbol->type ? clone_type(symbol->type)
+                                             : create_type(TYPE_UNKNOWN));
             return 1;
         }
 
@@ -7150,7 +7165,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             }
             free_type(left_type);
             free_type(right_type);
-            expr->node_type = create_type(TYPE_BOOL);
+            set_node_type(expr, create_type(TYPE_BOOL));
             return 1;
         }
     }
@@ -7211,7 +7226,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(right_type);
             return 0;
         }
-        expr->node_type = clone_type(left_type);
+        set_node_type(expr, clone_type(left_type));
     } else {
         Type* result_type = infer_binary_type(left, right, operator);
         if (result_type->kind == TYPE_UNKNOWN &&
@@ -7224,7 +7239,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             type_error("Invalid operation for given types", expr->line, expr->column);
             return 0;
         }
-        expr->node_type = result_type;
+        set_node_type(expr, result_type);
         /* #697: this op is 64-bit — widen any 32-bit-int arithmetic
          * operands so the computation happens in 64 bits, not in C int. */
         if (result_type && (result_type->kind == TYPE_INT64 ||

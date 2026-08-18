@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **contrib.host.ruby segfaulted inside libruby on Ruby 3.4** (#1618). The
+  bridge baked `Qnil` in as `(VALUE)0x08` with a note that a change was
+  "extremely unlikely"; Ruby 3.4 moved nil to `0x04`. Every errinfo comparison
+  then missed, and `rb_set_errinfo(0x08)` handed 3.4 a value it no longer
+  treats as a special constant, so it dereferenced it: `[BUG] Segmentation
+  fault at 0x10`, the crash the CachyOS nightly hit. Init asks the loaded
+  interpreter instead, evaluating `nil` once and keeping what comes back,
+  which is right for any version and any `USE_FLONUM` setting. Verified in
+  containers: 5 passing on 3.4.10 where it died after 1, still 5 passing on
+  3.1.7.
+
+- **`typecheck_program` leaked four `Type` objects on trivial input** (#1575).
+  Inference runs before the typecheck walk and leaves expressions already
+  typed, so the walk's `expr->node_type = clone_type(...)` orphaned the first
+  type: two per identifier and one per binary expression, 512 bytes for
+  `main() { x = 42; }` plus a `while` loop. The assignments go through a
+  helper that releases what was there. That was the last thing keeping
+  `tests/compiler/test_typechecker.c` out of the unit suite, so it is back in:
+  392 tests, and the LeakSanitizer job stays at zero.
+
 ## [0.550.0]
 
 ### Changed

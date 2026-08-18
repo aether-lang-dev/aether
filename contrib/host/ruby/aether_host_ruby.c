@@ -22,13 +22,16 @@
 // This is the same effect as `RUBY_INIT_STACK; ruby_init();` from
 // the original code, just expressed without the macro.
 //
-// Qnil — Ruby's nil singleton VALUE is a compile-time enum constant
-// (RUBY_Qnil = 0x08 on modern Ruby with USE_FLONUM=1, which has
-// been the default since 2.0 in 2013). It's NOT an exported symbol;
-// there's nothing to dlsym. We bake the value directly. If a future
-// Ruby ever flips USE_FLONUM=0 by default (extremely unlikely —
-// would be a deliberate ABI break), Qnil would become 0x04 and
-// NIL_P comparisons would silently miss. Documented assumption.
+// Qnil — Ruby's nil singleton VALUE is a compile-time enum constant, not an
+// exported symbol, so there is nothing to dlsym. It was baked in as 0x08 with
+// a note that a change would be "extremely unlikely"; Ruby 3.4 changed it to
+// 0x04. The bridge then compared errinfo against the wrong value and handed
+// 0x08 to rb_set_errinfo, which is no longer a special constant there, so
+// Ruby dereferenced it: "[BUG] Segmentation fault at 0x10" (#1618).
+//
+// The loaded interpreter is asked instead: evaluating `nil` once at init
+// yields whatever nil is in THAT libruby, for any version and any
+// USE_FLONUM setting.
 
 #include "aether_host_ruby.h"
 #include "../../../runtime/aether_sandbox.h"
@@ -50,9 +53,10 @@
 
 static void* libruby_handle = NULL;
 
-// RUBY_Qnil literal value (USE_FLONUM=1 — modern Ruby default).
-// See header comment for the ABI assumption.
-#define BRIDGE_QNIL ((VALUE)0x08)
+// nil, as the LOADED libruby spells it. Resolved in ruby_init_host by
+// evaluating `nil`; see the header comment. The 0x08 fallback only applies if
+// that evaluation somehow fails, and matches Ruby 3.0 through 3.3.
+static VALUE bridge_qnil = (VALUE)0x08;
 
 static struct {
     // Lifecycle.
@@ -223,6 +227,20 @@ int ruby_init_host(void) {
     g_rb.ruby_init();
     g_rb.ruby_init_loadpath();
     ruby_initialized = 1;
+
+    /* Ask the interpreter what nil is, now that it can answer. Must precede
+     * any eval that inspects errinfo, which is why it sits here and not in
+     * eval_ruby: the very first eval would otherwise compare against, and
+     * assign, the wrong constant. */
+    {
+        int st = 0;
+        VALUE v = g_rb.rb_eval_string_protect("nil", &st);
+        if (!st) {
+            bridge_qnil = v;
+        } else {
+            g_rb.rb_set_errinfo(bridge_qnil);
+        }
+    }
     return 0;
 }
 
@@ -239,13 +257,13 @@ static int eval_ruby(const char* code) {
     g_rb.rb_eval_string_protect(code, &state);
     if (state) {
         VALUE err = g_rb.rb_errinfo();
-        if (err != BRIDGE_QNIL) {
+        if (err != bridge_qnil) {
             VALUE msg = g_rb.f_rb_funcall(err, g_rb.f_rb_intern("message"), 0);
             // StringValueCStr(msg) macro expands to
             // rb_string_value_cstr(&msg); call the function directly.
             fprintf(stderr, "[ruby] %s\n", g_rb.rb_string_value_cstr(&msg));
         }
-        g_rb.rb_set_errinfo(BRIDGE_QNIL);
+        g_rb.rb_set_errinfo(bridge_qnil);
         return -1;
     }
     return 0;
