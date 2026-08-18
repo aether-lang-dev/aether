@@ -29,6 +29,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "  FAIL: $1"; exit 1; }
 
+# Byte-identity of two files, without cmp(1).
+#
+# The Windows MSYS2 CI shell ships no diffutils, so `cmp` is absent there —
+# the same constraint tests/integration/fmt_gate documents and works around.
+# Using `cmp` here made this test report "emitted C differs by target" on all
+# three Windows legs when the real cause was `cmp: command not found`: a
+# missing tool read as a content mismatch. cksum is POSIX and always present.
+same_bytes() {
+    [ "$(cksum < "$1")" = "$(cksum < "$2")" ]
+}
+
 # --- 1. csrc under a cross triple succeeds and writes all three artifacts ---
 if ! "$AE" build --target=aarch64-linux --emit=csrc "$SRC" -o "$TMP/out" >"$TMP/log" 2>&1; then
     cat "$TMP/log"
@@ -56,8 +67,8 @@ grep -q 'aether_greet' "$TMP/out.h" || fail "out.h lacks the aether_greet protot
 "$AE" build                          --emit=csrc "$SRC" -o "$TMP/nat" >/dev/null 2>&1 \
     || fail "native --emit=csrc was rejected"
 
-if ! cmp -s "$TMP/out.c" "$TMP/mac.c" || ! cmp -s "$TMP/out.c" "$TMP/win.c" \
-   || ! cmp -s "$TMP/out.c" "$TMP/nat.c"; then
+if ! same_bytes "$TMP/out.c" "$TMP/mac.c" || ! same_bytes "$TMP/out.c" "$TMP/win.c" \
+   || ! same_bytes "$TMP/out.c" "$TMP/nat.c"; then
     fail "emitted C differs by target; csrc is meant to be target-neutral source"
 fi
 
@@ -90,7 +101,7 @@ if command -v zig >/dev/null 2>&1; then
     # The cross object must differ from the host one — a silently-native
     # object would satisfy every check above except this.
     "$AE" build --emit=obj "$SRC" -o "$TMP/o_native.o" >/dev/null 2>&1         || fail "native --emit=obj was rejected"
-    if cmp -s "$TMP/o_aarch64-linux.o" "$TMP/o_native.o"; then
+    if same_bytes "$TMP/o_aarch64-linux.o" "$TMP/o_native.o"; then
         fail "the aarch64 object is byte-identical to the host object"
     fi
 else
@@ -105,7 +116,8 @@ fi
 if command -v zig >/dev/null 2>&1; then
     "$AE" build --target=wasm32-wasi --emit=csrc "$SRC" -o "$TMP/wasi"         >"$TMP/wasilog" 2>&1 || { cat "$TMP/wasilog"; fail "wasm32-wasi --emit=csrc was rejected"; }
     [ -s "$TMP/wasi.c" ] || fail "no C emitted for wasm32-wasi"
-    cmp -s "$TMP/wasi.c" "$TMP/out.c"         || fail "wasm32-wasi csrc differs; csrc is meant to be target-neutral"
+    same_bytes "$TMP/wasi.c" "$TMP/out.c" \
+        || fail "wasm32-wasi csrc differs; csrc is meant to be target-neutral"
 
     "$AE" build --target=wasm32-wasi --emit=obj "$SRC" -o "$TMP/wasi.o"         >"$TMP/wasiobj" 2>&1 || { cat "$TMP/wasiobj"; fail "wasm32-wasi --emit=obj was rejected"; }
     case "$(file "$TMP/wasi.o")" in
