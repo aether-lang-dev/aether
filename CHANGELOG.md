@@ -19,6 +19,28 @@ version number before tagging the release.
   release workflows now use the repository-pinned Zig 0.16.0 toolchain, the
   first release with the WASI `setjmp` headers needed to compile this runtime.
 
+### Changed
+
+- **The CachyOS nightly now fails hard on every contrib skip.** The box is
+  provisioned with every contrib dependency, so a step that SKIPs there is a
+  silently shrinking test surface rather than an honest report of an absent
+  library. Three layers each hid the one below it and are now closed:
+  `make contrib` runs in `contrib_build.sh`'s explicit `MODULES=` mode (fail-hard
+  by design) with the list derived from that script's own `CATALOGUE`, so a
+  module that no longer *builds* is a failure rather than a skip — the class of
+  breakage a GCC 16 / Clang 22 box exists to find, which the dependency gate
+  cannot catch because the library is present; `make contrib-host-check` gains
+  `CONTRIB_HOST_STRICT=1`, turning a missing bridge archive into a FAIL; and a
+  new step asserts that no host spec skipped any of its cases. That last one was
+  found by testing rather than reasoning — `contrib/host/factor` builds its
+  archive with no Factor installed (the bridge is pure `dlopen`), passes both
+  earlier layers, and then skips all six cases at runtime with
+  `AETHER_FACTOR_SONAME` unset, reporting `0 passing / 6 skipped` and exiting 0.
+  The gate reads `std.spec`'s machine-readable `AE_SPEC_FORMAT=aeocha` report
+  (`skipped=<n>`) rather than parsing the ANSI-coloured human output.
+  `CONTRIB_HOST_STRICT` defaults to `0`, so GitHub CI and dev boxes are
+  unaffected.
+
 ## [0.551.0]
 
 ### Added

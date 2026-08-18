@@ -348,8 +348,111 @@ run_and_record() {
 
 # Thin wrappers so make steps are named commands run_and_record can invoke.
 make_ci_step() { make ci; }
-make_contrib_step() { make contrib; }
-make_host_check_step() { make contrib-host-check; }
+
+# Build EVERY contrib module by name, fail-hard.
+#
+# `make contrib` with MODULES unset is contrib_build.sh's probe-and-skip mode:
+# it tallies anything whose dep is absent as a SKIP and still exits 0. That is
+# right for portable CI runners, which cannot have every language installed —
+# and wrong here. This box is provisioned for the purpose and its dep gate
+# (step 1) has already turned the run RED if anything is missing, so by the
+# time we reach step 5 every dep IS present and a module that does not build
+# is a genuine break, not an absent library.
+#
+# The distinction matters because the two failures are not the same. The dep
+# gate catches "the library is gone"; it cannot catch "the library is here and
+# the module no longer compiles against it" — which is precisely the class of
+# breakage this box exists to find, given it runs GCC 16 / Clang 22 against
+# CI's GCC 11. In probe-and-skip mode such a break is reported as a skip and
+# the nightly stays green.
+#
+# MODULES=<list> is contrib_build.sh's explicit mode, documented there as
+# "fail-hard: any requested module that can't compile is a hard failure (exit
+# 1), not a silent skip". The list is derived from the script's own CATALOGUE
+# rather than hardcoded, so a module added there is covered here automatically
+# and cannot be forgotten.
+contrib_modules_all() {
+    sed -n 's/^[[:space:]]*"\([a-z_]*\)|.*/\1/p' "$REPO/tests/scripts/contrib_build.sh" \
+        | sort -u | paste -sd,
+}
+make_contrib_step() {
+    mods="$(contrib_modules_all)"
+    if [ -z "$mods" ]; then
+        echo "  contrib: could not derive the module list from contrib_build.sh"
+        return 1
+    fi
+    echo "  building (fail-hard): $mods"
+    make contrib MODULES="$mods"
+}
+
+# CONTRIB_HOST_STRICT=1: on this box a bridge whose archive is unavailable is a
+# provisioning failure, not a skip. Without it a spec that never runs is
+# indistinguishable from one that passes (see the Makefile comment).
+make_host_check_step() { make contrib-host-check CONTRIB_HOST_STRICT=1; }
+
+# Assert that no host spec SKIPPED any of its cases.
+#
+# CONTRIB_HOST_STRICT catches a bridge whose ARCHIVE is missing, but not the
+# layer below it: a spec whose archive built fine and which then skips every
+# case at RUNTIME because a runtime dependency is unset. contrib/host/factor is
+# the live example — with AETHER_FACTOR_SONAME unset it reports
+#
+#     0 passing
+#     6 skipped
+#
+# and exits 0, so the step passes while testing nothing. std.spec puts the
+# principle plainly (std/spec/module.ae): "A skip that reports as a pass is
+# worse than no skip at all." On a portable runner a skip is honest; on a box
+# provisioned for the purpose it is a provisioning failure.
+#
+# Rather than parse the human output (whose ⊘ lines carry ANSI colour and
+# would break the moment the renderer changes), this uses the machine-readable
+# contract std.spec already exposes: AE_SPEC_FORMAT=aeocha + AE_SPEC_REPORT
+# make each run write "skipped=<n>" to a file. Summing that key across every
+# host spec is exact and renderer-independent.
+host_specs_no_skips() {
+    rc=0
+    total_skipped=0
+    rpt="$OUTDIR/spec_report_$$.txt"
+    for t in $(find "$REPO/contrib/host" -maxdepth 2 -name 'test_*.ae' | sort); do
+        lang="$(basename "$(dirname "$t")")"
+        rm -f "$rpt"
+        # Mirror the per-language SONAME discovery `make contrib-host-check`
+        # does before running each spec (Makefile, phase [3/3]). Without it the
+        # bridges cannot dlopen their runtime and every case skips — which
+        # would make this gate fire on a correctly provisioned box.
+        case "$lang" in
+            ruby)   AETHER_RUBY_SONAME="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"
+                    export AETHER_RUBY_SONAME ;;
+            python) AETHER_PYTHON_SONAME="$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"
+                    export AETHER_PYTHON_SONAME ;;
+            perl)   AETHER_PERL_SONAME="$(perl -MConfig -e 'print "$Config{archlibexp}/CORE/$Config{libperl}"' 2>/dev/null)"
+                    export AETHER_PERL_SONAME ;;
+            lua)    for so in /usr/lib/*/liblua5.4.so /usr/lib/*/liblua5.3.so /usr/lib/liblua5.4.so; do
+                        [ -f "$so" ] && { AETHER_LUA_SONAME="$so"; export AETHER_LUA_SONAME; break; }
+                    done ;;
+        esac
+        AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT="$rpt" \
+            "$REPO/build/ae" run "$t" >/dev/null 2>&1
+        if [ ! -f "$rpt" ]; then
+            echo "  $lang: no spec report written (spec did not reach run_summary)"
+            rc=1
+            continue
+        fi
+        n="$(sed -n 's/^skipped=//p' "$rpt" | head -1)"
+        [ -n "$n" ] || n=0
+        if [ "$n" -gt 0 ]; then
+            echo "  $lang: $n skipped case(s) — a runtime dep is unset on this box"
+            total_skipped=$((total_skipped + n))
+            rc=1
+        else
+            echo "  $lang: no skips"
+        fi
+    done
+    rm -f "$rpt"
+    [ "$rc" -eq 0 ] || echo "  => $total_skipped skipped host-spec case(s); provisioning failure"
+    return $rc
+}
 # Build + RUN every contrib test_*.ae, under valgrind where the test is
 # leak-clean by design (see .github/scripts/contrib_check.sh). This is the
 # RUNTIME coverage the type-check sweep can't provide — the class of bug that
@@ -444,6 +547,7 @@ fails=0
     run_and_record "install freshness check" verify_install_step
     run_and_record "make contrib" make_contrib_step
     run_and_record "make contrib-host-check" make_host_check_step
+    run_and_record "host specs: no skipped cases" host_specs_no_skips
     # `make ci` and `make contrib` never compile the contrib Aether code
     # (test-ae globs only tests/*, `make contrib` builds C shims). This sweep
     # type-checks every contrib module under the newer toolchain — the gap that

@@ -22,9 +22,10 @@ half of the coverage gap that actually catches that class of bug.
    everything, so an absent contrib dependency is a provisioning bug that turns
    the run RED (the opposite of `contrib_build.sh`'s probe-and-skip).
 3. `make ci` → **`make install` + a freshness check** → `make contrib` → `make
-   contrib-host-check` → a `contrib` `ae check` sweep → `make
-   contrib-check-valgrind` (build + run every contrib `test_*.ae`,
-   valgrind-gating the leak-clean ones), each timed (ms) and recorded.
+   contrib-host-check` → **a no-skipped-cases gate over the host specs** → a
+   `contrib` `ae check` sweep → `make contrib-check-valgrind` (build + run
+   every contrib `test_*.ae`, valgrind-gating the leak-clean ones), each timed
+   (ms) and recorded.
 4. Publishes a topline pass/fail table to the **`nightly-results`** orphan
    branch (no shared history, no CI triggered) and writes a dated summary + log
    locally (last 14 kept).
@@ -36,6 +37,47 @@ the header comment in `nightly.sh`). Provision the contrib deps first — packag
 installs plus the `aether-lang-dev/factor-language` fork build — and export the
 `AETHER_*` dep env vars in the timer environment. The gate stays RED until every
 dep is present, by design.
+
+### Why every contrib step here is fail-hard
+
+The portable CI runners probe-and-skip because they cannot have every
+language's dev kit installed. This box can, and does — so the same skip that
+is honest on a runner is a **silently shrinking test surface** here. Each layer
+hides the one below it, so all of them have to be closed:
+
+| Layer | Default behaviour | On this box |
+| --- | --- | --- |
+| A dep is absent | — | step 1's dep gate turns the run RED |
+| A module fails to **build** | `make contrib` tallies a SKIP, exits 0 | `MODULES=<all>` → fail-hard (exit 1) |
+| A bridge **archive** is missing | phase [3/3] prints SKIP, exits 0 | `CONTRIB_HOST_STRICT=1` → FAIL |
+| A spec **runs but skips its cases** | prints `⊘`, exits 0 | `skipped=0` gate → RED |
+
+The dep gate alone is not enough for the middle two: it catches "the library
+is gone", never "the library is here and the module no longer compiles against
+it" — which is precisely the breakage a GCC 16 / Clang 22 box exists to find.
+In probe-and-skip mode that break reports as a skip and the nightly stays
+green.
+
+The last row is the subtlest and was found by testing rather than reasoning.
+`contrib/host/factor`'s archive builds fine with no Factor installed (the
+bridge is pure `dlopen`), so both `MODULES=` and `CONTRIB_HOST_STRICT` pass it
+— and then all six of its cases skip at runtime because `AETHER_FACTOR_SONAME`
+is unset, reporting `0 passing / 6 skipped` and exiting 0. `std.spec` states
+the principle directly: *"A skip that reports as a pass is worse than no skip
+at all."*
+
+That gate reads the **machine-readable** report rather than the human output:
+`AE_SPEC_FORMAT=aeocha` + `AE_SPEC_REPORT=<path>` make each spec write
+`skipped=<n>`, which is summed across the host specs. Parsing the `⊘` lines
+would mean parsing ANSI colour and would break the moment the renderer
+changes.
+
+The module list for the fail-hard build is **derived from
+`contrib_build.sh`'s own `CATALOGUE`**, not hardcoded, so a module added there
+is covered here automatically and cannot be forgotten.
+
+`CONTRIB_HOST_STRICT` defaults to `0`, so GitHub CI and dev boxes are
+unaffected — only this nightly sets it.
 
 ### Why the nightly installs, and why it fetches tags
 
