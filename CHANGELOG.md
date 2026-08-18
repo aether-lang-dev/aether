@@ -40,8 +40,21 @@ version number before tagging the release.
   with CI green throughout. Type checking needs no native library, so all nine
   modules are covered on every box.
 
-### Fixed
+### Changed
 
+- **17 more `std` module tests co-located** in
+  `std/<module>/test_<module>.ae`, continuing the move started in the
+  previous release: audio, bytes, cbor, clapae, config, encoding, hash,
+  language, message, msgpack, number, regex, schema, strbuilder, time,
+  url, worker. All are pure renames — no test content changed — and each
+  was selected by checking it actually imports its namesake module rather
+  than by filename alone.
+  Compiler and codegen regressions that merely *use* a std module (the
+  `test_string_leak_*` and `test_return_escape_*` families, for instance)
+  stay in `tests/regression/`: they exercise the heap tracker and closure
+  lowering, not the module's API.
+
+### Fixed
 - **Documentation that does not compile**, found by the new gates rather than
   by hand: `std.http.client`'s header documented `client.send(...)` when the
   function is `send_request` (the same file says so 245 lines further down);
