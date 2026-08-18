@@ -232,7 +232,7 @@ For hosts that want raw FFI without the namespace SDK:
 
 The original sketch:
 
-```aether
+```aether,fragment
 // server_config.ae
 main() {
     server = web_server(8080) {
@@ -332,7 +332,7 @@ host.run("config/server.ae");  // Aether script drives the wiring
 
 **Aether side**, calls the host, registers callbacks:
 
-```aether
+```aether,fragment
 // server.ae, this IS the config, and it drives the Java app
 
 inv = host_call("get_inventory")
@@ -375,7 +375,7 @@ the facade IS the whitelist.
 
 A new built-in (or extern) that dispatches to the host:
 
-```aether
+```aether,fragment
 extern host_call(name: string, ...) -> ptr
 ```
 
@@ -583,7 +583,7 @@ The host Aether application:
 5. `exec`s the script (or `dlopen`s the `.so` in the child)
 6. The child runs with libc calls intercepted, any `connect()`, `open()`, `execve()` that isn't in the grant list is denied at the OS level
 
-```aether
+```aether,fragment
 // host_app.ae
 
 // Compile the rules script (--emit=lib is shipped)

@@ -209,7 +209,7 @@ main() {
 
 ### Mistake 1: Forgetting Parentheses
 
-```aether
+```aether,fails
 // Wrong
 main {
     print("Hello")
@@ -223,7 +223,7 @@ main() {
 
 ### Mistake 2: Missing Newlines
 
-```aether
+```aether,fragment
 // Prints on same line
 print("Hello")
 print("World")
@@ -249,7 +249,7 @@ You've learned:
 
 ## Quick Reference
 
-```aether
+```aether,fragment
 // Variables (type inferred)
 x = 42
 name = "Alice"

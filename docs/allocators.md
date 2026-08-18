@@ -13,7 +13,7 @@ pass it explicitly to the entry points that accept one. This keeps data flow
 visible and composes with the actor boundary: an actor can hold its own
 allocator in `state` without any hidden per-call parameter.
 
-```aether
+```aether,fragment
 import std.alloc
 
 a  = alloc.system()          // malloc/free; the default everywhere
@@ -36,7 +36,7 @@ allocation bump-allocates from the arena and individual frees are no-ops.
 Reclaim everything at once with `arena.reset` (O(1)); it is ideal for a
 request-scoped structure that is built up and thrown away as a unit.
 
-```aether
+```aether,fragment
 import std.alloc
 import std.arena
 
@@ -56,7 +56,7 @@ own memory (its control struct and backing arrays) is then owned by the
 allocator, so an arena or a tracking wrapper manages the container. Element
 ownership is unchanged.
 
-```aether
+```aether,fragment
 import std.list (list_new_in, add)
 import std.arena
 import std.alloc (of_arena)
@@ -78,7 +78,7 @@ Because there is no GC backstop, a missed `release`/`free` is a silent leak.
 the outstanding set, turning a leak from something only a coarse external CI
 gate can catch into an ordinary in-test assertion.
 
-```aether
+```aether,fragment
 import std.alloc
 import std.tracking
 

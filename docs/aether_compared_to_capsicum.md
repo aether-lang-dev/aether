@@ -538,7 +538,7 @@ This inverts the traditional Unix model (allow by default, explicitly restrict),
 
 #### Example Flow
 
-```aether
+```aether,fragment
 // Untrusted plugin (could be malicious)
 plugin = |ctx| {
     // This is sandboxed: permission checks will deny it
@@ -572,7 +572,7 @@ main() {
 The `std.capsicum` module ships these bindings (FreeBSD-enforced,
 no-op stubs elsewhere):
 
-```aether
+```aether,fragment
 import std.capsicum
 
 capsicum.available()              // 1 if the kernel enforces Capsicum
@@ -670,7 +670,7 @@ and denied, with two faces (`runtime/sandbox/aether_audit.c`,
   `std.audit`: `audit.count()`, `audit.entry(i)` → `(category,
   resource, allowed)`, `audit.denied_count()`, `audit.clear()`.
 
-```aether
+```aether,fragment
 import std.audit
 n = audit.count()
 for (i = 0; i < n; i = i + 1) {
@@ -692,7 +692,7 @@ instrumentation.
 
 Allow hosted modules (Java, Python, Go) to declare Capsicum requirements:
 
-```aether
+```aether,fragment
 // Aether code compiled to library, embedded in Java
 config = |ctx| {
     grant_tcp(ctx, "api.example.com", 443)
@@ -723,7 +723,7 @@ passwd lookups, sysctl, over a channel opened *before* `cap_enter()`.
 
 The `std.casper` module binds it (`std/casper/`):
 
-```aether
+```aether,fragment
 import std.casper
 import std.capsicum
 
@@ -765,7 +765,7 @@ FreeBSD's RCTL allows resource limits (CPU, memory, file descriptors) per proces
 
 **Opportunity:** Aether's permission context could map to RCTL rules:
 
-```aether
+```aether,fragment
 grant_memory(ctx, 100)     // 100 MB limit
 grant_cpu(ctx, 500)        // 500 ms per second
 grant_fds(ctx, 10)         // Max 10 open fds
@@ -781,7 +781,7 @@ The runtime would apply RCTL rules when spawning the actor.
 
 **Scenario:** A system administration tool (like Ansible or Puppet) uses Aether for configuration logic.
 
-```aether
+```aether,fragment
 // Untrusted configuration script
 config = |ctx| {
     // Script can only access /etc/myapp/ and connect to config.internal
@@ -809,7 +809,7 @@ Even if the config script is malicious or compromised, it can't escape its sandb
 
 **Scenario:** A database server or web server allows plugins written in Aether.
 
-```aether
+```aether,fragment
 // User-supplied plugin
 plugin = |ctx| {
     // Plugin can query the database and read data files
@@ -835,7 +835,7 @@ main() {
 
 **Scenario:** A DevOps tool (like Terraform or Nomad) uses Aether for provisioning scripts.
 
-```aether
+```aether,fragment
 // Provisioning script
 script = |ctx| {
     grant_tcp(ctx, "*.cloud.provider", 443)        // Only to cloud provider

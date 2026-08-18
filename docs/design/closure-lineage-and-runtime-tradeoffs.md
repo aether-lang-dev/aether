@@ -123,7 +123,7 @@ Lisp and Smalltalk bindings behave like cells from the closure's point of
 view. Aether captures ordinary scalar locals by value. If several callbacks
 need shared mutation, the program says so:
 
-```aether
+```aether,fragment
 count = ref(0)
 button("inc") callback {
     ref_set(count, ref_get(count) + 1)

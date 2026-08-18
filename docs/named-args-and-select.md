@@ -5,7 +5,7 @@
 Function calls can use named arguments with colon syntax, consistent
 with Aether's parameter definition style:
 
-```aether
+```aether,fragment
 // Definition
 greet(name: string, count: int) {
     for (i = 0; i < count; i++) { println(name) }
@@ -36,7 +36,7 @@ positional arguments regardless.
 
 Array literals with square bracket syntax:
 
-```aether
+```aether,fragment
 nums = [10, 20, 30]
 println(nums[0])         // 10
 
@@ -60,7 +60,7 @@ Arrays are fixed-size C arrays. Element access uses `[]` subscript.
 
 Compile-time platform selection using named arguments:
 
-```aether
+```aether,fragment
 port = select(linux: 8080, windows: 80, macos: 8080)
 timeout = select(windows: 5000, other: 3000)
 flags = select(linux: "-lpthread", windows: "-lws2_32", macos: "-framework Security")
@@ -95,7 +95,7 @@ platform's value is compiled into the binary:
 
 `other:` provides a default value for platforms not explicitly named:
 
-```aether
+```aether,fragment
 // Only need to specify the exception
 separator = select(windows: "\\", other: "/")
 ```
@@ -105,7 +105,7 @@ separator = select(windows: "\\", other: "/")
 If a platform is missing and there's no `other:` fallback, the Aether
 compiler emits an error and the C compiler emits `#error`:
 
-```aether
+```aether,fragment
 // ERROR: no value for windows or macos, no other: fallback
 port = select(linux: 8080)
 ```
@@ -116,7 +116,7 @@ Either list all platforms or provide `other:`.
 ### Use cases
 
 **Build system flags:**
-```aether
+```aether,fragment
 linker_flags = select(
     linux: "-lpthread -lrt",
     windows: "-lws2_32",
@@ -125,7 +125,7 @@ linker_flags = select(
 ```
 
 **Default paths:**
-```aether
+```aether,fragment
 config_dir = select(
     linux: "/etc/myapp",
     macos: "/Library/Application Support/myapp",
@@ -134,7 +134,7 @@ config_dir = select(
 ```
 
 **Feature availability:**
-```aether
+```aether,fragment
 max_threads = select(linux: 16, windows: 8, macos: 12)
 has_io_uring = select(linux: 1, other: 0)
 ```
@@ -146,7 +146,7 @@ inference doesn't yet propagate through the call site. Both a direct
 `println(os)` and string interpolation currently print the pointer as an
 integer, because the result is treated as an `int`:
 
-```aether
+```aether,fragment
 os = select(linux: "Linux", windows: "Windows", macos: "macOS")
 println(os)               // BROKEN: prints a garbage integer, not the string
 println("os: ${os}")      // BROKEN: emits printf(..., %d) for the const char*
@@ -156,7 +156,7 @@ Until this is fixed, either inline the `select()` directly in the
 `println()` call, or return it from a `-> string` function and print that
 result:
 
-```aether
+```aether,fragment
 // Works: inline, where the string type is known at the call site
 println(select(linux: "Linux", windows: "Windows", macos: "macOS"))
 

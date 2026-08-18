@@ -14,7 +14,7 @@ the program can trust without re-checking.
 The difference is purely *what survives the check*. Both of these do the same
 work; only one keeps the receipt:
 
-```aether
+```aether,fragment
 // VALIDATE, the proof evaporates. The bool is discarded; `s` is still `string`.
 is_nonempty(s: string) -> bool { return string.length(s) > 0 }
 
@@ -54,7 +54,7 @@ about inputs it can't actually handle. Both keep the proof; they differ in
 and hands the caller both outcomes. Use this for **untrusted input** that can
 legitimately be malformed (a config string, a network field, user text):
 
-```aether
+```aether,fragment
 type Email = distinct string
 
 parse_email(raw: string) -> (Email, string) {     // empty err = success
@@ -69,7 +69,7 @@ and if an upstream stops guaranteeing the property, the program **stops
 compiling**. Use this for **invariants the rest of your code should be able to
 assume** (non-empty, in-range, already-authorized):
 
-```aether
+```aether,fragment
 type Age = distinct int
 
 parse_age(raw: int where raw >= 0 && raw <= 150) -> Age { return raw as Age }
@@ -82,7 +82,7 @@ The strengthen-the-argument move is the one worth internalizing, because it's th
 one that turns a *runtime* check into a *compile-time* guarantee. Pass a raw value
 where a `distinct` is required and you get a compile error, not a crash:
 
-```aether
+```aether,fragment
 birthday_message(30)
 // error[E0200]: Argument 1 'a' of 'birthday_message': expected int, got int,
 //   a distinct type needs an explicit `as` cast at the boundary
@@ -101,7 +101,7 @@ because nothing depends on its result. That's not a style nit; it's how the
 "impossible" case sneaks back in months later when someone deletes the guard
 upstream.
 
-```aether
+```aether,fragment
 // SMELL, omittable. Nothing forces a caller to consult this.
 ensure_nonempty(s: string) -> bool { return string.length(s) > 0 }
 
@@ -123,7 +123,7 @@ shape **different names**, with a parser as the only bridge. Illegal states then
 can't be represented: a trusted value simply has no constructor that skips the
 check.
 
-```aether
+```aether,fragment
 import std.string
 
 type Email = distinct string
@@ -165,14 +165,14 @@ that block *read* declaratively and *wire* itself.
 But an operator-authored `.ae` config block **is outside data**, King's blob
 from the wire, just written in your own syntax. A setter that takes a raw string:
 
-```aether
+```aether,fragment
 set_release("21")          // "21" stays a bare string forever, the validator smell
 ```
 
 …throws the proof away. The upgrade is to make **the DSL setters the parsing
 boundary**, so the filled config object holds domain types, not raw strings:
 
-```aether
+```aether,fragment
 type Version = distinct string
 parse_version(s: string where string.length(s) > 0) -> Version { return s as Version }
 

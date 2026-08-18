@@ -6,7 +6,7 @@ parses but is pruned before any later phase ever sees it. This lets `.ae`
 source fork by platform or build capability *visibly in Aether* instead of
 pushing `#ifdef` into the generated C.
 
-```aether
+```aether,fragment
 when target.os == "windows" {
     extern win_only(handle: ptr) -> int
     poll(h: ptr) -> int { return win_only(h) }

@@ -54,7 +54,7 @@ extra_sources = ["src/ffi_helpers.c", "src/renderer.c"]
 `link_flags` is for libraries *your* program needs. A library that a *module*
 needs is declared by that module, with `@link` at the top of its `module.ae`:
 
-```aether
+```aether,fragment
 @link("-laether_sqlite -lsqlite3")
 ```
 

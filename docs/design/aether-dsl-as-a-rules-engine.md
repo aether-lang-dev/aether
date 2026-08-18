@@ -88,7 +88,7 @@ express the same pattern with two advantages grules never had:
 
 ### What the DSL could look like
 
-```aether
+```aether,fragment
 // order_rules.ae, lives next to the app binary, deployed separately
 
 import rules   // hypothetical rules stdlib module
@@ -129,7 +129,7 @@ It's what `hide`/`seal except` adds.
 
 Consider a multi-tier rule set for an e-commerce checkout:
 
-```aether
+```aether,fragment
 // checkout_rules.ae
 
 checkout_rules(order: ptr, customer: ptr, payment: ptr) {
@@ -215,7 +215,7 @@ covers the same use case without a serialization round-trip.
 Using the v2 embedded-namespace model from
 [Aether as a Config Language v2](../embedded-namespaces-and-host-bindings.md):
 
-```aether
+```aether,fragment
 // rules/manifest.ae
 import std.host
 abi() {

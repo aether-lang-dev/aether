@@ -39,7 +39,7 @@ Use `extern` to declare C functions you want to call from Aether code:
 
 ### Syntax
 
-```aether
+```aether,fragment
 extern function_name(param1: type1, param2: type2) -> return_type
 extern void_function(param: type)  // No return type = void
 ```
@@ -155,7 +155,7 @@ _tuple_int_string parse_int_safe(const char* s) {
 
 Three or more elements work the same way:
 
-```aether
+```aether,fragment
 extern fs_read_binary_tuple(path: string) -> (ptr, int, string)
 
 read_binary(path: string) -> {
@@ -211,7 +211,7 @@ of any real C API, raylib again:
 void ImageDrawTriangle(Image *dst, Vector2 v1, Vector2 v2, Vector2 v3, Color color);
 ```
 
-```aether
+```aether,fragment
 @extern("ImageDrawTriangle")
 img_triangle(dst: ptr, v1: (f32, f32), v2: (f32, f32), v3: (f32, f32),
              c: (byte, byte, byte, byte))
@@ -232,7 +232,7 @@ result of a tuple-returning extern passed straight through. The value already
 *is* the matching `_tuple_*` struct, so it crosses by value with no
 destructure, which is what makes pass-through FFI chains compose:
 
-```aether
+```aether,fragment
 img = gen_image(64, 48, (30, 20, 16, 255))   // img : (ptr, int, int, int, int)
 export_image(img, "out.png")                  // hand the same struct back
 save(load(path))                              // and chains compose directly
@@ -259,7 +259,7 @@ literal aimed at a non-tuple parameter. Exercised end-to-end by
 
 Sometimes the C symbol you want to bind has a name that clashes with a wrapper you'd like to expose, or that doesn't fit the module's naming style. Use the `@extern` annotation to bind an Aether-side name to a chosen C symbol:
 
-```aether
+```aether,fragment
 @extern("EVP_MD_CTX_new") md_ctx_new() -> ptr
 @extern("EVP_MD_CTX_free") md_ctx_free(ctx: ptr)
 @extern("strerror") describe_errno(errno: int) -> string
@@ -267,7 +267,7 @@ Sometimes the C symbol you want to bind has a name that clashes with a wrapper y
 
 The Aether-side name (`md_ctx_new`, `describe_errno`) is what callers write. The compiler emits the forward declaration and every call site using the C symbol from the annotation, no wrapper function is generated. This is exactly equivalent to writing:
 
-```aether
+```aether,fragment
 extern EVP_MD_CTX_new() -> ptr
 md_ctx_new() -> ptr {
     return EVP_MD_CTX_new()
@@ -282,7 +282,7 @@ An `@extern` declaration is part of its module's public surface: unlike a bare `
 
 `@extern` also accepts a trailing `...` for variadic C symbols, exactly like a plain `extern`:
 
-```aether
+```aether,fragment
 @extern("aether_strbuilder_append_format")
 append_format(b: ptr, fmt: string, ...) -> int
 ```
@@ -293,7 +293,7 @@ Call sites pass any number of trailing arguments literally, and `@extern` is the
 
 The inverse of `@extern`. When a C library wants you to hand it a function pointer, HTTP route handlers, signal handlers, `qsort` comparators, libcurl callbacks, sqlite hooks, annotate the Aether function with `@c_callback`. The compiler emits a stable, externally-visible C symbol that the linker can resolve from any translation unit:
 
-```aether
+```aether,fragment
 extern http_server_add_route(server: ptr, method: string, path: string, handler: ptr, user_data: ptr)
 
 @c_callback
@@ -315,7 +315,7 @@ main() {
 
 By default, the C symbol matches the Aether-side name (or the namespace-prefixed form `<module>_<name>` when defined inside an imported module, e.g. `vcr_dispatch`). Pass an explicit string when you need a specific C name:
 
-```aether
+```aether,fragment
 @c_callback("aether_signal_handler")
 on_sigint(sig: int) {
     // …
@@ -343,7 +343,7 @@ For plain Aether-to-Aether function-pointer use within a single program, no anno
 
 Declare the fields with their signatures rather than as bare `ptr`:
 
-```aether
+```aether,fragment
 extern struct dictType @c_import {
     hashFunction: fn(ptr) -> int
     keyCompare: fn(ptr, ptr) -> int
@@ -370,7 +370,7 @@ For every `extern` Aether normally emits its own forward declaration into the ge
 
 `@c_import` after the signature hands prototype ownership to the header. Aether emits no declaration at all:
 
-```aether
+```aether,fragment
 extern type blob
 
 extern api_scale(v: int) -> int          @c_import   // header: uint8_t api_scale(uint8_t)
@@ -395,7 +395,7 @@ A `static inline` helper has no linkable symbol, so a non-static prototype for i
 static inline uint8_t api_inline_twice(uint8_t v) { return (uint8_t)(v * 2); }
 ```
 
-```aether
+```aether,fragment
 extern api_inline_twice(v: int) -> int @c_import
 ```
 
@@ -407,7 +407,7 @@ With `@c_import` the force-included definition is the only one the translation u
 
 Every printf-style C function comes in a pair: the variadic one and the `v*` one that takes an already-collected argument list (`printf`/`vprintf`, `snprintf`/`vsnprintf`, and in Redis `serverLog`, `sdscatprintf`, `sentinelEvent`). An Aether function can define a variadic tail and forward it to the `v*` half:
 
-```aether
+```aether,fragment
 extern vsnprintf(buf: ptr, n: int, fmt: ptr, ap: va_list) -> int
 
 format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
@@ -616,7 +616,7 @@ This means C shim authors don't have to remember to unwrap on the receiving side
 
 **Sophisticated-consumer escape hatch.** A C function that *wants* the AetherString header pointer (e.g. so it can call `aether_string_data` / `aether_string_length` itself to recover the stored length on binary content) should declare its parameter as `ptr` rather than `string`:
 
-```aether
+```aether,fragment
 // Naive consumer, receives payload bytes; codegen auto-unwraps:
 extern memcpy_into_buf(content: string, len: int) -> int
 
@@ -632,7 +632,7 @@ The auto-unwrap above is correct for **naive C externs**, functions that receive
 
 The fix is per-param, opt-in: annotate the param with `@aether` to mark it as receiving an AetherString pointer (header preserved) rather than an unwrapped `const char*`:
 
-```aether
+```aether,fragment
 // helper.ae (compiled with --emit=lib):
 export consume_binary(s: string) {
     println("len=${string.length(s)}")   // sees stored length, not strlen
@@ -645,7 +645,7 @@ extern other_c_function(s: string)         // ← still unwrapped (naive C contr
 
 The `@aether` annotation is per-param, so a single extern can mix Aether-emitted-string params with naive-C-pointer params:
 
-```aether
+```aether,fragment
 extern do_thing(aether_msg: @aether string,
                 c_path:     string) -> int
 // Codegen emits: do_thing(msg, aether_string_data(path))
@@ -700,7 +700,7 @@ If a shim genuinely needs to dispatch on the header (e.g. for a polymorphic API 
 
 **The same hazard fires inside Aether code.** Any Aether library that exports a `string`-typed parameter and tries to derive length / slice / iterate is at risk for the symmetric reason: the auto-unwrap fires at the `.ae→.ae` extern boundary, replacing the length-aware AetherString with a raw payload pointer. By the time the helper sees its argument, calls to `string.length(s)`, `string.substring(s, …)`, or `string.char_at(s, i)` go through `str_len` → `strlen` and truncate binary content at the first embedded NUL.
 
-```aether
+```aether,fragment
 // HAZARD, looks safe; truncates binary content at the auto-unwrap.
 export slice_from(s: string, start: int, end: int) -> string {
     n = string.length(s)        // strlen on auto-unwrapped payload!
@@ -711,7 +711,7 @@ export slice_from(s: string, start: int, end: int) -> string {
 
 **The proper fix is the `@aether` annotation on the caller's `extern` declaration** (see "Aether-emitted receivers" above). Mark the boundary on the caller side and the auto-unwrap is suppressed for that arg slot, the receiver sees the AetherString pointer intact, `string.length` reads the stored length, and binary content with embedded NULs round-trips correctly:
 
-```aether
+```aether,fragment
 // caller.ae
 extern slice_from(s: @aether string, start: int, end: int) -> string
 //                ^^^^^^^ marks the receiver as Aether-emitted
@@ -721,7 +721,7 @@ The `slice_from` definition above can stay as-written, `string.length(s)` now se
 
 **Alternative, explicit-length parameter.** If the call site is a hand-written C shim that can't use `@aether`, or you want to be defensive about the input type, the explicit-length companions in `std.string` work:
 
-```aether
+```aether,fragment
 // CORRECT, caller threads the length through; no internal strlen.
 export slice_from(s: string, s_len: int, start: int, end: int) -> string {
     n = string.length_n(s, s_len)   // identity; documents intent
@@ -793,7 +793,7 @@ The `as` keyword is the same token already used for module-import aliasing (`imp
 
 The prefix `&` operator takes the address of an lvalue and lowers directly to C's `&`. This is what a C extern with a `&struct->field` out-parameter needs (in-place mutation, a sub-field written by the callee, a `memcpy`/resize destination):
 
-```aether
+```aether,fragment
 extern struct JSObject {
     proto: long
     u: union { array: struct { tab: long  len: uint32_t } }
@@ -853,7 +853,7 @@ When you're porting C that overlays a struct on memory the **C side owns**
 (`s->length--`, `max->ms = id->ms`), the raw way is hand-rolled offset math
 through `std.mem`:
 
-```aether
+```aether,fragment
 const ST_LENGTH = 8
 mem.set_long(s, ST_LENGTH, mem.get_long(s, ST_LENGTH) - 1)   // s->length--
 ```
@@ -863,7 +863,7 @@ The footgun is the **accessor width**: picking `get_long` (8 bytes) for a
 fixes that *structurally*, declare the layout once with explicit offsets, and
 field access lowers to a width-correct `mem` accessor the **compiler** chooses:
 
-```aether
+```aether,fragment
 @c_struct streamID {
     ms:  uint64 @0
     seq: uint64 @8
@@ -916,7 +916,7 @@ widened to `uint64` reads half of it.
 When the owning header is in scope, `@c_verify` hands both checks to the C
 compiler:
 
-```aether
+```aether,fragment
 @c_struct shape @c_verify {
     rax: ptr @0
     length: uint64 @8
@@ -950,7 +950,7 @@ mismatch is a build error naming the field:
 
 C structs that span an FFI boundary often contain unions. mquickjs's `JSPropDef` has six variants overlayed on the same 32-byte tail; every tagged-union C shape (Lua `TValue`, JSON value, ...) hits the same problem.
 
-```aether
+```aether,fragment
 extern struct JSPropDef {
     def_type: int          //  0
     name: ptr              //  8
@@ -991,7 +991,7 @@ Access via dotted notation: `d.u.f64`, `d.u.func.length`, `d.u.getset.get_func_n
 
 A `@packed` attribute on an `extern struct` emits the C body with `__attribute__((packed))`, so the layout has **no inter-field padding** and no trailing alignment:
 
-```aether
+```aether,fragment
 extern struct sdshdr16 @packed { len: uint16  alloc: uint16  flags: byte }
 // sizeof == 5 (not 6); offsetof(flags) == 4
 ```
@@ -1008,7 +1008,7 @@ header lives at negative offsets, `SDS_HDR(T, s)` is just `s -
 sizeof(struct sdshdrT)`, and `s[-1]` is the flags byte that selects the
 variant. Both halves compose from `@packed` + `std.mem`:
 
-```aether
+```aether,fragment
 import std.mem
 
 extern struct sdshdr8 @packed { len: uint8  alloc: uint8  flags: byte }
@@ -1119,7 +1119,7 @@ A renamed function is equally usable **as a value** — passing it across an
 ABI boundary as a `ptr` handler reaches the renamed definition, not a
 same-named libc symbol:
 
-```aether
+```aether,fragment
 _h_health(req: ptr, res: ptr, ud: ptr) -> int { return 0 }
 server_get(raw, "/health", _h_health, 0)   // references ae_h_health
 ```

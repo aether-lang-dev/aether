@@ -220,7 +220,7 @@ main() {
 
 Aether supports Eiffel-style runtime contracts, pre/postconditions you attach directly to a function declaration. They document intent at the boundary, fire as `aether_panic` on violation (which prints the failed predicate by name), and elide entirely when the predicate is provably constant-true at compile time.
 
-```aether
+```aether,fragment
 add(a: int, b: int) -> int
     requires a >= 0
     requires b >= 0
@@ -328,7 +328,7 @@ Functions are called using **namespace-style syntax**: `namespace.function()`.
 Stdlib functions that can fail return `(value, err)` tuples,
 check `err` first, then use `value`:
 
-```aether
+```aether,fragment
 body, err = http.get("http://example.com")
 if err != "" { println("failed: ${err}"); return }
 println(body)
@@ -358,7 +358,7 @@ advanced callers who need direct access to the underlying ptr or status code.
 You can write reusable modules in pure Aether, no C required. Place your module in `lib/<name>/module.ae`:
 
 **lib/mymath/module.ae:**
-```aether
+```aether,fragment
 export const PI = 3
 
 export double_it(x) {
@@ -376,7 +376,7 @@ multiply(a, b) {
 ```
 
 **src/main.ae:**
-```aether
+```aether,fails
 import mymath
 
 main() {
@@ -460,7 +460,7 @@ runs.
 
 Define functions with multiple clauses that match on argument values:
 
-```aether
+```aether,fragment
 // Match on literal values
 factorial(0) -> 1
 factorial(n) when n > 0 -> n * factorial(n - 1)
@@ -486,7 +486,7 @@ This style replaces verbose if/else chains with declarative, readable code.
 
 Use `match` for value dispatch:
 
-```aether
+```aether,fragment
 match (value) {
     0 -> { println("Zero") }
     1 -> { println("One") }
@@ -498,7 +498,7 @@ match (value) {
 
 Match on arrays (requires corresponding `_len` variable):
 
-```aether
+```aether,fragment
 nums = [1, 2, 3]
 nums_len = 3
 

@@ -41,7 +41,7 @@ This document provides an overview of Aether's compiler pipeline, runtime design
 4. Track line and column numbers for error reporting
 
 **Example:**
-```aether
+```aether,fragment
 x = 42 + y
 ```
 

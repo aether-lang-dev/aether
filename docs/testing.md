@@ -16,7 +16,7 @@ mutation-testing facility remain in aeocha; `std.spec` is
 
 `std.spec` is a normal stdlib module — no install step, no `--lib`:
 
-```aether
+```aether,fragment
 import std.spec
 
 main() {
@@ -62,7 +62,7 @@ framework. The top-level `describe` and `run_summary` take that `fw`;
 everything nested inside a suite omits it, because Aether injects the
 suite context (`_ctx`) into the trailing block.
 
-```aether
+```aether,fragment
 spec.describe(fw, "outer") {
     spec.describe("inner") {           // no fw — injected
         spec.before_each() callback { reset() }
@@ -89,7 +89,7 @@ failure makes that `it` red.
 
 ### Flat assertions
 
-```aether
+```aether,fragment
 spec.assert_eq(count, 4, "four jobs")          // int equality
 spec.assert_not_eq(a, b, "distinct")
 spec.assert_gt(size, 0, "non-empty")
@@ -110,7 +110,7 @@ the difference in a long string.
 
 A subject-first, chainable facade over the same soft-failure machinery:
 
-```aether
+```aether,fragment
 spec.expect_int(count).to_be_gt(0).to_equal(4)
 spec.expect_int(exit_code).not_().to_equal(1)
 spec.expect_str(name).to_start_with("ae").to_contain("the")
@@ -134,7 +134,7 @@ generated text tells you *what* the values were; the message tells a
 failing-CI triager *why* the check exists, which is the part the values
 cannot convey:
 
-```aether
+```aether,fragment
 spec.expect_str(egress_fqdn_csv("python_vm"))
     .to_equal_str(want, "a node's egress set is exactly its declared whitelist")
 spec.expect_int(n).to_be_gt(0, "a derived attempt budget is never zero")
@@ -164,7 +164,7 @@ keep the compact `expected 'x', got 'y'` form.
 parameter is one of those types participates in Aether's UFCS method
 syntax — no base class, no registration:
 
-```aether
+```aether,fragment
 to_be_even(s: spec.IntSubject, msg: string) -> spec.IntSubject {
     if s.value % 2 != 0 { spec.fail("${msg} — ${s.value} is not even") }
     return s
@@ -176,7 +176,7 @@ spec.expect_int(count).to_be_gt(0).to_be_even("even count")
 Return the subject so callers can keep chaining. A flat custom matcher is
 even simpler — any function that calls `spec.fail(msg)`:
 
-```aether
+```aether,fragment
 expect_prime(n: int, msg: string) {
     if !is_prime(n) { spec.fail("${msg} — ${n} is not prime") }
 }
@@ -187,7 +187,7 @@ expect_prime(n: int, msg: string) {
 Operate on a `std.list` of strings — the common shape for captured lines,
 names, or ids:
 
-```aether
+```aether,fragment
 spec.expect_list_size(xs, 3, "three rows")
 spec.expect_list_empty(ys, "nothing pending")
 spec.expect_list_has_str(xs, "alpha", "has alpha")
@@ -200,7 +200,7 @@ spec.expect_list_every(xs, is_nonempty, "no blanks")       // empty passes
 `it_within` runs a normal test and *also* fails it when the body meets or
 exceeds a `Duration` budget:
 
-```aether
+```aether,fragment
 spec.it_within("responds promptly", 50ms) callback {
     call_service()
 }
@@ -209,7 +209,7 @@ spec.it_within("responds promptly", 50ms) callback {
 `expect_elapsed_under` does the same comparison for a monotonic-ns span
 the caller measures itself:
 
-```aether
+```aether,fragment
 t0 = os.now_monotonic_ns()
 do_work()
 spec.expect_elapsed_under(os.now_monotonic_ns() - t0, 50ms, "fast path")
@@ -226,7 +226,7 @@ fail. Failing presents a *provisioning* gap as a code defect (and gets the
 test deleted from the sweep); passing silently is worse, because a box that
 skips everything then looks exactly like a box that passes everything.
 
-```aether
+```aether,fragment
 have_ruby = 0
 if ruby.ruby_init_host() == 0 { have_ruby = 1 }
 

@@ -10,7 +10,7 @@ ae bindgen consts sentinel.h -o lib/sentinel/module.ae
 ae bindgen consts redis.h -I ../src --match OBJ_ -o lib/objflags/module.ae
 ```
 
-```aether
+```aether,fragment
 import sentinel
 
 main() {

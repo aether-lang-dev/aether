@@ -94,7 +94,7 @@ A separate whole-program analysis assigns every function a **purity** bit, and
 the compile-time builtin `__pure(funcName)` folds to a `true`/`false` constant
 reflecting it:
 
-```aether
+```aether,fragment
 let safe = __pure(transform)           // bool constant, no runtime cost
 if __pure(parse_config) { ... }        // branch on purity; folded to a literal
 ```

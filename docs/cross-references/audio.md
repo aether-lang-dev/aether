@@ -197,7 +197,7 @@ no language work required.
 
 ### v1 surface (`std.audio`)
 
-```aether
+```aether,fragment
 import std.audio
 
 ok, err   = audio.open()                      // once per app; null-backend aware

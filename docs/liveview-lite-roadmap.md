@@ -242,7 +242,7 @@ Everything lives in **`contrib/tinyweb/live_view/`** (a new sibling of
 existing tinyweb WS API — no core/`std` changes. Reference signatures the
 implementer should target (names may be refined, shapes should not):
 
-```aether
+```aether,fragment
 // contrib/tinyweb/live_view/module.ae
 
 // A per-connection live view is three caller-supplied closures. `assigns` is an

@@ -57,7 +57,7 @@ main() {
 
 State persists across messages:
 
-```aether
+```aether,fragment
 message Deposit { amount: int }
 message Withdraw { amount: int }
 
@@ -80,7 +80,7 @@ actor BankAccount {
 
 Messages are defined with the `message` keyword and can carry typed fields:
 
-```aether
+```aether,fragment
 // Empty message (no data)
 message Reset {}
 
@@ -274,7 +274,7 @@ main() {
 
 ### Pattern 1: Request-Response
 
-```aether
+```aether,fragment
 message AddTen { value: int }
 message Double { value: int }
 
@@ -294,7 +294,7 @@ actor Calculator {
 
 ### Pattern 2: State Machine
 
-```aether
+```aether,fragment
 message TakeDamage { amount: int }
 message Heal { amount: int }
 message LevelUp {}
@@ -333,7 +333,7 @@ actor GamePlayer {
 
 ### Pattern 3: Accumulator
 
-```aether
+```aether,fragment
 message AddValue { value: int }
 
 actor Statistics {
@@ -360,7 +360,7 @@ actor Statistics {
 
 Create an actor that tracks temperature readings:
 
-```aether
+```aether,fragment
 message UpdateTemp { temp: int }
 message Reading {}
 
@@ -384,7 +384,7 @@ actor TempSensor {
 
 Create an actor for game inventory:
 
-```aether
+```aether,fragment
 message AddGold { amount: int }
 message SpendGold { amount: int }
 message AddItem {}
@@ -415,7 +415,7 @@ actor Inventory {
 
 Create an actor that tracks game scores:
 
-```aether
+```aether,fragment
 message AddPoints { points: int }
 message SetMultiplier { value: int }
 message ResetScore {}
@@ -470,7 +470,7 @@ actor ScoreTracker {
 
 ### 1. Keep State Small
 
-```aether
+```aether,fragment
 // Good: Minimal state
 actor Counter {
     state count = 0
@@ -488,7 +488,7 @@ actor Everything {
 
 ### 2. Use Clear Message Names
 
-```aether
+```aether,fragment
 // Define descriptive message types
 message Increment {}
 message Decrement {}
@@ -515,7 +515,7 @@ actor Counter {
 
 The scheduler automatically delivers and processes messages:
 
-```aether
+```aether,fragment
 // Just send - no manual stepping needed
 counter ! Increment {}
 counter ! Increment {}
@@ -563,7 +563,7 @@ The `wait_for_idle()` function blocks until all actors have finished processing 
 
 For timed delays, use `sleep(milliseconds)`:
 
-```aether
+```aether,fragment
 main() {
     worker = spawn(Worker())
     worker ! Start {}
@@ -588,7 +588,7 @@ You've learned:
 
 ## Quick Reference
 
-```aether
+```aether,fragment
 // Define messages
 message MyMessage { value: int }
 message SimpleMessage {}

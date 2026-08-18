@@ -34,7 +34,7 @@ Run it: `ae run server.ae`. Hit `http://127.0.0.1:8080/` from any client.
 
 ## Routing
 
-```aether
+```aether,fragment
 http.server_get   (server, "/users",      handle_list,   0)
 http.server_get   (server, "/users/:id",  handle_get,    0)
 http.server_post  (server, "/users",      handle_create, 0)
@@ -51,7 +51,7 @@ Path parameters (`:id`) are extracted and reachable via
 
 ## Static files
 
-```aether
+```aether,fragment
 http.server_get(server, "/report", handle_report, 0)
 
 handle_report(req: ptr, res: ptr, ud: ptr) {
@@ -80,7 +80,7 @@ honoured for partial content.
 
 ## TLS termination
 
-```aether
+```aether,fragment
 err = http.server_set_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
 if err != "" { println("TLS setup: ${err}"); exit(1) }
 ```
@@ -103,7 +103,7 @@ OpenSSL"`.
 Tier 2). Enable with one call alongside the existing TLS / keep-
 alive setup:
 
-```aether
+```aether,fragment
 import std.http
 
 main() {
@@ -154,7 +154,7 @@ process-wide pool serves both `worker.run` and every h2 connection
 on every server. POSIX-only (macOS / Linux); on Windows the call is
 silently ignored and streams stay sequential.
 
-```aether
+```aether,fragment
 http.server_set_h2(server, 0)                          // h2 enabled
 http.server_set_h2_concurrent_dispatch(server, 4)      // 4-way fan-out
 ```
@@ -346,7 +346,7 @@ specifically for WS/SSE alongside the h2 traffic.
 
 ## HTTP/1.1 keep-alive
 
-```aether
+```aether,fragment
 http.server_set_keepalive(server, 1, 100, 30000ms)
 //                              ^   ^    ^
 //                       enabled max  idle_ms
@@ -366,7 +366,7 @@ max=M` headers per response.
 
 ## Per-connection actor dispatch
 
-```aether
+```aether,fragment
 // User actor step function, replaces the thread-pool worker path
 @c_callback worker_step(msg_ptr: ptr) {
     msg = unwrap_msg_http_connection(msg_ptr)
@@ -390,7 +390,7 @@ Eleven production middleware in `std.http.middleware`. All registered
 via the existing function-pointer chain, hot path stays C function
 pointers, no closure indirection.
 
-```aether
+```aether,fragment
 import std.http.middleware
 
 // CORS, open it up to one origin
@@ -506,7 +506,7 @@ underlying cleartext HTTP/1.1 connection as a `std.tcp` socket. This
 is the primitive for forward-proxy tunnels and other protocols where
 HTTP is only the setup handshake.
 
-```aether
+```aether,fragment
 import std.http
 import std.tcp
 
@@ -546,7 +546,7 @@ parser has already buffered bytes that a raw socket could not replay.
 
 ## WebSocket (RFC 6455)
 
-```aether
+```aether,fragment
 @c_callback echo_handler(req: ptr, ws: ptr, ud: ptr) {
     kind = http.ws_recv(ws)         // 1 = text, 2 = binary, -1 = closed
     if kind != -1 {
@@ -577,7 +577,7 @@ Returning from the handler closes with code `1000` automatically.
 
 ## Server-Sent Events
 
-```aether
+```aether,fragment
 @c_callback events_handler(req: ptr, sse: ptr, ud: ptr) {
     http.sse_send(sse, "tick", "1")
     http.sse_send(sse, "tick", "2")
@@ -602,7 +602,7 @@ Multi-line `data:` payloads are split on `\n` per the spec. Optional
 
 ## Structured access logging
 
-```aether
+```aether,fragment
 http.server_set_access_log(server, "json", "/var/log/api.log")
 //                                  ^         ^
 //                            "json" or       file path,
@@ -624,7 +624,7 @@ NCSA Combined Log Format is the Apache default. File is opened
 
 ## Prometheus metrics
 
-```aether
+```aether,fragment
 http.server_set_metrics(server, "/metrics")
 ```
 
@@ -659,7 +659,7 @@ callable from Aether code.
 
 ## Graceful shutdown
 
-```aether
+```aether,fragment
 err = http.server_shutdown_graceful(server, 5000ms)  // 5-second deadline
 if err != "" { println("warning: ${err}") }       // "timeout" if not drained
 ```
@@ -701,7 +701,7 @@ let the process exit, rather than orphaning it.
 
 ## Lifecycle hooks
 
-```aether
+```aether,fragment
 @c_callback on_started(server: ptr, ud: ptr) {
     println("server is ready")
 }
@@ -721,7 +721,7 @@ sockets close.
 
 ## Health probes
 
-```aether
+```aether,fragment
 @c_callback ready_check(ud: ptr) -> int {
     return database_is_healthy()
 }
