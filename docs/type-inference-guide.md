@@ -8,7 +8,7 @@ Aether implements a type inference system that automatically deduces types from 
 
 ### From Literals
 
-```aether
+```aether,fragment
 x = 42              // inferred: int
 pi = 3.14           // inferred: float
 name = "Alice"      // inferred: string
@@ -20,14 +20,14 @@ A bare integer literal always infers as `int` there is no `long`
 literal or `long <value>` prefix. To get a `long` (64-bit) binding,
 annotate the declaration explicitly:
 
-```aether
+```aether,fragment
 big = 0             // inferred: int
 long wide = 0       // explicit: long (64-bit)
 ```
 
 ### From Expressions
 
-```aether
+```aether,fragment
 a = 10
 b = 20
 sum = a + b           // inferred: int (both operands are int)
@@ -91,7 +91,7 @@ literal at least once, or annotate the field explicitly.
 
 ### Array Elements
 
-```aether
+```aether,fragment
 nums = [1, 2, 3, 4, 5]             // inferred: int[]
 names = ["Alice", "Bob"]           // inferred: string[]
 mixed_ok = [1.0, 2.0, 3.0]         // inferred: float[]
@@ -99,7 +99,7 @@ mixed_ok = [1.0, 2.0, 3.0]         // inferred: float[]
 
 ### Through Assignments
 
-```aether
+```aether,fragment
 x = 42            // x: int
 y = x             // y: int (inferred from x)
 z = y + 10        // z: int (inferred from y + int)
@@ -111,7 +111,7 @@ While inference handles most cases, explicit types are useful for:
 
 ### 1. Function Signatures (Documentation)
 
-```aether
+```aether,fragment
 // Explicit types make intent clear
 calculate_damage(base: int, defense: int): int {
     return base - defense
@@ -125,7 +125,7 @@ calculate_damage(base, defense) {
 
 ### 2. Complex Scenarios
 
-```aether
+```aether,fragment
 // When inference might be ambiguous
 process_data(input: float[]) {
     // Explicit type ensures correct interpretation
@@ -134,7 +134,7 @@ process_data(input: float[]) {
 
 ### 3. Public APIs
 
-```aether
+```aether,fragment
 // Export with explicit types for clarity
 export calculate_score(kills: int, deaths: int, assists: int): float {
     return (kills + assists / 2.0) / (deaths + 1)
@@ -145,7 +145,7 @@ export calculate_score(kills: int, deaths: int, assists: int): float {
 
 You can mix explicit and inferred types:
 
-```aether
+```aether,fragment
 // Some parameters explicit, some inferred
 process(data, threshold: int) {
     return data > threshold   // data type inferred from usage
@@ -163,7 +163,7 @@ format_name(first, last): string {
 
 The compiler walks the AST and collects type constraints:
 
-```aether
+```aether,fragment
 x = 42
 // Constraint: x must be int (from literal 42)
 
@@ -185,7 +185,7 @@ Done: All types resolved
 
 Once inferred, types are validated for consistency:
 
-```aether
+```aether,fragment
 x = 42
 x = "hello"   // rejected at the C-compile stage (-Wint-conversion),
               // not by an Aether type-inference diagnostic
@@ -195,7 +195,7 @@ x = "hello"   // rejected at the C-compile stage (-Wint-conversion),
 
 The `null` keyword is typed as `ptr`:
 
-```aether
+```aether,fragment
 conn = null                  // inferred: ptr
 conn = tcp_connect_raw(...)  // still ptr, type is consistent
 ```
@@ -209,7 +209,7 @@ retypes a `0`-initialized local as `ptr` when that local lives inside a
 `main()` keeps the local as `int` and fails to compile with
 `incompatible pointer to integer conversion`:
 
-```aether
+```aether,fragment
 listen(): ptr {
     server = 0                   // widened to ptr: this function returns ptr
     server = tcp_listen_raw(80)  // OK
@@ -221,7 +221,7 @@ listen(): ptr {
 
 Top-level `const` declarations infer their type from the value:
 
-```aether
+```aether,fragment
 const MAX = 100          // inferred: int
 const NAME = "hello"     // inferred: string
 ```
@@ -235,14 +235,14 @@ the postfix `name: type` form. A bare `x: int` local does not parse; it
 reports `error[E0100]: Expected statement in block`. Postfix `name: type`
 is valid only for function parameters and struct fields.
 
-```aether
+```aether,fragment
 // Give the local an explicit type up front
 int x = get_value()   // OK - x is int
 ```
 
 ### Generic Functions
 
-```aether
+```aether,fragment
 // Currently not supported - specify explicit types
 identity(x: int): int {
     return x

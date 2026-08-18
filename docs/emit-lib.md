@@ -10,7 +10,7 @@ see [aether-embedded-in-host-applications.md](aether-embedded-in-host-applicatio
 
 ## Quick example
 
-```aether
+```aether,fragment
 // config.ae
 import std.map
 
@@ -631,7 +631,7 @@ The records above are not just for inspection, they are what lets an
 first-class `import`, with the call site reading as if the library were
 compiled in the same cycle:
 
-```aether
+```aether,fragment
 import std.map        // builder default factory (map_new) lives here
 import gizmo          // resolves libgizmo.so, no gizmo.ae source needed
 

@@ -132,7 +132,7 @@ main() {
 
 Actor `state` variables initialized with `*.new()` outlive any single message handler. Free them in the actor's `Stop` handler (or wherever the actor is shut down):
 
-```aether
+```aether,fragment
 import std.map
 
 message Store { key: string, value: string }
@@ -165,7 +165,7 @@ The actor runtime frees the actor's single NUMA-aware allocation (the actor stru
 
 **Forgetting `defer` after allocation:**
 
-```aether
+```aether,fragment
 m = map.new()
 map.put(m, "k", "v")
 // LEAK: m is never freed
@@ -173,7 +173,7 @@ map.put(m, "k", "v")
 
 Fix: always pair allocation with `defer`:
 
-```aether
+```aether,fragment
 m = map.new()
 defer map.free(m)
 ```
@@ -188,7 +188,7 @@ defer map.free(m)
 each iteration, not just once at function exit. So an allocation made inside the
 loop is reclaimed every pass, no manual per-iteration free is needed:
 
-```aether
+```aether,fragment
 while i < n {
     item = list.new()
     defer list.free(item)   // runs at the end of THIS iteration
@@ -224,7 +224,7 @@ Aether takes the same shape, strings are the "standard container" for character 
 
 For every string variable in a function, the compiler emits a companion `int _heap_<name>` tracker that's set to `1` after every heap-string assignment and `0` after every literal assignment. On reassignment, the wrapper `if (_heap_<name>) free(<old>)` decides whether to release the previous buffer.
 
-```aether
+```aether,fragment
 s = ""                          // _heap_s = 0 (literal)
 s = string.concat(s, "x")       // free(""): no, _heap_s was 0; _heap_s = 1
 s = string.concat(s, "y")       // free(prev concat): yes, _heap_s was 1; _heap_s = 1
@@ -258,7 +258,7 @@ it. A struct with `string` fields is allowed (previously POD-only): the box
 **owns** its string fields under the same tracker model described above. Each
 string field carries a hidden `_heap_<field>` companion, so:
 
-```aether
+```aether,fragment
 struct AppCtx { db: ptr; data_dir: string }
 
 ctx = heap.new(AppCtx)                       // calloc, fields NULL, trackers 0
@@ -282,7 +282,7 @@ A `let`/`var` declaration can be annotated `@scoped` to declare that its value
 escape analysis, not a borrow checker (Aether has none). It turns a footgun
 into a compile-time invariant and documents intent at the binding site:
 
-```aether
+```aether,fragment
 process() -> long {
     @scoped buf = make_buffer(64 * 1024)
     return buf.checksum()        // ok, a scalar DERIVED from buf escapes
@@ -347,7 +347,7 @@ function that mints a fresh owned buffer belongs here.
 
 A user-defined function that returns `string` is treated as heap-returning **iff *any* return statement in its body yields a heap-string-expression** (recursively considering other heap-returning user functions), an OR-fold across the return sites. A function whose returns are *all* string literals or forwarded borrowed parameters is NOT heap-returning, and the wrapper won't try to free its results. A function that *mixes* the two (one branch `return string.concat(...)`, another `return "constant"`) *is* heap-returning: its literal branches are duplicated into owned strings through the uniform-heap return wrap (see [Return-ownership contract](#return-ownership-contract-uniform-heap-return-escape) below) so the caller can free every branch identically.
 
-```aether
+```aether,fragment
 my_concat(a: string, b: string) -> string {
     return string.concat(a, b)        // RHS is heap → my_concat returns heap
 }
@@ -367,7 +367,7 @@ The recursive walk has cycle detection (mutual recursion through `-> string` use
 
 `_heap_<name>` trackers are emitted at **function-entry scope**, not at the C scope where the variable is first assigned. This means a string variable first-assigned in one if-branch and reassigned in another, or first-assigned at the top of a function and reassigned inside a deeply-nested loop, has a tracker visible at every reassignment site:
 
-```aether
+```aether,fragment
 result = ""                            // _heap_result = 0 at function entry
 if cond1 {
     result = my_concat("a", "b")       // _heap_result = 1; tracker is at fn scope
@@ -388,7 +388,7 @@ One case vetoes the OR-fold: a **whole-tuple passthrough** return, `return g(...
 
 (Earlier releases AND-folded instead, a position counted as heap only if *every* return-site made it heap, which classified the mixed `decode`-shaped functions non-heap and leaked their success-path allocation at every caller. The OR-fold + uniform-heap wrap + passthrough veto replaced it.)
 
-```aether
+```aether,fragment
 build_pair(prefix: string, name: string) -> (string, string) {
     return string.concat(prefix, name), string.concat(name, prefix)
     //     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -412,7 +412,7 @@ Without the tuple-destructure wrapper the loop would leak 1000×2 heap allocatio
 
 For C externs there is no body to walk, so the compiler exposes per-position annotations:
 
-```aether
+```aether,fragment
 extern decode_b64(b64: string) -> (string @heap, int, string)
 //                                 ^^^^^^^^^^^^       ^^^^^^
 //                                 fresh malloc       borrow / static literal
@@ -423,7 +423,7 @@ Default for unannotated string positions is `@borrow` preserves the previous sil
 
 Mix-and-match is allowed; trailing positions default to borrow:
 
-```aether
+```aether,fragment
 extern realpath_raw(path: string) -> (string @heap, int, string)
 extern get_pair(s: string)        -> (string @heap, string @borrow)
 ```
@@ -455,7 +455,7 @@ The wrapper-on-reassignment frees the **previous** value when a heap-string vari
 
 The codegen now emits `if (_heap_<name>) { aether_heap_str_free(<name>); <name> = NULL; _heap_<name> = 0; }` at every function-exit and explicit `return` for every hoisted heap-string variable that is **not** escaped. `aether_heap_str_free` dispatches on the AetherString magic header: `string_release` for refcounted AetherStrings, plain `free` for malloc'd `char*`. The escape walker (the same one the wrapper consults) decides which variables are held by something that outlives the call (return, closure capture, `ptr`-typed param, `@retain`-typed param, recursive escape via another store) and skips the defer for those.
 
-```aether
+```aether,fragment
 foo(b64: string) -> int {
     raw = decode_b64(b64)         // _heap_raw = 1
     n   = check(raw)              // raw is not escaped (read-only)
@@ -470,7 +470,7 @@ Cost: zero on functions that don't allocate heap strings; one inline conditional
 
 For functions that *store* (or take a strong reference on) a string pointer beyond the call, such as refcount operations and owning map keys, the default "string parameter is read-only" treatment from the escape walker is wrong: it would let the function-exit defer-free reclaim the bytes while the recipient still holds the pointer, a use-after-free. The `@retain` annotation fixes this:
 
-```aether
+```aether,fragment
 extern string_retain(str: @retain string)
 extern map_put_string_owned(map: ptr, key: @retain string, value: ptr) -> int
 ```

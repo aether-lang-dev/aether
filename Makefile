@@ -2354,6 +2354,8 @@ help:
 	@echo "  make test-ae        - Run .ae integration tests"
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
+	@echo "  make check-docs       - Compile the documentation's complete examples"
+	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make test-fast      - Run C tests (monolithic build)"
 	@echo "  make test-install   - Install smoke test (init + run)"
 	@echo "  make test-valgrind  - Run tests with Valgrind"
@@ -2516,6 +2518,7 @@ ci: clean
 	@echo "[4/10] Running C unit tests..."
 	@$(MAKE) -j$(NPROC) test
 	@$(MAKE) check-standalone
+	@$(MAKE) check-docs
 	@echo ""
 	@echo "[5/10] Running .ae integration tests..."
 	@$(MAKE) test-ae
@@ -2585,6 +2588,70 @@ test-differential: ae
 # the Racket VM), so it is not listed here (the check SKIPs missing-bridge
 # dirs).
 CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket
+
+# Documentation examples that are supposed to work (#1500, #1522).
+#
+# Two gates, both cheap. `check_doc_examples.py` reads the stdlib module doc
+# comments, which are deliberately fragments and cannot be compiled, and
+# catches the two defects that do not need compiling: a block introduced by a
+# word that is not a keyword, and a documented `mod.fn(` the module does not
+# have. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
+# README that is labelled complete, and asserts the ones labelled `fails`
+# still fail.
+.PHONY: check-docs
+check-docs: compiler ae stdlib
+	@echo "==================================="
+	@echo "  documentation examples"
+	@echo "==================================="
+	@# The two checkers are Python, and MSYS2 on the Windows runners has no
+	@# python3 — `make ci` calls this target on every platform, so without a
+	@# guard the whole Windows build dies with "python3: No such file or
+	@# directory" (exit 127) before it reaches anything Aether.
+	@#
+	@# Skipping there costs nothing: what these check is whether a
+	@# documentation block still compiles, which does not vary by platform.
+	@# A block that compiles on the Linux and macOS legs compiles anywhere,
+	@# and those legs run the same `make ci`. The skip is announced rather
+	@# than silent, so a box that has quietly lost python3 is visible in the
+	@# log instead of reading as a pass.
+	@if command -v python3 >/dev/null 2>&1; then \
+	    python3 tests/scripts/check_doc_examples.py && \
+	    python3 tests/scripts/check_doc_blocks.py; \
+	else \
+	    echo "  [SKIP] documentation examples — python3 not found"; \
+	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
+	fi
+
+# Every non-host contrib module's Aether surface, type-checked (#1442).
+#
+# `make contrib` build-probes each module's C shim and `contrib-check` RUNS the
+# ones with tests, but a module whose native library is absent skips both, and
+# nothing else ever feeds its module.ae to the compiler: tinyweb's builder-DSL
+# serving path was broken for a long stretch with CI green throughout. Type
+# checking needs no native library (externs are declarations), so this covers
+# every module on every box, including the ones whose runtime tests skip.
+.PHONY: check-contrib-modules
+check-contrib-modules: compiler ae stdlib
+	@echo "==================================="
+	@echo "  contrib modules (type check)"
+	@echo "==================================="
+	@pass=0; fail=0; \
+	for m in $$(find contrib -name module.ae -not -path 'contrib/host/*' | sort); do \
+		printf '  %-44s ' "$$m"; \
+		if err="$$(AETHER_HOME="" ./build/ae$(EXE_EXT) check "$$m" 2>&1)"; then \
+			echo "ok"; pass=$$((pass + 1)); \
+		else \
+			echo "FAIL"; \
+			printf '%s\n' "$$err" | grep -E "error" | head -4 | sed 's/^/        /'; \
+			fail=$$((fail + 1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "  $$pass ok, $$fail failed"; \
+	if [ "$$fail" -gt 0 ]; then \
+		echo "  A contrib module no longer type-checks against the current stdlib."; \
+		exit 1; \
+	fi
 
 contrib-host-check: compiler ae stdlib
 	@echo "==================================="

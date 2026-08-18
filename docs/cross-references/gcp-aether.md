@@ -74,7 +74,7 @@ GA's everything-is-a-keyword-S-expression shape:
 
 Aether:
 
-```aether
+```aether,fragment
 add(a: int, b: int) -> int { return a + b }
 ```
 
@@ -162,7 +162,7 @@ the doc / lib export.
 
 The shape worth building:
 
-```aether
+```aether,fragment
 add(a: int, b: int) -> int
     requires a >= 0
     requires b >= 0
@@ -298,7 +298,7 @@ Aether's `defer` (per `docs/language-reference.md` §8) is the LIFO-
 cleanup-on-scope-exit construct, and it composes cleanly with normal
 expressions:
 
-```aether
+```aether,fragment
 f, err = fs.open("data.txt", "r")
 if err != "" { return err }
 defer fs.close(f)
@@ -312,7 +312,7 @@ Skip `RESOURCE_SCOPE`.
 The **runtime resource limit** part is genuinely novel and has no
 counterpart in Aether's design so far. The shape:
 
-```aether
+```aether,fragment
 process_request(req: Request) -> string
     @max_open_fds(10)
     @max_memory_mb(100)
@@ -539,7 +539,7 @@ It's a real design space (refinement types, F#-style units of
 measure), but the cost/value for the Aether user base is poor. Aether
 projects that want it can write a struct wrapper:
 
-```aether
+```aether,fragment
 struct EmailAddress { raw: string }
 parse_email(s: string) -> (EmailAddress, string) { … }
 ```

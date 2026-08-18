@@ -9,7 +9,7 @@ rebuilt only rarely.
 
 Import with:
 
-```aether
+```aether,fragment
 import std.snapshot
 ```
 
@@ -96,7 +96,7 @@ cannot hold a pointer across two of the writer's publishes. So the writer can
 safely **defer one generation**: when it publishes snapshot N+1, it frees
 snapshot N−1.
 
-```aether
+```aether,fragment
 import std.snapshot
 
 // Writer-actor: owns the cell plus the one deferred (previous) snapshot.
@@ -136,7 +136,7 @@ which is the common case.
 Use `cas` when the new snapshot is derived from the current one and concurrent
 writers are possible (or just for a uniform pattern):
 
-```aether
+```aether,fragment
 loop {
     cur  = snapshot.load(cell)
     next = build_next_from(cur)        // pure; allocates `next`

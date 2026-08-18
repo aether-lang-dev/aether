@@ -217,7 +217,7 @@ contract around reassignment. Each has a near-term workaround; the
 
 ### L1. `call(x)` where `x` comes from a list
 
-```aether
+```aether,fragment
 handlers = list.new()
 list.add(handlers, box_closure(|_| { return "hello" }))
 ...
@@ -249,7 +249,7 @@ comparisons. A real fix threads through the typechecker.
 
 ### L2. `call(x)` where `x` is chosen via `match`/`if`
 
-```aether
+```aether,fragment
 op = if user_wants_add { add_fn } else { mul_fn }
 r = call(op, 3, 4)            // op's closure id is not knowable
 ```
@@ -260,7 +260,7 @@ with the `int` default.
 
 ### L3. `call(x)` where `x` is threaded through intermediate functions
 
-```aether
+```aether,fragment
 x = setup()                   // setup returns a closure
 y = wrap(x)                   // wrap takes fn, returns fn
 r = call(y)                   // y's underlying closure is two hops away
@@ -277,7 +277,7 @@ workaround sections on each limit apply.
 
 ### L4. Closure inside actor handler mutating actor state
 
-```aether
+```aether,fragment
 actor Counter {
     state count = 0
     receive {
@@ -313,7 +313,7 @@ answers.
 
 ### L5. Closure-var reassignment leaks the previous env
 
-```aether
+```aether,fragment
 op = |x: int| { return x + 1 }
 op = |x: int| { return x * 2 }  // old env (malloc'd) is leaked
 ```

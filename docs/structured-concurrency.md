@@ -93,7 +93,7 @@ The runtime change needed is small: actor failure notification.
 
 ### Language / stdlib surface
 
-```aether
+```aether,fragment
 // Builtins
 monitor(actor_ref) -> monitor_id   // one-way
 link(actor_ref)                     // two-way
@@ -112,7 +112,7 @@ message Down {
 No language-level supervisor primitive. A `std.supervise` module provides
 an ordinary actor type:
 
-```aether
+```aether,fragment
 import std.supervise
 
 main() {
@@ -156,7 +156,7 @@ diagnostic.
 
 ### Worked example
 
-```aether
+```aether,fragment
 sandbox("payment-handler") {
     grant_tcp("payments.example.com")
     seal except req, res, payment_client, logger

@@ -2,7 +2,7 @@
 // append_codepoint / append_format / finish_with_length / reserve /
 // truncate / clear / capacity.
 //
-// v1 (test_std_strbuilder.ae) covers new/append/append_n/append_byte/
+// v1 (std/strbuilder/test_strbuilder.ae) covers new/append/append_n/append_byte/
 // append_int/length/finish/free. This file exercises only the v2
 // surface added for issue #489.
 //

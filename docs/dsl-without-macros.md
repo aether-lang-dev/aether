@@ -12,7 +12,7 @@ is useful when choosing or evaluating either.
 A nested, declarative-feeling DSL, the GUI / SwiftUI / kotlinx.html / Sinatra
 shape:
 
-```aether
+```aether,fragment
 frame("App") {
     panel("Controls") {
         button("OK")
@@ -92,7 +92,7 @@ closures with implicit capture, [`closures-and-builder-dsl.md`
 actual test bodies. Shared state across `before`/`it` lives in `ref`
 cells the closures capture by pointer:
 
-```aether
+```aether,fragment
 describe("Account") {
     account = ref(0)
     before callback { ref_set(account, account_new(100)) }
@@ -153,7 +153,7 @@ object; the function executes with the filled config; the typed bindings
 come from the same `--emit=lib` C-ABI shape Aether uses for everything
 else.
 
-```aether
+```aether,fragment
 import std.sql
 
 actives = sql.select(users) {
@@ -236,7 +236,7 @@ to read.
 **Aether.** Trailing blocks for structure, real closures for behaviour,
 both first-class:
 
-```aether
+```aether,fragment
 import contrib.scene as s
 
 room = s.room("Library") {
@@ -357,7 +357,7 @@ The block runs first against a config object filled via setter calls;
 the function runs second with that config. This is the closest analogue
 to a real declarative DSL and it works for most cases:
 
-```aether
+```aether,fragment
 builder compile(src: string) {
     rel = ""
     if _builder != null {

@@ -81,7 +81,7 @@ list at the top of the file. Names in the list are accessible from
 importers; names not in the list are private, still usable inside the
 module's own functions, but rejected at qualified-call sites.
 
-```aether
+```aether,fragment
 // lib/geometry/module.ae
 
 exports (PI, distance)
@@ -100,7 +100,7 @@ _sqrt_approx(n) {
 }
 ```
 
-```aether
+```aether,fails
 import geometry
 
 main() {
@@ -127,7 +127,7 @@ main() {
 
 Earlier versions of Aether used a per-function `export` keyword:
 
-```aether
+```aether,fragment
 // DEPRECATED, emits a warning at compile time.
 export const PI = 3
 export distance(...) { … }
@@ -144,7 +144,7 @@ one module is a hard error.
 An entry in a selective-import list can be renamed with `as`, the same
 token module-level aliasing already uses:
 
-```aether
+```aether,fragment
 import vg (rect, fill, path as vgpath, text_paths)
 ```
 
@@ -155,7 +155,7 @@ selective import collides: keep the other names bare, rename the one
 that clashes, instead of qualifying every call to rescue a single
 symbol.
 
-```aether
+```aether,fragment
 import vg (rect, path as vgpath)
 
 path(x: int) -> int { … }        // the local `path` is unaffected
@@ -178,7 +178,7 @@ the program actually binds: `import vg (path as vgpath)` plus a local
 
 A module (or main program) that selectively imports a name AND defines a local function with the same name silently shadowed the import:
 
-```aether
+```aether,fragment
 import std.string (length)
 
 length(s: string) -> int {
@@ -234,7 +234,7 @@ A module can re-export a symbol it imports from another module by listing that
 symbol in its own `exports`. A consumer then reaches it through the re-exporting
 module even though that module never defined it:
 
-```aether
+```aether,fragment
 // hub.ae, re-exports DERIVED from an inner module
 import layout_consts (DERIVED)
 exports (DERIVED)
@@ -355,7 +355,7 @@ myapp/
 ```
 
 **lib/utils/module.ae**, define your module:
-```aether
+```aether,fragment
 export const MULTIPLIER = 2
 
 export double_value(x) {
@@ -373,7 +373,7 @@ multiply(a, b) {
 ```
 
 **src/main.ae**, use the module:
-```aether
+```aether,fragment
 import utils
 
 main() {
@@ -452,7 +452,7 @@ The compiler converts `namespace.function()` to `namespace_function()`.
 You can write reusable modules in pure Aether, no C backing file required:
 
 **lib/mymath/module.ae:**
-```aether
+```aether,fragment
 export const PI_APPROX = 3
 
 export double_it(x) {
@@ -470,7 +470,7 @@ export double_and_add(x, y) {
 ```
 
 **src/main.ae:**
-```aether
+```aether,fragment
 import mymath
 
 main() {
@@ -490,7 +490,7 @@ After module orchestration, the compiler clones each module's function and const
 **Native link dependencies (`@link`).** A module that wraps a native
 library declares its own link flags at the top of `module.ae`:
 
-```aether
+```aether,fragment
 @link("-laether_sqlite -lsqlite3")
 ```
 

@@ -11,7 +11,7 @@ Aether's type inference can deduce types automatically in most cases.
 ### When to Use Type Inference
 
 **Local variables**
-```aether
+```aether,fragment
 // Type inference - clean and concise
 x = 42              // Inferred as int
 name = "Alice"      // Inferred as string
@@ -19,21 +19,21 @@ points = [1, 2, 3]  // Inferred as int array
 ```
 
 **Simple computations**
-```aether
+```aether,fragment
 sum = a + b
 product = x * y
 result = compute_value()
 ```
 
 **Loop variables**
-```aether
+```aether,fragment
 for i in 0..10 {
     total = total + i
 }
 ```
 
 **Struct field access**
-```aether
+```aether,fragment
 point = Point{ x: 5, y: 10 }
 x_value = point.x  // Inferred from struct definition
 ```
@@ -45,7 +45,7 @@ Use explicit type annotations when they improve code clarity or are required.
 ### When to Use Explicit Types
 
 **Function signatures** (highly recommended)
-```aether
+```aether,fragment
 // Function parameters and return types
 add(int a, int b): int {
     return a + b
@@ -63,7 +63,7 @@ find_user(int id): User {
 **Why**: Makes function contracts clear, improves documentation, helps catch errors at call sites.
 
 **Public APIs and library functions**
-```aether
+```aether,fragment
 // Export functions should have explicit types
 import std.math
 
@@ -75,7 +75,7 @@ export calculate_distance(p1: Point, p2: Point): float {
 ```
 
 **Complex types or ambiguous cases**
-```aether
+```aether,fragment
 import std.map
 import std.list
 
@@ -88,7 +88,7 @@ int result = parse_number(input)  // Clarifies we want int, not float
 ```
 
 **Actor state declarations**
-```aether
+```aether,fragment
 actor Counter {
     state int count            // Explicit prefix form for clarity
     state string name
@@ -101,7 +101,7 @@ actor Counter {
 ```
 
 **Struct field definitions**
-```aether
+```aether,fragment
 struct User {
     int id
     string name
@@ -116,7 +116,7 @@ struct User {
 
 **Be consistent** within a single file or module:
 
-```aether
+```aether,fragment
 // Option A: Pure inference (for small scripts)
 x = 10
 y = 20
@@ -129,7 +129,7 @@ int sum = x + y
 ```
 
 **Don't mix** styles randomly:
-```aether
+```aether,fragment
 // Inconsistent - avoid
 int x = 10
 y = 20           // Sudden switch to inference
@@ -147,7 +147,7 @@ Establish team conventions:
 
 ### Variables
 
-```aether
+```aether,fragment
 // Explicit type annotation
 int x = 42
 string name = "Alice"
@@ -163,7 +163,7 @@ active = true
 
 ### Functions
 
-```aether
+```aether,fragment
 // Explicit parameter and return types
 multiply(int a, int b): int {
     return a * b
@@ -182,7 +182,7 @@ subtract(a, b) {
 
 ### Arrays
 
-```aether
+```aether,fragment
 // Type inference from elements (the working form for array literals)
 numbers = [1, 2, 3, 4, 5]  // Inferred as int[]
 names = ["Alice", "Bob"]   // Inferred as string[]
@@ -199,7 +199,7 @@ const primes[] = [2, 3, 5, 7]
 
 ### Complex Types
 
-```aether
+```aether,fragment
 import std.map
 import std.list
 
@@ -234,7 +234,7 @@ main() {
 
 ### Example 2: Library-Style (Explicit Types)
 
-```aether
+```aether,fragment
 // Public library with clear contracts
 import std.math
 
@@ -259,7 +259,7 @@ export midpoint(p1: Point, p2: Point): Point {
 
 ### Example 3: Balanced Approach (Recommended)
 
-```aether
+```aether,fragment
 // Explicit where it matters, inference elsewhere
 import std.file
 
@@ -284,7 +284,7 @@ process_file(string filename): int {
 
 Some cases don't give the inferencer enough to work with; annotate explicitly:
 
-```aether
+```aether,fragment
 // This fails - type can't be inferred
 x = undefined()
 y = get_value()  // If get_value() return type is unknown
@@ -294,7 +294,7 @@ int x = undefined()
 int y = get_value()
 ```
 
-```aether
+```aether,fragment
 // Recursive functions need return type
 fibonacci(n) {
     if n <= 1 { return n }

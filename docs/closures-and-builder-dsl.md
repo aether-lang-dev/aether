@@ -79,7 +79,7 @@ parent-child wiring.
 
 Aether closures use pipe-delimited parameters with arrow or block bodies:
 
-```aether
+```aether,fragment
 // Arrow closure (single expression, returns value)
 doubler = |x: int| -> x * 2
 
@@ -96,7 +96,7 @@ action = || {
 
 Closures capture variables from their enclosing scope:
 
-```aether
+```aether,fragment
 base = 100
 adder = |x: int| -> x + base    // captures 'base'
 result = call(adder, 42)         // 142
@@ -106,7 +106,7 @@ result = call(adder, 42)         // 142
 
 Use the `call()` builtin:
 
-```aether
+```aether,fragment
 doubler = |x: int| -> x * 2
 result = call(doubler, 21)    // 42
 ```
@@ -136,7 +136,7 @@ main() {
 Any function call can be followed by a block `{ ... }`. This is the foundation of
 the builder DSL pattern:
 
-```aether
+```aether,fragment
 setup("config") {
     println("initializing")
     // arbitrary code here
@@ -149,7 +149,7 @@ There are two forms with different semantics:
 
 A bare `{ }` after a function call runs immediately, inline:
 
-```aether
+```aether,fragment
 panel("title") {
     button("OK")       // runs now, during construction
     button("Cancel")
@@ -163,7 +163,7 @@ when `{` appears on the **same source line** as the call's closing `)`.
 A `{` on a later line is parsed as an independent block, not as a
 trailing closure for the preceding call.
 
-```aether
+```aether,fragment
 result = build() { ... }    // trailing closure of build()
 
 result = build()
@@ -172,7 +172,7 @@ result = build()
 
 Why: this rule lets ordinary statements like
 
-```aether
+```aether,fragment
 base_body = read_blob(repo, sha)
 {
     n = string.length(base_body)
@@ -198,7 +198,7 @@ self-diagnosing.
 A `|| { }` or `|params| { }` after a function call creates a real closure that is
 passed as an argument, it runs later when invoked:
 
-```aether
+```aether,fragment
 save_handler = || { println("saved!") }
 button("Save", save_handler)
 
@@ -220,7 +220,7 @@ trailing-block mode:
 | Closure | `func() \|x\| { block }` | Real closure with explicit params |
 | Callback | `func() callback { block }` | Real closure, captures from scope |
 
-```aether
+```aether,fragment
 counter = ref(0)
 
 btn("increment") callback { ref_set(counter, ref_get(counter) + 1) }
@@ -232,7 +232,7 @@ through as an explicit parameter. At the call site, `call(handler)` is enough.
 
 Callback blocks also support explicit params and arrow bodies:
 
-```aether
+```aether,fragment
 // With params, invoked as call(adder, 3, 4)
 store(action) callback |a: int, b: int| { return a + b }
 
@@ -255,7 +255,7 @@ erroring as undefined. Resolution order:
 Pre-fix, every downstream project consuming an SDK module had to
 write a two-line import preamble:
 
-```aether
+```aether,fragment
 import bash
 import bash (script, jobs, env)        // ← this companion line
 
@@ -272,7 +272,7 @@ Post-fix, the second `import bash (...)` line is unnecessary,
 bare-name calls inside the trailing block fall back to
 `bash_script` / `bash_jobs` automatically:
 
-```aether
+```aether,fragment
 import bash
 
 main() {
@@ -407,7 +407,7 @@ When a function's first parameter is named `_ctx` with type `ptr`:
 
 This means the user writes:
 
-```aether
+```aether,fragment
 frame("Address") {
     panel("Enter your address:") {
         label("Street:")
@@ -457,7 +457,7 @@ on the definition:
 
 ### Defining a builder function
 
-```aether
+```aether,fragment
 import std.map
 
 builder compile(src: string) {
@@ -478,7 +478,7 @@ The caller never sees it.
 
 ### Calling a builder function
 
-```aether
+```aether,fragment
 // With trailing block, block fills config, then compile() runs
 compile("Main.java") {
     set_release("21")
@@ -496,7 +496,7 @@ pops, then calls the function with the filled config.
 
 ### Builder functions can return values
 
-```aether
+```aether,fragment
 builder make_greeting(name: string): string {
     prefix = "Hello"
     if _builder != null {
@@ -520,7 +520,7 @@ main() {
 By default, the compiler creates the config object via `map_new()`. The `with`
 clause lets the SDK author specify any zero-argument factory function:
 
-```aether
+```aether,fragment
 // Default, map_new
 builder compile(src: string) { ... }
 
@@ -581,7 +581,7 @@ a value passed explicitly as a `ptr` argument to callbacks (UI event
 handlers), threaded through a struct field, or handed across an actor
 boundary:
 
-```aether
+```aether,fragment
 count = ref(0)           // heap-allocated mutable cell
 defer ref_free(count)
 
@@ -606,7 +606,7 @@ holding the same pointer see the same heap location.
 Closures are structs (not pointers), so they can't be stored directly in
 `std.list`. Use `box_closure()` / `unbox_closure()` to heap-allocate:
 
-```aether
+```aether,fragment
 import std.list
 
 handlers = list.new()
@@ -623,7 +623,7 @@ call(handler, some_ref)
 
 Combining ref cells, boxed closures, and the builder DSL:
 
-```aether
+```aether,fragment
 num  = ref(0)
 prev = ref(0)
 op   = ref(0)
@@ -667,7 +667,7 @@ function whose **first parameter type matches `typeof(x)`**. No new
 declaration syntax: any existing free function whose first parameter is the
 receiver type is callable in method position.
 
-```aether
+```aether,fragment
 struct Subject { v: int, ok: int }
 expect(n: int) -> Subject { return Subject { v: n, ok: 1 } }
 // returns the receiver, so calls chain (the fluent-interface contract)
@@ -691,7 +691,7 @@ a query API's combinators. `value.method()` resolves a `method` exported by
 an imported module whose first parameter matches `typeof(value)`, honoring the
 same visibility as a normal qualified `mod.method(value)` call:
 
-```aether
+```aether,fragment
 import assert
 r = assert.expect_int(5).to_equal(5).to_be_gt(0)  // matchers imported, chain local
 ```

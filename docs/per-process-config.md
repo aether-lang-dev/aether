@@ -168,7 +168,7 @@ const char *aether_ra_get_user(void) {
 
 This shim stores a **string** (`char *`) and owns it (`free` / `strdup`), so it maps onto the actor singleton above rather than a module-level `var`. Set on CLI parse:
 
-```aether
+```aether,fragment
 cfg ! SetUser { name: parsed_user_arg }
 ```
 
@@ -176,7 +176,7 @@ cfg ! SetUser { name: parsed_user_arg }
 
 Read in the request handler, slightly more involved than a function call because the handler needs an actor_ref to receive the reply. The natural place to plumb that is through whatever spawns the handler:
 
-```aether
+```aether,fragment
 // At handler-spawn time:
 worker = spawn(RequestHandler())
 cfg ! GetUser { to: worker }   // worker stashes the reply when it arrives

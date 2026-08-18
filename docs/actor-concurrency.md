@@ -181,7 +181,7 @@ void ActorName_step(ActorName* self) {
 
 The `after` clause on a `receive` block fires a handler if no message arrives within a given number of milliseconds:
 
-```aether
+```aether,fragment
 actor Monitor {
     receive {
         Heartbeat -> { println("alive") }
@@ -195,7 +195,7 @@ The timeout is one-shot: it is cancelled when any message is received. The count
 
 The timeout expression can reference actor state fields, not just integer literals, useful when the interval is configurable per-actor or computed:
 
-```aether
+```aether,fragment
 actor Poller {
     state interval_ms = 30000
     state ticks       = 0
@@ -290,7 +290,7 @@ The multi-core scheduler uses core partitioning with locality-aware placement:
 
 The `wait_for_idle()` function blocks until all actors have finished processing their messages (quiescence). It is **non-destructive**: it does not stop or join scheduler threads, so it can be called multiple times in a program. This is the recommended way to synchronize the main thread with actor completion:
 
-```aether
+```aether,fragment
 main() {
     ping = spawn(PingActor())
     pong = spawn(PongActor())

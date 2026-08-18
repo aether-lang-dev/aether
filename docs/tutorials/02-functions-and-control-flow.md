@@ -273,7 +273,7 @@ Here are several examples showing the same problem solved both ways:
 #### Sum of List
 
 **Imperative style (for loop):**
-```aether
+```aether,fragment
 sum_loop(nums, len) {
     total = 0
     for (i = 0; i < len; i = i + 1) {
@@ -313,7 +313,7 @@ The functional style reads like a definition: "The total length of an empty list
 #### Factorial
 
 **Imperative style:**
-```aether
+```aether,fragment
 factorial_loop(n) {
     result = 1
     for (i = 2; i <= n; i = i + 1) {
@@ -324,7 +324,7 @@ factorial_loop(n) {
 ```
 
 **Functional style:**
-```aether
+```aether,fragment
 factorial(n) {
     if (n <= 1) { return 1 }
     return n * factorial(n - 1)
@@ -334,7 +334,7 @@ factorial(n) {
 #### Finding Maximum in List
 
 **Imperative style:**
-```aether
+```aether,fragment
 max_loop(nums, len) {
     if (len == 0) { return 0 }
     max_val = nums[0]
@@ -391,7 +391,7 @@ main() {
 
 Aether's pattern matching in receive blocks is inspired by Erlang:
 
-```aether
+```aether,fragment
 actor Calculator {
     receive {
         Add(x, y) -> {
@@ -468,7 +468,7 @@ main() {
 <details>
 <summary>Solution</summary>
 
-```aether
+```aether,fragment
 abs(n) {
     if (n < 0) {
         return -n
@@ -498,7 +498,7 @@ main() {
 <details>
 <summary>Solution</summary>
 
-```aether
+```aether,fragment
 power(x, n) {
     result = 1
     for (i = 0; i < n; i = i + 1) {
@@ -546,7 +546,7 @@ main() {
 
 ### 1. Keep Functions Small
 
-```aether
+```aether,fragment
 // Good: One clear purpose
 calculate_area(width, height) {
     return width * height
@@ -560,7 +560,7 @@ process_everything(a, b, c, d, e) {
 
 ### 2. Use Meaningful Names
 
-```aether
+```aether,fragment
 // Good
 calculate_average(numbers) { }
 is_valid_email(email) { }
@@ -572,7 +572,7 @@ check(e) { }
 
 ### 3. Avoid Deep Nesting
 
-```aether
+```aether,fragment
 // Bad: Too nested
 if (a) {
     if (b) {
@@ -608,7 +608,7 @@ You've learned:
 
 ## Quick Reference
 
-```aether
+```aether,fragment
 // Function
 add(a, b) {
     return a + b

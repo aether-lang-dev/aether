@@ -4,7 +4,7 @@ Server handlers registered via `http.server_get` (and friends:
 `server_post`, `server_put`, `server_delete`, `server_add_route`)
 receive three arguments:
 
-```aether
+```aether,fragment
 handler(req: ptr, res: ptr, ud: ptr)
 ```
 
@@ -24,7 +24,7 @@ Declare a struct, `malloc`+init it, and pass the resulting `ptr` as
 the `user_data` argument. The handler casts back via
 `ud as *YourStruct`.
 
-```aether
+```aether,fragment
 import std.http
 extern malloc(n: int) -> ptr
 
@@ -58,7 +58,7 @@ main() {
 Each route has its own `user_data` slot. A server can host routes
 with distinct contexts without any coordination:
 
-```aether
+```aether,fragment
 ctx_v1 = malloc(64) as *ApiCtx
 ctx_v1.version = 1
 

@@ -211,7 +211,7 @@ library-agnostic at the tool layer.
 
 A novice writes:
 
-```aether
+```aether,fragment
 import avnserver
 avnserver.serve { repo("a", "/x"); port(9990) }
 ```

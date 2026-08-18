@@ -45,7 +45,7 @@ Original design rationale and open questions follow.
 A zero-runtime-cost way to give Aether's structurally-typed primitives
 nominal identity. The motivating example:
 
-```aether
+```aether,fragment
 type Path = distinct string
 type ConfigK = distinct string
 type Port = distinct int
@@ -94,7 +94,7 @@ users").
 
 ## Sketch
 
-```aether
+```aether,fragment
 type Path = distinct string
 type Port = distinct int
 
@@ -132,7 +132,7 @@ without the unit-conversion machinery.
 
 Declaration syntax:
 
-```aether
+```aether,fragment
 type Name = distinct Underlying
 ```
 

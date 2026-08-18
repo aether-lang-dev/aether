@@ -90,7 +90,7 @@ top-level public functions to the namespace declared by `manifest.ae`.
 
 ### `aether/manifest.ae` (as shipped)
 
-```aether
+```aether,fragment
 import std.host
 
 abi() {
@@ -117,7 +117,7 @@ TinyWeb's `path() { end_point(...) }` or `examples/calculator-tui.ae`'s
 
 ### `aether/placeTrade.ae` (as shipped)
 
-```aether
+```aether,fragment
 place_trade(order_id: long, amount: int, ticker_known: int) {
     println("[ae] place_trade order_id=${order_id} amount=${amount}")
     if amount < 0 || amount > 100000 {
@@ -212,7 +212,7 @@ is plumbing underneath.
 `std.host` defines the manifest builder. Every form below is a function
 call (or builder block), pure Aether, no new lexer or parser work.
 
-```aether
+```aether,fragment
 import std.host
 
 abi() {
@@ -292,7 +292,7 @@ joins, not just module pulls. Not yet shipped.
 
 Aether-side primitive in `std.host`:
 
-```aether
+```aether,fragment
 extern notify(event: string, id: int64) -> int    // 0 = no listener, 1 = delivered
 ```
 

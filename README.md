@@ -317,7 +317,7 @@ Aether closures take three shapes after a function call. They look similar but h
 | **Closure** | `func() \|x\| { block }` | Real closure with explicit params, hoisted to a C function |
 | **Callback** | `func() callback { block }` | Real closure that captures enclosing scope, no params needed |
 
-```aether
+```aether,fragment
 // Immediate, declarative structure, runs during construction
 panel("Settings") {
     button("OK")
@@ -343,7 +343,7 @@ Inspired by Smalltalk blocks, Ruby's blocks/procs, Groovy closures, and Kotlin/S
 
 **Don't ship a YAML loader.** If your Aether library has a "start the thing" surface, HTTP server, daemon, agent, scheduler, test rig, expose it as a closure-DSL block and let the operator's "config" be a `.ae` file they run with `ae run`. The pattern collapses YAML → templating → second-language-DSL (HCL, Helm) → embedded-scripting all into one thing: real Aether, type-checked, sandboxable, with the full stdlib available when the operator needs it.
 
-```aether
+```aether,fragment
 import avnserver
 
 main() {
