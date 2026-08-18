@@ -61,17 +61,53 @@ if ! cmp -s "$TMP/out.c" "$TMP/mac.c" || ! cmp -s "$TMP/out.c" "$TMP/win.c" \
     fail "emitted C differs by target; csrc is meant to be target-neutral source"
 fi
 
-# --- 3. the linking emit modes are still rejected, up front ---
+# --- 3. --emit=obj under --target produces a TARGET-format object ---
+# obj is the other non-linking mode (#1648): it stops at `zig cc -c`, so the
+# "executable link rejects it" rationale does not apply to it either. Unlike
+# csrc it emits target-FORMAT machine code, so it does need zig — skip when
+# absent rather than fail, matching how the cross exe tests behave.
+if command -v zig >/dev/null 2>&1; then
+    for spec in "aarch64-linux:ELF:aarch64" "x86_64-windows:COFF:" "x86_64-macos:Mach-O:"; do
+        t="${spec%%:*}"; rest="${spec#*:}"; want="${rest%%:*}"; arch="${rest#*:}"
+        if ! "$AE" build --target="$t" --emit=obj "$SRC" -o "$TMP/o_$t.o"                 >"$TMP/objlog" 2>&1; then
+            cat "$TMP/objlog"
+            fail "--target=$t --emit=obj was rejected"
+        fi
+        [ -s "$TMP/o_$t.o" ] || fail "no object emitted for $t"
+        desc="$(file "$TMP/o_$t.o")"
+        case "$desc" in
+            *"$want"*) ;;
+            *) fail "$t object is not $want format: $desc" ;;
+        esac
+        if [ -n "$arch" ]; then
+            case "$desc" in
+                *"$arch"*) ;;
+                *) fail "$t object is not $arch: $desc" ;;
+            esac
+        fi
+    done
+
+    # The cross object must differ from the host one — a silently-native
+    # object would satisfy every check above except this.
+    "$AE" build --emit=obj "$SRC" -o "$TMP/o_native.o" >/dev/null 2>&1         || fail "native --emit=obj was rejected"
+    if cmp -s "$TMP/o_aarch64-linux.o" "$TMP/o_native.o"; then
+        fail "the aarch64 object is byte-identical to the host object"
+    fi
+else
+    echo "  [skip] --emit=obj cross checks: zig not on PATH"
+fi
+
+# --- 4. the linking emit modes are still rejected, up front ---
 # Up front matters: --emit=both re-dispatches as exe, and without an explicit
 # check it reaches the cross LINKER and dies with "undefined symbol: main" on
 # a source that has no main by design.
-for mode in lib obj both; do
+for mode in lib both; do
     if "$AE" build --target=aarch64-linux --emit="$mode" "$SRC" -o "$TMP/x" \
             >"$TMP/err" 2>&1; then
         fail "--emit=$mode under --target should be rejected but succeeded"
     fi
-    grep -q 'supports executables and --emit=csrc only' "$TMP/err" \
+    grep -q 'supports executables, --emit=csrc and --emit=obj' "$TMP/err" \
         || fail "--emit=$mode gave the wrong diagnostic: $(head -1 "$TMP/err")"
 done
 
-echo "  PASS: --emit=csrc works under --target; lib/obj/both still rejected"
+echo "  PASS: --emit=csrc + --emit=obj work under --target; lib/both still rejected"

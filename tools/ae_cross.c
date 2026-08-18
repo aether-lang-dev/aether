@@ -215,6 +215,81 @@ static bool cross_cmd_fmt(char** buf, size_t* cap, const char* fmt, ...) {
     }
 }
 
+/* #1648 part (2), obj slice: compile ONE generated .c to a target-format
+ * object with `zig cc -target <t> -c`, and stop.
+ *
+ * Deliberately not run_cross_build with a flag. That function assembles the
+ * whole runtime+stdlib source set, archives it into libaether.a and LINKS an
+ * executable; --emit=obj wants none of that — the caller drops the .o into
+ * their own build and links it themselves. What the two DO share is the
+ * compile-side flag shape, so this mirrors it exactly: the same --sysroot
+ * handling for Tier-B targets, the same -DMA_NO_COREAUDIO workaround for
+ * macos, and the same include flags.
+ *
+ * What it deliberately omits is the link tail (fbsd_link, *_platform_libs,
+ * crossbuild_libs): those name libraries, and nothing is being linked. The
+ * Tier-2 CROSSBUILD_SYSROOT probe is likewise skipped — it exists to decide
+ * which -l names the LINK gets. A consumer linking this object supplies its
+ * own libaether.a and system libraries for the target, exactly as they do for
+ * a native --emit=obj.
+ */
+int run_cross_compile_obj(const char* c_file, const char* obj_file,
+                          bool optimize, const char* ztriple) {
+    const char* user_cflags = get_cflags();
+    const char* opt = optimize ? "-O2" : "-O0 -g";
+
+    /* Same macos workaround as the link path: zig's bundled macOS SDK stubs
+     * do not ship the Apple-licensed CoreAudio framework headers, so
+     * miniaudio (always compiled into the runtime) must fall back to its null
+     * backend or ANY macos cross-compile fails. */
+    char feature_defs[512] = "-DAETHER_HAS_SANDBOX";
+    if (strstr(ztriple, "macos")) {
+        strncat(feature_defs, " -DMA_NO_COREAUDIO",
+                sizeof(feature_defs) - strlen(feature_defs) - 1);
+    }
+
+    /* Tier-B (FreeBSD) targets need the base sysroot for HEADERS here (the
+     * -L is link-side, but harmless and kept so the flag string matches the
+     * link path's shape). Same explicit -I as run_cross_build: for a FreeBSD
+     * target `--sysroot` alone does not make zig cc search usr/include. */
+    char sysroot_flag[3200];
+    sysroot_flag[0] = '\0';
+    if (cross_target_needs_sysroot(ztriple)) {
+        const char* sr = getenv("AETHER_SYSROOT");
+        if (!sr || !*sr) {
+            fprintf(stderr,
+                "Error: target %s needs a FreeBSD base sysroot, but AETHER_SYSROOT is unset.\n"
+                "  Provision the FreeBSD system headers with aether-crossbuild:\n"
+                "    ./scripts/fetch-freebsd-base.sh <cpu> [major]   # e.g. x86_64 15\n"
+                "  then: AETHER_SYSROOT=<crossbuild>/bases/<cpu>-freebsd[ver] ae build ... --target=%s\n",
+                ztriple, ztriple);
+            return 1;
+        }
+        snprintf(sysroot_flag, sizeof(sysroot_flag),
+                 "--sysroot=%s -I%s/usr/include", sr, sr);
+    }
+
+    char* cmd = NULL;
+    size_t cmd_cap = 0;
+    if (!cross_cmd_fmt(&cmd, &cmd_cap,
+            "zig cc -target %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+            ztriple, sysroot_flag, opt, feature_defs, user_cflags,
+            tc.include_flags ? tc.include_flags : "",
+            c_file, obj_file)) {
+        fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
+        free(cmd);
+        return 1;
+    }
+    if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
+    int rc = run_cmd_show_warnings(cmd);
+    free(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "Error: cross-compiling %s for %s failed.\n", c_file, ztriple);
+        return 1;
+    }
+    return 0;
+}
+
 int run_cross_build(const char* c_file, const char* out_file,
                            bool optimize, const char* extra,
                            const char* ztriple) {

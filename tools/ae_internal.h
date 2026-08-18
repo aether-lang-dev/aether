@@ -102,6 +102,10 @@ unsigned long long compute_cache_key(const char* ae_file, const char* extra_file
 /* ae_cross.c — cross-compilation via the zig cc backend (#1105). */
 const char* cross_target_to_zig(const char* t);
 bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz);
+/* #1648: compile one generated .c to a target-format object (zig cc -c),
+ * without assembling or linking the runtime. Backs `--emit=obj --target=`. */
+int  run_cross_compile_obj(const char* c_file, const char* obj_file,
+                           bool optimize, const char* ztriple);
 int  run_cross_build(const char* c_file, const char* out_file,
                      bool optimize, const char* extra_files,
                      const char* ztriple);

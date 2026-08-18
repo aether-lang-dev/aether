@@ -5121,8 +5121,8 @@ static int cmd_build(int argc, char** argv) {
                     if (strncmp(argv[j], "--target=", 9) == 0 &&
                         strcmp(argv[j] + 9, "native") != 0) {
                         fprintf(stderr,
-                            "Error: cross-compilation (%s) supports executables and "
-                            "--emit=csrc only; --emit=lib, --emit=both and --emit=obj "
+                            "Error: cross-compilation (%s) supports executables, "
+                            "--emit=csrc and --emit=obj; --emit=lib and --emit=both "
                             "are not supported yet.\n", argv[j]);
                         return 1;
                     }
@@ -5402,11 +5402,18 @@ static int cmd_build(int argc, char** argv) {
         // then LINK it, which the executable link rejects. Reject those up
         // front, like unknown targets.
         //
-        // --emit=csrc is deliberately allowed through (#1648). It sets
-        // g_emit_lib for its codegen shape (the same aether_<name> catalog as
-        // --emit=lib), but it never invokes gcc: the build path returns as soon
-        // as the .c/.h/catalog are written. The "executable link rejects it"
-        // rationale therefore does not apply — there is no link.
+        // --emit=csrc and --emit=obj are deliberately allowed through
+        // (#1648). Both set g_emit_lib for their codegen shape (the same
+        // aether_<name> catalog as --emit=lib), but NEITHER LINKS: csrc
+        // returns as soon as the .c/.h/catalog are written, and obj stops at
+        // `zig cc -c`. The "executable link rejects it" rationale therefore
+        // does not apply to either — there is no link to reject anything.
+        //
+        // They differ in what they produce, which is why csrc needs no zig
+        // and obj does: csrc emits portable SOURCE (target-neutral, compiled
+        // later by the consumer), while obj emits a target-FORMAT object
+        // (real machine code for the triple), so it genuinely needs the cross
+        // toolchain.
         //
         // The emitted C is target-NEUTRAL, not target-parameterised: platform
         // selection stays in #if __linux__ / __APPLE__ / __wasi__ and is
@@ -5416,17 +5423,18 @@ static int cmd_build(int argc, char** argv) {
         // consumer compiles the .so/.a/.wasm themselves. --target therefore
         // does not change the bytes emitted; it is accepted so one command
         // line works for both native and cross consumers.
-        if (g_emit_lib && !g_emit_csrc) {
+        if (g_emit_lib && !g_emit_csrc && !g_emit_obj) {
             fprintf(stderr,
-                "Error: cross-compilation (--target=%s) supports executables and "
-                "--emit=csrc only; --emit=lib, --emit=both and --emit=obj are not "
+                "Error: cross-compilation (--target=%s) supports executables, "
+                "--emit=csrc and --emit=obj; --emit=lib and --emit=both are not "
                 "supported yet.\n", target);
             return 1;
         }
-        /* zig is the cross LINKER. --emit=csrc never links, so requiring zig
-         * for it would invent a dependency the build does not have — and one
-         * that would block the very case csrc exists to serve: emitting
-         * portable C on a machine that has no cross toolchain at all. */
+        /* --emit=csrc never invokes zig at all: it emits portable C and
+         * stops, so requiring zig would invent a dependency the build does
+         * not have — and would block the very case csrc exists to serve,
+         * emitting portable C on a machine with no cross toolchain. Every
+         * other mode (exe, and --emit=obj's `zig cc -c`) does need it. */
         if (!g_emit_csrc && run_cmd_quiet("zig version") != 0) {
             fprintf(stderr, "Error: zig not found on PATH (required to cross-compile for %s).\n",
                     target);
@@ -5570,6 +5578,21 @@ static int cmd_build(int argc, char** argv) {
             } else {
                 snprintf(obj_file + ol, sizeof(obj_file) - ol, ".o");
             }
+        }
+        /* #1648: under --target the object must be in the TARGET's format,
+         * so it goes through `zig cc -target <t> -c` rather than the host CC.
+         * AE_CC/CC are deliberately not consulted on this path — they name a
+         * host compiler, and honouring them would silently produce a host
+         * object for a command that asked for a cross one. */
+        if (is_cross) {
+            if (run_cross_compile_obj(c_file, obj_file, !quick, ztriple) != 0) {
+                fprintf(stderr, "Failed to compile the generated C to an object.\n");
+                return 1;
+            }
+            printf("Built object: %s\n", obj_file);
+            printf("       target %s: link it on a matching host, or with the same "
+                   "zig target.\n", target);
+            return 0;
         }
         const char* objcc = getenv("AE_CC");
         if (!objcc || !*objcc) objcc = getenv("CC");

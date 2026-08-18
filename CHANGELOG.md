@@ -25,7 +25,20 @@ version number before tagging the release.
   selection stays in `#if __linux__`/`__APPLE__`/`__wasi__` and is resolved by
   the consumer's compiler — verified byte-identical across four targets in
   `tests/integration/emit_csrc_cross/`. csrc under `--target` also no longer
-  requires `zig` on PATH, since there is no link to perform.
+  requires `zig` on PATH, since nothing is compiled or linked.
+
+- **`ae build --target=<triple> --emit=obj` is now allowed** (#1648), producing
+  a real target-format object via `zig cc -target <triple> -c`: ELF/aarch64 for
+  `aarch64-linux`, COFF/amd64 for `x86_64-windows`, Mach-O for `x86_64-macos`,
+  each verified by `file` and asserted to differ from the host object. obj is
+  the other **non-linking** mode, so the guard's "the executable link rejects
+  it" rationale never applied to it either; it stops at `-c`. Unlike csrc it
+  emits machine code rather than portable source, so it does need `zig`.
+  `AE_CC`/`CC` are deliberately not consulted on the cross object path — they
+  name a host compiler, and honouring them would silently produce a host object
+  for a command that asked for a cross one. `--emit=lib` and `--emit=both`
+  remain rejected: they link a shared library, which the cross path does not
+  yet produce.
 
 ### Fixed
 

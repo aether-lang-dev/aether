@@ -414,11 +414,11 @@ no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
 upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
 regex-using program cross-builds self-contained for every target. A
 CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
-vendored copy. Executables **and `--emit=csrc`** (`--emit=lib`, `--emit=both`
-and `--emit=obj` are rejected for now — they link, and the cross link path
-produces executables only), and the host must be POSIX (Linux/macOS). The
-generated binary targets another platform, so it is not runnable on the build
-host; copy it to a matching machine (or an emulator).
+vendored copy. Executables, **`--emit=csrc` and `--emit=obj`** (`--emit=lib`
+and `--emit=both` are rejected for now — they link a shared library, which the
+cross link path does not yet produce), and the host must be POSIX
+(Linux/macOS). The generated binary targets another platform, so it is not
+runnable on the build host; copy it to a matching machine (or an emulator).
 
 `--emit=csrc` is allowed under `--target` because it never links: it writes
 the portable C, its catalog header and the JSON catalog, and stops (#1648).
@@ -432,7 +432,27 @@ by the consumer's compiler, which defines those macros for whatever target it
 builds. `--target` therefore does not change the bytes emitted (asserted by
 `tests/integration/emit_csrc_cross/`); it is accepted so one command line
 works for both native and cross consumers. For the same reason csrc under
-`--target` does **not** require `zig` on PATH — there is no link to perform.
+`--target` does **not** require `zig` on PATH — nothing is compiled or linked.
+
+`--emit=obj` is the other non-linking mode, and is allowed under `--target` for
+the same reason: it stops at `zig cc -target <triple> -c`. Unlike csrc it emits
+a **target-format object** — real machine code for the triple — so it *does*
+need `zig`:
+
+```
+$ ae build --target=aarch64-linux  --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: ELF 64-bit LSB relocatable, ARM aarch64
+$ ae build --target=x86_64-windows --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: Intel amd64 COFF object file
+$ ae build --target=x86_64-macos   --emit=obj lib.ae -o lib.o && file lib.o
+lib.o: Mach-O 64-bit x86_64 object
+```
+
+`AE_CC`/`CC` are deliberately **not** consulted on the cross object path: they
+name a host compiler, and honouring them would silently produce a host object
+for a command that asked for a cross one. The consumer links the object with
+their own `libaether.a` and system libraries for the target, exactly as they do
+for a native `--emit=obj`.
 
 The same vendored engine backs two native cases: a build box with no system
 libpcre2-8 (`make` compiles the vendored copy instead of stubbing
