@@ -406,6 +406,17 @@ jobs:
           exit 1
         fi
 
+    # Leak gate for contrib/vulkan, which the valgrind run above deliberately
+    # skips: lavapipe's LLVM JIT makes valgrind report ~13k errors of the
+    # driver's own, so gating on it would measure Mesa. LeakSanitizer
+    # suppresses by module, so the driver is excluded by object while every
+    # allocation the module makes is gated. Runs last: it rebuilds the same
+    # binaries with the sanitizer linked in.
+    - name: Leak-gate contrib/vulkan (LeakSanitizer)
+      env:
+        VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+      run: make contrib-check-lsan
+
   # ============================================================
   # Windows CI — MinGW via MSYS2
   # Runs `make ci` — compiler, ae, stdlib, unit tests,

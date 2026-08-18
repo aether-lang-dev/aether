@@ -205,9 +205,27 @@ int string_equals(const void* a, const void* b) {
     return memcmp(str_data(a), str_data(b), la) == 0;
 }
 
+/* The contract is the sign, and only the sign: -1, 0 or 1. C leaves strcmp's
+ * magnitude unspecified, so a bare `return strcmp(...)` hands callers a byte
+ * difference that is +/-1 for adjacent characters and anything at all
+ * otherwise: `compare("c","a") == 1` was false while `compare("b","a") == 1`
+ * was true, and either could change with the libc (#1640). memcmp over the
+ * shorter run, not strcmp: an AetherString may carry embedded NULs, and
+ * strcmp would stop at the first one and report two different strings equal.
+ * A null sorts before any string, so a missing operand cannot read as
+ * "equal to everything". */
 int string_compare(const void* a, const void* b) {
-    if (!a || !b) return 0;
-    return strcmp(str_data(a), str_data(b));
+    if (a == b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    size_t la = str_len(a), lb = str_len(b);
+    size_t n = la < lb ? la : lb;
+    if (n > 0) {
+        int d = memcmp(str_data(a), str_data(b), n);
+        if (d != 0) return d < 0 ? -1 : 1;
+    }
+    if (la == lb) return 0;
+    return la < lb ? -1 : 1;
 }
 
 // String methods

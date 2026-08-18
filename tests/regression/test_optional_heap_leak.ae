@@ -40,9 +40,9 @@ peek(x: string?) -> int {
 }
 
 main() {
-    let mut fails = 0
-    let mut n = 0
-    let mut total = 0
+    let fails = 0
+    let n = 0
+    let total = 0
 
     while n < 40 {
         // Reassign-in-loop: each iteration's prior `.val` is freed by the

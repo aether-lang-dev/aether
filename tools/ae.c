@@ -201,13 +201,22 @@ static char g_with_caps[128] = "";
  * aether.toml's `[build] defines`. */
 static char g_defines[1024] = "";
 
-/* The cache key must see the symbols: two builds of the same source with
- * different -D produce different binaries, and without this the second is
- * served the first's artifact and the region silently comes back. Same
+static const char* get_link_flags(void);
+
+/* The cache key must see every input that changes the emitted binary but is
+ * not the source text: the -D symbols (two builds of one source with different
+ * -D produce different binaries, and without this the second is served the
+ * first's artifact and the region silently comes back), and the manifest's
+ * `[build] cflags` / `link_flags`, which go straight onto the gcc line. The
+ * flags were missing: staging an aether.toml that adds `-fsanitize=address`
+ * over an already-built tree printed "Built (cache hit)" and handed back the
+ * uninstrumented binary, so a sanitizer run measured nothing at all. Same
  * silent-staleness shape as the --trace miss below. */
 static const char* ae_define_salt(const char* base, char* buf, size_t n) {
-    if (!g_defines[0]) return base;
-    snprintf(buf, n, "%s%s", base, g_defines);
+    const char* cf = get_cflags();
+    const char* lf = get_link_flags();
+    if (!g_defines[0] && !cf[0] && !lf[0]) return base;
+    snprintf(buf, n, "%s%s|cf=%s|lf=%s", base, g_defines, cf, lf);
     return buf;
 }
 
@@ -3133,7 +3142,7 @@ static int cmd_run(int argc, char** argv) {
     // this exact source + compiler + extras combination.
     bool using_cache = false;
     char cached_exe[1024] = "";
-    char run_salt[1200];
+    char run_salt[4096];
     unsigned long long cache_key =
         compute_cache_key(file, extra_files, "O0",
                           ae_define_salt("run", run_salt, sizeof(run_salt)));
@@ -5507,7 +5516,7 @@ static int cmd_build(int argc, char** argv) {
          * all: the same silent-staleness shape as the imported-module miss
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
-        char build_salt[1200];
+        char build_salt[4096];
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
                                       ae_define_salt(g_trace ? "build+trace" : "build",

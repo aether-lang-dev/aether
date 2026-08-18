@@ -1,0 +1,67 @@
+// Regression: string.compare returns a sign, not a byte difference (#1640).
+//
+// The implementation was `return strcmp(...)`, whose magnitude C leaves
+// unspecified. That made the documented `-1, 0, 1` contract true only for
+// characters one apart: compare("b", "a") was 1, compare("c", "a") was 2, and
+// a caller testing `== 1` silently got the wrong answer for almost every pair.
+// The shape is what made it dangerous, the first thing anyone tries passes.
+
+import std.string
+
+extern exit(code: int)
+
+check_eq(got: int, want: int, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    println("=== string.compare returns -1 / 0 / 1 ===")
+    failures = 0
+
+    // Adjacent characters: right before the fix too.
+    failures = failures + check_eq(string.compare("b", "a"), 1, "compare(\"b\", \"a\")")
+    failures = failures + check_eq(string.compare("a", "b"), -1, "compare(\"a\", \"b\")")
+
+    // Further apart: 2 and -2 before the fix.
+    failures = failures + check_eq(string.compare("c", "a"), 1, "compare(\"c\", \"a\")")
+    failures = failures + check_eq(string.compare("a", "c"), -1, "compare(\"a\", \"c\")")
+    failures = failures + check_eq(string.compare("z", "a"), 1, "compare(\"z\", \"a\")")
+    failures = failures + check_eq(string.compare("a", "z"), -1, "compare(\"a\", \"z\")")
+
+    failures = failures + check_eq(string.compare("a", "a"), 0, "compare(\"a\", \"a\")")
+    failures = failures + check_eq(string.compare("", ""), 0, "compare(\"\", \"\")")
+
+    // A prefix sorts before the string it prefixes, whatever the length gap.
+    failures = failures + check_eq(string.compare("abc", "abcdefgh"), -1, "compare(\"abc\", \"abcdefgh\")")
+    failures = failures + check_eq(string.compare("abcdefgh", "abc"), 1, "compare(\"abcdefgh\", \"abc\")")
+    failures = failures + check_eq(string.compare("", "abc"), -1, "compare(\"\", \"abc\")")
+
+    // Case: upper-case ASCII sorts before lower-case, by byte value.
+    failures = failures + check_eq(string.compare("Zebra", "apple"), -1, "compare(\"Zebra\", \"apple\")")
+
+    // Bytes order as unsigned: 0x82 sorts after 'a', not before it.
+    high = "\x82"
+    failures = failures + check_eq(string.compare(high, "a"), 1, "compare(\"\\x82\", \"a\")")
+    failures = failures + check_eq(string.compare("a", high), -1, "compare(\"a\", \"\\x82\")")
+
+    // The documented test form, the one the raw difference broke.
+    if string.compare("c", "a") == 1 {
+        println("  PASS `compare(x, y) == 1` is a valid greater-than test")
+    } else {
+        println("  FAIL `compare(x, y) == 1` does not detect greater-than")
+        failures = failures + 1
+    }
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}

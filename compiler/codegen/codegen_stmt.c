@@ -4887,12 +4887,20 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                             vtype = stmt->children[0]->node_type;
                         }
                         emit_struct_destroy_before_reassign(gen, stmt->value, vtype);
-                        fprintf(gen->output, "%s", stmt->value);
                         if (stmt->child_count > 0) {
-                            fprintf(gen->output, " = ");
+                            fprintf(gen->output, "%s = ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
+                            fprintf(gen->output, ";\n");
+                        } else {
+                            /* A re-declaration with no initializer, of a name
+                             * something already declared: `byte[8] scratch`
+                             * inside a loop, whose declaration the array hoist
+                             * lifted to function scope. There is nothing left
+                             * to assign, and emitting the bare name left
+                             * `scratch;` in the output, a dead statement that
+                             * is -Wunused-value in the user's own build. */
+                            fprintf(gen->output, "\n");
                         }
-                        fprintf(gen->output, ";\n");
                     }
                     // Handle trailing blocks on reassignment (same as first declaration)
                     if (stmt->child_count > 0 && stmt->children[0] &&
@@ -7135,7 +7143,52 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         emit_closure_env_drained_call(gen, inner, cclos);
                         fprintf(gen->output, "\n");
                     } else {
+                        /* A statement whose value is thrown away is
+                         * -Wunused-value in the user's own build: a
+                         * line-leading `- b`, a bare name, an `x ? y` ask
+                         * whose reply is ignored. The cast says what the
+                         * statement means (evaluate, keep nothing) and costs
+                         * nothing at runtime.
+                         *
+                         * An allow-list, not a deny-list: some statements
+                         * lower to something that is not an expression at all
+                         * (a bare array literal emits a braced initializer,
+                         * and `(void)({2, 99})` is a statement-expression
+                         * containing a brace list, which does not compile).
+                         * Calls are left out too: discarding a call's result
+                         * is ordinary and warns nowhere. */
+                        /* A bare array-literal statement (`[1 + 1, 99]` on
+                         * its own line) has no value and no C spelling: the
+                         * literal lowers to a braced initializer, and
+                         * `{2, 99};` is not a statement any C compiler
+                         * accepts. It used to be emitted anyway, so a program
+                         * the parser accepts produced C that did not build.
+                         * Emit the elements as discarded expressions instead:
+                         * anything with a side effect still runs, in order. */
+                        if (inner && inner->type == AST_ARRAY_LITERAL) {
+                            if (inner->child_count == 0) {
+                                fprintf(gen->output, "(void)0;\n");
+                            } else {
+                                for (int ei = 0; ei < inner->child_count; ei++) {
+                                    fprintf(gen->output, "(void)(");
+                                    generate_expression(gen, inner->children[ei]);
+                                    fprintf(gen->output, ");%s",
+                                            ei + 1 == inner->child_count ? "\n" : " ");
+                                }
+                            }
+                            gen->discard_call_value = 0;
+                            break;
+                        }
+                        int discards_value = inner && (
+                            inner->type == AST_IDENTIFIER ||
+                            inner->type == AST_LITERAL ||
+                            inner->type == AST_UNARY_EXPRESSION ||
+                            inner->type == AST_SEND_ASK ||
+                            (inner->type == AST_BINARY_EXPRESSION &&
+                             !(inner->value && strcmp(inner->value, "=") == 0)));
+                        if (discards_value) fprintf(gen->output, "(void)(");
                         generate_expression(gen, inner);
+                        if (discards_value) fprintf(gen->output, ")");
                         fprintf(gen->output, ";\n");
                     }
                     gen->discard_call_value = 0;

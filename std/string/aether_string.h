@@ -72,6 +72,8 @@ int string_length(const void* str);
 /* The byte at `index` as 0..255, or 0 when out of range. */
 int string_char_at(const void* str, int index);
 int string_equals(const void* a, const void* b);
+/* Lexicographic byte order, sign only: -1 if a<b, 0 if equal, 1 if a>b.
+ * Binary-safe (embedded NULs compare), and a null operand sorts first. */
 int string_compare(const void* a, const void* b);
 
 // String methods — accept both AetherString* and plain char*
