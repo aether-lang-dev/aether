@@ -560,8 +560,22 @@ jobs:
         set -e
         ZIG_BIN="$(./scripts/get-zig.sh "$RUNNER_TEMP/zig")"
         export PATH="$(dirname "$ZIG_BIN"):$PATH"
-        curl -sSf https://wasmtime.dev/install.sh | bash
-        WASMTIME="$HOME/.wasmtime/bin/wasmtime"
+
+        # Pinned release tarball rather than `curl https://wasmtime.dev/install.sh
+        # | bash`: that installer produced NO output and NO binary on this
+        # runner, and because the pipe's exit status is the shell's, the step
+        # sailed on and died later with "wasmtime: No such file or directory" —
+        # a confusing failure a long way from its cause. A fixed URL is
+        # reproducible, and the existence check below turns a download problem
+        # into a message that says so.
+        WASMTIME_VER=v47.0.3
+        curl -sSfL -o "$RUNNER_TEMP/wasmtime.tar.xz" \
+          "https://github.com/bytecodealliance/wasmtime/releases/download/$WASMTIME_VER/wasmtime-$WASMTIME_VER-x86_64-linux.tar.xz"
+        tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
+        WASMTIME="$RUNNER_TEMP/wasmtime-$WASMTIME_VER-x86_64-linux/wasmtime"
+        [ -x "$WASMTIME" ] || { echo "wasmtime not found at $WASMTIME"; ls -la "$RUNNER_TEMP"; exit 1; }
+        "$WASMTIME" --version
+
         make -j"$(nproc)" ae stdlib
 
         printf 'main() {\n    println("hello from wasi")\n}\n' > "$RUNNER_TEMP/hello.ae"
