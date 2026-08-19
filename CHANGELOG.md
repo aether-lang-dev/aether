@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.553.0]
+## [current]
 
 ### Fixed
 
@@ -30,6 +30,10 @@ version number before tagging the release.
   have; one test in this repo had three of them. A `let` that binds nothing is
   now one error naming the form to use instead, and a statement that reports
   its own error no longer draws a second, generic one from the block parser.
+
+## [0.553.0]
+
+### Fixed
 
 - **A function parameter is no longer shadowed by a same-named function in a
   consuming module** (#1657). `bare_top_level_fn` asked only "is there a
