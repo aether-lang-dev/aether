@@ -1,0 +1,16 @@
+import lib.ui
+
+// Identical to probe.ae except the consumer's function is renamed. This is the
+// control: the library's emitted C must be the same either way.
+rc_on_press(view: ptr, x: int, y: int) {
+    println("consumer rc_on_press")
+}
+
+main() {
+    captured = "captured-value"
+    boxed = ui.btn(0, "Shuffle") callback {
+        println("closure ran with ${captured}")
+    }
+    c = unbox_closure(boxed)
+    c()
+}

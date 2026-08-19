@@ -1,0 +1,17 @@
+import lib.ui
+
+// A module-level function whose name collides with ui.btn's PARAMETER name.
+// It is never exported, never imported by ui, and never referenced from btn.
+// Its mere existence used to rewrite the parameter (#1657).
+on_press(view: ptr, x: int, y: int) {
+    println("consumer on_press — must NOT be what btn boxes")
+}
+
+main() {
+    captured = "captured-value"
+    boxed = ui.btn(0, "Shuffle") callback {
+        println("closure ran with ${captured}")
+    }
+    c = unbox_closure(boxed)
+    c()
+}
