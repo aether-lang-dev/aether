@@ -42,6 +42,39 @@
  *  documented follow-up. Native builds are entirely unaffected.
  * ------------------------------------------------------------------ */
 
+/* Recognised spellings of the iOS targets, arch aliases included, matching the
+ * arm64-/amd64- tolerance the zig arms already have. Device and simulator are
+ * separate targets, not a flag on one target: they differ in SDK, in Mach-O
+ * platform (IOS vs IOSSIMULATOR), and a binary for one will not load on the
+ * other. */
+static bool cross_target_is_ios_alias(const char* t) {
+    return !strcmp(t, "aarch64-ios")           || !strcmp(t, "arm64-ios")           ||
+           !strcmp(t, "aarch64-ios-simulator") || !strcmp(t, "arm64-ios-simulator") ||
+           !strcmp(t, "x86_64-ios-simulator")  || !strcmp(t, "amd64-ios-simulator");
+}
+
+/* Compose the clang triple for an iOS alias, e.g. "arm64-apple-ios15.0" or
+ * "x86_64-apple-ios15.0-simulator". The deployment target is part of the
+ * triple — that is how clang stamps LC_BUILD_VERSION minos — so it has to be
+ * decided here rather than added as a separate flag. AETHER_IOS_MIN overrides
+ * the default for a project that must support older devices, or that needs a
+ * newer floor to use a newer SDK symbol.
+ *
+ * NB the returned pointer is into a static buffer, unlike the string literals
+ * every other arm returns: one resolved target per build is the only use, and
+ * a second call for a different iOS alias would overwrite the first result. */
+#define CROSS_IOS_MIN_DEFAULT "15.0"
+static const char* cross_ios_triple(const char* t) {
+    static char triple[64];
+    const char* minv = getenv("AETHER_IOS_MIN");
+    if (!minv || !*minv) minv = CROSS_IOS_MIN_DEFAULT;
+    const char* arch = (!strncmp(t, "x86_64", 6) || !strncmp(t, "amd64", 5))
+                       ? "x86_64" : "arm64";
+    const char* sim = strstr(t, "-simulator") ? "-simulator" : "";
+    snprintf(triple, sizeof(triple), "%s-apple-ios%s%s", arch, minv, sim);
+    return triple;
+}
+
 /* Map an Aether target string to a zig `-target` triple. Returns NULL
  * for anything that isn't a supported cross triple (native / wasm /
  * unknown), which the caller treats as "not a cross build". */
@@ -79,6 +112,14 @@ const char* cross_target_to_zig(const char* t) {
      * `--emit=csrc` — which produces the same target-neutral bytes as every
      * other target anyway — would advertise support that does not exist. */
     if (!strcmp(t, "wasm32-wasi")   || !strcmp(t, "wasm-wasi"))  return "wasm32-wasi";
+    /* iOS (Tier C — Apple toolchain, NOT zig): zig bundles no Apple SDK, and
+     * the iOS SDK is Xcode-licensed so it cannot be redistributed the way the
+     * musl/mingw bundles are. There is therefore no self-contained path here;
+     * these triples route to `xcrun clang` instead. The returned string IS the
+     * clang -target triple, deployment target included, and the backend is
+     * selected off the "-apple-" in it rather than a parallel flag, so the
+     * rest of the cross pipeline stays single-triple-driven. */
+    if (cross_target_is_ios_alias(t)) return cross_ios_triple(t);
     return NULL;
 }
 
@@ -97,6 +138,74 @@ const char* cross_target_to_zig(const char* t) {
 /* True if the resolved zig triple is a WASI target. */
 static bool cross_target_is_wasi(const char* ztriple) {
     return ztriple && strstr(ztriple, "wasi") != NULL;
+}
+
+/* True when `triple` (a cross_target_to_zig result) names an Apple target that
+ * must be driven by the Xcode toolchain rather than zig. */
+bool cross_target_is_apple(const char* triple) {
+    return triple && strstr(triple, "-apple-") != NULL;
+}
+
+/* Resolve an SDK name to its filesystem root via `xcrun --show-sdk-path`.
+ * Asking xcrun rather than hardcoding /Applications/Xcode.app/... is what
+ * makes this work with a relocated Xcode, a beta Xcode, or a DEVELOPER_DIR
+ * override — all of which are normal on a machine that ships iOS apps.
+ * Returns false when Xcode is absent or only the Command Line Tools are
+ * installed (which carry no iPhoneOS SDK). */
+static bool cross_apple_sdk_path(const char* sdk, char* out, size_t osz) {
+    if (!sdk || !out || osz == 0) return false;
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "xcrun --sdk %s --show-sdk-path 2>/dev/null", sdk);
+    FILE* p = popen(cmd, "r");
+    if (!p) return false;
+    out[0] = '\0';
+    if (!fgets(out, (int)osz, p)) { pclose(p); return false; }
+    int rc = pclose(p);
+    size_t n = strlen(out);
+    while (n && (out[n-1] == '\n' || out[n-1] == '\r')) out[--n] = '\0';
+    return rc == 0 && n > 0;
+}
+
+/* The `xcrun --sdk` name for an Apple triple. Device and simulator are
+ * different SDKs with different libSystem stubs, so this cannot be derived
+ * from the architecture alone. */
+const char* cross_apple_sdk(const char* triple) {
+    if (!cross_target_is_apple(triple)) return NULL;
+    return strstr(triple, "-simulator") ? "iphonesimulator" : "iphoneos";
+}
+
+/* Resolve the compiler and archiver command prefixes for a target, so every
+ * compile / archive / link below is composed against these strings rather than
+ * a literal "zig cc". The Apple path is then a different DRIVER, not a
+ * different code path — the object loop, the archive step and the link step
+ * stay shared.
+ *
+ * Apple targets shell to the Xcode toolchain via xcrun, which resolves the
+ * right clang and ar for the selected SDK. -isysroot is mandatory: without it
+ * clang finds the host macOS headers and silently builds for the wrong
+ * platform. `ar_out` may be NULL when the caller only compiles.
+ * Returns false (having printed the reason) if the Apple SDK cannot be found. */
+static bool cross_toolchain(const char* ztriple, char* cc_out, size_t cc_sz,
+                            char* ar_out, size_t ar_sz) {
+    if (cross_target_is_apple(ztriple)) {
+        const char* sdk = cross_apple_sdk(ztriple);
+        char sysroot[2048];
+        if (!cross_apple_sdk_path(sdk, sysroot, sizeof(sysroot))) {
+            fprintf(stderr,
+                "Error: could not locate the %s SDK (xcrun --sdk %s --show-sdk-path failed).\n"
+                "  Cross-compiling for iOS needs Xcode, not just the Command Line Tools:\n"
+                "    sudo xcode-select -s /Applications/Xcode.app/Contents/Developer\n",
+                sdk, sdk);
+            return false;
+        }
+        snprintf(cc_out, cc_sz, "xcrun --sdk %s clang -target %s -isysroot \"%s\"",
+                 sdk, ztriple, sysroot);
+        if (ar_out) snprintf(ar_out, ar_sz, "xcrun --sdk %s ar", sdk);
+        return true;
+    }
+    snprintf(cc_out, cc_sz, "zig cc -target %s", ztriple);
+    if (ar_out) snprintf(ar_out, ar_sz, "zig ar");
+    return true;
 }
 
 /* True if `t` is a cross target that needs a base sysroot for system headers
@@ -276,7 +385,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * miniaudio (always compiled into the runtime) must fall back to its null
      * backend or ANY macos cross-compile fails. */
     char feature_defs[512] = "-DAETHER_HAS_SANDBOX";
-    if (strstr(ztriple, "macos")) {
+    if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
@@ -306,11 +415,14 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
                  "--sysroot=%s -I%s/usr/include", sr, sr);
     }
 
+    char cc_cmd[3072];
+    if (!cross_toolchain(ztriple, cc_cmd, sizeof(cc_cmd), NULL, 0)) return 1;
+
     char* cmd = NULL;
     size_t cmd_cap = 0;
     if (!cross_cmd_fmt(&cmd, &cmd_cap,
-            "zig cc -target %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
-            ztriple, sysroot_flag, opt, feature_defs, user_cflags,
+            "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+            cc_cmd, sysroot_flag, opt, feature_defs, user_cflags,
             tc.include_flags ? tc.include_flags : "",
             c_file, obj_file)) {
         fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
@@ -329,7 +441,7 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
 
 int run_cross_build(const char* c_file, const char* out_file,
                            bool optimize, const char* extra,
-                           const char* ztriple) {
+                           const char* ztriple, bool emit_lib) {
     char manifest[2048], base[1024];
     if (!cross_find_manifest(manifest, sizeof(manifest), base, sizeof(base))) {
         fprintf(stderr,
@@ -345,6 +457,11 @@ int run_cross_build(const char* c_file, const char* out_file,
                 manifest);
         return 1;
     }
+
+    bool is_apple = cross_target_is_apple(ztriple);
+    char cc_cmd[3072];
+    char ar_cmd[1024];
+    if (!cross_toolchain(ztriple, cc_cmd, sizeof(cc_cmd), ar_cmd, sizeof(ar_cmd))) return 1;
 
     /* Fresh per-build object directory under the system temp. */
     char objdir[1024];
@@ -368,7 +485,12 @@ int run_cross_build(const char* c_file, const char* out_file,
      * COMPILES REAL (its -DAETHER_HAS_* here). Sized for the base defs plus
      * every Tier-2 macro. */
     char feature_defs[2048] = "-DAETHER_HAS_SANDBOX";
-    if (strstr(ztriple, "macos")) {
+    /* iOS needs the same treatment for a different reason: miniaudio's Apple
+     * backend is CoreAudio on macOS but AVAudioSession (Objective-C) on iOS,
+     * so aether_audio.c stops being valid C there and fails the compile for
+     * every program, audio or not. MA_NO_COREAUDIO selects the null backend on
+     * both, so std.audio reports unavailable at runtime instead. */
+    if (strstr(ztriple, "macos") || strstr(ztriple, "-apple-ios")) {
         strncat(feature_defs, " -DMA_NO_COREAUDIO",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
@@ -589,8 +711,8 @@ int run_cross_build(const char* c_file, const char* out_file,
             snprintf(objpath, sizeof(objpath), "%s/%.*so", objdir,
                      (int)(strlen(bn) - 1), bn);
             if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "zig cc -target %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
-                ztriple, sysroot_flag, opt, feature_defs, user_cflags, tc.include_flags,
+                "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+                cc_cmd, sysroot_flag, opt, feature_defs, user_cflags, tc.include_flags,
                 srcs[i], objpath)) {
                 fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
                 compile_failed = true;
@@ -618,7 +740,7 @@ int run_cross_build(const char* c_file, const char* out_file,
          *    link pulls only what the program references (native
          *    `-laether` semantics). */
         if (!cross_cmd_fmt(&cmd, &cmd_cap,
-            "zig ar rcs \"%s/libaether.a\" %s", objdir, objlist)) {
+            "%s rcs \"%s/libaether.a\" %s", ar_cmd, objdir, objlist)) {
             fprintf(stderr, "Error: out of memory building the cross-compile archive command.\n");
             break;
         }
@@ -638,16 +760,29 @@ int run_cross_build(const char* c_file, const char* out_file,
              * symbols (casper's cap_*, openssl's SSL_*, …), so they must
              * follow it on the link line for ld.lld's single-pass resolution. */
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "zig cc -target %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
-                ztriple, sysroot_flag, fbsd_link, opt, feature_defs, tc.include_flags,
+                "%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
+                cc_cmd, sysroot_flag, fbsd_link, opt, feature_defs, tc.include_flags,
                 c_file, ex, objdir, fbsd_platform_libs, crossbuild_libs, out_file) ? 1 : -1;
         } else {
             /* Tier A (linux/macos/windows): compact form + any CROSSBUILD_SYSROOT
              * Tier-2 libs AND the Windows system libs after libaether.a (it
              * references their symbols — BCryptGenRandom etc.). */
+            /* --emit=lib on an Apple target produces a Mach-O dylib. It needs
+             * -dynamiclib and an -install_name: without one the load command
+             * records the BUILD path, and the dylib then fails to load from
+             * inside an .app bundle. @rpath/<leaf> is what an Xcode "Embed
+             * Frameworks" phase expects. */
+            char apple_lib_flags[1152];
+            apple_lib_flags[0] = '\0';
+            if (is_apple && emit_lib) {
+                const char* leaf = strrchr(out_file, '/');
+                leaf = leaf ? leaf + 1 : out_file;
+                snprintf(apple_lib_flags, sizeof(apple_lib_flags),
+                         "-dynamiclib -install_name @rpath/%s", leaf);
+            }
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "zig cc -target %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
-                ztriple, sysroot_flag, opt, feature_defs, tc.include_flags, c_file, ex, objdir, crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
+                "%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                cc_cmd, sysroot_flag, apple_lib_flags, opt, feature_defs, tc.include_flags, c_file, ex, objdir, crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
         }
         if (w < 0) {
             fprintf(stderr, "Error: out of memory building the cross-compile link command.\n");

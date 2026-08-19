@@ -393,6 +393,17 @@ Supported triples: `aarch64-macos`, `x86_64-macos`, `aarch64-linux`,
 or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
 `scripts/get-zig.sh`); the build fails fast with an install hint otherwise.
 
+### iOS: `--target=aarch64-ios` (Xcode backend)
+
+iOS is the one cross target that does **not** go through zig: the Apple SDKs are
+Xcode-licensed and not redistributable, so `aarch64-ios`,
+`aarch64-ios-simulator` and `x86_64-ios-simulator` shell to `xcrun clang`
+instead and require a macOS host with Xcode. Unlike the zig targets, `--emit=lib`
+**is** supported there (it produces an `@rpath`-installed Mach-O dylib), because
+an iOS app is built by Xcode and what it wants from Aether is a library, not a
+standalone binary. Full details, including the sandbox restrictions that apply
+at runtime, are in **[cross-ios.md](cross-ios.md)**.
+
 **How it links.** The full runtime and standard library are compiled from
 source for the target and archived, then the program links against that
 archive, so the linker pulls only the objects it references, exactly as a
@@ -513,6 +524,7 @@ so an installed toolchain never ships a silently-stubbed regex.
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
 | Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
+| iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=lib` supported — see [cross-ios.md](cross-ios.md) |
 | Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend, `--emit=csrc`/`--emit=obj` only |
 
 ## Hardening (`HARDEN=1`)
