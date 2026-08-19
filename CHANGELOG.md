@@ -9,39 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.555.0]
-
-### Fixed
-
-- **The compiler no longer leaks on every compile** (#1667). Nothing checked
-  it: the memory-check job builds `aetherc` with LeakSanitizer but only runs
-  the C unit tests, never a compile. Every program leaked, from 128 bytes for
-  a hello-world to 12,010 bytes over 114 allocations for one regression test.
-  Five sources, all of them things the compiler allocated for itself and never
-  handed to anything that frees:
-
-  - the type stamped on a call node, cloned once by inference and then
-    replaced by the typechecker with a bare assignment, orphaning the first;
-  - every token of a `${...}` interpolation, whose sub-lexer run was left to
-    a comment claiming the AST owned them, which it does not (`create_ast_node`
-    copies a token's text and keeps no reference);
-  - the AST nodes codegen synthesises for itself, the defer carriers and the
-    free-call statements, which hang off the defer stack rather than the
-    program AST, so `free_ast_node(program)` never reaches them;
-  - the operands of a constant-folded expression: the fold released the
-    children array but not the child nodes;
-  - the emitted-typedef registries, one strdup'd name per distinct tuple and
-    optional shape.
-
-  Measured over the first 120 `tests/regression/*.ae` programs compiled under
-  LeakSanitizer: **0 of 120 were leak-free before, 86 of 120 are now**, with no
-  new sanitizer error anywhere. The remaining 34 are recorded in the issue,
-  which stays open. `tests/scripts/check_compiler_leaks.sh` runs on the
-  memory-check job's Linux leg and holds five representative programs at zero,
-  so this cannot silently come back; a program that still leaks belongs in the
-  issue rather than in that list.
-
-## [0.554.0]
+## [current]
 
 ### Changed
 
@@ -96,6 +64,41 @@ version number before tagging the release.
   keep-alive path, because the route lookup there had no HEAD-to-GET fallback
   while the other dispatch path did; both now share one resolver.
 
+## [0.555.0]
+
+### Fixed
+
+- **The compiler no longer leaks on every compile** (#1667). Nothing checked
+  it: the memory-check job builds `aetherc` with LeakSanitizer but only runs
+  the C unit tests, never a compile. Every program leaked, from 128 bytes for
+  a hello-world to 12,010 bytes over 114 allocations for one regression test.
+  Five sources, all of them things the compiler allocated for itself and never
+  handed to anything that frees:
+
+  - the type stamped on a call node, cloned once by inference and then
+    replaced by the typechecker with a bare assignment, orphaning the first;
+  - every token of a `${...}` interpolation, whose sub-lexer run was left to
+    a comment claiming the AST owned them, which it does not (`create_ast_node`
+    copies a token's text and keeps no reference);
+  - the AST nodes codegen synthesises for itself, the defer carriers and the
+    free-call statements, which hang off the defer stack rather than the
+    program AST, so `free_ast_node(program)` never reaches them;
+  - the operands of a constant-folded expression: the fold released the
+    children array but not the child nodes;
+  - the emitted-typedef registries, one strdup'd name per distinct tuple and
+    optional shape.
+
+  Measured over the first 120 `tests/regression/*.ae` programs compiled under
+  LeakSanitizer: **0 of 120 were leak-free before, 86 of 120 are now**, with no
+  new sanitizer error anywhere. The remaining 34 are recorded in the issue,
+  which stays open. `tests/scripts/check_compiler_leaks.sh` runs on the
+  memory-check job's Linux leg and holds five representative programs at zero,
+  so this cannot silently come back; a program that still leaks belongs in the
+  issue rather than in that list.
+
+## [0.554.0]
+
+### Fixed
 
 - **64-bit values are no longer silently truncated on three paths** (#1643).
   A call through a struct's `fn`-pointer field, `ref_get`, and `force` each
