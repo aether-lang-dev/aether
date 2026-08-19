@@ -3,7 +3,13 @@
 #include "aether_http_pool.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
-#include <pthread.h>
+/* The portable thread shim, not raw <pthread.h> (see its header note).
+ * It is real pthreads on POSIX, a CRITICAL_SECTION shim on Windows, and
+ * no-op stubs where AETHER_HAS_THREADS is 0. Including <pthread.h> directly
+ * broke wasm32-wasi (#1655): wasi-libc SHIPS a pthread.h even though its
+ * pthread_create is a stub, so its real typedefs collided with the
+ * threadless shim's in the same TU. */
+#include "../../runtime/utils/aether_thread.h"
 #endif
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"

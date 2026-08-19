@@ -125,14 +125,33 @@ if command -v zig >/dev/null 2>&1; then
         *) fail "wasm32-wasi object is not a wasm module: $(file "$TMP/wasi.o")" ;;
     esac
 
-    # A full executable link is NOT supported for wasm32 (the runtime
-    # scheduler's layout assertions assume 64-bit pointers). It must fail with
-    # our one-line diagnostic, not a static_assert deep in a scheduler TU.
+    # A full executable link now WORKS for wasm32-wasi (#1655). It was rejected
+    # while the threaded runtime was the blocker; wasi now selects the
+    # cooperative scheduler and the exe links.
     printf 'main() {\n    println("hi")\n}\n' > "$TMP/app.ae"
-    if "$AE" build --target=wasm32-wasi "$TMP/app.ae" -o "$TMP/app.wasm"             >"$TMP/wasiexe" 2>&1; then
-        fail "wasm32-wasi executable link should be rejected but succeeded"
+    if ! "$AE" build --target=wasm32-wasi "$TMP/app.ae" -o "$TMP/app.wasm" \
+            >"$TMP/wasiexe" 2>&1; then
+        cat "$TMP/wasiexe"
+        fail "wasm32-wasi executable link failed"
     fi
-    grep -q 'executable link is not supported yet' "$TMP/wasiexe"         || fail "wasm32-wasi exe gave the wrong diagnostic: $(head -1 "$TMP/wasiexe")"
+    case "$(file "$TMP/app.wasm")" in
+        *WebAssembly*) ;;
+        *) fail "wasi exe is not a wasm module: $(file "$TMP/app.wasm")" ;;
+    esac
+
+    # An ACTOR program must link too. This is the case that caught the real
+    # bug: codegen emitted a computed-goto dispatch table (label addresses),
+    # which the wasm backend rejects with "relocations for function or section
+    # offsets are only supported in metadata sections". The guard excluded
+    # __EMSCRIPTEN__ but not __wasi__, so only wasi hit it — and only when
+    # LLVM folded the table rather than keeping it, which is why a
+    # single-receive-arm actor failed while a two-arm one compiled.
+    printf 'message Ping { n: int }\n\nactor Counter {\n    state total = 0;\n    receive { Ping(n) -> { total = total + n; } }\n}\n\nmain() { c = spawn(Counter()); c ! Ping { n: 5 }; wait_for_idle(); }\n' > "$TMP/act.ae"
+    if ! "$AE" build --target=wasm32-wasi "$TMP/act.ae" -o "$TMP/act.wasm" \
+            >"$TMP/wasiact" 2>&1; then
+        cat "$TMP/wasiact"
+        fail "wasm32-wasi actor executable failed to link"
+    fi
 else
     echo "  [skip] wasm32-wasi checks: zig not on PATH"
 fi

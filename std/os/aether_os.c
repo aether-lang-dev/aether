@@ -28,6 +28,19 @@ static char* aether_os_empty_heap(void) {
 // compiler link. Keeping the function next to its state fixes that and
 // leaves this file focused on shell/exec helpers.
 
+/* Two independent capabilities gate this file.
+ *
+ * !AETHER_HAS_FILESYSTEM stubs EVERYTHING (the historical behaviour, used by
+ * the Emscripten build, which passes -DAETHER_NO_FILESYSTEM).
+ *
+ * !AETHER_HAS_PROCESS stubs only the fork/exec/pipe/wait surface, leaving the
+ * filesystem and clock functions real. That is the WASI shape: it has a proper
+ * capability-based filesystem — preopened directories, sandboxed but real —
+ * and no process model whatsoever. Before #1655 the only way to compile out
+ * `fork` was to compile out the filesystem with it, because both lived behind
+ * one macro; that trade is fine for Emscripten and would have disabled std.fs
+ * on the one target that supports it properly.
+ */
 #if !AETHER_HAS_FILESYSTEM
 int os_system(const char* c) { (void)c; return -1; }
 char* os_exec_raw(const char* c) { (void)c; return NULL; }
@@ -115,6 +128,24 @@ int os_wall_micros_raw(void) { return 0; }
 int64_t os_now_monotonic_ms_raw(void) { return 0; }
 int64_t os_now_monotonic_ns_raw(void) { return 0; }
 int64_t os_now_unix_ms_raw(void) { return 0; }
+#elif !AETHER_HAS_PROCESS
+
+/* Filesystem yes, processes no — the WASI shape. Everything the process
+ * surface would provide is stubbed here; the filesystem, environment and
+ * clock functions fall through to their real implementations below.
+ *
+ * Return values mirror the !AETHER_HAS_FILESYSTEM stubs above so a caller
+ * sees the same "unavailable" shape on either platform. */
+int os_system(const char* c) { (void)c; return -1; }
+char* os_exec_raw(const char* c) { (void)c; return NULL; }
+int os_execv(const char* p, void* a) { (void)p; (void)a; return -1; }
+char* os_which(const char* n) { (void)n; return NULL; }
+int os_getpid_raw(void) { return 0; }
+int os_user_id_raw(void) { return -1; }
+int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
+
+#define AETHER_OS_PROCESS_STUBBED 1
+
 #else
 
 #include <stdio.h>

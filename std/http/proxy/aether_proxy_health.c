@@ -184,6 +184,20 @@ const char* aether_proxy_health_checks_enable(AetherProxyPool* pool,
     pool->hc_healthy_threshold = healthy_threshold;
     pool->hc_unhealthy_threshold = unhealthy_threshold;
 
+#if !AETHER_HAS_THREADS
+    /* Active health checking is a background thread by definition, so there is
+     * nothing to degrade to on a threadless target (wasi, Emscripten). Report
+     * it rather than silently returning success and leaving the caller to
+     * believe upstreams are being probed — a pool that reports healthy without
+     * checking is worse than one that says it cannot check.
+     *
+     * This is a call-site guard rather than a pthread_create stub in
+     * aether_thread.h: reaching a create on a threadless platform IS a logic
+     * error, and stubbing it would let every other such site fail silently. */
+    free(pool->hc_probe_path);
+    pool->hc_probe_path = NULL;
+    return "active health checks need threads (unavailable on this target)";
+#else
     if (pthread_create(&pool->hc_thread, NULL, health_check_loop, pool) != 0) {
         free(pool->hc_probe_path);
         pool->hc_probe_path = NULL;
@@ -191,4 +205,5 @@ const char* aether_proxy_health_checks_enable(AetherProxyPool* pool,
     }
     pool->hc_started = 1;
     return "";
+#endif
 }

@@ -480,7 +480,14 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         // sections, which wasm disallows ("relocations for function or
         // section offsets are only supported in metadata sections").
         // Route wasm through the MSVC switch-case fallback the same way.
-        print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__)");
+        // __wasi__ / __wasm__ join __EMSCRIPTEN__ here. The comment above has
+        // always described the intent as "route wasm through the switch-case
+        // fallback", but the guard named only Emscripten, so a wasm32-wasi
+        // build still emitted the label-address table and died with exactly
+        // the error quoted above (#1655). optimizer.c's equivalent guards
+        // already list all three; this one was the outlier.
+        print_line(gen, "#if AETHER_GCC_COMPAT && !defined(__EMSCRIPTEN__) && \\");
+        print_line(gen, "    !defined(__wasi__) && !defined(__wasm__)");
         print_line(gen, "// COMPUTED GOTO DISPATCH - 15-30%% faster than switch");
         print_line(gen, "static void* dispatch_table[256] = {");
         indent(gen);

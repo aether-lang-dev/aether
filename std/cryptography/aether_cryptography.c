@@ -639,6 +639,22 @@ static int fill_random(unsigned char* out, size_t n) {
     arc4random_buf(out, n);
     return 1;
 }
+#elif defined(__wasi__)
+/* WASI. wasi-libc exposes the host's CSPRNG through getentropy(3), which is
+ * backed by the random_get syscall — there is no getrandom(2) and no
+ * /dev/urandom to fall back to (WASI's filesystem is capability-scoped and a
+ * preopened /dev is not guaranteed). getentropy fills the whole buffer or
+ * fails; its documented cap is 256 bytes per call, so loop for larger asks. */
+static int fill_random(unsigned char* out, size_t n) {
+    size_t got = 0;
+    while (got < n) {
+        size_t chunk = n - got;
+        if (chunk > 256) chunk = 256;
+        if (getentropy(out + got, chunk) != 0) return 0;
+        got += chunk;
+    }
+    return 1;
+}
 #else
 /* Linux. getrandom(2) (glibc 2.25+, kernel 3.17+) is the right
  * source. The /dev/urandom fallback handles very old kernels (CI

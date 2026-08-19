@@ -41,8 +41,14 @@
 //
 // We only provide our own typedefs for truly bare-metal environments
 // where no system headers define pthread types at all.
+//   - WASI:        <pthread.h> IS shipped by wasi-libc, with real types, even
+//                  though its pthread_create is a stub that returns EAGAIN
+//                  (#1655). Include it: defining our own `typedef int
+//                  pthread_mutex_t` alongside would be a redefinition error,
+//                  which is exactly what happened before it was listed here.
 #if defined(_POSIX_THREADS) || defined(__unix__) || defined(__linux__) || \
-    defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(_NEWLIB_VERSION)
+    defined(__APPLE__) || defined(__EMSCRIPTEN__) || defined(__wasi__) || \
+    defined(_NEWLIB_VERSION)
 #include <pthread.h>
 #else
 // Bare-metal without newlib: define minimal types
@@ -53,7 +59,16 @@ typedef int pthread_t;
 typedef int pthread_attr_t;
 typedef int pthread_mutexattr_t;
 typedef int pthread_condattr_t;
+/* Read-write locks: std/config/aether_config.c uses them, and a threadless
+ * build failed with "unknown type name 'pthread_rwlock_t'" (#1655). These
+ * belong INSIDE this bare-metal-only branch — a platform that ships
+ * <pthread.h> (wasi included) already has the real types, and defining ours
+ * next to them is a redefinition error. */
+typedef int pthread_rwlock_t;
+typedef int pthread_rwlockattr_t;
 #endif
+
+
 
 // No-op function stubs — these shadow the real pthread functions.
 // On hosted platforms with -DAETHER_NO_THREADING, the linker picks our
@@ -73,7 +88,42 @@ static inline int aether_nop_key_create(pthread_key_t* k, void (*d)(void*)) { (v
 static inline int aether_nop_key_delete(pthread_key_t k) { (void)k; return 0; }
 static inline int aether_nop_setspecific(pthread_key_t k, const void* v) { (void)k; (void)v; return 0; }
 static inline void* aether_nop_getspecific(pthread_key_t k) { (void)k; return NULL; }
+static inline int aether_nop_rwlock_init(pthread_rwlock_t* l, const void* a) { (void)l; (void)a; return 0; }
+static inline int aether_nop_rwlock_destroy(pthread_rwlock_t* l) { (void)l; return 0; }
+static inline int aether_nop_rwlock_rdlock(pthread_rwlock_t* l) { (void)l; return 0; }
+static inline int aether_nop_rwlock_wrlock(pthread_rwlock_t* l) { (void)l; return 0; }
+static inline int aether_nop_rwlock_unlock(pthread_rwlock_t* l) { (void)l; return 0; }
 static inline int aether_nop_detach(pthread_t t) { (void)t; return 0; }
+
+/* pthread_join IS stubbed (unlike pthread_create, below), because a join is
+ * only reachable after a successful create. Real call sites guard on exactly
+ * that — std/http/proxy/aether_proxy_pool.c joins its health-check thread only
+ * `if (pool->hc_started)`, and hc_started is set only when pthread_create
+ * returned 0, which cannot happen here. So the join is dead code on a
+ * threadless target, but it must still COMPILE. Leaving it undeclared broke
+ * the wasm32-wasi build (#1655) on code that can never run.
+ *
+ * pthread_create stays unstubbed on purpose: reaching one IS a logic error,
+ * and the note below explains why the linker can't be trusted to catch it. */
+static inline int aether_nop_join(pthread_t t, void** r) { (void)t; if (r) *r = NULL; return 0; }
+
+// PTHREAD_MUTEX_INITIALIZER for statically-initialised locks. The function
+// stubs above cover every DYNAMIC use, but a file-scope
+//   static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+// needs the macro to exist too — runtime/sandbox/aether_audit.c does exactly
+// that, and without this a threadless build fails with "use of undeclared
+// identifier 'PTHREAD_MUTEX_INITIALIZER'" (#1655, first hit on wasm32-wasi).
+// pthread_mutex_t is an int here and every lock operation is a no-op, so any
+// value is correct; 0 matches the "unlocked" reading of the typedef.
+#ifndef PTHREAD_MUTEX_INITIALIZER
+#  define PTHREAD_MUTEX_INITIALIZER 0
+#endif
+#ifndef PTHREAD_COND_INITIALIZER
+#  define PTHREAD_COND_INITIALIZER 0
+#endif
+#ifndef PTHREAD_RWLOCK_INITIALIZER
+#  define PTHREAD_RWLOCK_INITIALIZER 0
+#endif
 
 // Redirect pthread calls to no-op stubs via macros
 #define pthread_mutex_init(m, a)     aether_nop_mutex_init((m), (a))
@@ -92,6 +142,12 @@ static inline int aether_nop_detach(pthread_t t) { (void)t; return 0; }
 #define pthread_setspecific(k, v)    aether_nop_setspecific((k), (v))
 #define pthread_getspecific(k)       aether_nop_getspecific(k)
 #define pthread_detach(t)            aether_nop_detach(t)
+#define pthread_rwlock_init(l, a)    aether_nop_rwlock_init((l), (a))
+#define pthread_rwlock_destroy(l)    aether_nop_rwlock_destroy(l)
+#define pthread_rwlock_rdlock(l)     aether_nop_rwlock_rdlock(l)
+#define pthread_rwlock_wrlock(l)     aether_nop_rwlock_wrlock(l)
+#define pthread_rwlock_unlock(l)     aether_nop_rwlock_unlock(l)
+#define pthread_join(t, r)           aether_nop_join((t), (r))
 
 // sched_yield stub — must come after any system header that declares it
 #if !defined(__linux__) && !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -99,7 +155,14 @@ static inline int aether_nop_detach(pthread_t t) { (void)t; return 0; }
 #endif
 
 // NOTE: pthread_create/pthread_join are NOT stubbed — calling them on
-// a threadless platform is a logic error and should fail at link time.
+// a threadless platform is a logic error.
+//
+// Do NOT rely on that being caught at link time. It is on most targets, but
+// zig's wasi-libc ships pthread STUBS (lib/libc/wasi/thread-stub/) whose
+// pthread_create returns EAGAIN unconditionally, so a wasi build resolves the
+// symbol, links clean, and then hangs on scheduler_start()'s readiness barrier
+// waiting for workers that were never created (#1655). The defence is
+// selecting the right scheduler source set for such targets, not the linker.
 
 #elif !defined(_WIN32)
 
@@ -349,6 +412,16 @@ static inline int aether_win32_sched_yield(void) {
 #endif
 
 // ---- monotonic nanosecond clock -----------------------------------------
+// <time.h> is included HERE rather than per-branch because aether_now_ns()
+// below is shared by all three (threadless / POSIX / Windows). The POSIX
+// branch got struct timespec and clock_gettime transitively from <pthread.h>
+// and the Windows branch includes <time.h> itself, so only the THREADLESS
+// branch was left without a declaration — which no target exercised until
+// wasm32-wasi (#1655), where it surfaced as
+//   error: call to undeclared function 'clock_gettime'
+// Including it unconditionally is harmless for the other two.
+#include <time.h>
+
 // One implementation for every caller. On Windows this routes through the
 // aether_win32_clock_gettime shim above, which splits the
 // QueryPerformanceCounter division into whole seconds plus remainder.

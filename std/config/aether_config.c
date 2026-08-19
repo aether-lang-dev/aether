@@ -16,7 +16,13 @@ static void ae_cfg_rwlock_wrlock(ae_cfg_rwlock_t* lk) { AcquireSRWLockExclusive(
 static void ae_cfg_rwlock_wrunlock(ae_cfg_rwlock_t* lk) { ReleaseSRWLockExclusive(lk); }
 #define AE_CFG_RWLOCK_INITIALIZER SRWLOCK_INIT
 #else
-#include <pthread.h>
+/* The portable thread shim, not raw <pthread.h> (see its header note).
+ * It is real pthreads on POSIX, a CRITICAL_SECTION shim on Windows, and
+ * no-op stubs where AETHER_HAS_THREADS is 0. Including <pthread.h> directly
+ * broke wasm32-wasi (#1655): wasi-libc SHIPS a pthread.h even though its
+ * pthread_create is a stub, so its real typedefs collided with the
+ * threadless shim's in the same TU. */
+#include "../../runtime/utils/aether_thread.h"
 typedef pthread_rwlock_t ae_cfg_rwlock_t;
 static void ae_cfg_rwlock_rdlock  (ae_cfg_rwlock_t* lk) { pthread_rwlock_rdlock(lk); }
 static void ae_cfg_rwlock_rdunlock(ae_cfg_rwlock_t* lk) { pthread_rwlock_unlock(lk); }

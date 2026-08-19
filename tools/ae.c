@@ -5439,29 +5439,25 @@ static int cmd_build(int argc, char** argv) {
         // consumer compiles the .so/.a/.wasm themselves. --target therefore
         // does not change the bytes emitted; it is accepted so one command
         // line works for both native and cross consumers.
-        /* The wasm triples are wired for the NON-LINKING emit modes only.
-         * `--emit=csrc` and `--emit=obj` are proven end to end (a real
-         * `WebAssembly (wasm) binary module` object), but a full executable
-         * link is not: runtime/scheduler/multicore_scheduler.c carries
+        /* wasm32-wasi supports a full executable link as of #1655.
          *
-         *     _Static_assert(sizeof(Mailbox) % 8 == 0, ...)
+         * The previous gate here blamed multicore_scheduler.c's
+         * `_Static_assert(sizeof(Mailbox) % 8 == 0, ...)` for failing on 32-bit
+         * targets. #1652 fixed that assertion, and the reason was never the
+         * whole story anyway: the real blocker is THREADING. wasi has no usable
+         * threads, and zig's wasi-libc resolves pthread_create to a stub that
+         * returns EAGAIN rather than leaving the symbol undefined — so a
+         * threaded build links, starts, prints "Failed to create scheduler
+         * thread", and then spins forever on scheduler_start()'s readiness
+         * barrier. A silent hang, with no link error to catch it.
          *
-         * with no 64-bit guard (unlike the `sizeof(Message) == 48` assertion
-         * directly above it, which has one), so it fails on any 32-bit target
-         * including wasm32. That is a pre-existing runtime portability gap
-         * (filed as #1652), not something this path introduces, and it wants
-         * its own change rather than a workaround here. Reject up front so the
-         * user gets one line instead of a static-assert deep in a scheduler
-         * TU. */
-        if (strstr(ztriple, "wasm") && g_emit_exe && !g_emit_csrc && !g_emit_obj) {
-            fprintf(stderr,
-                "Error: --target=%s supports --emit=csrc and --emit=obj; a full "
-                "executable link is not supported yet (the runtime scheduler's "
-                "layout assertions assume a 64-bit target).\n"
-                "  For a runnable wasm bundle use --target=wasm (Emscripten).\n",
-                target);
-            return 1;
-        }
+         * run_cross_build now selects the cooperative scheduler for wasi (the
+         * same substitution the Emscripten backend makes) and the __wasi__ arm
+         * in aether_optimization_config.h turns the threaded path off, so the
+         * pthread_create call site is never reached. Nothing to reject.
+         *
+         * wasm32-freestanding is not a target here (it has no libc, so the
+         * generated C cannot compile at all) — see cross_target_to_zig. */
         // --emit=lib/--emit=both link, so they are rejected on the zig
         // targets. Apple targets DO support them: the link there produces a
         // Mach-O dylib, which is the primary iOS use case (an iOS app is built

@@ -21,10 +21,55 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* WASI has no audio device, and miniaudio's device layer reaches for
+ * pthread_attr_setschedparam / sched_get_priority_max to raise its audio
+ * thread's priority — none of which wasi-libc declares (#1655). MA_NO_DEVICE_IO
+ * is not a way out: it removes ma_context/ma_backend, which this file's own
+ * null-backend fallback uses.
+ *
+ * So the module is stubbed wholesale on wasi, reporting the SAME shape it
+ * already reports on a box with no sound card: is_null_backend() true and a
+ * last_error() explaining why. Callers that already handle the null backend
+ * need no wasi-specific code. */
+#if defined(__wasi__)
+
+#include <stdint.h>   /* int64_t, used by the seek stub */
+
+int aether_audio_open(void) { return 0; }
+void aether_audio_close(void) { }
+int aether_audio_is_null_backend(void) { return 1; }
+const char* aether_audio_last_error(void) {
+    return "audio is unavailable on wasm32-wasi (no device, no threads)";
+}
+void* aether_audio_load_wav(const char* d, int n) { (void)d; (void)n; return NULL; }
+void* aether_audio_load_pcm(const char* d, int n, int ch, int sr, int bits) {
+    (void)d; (void)n; (void)ch; (void)sr; (void)bits; return NULL;
+}
+void aether_audio_unload(void* s) { (void)s; }
+int aether_audio_play(void* s) { (void)s; return 0; }
+int aether_audio_pause(void* s) { (void)s; return 0; }
+int aether_audio_stop(void* s) { (void)s; return 0; }
+int aether_audio_is_playing(void* s) { (void)s; return 0; }
+int aether_audio_set_volume(void* s, double v) { (void)s; (void)v; return 0; }
+double aether_audio_get_volume(void* s) { (void)s; return 0.0; }
+int aether_audio_seek_ns(void* s, int64_t ns) { (void)s; (void)ns; return 0; }
+int aether_audio_channels(void* s) { (void)s; return 0; }
+int aether_audio_sample_rate(void* s) { (void)s; return 0; }
+
+#else
+
 #define MINIAUDIO_IMPLEMENTATION
 /* Trim the build: we only need decoding + playback, no capture/encoding/
  * resource-manager niceties beyond what ma_engine needs by default. */
 #define MA_NO_ENCODING
+/* WASI has no audio device and no threads. miniaudio's device layer reaches
+ * for pthread_attr_setschedparam / sched_get_priority_max to raise its audio
+ * thread's priority, none of which wasi-libc declares (#1655). MA_NO_DEVICE_IO
+ * drops the whole backend layer — the same warn-and-degrade posture the cross
+ * path already takes for CoreAudio on a macos target, where zig's SDK stubs
+ * omit the Apple-licensed framework headers. Decoding still builds; playback
+ * reports unavailable at runtime, which is correct for a target with no
+ * audio device to play to. */
 #include "miniaudio.h"
 
 /* ---- engine ------------------------------------------------------------ */
@@ -326,3 +371,5 @@ int aether_audio_sample_rate(void* sound) {
     if (!sound) return 0;
     return sound_sample_rate((AudioSound*)sound);
 }
+
+#endif /* __wasi__ */

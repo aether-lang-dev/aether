@@ -96,8 +96,11 @@ static int _ae_pipe_read_fd = -1;
 static int _ae_pipe_write_fd = -1;
 
 int ae_pipe_open(void) {
-#ifdef _WIN32
-    return -1;  // pipe() is POSIX; Windows callers must use sockets.
+#if defined(_WIN32) || !AETHER_HAS_PROCESS
+    /* pipe() is POSIX; Windows callers must use sockets. WASI reaches the same
+     * arm via AETHER_HAS_PROCESS: it has no pipe(), no fork, and no process
+     * model to plumb one between (#1655). */
+    return -1;
 #else
     int fds[2];
     if (pipe(fds) != 0) return -1;
