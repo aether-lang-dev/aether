@@ -9,6 +9,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **HTTP connections are reused in both directions** (#1653). The load
+  balancer ran 3.7x behind nginx and dropped 8% of requests under load, and
+  both symptoms were connection churn rather than compute: it closed the
+  client's connection after every response and dialled its upstream once per
+  request.
+
+  Upstream, `std.http.client` now keeps a connection open after a response
+  whose length was definite and reuses it for the next request to the same
+  origin. Reading the body needed the framing to be honoured first: the client
+  read until EOF, which only works when the connection *is* the delimiter, so
+  it now reads the header block, then exactly the body that `Content-Length`
+  or the chunk stream declares. Connections are keyed by origin, by the proxy
+  actually dialled, by TLS and by the verification the caller asked for, so a
+  pinned-CA or verification-off connection is never handed to a request that
+  did not ask for it. A connection the peer closed while it sat idle is
+  indistinguishable from a live one until it is used: a readability probe
+  catches nearly all of them, and a request that gets nothing back on a pooled
+  connection is redialled and sent once more, which is safe precisely because
+  the server never saw it. Against an upstream that closes after every
+  response, 4% of requests landed in that window before the retry and none
+  after. `http.client_pool_configure` / `client_pool_disable` /
+  `client_pool_clear` / `client_pool_idle_count` are the controls; reuse is on
+  by default.
+
+  Inbound, keep-alive is on by default and, more to the point, it now applies
+  to responses that come from a middleware. A middleware that answers (the
+  reverse proxy is one) short-circuited the chain and sent its response on a
+  path that skipped the keep-alive decision entirely and closed, so the load
+  balancer closed every inbound connection whatever its configuration said.
+  Both paths finish through one function now.
+
+  Two rules keep the default safe on a thread-per-connection server: a
+  response with no definite body length is never kept open (a handler that
+  sets no body gets `Content-Length: 0` rather than a close), and a connection
+  is not kept while another connection is waiting for a worker, because a
+  worker owns its connection for that connection's whole life. Measured on an
+  8-core box, 3000 requests per cell: 80,700 rps at 8 concurrent clients
+  against 22,100 closing per response, and no collapse at 20 or 50 clients,
+  where keeping connections unconditionally fell to 99 rps. Through the load
+  balancer, 30,686 rps against 14,502. `benchmarks/http/run_lb_reuse.sh` is
+  the harness that produced those numbers.
+
+### Fixed
+
+- **A HEAD response no longer carries a body.** The server sent the body it
+  would have sent for GET, which RFC 9110 forbids and which desynchronises a
+  persistent connection: the client reads those bytes as the start of the next
+  response. HEAD on a path with only a GET route also answered 404 on the
+  keep-alive path, because the route lookup there had no HEAD-to-GET fallback
+  while the other dispatch path did; both now share one resolver.
+
 ## [0.553.0]
 
 ### Fixed

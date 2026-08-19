@@ -346,6 +346,9 @@ specifically for WS/SSE alongside the h2 traffic.
 
 ## HTTP/1.1 keep-alive
 
+On by default, unlimited requests per connection and a 30s idle
+timeout. Call this to change the limits, or to turn it off:
+
 ```aether,fragment
 http.server_set_keepalive(server, 1, 100, 30000ms)
 //                              ^   ^    ^
@@ -357,7 +360,30 @@ Loop terminates when:
 - HTTP/1.0 default,
 - `max_requests` reached (0 = unlimited),
 - `idle_ms` elapses with no new bytes (0 = use default 30s),
-- response status mandates close (408, 426).
+- response status mandates close (408, 426),
+- the response has no definite body length (a handler that sets no
+  body gets `Content-Length: 0` rather than a close; anything read
+  until EOF closes),
+- **another connection is waiting for a worker**.
+
+That last rule is what makes the default safe here. A worker owns a
+connection for its whole life (see the section above), so keeping one
+open while the pool is saturated takes a queued connection's turn
+instead of saving it a handshake. Measured on an 8-core box (16
+workers), 3000 requests:
+
+| concurrent clients | close per response | keep-alive | unconditional keep-alive |
+|---|---|---|---|
+| 4  | 17,800 rps | 50,900 rps | 65,600 rps |
+| 8  | 22,100 rps | 80,800 rps | 60,700 rps |
+| 20 | 22,500 rps | 59,100 rps | **99 rps** |
+| 50 | 22,700 rps | 36,500 rps | (starves) |
+
+The third column is what happens without the rule: past the worker
+count, connections that never reach a worker stall the client. The
+second column is the shipped behaviour, which tracks the best of the
+other two at every point. Lifting the cap itself means parking idle
+connections in a poller instead of holding a worker.
 
 Server emits `Connection: keep-alive` and `Keep-Alive: timeout=N,
 max=M` headers per response.

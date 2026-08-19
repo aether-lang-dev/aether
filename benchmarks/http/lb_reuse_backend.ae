@@ -1,0 +1,29 @@
+// Backend for the load-balancer connection-reuse benchmark: one route, a
+// fixed small body, nothing else on the path. PORT comes from the
+// environment so the harness can start several.
+
+import std.http
+import std.io
+import std.string
+
+handle(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "ok\n")
+}
+
+main() {
+    port_s = io.getenv("PORT")
+    if port_s == 0 {
+        println("PORT not set")
+        return
+    }
+    port = string.get_int(port_s)
+    server = http.server_create(port)
+    if server == 0 {
+        println("cannot bind ${port}")
+        return
+    }
+    http.server_get(server, "/", handle, 0)
+    http.server_start(server)
+}

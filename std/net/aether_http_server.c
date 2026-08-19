@@ -380,6 +380,16 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
 
     int force_close = 0;
     int sent_via_sendfile = 0;
+    /* RFC 9110 section 9.3.2: a HEAD response carries the headers the GET
+     * would have carried and no body. Sending one desynchronises a
+     * persistent connection, the client reads those bytes as the start of
+     * the next response. */
+    int head_only = req && req->method && strcmp(req->method, "HEAD") == 0;
+
+    if (head_only && res->sendfile_fd >= 0) {
+        close(res->sendfile_fd);
+        res->sendfile_fd = -1;
+    }
 
     if (res->sendfile_fd >= 0 && sendfile_eligible(conn, req)) {
         size_t resp_len = 0;
@@ -452,7 +462,11 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
 
     if (!sent_via_sendfile) {
         size_t resp_len = 0;
+        char*  body      = res->body;
+        size_t body_len  = res->body_length;
+        if (head_only) { res->body = NULL; res->body_length = 0; }
         char* response_str = http_response_serialize_len(res, &resp_len);
+        if (head_only) { res->body = body; res->body_length = body_len; }
         if (response_str) {
             conn_send(conn, response_str, (int)resp_len);
             free(response_str);
@@ -679,7 +693,14 @@ HttpServer* http_server_create(int port) {
     server->tls_ctx = NULL;
     server->h2_enabled = 0;
     server->h2_max_concurrent_streams = 0;  /* nghttp2 default 100 when 0 */
-    server->keep_alive_enabled = 0;
+    /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
+     * or client that dials this server pays a handshake per request when it
+     * is not: the load balancer measured 3.7x behind nginx with 8% of
+     * requests dropped mid-response, entirely from connection churn (#1653).
+     * A client that asks for `Connection: close` still gets close, and the
+     * response path refuses to keep a connection whose body has no definite
+     * length. 0 = unlimited requests, 0 = the 30s idle default. */
+    server->keep_alive_enabled = 1;
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
     server->response_transformer_chain = NULL;
@@ -2585,6 +2606,26 @@ static int http_request_wants_keepalive(HttpRequest* req) {
     return is_http_1_0 ? 0 : 1;
 }
 
+/* Route lookup, shared by both dispatch paths. HEAD is GET-without-body
+ * (RFC 9110 section 9.3.2), so a path with only a GET route answers HEAD with
+ * the shape GET would have produced; an exact HEAD route still wins. The
+ * keep-alive path had no such fallback and answered every HEAD with 404. */
+static HttpRoute* http_resolve_route(HttpServer* server, HttpRequest* req) {
+    HttpRoute* head_to_get = NULL;
+    int is_head = req->method && strcmp(req->method, "HEAD") == 0;
+    for (HttpRoute* route = server->routes; route; route = route->next) {
+        if (!http_route_matches(route->path_pattern, req->path, req)) continue;
+        if (strcmp(route->method, req->method) == 0 ||
+            strcmp(route->method, "*") == 0) {
+            return route;
+        }
+        if (is_head && !head_to_get && strcmp(route->method, "GET") == 0) {
+            head_to_get = route;
+        }
+    }
+    return head_to_get;
+}
+
 /* Per-request slice of the connection lifecycle. Returns:
  *    1 — request was processed; caller may loop for another request
  *        on the same connection (subject to keep-alive policy).
@@ -2594,6 +2635,92 @@ static int http_request_wants_keepalive(HttpRequest* req) {
  * Uses the conn's persistent read buffer so that bytes the previous
  * request's recv loop pulled past its own boundary (HTTP pipelining,
  * or just two requests in one TCP packet) are not dropped. */
+/* Emit `res` on `conn` and decide whether the connection carries another
+ * request. Owns `req` and `res` and frees both. Reached from the route
+ * handler AND from a middleware short-circuit: the short-circuit used to
+ * send the response itself and close, so every reverse-proxied response
+ * (the proxy middleware answers by short-circuiting) closed its inbound
+ * connection, whatever the server keep-alive setting said (#1653). */
+static int finish_response(HttpServer* server, HttpConn* conn,
+                           HttpRequest* req, HttpServerResponse* res,
+                           int requests_served, int max_requests) {
+    /* Decide whether this response keeps the connection open.
+     * Three things can force close:
+     *   - keep-alive disabled on the server,
+     *   - client requested close (or HTTP/1.0 default),
+     *   - max_requests reached (caller passes the post-increment).
+     * We also force close on response statuses that semantically
+     * mandate it (408 Request Timeout, 426 Upgrade Required). */
+    int will_keep_alive = server->keep_alive_enabled
+                       && http_request_wants_keepalive(req)
+                       && (max_requests == 0 ||
+                           requests_served + 1 < max_requests)
+                       && res->status_code != 408
+                       && res->status_code != 426;
+
+    /* One worker owns a connection for its whole life, so a connection kept
+     * open while others wait in the accept queue takes their turn rather than
+     * saving a handshake. Measured on an 8-core box (16 workers), 3000
+     * requests: 60,700 rps keeping connections at 8 concurrent clients,
+     * 20,600 rps closing every response, and 99 rps keeping them at 20
+     * concurrent clients, where four connections never reached a worker.
+     * Keeping only while nothing is queued gets the first number without the
+     * third: the server falls back to close exactly when it is saturated. */
+    if (will_keep_alive && http_pool_pending() > 0) {
+        will_keep_alive = 0;
+    }
+
+    /* A persistent connection needs a definite body length, or the client
+     * cannot tell where this response ends and the next begins. Responses
+     * built without a body carry no Content-Length (http_response_create
+     * sets only Content-Type and Server), so state it rather than close. */
+    if (will_keep_alive) {
+        int has_length = 0;
+        for (int i = 0; i < res->header_count; i++) {
+            if (strcasecmp(res->header_keys[i], "Content-Length") == 0 ||
+                strcasecmp(res->header_keys[i], "Transfer-Encoding") == 0) {
+                has_length = 1;
+                break;
+            }
+        }
+        if (!has_length) {
+            char len_str[32];
+            long long len = res->sendfile_fd >= 0
+                ? (long long)res->sendfile_size : (long long)res->body_length;
+            snprintf(len_str, sizeof(len_str), "%lld", len);
+            http_response_set_header(res, "Content-Length", len_str);
+        }
+    }
+
+    /* Emit the right Connection / Keep-Alive headers so the client
+     * knows what we're going to do. */
+    if (will_keep_alive) {
+        http_response_set_header(res, "Connection", "keep-alive");
+        if (max_requests > 0) {
+            char ka[64];
+            int remaining = max_requests - requests_served - 1;
+            int idle_sec = server->keep_alive_idle_ms > 0
+                ? server->keep_alive_idle_ms / 1000 : 30;
+            snprintf(ka, sizeof(ka), "timeout=%d, max=%d", idle_sec, remaining);
+            http_response_set_header(res, "Keep-Alive", ka);
+        }
+    } else {
+        http_response_set_header(res, "Connection", "close");
+    }
+
+    /* Issue #383 zero-copy: dispatched via the helper so the same
+     * behaviour applies whether we got here from the route handler
+     * or from a middleware short-circuit (the chain at line ~2270
+     * also calls this helper). */
+    int force_close = send_response_with_optional_sendfile(conn, res, req);
+    if (force_close) will_keep_alive = 0;
+
+    // Cleanup
+    http_request_free(req);
+    http_server_response_free(res);
+    return will_keep_alive;
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     long t_start = http_now_us();
@@ -2834,17 +2961,11 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             http_server_response_free(res);
             return 0;
         }
-        /* Goes through the same zero-copy helper as the route-handler
-         * path (#383). When a middleware (e.g. static_files) staged
-         * a sendfile FD on the response, this is where we still
-         * serve it — the chain doesn't fall through to the regular
-         * end-of-handler path, so without this the FD-stashed
-         * response would emit headers with Content-Length but no
-         * body. */
-        send_response_with_optional_sendfile(conn, res, req);
-        http_request_free(req);
-        http_server_response_free(res);
-        return 0;
+        /* Same finish as the route-handler path: a middleware that answers
+         * (static_files staging a sendfile FD, the reverse proxy returning an
+         * upstream response) produces an ordinary response, and the
+         * connection's fate is decided the same way. */
+        return finish_response(server, conn, req, res, requests_served, max_requests);
     }
 
     /* h2c (cleartext HTTP/2) upgrade dispatch (#260 Tier 2 — RFC 7540 §3.2).
@@ -3016,19 +3137,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         }
     }
 
-    // Find matching route
-    HttpRoute* route = server->routes;
-    HttpRoute* matched_route = NULL;
-
-    while (route) {
-        if (strcmp(route->method, req->method) == 0 || strcmp(route->method, "*") == 0) {
-            if (http_route_matches(route->path_pattern, req->path, req)) {
-                matched_route = route;
-                break;
-            }
-        }
-        route = route->next;
-    }
+    HttpRoute* matched_route = http_resolve_route(server, req);
 
     // Execute route handler or return 404
     if (matched_route) {
@@ -3110,47 +3219,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         req->stream_conn = NULL;
     }
 
-    /* Decide whether this response keeps the connection open.
-     * Three things can force close:
-     *   - keep-alive disabled on the server,
-     *   - client requested close (or HTTP/1.0 default),
-     *   - max_requests reached (caller passes the post-increment).
-     * We also force close on response statuses that semantically
-     * mandate it (408 Request Timeout, 426 Upgrade Required). */
-    int will_keep_alive = server->keep_alive_enabled
-                       && http_request_wants_keepalive(req)
-                       && (max_requests == 0 ||
-                           requests_served + 1 < max_requests)
-                       && res->status_code != 408
-                       && res->status_code != 426;
-
-    /* Emit the right Connection / Keep-Alive headers so the client
-     * knows what we're going to do. */
-    if (will_keep_alive) {
-        http_response_set_header(res, "Connection", "keep-alive");
-        if (max_requests > 0) {
-            char ka[64];
-            int remaining = max_requests - requests_served - 1;
-            int idle_sec = server->keep_alive_idle_ms > 0
-                ? server->keep_alive_idle_ms / 1000 : 30;
-            snprintf(ka, sizeof(ka), "timeout=%d, max=%d", idle_sec, remaining);
-            http_response_set_header(res, "Keep-Alive", ka);
-        }
-    } else {
-        http_response_set_header(res, "Connection", "close");
-    }
-
-    /* Issue #383 zero-copy: dispatched via the helper so the same
-     * behaviour applies whether we got here from the route handler
-     * or from a middleware short-circuit (the chain at line ~2270
-     * also calls this helper). */
-    int force_close = send_response_with_optional_sendfile(conn, res, req);
-    if (force_close) will_keep_alive = 0;
-
-    // Cleanup
-    http_request_free(req);
-    http_server_response_free(res);
-    return will_keep_alive;
+    return finish_response(server, conn, req, res, requests_served, max_requests);
 }
 
 /* Public reusable helper. Owns the full per-connection lifecycle:
@@ -3188,33 +3257,7 @@ void http_server_dispatch_for_h2(HttpServer* server,
         return;  /* middleware blocked; res already populated */
     }
 
-    /* Route lookup. HEAD is semantically GET-without-body per
-     * RFC 7231 §4.3.2 — if the application registered a GET route
-     * but no HEAD route at the same path, run the GET handler so
-     * the response shape (status, headers, Content-Length) matches
-     * what GET would have produced. The wire-side body suppression
-     * for HEAD is the wrapper's job (h2: NULL data_provider on
-     * nghttp2_submit_response; HTTP/1.1: skip body in serializer). */
-    HttpRoute* route = server->routes;
-    HttpRoute* matched_route = NULL;
-    HttpRoute* head_to_get = NULL;
-    while (route) {
-        if (http_route_matches(route->path_pattern, req->path, req)) {
-            if (strcmp(route->method, req->method) == 0 || strcmp(route->method, "*") == 0) {
-                matched_route = route;
-                break;
-            }
-            if (!head_to_get &&
-                strcmp(req->method, "HEAD") == 0 &&
-                strcmp(route->method, "GET") == 0) {
-                head_to_get = route;
-                /* keep scanning — an exact HEAD route, if registered,
-                 * still wins. */
-            }
-        }
-        route = route->next;
-    }
-    if (!matched_route) matched_route = head_to_get;
+    HttpRoute* matched_route = http_resolve_route(server, req);
     if (matched_route) {
         matched_route->handler(req, res, matched_route->user_data);
     } else {

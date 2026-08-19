@@ -1619,6 +1619,13 @@ main() {
 
 All wrappers auto-free the underlying response and return an error string for transport failures or non-2xx status codes. Raw externs: `http_get_raw`, `http_get_with_timeout_raw`, `http_post_raw`, `http_put_raw`, `http_delete_raw`.
 
+**Connection reuse.** The client keeps a connection open after a response whose length was definite (`Content-Length` or chunked) and reuses it for the next request to the same origin, which is what HTTP/1.1 is for: a proxy or a polling client otherwise pays a TCP, and for HTTPS a TLS, handshake per request. It is on by default; a reverse proxy through `std.http.proxy` measured about 2x on the same box once it stopped dialling per request. Connections are keyed by origin, by the proxy actually dialled, by TLS, and by the verification the caller asked for, so a connection opened with a pinned CA or with verification off is never handed to a request that did not ask for that. A response with no definite length, or either side saying `Connection: close`, retires the connection instead of pooling it, and a streaming response (`stream()`) is never pooled because the caller may abandon it mid-body. A connection the peer closed while it sat idle looks live until it is used, so a pooled connection that returns nothing is redialled and the request sent once more, which is safe precisely because the server never saw it.
+
+- `http.client_pool_configure(max_idle, max_per_host, idle)` → `string` - Resize the pool: idle connections in total, idle connections to one origin, and how long an unused one is kept (a `Duration`). Defaults are `(64, 8, 15s)`. Keep the idle time under the upstream's own keep-alive timeout, or connections are closed while they sit here and every reuse costs a retry.
+- `http.client_pool_disable()` - Turn reuse off and close what is held.
+- `http.client_pool_clear()` - Close every idle connection, keeping reuse on. Worth calling before a measurement, or after a change that makes held connections invalid (a new CA, a rotated proxy).
+- `http.client_pool_idle_count()` → `int` - How many idle connections are held right now.
+
 **Response accessors (used with raw externs):**
 - `http.response_status(response)` - Read HTTP status code (0 on transport failure)
 - `http.response_body(response)` - Read body as string
@@ -1650,7 +1657,7 @@ Raw externs: `http_server_bind_raw`, `http_server_start_raw`, `http_server_set_h
 
 **Server Configuration:**
 - `http.server_set_tls(server, cert_path, key_path)` → `string` - Enable HTTPS with PEM cert + key.
-- `http.server_set_keepalive(server, enable, max_requests, idle_timeout)` → `string` - HTTP/1.1 keep-alive with a `Duration` idle timeout (`max_requests=0` is unlimited per connection).
+- `http.server_set_keepalive(server, enable, max_requests, idle_timeout)` → `string` - HTTP/1.1 keep-alive with a `Duration` idle timeout (`max_requests=0` is unlimited per connection). Keep-alive is **on by default**, so this is for changing the limits or turning it off. Two rules bound it, both automatic: a response with no definite body length is never kept open, and a connection is not kept while another connection is waiting for a worker (one worker owns a connection for its lifetime, so keeping one while the pool is saturated would take another connection's turn). Measured on an 8-core box, 3000 requests: 80,700 rps at 8 concurrent clients against 22,000 with a close per response, and no collapse at 20 or 50 clients, where holding connections unconditionally fell to 99 rps.
 - `http.server_set_h2(server, max_concurrent_streams)` → `string` - Enable HTTP/2 (h2 + h2c + ALPN). `max_concurrent_streams=0` uses libnghttp2's default (100). Returns error string when the build is missing libnghttp2.
 - `http.server_set_h2_concurrent_dispatch(server, worker_count)` → `string` - Routes h2 stream handlers onto the shared `std.worker` thread pool, sized to `worker_count`. `worker_count > 0` lets streams across all h2 connections execute their handlers in parallel; `worker_count == 0` (default) keeps dispatch sequential on each connection thread. POSIX-only; on Windows the call is a silent no-op. See `docs/http-server.md` for the architecture rationale (pool threads vs actors, one shared pool vs per-connection).
 - `http.server_shutdown_graceful(server, timeout)` → `string` - Stop accepting new connections, drain in-flight requests for up to a `Duration`, exit. h2 sessions emit a `GOAWAY` frame so peers know not to start new streams while existing ones complete.

@@ -41,6 +41,8 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <time.h>
+#include "../../runtime/utils/aether_thread.h"
 #include <limits.h>
 
 #ifdef _WIN32
@@ -339,6 +341,185 @@ struct HttpStream {
     int   pending_len;
     int   pending_cap;
 };
+
+// -----------------------------------------------------------------
+// Idle connection pool (#1653)
+//
+// HTTP/1.1 connections are persistent, and a client that closes after every
+// response pays a TCP handshake (and a TLS handshake) per request. Measured
+// against nginx, that churn was the whole of std.http.server.lb's 3.7x deficit
+// and its 8% dropped requests: the proxy dialled its upstream once per
+// request.
+//
+// A connection is only returned here when the response framing was definite
+// (Content-Length or chunked) and neither side asked to close, so nothing is
+// ever reused when the connection itself was the message delimiter. Entries
+// are keyed by everything that makes two connections non-interchangeable:
+// origin, the proxy actually dialled, TLS, and the verification the caller
+// asked for. A pooled socket the peer closed while idle is indistinguishable
+// from a live one until it is used, so the request path retries once on a
+// fresh connection when a reused one fails before any response byte arrives.
+// -----------------------------------------------------------------
+
+#define HTTP_POOL_KEY_MAX 512
+
+typedef struct HttpIdleConn {
+    Transport t;
+    char      key[HTTP_POOL_KEY_MAX];
+    int64_t   idle_since_ms;
+    struct HttpIdleConn* next;
+} HttpIdleConn;
+
+static pthread_mutex_t http_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+static HttpIdleConn*   http_pool_head = NULL;
+static int             http_pool_count = 0;
+static int             http_pool_enabled = 1;
+static int             http_pool_max_idle = 64;
+static int             http_pool_max_per_key = 8;
+static int64_t         http_pool_idle_ms = 15000;
+
+static int64_t http_now_ms(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+    return (int64_t)time(NULL) * 1000;
+}
+
+/* Everything that makes two connections non-interchangeable: the origin, the
+ * endpoint actually dialled (proxy or origin), TLS, and the verification the
+ * caller asked for. A connection opened with a pinned CA or with verification
+ * off must never be handed to a request that did not ask for that. */
+static void http_pool_key(char* out, size_t n, const char* host, int port,
+                          int use_tls, const char* dial_host, int dial_port,
+                          int insecure, const char* cafile) {
+    snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
+             host ? host : "", port,
+             dial_host ? dial_host : "", dial_port,
+             use_tls ? 1 : 0, insecure ? 1 : 0, cafile ? cafile : "");
+}
+
+/* Caller holds the lock. Drops every entry idle past the timeout. */
+static void http_pool_expire_locked(int64_t now) {
+    HttpIdleConn** link = &http_pool_head;
+    while (*link) {
+        HttpIdleConn* c = *link;
+        if (now - c->idle_since_ms >= http_pool_idle_ms) {
+            *link = c->next;
+            http_pool_count--;
+            transport_close(&c->t);
+            free(c);
+            continue;
+        }
+        link = &c->next;
+    }
+}
+
+/* Take an idle connection for `key`, newest first (the most recently used is
+ * the one the peer is least likely to have closed). Returns 1 on a hit. */
+static int http_pool_take(const char* key, Transport* out) {
+    if (!http_pool_enabled) return 0;
+    int found = 0;
+    pthread_mutex_lock(&http_pool_lock);
+    http_pool_expire_locked(http_now_ms());
+    HttpIdleConn** link = &http_pool_head;
+    while (*link) {
+        HttpIdleConn* c = *link;
+        if (strcmp(c->key, key) == 0) {
+            *link = c->next;
+            http_pool_count--;
+            *out = c->t;
+            free(c);
+            found = 1;
+            break;
+        }
+        link = &c->next;
+    }
+    pthread_mutex_unlock(&http_pool_lock);
+    return found;
+}
+
+/* Hand a still-usable connection back. Takes ownership either way: over the
+ * caps it is closed here rather than returned to the caller to close. */
+static void http_pool_put(const char* key, Transport* t) {
+    if (!http_pool_enabled || t->sockfd < 0) {
+        transport_close(t);
+        return;
+    }
+    HttpIdleConn* c = (HttpIdleConn*)malloc(sizeof(HttpIdleConn));
+    if (!c) {
+        transport_close(t);
+        return;
+    }
+    int64_t now = http_now_ms();
+    pthread_mutex_lock(&http_pool_lock);
+    http_pool_expire_locked(now);
+    int per_key = 0;
+    for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
+        if (strcmp(e->key, key) == 0) per_key++;
+    }
+    if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
+        pthread_mutex_unlock(&http_pool_lock);
+        free(c);
+        transport_close(t);
+        return;
+    }
+    c->t = *t;
+    snprintf(c->key, sizeof(c->key), "%s", key);
+    c->idle_since_ms = now;
+    c->next = http_pool_head;
+    http_pool_head = c;
+    http_pool_count++;
+    pthread_mutex_unlock(&http_pool_lock);
+    t->sockfd = -1;
+#ifdef AETHER_HAS_OPENSSL
+    t->ssl = NULL;
+    t->owned_ctx = NULL;
+#endif
+}
+
+/* Close and drop every idle connection. */
+void http_client_pool_clear_raw(void) {
+    pthread_mutex_lock(&http_pool_lock);
+    HttpIdleConn* c = http_pool_head;
+    http_pool_head = NULL;
+    http_pool_count = 0;
+    pthread_mutex_unlock(&http_pool_lock);
+    while (c) {
+        HttpIdleConn* next = c->next;
+        transport_close(&c->t);
+        free(c);
+        c = next;
+    }
+}
+
+/* Reconfigure the pool. `max_idle` 0 turns reuse off (and clears what is
+ * held); negative values leave that setting untouched. */
+const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
+                                           int64_t idle_ns) {
+    pthread_mutex_lock(&http_pool_lock);
+    if (max_idle >= 0) {
+        http_pool_max_idle = max_idle;
+        http_pool_enabled = max_idle > 0;
+    }
+    if (max_per_host >= 0) http_pool_max_per_key = max_per_host;
+    if (idle_ns >= 0) {
+        int64_t ms = idle_ns / 1000000LL;
+        http_pool_idle_ms = ms > 0 ? ms : 1;
+    }
+    pthread_mutex_unlock(&http_pool_lock);
+    if (!http_pool_enabled) http_client_pool_clear_raw();
+    return "";
+}
+
+int http_client_pool_idle_count_raw(void) {
+    pthread_mutex_lock(&http_pool_lock);
+    int n = http_pool_count;
+    pthread_mutex_unlock(&http_pool_lock);
+    return n;
+}
+
 
 static void http_stream_free(struct HttpStream* s) {
     if (!s) return;
@@ -768,6 +949,71 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
  * length). Defined below. */
 static char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 static int http_value_has_chunked(const char* v);
+static char* http_extract_response_header(const char* hdr_block, const char* name);
+
+/* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
+ * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
+ * which can appear inside chunk data. */
+static int http_chunked_complete(const char* buf, size_t len) {
+    size_t off = 0;
+    for (;;) {
+        const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
+        if (!line_end) return 0;
+        size_t size_len = (size_t)(line_end - (buf + off));
+        char size_buf[32];
+        if (size_len >= sizeof(size_buf)) return 0;
+        memcpy(size_buf, buf + off, size_len);
+        size_buf[size_len] = '\0';
+        long long chunk = strtoll(size_buf, NULL, 16);
+        if (chunk < 0) return 0;
+        off = (size_t)(line_end - buf) + 1;
+        if (chunk == 0) {
+            /* Trailer section: header lines until an empty one ends it. */
+            for (;;) {
+                const char* le = (const char*)memchr(buf + off, '\n', len - off);
+                if (!le) return 0;
+                size_t line_len = (size_t)(le - (buf + off));
+                int empty = line_len == 0 || (line_len == 1 && buf[off] == '\r');
+                off = (size_t)(le - buf) + 1;
+                if (empty) return 1;
+            }
+        }
+        off += (size_t)chunk + 2;   /* payload + its trailing CRLF */
+        if (off > len) return 0;
+    }
+}
+
+/* Case-insensitive substring search, for header values. */
+static const char* http_strcasestr_local(const char* hay, const char* needle) {
+    if (!hay || !needle || !*needle) return NULL;
+    size_t nlen = strlen(needle);
+    for (const char* p = hay; *p; p++) {
+        size_t i = 0;
+        while (i < nlen) {
+            char a = p[i], b = needle[i];
+            if (a >= 'A' && a <= 'Z') a = (char)(a + 32);
+            if (b >= 'A' && b <= 'Z') b = (char)(b + 32);
+            if (a != b) break;
+            i++;
+        }
+        if (i == nlen) return p;
+    }
+    return NULL;
+}
+
+/* The status code from a response header block. */
+static int response_status_of(const char* header_block) {
+    const char* sp = strchr(header_block, ' ');
+    return sp ? atoi(sp + 1) : 0;
+}
+
+/* RFC 9110: 1xx, 204 and 304 carry no body, and neither does any response to
+ * HEAD, whatever the headers say. */
+static int no_body_expected(int status, const char* method) {
+    if (method && strcmp(method, "HEAD") == 0) return 1;
+    if (status >= 100 && status < 200) return 1;
+    return status == 204 || status == 304;
+}
 
 // -----------------------------------------------------------------
 // Forward-proxy resolution (aether#1012 part 2)
@@ -918,6 +1164,343 @@ static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, in
 // throwaway HttpClientRequest and discard it after send.
 // -----------------------------------------------------------------
 
+/* Send / receive timeouts for this request.
+ *
+ * SO_RCVTIMEO / SO_SNDTIMEO take different shapes on the two families: POSIX
+ * a `struct timeval`, Winsock a DWORD of milliseconds. Passing a timeval to
+ * Winsock makes it read tv_sec as milliseconds, so `set_timeout(35)` would
+ * become a 35ms recv timeout that fires before any upstream can answer.
+ * Both shapes keep sub-second precision; Winsock rounds up so a sub-ms value
+ * cannot land on 0, which it reads as "infinite". */
+static void http_apply_timeouts(int sockfd, int64_t timeout_ns) {
+    if (timeout_ns < 0) timeout_ns = 0;   /* 0 clears: block indefinitely */
+#ifdef _WIN32
+    int64_t ms_total = (timeout_ns + 999999LL) / 1000000LL;
+    if (ms_total > 0xFFFFFFFFLL) ms_total = 0xFFFFFFFFLL;
+    DWORD rwtv_ms = (DWORD)ms_total;
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rwtv_ms, sizeof(rwtv_ms));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&rwtv_ms, sizeof(rwtv_ms));
+#else
+    struct timeval rwtv;
+    rwtv.tv_sec  = (time_t)(timeout_ns / 1000000000LL);
+    rwtv.tv_usec = (long)((timeout_ns / 1000LL) % 1000000LL);
+    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rwtv, sizeof(rwtv));
+    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&rwtv, sizeof(rwtv));
+#endif
+}
+
+/* Is a pooled connection still usable? A peer that closed leaves the socket
+ * readable at EOF, and anything readable on an idle keep-alive connection is
+ * unexpected in either direction (a stray byte would desynchronise the next
+ * response), so both readings retire it. */
+static int transport_is_live(Transport* t) {
+    if (t->sockfd < 0) return 0;
+    /* Readable means either the peer closed (recv returns 0) or it sent
+     * something nobody asked for, and a stray byte would be read as the head
+     * of the next response. Not readable is the healthy idle case. */
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(t->sockfd, &rfds);
+    struct timeval zero;
+    zero.tv_sec = 0;
+    zero.tv_usec = 0;
+    int ready = select(t->sockfd + 1, &rfds, NULL, NULL, &zero);
+    if (ready < 0) return 0;
+    return ready == 0;
+}
+
+/* Set *err to a heap copy of `msg`, for the dial helper's error returns. */
+static void ae_set_err(char** err, const char* msg) {
+    if (!err) return;
+    *err = msg ? strdup(msg) : NULL;
+}
+
+/* Open one connection to `serv_addr`: socket, connect (with the request's
+ * timeout when set), the forward-proxy CONNECT tunnel for HTTPS, and the TLS
+ * handshake. On success `out` holds a ready transport and 0 is returned; on
+ * failure nothing is left open, *err holds a message the caller frees, and
+ * the return is -1.
+ *
+ * Split out of http_request_internal so a pooled connection that turns out to
+ * be dead can be redialled without duplicating any of this (#1653). */
+static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
+                     const char* host, int port, int use_tls, int via_proxy,
+                     Transport* out, char** err) {
+    struct sockaddr_in serv_addr = *serv_addr_in;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        ae_set_err(err, "could not create socket");
+        return -1;
+    }
+
+    /* Connect — with timeout via non-blocking + select when the
+     * caller asked for one. Without a timeout, fall through to the
+     * original blocking connect (preserves v1 behaviour exactly). */
+    int connect_rc;
+    if (req->timeout_ns > 0) {
+#ifdef _WIN32
+        u_long nb = 1;
+        ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+        int flags = fcntl(sockfd, F_GETFL, 0);
+        if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+#endif
+        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+        if (connect_rc < 0) {
+#ifdef _WIN32
+            int err = WSAGetLastError();
+            int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+            int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
+#endif
+            if (in_progress) {
+                /* Watch both the writable set (success) and the
+                 * exception set (failure). On POSIX, a refused
+                 * non-blocking connect makes the socket writable
+                 * with SO_ERROR=ECONNREFUSED — only `wfds` matters.
+                 * On Windows, Winsock signals connect failures via
+                 * the *exception* fd set instead, NOT writable —
+                 * so a select that watches only wfds waits the full
+                 * timeout for refused connects rather than failing
+                 * fast. Watching both makes select fire on either
+                 * outcome; SO_ERROR distinguishes success from
+                 * failure afterwards. */
+                fd_set wfds, efds;
+                FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
+                FD_ZERO(&efds); FD_SET(sockfd, &efds);
+                /* `select` takes microsecond precision via tv_usec —
+                 * slice the configured nanoseconds straight in.
+                 * tv_usec is `suseconds_t` on POSIX and `long` on
+                 * MinGW; cast to `long` to satisfy both portably. */
+                struct timeval tv;
+                tv.tv_sec  = (time_t)(req->timeout_ns / 1000000000LL);
+                tv.tv_usec = (long)((req->timeout_ns / 1000LL) % 1000000LL);
+                int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
+                if (sel == 0) {
+                    close(sockfd);
+                    ae_set_err(err, "connect timeout");
+                    return -1;
+                }
+                if (sel < 0) {
+                    close(sockfd);
+                    ae_set_err(err, "select on connect failed");
+                    return -1;
+                }
+                /* Check SO_ERROR — distinguishes "writable because
+                 * connected" from "writable because failed". On
+                 * Windows the failure surfaces via efds; on POSIX
+                 * via wfds with so_err set. SO_ERROR works the
+                 * same in both cases. */
+                int so_err = 0;
+                socklen_t slen = sizeof(so_err);
+                if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
+                    || so_err != 0) {
+                    close(sockfd);
+                    ae_set_err(err, "connection failed");
+                    return -1;
+                }
+                connect_rc = 0;
+            } else {
+                close(sockfd);
+                ae_set_err(err, "connection failed");
+                return -1;
+            }
+        }
+        /* Restore blocking mode for the send/recv path — those use
+         * setsockopt(SO_*TIMEO) below for their timeouts. */
+#ifdef _WIN32
+        nb = 0;
+        ioctlsocket(sockfd, FIONBIO, &nb);
+#else
+        if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
+#endif
+
+        /* Apply send/recv timeouts equal to the configured value.
+         *
+         * SO_RCVTIMEO / SO_SNDTIMEO take different shapes on the two
+         * families:
+         *   - POSIX: pointer to `struct timeval` (seconds + microseconds)
+         *   - Winsock: pointer to a 32-bit DWORD in milliseconds
+         *
+         * Passing a struct timeval to Winsock causes it to interpret
+         * the first 4 bytes (tv_sec) as a millisecond count — so
+         * `set_timeout(35)` would degrade to a 35-millisecond recv
+         * timeout, which fires almost instantly and surfaces as
+         * "recv timeout or I/O error" before any sane upstream can
+         * even respond. Use the right type per platform.
+         *
+         * Both shapes carry sub-second precision: POSIX gets the full
+         * microsecond resolution via tv_usec; Winsock rounds up to
+         * the next whole millisecond (sub-ms DWORD=0 is ambiguous
+         * with "infinite"). */
+        http_apply_timeouts(sockfd, req->timeout_ns);
+    } else {
+        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
+        if (connect_rc < 0) {
+            close(sockfd);
+            ae_set_err(err, "connection failed");
+            return -1;
+        }
+    }
+
+    out->sockfd = sockfd;
+
+    /* HTTPS via a forward proxy: establish a CONNECT tunnel over the raw socket
+     * BEFORE the TLS handshake, so TLS runs end-to-end through the proxy (the
+     * proxy is a blind pipe; it does not terminate TLS). HTTP via proxy needs no
+     * tunnel — it uses an absolute-form request line, handled below. */
+    if (via_proxy && use_tls) {
+        char creq[512];
+        int cn = snprintf(creq, sizeof(creq),
+                          "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n"
+                          "Proxy-Connection: keep-alive\r\n\r\n",
+                          host, port, host, port);
+        if (cn <= 0 || cn >= (int)sizeof(creq) ||
+            send(sockfd, creq, (size_t)cn, 0) != cn) {
+            close(sockfd);
+            ae_set_err(err, "proxy CONNECT: send failed");
+            return -1;
+        }
+        /* Read the proxy's response headers up to the terminating CRLFCRLF.
+         * A 2xx means the tunnel is open; anything else is a proxy refusal. */
+        char cbuf[1024];
+        size_t clen = 0;
+        int saw_end = 0;
+        while (clen < sizeof(cbuf) - 1) {
+            ssize_t rn = recv(sockfd, cbuf + clen, sizeof(cbuf) - 1 - clen, 0);
+            if (rn <= 0) break;
+            clen += (size_t)rn;
+            cbuf[clen] = '\0';
+            if (strstr(cbuf, "\r\n\r\n")) { saw_end = 1; break; }
+        }
+        if (!saw_end) {
+            close(sockfd);
+            ae_set_err(err, "proxy CONNECT: no response from proxy");
+            return -1;
+        }
+        /* Parse "HTTP/1.x NNN ..." status. */
+        int pstatus = 0;
+        const char* sp = strchr(cbuf, ' ');
+        if (sp) pstatus = atoi(sp + 1);
+        if (pstatus < 200 || pstatus >= 300) {
+            close(sockfd);
+            char emsg[128];
+            snprintf(emsg, sizeof(emsg),
+                     "proxy CONNECT refused (status %d)", pstatus);
+            ae_set_err(err, emsg);
+            return -1;
+        }
+        /* Tunnel open. TLS handshake below runs against `host` end-to-end. */
+    }
+
+#ifdef AETHER_HAS_OPENSSL
+    out->ssl = NULL;
+    out->owned_ctx = NULL;
+
+    if (use_tls) {
+        /* Custom-CA pin (set_cafile): build a DEDICATED SSL_CTX whose trust
+         * store is loaded from the couriered CA, instead of the shared
+         * system-store CTX. Loading the CA onto the CTX's own verify store via
+         * SSL_CTX_load_verify_locations is the portable, version-agnostic trust
+         * idiom — it's exactly what `openssl s_client -CAfile` does, and it
+         * verifies identically across OpenSSL 1.1/3.x and LibreSSL. (The prior
+         * per-SSL SSL_set1_verify_cert_store approach verified on OpenSSL 3.x
+         * but did not reliably become the *trust* store on every TLS library,
+         * so a couriered CA that `openssl -CAfile` accepted still failed
+         * `certificate verify failed` on some builds — #1110.) The per-request
+         * CTX is owned by the transport and freed in transport_close after the
+         * SSL. When no cafile is set we keep the shared process-wide CTX. */
+        SSL_CTX* ctx;
+        if (req->cafile) {
+            ctx = SSL_CTX_new(TLS_client_method());
+            if (ctx) {
+                SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+                if (SSL_CTX_load_verify_locations(ctx, req->cafile, NULL) != 1) {
+                    SSL_CTX_free(ctx);
+                    close(sockfd);
+                    char* msg = ssl_err_string("custom CA (set_cafile) load failed");
+                    ae_set_err(err, msg ? msg : "custom CA load failed");
+                    free(msg);
+                    return -1;
+                }
+            }
+            out->owned_ctx = ctx;   /* transport frees it (NULL is a no-op) */
+        } else {
+            ctx = get_ssl_ctx();
+        }
+        if (!ctx) {
+            close(sockfd);
+            char* msg = ssl_err_string("TLS context init failed");
+            ae_set_err(err, msg ? msg : "TLS context init failed");
+            free(msg);
+            return -1;
+        }
+
+        SSL* ssl = SSL_new(ctx);
+        if (!ssl) {
+            if (out->owned_ctx) { SSL_CTX_free(out->owned_ctx); out->owned_ctx = NULL; }
+            close(sockfd);
+            char* msg = ssl_err_string("SSL_new failed");
+            ae_set_err(err, msg ? msg : "SSL_new failed");
+            free(msg);
+            return -1;
+        }
+
+        // SNI: server-name indication so virtual-hosted TLS services
+        // return the right cert.
+        SSL_set_tlsext_host_name(ssl, host);
+
+        if (req->insecure) {
+            // Per-request opt-out (set_insecure): skip peer verification AND
+            // the hostname pin for THIS connection only. The shared SSL_CTX
+            // (which set SSL_VERIFY_PEER) is untouched, so every other request
+            // still verifies. Mirrors curl -k / wget --no-check-certificate.
+            SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
+        } else {
+            // Verify the cert's CN/SAN matches the host we connected to. For an
+            // IP literal (e.g. a Proxmox API at https://192.168.0.204:8006),
+            // set1_ip_asc pins the IP SAN; for a DNS name, set1_host pins the
+            // DNS SAN/CN. Using the IP-specific call for IP literals is correct
+            // across OpenSSL versions (older set1_host did not auto-detect IPs).
+            // The trust anchor for THIS connection is either the shared system
+            // store or, when set_cafile was called, the couriered CA loaded onto
+            // the per-request CTX above (#1107/#1110) — peer + hostname
+            // verification stay ON either way, so a pinned request is strictly
+            // stronger than set_insecure and fails closed if the CA doesn't
+            // cover the presented cert.
+            X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
+            X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            struct in_addr in4;
+            struct in6_addr in6;
+            if (inet_pton(AF_INET, host, &in4) == 1 ||
+                inet_pton(AF_INET6, host, &in6) == 1) {
+                X509_VERIFY_PARAM_set1_ip_asc(vpm, host);
+            } else {
+                X509_VERIFY_PARAM_set1_host(vpm, host, 0);
+            }
+        }
+
+        SSL_set_fd(ssl, sockfd);
+        int connect_result = SSL_connect(ssl);
+        if (connect_result != 1) {
+            int ssl_err = SSL_get_error(ssl, connect_result);
+            (void)ssl_err;
+            SSL_free(ssl);
+            if (out->owned_ctx) { SSL_CTX_free(out->owned_ctx); out->owned_ctx = NULL; }
+            close(sockfd);
+            char* msg = ssl_err_string("TLS handshake failed");
+            ae_set_err(err, msg ? msg : "TLS handshake failed");
+            free(msg);
+            return -1;
+        }
+
+        out->ssl = ssl;
+    }
+#endif
+    return 0;
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -987,9 +1570,9 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
     /* Resolve via getaddrinfo, NOT gethostbyname: gethostbyname returns a
      * pointer into a shared, process-static `struct hostent`, so two client
-     * calls resolving at once on different threads — e.g. a request handler
+     * calls resolving at once on different threads, e.g. a request handler
      * that dials out while serving (serve-and-dial), where the inner call runs
-     * on a server worker thread — race on that static buffer and can corrupt
+     * on a server worker thread, race on that static buffer and can corrupt
      * each other's resolved address. getaddrinfo is thread-safe and returns
      * caller-owned memory freed with freeaddrinfo. Pinned to AF_INET: the rest
      * of this function builds a sockaddr_in and the timeout/connect path
@@ -1016,291 +1599,33 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(dial_port);
 
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
-        response->error = string_new("could not create socket");
-        return response;
-    }
-
-    /* Connect — with timeout via non-blocking + select when the
-     * caller asked for one. Without a timeout, fall through to the
-     * original blocking connect (preserves v1 behaviour exactly). */
-    int connect_rc;
-    if (req->timeout_ns > 0) {
-#ifdef _WIN32
-        u_long nb = 1;
-        ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-        int flags = fcntl(sockfd, F_GETFL, 0);
-        if (flags >= 0) fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
-#endif
-        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-        if (connect_rc < 0) {
-#ifdef _WIN32
-            int err = WSAGetLastError();
-            int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
-#else
-            int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
-#endif
-            if (in_progress) {
-                /* Watch both the writable set (success) and the
-                 * exception set (failure). On POSIX, a refused
-                 * non-blocking connect makes the socket writable
-                 * with SO_ERROR=ECONNREFUSED — only `wfds` matters.
-                 * On Windows, Winsock signals connect failures via
-                 * the *exception* fd set instead, NOT writable —
-                 * so a select that watches only wfds waits the full
-                 * timeout for refused connects rather than failing
-                 * fast. Watching both makes select fire on either
-                 * outcome; SO_ERROR distinguishes success from
-                 * failure afterwards. */
-                fd_set wfds, efds;
-                FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
-                FD_ZERO(&efds); FD_SET(sockfd, &efds);
-                /* `select` takes microsecond precision via tv_usec —
-                 * slice the configured nanoseconds straight in.
-                 * tv_usec is `suseconds_t` on POSIX and `long` on
-                 * MinGW; cast to `long` to satisfy both portably. */
-                struct timeval tv;
-                tv.tv_sec  = (time_t)(req->timeout_ns / 1000000000LL);
-                tv.tv_usec = (long)((req->timeout_ns / 1000LL) % 1000000LL);
-                int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
-                if (sel == 0) {
-                    close(sockfd);
-                    response->error = string_new("connect timeout");
-                    return response;
-                }
-                if (sel < 0) {
-                    close(sockfd);
-                    response->error = string_new("select on connect failed");
-                    return response;
-                }
-                /* Check SO_ERROR — distinguishes "writable because
-                 * connected" from "writable because failed". On
-                 * Windows the failure surfaces via efds; on POSIX
-                 * via wfds with so_err set. SO_ERROR works the
-                 * same in both cases. */
-                int so_err = 0;
-                socklen_t slen = sizeof(so_err);
-                if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
-                    || so_err != 0) {
-                    close(sockfd);
-                    response->error = string_new("connection failed");
-                    return response;
-                }
-                connect_rc = 0;
-            } else {
-                close(sockfd);
-                response->error = string_new("connection failed");
-                return response;
-            }
-        }
-        /* Restore blocking mode for the send/recv path — those use
-         * setsockopt(SO_*TIMEO) below for their timeouts. */
-#ifdef _WIN32
-        nb = 0;
-        ioctlsocket(sockfd, FIONBIO, &nb);
-#else
-        if (flags >= 0) fcntl(sockfd, F_SETFL, flags);
-#endif
-
-        /* Apply send/recv timeouts equal to the configured value.
-         *
-         * SO_RCVTIMEO / SO_SNDTIMEO take different shapes on the two
-         * families:
-         *   - POSIX: pointer to `struct timeval` (seconds + microseconds)
-         *   - Winsock: pointer to a 32-bit DWORD in milliseconds
-         *
-         * Passing a struct timeval to Winsock causes it to interpret
-         * the first 4 bytes (tv_sec) as a millisecond count — so
-         * `set_timeout(35)` would degrade to a 35-millisecond recv
-         * timeout, which fires almost instantly and surfaces as
-         * "recv timeout or I/O error" before any sane upstream can
-         * even respond. Use the right type per platform.
-         *
-         * Both shapes carry sub-second precision: POSIX gets the full
-         * microsecond resolution via tv_usec; Winsock rounds up to
-         * the next whole millisecond (sub-ms DWORD=0 is ambiguous
-         * with "infinite"). */
-#ifdef _WIN32
-        /* (ns + 999999) / 1000000 = ms rounded up; 1ns becomes 1ms. */
-        int64_t ms_total = (req->timeout_ns + 999999LL) / 1000000LL;
-        if (ms_total > 0xFFFFFFFFLL) ms_total = 0xFFFFFFFFLL;
-        DWORD rwtv_ms = (DWORD)ms_total;
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rwtv_ms, sizeof(rwtv_ms));
-        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&rwtv_ms, sizeof(rwtv_ms));
-#else
-        struct timeval rwtv;
-        rwtv.tv_sec  = (time_t)(req->timeout_ns / 1000000000LL);
-        rwtv.tv_usec = (long)((req->timeout_ns / 1000LL) % 1000000LL);
-        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rwtv, sizeof(rwtv));
-        setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&rwtv, sizeof(rwtv));
-#endif
-    } else {
-        connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
-        if (connect_rc < 0) {
-            close(sockfd);
-            response->error = string_new("connection failed");
-            return response;
-        }
-    }
-
     Transport t;
-    t.sockfd = sockfd;
-
-    /* HTTPS via a forward proxy: establish a CONNECT tunnel over the raw socket
-     * BEFORE the TLS handshake, so TLS runs end-to-end through the proxy (the
-     * proxy is a blind pipe; it does not terminate TLS). HTTP via proxy needs no
-     * tunnel — it uses an absolute-form request line, handled below. */
-    if (via_proxy && use_tls) {
-        char creq[512];
-        int cn = snprintf(creq, sizeof(creq),
-                          "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n"
-                          "Proxy-Connection: keep-alive\r\n\r\n",
-                          host, port, host, port);
-        if (cn <= 0 || cn >= (int)sizeof(creq) ||
-            send(sockfd, creq, (size_t)cn, 0) != cn) {
-            close(sockfd);
-            response->error = string_new("proxy CONNECT: send failed");
-            return response;
-        }
-        /* Read the proxy's response headers up to the terminating CRLFCRLF.
-         * A 2xx means the tunnel is open; anything else is a proxy refusal. */
-        char cbuf[1024];
-        size_t clen = 0;
-        int saw_end = 0;
-        while (clen < sizeof(cbuf) - 1) {
-            ssize_t rn = recv(sockfd, cbuf + clen, sizeof(cbuf) - 1 - clen, 0);
-            if (rn <= 0) break;
-            clen += (size_t)rn;
-            cbuf[clen] = '\0';
-            if (strstr(cbuf, "\r\n\r\n")) { saw_end = 1; break; }
-        }
-        if (!saw_end) {
-            close(sockfd);
-            response->error = string_new("proxy CONNECT: no response from proxy");
-            return response;
-        }
-        /* Parse "HTTP/1.x NNN ..." status. */
-        int pstatus = 0;
-        const char* sp = strchr(cbuf, ' ');
-        if (sp) pstatus = atoi(sp + 1);
-        if (pstatus < 200 || pstatus >= 300) {
-            close(sockfd);
-            char emsg[128];
-            snprintf(emsg, sizeof(emsg),
-                     "proxy CONNECT refused (status %d)", pstatus);
-            response->error = string_new(emsg);
-            return response;
-        }
-        /* Tunnel open. TLS handshake below runs against `host` end-to-end. */
-    }
-
-#ifdef AETHER_HAS_OPENSSL
-    t.ssl = NULL;
-    t.owned_ctx = NULL;
-
-    if (use_tls) {
-        /* Custom-CA pin (set_cafile): build a DEDICATED SSL_CTX whose trust
-         * store is loaded from the couriered CA, instead of the shared
-         * system-store CTX. Loading the CA onto the CTX's own verify store via
-         * SSL_CTX_load_verify_locations is the portable, version-agnostic trust
-         * idiom — it's exactly what `openssl s_client -CAfile` does, and it
-         * verifies identically across OpenSSL 1.1/3.x and LibreSSL. (The prior
-         * per-SSL SSL_set1_verify_cert_store approach verified on OpenSSL 3.x
-         * but did not reliably become the *trust* store on every TLS library,
-         * so a couriered CA that `openssl -CAfile` accepted still failed
-         * `certificate verify failed` on some builds — #1110.) The per-request
-         * CTX is owned by the transport and freed in transport_close after the
-         * SSL. When no cafile is set we keep the shared process-wide CTX. */
-        SSL_CTX* ctx;
-        if (req->cafile) {
-            ctx = SSL_CTX_new(TLS_client_method());
-            if (ctx) {
-                SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
-                SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-                if (SSL_CTX_load_verify_locations(ctx, req->cafile, NULL) != 1) {
-                    SSL_CTX_free(ctx);
-                    close(sockfd);
-                    char* msg = ssl_err_string("custom CA (set_cafile) load failed");
-                    response->error = string_new(msg ? msg : "custom CA load failed");
-                    free(msg);
-                    return response;
-                }
-            }
-            t.owned_ctx = ctx;   /* transport frees it (NULL is a no-op) */
+    char pool_key[HTTP_POOL_KEY_MAX];
+    http_pool_key(pool_key, sizeof(pool_key), host, port, use_tls,
+                  dial_host, dial_port, req->insecure, req->cafile);
+    /* A streaming response hands the transport to the caller, who may abandon
+     * it mid-body, so those connections are never pooled in either direction.
+     * A caller who set their own Connection header gets exactly that, and a
+     * connection the peer is about to close is not worth keeping. */
+    int pool_this = http_pool_enabled && !req->stream &&
+                    !header_already_set(req, "Connection");
+    int reused = 0;
+    if (pool_this && http_pool_take(pool_key, &t)) {
+        if (transport_is_live(&t)) {
+            reused = 1;
+            http_apply_timeouts(t.sockfd, req->timeout_ns);
         } else {
-            ctx = get_ssl_ctx();
+            transport_close(&t);
         }
-        if (!ctx) {
-            close(sockfd);
-            char* msg = ssl_err_string("TLS context init failed");
-            response->error = string_new(msg ? msg : "TLS context init failed");
-            free(msg);
-            return response;
-        }
-
-        SSL* ssl = SSL_new(ctx);
-        if (!ssl) {
-            if (t.owned_ctx) { SSL_CTX_free(t.owned_ctx); t.owned_ctx = NULL; }
-            close(sockfd);
-            char* msg = ssl_err_string("SSL_new failed");
-            response->error = string_new(msg ? msg : "SSL_new failed");
-            free(msg);
-            return response;
-        }
-
-        // SNI: server-name indication so virtual-hosted TLS services
-        // return the right cert.
-        SSL_set_tlsext_host_name(ssl, host);
-
-        if (req->insecure) {
-            // Per-request opt-out (set_insecure): skip peer verification AND
-            // the hostname pin for THIS connection only. The shared SSL_CTX
-            // (which set SSL_VERIFY_PEER) is untouched, so every other request
-            // still verifies. Mirrors curl -k / wget --no-check-certificate.
-            SSL_set_verify(ssl, SSL_VERIFY_NONE, NULL);
-        } else {
-            // Verify the cert's CN/SAN matches the host we connected to. For an
-            // IP literal (e.g. a Proxmox API at https://192.168.0.204:8006),
-            // set1_ip_asc pins the IP SAN; for a DNS name, set1_host pins the
-            // DNS SAN/CN. Using the IP-specific call for IP literals is correct
-            // across OpenSSL versions (older set1_host did not auto-detect IPs).
-            // The trust anchor for THIS connection is either the shared system
-            // store or, when set_cafile was called, the couriered CA loaded onto
-            // the per-request CTX above (#1107/#1110) — peer + hostname
-            // verification stay ON either way, so a pinned request is strictly
-            // stronger than set_insecure and fails closed if the CA doesn't
-            // cover the presented cert.
-            X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
-            X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-            struct in_addr in4;
-            struct in6_addr in6;
-            if (inet_pton(AF_INET, host, &in4) == 1 ||
-                inet_pton(AF_INET6, host, &in6) == 1) {
-                X509_VERIFY_PARAM_set1_ip_asc(vpm, host);
-            } else {
-                X509_VERIFY_PARAM_set1_host(vpm, host, 0);
-            }
-        }
-
-        SSL_set_fd(ssl, sockfd);
-        int connect_result = SSL_connect(ssl);
-        if (connect_result != 1) {
-            int ssl_err = SSL_get_error(ssl, connect_result);
-            (void)ssl_err;
-            SSL_free(ssl);
-            if (t.owned_ctx) { SSL_CTX_free(t.owned_ctx); t.owned_ctx = NULL; }
-            close(sockfd);
-            char* msg = ssl_err_string("TLS handshake failed");
-            response->error = string_new(msg ? msg : "TLS handshake failed");
-            free(msg);
-            return response;
-        }
-
-        t.ssl = ssl;
     }
-#endif
+    if (!reused) {
+        char* dial_err = NULL;
+        if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
+            response->error = string_new(dial_err ? dial_err : "connection failed");
+            free(dial_err);
+            return response;
+        }
+    }
 
     /* Build the header block in a heap-allocated growing buffer so
      * we're not bounded by a 4K stack array. Body goes out as a
@@ -1380,10 +1705,12 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
     }
 
-    /* Connection: close (overridable — keep-alive is out of scope
-     * for v2 but a caller is welcome to ask for it). */
+    /* Persistent by default: the connection goes back to the idle pool when
+     * the response framing is definite. A caller who sets their own
+     * Connection header still gets exactly that. */
     if (!header_already_set(req, "Connection")) {
-        HDR_APPEND_STR("Connection: close\r\n");
+        HDR_APPEND_STR(pool_this ? "Connection: keep-alive\r\n"
+                                 : "Connection: close\r\n");
     }
 
     /* Caller-provided headers, in insertion order. */
@@ -1396,17 +1723,61 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
     #undef HDR_APPEND_STR
 
+    /* Accumulator for the buffered read below, declared here because the
+     * reuse retry rewinds to `send_request` and has to reset it. */
+    char   buffer[8192];
+    char*  full_response = NULL;
+    size_t total_len = 0;
+    size_t cap = 0;
+    int    n = 0;
+    int    recv_err = 0;
+    size_t header_bytes = 0;
+    size_t body_target = 0;
+    int    framing_chunked = 0;
+    int    framing_definite = 0;
+    /* A pooled connection the peer closed while it sat idle is
+     * indistinguishable from a live one until it is used: the liveness probe
+     * catches almost all of them, and the rest fail with nothing received.
+     * Measured against an upstream that closes after every response, 4% of
+     * requests landed in that window. One redial covers it. The retry is
+     * bounded to a connection that came from the pool and produced no
+     * response byte, so the server cannot have acted on the request. */
+    int retried = 0;
+
+send_request:
     if (transport_send(&t, hdr, (int)hdr_len) < 0) {
+        if (reused && !retried) {
+            retried = 1;
+            reused = 0;
+            transport_close(&t);
+            char* rd_err = NULL;
+            if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+                free(rd_err);
+                goto send_request;
+            }
+            free(rd_err);
+        }
         aether_caps_free(hdr, hdr_cap);
         transport_close(&t);
         response->error = string_new("send failed");
         return response;
     }
-    aether_caps_free(hdr, hdr_cap);
 
     /* Body — emitted raw so embedded NULs survive. */
     if (body && body_len > 0) {
         if (transport_send(&t, body, body_len) < 0) {
+            if (reused && !retried) {
+                retried = 1;
+                reused = 0;
+                transport_close(&t);
+                char* rd_err = NULL;
+                if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+                    free(rd_err);
+                    goto send_request;
+                }
+                free(rd_err);
+            }
+            aether_caps_free(hdr, hdr_cap);
             transport_close(&t);
             response->error = string_new("send failed");
             return response;
@@ -1418,6 +1789,10 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * incrementally (peak memory = one read window, not O(Content-Length)).
      * The buffered read-until-EOF path below is skipped. */
     if (req->stream) {
+        /* A stream is never taken from the pool, so it never retries and the
+         * request buffer is done with here. */
+        aether_caps_free(hdr, hdr_cap);
+        hdr = NULL;
         char   sbuf[8192];
         char*  hb = NULL;        /* headers + any over-read body bytes */
         size_t hlen = 0, hcap = 0;
@@ -1507,16 +1882,13 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         return response;           /* transport stays open, owned by the stream */
     }
 
-    // Accumulator grows with capacity doubling. The previous
-    // realloc-per-recv pattern was quadratic on large responses;
-    // doubling amortises growth to O(n).
-    char   buffer[8192];
-    char*  full_response = NULL;
-    size_t total_len = 0;
-    size_t cap = 0;
-    int    n;
-
-    int recv_err = 0;  /* set if the loop exits via timeout / I/O error */
+    /* Read to the end of THIS response, not to end of connection: the header
+     * block, then exactly the body its framing declares. Reading to EOF works
+     * only when the connection is the delimiter, which is what made every
+     * request cost a fresh connection (#1653). `body_target` is the total
+     * byte count that ends the response, or 0 while it is still unknown.
+     * The accumulator grows by doubling; a realloc per recv was quadratic on
+     * large responses. */
     while ((n = transport_recv(&t, buffer, sizeof(buffer) - 1)) > 0) {
         if (total_len + (size_t)n + 1 > cap) {
             size_t new_cap = cap ? cap * 2 : 16384;
@@ -1541,7 +1913,74 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         memcpy(full_response + total_len, buffer, (size_t)n);
         total_len += (size_t)n;
         full_response[total_len] = '\0';
+
+        if (!header_bytes) {
+            /* The terminator is NUL-free ASCII and precedes any body byte. */
+            char* hend = strstr(full_response, "\r\n\r\n");
+            if (!hend) continue;
+            header_bytes = (size_t)((hend + 4) - full_response);
+            char saved = *hend;
+            *hend = '\0';
+            char* te = http_extract_response_header(full_response, "Transfer-Encoding");
+            if (te && http_value_has_chunked(te)) {
+                framing_chunked = 1;
+                framing_definite = 1;
+            } else {
+                char* cl = http_extract_response_header(full_response, "Content-Length");
+                if (cl) {
+                    long long declared = strtoll(cl, NULL, 10);
+                    if (declared >= 0) {
+                        body_target = header_bytes + (size_t)declared;
+                        framing_definite = 1;
+                    }
+                    free(cl);
+                }
+            }
+            free(te);
+            *hend = saved;
+            if (no_body_expected(response_status_of(full_response), method)) {
+                body_target = header_bytes;
+                framing_definite = 1;
+                framing_chunked = 0;
+            }
+        }
+        if (framing_definite) {
+            if (framing_chunked) {
+                if (http_chunked_complete(full_response + header_bytes,
+                                          total_len - header_bytes)) break;
+            } else if (total_len >= body_target) {
+                break;
+            }
+        }
     }
+    /* Nothing at all came back on a connection that came from the pool: the
+     * peer had closed it and our request went into the void. Redial once and
+     * send again; the server never saw this request, so repeating it is safe
+     * whatever the method. */
+    if (total_len == 0 && reused && !retried) {
+        retried = 1;
+        reused = 0;
+        transport_close(&t);
+        char* rd_err = NULL;
+        if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+            free(rd_err);
+            aether_caps_free(full_response, cap);
+            full_response = NULL;
+            total_len = 0;
+            cap = 0;
+            recv_err = 0;
+            header_bytes = 0;
+            body_target = 0;
+            framing_chunked = 0;
+            framing_definite = 0;
+            goto send_request;
+        }
+        free(rd_err);
+    }
+
+    aether_caps_free(hdr, hdr_cap);
+    hdr = NULL;
+
     /* n < 0 means transport_recv hit an error; the most common one
      * (when the caller set a timeout) is recv-side EAGAIN/EWOULDBLOCK
      * from SO_RCVTIMEO firing. Without this, a timed-out request
@@ -1564,7 +2003,30 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         cap = 1;  /* #461: record the 1-byte size so the frees below balance */
     }
 
-    transport_close(&t);
+    /* Hand the connection back only when this response ended where its own
+     * framing said it would, and neither side asked to close. Anything else
+     * (read-until-EOF framing, a truncated body, an I/O error) leaves the
+     * next response's start position unknown, so the connection is retired. */
+    {
+        int keep = pool_this && !recv_err && framing_definite &&
+                   (framing_chunked || total_len == body_target);
+        if (keep && header_bytes > 0) {
+            char saved = full_response[header_bytes - 4];
+            full_response[header_bytes - 4] = '\0';
+            char* conn_hdr = http_extract_response_header(full_response, "Connection");
+            if (conn_hdr) {
+                if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
+                free(conn_hdr);
+            } else if (strncmp(full_response, "HTTP/1.0", 8) == 0) {
+                keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
+            }
+            full_response[header_bytes - 4] = saved;
+        } else {
+            keep = 0;
+        }
+        if (keep) http_pool_put(pool_key, &t);
+        else      transport_close(&t);
+    }
 
     /* If transport_recv reported an error AND we didn't get a complete
      * header block, this was a timeout / I/O error mid-recv. Tell the

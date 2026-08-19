@@ -10,6 +10,7 @@
 #include "../../runtime/utils/aether_thread.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #if defined(_WIN32)
     #include <winsock2.h>
@@ -22,6 +23,16 @@
  * and the bounded queue applies backpressure to the accept loop rather
  * than buffering client fds without limit. See the header for why this
  * pool is separate from the shared std.worker pool. */
+
+/* Connections accepted and not yet picked up by a worker, across every pool
+ * in the process. A worker owns its connection for the connection's life, so
+ * a kept-alive connection while this is non-zero starves one that is waiting;
+ * the response path reads it to decide (see finish_response). */
+static atomic_int http_pool_pending_conns;
+
+int http_pool_pending(void) {
+    return atomic_load(&http_pool_pending_conns);
+}
 
 #if AETHER_HAS_THREADS
 
@@ -76,6 +87,7 @@ static void* http_pool_worker(void* arg) {
         int client_fd = pool->queue[pool->head];
         pool->head = (pool->head + 1) % HTTP_POOL_QUEUE_CAP;
         pool->count--;
+        atomic_fetch_sub(&http_pool_pending_conns, 1);
         pthread_cond_signal(&pool->not_full);
         pthread_mutex_unlock(&pool->lock);
 
@@ -124,6 +136,7 @@ void http_pool_submit(HttpConnectionPool* pool, int client_fd) {
         close(client_fd);
         return;
     }
+    atomic_fetch_add(&http_pool_pending_conns, 1);
     pool->queue[pool->tail] = client_fd;
     pool->tail = (pool->tail + 1) % HTTP_POOL_QUEUE_CAP;
     pool->count++;
