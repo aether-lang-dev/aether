@@ -370,7 +370,27 @@ typedef struct HttpIdleConn {
     struct HttpIdleConn* next;
 } HttpIdleConn;
 
-static pthread_mutex_t http_pool_lock = PTHREAD_MUTEX_INITIALIZER;
+/* CRITICAL_SECTION, which the thread shim maps pthread_mutex_t to on Windows,
+ * has no static initialiser, so the lock is created once through an atomic
+ * gate there. Same shape as runtime/sandbox/aether_audit.c. */
+#if defined(_WIN32)
+static pthread_mutex_t http_pool_mutex;
+static atomic_int      http_pool_mutex_state = 0;   /* 0 unset, 1 setting, 2 ready */
+static pthread_mutex_t* http_pool_lock(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&http_pool_mutex_state, &expected, 1)) {
+        pthread_mutex_init(&http_pool_mutex, NULL);
+        atomic_store(&http_pool_mutex_state, 2);
+    } else {
+        while (atomic_load(&http_pool_mutex_state) != 2) { /* one-shot spin */ }
+    }
+    return &http_pool_mutex;
+}
+#else
+static pthread_mutex_t http_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t* http_pool_lock(void) { return &http_pool_mutex; }
+#endif
+
 static HttpIdleConn*   http_pool_head = NULL;
 static int             http_pool_count = 0;
 static int             http_pool_enabled = 1;
@@ -421,7 +441,7 @@ static void http_pool_expire_locked(int64_t now) {
 static int http_pool_take(const char* key, Transport* out) {
     if (!http_pool_enabled) return 0;
     int found = 0;
-    pthread_mutex_lock(&http_pool_lock);
+    pthread_mutex_lock(http_pool_lock());
     http_pool_expire_locked(http_now_ms());
     HttpIdleConn** link = &http_pool_head;
     while (*link) {
@@ -436,7 +456,7 @@ static int http_pool_take(const char* key, Transport* out) {
         }
         link = &c->next;
     }
-    pthread_mutex_unlock(&http_pool_lock);
+    pthread_mutex_unlock(http_pool_lock());
     return found;
 }
 
@@ -453,14 +473,14 @@ static void http_pool_put(const char* key, Transport* t) {
         return;
     }
     int64_t now = http_now_ms();
-    pthread_mutex_lock(&http_pool_lock);
+    pthread_mutex_lock(http_pool_lock());
     http_pool_expire_locked(now);
     int per_key = 0;
     for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
         if (strcmp(e->key, key) == 0) per_key++;
     }
     if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
-        pthread_mutex_unlock(&http_pool_lock);
+        pthread_mutex_unlock(http_pool_lock());
         free(c);
         transport_close(t);
         return;
@@ -471,7 +491,7 @@ static void http_pool_put(const char* key, Transport* t) {
     c->next = http_pool_head;
     http_pool_head = c;
     http_pool_count++;
-    pthread_mutex_unlock(&http_pool_lock);
+    pthread_mutex_unlock(http_pool_lock());
     t->sockfd = -1;
 #ifdef AETHER_HAS_OPENSSL
     t->ssl = NULL;
@@ -481,11 +501,11 @@ static void http_pool_put(const char* key, Transport* t) {
 
 /* Close and drop every idle connection. */
 void http_client_pool_clear_raw(void) {
-    pthread_mutex_lock(&http_pool_lock);
+    pthread_mutex_lock(http_pool_lock());
     HttpIdleConn* c = http_pool_head;
     http_pool_head = NULL;
     http_pool_count = 0;
-    pthread_mutex_unlock(&http_pool_lock);
+    pthread_mutex_unlock(http_pool_lock());
     while (c) {
         HttpIdleConn* next = c->next;
         transport_close(&c->t);
@@ -498,7 +518,7 @@ void http_client_pool_clear_raw(void) {
  * held); negative values leave that setting untouched. */
 const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
                                            int64_t idle_ns) {
-    pthread_mutex_lock(&http_pool_lock);
+    pthread_mutex_lock(http_pool_lock());
     if (max_idle >= 0) {
         http_pool_max_idle = max_idle;
         http_pool_enabled = max_idle > 0;
@@ -508,15 +528,15 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
         int64_t ms = idle_ns / 1000000LL;
         http_pool_idle_ms = ms > 0 ? ms : 1;
     }
-    pthread_mutex_unlock(&http_pool_lock);
+    pthread_mutex_unlock(http_pool_lock());
     if (!http_pool_enabled) http_client_pool_clear_raw();
     return "";
 }
 
 int http_client_pool_idle_count_raw(void) {
-    pthread_mutex_lock(&http_pool_lock);
+    pthread_mutex_lock(http_pool_lock());
     int n = http_pool_count;
-    pthread_mutex_unlock(&http_pool_lock);
+    pthread_mutex_unlock(http_pool_lock());
     return n;
 }
 
@@ -1210,9 +1230,9 @@ static int transport_is_live(Transport* t) {
 }
 
 /* Set *err to a heap copy of `msg`, for the dial helper's error returns. */
-static void ae_set_err(char** err, const char* msg) {
-    if (!err) return;
-    *err = msg ? strdup(msg) : NULL;
+static void ae_set_err(char** out_err, const char* msg) {
+    if (!out_err) return;
+    *out_err = msg ? strdup(msg) : NULL;
 }
 
 /* Open one connection to `serv_addr`: socket, connect (with the request's
@@ -1225,11 +1245,11 @@ static void ae_set_err(char** err, const char* msg) {
  * be dead can be redialled without duplicating any of this (#1653). */
 static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                      const char* host, int port, int use_tls, int via_proxy,
-                     Transport* out, char** err) {
+                     Transport* out, char** out_err) {
     struct sockaddr_in serv_addr = *serv_addr_in;
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        ae_set_err(err, "could not create socket");
+        ae_set_err(out_err, "could not create socket");
         return -1;
     }
 
@@ -1278,12 +1298,12 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                 int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
                 if (sel == 0) {
                     close(sockfd);
-                    ae_set_err(err, "connect timeout");
+                    ae_set_err(out_err, "connect timeout");
                     return -1;
                 }
                 if (sel < 0) {
                     close(sockfd);
-                    ae_set_err(err, "select on connect failed");
+                    ae_set_err(out_err, "select on connect failed");
                     return -1;
                 }
                 /* Check SO_ERROR — distinguishes "writable because
@@ -1296,13 +1316,13 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                 if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (char*)&so_err, &slen) < 0
                     || so_err != 0) {
                     close(sockfd);
-                    ae_set_err(err, "connection failed");
+                    ae_set_err(out_err, "connection failed");
                     return -1;
                 }
                 connect_rc = 0;
             } else {
                 close(sockfd);
-                ae_set_err(err, "connection failed");
+                ae_set_err(out_err, "connection failed");
                 return -1;
             }
         }
@@ -1338,7 +1358,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         connect_rc = connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr));
         if (connect_rc < 0) {
             close(sockfd);
-            ae_set_err(err, "connection failed");
+            ae_set_err(out_err, "connection failed");
             return -1;
         }
     }
@@ -1358,7 +1378,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         if (cn <= 0 || cn >= (int)sizeof(creq) ||
             send(sockfd, creq, (size_t)cn, 0) != cn) {
             close(sockfd);
-            ae_set_err(err, "proxy CONNECT: send failed");
+            ae_set_err(out_err, "proxy CONNECT: send failed");
             return -1;
         }
         /* Read the proxy's response headers up to the terminating CRLFCRLF.
@@ -1375,7 +1395,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         }
         if (!saw_end) {
             close(sockfd);
-            ae_set_err(err, "proxy CONNECT: no response from proxy");
+            ae_set_err(out_err, "proxy CONNECT: no response from proxy");
             return -1;
         }
         /* Parse "HTTP/1.x NNN ..." status. */
@@ -1387,7 +1407,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
             char emsg[128];
             snprintf(emsg, sizeof(emsg),
                      "proxy CONNECT refused (status %d)", pstatus);
-            ae_set_err(err, emsg);
+            ae_set_err(out_err, emsg);
             return -1;
         }
         /* Tunnel open. TLS handshake below runs against `host` end-to-end. */
@@ -1420,7 +1440,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                     SSL_CTX_free(ctx);
                     close(sockfd);
                     char* msg = ssl_err_string("custom CA (set_cafile) load failed");
-                    ae_set_err(err, msg ? msg : "custom CA load failed");
+                    ae_set_err(out_err, msg ? msg : "custom CA load failed");
                     free(msg);
                     return -1;
                 }
@@ -1432,7 +1452,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         if (!ctx) {
             close(sockfd);
             char* msg = ssl_err_string("TLS context init failed");
-            ae_set_err(err, msg ? msg : "TLS context init failed");
+            ae_set_err(out_err, msg ? msg : "TLS context init failed");
             free(msg);
             return -1;
         }
@@ -1442,7 +1462,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
             if (out->owned_ctx) { SSL_CTX_free(out->owned_ctx); out->owned_ctx = NULL; }
             close(sockfd);
             char* msg = ssl_err_string("SSL_new failed");
-            ae_set_err(err, msg ? msg : "SSL_new failed");
+            ae_set_err(out_err, msg ? msg : "SSL_new failed");
             free(msg);
             return -1;
         }
@@ -1490,7 +1510,7 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
             if (out->owned_ctx) { SSL_CTX_free(out->owned_ctx); out->owned_ctx = NULL; }
             close(sockfd);
             char* msg = ssl_err_string("TLS handshake failed");
-            ae_set_err(err, msg ? msg : "TLS handshake failed");
+            ae_set_err(out_err, msg ? msg : "TLS handshake failed");
             free(msg);
             return -1;
         }
