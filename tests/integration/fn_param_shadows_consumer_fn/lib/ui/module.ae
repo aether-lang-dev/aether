@@ -1,0 +1,16 @@
+// A library that takes a callback parameter named `on_press`.
+//
+// Nothing here is unusual, and nothing here changes between the two builds the
+// test performs. That is the point of #1657: this module's emitted C differed
+// depending on what the CONSUMING app happened to name its own functions.
+exports(btn)
+
+box_it(f: fn) -> ptr {
+    return box_closure(f)
+}
+
+btn(_ctx: ptr, label: string, on_press: fn) -> ptr {
+    // `on_press` is a PARAMETER. It is the innermost binding there is, so it
+    // must win over any same-named function anywhere in the program.
+    return box_it(on_press)
+}

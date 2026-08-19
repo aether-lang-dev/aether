@@ -158,6 +158,37 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A function parameter was silently replaced by a same-named function in a
+  CONSUMING module** (#1657). After module merging one program holds every
+  module's functions, including non-exported ones from the app. Codegen asked
+  "is there a top-level function with this name?" to decide whether an argument
+  was a bare function needing an env-ignoring adapter, and never checked
+  whether the name was a local binding — so a library's `btn(on_press: fn)` had
+  its PARAMETER replaced by an adapter for the app's unrelated
+  `on_press(view, x, y)`, discarding the caller's closure and its captured
+  environment with `.env = NULL`. The generated C is well-formed, the call
+  returns, and nothing happens; in aether-ui a button connected, fired, never
+  moved the model, and eventually segfaulted inside GLib on a 3-argument
+  adapter reached through a 0-argument signature.
+
+  A parameter is the innermost binding there is, so nothing outside the
+  function may be reachable under that name. The lookup now yields to an
+  enclosing parameter or declared local. Sibling of #1606, which fixed the
+  closure-parameter case in the module RENAMER; this is the CODEGEN half, a
+  separate pass with its own name resolution, and an ordinary function
+  parameter shadowed from a different module.
+
+  Worth recording for whoever touches this next: one of the three call sites
+  carried its own inlined copy of the whole-program scan rather than calling
+  the shared helper, which is exactly how the scope rule could be fixed in one
+  place and still violated in another. That site now goes through the helper.
+
+  Until this, a library's PARAMETER NAMES were effectively part of its public
+  API surface: an app choosing an ordinary name like `on_press` or `label` for
+  its own helper could break an unrelated library call, with no diagnostic
+  pointing at either file.
+
+
 - **`multicore_scheduler.c` now compiles for 32-bit targets** (#1652). The
   `Message` layout assertion was guarded by `#if INTPTR_MAX == INT64_MAX`; the
   `Mailbox` one directly below it was not, so every ILP32 triple failed to

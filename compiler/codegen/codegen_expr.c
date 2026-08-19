@@ -55,9 +55,47 @@ static const char* arg_drain_lookup(ASTNode* node) {
 /* A bare reference to a top-level Aether function, as opposed to a closure or
  * an fn-typed variable. Its address is a real C symbol, which is the only thing
  * a C function-pointer field can hold. */
+/* Is `name` a parameter of the function currently being emitted?
+ *
+ * Parameters are AST_PATTERN_VARIABLE children of the AST_FUNCTION_DEFINITION,
+ * ahead of its BLOCK. Closures carry AST_CLOSURE_PARAM instead, so both are
+ * accepted; a closure's own parameters shadow just as a function's do. */
+static int name_is_enclosing_param(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->current_function || !name) return 0;
+    ASTNode* fn = gen->current_function;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* c = fn->children[i];
+        if (!c) continue;
+        if (c->type == AST_BLOCK) break;   /* params precede the body */
+        if ((c->type == AST_PATTERN_VARIABLE || c->type == AST_CLOSURE_PARAM) &&
+            c->value && strcmp(c->value, name) == 0) return 1;
+    }
+    return 0;
+}
+
 static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
     if (!gen || !gen->program || !node ||
         node->type != AST_IDENTIFIER || !node->value) return NULL;
+    /* #1657: a LOCAL BINDING WINS. This function asks "is there a top-level
+     * function with this name?", and after module merging that program
+     * contains every module's functions — including non-exported ones from a
+     * CONSUMING module. So a library function's parameter `on_press` matched
+     * an app's unrelated module-level `on_press`, and the call site emitted a
+     * bare-fn adapter for the app's function in place of the caller's
+     * closure, discarding .env with it. Silent: the C is well-formed, the
+     * call returns, and nothing happens.
+     *
+     * A parameter is the innermost binding there is, so nothing outside the
+     * function may be reachable under that name. Checking the enclosing
+     * function's own parameters is the scope rule this was missing; the
+     * declared-locals list is consulted too, so a local `on_press = ...`
+     * shadows equally.
+     *
+     * Same family as #1606, which fixed the closure-parameter case in the
+     * module renamer. This is the codegen half, and an ordinary function
+     * parameter shadowed from a DIFFERENT module, which survived that fix. */
+    if (name_is_enclosing_param(gen, node->value) ||
+        is_var_declared(gen, node->value)) return NULL;
     for (int i = 0; i < gen->program->child_count; i++) {
         ASTNode* pc = gen->program->children[i];
         if (pc && (pc->type == AST_FUNCTION_DEFINITION ||
@@ -5052,18 +5090,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * (*)(void)" — the silent type-check pass
                              * that the fn_ptr_coercion.md filing
                              * surfaced. */
-                            int arg_is_bare_fn = 0;
-                            if (arg->type == AST_IDENTIFIER && arg->value && gen->program) {
-                                for (int pi = 0; pi < gen->program->child_count; pi++) {
-                                    ASTNode* pc = gen->program->children[pi];
-                                    if (pc && (pc->type == AST_FUNCTION_DEFINITION ||
-                                               pc->type == AST_BUILDER_FUNCTION) &&
-                                        pc->value && strcmp(pc->value, arg->value) == 0) {
-                                        arg_is_bare_fn = 1;
-                                        break;
-                                    }
-                                }
-                            }
+                            /* #1657: use the shared helper rather than an
+                             * inline whole-program scan. This site had its own
+                             * copy of that loop, so it kept substituting an
+                             * adapter for a name that is really a PARAMETER of
+                             * the enclosing function — see bare_top_level_fn
+                             * for why a local binding must win. Duplicating
+                             * the search is what let the scope rule be fixed
+                             * in one place and still be violated here. */
+                            int arg_is_bare_fn = bare_top_level_fn(gen, arg) != NULL;
                             if (arg_is_bare_fn) {
                                 const char* bn = arg && arg->value ? arg->value : NULL;
                                 if (bn) register_bare_fn_adapter(gen, bn);
