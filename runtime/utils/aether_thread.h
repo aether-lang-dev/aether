@@ -59,11 +59,25 @@ typedef int pthread_t;
 typedef int pthread_attr_t;
 typedef int pthread_mutexattr_t;
 typedef int pthread_condattr_t;
-/* Read-write locks: std/config/aether_config.c uses them, and a threadless
- * build failed with "unknown type name 'pthread_rwlock_t'" (#1655). These
- * belong INSIDE this bare-metal-only branch — a platform that ships
- * <pthread.h> (wasi included) already has the real types, and defining ours
- * next to them is a redefinition error. */
+#endif
+
+/* Read-write locks, needed by std/config/aether_config.c.
+ *
+ * Guarded on the POSIX feature macro rather than on a platform list, because
+ * neither "has <pthread.h>" nor "is bare metal" predicts this correctly:
+ *
+ *   - bare metal has no <pthread.h> at all           -> needs our typedef
+ *   - ARM newlib SHIPS <pthread.h> but WITHOUT rwlocks -> also needs it
+ *   - glibc / musl / wasi-libc ship both              -> must NOT redefine
+ *
+ * An earlier attempt put these inside the bare-metal branch on the reasoning
+ * that "a platform shipping <pthread.h> already has the real types". Newlib
+ * disproves that: the Cortex-M4 leg failed with "unknown type name
+ * 'pthread_rwlock_t'; did you mean 'pthread_once_t'?" — the suggestion itself
+ * showing a pthread header was present, just without this type.
+ * _POSIX_READER_WRITER_LOCKS is the macro POSIX defines for exactly this
+ * question, so ask it instead of guessing per platform. */
+#if !defined(_POSIX_READER_WRITER_LOCKS) && !defined(PTHREAD_RWLOCK_INITIALIZER)
 typedef int pthread_rwlock_t;
 typedef int pthread_rwlockattr_t;
 #endif
