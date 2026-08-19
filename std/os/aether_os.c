@@ -174,6 +174,15 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
 int os_system(const char* cmd) {
     if (!cmd) return -1;
     if (!aether_sandbox_check("exec", cmd)) return -1;
+#if !AETHER_HAS_SHELL
+    /* iOS/tvOS/watchOS: no shell to exec into, and system() is marked
+     * __API_UNAVAILABLE there, so even naming it fails the compile. Report
+     * the same -1 the sandbox-denied and spawn-failure paths use rather
+     * than dropping the whole module from the build. os.run / os.run_capture
+     * (fork+exec, argv-based) are unaffected and remain the portable way to
+     * spawn a child; system() was always the legacy shell-out. */
+    return -1;
+#else
     int status = system(cmd);
     if (status == -1) return -1;
 #ifdef _WIN32
@@ -192,6 +201,7 @@ int os_system(const char* cmd) {
     if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
     return -1;
 #endif
+#endif /* AETHER_HAS_SHELL */
 }
 
 char* os_exec_raw(const char* cmd) {

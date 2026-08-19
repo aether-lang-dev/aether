@@ -1,0 +1,4 @@
+main() {
+    let n = 6 * 7
+    print("answer=${n}")
+}
