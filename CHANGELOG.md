@@ -13,6 +13,53 @@ version number before tagging the release.
 
 ### Added
 
+- **`ae build --target=wasm32-wasi` produces a runnable executable**, actor
+  programs included (#1655). Previously only `--emit=csrc` / `--emit=obj`
+  worked; a full link was rejected up front. The gate blamed
+  `multicore_scheduler.c`'s 64-bit layout assertion, which #1652 had already
+  fixed — the real blocker was always threading, and finding it took three
+  separate places where WASI had been forgotten beside Emscripten.
+
+  **The scheduler.** WASI has no usable threads, but zig's wasi-libc ships
+  pthread *stubs* whose `pthread_create` returns `EAGAIN` rather than leaving
+  the symbol undefined. So the threaded runtime linked, started, printed
+  "Failed to create scheduler thread", and then span forever on
+  `scheduler_start()`'s readiness barrier — a silent hang with no link error to
+  catch it, which is why `aether_thread.h`'s comment predicting a link failure
+  is now corrected. A wasi exe selects the cooperative scheduler instead, the
+  same substitution the Emscripten backend has always made, and `__wasi__`
+  joins the `AETHER_HAS_THREADS` / `NETWORKING` / `NUMA` / `AFFINITY` gates.
+
+  **A new `AETHER_HAS_PROCESS` capability.** `std/os/aether_os.c` was guarded
+  entirely by `!AETHER_HAS_FILESYSTEM`, so the only way to compile out `fork`
+  was to compile out the filesystem with it — which is how Emscripten has
+  always avoided the problem, and is wrong for WASI, whose capability-based
+  filesystem is the point of the target. The split also showed the old macro
+  was conflating things: `os_getenv`, `os_platform_raw` and the clock
+  functions were stubbed only because they shared a file with `fork`.
+
+  **Computed-goto dispatch in actor codegen.** The emitted label-address table
+  is rejected by the wasm backend — "relocations for function or section
+  offsets are only supported in metadata sections" — and the comment above the
+  guard has always said to route wasm through the switch-case fallback, but
+  the guard named only `__EMSCRIPTEN__`. `optimizer.c`'s equivalent guards
+  already listed `__wasi__` and `__wasm__`; this one was the outlier. It
+  surfaced only for actors whose dispatch table LLVM folds rather than keeps,
+  so a single-receive-arm actor failed where a two-arm one compiled.
+
+  Also fixed along the way, each a threadless- or WASI-specific gap that no
+  target had previously exercised: `<time.h>` missing from the threadless
+  branch of `aether_thread.h` (`aether_now_ns` is shared by all three
+  branches); no `PTHREAD_MUTEX_INITIALIZER` / `PTHREAD_RWLOCK_INITIALIZER` or
+  `pthread_rwlock_*` in the threadless shim; `__wasi__` absent from the list of
+  platforms that ship a real `<pthread.h>`, so the shim redefined wasi-libc's
+  own types; four stdlib files including raw `<pthread.h>` instead of the
+  shim; `umask` (absent on WASI), `getrandom` (WASI uses `getentropy`), `pipe`,
+  and miniaudio's thread-priority calls.
+
+  `--target=wasm` (Emscripten) is unchanged and remains the route to a browser
+  bundle with JS glue; `wasm32-wasi` produces a self-contained module.
+
 - **iOS arm64 cross-compilation** — `ae build --target=aarch64-ios`, plus
   `aarch64-ios-simulator` and `x86_64-ios-simulator`. iOS is the first cross
   target NOT served by `zig cc`: Apple's SDKs are Xcode-licensed and cannot be

@@ -544,6 +544,53 @@ jobs:
     - name: Run WASM CI
       run: make ci-wasm
 
+    # #1655 asked for a leg that actually LINKS and RUNS a wasm32-wasi
+    # executable. Nothing did before: the step above compiles one runtime TU
+    # in isolation, and ci-wasm exercises the Emscripten backend, not the zig
+    # one. The failure this guards against is a silent HANG (wasi-libc's
+    # pthread_create stub returns EAGAIN, so a threaded build links and then
+    # spins on the scheduler's readiness barrier), which only running catches
+    # — hence the timeout, and hence asserting on the output rather than the
+    # exit code alone.
+    #
+    # The actor case is separate on purpose: it is what caught the
+    # computed-goto dispatch bug, which affected actors and nothing else.
+    - name: Link and RUN a wasm32-wasi executable
+      run: |
+        set -e
+        ZIG_BIN="$(./scripts/get-zig.sh "$RUNNER_TEMP/zig")"
+        export PATH="$(dirname "$ZIG_BIN"):$PATH"
+
+        # Pinned release tarball rather than `curl https://wasmtime.dev/install.sh
+        # | bash`: that installer produced NO output and NO binary on this
+        # runner, and because the pipe's exit status is the shell's, the step
+        # sailed on and died later with "wasmtime: No such file or directory" —
+        # a confusing failure a long way from its cause. A fixed URL is
+        # reproducible, and the existence check below turns a download problem
+        # into a message that says so.
+        WASMTIME_VER=v47.0.3
+        curl -sSfL -o "$RUNNER_TEMP/wasmtime.tar.xz" \
+          "https://github.com/bytecodealliance/wasmtime/releases/download/$WASMTIME_VER/wasmtime-$WASMTIME_VER-x86_64-linux.tar.xz"
+        tar -xJf "$RUNNER_TEMP/wasmtime.tar.xz" -C "$RUNNER_TEMP"
+        WASMTIME="$RUNNER_TEMP/wasmtime-$WASMTIME_VER-x86_64-linux/wasmtime"
+        [ -x "$WASMTIME" ] || { echo "wasmtime not found at $WASMTIME"; ls -la "$RUNNER_TEMP"; exit 1; }
+        "$WASMTIME" --version
+
+        make -j"$(nproc)" ae stdlib
+
+        printf 'main() {\n    println("hello from wasi")\n}\n' > "$RUNNER_TEMP/hello.ae"
+        ./build/ae build --target=wasm32-wasi "$RUNNER_TEMP/hello.ae" -o "$RUNNER_TEMP/hello.wasm"
+        file "$RUNNER_TEMP/hello.wasm" | grep -q WebAssembly
+        out="$(timeout 60 "$WASMTIME" "$RUNNER_TEMP/hello.wasm")"
+        echo "hello -> $out"
+        [ "$out" = "hello from wasi" ]
+
+        ./build/ae build --target=wasm32-wasi examples/actors/counter.ae \
+          -o "$RUNNER_TEMP/counter.wasm"
+        out="$(timeout 60 "$WASMTIME" "$RUNNER_TEMP/counter.wasm")"
+        echo "$out"
+        echo "$out" | grep -q 'Current value: 18'
+
   ci-embedded:
     name: Embedded ARM (Cortex-M4)
     runs-on: ubuntu-22.04

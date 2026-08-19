@@ -472,7 +472,7 @@ There are **two** wasm paths, and they are not interchangeable:
 | Target | Backend | Produces | Supported modes |
 |---|---|---|---|
 | `--target=wasm` | Emscripten (`emcc`) | `.js` + `.wasm` bundle | executables |
-| `--target=wasm32-wasi` | `zig cc` | a self-contained wasm object | `--emit=csrc`, `--emit=obj` |
+| `--target=wasm32-wasi` | `zig cc` | a self-contained wasm module | executables, `--emit=csrc`, `--emit=obj` |
 
 Emscripten supplies a JS host, a DOM/filesystem shim and its own pthread
 emulation; the zig path produces a plain object a WASI runtime (or someone
@@ -493,12 +493,35 @@ requires Exception handling support"*), and WASI has no POSIX signal API
 without `-D_WASI_EMULATED_SIGNAL`. `ae build` adds both when the target
 resolves to a WASI triple, so nothing needs passing by hand.
 
-**A full executable link for `wasm32-wasi` is not supported**, and is rejected
-up front rather than failing deep in a compile:
-`runtime/scheduler/multicore_scheduler.c` asserts
-`sizeof(Mailbox) % 8 == 0` with no 64-bit guard (unlike the
-`sizeof(Message) == 48` assertion beside it, which has one), so it fails on any
-32-bit target. Use `--target=wasm` for a runnable bundle.
+**A full executable link works** as of #1655 — including actor programs:
+
+```
+$ ae build --target=wasm32-wasi hello.ae -o hello.wasm
+$ wasmtime hello.wasm
+hello from wasi
+```
+
+Three things had to change for that, and they are worth knowing because each
+was a place where WASI had been forgotten beside Emscripten:
+
+- **The scheduler.** WASI has no usable threads, but zig's wasi-libc ships
+  pthread *stubs* whose `pthread_create` returns `EAGAIN` — so the threaded
+  runtime linked, started, printed "Failed to create scheduler thread", and
+  then span forever on `scheduler_start()`'s readiness barrier. A wasi exe now
+  selects the cooperative scheduler, the same substitution the Emscripten
+  backend has always made.
+- **`AETHER_HAS_PROCESS`** (new). `std/os/aether_os.c` was guarded entirely by
+  `!AETHER_HAS_FILESYSTEM`, so the only way to compile out `fork` was to
+  compile out the filesystem with it. Emscripten accepts that trade; WASI must
+  not, because a capability-based filesystem is the point of WASI. The two
+  capabilities are now separate.
+- **Computed-goto dispatch.** Actor codegen emits a table of label addresses,
+  which wasm rejects ("relocations for function or section offsets are only
+  supported in metadata sections"). The guard excluded `__EMSCRIPTEN__` but
+  not `__wasi__`.
+
+`--target=wasm` remains the route to a runnable **browser** bundle with JS
+glue; `wasm32-wasi` produces a self-contained module for a WASI runtime.
 
 `wasm32-freestanding` is deliberately **not** offered: it ships no libc, so the
 generated C's `#include <stdio.h>` cannot resolve and `--emit=obj` fails
@@ -525,7 +548,7 @@ so an installed toolchain never ships a silently-stubbed regex.
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
 | Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
 | iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=lib` supported — see [cross-ios.md](cross-ios.md) |
-| Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend, `--emit=csrc`/`--emit=obj` only |
+| Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend; executables + `--emit=csrc`/`--emit=obj` |
 
 ## Hardening (`HARDEN=1`)
 

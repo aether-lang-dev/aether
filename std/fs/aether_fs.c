@@ -883,6 +883,12 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
     int fd = _open(tmp,
                    _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY,
                    _S_IREAD | _S_IWRITE);
+#elif defined(__wasi__)
+    /* WASI has no umask: permissions are the host runtime's business under
+     * its capability model, and there is no process-wide mask to consult.
+     * Pass 0666 unmodified and let the host apply whatever policy it has.
+     * O_NOFOLLOW is likewise absent from wasi-libc's fcntl.h. */
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0666);
 #else
     mode_t um = umask(0);
     umask(um);

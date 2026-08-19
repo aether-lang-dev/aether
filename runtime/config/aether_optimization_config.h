@@ -48,8 +48,18 @@
 // ============================================================================
 
 // --- Threads (pthreads / Win32 threads) ---
+//
+// __wasi__ joins __EMSCRIPTEN__ here, and it is the load-bearing arm of the
+// four below. wasi has no usable threads, but zig's wasi-libc ships pthread
+// STUBS (lib/libc/wasi/thread-stub/pthread_create.c) whose pthread_create
+// returns EAGAIN unconditionally. So the threaded runtime does NOT fail to
+// link the way aether_thread.h predicts — it links, starts, prints "Failed to
+// create scheduler thread", and then spins forever on scheduler_start()'s
+// readiness barrier waiting for workers that were never created. A silent
+// hang is a worse failure than a missing symbol, which is why wasi must select
+// the threadless path here rather than relying on a link error to catch it.
 #ifndef AETHER_HAS_THREADS
-#  if defined(__EMSCRIPTEN__) || defined(AETHER_NO_THREADING)
+#  if defined(__EMSCRIPTEN__) || defined(__wasi__) || defined(AETHER_NO_THREADING)
 #    define AETHER_HAS_THREADS 0
 #  else
 #    define AETHER_HAS_THREADS 1
@@ -90,9 +100,32 @@
 #  endif
 #endif
 
+// --- Process control (fork / exec / pipe / popen / waitpid / kill) ---
+//
+// Separate from AETHER_HAS_FILESYSTEM because the two are genuinely different
+// capabilities that happened to share a file. std/os/aether_os.c was guarded
+// entirely by !AETHER_HAS_FILESYSTEM, so the only way to compile out `fork`
+// was to compile out the filesystem with it. That trade is acceptable for
+// Emscripten (which passes -DAETHER_NO_FILESYSTEM anyway) and wrong for WASI,
+// whose whole point is a capability-based filesystem: preopened directories,
+// sandboxed but real. Giving that up to dodge `fork` would disable std.fs on
+// the one target that supports it properly.
+//
+// WASI has no process model at all — no fork, no exec, no pipe — so this is 0
+// there. Emscripten is listed too: it is equally processless, and naming it
+// here means the capability is honest even though its build also happens to
+// pass -DAETHER_NO_FILESYSTEM today.
+#ifndef AETHER_HAS_PROCESS
+#  if defined(__wasi__) || defined(__EMSCRIPTEN__) || defined(AETHER_NO_PROCESS)
+#    define AETHER_HAS_PROCESS 0
+#  else
+#    define AETHER_HAS_PROCESS 1
+#  endif
+#endif
+
 // --- Networking (sockets, connect, etc.) ---
 #ifndef AETHER_HAS_NETWORKING
-#  if defined(__EMSCRIPTEN__) || defined(AETHER_NO_NETWORKING)
+#  if defined(__EMSCRIPTEN__) || defined(__wasi__) || defined(AETHER_NO_NETWORKING)
 #    define AETHER_HAS_NETWORKING 0
 #  else
 #    define AETHER_HAS_NETWORKING 1
@@ -101,7 +134,7 @@
 
 // --- NUMA (Linux libnuma / Win32 NUMA API) ---
 #ifndef AETHER_HAS_NUMA
-#  if defined(AETHER_NO_NUMA) || defined(__EMSCRIPTEN__)
+#  if defined(AETHER_NO_NUMA) || defined(__EMSCRIPTEN__) || defined(__wasi__)
 #    define AETHER_HAS_NUMA 0
 #  elif defined(__linux__) || defined(_WIN32)
 #    define AETHER_HAS_NUMA 1
@@ -123,7 +156,7 @@
 
 // --- Thread Affinity (core pinning) ---
 #ifndef AETHER_HAS_AFFINITY
-#  if defined(AETHER_NO_AFFINITY) || defined(__EMSCRIPTEN__)
+#  if defined(AETHER_NO_AFFINITY) || defined(__EMSCRIPTEN__) || defined(__wasi__)
 #    define AETHER_HAS_AFFINITY 0
 #  elif defined(__linux__) || defined(__APPLE__) || defined(_WIN32)
 #    define AETHER_HAS_AFFINITY 1

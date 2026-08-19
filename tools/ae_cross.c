@@ -135,6 +135,13 @@ const char* cross_target_to_zig(const char* t) {
  * on the command line. */
 #define AETHER_WASI_DEFINES "-D_WASI_EMULATED_SIGNAL -D__wasm_exception_handling__=1"
 
+/* Extra defines for a wasi EXECUTABLE link (not needed for csrc/obj, which
+ * never compile the runtime). AETHER_NO_THREADING belts-and-braces the
+ * __wasi__ arm now in aether_optimization_config.h: the capability header is
+ * the authority, but a TU that somehow misses it still gets the threadless
+ * path rather than a stub-backed hang. */
+#define AETHER_WASI_EXE_DEFINES "-DAETHER_NO_THREADING"
+
 /* True if the resolved zig triple is a WASI target. */
 static bool cross_target_is_wasi(const char* ztriple) {
     return ztriple && strstr(ztriple, "wasi") != NULL;
@@ -283,6 +290,45 @@ static int cross_collect_core_list(char out[][CROSS_SRC_PATH_MAX], int max,
         count++;
     }
     fclose(f);
+    return count;
+}
+
+/* Substitute the COOPERATIVE scheduler for the multicore one, in place.
+ *
+ * The MANIFEST names runtime/scheduler/multicore_scheduler.c, which is right
+ * for every threaded target and wrong for wasi. wasi has no usable threads,
+ * and — because zig's wasi-libc resolves pthread_create to a stub that returns
+ * EAGAIN rather than leaving it undefined — the threaded build LINKS and then
+ * hangs on scheduler_start()'s readiness barrier. Selecting the right source
+ * set is therefore the fix; there is no link error to fall back on.
+ *
+ * This mirrors what the Emscripten backend already does: build_wasm_cmd() in
+ * ae.c compiles aether_scheduler_coop.c and deliberately omits
+ * multicore_scheduler.c. aether_scheduler_coop.c implements the same
+ * scheduler_* API surface, so the swap is a drop-in.
+ *
+ * The io pollers are left alone: aether_io_poller_poll.c is the fallback wasi
+ * selects, it compiles clean for wasm32, and its registration path is inert
+ * when nothing registers a descriptor.
+ *
+ * Returns the new count (unchanged unless the swap applied). */
+static int cross_use_coop_scheduler(char srcs[][CROSS_SRC_PATH_MAX], int count,
+                                    const char* base) {
+    for (int i = 0; i < count; i++) {
+        const char* bn = strrchr(srcs[i], '/');
+        bn = bn ? bn + 1 : srcs[i];
+        if (strcmp(bn, "multicore_scheduler.c") != 0) continue;
+        int need = snprintf(srcs[i], CROSS_SRC_PATH_MAX,
+                            "%s/runtime/scheduler/aether_scheduler_coop.c", base);
+        if (need < 0 || need >= CROSS_SRC_PATH_MAX) {
+            fprintf(stderr, "Error: cooperative scheduler path too long.\n");
+            return -1;
+        }
+        return count;
+    }
+    /* Not in the manifest at all: nothing to swap, and nothing to warn about
+     * either — a manifest without the multicore scheduler is already
+     * threadless. */
     return count;
 }
 
@@ -457,6 +503,12 @@ int run_cross_build(const char* c_file, const char* out_file,
                 manifest);
         return 1;
     }
+    /* wasi links the cooperative scheduler instead of the multicore one — see
+     * cross_use_coop_scheduler for why a link error cannot be relied on here. */
+    if (cross_target_is_wasi(ztriple)) {
+        n = cross_use_coop_scheduler(srcs, n, base);
+        if (n < 0) return 1;
+    }
 
     bool is_apple = cross_target_is_apple(ztriple);
     char cc_cmd[3072];
@@ -495,7 +547,7 @@ int run_cross_build(const char* c_file, const char* out_file,
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
     if (cross_target_is_wasi(ztriple)) {
-        strncat(feature_defs, " " AETHER_WASI_DEFINES,
+        strncat(feature_defs, " " AETHER_WASI_DEFINES " " AETHER_WASI_EXE_DEFINES,
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
     /* Tier-B (FreeBSD) targets need a base sysroot for headers and libraries;
