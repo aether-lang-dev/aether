@@ -597,9 +597,35 @@ holding the same pointer see the same heap location.
 
 **API:**
 - `ref(value)` create a ref cell (heap-allocated `intptr_t`)
-- `ref_get(r)` read the value
+- `ref_get(r)` read the value, as `long`: the cell is pointer-wide, so a value
+  above 2^31 comes back whole
 - `ref_set(r, value)` write a new value
 - `ref_free(r)` free the cell (or use `defer ref_free(r)`)
+
+### Lazy Values
+
+`lazy` defers a computation until something asks for it, and remembers the
+answer. The closure runs at most once, however many times it is forced:
+
+```aether,fragment
+expensive = || { return fib(35) }
+
+value = lazy(expensive)
+defer thunk_free(value)
+
+println(force(value))    // runs the closure
+println(force(value))    // the remembered result, no second run
+```
+
+**API:**
+- `lazy(closure)` wrap a zero-argument closure in a thunk
+- `force(t)` evaluate on first call, return the remembered value after, as
+  `long` (the thunk holds a pointer-wide value)
+- `thunk_free(t)` free the thunk (or use `defer thunk_free(t)`)
+
+Both the cell and the thunk hold one machine word, so they carry an integer or
+a pointer. A `string` or a struct goes in as a `ptr` to storage the program
+owns for at least as long as the cell.
 
 ### Storing Closures in Collections
 
