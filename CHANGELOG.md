@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **64-bit values are no longer silently truncated on three paths** (#1643).
+  A call through a struct's `fn`-pointer field, `ref_get`, and `force` each
+  produced a value the compiler then recorded as `int`: `5000000000` printed as
+  `705032704`, and a ref cell round-tripped through 32 bits. The C storage was
+  already 64-bit in the first case, so only the printed value was wrong; the
+  other two truncated the value itself. `typecheck_call` resolved the field
+  call's return type but a declaration reads its initializer through
+  `infer_type`, which did not, so both now resolve it the same way; the two
+  builtins are typed `long`, which is the width their cells always had.
+
+- **`let a b = expr` no longer compiles** (#1644). Two identifiers after `let`
+  parsed as two declarations: an uninitialised one for the first name and the
+  real binding for the second. `let mut x = 0` (Rust habit) therefore compiled
+  and gave the program a stray variable named after a keyword Aether does not
+  have; one test in this repo had three of them. A `let` that binds nothing is
+  now one error naming the form to use instead, and a statement that reports
+  its own error no longer draws a second, generic one from the block parser.
+
 ## [0.553.0]
 
 ### Fixed

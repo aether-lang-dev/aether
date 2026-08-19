@@ -272,6 +272,7 @@ static void parser_message(Parser* parser, const char* message) {
 }
 
 static Type* parse_type_unsuffixed(Parser* parser);
+static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw);
 
 // #340: a type may carry a postfix `?` making it optional (`int?`, `string?`,
 // `Vec2?`, `*Node?`). Parse the base type, then wrap once per `?`. In type
@@ -2385,6 +2386,10 @@ ASTNode* parse_statement(Parser* parser) {
                 advance_token(parser); // optional let/var
             }
             ASTNode* decl = parse_python_style_declaration(parser);
+            if (reject_unbound_binding(parser, decl, "@scoped")) {
+                free_ast_node(decl);
+                return NULL;
+            }
             if (decl && decl->type == AST_VARIABLE_DECLARATION) {
                 if (decl->annotation) free(decl->annotation);
                 decl->annotation = strdup("scoped");
@@ -2395,10 +2400,16 @@ ASTNode* parse_statement(Parser* parser) {
             return decl;
         }
         case TOKEN_LET:
-        case TOKEN_VAR:
-            // Optional 'let' or 'var' - skip it and parse as Python-style
+        case TOKEN_VAR: {
+            const char* kw = token->type == TOKEN_LET ? "let" : "var";
             advance_token(parser);
-            return parse_python_style_declaration(parser);
+            ASTNode* decl = parse_python_style_declaration(parser);
+            if (reject_unbound_binding(parser, decl, kw)) {
+                free_ast_node(decl);
+                return NULL;
+            }
+            return decl;
+        }
 
         case TOKEN_CONST: {
             // Local constant: const x = 5 or const arr[] = [1, 2, 3]
@@ -2745,6 +2756,41 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
 }
 
 // Python-style variable declaration: x = 42 (no 'let', type inferred)
+/* `let` / `var` bind, so a binding with nothing bound is a typo rather than a
+ * declaration: `let mut x = 0` used to parse as a bare `mut` plus a separate
+ * `x = 0`, leaving the program a stray variable named after a keyword Aether
+ * does not have (#1644). Reports, drops the rest of the statement so its
+ * remains are not reported a second time, and returns 1 when `decl` is
+ * rejected. */
+static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw) {
+    if (!decl || decl->type != AST_VARIABLE_DECLARATION || decl->child_count > 0)
+        return 0;
+    if (!parser->suppress_errors) {
+        Token* stray = peek_token(parser);
+        char msg[256];
+        snprintf(msg, sizeof(msg), "`%s %s` binds nothing: expected `= <expression>`",
+                 kw, decl->value ? decl->value : "?");
+        if (stray && stray->type == TOKEN_IDENTIFIER && stray->value) {
+            char hint[320];
+            snprintf(hint, sizeof(hint),
+                     "a typed declaration is written without `%s` (`%s %s = ...`); "
+                     "an inferred one names only the variable (`%s %s = ...`)",
+                     kw, decl->value ? decl->value : "?", stray->value, kw, stray->value);
+            aether_error_with_suggestion(msg, decl->line, decl->column, hint);
+        } else {
+            aether_error_with_code(msg, decl->line, decl->column, AETHER_ERR_SYNTAX);
+        }
+    }
+    int line = decl->line;
+    while (!is_at_end(parser)) {
+        Token* rest = peek_token(parser);
+        if (!rest || rest->type == TOKEN_RIGHT_BRACE || rest->line > line) break;
+        advance_token(parser);
+        if (rest->type == TOKEN_SEMICOLON) break;
+    }
+    return 1;
+}
+
 ASTNode* parse_python_style_declaration(Parser* parser) {
     // Accept a value-identifier token as the binding name — TOKEN_IDENTIFIER,
     // `state` (a regular identifier outside actors), or the #880 keyword set.
@@ -4090,9 +4136,15 @@ ASTNode* parse_block(Parser* parser) {
             continue;
         }
         int start_token = parser->current_token;
+        int start_errors = aether_error_count();
         ASTNode* stmt = parse_statement(parser);
         if (stmt) {
             add_child(block, stmt);
+        } else if (aether_error_count() > start_errors &&
+                   parser->current_token > start_token) {
+            /* The statement parser already said what was wrong and consumed
+             * its input; a generic "expected statement" on the remains points
+             * at the next good line and reads as a second, phantom defect. */
         } else {
             // Prevent infinite loops on unexpected tokens inside blocks.
             // If the block-head token is a reserved keyword being used as

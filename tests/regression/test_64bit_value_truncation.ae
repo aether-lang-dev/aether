@@ -1,0 +1,77 @@
+// Regression: values wider than 32 bits survive the paths that used to type
+// them `int` (#1643).
+//
+// Three producers returned a 64-bit value while the compiler recorded the
+// result as `int`: a call through a struct's fn-pointer field (typecheck_call
+// stamped the call node, but a declaration reads its initializer through
+// infer_type, which did not), and the `ref_get` / `force` builtins, whose cells
+// hold an intptr_t. The value was truncated on the way out and printed with
+// %d, so `5000000000` read as `705032704` with no diagnostic.
+
+import std.string
+
+extern exit(code: int)
+
+struct Ops {
+    read: fn(ptr, ptr, long) -> long
+}
+
+big_read(a: ptr, b: ptr, n: long) -> long {
+    return 5000000000
+}
+
+check_text(got: string, want: string, label: string) -> int {
+    if string.equals(got, want) == 1 {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got '${got}', want '${want}'")
+    return 1
+}
+
+check(got: long, want: long, label: string) -> int {
+    if got == want {
+        println("  PASS ${label} = ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    println("=== 64-bit values are not truncated ===")
+    failures = 0
+
+    t = Ops { read: big_read as fn(ptr, ptr, long) -> long }
+    n = t.read(null, null, 7)
+    failures = failures + check(n, 5000000000, "fn-pointer field call")
+    failures = failures + check(n / 1000, 5000000, "the value is whole, not a truncated half")
+
+    r = ref(5000000000)
+    failures = failures + check(ref_get(r), 5000000000, "ref_get after ref")
+    ref_set(r, 9000000000)
+    failures = failures + check(ref_get(r), 9000000000, "ref_get after ref_set")
+
+    c = || { return 7000000000 }
+    l = lazy(c)
+    failures = failures + check(force(l), 7000000000, "force")
+    failures = failures + check(force(l), 7000000000, "force again (memoized)")
+
+    // Interpolation picks its format from the same recorded type, so a value
+    // that survives arithmetic can still print truncated. Check the text.
+    failures = failures + check_text("${n}", "5000000000", "interpolated fn-field result")
+    failures = failures + check_text("${force(l)}", "7000000000", "interpolated force")
+    ref_set(r, 5000000000)
+    failures = failures + check_text("${ref_get(r)}", "5000000000", "interpolated ref_get")
+
+    ref_free(r)
+    thunk_free(l)
+
+    println("")
+    if failures == 0 {
+        println("All PASS")
+    } else {
+        println("${failures} FAILURE(S)")
+        exit(1)
+    }
+}

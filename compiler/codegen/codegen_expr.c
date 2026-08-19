@@ -3995,7 +3995,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 // ref_get(r) — read from a ref cell
                 else if (strcmp(func_name, "ref_get") == 0 && expr->child_count == 1) {
-                    fprintf(gen->output, "(int)(*(intptr_t*)");
+                    fprintf(gen->output, "(*(intptr_t*)");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
