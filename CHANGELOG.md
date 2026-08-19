@@ -13,6 +13,36 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`ae build --target=wasm` failed on every installed tree**, looking for
+  runtime sources one directory too high. `tc.root` means two different things
+  — the repo root in dev mode, the install PREFIX otherwise — and the sources
+  sit directly under it only in the first case; installed, they live under
+  `share/aether/`. The native build path appended that itself, but the wasm
+  source and include lists used a bare `tc.root`, so an installed `ae`
+  composed `<prefix>/runtime/...` and emcc reported every runtime file
+  missing. A dev tree cannot reproduce it, which is why CI stayed green while
+  the feature was broken for everyone who had installed rather than cloned.
+
+  Rather than patch the two wasm call sites, the source root is now resolved
+  ONCE (`tc.src_root`) beside where `tc.root` and `dev_mode` are settled, so a
+  consumer can no longer get it wrong. That surfaced a third site the reporter
+  had suspected but not pursued: `--emit=lib`'s lookup of
+  `runtime/aether_config.c` was also unconditional, and on an installed tree
+  simply found nothing — omitting the translation unit **silently**, with no
+  error at all. Worse than the wasm case, and correspondingly unreported.
+
+  The other 43 `tc.root` uses were checked and are correct: the bare
+  `%s/runtime` and `%s/std` ones sit inside `if (tc.dev_mode)`, and the cross
+  path (`ae_cross.c`) tries both layouts explicitly — which is why
+  `--target=aarch64-linux` worked from the same install that `--target=wasm`
+  could not.
+
+  The regression test installs to a temporary prefix and drives the INSTALLED
+  binary, because nothing else can catch this class of bug. It needs no emcc: a
+  stub answers `--version` and then asserts every `.c` it is handed exists,
+  which is exactly the property at issue — the generated C was always fine.
+
+
 - **64-bit values are no longer silently truncated on three paths** (#1643).
   A call through a struct's `fn`-pointer field, `ref_get`, and `force` each
   produced a value the compiler then recorded as `int`: `5000000000` printed as
