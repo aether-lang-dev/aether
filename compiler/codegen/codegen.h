@@ -484,6 +484,15 @@ typedef struct {
     }* fnptr_locals;
     int fnptr_local_count;
     int fnptr_local_capacity;
+    /* AST nodes codegen synthesises rather than reads from the program: the
+     * defer carriers, the free-call statements it builds for scope exits, the
+     * folded literals the optimizer substitutes. They are not reachable from
+     * the program AST, so free_ast_node(program) never sees them and every
+     * one of them used to leak (#1667). Owned here, released in
+     * free_code_generator. */
+    ASTNode** synthesised_nodes;
+    int synthesised_count;
+    int synthesised_cap;
 } CodeGenerator;
 
 // Code generation functions
@@ -542,6 +551,7 @@ const char* codegen_diag_context(void);
 const char* get_c_operator(const char* aether_op);
 
 // Defer management
+void codegen_own_node(CodeGenerator* gen, ASTNode* node);
 void push_defer(CodeGenerator* gen, ASTNode* stmt);
 void push_defer_mode(CodeGenerator* gen, ASTNode* stmt, DeferMode mode);  /* #1140 */
 void emit_defers_for_scope(CodeGenerator* gen);

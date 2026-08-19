@@ -386,8 +386,27 @@ const char* get_single_int_field(MessageDef* msg_def) {
     return is_inlineable_scalar(field->type_kind) ? field->name : NULL;
 }
 
+/* Take ownership of a node codegen built itself. Such nodes hang off the
+ * defer stack or a rewritten statement, never off the program AST, so
+ * free_ast_node(program) does not reach them (#1667). */
+void codegen_own_node(CodeGenerator* gen, ASTNode* node) {
+    if (!gen || !node) return;
+    if (gen->synthesised_count == gen->synthesised_cap) {
+        int cap = gen->synthesised_cap ? gen->synthesised_cap * 2 : 32;
+        ASTNode** grown = (ASTNode**)realloc(gen->synthesised_nodes,
+                                             (size_t)cap * sizeof(ASTNode*));
+        if (!grown) return;   /* the node stays alive; losing the free beats losing the node */
+        gen->synthesised_nodes = grown;
+        gen->synthesised_cap = cap;
+    }
+    gen->synthesised_nodes[gen->synthesised_count++] = node;
+}
+
 CodeGenerator* create_code_generator(FILE* output) {
     CodeGenerator* gen = malloc(sizeof(CodeGenerator));
+    gen->synthesised_nodes = NULL;
+    gen->synthesised_count = 0;
+    gen->synthesised_cap = 0;
     gen->output = output;
     gen->indent_level = 0;
     gen->actor_count = 0;
@@ -575,6 +594,29 @@ CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, con
 
 void free_code_generator(CodeGenerator* gen) {
     if (gen) {
+        /* The emitted-typedef registries: one strdup'd name per distinct
+         * tuple / optional / sum shape in the program (#1667). */
+        for (int i = 0; i < gen->tuple_type_count; i++) {
+            free(gen->tuple_type_names[i]);
+        }
+        free(gen->tuple_type_names);
+        gen->tuple_type_names = NULL;
+        gen->tuple_type_count = 0;
+        gen->tuple_type_capacity = 0;
+        for (int i = 0; i < gen->opt_type_count; i++) {
+            free(gen->opt_type_names[i]);
+        }
+        free(gen->opt_type_names);
+        gen->opt_type_names = NULL;
+        gen->opt_type_count = 0;
+        gen->opt_type_capacity = 0;
+        for (int i = 0; i < gen->synthesised_count; i++) {
+            free_ast_node(gen->synthesised_nodes[i]);
+        }
+        free(gen->synthesised_nodes);
+        gen->synthesised_nodes = NULL;
+        gen->synthesised_count = 0;
+        gen->synthesised_cap = 0;
         if (gen->current_actor) free(gen->current_actor);
         if (gen->actor_state_vars) {
             for (int i = 0; i < gen->state_var_count; i++) {

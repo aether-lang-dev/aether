@@ -142,13 +142,10 @@ static ASTNode* fold_binary_expression(ASTNode* node) {
                 result = (double)wrapped;
             }
             ASTNode* folded = create_numeric_literal(result, both_int, node->line, node->column);
-            
-            // Free old node (but not the original structure, return new one)
-            free(node->value);
-            free_type(node->node_type);
-            free(node->children);
-            free(node);
-            
+            /* The whole folded subtree goes, operands included: the hand-rolled
+             * teardown here released the children ARRAY but never the child
+             * nodes, so every folded expression leaked its operands (#1667). */
+            free_ast_node(node);
             return folded;
         }
     }

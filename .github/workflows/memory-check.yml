@@ -129,6 +129,14 @@ jobs:
         fi
         ./build/test_runner
 
+    # The compiler compiling a program, not just the unit tests. Everything
+    # aetherc allocates for a compile should be released by the time it exits;
+    # nothing checked that, and every program leaked. Linux only: LeakSanitizer
+    # is the whole point and macOS has no LSan.
+    - name: Compiler leak gate
+      if: matrix.os == 'ubuntu-latest'
+      run: bash tests/scripts/check_compiler_leaks.sh
+
     - name: Build with UndefinedBehaviorSanitizer
       run: |
         make clean

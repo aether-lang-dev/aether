@@ -3014,6 +3014,7 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
         if (carrier) {
             if (carrier->annotation) free(carrier->annotation);
             carrier->annotation = strdup(annot);
+            codegen_own_node(gen, carrier);
             push_defer(gen, carrier);
         }
     }
@@ -3117,6 +3118,7 @@ void push_seq_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
         if (carrier) {
             if (carrier->annotation) free(carrier->annotation);
             carrier->annotation = strdup(annot);
+            codegen_own_node(gen, carrier);
             push_defer(gen, carrier);
         }
     }
@@ -3236,6 +3238,7 @@ void push_opt_str_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
         if (carrier) {
             if (carrier->annotation) free(carrier->annotation);
             carrier->annotation = strdup(annot);
+            codegen_own_node(gen, carrier);
             push_defer(gen, carrier);
         }
     }
@@ -3418,6 +3421,7 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
                             if (carrier) {
                                 if (carrier->annotation) free(carrier->annotation);
                                 carrier->annotation = strdup(annot);
+                                codegen_own_node(gen, carrier);
                                 push_defer(gen, carrier);
                             }
                         }
@@ -3778,6 +3782,7 @@ static void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
     if (carrier) {
         if (carrier->annotation) free(carrier->annotation);
         carrier->annotation = strdup(annot);
+        codegen_own_node(gen, carrier);
         push_defer(gen, carrier);
     }
 }
@@ -5068,6 +5073,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                 if (carrier) {
                                     if (carrier->annotation) free(carrier->annotation);
                                     carrier->annotation = strdup(annot);
+                                    codegen_own_node(gen, carrier);
                                     push_defer(gen, carrier);
                                 }
                             }
