@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A function parameter is no longer shadowed by a same-named function in a
+  consuming module** (#1657). `bare_top_level_fn` asked only "is there a
+  top-level function with this name?", and after module merging that program
+  holds every module's functions, including non-exported ones belonging to the
+  *consuming* app. So `ui/module.ae`'s `btn(_ctx, label, on_press: fn)` matched
+  an app's unrelated module-level `on_press`, and the call site emitted a
+  bare-fn adapter for the app's function in place of the caller's closure,
+  discarding its captured environment with it.
+
+  The generated C was well formed, so nothing complained: the call compiled,
+  ran, and did nothing. Where the two signatures differed it was worse than
+  silent. aether-ui's `apps/rubiks_cube` defines `on_press(view, x, y)`, so
+  every one of its buttons received a three-argument adapter for a zero-
+  argument callback and the first click crashed the process, SIGBUS on macOS
+  and SIGSEGV on Linux, storing through a register that held no pointer.
+
+  A parameter is the innermost binding there is, so the lookup now rejects any
+  name bound by the enclosing function's parameters or its declared locals
+  before considering top-level functions. Same family as #1606, which fixed
+  the closure-parameter case in the module renamer; this is the codegen half,
+  for an ordinary parameter shadowed from a different module.
+
 ## [0.552.0]
 
 ### Added
