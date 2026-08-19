@@ -58,6 +58,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
     #include <netdb.h>
     #include <unistd.h>
     #include <arpa/inet.h>
+    #include <poll.h>        /* poll: no FD_SETSIZE bound, unlike select   */
     #include <fcntl.h>       /* fcntl, O_NONBLOCK for connect-with-timeout */
     #include <errno.h>       /* EINPROGRESS / EWOULDBLOCK detection      */
     #include <sys/select.h>  /* select(), fd_set                          */
@@ -1215,9 +1216,10 @@ static void http_apply_timeouts(int sockfd, int64_t timeout_ns) {
  * response), so both readings retire it. */
 static int transport_is_live(Transport* t) {
     if (t->sockfd < 0) return 0;
-    /* Readable means either the peer closed (recv returns 0) or it sent
+    /* Readable means either the peer closed (recv would return 0) or it sent
      * something nobody asked for, and a stray byte would be read as the head
      * of the next response. Not readable is the healthy idle case. */
+#ifdef _WIN32
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(t->sockfd, &rfds);
@@ -1225,6 +1227,13 @@ static int transport_is_live(Transport* t) {
     zero.tv_sec = 0;
     zero.tv_usec = 0;
     int ready = select(t->sockfd + 1, &rfds, NULL, NULL, &zero);
+#else
+    struct pollfd pfd;
+    pfd.fd = t->sockfd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int ready = poll(&pfd, 1, 0);
+#endif
     if (ready < 0) return 0;
     return ready == 0;
 }
@@ -1285,17 +1294,35 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
                  * fast. Watching both makes select fire on either
                  * outcome; SO_ERROR distinguishes success from
                  * failure afterwards. */
+#ifdef _WIN32
+                /* Winsock's fd_set is a small array of SOCKET handles, not a
+                 * bitmap indexed by descriptor, so it has no FD_SETSIZE
+                 * hazard for a single socket. */
                 fd_set wfds, efds;
                 FD_ZERO(&wfds); FD_SET(sockfd, &wfds);
                 FD_ZERO(&efds); FD_SET(sockfd, &efds);
-                /* `select` takes microsecond precision via tv_usec —
-                 * slice the configured nanoseconds straight in.
-                 * tv_usec is `suseconds_t` on POSIX and `long` on
-                 * MinGW; cast to `long` to satisfy both portably. */
                 struct timeval tv;
                 tv.tv_sec  = (time_t)(req->timeout_ns / 1000000000LL);
                 tv.tv_usec = (long)((req->timeout_ns / 1000LL) % 1000000LL);
                 int sel = select(sockfd + 1, NULL, &wfds, &efds, &tv);
+#else
+                /* poll, not select: a POSIX fd_set is a bitmap of FD_SETSIZE
+                 * bits, and FD_SET on a descriptor at or above it writes past
+                 * the end. A process serving many connections (a proxy, which
+                 * is what dials most often) passes 1024 descriptors easily,
+                 * and the corruption would land on the stack. poll takes the
+                 * descriptor by value and has no such bound. POLLOUT covers
+                 * both outcomes: a refused non-blocking connect reports the
+                 * socket ready with SO_ERROR set, which the check below
+                 * reads. */
+                struct pollfd pfd;
+                pfd.fd = sockfd;
+                pfd.events = POLLOUT;
+                pfd.revents = 0;
+                int64_t timeout_ms = (req->timeout_ns + 999999LL) / 1000000LL;
+                if (timeout_ms > INT_MAX) timeout_ms = INT_MAX;
+                int sel = poll(&pfd, 1, (int)timeout_ms);
+#endif
                 if (sel == 0) {
                     close(sockfd);
                     ae_set_err(out_err, "connect timeout");
