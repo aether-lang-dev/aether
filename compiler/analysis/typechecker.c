@@ -566,6 +566,8 @@ static int function_can_fail(Type* ret) {
  * and `!`/`or` unwrap it to the success type with `is_result` cleared — so
  * none of them reach here as the statement's own expression. */
 Type* infer_type(ASTNode* expr, SymbolTable* table);   /* defined below */
+static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
+                                        const char* field_name, int* out_is_ptr);
 static int check_unconsumed_result(ASTNode* expr, SymbolTable* table) {
     if (!expr) return 0;
     Type* t = infer_type(expr, table);
@@ -1727,6 +1729,27 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 symbol->type->return_type) {
                 return clone_type(symbol->type->return_type);
             }
+            /* #749 dispatch through a struct's function-pointer field,
+             * `recv.field(args)`. typecheck_call resolves and stamps this,
+             * but a declaration reads its initializer through infer_type,
+             * so without the same resolution here `n = t.read(...)` bound a
+             * `long`-returning call to an `int` and every later read of `n`
+             * truncated (#1643). Same shape and same single-level receiver
+             * rule as the call-site dispatch. */
+            if (expr->value && (!symbol || !symbol->is_function)) {
+                const char* dot = strrchr(expr->value, '.');
+                size_t rlen = dot ? (size_t)(dot - expr->value) : 0;
+                if (dot && rlen > 0 && rlen < 200 &&
+                    !memchr(expr->value, '.', rlen)) {
+                    char recv[200];
+                    memcpy(recv, expr->value, rlen);
+                    recv[rlen] = '\0';
+                    Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
+                    if (fsig && fsig->return_type) {
+                        return clone_type(fsig->return_type);
+                    }
+                }
+            }
             return create_type(TYPE_UNKNOWN);
         }
         
@@ -2833,7 +2856,9 @@ int typecheck_program(ASTNode* program) {
     add_symbol(global_table, "unbox_closure", unbox_closure_type, 0, 1, 0);
     Type* ref_type = create_type(TYPE_PTR);
     add_symbol(global_table, "ref", ref_type, 0, 1, 0);
-    Type* ref_get_type = create_type(TYPE_INT);
+    /* Both cells hold an intptr_t; typing the read `int` truncated every
+     * value above 2^31 with no diagnostic. */
+    Type* ref_get_type = create_type(TYPE_INT64);
     add_symbol(global_table, "ref_get", ref_get_type, 0, 1, 0);
     Type* ref_set_type = create_type(TYPE_VOID);
     add_symbol(global_table, "ref_set", ref_set_type, 0, 1, 0);
@@ -2842,7 +2867,7 @@ int typecheck_program(ASTNode* program) {
     // Lazy evaluation builtins
     Type* lazy_type = create_type(TYPE_PTR);
     add_symbol(global_table, "lazy", lazy_type, 0, 1, 0);
-    Type* force_type = create_type(TYPE_INT);  // default int; C returns intptr_t, implicit conversion
+    Type* force_type = create_type(TYPE_INT64);
     add_symbol(global_table, "force", force_type, 0, 1, 0);
     Type* thunk_free_type = create_type(TYPE_VOID);
     add_symbol(global_table, "thunk_free", thunk_free_type, 0, 1, 0);
