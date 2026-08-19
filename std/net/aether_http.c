@@ -1995,7 +1995,14 @@ send_request:
             framing_definite = 0;
             goto send_request;
         }
+        /* The redial failed too, so the upstream is gone rather than the
+         * pooled connection being stale. Say that instead of handing back an
+         * empty status-0 response. */
+        aether_caps_free(hdr, hdr_cap);
+        aether_caps_free(full_response, cap);
+        response->error = string_new(rd_err ? rd_err : "connection failed");
         free(rd_err);
+        return response;
     }
 
     aether_caps_free(hdr, hdr_cap);
