@@ -1,0 +1,60 @@
+// Driver for the HEAD and middleware-keep-alive test (#1653).
+//
+// One GET route and no HEAD route, so HEAD has to fall back to the GET
+// handler, and one middleware that answers by short-circuiting the chain,
+// which is how the reverse proxy answers.
+
+import std.http
+import std.os
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18107
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "body-from-get")
+}
+
+@c_callback mw_answer(req: ptr, res: ptr, ud: ptr) -> int {
+    if http.request_path(req) == "/mw" {
+        http.response_set_status(res, 200)
+        http.response_set_header(res, "Content-Type", "text/plain")
+        http.response_set_body(res, "answered-by-middleware")
+        return 0
+    }
+    return 1
+}
+
+message StartSrv { raw: ptr }
+message Noop {}
+
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+}
+actor SchedHelper {
+    state x = 0
+    receive { Noop() -> { x = 1 } }
+}
+
+main() {
+    raw = http.server_create(PORT)
+    if raw == 0 {
+        println("FAIL: server_create returned null")
+        exit(1)
+    }
+    http.server_set_host(raw, "127.0.0.1")
+    http.server_use_middleware(raw, mw_answer, 0)
+    http.server_get(raw, "/", handle_root, 0)
+    println("READY")
+
+    spawn(SchedHelper())
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+
+    sleep(60000)
+    exit(0)
+}
