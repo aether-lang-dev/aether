@@ -904,7 +904,14 @@ static ASTNode* parse_interp_string_expr(const char* raw) {
                     ? sub_count - 1 : sub_count;
             Parser* sub = create_parser(sub_tokens, n);
             ASTNode* expr_node = parse_expression(sub);
-            free(sub); // tokens owned by AST nodes; do not free them here
+            free(sub);
+            /* AST nodes copy a token's text (create_ast_node strdups it) and
+             * keep no reference to the token itself, so these are ours to
+             * release: every `${...}` used to leak its whole token run
+             * (#1667). */
+            for (int ti = 0; ti < sub_count; ti++) {
+                free_token(sub_tokens[ti]);
+            }
 
             if (expr_node) add_child(interp, expr_node);
         } else if (*p == '\\' && p[1]) {

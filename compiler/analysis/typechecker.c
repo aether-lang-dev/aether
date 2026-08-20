@@ -566,6 +566,7 @@ static int function_can_fail(Type* ret) {
  * and `!`/`or` unwrap it to the success type with `is_result` cleared — so
  * none of them reach here as the statement's own expression. */
 Type* infer_type(ASTNode* expr, SymbolTable* table);   /* defined below */
+static void set_node_type(ASTNode* node, Type* fresh);
 static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
                                         const char* field_name, int* out_is_ptr);
 static int check_unconsumed_result(ASTNode* expr, SymbolTable* table) {
@@ -1312,7 +1313,7 @@ static Type* try_resolve_using_field(SymbolTable* table, ASTNode* struct_def,
             ASTNode* mid = create_ast_node(AST_MEMBER_ACCESS, uf->value,
                                            expr->line, expr->column);
             add_child(mid, expr->children[0]);
-            mid->node_type = clone_type(uf->node_type);
+            set_node_type(mid, clone_type(uf->node_type));
             expr->children[0] = mid;
             Type* ft = (inf->node_type && inf->node_type->kind != TYPE_UNKNOWN)
                        ? clone_type(inf->node_type) : create_type(TYPE_UNKNOWN);
@@ -1823,7 +1824,7 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                     expr->type = AST_IDENTIFIER;
                     free(expr->value);
                     expr->value = strdup(qualified);
-                    expr->node_type = clone_type(sym->type);
+                    set_node_type(expr, clone_type(sym->type));
                     return clone_type(sym->type);
                 }
             }
@@ -3625,7 +3626,7 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                 if (init->type == AST_FUNCTION_CALL && init->value) {
                     Symbol* fn = lookup_qualified_symbol(actor_table, init->value);
                     if (fn && fn->type) {
-                        child->node_type = clone_type(fn->type);
+                        set_node_type(child, clone_type(fn->type));
                     }
                 }
             }
@@ -6052,7 +6053,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 // Propagate arm result type to the match node (for match-as-expression)
                 if (!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) {
                     if (body->node_type && body->node_type->kind != TYPE_UNKNOWN) {
-                        stmt->node_type = clone_type(body->node_type);
+                        set_node_type(stmt, clone_type(body->node_type));
                     }
                 }
 
@@ -6296,7 +6297,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 type_error("`or` requires a fallible `(value, err)` / `T!` "
                            "expression on its left", expr->line, expr->column);
                 if (op) free_type(op);
-                expr->node_type = create_type(TYPE_UNKNOWN);
+                set_node_type(expr, create_type(TYPE_UNKNOWN));
                 return 0;
             }
             ASTNode* handler = expr->children[1];
@@ -6400,7 +6401,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                            "with at least two slots",
                            expr->line, expr->column);
                 free_type(op);
-                expr->node_type = create_type(TYPE_UNKNOWN);
+                set_node_type(expr, create_type(TYPE_UNKNOWN));
                 return 0;
             }
             Type* last = op->tuple_types[op->tuple_count - 1];
@@ -6409,10 +6410,10 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                            "the `string` error of a `(value, err)` result",
                            expr->line, expr->column);
                 free_type(op);
-                expr->node_type = create_type(TYPE_UNKNOWN);
+                set_node_type(expr, create_type(TYPE_UNKNOWN));
                 return 0;
             }
-            expr->node_type = clone_type(op->tuple_types[0]);
+            set_node_type(expr, clone_type(op->tuple_types[0]));
             free_type(op);
             return 1;
         }
@@ -6428,7 +6429,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (!expr->value) {
                 type_error("heap.new requires a struct type name",
                            expr->line, expr->column);
-                expr->node_type = create_type(TYPE_UNKNOWN);
+                set_node_type(expr, create_type(TYPE_UNKNOWN));
                 return 0;
             }
             Symbol* struct_sym = lookup_symbol(table, expr->value);
@@ -6439,7 +6440,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     "heap.new(%s), '%s' is not a struct type",
                     expr->value, expr->value);
                 type_error(msg, expr->line, expr->column);
-                expr->node_type = create_type(TYPE_UNKNOWN);
+                set_node_type(expr, create_type(TYPE_UNKNOWN));
                 return 0;
             }
             /* #790: a struct with `string` fields IS allowed. The box owns
@@ -6493,7 +6494,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             // Field/type validity is the C compiler's job (offsetof on a
             // bad field is a hard C error), matching the trust-the-author
             // posture of the `as *Struct` cast.
-            expr->node_type = create_type(TYPE_INT);
+            set_node_type(expr, create_type(TYPE_INT));
             return 1;
 
         case AST_BITSET_LITERAL: {
@@ -6534,17 +6535,17 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (!at || at->kind != TYPE_BITSET) {
                 type_error("card() requires a bit_set argument", expr->line, expr->column);
                 if (at) free_type(at);
-                expr->node_type = create_type(TYPE_INT);
+                set_node_type(expr, create_type(TYPE_INT));
                 return 0;
             }
             free_type(at);
-            expr->node_type = create_type(TYPE_INT);
+            set_node_type(expr, create_type(TYPE_INT));
             return 1;
         }
 
         case AST_VA_START:
             // No children; opaque va_list cookie (ptr).
-            expr->node_type = create_type(TYPE_PTR);
+            set_node_type(expr, create_type(TYPE_PTR));
             return 1;
 
         case AST_VA_ARG:
@@ -6560,7 +6561,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count > 0) {
                 typecheck_expression(expr->children[0], table);
             }
-            expr->node_type = create_type(TYPE_VOID);
+            set_node_type(expr, create_type(TYPE_VOID));
             return 1;
 
         case AST_IF_EXPRESSION:
@@ -6688,7 +6689,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
             }
-            expr->node_type = create_type(TYPE_STRING);
+            set_node_type(expr, create_type(TYPE_STRING));
             return 1;
 
         case AST_CLOSURE: {
@@ -6881,7 +6882,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     expr->type = AST_IDENTIFIER;
                     free(expr->value);
                     expr->value = strdup(qualified);
-                    expr->node_type = clone_type(sym->type);
+                    set_node_type(expr, clone_type(sym->type));
                     return 1;
                 }
                 // The prefix IS a visible imported namespace, but `prefix.member`
@@ -6916,12 +6917,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
 
                 if (base_type && base_type->kind == TYPE_DURATION) {
                     if (expr->value && strcmp(expr->value, "ns") == 0) {
-                        expr->node_type = create_type(TYPE_INT64);
+                        set_node_type(expr, create_type(TYPE_INT64));
                     } else if (expr->value &&
                                (strcmp(expr->value, "us") == 0 || strcmp(expr->value, "ms") == 0 ||
                                 strcmp(expr->value, "s") == 0 || strcmp(expr->value, "m") == 0 ||
                                 strcmp(expr->value, "h") == 0 || strcmp(expr->value, "d") == 0)) {
-                        expr->node_type = create_type(TYPE_FLOAT);
+                        set_node_type(expr, create_type(TYPE_FLOAT));
                     } else {
                         char error_msg[256];
                         snprintf(error_msg, sizeof(error_msg),
@@ -6952,9 +6953,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (strcmp(expr->value, "type") == 0 ||
                         strcmp(expr->value, "sender_id") == 0 ||
                         strcmp(expr->value, "payload_int") == 0) {
-                        expr->node_type = create_type(TYPE_INT);
+                        set_node_type(expr, create_type(TYPE_INT));
                     } else if (strcmp(expr->value, "payload_ptr") == 0) {
-                        expr->node_type = create_type(TYPE_VOID);
+                        set_node_type(expr, create_type(TYPE_VOID));
                     }
                 }
                 // Handle actor ref member access — look up state field type from actor definition
@@ -6968,7 +6969,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             if (field && field->type == AST_STATE_DECLARATION &&
                                 field->value && strcmp(field->value, expr->value) == 0) {
                                 if (field->node_type && field->node_type->kind != TYPE_UNKNOWN) {
-                                    expr->node_type = clone_type(field->node_type);
+                                    set_node_type(expr, clone_type(field->node_type));
                                 }
                                 break;
                             }
@@ -7011,7 +7012,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 ct->compound_node = field;
                                 expr->node_type = ct;
                             } else if (field->node_type && field->node_type->kind != TYPE_UNKNOWN) {
-                                expr->node_type = clone_type(field->node_type);
+                                set_node_type(expr, clone_type(field->node_type));
                             }
                             found = 1;
                             break;
@@ -7065,7 +7066,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 ct->compound_node = field;
                                 expr->node_type = ct;
                             } else if (field->node_type && field->node_type->kind != TYPE_UNKNOWN) {
-                                expr->node_type = clone_type(field->node_type);
+                                set_node_type(expr, clone_type(field->node_type));
                             }
                             found = 1;
                             break;
@@ -7118,7 +7119,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // Validate field value types match declared field types
                 typecheck_message_constructor(message, table);
             }
-            expr->node_type = create_type(TYPE_VOID);
+            set_node_type(expr, create_type(TYPE_VOID));
             return 1;
         }
 
@@ -7496,7 +7497,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         if (call->child_count != 1) {
             type_error("heap.free(p) takes exactly one pointer argument",
                        call->line, call->column);
-            call->node_type = create_type(TYPE_VOID);
+            set_node_type(call, create_type(TYPE_VOID));
             return 0;
         }
         typecheck_expression(call->children[0], table);
@@ -7506,10 +7507,10 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         if (!ok) {
             type_error("heap.free(p), argument must be a pointer "
                        "(a `*T` from heap.new)", call->line, call->column);
-            call->node_type = create_type(TYPE_VOID);
+            set_node_type(call, create_type(TYPE_VOID));
             return 0;
         }
-        call->node_type = create_type(TYPE_VOID);
+        set_node_type(call, create_type(TYPE_VOID));
         return 1;
     }
 
@@ -7619,9 +7620,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             typecheck_expression(call->children[i], table);
         }
         if (symbol->type->return_type) {
-            call->node_type = clone_type(symbol->type->return_type);
+            set_node_type(call, clone_type(symbol->type->return_type));
         } else {
-            call->node_type = create_type(TYPE_VOID);
+            set_node_type(call, create_type(TYPE_VOID));
         }
         return 1;
     }
@@ -7643,7 +7644,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // Build a new child list: [fn_ref, original_args...]
         ASTNode* fn_ref = create_ast_node(AST_IDENTIFIER, call->value,
                                           call->line, call->column);
-        fn_ref->node_type = clone_type(symbol->type);
+        set_node_type(fn_ref, clone_type(symbol->type));
 
         int old_count = call->child_count;
         ASTNode** new_children = malloc(sizeof(ASTNode*) * (old_count + 1));
@@ -7671,9 +7672,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         // when known. Otherwise leave UNKNOWN — type inference may
         // refine it later.
         if (symbol->type->return_type) {
-            call->node_type = clone_type(symbol->type->return_type);
+            set_node_type(call, clone_type(symbol->type->return_type));
         } else {
-            call->node_type = create_type(TYPE_UNKNOWN);
+            set_node_type(call, create_type(TYPE_UNKNOWN));
         }
         return 1;
     }
@@ -7701,8 +7702,8 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 for (int i = 0; i < call->child_count; i++) {
                     typecheck_expression(call->children[i], table);
                 }
-                call->node_type = fsig->return_type
-                    ? clone_type(fsig->return_type) : create_type(TYPE_UNKNOWN);
+                set_node_type(call, fsig->return_type
+                    ? clone_type(fsig->return_type) : create_type(TYPE_UNKNOWN));
                 if (call->annotation) free(call->annotation);
                 call->annotation = strdup(is_ptr ? "fnfield_ptr" : "fnfield_val");
                 return 1;
@@ -8335,7 +8336,12 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         }
     }
 
-    call->node_type = symbol->type ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
+    /* Inference already stamped this node with a clone of the same function
+     * type, and a bare assignment orphans it: one leaked function type per
+     * call in the program, which was most of what the compiler leaked
+     * (#1667). */
+    set_node_type(call, symbol->type ? clone_type(symbol->type)
+                                     : create_type(TYPE_UNKNOWN));
 
     // select() infers its type from the first named arg's value
     if (call->value && strcmp(call->value, "select") == 0 &&
