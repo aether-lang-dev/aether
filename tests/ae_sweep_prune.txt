@@ -90,10 +90,12 @@ tests/integration/http_client_custom_ca/
 tests/integration/http_client_dechunk/
 tests/integration/http_client_forward_proxy/
 tests/integration/http_client_insecure_tls/
+tests/integration/http_client_keepalive/
 tests/integration/http_client_redirects/
 tests/integration/http_client_stream/
 tests/integration/http_client_stream_chunked/
 tests/integration/http_external_ptr/
+tests/integration/http_head_and_middleware/
 tests/integration/http_h2_concurrent_dispatch/
 tests/integration/http_middleware_d1/
 tests/integration/http_middleware_d2/

@@ -35,40 +35,48 @@
 // not (yet) a hand-tuned event-loop LB; it is the .ae convenience surface over
 // std.http.proxy, and it prioritizes being right and portable.
 //
-// Measured 2026-07-12 on an Intel N100 (4 cores), load gen + LB + backends co-
-// located, cores pinned (gen 0-1, LB+backends 2-3), oha at 150k target rps, 20s,
-// two nginx static backends. Head-to-head, same backends:
+// Connection reuse landed in both directions (#1653). Inbound, a response keeps
+// its connection open unless another connection is waiting for a worker; the
+// LB used to close every one of them because a middleware that answers, which
+// is how the reverse proxy answers, bypassed the keep-alive decision entirely.
+// Upstream, std.http.client now holds an idle connection per origin instead of
+// dialling per request.
 //
-//     nginx (reverse-proxy)   ~65,100 rps   100% success   p50 0.56ms  p99 1.12ms
-//     haproxy                 ~60,900 rps   100% success   p50 0.59ms  p99 1.18ms
-//     std.http.server.lb      ~24,400 rps    80% success   p50 0.84ms  p99 1.66ms
+// Measured 2026-08-19 on an Apple M1 Pro (8 cores), everything co-located, two
+// Aether backends, `ab -k`, 3000 requests per cell
+// (benchmarks/http/run_lb_reuse.sh, which is what produced this table):
 //
-// So ~2.5-2.7x behind best-in-class on throughput, AND dropping ~1 in 5 requests
-// at that load where nginx/haproxy held 100%. (Co-located client caps absolute
-// numbers; the RELATIVE ratio is the meaningful figure.)
+//     concurrency   upstream reuse off   upstream reuse on   gain
+//               4            13,423 rps          25,549 rps  1.90x
+//               8            14,502 rps          30,686 rps  2.12x
+//              20            12,783 rps          25,078 rps  1.96x
+//              50             9,662 rps          12,170 rps  1.26x
 //
-// SUSPECTED FINDABLE BUG (not confirmed): the 80% success rate under load is a red
-// flag that smells like a CONNECTION-HANDLING limit, NOT pure CPU saturation —
-// most likely NO UPSTREAM KEEPALIVE (a fresh backend dial per request, vs. nginx's
-// `keepalive 128` / haproxy's persistent server conns), and/or a listen-backlog /
-// fd ceiling. If so, the true ceiling is higher than 24k and the drop is fixable.
-// Verify before treating 24k as the real number: check whether std.http.proxy
-// reuses upstream connections; add a keepalive pool if not.
+// Zero failed requests at every point. The earlier note here recorded ~24,400
+// rps and an 80% success rate against nginx's ~65,100 on an Intel N100; those
+// numbers were taken on different hardware and are not comparable to the table
+// above, but the diagnosis they carried ("most likely NO UPSTREAM KEEPALIVE")
+// was right, and the dropped requests were connection churn.
+//
+// What limits it now is the thread-per-connection model: one worker owns a
+// connection for its lifetime, so a kept-alive connection is only kept while
+// no other connection is queued. Serving many idle-but-open clients needs
+// connection parking (park the fd in a poller, release the worker), which is
+// the next real step rather than more tuning of this path.
 //
 // DEVELOPMENT DIRECTIONS (in rough order of value):
-//   1. Fix the request drops — upstream keepalive/connection reuse; confirm the
-//      real saturation ceiling once requests aren't lost.
+//   1. Park idle keep-alive connections instead of holding a worker, so
+//      concurrency stops being bounded by the worker count (#1663).
 //   2. Reduce per-request overhead on the hot path (the picker mutates shared
 //      state under a lock/atomics; profile it under load).
 //   3. For throughput-critical deployments, aeo can ORCHESTRATE haproxy instead of
 //      this LB (same load_balancer(){} grammar, haproxy.cfg rendered by the driver)
-//      — keep this lib as the zero-dependency, works-anywhere default; use haproxy
+//      keep this lib as the zero-dependency, works-anywhere default; use haproxy
 //      when raw rps matters. (haproxy is a standalone daemon, not an embeddable
 //      library, so it is RUN, not linked.)
 //
-// Harness: aeo repo, examples/checks or a scratch lb.serve() binary + oha + the
-// nginx/haproxy configs used above. Re-run on a dedicated (non-co-located) box for
-// absolute numbers.
+// Harness: benchmarks/http/run_lb_reuse.sh (committed). Re-run on a dedicated
+// (non-co-located) box for absolute numbers.
 
 import std.http(http_server_create, http_server_set_host, http_server_start_raw,
     http_server_use_middleware, request_path, request_body,

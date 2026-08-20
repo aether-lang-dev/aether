@@ -1,0 +1,53 @@
+// Driver for the client connection-reuse test (#1653). The upstream accepts
+// one connection and then closes its listener, so the second and third
+// requests can only be answered over the connection the first one opened.
+
+import std.http
+import std.io
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if port == 0 {
+        fail("UPSTREAM_PORT not set")
+    }
+    url = "http://127.0.0.1:${port}/"
+
+    first, e1 = http.get(url)
+    if e1 != "" { fail("first request: ${e1}") }
+    if string.equals(first, "1") == 0 { fail("first response was '${first}', want '1'") }
+
+    if http.client_pool_idle_count() != 1 {
+        fail("the connection was not kept after a Content-Length response")
+    }
+
+    second, e2 = http.get(url)
+    if e2 != "" { fail("second request: ${e2} (the connection was not reused)") }
+    if string.equals(second, "2") == 0 {
+        fail("second response was '${second}', want '2' (a redial would restart the count)")
+    }
+
+    third, e3 = http.get(url)
+    if e3 != "" { fail("third request: ${e3}") }
+    if string.equals(third, "3") == 0 { fail("third response was '${third}', want '3'") }
+
+    // Drop the pooled connection: with the listener closed, a fresh dial has
+    // nowhere to land, which is what proves the three above were reuse.
+    http.client_pool_clear()
+    if http.client_pool_idle_count() != 0 {
+        fail("client_pool_clear left connections behind")
+    }
+    _, e4 = http.get(url)
+    if e4 == "" {
+        fail("a request after client_pool_clear succeeded, so the upstream was still dialable and the test proves nothing")
+    }
+
+    println("PASS: three requests over one connection, and none possible after the pool was cleared")
+}

@@ -28,4 +28,9 @@ void http_pool_submit(HttpConnectionPool* pool, int client_fd);
 // Drains the queue, joins every worker and frees the pool. Safe on NULL.
 void http_pool_destroy(HttpConnectionPool* pool);
 
+// Connections accepted and still waiting for a worker, across every pool in
+// the process. Non-zero means holding a connection open costs another one its
+// turn, which is what the keep-alive decision needs to know.
+int http_pool_pending(void);
+
 #endif // AETHER_HTTP_POOL_H

@@ -1,0 +1,26 @@
+// The load balancer under measurement. BACKENDS and PORT come from the
+// environment; NO_UPSTREAM_REUSE=1 turns the client's connection pool off so
+// the same binary measures both sides of the comparison.
+
+import std.http
+import std.http.server.lb
+import std.io
+import std.string
+
+main() {
+    port_s = io.getenv("PORT")
+    backends = io.getenv("BACKENDS")
+    if port_s == 0 || backends == 0 {
+        println("PORT and BACKENDS must be set")
+        return
+    }
+    no_reuse = io.getenv("NO_UPSTREAM_REUSE")
+    if no_reuse != 0 && string.length(no_reuse) > 0 {
+        http.client_pool_disable()
+    }
+    err = lb.serve("127.0.0.1", string.get_int(port_s), "round_robin", backends,
+        lb.no_health(), lb.no_breaker(), lb.no_cache())
+    if err != "" {
+        println("lb: ${err}")
+    }
+}

@@ -16,6 +16,10 @@ exports(
     http_response_status, http_response_body, http_response_headers,
     http_response_error, http_response_ok,
     get, get_with_timeout, post, put, delete,
+    http_client_pool_configure_raw, http_client_pool_clear_raw,
+    http_client_pool_idle_count_raw,
+    client_pool_configure, client_pool_disable, client_pool_clear,
+    client_pool_idle_count,
     http_server_create, http_server_bind_raw, http_server_port, http_server_start_raw,
     http_server_set_host, server_set_host,
     http_server_start_background_raw,
@@ -78,6 +82,19 @@ exports(
 // underlying HttpResponse struct (e.g. to inspect headers and body
 // together, or to implement custom retry logic). Most callers should
 // use the Go-style wrappers below.
+// Idle connection pool. The client keeps a connection open after a response
+// whose length was definite and reuses it for the next request to the same
+// origin, which is what HTTP/1.1 is designed for: a proxy or a polling client
+// otherwise pays a TCP (and TLS) handshake per request.
+//
+// Reuse is on by default. Connections are keyed by origin, the proxy actually
+// dialled, TLS, and the verification the caller asked for, so a pinned-CA or
+// verification-off connection is never handed to a request that did not ask
+// for it.
+extern http_client_pool_configure_raw(max_idle: int, max_per_host: int, idle_ns: long) -> string
+extern http_client_pool_clear_raw()
+extern http_client_pool_idle_count_raw() -> int
+
 extern http_get_raw(url: string) -> ptr
 // http.get with a per-call timeout. 0ns blocks forever
 // (matches http.get's default). Sub-second values are rounded UP to
@@ -116,6 +133,36 @@ extern string_concat(a: string, b: string) -> string
 // On failure, the value is a zero-value ("" or 0) and the error string
 // describes what went wrong. Errors include both transport-level
 // failures (DNS, connect, send) and non-2xx HTTP status codes.
+
+// Resize the idle connection pool: how many idle connections to keep in
+// total, how many of those may be to one origin, and how long an unused one
+// is kept before it is closed. The defaults are the call below.
+//
+//     http.client_pool_configure(64, 8, 15s)
+//
+// Keep the idle time under the upstream's own keep-alive timeout, or the
+// server closes connections while they sit here and every reuse costs a
+// retry.
+client_pool_configure(max_idle: int, max_per_host: int, idle: Duration) -> string {
+    return http_client_pool_configure_raw(max_idle, max_per_host, idle)
+}
+
+// Turn connection reuse off and close what is held. Every request then opens
+// its own connection, which is what the client did before reuse existed.
+client_pool_disable() {
+    _ = http_client_pool_configure_raw(0, -1, -1)
+}
+
+// Close every idle connection. Useful before measuring, and after a change
+// that makes held connections invalid (a new CA, a rotated proxy).
+client_pool_clear() {
+    http_client_pool_clear_raw()
+}
+
+// How many idle connections are held right now.
+client_pool_idle_count() -> int {
+    return http_client_pool_idle_count_raw()
+}
 
 // GET a URL and return the response body. Most common case.
 get(url: string) -> {
