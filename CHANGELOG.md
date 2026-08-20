@@ -13,6 +13,33 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A test killed by a signal now says so.** The sweep's shell-test runner
+  handled a timeout (`rc == 124`) but had no branch for a child that died on a
+  signal, so a SIGKILLed test produced no attribution at all — the run simply
+  stopped mid-list and the job reported `exit code 2304` with nothing to say
+  what had happened or where. That is `9 << 8`, a shell reporting SIGKILL, but
+  nothing in the output said so. The Windows leg hit exactly this and six
+  re-runs taught us nothing.
+
+  Failures in the 129–159 range are now reported as
+  `[SIGNAL] <test> - SIGKILL - killed outright; on a CI runner this is
+  normally the OOM/resource killer (rc=137)`, with SIGSEGV, SIGABRT and
+  SIGTERM named too, plus a matching phase label in the failure detail.
+
+  `AE_SWEEP_RESOURCE_TRACE=1` additionally prints available memory before each
+  shell test (`tests/scripts/sweep_resource_probe.sh`), off by default since it
+  costs a line per test. It reads `MemAvailable` where that exists and falls
+  back to `MemFree`: MSYS2 — the platform this was written to diagnose — ships
+  an eight-field `/proc/meminfo` with no `MemAvailable`, so keying on it alone
+  printed "(mem unknown)" on Windows and nowhere else. Verified on a real
+  MSYS2 box rather than assumed.
+
+  The probe lives in a tracked script rather than being generated into the
+  sweep's temporary runner: emitted through the Makefile's `printf` layer, its
+  awk arrived as `\&\&` and was broken on every platform while still printing
+  something.
+
+
 - **`ae build --target=wasm` failed on every installed tree**, looking for
   runtime sources one directory too high. `tc.root` means two different things
   — the repo root in dev mode, the install PREFIX otherwise — and the sources
