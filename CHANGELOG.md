@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Nine more std module tests sit beside the modules they cover** (#1584).
+  Third tranche, continuing #1634 and #1636: `bignum` (three files), `math`,
+  `path`, `xml`, `yaml`, `alloc` and `arena` move from `tests/regression/` into
+  `std/<module>/`. All nine are pure R100 renames — no test content changed.
+
+  Selected by what each test IMPORTS, not by what it is named, which is the
+  rule the earlier tranches set and the one that does the work here. Seven
+  name-matching candidates were left where they are: `test_collections_*`
+  import `list`/`map`/`string` and never `collections`, and
+  `test_file_io_char_return` imports `io`/`fs` rather than `file`. The
+  `test_map_*` trio is the more interesting exclusion — those do import
+  `std.map`, but they are heap-tracker and ownership tests that merely use a
+  map, carrying 27, 18 and 10 ownership terms against zero in every
+  module-API test moved here. Filing them under `std/map/` would misattribute
+  them.
+
+  Verified as a rename rather than assumed: the sweep reports the same 977
+  tests with the same three environmental failures before and after, and a
+  set-difference on test NAMES (not counts) shows exactly nine identifiers
+  retiring and exactly nine appearing, one-to-one — a matching total alone
+  would also be consistent with losing one test and gaining another.
+
+  Census after this tranche: 36 of 71 std modules have a co-located test.
+
 ## [0.558.0]
 
 ### Changed
