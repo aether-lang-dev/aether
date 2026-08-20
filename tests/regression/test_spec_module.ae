@@ -57,6 +57,18 @@ main() {
                 spec.assert_null(null, "null is null")
                 spec.assert_not_null(fw, "fw non-null")
             }
+
+            // Failure-path matchers for the (value, err) convention: err is
+            // "" on success and a message on failure, so assert_err wants a
+            // non-empty string and assert_ok an empty one. All-green by
+            // construction like the rest of this file, so what is pinned here
+            // is that each matcher ACCEPTS the outcome it is meant to accept.
+            spec.it("failure-path matchers") callback {
+                spec.assert_err("boom", "a non-empty err is an error")
+                spec.assert_err_contains("unexpected token at 3", "unexpected token",
+                    "and the reason can be pinned by substring")
+                spec.assert_ok("", "an empty err is success")
+            }
         }
 
         spec.describe("fluent facade") {
