@@ -1153,12 +1153,13 @@ test-ae: compiler ae stdlib
 	xargs -P $(NPROC) -I{} "$$script" "{}" "$$tmpdir" "$$root"; \
 	sh_script="$$tmpdir/run_sh_dir.sh"; \
 	printf '#!/bin/sh\n'                                                                                          > "$$sh_script"; \
-	printf 'dir="$$1"; tmpdir="$$2"\n'                                                                            >> "$$sh_script"; \
+	printf 'dir="$$1"; tmpdir="$$2"; root="$$3"\n'                                                                >> "$$sh_script"; \
 	printf 'if command -v timeout >/dev/null 2>&1; then TO="timeout $${AE_SH_TEST_TIMEOUT:-180}"; \\\n'          >> "$$sh_script"; \
 	printf 'elif command -v gtimeout >/dev/null 2>&1; then TO="gtimeout $${AE_SH_TEST_TIMEOUT:-180}"; \\\n'      >> "$$sh_script"; \
 	printf 'else TO=""; fi\n'                                                                                     >> "$$sh_script"; \
 	printf 'for sh_test in $$(find "$$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort); do\n'              >> "$$sh_script"; \
 	printf '  name=$$(echo "$$sh_test" | sed "s|tests/||;s|/|_|g;s|\\.sh$$||")\n'                              >> "$$sh_script"; \
+	printf '  sh "$$root/tests/scripts/sweep_resource_probe.sh" "$$name" 2>/dev/null\n'                           >> "$$sh_script"; \
 	printf '  $$TO bash "$$sh_test" >"$$tmpdir/run_$$name.out" 2>"$$tmpdir/run_$$name.err"; sh_rc=$$?\n'         >> "$$sh_script"; \
 	printf '  if [ $$sh_rc -eq 0 ]; then\n'                                                                       >> "$$sh_script"; \
 	printf '    if grep -q "\\[SKIP-WIN\\]" "$$tmpdir/run_$$name.out" 2>/dev/null; then\n'                        >> "$$sh_script"; \
@@ -1170,6 +1171,18 @@ test-ae: compiler ae stdlib
 	printf '  elif [ $$sh_rc -eq 124 ]; then\n'                                                                   >> "$$sh_script"; \
 	printf '    echo "  [TIMEOUT] $$name (shell test exceeded $${AE_SH_TEST_TIMEOUT:-180}s)"\n'                   >> "$$sh_script"; \
 	printf '    printf timeout > "$$tmpdir/phase_$$name.txt"\n'                                                   >> "$$sh_script"; \
+	printf '    touch "$$tmpdir/FAIL_$$name"\n'                                                                   >> "$$sh_script"; \
+	printf '  elif [ $$sh_rc -gt 128 ] && [ $$sh_rc -lt 160 ]; then\n'                                            >> "$$sh_script"; \
+	printf '    sig=$$((sh_rc - 128))\n'                                                                          >> "$$sh_script"; \
+	printf '    case $$sig in\n'                                                                                  >> "$$sh_script"; \
+	printf '      9)  what="SIGKILL - killed outright; on a CI runner this is normally the OOM/resource killer" ;;\n' >> "$$sh_script"; \
+	printf '      11) what="SIGSEGV - segfault" ;;\n'                                                             >> "$$sh_script"; \
+	printf '      6)  what="SIGABRT - abort()/assert" ;;\n'                                                        >> "$$sh_script"; \
+	printf '      15) what="SIGTERM - asked to stop" ;;\n'                                                         >> "$$sh_script"; \
+	printf '      *)  what="signal $$sig" ;;\n'                                                                   >> "$$sh_script"; \
+	printf '    esac\n'                                                                                           >> "$$sh_script"; \
+	printf '    echo "  [SIGNAL] $$name - $$what (rc=$$sh_rc)"\n'                                                 >> "$$sh_script"; \
+	printf '    printf signal > "$$tmpdir/phase_$$name.txt"\n'                                                    >> "$$sh_script"; \
 	printf '    touch "$$tmpdir/FAIL_$$name"\n'                                                                   >> "$$sh_script"; \
 	printf '  else\n'                                                                                             >> "$$sh_script"; \
 	printf '    echo "  [FAIL] $$name (shell test)"\n'                                                            >> "$$sh_script"; \
@@ -1186,7 +1199,7 @@ test-ae: compiler ae stdlib
 	fi; \
 	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
 	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
-	    | xargs -P $$sh_nproc -I{} "$$sh_script" "{}" "$$tmpdir"; \
+	    | xargs -P $$sh_nproc -I{} "$$sh_script" "{}" "$$tmpdir" "$$root"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	total=$$((passed + failed)); \
@@ -1201,6 +1214,7 @@ test-ae: compiler ae stdlib
 				runtime) rc=$$(cat "$$tmpdir/rc_$$fname.txt" 2>/dev/null || echo '?'); \
 				         echo "--- $$fname (runtime error, exit $$rc) ---" ;; \
 				timeout) echo "--- $$fname (TIMED OUT — hung; killed by per-test timeout) ---" ;; \
+				signal)  echo "--- $$fname (KILLED BY A SIGNAL — see the [SIGNAL] line above) ---" ;; \
 				shell)   echo "--- $$fname (shell test) ---" ;; \
 				*)       echo "--- $$fname ---" ;; \
 			esac; \

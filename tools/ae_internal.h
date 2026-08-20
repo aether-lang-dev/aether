@@ -13,7 +13,18 @@
 #include "../compiler/aether_lib_path.h"
 
 typedef struct {
-    char root[1024];           // Aether root directory
+    char root[1024];           // Aether root directory (dev: repo root;
+                               // installed: the PREFIX, e.g. ~/.local)
+    /* Where the runtime/std SOURCES actually live. Dev mode: same as root.
+     * Installed: root + "/share/aether", because install.sh puts them there.
+     *
+     * This exists because `root` alone is ambiguous and every consumer had to
+     * remember to append share/aether/ in installed mode. The native path did;
+     * the --target=wasm source and include lists did not, so an installed `ae`
+     * looked for every runtime .c one directory too high and emcc reported a
+     * wall of "No such file or directory". Resolving it once removes the
+     * question from the call sites. */
+    char src_root[1024];
     char compiler[2048];       // Path to aetherc (root + /bin/aetherc = up to 1036 bytes)
     char lib[1024];            // Path to libaether.a (if exists)
     char*  include_flags;      // -I flags for GCC. Heap-grown: a fixed ceiling

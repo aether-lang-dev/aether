@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **A test killed by a signal now says so.** The sweep's shell-test runner
+  handled a timeout (`rc == 124`) but had no branch for a child that died on a
+  signal, so a SIGKILLed test produced no attribution at all — the run simply
+  stopped mid-list and the job reported `exit code 2304` with nothing to say
+  what had happened or where. That is `9 << 8`, a shell reporting SIGKILL, but
+  nothing in the output said so. The Windows leg hit exactly this and six
+  re-runs taught us nothing.
+
+  Failures in the 129–159 range are now reported as
+  `[SIGNAL] <test> - SIGKILL - killed outright; on a CI runner this is
+  normally the OOM/resource killer (rc=137)`, with SIGSEGV, SIGABRT and
+  SIGTERM named too, plus a matching phase label in the failure detail.
+
+  `AE_SWEEP_RESOURCE_TRACE=1` additionally prints available memory before each
+  shell test (`tests/scripts/sweep_resource_probe.sh`), off by default since it
+  costs a line per test. It reads `MemAvailable` where that exists and falls
+  back to `MemFree`: MSYS2 — the platform this was written to diagnose — ships
+  an eight-field `/proc/meminfo` with no `MemAvailable`, so keying on it alone
+  printed "(mem unknown)" on Windows and nowhere else. Verified on a real
+  MSYS2 box rather than assumed.
+
+  The probe lives in a tracked script rather than being generated into the
+  sweep's temporary runner: emitted through the Makefile's `printf` layer, its
+  awk arrived as `\&\&` and was broken on every platform while still printing
+  something.
+
+
+- **`ae build --target=wasm` failed on every installed tree**, looking for
+  runtime sources one directory too high. `tc.root` means two different things
+  — the repo root in dev mode, the install PREFIX otherwise — and the sources
+  sit directly under it only in the first case; installed, they live under
+  `share/aether/`. The native build path appended that itself, but the wasm
+  source and include lists used a bare `tc.root`, so an installed `ae`
+  composed `<prefix>/runtime/...` and emcc reported every runtime file
+  missing. A dev tree cannot reproduce it, which is why CI stayed green while
+  the feature was broken for everyone who had installed rather than cloned.
+
+  Rather than patch the two wasm call sites, the source root is now resolved
+  ONCE (`tc.src_root`) beside where `tc.root` and `dev_mode` are settled, so a
+  consumer can no longer get it wrong. That surfaced a third site the reporter
+  had suspected but not pursued: `--emit=lib`'s lookup of
+  `runtime/aether_config.c` was also unconditional, and on an installed tree
+  simply found nothing — omitting the translation unit **silently**, with no
+  error at all. Worse than the wasm case, and correspondingly unreported.
+
+  The other 43 `tc.root` uses were checked and are correct: the bare
+  `%s/runtime` and `%s/std` ones sit inside `if (tc.dev_mode)`, and the cross
+  path (`ae_cross.c`) tries both layouts explicitly — which is why
+  `--target=aarch64-linux` worked from the same install that `--target=wasm`
+  could not.
+
+  The regression test installs to a temporary prefix and drives the INSTALLED
+  binary, because nothing else can catch this class of bug. It needs no emcc: a
+  stub answers `--version` and then asserts every `.c` it is handed exists,
+  which is exactly the property at issue — the generated C was always fine.
+
 ## [0.556.0]
 
 ### Fixed
