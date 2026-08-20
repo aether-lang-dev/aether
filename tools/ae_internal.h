@@ -118,6 +118,17 @@ const char* cross_apple_sdk(const char* triple);
 bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz);
 /* #1648: compile one generated .c to a target-format object (zig cc -c),
  * without assembling or linking the runtime. Backs `--emit=obj --target=`. */
+/* The --export=/--exports= list for a wasm --emit=lib link, comma-separated
+ * and empty when the caller gave none (in which case the catalog is used).
+ * Owned by ae.c. */
+extern char g_wasm_exports[8192];
+
+/* Export NAMES (mangled, newline-separated) for a wasm --emit=lib. Shared by
+ * both wasm backends so the zig (-Wl,--export=) and emcc
+ * (-sEXPORTED_FUNCTIONS) spellings cannot derive different sets. */
+int wasm_collect_export_names(const char* c_file, const char* explicit_list,
+                              char* out, size_t outsz);
+
 int  run_cross_compile_obj(const char* c_file, const char* obj_file,
                            bool optimize, const char* ztriple);
 int  run_cross_build(const char* c_file, const char* out_file,
