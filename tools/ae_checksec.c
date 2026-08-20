@@ -27,6 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
 #define CHECKSEC_MAX_FILE (256u * 1024u * 1024u)
 
@@ -204,9 +205,14 @@ static int inspect_pe(const unsigned char* b, size_t len, Checksec* out) {
     if (memcmp(b + pe_off, "PE\0\0", 4) != 0) return -1;
     out->format = "PE";
 
+    /* DllCharacteristics sits at optional-header offset 0x46 in both PE32 and
+     * PE32+: the two layouts diverge only around ImageBase (4 bytes vs 8, with
+     * PE32's BaseOfData making up the difference) and realign from
+     * SectionAlignment onward. The magic is still read, to reject an optional
+     * header that is neither. */
     uint16_t opt_magic = rd16(b + pe_off + 0x18, 0);
-    int plus = (opt_magic == 0x20b);
-    size_t dllchar_off = pe_off + 0x18 + (plus ? 0x46 : 0x46);
+    if (opt_magic != 0x10b && opt_magic != 0x20b) return -1;
+    size_t dllchar_off = pe_off + 0x18 + 0x46;
     if (dllchar_off + 2 > len) return -1;
     uint16_t dllchar = rd16(b + dllchar_off, 0);
 
@@ -220,10 +226,15 @@ static int inspect_pe(const unsigned char* b, size_t len, Checksec* out) {
     return 0;
 }
 
+/* Distinguishes "could not read that file" from "read it, and it is not a
+ * binary this understands". Reporting both as the second sent a Windows CI run
+ * hunting a format bug when the path simply had no .exe on the end. */
+#define CHECKSEC_UNREADABLE (-2)
+
 static int inspect(const char* path, Checksec* out) {
     size_t len = 0;
     unsigned char* b = read_file(path, &len);
-    if (!b) return -1;
+    if (!b) return CHECKSEC_UNREADABLE;
     memset(out, 0, sizeof(*out));
 
     int rc = -1;
@@ -299,8 +310,13 @@ int cmd_checksec(int argc, char** argv) {
     }
 
     Checksec c;
-    if (inspect(path, &c) != 0) {
-        fprintf(stderr, "ae checksec: '%s' is not a readable ELF, Mach-O or PE binary\n", path);
+    int rc = inspect(path, &c);
+    if (rc == CHECKSEC_UNREADABLE) {
+        fprintf(stderr, "ae checksec: cannot read '%s': %s\n", path, strerror(errno));
+        return 2;
+    }
+    if (rc != 0) {
+        fprintf(stderr, "ae checksec: '%s' is not an ELF, Mach-O or PE binary\n", path);
         return 2;
     }
 

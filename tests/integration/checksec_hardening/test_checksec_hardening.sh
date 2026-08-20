@@ -44,10 +44,16 @@ if ! "$AE" build "$TMP/probe.ae" -o "$TMP/probe" >"$TMP/build.log" 2>&1; then
     fail "the probe did not build"
 fi
 
-# Hardening must not have broken the program.
-[ "$("$TMP/probe")" = "v=21" ] || fail "the hardened probe printed '$("$TMP/probe")', expected 'v=21'"
+# Windows names the artifact probe.exe whatever -o asked for, so ask the
+# filesystem which one the build wrote rather than assuming.
+PROBE="$TMP/probe"
+[ -f "$PROBE" ] || PROBE="$TMP/probe.exe"
+[ -f "$PROBE" ] || fail "the build reported success but wrote neither $TMP/probe nor $TMP/probe.exe"
 
-report="$("$AE" checksec "$TMP/probe" 2>&1)" || fail "ae checksec failed: $report"
+# Hardening must not have broken the program.
+[ "$("$PROBE")" = "v=21" ] || fail "the hardened probe printed '$("$PROBE")', expected 'v=21'"
+
+report="$("$AE" checksec "$PROBE" 2>&1)" || fail "ae checksec failed: $report"
 printf '%s' "$report" | grep -q "PIE" || fail "checksec printed no report: $report"
 
 check_prop() {   # check_prop <label> <expected-word>
@@ -83,11 +89,11 @@ esac
 # The gate agrees with the report.
 require="pie,nx,canary"
 [ "$fortify" = "yes" ] && require="$require,fortify"
-"$AE" checksec --require "$require" "$TMP/probe" >/dev/null 2>&1 \
+"$AE" checksec --require "$require" "$PROBE" >/dev/null 2>&1 \
     || fail "--require rejected a binary the report says is hardened"
 
 # And the gate is a gate: something the binary cannot have must fail it.
-if "$AE" checksec --require stripped "$TMP/probe" >/dev/null 2>&1; then
+if "$AE" checksec --require stripped "$PROBE" >/dev/null 2>&1; then
     fail "--require stripped passed on an unstripped binary, so the gate proves nothing"
 fi
 
