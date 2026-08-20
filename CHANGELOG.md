@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The compiler leak gate reported success without a leak detector.** It
+  greps each compile for a LeakSanitizer report, so on an ordinary build it
+  found nothing to find and passed, which reads as evidence while checking
+  nothing. It now skips explicitly unless the compiler is a sanitizer build
+  (`ASAN_OPTIONS=help=1` makes one print its flag list and an ordinary one
+  print nothing), and fails rather than skips when it cannot compile its probe
+  at all. Both directions checked in a container: green on the sanitizer
+  build, red with the constant-folding leak put back.
+
 ## [0.555.0]
 
 ### Fixed
