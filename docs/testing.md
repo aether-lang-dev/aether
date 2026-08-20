@@ -94,13 +94,40 @@ spec.assert_eq(count, 4, "four jobs")          // int equality
 spec.assert_not_eq(a, b, "distinct")
 spec.assert_gt(size, 0, "non-empty")
 spec.assert_true(ok, "the thing worked")
-spec.assert_false(err, "no error")
+spec.assert_false(flag, "flag is clear")
 spec.assert_str_eq(name, "Ada", "user name")   // exact string equality
 spec.assert_str_eq_diff(got, want, "payload")  // caret under first diff
 spec.assert_contains(body, "world", "greeting")
 spec.assert_null(ptr, "was freed")
 spec.assert_not_null(user, "was loaded")
 ```
+
+### Asserting on the failure path
+
+`std` returns `(value, err)` throughout — `err` is `""` on success and a
+message on failure. Three matchers state that outcome directly:
+
+```aether,fragment
+v, err = thing.parse(input)
+spec.assert_ok(err, "parse should accept good input")
+
+v, err = thing.parse(bad)
+spec.assert_err(err, "parse should reject bad input")
+spec.assert_err_contains(err, "unexpected token", "and should say why")
+```
+
+Prefer these over `assert_true(err != "", ...)`. That form reports only
+"expected true" and **discards the error string**, so a failing test tells you
+nothing about what went wrong; `assert_ok` prints the error it got. It also
+reads as a mechanism rather than an outcome.
+
+`assert_err_contains` matches a substring on purpose: a test pins the *reason*
+without pinning the exact wording, so rephrasing a message does not break
+every spec that asserts on it.
+
+`assert_ok` is worth reaching for even when the call "obviously" succeeds — it
+is the one people omit, and a suite with only error-path assertions stays green
+while the success path rots.
 
 `assert_str_eq_diff` aligns the two values and points a caret at the first
 differing byte — reach for it when a plain "expected X got Y" would bury

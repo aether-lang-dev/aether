@@ -13,6 +13,35 @@ version number before tagging the release.
 
 ### Added
 
+- **`std.spec` can assert on the failure path** — `assert_err`,
+  `assert_err_contains` and `assert_ok`, for the `(value, err)` convention std
+  uses throughout. Asked for by the html-sanitizer line while porting a C#
+  suite, but the gap is Aether's own: the error arm is the one most likely to
+  be wrong and least likely to be tested, and the matcher set was entirely
+  success-path.
+
+  The workaround was `assert_true(err != "", ...)`, which is worse than it
+  looks. It reports "expected true" and **discards the error string**, so a
+  failing test says nothing about what went wrong — the reporter hit exactly
+  this, with 71 of 101 failing tests undiagnosable until they swapped a
+  boolean check for one that printed both sides. `assert_ok(err, ...)` prints
+  the error it got.
+
+  `assert_err_contains` matches a substring deliberately: a test pins the
+  reason without pinning the exact wording, so rephrasing a message does not
+  break every spec that asserts on it.
+
+  `assert_ok` earns its place by being the one people omit. With no positive
+  form to reach for, error-path tests get written and success-path ones do
+  not, and a function that starts failing everywhere still passes its suite.
+  `docs/testing.md` gained a section on this — and lost an example that taught
+  the very anti-pattern these replace (`assert_false(err, "no error")`).
+
+  `assert_panics` is deliberately NOT here. The ask records it as a separate,
+  larger piece — it needs the harness to survive a panic, and interacts with
+  `--no-contracts` and with wasi, where `AETHER_SIGLONGJMP` is `abort()` and
+  cannot unwind at all.
+
 - **`ae checksec <binary>`: what a built artifact's hardening actually is**
   (#1646). The toolchain can say what it asked for; only the file says what it
   got. It reads ELF program and dynamic headers, Mach-O load commands and PE
