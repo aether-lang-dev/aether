@@ -25,24 +25,27 @@ if [ ! -x "$AETHERC" ]; then
     exit 0
 fi
 
-# Refuse to pass silently on a build with no leak detector: a green result
-# here would otherwise mean nothing on macOS or on a non-sanitized build.
+# Refuse to report success without a leak detector. A sanitized binary prints
+# its flag list for ASAN_OPTIONS=help=1; an ordinary one prints nothing, and
+# every check below would then pass by finding no report to find, which is
+# worse than not running at all.
+if ! ASAN_OPTIONS=help=1 "$AETHERC" --version 2>&1 | grep -q "AddressSanitizer"; then
+    echo "  [SKIP] compiler leaks: $AETHERC is not a LeakSanitizer build"
+    exit 0
+fi
+
 probe_dir="$(mktemp -d)"
 cat > "$probe_dir/probe.ae" <<'AEOF'
 main() {
-    leaked = "x"
-    println("${leaked}")
+    println("probe")
 }
 AEOF
 if ! ASAN_OPTIONS=detect_leaks=1 "$AETHERC" "$probe_dir/probe.ae" "$probe_dir/probe.c" \
         >"$probe_dir/probe.log" 2>&1; then
-    echo "  [SKIP] compiler leaks: $AETHERC cannot compile a trivial program"
-    sed 's/^/        /' "$probe_dir/probe.log" | head -5
+    echo "  [FAIL] compiler leaks: $AETHERC cannot compile a trivial program"
+    sed 's/^/        /' "$probe_dir/probe.log" | head -8
     rm -rf "$probe_dir"
-    exit 0
-fi
-if ! grep -q "detect_leaks" "$probe_dir/probe.log" 2>/dev/null; then
-    : # a clean run prints nothing; the detector check below covers the rest
+    exit 1
 fi
 rm -rf "$probe_dir"
 

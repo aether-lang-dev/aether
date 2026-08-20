@@ -1230,8 +1230,25 @@ found_root:
     setenv("AETHER_HOME", tc.root, 0);
 #endif
 
+    /* Resolve the SOURCE root once, now that root and dev_mode are settled.
+     *
+     * `tc.root` means two different things: the repo root in dev mode, and the
+     * install PREFIX otherwise. The runtime/std sources sit directly under it
+     * in the first case and under share/aether/ in the second, so every
+     * consumer had to remember the difference. The native build path appended
+     * share/aether/ itself; the --target=wasm source and include lists used a
+     * bare tc.root, so an installed `ae` composed <prefix>/runtime/... and
+     * emcc reported every runtime file missing. Deriving it here means a call
+     * site can no longer get it wrong. */
+    if (tc.dev_mode) {
+        snprintf(tc.src_root, sizeof(tc.src_root), "%s", tc.root);
+    } else {
+        snprintf(tc.src_root, sizeof(tc.src_root), "%s/share/aether", tc.root);
+    }
+
     if (tc.verbose) {
         fprintf(stderr, "[toolchain] root: %s\n", tc.root);
+        fprintf(stderr, "[toolchain] src_root: %s\n", tc.src_root);
         fprintf(stderr, "[toolchain] compiler: %s\n", tc.compiler);
         fprintf(stderr, "[toolchain] dev_mode: %s\n", tc.dev_mode ? "yes" : "no");
     }
@@ -2339,7 +2356,12 @@ void build_gcc_cmd(char* cmd, size_t size,
     char config_c[2056] = "";
     if (g_emit_lib) {
         char candidate[2048];
-        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.root);
+        /* src_root: this is a SOURCE path, and it is not inside a dev_mode
+         * branch, so a bare tc.root silently found nothing on an installed
+         * tree — the same defect as the wasm list, reached from --emit=lib.
+         * It failed quietly here (path_exists simply returns false and the
+         * config TU is omitted) rather than loudly as emcc did. */
+        snprintf(candidate, sizeof(candidate), "%s/runtime/aether_config.c", tc.src_root);
         if (path_exists(candidate)) {
             snprintf(config_c, sizeof(config_c), " \"%s\"", candidate);
         }
@@ -2489,7 +2511,9 @@ static int build_wasm_cmd(char* cmd, size_t size,
         includes[0] = '\0';
         for (int i = 0; include_dirs[i]; i++) {
             char flag[2048];
-            snprintf(flag, sizeof(flag), "-I%s/%s ", tc.root, include_dirs[i]);
+            /* src_root, not root: installed trees keep these under
+             * share/aether/ (see the src_root derivation). */
+            snprintf(flag, sizeof(flag), "-I%s/%s ", tc.src_root, include_dirs[i]);
             strncat(includes, flag, sizeof(includes) - strlen(includes) - 1);
         }
     }
@@ -2542,7 +2566,9 @@ static int build_wasm_cmd(char* cmd, size_t size,
     runtime[0] = '\0';
     for (int i = 0; wasm_runtime_files[i]; i++) {
         char path[2048];
-        snprintf(path, sizeof(path), "%s/%s ", tc.root, wasm_runtime_files[i]);
+        /* src_root, not root — this bare tc.root was the bug: on an installed
+         * tree it composed <prefix>/runtime/... and emcc failed on every file. */
+        snprintf(path, sizeof(path), "%s/%s ", tc.src_root, wasm_runtime_files[i]);
         strncat(runtime, path, sizeof(runtime) - strlen(runtime) - 1);
     }
 
