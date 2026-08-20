@@ -45,15 +45,17 @@ fail() { echo "  [FAIL] $1"; [ -f "$TMPDIR/srv.log" ] && head -20 "$TMPDIR/srv.l
 AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/server.ae" >"$TMPDIR/srv.log" 2>&1 &
 SRV_PID=$!
 
-deadline=$(($(date +%s) + 15))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    grep -q READY "$TMPDIR/srv.log" 2>/dev/null && break
-    kill -0 "$SRV_PID" 2>/dev/null || fail "server died"
+URL="http://127.0.0.1:18107"
+
+# Wait for the port to answer, not for a line in the log: the server prints
+# READY before it binds, so a port left busy by an earlier run would otherwise
+# show up as a confusing failure in the first assertion instead of here.
+deadline=$(($(date +%s) + 20))
+until curl --silent --max-time 2 -o /dev/null "$URL/" 2>/dev/null; do
+    kill -0 "$SRV_PID" 2>/dev/null || fail "server exited before it served"
+    [ "$(date +%s)" -lt "$deadline" ] || fail "server never answered on 18107 (port already in use?)"
     sleep 0.1
 done
-sleep 0.3
-
-URL="http://127.0.0.1:18107"
 
 # 1. HEAD on a GET-only route: 200, the Content-Length GET would have sent,
 #    and not one byte of body.
@@ -69,26 +71,32 @@ get_bytes="$(curl --silent --show-error --max-time 5 -o /dev/null \
     -w '%{size_download}' "$URL/")" || fail "GET request failed"
 [ "$get_bytes" = "13" ] || fail "GET returned $get_bytes bytes, expected 13"
 
-# 2. HEAD then GET on ONE connection. A body on the HEAD response would be
-#    read as the start of the GET response, so this fails if 1. regresses.
-curl --silent --show-error --max-time 5 -v \
-        -I "$URL/" -o "$TMPDIR/p1" \
-        --next "$URL/" -o "$TMPDIR/p2" 2>"$TMPDIR/pipe.err" \
-    || fail "HEAD-then-GET on one connection failed"
-grep -q "Re-using existing connection" "$TMPDIR/pipe.err" \
-    || fail "curl did not reuse the connection for the second request"
-[ "$(cat "$TMPDIR/p2")" = "body-from-get" ] \
-    || fail "the GET after a HEAD read '$(cat "$TMPDIR/p2")'"
+# 2 and 3. HEAD, then GET, then a middleware-answered GET, all on ONE
+#    connection, spoken directly rather than through a client's verbose
+#    output. A body on the HEAD response desynchronises the stream, so the
+#    second response would be wrong or absent; a close after any response
+#    ends the exchange early and the helper says so.
+cc "$SCRIPT_DIR/pipeline_client.c" -o "$TMPDIR/pipeline" 2>"$TMPDIR/cc.log" \
+    || { sed 's/^/        /' "$TMPDIR/cc.log" | head -5; fail "could not compile pipeline_client.c"; }
 
-# 3. A middleware-answered response keeps the connection open.
-curl --silent --show-error --max-time 5 -v \
-        "$URL/mw" -o "$TMPDIR/m1" \
-        "$URL/mw" -o "$TMPDIR/m2" 2>"$TMPDIR/mw.err" \
-    || fail "middleware requests failed"
-[ "$(cat "$TMPDIR/m1")" = "answered-by-middleware" ] || fail "middleware body wrong"
-grep -qi "^< Connection: keep-alive" "$TMPDIR/mw.err" \
-    || fail "a middleware-answered response did not keep the connection open"
-grep -q "Re-using existing connection" "$TMPDIR/mw.err" \
-    || fail "the second middleware request opened a new connection"
+if ! "$TMPDIR/pipeline" 127.0.0.1 18107 >"$TMPDIR/pipe.out" 2>"$TMPDIR/pipe.err"; then
+    sed 's/^/        /' "$TMPDIR/pipe.err" | head -5
+    fail "the three requests did not complete on one connection"
+fi
 
-echo "  [PASS] http_head_and_middleware: HEAD sends no body, falls back to GET, and a middleware answer keeps the connection"
+grep -q "^1 status=200 clen=13 body=$" "$TMPDIR/pipe.out" \
+    || fail "HEAD on the shared connection: $(sed -n 1p "$TMPDIR/pipe.out")"
+grep -q "^2 status=200 clen=13 body=body-from-get$" "$TMPDIR/pipe.out" \
+    || fail "the GET after a HEAD read: $(sed -n 2p "$TMPDIR/pipe.out")"
+grep -q "^3 status=200 clen=22 body=answered-by-middleware$" "$TMPDIR/pipe.out" \
+    || fail "the middleware-answered request read: $(sed -n 3p "$TMPDIR/pipe.out")"
+
+# The middleware answer must also SAY it is keeping the connection, since that
+# is what a client acts on.
+curl --silent --show-error --max-time 5 -D "$TMPDIR/mw.hdr" -o "$TMPDIR/mw.body" "$URL/mw" \
+    || fail "middleware request failed"
+[ "$(cat "$TMPDIR/mw.body")" = "answered-by-middleware" ] || fail "middleware body wrong"
+grep -qi "^Connection: keep-alive" "$TMPDIR/mw.hdr" \
+    || fail "a middleware-answered response did not advertise keep-alive"
+
+echo "  [PASS] http_head_and_middleware: HEAD sends no body, falls back to GET, and three requests share one connection"
