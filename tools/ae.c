@@ -236,6 +236,42 @@ static void ae_define_append(const char* name) {
 static bool g_emit_exe = true;
 static bool g_emit_lib = false;
 static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no gcc
+
+/* Explicit wasm export list, from --export=<sym> (repeatable) or
+ * --exports=a,b,c. REPLACES the catalog-derived set when present rather than
+ * adding to it.
+ *
+ * The default for a wasm --emit=lib is every function the module's catalog
+ * declares — the module already states its own ABI, so no flag is needed for
+ * the common case. This override exists because a wasm surface can be a
+ * deliberate SUBSET of the full ABI: html-sanitizer defines 34 hs_embed_*
+ * functions and exports 16 of them to wasm, omitting the callback registrars
+ * (they take C function pointers, which need a table/trampoline to cross the
+ * boundary) and the DOM-walk accessors (out of scope for a browser build).
+ * Exporting all 34 would bloat the module and publish an ABI that cannot be
+ * called from JS.
+ *
+ * Replace-only, not additive: a consumer enumerates the exact set it wants,
+ * and "all minus some" cannot be expressed by adding. */
+char g_wasm_exports[8192] = "";   /* extern: read by ae_cross.c */
+/* Set for a wasm --emit=lib so build_aetherc_cmd also asks for the catalog;
+ * without it the export set has no source and the module ships only
+ * malloc/free. */
+static bool g_wasm_lib_wants_catalog = false;
+static int  g_export_count = 0;
+
+static void add_export_sym(const char* sym) {
+    if (!sym || !*sym) return;
+    size_t used = strlen(g_wasm_exports);
+    int w = snprintf(g_wasm_exports + used, sizeof(g_wasm_exports) - used,
+                     "%s%s", used ? "," : "", sym);
+    if (w < 0 || (size_t)w >= sizeof(g_wasm_exports) - used) {
+        fprintf(stderr, "warning: export list full; '%s' was dropped\n", sym);
+        g_wasm_exports[used] = '\0';
+        return;
+    }
+    g_export_count++;
+}
 /* #1243: --emit=obj compiles straight to a .o. A build that checks in only
  * handwritten Aether can then treat the generated C as a build artifact in a
  * temp dir, instead of committing it and risking a plain `make` linking stale
@@ -345,7 +381,10 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * strips a trailing .c and appends .catalog.json. */
     char csrc_hdr_flag[PATH_MAX + 32] = "";
     char csrc_json_flag[PATH_MAX + 40] = "";
-    if (g_emit_csrc && output) {
+    /* A wasm --emit=lib needs the catalog too, not just --emit=csrc: it is
+     * where the export set comes from when the caller gives no --export=
+     * flags, and it is where the aether_ mangling is already resolved. */
+    if ((g_emit_csrc || g_wasm_lib_wants_catalog) && output) {
         char hpath[PATH_MAX];
         snprintf(hpath, sizeof(hpath), "%s", output);
         size_t hl = strlen(hpath);
@@ -2572,12 +2611,38 @@ static int build_wasm_cmd(char* cmd, size_t size,
         strncat(runtime, path, sizeof(runtime) - strlen(runtime) - 1);
     }
 
+    /* --emit=lib: a side-effect-free module with named exports rather than a
+     * program. Emscripten spells that -sEXPORTED_FUNCTIONS (leading underscore
+     * per its C ABI convention) with --no-entry, where the zig backend spells
+     * it -Wl,--export= with -Wl,--no-entry. The SET is derived by the same
+     * helper for both, so the two backends cannot drift.
+     *
+     * -sEXPORTED_RUNTIME_METHODS=ccall,cwrap and MODULARIZE give the JS half
+     * a callable surface; without them a consumer gets a module whose exports
+     * exist in the wasm but have no wrapper to reach them. */
+    char lib_flags[16384];
+    lib_flags[0] = '\0';
+    if (g_emit_lib && !g_emit_exe) {
+        static char names[8192];
+        int n = wasm_collect_export_names(c_file, g_wasm_exports, names, sizeof(names));
+        size_t p = (size_t)snprintf(lib_flags, sizeof(lib_flags),
+            "--no-entry -sEXPORTED_RUNTIME_METHODS=ccall,cwrap "
+            "-sALLOW_MEMORY_GROWTH=1 -sEXPORTED_FUNCTIONS=_malloc,_free");
+        if (n > 0) {
+            for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n")) {
+                int w = snprintf(lib_flags + p, sizeof(lib_flags) - p, ",_%s", line);
+                if (w < 0 || (size_t)w >= sizeof(lib_flags) - p) break;
+                p += (size_t)w;
+            }
+        }
+    }
+
     snprintf(cmd, size,
         "emcc -O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
-        "%s \"%s\" %s -o \"%s\" -lm "
+        "%s %s \"%s\" %s -o \"%s\" -lm "
         "-Wall -Wextra -Wno-unused-parameter -Wno-unused-function "
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
-        includes, c_file, runtime, out_file);
+        lib_flags, includes, c_file, runtime, out_file);
 
     return 1;
 }
@@ -5113,6 +5178,19 @@ static int cmd_build(int argc, char** argv) {
             // .ae source. Forces -O0 -g — gcov line attribution is
             // unreliable at -O2 because of inlining and block merging.
             g_coverage = true;
+        } else if (strncmp(argv[i], "--export=", 9) == 0) {
+            /* Repeatable. Accepts the Aether name (`hs_embed_new`); the
+             * aether_ mangling is applied at link time from the catalog, so a
+             * caller writes the name it declared, not the C symbol. */
+            add_export_sym(argv[i] + 9);
+        } else if (strncmp(argv[i], "--exports=", 10) == 0) {
+            /* Comma-separated convenience form of the above. */
+            char list[8192];
+            snprintf(list, sizeof(list), "%s", argv[i] + 10);
+            for (char* tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+                while (*tok == ' ') tok++;
+                add_export_sym(tok);
+            }
         } else if (strncmp(argv[i], "--emit=", 7) == 0) {
             const char* val = argv[i] + 7;
             if (strcmp(val, "exe") == 0) {
@@ -5274,6 +5352,12 @@ static int cmd_build(int argc, char** argv) {
         return 1;
     }
     int is_wasm = target && strcmp(target, "wasm") == 0;
+    /* Both wasm backends need the catalog for --emit=lib: it is where the
+     * default export set comes from. The zig path sets this too, further
+     * down, once its triple is resolved. */
+    if (is_wasm && g_emit_lib && !g_emit_csrc && !g_emit_obj) {
+        g_wasm_lib_wants_catalog = true;
+    }
     int is_cross = ztriple != NULL;
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
@@ -5489,7 +5573,18 @@ static int cmd_build(int argc, char** argv) {
         // Mach-O dylib, which is the primary iOS use case (an iOS app is built
         // by Xcode, so Aether's job is to hand it a loadable library rather
         // than a standalone binary iOS would not let you run anyway).
-        if (g_emit_lib && !g_emit_csrc && !g_emit_obj && !is_apple_target) {
+        /* wasm joins Apple in supporting --emit=lib: the link is the same
+         * shape one target over — --no-entry plus an export list instead of
+         * -dynamiclib plus an install_name. The runtime assembly is already
+         * correct for wasm (cross_use_coop_scheduler swaps the multicore
+         * scheduler out), so nothing new about wasm has to be invented; this
+         * mode just needed un-gating and the wasm link flags. */
+        bool is_wasm_lib_target = strstr(ztriple, "wasm") != NULL;
+        if (is_wasm_lib_target && g_emit_lib && !g_emit_csrc && !g_emit_obj) {
+            g_wasm_lib_wants_catalog = true;
+        }
+        if (g_emit_lib && !g_emit_csrc && !g_emit_obj && !is_apple_target &&
+            !is_wasm_lib_target) {
             fprintf(stderr,
                 "Error: cross-compilation (--target=%s) supports executables, "
                 "--emit=csrc and --emit=obj; --emit=lib and --emit=both are not "

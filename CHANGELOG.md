@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`ae build --target=wasm32-wasi --emit=lib` produces a wasm library with an
+  export list.** Asked for by the aeb / html-sanitizer line. Until now a
+  downstream wanting a wasm library hand-rolled the whole link in a shell
+  script — including a hand-picked copy of Aether's runtime source list, which
+  existed only to avoid `multicore_scheduler.c` and drifted every time the
+  runtime changed. Aether already owns that curation; it now hands back a lib
+  so nobody re-derives it.
+
+  Nothing new about wasm had to be invented. `cross_use_coop_scheduler`
+  already swaps the multicore scheduler out for a wasm build, and the link is
+  the same shape as the existing Apple `--emit=lib` branch one target over:
+  `-Wl,--no-entry -Wl,--gc-sections` plus an export set instead of
+  `-dynamiclib` plus an `-install_name`.
+
+  **The export set comes from the module by default.** `--emit=csrc` already
+  emits a catalog mapping each declared function to its mangled `aether_`
+  symbol, so the module states its own ABI once and the wasm link reads it —
+  no flag needed for the common case.
+
+  `--export=<sym>` (repeatable) and `--exports=a,b,c` **replace** that set when
+  given. A wasm surface is frequently a deliberate subset of the full ABI:
+  html-sanitizer defines 34 embedding functions and exports 16 to wasm,
+  omitting callback registrars (they take C function pointers, which need a
+  table or trampoline to cross the boundary) and DOM-walk accessors a browser
+  build does not want. Replace rather than add, because "all minus some"
+  cannot be expressed by adding, and because a consumer enumerating its exact
+  surface is the behaviour the hand-rolled scripts already had. Either
+  spelling works — `greet` or `aether_greet` — so a caller writes the name it
+  declared. `malloc` and `free` are always exported; a wasm consumer needs
+  them to pass strings across the ABI.
+
+  The regression test reads the wasm **export section** rather than grepping
+  the binary: a symbol name can appear in the linking or name sections while
+  the function is not exported at all, so a grep would pass on a module that
+  exports nothing.
+
+  **Both wasm backends are covered.** `--target=wasm32-wasi` (zig) spells the
+  set `-Wl,--export=<sym>` with `-Wl,--no-entry`; `--target=wasm` (Emscripten)
+  spells it `-sEXPORTED_FUNCTIONS=_<sym>` with `--no-entry`, plus
+  `-sEXPORTED_RUNTIME_METHODS=ccall,cwrap` so the JS half has a callable
+  surface. One collector derives the set for both, so the two spellings cannot
+  drift apart.
+
 ## [0.559.0]
 
 ### Changed

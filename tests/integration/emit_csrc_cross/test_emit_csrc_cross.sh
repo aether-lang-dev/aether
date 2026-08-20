@@ -160,6 +160,10 @@ fi
 # Up front matters: --emit=both re-dispatches as exe, and without an explicit
 # check it reaches the cross LINKER and dies with "undefined symbol: main" on
 # a source that has no main by design.
+# aarch64-linux specifically: --emit=lib IS supported on Apple targets
+# (-dynamiclib) and, since the wasm-lib work, on wasm32-wasi (--no-entry plus
+# an export list). It remains unsupported on the plain zig triples, which is
+# what this loop pins.
 for mode in lib both; do
     if "$AE" build --target=aarch64-linux --emit="$mode" "$SRC" -o "$TMP/x" \
             >"$TMP/err" 2>&1; then
@@ -169,4 +173,4 @@ for mode in lib both; do
         || fail "--emit=$mode gave the wrong diagnostic: $(head -1 "$TMP/err")"
 done
 
-echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); lib/both still rejected"
+echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); lib/both still rejected on non-wasm/non-Apple"

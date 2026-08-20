@@ -421,6 +421,107 @@ static bool cross_cmd_fmt(char** buf, size_t* cap, const char* fmt, ...) {
  * own libaether.a and system libraries for the target, exactly as they do for
  * a native --emit=obj.
  */
+/* Collect the wasm export flags for an --emit=lib link.
+ *
+ * Default: every `c_symbol` in the catalog aetherc emitted beside the .c —
+ * the module already declares its own ABI, so the common case needs no flag.
+ * The catalog is read rather than the source re-parsed because it is where
+ * the aether_ mangling is already resolved: a caller names `hs_embed_new`,
+ * the linker needs `aether_hs_embed_new`.
+ *
+ * `explicit_list` (from --export=/--exports=) REPLACES that set. A wasm
+ * surface is often a deliberate subset of the full ABI — html-sanitizer
+ * exports 16 of its 34 functions, omitting callback registrars that take C
+ * function pointers and DOM-walk accessors a browser build does not need.
+ * Replace rather than add, because "all minus some" cannot be expressed by
+ * adding, and consumers enumerate the exact set they want.
+ *
+ * malloc/free are always exported: a wasm consumer needs them to pass strings
+ * across the ABI, and every hand-rolled script this replaces did the same.
+ *
+ * Returns a malloc'd flag string, or NULL on allocation failure. */
+/* Collect the export NAMES (mangled, no flag syntax) for a wasm --emit=lib,
+ * one per line in `out`. Shared by both wasm backends: the zig path spells
+ * them `-Wl,--export=<sym>` and the emcc path `-sEXPORTED_FUNCTIONS=_<sym>`,
+ * but the SET is identical and deriving it twice would let them drift.
+ *
+ * Returns the count. See wasm_export_flags for why explicit_list replaces
+ * rather than extends the catalog set. */
+int wasm_collect_export_names(const char* c_file, const char* explicit_list,
+                              char* out, size_t outsz) {
+    size_t len = 0; int n = 0;
+    out[0] = '\0';
+
+    if (explicit_list && *explicit_list) {
+        char list[8192];
+        snprintf(list, sizeof(list), "%s", explicit_list);
+        for (char* tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+            while (*tok == ' ') tok++;
+            if (!*tok) continue;
+            const char* pfx = strncmp(tok, "aether_", 7) == 0 ? "" : "aether_";
+            int w = snprintf(out + len, outsz - len, "%s%s\n", pfx, tok);
+            if (w < 0 || (size_t)w >= outsz - len) break;
+            len += (size_t)w; n++;
+        }
+        return n;
+    }
+
+    char jpath[2048];
+    snprintf(jpath, sizeof(jpath), "%s", c_file);
+    size_t jl = strlen(jpath);
+    if (jl > 2 && strcmp(jpath + jl - 2, ".c") == 0) jpath[jl - 2] = '\0';
+    strncat(jpath, ".catalog.json", sizeof(jpath) - strlen(jpath) - 1);
+
+    FILE* f = fopen(jpath, "r");
+    if (!f) return 0;
+    char line[2048];
+    while (fgets(line, sizeof(line), f)) {
+        /* Line shape:  { ... "c_symbol": "aether_greet", ... }
+         * Skip past the KEY's closing quote, then take the next quoted run —
+         * that is the value. An earlier version advanced a fixed offset past
+         * strstr's hit and landed inside the wrong quote pair, emitting
+         * `--export=,` and failing the link with "unsupported linker arg". */
+        const char* k = strstr(line, "\"c_symbol\"");
+        if (!k) continue;
+        const char* q = strchr(k + strlen("\"c_symbol\""), '"');
+        if (!q) continue;
+        const char* e = strchr(q + 1, '"');
+        if (!e) continue;
+        int sl = (int)(e - q - 1);
+        if (sl <= 0) continue;
+        int w = snprintf(out + len, outsz - len, "%.*s\n", sl, q + 1);
+        if (w < 0 || (size_t)w >= outsz - len) break;
+        len += (size_t)w; n++;
+    }
+    fclose(f);
+    return n;
+}
+
+/* The zig spelling of that set: -Wl,--export=<sym> per name, plus the
+ * link flags a library needs. Returns a malloc'd string, NULL on OOM. */
+static char* wasm_export_flags(const char* c_file, const char* explicit_list) {
+    size_t cap = 16384, len = 0;
+    char* out = malloc(cap);
+    if (!out) return NULL;
+    /* --no-entry: wasm-ld demands a `main` without it, which a library has
+     * not got. --gc-sections keeps the module to what the exports reach.
+     * malloc/free are always exported — a wasm consumer needs them to pass
+     * strings across the ABI, as every hand-rolled script this replaces did. */
+    len += (size_t)snprintf(out, cap, "-Wl,--no-entry -Wl,--gc-sections "
+                                      "-Wl,--export=malloc -Wl,--export=free");
+
+    static char names[8192];
+    int n = wasm_collect_export_names(c_file, explicit_list, names, sizeof(names));
+    if (n > 0) {
+        for (char* line = strtok(names, "\n"); line; line = strtok(NULL, "\n")) {
+            int w = snprintf(out + len, cap - len, " -Wl,--export=%s", line);
+            if (w < 0 || (size_t)w >= cap - len) break;
+            len += (size_t)w;
+        }
+    }
+    return out;
+}
+
 int run_cross_compile_obj(const char* c_file, const char* obj_file,
                           bool optimize, const char* ztriple) {
     const char* user_cflags = get_cflags();
@@ -832,9 +933,22 @@ int run_cross_build(const char* c_file, const char* out_file,
                 snprintf(apple_lib_flags, sizeof(apple_lib_flags),
                          "-dynamiclib -install_name @rpath/%s", leaf);
             }
+            /* A wasm --emit=lib is the same shape one target over: swap the
+             * executable entry point for --no-entry and name the exports.
+             * Without --no-entry wasm-ld demands a `main`, which a library
+             * does not have. --gc-sections keeps the module to what the
+             * exports actually reach. */
+            char* wasm_lib_flags = NULL;
+            if (strstr(ztriple, "wasm") && emit_lib) {
+                wasm_lib_flags = wasm_export_flags(c_file, g_wasm_exports);
+            }
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
-                cc_cmd, sysroot_flag, apple_lib_flags, opt, feature_defs, tc.include_flags, c_file, ex, objdir, crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
+                "%s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                cc_cmd, sysroot_flag, apple_lib_flags,
+                wasm_lib_flags ? wasm_lib_flags : "",
+                opt, feature_defs, tc.include_flags, c_file, ex, objdir,
+                crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
+            free(wasm_lib_flags);
         }
         if (w < 0) {
             fprintf(stderr, "Error: out of memory building the cross-compile link command.\n");

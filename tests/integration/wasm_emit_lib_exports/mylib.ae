@@ -1,0 +1,16 @@
+// Library for the wasm --emit=lib export test.
+//
+// Three functions, so the override can be shown to select a SUBSET rather
+// than merely "work": the default exports all three, `--export=greet` exports
+// exactly one and drops the other two.
+greet() -> int {
+    return 42
+}
+
+add(a: int, b: int) -> int {
+    return a + b
+}
+
+helper_internal() -> int {
+    return 7
+}
