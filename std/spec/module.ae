@@ -78,6 +78,9 @@ exports(
     fail, assert_true, assert_false,
     assert_eq, assert_str_eq, assert_str_eq_diff, assert_not_eq, assert_gt,
     assert_contains, assert_null, assert_not_null,
+    // Failure-path matchers for the (value, err) convention. assert_true(err
+    // != "") discards the error string; these print it.
+    assert_err, assert_err_contains, assert_ok,
     // Timing-budget matcher (caller-measured monotonic-ns span vs a
     // Duration literal)
     expect_elapsed_under,
@@ -586,6 +589,53 @@ assert_gt(actual: int, expected: int, msg: string) {
 assert_contains(haystack: string, needle: string, msg: string) {
     if string.contains(haystack, needle) == 0 {
         fail("${msg} — '${haystack}' does not contain '${needle}'")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Failure-path matchers for the `(value, err)` convention
+//
+// std returns `(value, err)` throughout, with err "" on success and a
+// message on failure. That error arm is the one most likely to be wrong and
+// least likely to be tested, and until now the matcher set was entirely
+// success-path — so a spec author wrote `assert_true(err != "", ...)` by hand.
+//
+// That works and is worse than it looks. assert_true reports "expected true"
+// and DISCARDS the error string, so a failing test tells you nothing about
+// what the error actually was. These print the error they did or did not get.
+//
+// assert_ok earns its place by being the one people omit: with no positive
+// form to reach for, error-path tests get written and success-path ones do
+// not, and a function that starts failing everywhere still passes its suite.
+// ---------------------------------------------------------------------------
+
+// The call was expected to fail: `err` must be non-empty.
+assert_err(err: string, msg: string) {
+    if string.length(err) == 0 {
+        fail("${msg} — expected an error, got success (err was empty)")
+    }
+}
+
+// The call was expected to fail FOR A REASON: `err` must be non-empty and
+// contain `needle`. Substring rather than equality on purpose — a test pins
+// the reason without pinning the exact wording, so rephrasing a message does
+// not break every spec that asserts on it.
+assert_err_contains(err: string, needle: string, msg: string) {
+    if string.length(err) == 0 {
+        fail("${msg} — expected an error containing '${needle}', got success")
+        return
+    }
+    if string.contains(err, needle) == 0 {
+        fail("${msg} — expected the error to contain '${needle}', got '${err}'")
+    }
+}
+
+// The call was expected to succeed: `err` must be empty. Printing the error
+// is the whole point — this is the assertion that tells you WHY something
+// that should have worked did not.
+assert_ok(err: string, msg: string) {
+    if string.length(err) != 0 {
+        fail("${msg} — expected success, got error '${err}'")
     }
 }
 
