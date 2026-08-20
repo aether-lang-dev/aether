@@ -156,6 +156,7 @@ ae cache clear           # Clear the build cache
 ae inspect [file.ae]     # Show what a script declares (imports, capabilities, exports)
 ae bindgen consts <h>    # Import C macro constants from a header as Aether consts
 ae cflags                # Print -I/-L/-laether for embedding in external builds
+ae checksec <binary>     # Report the hardening a built artifact carries
 ae lib-path              # Print the resolved module-search chain
 ae version               # Show current version
 ae upgrade               # Install the latest release and switch to it

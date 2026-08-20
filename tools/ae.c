@@ -2151,6 +2151,44 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
 // compile + -lgcov at link). -O0 is load-bearing for coverage: at -O2
 // gcc inlines / merges blocks, and the .gcov line attribution gets
 // scrambled (a hit on line 7 might show up on line 9).
+/* Binary hardening for the programs `ae build` produces (#1646).
+ *
+ * A build that asks for nothing inherits whatever the platform toolchain
+ * happens to default to, which on a measured Linux/gcc was partial RELRO, no
+ * canary and no fortified calls. These are the mitigations whose cost is a
+ * rounding error next to what they catch, and `ae checksec` reports whether an
+ * artifact actually carries them.
+ *
+ * _FORTIFY_SOURCE needs an optimising build to do anything and warns when it
+ * gets none, so it is tied to the optimised path rather than requested
+ * unconditionally. A project that wants a different posture overrides it
+ * through aether.toml's `[build] cflags`, which append after these. */
+static const char* harden_cflags(bool optimize) {
+#if defined(_WIN32)
+    /* MinGW's stack protector needs libssp on the link line, which a static
+     * MinGW build does not always carry; ASLR and NX come from the link flags
+     * below instead. */
+    (void)optimize;
+    return "";
+#else
+    return optimize ? " -fstack-protector-strong -D_FORTIFY_SOURCE=2"
+                    : " -fstack-protector-strong";
+#endif
+}
+
+/* Link-side hardening: full RELRO where the platform has it, ASLR and a
+ * non-executable stack where it needs asking for. macOS links read-only
+ * dyld info and PIE by default, so it needs none of these. */
+static const char* harden_ldflags(void) {
+#if defined(_WIN32)
+    return " -Wl,--dynamicbase -Wl,--nxcompat";
+#elif defined(__APPLE__)
+    return "";
+#else
+    return " -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack";
+#endif
+}
+
 static const char* opt_flags(bool optimize) {
     /* -Wformat: with the interop lowering no longer casting literal format
      * strings to void* (#1252), the C compiler can check printf-family
@@ -2250,12 +2288,14 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
-    char opt[600];
+    char opt[768];
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s %s%s", opt_flags(optimize), user_cflags, trace_def);
+        snprintf(opt, sizeof(opt), "-static %s%s%s %s%s", opt_flags(optimize),
+                 harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static %s%s", opt_flags(optimize), trace_def);
+        snprintf(opt, sizeof(opt), "-static %s%s%s%s", opt_flags(optimize),
+                 harden_cflags(optimize), harden_ldflags(), trace_def);
     // -ldbghelp is required for the panic stack-trace path
     // (CaptureStackBackTrace is in kernel32 / always-linked, but
     // SymInitialize/SymFromAddr live in dbghelp). Issue #347.
@@ -2348,7 +2388,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
-    char opt[600];
+    char opt[768];
     // --emit=lib adds -fPIC -shared so the output is loadable via dlopen.
     // --emit=both (exe + lib from one source) is not supported by this
     // helper — the caller should invoke it twice with different modes,
@@ -2380,10 +2420,25 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* base_opt = g_coverage ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe -Wformat" : "-O0 -g -pipe -Wformat");
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
+    /* The link-side flags ride in the same blob: gcc accepts -Wl,... anywhere
+     * on the line, and threading them through four separate link-command
+     * format strings would be four places to forget. */
+    const char* harden_link = g_emit_obj || g_emit_csrc ? "" : harden_ldflags();
+    /* Position independence, for executables only: -pie and -shared are
+     * mutually exclusive, and an object file is linked later by someone else.
+     * macOS and Windows produce relocatable images already. */
+#if defined(_WIN32) || defined(__APPLE__)
+    const char* harden_pie = "";
+#else
+    const char* harden_pie = (g_emit_exe && !g_emit_lib && !g_emit_obj && !g_emit_csrc)
+                             ? " -fPIE -pie" : "";
+#endif
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "%s%s %s%s", emit_lib_flags, base_opt, user_cflags, trace_def);
+        snprintf(opt, sizeof(opt), "%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
+                 harden_cflags(optimize), harden_link, harden_pie, user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "%s%s%s", emit_lib_flags, base_opt, trace_def);
+        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s", emit_lib_flags, base_opt,
+                 harden_cflags(optimize), harden_link, harden_pie, trace_def);
 
     // Append aether_config.c to the compile when building a lib so the
     // aether_config_* accessors are bundled into the .so. The .c file
@@ -7067,6 +7122,7 @@ static void print_usage(void) {
     printf("  add <package>        Add a dependency\n");
     printf("  cache [clear]        Show or clear build cache\n");
     printf("  cflags               Print -I/-L/-laether for embedding in external builds\n");
+    printf("  checksec <binary>    Report the hardening a built artifact carries\n");
     printf("  lib-path             Print the resolved module-search chain\n");
     printf("  examples             List and run example programs\n");
     printf("  repl                 Start interactive REPL\n");
@@ -7577,6 +7633,7 @@ int main(int argc, char** argv) {
     if (strcmp(cmd, "cache") == 0)    return cmd_cache(sub_argc, sub_argv);
     if (strcmp(cmd, "cflags") == 0)   return cmd_cflags(sub_argc, sub_argv);
     if (strcmp(cmd, "repl") == 0)     return cmd_repl();
+    if (strcmp(cmd, "checksec") == 0) return cmd_checksec(sub_argc, sub_argv);
     if (strcmp(cmd, "lib-info") == 0) return cmd_lib_info(sub_argc, sub_argv);
     if (strcmp(cmd, "lib-path") == 0) return cmd_lib_path(sub_argc, sub_argv);
 

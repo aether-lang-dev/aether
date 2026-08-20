@@ -92,6 +92,19 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
 
+    # The hardened leg must produce a hardened toolchain, and a program built
+    # by it must carry the mitigations too. Before this, `make HARDEN=1` after
+    # an ordinary build recompiled nothing and relinked the same unhardened
+    # objects, so the leg could pass while testing the flags it never applied.
+    - name: Assert the hardened build is hardened
+      if: matrix.harden == '1'
+      run: |
+        ./build/ae checksec build/aetherc
+        ./build/ae checksec --require canary,fortify build/aetherc
+        printf 'import std.mem\n\nfill(n: int) -> long {\n    byte[64] scratch\n    mem.set_long(scratch, 0, n * 3)\n    return mem.get_long(scratch, 0)\n}\n\nmain() {\n    println("v=${fill(7)}")\n}\n' > /tmp/harden_probe.ae
+        ./build/ae build /tmp/harden_probe.ae -o /tmp/harden_probe
+        ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
+
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'

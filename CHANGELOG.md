@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`ae checksec <binary>`: what a built artifact's hardening actually is**
+  (#1646). The toolchain can say what it asked for; only the file says what it
+  got. It reads ELF program and dynamic headers, Mach-O load commands and PE
+  `DllCharacteristics` directly, so no `checksec(1)`, `readelf` or `otool` is
+  needed on the machine, and reports PIE, NX, RELRO, stack canary, FORTIFY and
+  whether the binary is stripped. A property the format has no concept of says
+  `n/a` rather than failing: RELRO is an ELF idea. `--require
+  pie,nx,relro-full,canary,fortify` turns the report into a gate that exits
+  non-zero, which is the part that keeps a mitigation from disappearing in a
+  flag change nobody notices.
+
+- **`ae build` hardens the programs it produces.** It asked for nothing
+  before, so a program inherited whatever the platform defaulted to: on
+  Linux/gcc that measured as partial RELRO, no canary and no fortified calls.
+  It now passes `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2` on optimised
+  builds, `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack` and `-fPIE -pie` on ELF,
+  and `-Wl,--dynamicbase -Wl,--nxcompat` on PE. `--emit=lib` and `--emit=obj`
+  skip `-pie`, which contradicts `-shared`. Project `cflags` still append
+  after, so a different posture stays available.
+
+### Fixed
+
+- **`make HARDEN=1` after an ordinary build produced an unhardened binary and
+  reported success.** Object files carry no record of the flags that built
+  them, so changing `HARDEN` recompiled nothing and relinked the same objects:
+  zero canaries, zero fortified calls, and a green build. That is how the
+  hardened CI leg came to be reported as testing nothing. The build now keeps
+  a digest of everything that changes code generation and every object depends
+  on it, so a flag change forces the rebuild and an unchanged one still
+  compiles nothing. The hardened CI leg additionally asserts, through
+  `ae checksec --require`, that both the toolchain and a program it builds
+  carry the mitigations.
+
 ## [0.560.0]
 
 ### Added
