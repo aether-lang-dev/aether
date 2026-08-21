@@ -937,7 +937,14 @@ HttpServer* http_server_create(int port) {
      * response path refuses to keep a connection whose body has no definite
      * length. 0 = unlimited requests, 0 = the 30s idle default. */
     server->keep_alive_enabled = 1;
-    server->keep_alive_parking = 1;   /* #1663; see http_server_set_keepalive_parking */
+    /* #1663. On by default; AETHER_HTTP_PARKING=0 turns it off without a
+     * rebuild, which is what makes a park-on/park-off A/B measurable on a
+     * single binary (and lets a deployment back it out). */
+    server->keep_alive_parking = 1;
+    {
+        const char* pk = getenv("AETHER_HTTP_PARKING");
+        if (pk && pk[0] == '0' && pk[1] == '\0') server->keep_alive_parking = 0;
+    }
     server->keep_alive_max = 0;
     server->keep_alive_idle_ms = 0;
     server->response_transformer_chain = NULL;
