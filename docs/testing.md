@@ -47,7 +47,14 @@ or let the runner discover it:
 ae test              # every test_*.ae / *_test.ae under tests/
 ae test calc_test.ae # a single file
 ae test path/to/dir  # a directory (its tests/ subdir if present, else itself)
+ae test --list       # print what would run, run nothing
 ```
+
+Discovery has no ceiling: every matching file runs, and the summary's total
+is that number. A `fixtures/` directory is not searched, because a fixture is
+input to a test rather than a test, and some are meant to fail so that another
+test can assert on the failure. Naming one as the target still runs what is in
+it (`ae test path/to/fixtures`).
 
 Each test file is a standalone program with its own `main()`. `ae test`
 compiles and runs each one and reads its **process exit code**: `0` means

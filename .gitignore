@@ -121,3 +121,7 @@ compiler/codegen/aether_stdlib_symbols.h
 *.gcda
 *.gcno
 *.gcov
+
+# Python bytecode from the doc/index checkers in tests/scripts
+__pycache__/
+*.pyc

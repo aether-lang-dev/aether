@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **`ae test` ran at most 256 files and reported that as the suite total**
+  (#1682). Discovery collected into a fixed array and stopped reading there,
+  so a repository with more tests than that got a green summary for a run that
+  never opened the rest. Measured here: 593 test files match the naming
+  convention, `ae test` ran 256 of them and printed `256 total`. A runner that
+  quietly covers less than it claims is worse than one that fails, because
+  every green total has been read as a full pass. The list now grows with what
+  is found, and the total is the number of files there are.
+
+  A `fixtures/` directory is no longer searched. A fixture is input to a test,
+  and the spec reporter's fixtures fail on purpose so its own test can assert
+  on the failure rows, which `ae test` reported as a failing suite. The rule
+  applies to the path below the directory being searched, so naming a fixtures
+  directory as the target still runs what is in it, which is how that reporter
+  test drives them.
+
+### Added
+
+- **`ae test --list`** prints the files discovery found and runs none of them,
+  which answers "what will run?" without a build, and is how the bound above
+  is regression-tested without compiling three hundred programs.
+
 ## [0.562.0]
 
 ### Fixed
