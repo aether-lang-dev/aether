@@ -34,6 +34,15 @@ int http_pool_pending(void) {
     return atomic_load(&http_pool_pending_conns);
 }
 
+/* Workers currently inside a connection, and the live pool's size. Both
+ * are process-wide: a process runs one HTTP pool in every shipped
+ * configuration, and parking only needs the ratio. */
+static atomic_int http_pool_busy_workers;
+static atomic_int http_pool_total_workers;
+
+int http_pool_busy(void)    { return atomic_load(&http_pool_busy_workers); }
+int http_pool_workers(void) { return atomic_load(&http_pool_total_workers); }
+
 #if AETHER_HAS_THREADS
 
 #define HTTP_POOL_QUEUE_CAP  256
@@ -99,11 +108,13 @@ static void* http_pool_worker(void* arg) {
         pthread_cond_signal(&pool->not_full);
         pthread_mutex_unlock(&pool->lock);
 
+        atomic_fetch_add(&http_pool_busy_workers, 1);
         if (item.conn) {
             http_server_resume_connection(pool->server, item.conn);
         } else {
             http_server_drain_connection(pool->server, item.fd);
         }
+        atomic_fetch_sub(&http_pool_busy_workers, 1);
     }
     return NULL;
 }
@@ -127,6 +138,7 @@ HttpConnectionPool* http_pool_create(HttpServer* server) {
         }
         pool->worker_count++;
     }
+    atomic_fetch_add(&http_pool_total_workers, pool->worker_count);
 
     if (pool->worker_count == 0) {
         pthread_mutex_destroy(&pool->lock);
@@ -186,6 +198,7 @@ void http_pool_destroy(HttpConnectionPool* pool) {
     for (int i = 0; i < pool->worker_count; i++) {
         pthread_join(pool->workers[i], NULL);
     }
+    atomic_fetch_sub(&http_pool_total_workers, pool->worker_count);
     pthread_mutex_destroy(&pool->lock);
     pthread_cond_destroy(&pool->not_empty);
     pthread_cond_destroy(&pool->not_full);

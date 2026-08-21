@@ -41,4 +41,12 @@ void http_pool_destroy(HttpConnectionPool* pool);
 // turn, which is what the keep-alive decision needs to know.
 int http_pool_pending(void);
 
+/* Workers currently running a connection, and the pool's worker count.
+ * Parking (#1663) reads these to decide whether releasing a worker is
+ * worth its cost: when the pool is not near saturation, looping on the
+ * same worker is strictly cheaper than a poller round trip. Both return
+ * 0 when no pool exists (inline / no-threads paths). */
+int http_pool_busy(void);
+int http_pool_workers(void);
+
 #endif // AETHER_HTTP_POOL_H

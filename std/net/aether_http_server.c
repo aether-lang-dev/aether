@@ -3718,6 +3718,21 @@ static int conn_has_buffered_input(HttpConn* conn) {
     return 0;
 }
 
+#if AETHER_HTTP_PARK
+/* Is releasing this worker worth the handoff? Yes once most workers are
+ * occupied or anything is already queued — below that the pool has spare
+ * capacity, so nobody is waiting on the worker this connection holds. */
+static int park_is_worthwhile(void) {
+    if (http_pool_pending() > 0) return 1;
+    int workers = http_pool_workers();
+    if (workers <= 0) return 0;      /* inline path: no pool to return to */
+    /* 3/4 is a deliberately soft edge: parking has to engage before the
+     * queue actually backs up, or the first connections over the line
+     * still stall behind idle ones. */
+    return http_pool_busy() * 4 >= workers * 3;
+}
+#endif
+
 /* Run requests on an established connection until it closes or is parked.
  * Owns `conn`: frees it on close, hands it to the park poller otherwise.
  * The inflight_connections counter is the caller's responsibility — a
@@ -3731,11 +3746,15 @@ static void drain_established(HttpServer* server, HttpConn* conn) {
         if (max_requests > 0 && conn->requests_served >= max_requests) break;
 
 #if AETHER_HTTP_PARK
-        /* Hand the connection to the poller and release this worker,
-         * unless bytes for the next request are already buffered (in
-         * which case looping is strictly cheaper than a poller round
-         * trip, and for TLS the fd may never signal at all). */
-        if (server->keep_alive_parking && !conn_has_buffered_input(conn)) {
+        /* Hand the connection to the poller and release this worker —
+         * but only when doing so buys something. Parking costs an
+         * epoll_ctl, a poller wakeup, a queue hop and a worker handoff,
+         * where staying costs nothing, so on an unloaded server it is
+         * pure overhead (measured: -30% at 4 and 8 concurrent clients
+         * when parking unconditionally). Park once workers are scarce,
+         * which is exactly when holding one hurts somebody else. */
+        if (server->keep_alive_parking && !conn_has_buffered_input(conn) &&
+            park_is_worthwhile()) {
             if (park_connection(server, conn, conn_idle_ms(server)) == 0) {
                 return;   /* conn is the park poller's now */
             }
