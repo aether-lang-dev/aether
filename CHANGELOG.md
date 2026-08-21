@@ -11,6 +11,33 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **The stdlib reference's module index did not match the tree it describes.**
+  The page opened by telling the reader that table came from the source and so
+  could not drift. Nothing generated or checked it, and it carried eleven wrong
+  export counts, no row at all for `std.mutation`, and a heading claiming 70
+  modules over 71 rows. An index that is wrong is worse than no index, because
+  it is the first thing a reader trusts.
+
+  `make check-docs` now fails when the table stops matching the tree: a module
+  with no row, a row with no module, a count that disagrees with the module's
+  `exports(...)`, or a heading that disagrees with the row count.
+  `--fix` updates the mechanical parts. It will not invent a purpose for a new
+  module, because that is a sentence someone has to write.
+
+  Two other corrections on the same page. `std.net` was documented as offering
+  `net.get(url)`; the short Go-style wrappers (`get`, `post`, `put`, `delete`)
+  are defined in `std.http` and `std.net` has no such name, so the example
+  would not compile. And the platform table said process execution on Windows
+  fell back to POSIX and that `os.run` waited on a `CreateProcessW` backend to
+  land; that backend is there, along with Job Object supervision, and what
+  actually stays POSIX-only is the back-channel pipe and `symlink`/`readlink`.
+
+  The purposes are now written rather than scraped: the column had lines like
+  "Collections Module Import with: import std.collections." and one cut off
+  mid-sentence.
+
 ### Added
 
 - **`ae checksec <binary>`: what a built artifact's hardening actually is**

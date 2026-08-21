@@ -1,85 +1,87 @@
 # Aether Standard Library Reference
 
 Reference for Aether's standard library. The index lists every module that
-ships, with its purpose and export count taken from the source rather than
-maintained by hand, so it cannot drift out of step with the tree. The sections
-after it cover the most-used modules in depth; for the others the index links
-to the module source, whose header comment is the authoritative description.
+ships with the number of names it exports, and `make check-docs` fails when
+that table stops matching the tree, so a module added, removed or grown here
+cannot leave the index behind. The sections after it cover the most-used
+modules in depth; for the others the index links to the module source, whose
+header comment is the authoritative description.
 
-## Module index (70 modules)
+## Module index (71 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
-| `std.actors` | Process-global name → actor_ref registry. | 12 | [module source](../std/actors/module.ae) |
-| `std.alloc` | std.alloc (#1045): swappable allocator convention. | 6 | [module source](../std/alloc/module.ae) |
-| `std.arena` | Arena (bulk) allocator. | 14 | [module source](../std/arena/module.ae) |
-| `std.audio` | Audio playback (v1: playback tier). | 23 | [module source](../std/audio/module.ae) |
-| `std.audit` | Query the sandbox audit trail. | 15 | [module source](../std/audit/module.ae) |
+| `std.actors` | Process-global registry mapping names to actor references. | 12 | [module source](../std/actors/module.ae) |
+| `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [module source](../std/alloc/module.ae) |
+| `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [module source](../std/arena/module.ae) |
+| `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [module source](../std/audio/module.ae) |
+| `std.audit` | Query the sandbox audit trail. | 9 | [module source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 25 | [module source](../std/bignum/module.ae) |
-| `std.bits` | Unsigned-bit helpers. | 34 | [module source](../std/bits/module.ae) |
-| `std.bytes` | Mutable byte buffer with random-access write and overlap-safe forward copy_within. | 50 | [module source](../std/bytes/module.ae) |
-| `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 26 | [module source](../std/capsicum/module.ae) |
-| `std.cas` | Content-addressed artifact store. | 21 | [module source](../std/cas/module.ae) |
-| `std.casper` | FreeBSD Casper service delegation. | 22 | [module source](../std/casper/module.ae) |
-| `std.cbor` | CBOR (RFC 8949) encode and decode. | 45 | [module source](../std/cbor/module.ae) |
+| `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [module source](../std/bits/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [module source](../std/bytes/module.ae) |
+| `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [module source](../std/capsicum/module.ae) |
+| `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [module source](../std/cas/module.ae) |
+| `std.casper` | FreeBSD Casper service delegation. | 16 | [module source](../std/casper/module.ae) |
+| `std.cbor` | CBOR encoding and decoding (RFC 8949). | 45 | [module source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [module source](../std/clapae/module.ae) |
-| `std.collections` | Collections Module Import with: import std.collections. | 43 | [module source](../std/collections/module.ae) |
-| `std.config` | Process-global immutable string→string KV store. | 12 | [module source](../std/config/module.ae) |
-| `std.cryptography` | Cryptographic hash primitives + Base64 codec Import with: import std.cryptography. | 46 | [full section](#cryptography-stdcryptography) |
-| `std.deque` | A fixed-capacity double-ended queue / ring buffer of `long` values (a `long` holds any int, and a pointer via. | 14 | [module source](../std/deque/module.ae) |
-| `std.dir` | Directory Operations (alias for std.fs). | 11 | [module source](../std/dir/module.ae) |
-| `std.dl` | Cross-platform dynamic library loader. | 8 | [module source](../std/dl/module.ae) |
-| `std.encoding` | General-purpose binary/text encodings. | 11 | [module source](../std/encoding/module.ae) |
-| `std.file` | File Operations (alias for std.fs). | 14 | [module source](../std/file/module.ae) |
-| `std.floatarr` | Fixed-size packed-double buffer (float twin of std.intarr). | 13 | [module source](../std/floatarr/module.ae) |
-| `std.fs` | File System Module Import with: import std.fs. | 147 | [module source](../std/fs/module.ae) |
-| `std.hash` | Fast NON-cryptographic hashes for checksums and hashmap seeding. | 4 | [module source](../std/hash/module.ae) |
+| `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [module source](../std/collections/module.ae) |
+| `std.config` | Process-global immutable string to string store. | 12 | [module source](../std/config/module.ae) |
+| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 46 | [full section](#cryptography-stdcryptography) |
+| `std.deque` | Fixed-capacity double-ended queue over `long` values. | 14 | [module source](../std/deque/module.ae) |
+| `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [module source](../std/dir/module.ae) |
+| `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [module source](../std/dl/module.ae) |
+| `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [module source](../std/encoding/module.ae) |
+| `std.file` | File operations, re-exported from `std.fs`. | 14 | [module source](../std/file/module.ae) |
+| `std.floatarr` | Fixed-size packed-double buffer. | 13 | [module source](../std/floatarr/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [module source](../std/fs/module.ae) |
+| `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [module source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [module source](../std/host/module.ae) |
-| `std.http` | HTTP Client & Server (alias for std.net). | 142 | [module source](../std/http/module.ae) |
-| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 20 | [module source](../std/http1/module.ae) |
-| `std.intarr` | Fixed-size packed-int buffer (alias for std.collections). | 13 | [module source](../std/intarr/module.ae) |
-| `std.io` | Input/Output Module Import with: import std.io. | 43 | [full section](#io-stdio) |
-| `std.ipc` | Child-to-parent back-channel IPC. | 4 | [module source](../std/ipc/module.ae) |
-| `std.json` | JSON Module Import with: import std.json. | 54 | [full section](#json-stdjson) |
-| `std.ksuid` | KSUID (https://github.com/segmentio/ksuid). | 1 | [module source](../std/ksuid/module.ae) |
-| `std.language` | BCP 47 Language Tags and Matching (RFC 5646, RFC 4647). | 11 | [module source](../std/language/module.ae) |
-| `std.list` | ArrayList Operations (alias for std.collections). | 12 | [module source](../std/list/module.ae) |
-| `std.log` | Logging Module Import with: import std.log Log level constants. | 9 | [full section](#logging-stdlog) |
-| `std.longarr` | Fixed-size packed-long buffer (the 64-bit twin of std.intarr). | 13 | [module source](../std/longarr/module.ae) |
-| `std.lzf` | One-shot LZF compression/decompression. | 12 | [module source](../std/lzf/module.ae) |
-| `std.map` | HashMap Operations (alias for std.collections). | 14 | [module source](../std/map/module.ae) |
-| `std.math` | Math Module Import with: import std.math. | 31 | [full section](#math-stdmath) |
-| `std.mem` | Byte-level access to caller-allocated raw pointers. | 94 | [module source](../std/mem/module.ae) |
-| `std.message` | ICU MessageFormat + message catalog (Phase 3 of #863). | 8 | [module source](../std/message/module.ae) |
+| `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 149 | [module source](../std/http/module.ae) |
+| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [module source](../std/http1/module.ae) |
+| `std.intarr` | Fixed-size packed-int buffer. | 13 | [module source](../std/intarr/module.ae) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
+| `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [module source](../std/ipc/module.ae) |
+| `std.json` | JSON parsing, building and serialisation. | 54 | [full section](#json-stdjson) |
+| `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [module source](../std/ksuid/module.ae) |
+| `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [module source](../std/language/module.ae) |
+| `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [module source](../std/list/module.ae) |
+| `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
+| `std.longarr` | Fixed-size packed-long buffer. | 13 | [module source](../std/longarr/module.ae) |
+| `std.lzf` | One-shot LZF compression and decompression. | 12 | [module source](../std/lzf/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`. | 14 | [module source](../std/map/module.ae) |
+| `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 31 | [full section](#math-stdmath) |
+| `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 94 | [module source](../std/mem/module.ae) |
+| `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [module source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [module source](../std/msgpack/module.ae) |
-| `std.nanoid` | NanoID (https://github.com/ai/nanoid). | 2 | [module source](../std/nanoid/module.ae) |
-| `std.net` | Networking Module Import with: import std.net. | 69 | [module source](../std/net/module.ae) |
-| `std.number` | Locale-aware number, percent, and currency formatting (Phase 4 of #863). | 10 | [module source](../std/number/module.ae) |
-| `std.os` | Shell & Process Execution Import with: import std.os. | 75 | [full section](#os-stdos) |
-| `std.path` | Path Utilities. | 20 | [module source](../std/path/module.ae) |
-| `std.plural` | CLDR Plural Rules evaluation (Phase 2 of #863). | 2 | [module source](../std/plural/module.ae) |
-| `std.pqueue` | Priority queue over (priority, item) pairs. | 18 | [module source](../std/pqueue/module.ae) |
-| `std.regex` | Perl-compatible regular expressions (PCRE2-backed). | 12 | [module source](../std/regex/module.ae) |
-| `std.schema` | Declarative, typed data validation & coercion. | 46 | [module source](../std/schema/module.ae) |
+| `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [module source](../std/mutation/module.ae) |
+| `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [module source](../std/nanoid/module.ae) |
+| `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [module source](../std/net/module.ae) |
+| `std.number` | Locale-aware number, percent and currency formatting. | 10 | [module source](../std/number/module.ae) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 75 | [full section](#os-stdos) |
+| `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [module source](../std/path/module.ae) |
+| `std.plural` | CLDR plural-rule categories. | 2 | [module source](../std/plural/module.ae) |
+| `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [module source](../std/pqueue/module.ae) |
+| `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [module source](../std/regex/module.ae) |
+| `std.schema` | Declarative typed validation and coercion. | 31 | [module source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 18 | [module source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [module source](../std/signal/module.ae) |
-| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 5 | [module source](../std/snapshot/module.ae) |
-| `std.sort` | In-place ascending sort and binary search over the packed numeric array types. | 6 | [module source](../std/sort/module.ae) |
-| `std.spec` | BDD-style test framework: describe/it, hooks, flat and fluent assertions, structured reporting. | 39 | [module source](../std/spec/module.ae) |
-| `std.strbuilder` | Amortised-O(1) string append. | 33 | [module source](../std/strbuilder/module.ae) |
-| `std.string` | String Module Import with: import std.string. | 92 | [full section](#strings-stdstring) |
-| `std.tar` | Streaming POSIX ustar TAR Archive Module Import with: import std.tar. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP Socket Operations (alias for std.net). | 24 | [module source](../std/tcp/module.ae) |
-| `std.time` | Civil date/time over Unix epoch seconds (UTC). | 19 | [module source](../std/time/module.ae) |
-| `std.tracking` | std.tracking (#1049): leak-detecting allocator wrapper. | 5 | [module source](../std/tracking/module.ae) |
-| `std.tsid` | TSID (Twitter Snowflake family / Discord-shaped). | 1 | [module source](../std/tsid/module.ae) |
-| `std.ulid` | ULID (https://github.com/ulid/spec). | 1 | [module source](../std/ulid/module.ae) |
-| `std.url` | RFC 3986 percent-encoding + query-string parsing (#629). | 7 | [module source](../std/url/module.ae) |
+| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [module source](../std/snapshot/module.ae) |
+| `std.sort` | In-place ascending sort and binary search over the packed numeric arrays. | 6 | [module source](../std/sort/module.ae) |
+| `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 45 | [module source](../std/spec/module.ae) |
+| `std.strbuilder` | Amortised-O(1) string building. | 33 | [module source](../std/strbuilder/module.ae) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
+| `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [module source](../std/tcp/module.ae) |
+| `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [module source](../std/time/module.ae) |
+| `std.tracking` | Leak-detecting allocator wrapper. | 5 | [module source](../std/tracking/module.ae) |
+| `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [module source](../std/tsid/module.ae) |
+| `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [module source](../std/ulid/module.ae) |
+| `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 7 | [module source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [module source](../std/uuid/module.ae) |
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [module source](../std/worker/module.ae) |
-| `std.xml` | XML Module Import with: import std.xml. | 45 | [full section](#xml-stdxml) |
-| `std.yaml` | YAML Module Import with: import std.yaml. | 16 | [module source](../std/yaml/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate/inflate. | 16 | [full section](#compression-stdzlib) |
+| `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
+| `std.yaml` | YAML parsing and emitting. | 16 | [module source](../std/yaml/module.ae) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 16 | [full section](#compression-stdzlib) |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
@@ -88,7 +90,7 @@ to the module source, whose header comment is the authoritative description.
 | Target | Filesystem | Networking | Threading | Notes |
 |---|---|---|---|---|
 | Linux / macOS / BSD | full POSIX | full | full | Reference target. |
-| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec uses POSIX fallbacks; `os.run` is POSIX-only until the `CreateProcessW` backend lands. Some fs operations (`symlink`, `readlink`) are stubs returning clean errors via the Go-style wrappers. |
+| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec is native: `run`, `run_capture`, `spawn`, `wait`, `kill` and supervision go through `CreateProcessW` and Job Objects. Two things stay POSIX-only and say so: the back-channel pipe (`run_pipe` spawns but hands back no pipe fd, `run_pipe_drain_and_wait` returns `"unsupported on Windows"`), and `symlink` / `readlink`, which return clean errors through the Go-style wrappers. |
 | WASI (wasi-sdk) | per preopened paths | none | single-threaded | wasi-libc provides POSIX-compatible `fopen`/`fread`/`stat`/etc., so the normal fs code path compiles. Paths must be under a WASI preopen. |
 | Emscripten (browser WASM) | off by default | off | cooperative | Builds pass `-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING`. File ops return `(null, "cannot open file")` via the Go-style wrappers, no silent failures. To enable, compile with `-sFORCE_FILESYSTEM=1` and drop the define; untested in CI. |
 | Bare embedded | off | off | cooperative | Same as Emscripten, stubs route all failures through the Go-style error tuples. |
@@ -1583,7 +1585,11 @@ Gzip-framed helpers for HTTP `Content-Encoding: gzip` are also available: `zlib.
 
 ### HTTP (`std.http`)
 
-> **Note:** Use `import std.http` for the `http.*` prefix shown below. You can also `import std.net` which includes both HTTP and TCP functions, but the namespace prefix becomes `net` e.g. the raw client extern is reached as `net.http_get_raw(url)`, and the Go-style wrapper as `net.get(url)`.
+> **Note:** Use `import std.http` for the `http.*` prefix shown below.
+> `import std.net` reaches the same HTTP externs, alongside TCP, under the
+> `net` prefix: `net.http_get_raw(url)`. The short Go-style wrappers
+> (`get`, `post`, `put`, `delete`) are defined in `std.http` and are not part
+> of `std.net`, so those need the `http` import.
 
 ```aether
 import std.http
