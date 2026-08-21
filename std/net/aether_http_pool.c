@@ -29,9 +29,21 @@
  * a kept-alive connection while this is non-zero starves one that is waiting;
  * the response path reads it to decide (see finish_response). */
 static atomic_int http_pool_pending_conns;
+/* Workers inside a connection, and workers that exist, across every pool in
+ * the process. The response path reads these to decide whether holding an
+ * idle connection for a moment costs anyone else their turn (#1663). */
+static atomic_int http_pool_busy_workers;
+static atomic_int http_pool_total_workers;
 
 int http_pool_pending(void) {
     return atomic_load(&http_pool_pending_conns);
+}
+
+int http_pool_has_spare_worker(void) {
+    int total = atomic_load(&http_pool_total_workers);
+    if (total <= 0) return 0;   /* no pool: the caller is the only worker */
+    return atomic_load(&http_pool_busy_workers) < total
+        && atomic_load(&http_pool_pending_conns) == 0;
 }
 
 #if AETHER_HAS_THREADS
@@ -40,9 +52,18 @@ int http_pool_pending(void) {
 #define HTTP_POOL_MIN_WORKERS 8
 #define HTTP_POOL_MAX_WORKERS 64
 
+/* A queued item is either a freshly accepted descriptor or a connection the
+ * parking lot woke (#1663). They travel the same queue because a worker does
+ * the same thing with both: run requests until the connection is done or
+ * parks again. */
+typedef struct {
+    int       fd;      /* valid when conn == NULL */
+    HttpConn* conn;    /* a resumed connection, already past its handshake */
+} HttpPoolItem;
+
 struct HttpConnectionPool {
     HttpServer* server;
-    int queue[HTTP_POOL_QUEUE_CAP];   // Ring buffer of pending client fds
+    HttpPoolItem queue[HTTP_POOL_QUEUE_CAP];   // Ring buffer of pending work
     int head, tail, count;
     pthread_mutex_t lock;
     pthread_cond_t  not_empty;
@@ -84,14 +105,17 @@ static void* http_pool_worker(void* arg) {
             pthread_mutex_unlock(&pool->lock);
             break;
         }
-        int client_fd = pool->queue[pool->head];
+        HttpPoolItem item = pool->queue[pool->head];
         pool->head = (pool->head + 1) % HTTP_POOL_QUEUE_CAP;
         pool->count--;
         atomic_fetch_sub(&http_pool_pending_conns, 1);
         pthread_cond_signal(&pool->not_full);
         pthread_mutex_unlock(&pool->lock);
 
-        http_server_drain_connection(pool->server, client_fd);
+        atomic_fetch_add(&http_pool_busy_workers, 1);
+        if (item.conn) http_server_resume_connection(pool->server, item.conn);
+        else           http_server_drain_connection(pool->server, item.fd);
+        atomic_fetch_sub(&http_pool_busy_workers, 1);
     }
     return NULL;
 }
@@ -114,6 +138,7 @@ HttpConnectionPool* http_pool_create(HttpServer* server) {
             break;
         }
         pool->worker_count++;
+        atomic_fetch_add(&http_pool_total_workers, 1);
     }
 
     if (pool->worker_count == 0) {
@@ -126,22 +151,33 @@ HttpConnectionPool* http_pool_create(HttpServer* server) {
     return pool;
 }
 
-void http_pool_submit(HttpConnectionPool* pool, int client_fd) {
+static void http_pool_submit_item(HttpConnectionPool* pool, HttpPoolItem item) {
     pthread_mutex_lock(&pool->lock);
     while (pool->count >= HTTP_POOL_QUEUE_CAP && !pool->shutdown) {
         pthread_cond_wait(&pool->not_full, &pool->lock);
     }
     if (pool->shutdown) {
         pthread_mutex_unlock(&pool->lock);
-        close(client_fd);
+        if (item.conn) http_conn_close_owned(item.conn);
+        else           close(item.fd);
         return;
     }
     atomic_fetch_add(&http_pool_pending_conns, 1);
-    pool->queue[pool->tail] = client_fd;
+    pool->queue[pool->tail] = item;
     pool->tail = (pool->tail + 1) % HTTP_POOL_QUEUE_CAP;
     pool->count++;
     pthread_cond_signal(&pool->not_empty);
     pthread_mutex_unlock(&pool->lock);
+}
+
+void http_pool_submit(HttpConnectionPool* pool, int client_fd) {
+    HttpPoolItem item = { .fd = client_fd, .conn = NULL };
+    http_pool_submit_item(pool, item);
+}
+
+void http_pool_submit_conn(HttpConnectionPool* pool, HttpConn* conn) {
+    HttpPoolItem item = { .fd = -1, .conn = conn };
+    http_pool_submit_item(pool, item);
 }
 
 void http_pool_destroy(HttpConnectionPool* pool) {
@@ -154,6 +190,7 @@ void http_pool_destroy(HttpConnectionPool* pool) {
     for (int i = 0; i < pool->worker_count; i++) {
         pthread_join(pool->workers[i], NULL);
     }
+    atomic_fetch_sub(&http_pool_total_workers, pool->worker_count);
     pthread_mutex_destroy(&pool->lock);
     pthread_cond_destroy(&pool->not_empty);
     pthread_cond_destroy(&pool->not_full);

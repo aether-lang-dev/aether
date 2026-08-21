@@ -1,6 +1,7 @@
 #include "aether_http_server.h"
 #include "aether_net.h"
 #include "aether_http_pool.h"
+#include "aether_http_park.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
@@ -226,7 +227,15 @@ typedef struct HttpConn {
     int   buf_cap;
     int   read_pos;
     int   write_pos;
+    /* Requests already served on this connection. A parked connection comes
+     * back to a different worker, so the count has to live with the
+     * connection rather than on the worker's stack (#1663). */
+    int   requests_served;
 } HttpConn;
+
+/* The parking lot holds HttpConn by pointer and needs exactly two things from
+ * it: the descriptor to watch, and a way to close what it still owns. */
+int http_conn_fd(HttpConn* conn) { return conn ? conn->fd : -1; }
 
 static int conn_recv(HttpConn* c, void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
@@ -682,6 +691,8 @@ HttpServer* http_server_create(int port) {
     server->spawn_fn = NULL;
     server->release_fn = NULL;
     server->step_fn = NULL;
+    server->park_lot = NULL;
+    server->conn_pool = NULL;
     server->accept_poller.fd = -1;
     server->accept_poller.backend_data = NULL;
     server->multi_accept = 0;
@@ -983,6 +994,9 @@ typedef struct MetricsRoute {
 typedef struct {
     pthread_mutex_t lock;
     MetricsRoute* head;
+    /* The server this scrape belongs to, for the gauges that read live state
+     * rather than accumulated counters. */
+    HttpServer* server;
 } MetricsState;
 
 static MetricsRoute* metrics_route_for(MetricsState* st,
@@ -1093,7 +1107,16 @@ static void metrics_handler(HttpRequest* req, HttpServerResponse* res, void* use
         "# TYPE aether_http_requests_total counter\n"
         "# TYPE aether_http_errors_total counter\n"
         "# TYPE aether_http_4xx_total counter\n"
-        "# TYPE aether_http_request_duration_seconds histogram\n");
+        "# TYPE aether_http_request_duration_seconds histogram\n"
+        "# TYPE aether_http_parked_connections gauge\n");
+
+    /* Idle keep-alive connections held by the poller rather than by a worker
+     * (#1663). Worth exporting because it is the number that used to be
+     * capped at the worker count: a deployment can see how far past that line
+     * it is running. */
+    off += snprintf(buf + off, cap - off,
+        "aether_http_parked_connections %d\n",
+        st->server ? http_park_count((HttpParkLot*)st->server->park_lot) : 0);
 
     pthread_mutex_lock(&st->lock);
     for (MetricsRoute* r = st->head; r; r = r->next) {
@@ -1147,6 +1170,7 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     MetricsState* st = (MetricsState*)calloc(1, sizeof(MetricsState));
     if (!st) return "out of memory";
     pthread_mutex_init(&st->lock, NULL);
+    st->server = server;
     http_server_use_request_hook(server, metrics_hook, st);
     const char* endpoint = (metrics_endpoint && *metrics_endpoint)
         ? metrics_endpoint : "/metrics";
@@ -2658,15 +2682,19 @@ static int finish_response(HttpServer* server, HttpConn* conn,
                        && res->status_code != 408
                        && res->status_code != 426;
 
-    /* One worker owns a connection for its whole life, so a connection kept
-     * open while others wait in the accept queue takes their turn rather than
-     * saving a handshake. Measured on an 8-core box (16 workers), 3000
-     * requests: 60,700 rps keeping connections at 8 concurrent clients,
-     * 20,600 rps closing every response, and 99 rps keeping them at 20
-     * concurrent clients, where four connections never reached a worker.
-     * Keeping only while nothing is queued gets the first number without the
-     * third: the server falls back to close exactly when it is saturated. */
-    if (will_keep_alive && http_pool_pending() > 0) {
+    /* Without somewhere to park it, a kept connection holds its worker for
+     * its whole life, so keeping one while others wait in the accept queue
+     * takes their turn rather than saving a handshake: at 20 concurrent
+     * clients against 16 workers that measured 99 rps, because four
+     * connections never reached a worker. #1653 shipped this rule, which
+     * closes exactly when the pool is saturated.
+     *
+     * With a parking lot the premise is gone: an idle connection costs a
+     * descriptor, not a thread, and closing it would throw away the handshake
+     * for no one's benefit (#1663). Keeping this rule on made the server
+     * close 284 of 300 idle keep-alive connections, which is the behaviour
+     * parking exists to remove. */
+    if (will_keep_alive && !server->park_lot && http_pool_pending() > 0) {
         will_keep_alive = 0;
     }
 
@@ -2719,6 +2747,22 @@ static int finish_response(HttpServer* server, HttpConn* conn,
     http_request_free(req);
     http_server_response_free(res);
     return will_keep_alive;
+}
+
+/* handle_one_request's third answer, alongside 1 (keep going) and 0 (close):
+ * the connection is idle between requests and may be parked. Distinct from 0
+ * so a broken connection is still closed rather than parked. */
+#define HTTP_REQUEST_IDLE 2
+
+/* Did the last recv fail because the socket's receive timeout fired, rather
+ * than because the peer went away? */
+static int conn_recv_timed_out(void) {
+#if defined(_WIN32)
+    int e = WSAGetLastError();
+    return e == WSAETIMEDOUT || e == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
 }
 
 static int handle_one_request(HttpServer* server, HttpConn* conn,
@@ -2785,7 +2829,16 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         }
         int n = conn_recv(conn, conn->buf + conn->write_pos,
                           conn->buf_cap - conn->write_pos - 1);
-        if (n <= 0) return 0;  /* EOF / timeout / error */
+        if (n <= 0) {
+            /* Nothing yet, and nothing of this request read so far: the
+             * connection is idle rather than broken, and the caller can park
+             * it instead of closing it (#1663). Anything mid-request stays a
+             * close, because a half-read request cannot be resumed by a
+             * different worker without carrying parse state with it. */
+            if (n < 0 && conn->write_pos == conn->read_pos && conn_recv_timed_out())
+                return HTTP_REQUEST_IDLE;
+            return 0;  /* EOF / error */
+        }
         conn->write_pos += n;
     }
 
@@ -3428,77 +3481,214 @@ static int conn_buffered_is_h2_preface(HttpConn* conn) {
 }
 #endif  /* AETHER_HAS_NGHTTP2 */
 
-void http_server_drain_connection(HttpServer* server, int client_fd) {
-    if (!server || client_fd < 0) return;
-    atomic_fetch_add(&server->inflight_connections, 1);
+/* Close a connection the parking lot still owns, and release it. The lot
+ * holds connections by pointer and has no view of what is inside one. */
+void http_conn_close_owned(HttpConn* conn) {
+    if (!conn) return;
+    conn_close(conn);
+    free(conn);
+}
 
-    /* Connection transport — plain by default; SSL-wrapped when the
-     * server has TLS enabled. The conn_recv/conn_send/conn_close
-     * helpers polymorphise over both shapes so handle_one_request
-     * reads the same regardless. */
-    HttpConn conn = {
-        .fd = client_fd,
-        .ssl = NULL,
-        .is_h2 = 0,
-        .buf = NULL,
-        .buf_cap = 0,
-        .read_pos = 0,
-        .write_pos = 0,
-    };
-#ifdef AETHER_HAS_OPENSSL
-    if (server->tls_enabled && server->tls_ctx) {
-        if (conn_tls_accept(&conn, (SSL_CTX*)server->tls_ctx) != 0) {
-            close(client_fd);
-            return;
-        }
-    }
+/* Per-recv socket timeout, applied whenever a worker is about to block on
+ * this connection. Also the idle guard against a slow-loris client. */
+/* How long a worker waits for the next request before handing the connection
+ * to the lot. Long enough that a client already mid-burst is never handed off
+ * (a browser's next request on a warm connection lands in microseconds), short
+ * enough that an idle connection does not hold a worker: at the measured
+ * ceiling of 16 workers, 250ms bounds the stall a newly accepted connection
+ * can see behind idle ones at a quarter second rather than the 30s idle
+ * timeout. */
+/* How long a worker waits for a follow-up request before parking, while a
+ * worker is free to take other work. */
+#define HTTP_PARK_GRACE_MS 2
+
+static int64_t conn_now_ms(void) {
+    struct timespec ts;
+#if defined(CLOCK_MONOTONIC)
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
+    return (int64_t)time(NULL) * 1000;
+}
 
-    /* Per-recv socket timeout. When keep-alive is off this is the
-     * existing 30-second guard that bounds slow-loris attacks; when
-     * keep-alive is on this doubles as the idle-timeout (the loop
-     * exits when conn_recv returns -1 from EAGAIN/timeout). */
+static void conn_apply_recv_timeout(HttpServer* server, int fd) {
     int idle_ms = server->keep_alive_idle_ms > 0
         ? server->keep_alive_idle_ms : 30000;
 #ifdef _WIN32
     DWORD rcv_timeout = (DWORD)idle_ms;
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO,
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
                (const char*)&rcv_timeout, sizeof(rcv_timeout));
 #else
     struct timeval rcv_tv = {
         .tv_sec  = idle_ms / 1000,
         .tv_usec = (idle_ms % 1000) * 1000
     };
-    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_tv, sizeof(rcv_tv));
 #endif
+}
 
-    /* HTTP/2 path (#260 Tier 2). When ALPN selected "h2" during the
-     * TLS handshake, switch to the framed-protocol driver instead of
-     * the HTTP/1.1 keep-alive loop. The driver owns the connection
-     * lifetime — it returns when both peers have GOAWAY'd or the
-     * wire dies. */
+/* Is the next request already here, or about to be?
+ *
+ * Bytes in the connection's own buffer (a pipelined request, or an over-read
+ * past the last one) and plaintext OpenSSL is holding both count and cost
+ * nothing to check. Beyond that the answer is worth a brief wait only while a
+ * worker is free: a client mid-burst sends again in microseconds and handing
+ * that connection to the poller would be pure cost, but with every worker
+ * busy the same wait is time another connection spends queued.
+ *
+ * Measured at 3000 requests per cell on an 8-core box, 16 workers: waiting
+ * unconditionally gives 8,450 rps at 200 clients, parking on the instant
+ * gives 29,800 at 8 clients, and this gives 86,000 and 30,300. */
+static int conn_next_request_imminent(HttpConn* conn) {
+    if (conn->write_pos > conn->read_pos) return 1;
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
+#endif
+    int grace_ms = http_pool_has_spare_worker() ? HTTP_PARK_GRACE_MS : 0;
+#if !defined(_WIN32)
+    struct pollfd pfd = { .fd = conn->fd, .events = POLLIN, .revents = 0 };
+    return poll(&pfd, 1, grace_ms) > 0;
+#else
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(conn->fd, &rfds);
+    struct timeval tv = { .tv_sec = 0, .tv_usec = grace_ms * 1000 };
+    return select(conn->fd + 1, &rfds, NULL, NULL, &tv) > 0;
+#endif
+}
+
+/* Run requests on a connection the caller owns until it closes or parks.
+ * Frees the connection unless the lot took it. */
+static void conn_serve(HttpServer* server, HttpConn* conn) {
+    atomic_fetch_add(&server->inflight_connections, 1);
+    HttpParkLot* lot = (HttpParkLot*)server->park_lot;
+    /* With a lot to park into, a worker waits only briefly for the next
+     * request before handing the connection over; the lot then holds it for
+     * the real idle timeout. Without one, the socket timeout IS the idle
+     * timeout, which is what it has always been.
+     *
+     * The wait is a plain blocking recv either way: a poll before it would be
+     * a syscall per request, and measured at 8 concurrent clients that cost
+     * 9% against simply blocking. */
+    conn_apply_recv_timeout(server, conn->fd);
+
 #ifdef AETHER_HAS_NGHTTP2
-    if (conn.is_h2) {
-        handle_h2_connection(server, &conn, NULL);
-        conn_close(&conn);
+    if (conn->is_h2) {
+        handle_h2_connection(server, conn, NULL);
+        conn_close(conn);
+        free(conn);
         atomic_fetch_sub(&server->inflight_connections, 1);
         return;
     }
 #endif
 
-    /* Drain loop. handle_one_request returns 1 to keep the connection
-     * open for another request, 0 to close. With keep-alive disabled
-     * (server->keep_alive_enabled == 0) the function always returns 0
-     * after the first request — no behavioural change vs. pre-#260. */
-    int requests_served = 0;
     int max_requests = server->keep_alive_max;
-    while (handle_one_request(server, &conn, requests_served, max_requests)) {
-        requests_served++;
-        if (max_requests > 0 && requests_served >= max_requests) break;
+    int64_t idle_since_ms = 0;
+    for (;;) {
+        int rc = handle_one_request(server, conn, conn->requests_served, max_requests);
+        if (rc == 0) break;
+
+        if (rc == HTTP_REQUEST_IDLE) {
+            /* No request arrived within the handoff window. Park it and free
+             * the worker; the lot watches it for the rest of the idle
+             * timeout. When there is no lot, or it declines (at capacity,
+             * shutting down), keep waiting on this worker until the real idle
+             * timeout, which is the pre-parking behaviour. */
+            if (!lot) break;
+            int idle_ms = server->keep_alive_idle_ms > 0
+                ? server->keep_alive_idle_ms : 30000;
+            if (idle_since_ms == 0) idle_since_ms = conn_now_ms();
+            int64_t waited = conn_now_ms() - idle_since_ms;
+            if (waited >= idle_ms) break;   /* silent past the deadline: close */
+            if (http_park_add(lot, conn, (int)(idle_ms - waited)) == 0) {
+                atomic_fetch_sub(&server->inflight_connections, 1);
+                return;
+            }
+            continue;   /* lot declined: wait again on this worker */
+        }
+
+        idle_since_ms = 0;
+        conn->requests_served++;
+        if (max_requests > 0 && conn->requests_served >= max_requests) break;
+
+        /* How long this worker will wait for the next request before handing
+         * the connection to the lot, decided per response from whether a
+         * worker is actually free.
+         *
+         * With one to spare, waiting costs nobody anything and saves a
+         * handoff, so wait the full window: the read below is then exactly
+         * the blocking recv this server has always done, with no extra
+         * syscall on the hot path. With every worker busy, that wait is time
+         * another connection spends queued, so shrink it to almost nothing
+         * and let the poller hold this one instead.
+         *
+         * Measured at 3000 requests per cell on an 8-core box: waiting
+         * unconditionally gives 89,000 rps at 8 clients but 8,450 at 200;
+         * parking on the instant gives 29,800 at 8 and 30,300 at 200. The
+         * window is only re-applied when it changes, so a steady connection
+         * pays one setsockopt, not one per request. */
+        /* Park unless the next request is already here. The check waits a
+         * couple of milliseconds when a worker is free, because a client
+         * mid-burst is the case keep-alive exists for and a handoff there is
+         * pure cost; it waits not at all when every worker is busy, because
+         * then the wait is time another connection spends queued. */
+        if (lot && !conn_next_request_imminent(conn)) {
+            int idle_ms = server->keep_alive_idle_ms > 0
+                ? server->keep_alive_idle_ms : 30000;
+            if (http_park_add(lot, conn, idle_ms) == 0) {
+                atomic_fetch_sub(&server->inflight_connections, 1);
+                return;
+            }
+        }
     }
 
-    conn_close(&conn);
+    conn_close(conn);
+    free(conn);
     atomic_fetch_sub(&server->inflight_connections, 1);
+}
+
+/* The parking lot woke this connection: it has data, so put it back on a
+ * worker. Runs on the poller thread, so it must not serve the request here. */
+void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
+    if (!server || !conn) return;
+    conn_serve(server, conn);
+}
+
+void http_server_drain_connection(HttpServer* server, int client_fd) {
+    if (!server || client_fd < 0) return;
+
+    /* Heap-allocated because a parked connection outlives the worker that
+     * parked it: the read buffer (with any bytes already pulled past the last
+     * request), the TLS session and the request count all have to survive the
+     * handoff (#1663). */
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) { close(client_fd); return; }
+    conn->fd = client_fd;
+    conn->ssl = NULL;
+    conn->is_h2 = 0;
+    conn->buf = NULL;
+    conn->buf_cap = 0;
+    conn->read_pos = 0;
+    conn->write_pos = 0;
+    conn->requests_served = 0;
+
+#ifdef AETHER_HAS_OPENSSL
+    if (server->tls_enabled && server->tls_ctx) {
+        if (conn_tls_accept(conn, (SSL_CTX*)server->tls_ctx) != 0) {
+            close(client_fd);
+            free(conn);
+            return;
+        }
+    }
+#endif
+    conn_serve(server, conn);
+}
+
+/* The parking lot woke a connection: put it back on a worker rather than
+ * serving it on the poller thread, which must stay free for the other parked
+ * connections. */
+static void http_park_resume(HttpServer* server, HttpConn* conn) {
+    http_pool_submit_conn((HttpConnectionPool*)server->conn_pool, conn);
 }
 
 static void handle_client_connection(HttpServer* server, int client_fd) {
@@ -3774,6 +3964,13 @@ int http_server_start_raw(HttpServer* server) {
 
 #if AETHER_HAS_THREADS
         HttpConnectionPool* pool = http_pool_create(server);
+        server->conn_pool = pool;
+        /* The lot resubmits woken connections into the same pool. Capacity is
+         * descriptors, not threads, which is the whole point: a few thousand
+         * idle keep-alive clients cost a table slot each. */
+        if (pool) {
+            server->park_lot = http_park_create(server, http_park_resume, 4096);
+        }
 #endif
 
         // Fallback: poll + thread pool (non-Linux or no actor handler)
@@ -3806,7 +4003,12 @@ int http_server_start_raw(HttpServer* server) {
         }
 
 #if AETHER_HAS_THREADS
+        /* Stop parking before the pool: the lot resubmits into it, and a
+         * connection woken into a destroyed pool would be closed twice. */
+        http_park_destroy((HttpParkLot*)server->park_lot);
+        server->park_lot = NULL;
         http_pool_destroy(pool);
+        server->conn_pool = NULL;
 #endif
 
         /* on_stop lifecycle hook fires after the accept loop exits

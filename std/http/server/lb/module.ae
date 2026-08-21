@@ -58,18 +58,19 @@
 // above, but the diagnosis they carried ("most likely NO UPSTREAM KEEPALIVE")
 // was right, and the dropped requests were connection churn.
 //
-// What limits it now is the thread-per-connection model: one worker owns a
-// connection for its lifetime, so a kept-alive connection is only kept while
-// no other connection is queued. Serving many idle-but-open clients needs
-// connection parking (park the fd in a poller, release the worker), which is
-// the next real step rather than more tuning of this path.
+// Concurrency is no longer bounded by the worker count. A connection with no
+// request in flight is handed to a poller thread instead of holding its worker
+// (#1663), so it costs a descriptor rather than a thread: measured on the same
+// 8-core box, 3000 requests per cell, the server does 38,100 rps at 50 clients
+// and 24,500 at 200 with connections held on workers, against 74,400 and
+// 70,000 parked. Below the worker count the handoff costs a few percent, which
+// is why the worker waits briefly for a follow-up request before parking, and
+// only while another worker is free to take other work.
 //
 // DEVELOPMENT DIRECTIONS (in rough order of value):
-//   1. Park idle keep-alive connections instead of holding a worker, so
-//      concurrency stops being bounded by the worker count (#1663).
-//   2. Reduce per-request overhead on the hot path (the picker mutates shared
+//   1. Reduce per-request overhead on the hot path (the picker mutates shared
 //      state under a lock/atomics; profile it under load).
-//   3. For throughput-critical deployments, aeo can ORCHESTRATE haproxy instead of
+//   2. For throughput-critical deployments, aeo can ORCHESTRATE haproxy instead of
 //      this LB (same load_balancer(){} grammar, haproxy.cfg rendered by the driver)
 //      keep this lib as the zero-dependency, works-anywhere default; use haproxy
 //      when raw rps matters. (haproxy is a standalone daemon, not an embeddable
