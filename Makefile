@@ -2652,11 +2652,13 @@ CONTRIB_HOST_STRICT ?= 0
 
 # Documentation examples that are supposed to work (#1500, #1522).
 #
-# Two gates, both cheap. `check_doc_examples.py` reads the stdlib module doc
+# Three gates, all cheap. `check_doc_examples.py` reads the stdlib module doc
 # comments, which are deliberately fragments and cannot be compiled, and
 # catches the two defects that do not need compiling: a block introduced by a
 # word that is not a keyword, and a documented `mod.fn(` the module does not
-# have. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
+# have. `check_stdlib_index.py` holds the reference page's module index to the
+# tree it describes, which it had drifted from in eleven counts and a whole
+# module. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
 # README that is labelled complete, and asserts the ones labelled `fails`
 # still fail.
 .PHONY: check-docs
@@ -2677,6 +2679,7 @@ check-docs: compiler ae stdlib
 	@# log instead of reading as a pass.
 	@if command -v python3 >/dev/null 2>&1; then \
 	    python3 tests/scripts/check_doc_examples.py && \
+	    python3 tests/scripts/check_stdlib_index.py && \
 	    python3 tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — python3 not found"; \
