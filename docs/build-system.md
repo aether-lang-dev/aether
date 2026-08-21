@@ -122,6 +122,93 @@ If you run `ae build` from a subdirectory and there's no `aether.toml` in the cu
 
 ---
 
+## Binary Hardening
+
+`ae build` asks the C toolchain for the mitigations whose cost is a rounding
+error next to what they catch, rather than inheriting whatever the platform
+defaults to:
+
+| flag | what it buys | where |
+|---|---|---|
+| `-fstack-protector-strong` | a canary on functions with buffers or address-taken locals | everywhere |
+| `-D_FORTIFY_SOURCE=2` | bounds-checked `memcpy` / `sprintf` / `printf` wrappers | everywhere, on optimised builds only, since it needs `-O1` or better and warns without it |
+| `-Wl,-z,relro -Wl,-z,now` | full RELRO: the GOT is read-only before `main` | ELF |
+| `-Wl,-z,noexecstack` | a non-executable stack even when a dependency forgets | ELF |
+| `-fPIE -pie` | a position-independent executable, so ASLR applies to the program image | ELF executables (macOS and Windows produce relocatable images already) |
+| `-Wl,--dynamicbase -Wl,--nxcompat` | ASLR and NX | PE |
+
+`--emit=lib` and `--emit=obj` skip `-pie` (it contradicts `-shared`, and an
+object file is linked by someone else). A project that wants a different
+posture overrides it through `aether.toml`'s `[build] cflags`, which append
+after these.
+
+### `ae checksec` reads the artifact, not the intent
+
+The flags above say what was asked for. What a binary ended up with is a
+separate question, and the only honest answer comes from the file itself:
+
+```text
+$ ae checksec build/myprog
+build/myprog (ELF)
+  PIE          yes
+  NX           yes
+  RELRO        yes
+  canary       yes
+  FORTIFY      yes
+  stripped     no
+```
+
+It reads ELF program and dynamic headers, Mach-O load commands, and PE
+`DllCharacteristics` directly, so it needs no `checksec(1)`, `readelf` or
+`otool` on the machine. A property the format has no concept of reports `n/a`
+rather than a failure: RELRO is an ELF idea, and Mach-O keeps its dyld info
+read-only by construction.
+
+A property reporting `n/a` satisfies `--require`, so one gate line works on
+every format: `ae checksec --require pie,nx,relro-full,canary,fortify` passes
+on a hardened Mach-O, where RELRO does not exist, and holds an ELF to full
+RELRO. `relro` without `-full` accepts partial RELRO; `relro-full` requires
+`BIND_NOW`.
+
+`n/a` also covers what a file genuinely cannot answer. Canary and FORTIFY are
+read from names, and a PE need not carry any: the COFF symbol table is
+optional, and mingw-w64 fortifies in its own headers, so the bound check is
+inlined and the only name it can leave behind is the handler on the failing
+branch. Where there are no names to read, `checksec` says `n/a` instead of
+reporting an absence it did not observe. The protection is still there, and
+the test suite proves it the way the file cannot: it builds a program that
+copies 32 bytes into a 16-byte object and requires the process to die rather
+than complete. That check runs on every platform, and the same overflow
+completes normally when the flag is taken away.
+
+`--require` turns the report into a gate, which is the part that keeps a
+mitigation from disappearing in a flag change nobody notices:
+
+```text
+$ ae checksec --require pie,nx,relro-full,canary,fortify build/myprog
+$ echo $?
+0
+```
+
+A missing property prints a `FAIL` row and exits 1. `relro-full` demands
+BIND_NOW; plain `relro` accepts partial.
+
+Whether a `FORTIFY` call appears at all is the libc's decision, not the
+flag's: glibc's headers redirect the printf family, Apple's do not for the
+same source. The flag is passed on both; only the artifact knows.
+
+### Hardening the toolchain itself
+
+`make HARDEN=1` builds the compiler and runtime with
+`-fstack-protector-all -D_FORTIFY_SOURCE=2 -Wformat -Wformat-security`, and CI
+pins a leg that does so.
+
+Object files carry no record of the flags that built them, so changing
+`HARDEN` used to recompile nothing: `make HARDEN=1` after an ordinary build
+relinked the same unhardened objects and reported success. The build now keeps
+a digest of everything that changes code generation, and any change to it
+forces the rebuild.
+
 ## Build Cache
 
 Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The cache key is an FNV64 hash of:
