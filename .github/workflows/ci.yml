@@ -92,6 +92,25 @@ jobs:
     - name: Run full CI suite
       run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} make ci
 
+    # The hardened leg must produce a hardened toolchain, and a program built
+    # by it must carry the mitigations too. Before this, `make HARDEN=1` after
+    # an ordinary build recompiled nothing and relinked the same unhardened
+    # objects, so the leg could pass while testing the flags it never applied.
+    - name: Assert the hardened build is hardened
+      if: matrix.harden == '1'
+      run: |
+        ./build/ae checksec build/aetherc
+        ./build/ae checksec --require canary,fortify build/aetherc
+        # The probe carries a sized libc copy of its own, so whether it ends
+        # up with a fortified call is decided by the flags rather than by
+        # whichever calls the generated C happened to make.
+        printf '#include <string.h>\nstatic char small[16];\nint probe_copy(int n) {\n    memcpy(small, "0123456789abcdef", (size_t)n);\n    return small[0];\n}\n' > /tmp/harden_copy.c
+        printf 'import std.mem\n\nextern probe_copy(n: int) -> int\n\nfill(n: int) -> long {\n    byte[64] scratch\n    mem.set_long(scratch, 0, n * 3)\n    return mem.get_long(scratch, 0)\n}\n\nmain() {\n    probe_copy(8)\n    println("v=${fill(7)}")\n}\n' > /tmp/harden_probe.ae
+        # -o /tmp/harden_probe puts the generated C at /tmp/harden_probe.c, so
+        # the extra source cannot share that name (see the refusal in ae build).
+        ./build/ae build /tmp/harden_probe.ae --extra /tmp/harden_copy.c -o /tmp/harden_probe
+        ./build/ae checksec --require pie,nx,relro-full,canary,fortify /tmp/harden_probe
+
     - name: Save miniaudio object cache (merge to main, on miss only)
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
