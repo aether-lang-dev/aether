@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.562.0]
+## [current]
 
 ### Fixed
 
@@ -34,6 +34,11 @@ version number before tagging the release.
 - **`ae test --list`** prints the files discovery found and runs none of them,
   which answers "what will run?" without a build, and is how the bound above
   is regression-tested without compiling three hundred programs.
+
+## [0.562.0]
+
+### Fixed
+
 - **The stdlib reference's module index did not match the tree it describes.**
   The page opened by telling the reader that table came from the source and so
   could not drift. Nothing generated or checked it, and it carried eleven wrong

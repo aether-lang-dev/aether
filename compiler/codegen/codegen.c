@@ -670,6 +670,65 @@ void free_code_generator(CodeGenerator* gen) {
             }
             free(gen->reply_type_map);
         }
+
+        /* Registries filled while walking the program (#1667). Each holds
+         * strdup'd names, and none of them were released: closure discovery
+         * alone accounted for 24 of the 34 programs that still leaked, since
+         * every closure contributes one string per capture plus its parent
+         * function's name. What is borrowed rather than owned is called out
+         * where it is skipped. */
+        if (gen->closures) {
+            for (int i = 0; i < gen->closure_count; i++) {
+                for (int c = 0; c < gen->closures[i].capture_count; c++) {
+                    free(gen->closures[i].captures[c]);
+                }
+                free(gen->closures[i].captures);
+                /* The Types are the AST's; only the array is ours. */
+                free(gen->closures[i].capture_types);
+                free(gen->closures[i].parent_func);
+            }
+            free(gen->closures);
+        }
+        if (gen->closure_var_map) {
+            for (int i = 0; i < gen->closure_var_count; i++) {
+                free(gen->closure_var_map[i].var_name);
+            }
+            free(gen->closure_var_map);
+        }
+        if (gen->promoted_funcs) {
+            for (int i = 0; i < gen->promoted_func_count; i++) {
+                for (int n = 0; n < gen->promoted_funcs[i].count; n++) {
+                    free(gen->promoted_funcs[i].names[n]);
+                }
+                free(gen->promoted_funcs[i].names);
+                free(gen->promoted_funcs[i].func_name);
+            }
+            free(gen->promoted_funcs);
+        }
+        /* current_promoted_captures borrows a promoted_funcs entry's array,
+         * saved and restored around each function body, so it is not freed
+         * here: the owner above already released it. */
+        if (gen->builder_funcs_reg) {
+            for (int i = 0; i < gen->builder_func_reg_count; i++) {
+                free(gen->builder_funcs_reg[i].name);
+                free(gen->builder_funcs_reg[i].factory);
+            }
+            free(gen->builder_funcs_reg);
+        }
+        if (gen->bare_fn_adapter_names) {
+            for (int i = 0; i < gen->bare_fn_adapter_count; i++) {
+                free(gen->bare_fn_adapter_names[i]);
+            }
+            free(gen->bare_fn_adapter_names);
+        }
+        if (gen->fnptr_locals) {
+            for (int i = 0; i < gen->fnptr_local_count; i++) {
+                /* signature is a borrow of an AST-owned Type. */
+                free(gen->fnptr_locals[i].name);
+            }
+            free(gen->fnptr_locals);
+        }
+
         free(gen);
     }
 }
