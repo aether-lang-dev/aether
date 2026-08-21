@@ -14,6 +14,7 @@
 // that pool. Separate lifetimes need separate thread budgets.
 
 typedef struct HttpConnectionPool HttpConnectionPool;
+typedef struct HttpConn HttpConn;
 
 // Starts the worker threads. Returns NULL when no worker could be
 // started, in which case the caller should handle connections inline.
@@ -25,6 +26,11 @@ HttpConnectionPool* http_pool_create(HttpServer* server);
 // pool is shutting down.
 void http_pool_submit(HttpConnectionPool* pool, int client_fd);
 
+// Hands a connection the parking lot woke back to a worker (#1663). Same
+// queue as a fresh descriptor: a worker treats both the same way, running
+// requests until the connection closes or parks again. Takes ownership.
+void http_pool_submit_conn(HttpConnectionPool* pool, HttpConn* conn);
+
 // Drains the queue, joins every worker and frees the pool. Safe on NULL.
 void http_pool_destroy(HttpConnectionPool* pool);
 
@@ -32,5 +38,11 @@ void http_pool_destroy(HttpConnectionPool* pool);
 // the process. Non-zero means holding a connection open costs another one its
 // turn, which is what the keep-alive decision needs to know.
 int http_pool_pending(void);
+
+// Is a worker free right now, with nothing queued? The response path asks
+// before holding an idle keep-alive connection for a grace period instead of
+// parking it: with a spare worker that costs nobody their turn, and without
+// one it is the starvation parking exists to remove (#1663).
+int http_pool_has_spare_worker(void);
 
 #endif // AETHER_HTTP_POOL_H
