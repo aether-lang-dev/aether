@@ -33,6 +33,18 @@ SRC="$SCRIPT_DIR/mylib.ae"
 READ="$SCRIPT_DIR/read_exports.py"
 
 command -v zig >/dev/null 2>&1 || { echo "  [SKIP] wasm_emit_lib_exports: zig not on PATH"; exit 0; }
+
+# The wasi-libc that ships with zig decides how a library-shaped wasm link
+# behaves, and it differs between releases: an older zig fails this with
+# "wasm-ld: undefined symbol: main" from its own __main_void.o, which reads as
+# a defect in the toolchain rather than a version mismatch. Skip unless the
+# zig on PATH is the one the repo pins.
+ZIG_PINNED="$(sed -n 's/^ZIG_VERSION=//p' "$ROOT/scripts/get-zig.sh" 2>/dev/null | head -1)"
+ZIG_HAVE="$(zig version 2>/dev/null)"
+if [ -n "$ZIG_PINNED" ] && [ "$ZIG_HAVE" != "$ZIG_PINNED" ]; then
+    echo "  [SKIP] wasm_emit_lib_exports: zig $ZIG_HAVE on PATH, this needs the pinned $ZIG_PINNED"
+    exit 0
+fi
 command -v python3 >/dev/null 2>&1 || { echo "  [SKIP] wasm_emit_lib_exports: python3 not on PATH"; exit 0; }
 
 TMP="${TMPDIR:-/tmp}/ae_wasmlib_$$"
