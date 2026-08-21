@@ -1421,12 +1421,9 @@ ASTNode* parse_primary_expression(Parser* parser) {
             }
             if (next && next->type == TOKEN_LEFT_BRACE && looks_like_struct) {
                 // Struct literal: TypeName{ field: value, ... }
-                // create_ast_node copies the name, and advancing only moves
-                // the token index, so the token's own text is what to pass:
-                // a copy here was never freed (#1667).
+                char* struct_name = strdup(token->value);
                 int line = token->line;
                 int column = token->column;
-                const char* struct_name = token->value;
                 advance_token(parser); // consume identifier
                 advance_token(parser); // consume '{'
 
