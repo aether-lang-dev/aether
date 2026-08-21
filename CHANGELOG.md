@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.562.0]
+## [current]
 
 ### Changed
 
@@ -43,6 +43,10 @@ version number before tagging the release.
   by scanning the parked set, so a wakeup costs the same whether four
   connections are parked or four thousand, which is the property the whole
   change is for. `aether_http_parked_connections` reports the current count.
+### Fixed
+
+## [0.562.0]
+
 ### Fixed
 
 - **The stdlib reference's module index did not match the tree it describes.**
