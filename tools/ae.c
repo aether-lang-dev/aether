@@ -6103,6 +6103,25 @@ static void test_files_free(char** list, int count) {
     free(list);
 }
 
+/* Path spellings that mean the same directory, made comparable.
+ *
+ * Separators are normalised because Windows lists what `dir /b /s` prints,
+ * which is backslashed and absolute, while the target arrives however the
+ * caller wrote it (MSYS2 hands a native binary forward slashes). Case is
+ * folded there too, where two spellings that differ only in case are the same
+ * directory. */
+static void path_normalize(const char* in, char* out, size_t cap) {
+    size_t i = 0;
+    for (; in[i] && i + 1 < cap; i++) {
+        char c = in[i] == '\\' ? '/' : in[i];
+#ifdef _WIN32
+        c = (char)tolower((unsigned char)c);
+#endif
+        out[i] = c;
+    }
+    out[i] = '\0';
+}
+
 /* A `fixtures/` directory holds input to a test rather than tests.
  *
  * The spec reporter's fixtures are suites that fail on purpose, so that its
@@ -6217,13 +6236,22 @@ static int cmd_test(int argc, char** argv) {
                     const char* ext = strstr(base, "_test.ae");
                     if (!ext || strcmp(ext, "_test.ae") != 0) continue;
                 }
-                const char* rel = line;
-                size_t dir_len = strlen(test_dir);
-                if (strncmp(line, test_dir, dir_len) == 0) {
-                    rel += dir_len;
-                    while (*rel == '/' || *rel == '\\') rel++;
+                /* The rule applies below the directory being searched, so
+                 * the path is taken relative to it. When the two spellings do
+                 * not line up the rule is not applied at all: running a
+                 * fixture is a visible, fixable annoyance, and silently
+                 * skipping a real test is the failure this whole change is
+                 * about. */
+                char line_norm[4096], root_norm[4096];
+                path_normalize(line, line_norm, sizeof(line_norm));
+                path_normalize(test_dir, root_norm, sizeof(root_norm));
+                size_t root_len = strlen(root_norm);
+                while (root_len > 0 && root_norm[root_len - 1] == '/') root_len--;
+                if (strncmp(line_norm, root_norm, root_len) == 0) {
+                    const char* rel = line_norm + root_len;
+                    while (*rel == '/') rel++;
+                    if (path_has_fixtures_dir(rel)) continue;
                 }
-                if (path_has_fixtures_dir(rel)) continue;
                 if (!test_files_push(&test_files, &test_count, &test_cap, line)) {
                     oom = 1;
                     break;
