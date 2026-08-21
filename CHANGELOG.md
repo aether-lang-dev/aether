@@ -25,7 +25,9 @@ version number before tagging the release.
   reporting an absence it did not observe. `--require
   pie,nx,relro-full,canary,fortify` turns the report into a gate that exits
   non-zero, which is the part that keeps a mitigation from disappearing in a
-  flag change nobody notices.
+  flag change nobody notices. An `n/a` satisfies that gate, so the same line
+  works on all three formats; `relro` accepts partial RELRO and `relro-full`
+  requires `BIND_NOW`.
 
 - **`ae build` hardens the programs it produces.** It asked for nothing
   before, so a program inherited whatever the platform defaulted to: on

@@ -170,8 +170,10 @@ case "$fmt" in
     *)    [ "$fortify" = "yes" ] || fail "FORTIFY is '$fortify' on $fmt, expected yes" ;;
 esac
 
-# The gate agrees with the report.
-"$AE" checksec --require "pie,nx,canary,fortify" "$PROBE" >/dev/null 2>&1 \
+# The gate agrees with the report, and it is the same gate everywhere: a
+# property the format cannot express reports n/a and satisfies --require, so
+# `relro-full` is in this list on Mach-O and PE too.
+"$AE" checksec --require "pie,nx,relro-full,canary,fortify" "$PROBE" >/dev/null 2>&1 \
     || fail "--require rejected a binary the report says is hardened"
 
 # And the gate is a gate: something the binary cannot have must fail it.

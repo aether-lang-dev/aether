@@ -164,6 +164,12 @@ It reads ELF program and dynamic headers, Mach-O load commands, and PE
 rather than a failure: RELRO is an ELF idea, and Mach-O keeps its dyld info
 read-only by construction.
 
+A property reporting `n/a` satisfies `--require`, so one gate line works on
+every format: `ae checksec --require pie,nx,relro-full,canary,fortify` passes
+on a hardened Mach-O, where RELRO does not exist, and holds an ELF to full
+RELRO. `relro` without `-full` accepts partial RELRO; `relro-full` requires
+`BIND_NOW`.
+
 `n/a` also covers what a file genuinely cannot answer. Canary and FORTIFY are
 read from names, and a PE need not carry any: the COFF symbol table is
 optional, and mingw-w64 fortifies in its own headers, so the bound check is

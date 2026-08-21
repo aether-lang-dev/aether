@@ -310,7 +310,8 @@ int cmd_checksec(int argc, char** argv) {
                    "lost silently.\n"
                    "\n"
                    "Properties: pie, nx, relro (relro-full requires BIND_NOW), canary,\n"
-                   "fortify, stripped.\n");
+                   "fortify, stripped. A property the artifact's format cannot express\n"
+                   "reports n/a and satisfies --require, so one gate works everywhere.\n");
             return 0;
         }
         if (strcmp(argv[i], "--require") == 0 && i + 1 < argc) {
@@ -358,7 +359,14 @@ int cmd_checksec(int argc, char** argv) {
         if (dash) { *dash = '\0'; want_full = 1; }
 
         PropState s = prop_by_name(&c, name);
-        int ok = want_full ? (s == PROP_YES) : (s == PROP_YES || s == PROP_NA);
+        /* n/a passes: the format cannot express the property, so demanding it
+         * would make one gate unwritable across formats, and the report says
+         * n/a in plain sight either way. `-full` is about the distinction the
+         * property itself has (RELRO with BIND_NOW versus without), so partial
+         * satisfies the plain form and only the full one. */
+        int ok = (s == PROP_NA) ? 1
+               : want_full     ? (s == PROP_YES)
+                               : (s == PROP_YES || s == PROP_PARTIAL);
         if (!ok) {
             printf("  %-12s %-8s FAIL (required%s)\n", name, prop_word(s),
                    want_full ? ": full" : "");
