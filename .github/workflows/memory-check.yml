@@ -7,6 +7,18 @@ on:
     branches: [ main, master, develop ]
   workflow_dispatch:
 
+# A newer push to the same ref supersedes the older run. Without this every
+# push stacked another full run: 26 active runs and 19 queued at once, which
+# starved sibling repos sharing the org's runners for the better part of an
+# hour, and left CI reporting on commits that had already been replaced.
+#
+# PR runs cancel; pushes to main do not. A main run is the one that fills the
+# shared caches (see the Restore/Save split in windows.yml), and cancelling it
+# would leave PR runs rebuilding from cold.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   valgrind-test:
     name: Valgrind Memory Leak Check
