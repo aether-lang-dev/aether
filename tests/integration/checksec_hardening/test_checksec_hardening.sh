@@ -44,11 +44,15 @@ if ! "$AE" build "$TMP/probe.ae" -o "$TMP/probe" >"$TMP/build.log" 2>&1; then
     fail "the probe did not build"
 fi
 
-# Windows names the artifact probe.exe whatever -o asked for, so ask the
-# filesystem which one the build wrote rather than assuming.
-PROBE="$TMP/probe"
-[ -f "$PROBE" ] || PROBE="$TMP/probe.exe"
-[ -f "$PROBE" ] || fail "the build reported success but wrote neither $TMP/probe nor $TMP/probe.exe"
+# Take the artifact's path from the build's own report. Windows appends .exe
+# whatever -o asked for, and the filesystem cannot be asked about it from here:
+# MSYS2's `test -f probe` answers yes for probe.exe, so the shell sees a file
+# that the native `ae` binary, going through the Win32 CRT, does not. `ae
+# build` prints the path it actually wrote ("Built: <path>", or "Built (cache
+# hit): <path>"), which is the one thing that is true on every platform.
+PROBE="$(sed -n 's/^Built[^:]*: //p' "$TMP/build.log" | tail -1)"
+[ -n "$PROBE" ] || { sed 's/^/        /' "$TMP/build.log" | head -10
+                     fail "the build printed no artifact path"; }
 
 # Hardening must not have broken the program.
 [ "$("$PROBE")" = "v=21" ] || fail "the hardened probe printed '$("$PROBE")', expected 'v=21'"
