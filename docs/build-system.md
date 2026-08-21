@@ -130,8 +130,8 @@ defaults to:
 
 | flag | what it buys | where |
 |---|---|---|
-| `-fstack-protector-strong` | a canary on functions with buffers or address-taken locals | everywhere but MinGW, whose stack protector needs libssp on the link line |
-| `-D_FORTIFY_SOURCE=2` | bounds-checked `memcpy` / `sprintf` / `printf` wrappers | optimised builds only, since it needs `-O1` or better and warns without it |
+| `-fstack-protector-strong` | a canary on functions with buffers or address-taken locals | everywhere |
+| `-D_FORTIFY_SOURCE=2` | bounds-checked `memcpy` / `sprintf` / `printf` wrappers | everywhere, on optimised builds only, since it needs `-O1` or better and warns without it |
 | `-Wl,-z,relro -Wl,-z,now` | full RELRO: the GOT is read-only before `main` | ELF |
 | `-Wl,-z,noexecstack` | a non-executable stack even when a dependency forgets | ELF |
 | `-fPIE -pie` | a position-independent executable, so ASLR applies to the program image | ELF executables (macOS and Windows produce relocatable images already) |
@@ -163,6 +163,17 @@ It reads ELF program and dynamic headers, Mach-O load commands, and PE
 `otool` on the machine. A property the format has no concept of reports `n/a`
 rather than a failure: RELRO is an ELF idea, and Mach-O keeps its dyld info
 read-only by construction.
+
+`n/a` also covers what a file genuinely cannot answer. Canary and FORTIFY are
+read from names, and a PE need not carry any: the COFF symbol table is
+optional, and mingw-w64 fortifies in its own headers, so the bound check is
+inlined and the only name it can leave behind is the handler on the failing
+branch. Where there are no names to read, `checksec` says `n/a` instead of
+reporting an absence it did not observe. The protection is still there, and
+the test suite proves it the way the file cannot: it builds a program that
+copies 32 bytes into a 16-byte object and requires the process to die rather
+than complete. That check runs on every platform, and the same overflow
+completes normally when the flag is taken away.
 
 `--require` turns the report into a gate, which is the part that keeps a
 mitigation from disappearing in a flag change nobody notices:

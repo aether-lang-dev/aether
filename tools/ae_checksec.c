@@ -103,12 +103,17 @@ static int has_name(const unsigned char* buf, size_t len, const char* needle) {
 
 /* A fortified call is any of the __*_chk family. Rather than list them, look
  * for the suffix on a symbol-looking name, which is what _FORTIFY_SOURCE
- * emits and what nothing else does. */
+ * emits and what nothing else does.
+ *
+ * __chk_fail is mingw-w64's: it fortifies in its own headers, so the bound
+ * check is inlined and the only name left behind is the handler the failing
+ * branch jumps to. */
 static int has_fortified_call(const unsigned char* buf, size_t len) {
     static const char* known[] = {
         "__memcpy_chk", "__memset_chk", "__strcpy_chk", "__strncpy_chk",
         "__sprintf_chk", "__snprintf_chk", "__printf_chk", "__fprintf_chk",
         "__memmove_chk", "__strcat_chk", "__vsnprintf_chk", "__read_chk",
+        "__chk_fail",
     };
     for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++) {
         if (has_name(buf, len, known[i])) return 1;
@@ -221,7 +226,18 @@ static int inspect_pe(const unsigned char* b, size_t len, Checksec* out) {
     out->relro = PROP_NA;                                   /* no PE equivalent */
     out->canary  = has_name(b, len, "__stack_chk_fail") ||
                    has_name(b, len, "__security_cookie") ? PROP_YES : PROP_NO;
-    out->fortify = has_fortified_call(b, len) ? PROP_YES : PROP_NO;
+
+    /* Both of the above are read from names, and a PE need not carry any: the
+     * COFF symbol table is optional and some linkers emit none at all. With no
+     * names to read, "no" would be a guess dressed as a finding, so say so
+     * instead. NumberOfSymbols lives at offset 12 of the 20-byte COFF header,
+     * which starts right after the 4-byte PE signature. */
+    uint32_t num_symbols = (pe_off + 4 + 16 <= len) ? rd32(b + pe_off + 4 + 12, 0) : 0;
+
+    out->fortify = has_fortified_call(b, len) ? PROP_YES
+                 : num_symbols == 0           ? PROP_NA
+                                              : PROP_NO;
+    if (out->canary == PROP_NO && num_symbols == 0) out->canary = PROP_NA;
     out->stripped = has_name(b, len, ".debug_info") ? PROP_NO : PROP_YES;
     return 0;
 }

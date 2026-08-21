@@ -19,7 +19,10 @@ version number before tagging the release.
   `DllCharacteristics` directly, so no `checksec(1)`, `readelf` or `otool` is
   needed on the machine, and reports PIE, NX, RELRO, stack canary, FORTIFY and
   whether the binary is stripped. A property the format has no concept of says
-  `n/a` rather than failing: RELRO is an ELF idea. `--require
+  `n/a` rather than failing: RELRO is an ELF idea. So does one the file cannot
+  answer: canary and FORTIFY are read from names, and a PE need not carry a
+  symbol table, so where there is nothing to read it says so instead of
+  reporting an absence it did not observe. `--require
   pie,nx,relro-full,canary,fortify` turns the report into a gate that exits
   non-zero, which is the part that keeps a mitigation from disappearing in a
   flag change nobody notices.
@@ -27,13 +30,31 @@ version number before tagging the release.
 - **`ae build` hardens the programs it produces.** It asked for nothing
   before, so a program inherited whatever the platform defaulted to: on
   Linux/gcc that measured as partial RELRO, no canary and no fortified calls.
-  It now passes `-fstack-protector-strong`, `-D_FORTIFY_SOURCE=2` on optimised
-  builds, `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack` and `-fPIE -pie` on ELF,
-  and `-Wl,--dynamicbase -Wl,--nxcompat` on PE. `--emit=lib` and `--emit=obj`
-  skip `-pie`, which contradicts `-shared`. Project `cflags` still append
-  after, so a different posture stays available.
+  It now passes `-fstack-protector-strong` and, on optimised builds,
+  `-D_FORTIFY_SOURCE=2` on every platform, plus `-Wl,-z,relro -Wl,-z,now
+  -Wl,-z,noexecstack` and `-fPIE -pie` on ELF and `-Wl,--dynamicbase
+  -Wl,--nxcompat` on PE. `--emit=lib` and `--emit=obj` skip `-pie`, which
+  contradicts `-shared`. Project `cflags` still append after, so a different
+  posture stays available.
+
+  FORTIFY is verified by running an overflow into it rather than by reading a
+  symbol, because the symbol is a libc implementation detail and the
+  protection is not: glibc and Apple libc call out to `__*_chk`, mingw-w64
+  inlines the same check and leaves no name behind. The test builds a program
+  that copies 32 bytes into a 16-byte object and requires the process to die
+  instead of completing, on every platform. Measured against the control, the
+  same program compiled without the flag prints its way to a clean exit.
 
 ### Fixed
+
+- **`ae build` overwrote an input file when `-o` matched its name** (#1681).
+  The generated C goes to `<output>.c` and the program to `<output>`, and
+  neither was checked against the files the caller passed in, so `ae build
+  p.ae --extra p.c -o p` wrote generated code over `p.c` and then failed to
+  link against the source it had just destroyed. `-o p.ae` did the same to the
+  Aether source. Both names are known before anything is written, so the
+  collision is now refused there, with the conflicting path named. Found while
+  building the `--extra` hardening probe below.
 
 - **`make HARDEN=1` after an ordinary build produced an unhardened binary and
   reported success.** Object files carry no record of the flags that built

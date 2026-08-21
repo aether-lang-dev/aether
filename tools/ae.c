@@ -2162,18 +2162,20 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
  * _FORTIFY_SOURCE needs an optimising build to do anything and warns when it
  * gets none, so it is tied to the optimised path rather than requested
  * unconditionally. A project that wants a different posture overrides it
- * through aether.toml's `[build] cflags`, which append after these. */
+ * through aether.toml's `[build] cflags`, which append after these.
+ *
+ * Windows gets the same flags as everywhere else. mingw-w64 implements
+ * _FORTIFY_SOURCE in its own headers rather than by calling into libc, so the
+ * check is inlined and the artifact carries no __*_chk symbol to read back;
+ * the protection is there all the same, which the integration test proves by
+ * running an overflow into it rather than by reading the symbol table.
+ *
+ * -U before -D: a toolchain that predefines _FORTIFY_SOURCE (several distro
+ * GCCs do) would otherwise warn about the redefinition on every compile, and
+ * a warning on every compile is a warning nobody reads. */
 static const char* harden_cflags(bool optimize) {
-#if defined(_WIN32)
-    /* MinGW's stack protector needs libssp on the link line, which a static
-     * MinGW build does not always carry; ASLR and NX come from the link flags
-     * below instead. */
-    (void)optimize;
-    return "";
-#else
-    return optimize ? " -fstack-protector-strong -D_FORTIFY_SOURCE=2"
+    return optimize ? " -fstack-protector-strong -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2"
                     : " -fstack-protector-strong";
-#endif
 }
 
 /* Link-side hardening: full RELRO where the platform has it, ASLR and a
@@ -2911,6 +2913,53 @@ static void ae_abspath(const char* path, char* out, size_t outcap) {
     char* rp = realpath(path, NULL);
     if (rp) { snprintf(out, outcap, "%s", rp); free(rp); }
     else    { snprintf(out, outcap, "%s", path); }
+}
+
+/* Do two paths name the same file? Resolved first, so `./p.c` and `p.c` are
+ * not mistaken for different files, and compared case-insensitively on
+ * Windows, where they are not. */
+static int paths_same(const char* a, const char* b) {
+    char ra[2048], rb[2048];
+    ae_abspath(a, ra, sizeof(ra));
+    ae_abspath(b, rb, sizeof(rb));
+#ifdef _WIN32
+    for (char* q = ra; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
+    for (char* q = rb; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
+#endif
+    return strcmp(ra, rb) == 0;
+}
+
+/* Would this build write over one of its own inputs?
+ *
+ * `-o name` puts the generated C at `name.c` and the program at `name`, and
+ * either can be a file the caller handed us: `ae build p.ae --extra p.c -o p`
+ * wrote generated code over p.c, then failed to link against the source it
+ * had just destroyed. Checked before anything is written, and refused rather
+ * than worked around, because the two names the caller gave are in conflict
+ * and only the caller knows which one they meant. */
+static int output_clobbers_input(const char* c_file, const char* exe_file,
+                                 const char* ae_file, const char* extras) {
+    const char* outs[2] = { c_file, exe_file };
+    const char* what[2] = { "generated C", "program" };
+
+    for (int i = 0; i < 2; i++) {
+        if (ae_file && paths_same(outs[i], ae_file)) {
+            fprintf(stderr, "Error: the %s would be written over the source it "
+                            "is built from (%s).\n"
+                            "       Pick a different -o name.\n", what[i], ae_file);
+            return 1;
+        }
+        char list[8192];
+        snprintf(list, sizeof(list), "%s", extras ? extras : "");
+        for (char* tok = strtok(list, " "); tok; tok = strtok(NULL, " ")) {
+            if (!paths_same(outs[i], tok)) continue;
+            fprintf(stderr, "Error: the %s would be written over an --extra "
+                            "input (%s).\n"
+                            "       Pick a different -o name.\n", what[i], tok);
+            return 1;
+        }
+    }
+    return 0;
 }
 
 // Scan `main_file` for `import <bare>` statements that resolve to a
@@ -5561,6 +5610,8 @@ static int cmd_build(int argc, char** argv) {
         strncpy(exe_file, composed, sizeof(exe_file) - 1);
         exe_file[sizeof(exe_file) - 1] = '\0';
     }
+
+    if (output_clobbers_input(c_file, exe_file, file, extra_files)) return 1;
 
     // Pre-flight: verify emcc for wasm target before starting compilation
     if (is_wasm && run_cmd_quiet("emcc --version") != 0) {
