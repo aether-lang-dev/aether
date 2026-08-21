@@ -42,6 +42,13 @@ listed="$("$AE" test --list "$TMP" 2>/dev/null | wc -l | tr -d ' ')"
 "$AE" test --list "$TMP" 2>/dev/null | grep -q "/fixtures/" \
     && fail "a file under fixtures/ was collected as a test"
 
+# Not searched is not the same as unreachable: naming the directory runs what
+# is in it, which is how the spec reporter drives its own deliberately failing
+# fixtures.
+named="$("$AE" test --list "$TMP/tests/fixtures" 2>/dev/null | wc -l | tr -d ' ')"
+[ "$named" = "1" ] \
+    || fail "naming a fixtures directory listed $named files, expected 1"
+
 # The list is what runs: a small suite executes, and its total is the count.
 mkdir -p "$TMP/small/tests"
 printf 'main() {\n    println("ok")\n}\n' > "$TMP/small/tests/test_one.ae"

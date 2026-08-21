@@ -6103,12 +6103,17 @@ static void test_files_free(char** list, int count) {
     free(list);
 }
 
-/* A file under a `fixtures/` directory is input to a test, not a test.
+/* A `fixtures/` directory holds input to a test rather than tests.
  *
  * The spec reporter's fixtures are suites that fail on purpose, so that its
  * own shell test can assert on the failure rows. They match the *_test.ae
- * naming convention, and collecting them reported a failure for a suite that
- * was working exactly as intended. */
+ * naming convention, and sweeping them up reported a failure for a component
+ * that was working exactly as intended.
+ *
+ * The path checked here is relative to the directory being searched, so a
+ * fixtures directory is never walked into but can still be named as the
+ * target: `ae test path/to/fixtures` runs what is in it, which is exactly what
+ * the reporter's own test does. */
 static int path_has_fixtures_dir(const char* path) {
     for (const char* p = path; (p = strstr(p, "fixtures")) != NULL; p += 8) {
         int at_start = (p == path) || p[-1] == '/' || p[-1] == '\\';
@@ -6212,7 +6217,13 @@ static int cmd_test(int argc, char** argv) {
                     const char* ext = strstr(base, "_test.ae");
                     if (!ext || strcmp(ext, "_test.ae") != 0) continue;
                 }
-                if (path_has_fixtures_dir(line)) continue;
+                const char* rel = line;
+                size_t dir_len = strlen(test_dir);
+                if (strncmp(line, test_dir, dir_len) == 0) {
+                    rel += dir_len;
+                    while (*rel == '/' || *rel == '\\') rel++;
+                }
+                if (path_has_fixtures_dir(rel)) continue;
                 if (!test_files_push(&test_files, &test_count, &test_cap, line)) {
                     oom = 1;
                     break;

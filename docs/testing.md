@@ -51,9 +51,10 @@ ae test --list       # print what would run, run nothing
 ```
 
 Discovery has no ceiling: every matching file runs, and the summary's total
-is that number. Files under a `fixtures/` directory are skipped, because a
-fixture is input to a test rather than a test, and some are meant to fail so
-that another test can assert on the failure.
+is that number. A `fixtures/` directory is not searched, because a fixture is
+input to a test rather than a test, and some are meant to fail so that another
+test can assert on the failure. Naming one as the target still runs what is in
+it (`ae test path/to/fixtures`).
 
 Each test file is a standalone program with its own `main()`. `ae test`
 compiles and runs each one and reads its **process exit code**: `0` means

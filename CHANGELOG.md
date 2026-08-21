@@ -22,10 +22,12 @@ version number before tagging the release.
   every green total has been read as a full pass. The list now grows with what
   is found, and the total is the number of files there are.
 
-  Files under a `fixtures/` directory are no longer collected. A fixture is
-  input to a test, and the spec reporter's fixtures fail on purpose so its own
-  test can assert on the failure rows, which `ae test` reported as a failing
-  suite.
+  A `fixtures/` directory is no longer searched. A fixture is input to a test,
+  and the spec reporter's fixtures fail on purpose so its own test can assert
+  on the failure rows, which `ae test` reported as a failing suite. The rule
+  applies to the path below the directory being searched, so naming a fixtures
+  directory as the target still runs what is in it, which is how that reporter
+  test drives them.
 
 ### Added
 
