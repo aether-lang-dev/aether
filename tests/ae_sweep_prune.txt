@@ -97,6 +97,7 @@ tests/integration/http_client_stream_chunked/
 tests/integration/http_external_ptr/
 tests/integration/http_head_and_middleware/
 tests/integration/http_h2_concurrent_dispatch/
+tests/integration/http_keepalive_parking/
 tests/integration/http_middleware_d1/
 tests/integration/http_middleware_d2/
 tests/integration/http_real_ip/

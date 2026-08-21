@@ -363,30 +363,55 @@ Loop terminates when:
 - response status mandates close (408, 426),
 - the response has no definite body length (a handler that sets no
   body gets `Content-Length: 0` rather than a close; anything read
-  until EOF closes),
-- **another connection is waiting for a worker**.
-
-That last rule is what makes the default safe here. A worker owns a
-connection for its whole life (see the section above), so keeping one
-open while the pool is saturated takes a queued connection's turn
-instead of saving it a handshake. Measured on an 8-core box (16
-workers), 3000 requests:
-
-| concurrent clients | close per response | keep-alive | unconditional keep-alive |
-|---|---|---|---|
-| 4  | 17,800 rps | 50,900 rps | 65,600 rps |
-| 8  | 22,100 rps | 80,800 rps | 60,700 rps |
-| 20 | 22,500 rps | 59,100 rps | **99 rps** |
-| 50 | 22,700 rps | 36,500 rps | (starves) |
-
-The third column is what happens without the rule: past the worker
-count, connections that never reach a worker stall the client. The
-second column is the shipped behaviour, which tracks the best of the
-other two at every point. Lifting the cap itself means parking idle
-connections in a poller instead of holding a worker.
+  until EOF closes).
 
 Server emits `Connection: keep-alive` and `Keep-Alive: timeout=N,
 max=M` headers per response.
+
+### Connection parking
+
+A worker used to own a connection for that connection's whole life, so
+the number of connections a server could hold open at once was the
+worker count — `cores * 2`, capped at 64. Keep-alive was worth several
+times close-per-response below that line and a net loss above it,
+because connections that never reached a worker stalled behind ones
+sitting idle in `recv`.
+
+Now, when a response completes and the connection stays alive, the fd
+goes to a poller thread and the worker is released; the connection is
+re-submitted to the pool when its next request arrives. Concurrency
+bounds on file descriptors rather than on threads.
+
+Parking engages only once workers are scarce — anything queued, or
+three quarters of them busy. Below that the pool has spare capacity, so
+nobody is waiting on the worker a connection holds, and the handoff
+(an `epoll_ctl`, a poller wakeup, a queue hop) would be pure overhead.
+
+Measured on a 4-core box (8 workers), 6000 requests per cell, parking
+toggled on the same binary:
+
+| concurrent clients | parking off | parking on |
+|---|---|---|
+| 4  | 80,009 rps | 74,048 rps |
+| 8  | 65,358 rps | 60,925 rps |
+| 16 | 33,513 rps | **66,671 rps** |
+| 50 | 30,890 rps | **74,474 rps** |
+
+Roughly 7% for the handoff below the worker count, against 2–2.4x above
+it, and the cliff at `cores * 2` is gone. `AETHER_HTTP_PARKING=0` in the
+environment turns parking off without a rebuild.
+
+Two limits worth knowing:
+
+- Parking is POSIX-only. On Windows, and in builds without threads, a
+  worker still owns its connection, and the older rule applies instead:
+  a connection is closed rather than kept alive while **another
+  connection is waiting for a worker**, so the server degrades to
+  close-per-response exactly when it is saturated rather than starving.
+- A TLS connection is parked only when neither the read buffer nor
+  `SSL_pending` holds bytes — already-decrypted plaintext would never
+  make the fd readable, so such a connection keeps its worker and
+  loops.
 
 ---
 

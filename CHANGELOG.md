@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **HTTP server: idle keep-alive connections no longer hold a worker**
+  (#1663). A worker owned a connection for that connection's whole life, so
+  the number of connections a server could hold open at once was the worker
+  count (`cores * 2`, capped at 64) — keep-alive was worth several times
+  close-per-response below that line and a net loss above it, because
+  connections that never reached a worker stalled behind ones sitting idle in
+  `recv`. When a response completes and the connection stays alive, the fd now
+  goes to a poller thread and the worker is released, so concurrency bounds on
+  file descriptors rather than on threads. Measured on a 4-core box (8
+  workers), 6000 requests per cell: 33,513 → 66,671 rps at 16 concurrent
+  clients and 30,890 → 74,474 at 50, against roughly 7% for the handoff below
+  the worker count. Parking engages only once workers are scarce, is POSIX-only
+  (Windows and no-threads builds keep the previous capacity rule), and
+  `AETHER_HTTP_PARKING=0` turns it off without a rebuild.
+
 ## [0.563.0]
 
 ### Fixed
