@@ -693,7 +693,7 @@ TOOLS_CFLAGS = -O2 -Itools -MMD -MP \
     $(if $(AETHER_ENABLE_LLM),-DAETHER_ENABLE_LLM=1)
 TOOLS_SRC = tools/ae.c tools/ae_help.c tools/ae_fmt.c tools/ae_bindgen.c \
             tools/ae_cross.c tools/ae_repl.c tools/ae_version.c \
-            tools/ae_cache.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
+            tools/ae_cache.c tools/ae_checksec.c tools/apkg/toml_parser.c $(if $(AETHER_ENABLE_LLM),tools/llm_shim.c)
 TOOLS_OBJS = $(TOOLS_SRC:%.c=$(OBJ_DIR)/%.o)
 COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(OBJ_DIR)/%.o)
 RUNTIME_OBJS = $(RUNTIME_SRC:%.c=$(OBJ_DIR)/%.o)
@@ -797,7 +797,39 @@ else
 endif
 
 # Pattern rule for object files
-$(OBJ_DIR)/%.o: %.c | $(STDLIB_SYMS_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
+# Rebuild when the flags change, not just when a source does (#1646).
+#
+# Object files carry no record of what built them, so `make HARDEN=1` after a
+# plain build recompiled NOTHING and relinked the same unhardened objects into
+# a binary the caller believes is hardened: zero canaries, zero fortified
+# calls, and a successful build. A security posture nobody can see is worse
+# than none, and it is how the hardened CI leg came to be reported as testing
+# nothing.
+#
+# The stamp holds a digest of everything that changes code generation, and
+# every object depends on it. The digest is computed inside the recipe rather
+# than in a variable because CKSUM_CMD is defined further down this file: an
+# immediate `:=` here would expand it to nothing and the stamp would never
+# change, which is the same silence in a new place.
+#
+# FORCE, not .PHONY: the recipe must RUN every build to compare, but the file
+# must only be TOUCHED when the digest actually moves. A phony stamp is always
+# newer than its dependents and would rebuild the world on every make.
+BUILD_FLAGS_STAMP := $(OBJ_DIR)/.build-flags
+
+.PHONY: build-flags-force
+build-flags-force:
+
+$(BUILD_FLAGS_STAMP): build-flags-force
+	@mkdir -p $(dir $@) 2>/dev/null || true
+	@digest=$$(printf '%s|%s|%s|%s|%s|%s' "$(CC)" "$(CFLAGS)" "$(EXTRA_CFLAGS)" \
+	    "$(AETHER_REQUIRED_CFLAGS)" "HARDEN=$(HARDEN)" "$(PLATFORM)" \
+	    | $(CKSUM_CMD) 2>/dev/null | cut -d' ' -f1); \
+	  if [ ! -f "$@" ] || [ "$$(cat "$@" 2>/dev/null)" != "$$digest" ]; then \
+	    printf '%s' "$$digest" > "$@"; \
+	  fi
+
+$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(STDLIB_SYMS_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
 	@echo "Compiling $<..."
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -1609,7 +1641,7 @@ apkg:
 # Per-object compile for the tools driver (#1221). Static pattern rule so it
 # wins over the generic $(OBJ_DIR)/%.o rule (which uses CFLAGS, wrong include
 # path and defines for tools). The order-only dir prereqs create the obj tree.
-$(TOOLS_OBJS): $(OBJ_DIR)/%.o: %.c | $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg
+$(TOOLS_OBJS): $(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(OBJ_DIR)/tools $(OBJ_DIR)/tools/apkg
 	@echo "Compiling $<..."
 	@$(CC) $(TOOLS_CFLAGS) -c $< -o $@
 
@@ -2620,11 +2652,13 @@ CONTRIB_HOST_STRICT ?= 0
 
 # Documentation examples that are supposed to work (#1500, #1522).
 #
-# Two gates, both cheap. `check_doc_examples.py` reads the stdlib module doc
+# Three gates, all cheap. `check_doc_examples.py` reads the stdlib module doc
 # comments, which are deliberately fragments and cannot be compiled, and
 # catches the two defects that do not need compiling: a block introduced by a
 # word that is not a keyword, and a documented `mod.fn(` the module does not
-# have. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
+# have. `check_stdlib_index.py` holds the reference page's module index to the
+# tree it describes, which it had drifted from in eleven counts and a whole
+# module. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
 # README that is labelled complete, and asserts the ones labelled `fails`
 # still fail.
 .PHONY: check-docs
@@ -2645,6 +2679,7 @@ check-docs: compiler ae stdlib
 	@# log instead of reading as a pass.
 	@if command -v python3 >/dev/null 2>&1; then \
 	    python3 tests/scripts/check_doc_examples.py && \
+	    python3 tests/scripts/check_stdlib_index.py && \
 	    python3 tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — python3 not found"; \

@@ -68,6 +68,10 @@ int  run_cmd_show_warnings(const char* cmd);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
 const char* get_cflags(void);
+
+/* `ae checksec` (#1646): report the hardening a linked artifact carries.
+ * Implemented in tools/ae_checksec.c. */
+int cmd_checksec(int argc, char** argv);
 const char* get_home_dir(void);
 bool get_exe_path(char* buf, size_t size);
 bool dir_exists(const char* path);

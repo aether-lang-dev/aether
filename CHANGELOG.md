@@ -34,6 +34,88 @@ version number before tagging the release.
 - **`ae test --list`** prints the files discovery found and runs none of them,
   which answers "what will run?" without a build, and is how the bound above
   is regression-tested without compiling three hundred programs.
+- **The stdlib reference's module index did not match the tree it describes.**
+  The page opened by telling the reader that table came from the source and so
+  could not drift. Nothing generated or checked it, and it carried eleven wrong
+  export counts, no row at all for `std.mutation`, and a heading claiming 70
+  modules over 71 rows. An index that is wrong is worse than no index, because
+  it is the first thing a reader trusts.
+
+  `make check-docs` now fails when the table stops matching the tree: a module
+  with no row, a row with no module, a count that disagrees with the module's
+  `exports(...)`, or a heading that disagrees with the row count.
+  `--fix` updates the mechanical parts. It will not invent a purpose for a new
+  module, because that is a sentence someone has to write.
+
+  Two other corrections on the same page. `std.net` was documented as offering
+  `net.get(url)`; the short Go-style wrappers (`get`, `post`, `put`, `delete`)
+  are defined in `std.http` and `std.net` has no such name, so the example
+  would not compile. And the platform table said process execution on Windows
+  fell back to POSIX and that `os.run` waited on a `CreateProcessW` backend to
+  land; that backend is there, along with Job Object supervision, and what
+  actually stays POSIX-only is the back-channel pipe and `symlink`/`readlink`.
+
+  The purposes are now written rather than scraped: the column had lines like
+  "Collections Module Import with: import std.collections." and one cut off
+  mid-sentence.
+
+### Added
+
+- **`ae checksec <binary>`: what a built artifact's hardening actually is**
+  (#1646). The toolchain can say what it asked for; only the file says what it
+  got. It reads ELF program and dynamic headers, Mach-O load commands and PE
+  `DllCharacteristics` directly, so no `checksec(1)`, `readelf` or `otool` is
+  needed on the machine, and reports PIE, NX, RELRO, stack canary, FORTIFY and
+  whether the binary is stripped. A property the format has no concept of says
+  `n/a` rather than failing: RELRO is an ELF idea. So does one the file cannot
+  answer: canary and FORTIFY are read from names, and a PE need not carry a
+  symbol table, so where there is nothing to read it says so instead of
+  reporting an absence it did not observe. `--require
+  pie,nx,relro-full,canary,fortify` turns the report into a gate that exits
+  non-zero, which is the part that keeps a mitigation from disappearing in a
+  flag change nobody notices. An `n/a` satisfies that gate, so the same line
+  works on all three formats; `relro` accepts partial RELRO and `relro-full`
+  requires `BIND_NOW`.
+
+- **`ae build` hardens the programs it produces.** It asked for nothing
+  before, so a program inherited whatever the platform defaulted to: on
+  Linux/gcc that measured as partial RELRO, no canary and no fortified calls.
+  It now passes `-fstack-protector-strong` and, on optimised builds,
+  `-D_FORTIFY_SOURCE=2` on every platform, plus `-Wl,-z,relro -Wl,-z,now
+  -Wl,-z,noexecstack` and `-fPIE -pie` on ELF and `-Wl,--dynamicbase
+  -Wl,--nxcompat` on PE. `--emit=lib` and `--emit=obj` skip `-pie`, which
+  contradicts `-shared`. Project `cflags` still append after, so a different
+  posture stays available.
+
+  FORTIFY is verified by running an overflow into it rather than by reading a
+  symbol, because the symbol is a libc implementation detail and the
+  protection is not: glibc and Apple libc call out to `__*_chk`, mingw-w64
+  inlines the same check and leaves no name behind. The test builds a program
+  that copies 32 bytes into a 16-byte object and requires the process to die
+  instead of completing, on every platform. Measured against the control, the
+  same program compiled without the flag prints its way to a clean exit.
+
+### Fixed
+
+- **`ae build` overwrote an input file when `-o` matched its name** (#1681).
+  The generated C goes to `<output>.c` and the program to `<output>`, and
+  neither was checked against the files the caller passed in, so `ae build
+  p.ae --extra p.c -o p` wrote generated code over `p.c` and then failed to
+  link against the source it had just destroyed. `-o p.ae` did the same to the
+  Aether source. Both names are known before anything is written, so the
+  collision is now refused there, with the conflicting path named. Found while
+  building the `--extra` hardening probe below.
+
+- **`make HARDEN=1` after an ordinary build produced an unhardened binary and
+  reported success.** Object files carry no record of the flags that built
+  them, so changing `HARDEN` recompiled nothing and relinked the same objects:
+  zero canaries, zero fortified calls, and a green build. That is how the
+  hardened CI leg came to be reported as testing nothing. The build now keeps
+  a digest of everything that changes code generation and every object depends
+  on it, so a flag change forces the rebuild and an unchanged one still
+  compiles nothing. The hardened CI leg additionally asserts, through
+  `ae checksec --require`, that both the toolchain and a program it builds
+  carry the mitigations.
 
 ## [0.561.0]
 
