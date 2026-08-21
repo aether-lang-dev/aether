@@ -255,6 +255,19 @@ typedef struct HttpServer {
     int keep_alive_max;              // 0 means "unlimited"
     int keep_alive_idle_ms;          // 0 means "use SO_RCVTIMEO default (30s)"
 
+    // Keep-alive connection parking (#1663). When non-zero (the default),
+    // a connection that stays alive between requests is handed to a poller
+    // thread and its worker released, so the number of connections a server
+    // can hold open bounds on file descriptors rather than on the worker
+    // count (cores*2, capped at 64). Set to 0 to restore the pre-#1663
+    // behaviour of a worker owning a connection for its whole life.
+    int keep_alive_parking;
+
+    // Worker pool for the non-actor accept path. Held here (rather than as
+    // an accept-loop local) so a resumed connection can be handed back to a
+    // worker from the park poller thread.
+    struct HttpConnectionPool* conn_pool;
+
     // Accept-side I/O poller: wait for client data before dispatching to worker
     AetherIoPoller accept_poller;   // Platform poller for single-accept mode
 
@@ -619,6 +632,16 @@ const char* http_server_set_metrics_raw(HttpServer* server,
 // MSG_HTTP_CONNECTION message's client_fd to get the same
 // keep-alive / TLS / route-dispatch behaviour. (#260 Tier 0)
 void http_server_drain_connection(HttpServer* server, int client_fd);
+
+// Resume a parked keep-alive connection on a worker thread (#1663).
+// `parked_conn` is the opaque HttpConn* the park poller handed back.
+// Takes ownership: the connection is closed and freed when it ends.
+void http_server_resume_connection(HttpServer* server, void* parked_conn);
+
+// Enable (1, the default) or disable (0) keep-alive connection parking.
+// With parking off, a worker owns a connection for its whole life and the
+// server can hold only as many connections as it has workers.
+const char* http_server_set_keepalive_parking_raw(HttpServer* server, int enabled);
 
 // Request accessors (for use from Aether .ae code via opaque ptr)
 const char* http_request_method(HttpRequest* req);

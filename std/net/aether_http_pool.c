@@ -40,9 +40,17 @@ int http_pool_pending(void) {
 #define HTTP_POOL_MIN_WORKERS 8
 #define HTTP_POOL_MAX_WORKERS 64
 
+/* A queue entry is either a freshly accepted fd (conn == NULL) or a parked
+ * keep-alive connection that woke up (#1663), in which case the worker
+ * resumes it instead of starting a new one. */
+typedef struct {
+    int   fd;
+    void* conn;
+} HttpPoolItem;
+
 struct HttpConnectionPool {
     HttpServer* server;
-    int queue[HTTP_POOL_QUEUE_CAP];   // Ring buffer of pending client fds
+    HttpPoolItem queue[HTTP_POOL_QUEUE_CAP];  // Ring buffer of pending work
     int head, tail, count;
     pthread_mutex_t lock;
     pthread_cond_t  not_empty;
@@ -84,14 +92,18 @@ static void* http_pool_worker(void* arg) {
             pthread_mutex_unlock(&pool->lock);
             break;
         }
-        int client_fd = pool->queue[pool->head];
+        HttpPoolItem item = pool->queue[pool->head];
         pool->head = (pool->head + 1) % HTTP_POOL_QUEUE_CAP;
         pool->count--;
         atomic_fetch_sub(&http_pool_pending_conns, 1);
         pthread_cond_signal(&pool->not_full);
         pthread_mutex_unlock(&pool->lock);
 
-        http_server_drain_connection(pool->server, client_fd);
+        if (item.conn) {
+            http_server_resume_connection(pool->server, item.conn);
+        } else {
+            http_server_drain_connection(pool->server, item.fd);
+        }
     }
     return NULL;
 }
@@ -137,11 +149,31 @@ void http_pool_submit(HttpConnectionPool* pool, int client_fd) {
         return;
     }
     atomic_fetch_add(&http_pool_pending_conns, 1);
-    pool->queue[pool->tail] = client_fd;
+    pool->queue[pool->tail].fd   = client_fd;
+    pool->queue[pool->tail].conn = NULL;
     pool->tail = (pool->tail + 1) % HTTP_POOL_QUEUE_CAP;
     pool->count++;
     pthread_cond_signal(&pool->not_empty);
     pthread_mutex_unlock(&pool->lock);
+}
+
+int http_pool_submit_conn(HttpConnectionPool* pool, void* conn) {
+    if (!pool || !conn) return -1;
+    pthread_mutex_lock(&pool->lock);
+    /* Never block: the caller is the single park poller thread, and waiting
+     * for queue space here would stall every other parked connection. */
+    if (pool->shutdown || pool->count >= HTTP_POOL_QUEUE_CAP) {
+        pthread_mutex_unlock(&pool->lock);
+        return -1;
+    }
+    atomic_fetch_add(&http_pool_pending_conns, 1);
+    pool->queue[pool->tail].fd   = -1;
+    pool->queue[pool->tail].conn = conn;
+    pool->tail = (pool->tail + 1) % HTTP_POOL_QUEUE_CAP;
+    pool->count++;
+    pthread_cond_signal(&pool->not_empty);
+    pthread_mutex_unlock(&pool->lock);
+    return 0;
 }
 
 void http_pool_destroy(HttpConnectionPool* pool) {

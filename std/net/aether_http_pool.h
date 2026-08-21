@@ -25,6 +25,14 @@ HttpConnectionPool* http_pool_create(HttpServer* server);
 // pool is shutting down.
 void http_pool_submit(HttpConnectionPool* pool, int client_fd);
 
+/* Submit an already-established connection (a parked keep-alive connection
+ * that became readable again, #1663). Unlike http_pool_submit this never
+ * blocks waiting for queue space — the caller is the park poller thread,
+ * and stalling it would hold up every other parked connection. Returns 0
+ * when queued, -1 when the pool is absent, shutting down, or full; the
+ * caller still owns the connection on -1. */
+int http_pool_submit_conn(HttpConnectionPool* pool, void* conn);
+
 // Drains the queue, joins every worker and frees the pool. Safe on NULL.
 void http_pool_destroy(HttpConnectionPool* pool);
 
