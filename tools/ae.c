@@ -2143,6 +2143,63 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
     return truncated;
 }
 
+/* Do two paths name the same file? Resolved first, so `./p.c` and `p.c` are
+ * not mistaken for different files, and compared case-insensitively on
+ * Windows, where they are not. */
+static void abs_path_for_compare(const char* path, char* out, size_t outcap) {
+#ifdef _WIN32
+    if (_fullpath(out, path, outcap)) return;
+#else
+    char* rp = realpath(path, NULL);
+    if (rp) { snprintf(out, outcap, "%s", rp); free(rp); return; }
+#endif
+    snprintf(out, outcap, "%s", path);
+}
+
+static int paths_same(const char* a, const char* b) {
+    char ra[2048], rb[2048];
+    abs_path_for_compare(a, ra, sizeof(ra));
+    abs_path_for_compare(b, rb, sizeof(rb));
+#ifdef _WIN32
+    for (char* q = ra; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
+    for (char* q = rb; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
+#endif
+    return strcmp(ra, rb) == 0;
+}
+
+/* Would this build write over one of its own inputs?
+ *
+ * `-o name` puts the generated C at `name.c` and the program at `name`, and
+ * either can be a file the caller handed us: `ae build p.ae --extra p.c -o p`
+ * wrote generated code over p.c, then failed to link against the source it
+ * had just destroyed. Checked before anything is written, and refused rather
+ * than worked around, because the two names the caller gave are in conflict
+ * and only the caller knows which one they meant. */
+static int output_clobbers_input(const char* c_file, const char* exe_file,
+                                 const char* ae_file, const char* extras) {
+    const char* outs[2] = { c_file, exe_file };
+    const char* what[2] = { "generated C", "program" };
+
+    for (int i = 0; i < 2; i++) {
+        if (ae_file && paths_same(outs[i], ae_file)) {
+            fprintf(stderr, "Error: the %s would be written over the source it "
+                            "is built from (%s).\n"
+                            "       Pick a different -o name.\n", what[i], ae_file);
+            return 1;
+        }
+        char list[8192];
+        snprintf(list, sizeof(list), "%s", extras ? extras : "");
+        for (char* tok = strtok(list, " "); tok; tok = strtok(NULL, " ")) {
+            if (!paths_same(outs[i], tok)) continue;
+            fprintf(stderr, "Error: the %s would be written over an --extra "
+                            "input (%s).\n"
+                            "       Pick a different -o name.\n", what[i], tok);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // --------------------------------------------------------------------------
 // Build GCC/MinGW command for linking an Aether-compiled C file
 // Optimisation-and-instrumentation flag fragment for the gcc invocation.
@@ -2913,53 +2970,6 @@ static void ae_abspath(const char* path, char* out, size_t outcap) {
     char* rp = realpath(path, NULL);
     if (rp) { snprintf(out, outcap, "%s", rp); free(rp); }
     else    { snprintf(out, outcap, "%s", path); }
-}
-
-/* Do two paths name the same file? Resolved first, so `./p.c` and `p.c` are
- * not mistaken for different files, and compared case-insensitively on
- * Windows, where they are not. */
-static int paths_same(const char* a, const char* b) {
-    char ra[2048], rb[2048];
-    ae_abspath(a, ra, sizeof(ra));
-    ae_abspath(b, rb, sizeof(rb));
-#ifdef _WIN32
-    for (char* q = ra; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
-    for (char* q = rb; *q; q++) *q = (*q == '\\') ? '/' : (char)tolower((unsigned char)*q);
-#endif
-    return strcmp(ra, rb) == 0;
-}
-
-/* Would this build write over one of its own inputs?
- *
- * `-o name` puts the generated C at `name.c` and the program at `name`, and
- * either can be a file the caller handed us: `ae build p.ae --extra p.c -o p`
- * wrote generated code over p.c, then failed to link against the source it
- * had just destroyed. Checked before anything is written, and refused rather
- * than worked around, because the two names the caller gave are in conflict
- * and only the caller knows which one they meant. */
-static int output_clobbers_input(const char* c_file, const char* exe_file,
-                                 const char* ae_file, const char* extras) {
-    const char* outs[2] = { c_file, exe_file };
-    const char* what[2] = { "generated C", "program" };
-
-    for (int i = 0; i < 2; i++) {
-        if (ae_file && paths_same(outs[i], ae_file)) {
-            fprintf(stderr, "Error: the %s would be written over the source it "
-                            "is built from (%s).\n"
-                            "       Pick a different -o name.\n", what[i], ae_file);
-            return 1;
-        }
-        char list[8192];
-        snprintf(list, sizeof(list), "%s", extras ? extras : "");
-        for (char* tok = strtok(list, " "); tok; tok = strtok(NULL, " ")) {
-            if (!paths_same(outs[i], tok)) continue;
-            fprintf(stderr, "Error: the %s would be written over an --extra "
-                            "input (%s).\n"
-                            "       Pick a different -o name.\n", what[i], tok);
-            return 1;
-        }
-    }
-    return 0;
 }
 
 // Scan `main_file` for `import <bare>` statements that resolve to a
