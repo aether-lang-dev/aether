@@ -26,6 +26,19 @@ version number before tagging the release.
   `"lzf compress failed"`; and `zlib.gzip_inflate` rejects a raw deflate
   stream rather than returning garbage.
 
+- **Spec-based unit tests for `std.snapshot`, `std.list` and `std.map`**
+  (#1584). 25 more cases co-located as `std/<module>/test_*.ae`, covering
+  the container and lock-free-cell primitives the rest of `std` is built on
+  — `std.spec` keeps its own framework state in a `std.map`. The snapshot
+  suite pins the contracts a reader otherwise takes on trust from the doc
+  comments: `store` returns the displaced pointer rather than freeing it, a
+  failed `cas` leaves the cell untouched, and every entry point is
+  null-safe. Also pinned, as observed behaviour rather than as an
+  endorsement: `list.get` and `map.get` report an out-of-range index or an
+  unbound key as success (`err == ""`) while handing back null, so callers
+  must null-check the pointer as well as the error, and `map_has` is the
+  unambiguous membership test.
+
 ## [0.563.0]
 
 ### Fixed

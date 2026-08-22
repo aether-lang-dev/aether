@@ -1,0 +1,129 @@
+// std.list unit tests (#1584) — co-located with the module.
+//
+// The module had no co-located test before this. std.list is the
+// pointer-list container the rest of std builds on, and the wrapper
+// pair (add/get) is what most callers touch.
+//
+// One case below pins behaviour that is arguably wrong rather than
+// obviously right — see "reports no error for an out-of-range index".
+// It is asserted as-is so that changing it is a deliberate, visible
+// act; the comment there says what a caller should do meanwhile.
+//
+// Items are list handles used purely as distinct heap pointers; the
+// container never dereferences them, so only identity matters, and
+// identity is compared via mem.ptr_to_long because ptr has no direct
+// equality operator.
+
+import std.spec
+import std.list
+import std.collections
+import std.mem
+
+fn same_ptr(a: ptr, b: ptr) -> int {
+    if mem.ptr_to_long(a) == mem.ptr_to_long(b) {
+        return 1
+    }
+    return 0
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.list add and get") {
+        spec.it("starts empty") callback {
+            l = list.list_new()
+            spec.assert_eq(list.list_size(l), 0, "new list has size 0")
+            list.list_free(l)
+        }
+
+        spec.it("appends in order and reads back by index") callback {
+            l = list.list_new()
+            a = collections.list_new()
+            b = collections.list_new()
+            spec.assert_ok(list.add(l, a), "add first succeeds")
+            spec.assert_ok(list.add(l, b), "add second succeeds")
+            spec.assert_eq(list.list_size(l), 2, "size is 2")
+            got_a, e1 = list.get(l, 0)
+            got_b, e2 = list.get(l, 1)
+            spec.assert_ok(e1, "get(0) succeeds")
+            spec.assert_ok(e2, "get(1) succeeds")
+            spec.assert_true(same_ptr(got_a, a), "index 0 is the first item")
+            spec.assert_true(same_ptr(got_b, b), "index 1 is the second item")
+            list.list_free(l)
+            collections.list_free(a)
+            collections.list_free(b)
+        }
+
+        spec.it("overwrites a slot with set") callback {
+            l = list.list_new()
+            a = collections.list_new()
+            b = collections.list_new()
+            list.add(l, a)
+            list.list_set(l, 0, b)
+            got, err = list.get(l, 0)
+            spec.assert_ok(err, "get succeeds")
+            spec.assert_true(same_ptr(got, b), "slot 0 now holds the new item")
+            spec.assert_eq(list.list_size(l), 1, "set does not grow the list")
+            list.list_free(l)
+            collections.list_free(a)
+            collections.list_free(b)
+        }
+    }
+
+    spec.describe(fw, "std.list removal") {
+        spec.it("shrinks and shifts on remove") callback {
+            l = list.list_new()
+            a = collections.list_new()
+            b = collections.list_new()
+            list.add(l, a)
+            list.add(l, b)
+            list.list_remove(l, 0)
+            spec.assert_eq(list.list_size(l), 1, "size drops to 1")
+            got, err = list.get(l, 0)
+            spec.assert_ok(err, "get succeeds")
+            spec.assert_true(same_ptr(got, b),
+                "the surviving item shifted down to index 0")
+            list.list_free(l)
+            collections.list_free(a)
+            collections.list_free(b)
+        }
+
+        spec.it("empties on clear") callback {
+            l = list.list_new()
+            a = collections.list_new()
+            list.add(l, a)
+            list.add(l, a)
+            list.list_clear(l)
+            spec.assert_eq(list.list_size(l), 0, "size is 0 after clear")
+            list.list_free(l)
+            collections.list_free(a)
+        }
+    }
+
+    spec.describe(fw, "std.list error paths") {
+        spec.it("rejects a get on a null list") callback {
+            item, err = list.get(null, 0)
+            spec.assert_err_contains(err, "null list", "get(null) says why")
+        }
+
+        spec.it("reports no error for an out-of-range index") callback {
+            // NOT an endorsement. get() guards `list == null` but not the
+            // index, so an out-of-range read yields (null, "") — which a
+            // caller following the (value, err) convention reads as
+            // success. Until that changes, callers must null-check the
+            // returned pointer as well as the error. Pinned so the day
+            // it changes is a deliberate one.
+            l = list.list_new()
+            item, err = list.get(l, 99)
+            spec.assert_ok(err, "out-of-range get reports success today")
+            spec.assert_true(same_ptr(item, null),
+                "...but hands back null, so the pointer must be checked")
+            neg, nerr = list.get(l, -1)
+            spec.assert_true(same_ptr(neg, null),
+                "a negative index behaves the same way")
+            list.list_free(l)
+        }
+    }
+
+    spec.run_summary(fw)
+}
