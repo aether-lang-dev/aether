@@ -1,0 +1,164 @@
+// std.collections unit tests (#1584) — co-located with the module.
+//
+// std.collections re-exports the list and map primitives that
+// std/list and std/map wrap, and adds two families nothing else
+// covers: string_list (an owned-string vector with sorting) and
+// intarr (a fixed-size int array with checked and unchecked
+// accessors). Those two are what this suite concentrates on — the
+// list/map surface is already covered by std/list/test_list_ops.ae
+// and std/map/test_map_ops.ae, so repeating it here would just be a
+// second copy to keep in step.
+//
+// string_list_sort is deliberately not exercised: it takes a
+// comparator function pointer, and a spec case that has to synthesise
+// one tests the calling convention more than it tests the container.
+// sort_lex is the argument-free ordering the module offers and is
+// covered below.
+
+import std.spec
+import std.collections
+import std.string
+
+// Build a string_list from three literals, in the given order.
+fn three(a: string, b: string, c: string) -> ptr {
+    sl = collections.string_list_new()
+    collections.string_list_add(sl, a)
+    collections.string_list_add(sl, b)
+    collections.string_list_add(sl, c)
+    return sl
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.collections string_list") {
+        spec.it("starts empty") callback {
+            sl = collections.string_list_new()
+            spec.assert_eq(collections.string_list_size(sl), 0,
+                "a new string_list is empty")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("appends and reads back in insertion order") callback {
+            sl = three("one", "two", "three")
+            spec.assert_eq(collections.string_list_size(sl), 3, "three entries")
+            spec.assert_str_eq(collections.string_list_get(sl, 0), "one",
+                "index 0")
+            spec.assert_str_eq(collections.string_list_get(sl, 1), "two",
+                "index 1")
+            spec.assert_str_eq(collections.string_list_get(sl, 2), "three",
+                "index 2")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("overwrites a slot with set") callback {
+            sl = three("one", "two", "three")
+            collections.string_list_set(sl, 1, "replaced")
+            spec.assert_str_eq(collections.string_list_get(sl, 1), "replaced",
+                "slot 1 holds the new string")
+            spec.assert_eq(collections.string_list_size(sl), 3,
+                "set does not grow the list")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("shrinks and shifts on remove") callback {
+            sl = three("one", "two", "three")
+            collections.string_list_remove(sl, 0)
+            spec.assert_eq(collections.string_list_size(sl), 2, "two left")
+            spec.assert_str_eq(collections.string_list_get(sl, 0), "two",
+                "the survivor shifted down to index 0")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("empties on clear") callback {
+            sl = three("one", "two", "three")
+            collections.string_list_clear(sl)
+            spec.assert_eq(collections.string_list_size(sl), 0,
+                "size is 0 after clear")
+            collections.string_list_free(sl)
+        }
+    }
+
+    spec.describe(fw, "std.collections string_list ordering") {
+        spec.it("sorts lexicographically by byte value") callback {
+            // Byte order, not locale order: an uppercase initial sorts
+            // before every lowercase one because 'A' (65) < 'b' (98).
+            // Worth pinning — a caller expecting case-insensitive
+            // ordering gets this instead, and silently.
+            sl = three("pear", "Apple", "banana")
+            collections.string_list_sort_lex(sl)
+            spec.assert_str_eq(collections.string_list_get(sl, 0), "Apple",
+                "uppercase 'Apple' sorts first on byte value")
+            spec.assert_str_eq(collections.string_list_get(sl, 1), "banana",
+                "then 'banana'")
+            spec.assert_str_eq(collections.string_list_get(sl, 2), "pear",
+                "then 'pear'")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("leaves an already-ordered list alone") callback {
+            sl = three("a", "b", "c")
+            collections.string_list_sort_lex(sl)
+            spec.assert_str_eq(collections.string_list_get(sl, 0), "a", "a")
+            spec.assert_str_eq(collections.string_list_get(sl, 2), "c", "c")
+            collections.string_list_free(sl)
+        }
+
+        spec.it("handles a single-element list") callback {
+            sl = collections.string_list_new()
+            collections.string_list_add(sl, "only")
+            collections.string_list_sort_lex(sl)
+            spec.assert_eq(collections.string_list_size(sl), 1, "still one")
+            spec.assert_str_eq(collections.string_list_get(sl, 0), "only",
+                "unchanged")
+            collections.string_list_free(sl)
+        }
+    }
+
+    spec.describe(fw, "std.collections intarr") {
+        spec.it("fills every slot at construction") callback {
+            arr = collections.intarr_new_filled_raw(4, 7)
+            spec.assert_eq(collections.intarr_size(arr), 4, "size is 4")
+            spec.assert_eq(collections.intarr_get_raw(arr, 0), 7, "slot 0")
+            spec.assert_eq(collections.intarr_get_raw(arr, 3), 7, "slot 3")
+            collections.intarr_free(arr)
+        }
+
+        spec.it("writes and reads an individual slot") callback {
+            arr = collections.intarr_new_filled_raw(4, 0)
+            collections.intarr_set_raw(arr, 2, 99)
+            spec.assert_eq(collections.intarr_get_raw(arr, 2), 99,
+                "slot 2 holds the written value")
+            spec.assert_eq(collections.intarr_get_raw(arr, 1), 0,
+                "its neighbour is untouched")
+            collections.intarr_free(arr)
+        }
+
+        spec.it("overwrites every slot on fill") callback {
+            arr = collections.intarr_new_filled_raw(3, 1)
+            collections.intarr_set_raw(arr, 1, 42)
+            collections.intarr_fill(arr, 5)
+            spec.assert_eq(collections.intarr_get_raw(arr, 0), 5, "slot 0")
+            spec.assert_eq(collections.intarr_get_raw(arr, 1), 5,
+                "slot 1, previously 42, is overwritten too")
+            spec.assert_eq(collections.intarr_get_raw(arr, 2), 5, "slot 2")
+            collections.intarr_free(arr)
+        }
+
+        spec.it("agrees between the checked and unchecked accessors") callback {
+            // The unchecked pair skips the bounds test for hot loops.
+            // In range they must be indistinguishable, or a caller
+            // switching to them for speed changes behaviour silently.
+            arr = collections.intarr_new_filled_raw(3, 0)
+            collections.intarr_set_unchecked(arr, 1, 21)
+            spec.assert_eq(collections.intarr_get_raw(arr, 1), 21,
+                "the checked reader sees an unchecked write")
+            collections.intarr_set_raw(arr, 2, 22)
+            spec.assert_eq(collections.intarr_get_unchecked(arr, 2), 22,
+                "the unchecked reader sees a checked write")
+            collections.intarr_free(arr)
+        }
+    }
+
+    spec.run_summary(fw)
+}
