@@ -52,7 +52,7 @@ version number before tagging the release.
   undiscoverable by any mechanical audit is the argument #1584 makes for
   co-location.
 
-## [current]
+## [0.566.0]
 
 ### Added
 
