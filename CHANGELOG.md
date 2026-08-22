@@ -52,6 +52,22 @@ version number before tagging the release.
   undiscoverable by any mechanical audit is the argument #1584 makes for
   co-location.
 
+## [current]
+
+### Added
+
+- **Spec-based unit tests for `std.collections`** (#1584). 12 cases covering
+  the two families nothing else touches: `string_list` (an owned-string
+  vector — append, indexed get/set, remove-and-shift, clear) and `intarr`
+  (fixed-size int array — filled construction, individual slots, `fill`, and
+  that the checked and unchecked accessors agree in range, so switching to
+  the unchecked pair for speed does not change behaviour silently). The
+  list/map surface `std.collections` re-exports is already covered by
+  `std/list` and `std/map`, so it is not duplicated here. Pinned:
+  `string_list_sort_lex` orders by byte value, so an uppercase initial sorts
+  before every lowercase one — a caller expecting case-insensitive ordering
+  gets this instead, silently.
+
 ## [0.564.0]
 
 ### Added
