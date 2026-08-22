@@ -19,8 +19,8 @@ check_stdlib_index.py refuses to invent a purpose.
 Modules that genuinely should not carry one are listed in WAIVED with the
 reason, so the exception is a decision on the record rather than an omission.
 
-Exit status is 0 while the backlog is being worked through: a missing README is
-reported, not fatal. Flip REQUIRE_ALL once the list is empty.
+Every module now has a guide or a waiver, so a missing README fails the build.
+A new module ships with documentation or with a stated reason it does not.
 """
 
 import os
@@ -30,12 +30,26 @@ import sys
 # Modules with no co-located README, and why. A waiver is a claim that the
 # module is better documented somewhere else — not that documenting it is
 # hard.
-WAIVED = {}
+WAIVED = {
+    # These six carry a full, worked section in docs/stdlib-reference.md
+    # that the index links to directly. A co-located README would either
+    # duplicate it — two places to keep in step, which is how the base64
+    # error survived in two files — or be a stub pointing at it, which is
+    # the filler this script exists to avoid. The docs live where the
+    # index already sends readers.
+    "cryptography": "full section in docs/stdlib-reference.md",
+    "io": "full section in docs/stdlib-reference.md",
+    "os": "full section in docs/stdlib-reference.md",
+    "string": "full section in docs/stdlib-reference.md",
+    "tar": "full section in docs/stdlib-reference.md",
+    "xml": "full section in docs/stdlib-reference.md",
+}
 
-# While the #1523 backlog is worked through, a missing README is reported but
-# does not fail the build. Set to True once WAIVED plus the READMEs cover
-# every module, so a NEW module cannot ship undocumented.
-REQUIRE_ALL = False
+# The #1523 backlog is clear: every module has a guide or a waiver, so a
+# missing README is now a build failure. That is the point of finishing —
+# a NEW module cannot ship undocumented, and adding one is a deliberate
+# act (write the guide, or add a waiver saying where the docs live).
+REQUIRE_ALL = True
 
 
 EXPORTS = re.compile(r"^exports\((.*?)^\)", re.S | re.M)
@@ -52,9 +66,15 @@ def exported_names(module_ae):
     m = EXPORTS.search(src)
     if not m:
         return set()
+    # Strip comments BEFORE splitting. An exports(...) block carries
+    # multi-line `//` prose between entries; stripping per-token leaves
+    # the tail of a comment glued to the next real name, so a genuinely
+    # exported `assert_err` reads as "err) convention. assert_true(err"
+    # and is missed. That produced a false ghost report on std.spec.
+    body = re.sub(r"//[^\n]*", "", m.group(1))
     out = set()
-    for tok in m.group(1).split(","):
-        tok = re.sub(r"//.*", "", tok).strip()
+    for tok in body.split(","):
+        tok = tok.strip()
         if IDENT.match(tok):
             out.add(tok)
     return out

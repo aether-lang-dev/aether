@@ -13,15 +13,15 @@ version number before tagging the release.
 
 ### Added
 
-- **Eleven more co-located module guides, 47 of 71 covered** (#1523). `path`,
-  `signal`, `config`, `dir`, `fs`, `tcp`, `actors`, `worker`, `cas`, `dl` and
-  `snapshot`. A guide for a module that needs external state — a socket, a
-  scratch directory, a shared library — now carries a bare ` ```aether ` block
-  that is **compiled but not run**, rather than being left out: the example is
-  still type-checked against the real API, which is what catches a call that
-  no longer exists. That distinction earned itself in this batch, catching a
-  wrong arity (`worker.drain` takes a max; the guide called it with none) in
-  an example CI never executes.
+- **Every `std` module now has a co-located guide** (#1523), 65 written and 6
+  waived — the six that already carry a full worked section in
+  `docs/stdlib-reference.md`, which the index links to directly. A guide for a
+  module needing external state (a socket, a scratch directory, a device, a
+  host process) carries a bare ` ```aether ` block that is **compiled but not
+  run**: still type-checked against the real API, which is what catches a call
+  that no longer exists, giving up only the assertion about what it prints.
+  `check_module_readmes.py` now fails the build on a missing guide, so a new
+  module ships documented or with a stated reason it is not.
 
 ## [0.568.0]
 
@@ -45,49 +45,12 @@ version number before tagging the release.
   from both sides: a logger that drops the wrong side of its threshold
   either floods the log or silently discards the errors it exists to record.
 
-- **Co-located module guides, compiled and run in CI** (#1523). A module's
-  worked example now lives beside it as `std/<mod>/README.md`, the same shape
-  #1584 used for tests, and `docs/stdlib-reference.md` stays a generated index
-  that links to it. Thirty-six of the 71 modules are covered: the Common tier
-  (`url`, `encoding`, `set`, `deque`, `sort`, `time`, `regex`, `uuid`,
-  `number`), `bits` and `hash`, the allocator family (`arena`, `alloc`,
-  `tracking`), the identifier family (`nanoid`, `ulid`, `ksuid`, `tsid`), the
-  containers (`strbuilder`, `pqueue`, `intarr`, `longarr`, `floatarr`,
-  `bytes`, `list`, `map`, `collections`), the formats (`json`, `msgpack`,
-  `lzf`, `zlib`), and `math`, `bignum`, `plural`. The remainder need external
-  state — a socket, a device, a language runtime — so their examples want a
-  harness rather than a `run` block.
-- **A `run` block label for documentation examples** (#1523). ` ```aether,run `
-  compiles an example, runs it, and requires its stdout to match the
-  ` ```output ` block after it. Compiling proves a function exists; running
-  proves it does what the prose claims, which is the half that catches an
-  example whose output has drifted. Eleven blocks run under it today.
-- **A census for module guides** (#1523).
-  `tests/scripts/check_module_readmes.py` reports which modules have no
-  co-located README. It deliberately does not generate one — a worked example
-  is a sentence someone has to write, and a scraped header would be filler
-  that passes a check while teaching nothing, the same reason
-  `check_stdlib_index.py` refuses to invent a purpose. Reporting rather than
-  failing while the backlog is worked through. It also verifies each guide's
-  `## Exports` list against the module's real `exports(...)` — the example
-  blocks are compiled, but an exports list is prose that nothing checks, which
-  is how `math.log2` and `strbuilder.append_char` reached guides in this
-  change without existing. A ghost name fails the build.
-
 ### Changed
 
 - **`tests/integration/cas_roundtrip/` retired into `std/cas/`** (#1584).
   The co-located suite covers everything it did — including its
   known-answer digest, ported verbatim — plus `root()` and `path()`, which
   it did not reach.
-
-### Fixed
-
-- **`check_doc_blocks.py` never looked inside `std/`** (#1523). It walked
-  `docs/` and the top-level README only, so a co-located example was
-  unverified — three blocks in `std/schema/README.md` had not compiled for as
-  long as they had existed. The checker now walks `std/` too, which is what
-  makes co-location worth anything.
 
 ## [0.567.0]
 
