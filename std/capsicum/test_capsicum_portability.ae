@@ -1,0 +1,104 @@
+// std.capsicum / std.casper portability (#1584) — co-located, replacing
+// tests/regression/test_capsicum_portability.ae.
+//
+// Capsicum is FreeBSD-only, and that is exactly why this suite runs
+// EVERYWHERE rather than skipping. Two contracts, and both matter:
+//
+//   on FreeBSD  — the enforcement path is live: available() is 1 and
+//                 in_mode() gives a real 0/1 answer.
+//   elsewhere   — every entry point degrades cleanly to CAP_UNSUPPORTED
+//                 instead of crashing, so portable code can call them
+//                 unguarded.
+//
+// A suite that skipped on Linux would leave the second contract — the
+// one Linux, macOS and Windows actually depend on — untested on the
+// platforms that rely on it. Branching on os.platform() tests the right
+// half everywhere and asserts something real on every leg.
+//
+// The kernel-enforcement behaviour itself (entering capability mode,
+// rights narrowing, Casper delegation) needs a live FreeBSD box: that
+// lives in tests/freebsd/ and the nightly harness, which the CI matrix
+// has no runner for.
+
+import std.spec
+import std.capsicum
+import std.casper
+import std.os
+import std.string
+
+main() {
+    fw = spec.init()
+    plat = os.platform()
+    on_freebsd = string.equals(plat, "freebsd")
+
+    spec.describe(fw, "std.capsicum availability") {
+        spec.it("reports availability matching the platform") callback {
+            if on_freebsd == 1 {
+                spec.assert_eq(capsicum.available(), 1,
+                    "FreeBSD has Capsicum")
+            } else {
+                spec.assert_eq(capsicum.available(), 0,
+                    "${plat} does not have Capsicum")
+            }
+        }
+
+        spec.it("reports capability mode without crashing") callback {
+            m = capsicum.in_mode()
+            if on_freebsd == 1 {
+                // A real answer, not the unsupported sentinel.
+                spec.assert_not_eq(m, capsicum.CAP_UNSUPPORTED,
+                    "FreeBSD gives a real in_mode answer")
+                spec.assert_true(m == 0 || m == 1,
+                    "in_mode is 0 or 1, got ${m}")
+            } else {
+                spec.assert_eq(m, capsicum.CAP_UNSUPPORTED,
+                    "${plat} reports CAP_UNSUPPORTED")
+            }
+        }
+    }
+
+    spec.describe(fw, "std.capsicum degradation off FreeBSD") {
+        // These are the calls portable code makes unguarded. On FreeBSD
+        // enter() would sandbox the test process itself, so the suite
+        // only exercises them where they are inert — which is where the
+        // contract needs guarding anyway.
+        spec.it_when(on_freebsd == 0,
+            "declines enter, rights_limit and fcntls_limit",
+            "FreeBSD: enter() would sandbox the test process") callback {
+            spec.assert_eq(capsicum.enter(), capsicum.CAP_UNSUPPORTED,
+                "enter is unsupported")
+            spec.assert_eq(capsicum.rights_limit(-1, capsicum.R_READ),
+                capsicum.CAP_UNSUPPORTED, "rights_limit is unsupported")
+            spec.assert_eq(capsicum.fcntls_limit(-1, capsicum.F_GETFL),
+                capsicum.CAP_UNSUPPORTED, "fcntls_limit is unsupported")
+        }
+    }
+
+    spec.describe(fw, "std.casper availability") {
+        spec.it("tracks Capsicum's availability") callback {
+            if on_freebsd == 1 {
+                spec.assert_eq(casper.available(), 1, "FreeBSD has Casper")
+            } else {
+                spec.assert_eq(casper.available(), 0,
+                    "${plat} does not have Casper")
+            }
+        }
+    }
+
+    spec.describe(fw, "std.capsicum constants") {
+        spec.it("wires the status codes through to Aether") callback {
+            // Compile-time wiring: a mismatch here means the Aether
+            // constants and the C header have drifted apart, which no
+            // amount of runtime behaviour would reveal.
+            spec.assert_eq(capsicum.CAP_UNSUPPORTED, -2, "CAP_UNSUPPORTED")
+            spec.assert_eq(capsicum.CAP_OK, 0, "CAP_OK")
+        }
+
+        spec.it("wires the rights bits through to Aether") callback {
+            spec.assert_eq(capsicum.R_READ | capsicum.R_WRITE, 3,
+                "R_READ | R_WRITE")
+        }
+    }
+
+    spec.run_summary(fw)
+}

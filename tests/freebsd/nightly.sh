@@ -80,8 +80,11 @@ fail_report() {
         | sed 's#^#build/obj/#' | xargs mkdir -p 2>/dev/null
     gmake -j1 compiler ae stdlib || { fail_report "build"; exit 1; }
 
-    note "portable contract (regression)"
-    ./build/ae run tests/regression/test_capsicum_portability.ae \
+    note "portable contract (co-located spec)"
+    # Moved from tests/regression/ to sit beside the module (#1584). On
+    # FreeBSD it asserts the enforcement path is live; elsewhere it
+    # asserts clean degradation, so it is worth running on both.
+    ./build/ae run std/capsicum/test_capsicum_portability.ae \
         || { fail_report "portability test"; exit 1; }
 
     note "FreeBSD enforcement tests"
