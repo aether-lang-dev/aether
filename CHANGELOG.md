@@ -31,12 +31,38 @@ version number before tagging the release.
   from both sides: a logger that drops the wrong side of its threshold
   either floods the log or silently discards the errors it exists to record.
 
+- **Co-located module guides, compiled and run in CI** (#1523). A module's
+  worked example now lives beside it as `std/<mod>/README.md`, the same shape
+  #1584 used for tests, and `docs/stdlib-reference.md` stays a generated index
+  that links to it. First tranche covers the nine Common-tier modules: `url`,
+  `encoding`, `set`, `deque`, `sort`, `time`, `regex`, `uuid` and `number`.
+- **A `run` block label for documentation examples** (#1523). ` ```aether,run `
+  compiles an example, runs it, and requires its stdout to match the
+  ` ```output ` block after it. Compiling proves a function exists; running
+  proves it does what the prose claims, which is the half that catches an
+  example whose output has drifted. Eleven blocks run under it today.
+- **A census for module guides** (#1523).
+  `tests/scripts/check_module_readmes.py` reports which modules have no
+  co-located README. It deliberately does not generate one — a worked example
+  is a sentence someone has to write, and a scraped header would be filler
+  that passes a check while teaching nothing, the same reason
+  `check_stdlib_index.py` refuses to invent a purpose. Reporting rather than
+  failing while the backlog is worked through.
+
 ### Changed
 
 - **`tests/integration/cas_roundtrip/` retired into `std/cas/`** (#1584).
   The co-located suite covers everything it did — including its
   known-answer digest, ported verbatim — plus `root()` and `path()`, which
   it did not reach.
+
+### Fixed
+
+- **`check_doc_blocks.py` never looked inside `std/`** (#1523). It walked
+  `docs/` and the top-level README only, so a co-located example was
+  unverified — three blocks in `std/schema/README.md` had not compiled for as
+  long as they had existed. The checker now walks `std/` too, which is what
+  makes co-location worth anything.
 
 ## [0.567.0]
 
