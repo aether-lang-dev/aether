@@ -1,0 +1,170 @@
+// std.cas unit tests (#1584) — co-located with the module.
+//
+// std.cas is a content-addressed store: put(file) hashes the bytes and
+// files them under the digest, get(digest, dest) copies them back out.
+// The properties worth pinning are the ones that make it a CAS rather
+// than a directory — the same content always yields the same digest,
+// different content never does, and a put is idempotent — plus the
+// null/empty guards on every entry point.
+//
+// AETHER_CAS redirects the root, so the suite runs against a scratch
+// directory under the system temp rather than the developer's real
+// ~/.aether/cas. The root is suffixed with the pid so two concurrent
+// runs (make test -j) cannot collide, and it is removed at the end.
+
+import std.spec
+import std.cas
+import std.dir
+import std.fs
+import std.io
+import std.os
+import std.string
+
+// TEMP on Windows, TMPDIR on POSIX, /tmp as a last resort. A hardcoded
+// /tmp works under an MSYS2 shell (where it maps to C:\msys64\tmp) and
+// fails for the native ae.exe the Windows CI legs build, which is
+// exactly the way for a path bug to pass a local check and fail in CI.
+// See #1702 for the std accessor that would remove this copy.
+fn temp_root() -> string {
+    t = io.getenv("TEMP")
+    if t == 0 {
+        t = io.getenv("TMPDIR")
+    }
+    if t == 0 {
+        return "/tmp"
+    }
+    return t
+}
+
+main() {
+    fw = spec.init()
+
+    // Redirect the store before any cas call reads the variable.
+    root = "${temp_root()}/aether-cas-test-${os.getpid()}"
+    os.setenv("AETHER_CAS", root)
+    src = "${root}-src.txt"
+    dst = "${root}-dst.txt"
+
+    spec.describe(fw, "std.cas root and path") {
+        spec.it("honours AETHER_CAS for the root") callback {
+            spec.assert_str_eq(cas.root(), root,
+                "root follows the environment")
+        }
+
+        spec.it("composes a path as root/digest without touching disk") callback {
+            spec.assert_str_eq(cas.path("abc123"), "${root}/abc123",
+                "path is <root>/<digest>")
+        }
+    }
+
+    spec.describe(fw, "std.cas round trip") {
+        spec.it("computes the sha256 of the content, not of anything else") callback {
+            // Known-answer, ported from tests/integration/cas_roundtrip/,
+            // which this suite replaces. Determinism alone (the case
+            // below) would still hold for a store that hashed the
+            // filename or the inode; only a fixed vector pins that the
+            // digest is sha256 OF THE BYTES.
+            //   sha256("hello cas") =
+            //   ba532ff613d7df59916589e39fc6dc9dc71b61bf7fd14a2c98c12c222a6cfd39
+            kat = "${root}-kat.txt"
+            we = fs.write(kat, "hello cas")
+            spec.assert_ok(we, "fixture written")
+            digest, err = cas.put(kat)
+            spec.assert_ok(err, "put succeeds")
+            spec.assert_str_eq(digest,
+                "ba532ff613d7df59916589e39fc6dc9dc71b61bf7fd14a2c98c12c222a6cfd39",
+                "digest is sha256 of the file's bytes")
+            fs.delete(kat)
+        }
+
+        spec.it("stores a file and reports a 64-char sha256 digest") callback {
+            we = fs.write(src, "hello content-addressed world")
+            spec.assert_ok(we, "fixture written")
+            digest, err = cas.put(src)
+            spec.assert_ok(err, "put succeeds")
+            spec.assert_eq(string.length(digest), 64,
+                "sha256 hex is 64 characters")
+        }
+
+        spec.it("reports a stored digest as present") callback {
+            digest, err = cas.put(src)
+            spec.assert_ok(err, "put succeeds")
+            spec.assert_eq(cas.has(digest), 1, "has() finds it")
+        }
+
+        spec.it("returns the bytes unchanged") callback {
+            digest, err = cas.put(src)
+            spec.assert_ok(err, "put succeeds")
+            ge = cas.get(digest, dst)
+            spec.assert_ok(ge, "get succeeds")
+            body, re = fs.read(dst)
+            spec.assert_ok(re, "destination readable")
+            spec.assert_str_eq(body, "hello content-addressed world",
+                "content survives the round trip")
+        }
+
+        spec.it("gives identical content the same digest") callback {
+            // The defining property. Two puts of the same bytes must
+            // collide by design — that is what makes the store
+            // content-addressed rather than a copy per call.
+            a, e1 = cas.put(src)
+            b, e2 = cas.put(src)
+            spec.assert_ok(e1, "first put succeeds")
+            spec.assert_ok(e2, "second put succeeds")
+            spec.assert_str_eq(a, b, "the same file yields the same digest")
+        }
+
+        spec.it("gives different content a different digest") callback {
+            other = "${root}-other.txt"
+            fs.write(other, "entirely different bytes")
+            a, e1 = cas.put(src)
+            b, e2 = cas.put(other)
+            spec.assert_ok(e1, "first put succeeds")
+            spec.assert_ok(e2, "second put succeeds")
+            spec.assert_true(string.equals(a, b) == 0,
+                "distinct content yields distinct digests")
+            fs.delete(other)
+        }
+    }
+
+    spec.describe(fw, "std.cas guards") {
+        spec.it("reports an absent digest as missing") callback {
+            spec.assert_eq(cas.has("0000000000000000"), 0,
+                "an unstored digest is not present")
+        }
+
+        spec.it("treats an empty digest as missing rather than erroring") callback {
+            spec.assert_eq(cas.has(""), 0, "empty digest is not present")
+        }
+
+        spec.it("rejects a put of a file that does not exist") callback {
+            digest, err = cas.put("${root}/definitely-not-here")
+            spec.assert_err(err, "put of a missing file fails")
+            spec.assert_eq(string.length(digest), 0,
+                "no digest on the error path")
+        }
+
+        spec.it("rejects a get of a digest that was never stored") callback {
+            err = cas.get("0000000000000000", dst)
+            spec.assert_err_contains(err, "not present",
+                "get says the digest is absent")
+        }
+    }
+
+    spec.run_summary(fw)
+
+    // Scrub the scratch store and its fixtures. Enumerate-and-delete
+    // rather than shelling out to rm -rf: the native Windows build has
+    // no POSIX shell, and delete_dir refuses a non-empty directory.
+    fs.delete(src)
+    fs.delete(dst)
+    entries, lerr = dir.list(root)
+    if string.equals(lerr, "") == 1 {
+        n = dir.list_count(entries)
+        for (i = 0; i < n; i = i + 1) {
+            fs.delete("${root}/${dir.list_get(entries, i)}")
+        }
+        dir.dir_list_free(entries)
+    }
+    fs.delete_dir(root)
+}

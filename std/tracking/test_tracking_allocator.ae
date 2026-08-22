@@ -1,0 +1,120 @@
+// std.tracking unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind. It is a leak-detecting wrapper
+// around another allocator: wrap(inner) returns an allocator that
+// forwards every request and counts what is still live, so a test or a
+// shutdown path can ask "did anything leak?".
+//
+// The whole point is the arithmetic — count and bytes must rise on
+// alloc, fall on free, and reach zero exactly when the last block goes
+// back. A wrapper that under-counts reports a clean run over a real
+// leak, which is worse than having no tracker at all, so each case
+// asserts the counters at both ends rather than only at the end.
+//
+// report() prints to stdout as well as returning the live count; that
+// output is the module's documented behaviour, not stray noise.
+
+import std.spec
+import std.tracking
+import std.alloc
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.tracking counters") {
+        spec.it("starts with nothing live") callback {
+            t = tracking.wrap(alloc.system())
+            spec.assert_eq(tracking.count(t), 0, "no live allocations")
+            spec.assert_eq_long(tracking.bytes(t), 0, "no live bytes")
+            tracking.destroy(t)
+        }
+
+        spec.it("counts a single allocation") callback {
+            t = tracking.wrap(alloc.system())
+            p = alloc.raw(t, 64)
+            spec.assert_eq(tracking.count(t), 1, "one live allocation")
+            spec.assert_eq_long(tracking.bytes(t), 64, "64 live bytes")
+            alloc.release(t, p, 64)
+            tracking.destroy(t)
+        }
+
+        spec.it("accumulates across allocations") callback {
+            t = tracking.wrap(alloc.system())
+            a = alloc.raw(t, 64)
+            b = alloc.raw(t, 32)
+            spec.assert_eq(tracking.count(t), 2, "two live allocations")
+            spec.assert_eq_long(tracking.bytes(t), 96, "64 + 32 live bytes")
+            alloc.release(t, a, 64)
+            alloc.release(t, b, 32)
+            tracking.destroy(t)
+        }
+
+        spec.it("decrements on free, by the freed size") callback {
+            // Both halves matter: a wrapper that decremented the count
+            // but not the byte total would still report "0 live" at the
+            // end while its byte figure drifted, which is how a partial
+            // free goes unnoticed.
+            t = tracking.wrap(alloc.system())
+            a = alloc.raw(t, 64)
+            b = alloc.raw(t, 32)
+            alloc.release(t, a, 64)
+            spec.assert_eq(tracking.count(t), 1, "one left")
+            spec.assert_eq_long(tracking.bytes(t), 32,
+                "only the surviving block's bytes remain")
+            alloc.release(t, b, 32)
+            tracking.destroy(t)
+        }
+
+        spec.it("returns to zero when everything is freed") callback {
+            t = tracking.wrap(alloc.system())
+            a = alloc.raw(t, 128)
+            b = alloc.raw(t, 16)
+            alloc.release(t, a, 128)
+            alloc.release(t, b, 16)
+            spec.assert_eq(tracking.count(t), 0, "nothing live")
+            spec.assert_eq_long(tracking.bytes(t), 0, "no bytes live")
+            tracking.destroy(t)
+        }
+    }
+
+    spec.describe(fw, "std.tracking report") {
+        spec.it("reports zero for a balanced run") callback {
+            t = tracking.wrap(alloc.system())
+            p = alloc.raw(t, 48)
+            alloc.release(t, p, 48)
+            spec.assert_eq(tracking.report(t), 0,
+                "a balanced run reports no leaks")
+            tracking.destroy(t)
+        }
+
+        spec.it("reports the number of blocks still live") callback {
+            t = tracking.wrap(alloc.system())
+            a = alloc.raw(t, 8)
+            b = alloc.raw(t, 8)
+            alloc.release(t, a, 8)
+            spec.assert_eq(tracking.report(t), 1,
+                "one unfreed block is one leak")
+            alloc.release(t, b, 8)
+            spec.assert_eq(tracking.report(t), 0,
+                "and none once it is returned")
+            tracking.destroy(t)
+        }
+    }
+
+    spec.describe(fw, "std.tracking resize") {
+        spec.it("tracks a grow as a net byte change, not a new block") callback {
+            t = tracking.wrap(alloc.system())
+            p = alloc.raw(t, 32)
+            p2 = alloc.resize(t, p, 32, 128)
+            spec.assert_eq(tracking.count(t), 1,
+                "resize does not add a live allocation")
+            spec.assert_eq_long(tracking.bytes(t), 128,
+                "the byte total follows the new size")
+            alloc.release(t, p2, 128)
+            spec.assert_eq(tracking.count(t), 0, "and frees cleanly")
+            tracking.destroy(t)
+        }
+    }
+
+    spec.run_summary(fw)
+}
