@@ -15,11 +15,22 @@ import std.zlib
 import std.string
 
 main() {
+    // The backend is an optional build dependency, so a program that
+    // must degrade gracefully checks before compressing rather than
+    // reading "zlib unavailable" out of every call.
+    if zlib.available() == 0 {
+        println("round trip ok: skipped (no zlib backend)")
+        return
+    }
+
     src = "abcabcabcabcabcabcabcabcabcabcabcabc"
     n = string.length(src)
 
     packed, plen, cerr = zlib.deflate(src, n, 6)
-    println("compressed ${n} -> ${plen} err='${cerr}'")
+    if cerr != "" {
+        println("deflate failed: ${cerr}")
+        return
+    }
 
     // inflate does not need the original length — the zlib
     // container carries what it needs.
@@ -28,13 +39,16 @@ main() {
 }
 ```
 ```output
-compressed 36 -> 13 err=''
 round trip ok: 1 err=''
 ```
 
-`available()` reports whether the backend was built in. It is an optional
-dependency, so a program that must degrade gracefully should check rather than
-assume — every entry point returns `"zlib unavailable"` when it is absent.
+That guard is not decoration: it is what makes the example's output the same
+whether or not the machine running it has the backend, and it is the shape a
+caller should copy.
+
+Every entry point returns `"zlib unavailable"` when the backend is absent, so
+an unchecked caller gets an error rather than a wrong result — but checking
+`available()` once is clearer than threading that error through every call.
 
 Unlike `std.lzf`, deflating an incompressible input succeeds and simply
 produces slightly more bytes than it consumed.

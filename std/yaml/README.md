@@ -10,7 +10,7 @@ Accessors that return text return `(value, err)`, so a scalar read on a node
 that turns out to be a mapping is reported rather than yielding a pointer
 printed as a number.
 
-```aether,run
+```aether
 import std.yaml
 
 main() {
@@ -30,11 +30,25 @@ main() {
     yaml.free(doc)
 }
 ```
-```output
+
+With libfyaml present that prints:
+
+```
 err=''
 entries: 2
 name: Ada
 ```
+
+The block is **compiled but not run** in CI. `std.yaml` is backed by
+**libfyaml, an optional build dependency**: without it every entry point
+returns `"std.yaml unavailable: this build has no libfyaml (install libfyaml
++ rebuild, or set YAML=1)"` and the example prints that instead. An asserted
+`output` block would therefore pass or fail depending on how the machine
+running CI was provisioned, which is not something a documentation example
+should depend on.
+
+Unlike `std.zlib`, this module exposes no `available()` probe, so a program
+that must degrade gracefully has to check the error string from `parse`.
 
 `free` on the document releases the whole tree; nodes inside it are borrowed
 and must not be freed separately.
