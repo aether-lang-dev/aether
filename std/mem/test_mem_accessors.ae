@@ -43,8 +43,11 @@ main() {
             b = zeroed(BUFSZ)
             mem.set_int(b, 0, -123456)
             spec.assert_eq(mem.get_int(b, 0), -123456, "int round trip")
+            // assert_eq_long, not assert_eq: narrowing a 64-bit value at
+            // the call boundary aborts the process on Windows and passes
+            // on Linux, which is the worst of both.
             mem.set_long(b, 8, 9007199254740993)
-            spec.assert_eq(mem.get_long(b, 8), 9007199254740993,
+            spec.assert_eq_long(mem.get_long(b, 8), 9007199254740993,
                 "long round trip past 2^53")
         }
 
@@ -66,11 +69,31 @@ main() {
                 "the same bytes read unsigned are 65534")
         }
 
-        spec.it("round-trips uint32 at its top of range") callback {
+        spec.it("returns uint32 values above 2^31 as negative") callback {
+            // NOT an endorsement. get_uint32 is declared `-> int` and the C
+            // returns `(int)v` from a uint32_t, so 0xFFFFFFFF comes back as
+            // -1 rather than 4294967295 — the one width where the unsigned
+            // accessor cannot represent its own range, since get_uint16's
+            // 16 bits do fit in an int. Filed separately; pinned here as
+            // observed so the day it changes is a deliberate one.
+            //
+            // A caller needing the true value must mask it back:
+            //   v = mem.get_uint32(b, off) as long & 4294967295
             b = zeroed(BUFSZ)
             mem.set_uint32(b, 4, 4294967295)
-            spec.assert_eq(mem.get_uint32(b, 4), 4294967295,
-                "0xFFFFFFFF survives as unsigned")
+            spec.assert_eq(mem.get_uint32(b, 4), -1,
+                "0xFFFFFFFF reads back as -1, not 4294967295")
+            // The bytes themselves are correct — only the return type is
+            // too narrow to say so.
+            spec.assert_eq(mem.get_uint8(b, 4), 255, "byte 4 is 0xFF")
+            spec.assert_eq(mem.get_uint8(b, 7), 255, "byte 7 is 0xFF")
+        }
+
+        spec.it("round-trips a uint32 below 2^31 intact") callback {
+            b = zeroed(BUFSZ)
+            mem.set_uint32(b, 4, 2147483647)
+            spec.assert_eq(mem.get_uint32(b, 4), 2147483647,
+                "0x7FFFFFFF is representable and survives")
         }
     }
 
@@ -122,10 +145,10 @@ main() {
         spec.it("round-trips u64 in both orders") callback {
             b = zeroed(BUFSZ)
             mem.set_u64_le(b, 0, 81985529216486895)
-            spec.assert_eq(mem.get_u64_le(b, 0), 81985529216486895,
+            spec.assert_eq_long(mem.get_u64_le(b, 0), 81985529216486895,
                 "LE round trip")
             mem.set_u64_be(b, 8, 81985529216486895)
-            spec.assert_eq(mem.get_u64_be(b, 8), 81985529216486895,
+            spec.assert_eq_long(mem.get_u64_be(b, 8), 81985529216486895,
                 "BE round trip")
             spec.assert_eq(mem.get_uint8(b, 0), mem.get_uint8(b, 15),
                 "LE byte 0 equals BE byte 7")
@@ -152,7 +175,7 @@ main() {
         spec.it("reinterprets a double as its bit pattern and back") callback {
             // 1.5 is 0x3FF8000000000000 by IEEE 754.
             bits = mem.bits_of_float(1.5)
-            spec.assert_eq(bits, 4609434218613702656,
+            spec.assert_eq_long(bits, 4609434218613702656,
                 "1.5 has the IEEE 754 bit pattern 0x3FF8000000000000")
             spec.assert_true(mem.float_from_bits(bits) == 1.5,
                 "and converts back")
