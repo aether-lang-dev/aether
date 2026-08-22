@@ -9,26 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **macOS builds silently had no zlib** (#1690). Detection probed with
+  `pkg-config`, and the macOS SDK ships `libz` and `zlib.h` but **no
+  `zlib.pc`** — so the query failed while `-lz` linked and ran fine. Every
+  gzip response came back uncompressed and
+  `tests/integration/http_middleware_d2` failed on that leg with no hint a
+  dependency was missing: the gzip middleware was behaving correctly for a
+  build without a backend. A compile-and-link fallback now runs when
+  pkg-config comes up empty, answering the question that actually matters —
+  will this link — rather than looking for a metadata file a platform may not
+  ship. pkg-config stays first, so a box where it does know about zlib (a
+  non-default prefix, a cross sysroot) is unaffected.
+
 ## [0.570.0]
-
-### Added
-
-- **`os.temp_dir()`** (#1702), the directory for scratch files, with no
-  trailing separator. Windows resolves it through `GetTempPathW`, which
-  already performs the documented `TMP` → `TEMP` → `USERPROFILE` →
-  Windows-directory cascade, so there is no hand-rolled precedence to get
-  wrong; POSIX reads `TMPDIR` and falls back to `/tmp`. It never returns null
-  or an empty string, so `"${os.temp_dir()}/name"` needs no check.
-
-### Changed
-
-- **23 files stopped hand-rolling the temp-directory fallback** (#1702). Each
-  carried its own `TEMP` → `TMPDIR` → `/tmp` ladder — and eight tried `TMPDIR`
-  first, the wrong precedence on Windows. More to the point, a file that
-  skipped the ladder and hardcoded `/tmp` passed on POSIX and under an MSYS2
-  shell, where `/tmp` resolves, while failing on the Windows CI runners, which
-  install MSYS2 elsewhere. That shape of bug passes every local check, and it
-  broke #1701.
 
 ### Fixed
 
