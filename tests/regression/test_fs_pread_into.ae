@@ -8,6 +8,7 @@
 // pread + copy_from_string recipe.
 
 import std.fs
+import std.os
 import std.bytes
 import std.bytes.cursor
 import std.io
@@ -16,9 +17,7 @@ main() {
     print("=== fs.pread_into + LE cursor (#1102) ===\n\n")
 
     // Scratch dir idiom shared with the other std.fs tests.
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_test_pread_into.bin"
     fs.delete(path)
 

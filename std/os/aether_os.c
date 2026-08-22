@@ -121,6 +121,7 @@ char* os_now_utc_iso8601_raw(void) { return NULL; }
 char* os_now_local_iso8601_raw(void) { return NULL; }
 void os_now_local_fill_raw(void* out) { (void)out; }
 char* os_platform_raw(void) { return NULL; }
+char* os_temp_dir_raw(void) { return NULL; }
 int os_getpid_raw(void) { return 0; }
 int os_user_id_raw(void) { return -1; }
 int64_t os_wall_seconds_raw(void) { return 0; }
@@ -481,6 +482,68 @@ char* os_now_local_iso8601_raw(void) {
  * macros (__APPLE__, __linux__, _WIN32, etc.). The returned string
  * is a strdup'd copy so callers can assign and the runtime's heap-
  * string tracker can free uniformly. */
+/* The directory for scratch files.
+ *
+ * Every caller needing one used to hand-roll TEMP -> TMPDIR -> "/tmp"
+ * (23 sites in the tree, #1702), and the ones that skipped it and
+ * hardcoded "/tmp" passed on POSIX and on an MSYS2 shell — where /tmp
+ * resolves — while failing on the Windows CI runners, which install
+ * MSYS2 somewhere else entirely. That is the worst shape for a bug:
+ * the local check says yes.
+ *
+ * Windows uses GetTempPathW, which already performs the documented
+ * TMP -> TEMP -> USERPROFILE -> Windows-directory cascade, so there is
+ * no hand-rolled precedence to get wrong. It returns a path WITH a
+ * trailing separator; we strip it so callers can always write
+ * "${dir}/name" without a special case.
+ *
+ * POSIX reads TMPDIR (which POSIX itself specifies) and falls back to
+ * "/tmp". An empty TMPDIR is treated as unset rather than as the
+ * current directory.
+ *
+ * Never returns NULL or an empty string: a caller that cannot write a
+ * scratch file has a real problem, but it should not be a null deref.
+ */
+char* os_temp_dir_raw(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    wchar_t wbuf[MAX_PATH + 1];
+    DWORD n = GetTempPathW(MAX_PATH + 1, wbuf);
+    if (n == 0 || n > MAX_PATH) return strdup("C:\\Windows\\Temp");
+
+    /* Strip the trailing separator GetTempPathW always appends, but
+     * never the one in a drive root ("C:\\"), which is part of the
+     * name rather than a separator. */
+    while (n > 0 && (wbuf[n - 1] == L'\\' || wbuf[n - 1] == L'/')) {
+        if (n == 3 && wbuf[1] == L':') break;
+        wbuf[--n] = 0;
+    }
+
+    int need = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, NULL, 0, NULL, NULL);
+    if (need <= 0) return strdup("C:\\Windows\\Temp");
+    char* out = (char*)malloc((size_t)need);
+    if (!out) return strdup("C:\\Windows\\Temp");
+    if (WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, out, need, NULL, NULL) <= 0) {
+        free(out);
+        return strdup("C:\\Windows\\Temp");
+    }
+    return out;
+#else
+    const char* t = getenv("TMPDIR");
+    if (t && *t) {
+        size_t len = strlen(t);
+        /* Strip a trailing slash so the result never doubles one up,
+         * except for "/" itself. */
+        while (len > 1 && t[len - 1] == '/') len--;
+        char* out = (char*)malloc(len + 1);
+        if (!out) return strdup("/tmp");
+        memcpy(out, t, len);
+        out[len] = 0;
+        return out;
+    }
+    return strdup("/tmp");
+#endif
+}
+
 char* os_platform_raw(void) {
 #if defined(_WIN32) || defined(_WIN64)
     return strdup("windows");

@@ -5,19 +5,14 @@
 // canonical pattern documented in docs/stdlib-module-pattern.md.
 
 import std.file
+import std.os
 import std.dir
 import std.io
 
 main() {
     println("=== FS Return Value Tests ===")
 
-    tmp = io.getenv("TEMP")
-    if tmp == 0 {
-        tmp = io.getenv("TMPDIR")
-    }
-    if tmp == 0 {
-        tmp = "/tmp"
-    }
+    tmp = os.temp_dir()
 
     // Test 1: file.delete on non-existent file returns a non-empty error.
     println("\nTest 1: file.delete non-existent returns error")

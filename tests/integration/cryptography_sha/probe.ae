@@ -6,6 +6,7 @@
 // of the payload, and the digest wouldn't match the reference value.
 
 import std.cryptography
+import std.os
 import std.fs
 import std.string
 import std.io
@@ -71,9 +72,7 @@ main() {
     // Seed a 10-byte file (NUL at offset 3) via C shim; read it back
     // through fs.read_binary (length-aware AetherString); hash it.
     print("\nTest 4: sha256 of a 10-byte AetherString with NUL at offset 3\n")
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_crypto_nul_test.bin"
 
     ok = cryptography_probe_write_binary(path)

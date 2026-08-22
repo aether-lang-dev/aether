@@ -4,17 +4,12 @@
 // Related: GitHub issue #61
 
 import std.io
+import std.os
 import std.fs
 
 main() {
     // Use platform temp dir: TEMP (Windows) or TMPDIR (Unix), fallback /tmp
-    tmp = io.getenv("TEMP")
-    if tmp == 0 {
-        tmp = io.getenv("TMPDIR")
-    }
-    if tmp == 0 {
-        tmp = "/tmp"
-    }
+    tmp = os.temp_dir()
     test_file = "${tmp}/_aether_test_file_io_char.txt"
 
     // Test 1: Write and read back (Go-style wrappers return (value, err))

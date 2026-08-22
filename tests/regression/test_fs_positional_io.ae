@@ -4,6 +4,7 @@
 // truncate and verify the on-disk size.
 
 import std.fs
+import std.os
 import std.string
 import std.io
 
@@ -13,9 +14,7 @@ main() {
     // Pick a scratch dir — /tmp on POSIX, TEMP/TMPDIR elsewhere. A bare
     // "/tmp" resolves to C:\tmp via fopen on Windows and isn't created,
     // so fs.open(w+) fails there (matches the other std.fs tests' idiom).
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_test_pio.bin"
     fs.delete(path)
     f, ferr = fs.open(path, "w+")

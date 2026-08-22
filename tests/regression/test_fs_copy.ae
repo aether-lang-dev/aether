@@ -22,6 +22,7 @@
 //      accidental reordering of the const block
 
 import std.fs
+import std.os
 import std.file
 import std.dir
 import std.string
@@ -39,9 +40,7 @@ read_or_empty(path: string) -> string {
 main() {
     println("=== fs.copy regression ===")
 
-    tmp = io.getenv("TEMP")
-    if tmp == 0 { tmp = io.getenv("TMPDIR") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     tmpdir = "${tmp}/aether_fs_copy_test"
     // Best-effort cleanup of any leftover state from a previous run.
     fs.delete("${tmpdir}/src.txt")

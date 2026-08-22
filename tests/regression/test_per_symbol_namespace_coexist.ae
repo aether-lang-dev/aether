@@ -17,6 +17,7 @@
 // regression is specifically the *coexistence* of both forms.
 
 import std.fs.file_exists
+import std.os
 import std.fs
 import std.string
 import std.io
@@ -27,9 +28,7 @@ extern exit(code: int)
 // state, into a portable temp dir (TEMP/TMPDIR with a /tmp fallback) so
 // it works on Windows CI too — /tmp is not writable on native Windows.
 main() {
-    tmp = io.getenv("TEMP")
-    if tmp == 0 { tmp = io.getenv("TMPDIR") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     marker = "${tmp}/per_symbol_repro_marker"
 
     werr = fs.write(marker, "marker\n")

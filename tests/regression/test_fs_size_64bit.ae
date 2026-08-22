@@ -8,6 +8,7 @@
 // zero-filling) and asserts every size surface reports the true value.
 
 import std.fs
+import std.os
 import std.file
 import std.io
 
@@ -17,9 +18,7 @@ main() {
     // Pick a scratch dir — /tmp on POSIX, TEMP/TMPDIR elsewhere. A bare
     // "/tmp" resolves to C:\tmp via fopen on Windows and isn't created,
     // so fs.open(w+) fails there (matches the other std.fs tests' idiom).
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_test_size64.bin"
     fs.delete(path)
 
