@@ -2680,6 +2680,7 @@ check-docs: compiler ae stdlib
 	@if command -v python3 >/dev/null 2>&1; then \
 	    python3 tests/scripts/check_doc_examples.py && \
 	    python3 tests/scripts/check_stdlib_index.py && \
+	    python3 tests/scripts/check_module_readmes.py && \
 	    python3 tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — python3 not found"; \
