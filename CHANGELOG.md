@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **`mem.get_uint32` could not represent the top half of its own range**
+  (#1699). It was declared `-> int`, so `0xFFFFFFFF` read back as `-1`. The
+  bit pattern was right and a comment told callers to widen through `long`
+  themselves, but nothing enforced that — and the sibling accessors do not
+  ask: `get_uint16` fits its range in an `int`, and `get_u32_le` /
+  `get_u32_be` have always returned `int64`. The same four bytes therefore
+  read as `4294967295` through one accessor and `-1` through the other.
+  Both `get_uint32` and `set_uint32` now take and return `long`; the setter
+  masks to 32 bits, so a value wider than the field truncates rather than
+  spilling into the next one.
+
 ## [0.569.0]
 
 ### Added

@@ -484,40 +484,28 @@ main() {
         }
     }
 
-    // Case 21: uint32 — bit pattern fits in Aether int (signed int32).
-    // For values with bit 31 set, get_uint32 returns the same bit
-    // pattern (so equality compares correctly), but arithmetic
-    // interpretation as a signed int32 yields a negative number.
+    // Case 21: uint32 — the full unsigned range survives (#1699).
+    // get_uint32 used to be declared `-> int` and returned -1 for
+    // 0xffffffff, so this case documented the mask a caller needed. It
+    // returns `long` now, matching get_u32_le/get_u32_be, and the value
+    // reads back as itself.
     {
         p = malloc(8)
         if p == null {
             println("  [21] FAIL: malloc failed")
             failed = failed + 1
         } else {
-            // Hex literals 0x80000000 and 0xffffffff in Aether widen to long;
-            // when written through set_uint32 only the low 32 bits land in
-            // memory. Read back as int (signed int32) gives the negative
-            // representation of the same bit pattern.
             mem.set_uint32(p, 0, 0x80000000)
             mem.set_uint32(p, 4, 0xffffffff)
             ok = 1
             v0 = mem.get_uint32(p, 0)
             v1 = mem.get_uint32(p, 4)
-            // -2147483648 == int32 of 0x80000000.
-            if v0 != -2147483648 { println("  [21] FAIL: uint32 0x80000000 got ${v0}"); ok = 0 }
-            if v1 != -1 { println("  [21] FAIL: uint32 0xffffffff got ${v1}"); ok = 0 }
-            // Cross-check via long-widened read: 0xffffffff as long is
-            // 4294967295 (positive), proving the underlying bit pattern is
-            // unsigned-correct even though int32 representation is negative.
-            long widen = 0
-            widen = mem.get_uint32(p, 4)
-            // Note: assigning a negative int32 to long sign-extends in
-            // Aether, so widen will still be -1 here. The unsigned
-            // semantics live in the bit pattern, not the type. For
-            // arithmetic that needs unsigned compare, bit-mask via
-            // (widen & 0xffffffff) on the long side.
-            if (widen & 0xffffffff) != 0xffffffff {
-                println("  [21] FAIL: bit-mask check (widen & 0xffffffff) = ${widen & 0xffffffff}")
+            if v0 != 2147483648 { println("  [21] FAIL: uint32 0x80000000 got ${v0}"); ok = 0 }
+            if v1 != 4294967295 { println("  [21] FAIL: uint32 0xffffffff got ${v1}"); ok = 0 }
+            // The two accessors of this width must agree on the same
+            // bytes — their disagreeing is what made #1699 visible.
+            if mem.get_uint32(p, 4) != mem.get_u32_le(p, 4) {
+                println("  [21] FAIL: get_uint32 disagrees with get_u32_le")
                 ok = 0
             }
             if ok == 1 {

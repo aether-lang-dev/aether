@@ -84,31 +84,47 @@ main() {
                 "the same bytes read unsigned are 65534")
         }
 
-        spec.it("returns uint32 values above 2^31 as negative") callback {
-            // NOT an endorsement. get_uint32 is declared `-> int` and the C
-            // returns `(int)v` from a uint32_t, so 0xFFFFFFFF comes back as
-            // -1 rather than 4294967295 — the one width where the unsigned
-            // accessor cannot represent its own range, since get_uint16's
-            // 16 bits do fit in an int. Filed separately; pinned here as
-            // observed so the day it changes is a deliberate one.
-            //
-            // A caller needing the true value must mask it back:
-            //   v = mem.get_uint32(b, off) as long & 4294967295
+        spec.it("represents the whole uint32 range") callback {
+            // #1699: get_uint32 used to be declared `-> int` and returned
+            // -1 for 0xFFFFFFFF — it could not represent the top half of
+            // the range it exists to read. It is `-> long` now, matching
+            // get_u32_le/get_u32_be, which have always returned int64 for
+            // exactly this reason. The two reading the same four bytes
+            // and disagreeing was the tell.
             b = zeroed(ar, BUFSZ)
             mem.set_uint32(b, 4, 4294967295)
-            spec.assert_eq(mem.get_uint32(b, 4), -1,
-                "0xFFFFFFFF reads back as -1, not 4294967295")
-            // The bytes themselves are correct — only the return type is
-            // too narrow to say so.
+            spec.assert_eq_long(mem.get_uint32(b, 4), 4294967295,
+                "0xFFFFFFFF reads back as itself, not -1")
             spec.assert_eq(mem.get_uint8(b, 4), 255, "byte 4 is 0xFF")
             spec.assert_eq(mem.get_uint8(b, 7), 255, "byte 7 is 0xFF")
+        }
+
+        spec.it("agrees with the little-endian accessor on the same bytes") callback {
+            // The inconsistency that made #1699 visible: two accessors of
+            // the same width reading one buffer must not disagree.
+            b = zeroed(ar, BUFSZ)
+            mem.set_u32_le(b, 0, 4294967295)
+            spec.assert_eq_long(mem.get_uint32(b, 0), mem.get_u32_le(b, 0),
+                "get_uint32 and get_u32_le read the same value")
         }
 
         spec.it("round-trips a uint32 below 2^31 intact") callback {
             b = zeroed(ar, BUFSZ)
             mem.set_uint32(b, 4, 2147483647)
-            spec.assert_eq(mem.get_uint32(b, 4), 2147483647,
+            spec.assert_eq_long(mem.get_uint32(b, 4), 2147483647,
                 "0x7FFFFFFF is representable and survives")
+        }
+
+        spec.it("masks a setter value wider than 32 bits") callback {
+            // set_uint32 takes a long now, so a caller can pass the real
+            // unsigned value; anything above 32 bits is truncated to the
+            // field's width rather than corrupting the neighbouring one.
+            b = zeroed(ar, BUFSZ)
+            mem.set_uint32(b, 4, 4294967296 + 7)
+            spec.assert_eq_long(mem.get_uint32(b, 4), 7,
+                "2^32 + 7 stores as 7")
+            spec.assert_eq(mem.get_uint8(b, 8), 0,
+                "and does not spill into the next word")
         }
     }
 
