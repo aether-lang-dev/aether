@@ -131,6 +131,37 @@ RNG_HEX=$(od -An -tx1 -v "$RNG_BODY" | tr -d ' \n')
     echo "  [FAIL] T3 Range fallback content mismatch"; exit 1;
 }
 
+# --- Test 5: a SMALL file must arrive without waiting for the close ---
+# T2 uses the 1 MiB blob, which is larger than the socket buffer, so the
+# kernel has to push it whatever the sendfile path does with TCP_CORK /
+# TCP_NOPUSH. A small file fits, and then nothing forces the push: on Darwin
+# and the BSDs, clearing TCP_NOPUSH does not send what is queued, so the
+# response reached the client only when the connection closed. That is
+# invisible while a worker goes straight back to recv() on the socket, and a
+# hung request once idle connections are parked instead (#1663).
+#
+# Two requests on one connection is what pins it: curl cannot send the second
+# until the first response arrives, so a response held back stalls here rather
+# than being papered over by the close at the end of the test.
+printf 'small-file-body\n' > "$ROOT_DIR/small.txt"
+SM1="$TMPDIR/sm1.txt"
+SM2="$TMPDIR/sm2.txt"
+curl --silent --show-error --max-time 5 \
+     -o "$SM1" "$URL/static/small.txt" \
+     -o "$SM2" "$URL/static/small.txt" 2>"$TMPDIR/c5.err" || {
+    echo "  [FAIL] T5 small file over keep-alive did not complete within 5s:"
+    cat "$TMPDIR/c5.err"
+    echo "         (a sendfile response that only arrives when the connection"
+    echo "          closes looks exactly like this)"
+    exit 1
+}
+[ "$(cat "$SM1")" = "small-file-body" ] || {
+    echo "  [FAIL] T5 first response: $(cat "$SM1")"; exit 1;
+}
+[ "$(cat "$SM2")" = "small-file-body" ] || {
+    echo "  [FAIL] T5 second response: $(cat "$SM2")"; exit 1;
+}
+
 # --- Test 4: 404 doesn't break further requests (no FD leak) ---
 HTTP_CODE=$(curl --silent --show-error --max-time 5 \
                  -o /dev/null -w '%{http_code}' \
@@ -143,4 +174,4 @@ HTTP_CODE=$(curl --silent --show-error --max-time 5 \
                  "$URL/static/blob.bin" 2>"$TMPDIR/c4b.err") || true
 [ "$HTTP_CODE" = "200" ] || { echo "  [FAIL] T4 follow-up: $HTTP_CODE"; exit 1; }
 
-echo "  [PASS] http_sendfile: 4/4 — body / keep-alive / Range fallback / 404 cleanup"
+echo "  [PASS] http_sendfile: 5/5 — body / keep-alive / Range fallback / small-file flush / 404 cleanup"

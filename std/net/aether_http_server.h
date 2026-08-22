@@ -149,6 +149,8 @@ typedef void (*HttpRequestHook)(HttpRequest* req,
                                 void* user_data);
 
 // HTTP Server
+struct HttpConn;
+
 typedef struct HttpServer {
     int socket_fd;
     int port;
@@ -211,6 +213,15 @@ typedef struct HttpServer {
     // over `ready_check` via the route's user_data slot.
     HttpReadyCheck ready_check;
     void* ready_check_user_data;
+
+    // Idle keep-alive connections live here rather than on a worker (#1663).
+    // HttpParkLot*, void* so this header stays free of the parking header;
+    // NULL when parking is unavailable (no threads, no poller), in which case
+    // a worker keeps its connection as it did before.
+    void* park_lot;
+    // The worker pool the parking lot resubmits woken connections into.
+    // HttpConnectionPool*, same reasoning.
+    void* conn_pool;
 
     // In-flight connection tracker for graceful shutdown (#260 Tier 3).
     // Incremented at the top of http_server_drain_connection and
@@ -618,6 +629,17 @@ const char* http_server_set_metrics_raw(HttpServer* server,
 // http_server_set_actor_handler should call it on the
 // MSG_HTTP_CONNECTION message's client_fd to get the same
 // keep-alive / TLS / route-dispatch behaviour. (#260 Tier 0)
+/* Resume a connection the parking lot woke, on a worker thread (#1663).
+ * Takes ownership: the connection is closed and freed when it finishes. */
+void http_server_resume_connection(struct HttpServer* server, struct HttpConn* conn);
+
+/* Close and release a connection the caller owns. The parking lot holds
+ * connections by pointer and uses this for the ones that time out. */
+void http_conn_close_owned(struct HttpConn* conn);
+
+/* The descriptor a connection is on, for the parking lot's poller. */
+int http_conn_fd(struct HttpConn* conn);
+
 void http_server_drain_connection(HttpServer* server, int client_fd);
 
 // Request accessors (for use from Aether .ae code via opaque ptr)

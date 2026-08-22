@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Idle keep-alive connections wait in a poller instead of on a worker**
+  (#1663). A worker owned its connection for that connection's whole life, so
+  the number a server could hold open was the number of threads it had. Past
+  that point connections that never reached a worker stalled, and the only
+  defence was to refuse keep-alive while another connection was queued, which
+  put the ceiling at the worker count by design.
+
+  A connection with no request in flight is now handed to a poller thread: it
+  costs a descriptor and a table slot rather than a thread, comes back to a
+  worker when its client speaks again, and is closed when the idle deadline
+  passes in silence. Measured on an 8-core box (16 workers), 3000 requests per
+  cell with `ab -k`:
+
+  | clients | worker-held | parked |
+  |---|---|---|
+  | 8   | 83,300 rps | 78,700 rps |
+  | 50  | 38,100 rps | 74,400 rps |
+  | 200 | 24,500 rps | 70,000 rps |
+
+  Below the worker count the handoff costs a few percent, since there was no
+  thread shortage to solve; the worker therefore waits about two milliseconds
+  for a follow-up request before parking, and only while another worker is
+  free to take other work. Past the worker count the curve stops falling: 2.9x
+  at 200 clients, holding near peak instead of decaying towards the
+  connection-per-request rate.
+
+  A static file served through the sendfile fast path used to reach the
+  client only when the connection closed, on Darwin and the BSDs. Clearing
+  `TCP_NOPUSH` there does not send what is queued, unlike Linux's `TCP_CORK`;
+  the stack sends it when something else prompts output, and until now
+  something always did, because the worker went straight back to `recv()` on
+  the same socket. A parked connection reads nothing until the client speaks,
+  and the client is waiting for that response. The cork is now lifted before
+  the body write on those platforms, so the body write pushes headers and body
+  together, which is the coalescing the cork exists for.
+
+  The poller finds a woken connection through an fd-indexed table rather than
+  by scanning the parked set, so a wakeup costs the same whether four
+  connections are parked or four thousand, which is the property the whole
+  change is for. `aether_http_parked_connections` reports the current count.
+### Fixed
+
 ## [0.572.0]
 
 ### Changed
