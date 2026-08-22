@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Spec-based unit tests for `std.mem`** (#1584). 20 cases over the typed
+  accessors: signed/unsigned widths, the little- and big-endian u16/u32/u64
+  pairs, float storage and `bits_of_float`/`float_from_bits`, `clz32`/`clz64`,
+  and `copy`/`compare`. `std.mem` is imported by 36 tests under `tests/` and
+  tested directly by none of them — the widest-used `std` module without a
+  suite of its own, and the one where a wrong answer is quietest: a
+  sign-extension slip or a swapped endian pair yields a plausible number
+  rather than a crash. The endian cases assert the individual BYTES rather
+  than only the round trip, since a get/set pair that were both wrong in the
+  same direction would round-trip perfectly while corrupting every wire
+  format.
+
+- **`spec.assert_eq_long`** — the 64-bit sibling of `assert_eq`. Passing a
+  long to `assert_eq` narrows it at the call boundary, which is not merely a
+  wrong comparison: it aborted the process on all three Windows legs (exit
+  127) while passing on Linux, where both truncated halves happened to
+  agree. Anything wider than 32 bits — a `mem.get_long`, a u64 accessor, an
+  IEEE 754 bit pattern — needs it.
+
+### Fixed
+
+- **`## [0.566.0]` was released below `## [0.565.0]`.** The #1696 entry went
+  under the `[current]` marker left by the #1693 repair, which the 0.565.0
+  release had already moved past, so the section was stranded between two
+  released versions — and the next release renamed it in place, making the
+  ordering permanent. Moved above 0.565.0; the section's own content is
+  unchanged and every tagged section remains byte-identical to its tag. The
+  gate proposed in #1695 catches this class before it ships.
+
+## [0.566.0]
+
+### Added
+
+- **Spec-based unit tests for `std.collections`** (#1584). 12 cases covering
+  the two families nothing else touches: `string_list` (an owned-string
+  vector — append, indexed get/set, remove-and-shift, clear) and `intarr`
+  (fixed-size int array — filled construction, individual slots, `fill`, and
+  that the checked and unchecked accessors agree in range, so switching to
+  the unchecked pair for speed does not change behaviour silently). The
+  list/map surface `std.collections` re-exports is already covered by
+  `std/list` and `std/map`, so it is not duplicated here. Pinned:
+  `string_list_sort_lex` orders by byte value, so an uppercase initial sorts
+  before every lowercase one — a caller expecting case-insensitive ordering
+  gets this instead, silently.
+
 ## [0.565.0]
 
 ### Added
@@ -51,22 +100,6 @@ version number before tagging the release.
   from `std/actors` to `tests/regression/test_std_actor_registry.ae` is
   undiscoverable by any mechanical audit is the argument #1584 makes for
   co-location.
-
-## [0.566.0]
-
-### Added
-
-- **Spec-based unit tests for `std.collections`** (#1584). 12 cases covering
-  the two families nothing else touches: `string_list` (an owned-string
-  vector — append, indexed get/set, remove-and-shift, clear) and `intarr`
-  (fixed-size int array — filled construction, individual slots, `fill`, and
-  that the checked and unchecked accessors agree in range, so switching to
-  the unchecked pair for speed does not change behaviour silently). The
-  list/map surface `std.collections` re-exports is already covered by
-  `std/list` and `std/map`, so it is not duplicated here. Pinned:
-  `string_list_sort_lex` orders by byte value, so an uppercase initial sorts
-  before every lowercase one — a caller expecting case-insensitive ordering
-  gets this instead, silently.
 
 ## [0.564.0]
 

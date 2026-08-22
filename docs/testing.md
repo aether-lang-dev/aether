@@ -98,6 +98,7 @@ failure makes that `it` red.
 
 ```aether,fragment
 spec.assert_eq(count, 4, "four jobs")          // int equality
+spec.assert_eq_long(offset, 9007199254740993, "past 2^53")  // 64-bit
 spec.assert_not_eq(a, b, "distinct")
 spec.assert_gt(size, 0, "non-empty")
 spec.assert_true(ok, "the thing worked")
@@ -108,6 +109,13 @@ spec.assert_contains(body, "world", "greeting")
 spec.assert_null(ptr, "was freed")
 spec.assert_not_null(user, "was loaded")
 ```
+
+`assert_eq` takes `int`. Passing a value wider than 32 bits — a
+`mem.get_long`, a u64 accessor, an IEEE 754 bit pattern — narrows it at the
+call boundary, and the consequence is worse than a wrong comparison: it has
+aborted the process outright on Windows while passing on Linux, where both
+truncated halves happened to agree. Reach for `assert_eq_long` whenever the
+value can exceed 32 bits.
 
 ### Asserting on the failure path
 

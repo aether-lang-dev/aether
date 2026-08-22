@@ -67,7 +67,7 @@ header comment is the authoritative description.
 | `std.signal` | POSIX signal-number constants. | 11 | [module source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [module source](../std/snapshot/module.ae) |
 | `std.sort` | In-place ascending sort and binary search over the packed numeric arrays. | 6 | [module source](../std/sort/module.ae) |
-| `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 45 | [module source](../std/spec/module.ae) |
+| `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [module source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [module source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
