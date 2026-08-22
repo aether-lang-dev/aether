@@ -160,8 +160,8 @@ extern aether_mem_get_int16(p: ptr, offset: int) -> int
 extern aether_mem_set_int16(p: ptr, offset: int, value: int) -> int
 extern aether_mem_get_uint16(p: ptr, offset: int) -> int
 extern aether_mem_set_uint16(p: ptr, offset: int, value: int) -> int
-extern aether_mem_get_uint32(p: ptr, offset: int) -> int
-extern aether_mem_set_uint32(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_uint32(p: ptr, offset: int) -> long
+extern aether_mem_set_uint32(p: ptr, offset: int, value: long) -> int
 extern aether_mem_get_float32(p: ptr, offset: int) -> float
 extern aether_mem_set_float32(p: ptr, offset: int, value: float) -> int
 extern aether_mem_get_float64(p: ptr, offset: int) -> float
@@ -295,8 +295,8 @@ get_int16(p: ptr, offset: int) -> int { return aether_mem_get_int16(p, offset) }
 set_int16(p: ptr, offset: int, value: int) -> int { return aether_mem_set_int16(p, offset, value) }
 get_uint16(p: ptr, offset: int) -> int { return aether_mem_get_uint16(p, offset) }
 set_uint16(p: ptr, offset: int, value: int) -> int { return aether_mem_set_uint16(p, offset, value) }
-get_uint32(p: ptr, offset: int) -> int { return aether_mem_get_uint32(p, offset) }
-set_uint32(p: ptr, offset: int, value: int) -> int { return aether_mem_set_uint32(p, offset, value) }
+get_uint32(p: ptr, offset: int) -> long { return aether_mem_get_uint32(p, offset) }
+set_uint32(p: ptr, offset: int, value: long) -> int { return aether_mem_set_uint32(p, offset, value) }
 get_float32(p: ptr, offset: int) -> float { return aether_mem_get_float32(p, offset) }
 set_float32(p: ptr, offset: int, value: float) -> int { return aether_mem_set_float32(p, offset, value) }
 get_float64(p: ptr, offset: int) -> float { return aether_mem_get_float64(p, offset) }

@@ -11,6 +11,7 @@
 //   3. embedded NULs survive round-trip through C.
 
 import std.fs
+import std.os
 import std.io
 
 extern ffi_shim_write_binary(path: string) -> int
@@ -30,9 +31,7 @@ extern ffi_shim_check_bytes(s: ptr) -> int
 main() {
     print("=== aether_string_ffi_unwrap ===\n\n")
 
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_ffi_unwrap.bin"
 
     print("Test 1: setup — write 10-byte file via C shim\n")

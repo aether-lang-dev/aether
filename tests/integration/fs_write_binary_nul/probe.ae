@@ -12,6 +12,7 @@
 // round-trip file would be 3 bytes instead of 10.
 
 import std.fs
+import std.os
 import std.string
 import std.io
 
@@ -20,9 +21,7 @@ extern wb_probe_write_seed(path: string) -> int
 main() {
     print("=== fs.write_binary with embedded NULs ===\n\n")
 
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     seed_path = "${tmp}/aether_wb_seed.bin"
     out_path = "${tmp}/aether_wb_out.bin"
 

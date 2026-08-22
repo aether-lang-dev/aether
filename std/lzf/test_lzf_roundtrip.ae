@@ -1,0 +1,161 @@
+// std.lzf unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. LZF is a byte-exact
+// compressor, so the assertions that matter are round-trip fidelity
+// across inputs with different compressibility, the (data, length, err)
+// contract, and the documented rejections of negative lengths.
+//
+// LZF is not required to shrink every input — highly random data can
+// come back larger, which is why max_compressed_size exists and why no
+// assertion here claims compression always reduces size. Only the
+// repetitive case asserts an actual saving.
+
+import std.spec
+import std.lzf
+import std.string
+import std.bytes
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.lzf round trip") {
+        spec.it("restores highly repetitive data byte for byte") callback {
+            original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            n = string.length(original)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            spec.assert_true(plen > 0, "compressed length is positive")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "length restored")
+            spec.assert_str_eq(back, original, "content restored")
+        }
+
+        spec.it("actually shrinks repetitive input") callback {
+            original = "abcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabcabc"
+            n = string.length(original)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            spec.assert_true(plen < n,
+                "compressed ${plen} < original ${n}")
+        }
+
+        spec.it("restores mixed text byte for byte") callback {
+            original = "The quick brown fox jumps over the lazy dog, 0123456789."
+            n = string.length(original)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "length restored")
+            spec.assert_str_eq(back, original, "content restored")
+        }
+
+        spec.it("round-trips a short repetitive input") callback {
+            // 16 bytes of a repeating pair — the smallest case measured
+            // to survive a round trip here.
+            original = "abababababababab"
+            n = string.length(original)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "length restored")
+            spec.assert_str_eq(back, original, "content restored")
+        }
+
+        spec.it("declines input it cannot shrink") callback {
+            // Not a length floor — a compressibility one. LZF reports
+            // failure rather than emitting a larger-than-input block, so
+            // an all-distinct string is refused at any of the sizes
+            // measured here. Worth pinning because the error is opaque
+            // ("lzf compress failed") and a caller feeding it
+            // already-compressed or random bytes will hit it routinely.
+            data, n, err = lzf.compress("abcdefgh", 8)
+            spec.assert_err(err, "incompressible 8-byte input is refused")
+            spec.assert_eq(n, 0, "no length on the error path")
+
+            data2, n2, err2 = lzf.compress("abcdefghijklmnopqrstuvwx", 24)
+            spec.assert_err(err2, "incompressible 24-byte input is refused")
+            spec.assert_eq(n2, 0, "no length on the error path")
+        }
+    }
+
+    spec.describe(fw, "std.lzf binary data") {
+        spec.it("restores arbitrary bytes exactly, including high bits") callback {
+            // Ported from tests/integration/lzf_roundtrip/probe.ae, which
+            // this suite replaces. Text round trips prove little about a
+            // byte codec: a run of 0x00..0xFF is what catches sign-
+            // extension and NUL-termination bugs on the way through.
+            n = 256
+            buf = bytes.new(n)
+            for (i = 0; i < n; i = i + 1) {
+                bytes.set(buf, i, i % 256)
+            }
+            original = bytes.finish(buf, n)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds on binary input")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "length restored")
+            mismatches = 0
+            for (i = 0; i < n; i = i + 1) {
+                if string.char_at_n(back, n, i) != (i % 256) {
+                    mismatches = mismatches + 1
+                }
+            }
+            spec.assert_eq(mismatches, 0, "every byte survived unchanged")
+        }
+
+        spec.it("preserves embedded NUL bytes") callback {
+            // A NUL mid-buffer is where a codec that treats its input as
+            // a C string silently truncates.
+            n = 32
+            buf = bytes.new(n)
+            for (i = 0; i < n; i = i + 1) {
+                bytes.set(buf, i, 0)
+            }
+            bytes.set(buf, 7, 65)
+            original = bytes.finish(buf, n)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "all ${n} bytes back, not truncated at the NUL")
+            spec.assert_eq(string.char_at_n(back, n, 7), 65,
+                "the non-NUL byte is still in place")
+        }
+    }
+
+    spec.describe(fw, "std.lzf bounds") {
+        spec.it("reports a headroom bound for a given length") callback {
+            // The worst case for LZF is slightly larger than the input,
+            // so the bound must exceed it rather than merely match.
+            spec.assert_true(lzf.max_compressed_size(100) > 100,
+                "bound leaves headroom over 100 bytes")
+        }
+
+        spec.it("rejects a negative input length on compress") callback {
+            data, n, err = lzf.compress("abc", -1)
+            spec.assert_err_contains(err, "negative input length",
+                "compress(-1) says why")
+            spec.assert_eq(n, 0, "no length on the error path")
+        }
+
+        spec.it("rejects a negative input length on decompress") callback {
+            data, n, err = lzf.decompress("abc", -1, 10)
+            spec.assert_err_contains(err, "negative input length",
+                "decompress(-1, _) says why")
+            spec.assert_eq(n, 0, "no length on the error path")
+        }
+
+        spec.it("rejects a negative output length on decompress") callback {
+            data, n, err = lzf.decompress("abc", 3, -1)
+            spec.assert_err_contains(err, "negative output length",
+                "decompress(_, -1) says why")
+            spec.assert_eq(n, 0, "no length on the error path")
+        }
+    }
+
+    spec.run_summary(fw)
+}

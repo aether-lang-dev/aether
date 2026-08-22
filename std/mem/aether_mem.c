@@ -321,21 +321,31 @@ int aether_mem_set_uint16(void* p, int offset, int value) {
     return 1;
 }
 
-/* uint32 read: returned through Aether's signed `int` (32-bit) — the
- * bit pattern matches a uint32; callers that need unsigned semantics
- * for comparisons should convert via long (Aether's signed int64) for
- * arithmetic, then narrow back.
+/* uint32 read/write, returned and taken as int64 (Aether `long`).
+ *
+ * This used to return `int`, which cannot represent the top half of the
+ * range it exists to read: 0xFFFFFFFF came back as -1 (#1699). The bit
+ * pattern was right and the comment told callers to widen via long
+ * themselves, but nothing enforced it, and the sibling accessors do not
+ * ask: get_uint16 fits its range in an int, and get_u32_le/get_u32_be
+ * already return int64_t for exactly this reason. The same four bytes
+ * therefore read as 4294967295 through get_u32_le and -1 through
+ * get_uint32 — an inconsistency between accessors of the same width.
+ *
+ * The setter takes int64 to match, masking to 32 bits on the way in, so
+ * set_uint32(p, off, 4294967295) round-trips through get_uint32 rather
+ * than needing the caller to pass -1.
  *
  * The signed counterpart already exists as get_int / set_int. */
-int aether_mem_get_uint32(void* p, int offset) {
+int64_t aether_mem_get_uint32(void* p, int offset) {
     if (!p) return 0;
     uint32_t v;
     __builtin_memcpy(&v, (char*)p + offset, sizeof(v));
-    return (int)v;
+    return (int64_t)v;
 }
-int aether_mem_set_uint32(void* p, int offset, int value) {
+int aether_mem_set_uint32(void* p, int offset, int64_t value) {
     if (!p) return 0;
-    uint32_t v = (uint32_t)value;
+    uint32_t v = (uint32_t)(value & 0xFFFFFFFF);
     __builtin_memcpy((char*)p + offset, &v, sizeof(v));
     return 1;
 }

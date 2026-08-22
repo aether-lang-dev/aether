@@ -394,16 +394,30 @@ endif
 # zlib auto-detection: same pattern as OpenSSL. zlib is ambient on every
 # POSIX box we care about; when absent (bare embedded, etc.) the stdlib
 # wrappers report "zlib unavailable" cleanly.
+# zlib auto-detection. pkg-config first, then an actual compile-and-link
+# probe (#1690).
+#
+# The probe alone is not enough on macOS: the SDK ships libz and zlib.h
+# but NO zlib.pc, so `pkg-config --libs zlib` fails while `-lz` links
+# and runs. Detection therefore reported "no zlib", every gzip response
+# came back uncompressed, and tests/integration/http_middleware_d2
+# failed on that leg with no hint that a dependency was missing — the
+# gzip middleware was behaving correctly for a build without a backend.
+#
+# The fallback compiles and links a one-liner against -lz rather than
+# looking for a file, so it answers the question that actually matters:
+# will this link. Kept second so a box where pkg-config DOES know about
+# zlib (a non-default prefix, a cross sysroot) still gets its flags.
 ZLIB ?= auto
-ifeq ($(ZLIB),auto)
-  ZLIB_CFLAGS := $(shell pkg-config --cflags zlib 2>/dev/null)
-  ZLIB_LDFLAGS := $(shell pkg-config --libs zlib 2>/dev/null)
-else ifeq ($(ZLIB),1)
-  ZLIB_CFLAGS := $(shell pkg-config --cflags zlib 2>/dev/null)
-  ZLIB_LDFLAGS := $(shell pkg-config --libs zlib 2>/dev/null)
-else
+ifeq ($(ZLIB),0)
   ZLIB_CFLAGS :=
   ZLIB_LDFLAGS :=
+else
+  ZLIB_CFLAGS := $(shell pkg-config --cflags zlib 2>/dev/null)
+  ZLIB_LDFLAGS := $(shell pkg-config --libs zlib 2>/dev/null)
+  ifeq ($(ZLIB_LDFLAGS),)
+    ZLIB_LDFLAGS := $(shell sh tests/scripts/probe_zlib.sh "$(CC)" 2>/dev/null)
+  endif
 endif
 ifneq ($(ZLIB_LDFLAGS),)
   ZLIB_CFLAGS += -DAETHER_HAS_ZLIB
@@ -2680,6 +2694,7 @@ check-docs: compiler ae stdlib
 	@if command -v python3 >/dev/null 2>&1; then \
 	    python3 tests/scripts/check_doc_examples.py && \
 	    python3 tests/scripts/check_stdlib_index.py && \
+	    python3 tests/scripts/check_module_readmes.py && \
 	    python3 tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — python3 not found"; \

@@ -47,7 +47,14 @@ or let the runner discover it:
 ae test              # every test_*.ae / *_test.ae under tests/
 ae test calc_test.ae # a single file
 ae test path/to/dir  # a directory (its tests/ subdir if present, else itself)
+ae test --list       # print what would run, run nothing
 ```
+
+Discovery has no ceiling: every matching file runs, and the summary's total
+is that number. A `fixtures/` directory is not searched, because a fixture is
+input to a test rather than a test, and some are meant to fail so that another
+test can assert on the failure. Naming one as the target still runs what is in
+it (`ae test path/to/fixtures`).
 
 Each test file is a standalone program with its own `main()`. `ae test`
 compiles and runs each one and reads its **process exit code**: `0` means
@@ -91,6 +98,7 @@ failure makes that `it` red.
 
 ```aether,fragment
 spec.assert_eq(count, 4, "four jobs")          // int equality
+spec.assert_eq_long(offset, 9007199254740993, "past 2^53")  // 64-bit
 spec.assert_not_eq(a, b, "distinct")
 spec.assert_gt(size, 0, "non-empty")
 spec.assert_true(ok, "the thing worked")
@@ -101,6 +109,13 @@ spec.assert_contains(body, "world", "greeting")
 spec.assert_null(ptr, "was freed")
 spec.assert_not_null(user, "was loaded")
 ```
+
+`assert_eq` takes `int`. Passing a value wider than 32 bits — a
+`mem.get_long`, a u64 accessor, an IEEE 754 bit pattern — narrows it at the
+call boundary, and the consequence is worse than a wrong comparison: it has
+aborted the process outright on Windows while passing on Linux, where both
+truncated halves happened to agree. Reach for `assert_eq_long` whenever the
+value can exceed 32 bits.
 
 ### Asserting on the failure path
 

@@ -7,6 +7,7 @@
 // outright or produce garbage.
 
 import std.zlib
+import std.os
 import std.fs
 import std.string
 import std.io
@@ -99,9 +100,7 @@ main() {
 
     // ---- Test 5: binary payload with embedded NULs round-trips ----
     print("\nTest 5: binary round-trip with embedded NULs\n")
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_zlib_binary.bin"
 
     ok = zlib_probe_write_binary(path)

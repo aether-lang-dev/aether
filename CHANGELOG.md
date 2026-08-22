@@ -55,6 +55,231 @@ version number before tagging the release.
   change is for. `aether_http_parked_connections` reports the current count.
 ### Fixed
 
+## [0.572.0]
+
+### Changed
+
+- **`tests/regression/test_capsicum_portability.ae` retired into
+  `std/capsicum/`** (#1584). The suite runs **everywhere** rather than skipping
+  off FreeBSD, because it guards two contracts and the second is the one the
+  other platforms depend on: on FreeBSD the enforcement path is live
+  (`available()` is 1, `in_mode()` gives a real answer); elsewhere every entry
+  point degrades to `CAP_UNSUPPORTED` instead of crashing, so portable code
+  can call them unguarded. A suite that skipped on Linux would leave that
+  second contract untested on the platforms that rely on it. Only `enter()`,
+  `rights_limit()` and `fcntls_limit()` are skipped on FreeBSD — entering
+  capability mode would sandbox the test process — and the skip is reported
+  with its reason rather than passing silently.
+
+## [0.571.0]
+
+### Fixed
+
+- **macOS builds silently had no zlib** (#1690). Detection probed with
+  `pkg-config`, and the macOS SDK ships `libz` and `zlib.h` but **no
+  `zlib.pc`** — so the query failed while `-lz` linked and ran fine. Every
+  gzip response came back uncompressed and
+  `tests/integration/http_middleware_d2` failed on that leg with no hint a
+  dependency was missing: the gzip middleware was behaving correctly for a
+  build without a backend. A compile-and-link fallback now runs when
+  pkg-config comes up empty, answering the question that actually matters —
+  will this link — rather than looking for a metadata file a platform may not
+  ship. pkg-config stays first, so a box where it does know about zlib (a
+  non-default prefix, a cross sysroot) is unaffected.
+
+## [0.570.0]
+
+### Fixed
+
+- **`mem.get_uint32` could not represent the top half of its own range**
+  (#1699). It was declared `-> int`, so `0xFFFFFFFF` read back as `-1`. The
+  bit pattern was right and a comment told callers to widen through `long`
+  themselves, but nothing enforced that — and the sibling accessors do not
+  ask: `get_uint16` fits its range in an `int`, and `get_u32_le` /
+  `get_u32_be` have always returned `int64`. The same four bytes therefore
+  read as `4294967295` through one accessor and `-1` through the other.
+  Both `get_uint32` and `set_uint32` now take and return `long`; the setter
+  masks to 32 bits, so a value wider than the field truncates rather than
+  spilling into the next one.
+
+## [0.569.0]
+
+### Added
+
+- **Every `std` module now has a co-located guide** (#1523), 65 written and 6
+  waived — the six that already carry a full worked section in
+  `docs/stdlib-reference.md`, which the index links to directly. A guide for a
+  module needing external state (a socket, a scratch directory, a device, a
+  host process) carries a bare ` ```aether ` block that is **compiled but not
+  run**: still type-checked against the real API, which is what catches a call
+  that no longer exists, giving up only the assertion about what it prints.
+  `check_module_readmes.py` now fails the build on a missing guide, so a new
+  module ships documented or with a stated reason it is not.
+
+## [0.568.0]
+
+### Added
+
+- **Spec-based unit tests for `std.signal`, `std.cas`, `std.tracking` and
+  `std.log`** (#1584). 32 cases, closing out the modules that warrant a unit
+  suite. `std.signal` is eleven POSIX signal numbers whose entire value is a
+  portability claim — these are the ones identical across Linux, macOS and
+  the BSDs, with the platform-varying signals (`SIGUSR1` is 10 on Linux and
+  30 on macOS) deliberately not exported — so the numbers themselves are
+  what is worth pinning: a regression there sends the wrong signal to a live
+  process, which no type system catches. `std.cas` covers the properties
+  that make a content-addressed store one rather than a directory: a
+  known-answer sha256 vector, identical content always yielding the same
+  digest, different content never doing so, an idempotent put, and the
+  null/empty guards. `std.tracking` is the leak-detecting allocator wrapper
+  — its counters must rise on alloc, fall by the freed size, and reach zero
+  exactly when the last block returns, because a wrapper that under-counts
+  reports a clean run over a real leak. `std.log` covers the level filter
+  from both sides: a logger that drops the wrong side of its threshold
+  either floods the log or silently discards the errors it exists to record.
+
+### Changed
+
+- **`tests/integration/cas_roundtrip/` retired into `std/cas/`** (#1584).
+  The co-located suite covers everything it did — including its
+  known-answer digest, ported verbatim — plus `root()` and `path()`, which
+  it did not reach.
+
+## [0.567.0]
+
+### Added
+
+- **Spec-based unit tests for `std.mem`** (#1584). 20 cases over the typed
+  accessors: signed/unsigned widths, the little- and big-endian u16/u32/u64
+  pairs, float storage and `bits_of_float`/`float_from_bits`, `clz32`/`clz64`,
+  and `copy`/`compare`. `std.mem` is imported by 36 tests under `tests/` and
+  tested directly by none of them — the widest-used `std` module without a
+  suite of its own, and the one where a wrong answer is quietest: a
+  sign-extension slip or a swapped endian pair yields a plausible number
+  rather than a crash. The endian cases assert the individual BYTES rather
+  than only the round trip, since a get/set pair that were both wrong in the
+  same direction would round-trip perfectly while corrupting every wire
+  format.
+
+- **`spec.assert_eq_long`** — the 64-bit sibling of `assert_eq`. Passing a
+  long to `assert_eq` narrows it at the call boundary, which is not merely a
+  wrong comparison: it aborted the process on all three Windows legs (exit
+  127) while passing on Linux, where both truncated halves happened to
+  agree. Anything wider than 32 bits — a `mem.get_long`, a u64 accessor, an
+  IEEE 754 bit pattern — needs it.
+
+### Fixed
+
+- **`## [0.566.0]` was released below `## [0.565.0]`.** The #1696 entry went
+  under the `[current]` marker left by the #1693 repair, which the 0.565.0
+  release had already moved past, so the section was stranded between two
+  released versions — and the next release renamed it in place, making the
+  ordering permanent. Moved above 0.565.0; the section's own content is
+  unchanged and every tagged section remains byte-identical to its tag. The
+  gate proposed in #1695 catches this class before it ships.
+
+## [0.566.0]
+
+### Added
+
+- **Spec-based unit tests for `std.collections`** (#1584). 12 cases covering
+  the two families nothing else touches: `string_list` (an owned-string
+  vector — append, indexed get/set, remove-and-shift, clear) and `intarr`
+  (fixed-size int array — filled construction, individual slots, `fill`, and
+  that the checked and unchecked accessors agree in range, so switching to
+  the unchecked pair for speed does not change behaviour silently). The
+  list/map surface `std.collections` re-exports is already covered by
+  `std/list` and `std/map`, so it is not duplicated here. Pinned:
+  `string_list_sort_lex` orders by byte value, so an uppercase initial sorts
+  before every lowercase one — a caller expecting case-insensitive ordering
+  gets this instead, silently.
+
+## [0.565.0]
+
+### Added
+
+- **Spec-based unit tests for `std.list` and `std.map`** (#1584), the
+  container primitives the rest of `std` is built on — `std.spec` keeps its
+  own framework state in a `std.map`. Pinned as observed behaviour rather
+  than as an endorsement: `list.get` and `map.get` report an out-of-range
+  index or an unbound key as success (`err == ""`) while handing back null,
+  so callers must null-check the pointer as well as the error, and
+  `map_has` is the unambiguous membership test.
+
+### Changed
+
+- **Central tests for the co-located `std` modules retired into their
+  suites** (#1584). `tests/regression/test_ids.ae`,
+  `tests/regression/test_std_actor_registry.ae`,
+  `tests/integration/lzf_roundtrip/` and `tests/integration/test_zlib_gzip.ae`
+  are removed, their coverage having been ported case-by-case into the
+  co-located suites — the migration #1584 asks for, rather than the third
+  test home it warns against. `tests/integration/zlib_roundtrip/` is kept:
+  it drives a C shim and `fs.read_binary` to exercise the AetherString
+  unwrap path inside `aether_zlib.c`, which is an integration concern a
+  unit suite cannot cover. The ported `actors` cases are strictly stronger
+  than the originals: the regression test's "looked-up ref is usable for
+  send" and cross-context routing cases printed PASS without asserting
+  anything ("No direct way to peek at the listener's state from outside"),
+  and now assert against a spy actor that records what it was sent.
+
+### Fixed
+
+- **The 0.564.0 entry for #1584 overstated the gap it closed.** It said the
+  eight modules "had no test of any kind"; every one of them was already
+  covered, by tests filed under names that do not match the module
+  (`tests/regression/test_ids.ae` for the five identifier modules,
+  `test_std_actor_registry.ae` for `std.actors`, `probe.ae` inside named
+  directories for `lzf`, `zlib` and `snapshot`). The census behind that
+  claim globbed filenames and never read a file. Corrected here rather than
+  in the released section, which is left as it shipped. That the mapping
+  from `std/actors` to `tests/regression/test_std_actor_registry.ae` is
+  undiscoverable by any mechanical audit is the argument #1584 makes for
+  co-location.
+
+## [0.564.0]
+
+### Added
+
+- **Spec-based unit tests for eight previously untested `std` modules**
+  (#1584). `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and
+  `zlib` had no test of any kind — the `std.http.server.lb` class of gap the
+  issue was filed about. 53 cases, co-located as `std/<module>/test_*.ae`,
+  and the first co-located tests written against `std.spec` rather than
+  relocated from the central suites, which is the dogfooding half of the
+  proposal. Modules with zero coverage anywhere drop from eight to two
+  (`casper` is FreeBSD-only, `log` writes to stdout). Two behaviours had to
+  be measured rather than read off the source and are now pinned: `lzf`
+  refuses any input it cannot shrink, whatever its length, reporting only
+  `"lzf compress failed"`; and `zlib.gzip_inflate` rejects a raw deflate
+  stream rather than returning garbage.
+
+## [0.563.0]
+
+### Fixed
+
+- **`ae test` ran at most 256 files and reported that as the suite total**
+  (#1682). Discovery collected into a fixed array and stopped reading there,
+  so a repository with more tests than that got a green summary for a run that
+  never opened the rest. Measured here: 593 test files match the naming
+  convention, `ae test` ran 256 of them and printed `256 total`. A runner that
+  quietly covers less than it claims is worse than one that fails, because
+  every green total has been read as a full pass. The list now grows with what
+  is found, and the total is the number of files there are.
+
+  A `fixtures/` directory is no longer searched. A fixture is input to a test,
+  and the spec reporter's fixtures fail on purpose so its own test can assert
+  on the failure rows, which `ae test` reported as a failing suite. The rule
+  applies to the path below the directory being searched, so naming a fixtures
+  directory as the target still runs what is in it, which is how that reporter
+  test drives them.
+
+### Added
+
+- **`ae test --list`** prints the files discovery found and runs none of them,
+  which answers "what will run?" without a build, and is how the bound above
+  is regression-tested without compiling three hundred programs.
+
 ## [0.562.0]
 
 ### Fixed

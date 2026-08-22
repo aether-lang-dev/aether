@@ -14,14 +14,14 @@ exports(
     os_now_monotonic_ms_raw, os_now_monotonic_ns_raw,
     os_now_unix_ms_raw,
     os_now_local_fill_raw, os_now_local_iso8601_raw,
-    os_platform_raw,
+    os_platform_raw, os_temp_dir_raw,
     io_setenv_raw, io_unsetenv_raw,
     exec, run_capture, argv0, now_utc_iso8601, getpid, user_id,
     wall_seconds, wall_micros,
     now_monotonic_ms, now_monotonic_ns,
     now_unix_ms,
     now_local, now_local_iso8601, LocalTime,
-    platform,
+    platform, temp_dir,
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     spawn_proc, wait, wait_any, wait_any_timeout,
@@ -631,11 +631,31 @@ now_local_iso8601() -> string {
 // name alone. See CONTRIBUTING.md "Coding for portability" for
 // the broader pattern.
 extern os_platform_raw() -> string
+extern os_temp_dir_raw() -> string
 
 platform() -> string {
     s = os_platform_raw()
     if s == null {
         return "unknown"
+    }
+    return string_concat(s, "")
+}
+
+// The directory for scratch files, with no trailing separator.
+//
+// Windows resolves it through GetTempPathW, which already performs the
+// documented TMP -> TEMP -> USERPROFILE -> Windows-directory cascade;
+// POSIX reads TMPDIR and falls back to "/tmp". Always returns a
+// non-empty path, so a caller can write "${os.temp_dir()}/name"
+// without checking.
+//
+// Hardcoding "/tmp" is the thing this replaces: it works on POSIX and
+// under an MSYS2 shell, and fails on a native Windows build, which is
+// a bug that passes every local check (#1702).
+temp_dir() -> string {
+    s = os_temp_dir_raw()
+    if s == null {
+        return "/tmp"
     }
     return string_concat(s, "")
 }

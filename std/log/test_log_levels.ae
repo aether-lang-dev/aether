@@ -1,0 +1,118 @@
+// std.log unit tests (#1584) — co-located with the module.
+//
+// The module had no dedicated test. It is a level-filtered logger
+// writing to a file, and the behaviour worth pinning is the filter: a
+// logger that drops the wrong side of its threshold either floods a
+// production log or silently discards the errors it exists to record.
+//
+// Levels are DEBUG 0, INFO 1, WARN 2, ERROR 3, FATAL 4. They are
+// documented in the module header but NOT exported as constants, so
+// callers pass bare integers and this suite does the same — see the
+// last case, which pins that gap so it is visible rather than folklore.
+//
+// Timestamps and colours are switched off before each assertion: both
+// are on by default and would make the file content unassertable.
+
+import std.spec
+import std.log
+import std.fs
+import std.os
+import std.string
+
+const DEBUG = 0
+const INFO = 1
+const WARN = 2
+const ERROR = 3
+
+main() {
+    fw = spec.init()
+
+    // Pid-suffixed so a parallel run cannot collide on the path.
+    logfile = "${os.temp_dir()}/aether-log-test-${os.getpid()}.log"
+
+    spec.describe(fw, "std.log level filtering") {
+        spec.it("writes a message at or above the threshold") callback {
+            spec.assert_ok(log.init(logfile, WARN), "init succeeds")
+            log.log_set_timestamps(0)
+            log.log_set_colors(0)
+            log.log_write(WARN, "kept warning")
+            log.log_write(ERROR, "kept error")
+            log.log_shutdown()
+            body, err = fs.read(logfile)
+            spec.assert_ok(err, "log file readable")
+            spec.assert_contains(body, "kept warning", "the WARN line is there")
+            spec.assert_contains(body, "kept error", "the ERROR line is there")
+            fs.delete(logfile)
+        }
+
+        spec.it("drops a message below the threshold") callback {
+            // The half that matters most: a filter that let these
+            // through would flood the log, and one that dropped the
+            // case above would lose the errors.
+            spec.assert_ok(log.init(logfile, WARN), "init succeeds")
+            log.log_set_timestamps(0)
+            log.log_set_colors(0)
+            log.log_write(DEBUG, "dropped debug")
+            log.log_write(INFO, "dropped info")
+            log.log_shutdown()
+            body, err = fs.read(logfile)
+            spec.assert_ok(err, "log file readable")
+            spec.assert_true(string.contains(body, "dropped debug") == 0,
+                "the DEBUG line was filtered out")
+            spec.assert_true(string.contains(body, "dropped info") == 0,
+                "the INFO line was filtered out")
+            fs.delete(logfile)
+        }
+
+        spec.it("labels each line with its level") callback {
+            spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
+            log.log_set_timestamps(0)
+            log.log_set_colors(0)
+            log.log_write(ERROR, "tagged")
+            log.log_shutdown()
+            body, err = fs.read(logfile)
+            spec.assert_ok(err, "log file readable")
+            spec.assert_contains(body, "ERROR", "the level name is on the line")
+            fs.delete(logfile)
+        }
+
+        spec.it("honours a threshold raised after init") callback {
+            spec.assert_ok(log.init(logfile, DEBUG), "init succeeds")
+            log.log_set_timestamps(0)
+            log.log_set_colors(0)
+            log.log_write(INFO, "before raise")
+            log.log_set_level(ERROR)
+            log.log_write(INFO, "after raise")
+            log.log_shutdown()
+            body, err = fs.read(logfile)
+            spec.assert_ok(err, "log file readable")
+            spec.assert_contains(body, "before raise",
+                "written while the threshold was low")
+            spec.assert_true(string.contains(body, "after raise") == 0,
+                "dropped once the threshold was raised")
+            fs.delete(logfile)
+        }
+    }
+
+    spec.describe(fw, "std.log init") {
+        spec.it("reports a log file it cannot open") callback {
+            err = log.init("/nonexistent-directory-xyz/app.log", DEBUG)
+            spec.assert_err_contains(err, "cannot open log file",
+                "an unopenable path is reported")
+            log.log_shutdown()
+        }
+
+        spec.it("does not export its level constants") callback {
+            // Pinned as an observation, not an endorsement. The level
+            // numbers are documented only in the module header comment,
+            // so every caller hard-codes 0..4 — including this suite,
+            // which declares its own DEBUG/INFO/WARN/ERROR above. If the
+            // module ever exports them, this case should be replaced by
+            // one asserting the exported values.
+            spec.assert_eq(WARN, 2, "WARN is 2 by the header's table")
+            spec.assert_eq(ERROR, 3, "ERROR is 3 by the header's table")
+        }
+    }
+
+    spec.run_summary(fw)
+}

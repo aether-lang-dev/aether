@@ -34,7 +34,6 @@ tests/integration/c_qualified_ptr/
 tests/integration/c_static_inline/
 tests/integration/c_struct_verify/
 tests/integration/caller_info/
-tests/integration/cas_roundtrip/
 tests/integration/circular_import_diag/
 tests/integration/closure_actor_state_reject/
 tests/integration/closure_param_shadows_module_fn/

@@ -76,7 +76,8 @@ exports(
     it_when, skip_it, skip_all_if,
     before_each, after_each,
     fail, assert_true, assert_false,
-    assert_eq, assert_str_eq, assert_str_eq_diff, assert_not_eq, assert_gt,
+    assert_eq, assert_eq_long,
+    assert_str_eq, assert_str_eq_diff, assert_not_eq, assert_gt,
     assert_contains, assert_null, assert_not_null,
     // Failure-path matchers for the (value, err) convention. assert_true(err
     // != "") discards the error string; these print it.
@@ -522,6 +523,18 @@ assert_false(condition: int, msg: string) {
 }
 
 assert_eq(actual: int, expected: int, msg: string) {
+    if actual != expected {
+        fail("${msg} — expected ${expected}, got ${actual}")
+    }
+}
+
+// 64-bit sibling of assert_eq. Passing a long to assert_eq narrows it to
+// int at the call boundary, which on a 64-bit-clean value is not merely a
+// wrong comparison — it corrupted the caller badly enough to abort the
+// process on Windows (exit 127) while passing on Linux, where the
+// truncated halves happened to agree. Anything wider than 32 bits — a
+// mem.get_long, a u64 accessor, an IEEE 754 bit pattern — needs this.
+assert_eq_long(actual: long, expected: long, msg: string) {
     if actual != expected {
         fail("${msg} — expected ${expected}, got ${actual}")
     }

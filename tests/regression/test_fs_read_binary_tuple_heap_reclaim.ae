@@ -24,6 +24,7 @@
 // constant overhead.
 
 import std.fs
+import std.os
 import std.string
 import std.io
 
@@ -33,9 +34,7 @@ extern aether_caps_used_bytes() -> long
 main() {
     println("=== fs.read_binary tuple heap reclaim ===")
 
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_fs_read_binary_heap_reclaim.bin"
 
     // Build a ~10 KB payload so retention shows up clearly against

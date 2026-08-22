@@ -30,9 +30,7 @@ read_or_empty(path: string) -> string {
 main() {
     println("=== fs.move regression ===")
 
-    tmp = io.getenv("TEMP")
-    if tmp == 0 { tmp = io.getenv("TMPDIR") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     tmpdir = "${tmp}/aether_fs_move_test"
     fs.delete("${tmpdir}/src.txt")
     fs.delete("${tmpdir}/dst.txt")

@@ -6194,6 +6194,70 @@ static void tap_emit_child(const char* report, int* point) {
     }
 }
 
+/* Test-file collection for `ae test` (#1682).
+ *
+ * The list grows with what is found. It used to be a fixed 256 entries with
+ * the read loop stopping there, which in a repository with 593 test files ran
+ * 256 of them and printed "256 total": a suite reporting a full pass over
+ * fewer than half its tests. */
+static int test_files_push(char*** list, int* count, int* cap, const char* path) {
+    if (*count == *cap) {
+        int next = *cap ? *cap * 2 : 64;
+        char** grown = (char**)realloc(*list, (size_t)next * sizeof(char*));
+        if (!grown) return 0;
+        *list = grown;
+        *cap = next;
+    }
+    char* copy = strdup(path);
+    if (!copy) return 0;
+    (*list)[(*count)++] = copy;
+    return 1;
+}
+
+static void test_files_free(char** list, int count) {
+    for (int i = 0; i < count; i++) free(list[i]);
+    free(list);
+}
+
+/* Path spellings that mean the same directory, made comparable.
+ *
+ * Separators are normalised because Windows lists what `dir /b /s` prints,
+ * which is backslashed and absolute, while the target arrives however the
+ * caller wrote it (MSYS2 hands a native binary forward slashes). Case is
+ * folded there too, where two spellings that differ only in case are the same
+ * directory. */
+static void path_normalize(const char* in, char* out, size_t cap) {
+    size_t i = 0;
+    for (; in[i] && i + 1 < cap; i++) {
+        char c = in[i] == '\\' ? '/' : in[i];
+#ifdef _WIN32
+        c = (char)tolower((unsigned char)c);
+#endif
+        out[i] = c;
+    }
+    out[i] = '\0';
+}
+
+/* A `fixtures/` directory holds input to a test rather than tests.
+ *
+ * The spec reporter's fixtures are suites that fail on purpose, so that its
+ * own shell test can assert on the failure rows. They match the *_test.ae
+ * naming convention, and sweeping them up reported a failure for a component
+ * that was working exactly as intended.
+ *
+ * The path checked here is relative to the directory being searched, so a
+ * fixtures directory is never walked into but can still be named as the
+ * target: `ae test path/to/fixtures` runs what is in it, which is exactly what
+ * the reporter's own test does. */
+static int path_has_fixtures_dir(const char* path) {
+    for (const char* p = path; (p = strstr(p, "fixtures")) != NULL; p += 8) {
+        int at_start = (p == path) || p[-1] == '/' || p[-1] == '\\';
+        char after = p[8];
+        if (at_start && (after == '/' || after == '\\')) return 1;
+    }
+    return 0;
+}
+
 static int cmd_test(int argc, char** argv) {
     const char* target = NULL;
     // Structured-report format (opt-in via --format=<fmt>). NULL = default
@@ -6203,8 +6267,11 @@ static int cmd_test(int argc, char** argv) {
     // machine-readable stream; the process exit code still reflects pass/fail.
     const char* report_format = NULL;   // value passed to children via AE_SPEC_FORMAT
     const char* format_label = NULL;    // as the user typed it (for diagnostics)
+    int list_only = 0;                  // --list: print what would run, run nothing
     for (int i = 0; i < argc; i++) {
-        if (strncmp(argv[i], "--format=", 9) == 0) {
+        if (strcmp(argv[i], "--list") == 0) {
+            list_only = 1;
+        } else if (strncmp(argv[i], "--format=", 9) == 0) {
             format_label = argv[i] + 9;
             if (strcmp(format_label, "tap") == 0) {
                 report_format = "tap";
@@ -6230,15 +6297,20 @@ static int cmd_test(int argc, char** argv) {
         }
     }
 
-    // Collect test files
-    char test_files[256][512];
+    // Collect test files. Grown as they are found rather than capped: a fixed
+    // ceiling here read the first N files and reported N as the suite total,
+    // so a repository with more tests than that saw a green summary for a run
+    // that never opened the rest (#1682).
+    char** test_files = NULL;
     int test_count = 0;
+    int test_cap = 0;
 
     if (target && path_exists(target) && !dir_exists(target)) {
         // Single file
-        strncpy(test_files[0], target, sizeof(test_files[0]) - 1);
-        test_files[0][sizeof(test_files[0]) - 1] = '\0';
-        test_count = 1;
+        if (!test_files_push(&test_files, &test_count, &test_cap, target)) {
+            fprintf(stderr, "Error: out of memory collecting test files\n");
+            return 1;
+        }
     } else {
         // Discover from directory
         const char* test_dir = "tests";
@@ -6265,8 +6337,9 @@ static int cmd_test(int argc, char** argv) {
 #endif
         FILE* pipe = popen(find_cmd, "r");
         if (pipe) {
-            char line[512];
-            while (fgets(line, sizeof(line), pipe) && test_count < 256) {
+            char line[4096];
+            int oom = 0;
+            while (fgets(line, sizeof(line), pipe)) {
                 line[strcspn(line, "\r\n")] = '\0';
                 if (strlen(line) == 0) continue;
                 // Convention: only files named test_*.ae or *_test.ae are tests
@@ -6279,12 +6352,40 @@ static int cmd_test(int argc, char** argv) {
                     const char* ext = strstr(base, "_test.ae");
                     if (!ext || strcmp(ext, "_test.ae") != 0) continue;
                 }
-                strncpy(test_files[test_count], line, sizeof(test_files[0]) - 1);
-                test_files[test_count][sizeof(test_files[0]) - 1] = '\0';
-                test_count++;
+                /* The rule applies below the directory being searched, so
+                 * the path is taken relative to it. When the two spellings do
+                 * not line up the rule is not applied at all: running a
+                 * fixture is a visible, fixable annoyance, and silently
+                 * skipping a real test is the failure this whole change is
+                 * about. */
+                char line_norm[4096], root_norm[4096];
+                path_normalize(line, line_norm, sizeof(line_norm));
+                path_normalize(test_dir, root_norm, sizeof(root_norm));
+                size_t root_len = strlen(root_norm);
+                while (root_len > 0 && root_norm[root_len - 1] == '/') root_len--;
+                if (strncmp(line_norm, root_norm, root_len) == 0) {
+                    const char* rel = line_norm + root_len;
+                    while (*rel == '/') rel++;
+                    if (path_has_fixtures_dir(rel)) continue;
+                }
+                if (!test_files_push(&test_files, &test_count, &test_cap, line)) {
+                    oom = 1;
+                    break;
+                }
             }
             pclose(pipe);
+            if (oom) {
+                fprintf(stderr, "Error: out of memory collecting test files\n");
+                test_files_free(test_files, test_count);
+                return 1;
+            }
         }
+    }
+
+    if (list_only) {
+        for (int i = 0; i < test_count; i++) printf("%s\n", test_files[i]);
+        test_files_free(test_files, test_count);
+        return 0;
     }
 
     if (test_count == 0) {
@@ -6311,9 +6412,15 @@ static int cmd_test(int argc, char** argv) {
     if (report_format) {
         ae_set_env("AE_SPEC_FORMAT", report_format);
     }
-    char* reports[256];
-    int child_rc[256];   // <0 => compile/build error (no run); else exit code
-    for (int i = 0; i < 256; i++) { reports[i] = NULL; child_rc[i] = 0; }
+    char** reports = (char**)calloc((size_t)test_count, sizeof(char*));
+    int* child_rc = (int*)calloc((size_t)test_count, sizeof(int));   // <0 => compile/build error (no run); else exit code
+    if (!reports || !child_rc) {
+        fprintf(stderr, "Error: out of memory preparing %d test(s)\n", test_count);
+        free(reports);
+        free(child_rc);
+        test_files_free(test_files, test_count);
+        return 1;
+    }
 
     int passed = 0, failed = 0;
 
@@ -6446,6 +6553,9 @@ static int cmd_test(int argc, char** argv) {
     for (int i = 0; i < test_count; i++) {
         free(reports[i]);
     }
+    free(reports);
+    free(child_rc);
+    test_files_free(test_files, test_count);
     return (failed > 0) ? 1 : 0;
 }
 
@@ -7179,7 +7289,7 @@ static void print_usage(void) {
     printf("  fmt [--check] [path] Format source (stdin->stdout, or files/dirs in place)\n");
     printf("  bindgen consts <h>   Import C macro constants from a header as Aether consts\n");
     printf("  inspect [file.ae]    Show what a script declares (imports, capabilities, exports, decls)\n");
-    printf("  test [file|dir]      Discover and run tests (--format=tap|aeocha-v1)\n");
+    printf("  test [file|dir]      Discover and run tests (--list, --format=tap|aeocha-v1)\n");
     printf("  add <package>        Add a dependency\n");
     printf("  cache [clear]        Show or clear build cache\n");
     printf("  cflags               Print -I/-L/-laether for embedding in external builds\n");

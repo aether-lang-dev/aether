@@ -102,7 +102,7 @@ getting a normalized value back:
 | `lowercase()` | lowercase the value             |
 | `uppercase()` | uppercase the value             |
 
-```aether
+```aether,fragment
 schema.field("email", schema.STR) {
     schema.trim()        // "  Ada@X.COM " ...
     schema.lowercase()   // ... -> "ada@x.com" in the returned values
@@ -118,7 +118,7 @@ schema.field("plan", schema.STR) {
 (the module intentionally carries no regex dependency; `pattern()` handles the
 common contains/prefix/suffix cases without one):
 
-```aether
+```aether,fragment
 schema.field("even", schema.INT) {
     schema.refine(|v: string| {
         n, _ = to_int(v)
@@ -157,7 +157,7 @@ standard **draft-07 JSON Schema** string, so the same declaration can drive
 OpenAPI docs, other-language validators, or form generators (the idea behind
 Zod's `z.toJSONSchema()`).
 
-```aether
+```aether,fragment
 s = schema.record() {
     schema.field("age", schema.INT)  { schema.min(18); schema.max(120) }
     schema.field("role", schema.STR) { schema.one_of("admin,user"); schema.optional() }
