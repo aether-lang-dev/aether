@@ -7,40 +7,55 @@
 // than a crash, and the caller is usually a codec that will blame its
 // own arithmetic first.
 //
-// The buffers here come from bytes.new, which hands back a raw
-// writable region that the mem accessors take directly. bytes.new does
-// NOT zero its allocation, so every buffer is explicitly cleared
-// before use — reading an unwritten slot otherwise returns whatever
-// the allocator was holding, which makes a passing assertion an
-// accident.
+// Buffers come from std.arena, not from bytes.new. bytes.new returns an
+// AetherBytes STRUCT HANDLE, not a pointer to its payload, so a
+// mem.set_* write into one overwrites the struct's own length/capacity/
+// data fields. That corrupts the heap: it happens to survive on Linux
+// and aborts the process on Windows (0xC0000374), which is the worst
+// possible way for a mistake to behave. Every real caller of std.mem in
+// the tree passes a raw allocation — see std/cryptography/blake3, which
+// mallocs — so the arena is the std-blessed way to get one without an
+// extern.
+//
+// arena.alloc_aligned also pins the alignment, which matters because
+// set_long/set_u64 at an odd offset is undefined on strict-alignment
+// targets even where x86 tolerates it.
+//
+// The arena does not zero its allocations, so every buffer is cleared
+// explicitly — reading an unwritten slot otherwise returns whatever the
+// allocator was holding, which makes a passing assertion an accident.
 
 import std.spec
 import std.mem
-import std.bytes
+import std.arena
 
 const BUFSZ = 32
 
-// A zeroed scratch buffer. bytes.new leaves its contents undefined.
-fn zeroed(n: int) -> ptr {
-    b = bytes.new(n)
+// A zeroed, 8-byte-aligned scratch buffer carved from `ar`. The arena
+// leaves its allocations undefined, so the clear is not optional.
+fn zeroed(ar: ptr, n: int) -> ptr {
+    p = arena.alloc_aligned(ar, n, 8)
     for (i = 0; i < n; i = i + 1) {
-        mem.set_uint8(b, i, 0)
+        mem.set_uint8(p, i, 0)
     }
-    return b
+    return p
 }
 
 main() {
     fw = spec.init()
+    // One arena for the whole suite; every case carves its own buffer
+    // from it and it is destroyed once at the end.
+    ar = arena.create(65536)
 
     spec.describe(fw, "std.mem width accessors") {
         spec.it("round-trips a byte") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_byte(b, 5, 200)
             spec.assert_eq(mem.get_byte(b, 5), 200, "byte round trip")
         }
 
         spec.it("round-trips int and long") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_int(b, 0, -123456)
             spec.assert_eq(mem.get_int(b, 0), -123456, "int round trip")
             // assert_eq_long, not assert_eq: narrowing a 64-bit value at
@@ -55,14 +70,14 @@ main() {
             // The distinction the two accessors exist for. 0xFF is -1
             // read signed and 255 read unsigned; a codec that picks the
             // wrong one gets a plausible number, not an error.
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_uint8(b, 0, 255)
             spec.assert_eq(mem.get_int8(b, 0), -1, "int8 sign-extends 0xFF")
             spec.assert_eq(mem.get_uint8(b, 0), 255, "uint8 does not")
         }
 
         spec.it("sign-extends int16 but not uint16") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_int16(b, 2, -2)
             spec.assert_eq(mem.get_int16(b, 2), -2, "int16 reads back signed")
             spec.assert_eq(mem.get_uint16(b, 2), 65534,
@@ -79,7 +94,7 @@ main() {
             //
             // A caller needing the true value must mask it back:
             //   v = mem.get_uint32(b, off) as long & 4294967295
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_uint32(b, 4, 4294967295)
             spec.assert_eq(mem.get_uint32(b, 4), -1,
                 "0xFFFFFFFF reads back as -1, not 4294967295")
@@ -90,7 +105,7 @@ main() {
         }
 
         spec.it("round-trips a uint32 below 2^31 intact") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_uint32(b, 4, 2147483647)
             spec.assert_eq(mem.get_uint32(b, 4), 2147483647,
                 "0x7FFFFFFF is representable and survives")
@@ -103,7 +118,7 @@ main() {
             // the round trip: a get/set pair that agreed with each other
             // while both being big-endian would round-trip perfectly and
             // still corrupt every wire format.
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_u32_le(b, 0, 305419896)
             spec.assert_eq(mem.get_uint8(b, 0), 120, "byte 0 is 0x78")
             spec.assert_eq(mem.get_uint8(b, 1), 86, "byte 1 is 0x56")
@@ -113,7 +128,7 @@ main() {
         }
 
         spec.it("writes u32 big-endian high byte first") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_u32_be(b, 0, 305419896)
             spec.assert_eq(mem.get_uint8(b, 0), 18, "byte 0 is 0x12")
             spec.assert_eq(mem.get_uint8(b, 3), 120, "byte 3 is 0x78")
@@ -123,7 +138,7 @@ main() {
         spec.it("reads the same bytes byte-reversed across the two orders") callback {
             // The relationship that makes them a pair: LE and BE of the
             // same value are byte-reversals of each other.
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_u32_le(b, 0, 305419896)
             mem.set_u32_be(b, 8, 305419896)
             spec.assert_eq(mem.get_uint8(b, 0), mem.get_uint8(b, 11),
@@ -133,7 +148,7 @@ main() {
         }
 
         spec.it("round-trips u16 in both orders") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_u16_le(b, 0, 4660)
             spec.assert_eq(mem.get_uint8(b, 0), 52, "LE low byte first")
             spec.assert_eq(mem.get_u16_le(b, 0), 4660, "LE round trip")
@@ -143,7 +158,7 @@ main() {
         }
 
         spec.it("round-trips u64 in both orders") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_u64_le(b, 0, 81985529216486895)
             spec.assert_eq_long(mem.get_u64_le(b, 0), 81985529216486895,
                 "LE round trip")
@@ -157,7 +172,7 @@ main() {
 
     spec.describe(fw, "std.mem floats") {
         spec.it("round-trips a float64") callback {
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_float64(b, 0, 3.14159)
             spec.assert_true(mem.get_float64(b, 0) == 3.14159,
                 "float64 round trip")
@@ -166,7 +181,7 @@ main() {
         spec.it("round-trips a float32 at an exact value") callback {
             // 1.5 is exactly representable in binary32, so this asserts
             // the storage rather than the rounding.
-            b = zeroed(BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_float32(b, 0, 1.5)
             spec.assert_true(mem.get_float32(b, 0) == 1.5,
                 "float32 round trip")
@@ -202,8 +217,8 @@ main() {
 
     spec.describe(fw, "std.mem block operations") {
         spec.it("copies a run of bytes") callback {
-            src = zeroed(BUFSZ)
-            dst = zeroed(BUFSZ)
+            src = zeroed(ar, BUFSZ)
+            dst = zeroed(ar, BUFSZ)
             for (i = 0; i < 8; i = i + 1) {
                 mem.set_uint8(src, i, i + 1)
             }
@@ -215,8 +230,8 @@ main() {
         }
 
         spec.it("reports equality and difference like memcmp") callback {
-            a = zeroed(BUFSZ)
-            b = zeroed(BUFSZ)
+            a = zeroed(ar, BUFSZ)
+            b = zeroed(ar, BUFSZ)
             for (i = 0; i < 8; i = i + 1) {
                 mem.set_uint8(a, i, i)
                 mem.set_uint8(b, i, i)
@@ -230,8 +245,8 @@ main() {
         }
 
         spec.it("compares a zero-length run as equal") callback {
-            a = zeroed(BUFSZ)
-            b = zeroed(BUFSZ)
+            a = zeroed(ar, BUFSZ)
+            b = zeroed(ar, BUFSZ)
             mem.set_uint8(a, 0, 1)
             mem.set_uint8(b, 0, 2)
             spec.assert_eq(mem.compare(a, b, 0), 0,
@@ -240,4 +255,5 @@ main() {
     }
 
     spec.run_summary(fw)
+    arena.destroy(ar)
 }
