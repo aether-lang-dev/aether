@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **`tests/regression/test_capsicum_portability.ae` retired into
+  `std/capsicum/`** (#1584). The suite runs **everywhere** rather than skipping
+  off FreeBSD, because it guards two contracts and the second is the one the
+  other platforms depend on: on FreeBSD the enforcement path is live
+  (`available()` is 1, `in_mode()` gives a real answer); elsewhere every entry
+  point degrades to `CAP_UNSUPPORTED` instead of crashing, so portable code
+  can call them unguarded. A suite that skipped on Linux would leave that
+  second contract untested on the platforms that rely on it. Only `enter()`,
+  `rights_limit()` and `fcntls_limit()` are skipped on FreeBSD — entering
+  capability mode would sandbox the test process — and the skip is reported
+  with its reason rather than passing silently.
+
 ## [0.571.0]
 
 ### Fixed
