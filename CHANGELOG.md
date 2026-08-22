@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`ae build --target=<triple> --emit=lib` produces a real shared library**
+  (#1648) — an ELF `.so`, a PE `.dll` or a Mach-O `.dylib`, chosen by the
+  *target* rather than the host. Cross builds were executables-only;
+  `--emit=csrc` and `--emit=obj` were unblocked first because they do not
+  link, and this covers the linking case. zig links a shared object for a
+  target as readily as an executable, and the runtime and stdlib are already
+  compiled from source for that target on the executable path, so `-shared
+  -fPIC` instead of an executable link is the whole increment. Windows also
+  gets `--export-all-symbols`, for the reason #993 documents natively: GCC's
+  auto-export heuristic switches off as soon as any symbol carries an explicit
+  `__declspec(dllexport)`, and the `aether_<name>` catalog exports then vanish
+  from the DLL. A Windows `--emit=lib` is now named `.dll` rather than
+  `.dll.exe` — a valid DLL under a name nothing loads. `--emit=both` stays
+  rejected under `--target`, with a diagnostic naming the two-invocation
+  workaround instead of claiming the mode is unsupported.
+
 ## [0.572.0]
 
 ### Changed

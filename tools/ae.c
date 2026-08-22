@@ -5343,14 +5343,19 @@ static int cmd_build(int argc, char** argv) {
                  * source. Reject it here instead, where the flag is still
                  * visible, so the user gets the same up-front diagnostic as
                  * --emit=lib rather than an ld.lld error naming a symbol they
-                 * never wrote. (Pre-existing; #1648 only unblocks csrc.)  */
+                 * never wrote.
+                 *
+                 * --emit=lib itself now works under --target (#1648); it is
+                 * only the COMBINATION that this rejects, because the cross
+                 * path links once and cannot produce both artifacts from one
+                 * invocation. Two runs do the job. */
                 for (int j = 0; j < argc; j++) {
                     if (strncmp(argv[j], "--target=", 9) == 0 &&
                         strcmp(argv[j] + 9, "native") != 0) {
                         fprintf(stderr,
-                            "Error: cross-compilation (%s) supports executables, "
-                            "--emit=csrc and --emit=obj; --emit=lib and --emit=both "
-                            "are not supported yet.\n", argv[j]);
+                            "Error: cross-compilation (%s) cannot do --emit=both "
+                            "in one invocation; run it twice, once with "
+                            "--emit=exe and once with --emit=lib.\n", argv[j]);
                         return 1;
                     }
                 }
@@ -5568,10 +5573,20 @@ static int cmd_build(int argc, char** argv) {
     // cross-host EXE_EXT is empty, so `-o foo` would produce an extensionless
     // file for a Windows target — append .exe if it's not already there so the
     // artifact is named the way Windows (and the user) expects.
-    if (ztriple && strstr(ztriple, "windows")) {
+    if (ztriple && strstr(ztriple, "windows") && !g_emit_lib) {
         size_t el = strlen(exe_file);
         if (el < 4 || strcasecmp(exe_file + el - 4, ".exe") != 0) {
             strncat(exe_file, ".exe", sizeof(exe_file) - el - 1);
+        }
+    }
+    /* ...but a cross --emit=lib for Windows is a DLL, not an executable
+     * (#1648): appending .exe there produced `foo.dll.exe`, a valid PE
+     * DLL under a name nothing will load. Give it .dll when the caller
+     * has not already named it. */
+    if (ztriple && strstr(ztriple, "windows") && g_emit_lib && !g_emit_exe) {
+        size_t el = strlen(exe_file);
+        if (el < 4 || strcasecmp(exe_file + el - 4, ".dll") != 0) {
+            strncat(exe_file, ".dll", sizeof(exe_file) - el - 1);
         }
     }
 
@@ -5699,12 +5714,22 @@ static int cmd_build(int argc, char** argv) {
         if (is_wasm_lib_target && g_emit_lib && !g_emit_csrc && !g_emit_obj) {
             g_wasm_lib_wants_catalog = true;
         }
-        if (g_emit_lib && !g_emit_csrc && !g_emit_obj && !is_apple_target &&
-            !is_wasm_lib_target) {
+        /* --emit=lib now works for every supported triple (#1648): zig cc
+         * links a shared object for a target as readily as it links an
+         * executable, and the runtime + stdlib are already
+         * compiled-from-source FOR that target on the exe path, so
+         * producing `-shared` output instead of an exe is the whole
+         * increment. Apple (#1385) and wasm (#1676) got there first with
+         * their own link flags; ELF and PE now use -shared -fPIC.
+         *
+         * --emit=both stays rejected: it wants an exe AND a lib from one
+         * invocation, and the cross path links once. Two invocations with
+         * different --emit modes do the job today. */
+        if (g_emit_exe && g_emit_lib && !g_emit_csrc && !g_emit_obj) {
             fprintf(stderr,
-                "Error: cross-compilation (--target=%s) supports executables, "
-                "--emit=csrc and --emit=obj; --emit=lib and --emit=both are not "
-                "supported yet.\n", target);
+                "Error: cross-compilation (--target=%s) cannot do --emit=both "
+                "in one invocation; run it twice, once with --emit=exe and "
+                "once with --emit=lib.\n", target);
             return 1;
         }
         /* --emit=csrc never invokes the cross toolchain at all: it emits

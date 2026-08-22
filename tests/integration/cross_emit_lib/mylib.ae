@@ -1,0 +1,6 @@
+// Library-shaped source for the cross --emit=lib test: no main, one
+// exported function whose symbol the test looks for in the artifact.
+
+greet() -> int {
+    return 42
+}
