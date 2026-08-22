@@ -9,21 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.564.0]
+## [current]
 
 ### Added
-
-- **Spec-based unit tests co-located with eight `std` modules** (#1584).
-  `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and `zlib` gain
-  suites under `std/<module>/test_*.ae` — the first co-located tests written
-  against `std.spec` rather than relocated from the central suites, which is
-  the dogfooding half of the proposal. Each module's central test has been
-  retired into its co-located suite (see below), so this is a migration
-  rather than an addition. Two behaviours had to be measured rather than
-  read off the source and are now pinned: `lzf` refuses any input it cannot
-  shrink, whatever its length, reporting only `"lzf compress failed"`; and
-  `zlib.gzip_inflate` rejects a raw deflate stream rather than returning
-  garbage.
 
 - **Spec-based unit tests for `std.list` and `std.map`** (#1584), the
   container primitives the rest of `std` is built on — `std.spec` keeps its
@@ -49,6 +37,37 @@ version number before tagging the release.
   send" and cross-context routing cases printed PASS without asserting
   anything ("No direct way to peek at the listener's state from outside"),
   and now assert against a spy actor that records what it was sent.
+
+### Fixed
+
+- **The 0.564.0 entry for #1584 overstated the gap it closed.** It said the
+  eight modules "had no test of any kind"; every one of them was already
+  covered, by tests filed under names that do not match the module
+  (`tests/regression/test_ids.ae` for the five identifier modules,
+  `test_std_actor_registry.ae` for `std.actors`, `probe.ae` inside named
+  directories for `lzf`, `zlib` and `snapshot`). The census behind that
+  claim globbed filenames and never read a file. Corrected here rather than
+  in the released section, which is left as it shipped. That the mapping
+  from `std/actors` to `tests/regression/test_std_actor_registry.ae` is
+  undiscoverable by any mechanical audit is the argument #1584 makes for
+  co-location.
+
+## [0.564.0]
+
+### Added
+
+- **Spec-based unit tests for eight previously untested `std` modules**
+  (#1584). `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and
+  `zlib` had no test of any kind — the `std.http.server.lb` class of gap the
+  issue was filed about. 53 cases, co-located as `std/<module>/test_*.ae`,
+  and the first co-located tests written against `std.spec` rather than
+  relocated from the central suites, which is the dogfooding half of the
+  proposal. Modules with zero coverage anywhere drop from eight to two
+  (`casper` is FreeBSD-only, `log` writes to stdout). Two behaviours had to
+  be measured rather than read off the source and are now pinned: `lzf`
+  refuses any input it cannot shrink, whatever its length, reporting only
+  `"lzf compress failed"`; and `zlib.gzip_inflate` rejects a raw deflate
+  stream rather than returning garbage.
 
 ## [0.563.0]
 
