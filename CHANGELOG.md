@@ -34,8 +34,11 @@ version number before tagging the release.
 - **Co-located module guides, compiled and run in CI** (#1523). A module's
   worked example now lives beside it as `std/<mod>/README.md`, the same shape
   #1584 used for tests, and `docs/stdlib-reference.md` stays a generated index
-  that links to it. First tranche covers the nine Common-tier modules: `url`,
-  `encoding`, `set`, `deque`, `sort`, `time`, `regex`, `uuid` and `number`.
+  that links to it. Twenty-five modules covered so far: the Common tier
+  (`url`, `encoding`, `set`, `deque`, `sort`, `time`, `regex`, `uuid`,
+  `number`), `bits` and `hash`, the allocator family (`arena`, `alloc`,
+  `tracking`), the identifier family (`nanoid`, `ulid`, `ksuid`, `tsid`) and
+  `strbuilder`, `pqueue`, `intarr`, `bytes`, `math`.
 - **A `run` block label for documentation examples** (#1523). ` ```aether,run `
   compiles an example, runs it, and requires its stdout to match the
   ` ```output ` block after it. Compiling proves a function exists; running
@@ -47,7 +50,11 @@ version number before tagging the release.
   is a sentence someone has to write, and a scraped header would be filler
   that passes a check while teaching nothing, the same reason
   `check_stdlib_index.py` refuses to invent a purpose. Reporting rather than
-  failing while the backlog is worked through.
+  failing while the backlog is worked through. It also verifies each guide's
+  `## Exports` list against the module's real `exports(...)` — the example
+  blocks are compiled, but an exports list is prose that nothing checks, which
+  is how `math.log2` and `strbuilder.append_char` reached guides in this
+  change without existing. A ghost name fails the build.
 
 ### Changed
 

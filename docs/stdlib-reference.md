@@ -12,13 +12,13 @@ header comment is the authoritative description.
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
 | `std.actors` | Process-global registry mapping names to actor references. | 12 | [module source](../std/actors/module.ae) |
-| `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [module source](../std/alloc/module.ae) |
-| `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [module source](../std/arena/module.ae) |
+| `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
+| `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [module source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 9 | [module source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 25 | [module source](../std/bignum/module.ae) |
-| `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [module source](../std/bits/module.ae) |
-| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [module source](../std/bytes/module.ae) |
+| `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [module source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [module source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [module source](../std/casper/module.ae) |
@@ -34,15 +34,15 @@ header comment is the authoritative description.
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [module source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 13 | [module source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [module source](../std/fs/module.ae) |
-| `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [module source](../std/hash/module.ae) |
+| `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [module source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 149 | [module source](../std/http/module.ae) |
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [module source](../std/http1/module.ae) |
-| `std.intarr` | Fixed-size packed-int buffer. | 13 | [module source](../std/intarr/module.ae) |
+| `std.intarr` | Fixed-size packed-int buffer. | 13 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 43 | [full section](#io-stdio) |
 | `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [module source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 54 | [full section](#json-stdjson) |
-| `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [module source](../std/ksuid/module.ae) |
+| `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [module source](../std/language/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [module source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
@@ -54,13 +54,13 @@ header comment is the authoritative description.
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [module source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [module source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [module source](../std/mutation/module.ae) |
-| `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [module source](../std/nanoid/module.ae) |
+| `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [module source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 10 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 75 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [module source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [module source](../std/plural/module.ae) |
-| `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [module source](../std/pqueue/module.ae) |
+| `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 18 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
@@ -68,14 +68,14 @@ header comment is the authoritative description.
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [module source](../std/snapshot/module.ae) |
 | `std.sort` | In-place ascending sort and binary search over the packed numeric arrays. | 6 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [module source](../std/spec/module.ae) |
-| `std.strbuilder` | Amortised-O(1) string building. | 33 | [module source](../std/strbuilder/module.ae) |
+| `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [module source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
-| `std.tracking` | Leak-detecting allocator wrapper. | 5 | [module source](../std/tracking/module.ae) |
-| `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [module source](../std/tsid/module.ae) |
-| `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [module source](../std/ulid/module.ae) |
+| `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
+| `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
+| `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [guide](../std/ulid/README.md) · [source](../std/ulid/module.ae) |
 | `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 7 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [module source](../std/worker/module.ae) |
