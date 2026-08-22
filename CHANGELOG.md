@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Spec-based unit tests for `std.signal`, `std.cas`, `std.tracking` and
+  `std.log`** (#1584). 32 cases, closing out the modules that warrant a unit
+  suite. `std.signal` is eleven POSIX signal numbers whose entire value is a
+  portability claim — these are the ones identical across Linux, macOS and
+  the BSDs, with the platform-varying signals (`SIGUSR1` is 10 on Linux and
+  30 on macOS) deliberately not exported — so the numbers themselves are
+  what is worth pinning: a regression there sends the wrong signal to a live
+  process, which no type system catches. `std.cas` covers the properties
+  that make a content-addressed store one rather than a directory: a
+  known-answer sha256 vector, identical content always yielding the same
+  digest, different content never doing so, an idempotent put, and the
+  null/empty guards. `std.tracking` is the leak-detecting allocator wrapper
+  — its counters must rise on alloc, fall by the freed size, and reach zero
+  exactly when the last block returns, because a wrapper that under-counts
+  reports a clean run over a real leak. `std.log` covers the level filter
+  from both sides: a logger that drops the wrong side of its threshold
+  either floods the log or silently discards the errors it exists to record.
+
+### Changed
+
+- **`tests/integration/cas_roundtrip/` retired into `std/cas/`** (#1584).
+  The co-located suite covers everything it did — including its
+  known-answer digest, ported verbatim — plus `root()` and `path()`, which
+  it did not reach.
+
 ## [0.567.0]
 
 ### Added

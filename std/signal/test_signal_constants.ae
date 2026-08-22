@@ -1,0 +1,77 @@
+// std.signal unit tests (#1584) — co-located with the module.
+//
+// The module is eleven zero-arg functions returning POSIX signal
+// numbers, and its entire value is a portability claim: these are the
+// signals whose numbers are identical on Linux, macOS and the BSDs, and
+// the platform-varying ones (SIGUSR1 is 10 on Linux but 30 on macOS,
+// SIGCHLD and the job-control signals likewise) are deliberately NOT
+// exported rather than shipped wrong.
+//
+// So the useful assertions are the numbers themselves — a regression
+// here is a caller sending the wrong signal to a live process, which no
+// type system catches — plus the fact that they are all distinct. The
+// exclusion is guarded by the suite documenting it: adding SIGUSR1 to
+// exports() would make this file's header a lie, which is the cheapest
+// alarm available short of a compile-time check.
+
+import std.spec
+import std.signal
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.signal POSIX numbers") {
+        spec.it("reports the termination signals") callback {
+            spec.assert_eq(signal.SIGHUP(), 1, "SIGHUP is 1")
+            spec.assert_eq(signal.SIGINT(), 2, "SIGINT is 2")
+            spec.assert_eq(signal.SIGQUIT(), 3, "SIGQUIT is 3")
+            spec.assert_eq(signal.SIGTERM(), 15, "SIGTERM is 15")
+        }
+
+        spec.it("reports the fault signals") callback {
+            spec.assert_eq(signal.SIGILL(), 4, "SIGILL is 4")
+            spec.assert_eq(signal.SIGABRT(), 6, "SIGABRT is 6")
+            spec.assert_eq(signal.SIGFPE(), 8, "SIGFPE is 8")
+            spec.assert_eq(signal.SIGSEGV(), 11, "SIGSEGV is 11")
+        }
+
+        spec.it("reports the uncatchable and IO signals") callback {
+            spec.assert_eq(signal.SIGKILL(), 9, "SIGKILL is 9")
+            spec.assert_eq(signal.SIGPIPE(), 13, "SIGPIPE is 13")
+            spec.assert_eq(signal.SIGALRM(), 14, "SIGALRM is 14")
+        }
+    }
+
+    spec.describe(fw, "std.signal invariants") {
+        spec.it("gives every signal a distinct number") callback {
+            // A copy-paste slip between two of these returns the wrong
+            // signal from the right-looking call. Summing is a cheap
+            // total check: 1+2+3+4+6+8+9+11+13+14+15.
+            total = signal.SIGHUP() + signal.SIGINT() + signal.SIGQUIT()
+            total = total + signal.SIGILL() + signal.SIGABRT()
+            total = total + signal.SIGFPE() + signal.SIGKILL()
+            total = total + signal.SIGSEGV() + signal.SIGPIPE()
+            total = total + signal.SIGALRM() + signal.SIGTERM()
+            spec.assert_eq(total, 86, "the eleven numbers sum to 86")
+        }
+
+        spec.it("keeps every number in the POSIX 1..31 range") callback {
+            // Anything outside this is not a standard signal, so a
+            // caller passing it to kill(2) gets EINVAL rather than the
+            // effect they asked for.
+            spec.assert_gt(signal.SIGHUP(), 0, "SIGHUP is positive")
+            spec.assert_true(signal.SIGTERM() < 32, "SIGTERM is below 32")
+            spec.assert_true(signal.SIGSEGV() < 32, "SIGSEGV is below 32")
+        }
+
+        spec.it("orders SIGKILL before SIGTERM numerically") callback {
+            // Not arbitrary: code that ladders a shutdown (TERM, wait,
+            // then KILL) sometimes indexes a table by signal number, and
+            // 9 < 15 is the ordering that table assumes.
+            spec.assert_true(signal.SIGKILL() < signal.SIGTERM(),
+                "SIGKILL (9) sorts before SIGTERM (15)")
+        }
+    }
+
+    spec.run_summary(fw)
+}
