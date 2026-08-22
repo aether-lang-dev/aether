@@ -16,8 +16,25 @@
 import std.spec
 import std.log
 import std.fs
+import std.io
 import std.os
 import std.string
+
+// TEMP on Windows, TMPDIR on POSIX, /tmp as a last resort. A hardcoded
+// /tmp works under an MSYS2 shell (where it maps to C:\msys64\tmp) and
+// fails on the Windows CI runners, which install MSYS2 under a temp dir
+// — exactly the way for a path bug to pass a local check and fail in
+// CI. See #1702 for the std accessor that would remove this copy.
+fn temp_root() -> string {
+    t = io.getenv("TEMP")
+    if t == 0 {
+        t = io.getenv("TMPDIR")
+    }
+    if t == 0 {
+        return "/tmp"
+    }
+    return t
+}
 
 const DEBUG = 0
 const INFO = 1
@@ -28,7 +45,7 @@ main() {
     fw = spec.init()
 
     // Pid-suffixed so a parallel run cannot collide on the path.
-    logfile = "/tmp/aether-log-test-${os.getpid()}.log"
+    logfile = "${temp_root()}/aether-log-test-${os.getpid()}.log"
 
     spec.describe(fw, "std.log level filtering") {
         spec.it("writes a message at or above the threshold") callback {
