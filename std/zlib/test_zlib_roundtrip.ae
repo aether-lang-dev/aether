@@ -62,6 +62,36 @@ main() {
             }
         }
 
+        spec.describe(fw, "std.zlib edge cases") {
+            spec.it("round-trips an empty input to zero bytes") callback {
+                // Ported from tests/integration/zlib_roundtrip/probe.ae,
+                // which this suite replaces. Deflating nothing still
+                // produces a non-empty stream (the header and checksum), and
+                // inflating that has to give zero bytes back rather than an
+                // error.
+                packed, plen, err = zlib.deflate("", 0, -1)
+                spec.assert_ok(err, "deflate of an empty input succeeds")
+                spec.assert_true(plen > 0,
+                    "an empty input still yields a framed stream")
+                back, blen, derr = zlib.inflate(packed, plen)
+                spec.assert_ok(derr, "inflate succeeds")
+                spec.assert_eq(blen, 0, "zero bytes back")
+            }
+
+            spec.it("rejects an empty buffer on inflate") callback {
+                // Distinct from the case above: an empty INPUT to inflate is
+                // not a valid stream at all, whereas the deflate of an empty
+                // input is.
+                data, n, err = zlib.inflate("", 0)
+                spec.assert_err(err, "inflate of an empty buffer is rejected")
+            }
+
+            spec.it("rejects input that is not a zlib stream") callback {
+                data, n, err = zlib.inflate("not a zlib stream", 17)
+                spec.assert_err(err, "garbage input is rejected")
+            }
+        }
+
         spec.describe(fw, "std.zlib gzip framing") {
             spec.it("round-trips through the gzip container") callback {
                 n = string.length(SAMPLE)
@@ -84,6 +114,13 @@ main() {
                     "first byte is 0x1f")
                 spec.assert_eq(string.char_at_n(packed, plen, 1), 139,
                     "second byte is 0x8b")
+            }
+
+            spec.it("rejects input that is not gzip at all") callback {
+                // Ported from tests/integration/test_zlib_gzip.ae, which this
+                // suite replaces.
+                data, n, err = zlib.gzip_inflate("not gzip", 8)
+                spec.assert_err(err, "corrupt gzip input is rejected")
             }
 
             spec.it("rejects raw deflate output as gzip") callback {

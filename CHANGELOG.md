@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Spec-based unit tests for `std.list` and `std.map`** (#1584), the
+  container primitives the rest of `std` is built on — `std.spec` keeps its
+  own framework state in a `std.map`. Pinned as observed behaviour rather
+  than as an endorsement: `list.get` and `map.get` report an out-of-range
+  index or an unbound key as success (`err == ""`) while handing back null,
+  so callers must null-check the pointer as well as the error, and
+  `map_has` is the unambiguous membership test.
+
+### Changed
+
+- **Central tests for the co-located `std` modules retired into their
+  suites** (#1584). `tests/regression/test_ids.ae`,
+  `tests/regression/test_std_actor_registry.ae`,
+  `tests/integration/lzf_roundtrip/` and `tests/integration/test_zlib_gzip.ae`
+  are removed, their coverage having been ported case-by-case into the
+  co-located suites — the migration #1584 asks for, rather than the third
+  test home it warns against. `tests/integration/zlib_roundtrip/` is kept:
+  it drives a C shim and `fs.read_binary` to exercise the AetherString
+  unwrap path inside `aether_zlib.c`, which is an integration concern a
+  unit suite cannot cover. The ported `actors` cases are strictly stronger
+  than the originals: the regression test's "looked-up ref is usable for
+  send" and cross-context routing cases printed PASS without asserting
+  anything ("No direct way to peek at the listener's state from outside"),
+  and now assert against a spy actor that records what it was sent.
+
+### Fixed
+
+- **The 0.564.0 entry for #1584 overstated the gap it closed.** It said the
+  eight modules "had no test of any kind"; every one of them was already
+  covered, by tests filed under names that do not match the module
+  (`tests/regression/test_ids.ae` for the five identifier modules,
+  `test_std_actor_registry.ae` for `std.actors`, `probe.ae` inside named
+  directories for `lzf`, `zlib` and `snapshot`). The census behind that
+  claim globbed filenames and never read a file. Corrected here rather than
+  in the released section, which is left as it shipped. That the mapping
+  from `std/actors` to `tests/regression/test_std_actor_registry.ae` is
+  undiscoverable by any mechanical audit is the argument #1584 makes for
+  co-location.
+
 ## [0.564.0]
 
 ### Added
