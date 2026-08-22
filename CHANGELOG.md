@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Spec-based unit tests for eight previously untested `std` modules**
+  (#1584). `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and
+  `zlib` had no test of any kind — the `std.http.server.lb` class of gap the
+  issue was filed about. 53 cases, co-located as `std/<module>/test_*.ae`,
+  and the first co-located tests written against `std.spec` rather than
+  relocated from the central suites, which is the dogfooding half of the
+  proposal. Modules with zero coverage anywhere drop from eight to two
+  (`casper` is FreeBSD-only, `log` writes to stdout). Two behaviours had to
+  be measured rather than read off the source and are now pinned: `lzf`
+  refuses any input it cannot shrink, whatever its length, reporting only
+  `"lzf compress failed"`; and `zlib.gzip_inflate` rejects a raw deflate
+  stream rather than returning garbage.
+
 ## [0.563.0]
 
 ### Fixed

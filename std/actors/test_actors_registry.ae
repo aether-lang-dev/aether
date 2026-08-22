@@ -1,0 +1,99 @@
+// std.actors unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. The registry is a
+// name -> actor_ref map with a small set of documented edge cases:
+// rebinding a name overwrites without error, unregister reports
+// whether it removed anything, and whereis on a missing name yields
+// null. Those contracts are what this covers.
+//
+// registry_clear exists for exactly this purpose, so each `it` starts
+// from an empty registry via before_each rather than depending on the
+// order the cases run in.
+
+import std.spec
+import std.actors
+
+message Ping {}
+
+actor Probe {
+    state n = 0
+    receive { Ping() -> { n = n + 1 } }
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.actors registry") {
+        spec.before_each() callback {
+            actors.registry_clear()
+        }
+
+        spec.it("starts empty after a clear") callback {
+            spec.assert_eq(actors.registry_size(), 0, "size is 0")
+        }
+
+        spec.it("binds a name and looks it up") callback {
+            a = spawn(Probe())
+            actors.register("probe", a)
+            spec.assert_eq(actors.is_registered("probe"), 1, "probe is bound")
+            spec.assert_eq(actors.registry_size(), 1, "one binding")
+        }
+
+        spec.it("reports an unbound name as not registered") callback {
+            spec.assert_eq(actors.is_registered("absent"), 0,
+                "absent is not bound")
+        }
+
+        spec.it("overwrites a rebound name without error") callback {
+            // Documented: register on an existing name replaces the
+            // binding rather than failing, and does not grow the map.
+            a = spawn(Probe())
+            b = spawn(Probe())
+            actors.register("dup", a)
+            actors.register("dup", b)
+            spec.assert_eq(actors.registry_size(), 1,
+                "rebinding does not add an entry")
+            spec.assert_eq(actors.is_registered("dup"), 1, "dup still bound")
+        }
+
+        spec.it("removes a binding and reports that it did") callback {
+            a = spawn(Probe())
+            actors.register("gone", a)
+            spec.assert_eq(actors.unregister("gone"), 1, "unregister returns 1")
+            spec.assert_eq(actors.is_registered("gone"), 0, "no longer bound")
+            spec.assert_eq(actors.registry_size(), 0, "size back to 0")
+        }
+
+        spec.it("reports removing an unbound name as no-op") callback {
+            spec.assert_eq(actors.unregister("never"), 0,
+                "unregister of an unbound name returns 0")
+        }
+
+        spec.it("tracks several bindings independently") callback {
+            a = spawn(Probe())
+            b = spawn(Probe())
+            c = spawn(Probe())
+            actors.register("one", a)
+            actors.register("two", b)
+            actors.register("three", c)
+            spec.assert_eq(actors.registry_size(), 3, "three bindings")
+            actors.unregister("two")
+            spec.assert_eq(actors.registry_size(), 2, "two left")
+            spec.assert_eq(actors.is_registered("one"), 1, "one survives")
+            spec.assert_eq(actors.is_registered("two"), 0, "two removed")
+            spec.assert_eq(actors.is_registered("three"), 1, "three survives")
+        }
+
+        spec.it("clears every binding at once") callback {
+            a = spawn(Probe())
+            b = spawn(Probe())
+            actors.register("x", a)
+            actors.register("y", b)
+            actors.registry_clear()
+            spec.assert_eq(actors.registry_size(), 0, "registry emptied")
+            spec.assert_eq(actors.is_registered("x"), 0, "x gone")
+        }
+    }
+
+    spec.run_summary(fw)
+}

@@ -1,0 +1,84 @@
+// std.tsid unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. A TSID is 13 chars of
+// Crockford base32 over a 64-bit value: a 42-bit millisecond timestamp
+// (2020 epoch) shifted left by 22, with 22 random bits in the low end.
+// The assertions cover the shape, the alphabet, the (value, err)
+// contract, and time-ordering across a sleep.
+//
+// The high nibble is worth pinning: the module packs the timestamp into
+// bits 22..63 of a 64-bit value, so with a 2020 epoch the top four bits
+// stay 0 until roughly 2160. A regression that mis-shifts the timestamp
+// shows up as a non-'0' leading character.
+
+import std.spec
+import std.tsid
+import std.string
+
+const TSID_ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+fn all_chars_in_alphabet(id: string) -> int {
+    i = 0
+    while i < string.length(id) {
+        c = string.char_at(id, i)
+        found = 0
+        j = 0
+        while j < 32 {
+            if string.char_at(TSID_ALPHA, j) == c {
+                found = 1
+            }
+            j = j + 1
+        }
+        if found == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.tsid") {
+        spec.it("returns a 13-char id and no error") callback {
+            id, err = tsid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_eq(string.length(id), 13, "13 chars")
+        }
+
+        spec.it("uses only Crockford base32 characters") callback {
+            id, err = tsid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_true(all_chars_in_alphabet(id),
+                "id '${id}' is all Crockford base32")
+        }
+
+        spec.it("leaves the high nibble clear this century") callback {
+            id, err = tsid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_str_eq(string.substring(id, 0, 1), "0",
+                "leading char is '0' until ~2160")
+        }
+
+        spec.it("does not repeat across calls") callback {
+            a, e1 = tsid.generate()
+            b, e2 = tsid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.equals(a, b) == 0, "two tsids differ")
+        }
+
+        spec.it("sorts lexicographically by mint time") callback {
+            a, e1 = tsid.generate()
+            sleep(5)
+            b, e2 = tsid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.compare(a, b) < 0,
+                "later tsid sorts after: ${a} < ${b}")
+        }
+    }
+
+    spec.run_summary(fw)
+}

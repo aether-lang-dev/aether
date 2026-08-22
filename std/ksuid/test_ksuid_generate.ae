@@ -1,0 +1,79 @@
+// std.ksuid unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. A KSUID is a 27-char
+// base62 string over a 20-byte payload: a 4-byte big-endian seconds
+// timestamp (offset by a 2014 epoch) followed by 16 random bytes. The
+// assertions cover the shape, the alphabet, the (value, err) contract,
+// and time-ordering across a sleep.
+//
+// Ordering is checked across a >1s sleep because the timestamp has
+// SECOND resolution: two KSUIDs minted in the same second differ only
+// in their random tail and are not required to sort by mint time.
+
+import std.spec
+import std.ksuid
+import std.string
+
+const KSUID_ALPHA = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+// Every character must come from the base62 alphabet.
+fn all_chars_in_alphabet(id: string) -> int {
+    i = 0
+    while i < string.length(id) {
+        c = string.char_at(id, i)
+        found = 0
+        j = 0
+        while j < 62 {
+            if string.char_at(KSUID_ALPHA, j) == c {
+                found = 1
+            }
+            j = j + 1
+        }
+        if found == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.ksuid") {
+        spec.it("returns a 27-char id and no error") callback {
+            id, err = ksuid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_eq(string.length(id), 27, "27 chars")
+        }
+
+        spec.it("uses only base62 characters") callback {
+            id, err = ksuid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_true(all_chars_in_alphabet(id),
+                "id '${id}' is all base62")
+        }
+
+        spec.it("does not repeat across calls") callback {
+            a, e1 = ksuid.generate()
+            b, e2 = ksuid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.equals(a, b) == 0, "two ksuids differ")
+        }
+
+        spec.it("sorts lexicographically by mint time") callback {
+            // The timestamp is second-resolution, so the sleep has to
+            // cross a second boundary for ordering to be guaranteed.
+            a, e1 = ksuid.generate()
+            sleep(1100)
+            b, e2 = ksuid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.compare(a, b) < 0,
+                "later ksuid sorts after: ${a} < ${b}")
+        }
+    }
+
+    spec.run_summary(fw)
+}

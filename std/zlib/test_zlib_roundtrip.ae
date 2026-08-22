@@ -1,0 +1,102 @@
+// std.zlib unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. Both codecs are
+// byte-exact, so the assertions are round-trip fidelity for the raw
+// deflate and the gzip-framed variants, the compression-level range,
+// and the (data, length, err) contract.
+//
+// The whole suite is gated on zlib.available(): the backend is an
+// optional build dependency, and a box built without it should report
+// these as skipped rather than failed. A provisioning gap is not a code
+// defect — but nor should it pass silently, which is what skip_all_if
+// exists for (#1610).
+
+import std.spec
+import std.zlib
+import std.string
+
+const SAMPLE = "the quick brown fox jumps over the lazy dog, and then does it again and again"
+
+main() {
+    fw = spec.init()
+
+    // The backend is an optional build dependency. Skipping is reported
+    // (never silent) so a box built without zlib is distinguishable from
+    // one where these actually ran.
+    unavailable = spec.skip_all_if(fw, zlib.available() == 0,
+        "zlib backend not built in")
+
+    if unavailable == 0 {
+        spec.describe(fw, "std.zlib deflate/inflate") {
+            spec.it("round-trips a string byte for byte") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = zlib.deflate(SAMPLE, n, 6)
+                spec.assert_ok(err, "deflate succeeds")
+                spec.assert_true(plen > 0, "compressed length is positive")
+                back, blen, derr = zlib.inflate(packed, plen)
+                spec.assert_ok(derr, "inflate succeeds")
+                spec.assert_eq(blen, n, "length restored")
+                spec.assert_str_eq(back, SAMPLE, "content restored")
+            }
+
+            spec.it("shrinks repetitive input") callback {
+                original = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                n = string.length(original)
+                packed, plen, err = zlib.deflate(original, n, 6)
+                spec.assert_ok(err, "deflate succeeds")
+                spec.assert_true(plen < n, "compressed ${plen} < original ${n}")
+            }
+
+            spec.it("round-trips at every compression level") callback {
+                // 0 is store-only and 9 is maximum; both must survive a
+                // round trip, and 0 is the level most likely to be handled
+                // by a different code path.
+                n = string.length(SAMPLE)
+                for (lvl = 0; lvl <= 9; lvl = lvl + 1) {
+                    packed, plen, err = zlib.deflate(SAMPLE, n, lvl)
+                    spec.assert_ok(err, "deflate at level ${lvl}")
+                    back, blen, derr = zlib.inflate(packed, plen)
+                    spec.assert_ok(derr, "inflate at level ${lvl}")
+                    spec.assert_str_eq(back, SAMPLE, "content restored at ${lvl}")
+                }
+            }
+        }
+
+        spec.describe(fw, "std.zlib gzip framing") {
+            spec.it("round-trips through the gzip container") callback {
+                n = string.length(SAMPLE)
+                packed, plen, err = zlib.gzip_deflate(SAMPLE, n, 6)
+                spec.assert_ok(err, "gzip_deflate succeeds")
+                back, blen, derr = zlib.gzip_inflate(packed, plen)
+                spec.assert_ok(derr, "gzip_inflate succeeds")
+                spec.assert_eq(blen, n, "length restored")
+                spec.assert_str_eq(back, SAMPLE, "content restored")
+            }
+
+            spec.it("emits the gzip magic bytes") callback {
+                // A gzip member starts 1f 8b; a raw deflate stream does not.
+                // This is what distinguishes the two entry points, so it is
+                // worth asserting rather than trusting the name.
+                n = string.length(SAMPLE)
+                packed, plen, err = zlib.gzip_deflate(SAMPLE, n, 6)
+                spec.assert_ok(err, "gzip_deflate succeeds")
+                spec.assert_eq(string.char_at_n(packed, plen, 0), 31,
+                    "first byte is 0x1f")
+                spec.assert_eq(string.char_at_n(packed, plen, 1), 139,
+                    "second byte is 0x8b")
+            }
+
+            spec.it("rejects raw deflate output as gzip") callback {
+                // The two framings are not interchangeable; feeding one to
+                // the other's reader must fail rather than return garbage.
+                n = string.length(SAMPLE)
+                packed, plen, err = zlib.deflate(SAMPLE, n, 6)
+                spec.assert_ok(err, "deflate succeeds")
+                back, blen, derr = zlib.gzip_inflate(packed, plen)
+                spec.assert_err(derr, "gzip_inflate rejects a raw deflate stream")
+            }
+        }
+    }
+
+    spec.run_summary(fw)
+}
