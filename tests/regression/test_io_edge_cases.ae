@@ -4,17 +4,12 @@
 // all return `(value, err)` or `err`.
 
 import std.io
+import std.os
 
 main() {
     print("=== IO Edge Case Tests ===\n\n")
 
-    tmp = io.getenv("TEMP")
-    if tmp == 0 {
-        tmp = io.getenv("TMPDIR")
-    }
-    if tmp == 0 {
-        tmp = "/tmp"
-    }
+    tmp = os.temp_dir()
 
     // Test 1: read non-existent file returns error.
     print("Test 1: read non-existent file\n")

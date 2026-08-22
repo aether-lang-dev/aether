@@ -9,6 +9,7 @@
 // file it named inside the callback once the walk has returned.
 
 import std.fs
+import std.os
 import std.list
 import std.string
 import std.io
@@ -19,9 +20,7 @@ main() {
     println("=== fs.walk: copied paths outlive the walk ===")
     failures = 0
 
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
 
     root = "${tmp}/aether_walk_borrow_test"
     sub = "${root}/nested"

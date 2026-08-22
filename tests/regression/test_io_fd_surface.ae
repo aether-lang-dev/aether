@@ -24,6 +24,7 @@
 //      returns count=0 / non-empty err
 
 import std.io
+import std.os
 import std.string
 
 extern exit(code: int)
@@ -31,9 +32,7 @@ extern exit(code: int)
 main() {
     println("=== std.io fd surface regression ===")
 
-    tmpbase = io.getenv("TEMP")
-    if tmpbase == 0 { tmpbase = io.getenv("TMPDIR") }
-    if tmpbase == 0 { tmpbase = "/tmp" }
+    tmpbase = os.temp_dir()
     tmp = "${tmpbase}/aether_fd_test.txt"
 
     // Case 1: open_write + write_n + close.

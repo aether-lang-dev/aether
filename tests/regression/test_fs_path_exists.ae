@@ -15,6 +15,7 @@
 //      type-specific predicates partition `fs.exists`'s domain.
 
 import std.fs
+import std.os
 import std.file
 import std.dir
 import std.string
@@ -27,9 +28,7 @@ main() {
 
     // Set up: a known-existing directory and a known-existing file
     // inside it.
-    tmp = io.getenv("TEMP")
-    if tmp == 0 { tmp = io.getenv("TMPDIR") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     tmpdir = "${tmp}/aether_fs_exists_test"
     fs.create_dir(tmpdir)
     tmpfile = "${tmpdir}/probe"

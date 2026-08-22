@@ -2,6 +2,7 @@
 // Tests for bugs found in audit: type mismatches, bounds issues, etc.
 
 import std.string
+import std.os
 import std.fs
 import std.file
 import std.path
@@ -12,13 +13,7 @@ main() {
     print("=== Stdlib Edge Case Tests ===\n\n")
 
     // Use platform temp dir
-    tmp = io.getenv("TEMP")
-    if tmp == 0 {
-        tmp = io.getenv("TMPDIR")
-    }
-    if tmp == 0 {
-        tmp = "/tmp"
-    }
+    tmp = os.temp_dir()
 
     // === PATH MODULE: return types should be string, not ptr ===
     print("Test 1: path.join returns usable string\n")

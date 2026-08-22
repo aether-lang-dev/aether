@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`os.temp_dir()`** (#1702), the directory for scratch files, with no
+  trailing separator. Windows resolves it through `GetTempPathW`, which
+  already performs the documented `TMP` → `TEMP` → `USERPROFILE` →
+  Windows-directory cascade, so there is no hand-rolled precedence to get
+  wrong; POSIX reads `TMPDIR` and falls back to `/tmp`. It never returns null
+  or an empty string, so `"${os.temp_dir()}/name"` needs no check.
+
+### Changed
+
+- **23 files stopped hand-rolling the temp-directory fallback** (#1702). Each
+  carried its own `TEMP` → `TMPDIR` → `/tmp` ladder — and eight tried `TMPDIR`
+  first, the wrong precedence on Windows. More to the point, a file that
+  skipped the ladder and hardcoded `/tmp` passed on POSIX and under an MSYS2
+  shell, where `/tmp` resolves, while failing on the Windows CI runners, which
+  install MSYS2 elsewhere. That shape of bug passes every local check, and it
+  broke #1701.
+
 ### Fixed
 
 - **`mem.get_uint32` could not represent the top half of its own range**

@@ -12,6 +12,7 @@
 //      to owner, but chmod itself succeeds
 
 import std.fs
+import std.os
 import std.file
 import std.io
 
@@ -20,9 +21,7 @@ extern exit(code: int)
 main() {
     println("=== fs.chmod regression ===")
 
-    tmp = io.getenv("TEMP")
-    if tmp == 0 { tmp = io.getenv("TMPDIR") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     tmpdir = "${tmp}/aether_fs_chmod_test"
     fs.delete_dir(tmpdir)
     fs.create_dir(tmpdir)

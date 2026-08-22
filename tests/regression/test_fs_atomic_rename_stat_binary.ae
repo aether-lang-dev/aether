@@ -4,6 +4,7 @@
 // can import std.fs from --emit=lib builds.
 
 import std.fs
+import std.os
 import std.string
 import std.io
 
@@ -11,9 +12,7 @@ main() {
     println("=== std.fs follow-on APIs ===")
 
     // Pick a scratch dir — /tmp on POSIX, TEMP/TMPDIR on other platforms.
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
 
     // ---- Test 1: write_atomic round-trip ---------------------------
     println("\nTest 1: write_atomic writes what we gave it")

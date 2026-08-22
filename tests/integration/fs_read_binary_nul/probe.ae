@@ -10,6 +10,7 @@
 // takes an explicit byte count and memcpy's the full payload.
 
 import std.fs
+import std.os
 import std.string
 import std.io
 
@@ -21,9 +22,7 @@ extern rb_probe_write_binary(path: string) -> int
 main() {
     print("=== fs.read_binary with embedded NULs ===\n\n")
 
-    tmp = io.getenv("TMPDIR")
-    if tmp == 0 { tmp = io.getenv("TEMP") }
-    if tmp == 0 { tmp = "/tmp" }
+    tmp = os.temp_dir()
     path = "${tmp}/aether_rb_embedded_nul_test.bin"
 
     print("Test 1: setup — write 10-byte file with NUL at offset 3\n")
