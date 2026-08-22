@@ -1,0 +1,92 @@
+// std.nanoid unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. A NanoID is n chars
+// drawn from a 64-symbol URL-safe alphabet; generate() is the 21-char
+// default and generate_n(n) takes a length. The assertions cover both
+// shapes, the alphabet, uniqueness, and — unusually for this cluster —
+// a real rejected-input path, since generate_n(0) is defined to fail.
+
+import std.spec
+import std.nanoid
+import std.string
+
+const NANO_ALPHA = "_-0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+fn all_chars_in_alphabet(id: string) -> int {
+    i = 0
+    while i < string.length(id) {
+        c = string.char_at(id, i)
+        found = 0
+        j = 0
+        while j < 64 {
+            if string.char_at(NANO_ALPHA, j) == c {
+                found = 1
+            }
+            j = j + 1
+        }
+        if found == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.nanoid generate") {
+        spec.it("returns a 21-char id and no error") callback {
+            id, err = nanoid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_eq(string.length(id), 21, "21 chars")
+        }
+
+        spec.it("uses only the URL-safe alphabet") callback {
+            id, err = nanoid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_true(all_chars_in_alphabet(id),
+                "id '${id}' is all URL-safe")
+        }
+
+        spec.it("does not repeat across calls") callback {
+            a, e1 = nanoid.generate()
+            b, e2 = nanoid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.equals(a, b) == 0, "two nanoids differ")
+        }
+    }
+
+    spec.describe(fw, "std.nanoid generate_n") {
+        spec.it("honours the requested length") callback {
+            id, err = nanoid.generate_n(8)
+            spec.assert_ok(err, "generate_n(8) succeeds")
+            spec.assert_eq(string.length(id), 8, "8 chars")
+        }
+
+        spec.it("produces a single character for n = 1") callback {
+            id, err = nanoid.generate_n(1)
+            spec.assert_ok(err, "generate_n(1) succeeds")
+            spec.assert_eq(string.length(id), 1, "1 char")
+        }
+
+        spec.it("rejects a length below 1") callback {
+            // The one genuine failure path in this cluster — worth
+            // asserting the reason, not merely that it failed.
+            id, err = nanoid.generate_n(0)
+            spec.assert_err(err, "generate_n(0) is rejected")
+            spec.assert_err_contains(err, "n must be >= 1",
+                "generate_n(0) says why")
+            spec.assert_eq(string.length(id), 0, "no id on the error path")
+        }
+
+        spec.it("rejects a negative length") callback {
+            id, err = nanoid.generate_n(-5)
+            spec.assert_err(err, "generate_n(-5) is rejected")
+            spec.assert_eq(string.length(id), 0, "no id on the error path")
+        }
+    }
+
+    spec.run_summary(fw)
+}

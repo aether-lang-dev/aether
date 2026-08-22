@@ -1,0 +1,88 @@
+// std.ulid unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. A ULID is 26 chars of
+// Crockford base32 over 16 bytes: a 48-bit big-endian millisecond
+// timestamp then 80 random bits. The assertions cover the shape, the
+// alphabet (Crockford excludes I, L, O and U), the (value, err)
+// contract, and time-ordering.
+//
+// Ordering is checked across a sleep rather than back to back: the
+// timestamp has millisecond resolution and the module adds no
+// monotonic counter, so two ULIDs from the same millisecond sort by
+// their random tail.
+
+import std.spec
+import std.ulid
+import std.string
+
+const ULID_ALPHA = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+fn all_chars_in_alphabet(id: string) -> int {
+    i = 0
+    while i < string.length(id) {
+        c = string.char_at(id, i)
+        found = 0
+        j = 0
+        while j < 32 {
+            if string.char_at(ULID_ALPHA, j) == c {
+                found = 1
+            }
+            j = j + 1
+        }
+        if found == 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.ulid") {
+        spec.it("returns a 26-char id and no error") callback {
+            id, err = ulid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_eq(string.length(id), 26, "26 chars")
+        }
+
+        spec.it("uses only Crockford base32 characters") callback {
+            id, err = ulid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_true(all_chars_in_alphabet(id),
+                "id '${id}' is all Crockford base32")
+        }
+
+        spec.it("excludes the ambiguous letters I, L, O and U") callback {
+            // The whole point of Crockford's alphabet: these four are
+            // omitted so a transcribed ULID cannot be misread.
+            id, err = ulid.generate()
+            spec.assert_ok(err, "generate succeeds")
+            spec.assert_true(string.contains(id, "I") == 0, "no I in ${id}")
+            spec.assert_true(string.contains(id, "L") == 0, "no L in ${id}")
+            spec.assert_true(string.contains(id, "O") == 0, "no O in ${id}")
+            spec.assert_true(string.contains(id, "U") == 0, "no U in ${id}")
+        }
+
+        spec.it("does not repeat across calls") callback {
+            a, e1 = ulid.generate()
+            b, e2 = ulid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.equals(a, b) == 0, "two ulids differ")
+        }
+
+        spec.it("sorts lexicographically by mint time") callback {
+            a, e1 = ulid.generate()
+            sleep(5)
+            b, e2 = ulid.generate()
+            spec.assert_ok(e1, "first generate succeeds")
+            spec.assert_ok(e2, "second generate succeeds")
+            spec.assert_true(string.compare(a, b) < 0,
+                "later ulid sorts after: ${a} < ${b}")
+        }
+    }
+
+    spec.run_summary(fw)
+}

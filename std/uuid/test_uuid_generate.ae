@@ -1,0 +1,128 @@
+// std.uuid unit tests (#1584) — co-located with the module.
+//
+// The module had no test of any kind before this. Both generators are
+// pure formatting over CSPRNG bytes, so what is worth asserting is the
+// shape RFC 9562 mandates — length, hyphen positions, the version
+// nibble and the variant bits — plus the (value, err) contract and
+// that two calls differ.
+//
+// v7's timestamp ordering is deliberately NOT asserted across a
+// sub-millisecond pair: the module documents that it adds no monotonic
+// counter, so two IDs minted in the same millisecond sort arbitrarily.
+// The test sorts across a sleep instead, which is the guarantee the
+// module actually makes.
+
+import std.spec
+import std.uuid
+import std.string
+
+// A canonical UUID is 8-4-4-4-12 hex with hyphens at 8, 13, 18, 23.
+fn check_canonical_shape(fw: ptr, id: string, label: string) {
+    spec.assert_eq(string.length(id), 36, "${label}: 36 chars")
+    spec.assert_str_eq(string.substring(id, 8, 9), "-", "${label}: hyphen at 8")
+    spec.assert_str_eq(string.substring(id, 13, 14), "-", "${label}: hyphen at 13")
+    spec.assert_str_eq(string.substring(id, 18, 19), "-", "${label}: hyphen at 18")
+    spec.assert_str_eq(string.substring(id, 23, 24), "-", "${label}: hyphen at 23")
+}
+
+// Every non-hyphen position must be a lowercase hex digit.
+fn count_hex_digits(id: string) -> int {
+    n = 0
+    i = 0
+    while i < string.length(id) {
+        c = string.char_at(id, i)
+        if (c >= 48 && c <= 57) || (c >= 97 && c <= 102) {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    return n
+}
+
+main() {
+    fw = spec.init()
+
+    spec.describe(fw, "std.uuid v4") {
+        spec.it("returns a canonical 36-char id and no error") callback {
+            id, err = uuid.v4()
+            spec.assert_ok(err, "v4 succeeds")
+            check_canonical_shape(fw, id, "v4")
+        }
+
+        spec.it("sets the version nibble to 4") callback {
+            id, err = uuid.v4()
+            spec.assert_ok(err, "v4 succeeds")
+            // Position 14 is the first nibble of the third group.
+            spec.assert_str_eq(string.substring(id, 14, 15), "4",
+                "v4: version nibble")
+        }
+
+        spec.it("sets the RFC 9562 variant to one of 8/9/a/b") callback {
+            id, err = uuid.v4()
+            spec.assert_ok(err, "v4 succeeds")
+            v = string.substring(id, 19, 20)
+            ok = 0
+            if string.equals(v, "8") == 1 { ok = 1 }
+            if string.equals(v, "9") == 1 { ok = 1 }
+            if string.equals(v, "a") == 1 { ok = 1 }
+            if string.equals(v, "b") == 1 { ok = 1 }
+            spec.assert_true(ok, "v4: variant nibble '${v}' is 8/9/a/b")
+        }
+
+        spec.it("uses only lowercase hex outside the hyphens") callback {
+            id, err = uuid.v4()
+            spec.assert_ok(err, "v4 succeeds")
+            spec.assert_eq(count_hex_digits(id), 32, "v4: 32 hex digits")
+        }
+
+        spec.it("does not repeat across calls") callback {
+            a, e1 = uuid.v4()
+            b, e2 = uuid.v4()
+            spec.assert_ok(e1, "first v4 succeeds")
+            spec.assert_ok(e2, "second v4 succeeds")
+            spec.assert_true(string.equals(a, b) == 0, "two v4s differ")
+        }
+    }
+
+    spec.describe(fw, "std.uuid v7") {
+        spec.it("returns a canonical 36-char id and no error") callback {
+            id, err = uuid.v7()
+            spec.assert_ok(err, "v7 succeeds")
+            check_canonical_shape(fw, id, "v7")
+        }
+
+        spec.it("sets the version nibble to 7") callback {
+            id, err = uuid.v7()
+            spec.assert_ok(err, "v7 succeeds")
+            spec.assert_str_eq(string.substring(id, 14, 15), "7",
+                "v7: version nibble")
+        }
+
+        spec.it("sets the RFC 9562 variant to one of 8/9/a/b") callback {
+            id, err = uuid.v7()
+            spec.assert_ok(err, "v7 succeeds")
+            v = string.substring(id, 19, 20)
+            ok = 0
+            if string.equals(v, "8") == 1 { ok = 1 }
+            if string.equals(v, "9") == 1 { ok = 1 }
+            if string.equals(v, "a") == 1 { ok = 1 }
+            if string.equals(v, "b") == 1 { ok = 1 }
+            spec.assert_true(ok, "v7: variant nibble '${v}' is 8/9/a/b")
+        }
+
+        spec.it("sorts lexicographically by mint time") callback {
+            // Across a sleep, not back to back: the module states it
+            // carries no monotonic counter, so same-millisecond IDs
+            // are allowed to sort arbitrarily.
+            a, e1 = uuid.v7()
+            sleep(5)
+            b, e2 = uuid.v7()
+            spec.assert_ok(e1, "first v7 succeeds")
+            spec.assert_ok(e2, "second v7 succeeds")
+            spec.assert_true(string.compare(a, b) < 0,
+                "v7 minted later sorts after: ${a} < ${b}")
+        }
+    }
+
+    spec.run_summary(fw)
+}
