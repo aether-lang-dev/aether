@@ -48,9 +48,10 @@ Use `alloc_aligned` when the wider accessors are involved: `set_long` and the
 u64 pair at an unaligned offset are undefined on strict-alignment targets even
 where x86 tolerates them.
 
-**`get_uint32` returns -1 for `0xFFFFFFFF`** — it is declared `-> int` and
-cannot represent the top half of its own range. Mask it back with
-`mem.get_uint32(p, off) as long & 4294967295` until #1699 widens it.
+`get_uint32` and `set_uint32` take and return `long`, so the full unsigned
+range works without masking — they used to be `int`, which made `0xFFFFFFFF`
+read back as -1 (#1699). `set_uint32` truncates a wider value to the field
+rather than spilling into the next one.
 
 `bits_of_float` / `float_from_bits` reinterpret a double as its IEEE 754 bit
 pattern and back, without going through a conversion.
