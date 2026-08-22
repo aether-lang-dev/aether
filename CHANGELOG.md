@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **Eleven more co-located module guides, 47 of 71 covered** (#1523). `path`,
+  `signal`, `config`, `dir`, `fs`, `tcp`, `actors`, `worker`, `cas`, `dl` and
+  `snapshot`. A guide for a module that needs external state — a socket, a
+  scratch directory, a shared library — now carries a bare ` ```aether ` block
+  that is **compiled but not run**, rather than being left out: the example is
+  still type-checked against the real API, which is what catches a call that
+  no longer exists. That distinction earned itself in this batch, catching a
+  wrong arity (`worker.drain` takes a max; the guide called it with none) in
+  an example CI never executes.
+
 ## [0.568.0]
 
 ### Added

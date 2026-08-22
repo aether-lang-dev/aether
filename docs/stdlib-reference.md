@@ -11,7 +11,7 @@ header comment is the authoritative description.
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
-| `std.actors` | Process-global registry mapping names to actor references. | 12 | [module source](../std/actors/module.ae) |
+| `std.actors` | Process-global registry mapping names to actor references. | 12 | [guide](../std/actors/README.md) · [source](../std/actors/module.ae) |
 | `std.alloc` | Allocator handles the containers accept, so a structure can allocate from an arena instead of the system. | 6 | [guide](../std/alloc/README.md) · [source](../std/alloc/module.ae) |
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [module source](../std/audio/module.ae) |
@@ -20,20 +20,20 @@ header comment is the authoritative description.
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [module source](../std/capsicum/module.ae) |
-| `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [module source](../std/cas/module.ae) |
+| `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [module source](../std/casper/module.ae) |
 | `std.cbor` | CBOR encoding and decoding (RFC 8949). | 45 | [module source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [module source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
-| `std.config` | Process-global immutable string to string store. | 12 | [module source](../std/config/module.ae) |
+| `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
 | `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 46 | [full section](#cryptography-stdcryptography) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 14 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
-| `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [module source](../std/dir/module.ae) |
-| `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [module source](../std/dl/module.ae) |
+| `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
+| `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [module source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 13 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [module source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [module source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 149 | [module source](../std/http/module.ae) |
@@ -58,27 +58,27 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [module source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 10 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 75 | [full section](#os-stdos) |
-| `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [module source](../std/path/module.ae) |
+| `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 18 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
-| `std.signal` | POSIX signal-number constants. | 11 | [module source](../std/signal/module.ae) |
-| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [module source](../std/snapshot/module.ae) |
+| `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
+| `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
 | `std.sort` | In-place ascending sort and binary search over the packed numeric arrays. | 6 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [module source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [module source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
 | `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
 | `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [guide](../std/ulid/README.md) · [source](../std/ulid/module.ae) |
 | `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 7 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
-| `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [module source](../std/worker/module.ae) |
+| `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [module source](../std/yaml/module.ae) |
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 16 | [full section](#compression-stdzlib) |
