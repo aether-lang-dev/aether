@@ -13,6 +13,7 @@
 import std.spec
 import std.lzf
 import std.string
+import std.bytes
 
 main() {
     fw = spec.init()
@@ -77,6 +78,52 @@ main() {
             data2, n2, err2 = lzf.compress("abcdefghijklmnopqrstuvwx", 24)
             spec.assert_err(err2, "incompressible 24-byte input is refused")
             spec.assert_eq(n2, 0, "no length on the error path")
+        }
+    }
+
+    spec.describe(fw, "std.lzf binary data") {
+        spec.it("restores arbitrary bytes exactly, including high bits") callback {
+            // Ported from tests/integration/lzf_roundtrip/probe.ae, which
+            // this suite replaces. Text round trips prove little about a
+            // byte codec: a run of 0x00..0xFF is what catches sign-
+            // extension and NUL-termination bugs on the way through.
+            n = 256
+            buf = bytes.new(n)
+            for (i = 0; i < n; i = i + 1) {
+                bytes.set(buf, i, i % 256)
+            }
+            original = bytes.finish(buf, n)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds on binary input")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "length restored")
+            mismatches = 0
+            for (i = 0; i < n; i = i + 1) {
+                if string.char_at_n(back, n, i) != (i % 256) {
+                    mismatches = mismatches + 1
+                }
+            }
+            spec.assert_eq(mismatches, 0, "every byte survived unchanged")
+        }
+
+        spec.it("preserves embedded NUL bytes") callback {
+            // A NUL mid-buffer is where a codec that treats its input as
+            // a C string silently truncates.
+            n = 32
+            buf = bytes.new(n)
+            for (i = 0; i < n; i = i + 1) {
+                bytes.set(buf, i, 0)
+            }
+            bytes.set(buf, 7, 65)
+            original = bytes.finish(buf, n)
+            packed, plen, err = lzf.compress(original, n)
+            spec.assert_ok(err, "compress succeeds")
+            back, blen, derr = lzf.decompress(packed, plen, n)
+            spec.assert_ok(derr, "decompress succeeds")
+            spec.assert_eq(blen, n, "all ${n} bytes back, not truncated at the NUL")
+            spec.assert_eq(string.char_at_n(back, n, 7), 65,
+                "the non-NUL byte is still in place")
         }
     }
 

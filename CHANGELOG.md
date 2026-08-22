@@ -13,31 +13,42 @@ version number before tagging the release.
 
 ### Added
 
-- **Spec-based unit tests for eight previously untested `std` modules**
-  (#1584). `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and
-  `zlib` had no test of any kind — the `std.http.server.lb` class of gap the
-  issue was filed about. 53 cases, co-located as `std/<module>/test_*.ae`,
-  and the first co-located tests written against `std.spec` rather than
-  relocated from the central suites, which is the dogfooding half of the
-  proposal. Modules with zero coverage anywhere drop from eight to two
-  (`casper` is FreeBSD-only, `log` writes to stdout). Two behaviours had to
-  be measured rather than read off the source and are now pinned: `lzf`
-  refuses any input it cannot shrink, whatever its length, reporting only
-  `"lzf compress failed"`; and `zlib.gzip_inflate` rejects a raw deflate
-  stream rather than returning garbage.
+- **Spec-based unit tests co-located with eight `std` modules** (#1584).
+  `uuid`, `ksuid`, `ulid`, `tsid`, `nanoid`, `actors`, `lzf` and `zlib` gain
+  suites under `std/<module>/test_*.ae` — the first co-located tests written
+  against `std.spec` rather than relocated from the central suites, which is
+  the dogfooding half of the proposal. Each module's central test has been
+  retired into its co-located suite (see below), so this is a migration
+  rather than an addition. Two behaviours had to be measured rather than
+  read off the source and are now pinned: `lzf` refuses any input it cannot
+  shrink, whatever its length, reporting only `"lzf compress failed"`; and
+  `zlib.gzip_inflate` rejects a raw deflate stream rather than returning
+  garbage.
 
-- **Spec-based unit tests for `std.snapshot`, `std.list` and `std.map`**
-  (#1584). 25 more cases co-located as `std/<module>/test_*.ae`, covering
-  the container and lock-free-cell primitives the rest of `std` is built on
-  — `std.spec` keeps its own framework state in a `std.map`. The snapshot
-  suite pins the contracts a reader otherwise takes on trust from the doc
-  comments: `store` returns the displaced pointer rather than freeing it, a
-  failed `cas` leaves the cell untouched, and every entry point is
-  null-safe. Also pinned, as observed behaviour rather than as an
-  endorsement: `list.get` and `map.get` report an out-of-range index or an
-  unbound key as success (`err == ""`) while handing back null, so callers
-  must null-check the pointer as well as the error, and `map_has` is the
-  unambiguous membership test.
+- **Spec-based unit tests for `std.list` and `std.map`** (#1584), the
+  container primitives the rest of `std` is built on — `std.spec` keeps its
+  own framework state in a `std.map`. Pinned as observed behaviour rather
+  than as an endorsement: `list.get` and `map.get` report an out-of-range
+  index or an unbound key as success (`err == ""`) while handing back null,
+  so callers must null-check the pointer as well as the error, and
+  `map_has` is the unambiguous membership test.
+
+### Changed
+
+- **Central tests for the co-located `std` modules retired into their
+  suites** (#1584). `tests/regression/test_ids.ae`,
+  `tests/regression/test_std_actor_registry.ae`,
+  `tests/integration/lzf_roundtrip/` and `tests/integration/test_zlib_gzip.ae`
+  are removed, their coverage having been ported case-by-case into the
+  co-located suites — the migration #1584 asks for, rather than the third
+  test home it warns against. `tests/integration/zlib_roundtrip/` is kept:
+  it drives a C shim and `fs.read_binary` to exercise the AetherString
+  unwrap path inside `aether_zlib.c`, which is an integration concern a
+  unit suite cannot cover. The ported `actors` cases are strictly stronger
+  than the originals: the regression test's "looked-up ref is usable for
+  send" and cross-context routing cases printed PASS without asserting
+  anything ("No direct way to peek at the listener's state from outside"),
+  and now assert against a spy actor that records what it was sent.
 
 ## [0.563.0]
 

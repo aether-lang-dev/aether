@@ -1,23 +1,84 @@
 // std.actors unit tests (#1584) — co-located with the module.
 //
-// The module had no test of any kind before this. The registry is a
-// name -> actor_ref map with a small set of documented edge cases:
-// rebinding a name overwrites without error, unregister reports
-// whether it removed anything, and whereis on a missing name yields
-// null. Those contracts are what this covers.
+// This suite REPLACES tests/regression/test_std_actor_registry.ae, and
+// covers all eight of that test's cases plus three of its own. The
+// mapping is recorded case-by-case in the `it` descriptions below so a
+// reviewer can check nothing was dropped.
 //
-// registry_clear exists for exactly this purpose, so each `it` starts
-// from an empty registry via before_each rather than depending on the
-// order the cases run in.
+// Two of the ported cases are strictly stronger here. The original's
+// case 2 ("looked-up ref is usable for ! send") and case 8
+// ("cross-context routing") both printed PASS without asserting
+// anything — its own comment says "No direct way to peek at the
+// listener's state from outside", so a send that silently went nowhere
+// would still have passed.
+//
+// The fix is a spy actor: Spy records every Tell it is sent and hands
+// the last one back when drained. Asserting on the spy rather than on
+// the subject also exercises the reply path (Counter's `from ! Tell`),
+// which reading the subject's own state directly would skip — the
+// registry is only useful if a ref recovered from it can both receive
+// AND reply.
+//
+// registry_clear exists for test isolation, so each `it` starts from an
+// empty registry via before_each rather than depending on case order.
 
 import std.spec
 import std.actors
 
-message Ping {}
+message Bump {}
+// Ask the subject to report its count to `from`. The reply lands on a
+// Spy, which is what makes the send observable to an assertion.
+message Ask { from: actor_ref }
+message Tell { value: int }
+// Drain the spy's record into a caller-supplied cell. A ref cell is
+// the only channel out of an actor here; passing it in a message keeps
+// it off the actor's own state, where it segfaults.
+message Drain { sink: ptr }
 
-actor Probe {
-    state n = 0
-    receive { Ping() -> { n = n + 1 } }
+actor Counter {
+    state count = 0
+    receive {
+        Bump() -> { count = count + 1 }
+        Ask(from) -> { from ! Tell { value: count } }
+    }
+}
+
+// Test double. Records what it was told so an assertion can check that
+// a message actually arrived, rather than that nothing crashed.
+actor Spy {
+    state last = -1
+    state calls = 0
+    receive {
+        Tell(value) -> { last = value; calls = calls + 1 }
+        Drain(sink) -> { ref_set(sink, last) }
+    }
+}
+
+// Looks the counter up by name and bumps it. Deliberately takes NO
+// actor_ref parameter: this is the cross-context pattern the registry
+// exists for — a @c_callback handler that cannot carry an Aether-typed
+// argument still reaching an actor by name.
+fn bump_via_registry() {
+    a = actors.whereis("counter")
+    a ! Bump {}
+}
+
+// Send `n` bumps to `target`, then ask it to report its count to a
+// fresh spy and return what the spy recorded. -1 means the spy was
+// never told anything, which is what a silently-dropped send looks
+// like.
+fn count_via_spy(target: actor_ref, n: int) -> int {
+    for (i = 0; i < n; i = i + 1) {
+        target ! Bump {}
+    }
+    sleep(50)
+    spy = spawn(Spy())
+    target ! Ask { from: spy }
+    sleep(50)
+    cell = ref(-1)
+    spy ! Drain { sink: cell }
+    sleep(50)
+    return ref_get(cell)
 }
 
 main() {
@@ -28,55 +89,104 @@ main() {
             actors.registry_clear()
         }
 
-        spec.it("starts empty after a clear") callback {
-            spec.assert_eq(actors.registry_size(), 0, "size is 0")
+        // --- ported: case 1 (register + whereis returns a non-null ref)
+        spec.it("returns the registered ref from whereis") callback {
+            a = spawn(Counter())
+            actors.register("counter", a)
+            spec.assert_not_null(actors.whereis("counter"),
+                "whereis returns a non-null ref")
         }
 
-        spec.it("binds a name and looks it up") callback {
-            a = spawn(Probe())
-            actors.register("probe", a)
-            spec.assert_eq(actors.is_registered("probe"), 1, "probe is bound")
+        // --- ported: case 2, strengthened. The original could not
+        // observe the effect and printed PASS unconditionally.
+        spec.it("returns a ref that is usable for sending") callback {
+            a = spawn(Counter())
+            actors.register("counter", a)
+            looked_up = actors.whereis("counter")
+            spec.assert_eq(count_via_spy(looked_up, 3), 3,
+                "three bumps through the looked-up ref land")
+        }
+
+        // --- ported: case 8, strengthened the same way.
+        spec.it("routes from a function with no actor_ref parameter") callback {
+            a = spawn(Counter())
+            actors.register("counter", a)
+            bump_via_registry()
+            bump_via_registry()
+            spec.assert_eq(count_via_spy(a, 0), 2,
+                "both registry-routed bumps reached the actor")
+        }
+
+        // --- ported: case 3 (is_registered reports membership)
+        spec.it("reports membership for bound and unbound names") callback {
+            a = spawn(Counter())
+            actors.register("counter", a)
+            spec.assert_eq(actors.is_registered("counter"), 1,
+                "counter is bound")
+            spec.assert_eq(actors.is_registered("ghost"), 0,
+                "ghost is not bound")
+        }
+
+        // --- ported: case 4 (registry_size tracks live bindings)
+        spec.it("tracks the number of live bindings") callback {
+            spec.assert_eq(actors.registry_size(), 0, "starts empty")
+            a = spawn(Counter())
+            actors.register("counter", a)
             spec.assert_eq(actors.registry_size(), 1, "one binding")
+            b = spawn(Counter())
+            actors.register("auditor", b)
+            spec.assert_eq(actors.registry_size(), 2, "two bindings")
         }
 
-        spec.it("reports an unbound name as not registered") callback {
-            spec.assert_eq(actors.is_registered("absent"), 0,
-                "absent is not bound")
+        // --- ported: case 5 (unregister removes, or no-ops)
+        spec.it("removes a binding and reports that it did") callback {
+            a = spawn(Counter())
+            actors.register("auditor", a)
+            spec.assert_eq(actors.unregister("auditor"), 1,
+                "unregister returns 1")
+            spec.assert_eq(actors.is_registered("auditor"), 0,
+                "no longer bound")
+            spec.assert_eq(actors.unregister("auditor"), 0,
+                "a second unregister returns 0")
         }
 
+        // --- ported: case 6 (register overwrites, last writer wins)
         spec.it("overwrites a rebound name without error") callback {
-            // Documented: register on an existing name replaces the
-            // binding rather than failing, and does not grow the map.
-            a = spawn(Probe())
-            b = spawn(Probe())
-            actors.register("dup", a)
-            actors.register("dup", b)
+            a = spawn(Counter())
+            b = spawn(Counter())
+            actors.register("counter", a)
+            actors.register("counter", b)
             spec.assert_eq(actors.registry_size(), 1,
                 "rebinding does not add an entry")
-            spec.assert_eq(actors.is_registered("dup"), 1, "dup still bound")
+            spec.assert_not_null(actors.whereis("counter"),
+                "whereis still resolves after a rebind")
         }
 
-        spec.it("removes a binding and reports that it did") callback {
-            a = spawn(Probe())
-            actors.register("gone", a)
-            spec.assert_eq(actors.unregister("gone"), 1, "unregister returns 1")
-            spec.assert_eq(actors.is_registered("gone"), 0, "no longer bound")
-            spec.assert_eq(actors.registry_size(), 0, "size back to 0")
+        // --- ported: case 7 (registry_clear wipes everything)
+        spec.it("clears every binding at once") callback {
+            a = spawn(Counter())
+            b = spawn(Counter())
+            actors.register("x", a)
+            actors.register("y", b)
+            actors.registry_clear()
+            spec.assert_eq(actors.registry_size(), 0, "registry emptied")
+            spec.assert_eq(actors.is_registered("x"), 0, "x gone")
         }
 
-        spec.it("reports removing an unbound name as no-op") callback {
-            spec.assert_eq(actors.unregister("never"), 0,
+        // --- new: not covered by the regression test
+        spec.it("reports removing an unbound name as a no-op") callback {
+            spec.assert_eq(actors.unregister("never-bound"), 0,
                 "unregister of an unbound name returns 0")
         }
 
-        spec.it("tracks several bindings independently") callback {
-            a = spawn(Probe())
-            b = spawn(Probe())
-            c = spawn(Probe())
+        // --- new: not covered by the regression test
+        spec.it("keeps several bindings independent") callback {
+            a = spawn(Counter())
+            b = spawn(Counter())
+            c = spawn(Counter())
             actors.register("one", a)
             actors.register("two", b)
             actors.register("three", c)
-            spec.assert_eq(actors.registry_size(), 3, "three bindings")
             actors.unregister("two")
             spec.assert_eq(actors.registry_size(), 2, "two left")
             spec.assert_eq(actors.is_registered("one"), 1, "one survives")
@@ -84,14 +194,10 @@ main() {
             spec.assert_eq(actors.is_registered("three"), 1, "three survives")
         }
 
-        spec.it("clears every binding at once") callback {
-            a = spawn(Probe())
-            b = spawn(Probe())
-            actors.register("x", a)
-            actors.register("y", b)
-            actors.registry_clear()
-            spec.assert_eq(actors.registry_size(), 0, "registry emptied")
-            spec.assert_eq(actors.is_registered("x"), 0, "x gone")
+        // --- new: not covered by the regression test
+        spec.it("resolves an unbound name to null") callback {
+            spec.assert_null(actors.whereis("never-bound"),
+                "whereis on an unbound name is null")
         }
     }
 
