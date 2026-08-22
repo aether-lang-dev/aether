@@ -942,10 +942,29 @@ int run_cross_build(const char* c_file, const char* out_file,
             if (strstr(ztriple, "wasm") && emit_lib) {
                 wasm_lib_flags = wasm_export_flags(c_file, g_wasm_exports);
             }
+            /* --emit=lib on an ordinary ELF/PE target (#1648): the same
+             * -fPIC -shared the native path uses, chosen by the TARGET
+             * rather than by the host, since that is the whole point of
+             * cross-compiling. Apple and wasm are handled above and keep
+             * their own flags.
+             *
+             * Windows also needs --export-all-symbols, for the reason
+             * #993 documents on the native path: GCC's auto-export
+             * heuristic silently switches OFF as soon as any symbol
+             * carries an explicit __declspec(dllexport) — an --extra C
+             * shim is enough — and the aether_<name> catalog exports
+             * then vanish from the .dll. On ELF they are exported by
+             * default visibility, so the flag is Windows-only. */
+            const char* elf_pe_lib_flags = "";
+            if (emit_lib && !is_apple && !strstr(ztriple, "wasm")) {
+                elf_pe_lib_flags = strstr(ztriple, "windows")
+                    ? "-shared -fPIC -Wl,--export-all-symbols"
+                    : "-shared -fPIC";
+            }
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                "%s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
                 cc_cmd, sysroot_flag, apple_lib_flags,
-                wasm_lib_flags ? wasm_lib_flags : "",
+                wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags,
                 opt, feature_defs, tc.include_flags, c_file, ex, objdir,
                 crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
             free(wasm_lib_flags);

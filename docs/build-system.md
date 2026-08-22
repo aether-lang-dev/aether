@@ -485,10 +485,9 @@ or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
 iOS is the one cross target that does **not** go through zig: the Apple SDKs are
 Xcode-licensed and not redistributable, so `aarch64-ios`,
 `aarch64-ios-simulator` and `x86_64-ios-simulator` shell to `xcrun clang`
-instead and require a macOS host with Xcode. Unlike the zig targets, `--emit=lib`
-**is** supported there (it produces an `@rpath`-installed Mach-O dylib), because
-an iOS app is built by Xcode and what it wants from Aether is a library, not a
-standalone binary. Full details, including the sandbox restrictions that apply
+instead and require a macOS host with Xcode. `--emit=lib` there produces an
+`@rpath`-installed Mach-O dylib, because an iOS app is built by Xcode and what
+it wants from Aether is a library, not a standalone binary. Full details, including the sandbox restrictions that apply
 at runtime, are in **[cross-ios.md](cross-ios.md)**.
 
 **How it links.** The full runtime and standard library are compiled from
@@ -512,14 +511,37 @@ no sysroot** — its engine is vendored in-tree (`std/regex/pcre2/`, pinned
 upstream PCRE2 compiled by `std/regex/aether_pcre2_vendored.c`; #1389), so a
 regex-using program cross-builds self-contained for every target. A
 CROSSBUILD_SYSROOT that stages a real libpcre2-8 takes precedence over the
-vendored copy. Executables, **`--emit=csrc` and `--emit=obj`** (`--emit=lib`
-and `--emit=both` are rejected for now — they link a shared library, which the
-cross link path does not yet produce), and the host must be POSIX
-(Linux/macOS). The generated binary targets another platform, so it is not
-runnable on the build host; copy it to a matching machine (or an emulator).
+vendored copy. Executables, **`--emit=csrc`, `--emit=obj` and `--emit=lib`**
+are supported, and the host must be POSIX (Linux/macOS). The generated
+artifact targets another platform, so it is not runnable on the build host;
+copy it to a matching machine (or an emulator).
 
 `--emit=csrc` is allowed under `--target` because it never links: it writes
 the portable C, its catalog header and the JSON catalog, and stops (#1648).
+
+**`--emit=lib` under `--target`** produces a real shared library for the
+target (#1648): an ELF `.so`, a PE `.dll`, or a Mach-O `.dylib`, chosen by the
+*target* rather than the host. zig links a shared object for a target as
+readily as an executable, and the runtime and stdlib are already compiled from
+source for that target on the executable path, so `-shared -fPIC` instead of
+an executable link is the whole increment.
+
+| target | artifact | extra link flags |
+|---|---|---|
+| `*-linux`, other ELF | `.so` | `-shared -fPIC` |
+| `*-windows` | `.dll` | `-shared -fPIC -Wl,--export-all-symbols` |
+| `*-macos`, `*-ios` | `.dylib` | `-dynamiclib -install_name @rpath/<leaf>` |
+| `wasm32-*` | `.wasm` | `--no-entry --gc-sections` + `--export=` per symbol |
+
+Windows needs `--export-all-symbols` for the reason the native path documents
+(#993): GCC's auto-export heuristic switches off as soon as any symbol carries
+an explicit `__declspec(dllexport)`, and the `aether_<name>` catalog exports
+then vanish from the DLL. A Windows `--emit=lib` is named `.dll`, not `.exe` —
+the executable suffix is applied only to executables.
+
+**`--emit=both` is still rejected under `--target`**: it wants an executable
+*and* a library from one invocation, and the cross path links once. Run it
+twice with different `--emit` modes.
 That makes it the route to a **cross-compiled linkable library without
 cross-link support** — emit the C here, and let the consumer compile it for
 their target into the `.so` / `.a` / `.wasm` they need.
