@@ -39,6 +39,16 @@ version number before tagging the release.
   at 200 clients, holding near peak instead of decaying towards the
   connection-per-request rate.
 
+  A static file served through the sendfile fast path used to reach the
+  client only when the connection closed, on Darwin and the BSDs. Clearing
+  `TCP_NOPUSH` there does not send what is queued, unlike Linux's `TCP_CORK`;
+  the stack sends it when something else prompts output, and until now
+  something always did, because the worker went straight back to `recv()` on
+  the same socket. A parked connection reads nothing until the client speaks,
+  and the client is waiting for that response. The cork is now lifted before
+  the body write on those platforms, so the body write pushes headers and body
+  together, which is the coalescing the cork exists for.
+
   The poller finds a woken connection through an fd-indexed table rather than
   by scanning the parked set, so a wakeup costs the same whether four
   connections are parked or four thousand, which is the property the whole

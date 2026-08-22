@@ -267,6 +267,14 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
  * push a small headers-only segment immediately and follow with
  * separate body segments — measurable latency hit for small files.
  *
+ * The two options are not the same contract, which matters for when the
+ * cork is lifted. Clearing TCP_CORK on Linux sends what is queued. Clearing
+ * TCP_NOPUSH on Darwin and the BSDs does not: the stack sends it when
+ * something else prompts output, and TCP_NODELAY does not prompt it either
+ * (measured). So on those platforms the cork is lifted BEFORE the body write
+ * and the body write is what pushes headers and body together, which is the
+ * coalescing this exists for. See conn_uncork_for_body.
+ *
  * No-op on Windows (the fast path doesn't run there) and on
  * platforms without either socket option. Errors are non-fatal:
  * worst case the response still goes out, just less coalesced. */
@@ -284,6 +292,23 @@ static void conn_cork(HttpConn* c, int on) {
 #  else
     (void)v;
 #  endif
+#endif
+}
+
+/* Lift the cork on the stacks where the following write is what pushes.
+ *
+ * Nothing prompted that write once a connection could be parked instead of
+ * read from: a worker used to go straight back to recv() on the same socket
+ * and the read path prompted the send, so a sendfile'd file reached the
+ * client. A parked connection reads nothing until the client speaks, and the
+ * client is waiting for this response, so the bytes sat in the kernel until
+ * the connection closed — a 5-second stall for a static file on macOS, and a
+ * hung request for any client that waits longer than it does. */
+static void conn_uncork_for_body(HttpConn* c) {
+#if !defined(_WIN32) && !defined(TCP_CORK) && defined(TCP_NOPUSH)
+    conn_cork(c, 0);
+#else
+    (void)c;
 #endif
 }
 
@@ -413,6 +438,7 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
                 res->sendfile_fd = -1;
                 force_close = 1;
             } else {
+                conn_uncork_for_body(conn);
                 long long sent = conn_sendfile_drain(conn, res->sendfile_fd,
                                                     res->sendfile_size);
                 conn_cork(conn, 0);
