@@ -16,7 +16,7 @@ header comment is the authoritative description.
 | `std.arena` | Bulk allocator: many allocations, released in one shot. | 14 | [guide](../std/arena/README.md) · [source](../std/arena/module.ae) |
 | `std.audio` | Audio playback: WAV and PCM loading, device control, volume. | 23 | [module source](../std/audio/module.ae) |
 | `std.audit` | Query the sandbox audit trail. | 9 | [module source](../std/audit/module.ae) |
-| `std.bignum` | Arbitrary-precision integers. | 25 | [module source](../std/bignum/module.ae) |
+| `std.bignum` | Arbitrary-precision integers. | 25 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
 | `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [module source](../std/capsicum/module.ae) |
@@ -24,7 +24,7 @@ header comment is the authoritative description.
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [module source](../std/casper/module.ae) |
 | `std.cbor` | CBOR encoding and decoding (RFC 8949). | 45 | [module source](../std/cbor/module.ae) |
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [module source](../std/clapae/module.ae) |
-| `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [module source](../std/collections/module.ae) |
+| `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 12 | [module source](../std/config/module.ae) |
 | `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 46 | [full section](#cryptography-stdcryptography) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 14 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
@@ -32,7 +32,7 @@ header comment is the authoritative description.
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [module source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [module source](../std/file/module.ae) |
-| `std.floatarr` | Fixed-size packed-double buffer. | 13 | [module source](../std/floatarr/module.ae) |
+| `std.floatarr` | Fixed-size packed-double buffer. | 13 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [module source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [module source](../std/host/module.ae) |
@@ -44,22 +44,22 @@ header comment is the authoritative description.
 | `std.json` | JSON parsing, building and serialisation. | 54 | [full section](#json-stdjson) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [module source](../std/language/module.ae) |
-| `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [module source](../std/list/module.ae) |
+| `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
-| `std.longarr` | Fixed-size packed-long buffer. | 13 | [module source](../std/longarr/module.ae) |
-| `std.lzf` | One-shot LZF compression and decompression. | 12 | [module source](../std/lzf/module.ae) |
-| `std.map` | Hash map, re-exported from `std.collections`. | 14 | [module source](../std/map/module.ae) |
+| `std.longarr` | Fixed-size packed-long buffer. | 13 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
+| `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`. | 14 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 31 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 94 | [module source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [module source](../std/message/module.ae) |
-| `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [module source](../std/msgpack/module.ae) |
+| `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [module source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [module source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 10 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 75 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [module source](../std/path/module.ae) |
-| `std.plural` | CLDR plural-rule categories. | 2 | [module source](../std/plural/module.ae) |
+| `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |

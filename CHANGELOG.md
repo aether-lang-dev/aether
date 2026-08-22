@@ -34,11 +34,15 @@ version number before tagging the release.
 - **Co-located module guides, compiled and run in CI** (#1523). A module's
   worked example now lives beside it as `std/<mod>/README.md`, the same shape
   #1584 used for tests, and `docs/stdlib-reference.md` stays a generated index
-  that links to it. Twenty-five modules covered so far: the Common tier
+  that links to it. Thirty-six of the 71 modules are covered: the Common tier
   (`url`, `encoding`, `set`, `deque`, `sort`, `time`, `regex`, `uuid`,
   `number`), `bits` and `hash`, the allocator family (`arena`, `alloc`,
-  `tracking`), the identifier family (`nanoid`, `ulid`, `ksuid`, `tsid`) and
-  `strbuilder`, `pqueue`, `intarr`, `bytes`, `math`.
+  `tracking`), the identifier family (`nanoid`, `ulid`, `ksuid`, `tsid`), the
+  containers (`strbuilder`, `pqueue`, `intarr`, `longarr`, `floatarr`,
+  `bytes`, `list`, `map`, `collections`), the formats (`json`, `msgpack`,
+  `lzf`, `zlib`), and `math`, `bignum`, `plural`. The remainder need external
+  state — a socket, a device, a language runtime — so their examples want a
+  harness rather than a `run` block.
 - **A `run` block label for documentation examples** (#1523). ` ```aether,run `
   compiles an example, runs it, and requires its stdout to match the
   ` ```output ` block after it. Compiling proves a function exists; running
