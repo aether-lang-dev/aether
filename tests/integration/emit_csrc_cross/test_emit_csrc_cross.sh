@@ -13,8 +13,9 @@
 #   - the emitted C is target-NEUTRAL: byte-identical across triples and to
 #     the native emit, since platform selection stays in #if and is resolved
 #     by the consumer's compiler
-#   - --emit=lib / obj / both under --target are still rejected up front,
-#     with the diagnostic naming csrc as the supported mode
+#   - --emit=both under --target is still rejected up front, with a
+#     diagnostic naming the two-invocation workaround (--emit=lib itself
+#     now works — see tests/integration/cross_emit_lib/)
 
 set -e
 
@@ -156,21 +157,23 @@ else
     echo "  [skip] wasm32-wasi checks: zig not on PATH"
 fi
 
-# --- 4. the linking emit modes are still rejected, up front ---
+# --- 4. --emit=both is still rejected, up front ---
 # Up front matters: --emit=both re-dispatches as exe, and without an explicit
 # check it reaches the cross LINKER and dies with "undefined symbol: main" on
 # a source that has no main by design.
-# aarch64-linux specifically: --emit=lib IS supported on Apple targets
-# (-dynamiclib) and, since the wasm-lib work, on wasm32-wasi (--no-entry plus
-# an export list). It remains unsupported on the plain zig triples, which is
-# what this loop pins.
-for mode in lib both; do
-    if "$AE" build --target=aarch64-linux --emit="$mode" "$SRC" -o "$TMP/x" \
-            >"$TMP/err" 2>&1; then
-        fail "--emit=$mode under --target should be rejected but succeeded"
-    fi
-    grep -q 'supports executables, --emit=csrc and --emit=obj' "$TMP/err" \
-        || fail "--emit=$mode gave the wrong diagnostic: $(head -1 "$TMP/err")"
-done
+#
+# --emit=lib is no longer in this list: it produces a real shared library for
+# every target now (#1648), covered by tests/integration/cross_emit_lib/.
+# --emit=both stays rejected because it wants an executable AND a library from
+# one invocation and the cross path links once, so the diagnostic has to name
+# the workaround rather than claim the mode is unsupported.
+if "$AE" build --target=aarch64-linux --emit=both "$SRC" -o "$TMP/x" \
+        >"$TMP/err" 2>&1; then
+    fail "--emit=both under --target should be rejected but succeeded"
+fi
+grep -q 'cannot do --emit=both' "$TMP/err" \
+    || fail "--emit=both gave the wrong diagnostic: $(head -1 "$TMP/err")"
+grep -q 'run it twice' "$TMP/err" \
+    || fail "--emit=both rejected without naming the workaround"
 
-echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); lib/both still rejected on non-wasm/non-Apple"
+echo "  PASS: csrc/obj under --target (incl. wasm32-wasi); --emit=both still rejected"
