@@ -91,8 +91,34 @@ main() {
     if snap == null {
         fail("set.items returned null snapshot")
     }
+    // Reading the snapshot (#1724). Before this, `items` could only be
+    // allocated and freed -- nothing in the tree ever read an item out of one,
+    // which is how the gap survived unnoticed.
+    isz = set.items_size(snap)
+    if isz != set.size(s) {
+        fail("items_size ${isz} != set size ${set.size(s)}")
+    }
+    ii = 0
+    while ii < isz {
+        if set.items_get(snap, ii) == "" {
+            fail("in-range items_get(${ii}) came back empty")
+        }
+        ii = ii + 1
+    }
+    if set.items_get(snap, isz) != "" {
+        fail("items_get past the end should be empty")
+    }
+    if set.items_get(snap, -1) != "" {
+        fail("items_get at a negative index should be empty")
+    }
+    if set.items_size(null) != 0 {
+        fail("items_size(null) should be 0")
+    }
+    if set.items_get(null, 0) != "" {
+        fail("items_get(null) should be empty")
+    }
     set.items_free(snap)
-    println("PASS 6: items snapshots the members")
+    println("PASS 6: items snapshots the members, and the snapshot can be read")
 
     // 7. keys are copied, not aliased
     set.clear(s)

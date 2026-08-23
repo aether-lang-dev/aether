@@ -1,0 +1,71 @@
+// Deterministic output from a map: the case #1722 and #1724 exist for.
+//
+// "Print the word counts alphabetically" was not expressible before these
+// landed. Map iteration order is bucket order and unspecified, so a
+// deterministic listing needs two things that were both missing: a way to
+// read the key snapshot (#1724), and a way to sort strings (#1722).
+//
+// This test pins the whole shape end to end, so neither half can regress
+// into being individually present but jointly useless.
+
+import std.map
+import std.sort
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    words = ["pear", "apple", "fig", "apple", "banana", "fig", "apple"]
+    m = map.map_new()
+    i = 0
+    while i < 7 {
+        w = words[i]
+        cur, _ = map.get(m, w)
+        n = 0
+        if cur != null {
+            n, _ = string.to_int(cur)
+        }
+        map.put(m, w, "${n + 1}")
+        i = i + 1
+    }
+
+    k, e = map.keys(m)
+    if e != "" { fail("map.keys: ${e}") }
+    count = map.keys_size(k)
+    if count != 4 { fail("expected 4 distinct words, got ${count}") }
+
+    // Copy the borrowed keys into an array the sort can reorder. The snapshot
+    // itself must not be reordered: its entries are borrowed from live map
+    // entries and it is freed by count.
+    ordered = ["", "", "", ""]
+    j = 0
+    while j < count {
+        ordered[j] = map.keys_get(k, j)
+        j = j + 1
+    }
+    sort.strings(ordered, count)
+
+    if string.compare(ordered[0], "apple") != 0 { fail("first key ${ordered[0]}, want apple") }
+    if string.compare(ordered[1], "banana") != 0 { fail("second key ${ordered[1]}, want banana") }
+    if string.compare(ordered[2], "fig") != 0 { fail("third key ${ordered[2]}, want fig") }
+    if string.compare(ordered[3], "pear") != 0 { fail("fourth key ${ordered[3]}, want pear") }
+
+    // Counts still reachable through the sorted keys.
+    a, _ = map.get(m, ordered[0])
+    av, _ = string.to_int(a)
+    if av != 3 { fail("apple count ${av}, want 3") }
+
+    f, _ = map.get(m, ordered[2])
+    fv, _ = string.to_int(f)
+    if fv != 2 { fail("fig count ${fv}, want 2") }
+
+    map.keys_free(k)
+    map.map_free(m)
+
+    println("PASS: map keys read, sorted, and printed in a deterministic order")
+}

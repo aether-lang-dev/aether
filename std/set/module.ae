@@ -25,7 +25,9 @@
 exports(
     aether_set_new, aether_set_add, aether_set_has, aether_set_remove, aether_set_size, aether_set_clear, aether_set_free,
     aether_set_items_raw, aether_set_items_free,
-    new, add, contains, remove, size, clear, free, items, items_free
+    map_keys_size_raw, map_keys_get_raw,
+    new, add, contains, remove, size, clear, free, items, items_free,
+    items_size, items_get
 )
 
 // ---- raw externs (std/collections/aether_set.c) ----
@@ -38,6 +40,10 @@ extern aether_set_clear(set: ptr)
 extern aether_set_free(set: ptr)
 extern aether_set_items_raw(set: ptr) -> ptr
 extern aether_set_items_free(items: ptr)
+// aether_set_items_raw returns the same MapKeys snapshot map.keys does, so
+// the read side is literally the same two functions (#1724).
+extern map_keys_size_raw(items: ptr) -> int
+extern map_keys_get_raw(items: ptr, index: int) -> string
 
 // ---- Aether-side wrappers ----
 
@@ -94,4 +100,30 @@ items(set: ptr) -> {
 // Release a snapshot returned by `set.items`.
 items_free(items: ptr) {
     aether_set_items_free(items)
+}
+
+// ---- reading an items snapshot (#1724) ------------------------------------
+//
+// Same contract as map.keys_size / map.keys_get, because `items` returns the
+// same snapshot type: the strings are BORROWED, valid until `items_free` and
+// only while the set still holds them, and iteration order is unspecified.
+// Sort (std.sort.strings) for a deterministic order.
+
+items_size(items: ptr) -> int {
+    if items == null {
+        return 0
+    }
+    return map_keys_size_raw(items)
+}
+
+// Out of range or null returns "" rather than trapping. An empty string is
+// also a legitimate item, so callers who must distinguish check items_size.
+items_get(items: ptr, index: int) -> string {
+    if items == null {
+        return ""
+    }
+    if index < 0 || index >= map_keys_size_raw(items) {
+        return ""
+    }
+    return map_keys_get_raw(items, index)
 }
