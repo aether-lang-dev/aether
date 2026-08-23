@@ -9,44 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.576.0]
-
-### Added
-
-- **`std.bignum` reads and writes decimal** (#1723). `to_hex` was the only way
-  out and `from_int` (bounded by `long`) or `from_bytes` the only ways in, so a
-  value larger than 64 bits could be computed but neither entered nor printed
-  in the base every published test vector and task statement uses — 25!
-  computed correctly and could only be shown as `cd4a0619fb0907bc00000`.
-  `to_decimal` renders base 10 with a leading `-` for negatives and `"0"` for
-  zero; `from_decimal` parses it back as `(value, err)`, strictly: an optional
-  `-` then ASCII digits and nothing else, so malformed input is an error rather
-  than a silently truncated number. Conversion divides by 10^9 — nine digits a
-  pass — rather than one digit at a time, so a thousand-digit value costs about
-  a ninth of the big-integer divisions the naive form would.
-
-- **`std.sort` sorts strings, and takes comparators** (#1722). `sort.strings` /
-  `sort.string_search` order by `std.string.compare` — lexicographic byte order,
-  binary-safe — and `ints_by` / `longs_by` / `floats_by` / `strings_by` take a
-  comparator for any other order. Previously the module sorted only `int`,
-  `long` and `float` arrays with no way to express a different ordering, so
-  anything else meant hand-writing a sort at each call site. `string[]` carries
-  no length, so the string forms take an explicit count. Separate `_by` names
-  rather than an optional argument, so the default path keeps a direct
-  comparison instead of an indirect call per element. Sorts remain in place and
-  are still not stable.
-
-- **`std.map` and `std.set` key/item snapshots can now be read** (#1724).
-  `map.keys` and `set.items` returned a snapshot that could only be held and
-  freed: there was no size or element accessor, so a map's key set was
-  unreachable from Aether and callers kept a parallel array of keys purely to
-  have something iterable. `keys_size`/`keys_get` and `items_size`/`items_get`
-  expose what the C snapshot already held — a contiguous array with an exact
-  count. The returned strings are borrowed, valid until the snapshot is freed
-  and only while the container still holds them; iteration order stays
-  unspecified, so sort for deterministic output. Out-of-range and null return
-  `""` rather than trapping. Nothing in the tree had ever read a key from a
-  snapshot, which is how the gap went unnoticed.
+## [current]
 
 ### Changed
 
@@ -102,6 +65,45 @@ version number before tagging the release.
   moving under 0.3%. Under `strace`, `getpeername` disappears from the profile
   and `getsockname` falls from 133,162 calls to 50. The request still owns its
   own copies, so `http_request_free`'s contract is unchanged.
+
+## [0.576.0]
+
+### Added
+
+- **`std.bignum` reads and writes decimal** (#1723). `to_hex` was the only way
+  out and `from_int` (bounded by `long`) or `from_bytes` the only ways in, so a
+  value larger than 64 bits could be computed but neither entered nor printed
+  in the base every published test vector and task statement uses — 25!
+  computed correctly and could only be shown as `cd4a0619fb0907bc00000`.
+  `to_decimal` renders base 10 with a leading `-` for negatives and `"0"` for
+  zero; `from_decimal` parses it back as `(value, err)`, strictly: an optional
+  `-` then ASCII digits and nothing else, so malformed input is an error rather
+  than a silently truncated number. Conversion divides by 10^9 — nine digits a
+  pass — rather than one digit at a time, so a thousand-digit value costs about
+  a ninth of the big-integer divisions the naive form would.
+
+- **`std.sort` sorts strings, and takes comparators** (#1722). `sort.strings` /
+  `sort.string_search` order by `std.string.compare` — lexicographic byte order,
+  binary-safe — and `ints_by` / `longs_by` / `floats_by` / `strings_by` take a
+  comparator for any other order. Previously the module sorted only `int`,
+  `long` and `float` arrays with no way to express a different ordering, so
+  anything else meant hand-writing a sort at each call site. `string[]` carries
+  no length, so the string forms take an explicit count. Separate `_by` names
+  rather than an optional argument, so the default path keeps a direct
+  comparison instead of an indirect call per element. Sorts remain in place and
+  are still not stable.
+
+- **`std.map` and `std.set` key/item snapshots can now be read** (#1724).
+  `map.keys` and `set.items` returned a snapshot that could only be held and
+  freed: there was no size or element accessor, so a map's key set was
+  unreachable from Aether and callers kept a parallel array of keys purely to
+  have something iterable. `keys_size`/`keys_get` and `items_size`/`items_get`
+  expose what the C snapshot already held — a contiguous array with an exact
+  count. The returned strings are borrowed, valid until the snapshot is freed
+  and only while the container still holds them; iteration order stays
+  unspecified, so sort for deterministic output. Out-of-range and null return
+  `""` rather than trapping. Nothing in the tree had ever read a key from a
+  snapshot, which is how the gap went unnoticed.
 
 ## [0.575.0]
 
