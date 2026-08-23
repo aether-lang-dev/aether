@@ -13,6 +13,18 @@ version number before tagging the release.
 
 ### Added
 
+- **`std.bignum` reads and writes decimal** (#1723). `to_hex` was the only way
+  out and `from_int` (bounded by `long`) or `from_bytes` the only ways in, so a
+  value larger than 64 bits could be computed but neither entered nor printed
+  in the base every published test vector and task statement uses — 25!
+  computed correctly and could only be shown as `cd4a0619fb0907bc00000`.
+  `to_decimal` renders base 10 with a leading `-` for negatives and `"0"` for
+  zero; `from_decimal` parses it back as `(value, err)`, strictly: an optional
+  `-` then ASCII digits and nothing else, so malformed input is an error rather
+  than a silently truncated number. Conversion divides by 10^9 — nine digits a
+  pass — rather than one digit at a time, so a thousand-digit value costs about
+  a ninth of the big-integer divisions the naive form would.
+
 - **`std.sort` sorts strings, and takes comparators** (#1722). `sort.strings` /
   `sort.string_search` order by `std.string.compare` — lexicographic byte order,
   binary-safe — and `ints_by` / `longs_by` / `floats_by` / `strings_by` take a
