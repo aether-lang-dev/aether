@@ -700,3 +700,27 @@ void map_keys_free(MapKeys* keys) {
     aether_caps_free(keys, sizeof(MapKeys));
 }
 
+/* Read side of the snapshot (#1724).
+ *
+ * map_keys_raw already produces a contiguous AetherString* array with an exact
+ * count, but nothing exposed a way to look inside it, so an Aether caller could
+ * allocate and free a snapshot and never read a key from it. These two are that
+ * missing half.
+ *
+ * The returned string is BORROWED from the live map entry: it is valid until
+ * map_keys_free, and only while the map still holds that entry. Mutating the
+ * map after taking a snapshot does not update the snapshot, and a key removed
+ * from the map leaves a dangling pointer here. Callers who need to outlive the
+ * map must retain or copy. Out-of-range and NULL return NULL rather than
+ * trapping, so a bad index is a visible null instead of a wild read. */
+int map_keys_size_raw(MapKeys* keys) {
+    if (!keys) return 0;
+    return keys->count;
+}
+
+AetherString* map_keys_get_raw(MapKeys* keys, int index) {
+    if (!keys || !keys->keys) return NULL;
+    if (index < 0 || index >= keys->count) return NULL;
+    return keys->keys[index];
+}
+

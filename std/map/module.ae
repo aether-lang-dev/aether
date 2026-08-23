@@ -9,7 +9,8 @@
 exports(
     map_new, map_put_raw, map_put_string_owned, map_get_raw, map_has, map_remove,
     map_size, map_clear, map_free, map_keys_raw, map_keys_free,
-    put, get, keys
+    map_keys_size_raw, map_keys_get_raw,
+    put, get, keys, keys_size, keys_get
 )
 
 extern map_new() -> ptr
@@ -30,6 +31,8 @@ extern map_clear(map: ptr)
 extern map_free(map: ptr)
 extern map_keys_raw(map: ptr) -> ptr
 extern map_keys_free(keys: ptr)
+extern map_keys_size_raw(keys: ptr) -> int
+extern map_keys_get_raw(keys: ptr, index: int) -> string
 
 // Insert or update a key-value pair. Returns "" on success, error on
 // failure (null map/key or OOM).
@@ -64,4 +67,39 @@ keys(map: ptr) -> {
         return null, "allocation failed"
     }
     return k, ""
+}
+
+// ---- reading a keys snapshot (#1724) --------------------------------------
+//
+// `keys` hands back a snapshot; these read it. Before this pair the snapshot
+// could only be allocated and freed, so a map's key set was unreachable from
+// Aether and callers kept a parallel array of keys purely to have something
+// iterable.
+//
+// The strings are BORROWED from the live map: valid until `keys_free`, and
+// only while the map still holds that entry. The snapshot does not track
+// later mutation -- a key removed from the map leaves a dangling entry here.
+// Retain or copy anything that must outlive either.
+//
+// Iteration order is bucket order and is UNSPECIFIED. Callers who need a
+// deterministic order sort the keys (std.sort.strings).
+
+keys_size(keys: ptr) -> int {
+    if keys == null {
+        return 0
+    }
+    return map_keys_size_raw(keys)
+}
+
+// Out of range or null returns "" rather than trapping, so a bad index is a
+// visible empty string instead of a wild read. An empty string is also a
+// legitimate key, so callers who must distinguish check keys_size first.
+keys_get(keys: ptr, index: int) -> string {
+    if keys == null {
+        return ""
+    }
+    if index < 0 || index >= map_keys_size_raw(keys) {
+        return ""
+    }
+    return map_keys_get_raw(keys, index)
 }

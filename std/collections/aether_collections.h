@@ -81,6 +81,12 @@ typedef struct {
 MapKeys* map_keys_raw(HashMap* map);
 void map_keys_free(MapKeys* keys);
 
+// Read a snapshot. The returned string is borrowed: valid until
+// map_keys_free, and only while the map still holds that entry. Out-of-range
+// or NULL yields NULL.
+int map_keys_size_raw(MapKeys* keys);
+AetherString* map_keys_get_raw(MapKeys* keys, int index);
+
 // -------------------------------------------------------------------
 // IntArray — fixed-size packed int buffer with O(1) random access.
 //

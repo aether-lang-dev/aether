@@ -14,8 +14,12 @@
 
 exports(
     ints, longs, floats,
-    int_search, long_search, float_search
+    int_search, long_search, float_search,
+    strings, string_search,
+    ints_by, longs_by, floats_by, strings_by
 )
+
+import std.string
 
 // ---- array externs (bound to the same C the array modules use) -----------
 extern intarr_size(arr: ptr) -> int
@@ -176,4 +180,205 @@ float_search(arr: ptr, x: double) -> int {
         if v < x { lo = mid + 1 } else { hi = mid }
     }
     return lo
+}
+
+// ---- strings --------------------------------------------------------------
+//
+// `string[]` is a bare C array with no carried length, unlike the intarr /
+// longarr / floatarr handles above, so these take an explicit element count.
+// Passing a count larger than the array reads out of bounds exactly as it
+// would in C -- the array does not know its own size and cannot check.
+//
+// Ordering is std.string.compare: lexicographic BYTE order, binary-safe
+// (embedded NULs take part). That is the same default C, Go and Zig use.
+// Locale-aware collation is a different question and stays in contrib/i18n.
+
+strings(arr: string[], n: int) {
+    if n < 2 { return }
+    gap = 1
+    idx = 0
+    while idx < 8 && CIURA[idx] < n {
+        gap = CIURA[idx]
+        idx = idx + 1
+    }
+    while gap < n / 2 {
+        gap = (gap * 9) / 4
+    }
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = arr[i]
+            j = i
+            while j >= gap && string.compare(arr[j - gap], tmp) > 0 {
+                arr[j] = arr[j - gap]
+                j = j - gap
+            }
+            arr[j] = tmp
+            i = i + 1
+        }
+        if gap == 1 {
+            gap = 0
+        } else {
+            gap = (gap * 4) / 9
+            if gap < 1 { gap = 1 }
+        }
+    }
+}
+
+// Lower bound: the index of the first element not ordered before `x`, which
+// is where `x` would be inserted to keep the array sorted. Equal to `n` when
+// every element sorts before `x`. Same contract as int_search.
+string_search(arr: string[], n: int, x: string) -> int {
+    lo = 0
+    hi = n
+    while lo < hi {
+        mid = lo + (hi - lo) / 2
+        if string.compare(arr[mid], x) < 0 { lo = mid + 1 } else { hi = mid }
+    }
+    return lo
+}
+
+// ---- comparator forms -----------------------------------------------------
+//
+// `cmp(a, b)` returns <0 when a sorts before b, 0 when they tie, >0 when a
+// sorts after. It must be a strict weak ordering: an inconsistent comparator
+// gives an unspecified permutation, not a crash, but not a sorted array
+// either.
+//
+// Separate names rather than an optional argument on `ints`/`strings` so the
+// default path keeps a direct comparison instead of an indirect call per
+// element -- these sorts are in place and hot, and the natural order is what
+// almost every caller wants.
+//
+// Not stable, like every sort in this module.
+
+ints_by(arr: ptr, cmp: fn(int, int) -> int) {
+    n = intarr_size(arr)
+    if n < 2 { return }
+    gap = 1
+    idx = 0
+    while idx < 8 && CIURA[idx] < n {
+        gap = CIURA[idx]
+        idx = idx + 1
+    }
+    while gap < n / 2 {
+        gap = (gap * 9) / 4
+    }
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = intarr_get_unchecked(arr, i)
+            j = i
+            while j >= gap && cmp(intarr_get_unchecked(arr, j - gap), tmp) > 0 {
+                intarr_set_unchecked(arr, j, intarr_get_unchecked(arr, j - gap))
+                j = j - gap
+            }
+            intarr_set_unchecked(arr, j, tmp)
+            i = i + 1
+        }
+        if gap == 1 {
+            gap = 0
+        } else {
+            gap = (gap * 4) / 9
+            if gap < 1 { gap = 1 }
+        }
+    }
+}
+
+longs_by(arr: ptr, cmp: fn(long, long) -> int) {
+    n = longarr_size(arr)
+    if n < 2 { return }
+    gap = 1
+    idx = 0
+    while idx < 8 && CIURA[idx] < n {
+        gap = CIURA[idx]
+        idx = idx + 1
+    }
+    while gap < n / 2 {
+        gap = (gap * 9) / 4
+    }
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = longarr_get_unchecked(arr, i)
+            j = i
+            while j >= gap && cmp(longarr_get_unchecked(arr, j - gap), tmp) > 0 {
+                longarr_set_unchecked(arr, j, longarr_get_unchecked(arr, j - gap))
+                j = j - gap
+            }
+            longarr_set_unchecked(arr, j, tmp)
+            i = i + 1
+        }
+        if gap == 1 {
+            gap = 0
+        } else {
+            gap = (gap * 4) / 9
+            if gap < 1 { gap = 1 }
+        }
+    }
+}
+
+floats_by(arr: ptr, cmp: fn(double, double) -> int) {
+    n = floatarr_size(arr)
+    if n < 2 { return }
+    gap = 1
+    idx = 0
+    while idx < 8 && CIURA[idx] < n {
+        gap = CIURA[idx]
+        idx = idx + 1
+    }
+    while gap < n / 2 {
+        gap = (gap * 9) / 4
+    }
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = floatarr_get_unchecked(arr, i)
+            j = i
+            while j >= gap && cmp(floatarr_get_unchecked(arr, j - gap), tmp) > 0 {
+                floatarr_set_unchecked(arr, j, floatarr_get_unchecked(arr, j - gap))
+                j = j - gap
+            }
+            floatarr_set_unchecked(arr, j, tmp)
+            i = i + 1
+        }
+        if gap == 1 {
+            gap = 0
+        } else {
+            gap = (gap * 4) / 9
+            if gap < 1 { gap = 1 }
+        }
+    }
+}
+
+strings_by(arr: string[], n: int, cmp: fn(string, string) -> int) {
+    if n < 2 { return }
+    gap = 1
+    idx = 0
+    while idx < 8 && CIURA[idx] < n {
+        gap = CIURA[idx]
+        idx = idx + 1
+    }
+    while gap < n / 2 {
+        gap = (gap * 9) / 4
+    }
+    while gap >= 1 {
+        i = gap
+        while i < n {
+            tmp = arr[i]
+            j = i
+            while j >= gap && cmp(arr[j - gap], tmp) > 0 {
+                arr[j] = arr[j - gap]
+                j = j - gap
+            }
+            arr[j] = tmp
+            i = i + 1
+        }
+        if gap == 1 {
+            gap = 0
+        } else {
+            gap = (gap * 4) / 9
+            if gap < 1 { gap = 1 }
+        }
+    }
 }
