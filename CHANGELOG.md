@@ -13,6 +13,18 @@ version number before tagging the release.
 
 ### Changed
 
+- **`std.http.client`'s idle connection pool no longer walks its whole list on
+  every request** (#1719). `http_pool_take` and `http_pool_put` each swept the
+  idle list under the global pool mutex per request; with the default 15s idle
+  window and a proxy reusing upstreams continuously, that sweep frees nothing
+  almost every time. The pool now tracks when its earliest connection becomes
+  eligible and skips the walk until then. Separately, the per-key cap check
+  stops counting once it reaches the cap instead of walking to the end. **No
+  measurable throughput change** (48,854 → 48,870 rps over three alternating
+  A/B rounds, baseline ahead in two of them) — kept because it is strictly less
+  work under a global mutex, which matters with more upstreams than the
+  two-backend benchmark has, not as a performance claim.
+
 - **`std.http.server` and `std.http.client` no longer re-apply socket timeouts
   that are already set** (#1719). Under `strace` against the load-balancer
   benchmark, `setsockopt` was the third costliest syscall — 202,552 calls for
