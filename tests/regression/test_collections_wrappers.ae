@@ -78,6 +78,39 @@ main() {
     else if k == null { println("  FAIL: keys null"); fails = fails + 1 }
     else { print("  PASS: keys returns (snapshot, '')\n") }
 
+    // Reading the snapshot (#1724): before this pair, `keys` could only be
+    // allocated and freed, so a map's key set was unreachable from Aether.
+    if k != null {
+        ksz = map.keys_size(k)
+        if ksz != 2 { println("  FAIL: keys_size ${ksz} != 2"); fails = fails + 1 }
+        else { println("  PASS: keys_size matches map size") }
+
+        // Both inserted keys appear exactly once across the index range.
+        saw_a = 0
+        saw_b = 0
+        ki = 0
+        while ki < ksz {
+            kv = map.keys_get(k, ki)
+            if kv == "a" { saw_a = saw_a + 1 }
+            if kv == "b" { saw_b = saw_b + 1 }
+            ki = ki + 1
+        }
+        if saw_a != 1 || saw_b != 1 {
+            println("  FAIL: expected each key once, saw a=${saw_a} b=${saw_b}")
+            fails = fails + 1
+        } else {
+            println("  PASS: every key readable exactly once")
+        }
+
+        // Out of range and null are empty, not a trap or a wild read.
+        if map.keys_get(k, ksz) != "" || map.keys_get(k, -1) != "" {
+            println("  FAIL: out-of-range keys_get should be empty"); fails = fails + 1
+        } else { println("  PASS: out-of-range keys_get is empty") }
+        if map.keys_size(null) != 0 || map.keys_get(null, 0) != "" {
+            println("  FAIL: null snapshot should be size 0 / empty"); fails = fails + 1
+        } else { println("  PASS: null snapshot handled") }
+    }
+
     if k != null { map.keys_free(k) }
 
     kn, kne = map.keys(null)

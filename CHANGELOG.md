@@ -11,6 +11,31 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.sort` sorts strings, and takes comparators** (#1722). `sort.strings` /
+  `sort.string_search` order by `std.string.compare` — lexicographic byte order,
+  binary-safe — and `ints_by` / `longs_by` / `floats_by` / `strings_by` take a
+  comparator for any other order. Previously the module sorted only `int`,
+  `long` and `float` arrays with no way to express a different ordering, so
+  anything else meant hand-writing a sort at each call site. `string[]` carries
+  no length, so the string forms take an explicit count. Separate `_by` names
+  rather than an optional argument, so the default path keeps a direct
+  comparison instead of an indirect call per element. Sorts remain in place and
+  are still not stable.
+
+- **`std.map` and `std.set` key/item snapshots can now be read** (#1724).
+  `map.keys` and `set.items` returned a snapshot that could only be held and
+  freed: there was no size or element accessor, so a map's key set was
+  unreachable from Aether and callers kept a parallel array of keys purely to
+  have something iterable. `keys_size`/`keys_get` and `items_size`/`items_get`
+  expose what the C snapshot already held — a contiguous array with an exact
+  count. The returned strings are borrowed, valid until the snapshot is freed
+  and only while the container still holds them; iteration order stays
+  unspecified, so sort for deterministic output. Out-of-range and null return
+  `""` rather than trapping. Nothing in the tree had ever read a key from a
+  snapshot, which is how the gap went unnoticed.
+
 ### Changed
 
 - **`std.http.client` resolves the backend host only when it is about to dial**

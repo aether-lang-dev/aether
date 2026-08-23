@@ -36,7 +36,16 @@ after remove: 1
 `contains` returns a `bool`, so it reads directly in a condition — no
 comparison against 1 needed.
 
+## Reading the members
+
+`items` returns a snapshot of the members; read it with `items_size` and
+`items_get`. Same contract as `map.keys`: the strings are **borrowed** and
+valid until `items_free`, the order is **unspecified** (sort with
+`std.sort.strings` for a deterministic listing), and an out-of-range index
+returns `""` rather than trapping.
+
 ## Exports
 
 `new`, `add`, `contains`, `remove`, `size`, `clear`, `free`, `items`,
+`items_size`, `items_get`,
 plus the `aether_set_*` raw forms.

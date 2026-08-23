@@ -48,7 +48,7 @@ header comment is the authoritative description.
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 13 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
-| `std.map` | Hash map, re-exported from `std.collections`. | 14 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
+| `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
 | `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 31 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 94 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
@@ -63,10 +63,10 @@ header comment is the authoritative description.
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
-| `std.set` | Unordered set of unique strings. | 18 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
+| `std.set` | Unordered set of unique strings. | 22 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
-| `std.sort` | In-place ascending sort and binary search over the packed numeric arrays. | 6 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
+| `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
