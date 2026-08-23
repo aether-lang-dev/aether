@@ -13,6 +13,21 @@ version number before tagging the release.
 
 ### Changed
 
+- **`std.http.server` and `std.http.client` no longer re-apply socket timeouts
+  that are already set** (#1719). Under `strace` against the load-balancer
+  benchmark, `setsockopt` was the third costliest syscall — 202,552 calls for
+  20,000 requests, ~10 per request, 15.2% of syscall time — and not one of them
+  changed a socket option. Two sites, both on the keep-alive path: every reuse
+  of a pooled upstream connection re-applied `SO_RCVTIMEO`/`SO_SNDTIMEO`, and
+  every request on a parked client connection re-applied the idle timeout. Both
+  now remember the value they applied and skip the call when it is unchanged;
+  the unguarded form stays on the dial path, where the socket is new. Measured
+  effect: `setsockopt` falls from 202,552 calls to **72**, total syscalls per
+  request from **83.0 to 14.0**, and throughput rises 2.6% (47,852 → 49,083 rps,
+  three alternating A/B rounds, new ahead in every round). Note the parking
+  path's comment already claimed the window was "only re-applied when it
+  changes" — that guard did not exist until now.
+
 - **`std.http.server` resolves a connection's peer and local address once per
   connection rather than once per request** (#1719). The old comment reasoned
   that `getpeername`/`getsockname` are cache-warm and therefore cheap enough to
