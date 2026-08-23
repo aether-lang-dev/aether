@@ -257,6 +257,17 @@ typedef struct HttpConn {
     int   remote_port;
     int   local_port;
     int   addrs_resolved;
+
+    /* The SO_RCVTIMEO value currently on this socket, or -1 when none has been
+     * applied yet (#1719).
+     *
+     * conn_serve applies the idle timeout on entry, and with connection parking
+     * a kept-alive connection re-enters conn_serve once per request -- so an
+     * unguarded apply is one setsockopt per request setting the value that is
+     * already there. The comment on the parking path already claimed the window
+     * was "only re-applied when it changes"; this is the guard that makes that
+     * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
+    int   applied_recv_timeout_ms;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -3593,9 +3604,12 @@ static int64_t conn_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
-static void conn_apply_recv_timeout(HttpServer* server, int fd) {
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
+    int fd = c->fd;
     int idle_ms = server->keep_alive_idle_ms > 0
         ? server->keep_alive_idle_ms : 30000;
+    if (c->applied_recv_timeout_ms == idle_ms) return;
+    c->applied_recv_timeout_ms = idle_ms;
 #ifdef _WIN32
     DWORD rcv_timeout = (DWORD)idle_ms;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
@@ -3652,7 +3666,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
      * The wait is a plain blocking recv either way: a poll before it would be
      * a syscall per request, and measured at 8 concurrent clients that cost
      * 9% against simply blocking. */
-    conn_apply_recv_timeout(server, conn->fd);
+    conn_apply_recv_timeout(server, conn);
 
 #ifdef AETHER_HAS_NGHTTP2
     if (conn->is_h2) {
@@ -3753,6 +3767,9 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn->read_pos = 0;
     conn->write_pos = 0;
     conn->requests_served = 0;
+    /* calloc would leave this 0, which is a legitimate timeout meaning "block
+     * indefinitely"; the guard must see "nothing applied yet" instead. */
+    conn->applied_recv_timeout_ms = -1;
 
 #ifdef AETHER_HAS_OPENSSL
     if (server->tls_enabled && server->tls_ctx) {

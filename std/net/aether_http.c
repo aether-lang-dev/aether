@@ -269,6 +269,20 @@ static char* ssl_err_string(const char* prefix) {
 
 typedef struct {
     int sockfd;
+    /* The SO_RCVTIMEO/SO_SNDTIMEO value currently on this socket, or -1 when
+     * nothing has been applied yet (#1719).
+     *
+     * A Transport travels with its connection into the idle pool, so a reused
+     * connection already carries the timeouts the last request set. Re-applying
+     * an identical value costs 2 setsockopt syscalls per request and changes
+     * nothing: under strace against the LB benchmark, setsockopt was the third
+     * costliest syscall at 202,552 calls for 20,000 requests -- roughly 10 per
+     * request, on sockets whose options were already correct.
+     *
+     * A sentinel of -1 rather than 0 because 0 is a legitimate timeout value
+     * meaning "block indefinitely", and a socket set to block forever must not
+     * be confused with one never configured. */
+    int64_t applied_timeout_ns;
 #ifdef AETHER_HAS_OPENSSL
     SSL* ssl;
     /* A per-request SSL_CTX, owned by this transport, or NULL when the
@@ -1210,6 +1224,19 @@ static void http_apply_timeouts(int sockfd, int64_t timeout_ns) {
 #endif
 }
 
+/* Apply timeouts only when they differ from what the socket already carries.
+ *
+ * The unguarded http_apply_timeouts stays for the dial path, where the socket
+ * is new and its option state is genuinely unknown. This form is for the reuse
+ * path, where the answer is usually "already correct" -- see the comment on
+ * Transport::applied_timeout_ns for the measurement. */
+static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
+    int64_t want = timeout_ns < 0 ? 0 : timeout_ns;
+    if (t->applied_timeout_ns == want) return;
+    http_apply_timeouts(t->sockfd, want);
+    t->applied_timeout_ns = want;
+}
+
 /* Is a pooled connection still usable? A peer that closed leaves the socket
  * readable at EOF, and anything readable on an idle keep-alive connection is
  * unexpected in either direction (a stray byte would desynchronise the next
@@ -1391,6 +1418,9 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
     }
 
     out->sockfd = sockfd;
+    /* The dial path below applies the timeouts unconditionally on a fresh
+     * socket; record the value so a later reuse can skip re-applying it. */
+    out->applied_timeout_ns = req->timeout_ns < 0 ? 0 : req->timeout_ns;
 
     /* HTTPS via a forward proxy: establish a CONNECT tunnel over the raw socket
      * BEFORE the TLS handshake, so TLS runs end-to-end through the proxy (the
@@ -1646,7 +1676,11 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(dial_port);
 
-    Transport t;
+    /* Zero-initialised so applied_timeout_ns starts at the "nothing applied"
+     * sentinel rather than stack garbage, which the reuse guard would read as
+     * a real value and wrongly skip the setsockopt. */
+    Transport t = {0};
+    t.applied_timeout_ns = -1;
     char pool_key[HTTP_POOL_KEY_MAX];
     http_pool_key(pool_key, sizeof(pool_key), host, port, use_tls,
                   dial_host, dial_port, req->insecure, req->cafile);
@@ -1660,7 +1694,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     if (pool_this && http_pool_take(pool_key, &t)) {
         if (transport_is_live(&t)) {
             reused = 1;
-            http_apply_timeouts(t.sockfd, req->timeout_ns);
+            transport_apply_timeouts(&t, req->timeout_ns);
         } else {
             transport_close(&t);
         }
