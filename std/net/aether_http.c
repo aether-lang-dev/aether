@@ -44,6 +44,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
 #include <limits.h>
+#include <stdint.h>   /* INT64_MAX, for the pool expiry watermark */
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -412,6 +413,22 @@ static int             http_pool_enabled = 1;
 static int             http_pool_max_idle = 64;
 static int             http_pool_max_per_key = 8;
 static int64_t         http_pool_idle_ms = 15000;
+/* When the oldest pooled connection becomes eligible for expiry, or INT64_MAX
+ * when the pool is empty (#1719).
+ *
+ * http_pool_take and http_pool_put both swept the whole idle list on every
+ * request, under the global pool mutex. With the default 15s idle window and a
+ * proxy reusing its upstreams continuously, that sweep frees nothing on the
+ * overwhelming majority of calls -- it is a list walk per request to discover
+ * there is nothing to do. Tracking the earliest deadline lets both callers skip
+ * the walk outright until that time actually arrives.
+ *
+ * Kept deliberately coarse: it is a lower bound, not an exact answer. Entries
+ * are only ever added with a fresh idle_since_ms, so the earliest deadline can
+ * only move later when the list shrinks, and recomputing it during a sweep we
+ * were doing anyway is free. A stale-early value costs one redundant sweep,
+ * never a missed expiry. */
+static int64_t         http_pool_next_expiry_ms = INT64_MAX;
 
 static int64_t http_now_ms(void) {
     struct timespec ts;
@@ -435,8 +452,15 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
              use_tls ? 1 : 0, insecure ? 1 : 0, cafile ? cafile : "");
 }
 
-/* Caller holds the lock. Drops every entry idle past the timeout. */
+/* Caller holds the lock. Drops every entry idle past the timeout.
+ *
+ * Returns immediately when the earliest deadline is still in the future, which
+ * is the common case on a busy proxy -- see http_pool_next_expiry_ms. When it
+ * does sweep, it recomputes that watermark from the survivors. */
 static void http_pool_expire_locked(int64_t now) {
+    if (now < http_pool_next_expiry_ms) return;
+
+    int64_t earliest = INT64_MAX;
     HttpIdleConn** link = &http_pool_head;
     while (*link) {
         HttpIdleConn* c = *link;
@@ -447,8 +471,11 @@ static void http_pool_expire_locked(int64_t now) {
             free(c);
             continue;
         }
+        int64_t due = c->idle_since_ms + http_pool_idle_ms;
+        if (due < earliest) earliest = due;
         link = &c->next;
     }
+    http_pool_next_expiry_ms = earliest;
 }
 
 /* Take an idle connection for `key`, newest first (the most recently used is
@@ -490,9 +517,15 @@ static void http_pool_put(const char* key, Transport* t) {
     int64_t now = http_now_ms();
     pthread_mutex_lock(http_pool_lock());
     http_pool_expire_locked(now);
+    /* Only whether the per-key cap is REACHED matters, not the exact count, so
+     * stop at the cap instead of walking to the end -- and skip the walk
+     * entirely when the global cap already rejects this connection. */
     int per_key = 0;
-    for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
-        if (strcmp(e->key, key) == 0) per_key++;
+    if (http_pool_count < http_pool_max_idle) {
+        for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
+            if (strcmp(e->key, key) == 0 && ++per_key >= http_pool_max_per_key)
+                break;
+        }
     }
     if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
         pthread_mutex_unlock(http_pool_lock());
@@ -506,6 +539,10 @@ static void http_pool_put(const char* key, Transport* t) {
     c->next = http_pool_head;
     http_pool_head = c;
     http_pool_count++;
+    /* On an empty pool the watermark is INT64_MAX, and this entry is now the
+     * only deadline there is. Lowering it here is what re-arms the sweep. */
+    if (c->idle_since_ms + http_pool_idle_ms < http_pool_next_expiry_ms)
+        http_pool_next_expiry_ms = c->idle_since_ms + http_pool_idle_ms;
     pthread_mutex_unlock(http_pool_lock());
     t->sockfd = -1;
 #ifdef AETHER_HAS_OPENSSL
@@ -520,6 +557,7 @@ void http_client_pool_clear_raw(void) {
     HttpIdleConn* c = http_pool_head;
     http_pool_head = NULL;
     http_pool_count = 0;
+    http_pool_next_expiry_ms = INT64_MAX;   /* nothing left to expire */
     pthread_mutex_unlock(http_pool_lock());
     while (c) {
         HttpIdleConn* next = c->next;
@@ -542,6 +580,11 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
     if (idle_ns >= 0) {
         int64_t ms = idle_ns / 1000000LL;
         http_pool_idle_ms = ms > 0 ? ms : 1;
+        /* The expiry watermark was derived from the PREVIOUS window, so
+         * shortening the window would leave a deadline further out than the new
+         * setting allows and delay every eviction. Force the next pool
+         * operation to sweep and recompute it. */
+        http_pool_next_expiry_ms = INT64_MIN;
     }
     pthread_mutex_unlock(http_pool_lock());
     if (!http_pool_enabled) http_client_pool_clear_raw();
