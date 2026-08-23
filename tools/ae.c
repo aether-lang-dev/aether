@@ -2303,11 +2303,17 @@ static const char* opt_flags(bool optimize) {
      * after coverage because --coverage's -O0 is a correctness
      * requirement for gcov, not a preference. */
     if (g_profile) return "-O2 -g -fno-omit-frame-pointer -Wformat";
-    /* --size optimises for bytes: -Oz over -O2, and -g0 to suppress debug
+    /* --size optimises for bytes: -Os over -O2, and -g0 to suppress debug
      * info the compiler would otherwise emit. Checked after --profile
      * because asking for both is contradictory and the debug-oriented mode
-     * is the safer reading of the intent. */
-    if (g_size) return "-Oz -g0 -Wformat";
+     * is the safer reading of the intent.
+     *
+     * -Os, NOT -Oz, on the native path: gcc only gained -Oz in GCC 12, and
+     * the CI baseline (ubuntu-22.04) ships GCC 11, where it is a hard error.
+     * -Os is supported by every gcc and clang we target and gives nearly the
+     * same result. The CROSS path can and does use -Oz, because zig bundles
+     * its own clang and the version is not the host's to vary. */
+    if (g_size) return "-Os -g0 -Wformat";
     return optimize ? "-O2 -Wformat" : "-O0 -g -Wformat";
 }
 

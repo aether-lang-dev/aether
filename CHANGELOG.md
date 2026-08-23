@@ -13,7 +13,7 @@ version number before tagging the release.
 
 ### Added
 
-- **`ae build --size`** compiles with `-Oz -g0` and strips at link
+- **`ae build --size`** compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
   (`-Wl,--strip-all -Wl,--gc-sections`), for a shipped artifact rather than a
   debuggable one (#1729). Every other mode pointed at debugging — `--quick` is
   `-O0 -g`, `--profile` is `-O2 -g -fno-omit-frame-pointer`, `--coverage` is

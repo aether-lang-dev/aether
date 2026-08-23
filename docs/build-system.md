@@ -132,7 +132,7 @@ needs `-O0`, which is a correctness requirement rather than a preference.
 
 ### `--size` for shipped artifacts
 
-`--size` compiles with `-Oz -g0` and strips at link time
+`--size` compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link time
 (`-Wl,--strip-all -Wl,--gc-sections`):
 
 ```sh
@@ -156,6 +156,12 @@ the same library, from `-Oz` and the symbol table.
 Stripping is behaviour-preserving. The 24 KB module above still instantiates,
 still exports every symbol, and still runs identically — including the
 fail-stop panic path WASI has.
+
+`-Os` rather than `-Oz` on the native path: gcc only gained `-Oz` in GCC 12,
+and Ubuntu 22.04 — the CI baseline — ships GCC 11, where it is a hard error.
+`-Os` is supported everywhere and gives nearly the same result. Cross builds do
+use `-Oz`, because zig bundles its own clang and the version is not the host's
+to vary.
 
 Two things `--size` deliberately does not do:
 

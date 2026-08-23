@@ -42,8 +42,15 @@ main() {
     println("size mode ok")
 }
 AEEOF
-"$AE" build --size "$TMPDIR_T/app.ae" -o "$TMPDIR_T/app" >/dev/null 2>&1 \
-    || { echo "  [FAIL] size_mode: --size build failed"; exit 1; }
+# Keep the compiler's own message: a bad flag (say, one the host gcc is too
+# old for) is invisible if this is swallowed, and "--size build failed" alone
+# sends you looking in the wrong place.
+if ! "$AE" build --size "$TMPDIR_T/app.ae" -o "$TMPDIR_T/app" \
+        >"$TMPDIR_T/build.log" 2>&1; then
+    echo "  [FAIL] size_mode: --size build failed"
+    sed -n '1,15p' "$TMPDIR_T/build.log" | sed 's/^/         /'
+    exit 1
+fi
 OUT=$("$TMPDIR_T/app" 2>&1) || { echo "  [FAIL] size_mode: --size binary did not run"; exit 1; }
 [ "$OUT" = "size mode ok" ] || {
     echo "  [FAIL] size_mode: wrong output: $OUT"; exit 1; }

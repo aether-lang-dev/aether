@@ -529,6 +529,8 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * pass -g0 -- so a cross artifact was overwhelmingly debug information
      * (measured: 97.4% of a two-function wasi library). --size asks for the
      * smallest artifact, so it takes -Oz and suppresses that debug info. */
+    /* -Oz is safe here where it is not on the native path: zig bundles its
+     * own clang, so the version is not the host compiler's to vary. */
     const char* opt = ae_build_size_mode() ? "-Oz -g0"
                     : (optimize ? "-O2" : "-O0 -g");
 
@@ -631,6 +633,8 @@ int run_cross_build(const char* c_file, const char* out_file,
      * pass -g0 -- so a cross artifact was overwhelmingly debug information
      * (measured: 97.4% of a two-function wasi library). --size asks for the
      * smallest artifact, so it takes -Oz and suppresses that debug info. */
+    /* -Oz is safe here where it is not on the native path: zig bundles its
+     * own clang, so the version is not the host compiler's to vary. */
     const char* opt = ae_build_size_mode() ? "-Oz -g0"
                     : (optimize ? "-O2" : "-O0 -g");
     const char* ex = extra ? extra : "";
