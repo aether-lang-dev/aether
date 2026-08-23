@@ -50,7 +50,7 @@ exports(
     multiply, divide, remainder, mod,
     mod_pow, gcd, mod_inverse, is_probable_prime,
     shift_left, shift_right,
-    to_hex, free
+    to_hex, to_decimal, from_decimal, free
 )
 
 // libc allocator — whitelisted externs, no shim. The struct is three
@@ -1913,4 +1913,189 @@ free(n: ptr) {
         intarr_free(bn.mag)
     }
     libc_free(n)
+}
+
+// ---- decimal (#1723) ------------------------------------------------------
+//
+// to_hex was the only way out of a bignum and from_int (bounded by long) or
+// from_bytes the only ways in, so a value larger than 64 bits could be
+// computed but neither entered nor printed in the base every published test
+// vector and task statement uses.
+//
+// Conversion is by repeated division of the MAGNITUDE by 10^9 -- nine decimal
+// digits per pass -- rather than by calling divide()/remainder() per digit.
+// Both are O(n^2) in the limb count, but the chunked form does ~1/9th the
+// passes and allocates one scratch array instead of two bignums per digit.
+// 10^9 is the largest power of ten that fits a 32-bit limb, so each step is a
+// plain 64-bit divide with no intermediate overflow.
+
+// 1000000000 (10^9) is the largest power of ten below 2^32, so a chunk always
+// fits one limb and each division step is a plain 64-bit divide. Its digit
+// count, 9, is how many decimal places an interior chunk must be padded to.
+
+// Divide `mag` (len limbs, big-endian) by `d` IN PLACE, returning the
+// remainder. Classic schoolbook short division: carry the running remainder
+// down through the limbs, each step a 64-bit divide because the carry is
+// below `d` <= 2^32 and each limb is below 2^32.
+mag_divmod_small(mag: ptr, len: int, d: long) -> long {
+    // `long`, not inferred int: the running remainder is shifted left 32 bits
+    // each step and would silently truncate in a 32-bit slot.
+    long rem = 0
+    i = 0
+    while i < len {
+        cur = (rem << 32) | limb(mag, i)
+        q = cur / d
+        rem = cur - q * d
+        intarr_set_raw(mag, i, q)
+        i = i + 1
+    }
+    return rem
+}
+
+// Is every limb zero?
+mag_is_zero(mag: ptr, len: int) -> int {
+    i = 0
+    while i < len {
+        if limb(mag, i) != 0 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Decimal text, with a leading '-' for negatives and "0" for zero.
+//
+// The returned string is owned by the caller. Sign handling matches to_hex.
+to_decimal(n: ptr) -> string {
+    bn = n as *BN
+    if bn.sign == 0 {
+        return "0"
+    }
+
+    // Work on a copy: the division is destructive and `n` is the caller's.
+    work = mag_clone(bn.mag, bn.len)
+    len = bn.len
+
+    // Each pass yields up to 9 digits, emitted least-significant first and
+    // reversed at the end. 10 chunks per limb-word is a generous bound.
+    chunks = intarr_new_raw(bn.len * 2 + 2)
+    count = 0
+    while mag_is_zero(work, len) == 0 {
+        r = mag_divmod_small(work, len, 1000000000)
+        intarr_set_raw(chunks, count, r)
+        count = count + 1
+    }
+    intarr_free(work)
+
+    sb = strbuilder.new(count * 9 + 2)
+    if bn.sign < 0 {
+        strbuilder.append_byte(sb, 45) // '-'
+    }
+    // Most significant chunk carries no leading zeros; the rest are padded to
+    // exactly 9 digits, because an interior chunk of 42 means "000000042".
+    i = count - 1
+    while i >= 0 {
+        v = intarr_get_raw(chunks, i) & 0xFFFFFFFF
+        if i == count - 1 {
+            append_dec_nolead(sb, v)
+        } else {
+            append_dec_padded(sb, v)
+        }
+        i = i - 1
+    }
+    intarr_free(chunks)
+    return strbuilder.finish(sb)
+}
+
+// Nine zero-padded decimal digits.
+append_dec_padded(sb: ptr, v: long) {
+    div = 100000000
+    x = v
+    while div > 0 {
+        strbuilder.append_byte(sb, 48 + (x / div))
+        x = x - (x / div) * div
+        div = div / 10
+    }
+}
+
+// Decimal digits of one chunk with no leading zeros.
+append_dec_nolead(sb: ptr, v: long) {
+    if v == 0 {
+        strbuilder.append_byte(sb, 48) // '0'
+        return
+    }
+    div = 1
+    while v / div >= 10 {
+        div = div * 10
+    }
+    x = v
+    while div > 0 {
+        strbuilder.append_byte(sb, 48 + (x / div))
+        x = x - (x / div) * div
+        div = div / 10
+    }
+}
+
+// Parse decimal text into a bignum, returning (value, err).
+//
+// Strict by design: an optional leading '-' then one or more ASCII digits and
+// nothing else. No '+', no underscores, no whitespace trimming, no empty
+// string -- malformed input is an error rather than a silently truncated
+// number, because a number quietly parsed as a prefix of itself is far worse
+// than a rejected one.
+from_decimal(s: string) -> (ptr, string) {
+    n = string.length(s)
+    if n == 0 {
+        return null, "empty decimal string"
+    }
+    neg = 0
+    start = 0
+    if string.char_at(s, 0) == 45 { // '-'
+        neg = 1
+        start = 1
+        if n == 1 {
+            return null, "decimal string is just a sign"
+        }
+    }
+
+    acc = from_int(0)
+    i = start
+    while i < n {
+        // Take up to 9 digits at a time, matching to_decimal's chunking.
+        acc_digits = 0
+        chunk = 0
+        while i < n && acc_digits < 9 {
+            c = string.char_at(s, i)
+            if c < 48 || c > 57 {
+                free(acc)
+                return null, "invalid character in decimal string"
+            }
+            chunk = chunk * 10 + (c - 48)
+            acc_digits = acc_digits + 1
+            i = i + 1
+        }
+        // Scale by exactly the number of digits consumed, which is 9 for every
+        // pass but the last.
+        scale = 1
+        k = 0
+        while k < acc_digits {
+            scale = scale * 10
+            k = k + 1
+        }
+        scale_bn = from_int(scale)
+        scaled = multiply(acc, scale_bn)
+        free(scale_bn)
+        free(acc)
+        chunk_bn = from_int(chunk)
+        acc = add(scaled, chunk_bn)
+        free(scaled)
+        free(chunk_bn)
+    }
+    if neg == 1 {
+        neg_acc = negate(acc)
+        free(acc)
+        return neg_acc, ""
+    }
+    return acc, ""
 }

@@ -1,0 +1,144 @@
+// Regression: std.bignum decimal parse and render (#1723).
+//
+// Before this, to_hex was the only way out of a bignum and from_int (bounded
+// by long) or from_bytes the only ways in -- so a value larger than 64 bits
+// could be computed but neither entered nor printed in the base that every
+// published test vector and task statement uses.
+//
+// The values here are pinned to independently known decimal constants (25!,
+// 1000!'s digit count, powers of two at the limb boundaries) rather than to
+// the module's own hex output, so the test cannot agree with a wrong
+// implementation.
+
+import std.bignum
+import std.string
+
+extern exit(code: int)
+
+// Each helper returns its failure count; main sums them. A module-level
+// counter is not available here, and threading the total through returns
+// keeps every check's result visible at the call site.
+ck(cond: int, label: string) -> int {
+    if cond == 0 {
+        println("  FAIL: ${label}")
+        return 1
+    }
+    return 0
+}
+
+// Parse, render, and require the text to come back identical.
+round_trip(s: string) -> int {
+    v, e = bignum.from_decimal(s)
+    if e != "" {
+        println("  FAIL: from_decimal(${s}): ${e}")
+        return 1
+    }
+    out = bignum.to_decimal(v)
+    bad = ck(string.compare(out, s) == 0, "round trip ${s} came back ${out}")
+    bignum.free(v)
+    return bad
+}
+
+// Must be rejected with a non-empty error and no value.
+reject(s: string, label: string) -> int {
+    v, e = bignum.from_decimal(s)
+    if e == "" {
+        println("  FAIL: ${label}: [${s}] was accepted")
+        bignum.free(v)
+        return 1
+    }
+    return ck(v == null, "${label}: rejected but returned a value")
+}
+
+main() {
+    fails = 0
+
+    // ---- rendering ---------------------------------------------------------
+    z = bignum.from_int(0)
+    fails = fails + ck(string.compare(bignum.to_decimal(z), "0") == 0, "zero renders as 0")
+    bignum.free(z)
+
+    neg = bignum.from_int(0 - 12345)
+    fails = fails + ck(string.compare(bignum.to_decimal(neg), "-12345") == 0, "negative renders with -")
+    bignum.free(neg)
+
+    // 25! = 15511210043330985984000000 -- well beyond long, and the exact
+    // value the issue was filed with.
+    acc = bignum.from_int(1)
+    i = 2
+    while i <= 25 {
+        m = bignum.from_int(i)
+        nx = bignum.multiply(acc, m)
+        bignum.free(acc)
+        bignum.free(m)
+        acc = nx
+        i = i + 1
+    }
+    fails = fails + ck(string.compare(bignum.to_decimal(acc), "15511210043330985984000000") == 0,
+        "25! renders to its published decimal value")
+    bignum.free(acc)
+
+    // ---- round trips -------------------------------------------------------
+    fails = fails + round_trip("0")
+    fails = fails + round_trip("1")
+    fails = fails + round_trip("-1")
+    fails = fails + round_trip("9")
+    fails = fails + round_trip("10")
+    fails = fails + round_trip("999999999") // exactly one 10^9 chunk
+    fails = fails + round_trip("1000000000") // one past a chunk boundary
+    fails = fails + round_trip("4294967295") // 2^32 - 1, one full limb
+    fails = fails + round_trip("4294967296") // 2^32, straddles two limbs
+    fails = fails + round_trip("18446744073709551615") // 2^64 - 1
+    fails = fails + round_trip("18446744073709551616") // 2^64
+    fails = fails + round_trip("15511210043330985984000000")
+    fails = fails + round_trip("-15511210043330985984000000")
+    fails = fails + round_trip("-99999999999999999999999999999999")
+
+    // A value whose interior chunk has leading zeros: 10^18 + 1 is
+    // "1" then nine zeros then "000000001", which a renderer that forgets to
+    // pad interior chunks would print as "111".
+    fails = fails + round_trip("1000000000000000001")
+
+    // ---- rejections --------------------------------------------------------
+    fails = fails + reject("", "empty string")
+    fails = fails + reject("-", "lone sign")
+    fails = fails + reject("12a", "trailing letter")
+    fails = fails + reject("a12", "leading letter")
+    fails = fails + reject(" 12", "leading space")
+    fails = fails + reject("12 ", "trailing space")
+    fails = fails + reject("+12", "explicit plus")
+    fails = fails + reject("1_000", "underscore separator")
+    fails = fails + reject("1.5", "decimal point")
+
+    // ---- a big one ---------------------------------------------------------
+    // 1000! has 2568 decimal digits. Pinning the count (rather than the whole
+    // number) keeps the test readable while still exercising thousands of
+    // digits through both directions.
+    f = bignum.from_int(1)
+    j = 2
+    while j <= 1000 {
+        m2 = bignum.from_int(j)
+        nx2 = bignum.multiply(f, m2)
+        bignum.free(f)
+        bignum.free(m2)
+        f = nx2
+        j = j + 1
+    }
+    d = bignum.to_decimal(f)
+    fails = fails + ck(string.length(d) == 2568, "1000! has 2568 digits, got ${string.length(d)}")
+    back, be = bignum.from_decimal(d)
+    if be != "" {
+        println("  FAIL: re-parsing 1000!: ${be}")
+        fails = fails + 1
+    } else {
+        fails = fails + ck(string.compare(bignum.to_decimal(back), d) == 0, "1000! round trips")
+        bignum.free(back)
+    }
+    bignum.free(f)
+
+    if fails != 0 {
+        println("bignum decimal: ${fails} failure(s)")
+        exit(1)
+    }
+    println("PASS: test_bignum_decimal")
+}

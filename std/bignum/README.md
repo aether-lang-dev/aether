@@ -40,9 +40,44 @@ big-endian two's-complement, the encoding a key or a signature arrives in.
 The `_unsigned` variants skip the sign bit for values known to be positive,
 which is what most cryptographic material is.
 
+## Decimal
+
+`to_decimal` renders base 10 with a leading `-` for negatives and `"0"` for
+zero; `from_decimal` parses it back, returning `(value, err)`.
+
+The parse is strict: an optional leading `-` then one or more ASCII digits and
+nothing else. No `+`, no underscores, no whitespace trimming, no empty string
+— malformed input is an error rather than a silently truncated number.
+
+```aether,run
+import std.bignum
+
+main() {
+    acc = bignum.from_int(1)
+    i = 2
+    while i <= 25 {
+        m = bignum.from_int(i)
+        nx = bignum.multiply(acc, m)
+        bignum.free(acc)
+        bignum.free(m)
+        acc = nx
+        i = i + 1
+    }
+    println("25! = ${bignum.to_decimal(acc)}")
+    bignum.free(acc)
+}
+```
+```output
+25! = 15511210043330985984000000
+```
+
+Conversion divides by 10^9 — nine digits per pass — rather than one digit at a
+time, so a thousand-digit value costs about a ninth of the big-integer
+divisions the naive form would.
+
 ## Exports
 
 `from_int`, `from_bytes`, `from_bytes_unsigned`, `to_bytes`,
-`to_bytes_unsigned`, `to_hex`, `compare`, `is_zero`, `sign`, `bit_length`,
+`to_bytes_unsigned`, `to_hex`, `to_decimal`, `from_decimal`, `compare`, `is_zero`, `sign`, `bit_length`,
 `add`, `subtract`, `multiply`, `divide`, `mod`, `mod_pow`, `mod_inverse`,
 `gcd`, `shift_left`, `shift_right`, and the bitwise operations.
