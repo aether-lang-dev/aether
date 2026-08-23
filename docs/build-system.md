@@ -107,6 +107,29 @@ ae build src/main.ae --quick   # iteration-shape, -O0 -g
 
 `--quick` typically halves the gcc step on small programs, at the cost of unoptimised codegen. `ae run` already uses `-O0` regardless, since cache hits dominate over a single optimised compile.
 
+### `--profile` for sampling profilers
+
+`--profile` compiles with `-O2 -g -fno-omit-frame-pointer`:
+
+```sh
+ae build src/main.ae --profile   # -O2 -g -fno-omit-frame-pointer
+perf record -g ./main            # attributable frames
+perf report --stdio
+```
+
+Neither other mode serves this. The default `-O2` build carries no DWARF and
+omits frame pointers, so a sampling profiler cannot unwind it — profiling
+`std.http.server.lb` under load, gdb resolved 239 of 240 sampled frames as
+`??`. And `--quick`'s `-O0` inlines nothing and keeps every temporary live, so
+the hot spots it reports are not the ones the shipped binary has.
+
+`--profile` keeps `-O2` precisely so the profile describes the code you ship,
+and adds only what the profiler needs to attribute it. It works under
+`--target` as well, for profiling a cross-built binary on the target machine.
+
+`--coverage` takes precedence if both are passed: gcov's line attribution
+needs `-O0`, which is a correctness requirement rather than a preference.
+
 ### Resolving the build target
 
 `ae build` accepts either a path to a `.ae` file or a `[[bin]]` name from `aether.toml`. The two are equivalent:

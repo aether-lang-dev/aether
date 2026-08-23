@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`ae build --profile`** compiles with `-O2 -g -fno-omit-frame-pointer`, for
+  `perf record -g` and other sampling profilers. Neither existing mode served:
+  the default `-O2` build carries no DWARF and omits frame pointers, so a
+  profiler cannot unwind it — profiling `std.http.server.lb` under load, gdb
+  resolved 239 of 240 sampled frames as `??` — and `--quick`'s `-O0` inlines
+  nothing and keeps every temporary live, so its hot spots are not the shipped
+  binary's. `--profile` keeps `-O2` precisely so the profile describes the code
+  that ships. Works under `--target` too. `--coverage` still takes precedence,
+  since gcov's `-O0` is a correctness requirement rather than a preference.
+
 ## [0.574.0]
 
 ### Added
