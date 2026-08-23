@@ -366,6 +366,22 @@ typedef struct {
 // optimisation.
 static bool g_coverage = false;
 
+// --profile: -O2 with frame pointers and debug info, for `perf record -g`
+// and friends.
+//
+// --quick already gives -O0 -g, but -O0 is the wrong tool for a profile:
+// it inlines nothing and keeps every temporary live, so the hot spots it
+// reports are not the ones the shipped -O2 binary has. And the default
+// -O2 build carries no DWARF and omits frame pointers, so a sampling
+// profiler cannot unwind it — measured on the std.http.server.lb
+// benchmark, gdb resolved 239 of 240 sampled frames as `??`.
+//
+// The combination a profiler actually needs is -O2 (same code as ships)
+// plus -g (symbols) plus -fno-omit-frame-pointer (unwindable). None of
+// the existing modes give all three, so profiling meant emitting the C
+// with aetherc and hand-compiling it.
+static bool g_profile = false;
+
 // Build an aetherc command string with optional --lib flag
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
@@ -2255,6 +2271,11 @@ static const char* opt_flags(bool optimize) {
      * source. User cflags from aether.toml append after these flags, so
      * -Wno-format remains available to opt out. */
     if (g_coverage) return "-O0 -g --coverage -Wformat";
+    /* --profile keeps -O2 so the profile describes the code that ships,
+     * and adds what a sampling profiler needs to attribute it. Checked
+     * after coverage because --coverage's -O0 is a correctness
+     * requirement for gcov, not a preference. */
+    if (g_profile) return "-O2 -g -fno-omit-frame-pointer -Wformat";
     return optimize ? "-O2 -Wformat" : "-O0 -g -Wformat";
 }
 
@@ -2476,7 +2497,8 @@ void build_gcc_cmd(char* cmd, size_t size,
     // #line) never run on a normal `ae build` — regressing #1252. Keep this in
     // sync with opt_flags(); user cflags still append after, so -Wno-format
     // remains an opt-out.
-    const char* base_opt = g_coverage ? opt_flags(optimize)
+    const char* base_opt = (g_coverage || g_profile)
+                          ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe -Wformat" : "-O0 -g -pipe -Wformat");
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* The link-side flags ride in the same blob: gcc accepts -Wl,... anywhere
@@ -5239,12 +5261,19 @@ static int cmd_build(int argc, char** argv) {
     g_emit_lib = false;
     // Reset coverage flag — `ae build --coverage` enables it per-build.
     g_coverage = false;
+    g_profile = false;
 
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_name = argv[++i];
         } else if (strcmp(argv[i], "--quick") == 0) {
             quick = true;
+        } else if (strcmp(argv[i], "--profile") == 0) {
+            /* -O2 -g -fno-omit-frame-pointer: the code that ships, with
+             * enough left in the binary for `perf record -g` to attribute
+             * it. See g_profile for why neither --quick nor the default
+             * serves. */
+            g_profile = true;
         } else if (strcmp(argv[i], "--trace") == 0) {
             /* #1333: compile message tracing into this binary. The runtime has
              * to be rebuilt from source for it, since a prebuilt libaether.a
@@ -5509,8 +5538,9 @@ static int cmd_build(int argc, char** argv) {
 
     if (!file) {
         fprintf(stderr, "Error: No input file specified.\n");
-        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--target=<triple>] [-D SYMBOL]\n");
+        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--profile] [--target=<triple>] [-D SYMBOL]\n");
         fprintf(stderr, "  --quick    Compile with -O0 -g for faster iteration (default: -O2)\n");
+        fprintf(stderr, "  --profile  Compile with -O2 -g -fno-omit-frame-pointer (for perf/gdb)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
         fprintf(stderr, "             aarch64-linux, x86_64-linux, aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");

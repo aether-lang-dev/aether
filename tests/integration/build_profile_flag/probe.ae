@@ -1,0 +1,15 @@
+// Subject for the --profile build-mode test. Enough work that -O2 and
+// -O0 produce visibly different binaries, and a call the profiler would
+// have something to attribute.
+
+fn accumulate(n: int) -> int {
+    total = 0
+    for (i = 0; i < n; i = i + 1) {
+        total = total + i
+    }
+    return total
+}
+
+main() {
+    println("${accumulate(100)}")
+}
