@@ -13,6 +13,19 @@ version number before tagging the release.
 
 ### Changed
 
+- **`std.http.client` resolves the backend host only when it is about to dial**
+  (#1719). `getaddrinfo` ran unconditionally above the pool lookup, so every
+  request resolved the host and then discarded the answer on a pooled hit — a
+  lock-taking call per request for a result nobody used. Resolution now happens
+  behind a once-flag at the four dial sites (the initial dial plus three
+  pooled-connection retry paths). Worth **+0.56%** on the LB benchmark (47,887 →
+  48,156 rps); the gain is small here because the benchmark's backends are
+  numeric IPs, which `getaddrinfo` short-circuits — against named upstreams,
+  where resolution can touch `/etc/hosts` or the network, it removes real work.
+  One deliberate behaviour change: a request hitting a live pooled connection
+  now succeeds even if the host has since stopped resolving, rather than failing
+  with "could not resolve host". An open connection does not need DNS.
+
 - **`std.http.client`'s idle connection pool no longer walks its whole list on
   every request** (#1719). `http_pool_take` and `http_pool_put` each swept the
   idle list under the global pool mutex per request; with the default 15s idle
