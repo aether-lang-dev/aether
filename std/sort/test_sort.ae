@@ -152,11 +152,11 @@ main() {
     ss_sorted = ["a", "b", "c"]
     sort.strings(ss_sorted, 3)
     fails = fails + ck(string.compare(ss_sorted[0], "a") == 0 && string.compare(ss_sorted[2], "c") == 0,
-                       "string sort already-sorted")
+        "string sort already-sorted")
     ss_rev = ["c", "b", "a"]
     sort.strings(ss_rev, 3)
     fails = fails + ck(string.compare(ss_rev[0], "a") == 0 && string.compare(ss_rev[2], "c") == 0,
-                       "string sort reverse-sorted")
+        "string sort reverse-sorted")
 
     // n < 2 must be a no-op, not a read past the end.
     ss_one = ["only"]
@@ -176,7 +176,7 @@ main() {
     ss_desc = ["pear", "apple", "fig"]
     sort.strings_by(ss_desc, 3, cmp_desc)
     fails = fails + ck(string.compare(ss_desc[0], "pear") == 0 && string.compare(ss_desc[2], "apple") == 0,
-                       "strings_by descending")
+        "strings_by descending")
 
     // Ints by absolute value: an order the natural sort cannot express.
     ab, abe = intarr.new(4)
