@@ -1,0 +1,22 @@
+// Library-shaped source that DRAGS THE PANIC MACHINERY INTO THE LINK.
+//
+// A library with no panic/try/catch never references aether_panic.o, so it
+// links on wasi even when the setjmp selection is wrong -- which is exactly
+// why the bug went unnoticed. `try` makes codegen emit AETHER_SIGSETJMP and
+// `panic` pulls in AETHER_SIGLONGJMP, so both macros must resolve to
+// something wasm-ld can find.
+
+risky(x: int) -> int {
+    if x < 0 {
+        panic("negative")
+    }
+    return x * 2
+}
+
+safe(x: int) -> int {
+    try {
+        return risky(x)
+    } catch reason {
+        return 0
+    }
+}

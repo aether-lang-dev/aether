@@ -27,6 +27,7 @@
 
 #include <setjmp.h>
 #include <stdatomic.h>
+#include <stdlib.h>   /* abort(), for the __wasi__ no-unwind arm below */
 #include "../utils/aether_compiler.h"
 
 #ifdef __cplusplus
@@ -61,7 +62,40 @@ extern "C" {
 // The aether_sigjmp_buf typedef stays so call sites read uniformly;
 // on every target it's now jmp_buf under the hood.
 typedef jmp_buf aether_sigjmp_buf;
-#if defined(_WIN32) || defined(__EMSCRIPTEN__) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
+#if defined(__wasi__)
+  /* wasm32-wasi has NO usable setjmp/longjmp, in either spelling.
+   *
+   * WASI is hosted (__STDC_HOSTED__ == 1) and does not define
+   * __EMSCRIPTEN__, so without this arm it falls into the POSIX branch below
+   * and gets _setjmp/_longjmp -- which wasi-libc declares but never
+   * implements. That is a LINK error, not a compile error, so it surfaces
+   * only at the very end of a cross build:
+   *
+   *     wasm-ld: error: libaether.a(aether_panic.o): undefined symbol: _longjmp
+   *
+   * The plain setjmp/longjmp arm is no better: wasi-libc's <setjmp.h> is a
+   * hard `#error` telling you to compile with `-mllvm -wasm-enable-sjlj` and
+   * use an engine implementing the exception-handling proposal. Measured on
+   * zig 0.16.0, passing that flag does not help either -- the #error fires
+   * before the pass ever runs. Real support needs the WebAssembly
+   * exception-handling proposal in both toolchain and engine.
+   *
+   * So: do not unwind. SETJMP always takes the first-return arm, and LONGJMP
+   * traps.
+   *
+   * THE CONSEQUENCE, PLAINLY: on wasi, panic() / try / catch are fail-stop
+   * rather than recoverable -- a panic traps the instance instead of
+   * unwinding to the nearest catch. That is a real semantic reduction, and
+   * it is documented in docs/build-system.md alongside the target's other
+   * caveats.
+   *
+   * It is still strictly better than the alternative, which is that wasi
+   * cannot link at all. Nothing silently mis-executes: abort() is a trap the
+   * host observes, not a fallthrough into a half-unwound stack. A catch block
+   * that never runs is visible; one that runs on a corrupt stack is not. */
+  #define AETHER_SIGSETJMP(buf, savemask) ((void)(buf), 0)
+  #define AETHER_SIGLONGJMP(buf, val)     (((void)(buf)), ((void)(val)), abort())
+#elif defined(_WIN32) || defined(__EMSCRIPTEN__) || (defined(__STDC_HOSTED__) && __STDC_HOSTED__ == 0)
   #define AETHER_SIGSETJMP(buf, savemask) setjmp(buf)
   #define AETHER_SIGLONGJMP(buf, val)     longjmp((buf), (val))
 #else

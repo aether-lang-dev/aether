@@ -177,6 +177,7 @@ tests/integration/tcp_poll_fullduplex/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
 tests/integration/varargs_forward/
+tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/
 tests/integration/where_clause/
 tests/integration/wycheproof/
