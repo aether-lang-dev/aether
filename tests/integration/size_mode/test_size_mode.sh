@@ -55,14 +55,29 @@ OUT=$("$TMPDIR_T/app" 2>&1) || { echo "  [FAIL] size_mode: --size binary did not
 [ "$OUT" = "size mode ok" ] || {
     echo "  [FAIL] size_mode: wrong output: $OUT"; exit 1; }
 
-# ---- 2. --emit=lib keeps its dynamic symbols -----------------------------
-# --strip-all removes the symbol TABLE but must leave the dynamic symbols a
-# consumer resolves against; a .so with neither would satisfy a size check
-# and be unusable.
+# ---- 2. --emit=lib keeps the symbols a consumer resolves against ---------
+# Stripping removes the STATIC symbol table but must leave the dynamic /
+# external ones; a library with neither would satisfy a size check and be
+# unusable.
+#
+# The listing command is not portable. GNU nm spells it `nm -D`; BSD/macOS nm
+# has no -D at all and spells defined-external `nm -gU`. Getting this wrong
+# is not a harmless mismatch: the unsupported form exits non-zero with empty
+# output, which reads exactly like "the symbols are gone" and fails the test
+# on a perfectly good library. So pick by platform, and SKIP rather than fail
+# if neither form works -- an inconclusive probe must not masquerade as a
+# regression.
 if "$AE" build --emit=lib --size "$LIB" -o "$TMPDIR_T/lib.so" >/dev/null 2>&1; then
-    if command -v nm >/dev/null 2>&1; then
-        if ! nm -D --defined-only "$TMPDIR_T/lib.so" 2>/dev/null | grep -q 'safe'; then
-            echo "  [FAIL] size_mode: --emit=lib --size stripped the dynamic symbols"
+    SYMS=""
+    case "$(uname -s 2>/dev/null)" in
+        Darwin) SYMS=$(nm -gU "$TMPDIR_T/lib.so" 2>/dev/null || true) ;;
+        *)      SYMS=$(nm -D --defined-only "$TMPDIR_T/lib.so" 2>/dev/null || true) ;;
+    esac
+    if [ -n "$SYMS" ]; then
+        if ! printf '%s' "$SYMS" | grep -q 'safe'; then
+            echo "  [FAIL] size_mode: --emit=lib --size dropped the exported symbols"
+            echo "         (listing was non-empty, so this is a real strip, not a"
+            echo "          missing nm option)"
             exit 1
         fi
     fi
@@ -72,9 +87,12 @@ fi
 # An object file is linked later by someone else, so stripping it would
 # remove exactly what they need. --size must not apply link-time stripping
 # to a mode that does not link.
+# Plain `nm` (no -D) works on both toolchains for an object file, but the
+# same "empty means inconclusive" rule applies.
 if "$AE" build --emit=obj --size "$LIB" -o "$TMPDIR_T/lib.o" >/dev/null 2>&1; then
-    if command -v nm >/dev/null 2>&1; then
-        if ! nm --defined-only "$TMPDIR_T/lib.o" 2>/dev/null | grep -q 'safe'; then
+    OSYMS=$(nm "$TMPDIR_T/lib.o" 2>/dev/null || true)
+    if [ -n "$OSYMS" ]; then
+        if ! printf '%s' "$OSYMS" | grep -q 'safe'; then
             echo "  [FAIL] size_mode: --emit=obj --size stripped the object's symbols"
             exit 1
         fi
