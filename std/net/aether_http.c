@@ -1308,6 +1308,45 @@ static int transport_is_live(Transport* t) {
     return ready == 0;
 }
 
+/* Resolve `host`:`port` into `out`, at most once per request (#1719).
+ *
+ * `*resolved` is the caller's once-flag: 0 on entry means "not yet", and it is
+ * set on success so a second call is free. Returns 1 on success (including the
+ * cached case), 0 when the name does not resolve.
+ *
+ * Resolve via getaddrinfo, NOT gethostbyname: gethostbyname returns a pointer
+ * into a shared, process-static `struct hostent`, so two client calls resolving
+ * at once on different threads -- e.g. a request handler that dials out while
+ * serving (serve-and-dial), where the inner call runs on a server worker thread
+ * -- race on that static buffer and can corrupt each other's resolved address.
+ * getaddrinfo is thread-safe and returns caller-owned memory freed with
+ * freeaddrinfo. Pinned to AF_INET: the callers build a sockaddr_in and the
+ * timeout/connect path assumes IPv4, so widening to IPv6 is a separate change.
+ *
+ * A failed resolve leaves *resolved at 0, so a later caller retries rather than
+ * reading an uninitialised address. */
+static int resolve_dial_addr(const char* host, int port,
+                             struct sockaddr_in* out, int* resolved) {
+    if (*resolved) return 1;
+
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = NULL;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return 0;
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out, res->ai_addr, sizeof(struct sockaddr_in));
+    freeaddrinfo(res);
+    out->sin_family = AF_INET;
+    out->sin_port = htons(port);
+    *resolved = 1;
+    return 1;
+}
+
 /* Set *err to a heap copy of `msg`, for the dial helper's error returns. */
 static void ae_set_err(char** out_err, const char* msg) {
     if (!out_err) return;
@@ -1688,36 +1727,28 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* dial_host = connect_host;
     int         dial_port = connect_port;
 
-    /* Resolve via getaddrinfo, NOT gethostbyname: gethostbyname returns a
-     * pointer into a shared, process-static `struct hostent`, so two client
-     * calls resolving at once on different threads, e.g. a request handler
-     * that dials out while serving (serve-and-dial), where the inner call runs
-     * on a server worker thread, race on that static buffer and can corrupt
-     * each other's resolved address. getaddrinfo is thread-safe and returns
-     * caller-owned memory freed with freeaddrinfo. Pinned to AF_INET: the rest
-     * of this function builds a sockaddr_in and the timeout/connect path
-     * assumes IPv4, so widening to IPv6 is a separate change. */
+    /* The dial address, resolved lazily (#1719).
+     *
+     * Resolution used to run unconditionally, above the pool lookup, so every
+     * request resolved the backend host and threw the answer away on a pooled
+     * hit -- a lock-taking call per request for a result nobody used. Only the
+     * two http_dial sites consume it, and the pool key is built from
+     * dial_host/dial_port rather than the resolved address, so nothing before
+     * a dial needs it.
+     *
+     * Both dial sites go through resolve_dial_addr, which resolves at most
+     * once per request: the send-failure retry below re-dials a connection
+     * that came from the pool, and that is precisely the path where the first
+     * resolve was skipped.
+     *
+     * One deliberate behaviour change falls out of this: a request that hits a
+     * live pooled connection now succeeds even if the host has since stopped
+     * resolving, where before it failed with "could not resolve host". An open
+     * connection does not need DNS, and holding an established socket hostage
+     * to a resolver blip is the less useful behaviour -- it is also what nginx
+     * does. A request that has to dial still fails exactly as it did. */
     struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    {
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%d", dial_port);
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family   = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        struct addrinfo* res = NULL;
-        int gai = getaddrinfo(dial_host, port_str, &hints, &res);
-        if (gai != 0 || !res) {
-            response->error = string_new(via_proxy ? "could not resolve proxy host"
-                                                   : "could not resolve host");
-            return response;
-        }
-        memcpy(&serv_addr, res->ai_addr, sizeof(struct sockaddr_in));
-        freeaddrinfo(res);
-    }
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(dial_port);
+    int serv_addr_resolved = 0;
 
     /* Zero-initialised so applied_timeout_ns starts at the "nothing applied"
      * sentinel rather than stack garbage, which the reuse guard would read as
@@ -1743,6 +1774,13 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         }
     }
     if (!reused) {
+        if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                               &serv_addr_resolved)) {
+            response->error = string_new(via_proxy ? "could not resolve proxy host"
+                                                   : "could not resolve host");
+            return response;
+        }
+
         char* dial_err = NULL;
         if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
             response->error = string_new(dial_err ? dial_err : "connection failed");
@@ -1875,7 +1913,11 @@ send_request:
             reused = 0;
             transport_close(&t);
             char* rd_err = NULL;
-            if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+            /* This connection came from the pool, so the resolve above was
+             * skipped; do it now. A failure here just means no retry. */
+            if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                                  &serv_addr_resolved)
+                && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                 free(rd_err);
                 goto send_request;
             }
@@ -1895,7 +1937,10 @@ send_request:
                 reused = 0;
                 transport_close(&t);
                 char* rd_err = NULL;
-                if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+                /* Pooled connection, so the resolve was skipped; do it now. */
+                if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                                      &serv_addr_resolved)
+                    && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                     free(rd_err);
                     goto send_request;
                 }
@@ -2086,7 +2131,10 @@ send_request:
         reused = 0;
         transport_close(&t);
         char* rd_err = NULL;
-        if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+        /* Pooled connection, so the resolve was skipped; do it now. */
+        if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                              &serv_addr_resolved)
+            && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
             free(rd_err);
             aether_caps_free(full_response, cap);
             full_response = NULL;
