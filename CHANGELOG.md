@@ -66,6 +66,25 @@ version number before tagging the release.
   and `getsockname` falls from 133,162 calls to 50. The request still owns its
   own copies, so `http_request_free`'s contract is unchanged.
 
+## [0.577.0]
+
+### Fixed
+
+- **`--target=wasm32-wasi` links code that uses `panic` / `try` / `catch`.**
+  `aether_panic.c` guarded its crash handler with `!defined(__wasi__)`, but
+  `aether_panic.h`'s setjmp macro selection did not: WASI is hosted and does
+  not define `__EMSCRIPTEN__`, so it fell into the POSIX arm and got
+  `_setjmp`/`_longjmp`, which wasi-libc declares but never implements. A link
+  error rather than a compile error, so it surfaced only at the end of a cross
+  build (`wasm-ld: undefined symbol: _longjmp`), and only for code that
+  actually reached the panic machinery — a library without `try`/`catch` linked
+  fine, which is why it went unnoticed. There is no working `setjmp` on wasi in
+  either spelling (plain `setjmp` is a hard `#error` in wasi-libc, and
+  `-mllvm -wasm-enable-sjlj` does not help on zig 0.16.0), so the wasi arm does
+  not unwind: `panic` traps the instance instead of unwinding to the nearest
+  `catch`. That semantic reduction is documented in `docs/build-system.md`.
+  Native targets are unaffected.
+
 ## [0.576.0]
 
 ### Added

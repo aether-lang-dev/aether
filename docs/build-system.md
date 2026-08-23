@@ -633,7 +633,7 @@ $ wasmtime hello.wasm
 hello from wasi
 ```
 
-Three things had to change for that, and they are worth knowing because each
+Four things had to change for that, and they are worth knowing because each
 was a place where WASI had been forgotten beside Emscripten:
 
 - **The scheduler.** WASI has no usable threads, but zig's wasi-libc ships
@@ -651,6 +651,39 @@ was a place where WASI had been forgotten beside Emscripten:
   which wasm rejects ("relocations for function or section offsets are only
   supported in metadata sections"). The guard excluded `__EMSCRIPTEN__` but
   not `__wasi__`.
+- **`setjmp`/`longjmp` selection.** `aether_panic.c` guarded its crash handler
+  with `!defined(__wasi__)`, but `aether_panic.h`'s macro selection did not.
+  WASI is hosted and does not define `__EMSCRIPTEN__`, so it fell into the
+  POSIX arm and got `_setjmp`/`_longjmp` — which wasi-libc declares but never
+  implements. A **link** error, so it surfaced only at the end of a cross
+  build (`undefined symbol: _longjmp`). See the caveat below.
+
+### `panic` / `try` / `catch` are fail-stop on WASI
+
+There is no working `setjmp` on `wasm32-wasi` in either spelling. `_setjmp` is
+declared but unimplemented; plain `setjmp` is a hard `#error` in wasi-libc
+directing you to `-mllvm -wasm-enable-sjlj` and an engine implementing the
+exception-handling proposal (measured on zig 0.16.0, that flag does not help —
+the `#error` fires first). Real support needs the WebAssembly
+exception-handling proposal in both toolchain and engine.
+
+So on WASI the runtime **does not unwind**: `AETHER_SIGSETJMP` always takes the
+first-return arm and `AETHER_SIGLONGJMP` calls `abort()`. A `panic()` traps the
+instance instead of unwinding to the nearest `catch`, and a `catch` block
+therefore never runs:
+
+```
+$ node --experimental-wasi call.mjs module.wasm
+aether: panic outside any try/catch or actor: negative
+safe(-1) -> trapped: RuntimeError
+```
+
+That message says "outside any try/catch" even when there *is* one, because the
+frame never registers. This is a real semantic reduction, and the alternative
+is that WASI cannot link at all. Nothing silently mis-executes: `abort()` is a
+trap the host observes, not a fallthrough into a half-unwound stack. Code
+targeting WASI should treat `panic` as fatal and use `(value, err)` returns for
+anything it expects to recover from.
 
 `--target=wasm` remains the route to a runnable **browser** bundle with JS
 glue; `wasm32-wasi` produces a self-contained module for a WASI runtime.
