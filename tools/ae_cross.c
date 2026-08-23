@@ -982,8 +982,14 @@ int run_cross_build(const char* c_file, const char* out_file,
              * which is where the bulk of a cross artifact comes from. The
              * wasm library path already passes --gc-sections of its own; a
              * second copy is harmless. */
-            const char* size_link = ae_build_size_mode()
-                ? "-Wl,--strip-all -Wl,--gc-sections" : "";
+            /* Apple targets link with Apple's ld, which rejects
+             * --strip-all/--gc-sections as unknown options; -x and
+             * -dead_strip are the Mach-O equivalents. Everything else here
+             * (ELF, PE, wasm) goes through an LLD that takes the GNU
+             * spellings. */
+            const char* size_link = !ae_build_size_mode() ? ""
+                : (is_apple ? "-Wl,-x -Wl,-dead_strip"
+                            : "-Wl,--strip-all -Wl,--gc-sections");
             w = cross_cmd_fmt(&cmd, &cmd_cap,
                 "%s %s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
                 cc_cmd, sysroot_flag, apple_lib_flags,

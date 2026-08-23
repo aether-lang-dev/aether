@@ -2559,8 +2559,17 @@ void build_gcc_cmd(char* cmd, size_t size,
      * from. Not applied to --emit=obj or --emit=csrc: neither links, and
      * stripping an object file would remove the symbols whoever links it
      * next needs. */
+    /* Apple's ld is not GNU ld: --strip-all and --gc-sections are
+     * "unknown options" there. The equivalents are -x (strip local symbols;
+     * -S would also drop debug info, which -g0 already prevents) and
+     * -dead_strip. Same platform split harden_ldflags already makes. */
+#if defined(__APPLE__)
+    const char* size_link_flags = " -Wl,-x -Wl,-dead_strip";
+#else
+    const char* size_link_flags = " -Wl,--strip-all -Wl,--gc-sections";
+#endif
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
-                            ? " -Wl,--strip-all -Wl,--gc-sections" : "";
+                            ? size_link_flags : "";
     if (user_cflags[0])
         snprintf(opt, sizeof(opt), "%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
                  harden_cflags(optimize), harden_link, harden_pie, size_link,

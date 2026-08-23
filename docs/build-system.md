@@ -132,8 +132,10 @@ needs `-O0`, which is a correctness requirement rather than a preference.
 
 ### `--size` for shipped artifacts
 
-`--size` compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link time
-(`-Wl,--strip-all -Wl,--gc-sections`):
+`--size` compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
+time — `-Wl,--strip-all -Wl,--gc-sections` with GNU ld and LLD,
+`-Wl,-x -Wl,-dead_strip` on Apple targets, whose linker rejects the GNU
+spellings as unknown options:
 
 ```sh
 ae build --target=wasm32-wasi --emit=lib mylib.ae -o lib.wasm          # 956,573 bytes
