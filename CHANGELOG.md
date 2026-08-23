@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **`std.http.server` resolves a connection's peer and local address once per
+  connection rather than once per request** (#1719). The old comment reasoned
+  that `getpeername`/`getsockname` are cache-warm and therefore cheap enough to
+  run per request; measured against nginx on the same box, that was 2 syscalls,
+  2 `inet_ntop` calls and 2 `strdup`s on every request, where nginx makes none
+  of them — neither address can change while a socket is open. Caching them on
+  `HttpConn` (which connection parking, #1663, had already made
+  connection-lifetime) took the load-balancer benchmark from 48,073 to 49,432
+  rps, **+2.8%**, with nginx and haproxy measured in the same runs as controls
+  moving under 0.3%. Under `strace`, `getpeername` disappears from the profile
+  and `getsockname` falls from 133,162 calls to 50. The request still owns its
+  own copies, so `http_request_free`'s contract is unchanged.
+
 ## [0.575.0]
 
 ### Added
