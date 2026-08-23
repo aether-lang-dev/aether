@@ -525,7 +525,12 @@ static char* wasm_export_flags(const char* c_file, const char* explicit_list) {
 int run_cross_compile_obj(const char* c_file, const char* obj_file,
                           bool optimize, const char* ztriple) {
     const char* user_cflags = get_cflags();
-    const char* opt = optimize ? "-O2" : "-O0 -g";
+    /* `zig cc` emits DWARF by DEFAULT, even at -O2, and nothing here used to
+     * pass -g0 -- so a cross artifact was overwhelmingly debug information
+     * (measured: 97.4% of a two-function wasi library). --size asks for the
+     * smallest artifact, so it takes -Oz and suppresses that debug info. */
+    const char* opt = ae_build_size_mode() ? "-Oz -g0"
+                    : (optimize ? "-O2" : "-O0 -g");
 
     /* Same macos workaround as the link path: zig's bundled macOS SDK stubs
      * do not ship the Apple-licensed CoreAudio framework headers, so
@@ -622,7 +627,12 @@ int run_cross_build(const char* c_file, const char* out_file,
     mkdirs(objdir);
 
     const char* user_cflags = get_cflags();
-    const char* opt = optimize ? "-O2" : "-O0 -g";
+    /* `zig cc` emits DWARF by DEFAULT, even at -O2, and nothing here used to
+     * pass -g0 -- so a cross artifact was overwhelmingly debug information
+     * (measured: 97.4% of a two-function wasi library). --size asks for the
+     * smallest artifact, so it takes -Oz and suppresses that debug info. */
+    const char* opt = ae_build_size_mode() ? "-Oz -g0"
+                    : (optimize ? "-O2" : "-O0 -g");
     const char* ex = extra ? extra : "";
     /* std.audio's vendored miniaudio auto-selects a backend by platform macro:
      * on a macos target it #includes <CoreAudio/CoreAudio.h>, an APPLE FRAMEWORK
@@ -961,10 +971,19 @@ int run_cross_build(const char* c_file, const char* out_file,
                     ? "-shared -fPIC -Wl,--export-all-symbols"
                     : "-shared -fPIC";
             }
+            /* --size strips at link time as well as suppressing debug info
+             * at compile time: --strip-all drops the symbol table and any
+             * debug sections that survived, --gc-sections drops what nothing
+             * reaches. Both apply to the runtime and stdlib objects too,
+             * which is where the bulk of a cross artifact comes from. The
+             * wasm library path already passes --gc-sections of its own; a
+             * second copy is harmless. */
+            const char* size_link = ae_build_size_mode()
+                ? "-Wl,--strip-all -Wl,--gc-sections" : "";
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                "%s %s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
                 cc_cmd, sysroot_flag, apple_lib_flags,
-                wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags,
+                wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags, size_link,
                 opt, feature_defs, tc.include_flags, c_file, ex, objdir,
                 crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
             free(wasm_lib_flags);
