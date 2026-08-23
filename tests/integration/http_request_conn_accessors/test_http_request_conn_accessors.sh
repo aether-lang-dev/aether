@@ -92,12 +92,17 @@ MULTI=$(curl --silent --show-error --max-time 5 "$URL" "$URL" "$URL" 2>"$TMPDIR/
 # The three bodies concatenate with no separator, so a line-oriented
 # count would see "ver=HTTP/1.1peer=127.0.0.1" as one field. Count
 # occurrences instead.
-MULTI_PEERS=$(echo "$MULTI" | grep -o 'peer=127\.0\.0\.1' | wc -l)
+# `wc -l` pads its count with leading blanks on BSD/macOS ("       3"),
+# so a string compare against "3" passes on GNU and fails on Darwin --
+# which is exactly how this test went red on both macOS legs and green
+# everywhere else. Strip the padding rather than compare numerically, so
+# the failure message still prints a clean count.
+MULTI_PEERS=$(echo "$MULTI" | grep -o 'peer=127\.0\.0\.1' | wc -l | tr -d '[:space:]')
 [ "$MULTI_PEERS" = "3" ] || {
     echo "  [FAIL] expected peer=127.0.0.1 on all 3 keep-alive requests, got $MULTI_PEERS"
     echo "  raw: $MULTI"; exit 1; }
 
-MULTI_LOCALS=$(echo "$MULTI" | grep -o 'local_port=18294' | wc -l)
+MULTI_LOCALS=$(echo "$MULTI" | grep -o 'local_port=18294' | wc -l | tr -d '[:space:]')
 [ "$MULTI_LOCALS" = "3" ] || {
     echo "  [FAIL] expected local_port=18294 on all 3 keep-alive requests, got $MULTI_LOCALS"
     echo "  raw: $MULTI"; exit 1; }
