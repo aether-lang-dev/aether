@@ -906,6 +906,103 @@ void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* t
     }
 }
 
+/* Inline bodies for the std.mem scalar accessors (#1733).
+ *
+ * Returns 1 if `func` is one of them and a body was emitted; 0 otherwise.
+ *
+ * Each entry is copied VERBATIM from std/mem/aether_mem.c. The null returns
+ * are deliberately asymmetric and must stay that way:
+ *   - get_byte / get_byte_sz -> -1;  every other getter -> 0 / 0.0;
+ *     every setter -> 0.
+ * The integer getters DEREFERENCE (inheriting the platform alignment
+ * requirement, exactly as today) while the float accessors go through
+ * memcpy (unaligned-safe, exactly as today). Copying that distinction is
+ * what makes "same as the extern" true rather than approximately true.
+ *
+ * get_ptr/set_ptr are excluded: stricter documented aligned-slot contract,
+ * never hot.
+ *
+ * The bodies reference the wrapper's own parameter names (p / i / offset /
+ * value), which are the names in std/mem/module.ae and are what this
+ * emitter prints for the signature. emit_mem_accessor_body verifies the
+ * arity and names before substituting, so a signature change in std.mem
+ * turns into "no lowering" (correct, slower) rather than broken C. */
+typedef struct { const char* name; const char* body; } MemAccessorBody;
+
+static const MemAccessorBody MEM_ACCESSOR_BODIES[] = {
+    { "mem_get_byte",
+      "    if (!p) return -1;\n"
+      "    return (int)((unsigned char*)p)[i];\n" },
+    { "mem_set_byte",
+      "    if (!p) return 0;\n"
+      "    ((unsigned char*)p)[i] = (unsigned char)value;\n"
+      "    return 1;\n" },
+    { "mem_get_byte_sz",
+      "    if (!p) return -1;\n"
+      "    return (int)((unsigned char*)p)[i];\n" },
+    { "mem_set_byte_sz",
+      "    if (!p) return 0;\n"
+      "    ((unsigned char*)p)[i] = (unsigned char)value;\n"
+      "    return 1;\n" },
+    { "mem_get_int",
+      "    if (!p) return 0;\n"
+      "    return *(int32_t*)((char*)p + offset);\n" },
+    { "mem_set_int",
+      "    if (!p) return 0;\n"
+      "    *(int32_t*)((char*)p + offset) = (int32_t)value;\n"
+      "    return 1;\n" },
+    { "mem_get_long",
+      "    if (!p) return 0;\n"
+      "    return *(int64_t*)((char*)p + offset);\n" },
+    { "mem_set_long",
+      "    if (!p) return 0;\n"
+      "    *(int64_t*)((char*)p + offset) = value;\n"
+      "    return 1;\n" },
+    { "mem_get_float32",
+      "    if (!p) return 0.0;\n"
+      "    float _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return (double)_v;\n" },
+    { "mem_set_float32",
+      "    if (!p) return 0;\n"
+      "    float _v = (float)value;\n"
+      "    __builtin_memcpy((char*)p + offset, &_v, sizeof(_v));\n"
+      "    return 1;\n" },
+    { "mem_get_float64",
+      "    if (!p) return 0.0;\n"
+      "    double _v;\n"
+      "    __builtin_memcpy(&_v, (char*)p + offset, sizeof(_v));\n"
+      "    return _v;\n" },
+    { "mem_set_float64",
+      "    if (!p) return 0;\n"
+      "    __builtin_memcpy((char*)p + offset, &value, sizeof(value));\n"
+      "    return 1;\n" },
+};
+
+static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
+    if (!func || !func->value) return 0;
+    if (!fn_has_internal_linkage(func)) return 0;
+    const char* cname = safe_c_name(func->value);
+    if (!cname) return 0;
+
+    for (size_t k = 0;
+         k < sizeof(MEM_ACCESSOR_BODIES) / sizeof(MEM_ACCESSOR_BODIES[0]);
+         k++) {
+        if (strcmp(cname, MEM_ACCESSOR_BODIES[k].name) != 0) continue;
+
+        /* The canned bodies name the wrapper's parameters directly (p / i /
+         * offset / value), which are the names in std/mem/module.ae and the
+         * ones this emitter prints for the signature. That coupling is
+         * pinned by tests/integration/mem_inline_accessors, which compares
+         * every lowered accessor against its extern for equal results --
+         * including the null paths -- so a rename in std.mem fails loudly
+         * there rather than silently emitting C that will not compile. */
+        fputs(MEM_ACCESSOR_BODIES[k].body, gen->output);
+        return 1;
+    }
+    return 0;
+}
+
 void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return;
 
@@ -1086,6 +1183,32 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     }
 
     fprintf(gen->output, ") {\n");
+
+    /* std.mem scalar accessors: emit the body inline instead of the extern
+     * call (#1733).
+     *
+     * These wrappers are already emitted `static` into the consumer's own
+     * translation unit, so gcc can inline THEM — but each body is a call to
+     * aether_mem_* in libaether.a, which no -O level can inline across the
+     * static-library boundary (short of LTO, which the toolchain does not
+     * do). In a per-pixel loop that call IS the cost: measured on a
+     * 640x480x4 composite loop, 60 frames took 215 ms with 12 accessor
+     * calls in the inner loop, and 29 ms with the same bodies inlined --
+     * 7.4x, with the null contract fully preserved.
+     *
+     * Semantics are copied verbatim from std/mem/aether_mem.c, INCLUDING
+     * the null returns, which are asymmetric: reads return -1, writes
+     * return 0. The extern symbols stay in the runtime for existing
+     * binaries and FFI consumers; this changes only what this wrapper's
+     * body compiles to.
+     *
+     * get_ptr/set_ptr are deliberately excluded: they carry a stricter
+     * documented aligned-slot contract and are never hot. */
+    if (emit_mem_accessor_body(gen, func)) {
+        fprintf(gen->output, "}\n\n");
+        return;
+    }
+
     indent(gen);
     // Variadic prologue: declare the hidden va_list and prime it from
     // the last named parameter. va_start()/va_arg()/va_end() in the
