@@ -56,10 +56,11 @@ loads/stores vectorizes and/or reduces to `memcpy`-class throughput.
    opaque blit) are memcpy-shaped, and byte-at-a-time is the only current
    spelling. Same null/permissive contract as `mem.copy`.
 
-3. *(Optional, only if 1 wants a stricter contract)* An unchecked-access
-   escape hatch in the spirit of `floatarr_get_unchecked` for loops that
-   have hoisted their own null/bounds proof. With ask 1's inline null
-   branch we likely don't need it — measure first.
+3. *(Downgraded after measurement — see Acceptance)* An unchecked-access
+   escape hatch in the spirit of `floatarr_get_unchecked`. Revisit only if
+   a profile of ask 1's result shows the inline null branch is the
+   remaining cost; the review benchmark (inlined-with-null-check 38ms vs
+   raw-C 6ms per 60 frames, both far inside frame budget) says it isn't.
 
 ## Call-site census (downstream, by family)
 
@@ -74,11 +75,33 @@ loads/stores vectorizes and/or reduces to `memcpy`-class throughput.
 ## Acceptance
 
 A self-contained micro-benchmark, no downstream code needed: allocate two
-640×480×4 byte buffers; per "frame", for every pixel read 4 bytes from
-each buffer, combine, write 4 back; run 60 frames. Today that's ~8–9s.
-Target: within ~2–3× of the same loop hand-written in C at `-O2`
-(i.e. tens of milliseconds, not seconds). `tests/` presumably wants that
-loop as a perf regression probe alongside the correctness ones.
+640×480×4 byte buffers (via `std.arena` or a caller-supplied buffer —
+`std.mem` itself has no allocator); per "frame", for every pixel read 4
+bytes from each buffer, combine, write 4 back; run 60 frames.
+
+Measured baseline for exactly that loop (Linux x86-64, gcc 12.2,
+ae 0.578.0 — from the PR review, confirmed by objdump showing 8 `call
+aether_mem_get_byte` instructions in the inner loop):
+
+| | 60 frames |
+|---|---:|
+| Aether today (`std.mem` accessors) | ~215 ms |
+| C `-O2`, inlined, null check kept | ~38 ms |
+| C `-O2`, raw indexing | ~6 ms |
+
+**Target: within ~6× of raw C — i.e. the cost of retaining the null
+contract inline, ≈40 ms per 60 frames on a modern x86-64.** That is
+checkable, and honest about what inlining can and cannot recover; the
+null branch itself is the residual and is explicitly acceptable.
+
+(The 141ms-per-frame figure in the Symptom table is a *different, heavier*
+body — the downstream compositor touches ~30–40 accessors per pixel
+including float64 scratch and blend math, where this acceptance loop
+touches 12. Both shrink by the same mechanism; the acceptance bar is the
+minimal loop above, with the measured baseline.)
+
+`tests/` presumably wants that loop as a perf regression probe alongside
+the correctness ones.
 
 With asks 1+2 landed, the downstream engine folds its C helper back into
 pure Aether behind an already-pinned test suite — the "runtime stays C"
