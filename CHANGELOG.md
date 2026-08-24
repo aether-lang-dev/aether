@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **`std.mem`'s scalar accessors are lowered inline instead of calling into
+  the runtime** (#1733). `mem.get_byte`/`set_byte`, `get_int`/`set_int`,
+  `get_long`/`set_long`, `get_float32`/`set_float32`,
+  `get_float64`/`set_float64` and the `_sz` byte twins now emit their body
+  into the wrapper the codegen already places in the caller's translation
+  unit, rather than a call to `libaether.a`. The C compiler cannot inline
+  across a static-library boundary at any `-O` level, so in a per-pixel loop
+  that call *is* the cost: a 640×480×4 composite loop over 60 frames went
+  from **215 ms to 38 ms (5.7×)**, with zero accessor calls left in the inner
+  loop. Semantics are unchanged, including the asymmetric null contract —
+  byte reads return `-1`, other getters `0`, setters `0` — and the integer
+  getters still dereference (same alignment requirement) while the float
+  accessors still go through `memcpy` (still unaligned-safe). The extern
+  symbols remain in the runtime for existing binaries and FFI consumers;
+  `get_ptr`/`set_ptr` are deliberately excluded, since they carry a stricter
+  aligned-slot contract and are never hot.
+
 ## [0.578.0]
 
 ### Added

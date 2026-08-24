@@ -1,0 +1,107 @@
+// Differential test for the std.mem accessor lowering (#1733).
+//
+// The lowering emits each accessor's body inline instead of calling into
+// libaether.a. That is only safe if the inline form is INDISTINGUISHABLE
+// from the extern, so this compares them directly: every assertion calls
+// the std.mem wrapper (now lowered) and the raw extern (unchanged), and
+// requires identical results.
+//
+// The null returns are the part most likely to be got wrong, because they
+// are ASYMMETRIC: byte reads return -1, every other getter returns 0, and
+// every setter returns 0. A lowering that "helpfully" normalised those to
+// 0 would pass a naive round-trip test and break real callers.
+
+import std.mem
+import std.arena
+
+extern aether_mem_get_byte(p: ptr, i: int) -> int
+extern aether_mem_set_byte(p: ptr, i: int, value: int) -> int
+extern aether_mem_get_int(p: ptr, offset: int) -> int
+extern aether_mem_set_int(p: ptr, offset: int, value: int) -> int
+extern aether_mem_get_long(p: ptr, offset: int) -> long
+extern aether_mem_set_long(p: ptr, offset: int, value: long) -> int
+extern aether_mem_get_float64(p: ptr, offset: int) -> float
+extern aether_mem_set_float64(p: ptr, offset: int, value: float) -> int
+extern aether_mem_get_float32(p: ptr, offset: int) -> float
+extern aether_mem_set_float32(p: ptr, offset: int, value: float) -> int
+extern exit(code: int)
+
+ck(cond: int, label: string) -> int {
+    if cond == 0 {
+        println("  FAIL: ${label}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    f = 0
+    ar = arena.create(4096)
+    buf = arena.alloc(ar, 256)
+
+    // ---- byte: lowered vs extern, across the value range ----------------
+    i = 0
+    while i < 256 {
+        _ = mem.set_byte(buf, 0, i)
+        lowered = mem.get_byte(buf, 0)
+        _ = aether_mem_set_byte(buf, 1, i)
+        extern_v = aether_mem_get_byte(buf, 1)
+        f = f + ck(lowered == extern_v, "byte ${i}: lowered ${lowered} != extern ${extern_v}")
+        i = i + 1
+    }
+
+    // ---- int / long: including negatives and the boundaries -------------
+    _ = mem.set_int(buf, 8, 0 - 2147483648)
+    _ = aether_mem_set_int(buf, 16, 0 - 2147483648)
+    f = f + ck(mem.get_int(buf, 8) == aether_mem_get_int(buf, 16), "int INT_MIN")
+
+    _ = mem.set_int(buf, 8, 2147483647)
+    _ = aether_mem_set_int(buf, 16, 2147483647)
+    f = f + ck(mem.get_int(buf, 8) == aether_mem_get_int(buf, 16), "int INT_MAX")
+
+    _ = mem.set_long(buf, 24, 1234567890123)
+    _ = aether_mem_set_long(buf, 32, 1234567890123)
+    f = f + ck(mem.get_long(buf, 24) == aether_mem_get_long(buf, 32), "long")
+
+    _ = mem.set_long(buf, 24, 0 - 1234567890123)
+    _ = aether_mem_set_long(buf, 32, 0 - 1234567890123)
+    f = f + ck(mem.get_long(buf, 24) == aether_mem_get_long(buf, 32), "long negative")
+
+    // ---- float32 / float64 ----------------------------------------------
+    _ = mem.set_float64(buf, 40, 3.141592653589793)
+    _ = aether_mem_set_float64(buf, 48, 3.141592653589793)
+    f = f + ck(mem.get_float64(buf, 40) == aether_mem_get_float64(buf, 48), "float64")
+
+    _ = mem.set_float32(buf, 56, 2.5)
+    _ = aether_mem_set_float32(buf, 60, 2.5)
+    f = f + ck(mem.get_float32(buf, 56) == aether_mem_get_float32(buf, 60), "float32")
+
+    // ---- the null contract, which is ASYMMETRIC --------------------------
+    // Byte reads are the odd one out: -1, not 0.
+    f = f + ck(mem.get_byte(null, 0) == aether_mem_get_byte(null, 0), "null get_byte agrees")
+    f = f + ck(mem.get_byte(null, 0) == 0 - 1, "null get_byte is -1, not 0")
+
+    f = f + ck(mem.set_byte(null, 0, 1) == aether_mem_set_byte(null, 0, 1), "null set_byte agrees")
+    f = f + ck(mem.set_byte(null, 0, 1) == 0, "null set_byte is 0")
+
+    f = f + ck(mem.get_int(null, 0) == aether_mem_get_int(null, 0), "null get_int agrees")
+    f = f + ck(mem.get_int(null, 0) == 0, "null get_int is 0")
+
+    f = f + ck(mem.get_long(null, 0) == aether_mem_get_long(null, 0), "null get_long agrees")
+    f = f + ck(mem.set_long(null, 0, 1) == aether_mem_set_long(null, 0, 1), "null set_long agrees")
+    f = f + ck(mem.get_float64(null, 0) == aether_mem_get_float64(null, 0), "null get_float64 agrees")
+    f = f + ck(mem.set_float64(null, 0, 1.0) == aether_mem_set_float64(null, 0, 1.0), "null set_float64 agrees")
+
+    // ---- unaligned float access must stay defined (memcpy, not deref) ---
+    _ = mem.set_float64(buf, 65, 1.5)
+    _ = aether_mem_set_float64(buf, 73, 1.5)
+    f = f + ck(mem.get_float64(buf, 65) == aether_mem_get_float64(buf, 73), "unaligned float64")
+
+    arena.destroy(ar)
+
+    if f != 0 {
+        println("mem inline accessors: ${f} failure(s)")
+        exit(1)
+    }
+    println("PASS: mem_inline_accessors — lowered accessors match their externs")
+}
