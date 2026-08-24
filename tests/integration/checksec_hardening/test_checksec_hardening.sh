@@ -8,9 +8,18 @@
 #   - `ae checksec --require` exits non-zero when one is missing, which is the
 #     part that keeps a flag change from quietly dropping a mitigation.
 #
-# The probe deliberately contains a stack buffer: -fstack-protector-strong
-# protects functions that have one, so a program without any would report no
-# canary and prove nothing.
+# The probe deliberately contains a stack buffer AND hands it to an opaque
+# C function: -fstack-protector-strong protects functions whose local array
+# has its address taken by something the compiler cannot see through, so a
+# program without one would report no canary and prove nothing.
+#
+# The opaque call is load-bearing, not decoration. Before #1733 the std.mem
+# accessors were extern calls, which took the buffer's address and made it
+# at-risk as a side effect; once those lower inline (they are two
+# instructions now) gcc can prove every access in bounds and elides the
+# buffer entirely, canary and all. Passing it to probe_touch is what keeps
+# this test measuring the FLAG rather than an accident of how std.mem
+# happened to be compiled.
 #
 # FORTIFY is checked by running an overflow into it rather than by reading a
 # symbol name, because the name is a libc implementation detail and the
@@ -37,9 +46,13 @@ cat > "$TMP/probe.ae" <<'AEOF'
 import std.mem
 
 extern probe_copy(n: int) -> int
+extern probe_touch(p: ptr, n: int) -> int
 
 fill(n: int) -> long {
     byte[64] scratch
+    // Hand the buffer to something the compiler cannot see through, so the
+    // array is address-taken and -fstack-protector-strong protects it.
+    _ = probe_touch(scratch, n)
     mem.set_long(scratch, 0, n * 3)
     return mem.get_long(scratch, 0)
 }
@@ -74,6 +87,10 @@ cat > "$TMP/probe_copy.c" <<'COF'
 
 static char small[16];
 static char slack[256];
+
+/* Opaque to the caller's TU: takes the probe's stack buffer by address so
+ * the array cannot be proved safe and elided. Does nothing with it. */
+int probe_touch(void* p, int n) { (void)p; return n; }
 
 int probe_copy(int n) {
     const char* src = "0123456789abcdefghijklmnopqrstuv";
