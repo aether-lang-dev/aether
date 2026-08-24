@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.mem` gains offset forms of its bulk operations**: `copy_at`,
+  `move_at`, `fill_at` and `compare_at` (#1733). `copy`, `move`, `compare`
+  and `set` can only start at byte 0 of each buffer, and Aether has no
+  pointer arithmetic — so a bulk operation on an *interior* span had no
+  spelling at all, and copying one scanline out of a larger framebuffer meant
+  going byte at a time even though the operation is memcpy-shaped. Contracts
+  match the offset-less forms exactly: a null buffer is a no-op returning
+  `dst` (`0` for `compare_at`), and offsets are the caller's responsibility in
+  the same way `n` already is. `move_at` exists alongside `copy_at` because an
+  image scrolling within its own buffer is an *overlapping* interior copy,
+  which `copy_at` — being `memcpy` — leaves undefined.
+
 ## [0.579.0]
 
 ### Changed
