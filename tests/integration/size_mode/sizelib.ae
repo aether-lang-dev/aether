@@ -1,0 +1,18 @@
+// Library-shaped source for the --size test. Uses try/catch/panic so the
+// panic machinery is linked in too -- a fixture that pulls in more of the
+// runtime is a better size signal than one that pulls in almost none.
+
+risky(x: int) -> int {
+    if x < 0 {
+        panic("negative")
+    }
+    return x * 2
+}
+
+safe(x: int) -> int {
+    try {
+        return risky(x)
+    } catch reason {
+        return 0
+    }
+}

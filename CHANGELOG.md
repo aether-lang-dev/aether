@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`ae build --size`** compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
+  (`-Wl,--strip-all -Wl,--gc-sections`), for a shipped artifact rather than a
+  debuggable one (#1729). Every other mode pointed at debugging — `--quick` is
+  `-O0 -g`, `--profile` is `-O2 -g -fno-omit-frame-pointer`, `--coverage` is
+  `-O0 -g --coverage` — so anyone shipping a library had to emit the C and
+  hand-compile it. It matters most under `--target`: `zig cc` emits DWARF **by
+  default** even at `-O2`, and the cross backend passed no `-g0`, so a
+  cross-compiled `--emit=lib` artifact was overwhelmingly debug information —
+  measured at **97.4%** of a two-function wasi library, which `--size` takes
+  from 956,573 to 24,942 bytes, a **38×** reduction with identical behaviour.
+  The equivalent native `.so` has zero `.debug*` sections, so this was a
+  cross-path problem rather than something every target shipped; native still
+  gains about 14%. Deliberately not the default, and deliberately not applied
+  to `--emit=obj`/`--emit=csrc`, whose symbols are what the next linker needs.
+
 ## [0.577.0]
 
 ### Fixed

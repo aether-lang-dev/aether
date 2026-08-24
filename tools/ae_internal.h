@@ -68,6 +68,10 @@ int  run_cmd_show_warnings(const char* cmd);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
 const char* get_cflags(void);
+/* True when `ae build --size` was given: the cross backend uses it to add
+ * -Oz -g0 and link-time stripping. `zig cc` emits DWARF by default even at
+ * -O2, so without -g0 a cross artifact is overwhelmingly debug info. */
+bool ae_build_size_mode(void);
 
 /* `ae checksec` (#1646): report the hardening a linked artifact carries.
  * Implemented in tools/ae_checksec.c. */

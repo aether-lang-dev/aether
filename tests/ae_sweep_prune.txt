@@ -157,6 +157,7 @@ tests/integration/sealed_namespaces/
 tests/integration/selective_import_alias/
 tests/integration/selective_import_merge_order/
 tests/integration/selective_import_shadow/
+tests/integration/size_mode/
 tests/integration/source_location/
 tests/integration/source_location_default_capture/
 tests/integration/spec_format_reporting/

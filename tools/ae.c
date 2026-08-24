@@ -382,6 +382,31 @@ static bool g_coverage = false;
 // with aetherc and hand-compiling it.
 static bool g_profile = false;
 
+// --size: -Oz plus strip-all and dead-code elimination, for a shipped
+// artifact where bytes matter more than debuggability.
+//
+// The other three modes are all debug-oriented -- --quick is -O0 -g,
+// --profile is -O2 -g -fno-omit-frame-pointer, --coverage is -O0 -g
+// --coverage -- and the default -O2 sits in the middle. Nothing pointed
+// the other way, so anyone shipping a library had to emit the C and
+// hand-compile it, which is exactly the hand-rolled script this is meant
+// to delete.
+//
+// It matters most on the cross path. `zig cc` emits DWARF by DEFAULT, even
+// at -O2, and nothing in the cross backend passes -g0 -- so a
+// cross-compiled --emit=lib artifact is overwhelmingly debug information.
+// Measured on a two-function wasi library: 956,573 bytes, of which 97.4%
+// is .debug*/name sections; code and data are the rest. The equivalent
+// native .so has zero .debug* sections, so this is a cross-path problem
+// rather than something every target suffers.
+//
+// Deliberately NOT the default. A 38x size difference is discoverable --
+// anyone shipping to a browser will find the flag -- whereas stripping
+// every build by default would make the first "why can't I get a stack
+// trace from my wasm module" report genuinely hard to diagnose. Named
+// modes keep the trade-off visible at the point of choosing it.
+static bool g_size = false;
+
 // Build an aetherc command string with optional --lib flag
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
@@ -1832,6 +1857,8 @@ fail:
 
 // Get cflags from aether.toml [build] section (applied only for release/ae-build)
 // Returns empty string if not found or no aether.toml
+bool ae_build_size_mode(void) { return g_size; }
+
 const char* get_cflags(void) {
     static char flags[512] = "";
     static bool checked = false;
@@ -2276,6 +2303,17 @@ static const char* opt_flags(bool optimize) {
      * after coverage because --coverage's -O0 is a correctness
      * requirement for gcov, not a preference. */
     if (g_profile) return "-O2 -g -fno-omit-frame-pointer -Wformat";
+    /* --size optimises for bytes: -Os over -O2, and -g0 to suppress debug
+     * info the compiler would otherwise emit. Checked after --profile
+     * because asking for both is contradictory and the debug-oriented mode
+     * is the safer reading of the intent.
+     *
+     * -Os, NOT -Oz, on the native path: gcc only gained -Oz in GCC 12, and
+     * the CI baseline (ubuntu-22.04) ships GCC 11, where it is a hard error.
+     * -Os is supported by every gcc and clang we target and gives nearly the
+     * same result. The CROSS path can and does use -Oz, because zig bundles
+     * its own clang and the version is not the host's to vary. */
+    if (g_size) return "-Os -g0 -Wformat";
     return optimize ? "-O2 -Wformat" : "-O0 -g -Wformat";
 }
 
@@ -2497,7 +2535,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // #line) never run on a normal `ae build` — regressing #1252. Keep this in
     // sync with opt_flags(); user cflags still append after, so -Wno-format
     // remains an opt-out.
-    const char* base_opt = (g_coverage || g_profile)
+    const char* base_opt = (g_coverage || g_profile || g_size)
                           ? opt_flags(optimize)
                           : (optimize ? "-O2 -pipe -Wformat" : "-O0 -g -pipe -Wformat");
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
@@ -2514,12 +2552,32 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* harden_pie = (g_emit_exe && !g_emit_lib && !g_emit_obj && !g_emit_csrc)
                              ? " -fPIE -pie" : "";
 #endif
+    /* --size link flags. --strip-all drops the symbol table and any debug
+     * sections that survived compilation; --gc-sections drops what nothing
+     * reaches. Both are link-time, so they apply to the runtime and stdlib
+     * objects too -- which is where the bulk of a library artifact comes
+     * from. Not applied to --emit=obj or --emit=csrc: neither links, and
+     * stripping an object file would remove the symbols whoever links it
+     * next needs. */
+    /* Apple's ld is not GNU ld: --strip-all and --gc-sections are
+     * "unknown options" there. The equivalents are -x (strip local symbols;
+     * -S would also drop debug info, which -g0 already prevents) and
+     * -dead_strip. Same platform split harden_ldflags already makes. */
+#if defined(__APPLE__)
+    const char* size_link_flags = " -Wl,-x -Wl,-dead_strip";
+#else
+    const char* size_link_flags = " -Wl,--strip-all -Wl,--gc-sections";
+#endif
+    const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
+                            ? size_link_flags : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, user_cflags, trace_def);
+        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
+                 harden_cflags(optimize), harden_link, harden_pie, size_link,
+                 user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s", emit_lib_flags, base_opt,
-                 harden_cflags(optimize), harden_link, harden_pie, trace_def);
+        snprintf(opt, sizeof(opt), "%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+                 harden_cflags(optimize), harden_link, harden_pie, size_link,
+                 trace_def);
 
     // Append aether_config.c to the compile when building a lib so the
     // aether_config_* accessors are bundled into the .so. The .c file
@@ -5274,6 +5332,10 @@ static int cmd_build(int argc, char** argv) {
              * it. See g_profile for why neither --quick nor the default
              * serves. */
             g_profile = true;
+        } else if (strcmp(argv[i], "--size") == 0) {
+            /* -Oz plus -g0 and link-time stripping/GC: the smallest
+             * artifact, for shipping rather than debugging. See g_size. */
+            g_size = true;
         } else if (strcmp(argv[i], "--trace") == 0) {
             /* #1333: compile message tracing into this binary. The runtime has
              * to be rebuilt from source for it, since a prebuilt libaether.a
@@ -5538,9 +5600,12 @@ static int cmd_build(int argc, char** argv) {
 
     if (!file) {
         fprintf(stderr, "Error: No input file specified.\n");
-        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--profile] [--target=<triple>] [-D SYMBOL]\n");
+        fprintf(stderr, "Usage: ae build <file.ae> [-o output] [--extra file.c] [--quick] [--profile] [--size] [--target=<triple>] [-D SYMBOL]\n");
         fprintf(stderr, "  --quick    Compile with -O0 -g for faster iteration (default: -O2)\n");
         fprintf(stderr, "  --profile  Compile with -O2 -g -fno-omit-frame-pointer (for perf/gdb)\n");
+        fprintf(stderr, "  --size     Compile with -Oz -g0 and strip at link, for a shipped\n");
+        fprintf(stderr, "             artifact (biggest win on --target, where zig emits DWARF\n");
+        fprintf(stderr, "             by default: a wasm --emit=lib drops ~38x)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
         fprintf(stderr, "             aarch64-linux, x86_64-linux, aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
