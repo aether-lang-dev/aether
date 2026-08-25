@@ -56,6 +56,46 @@ rather than spilling into the next one.
 `bits_of_float` / `float_from_bits` reinterpret a double as its IEEE 754 bit
 pattern and back, without going through a conversion.
 
+## Bulk operations on interior spans
+
+`copy`, `move`, `compare` and `set` all start at byte 0 of each buffer. Since
+Aether has no pointer arithmetic, that left no way to express a bulk
+operation on an **interior** span — copying one scanline out of a larger
+framebuffer meant going byte at a time, even though the operation is
+memcpy-shaped.
+
+`copy_at`, `move_at`, `fill_at` and `compare_at` take explicit offsets:
+
+```aether,run
+import std.mem
+import std.arena
+
+main() {
+    ar = arena.create(256)
+    src = arena.alloc(ar, 32)
+    dst = arena.alloc(ar, 32)
+    i = 0
+    while i < 32 { _ = mem.set_byte(src, i, i) ; i = i + 1 }
+
+    // copy src[8..12) into dst[20..24)
+    _ = mem.copy_at(dst, 20, src, 8, 4)
+    println("${mem.get_byte(dst, 20)} ${mem.get_byte(dst, 23)}")
+    arena.destroy(ar)
+}
+```
+```output
+8 11
+```
+
+Contracts match the offset-less forms exactly: a null buffer is a no-op
+returning `dst` (`0` for `compare_at`), and offsets are the caller's
+responsibility in the same way `n` already is — no range checking is added,
+because none exists in the offset-less forms.
+
+**Use `move_at`, not `copy_at`, when the spans overlap.** An image scrolling
+within its own buffer is an overlapping interior copy; `copy_at` is `memcpy`
+and is undefined there, exactly as in C.
+
 ## Exports
 
 `get_byte`, `set_byte`, `get_int`, `set_int`, `get_long`, `set_long`,
@@ -64,7 +104,7 @@ pattern and back, without going through a conversion.
 `set_float32`, `get_float64`, `set_float64`, `get_ptr`, `set_ptr`; the
 endian pairs `get_u16_le` through `set_u64_be`; `bits_of_float`,
 `float_from_bits`, `clz32`, `clz64`, `udiv64_32`; `copy`, `move`, `compare`,
-`set`.
+`set`, `copy_at`, `move_at`, `fill_at`, `compare_at`.
 
 `mem.ptr_to_long` and `mem.long_to_ptr` are defined and callable but are
 **missing from the module's `exports(...)` list**. They work today because a

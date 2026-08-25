@@ -1,0 +1,113 @@
+// Offset forms of the std.mem bulk operations (#1733 ask 2).
+//
+// copy/move/compare/set can only start at byte 0 of each buffer, and Aether
+// has no pointer arithmetic — so a bulk operation on an INTERIOR span had no
+// spelling. These four close that.
+//
+// The load-bearing case is move_at: an image scrolling within its own buffer
+// is an OVERLAPPING interior copy. copy_at on overlapping spans is undefined
+// (it is memcpy), so the test below pins that move_at gives the memmove
+// answer, which is the whole reason it exists alongside copy_at.
+
+import std.mem
+import std.arena
+
+extern exit(code: int)
+
+ck(cond: int, label: string) -> int {
+    if cond == 0 {
+        println("  FAIL: ${label}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    fails = 0
+    ar = arena.create(4096)
+    a = arena.alloc(ar, 64)
+    b = arena.alloc(ar, 64)
+
+    // a = 0,1,2,...63 ; b = all zero
+    i = 0
+    while i < 64 {
+        _ = mem.set_byte(a, i, i)
+        _ = mem.set_byte(b, i, 0)
+        i = i + 1
+    }
+
+    // ---- copy_at: interior -> interior ----------------------------------
+    _ = mem.copy_at(b, 20, a, 8, 4)
+    fails = fails + ck(mem.get_byte(b, 20) == 8, "copy_at b[20]")
+    fails = fails + ck(mem.get_byte(b, 23) == 11, "copy_at b[23]")
+    // and nothing either side was touched
+    fails = fails + ck(mem.get_byte(b, 19) == 0, "copy_at did not write before the span")
+    fails = fails + ck(mem.get_byte(b, 24) == 0, "copy_at did not write after the span")
+
+    // ---- fill_at: an interior run --------------------------------------
+    _ = mem.fill_at(b, 40, 0xAB, 8)
+    fails = fails + ck(mem.get_byte(b, 40) == 0xAB, "fill_at start")
+    fails = fails + ck(mem.get_byte(b, 47) == 0xAB, "fill_at end")
+    fails = fails + ck(mem.get_byte(b, 39) == 0, "fill_at did not run early")
+    fails = fails + ck(mem.get_byte(b, 48) == 0, "fill_at did not overrun")
+
+    // ---- compare_at: interior spans ------------------------------------
+    // a[8..12) was copied to b[20..24), so those spans are equal.
+    fails = fails + ck(mem.compare_at(a, 8, b, 20, 4) == 0, "compare_at equal spans")
+    fails = fails + ck(mem.compare_at(a, 0, b, 20, 4) != 0, "compare_at unequal spans")
+
+    // ---- move_at: the OVERLAPPING case that copy_at cannot do -----------
+    // Scroll a's first 32 bytes forward by 4 within a itself. Source and
+    // destination overlap, so this is memmove territory: every byte must
+    // survive, shifted. memcpy would be free to clobber as it went.
+    c = arena.alloc(ar, 64)
+    i = 0
+    while i < 64 { _ = mem.set_byte(c, i, i); i = i + 1 }
+    // HONEST LIMITATION: this pins the RESULT, not the mechanism. glibc's
+    // memcpy copies backwards for an overlapping forward move, so swapping
+    // move_at's memmove for a memcpy still passes here (verified by doing
+    // exactly that, with a cleared build cache). The assertions below are
+    // still worth having — they catch an off-by-one or a wrong span — but
+    // the memmove guarantee itself rests on the implementation calling
+    // __builtin_memmove, not on this test. A platform whose memcpy copies
+    // forwards would fail these, which is the point: the contract is what
+    // makes the code portable, and the test documents what the contract
+    // must deliver.
+    shift_n = mem.get_byte(c, 32)
+    _ = mem.move_at(c, 4, c, 0, shift_n)
+    // c[4..36) should now hold the old c[0..32) == 0..31
+    fails = fails + ck(mem.get_byte(c, 4) == 0, "move_at overlapping: first byte")
+    fails = fails + ck(mem.get_byte(c, 20) == 16, "move_at overlapping: middle byte")
+    fails = fails + ck(mem.get_byte(c, 35) == 31, "move_at overlapping: last byte")
+    // the bytes before the destination are untouched
+    fails = fails + ck(mem.get_byte(c, 0) == 0, "move_at left c[0] alone")
+
+    // ---- null contract: no-op, same as the offset-less twins ------------
+    // A null buffer must not trap; copy/move/fill return dst, compare 0.
+    fails = fails + ck(mem.copy_at(null, 0, a, 0, 4) == null, "copy_at null dst returns dst")
+    fails = fails + ck(mem.copy_at(b, 0, null, 0, 4) == b, "copy_at null src returns dst")
+    fails = fails + ck(mem.move_at(null, 0, a, 0, 4) == null, "move_at null dst")
+    fails = fails + ck(mem.fill_at(null, 0, 1, 4) == null, "fill_at null dst")
+    fails = fails + ck(mem.compare_at(null, 0, b, 0, 4) == 0, "compare_at null a is 0")
+    fails = fails + ck(mem.compare_at(a, 0, null, 0, 4) == 0, "compare_at null b is 0")
+
+    // ---- zero length is a no-op, not an error ---------------------------
+    before = mem.get_byte(b, 0)
+    _ = mem.copy_at(b, 0, a, 0, 0)
+    fails = fails + ck(mem.get_byte(b, 0) == before, "copy_at n=0 writes nothing")
+
+    // ---- offset 0 agrees with the offset-less form ----------------------
+    d = arena.alloc(ar, 64)
+    e = arena.alloc(ar, 64)
+    _ = mem.copy(d, a, 16)
+    _ = mem.copy_at(e, 0, a, 0, 16)
+    fails = fails + ck(mem.compare(d, e, 16) == 0, "copy_at at offset 0 == copy")
+
+    arena.destroy(ar)
+
+    if fails != 0 {
+        println("mem offset bulk: ${fails} failure(s)")
+        exit(1)
+    }
+    println("PASS: mem_offset_bulk — interior spans, overlap, and null contracts")
+}
