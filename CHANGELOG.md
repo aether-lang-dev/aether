@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Removed
+
+- **Two plan documents that were being published as documentation.**
+  `docs/` is the source the website generator turns into pages, so everything
+  in it is served at aether-lang.dev/Docs. Two files there were not
+  documentation of anything the toolchain does:
+
+  `phase3-message-leak-fix-plan.md` was a task brief addressed to a specific
+  agent, on a branch that no longer exists, instructing it not to commit. Its
+  measurements and its four traps about string ownership are real and are
+  preserved in the issue, along with the finding that turned up while checking
+  whether it was stale: `std.message` shipped without the regression test the
+  brief was written against, so its leak status has never been verified.
+
+  `proposed-aea-lib.md` proposed compiled `.aea` module artifacts. Proposals
+  belong in the tracker, where they can be discussed and closed.
+
 ## [0.582.0]
 
 ### Changed
