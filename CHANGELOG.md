@@ -41,6 +41,22 @@ version number before tagging the release.
   one that does not, because a client that dropped the headers unconditionally
   would satisfy the first assertion alone. Removing the strip turns it red.
 
+## [0.581.0]
+
+### Fixed
+
+- **`ae cflags --libs` now publishes the Windows system libraries** that
+  linking `libaether` requires. It emitted none of them, so the documented
+  `gcc your.c $(ae cflags)` recipe failed on Windows with
+  `undefined reference to __imp_SymInitialize` and friends as soon as the
+  panic symboliser was pulled in — reproduced on a Windows box, then fixed
+  and re-verified there. `ae build` linked fine throughout because it carried
+  its own private copy of the list, and that asymmetry was the real bug:
+  `cflags` is the contract for what linking `libaether` needs on a box, so
+  `ae build`'s knowledge must not exceed it, or every downstream consumer
+  re-learns each delta as a platform-specific link break. Both now use one
+  shared `AETHER_WIN_SYSTEM_LIBS` definition. Non-Windows output is unchanged.
+
 ## [0.580.0]
 
 ### Added
