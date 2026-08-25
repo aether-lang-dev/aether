@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A release now updates the website.** The publish job dispatches to
+  `aesite`, which regenerates its docs from the released tree, stamps the
+  version on the page, moves its toolchain pin, and deploys. Doing that by
+  hand meant doing it late: the site sat on v0.562 while this repo shipped
+  0.580, so the front page named a version nobody could download and the docs
+  described a toolchain that had moved on.
+
+  The dispatch needs a token this repo's `GITHUB_TOKEN` cannot provide, so it
+  reads `AESITE_SYNC_TOKEN`. When that secret is absent the step says so and
+  succeeds, because a release must not fail over a downstream notification,
+  and the site checks daily on its own. A missing token delays the site by up
+  to a day rather than stalling it.
+
+## [current]
+
 ### Removed
 
 - **Two plan documents that were being published as documentation.**
