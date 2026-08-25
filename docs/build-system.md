@@ -130,6 +130,55 @@ and adds only what the profiler needs to attribute it. It works under
 `--coverage` takes precedence if both are passed: gcov's line attribution
 needs `-O0`, which is a correctness requirement rather than a preference.
 
+### `--size` for shipped artifacts
+
+`--size` compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
+time — `-Wl,--strip-all -Wl,--gc-sections` with GNU ld and LLD,
+`-Wl,-x -Wl,-dead_strip` on Apple targets, whose linker rejects the GNU
+spellings as unknown options:
+
+```sh
+ae build --target=wasm32-wasi --emit=lib mylib.ae -o lib.wasm          # 956,573 bytes
+ae build --target=wasm32-wasi --emit=lib --size mylib.ae -o lib.wasm   #  24,942 bytes
+```
+
+Every other mode points at debugging — `--quick` is `-O0 -g`, `--profile` is
+`-O2 -g -fno-omit-frame-pointer`, `--coverage` is `-O0 -g --coverage` — and the
+default `-O2` sits between them. `--size` is the one that points at shipping.
+
+**It matters most under `--target`.** `zig cc` emits DWARF **by default**, even
+at `-O2`, and the cross backend passed no `-g0` — so a cross-compiled
+`--emit=lib` artifact was overwhelmingly debug information. Measured on a
+two-function wasi library, 97.4% of the module was `.debug*`/`name` sections;
+code and data were the remaining 2.6%. The equivalent native `.so` has **zero**
+`.debug*` sections, so this was a cross-path problem rather than something
+every target shipped. Native builds still benefit, just far less: about 14% on
+the same library, from `-Oz` and the symbol table.
+
+Stripping is behaviour-preserving. The 24 KB module above still instantiates,
+still exports every symbol, and still runs identically — including the
+fail-stop panic path WASI has.
+
+`-Os` rather than `-Oz` on the native path: gcc only gained `-Oz` in GCC 12,
+and Ubuntu 22.04 — the CI baseline — ships GCC 11, where it is a hard error.
+`-Os` is supported everywhere and gives nearly the same result. Cross builds do
+use `-Oz`, because zig bundles its own clang and the version is not the host's
+to vary.
+
+Two things `--size` deliberately does not do:
+
+- **It is not the default.** A 38× difference is discoverable; anyone shipping
+  to a browser will find the flag. Stripping every build by default would make
+  the first "why can't I get a stack trace from my wasm module" report
+  genuinely hard to diagnose.
+- **It does not strip `--emit=obj` or `--emit=csrc`.** Neither links, and an
+  object file's symbols are exactly what whoever links it next needs. Those
+  modes still get `-Oz -g0` for the compile, but no link-time stripping.
+
+`--profile` takes precedence if both are passed: asking for a small artifact
+and a profileable one is contradictory, and the debug-oriented reading is the
+safer one.
+
 ### Resolving the build target
 
 `ae build` accepts either a path to a `.ae` file or a `[[bin]]` name from `aether.toml`. The two are equivalent:

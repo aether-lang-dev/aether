@@ -435,6 +435,52 @@ void* aether_mem_set_bulk(void* dst, int value, int64_t n) {
     return __builtin_memset(dst, value, (size_t)n);
 }
 
+/* Offset forms of the three bulk writers (#1733 ask 2).
+ *
+ * The offset-less versions above can only start at byte 0 of each buffer,
+ * and Aether has no pointer arithmetic — so there was no way to express a
+ * bulk operation on an INTERIOR span. Copying one scanline of a sub-region
+ * out of a larger framebuffer, or filling a rect's row, had to go byte at a
+ * time through get_byte/set_byte even though the operation is memcpy-shaped.
+ *
+ * Contracts match their offset-less twins exactly: NULL in either buffer is
+ * a no-op returning `dst`, and the offsets are the caller's problem in the
+ * same way `n` already is — these add no range checking, because the
+ * offset-less forms do none either and a bulk primitive that silently
+ * clamped would be worse than one that does what it is told.
+ *
+ * `move_at` exists alongside `copy_at` rather than after it: an image
+ * scrolling within its own buffer is an OVERLAPPING interior copy, so a
+ * copy_at-only surface would make the common case undefined behaviour. */
+void* aether_mem_copy_at(void* dst, int64_t dst_off,
+                         const void* src, int64_t src_off, int64_t n) {
+    if (!dst || !src) return dst;
+    return __builtin_memcpy((char*)dst + dst_off, (const char*)src + src_off,
+                            (size_t)n);
+}
+
+void* aether_mem_move_at(void* dst, int64_t dst_off,
+                         const void* src, int64_t src_off, int64_t n) {
+    if (!dst || !src) return dst;
+    return __builtin_memmove((char*)dst + dst_off, (const char*)src + src_off,
+                             (size_t)n);
+}
+
+void* aether_mem_fill_at(void* dst, int64_t off, int value, int64_t n) {
+    if (!dst) return dst;
+    return __builtin_memset((char*)dst + off, value, (size_t)n);
+}
+
+/* Offset form of compare, for symmetry with the writers: comparing an
+ * interior span had the same hole. Returns 0 when either buffer is NULL,
+ * exactly as aether_mem_compare does. */
+int aether_mem_compare_at(const void* a, int64_t a_off,
+                          const void* b, int64_t b_off, int64_t n) {
+    if (!a || !b) return 0;
+    return __builtin_memcmp((const char*)a + a_off, (const char*)b + b_off,
+                            (size_t)n);
+}
+
 /* Endian-aware 16/32/64-bit load/store at a byte offset.
  *
  * Unaligned-safe — each read/write goes through __builtin_memcpy,

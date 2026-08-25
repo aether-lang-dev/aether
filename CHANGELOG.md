@@ -9,7 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [0.583.0]
+
+### Changed
+
+- **A release now updates the website.** The publish job dispatches to
+  `aesite`, which regenerates its docs from the released tree, stamps the
+  version on the page, moves its toolchain pin, and deploys. Doing that by
+  hand meant doing it late: the site sat on v0.562 while this repo shipped
+  0.580, so the front page named a version nobody could download and the docs
+  described a toolchain that had moved on.
+
+  The dispatch needs a token this repo's `GITHUB_TOKEN` cannot provide, so it
+  reads `AESITE_SYNC_TOKEN`. When that secret is absent the step says so and
+  succeeds, because a release must not fail over a downstream notification,
+  and the site checks daily on its own. A missing token delays the site by up
+  to a day rather than stalling it.
+
 ## [current]
+
+### Removed
+
+- **Two plan documents that were being published as documentation.**
+  `docs/` is the source the website generator turns into pages, so everything
+  in it is served at aether-lang.dev/Docs. Two files there were not
+  documentation of anything the toolchain does:
+
+  `phase3-message-leak-fix-plan.md` was a task brief addressed to a specific
+  agent, on a branch that no longer exists, instructing it not to commit. Its
+  measurements and its four traps about string ownership are real and are
+  preserved in the issue, along with the finding that turned up while checking
+  whether it was stale: `std.message` shipped without the regression test the
+  brief was written against, so its leak status has never been verified.
+
+  `proposed-aea-lib.md` proposed compiled `.aea` module artifacts. Proposals
+  belong in the tracker, where they can be discussed and closed.
+
+### Fixed
+
+- **A bare trailing block passed where a closure is required now gets a real
+  diagnostic.** `f(x) { ... }` parses as a DSL block — it inlines at the call
+  site and is never hoisted — so when the callee's last parameter is `fn`
+  there is no closure value to pass. Codegen looked up closure id
+  `atoi("trailing") == 0`, found nothing registered, and emitted a reference
+  to a `_closure_fn_0` it never generated, leaving the user with
+  `error: '_closure_fn_0' undeclared` — a leaked internal symbol name on a
+  line they cannot act on. The typechecker now catches it and names the fix:
+  write `callback { ... }` (or `|params| { ... }`) so the block becomes a real
+  closure the function can hold and call later.
 
 ### Changed
 
@@ -65,6 +112,110 @@ version number before tagging the release.
   moving under 0.3%. Under `strace`, `getpeername` disappears from the profile
   and `getsockname` falls from 133,162 calls to 50. The request still owns its
   own copies, so `http_request_free`'s contract is unchanged.
+
+## [0.582.0]
+
+### Changed
+
+- **One allocation per outbound header instead of three, and no more
+  quadratic insert.** Measured with `dhat` over a proxied workload, a request
+  through `std.http.server.lb` made 76.2 allocations, and 21 of them were
+  `http_request_set_header_raw`: a `calloc` for the node plus a `strdup` each
+  for the name and the value, per header. The node now carries all three in
+  one block, so a header costs one allocation and one free.
+
+  The list was also appended to by walking it to the tail every time, which is
+  N(N+1)/2 traversals for a list that is only ever appended to. It keeps a tail
+  pointer now. The redirect path that strips credentials can unlink the tail,
+  so it recomputes it once there rather than tracking it through the loop:
+  that runs on a cross-host redirect, while the insert runs for every header
+  of every request.
+
+  Same workload after: **62.2 allocations per request, down 18.4%**, with every
+  other allocation site unmoved and total bytes unchanged — the same bytes, in
+  one block rather than three.
+
+### Added
+
+- **A test that a redirect to another host does not carry the caller's
+  credentials.** `std.http.client` drops `Authorization`, `Cookie` and
+  `Proxy-Authorization` when a redirect changes host, and that had no runtime
+  coverage: the existing redirect test asserts the API surface and never
+  follows a hop. The new test follows two, one that changes the host name and
+  one that does not, because a client that dropped the headers unconditionally
+  would satisfy the first assertion alone. Removing the strip turns it red.
+
+## [0.581.0]
+
+### Fixed
+
+- **`ae cflags --libs` now publishes the Windows system libraries** that
+  linking `libaether` requires. It emitted none of them, so the documented
+  `gcc your.c $(ae cflags)` recipe failed on Windows with
+  `undefined reference to __imp_SymInitialize` and friends as soon as the
+  panic symboliser was pulled in — reproduced on a Windows box, then fixed
+  and re-verified there. `ae build` linked fine throughout because it carried
+  its own private copy of the list, and that asymmetry was the real bug:
+  `cflags` is the contract for what linking `libaether` needs on a box, so
+  `ae build`'s knowledge must not exceed it, or every downstream consumer
+  re-learns each delta as a platform-specific link break. Both now use one
+  shared `AETHER_WIN_SYSTEM_LIBS` definition. Non-Windows output is unchanged.
+
+## [0.580.0]
+
+### Added
+
+- **`std.mem` gains offset forms of its bulk operations**: `copy_at`,
+  `move_at`, `fill_at` and `compare_at` (#1733). `copy`, `move`, `compare`
+  and `set` can only start at byte 0 of each buffer, and Aether has no
+  pointer arithmetic — so a bulk operation on an *interior* span had no
+  spelling at all, and copying one scanline out of a larger framebuffer meant
+  going byte at a time even though the operation is memcpy-shaped. Contracts
+  match the offset-less forms exactly: a null buffer is a no-op returning
+  `dst` (`0` for `compare_at`), and offsets are the caller's responsibility in
+  the same way `n` already is. `move_at` exists alongside `copy_at` because an
+  image scrolling within its own buffer is an *overlapping* interior copy,
+  which `copy_at` — being `memcpy` — leaves undefined.
+
+## [0.579.0]
+
+### Changed
+
+- **`std.mem`'s scalar accessors are lowered inline instead of calling into
+  the runtime** (#1733). `mem.get_byte`/`set_byte`, `get_int`/`set_int`,
+  `get_long`/`set_long`, `get_float32`/`set_float32`,
+  `get_float64`/`set_float64` and the `_sz` byte twins now emit their body
+  into the wrapper the codegen already places in the caller's translation
+  unit, rather than a call to `libaether.a`. The C compiler cannot inline
+  across a static-library boundary at any `-O` level, so in a per-pixel loop
+  that call *is* the cost: a 640×480×4 composite loop over 60 frames went
+  from **215 ms to 38 ms (5.7×)**, with zero accessor calls left in the inner
+  loop. Semantics are unchanged, including the asymmetric null contract —
+  byte reads return `-1`, other getters `0`, setters `0` — and the integer
+  getters still dereference (same alignment requirement) while the float
+  accessors still go through `memcpy` (still unaligned-safe). The extern
+  symbols remain in the runtime for existing binaries and FFI consumers;
+  `get_ptr`/`set_ptr` are deliberately excluded, since they carry a stricter
+  aligned-slot contract and are never hot.
+
+## [0.578.0]
+
+### Added
+
+- **`ae build --size`** compiles with `-Os -g0` (`-Oz` under `--target`) and strips at link
+  (`-Wl,--strip-all -Wl,--gc-sections`), for a shipped artifact rather than a
+  debuggable one (#1729). Every other mode pointed at debugging — `--quick` is
+  `-O0 -g`, `--profile` is `-O2 -g -fno-omit-frame-pointer`, `--coverage` is
+  `-O0 -g --coverage` — so anyone shipping a library had to emit the C and
+  hand-compile it. It matters most under `--target`: `zig cc` emits DWARF **by
+  default** even at `-O2`, and the cross backend passed no `-g0`, so a
+  cross-compiled `--emit=lib` artifact was overwhelmingly debug information —
+  measured at **97.4%** of a two-function wasi library, which `--size` takes
+  from 956,573 to 24,942 bytes, a **38×** reduction with identical behaviour.
+  The equivalent native `.so` has zero `.debug*` sections, so this was a
+  cross-path problem rather than something every target shipped; native still
+  gains about 14%. Deliberately not the default, and deliberately not applied
+  to `--emit=obj`/`--emit=csrc`, whose symbols are what the next linker needs.
 
 ## [0.577.0]
 

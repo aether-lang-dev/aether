@@ -772,6 +772,17 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
 // the same socket / TLS code below.
 // -----------------------------------------------------------------
 
+/* One allocation per header, not three (#1739).
+ *
+ * `name` and `value` point into the same block as the node, laid out
+ * immediately after it: [HttpHeader][name\0][value\0]. A proxied request
+ * forwards on the order of seven headers, and at a calloc plus two strdups
+ * each that was 21 of the 76 allocations a proxied request made. They are
+ * written once at insertion and never reassigned, so there is nothing to
+ * grow and the node's own free() releases all three.
+ *
+ * The pointers stay rather than being computed from the node, because every
+ * reader is `h->name` / `h->value` and this keeps them working unchanged. */
 typedef struct HttpHeader {
     char* name;
     char* value;
@@ -782,6 +793,7 @@ struct HttpClientRequest {
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
+    HttpHeader* headers_tail; /* last node, so insertion is O(1) (#1739) */
     char* body;          /* may be NULL; binary-safe via body_len */
     int   body_len;      /* explicit length; 0 if no body */
     char* content_type;  /* may be NULL; defaults applied at send time */
@@ -836,24 +848,25 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
 
 int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
     if (!req || !name || !*name || !value) return -1;
-    HttpHeader* h = (HttpHeader*)calloc(1, sizeof(HttpHeader));
+    size_t nl = strlen(name), vl = strlen(value);
+    HttpHeader* h = (HttpHeader*)malloc(sizeof(HttpHeader) + nl + 1 + vl + 1);
     if (!h) return -1;
-    h->name  = strdup(name);
-    h->value = strdup(value);
-    if (!h->name || !h->value) {
-        free(h->name); free(h->value); free(h);
-        return -1;
-    }
+    h->name = (char*)(h + 1);
+    memcpy(h->name, name, nl + 1);
+    h->value = h->name + nl + 1;
+    memcpy(h->value, value, vl + 1);
+    h->next = NULL;
     /* Append at the tail so emission order matches insertion order;
      * keeps tests deterministic and avoids surprises with servers
-     * that care about header ordering (rare but exists). */
-    if (!req->headers) {
-        req->headers = h;
+     * that care about header ordering (rare but exists). The tail is
+     * tracked rather than walked to: appending N headers by walking cost
+     * N(N+1)/2 traversals for a list that is only ever appended to. */
+    if (req->headers_tail) {
+        req->headers_tail->next = h;
     } else {
-        HttpHeader* tail = req->headers;
-        while (tail->next) tail = tail->next;
-        tail->next = h;
+        req->headers = h;
     }
+    req->headers_tail = h;
     return 0;
 }
 
@@ -1012,9 +1025,11 @@ void http_request_free_raw(HttpClientRequest* req) {
     HttpHeader* h = req->headers;
     while (h) {
         HttpHeader* next = h->next;
-        free(h->name); free(h->value); free(h);
+        free(h);          /* name and value live in this same block */
         h = next;
     }
+    req->headers = NULL;
+    req->headers_tail = NULL;
     free(req);
 }
 
@@ -2467,11 +2482,17 @@ static void http_strip_cross_host_headers(HttpClientRequest* req) {
                     http_strcaseeq(h->name, "Proxy-Authorization");
         if (strip) {
             *link = h->next;
-            free(h->name); free(h->value); free(h);
+            free(h);      /* name and value live in this same block */
         } else {
             link = &h->next;
         }
     }
+    /* Any of those unlinked nodes could have been the tail. Recomputed
+     * once here rather than tracked through the loop: this runs only on a
+     * redirect whose host differs, while the insert path it keeps O(1) runs
+     * for every header of every request. */
+    req->headers_tail = NULL;
+    for (HttpHeader* t = req->headers; t; t = t->next) req->headers_tail = t;
 }
 
 /* v2 entry point. The v1 wrappers below build a throwaway request

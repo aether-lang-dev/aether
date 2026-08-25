@@ -1,0 +1,66 @@
+// Fixture for the cross-host redirect check.
+//
+// One server, three routes. /start redirects to the SAME port under a
+// different host name, which is the change std.http.client acts on: it
+// compares the parsed host of each hop and drops Authorization, Cookie and
+// Proxy-Authorization when it differs. /same redirects under the identical
+// name as a control. /landing reports which of them survived.
+//
+// Binding 0.0.0.0 so both "127.0.0.1" and "localhost" reach it. The driver
+// checks that "localhost" is actually usable before asserting anything,
+// because a host that resolves it to ::1 alone would fail to connect and
+// say nothing about header stripping.
+
+import std.http
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18211
+
+redirect_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 302)
+    http.response_set_header(res, "Location",
+        "http://localhost:18211/landing")
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "moved\n")
+}
+
+// Same-name hop, the control: the credentials must survive this one.
+same_host_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 302)
+    http.response_set_header(res, "Location",
+        "http://127.0.0.1:18211/landing")
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "moved\n")
+}
+
+echo_handler(req: ptr, res: ptr, ud: ptr) {
+    // An absent header comes back as null, not "" — comparing against the
+    // empty string reports every absent header as present.
+    auth = http.get_header(req, "Authorization")
+    cookie = http.get_header(req, "Cookie")
+    body = "auth=present"
+    if auth == null {
+        body = "auth=absent"
+    }
+    if cookie == null {
+        body = "${body} cookie=absent"
+    } else {
+        body = "${body} cookie=present"
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "${body}\n")
+}
+
+main() {
+    s = http.server_create(PORT)
+    http.server_set_host(s, "0.0.0.0")
+    http.server_get(s, "/start", redirect_handler, 0)
+    http.server_get(s, "/same", same_host_handler, 0)
+    http.server_get(s, "/landing", echo_handler, 0)
+    println("READY")
+    http_server_start_raw(s)
+    exit(0)
+}

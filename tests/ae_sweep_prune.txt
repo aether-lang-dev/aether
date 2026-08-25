@@ -100,6 +100,7 @@ tests/integration/http_h2_concurrent_dispatch/
 tests/integration/http_middleware_d1/
 tests/integration/http_middleware_d2/
 tests/integration/http_park_idle_connections/
+tests/integration/http_redirect_cross_host/
 tests/integration/http_real_ip/
 tests/integration/http_request_conn_accessors/
 tests/integration/http_request_header_iter/
@@ -157,6 +158,7 @@ tests/integration/sealed_namespaces/
 tests/integration/selective_import_alias/
 tests/integration/selective_import_merge_order/
 tests/integration/selective_import_shadow/
+tests/integration/size_mode/
 tests/integration/source_location/
 tests/integration/source_location_default_capture/
 tests/integration/spec_format_reporting/

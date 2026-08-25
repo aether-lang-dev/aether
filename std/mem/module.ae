@@ -46,6 +46,8 @@ exports(
     aether_mem_udiv64_32,
     aether_mem_call_fn3_int, aether_mem_call_fn3_void,
     aether_mem_copy, aether_mem_move, aether_mem_compare, aether_mem_set_bulk,
+    aether_mem_copy_at, aether_mem_move_at, aether_mem_fill_at,
+    aether_mem_compare_at,
     aether_mem_get_u16_le, aether_mem_get_u16_be,
     aether_mem_set_u16_le, aether_mem_set_u16_be,
     aether_mem_get_u32_le, aether_mem_get_u32_be,
@@ -64,6 +66,7 @@ exports(
     udiv64_32,
     call_fn3_int, call_fn3_void,
     copy, move, compare, set,
+    copy_at, move_at, fill_at, compare_at,
     get_u16_le, get_u16_be, set_u16_le, set_u16_be,
     get_u32_le, get_u32_be, set_u32_le, set_u32_be,
     get_u64_le, get_u64_be, set_u64_le, set_u64_be
@@ -252,6 +255,10 @@ extern aether_mem_copy(dst: ptr, src: ptr, n: long) -> ptr
 extern aether_mem_move(dst: ptr, src: ptr, n: long) -> ptr
 extern aether_mem_compare(a: ptr, b: ptr, n: long) -> int
 extern aether_mem_set_bulk(dst: ptr, value: int, n: long) -> ptr
+extern aether_mem_copy_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr
+extern aether_mem_move_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr
+extern aether_mem_fill_at(dst: ptr, off: long, value: int, n: long) -> ptr
+extern aether_mem_compare_at(a: ptr, a_off: long, b: ptr, b_off: long, n: long) -> int
 
 // Endian-aware 16/32/64 load/store at a byte offset. Unaligned-safe
 // (each access uses byte-by-byte composition). `_le` is little-
@@ -319,6 +326,36 @@ copy(dst: ptr, src: ptr, n: long) -> ptr { return aether_mem_copy(dst, src, n) }
 move(dst: ptr, src: ptr, n: long) -> ptr { return aether_mem_move(dst, src, n) }
 compare(a: ptr, b: ptr, n: long) -> int { return aether_mem_compare(a, b, n) }
 set(dst: ptr, value: int, n: long) -> ptr { return aether_mem_set_bulk(dst, value, n) }
+
+// Offset forms of the bulk operations (#1733).
+//
+// The four above can only start at byte 0 of each buffer, and Aether has no
+// pointer arithmetic — so a bulk operation on an INTERIOR span had no
+// spelling at all. Copying one scanline out of a larger framebuffer, or
+// filling a rect's row, meant going byte at a time even though the operation
+// is memcpy-shaped.
+//
+// Contracts match their offset-less twins exactly: a null buffer is a no-op
+// returning `dst` (0 for compare), and offsets are the caller's problem in
+// the same way `n` already is — no range checking is added here, because
+// none exists in the offset-less forms and a bulk primitive that silently
+// clamped would be worse than one that does as it is told.
+//
+// `move_at` matters as much as `copy_at`: an image scrolling within its own
+// buffer is an OVERLAPPING interior copy, so a copy_at-only surface would
+// leave the common case undefined.
+copy_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr {
+    return aether_mem_copy_at(dst, dst_off, src, src_off, n)
+}
+move_at(dst: ptr, dst_off: long, src: ptr, src_off: long, n: long) -> ptr {
+    return aether_mem_move_at(dst, dst_off, src, src_off, n)
+}
+fill_at(dst: ptr, off: long, value: int, n: long) -> ptr {
+    return aether_mem_fill_at(dst, off, value, n)
+}
+compare_at(a: ptr, a_off: long, b: ptr, b_off: long, n: long) -> int {
+    return aether_mem_compare_at(a, a_off, b, b_off, n)
+}
 
 // Endian-aware wrappers.
 get_u16_le(p: ptr, offset: int) -> int { return aether_mem_get_u16_le(p, offset) }
