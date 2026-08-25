@@ -26,7 +26,7 @@ version number before tagging the release.
   and the site checks daily on its own. A missing token delays the site by up
   to a day rather than stalling it.
 
-## [current]
+## [0.584.0]
 
 ### Removed
 
