@@ -1616,6 +1616,35 @@ static void load_defines_from_toml(void) {
 // Returns empty string if not found or no aether.toml.
 // `${VAR}` occurrences are expanded against the process environment
 // (see expand_env_vars()).
+/* The Windows system libraries linking libaether requires (#347, and the
+ * cflags gap the aether-ui line reported on 2026-08-25).
+ *
+ * ONE definition, used by both `ae build`'s own link line and
+ * `ae cflags --libs`. They were separately maintained, and cflags carried
+ * none of them -- so `ae build` linked fine while any external consumer
+ * following the documented `gcc your.c $(ae cflags)` recipe got undefined
+ * __imp_Sym* the moment libaether's panic symboliser was pulled in.
+ *
+ * That asymmetry is the actual bug: cflags is the contract for "what does
+ * linking libaether require on this box", so `ae build`'s private knowledge
+ * must never exceed it. Keeping one string is what makes that true by
+ * construction rather than by remembering.
+ *
+ * Why each is here:
+ *   ws2_32   Winsock2 -- aether_http/net are always compiled into the runtime
+ *   crypt32 gdi32 user32 advapi32 bcrypt
+ *            pulled in by static libssl/libcrypto
+ *   dbghelp  SymInitialize/SymFromAddr, the panic stack-trace symboliser
+ *            (CaptureStackBackTrace is kernel32 and always linked; the
+ *            symbolisation half is not)
+ *
+ * Mirrors WIN_LINK_LIBS in the Makefile, minus -static, which is a link-mode
+ * choice rather than a library and belongs to whoever drives the link. */
+#if defined(_WIN32)
+#define AETHER_WIN_SYSTEM_LIBS \
+    "-lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp"
+#endif
+
 static const char* get_link_flags(void) {
     static char flags[1024] = "";
     static bool checked = false;
@@ -2414,10 +2443,9 @@ void build_gcc_cmd(char* cmd, size_t size,
     else
         snprintf(opt, sizeof(opt), "-static %s%s%s%s", opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), trace_def);
-    // -ldbghelp is required for the panic stack-trace path
-    // (CaptureStackBackTrace is in kernel32 / always-linked, but
-    // SymInitialize/SymFromAddr live in dbghelp). Issue #347.
-    const char* win_link_libs = "-lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp";
+    /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
+     * so the two cannot drift apart again. */
+    const char* win_link_libs = AETHER_WIN_SYSTEM_LIBS;
     char lib_dir[1024];
     if (tc.has_lib) {
         strncpy(lib_dir, tc.lib, sizeof(lib_dir) - 1);
@@ -7356,6 +7384,17 @@ static int cmd_cflags(int argc, char** argv) {
         if (wrote_anything) fputc(' ', stdout);
         fputs("-pthread -lm", stdout);
         wrote_anything = 1;
+
+        /* Windows system libraries. libaether references Winsock, the Crypto
+         * API and dbghelp's symboliser regardless of which std modules the
+         * consumer imports, so these are unconditional -- exactly as they are
+         * on `ae build`'s own link line, which uses this same macro. Omitting
+         * them made the documented `gcc your.c $(ae cflags)` recipe fail to
+         * link on Windows. */
+#if defined(_WIN32)
+        fputc(' ', stdout);
+        fputs(AETHER_WIN_SYSTEM_LIBS, stdout);
+#endif
 
         // Transitive deps. libaether.a was compiled with whatever optional
         // libraries pkg-config detected at Aether-build time (PCRE2 for
