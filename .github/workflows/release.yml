@@ -663,3 +663,46 @@ jobs:
           aether-*.zip
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # Tell the website a version shipped (#1748).
+    #
+    # aesite regenerates its docs from a released aether tree and stamps the
+    # version on the page. Doing that by hand meant doing it late: the site
+    # sat on v0.562 while this repo shipped 0.580, so the front page named a
+    # version nobody could download and the docs described a toolchain that
+    # had moved on.
+    #
+    # A cross-repo dispatch needs a token this repo's GITHUB_TOKEN cannot
+    # provide, so it is a PAT with `contents: write` on aesite, stored as
+    # AESITE_SYNC_TOKEN. When the secret is absent — a fork, or before it is
+    # configured — the step says so and succeeds: aesite also checks daily on
+    # its own, so a missing dispatch delays the site rather than stalling it,
+    # and a release must not fail because a downstream notification could not
+    # be sent.
+    - name: Notify aesite
+      if: success()
+      env:
+        AESITE_TOKEN: ${{ secrets.AESITE_SYNC_TOKEN }}
+        TAG: ${{ steps.tag.outputs.tag }}
+      run: |
+        set -euo pipefail
+        if [ -z "${AESITE_TOKEN:-}" ]; then
+          echo "::notice::AESITE_SYNC_TOKEN is not set — skipping the site notification."
+          echo "aesite's daily sync will pick up $TAG within 24h, or run its"
+          echo "'sync aether release' workflow manually to publish it now."
+          exit 0
+        fi
+        code=$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' -X POST \
+          -H "Authorization: token $AESITE_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/aether-lang-dev/aesite/dispatches \
+          -d "{\"event_type\":\"aether-release\",\"client_payload\":{\"tag\":\"$TAG\"}}")
+        if [ "$code" = "204" ]; then
+          echo "aesite notified: $TAG"
+        else
+          # Not fatal: the release itself is published and correct, and the
+          # site's daily check is the backstop. Loud, so it is fixed.
+          echo "::warning::aesite dispatch returned HTTP $code — the site will"
+          echo "::warning::sync on its daily schedule instead. Response:"
+          sed 's/^/  /' /tmp/dispatch.out | head -5
+        fi
