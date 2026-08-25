@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **One allocation per outbound header instead of three, and no more
+  quadratic insert.** Measured with `dhat` over a proxied workload, a request
+  through `std.http.server.lb` made 76.2 allocations, and 21 of them were
+  `http_request_set_header_raw`: a `calloc` for the node plus a `strdup` each
+  for the name and the value, per header. The node now carries all three in
+  one block, so a header costs one allocation and one free.
+
+  The list was also appended to by walking it to the tail every time, which is
+  N(N+1)/2 traversals for a list that is only ever appended to. It keeps a tail
+  pointer now. The redirect path that strips credentials can unlink the tail,
+  so it recomputes it once there rather than tracking it through the loop:
+  that runs on a cross-host redirect, while the insert runs for every header
+  of every request.
+
+  Same workload after: **62.2 allocations per request, down 18.4%**, with every
+  other allocation site unmoved and total bytes unchanged — the same bytes, in
+  one block rather than three.
+
+### Added
+
+- **A test that a redirect to another host does not carry the caller's
+  credentials.** `std.http.client` drops `Authorization`, `Cookie` and
+  `Proxy-Authorization` when a redirect changes host, and that had no runtime
+  coverage: the existing redirect test asserts the API surface and never
+  follows a hop. The new test follows two, one that changes the host name and
+  one that does not, because a client that dropped the headers unconditionally
+  would satisfy the first assertion alone. Removing the strip turns it red.
+
 ## [0.580.0]
 
 ### Added

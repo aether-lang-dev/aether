@@ -1,0 +1,76 @@
+// Does a redirect to another authority carry the caller's credentials?
+//
+// std.http.client strips Authorization, Cookie and Proxy-Authorization when
+// a redirect hop changes host. That is a security behaviour with a plain
+// failure mode — replaying a bearer token at a host the user never
+// authorised — and it had no runtime coverage, only an API-surface test.
+//
+// Two hops, one assertion each:
+//   /start -> localhost:18211   (host name differs: must be stripped)
+//   /same  -> 127.0.0.1:18211   (host name identical: must survive)
+//
+// Port is deliberately equal on both hops: the implemented rule compares the
+// parsed host and nothing else, so keeping the port fixed isolates it.
+//
+// The same-host hop is what makes the cross-host result meaningful: without
+// it, a client that dropped the header unconditionally would also pass.
+
+import std.http.client
+import std.string
+
+check(url: string, want: string, label: string) -> int {
+    req = client.request("GET", url)
+    client.set_header(req, "Authorization", "Bearer test-token")
+    client.set_header(req, "Cookie", "session=abc123")
+    err_follow = client.set_follow_redirects(req, 3)
+    if err_follow != "" {
+        println("FAIL: ${label}: set_follow_redirects: ${err_follow}")
+        client.request_free(req)
+        return 1
+    }
+    resp, err = client.send_request(req)
+    if err != "" {
+        println("FAIL: ${label}: send_request: ${err}")
+        client.request_free(req)
+        return 1
+    }
+    status = client.response_status(resp)
+    body = client.response_body(resp)
+    client.response_free(resp)
+    client.request_free(req)
+    if status != 200 {
+        println("FAIL: ${label}: status ${status}, expected 200")
+        return 1
+    }
+    if string.contains(body, want) == 0 {
+        println("FAIL: ${label}: landing saw '${body}', expected '${want}'")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    // "localhost" has to reach the same server, or the cross-host hop would
+    // fail to connect and prove nothing. Skip rather than report a failure
+    // that is about name resolution.
+    probe_req = client.request("GET", "http://localhost:18211/landing")
+    probe, probe_err = client.send_request(probe_req)
+    client.request_free(probe_req)
+    if probe_err != "" {
+        println("SKIP: localhost does not reach the test server: ${probe_err}")
+        return
+    }
+    client.response_free(probe)
+
+    bad = 0
+    // Cross-authority: the credentials must not be replayed.
+    bad = bad + check("http://127.0.0.1:18211/start",
+                      "auth=absent cookie=absent", "cross-host")
+    // Same authority: dropping them here would be a regression the other
+    // direction — the client would break ordinary same-site redirects.
+    bad = bad + check("http://127.0.0.1:18211/same",
+                      "auth=present cookie=present", "same-host")
+    if bad == 0 {
+        println("PASS: credentials dropped across hosts, kept within one")
+    }
+}
