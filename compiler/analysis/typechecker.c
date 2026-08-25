@@ -802,6 +802,29 @@ static int count_required_params(ASTNode* func) {
 // Returns 1 if the function's first parameter is _ctx: ptr. Such functions
 // can be called either with _ctx passed explicitly (got == expected) or with
 // _ctx auto-injected by the builder-DSL runtime (got == expected - 1).
+/* Does this function's LAST declared parameter have type `fn`?
+ *
+ * Such a function wants a real (hoisted, capturing) closure — `callback { }`
+ * or `|x| { }` — not a bare trailing block. A bare `{ }` parses as a DSL
+ * block, which inlines at the call site and is never hoisted, so codegen
+ * emits a reference to a `_closure_fn_N` it never generated and the C
+ * compiler fails with `'_closure_fn_0' undeclared`. Detecting it here turns
+ * that into a diagnostic that names the fix. */
+static int last_param_is_fn(ASTNode* func) {
+    if (!func || func->child_count < 2) return 0;
+    ASTNode* last_param = NULL;
+    for (int i = 0; i < func->child_count - 1; i++) {
+        ASTNode* child = func->children[i];
+        if (child && (child->type == AST_VARIABLE_DECLARATION ||
+                      child->type == AST_PATTERN_VARIABLE ||
+                      child->type == AST_PATTERN_LITERAL)) {
+            last_param = child;
+        }
+    }
+    return last_param && last_param->node_type &&
+           last_param->node_type->kind == TYPE_FUNCTION;
+}
+
 static int has_ctx_first_param(ASTNode* func) {
     if (!func || func->child_count == 0) return 0;
     for (int i = 0; i < func->child_count - 1; i++) {
@@ -7753,6 +7776,39 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
         int required = count_required_params(symbol->node);
         int ctx_first = has_ctx_first_param(symbol->node);
         int got = call->child_count;
+
+        /* A bare trailing block cannot stand in for an `fn` parameter.
+         *
+         * `f(x) { ... }` parses as a DSL block: it inlines at the call site
+         * and is never hoisted, so there is no closure VALUE to pass. When
+         * the callee's last parameter is `fn`, codegen then emits a
+         * reference to a `_closure_fn_N` it never generated and the C
+         * compiler fails with `'_closure_fn_0' undeclared` — a leaked
+         * internal symbol name, at a line the user cannot act on.
+         *
+         * Note this cannot live in the arity-mismatch branch below: the
+         * trailing block still occupies an argument slot, so `got` equals
+         * `expected` and that branch never runs. The signature is what
+         * distinguishes the two readings, not the count. */
+        if (last_param_is_fn(symbol->node)) {
+            for (int i = 0; i < call->child_count; i++) {
+                ASTNode* c = call->children[i];
+                if (c && c->type == AST_CLOSURE && c->value &&
+                    strcmp(c->value, "trailing") == 0) {
+                    char cb_msg[320];
+                    snprintf(cb_msg, sizeof(cb_msg),
+                             "'%s' takes a closure as its last parameter, but "
+                             "the trailing block here is a DSL block that runs "
+                             "inline. Write `callback { ... }` (or `|params| "
+                             "{ ... }`) so it becomes a real closure the "
+                             "function can hold and call later",
+                             call->value ? call->value : "function");
+                    type_error(cb_msg, call->line, call->column);
+                    return 0;
+                }
+            }
+        }
+
         // If mismatch, try excluding trailing closures (for functions that
         // don't accept fn params but have trailing blocks for DSL syntax)
         if (got != expected && !(ctx_first && got == expected - 1)) {
