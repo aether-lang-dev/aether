@@ -45,6 +45,19 @@ version number before tagging the release.
   `proposed-aea-lib.md` proposed compiled `.aea` module artifacts. Proposals
   belong in the tracker, where they can be discussed and closed.
 
+### Fixed
+
+- **A bare trailing block passed where a closure is required now gets a real
+  diagnostic.** `f(x) { ... }` parses as a DSL block — it inlines at the call
+  site and is never hoisted — so when the callee's last parameter is `fn`
+  there is no closure value to pass. Codegen looked up closure id
+  `atoi("trailing") == 0`, found nothing registered, and emitted a reference
+  to a `_closure_fn_0` it never generated, leaving the user with
+  `error: '_closure_fn_0' undeclared` — a leaked internal symbol name on a
+  line they cannot act on. The typechecker now catches it and names the fix:
+  write `callback { ... }` (or `|params| { ... }`) so the block becomes a real
+  closure the function can hold and call later.
+
 ## [0.582.0]
 
 ### Changed
