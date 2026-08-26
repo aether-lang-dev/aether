@@ -74,4 +74,37 @@ VER=$(get_field ver)
 [ "$IS_TLS" = "0" ] || { echo "  [FAIL] is_tls expected 0 (cleartext listener), got '$IS_TLS'"; echo "  raw: $RESP"; exit 1; }
 [ "$VER" = "HTTP/1.1" ] || { echo "  [FAIL] ver expected HTTP/1.1, got '$VER'"; echo "  raw: $RESP"; exit 1; }
 
-echo "  [PASS] http_request_conn_accessors (remote_port + local_addr/port + scheme + is_tls + http_version)"
+# The addresses are resolved once per CONNECTION and cached (#1719), not
+# fetched per request. That is only correct if every request on a reused
+# connection still reports them — a cache populated for request 1 and not
+# read back for request 2 would leave the later ones empty, which no
+# single-request check would notice.
+#
+# curl's multi-URL form reuses one connection, so this drives three
+# requests down one socket and requires all three to agree. The peer PORT
+# is the sharpest field here: it is kernel-assigned per connection, so if
+# the cache were somehow refreshed mid-connection it would still match,
+# but if it were dropped the field would go empty.
+MULTI=$(curl --silent --show-error --max-time 5 "$URL" "$URL" "$URL" 2>"$TMPDIR/m.err") || {
+    echo "  [FAIL] keep-alive curl failed:"; cat "$TMPDIR/m.err"; exit 1
+}
+
+# The three bodies concatenate with no separator, so a line-oriented
+# count would see "ver=HTTP/1.1peer=127.0.0.1" as one field. Count
+# occurrences instead.
+# `wc -l` pads its count with leading blanks on BSD/macOS ("       3"),
+# so a string compare against "3" passes on GNU and fails on Darwin --
+# which is exactly how this test went red on both macOS legs and green
+# everywhere else. Strip the padding rather than compare numerically, so
+# the failure message still prints a clean count.
+MULTI_PEERS=$(echo "$MULTI" | grep -o 'peer=127\.0\.0\.1' | wc -l | tr -d '[:space:]')
+[ "$MULTI_PEERS" = "3" ] || {
+    echo "  [FAIL] expected peer=127.0.0.1 on all 3 keep-alive requests, got $MULTI_PEERS"
+    echo "  raw: $MULTI"; exit 1; }
+
+MULTI_LOCALS=$(echo "$MULTI" | grep -o 'local_port=18294' | wc -l | tr -d '[:space:]')
+[ "$MULTI_LOCALS" = "3" ] || {
+    echo "  [FAIL] expected local_port=18294 on all 3 keep-alive requests, got $MULTI_LOCALS"
+    echo "  raw: $MULTI"; exit 1; }
+
+echo "  [PASS] http_request_conn_accessors (remote_port + local_addr/port + scheme + is_tls + http_version; cached addrs survive keep-alive)"

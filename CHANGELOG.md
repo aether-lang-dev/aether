@@ -58,6 +58,61 @@ version number before tagging the release.
   write `callback { ... }` (or `|params| { ... }`) so the block becomes a real
   closure the function can hold and call later.
 
+### Changed
+
+- **`std.http.client` resolves the backend host only when it is about to dial**
+  (#1719). `getaddrinfo` ran unconditionally above the pool lookup, so every
+  request resolved the host and then discarded the answer on a pooled hit — a
+  lock-taking call per request for a result nobody used. Resolution now happens
+  behind a once-flag at the four dial sites (the initial dial plus three
+  pooled-connection retry paths). Worth **+0.56%** on the LB benchmark (47,887 →
+  48,156 rps); the gain is small here because the benchmark's backends are
+  numeric IPs, which `getaddrinfo` short-circuits — against named upstreams,
+  where resolution can touch `/etc/hosts` or the network, it removes real work.
+  One deliberate behaviour change: a request hitting a live pooled connection
+  now succeeds even if the host has since stopped resolving, rather than failing
+  with "could not resolve host". An open connection does not need DNS.
+
+- **`std.http.client`'s idle connection pool no longer walks its whole list on
+  every request** (#1719). `http_pool_take` and `http_pool_put` each swept the
+  idle list under the global pool mutex per request; with the default 15s idle
+  window and a proxy reusing upstreams continuously, that sweep frees nothing
+  almost every time. The pool now tracks when its earliest connection becomes
+  eligible and skips the walk until then. Separately, the per-key cap check
+  stops counting once it reaches the cap instead of walking to the end. **No
+  measurable throughput change** (48,854 → 48,870 rps over three alternating
+  A/B rounds, baseline ahead in two of them) — kept because it is strictly less
+  work under a global mutex, which matters with more upstreams than the
+  two-backend benchmark has, not as a performance claim.
+
+- **`std.http.server` and `std.http.client` no longer re-apply socket timeouts
+  that are already set** (#1719). Under `strace` against the load-balancer
+  benchmark, `setsockopt` was the third costliest syscall — 202,552 calls for
+  20,000 requests, ~10 per request, 15.2% of syscall time — and not one of them
+  changed a socket option. Two sites, both on the keep-alive path: every reuse
+  of a pooled upstream connection re-applied `SO_RCVTIMEO`/`SO_SNDTIMEO`, and
+  every request on a parked client connection re-applied the idle timeout. Both
+  now remember the value they applied and skip the call when it is unchanged;
+  the unguarded form stays on the dial path, where the socket is new. Measured
+  effect: `setsockopt` falls from 202,552 calls to **72**, total syscalls per
+  request from **83.0 to 14.0**, and throughput rises 2.6% (47,852 → 49,083 rps,
+  three alternating A/B rounds, new ahead in every round). Note the parking
+  path's comment already claimed the window was "only re-applied when it
+  changes" — that guard did not exist until now.
+
+- **`std.http.server` resolves a connection's peer and local address once per
+  connection rather than once per request** (#1719). The old comment reasoned
+  that `getpeername`/`getsockname` are cache-warm and therefore cheap enough to
+  run per request; measured against nginx on the same box, that was 2 syscalls,
+  2 `inet_ntop` calls and 2 `strdup`s on every request, where nginx makes none
+  of them — neither address can change while a socket is open. Caching them on
+  `HttpConn` (which connection parking, #1663, had already made
+  connection-lifetime) took the load-balancer benchmark from 48,073 to 49,432
+  rps, **+2.8%**, with nginx and haproxy measured in the same runs as controls
+  moving under 0.3%. Under `strace`, `getpeername` disappears from the profile
+  and `getsockname` falls from 133,162 calls to 50. The request still owns its
+  own copies, so `http_request_free`'s contract is unchanged.
+
 ## [0.582.0]
 
 ### Changed

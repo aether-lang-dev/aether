@@ -231,6 +231,43 @@ typedef struct HttpConn {
      * back to a different worker, so the count has to live with the
      * connection rather than on the worker's stack (#1663). */
     int   requests_served;
+    /* Peer and local address, resolved once per CONNECTION (#1719).
+     *
+     * These used to be fetched per request, on the reasoning that
+     * getpeername/getsockname are cache-warm and therefore cheap. Measured
+     * against nginx on the same box, that cost 2 syscalls, 2 inet_ntop calls
+     * and 2 strdups on every request — nginx makes zero of any of them,
+     * because neither address can change while a connection is open.
+     *
+     * Cached as text because that is the shape every consumer wants
+     * (http_request_remote_addr returns a string). Empty string means the
+     * lookup failed — a Unix-domain socket, or an fd that closed under us —
+     * and is a valid cached answer, so `addrs_resolved` distinguishes
+     * "looked and found nothing" from "not looked yet". Without that flag a
+     * failing lookup would retry on every request, which is the cost this
+     * removes.
+     *
+     * The request still owns its own copies: http_request_free frees
+     * req->remote_addr and req->local_addr, so per-request strdups from
+     * these are what get handed out. That keeps the ownership contract
+     * unchanged; the saving is the syscalls and the inet_ntop, not the
+     * allocation. */
+    char  remote_addr[INET6_ADDRSTRLEN];
+    char  local_addr[INET6_ADDRSTRLEN];
+    int   remote_port;
+    int   local_port;
+    int   addrs_resolved;
+
+    /* The SO_RCVTIMEO value currently on this socket, or -1 when none has been
+     * applied yet (#1719).
+     *
+     * conn_serve applies the idle timeout on entry, and with connection parking
+     * a kept-alive connection re-enters conn_serve once per request -- so an
+     * unguarded apply is one setsockopt per request setting the value that is
+     * already there. The comment on the parking path already claimed the window
+     * was "only re-applied when it changes"; this is the guard that makes that
+     * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
+    int   applied_recv_timeout_ms;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -2791,6 +2828,60 @@ static int conn_recv_timed_out(void) {
 #endif
 }
 
+/* Resolve this connection's peer and local address, once (#1719).
+ *
+ * Idempotent: after the first call `addrs_resolved` is set and the cached
+ * text is returned unchanged, including when the lookup failed and the
+ * cache holds "". A failed lookup is a real answer for a Unix-domain
+ * socket, and retrying it per request is exactly the cost being removed.
+ *
+ * Not thread-safe by design: an HttpConn is owned by one worker at a
+ * time. Parking hands it between workers, but never concurrently. */
+static void conn_resolve_addrs(HttpConn* c) {
+    if (!c || c->addrs_resolved) return;
+    c->addrs_resolved = 1;
+    c->remote_addr[0] = '\0';
+    c->local_addr[0] = '\0';
+    c->remote_port = 0;
+    c->local_port = 0;
+    if (c->fd < 0) return;
+
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (getpeername(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
+        const char* src = NULL;
+        if (ss.ss_family == AF_INET) {
+            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
+            src = inet_ntop(AF_INET, &sa->sin_addr,
+                            c->remote_addr, sizeof(c->remote_addr));
+            c->remote_port = ntohs(sa->sin_port);
+        } else if (ss.ss_family == AF_INET6) {
+            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
+            src = inet_ntop(AF_INET6, &sa->sin6_addr,
+                            c->remote_addr, sizeof(c->remote_addr));
+            c->remote_port = ntohs(sa->sin6_port);
+        }
+        if (!src) { c->remote_addr[0] = '\0'; c->remote_port = 0; }
+    }
+
+    sslen = sizeof(ss);
+    if (getsockname(c->fd, (struct sockaddr*)&ss, &sslen) == 0) {
+        const char* src = NULL;
+        if (ss.ss_family == AF_INET) {
+            struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
+            src = inet_ntop(AF_INET, &sa->sin_addr,
+                            c->local_addr, sizeof(c->local_addr));
+            c->local_port = ntohs(sa->sin_port);
+        } else if (ss.ss_family == AF_INET6) {
+            struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
+            src = inet_ntop(AF_INET6, &sa->sin6_addr,
+                            c->local_addr, sizeof(c->local_addr));
+            c->local_port = ntohs(sa->sin6_port);
+        }
+        if (!src) { c->local_addr[0] = '\0'; c->local_port = 0; }
+    }
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     long t_start = http_now_us();
@@ -2958,64 +3049,40 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         req->body_length     = (size_t)content_length;
     }
 
-    /* Populate the connection-level metadata that handlers learn from
-     * the kernel rather than from the request bytes. Cheap (two
-     * cache-warm syscalls + two inet_ntop's) so it runs per request;
-     * failures (Unix-domain socket, EBADF on a just-closed fd) leave
-     * each field at its zero default and the accessors return ""/0.
+
+    /* Connection-level metadata that handlers learn from the kernel rather
+     * than from the request bytes.
      *
-     * - remote_addr/remote_port (from getpeername): the trusted peer.
-     *   The X-Forwarded-For header is client-supplied and a wrong
-     *   basis for an allow/deny decision on a direct listener; this
-     *   is the kernel's view of the socket, which is unspoofable.
-     * - local_addr/local_port (from getsockname): which NIC this
-     *   accepted fd is bound to. Needed when the listener binds
-     *   0.0.0.0 and the handler wants to gate behaviour on which
-     *   interface received the request (admin-on-loopback, multi-
-     *   tenant per-IP routing).
-     * - is_tls: the connection wrapper, not anything in the wire
-     *   bytes. Drives scheme/redirect/cookie-Secure decisions.
+     * Resolved ONCE per connection (#1719) — neither address can change
+     * while the socket is open, and fetching them per request cost 2
+     * syscalls, 2 inet_ntop calls and 2 strdups each time. nginx makes none
+     * of those calls at all.
      *
-     * IPv4 + IPv6 supported via sockaddr_storage. */
+     * - remote_addr/remote_port (getpeername): the trusted peer. The
+     *   X-Forwarded-For header is client-supplied and a wrong basis for an
+     *   allow/deny decision on a direct listener; this is the kernel's view
+     *   of the socket, which is unspoofable.
+     * - local_addr/local_port (getsockname): which NIC this accepted fd is
+     *   bound to. Needed when the listener binds 0.0.0.0 and the handler
+     *   gates on the receiving interface (admin-on-loopback, multi-tenant
+     *   per-IP routing).
+     * - is_tls: the connection wrapper, not anything in the wire bytes.
+     *   Drives scheme/redirect/cookie-Secure decisions.
+     *
+     * The request keeps owning its copies — http_request_free frees both —
+     * so the strdups stay and only the syscalls go. A failed lookup leaves
+     * the cache empty and the accessors return ""/0, as before.
+     *
+     * IPv4 + IPv6 via sockaddr_storage. */
     {
-        struct sockaddr_storage ss;
-        socklen_t sslen = sizeof(ss);
-        if (getpeername(conn->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-            char buf[INET6_ADDRSTRLEN];
-            const char* src = NULL;
-            int port = 0;
-            if (ss.ss_family == AF_INET) {
-                struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-                src = inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
-                port = ntohs(sa->sin_port);
-            } else if (ss.ss_family == AF_INET6) {
-                struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-                src = inet_ntop(AF_INET6, &sa->sin6_addr, buf, sizeof(buf));
-                port = ntohs(sa->sin6_port);
-            }
-            if (src) {
-                req->remote_addr = strdup(src);
-                req->remote_port = port;
-            }
+        conn_resolve_addrs(conn);
+        if (conn->remote_addr[0]) {
+            req->remote_addr = strdup(conn->remote_addr);
+            req->remote_port = conn->remote_port;
         }
-        sslen = sizeof(ss);
-        if (getsockname(conn->fd, (struct sockaddr*)&ss, &sslen) == 0) {
-            char buf[INET6_ADDRSTRLEN];
-            const char* src = NULL;
-            int port = 0;
-            if (ss.ss_family == AF_INET) {
-                struct sockaddr_in* sa = (struct sockaddr_in*)&ss;
-                src = inet_ntop(AF_INET, &sa->sin_addr, buf, sizeof(buf));
-                port = ntohs(sa->sin_port);
-            } else if (ss.ss_family == AF_INET6) {
-                struct sockaddr_in6* sa = (struct sockaddr_in6*)&ss;
-                src = inet_ntop(AF_INET6, &sa->sin6_addr, buf, sizeof(buf));
-                port = ntohs(sa->sin6_port);
-            }
-            if (src) {
-                req->local_addr = strdup(src);
-                req->local_port = port;
-            }
+        if (conn->local_addr[0]) {
+            req->local_addr = strdup(conn->local_addr);
+            req->local_port = conn->local_port;
         }
         req->is_tls = (conn->ssl != NULL) ? 1 : 0;
     }
@@ -3537,9 +3604,12 @@ static int64_t conn_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
-static void conn_apply_recv_timeout(HttpServer* server, int fd) {
+static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
+    int fd = c->fd;
     int idle_ms = server->keep_alive_idle_ms > 0
         ? server->keep_alive_idle_ms : 30000;
+    if (c->applied_recv_timeout_ms == idle_ms) return;
+    c->applied_recv_timeout_ms = idle_ms;
 #ifdef _WIN32
     DWORD rcv_timeout = (DWORD)idle_ms;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
@@ -3596,7 +3666,7 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
      * The wait is a plain blocking recv either way: a poll before it would be
      * a syscall per request, and measured at 8 concurrent clients that cost
      * 9% against simply blocking. */
-    conn_apply_recv_timeout(server, conn->fd);
+    conn_apply_recv_timeout(server, conn);
 
 #ifdef AETHER_HAS_NGHTTP2
     if (conn->is_h2) {
@@ -3697,6 +3767,9 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn->read_pos = 0;
     conn->write_pos = 0;
     conn->requests_served = 0;
+    /* calloc would leave this 0, which is a legitimate timeout meaning "block
+     * indefinitely"; the guard must see "nothing applied yet" instead. */
+    conn->applied_recv_timeout_ms = -1;
 
 #ifdef AETHER_HAS_OPENSSL
     if (server->tls_enabled && server->tls_ctx) {

@@ -49,6 +49,17 @@ main() {
 
     println("READY")
 
+    // Keep-alive on, so the multi-request half of the shell test actually
+    // reuses one connection. Without it curl reconnects per request, the
+    // per-connection address cache (#1719) is repopulated each time, and
+    // the assertion that cached values survive a reused connection would
+    // pass without testing anything.
+    ka_err = http.server_set_keepalive(raw, 1, 0, 10000ms)
+    if ka_err != "" {
+        println("FAIL: server_set_keepalive: ${ka_err}")
+        exit(1)
+    }
+
     http.server_get(raw, "/whoami", handle_whoami, 0)
 
     spawn(SchedHelper())

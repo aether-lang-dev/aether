@@ -44,6 +44,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
 #include <limits.h>
+#include <stdint.h>   /* INT64_MAX, for the pool expiry watermark */
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -269,6 +270,20 @@ static char* ssl_err_string(const char* prefix) {
 
 typedef struct {
     int sockfd;
+    /* The SO_RCVTIMEO/SO_SNDTIMEO value currently on this socket, or -1 when
+     * nothing has been applied yet (#1719).
+     *
+     * A Transport travels with its connection into the idle pool, so a reused
+     * connection already carries the timeouts the last request set. Re-applying
+     * an identical value costs 2 setsockopt syscalls per request and changes
+     * nothing: under strace against the LB benchmark, setsockopt was the third
+     * costliest syscall at 202,552 calls for 20,000 requests -- roughly 10 per
+     * request, on sockets whose options were already correct.
+     *
+     * A sentinel of -1 rather than 0 because 0 is a legitimate timeout value
+     * meaning "block indefinitely", and a socket set to block forever must not
+     * be confused with one never configured. */
+    int64_t applied_timeout_ns;
 #ifdef AETHER_HAS_OPENSSL
     SSL* ssl;
     /* A per-request SSL_CTX, owned by this transport, or NULL when the
@@ -398,6 +413,22 @@ static int             http_pool_enabled = 1;
 static int             http_pool_max_idle = 64;
 static int             http_pool_max_per_key = 8;
 static int64_t         http_pool_idle_ms = 15000;
+/* When the oldest pooled connection becomes eligible for expiry, or INT64_MAX
+ * when the pool is empty (#1719).
+ *
+ * http_pool_take and http_pool_put both swept the whole idle list on every
+ * request, under the global pool mutex. With the default 15s idle window and a
+ * proxy reusing its upstreams continuously, that sweep frees nothing on the
+ * overwhelming majority of calls -- it is a list walk per request to discover
+ * there is nothing to do. Tracking the earliest deadline lets both callers skip
+ * the walk outright until that time actually arrives.
+ *
+ * Kept deliberately coarse: it is a lower bound, not an exact answer. Entries
+ * are only ever added with a fresh idle_since_ms, so the earliest deadline can
+ * only move later when the list shrinks, and recomputing it during a sweep we
+ * were doing anyway is free. A stale-early value costs one redundant sweep,
+ * never a missed expiry. */
+static int64_t         http_pool_next_expiry_ms = INT64_MAX;
 
 static int64_t http_now_ms(void) {
     struct timespec ts;
@@ -421,8 +452,15 @@ static void http_pool_key(char* out, size_t n, const char* host, int port,
              use_tls ? 1 : 0, insecure ? 1 : 0, cafile ? cafile : "");
 }
 
-/* Caller holds the lock. Drops every entry idle past the timeout. */
+/* Caller holds the lock. Drops every entry idle past the timeout.
+ *
+ * Returns immediately when the earliest deadline is still in the future, which
+ * is the common case on a busy proxy -- see http_pool_next_expiry_ms. When it
+ * does sweep, it recomputes that watermark from the survivors. */
 static void http_pool_expire_locked(int64_t now) {
+    if (now < http_pool_next_expiry_ms) return;
+
+    int64_t earliest = INT64_MAX;
     HttpIdleConn** link = &http_pool_head;
     while (*link) {
         HttpIdleConn* c = *link;
@@ -433,8 +471,11 @@ static void http_pool_expire_locked(int64_t now) {
             free(c);
             continue;
         }
+        int64_t due = c->idle_since_ms + http_pool_idle_ms;
+        if (due < earliest) earliest = due;
         link = &c->next;
     }
+    http_pool_next_expiry_ms = earliest;
 }
 
 /* Take an idle connection for `key`, newest first (the most recently used is
@@ -476,9 +517,15 @@ static void http_pool_put(const char* key, Transport* t) {
     int64_t now = http_now_ms();
     pthread_mutex_lock(http_pool_lock());
     http_pool_expire_locked(now);
+    /* Only whether the per-key cap is REACHED matters, not the exact count, so
+     * stop at the cap instead of walking to the end -- and skip the walk
+     * entirely when the global cap already rejects this connection. */
     int per_key = 0;
-    for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
-        if (strcmp(e->key, key) == 0) per_key++;
+    if (http_pool_count < http_pool_max_idle) {
+        for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
+            if (strcmp(e->key, key) == 0 && ++per_key >= http_pool_max_per_key)
+                break;
+        }
     }
     if (http_pool_count >= http_pool_max_idle || per_key >= http_pool_max_per_key) {
         pthread_mutex_unlock(http_pool_lock());
@@ -492,6 +539,10 @@ static void http_pool_put(const char* key, Transport* t) {
     c->next = http_pool_head;
     http_pool_head = c;
     http_pool_count++;
+    /* On an empty pool the watermark is INT64_MAX, and this entry is now the
+     * only deadline there is. Lowering it here is what re-arms the sweep. */
+    if (c->idle_since_ms + http_pool_idle_ms < http_pool_next_expiry_ms)
+        http_pool_next_expiry_ms = c->idle_since_ms + http_pool_idle_ms;
     pthread_mutex_unlock(http_pool_lock());
     t->sockfd = -1;
 #ifdef AETHER_HAS_OPENSSL
@@ -506,6 +557,7 @@ void http_client_pool_clear_raw(void) {
     HttpIdleConn* c = http_pool_head;
     http_pool_head = NULL;
     http_pool_count = 0;
+    http_pool_next_expiry_ms = INT64_MAX;   /* nothing left to expire */
     pthread_mutex_unlock(http_pool_lock());
     while (c) {
         HttpIdleConn* next = c->next;
@@ -528,6 +580,11 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
     if (idle_ns >= 0) {
         int64_t ms = idle_ns / 1000000LL;
         http_pool_idle_ms = ms > 0 ? ms : 1;
+        /* The expiry watermark was derived from the PREVIOUS window, so
+         * shortening the window would leave a deadline further out than the new
+         * setting allows and delay every eviction. Force the next pool
+         * operation to sweep and recompute it. */
+        http_pool_next_expiry_ms = INT64_MIN;
     }
     pthread_mutex_unlock(http_pool_lock());
     if (!http_pool_enabled) http_client_pool_clear_raw();
@@ -1225,6 +1282,19 @@ static void http_apply_timeouts(int sockfd, int64_t timeout_ns) {
 #endif
 }
 
+/* Apply timeouts only when they differ from what the socket already carries.
+ *
+ * The unguarded http_apply_timeouts stays for the dial path, where the socket
+ * is new and its option state is genuinely unknown. This form is for the reuse
+ * path, where the answer is usually "already correct" -- see the comment on
+ * Transport::applied_timeout_ns for the measurement. */
+static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
+    int64_t want = timeout_ns < 0 ? 0 : timeout_ns;
+    if (t->applied_timeout_ns == want) return;
+    http_apply_timeouts(t->sockfd, want);
+    t->applied_timeout_ns = want;
+}
+
 /* Is a pooled connection still usable? A peer that closed leaves the socket
  * readable at EOF, and anything readable on an idle keep-alive connection is
  * unexpected in either direction (a stray byte would desynchronise the next
@@ -1251,6 +1321,45 @@ static int transport_is_live(Transport* t) {
 #endif
     if (ready < 0) return 0;
     return ready == 0;
+}
+
+/* Resolve `host`:`port` into `out`, at most once per request (#1719).
+ *
+ * `*resolved` is the caller's once-flag: 0 on entry means "not yet", and it is
+ * set on success so a second call is free. Returns 1 on success (including the
+ * cached case), 0 when the name does not resolve.
+ *
+ * Resolve via getaddrinfo, NOT gethostbyname: gethostbyname returns a pointer
+ * into a shared, process-static `struct hostent`, so two client calls resolving
+ * at once on different threads -- e.g. a request handler that dials out while
+ * serving (serve-and-dial), where the inner call runs on a server worker thread
+ * -- race on that static buffer and can corrupt each other's resolved address.
+ * getaddrinfo is thread-safe and returns caller-owned memory freed with
+ * freeaddrinfo. Pinned to AF_INET: the callers build a sockaddr_in and the
+ * timeout/connect path assumes IPv4, so widening to IPv6 is a separate change.
+ *
+ * A failed resolve leaves *resolved at 0, so a later caller retries rather than
+ * reading an uninitialised address. */
+static int resolve_dial_addr(const char* host, int port,
+                             struct sockaddr_in* out, int* resolved) {
+    if (*resolved) return 1;
+
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* res = NULL;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) return 0;
+
+    memset(out, 0, sizeof(*out));
+    memcpy(out, res->ai_addr, sizeof(struct sockaddr_in));
+    freeaddrinfo(res);
+    out->sin_family = AF_INET;
+    out->sin_port = htons(port);
+    *resolved = 1;
+    return 1;
 }
 
 /* Set *err to a heap copy of `msg`, for the dial helper's error returns. */
@@ -1406,6 +1515,9 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
     }
 
     out->sockfd = sockfd;
+    /* The dial path below applies the timeouts unconditionally on a fresh
+     * socket; record the value so a later reuse can skip re-applying it. */
+    out->applied_timeout_ns = req->timeout_ns < 0 ? 0 : req->timeout_ns;
 
     /* HTTPS via a forward proxy: establish a CONNECT tunnel over the raw socket
      * BEFORE the TLS handshake, so TLS runs end-to-end through the proxy (the
@@ -1630,38 +1742,34 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* dial_host = connect_host;
     int         dial_port = connect_port;
 
-    /* Resolve via getaddrinfo, NOT gethostbyname: gethostbyname returns a
-     * pointer into a shared, process-static `struct hostent`, so two client
-     * calls resolving at once on different threads, e.g. a request handler
-     * that dials out while serving (serve-and-dial), where the inner call runs
-     * on a server worker thread, race on that static buffer and can corrupt
-     * each other's resolved address. getaddrinfo is thread-safe and returns
-     * caller-owned memory freed with freeaddrinfo. Pinned to AF_INET: the rest
-     * of this function builds a sockaddr_in and the timeout/connect path
-     * assumes IPv4, so widening to IPv6 is a separate change. */
+    /* The dial address, resolved lazily (#1719).
+     *
+     * Resolution used to run unconditionally, above the pool lookup, so every
+     * request resolved the backend host and threw the answer away on a pooled
+     * hit -- a lock-taking call per request for a result nobody used. Only the
+     * two http_dial sites consume it, and the pool key is built from
+     * dial_host/dial_port rather than the resolved address, so nothing before
+     * a dial needs it.
+     *
+     * Both dial sites go through resolve_dial_addr, which resolves at most
+     * once per request: the send-failure retry below re-dials a connection
+     * that came from the pool, and that is precisely the path where the first
+     * resolve was skipped.
+     *
+     * One deliberate behaviour change falls out of this: a request that hits a
+     * live pooled connection now succeeds even if the host has since stopped
+     * resolving, where before it failed with "could not resolve host". An open
+     * connection does not need DNS, and holding an established socket hostage
+     * to a resolver blip is the less useful behaviour -- it is also what nginx
+     * does. A request that has to dial still fails exactly as it did. */
     struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    {
-        char port_str[16];
-        snprintf(port_str, sizeof(port_str), "%d", dial_port);
-        struct addrinfo hints;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family   = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        struct addrinfo* res = NULL;
-        int gai = getaddrinfo(dial_host, port_str, &hints, &res);
-        if (gai != 0 || !res) {
-            response->error = string_new(via_proxy ? "could not resolve proxy host"
-                                                   : "could not resolve host");
-            return response;
-        }
-        memcpy(&serv_addr, res->ai_addr, sizeof(struct sockaddr_in));
-        freeaddrinfo(res);
-    }
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_port = htons(dial_port);
+    int serv_addr_resolved = 0;
 
-    Transport t;
+    /* Zero-initialised so applied_timeout_ns starts at the "nothing applied"
+     * sentinel rather than stack garbage, which the reuse guard would read as
+     * a real value and wrongly skip the setsockopt. */
+    Transport t = {0};
+    t.applied_timeout_ns = -1;
     char pool_key[HTTP_POOL_KEY_MAX];
     http_pool_key(pool_key, sizeof(pool_key), host, port, use_tls,
                   dial_host, dial_port, req->insecure, req->cafile);
@@ -1675,12 +1783,19 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     if (pool_this && http_pool_take(pool_key, &t)) {
         if (transport_is_live(&t)) {
             reused = 1;
-            http_apply_timeouts(t.sockfd, req->timeout_ns);
+            transport_apply_timeouts(&t, req->timeout_ns);
         } else {
             transport_close(&t);
         }
     }
     if (!reused) {
+        if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                               &serv_addr_resolved)) {
+            response->error = string_new(via_proxy ? "could not resolve proxy host"
+                                                   : "could not resolve host");
+            return response;
+        }
+
         char* dial_err = NULL;
         if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
             response->error = string_new(dial_err ? dial_err : "connection failed");
@@ -1813,7 +1928,11 @@ send_request:
             reused = 0;
             transport_close(&t);
             char* rd_err = NULL;
-            if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+            /* This connection came from the pool, so the resolve above was
+             * skipped; do it now. A failure here just means no retry. */
+            if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                                  &serv_addr_resolved)
+                && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                 free(rd_err);
                 goto send_request;
             }
@@ -1833,7 +1952,10 @@ send_request:
                 reused = 0;
                 transport_close(&t);
                 char* rd_err = NULL;
-                if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+                /* Pooled connection, so the resolve was skipped; do it now. */
+                if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                                      &serv_addr_resolved)
+                    && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                     free(rd_err);
                     goto send_request;
                 }
@@ -2024,7 +2146,10 @@ send_request:
         reused = 0;
         transport_close(&t);
         char* rd_err = NULL;
-        if (http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
+        /* Pooled connection, so the resolve was skipped; do it now. */
+        if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                              &serv_addr_resolved)
+            && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
             free(rd_err);
             aether_caps_free(full_response, cap);
             full_response = NULL;
