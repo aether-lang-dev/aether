@@ -1295,34 +1295,6 @@ static void transport_apply_timeouts(Transport* t, int64_t timeout_ns) {
     t->applied_timeout_ns = want;
 }
 
-/* Is a pooled connection still usable? A peer that closed leaves the socket
- * readable at EOF, and anything readable on an idle keep-alive connection is
- * unexpected in either direction (a stray byte would desynchronise the next
- * response), so both readings retire it. */
-static int transport_is_live(Transport* t) {
-    if (t->sockfd < 0) return 0;
-    /* Readable means either the peer closed (recv would return 0) or it sent
-     * something nobody asked for, and a stray byte would be read as the head
-     * of the next response. Not readable is the healthy idle case. */
-#ifdef _WIN32
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(t->sockfd, &rfds);
-    struct timeval zero;
-    zero.tv_sec = 0;
-    zero.tv_usec = 0;
-    int ready = select(t->sockfd + 1, &rfds, NULL, NULL, &zero);
-#else
-    struct pollfd pfd;
-    pfd.fd = t->sockfd;
-    pfd.events = POLLIN;
-    pfd.revents = 0;
-    int ready = poll(&pfd, 1, 0);
-#endif
-    if (ready < 0) return 0;
-    return ready == 0;
-}
-
 /* Resolve `host`:`port` into `out`, at most once per request (#1719).
  *
  * `*resolved` is the caller's once-flag: 0 on entry means "not yet", and it is
@@ -1781,12 +1753,23 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
                     !header_already_set(req, "Connection");
     int reused = 0;
     if (pool_this && http_pool_take(pool_key, &t)) {
-        if (transport_is_live(&t)) {
-            reused = 1;
-            transport_apply_timeouts(&t, req->timeout_ns);
-        } else {
-            transport_close(&t);
-        }
+        /* Taken without probing it first (#1719).
+         *
+         * This used to poll the socket before reusing it, one syscall on
+         * every request through the pool, to catch a peer that had closed
+         * during the idle window. The read path already handles that case and
+         * handles it better: nothing coming back on a pooled connection means
+         * the request went into the void, and it redials and resends. The
+         * poll only moved the discovery earlier at the cost of asking the
+         * kernel every time.
+         *
+         * The other thing it caught — bytes waiting on a supposedly idle
+         * connection, which would be read as the head of this response — is
+         * caught below instead, by checking that what came back actually
+         * starts a response. That costs nothing and is a stronger check: the
+         * poll only knew that something was readable, not what it was. */
+        reused = 1;
+        transport_apply_timeouts(&t, req->timeout_ns);
     }
     if (!reused) {
         if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
@@ -2140,8 +2123,18 @@ send_request:
     /* Nothing at all came back on a connection that came from the pool: the
      * peer had closed it and our request went into the void. Redial once and
      * send again; the server never saw this request, so repeating it is safe
-     * whatever the method. */
-    if (total_len == 0 && reused && !retried) {
+     * whatever the method. The desync case below is the same reasoning: what
+     * came back was not an answer to this request. */
+    /* A pooled connection that answers with something that is not a response
+     * was carrying bytes nobody asked for, and reading them as this
+     * response's head would desynchronise everything after it. Same treatment
+     * as no answer at all: retire the connection and ask again on a fresh
+     * one. Only for a connection that came from the pool — a freshly dialled
+     * one returning nonsense is the upstream's answer, not a stale socket. */
+    int desynced = reused && total_len > 0
+                && (total_len < 5 || strncmp(full_response, "HTTP/", 5) != 0);
+
+    if ((total_len == 0 || desynced) && reused && !retried) {
         retried = 1;
         reused = 0;
         transport_close(&t);
