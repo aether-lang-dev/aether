@@ -41,9 +41,28 @@ same comparison to 0.9%. Almost all of the "regression" was the running order.
 **It refuses to report a balancer that is not proxying.** A balancer answering
 errors quickly reads as fast. A run against dead backends once showed +26%.
 
+## Three instruments, and when to use which
+
+| script | measures | use it when |
+|---|---|---|
+| `run.sh` | rps and CPU per request, with controls | judging a result |
+| `profile.sh` | where the balancer's CPU goes | choosing what to change |
+| `syscalls.sh` | syscalls per request, exactly | checking a syscall change |
+
+Throughput can be unresolvable on a shared or virtualised box: a run here has
+had its controls move 198% between rounds. Syscall counts do not care — they
+are what the code asks the kernel to do. When a change is about syscalls,
+count them and say so, rather than quoting a throughput delta the box cannot
+support.
+
 ## What it has established
 
-Replacing the ~30 per-request allocations of request parsing with a bump
-arena moved throughput by −0.9% and CPU per request by +3.4%: no benefit.
-Allocation *count* is not what limits this path, which is worth knowing before
-anyone spends more effort there. See #1739.
+**Allocation count is not what limits this path.** Replacing the ~30
+per-request allocations of request parsing with a bump arena moved throughput
+by −0.9% and CPU per request by +3.4%: no benefit. `profile.sh` says the same
+thing from the other side — `malloc` is 1.29% of self time, while syscall
+entry is 67%. The arena was written, measured and dropped. See #1739.
+
+**Syscalls are where the cost is.** Baseline measured 10.07 per proxied
+request, against the ~5 that #1719 measured for nginx. Removing the poll that
+preceded a read on a kept-alive connection took that to 9.24.

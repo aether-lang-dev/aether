@@ -9,10 +9,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         build-essential ca-certificates curl git pkg-config \
         libssl-dev zlib1g-dev \
-        nginx haproxy wrk procps \
+        nginx haproxy wrk procps linux-tools-generic strace gawk \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /bench
-COPY run.sh backends.conf nginx-lb.conf haproxy-lb.cfg ./
-RUN chmod +x run.sh
+COPY run.sh profile.sh syscalls.sh backends.conf nginx-lb.conf haproxy-lb.cfg ./
+RUN chmod +x run.sh profile.sh syscalls.sh
 ENTRYPOINT ["/bench/run.sh"]
