@@ -24,6 +24,7 @@
 #define AETHER_PROXY_INTERNAL_H
 
 #include "aether_proxy.h"
+#include "../../net/aether_http.h"
 
 #include "../../../runtime/utils/aether_thread.h"
 #include <stdatomic.h>
@@ -280,5 +281,38 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
 #ifdef __cplusplus
 }
 #endif
+
+
+/* One proxied request, suspendable at its single I/O point.
+ *
+ * The blocking server path and any caller that cannot block share these
+ * steps, so the proxy's semantics (retries, breaker accounting, cache,
+ * header rewriting) exist once rather than once per driver.
+ */
+#define PX_NEED_SEND 2
+
+typedef struct {
+    AetherProxyOpts*    opts;
+    HttpRequest*        req;
+    HttpServerResponse* res;
+    AetherUpstream*     u;
+    const char*         forward_path;
+    HttpClientRequest*  outbound;      /* built, the caller sends it */
+    char*               upstream_url;  /* owned alongside `outbound` */
+    HttpResponse*       resp;          /* the caller stores the result here */
+    int                 status;
+    int                 attempt;
+    int                 max_attempts;
+} AetherProxyExchange;
+
+/* Returns 0 or 1, the middleware's own result, when the exchange is finished,
+ * or PX_NEED_SEND when `outbound` is built and waiting. On PX_NEED_SEND the
+ * caller sends it, frees it and `upstream_url`, stores the reply in `resp`,
+ * and calls resume with how long the send took in milliseconds. */
+int aether_proxy_exchange_begin(AetherProxyExchange* px,
+                                HttpRequest* req,
+                                HttpServerResponse* res,
+                                void* user_data);
+int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms);
 
 #endif  /* AETHER_PROXY_INTERNAL_H */

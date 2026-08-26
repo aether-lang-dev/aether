@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **The reverse proxy's request is now a resumable exchange.** One upstream
+  call is the only point on that path that waits on I/O, so it is the only
+  point that has to be suspendable. The request is split into the work before
+  the send, the send, and the work after it, which lets a caller that cannot
+  block drive the same code by supplying the send. Retries, breaker
+  accounting, caching and header rewriting stay inside the exchange, so the
+  proxy's semantics exist once rather than once per driver. No behavioural
+  change: the blocking server path performs the send itself, and the proxy
+  integration suites cover it unchanged.
+
 ## [0.587.0]
 
 ### Changed

@@ -294,9 +294,28 @@ static void inject_traceparent_if_absent(HttpRequest* inbound,
 
 /* ----- the middleware function itself ----- */
 
-int aether_middleware_reverse_proxy(HttpRequest* req,
-                                    HttpServerResponse* res,
-                                    void* user_data) {
+/* ---- The proxied request as a resumable exchange ----
+ *
+ * One upstream call is the only place this path waits on I/O, so it is the
+ * only place that has to be suspendable. Splitting the request into the work
+ * before the send, the send itself, and the work after it lets a caller that
+ * cannot block drive the same code by supplying the send, without a second
+ * implementation of the proxy semantics to keep in step with this one.
+ *
+ * The step functions return the middleware's own result code, 0 or 1, when
+ * the exchange is finished, and PX_NEED_SEND when `outbound` is built and
+ * waiting to go. Retries stay inside: a caller only ever sends and resumes.
+ */
+
+static int px_build(AetherProxyExchange* px);
+static int px_classify(AetherProxyExchange* px, long elapsed_ms);
+static int px_copy(AetherProxyExchange* px);
+
+int aether_proxy_exchange_begin(AetherProxyExchange* px,
+                                HttpRequest* req,
+                                HttpServerResponse* res,
+                                void* user_data) {
+    memset(px, 0, sizeof(*px));
     AetherProxyOpts* opts = (AetherProxyOpts*)user_data;
     if (!opts || !opts->pool) return 1;  /* misconfigured — pass through */
     if (!req || !res) return 1;
@@ -353,7 +372,6 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
             if (!*forward_path) forward_path = "/";
         }
     }
-
     /* ---- Cache lookup ---- */
     if (opts->cache &&
         req->method &&
@@ -367,7 +385,6 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
         }
         atomic_fetch_add(&opts->pool->metric_cache_misses, 1);
     }
-
     /* ---- Pick upstream ---- */
     AetherUpstream* u = aether_proxy_lb_pick(opts->pool, req);
     if (!u) {
@@ -381,7 +398,6 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
             "the breaker is open)\n");
         return 0;
     }
-
     /* ---- Send (retry-aware) ----
      *
      * Build a fresh outbound request per attempt because the http
@@ -410,193 +426,165 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
      * breaker (otherwise retry behaviour trips the breaker faster
      * than it should). The intermediate failed upstreams DO get
      * their own breaker_record(0) when we re-pick away from them. */
-    int max_attempts = method_is_idempotent(req->method) ? (1 + opts->retry_max_retries) : 1;
-    HttpResponse* upstream = NULL;
-    int upstream_status = 0;
-    const char* upstream_err = NULL;
+    px->opts = opts;
+    px->req = req;
+    px->res = res;
+    px->u = u;
+    px->forward_path = forward_path;
+    px->attempt = 0;
+    px->max_attempts = method_is_idempotent(req->method)
+                     ? (1 + opts->retry_max_retries) : 1;
+    return px_build(px);
+}
 
-    for (int attempt = 0; attempt < max_attempts; attempt++) {
-        if (attempt > 0) {
-            /* Backoff between attempts. */
-            int sleep_ms = retry_backoff_ms(opts->retry_backoff_base_ms, attempt);
-            retry_sleep_ms(sleep_ms);
-            atomic_fetch_add(&u->metric_retries, 1);
+static int px_build(AetherProxyExchange* px) {
+    AetherProxyOpts* opts = px->opts;
+    HttpRequest* req = px->req;
+    HttpServerResponse* res = px->res;
+    if (px->attempt > 0) {
+        /* Backoff between attempts. */
+        int sleep_ms = retry_backoff_ms(opts->retry_backoff_base_ms, px->attempt);
+        retry_sleep_ms(sleep_ms);
+        atomic_fetch_add(&px->u->metric_retries, 1);
+    }
+
+    /* ---- Build a fresh outbound request. ---- */
+    px->upstream_url = build_upstream_url(px->u->base_url, px->forward_path,
+                                          req->query_string);
+    px->outbound = px->upstream_url ?
+        http_request_raw(req->method ? req->method : "GET", px->upstream_url) : NULL;
+    if (!px->outbound) {
+        free(px->upstream_url);
+        px->upstream_url = NULL;
+        aether_proxy_breaker_record(opts->pool, px->u, 0);
+        aether_proxy_inflight_dec(px->u);
+        http_response_set_status(res, 502);
+        http_response_set_header(res, "X-Aether-Proxy-Error", "request_alloc_failed");
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "proxy request allocation failed\n");
+        return 0;
+    }
+    if (opts->pool->request_timeout_sec > 0) {
+        http_request_set_timeout_raw(px->outbound, opts->pool->request_timeout_sec);
+    }
+
+    /* Forward inbound headers minus hop-by-hop. */
+    for (int i = 0; i < req->header_count; i++) {
+        const char* k = req->header_keys[i];
+        const char* v = req->header_values[i];
+        if (!k || is_hop_by_hop(k)) continue;
+        if (strcasecmp(k, "Host") == 0) continue;
+        /* Skip traceparent/tracestate here — the Trace-Context
+         * branch below handles them so the inject_traceparent
+         * generation path can run when absent. */
+        if (strcasecmp(k, "traceparent") == 0) continue;
+        if (strcasecmp(k, "tracestate")  == 0) continue;
+        http_request_set_header_raw(px->outbound, k, v ? v : "");
+    }
+
+    /* Host: rewrite. */
+    if (opts->preserve_host) {
+        const char* h = http_get_header(req, "Host");
+        if (h && *h) http_request_set_header_raw(px->outbound, "Host", h);
+    } else if (px->u->authority) {
+        http_request_set_header_raw(px->outbound, "Host", px->u->authority);
+    }
+
+    /* X-Forwarded-* injection. */
+    if (opts->add_xff) {
+        const char* prior = http_get_header(req, "X-Forwarded-For");
+        const char* client = client_ip_for_xff(req);
+        char* xff = append_csv(prior, client);
+        if (xff) {
+            http_request_set_header_raw(px->outbound, "X-Forwarded-For", xff);
+            free(xff);
         }
-
-        /* ---- Build a fresh outbound request. ---- */
-        char* upstream_url = build_upstream_url(u->base_url, forward_path,
-                                                req->query_string);
-        HttpClientRequest* outbound = upstream_url ?
-            http_request_raw(req->method ? req->method : "GET", upstream_url) : NULL;
-        if (!outbound) {
-            free(upstream_url);
-            aether_proxy_breaker_record(opts->pool, u, 0);
-            aether_proxy_inflight_dec(u);
-            http_response_set_status(res, 502);
-            http_response_set_header(res, "X-Aether-Proxy-Error", "request_alloc_failed");
-            http_response_set_header(res, "Content-Type", "text/plain");
-            http_response_set_body(res, "proxy request allocation failed\n");
-            return 0;
+    }
+    if (opts->add_xfp) {
+        http_request_set_header_raw(px->outbound, "X-Forwarded-Proto", "http");
+    }
+    if (opts->add_xfh) {
+        const char* h = http_get_header(req, "Host");
+        if (h && *h) http_request_set_header_raw(px->outbound, "X-Forwarded-Host", h);
+    }
+    {
+        const char* prior_via = http_get_header(req, "Via");
+        char* via = append_csv(prior_via, "1.1 aether-proxy");
+        if (via) {
+            http_request_set_header_raw(px->outbound, "Via", via);
+            free(via);
         }
-        if (opts->pool->request_timeout_sec > 0) {
-            http_request_set_timeout_raw(outbound, opts->pool->request_timeout_sec);
-        }
+    }
 
-        /* Forward inbound headers minus hop-by-hop. */
-        for (int i = 0; i < req->header_count; i++) {
-            const char* k = req->header_keys[i];
-            const char* v = req->header_values[i];
-            if (!k || is_hop_by_hop(k)) continue;
-            if (strcasecmp(k, "Host") == 0) continue;
-            /* Skip traceparent/tracestate here — the Trace-Context
-             * branch below handles them so the inject_traceparent
-             * generation path can run when absent. */
-            if (strcasecmp(k, "traceparent") == 0) continue;
-            if (strcasecmp(k, "tracestate")  == 0) continue;
-            http_request_set_header_raw(outbound, k, v ? v : "");
-        }
+    /* W3C Trace-Context: pass inbound through verbatim if present;
+     * otherwise generate a fresh trace when opts->trace_context_inject. */
+    const char* tp = http_get_header(req, "traceparent");
+    if (tp && *tp) {
+        http_request_set_header_raw(px->outbound, "traceparent", tp);
+        const char* ts = http_get_header(req, "tracestate");
+        if (ts && *ts) http_request_set_header_raw(px->outbound, "tracestate", ts);
+    } else if (opts->trace_context_inject) {
+        inject_traceparent_if_absent(req, px->outbound);
+    }
 
-        /* Host: rewrite. */
-        if (opts->preserve_host) {
-            const char* h = http_get_header(req, "Host");
-            if (h && *h) http_request_set_header_raw(outbound, "Host", h);
-        } else if (u->authority) {
-            http_request_set_header_raw(outbound, "Host", u->authority);
-        }
+    /* Forward request body. */
+    if (req->body && req->body_length > 0) {
+        const char* ct = http_get_header(req, "Content-Type");
+        http_request_set_body_raw(px->outbound, req->body,
+                                  (int)req->body_length,
+                                  ct ? ct : "application/octet-stream");
+    }
+    return PX_NEED_SEND;
+}
 
-        /* X-Forwarded-* injection. */
-        if (opts->add_xff) {
-            const char* prior = http_get_header(req, "X-Forwarded-For");
-            const char* client = client_ip_for_xff(req);
-            char* xff = append_csv(prior, client);
-            if (xff) {
-                http_request_set_header_raw(outbound, "X-Forwarded-For", xff);
-                free(xff);
-            }
-        }
-        if (opts->add_xfp) {
-            http_request_set_header_raw(outbound, "X-Forwarded-Proto", "http");
-        }
-        if (opts->add_xfh) {
-            const char* h = http_get_header(req, "Host");
-            if (h && *h) http_request_set_header_raw(outbound, "X-Forwarded-Host", h);
-        }
-        {
-            const char* prior_via = http_get_header(req, "Via");
-            char* via = append_csv(prior_via, "1.1 aether-proxy");
-            if (via) {
-                http_request_set_header_raw(outbound, "Via", via);
-                free(via);
-            }
-        }
+int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms) {
+    return px_classify(px, elapsed_ms);
+}
 
-        /* W3C Trace-Context: pass inbound through verbatim if present;
-         * otherwise generate a fresh trace when opts->trace_context_inject. */
-        const char* tp = http_get_header(req, "traceparent");
-        if (tp && *tp) {
-            http_request_set_header_raw(outbound, "traceparent", tp);
-            const char* ts = http_get_header(req, "tracestate");
-            if (ts && *ts) http_request_set_header_raw(outbound, "tracestate", ts);
-        } else if (opts->trace_context_inject) {
-            inject_traceparent_if_absent(req, outbound);
-        }
+static int px_classify(AetherProxyExchange* px, long elapsed_ms) {
+    AetherProxyOpts* opts = px->opts;
+    HttpRequest* req = px->req;
+    HttpServerResponse* res = px->res;
+    if (px->resp) {
+        atomic_fetch_add(&px->u->metric_latency_sum_ms, elapsed_ms);
+        atomic_fetch_add(&px->u->metric_latency_count, 1);
+    }
 
-        /* Forward request body. */
-        if (req->body && req->body_length > 0) {
-            const char* ct = http_get_header(req, "Content-Type");
-            http_request_set_body_raw(outbound, req->body,
-                                      (int)req->body_length,
-                                      ct ? ct : "application/octet-stream");
-        }
+    if (!px->resp) {
+        /* Allocation-class failure (rare). Record + bail; never
+         * retried because OOM tends not to clear up in 100ms. */
+        atomic_fetch_add(&px->u->metric_transport_errors, 1);
+        aether_proxy_breaker_record(opts->pool, px->u, 0);
+        aether_proxy_inflight_dec(px->u);
+        http_response_set_status(res, 502);
+        http_response_set_header(res, "X-Aether-Proxy-Error", "send_alloc_failed");
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, "proxy upstream call alloc failed\n");
+        return 0;
+    }
 
-        /* ---- Send + classify ---- */
-        long t_start = aether_proxy_now_ms();
-        HttpResponse* resp = http_send_raw(outbound);
-        long t_end = aether_proxy_now_ms();
-        http_request_free_raw(outbound);
-        free(upstream_url);
+    const char* err = http_response_error(px->resp);
+    int status = http_response_status(px->resp);
 
-        if (resp) {
-            atomic_fetch_add(&u->metric_latency_sum_ms, t_end - t_start);
-            atomic_fetch_add(&u->metric_latency_count, 1);
-        }
+    if (err && *err) {
+        int is_timeout = strstr(err, "timeout") != NULL ||
+                         strstr(err, "timed out") != NULL;
+        if (is_timeout) atomic_fetch_add(&px->u->metric_timeouts, 1);
+        else            atomic_fetch_add(&px->u->metric_transport_errors, 1);
 
-        if (!resp) {
-            /* Allocation-class failure (rare). Record + bail; never
-             * retried because OOM tends not to clear up in 100ms. */
-            atomic_fetch_add(&u->metric_transport_errors, 1);
-            aether_proxy_breaker_record(opts->pool, u, 0);
-            aether_proxy_inflight_dec(u);
-            http_response_set_status(res, 502);
-            http_response_set_header(res, "X-Aether-Proxy-Error", "send_alloc_failed");
-            http_response_set_header(res, "Content-Type", "text/plain");
-            http_response_set_body(res, "proxy upstream call alloc failed\n");
-            return 0;
-        }
-
-        const char* err = http_response_error(resp);
-        int status = http_response_status(resp);
-
-        if (err && *err) {
-            int is_timeout = strstr(err, "timeout") != NULL ||
-                             strstr(err, "timed out") != NULL;
-            if (is_timeout) atomic_fetch_add(&u->metric_timeouts, 1);
-            else            atomic_fetch_add(&u->metric_transport_errors, 1);
-
-            /* Retry transport failures on idempotent methods. */
-            int can_retry = (attempt + 1 < max_attempts);
-            if (can_retry) {
-                /* This upstream failed: charge it against the breaker
-                 * (it's a real failure that happened, not just a retry-
-                 * absorbed transient), release inflight, and re-pick
-                 * for the next attempt. */
-                aether_proxy_breaker_record(opts->pool, u, 0);
-                aether_proxy_inflight_dec(u);
-                http_response_free(resp);
-                AetherUpstream* next_u = aether_proxy_lb_pick(opts->pool, req);
-                if (!next_u) {
-                    /* Nothing else eligible — return 503. */
-                    atomic_fetch_add(&opts->pool->metric_503_no_upstream, 1);
-                    http_response_set_status(res, 503);
-                    http_response_set_header(res, "X-Aether-Proxy-Error", "no_upstream_after_retry");
-                    http_response_set_header(res, "Retry-After", "1");
-                    http_response_set_header(res, "Content-Type", "text/plain");
-                    http_response_set_body(res, "no upstream available after retries\n");
-                    return 0;
-                }
-                u = next_u;
-                continue;
-            }
-            /* Final attempt — surface the error. */
-            int is_oversize_resp = strstr(err, "exceeds") != NULL;
-            aether_proxy_breaker_record(opts->pool, u, 0);
-            aether_proxy_inflight_dec(u);
-            http_response_set_status(res, is_timeout ? 504 : 502);
-            http_response_set_header(res, "X-Aether-Proxy-Error",
-                is_timeout ? "upstream_timeout" :
-                is_oversize_resp ? "response_too_large" : "upstream_transport");
-            http_response_set_header(res, "Content-Type", "text/plain");
-            http_response_set_body(res, err);
-            http_response_free(resp);
-            return 0;
-        }
-
-        /* Status arrived. Tally by class. */
-        if      (status >= 200 && status < 300) atomic_fetch_add(&u->metric_requests_2xx, 1);
-        else if (status >= 300 && status < 400) atomic_fetch_add(&u->metric_requests_3xx, 1);
-        else if (status >= 400 && status < 500) atomic_fetch_add(&u->metric_requests_4xx, 1);
-        else if (status >= 500)                  atomic_fetch_add(&u->metric_requests_5xx, 1);
-
-        /* Retry on 5xx if there's budget (idempotent guarantee
-         * already enforced by max_attempts). */
-        if (status >= 500 && (attempt + 1) < max_attempts) {
-            /* Charge the failure to this upstream's breaker, release
-             * inflight, and re-pick. */
-            aether_proxy_breaker_record(opts->pool, u, 0);
-            aether_proxy_inflight_dec(u);
-            http_response_free(resp);
+        /* Retry transport failures on idempotent methods. */
+        int can_retry = (px->attempt + 1 < px->max_attempts);
+        if (can_retry) {
+            /* This upstream failed: charge it against the breaker
+             * (it's a real failure that happened, not just a retry-
+             * absorbed transient), release inflight, and re-pick
+             * for the next px->attempt. */
+            aether_proxy_breaker_record(opts->pool, px->u, 0);
+            aether_proxy_inflight_dec(px->u);
+            http_response_free(px->resp);
             AetherUpstream* next_u = aether_proxy_lb_pick(opts->pool, req);
             if (!next_u) {
+                /* Nothing else eligible — return 503. */
                 atomic_fetch_add(&opts->pool->metric_503_no_upstream, 1);
                 http_response_set_status(res, 503);
                 http_response_set_header(res, "X-Aether-Proxy-Error", "no_upstream_after_retry");
@@ -605,32 +593,73 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
                 http_response_set_body(res, "no upstream available after retries\n");
                 return 0;
             }
-            u = next_u;
-            continue;
+            px->u = next_u;
+            px->attempt++;
+            return px_build(px);
         }
-
-        upstream = resp;
-        upstream_status = status;
-        upstream_err = err;
-        break;
+        /* Final px->attempt — surface the error. */
+        int is_oversize_resp = strstr(err, "exceeds") != NULL;
+        aether_proxy_breaker_record(opts->pool, px->u, 0);
+        aether_proxy_inflight_dec(px->u);
+        http_response_set_status(res, is_timeout ? 504 : 502);
+        http_response_set_header(res, "X-Aether-Proxy-Error",
+            is_timeout ? "upstream_timeout" :
+            is_oversize_resp ? "response_too_large" : "upstream_transport");
+        http_response_set_header(res, "Content-Type", "text/plain");
+        http_response_set_body(res, err);
+        http_response_free(px->resp);
+        return 0;
     }
 
-    /* Falling out of the loop with upstream != NULL means we have a
-     * response (possibly 5xx) to copy back. NULL means we exhausted
-     * attempts on transport failures (already returned above). */
+    /* Status arrived. Tally by class. */
+    if      (status >= 200 && status < 300) atomic_fetch_add(&px->u->metric_requests_2xx, 1);
+    else if (status >= 300 && status < 400) atomic_fetch_add(&px->u->metric_requests_3xx, 1);
+    else if (status >= 400 && status < 500) atomic_fetch_add(&px->u->metric_requests_4xx, 1);
+    else if (status >= 500)                  atomic_fetch_add(&px->u->metric_requests_5xx, 1);
 
-    /* Status reached us. Record breaker outcome — ok = 2xx/3xx/4xx,
-     * !ok = 5xx. 4xx is client error, not upstream fault. */
-    (void)upstream_err;
-    int classified_ok = (upstream_status >= 200 && upstream_status < 500);
-    aether_proxy_breaker_record(opts->pool, u, classified_ok);
-    aether_proxy_inflight_dec(u);
+    /* Retry on 5xx if there's budget (idempotent guarantee
+     * already enforced by px->max_attempts). */
+    if (status >= 500 && (px->attempt + 1) < px->max_attempts) {
+        /* Charge the failure to this upstream's breaker, release
+         * inflight, and re-pick. */
+        aether_proxy_breaker_record(opts->pool, px->u, 0);
+        aether_proxy_inflight_dec(px->u);
+        http_response_free(px->resp);
+        AetherUpstream* next_u = aether_proxy_lb_pick(opts->pool, req);
+        if (!next_u) {
+            atomic_fetch_add(&opts->pool->metric_503_no_upstream, 1);
+            http_response_set_status(res, 503);
+            http_response_set_header(res, "X-Aether-Proxy-Error", "no_upstream_after_retry");
+            http_response_set_header(res, "Retry-After", "1");
+            http_response_set_header(res, "Content-Type", "text/plain");
+            http_response_set_body(res, "no upstream available after retries\n");
+            return 0;
+        }
+        px->u = next_u;
+        px->attempt++;
+        return px_build(px);
+    }
+
+    px->status = status;
+    return px_copy(px);
+}
+
+static int px_copy(AetherProxyExchange* px) {
+    AetherProxyOpts* opts = px->opts;
+    HttpRequest* req = px->req;
+    HttpServerResponse* res = px->res;
+    /* A status reached us, so this attempt is the one that counts. Record
+     * the breaker outcome: ok is 2xx/3xx/4xx, not-ok is 5xx, because a 4xx
+     * is the client's error and not the upstream's fault. */
+    int classified_ok = (px->status >= 200 && px->status < 500);
+    aether_proxy_breaker_record(opts->pool, px->u, classified_ok);
+    aether_proxy_inflight_dec(px->u);
 
     /* ---- Copy upstream response onto `res` ---- */
-    http_response_set_status(res, upstream_status);
+    http_response_set_status(res, px->status);
 
     /* Headers — parse the raw block, drop hop-by-hop. */
-    const char* headers_block = http_response_headers(upstream);
+    const char* headers_block = http_response_headers(px->resp);
     int seen_content_type = 0;
     if (headers_block) {
         const char* p = headers_block;
@@ -677,13 +706,13 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
      * copy via http_response_set_body_n below, before http_response_free
      * (unlike http_response_body, which now hands back a retained
      * AetherString for Aether callers). */
-    const char* body = http_response_body_str(upstream);
-    int body_length = http_response_body_length(upstream);
+    const char* body = http_response_body_str(px->resp);
+    int body_length = http_response_body_length(px->resp);
     if (body_length > opts->max_body_bytes) {
         http_response_set_status(res, 502);
         http_response_set_header(res, "X-Aether-Proxy-Error", "response_too_large");
-        http_response_set_body(res, "upstream response exceeds proxy cap\n");
-        http_response_free(upstream);
+        http_response_set_body(res, "px->resp response exceeds proxy cap\n");
+        http_response_free(px->resp);
         return 0;
     }
     if (body && body_length > 0) {
@@ -695,13 +724,33 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
     /* ---- Cache store ---- */
     if (opts->cache && headers_block && req->method &&
         (strcmp(req->method, "GET") == 0 || strcmp(req->method, "HEAD") == 0)) {
-        aether_proxy_cache_store(opts->cache, req->method, forward_path, req,
-                                 upstream_status, headers_block,
+        aether_proxy_cache_store(opts->cache, req->method, px->forward_path, req,
+                                 px->status, headers_block,
                                  body, body_length);
     }
 
-    http_response_free(upstream);
+    http_response_free(px->resp);
     return 0;
+}
+
+/* The blocking driver: the server's worker owns the thread for the whole
+ * request, so it simply performs the send itself. */
+int aether_middleware_reverse_proxy(HttpRequest* req,
+                                    HttpServerResponse* res,
+                                    void* user_data) {
+    AetherProxyExchange px;
+    int r = aether_proxy_exchange_begin(&px, req, res, user_data);
+    while (r == PX_NEED_SEND) {
+        long t0 = aether_proxy_now_ms();
+        px.resp = http_send_raw(px.outbound);
+        long elapsed = aether_proxy_now_ms() - t0;
+        http_request_free_raw(px.outbound);
+        free(px.upstream_url);
+        px.outbound = NULL;
+        px.upstream_url = NULL;
+        r = aether_proxy_exchange_resume(&px, elapsed);
+    }
+    return r;
 }
 
 /* ----- install ----- */
