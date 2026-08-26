@@ -1,0 +1,119 @@
+// Regression test for std.message (#1745).
+//
+// The module shipped in d32769fb with no test in the tree, so its behaviour
+// was unpinned and its leak status unmeasurable — every figure in the issue
+// was taken against a file that did not exist. This covers all eight exports
+// and is the harness the leak work is measured through.
+//
+// `message` is a reserved word, so the import needs the backtick form; `(*)`
+// makes the exports bare because a namespaced spelling would be blocked by
+// the reserved word.
+
+import std.`message`(*)
+import std.map(*)
+import std.string
+
+extern exit(code: int)
+
+ck(got: string, want: string, label: string) -> int {
+    if string.compare(got, want) != 0 {
+        println("  FAIL: ${label}")
+        println("        got:  [${got}]")
+        println("        want: [${want}]")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    f = 0
+
+    // ---- plain interpolation ------------------------------------------
+    args = map_new()
+    map_put_raw(args, "name", "Ada")
+    map_put_raw(args, "count", "3")
+    f = f + ck(format("en", "Hello {name}, you have {count} messages.", args),
+        "Hello Ada, you have 3 messages.", "simple interpolation")
+
+    // A literal with no placeholders passes through untouched.
+    f = f + ck(format("en", "no placeholders here", args),
+        "no placeholders here", "literal passthrough")
+
+    // An unknown placeholder substitutes empty — pinning the module's actual
+    // contract (format_nodes seeds `val = ""` and only overwrites it when
+    // map_has succeeds), not the passthrough a reader might assume.
+    f = f + ck(format("en", "{nope}", args), "", "unknown placeholder -> empty")
+
+    // ---- plural ---------------------------------------------------------
+    // The `one`/`other` split is the whole point of the plural form.
+    one = map_new()
+    map_put_raw(one, "n", "1")
+    f = f + ck(format("en", "{n, plural, one {# item} other {# items}}", one),
+        "1 item", "plural one")
+    map_free(one)
+
+    many = map_new()
+    map_put_raw(many, "n", "5")
+    f = f + ck(format("en", "{n, plural, one {# item} other {# items}}", many),
+        "5 items", "plural other")
+    map_free(many)
+
+    // ---- select ---------------------------------------------------------
+    she = map_new()
+    map_put_raw(she, "g", "female")
+    f = f + ck(format("en", "{g, select, male {he} female {she} other {they}}", she),
+        "she", "select matches a branch")
+    map_free(she)
+
+    other = map_new()
+    map_put_raw(other, "g", "nonbinary")
+    f = f + ck(format("en", "{g, select, male {he} female {she} other {they}}", other),
+        "they", "select falls through to other")
+    map_free(other)
+
+    // ---- parse / format_pattern / pattern_free --------------------------
+    // The parse-once-format-many path, which is why parse is exported.
+    pat, perr = parse("Hi {name}!")
+    if perr != "" {
+        println("  FAIL: parse returned error [${perr}]")
+        f = f + 1
+    } else {
+        f = f + ck(format_pattern("en", pat, args), "Hi Ada!", "format_pattern")
+        // Same pattern, second use — proves the pattern survives formatting.
+        f = f + ck(format_pattern("en", pat, args), "Hi Ada!", "format_pattern reuse")
+    }
+    pattern_free(pat)
+
+    // A malformed pattern must report an error rather than crash.
+    bad, berr = parse("{unclosed")
+    if berr == "" {
+        println("  FAIL: malformed pattern parsed without error")
+        f = f + 1
+    }
+    pattern_free(bad)
+
+    // ---- catalog --------------------------------------------------------
+    cat = catalog_new("en")
+    catalog_add(cat, "greeting", "Hello {name}!")
+    catalog_add(cat, "farewell", "Bye {name}.")
+    f = f + ck(catalog_format(cat, "greeting", args), "Hello Ada!", "catalog hit")
+    f = f + ck(catalog_format(cat, "farewell", args), "Bye Ada.", "catalog second id")
+
+    // A missing id yields the diagnostic form rather than empty or a crash.
+    // This is also the path that exercises the nested-concat in catalog_format.
+    f = f + ck(catalog_format(cat, "absent", args), "[missing: absent]",
+        "catalog missing id")
+    catalog_free(cat)
+
+    // A null catalogue takes the same missing-id path.
+    f = f + ck(catalog_format(null, "anything", args), "[missing: anything]",
+        "null catalog")
+
+    map_free(args)
+
+    if f != 0 {
+        println("${f} failure(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
