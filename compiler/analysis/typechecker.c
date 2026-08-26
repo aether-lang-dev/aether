@@ -1041,6 +1041,10 @@ static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
     return is_const_expression(elem, table);
 }
 
+/* Defined below, beside typecheck_function_call — used by the
+ * variable-declaration arm, which appears earlier in this file. */
+static int call_yields_no_value(ASTNode* call, SymbolTable* table);
+
 // Type compatibility functions
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
@@ -5024,6 +5028,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count > 0) {
                 // Has initializer
                 ASTNode* init = stmt->children[0];
+
+                /* Reading the value of a call that yields none. The callee
+                 * lowers to C `void`, so this reads the return register:
+                 * stack residue, different every run, and silent today. See
+                 * call_yields_no_value for the full shape. */
+                if (call_yields_no_value(init, table)) {
+                    char vmsg[320];
+                    snprintf(vmsg, sizeof(vmsg),
+                             "'%s' returns no value, so there is nothing to "
+                             "assign here. Give it a return type (e.g. "
+                             "`%s(...): int`) and a `return`, or call it as a "
+                             "statement on its own line",
+                             init->value ? init->value : "function",
+                             init->value ? init->value : "f");
+                    type_error(vmsg, init->line, init->column);
+                    return 0;
+                }
                 // #1044 implicit enum selector: resolve a bare enum member on
                 // the RHS. For a typed declaration `c: Color = Blue` the expected
                 // type is the annotation (stmt->node_type); for a bare-local
@@ -7491,6 +7512,63 @@ static int try_ufcs_rewrite(ASTNode* call, SymbolTable* table) {
     call->value = resolved;          /* transfer ownership */
     if (call->annotation) { free(call->annotation); call->annotation = NULL; }
     return 1;
+}
+
+/* Mirrors codegen's has_return_value (codegen_func.c:586) — deliberately a
+ * copy rather than a cross-layer include, so the typechecker does not depend
+ * on a codegen header. The two must agree: if they diverge, this diagnostic
+ * either fires on a function that codegen emits as int, or misses one it
+ * emits as void. tests/regression/test_void_value_read.ae pins the agreement
+ * from the outside, by asserting the diagnostic on exactly the shapes codegen
+ * makes void. */
+static int tc_has_return_value(ASTNode* node) {
+    if (!node) return 0;
+    if (node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 && node->children[0]) {
+        if (node->children[0]->type == AST_PRINT_STATEMENT) return 0;
+        return 1;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (tc_has_return_value(node->children[i])) return 1;
+    }
+    return 0;
+}
+
+/* Does calling `call` yield no value?
+ *
+ * A function with no declared return type and no `return <value>` anywhere in
+ * its body lowers to C `void` (codegen_func.c, the ret_unannotated branch —
+ * deliberate since #354). Reading such a call's "result" reads whatever the
+ * ABI's return register happens to hold: stack residue, different on every
+ * run, and silently so.
+ *
+ * The shape that surfaced this (#1745-adjacent, reported by the aeb line):
+ *
+ *     builder voidprog(ctx: ptr) { }              // no ': int'
+ *     node(s: ptr) -> int { voidprog(null) { } }  // rc = -843144544
+ *
+ * A build orchestrator read that as a node's exit status, so a failing node
+ * could exit falsely green. It compiled without a word of warning, and the
+ * same-translation-unit case is not caught by the C compiler either, because
+ * Aether emits the callee as `void` and the caller simply reads the register.
+ *
+ * Returns 1 when `call` names a user-defined function that lowers to void.
+ * Externs are excluded: their declared type is the only truth available, and
+ * an `extern f() -> int` may well front a real int-returning C function. */
+static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
+    Symbol* sym = lookup_symbol(table, call->value);
+    if (!sym || !sym->node) return 0;
+    ASTNode* fn = sym->node;
+    if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION)
+        return 0;
+    /* An annotated return type is authoritative, whatever the body does. */
+    Type* rt = fn->node_type;
+    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 0;
+    /* Unannotated: void exactly when no `return <value>` reaches codegen.
+     * has_return_value is the same predicate codegen uses to decide, so the
+     * two cannot disagree. */
+    return !tc_has_return_value(fn);
 }
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {

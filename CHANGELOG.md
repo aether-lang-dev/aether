@@ -23,6 +23,18 @@ version number before tagging the release.
   change: the blocking server path performs the send itself, and the proxy
   integration suites cover it unchanged.
 
+### Fixed
+
+- **Reading the value of a call that returns none is now a diagnostic.** A
+  function with no declared return type and no `return <value>` lowers to C
+  `void` (deliberate since #354), so `v = voidfn(1)` read whatever the ABI's
+  return register happened to hold — stack residue, a different number every
+  run, and silent. The aeb line hit this through a build orchestrator that read
+  such a value as a node's exit status, so a failing node could exit falsely
+  green. The typechecker now rejects it and names the way out: give the callee
+  a return type and a `return`, or call it as a statement. Calling an
+  unannotated function for its effect — by far the common case — is unchanged.
+
 ## [0.587.0]
 
 ### Changed
