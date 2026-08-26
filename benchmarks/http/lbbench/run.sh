@@ -74,10 +74,9 @@ stop_lb() {
 }
 
 # nginx daemonizes, so the pid of the process the shell started is not the
-# master's: the master's is in the pid file, and it is not written yet when
-# the launcher returns. Reading it straight away got the previous round's
-# stale pid, whose /proc entry is gone, and every per-request figure derived
-# from it came out 0.
+# master's. The master's is in the pid file and is not written yet when the
+# launcher returns, so it has to be waited for; a stale pid from the previous
+# round names a dead process and every figure derived from it reads 0.
 wait_pid_file() {                 # wait_pid_file <file>
     local f="$1" i pid
     for i in $(seq 1 60); do
@@ -112,11 +111,10 @@ lb_pids() {                       # lb_pids <pid>
     for k in $kids; do lb_pids "$k"; done
 }
 
-# Voluntary and involuntary switches are two different findings and are
-# counted separately. Voluntary means the code asked to sleep, which for this
-# path is the upstream call blocking a worker. Involuntary means the scheduler
-# took the CPU away, which is threads oversubscribing the cores. A single
-# summed figure cannot tell those apart, and they call for opposite fixes.
+# Voluntary and involuntary switches are counted separately. Voluntary means
+# the code asked to sleep; involuntary means the scheduler took the CPU away,
+# which is threads oversubscribing the cores. A summed figure cannot tell them
+# apart and they call for opposite fixes.
 lb_ctxt() {                       # lb_ctxt <pid> <voluntary|involuntary>
     local pid="$1" which="$2" total=0 t v p key
     case "$which" in
@@ -173,9 +171,8 @@ measure() {                       # measure <label> [pid]
     # than rps on a shared box: rps depends on everything else running, this
     # depends on the work the code does. A jiffy is 10ms at the usual 100Hz.
     # A CPU figure this could not measure is reported as unmeasured, never as
-    # zero. A zero here reads as "burned no CPU", which is the most flattering
-    # number in the table and is never true of a process that served requests:
-    # it means the pid was wrong, and it once hid nginx's real cost entirely.
+    # zero. Zero reads as "burned no CPU", which is never true of a process
+    # that served requests, and it silently hides the subject's real cost.
     cpu_us=""; ctx_per=""; vol_per=""; inv_per=""; note=""
     if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
         note="cpu UNMEASURED (no live pid)  "
@@ -194,9 +191,8 @@ measure() {                       # measure <label> [pid]
         fi
     fi
     # stderr, like every other line this prints. A result on stdout and the
-    # round header on stderr interleave once the output is piped, and a row
-    # then appears under the wrong round: one run showed a subject missing
-    # from round 2 and listed twice in round 3.
+    # round header on stderr interleave once the output is piped, which files
+    # a row under the wrong round.
     printf '%-10s %12s rps   p99 %-9s %s%s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
         "$note" "${cpu_us:+cpu ${cpu_us}us/req  }" \
         "${ctx_per:+ctxsw ${ctx_per}/req (vol ${vol_per} inv ${inv_per})  }" \
