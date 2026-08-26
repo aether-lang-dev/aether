@@ -10,6 +10,9 @@
 # This is a diagnosis, not a benchmark: it says which wall we are against.
 set -uo pipefail
 
+. /bench/use_mounted.sh
+lbbench_use_mounted workers.sh "$@"
+
 DURATION="${DURATION:-10s}"
 CONNECTIONS="${CONNECTIONS:-50}"
 SWEEP="${SWEEP:-8 16 32 64}"

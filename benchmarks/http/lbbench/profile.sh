@@ -1,7 +1,7 @@
 #!/bin/bash
 # Where does the aether load balancer's CPU actually go?
 #
-# Same setup as run.sh — two backends, pinned generator and balancer — but
+# Same setup as run.sh, two backends and a pinned generator and balancer, but
 # instead of timing it, this samples the balancer under load and prints the
 # hot paths. Guessing produced one change worth nothing (#1739); this is the
 # instrument for choosing the next one.
@@ -11,6 +11,9 @@
 # sampling of our own child still works at 2 on most kernels, and the script
 # says which it got rather than silently profiling nothing.
 set -uo pipefail
+
+. /bench/use_mounted.sh
+lbbench_use_mounted profile.sh "$@"
 
 DURATION="${DURATION:-20}"
 CONNECTIONS="${CONNECTIONS:-50}"
