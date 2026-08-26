@@ -13,6 +13,14 @@ version number before tagging the release.
 
 ### Changed
 
+- **Response framing is decided in one place.** Reading to the end of a
+  response, rather than to the end of the connection, is what lets a
+  connection carry the next one. That logic (the header block, then chunked or
+  Content-Length or a status that carries no body) now lives in a single
+  helper instead of inside the blocking read loop, so a caller that reads the
+  same bytes in a different order cannot end up with a second opinion about
+  where a response ends. No behavioural change.
+
 - **The reverse proxy's request is now a resumable exchange.** One upstream
   call is the only point on that path that waits on I/O, so it is the only
   point that has to be suspendable. The request is split into the work before
@@ -22,6 +30,14 @@ version number before tagging the release.
   proxy's semantics exist once rather than once per driver. No behavioural
   change: the blocking server path performs the send itself, and the proxy
   integration suites cover it unchanged.
+
+### Added
+
+- **A test for a response whose body arrives after its headers.** Every client
+  test sent a response small enough to arrive in a single segment, so a client
+  that stopped reading at the header block would have passed all of them. This
+  one forces the split and fails any client that ignores the declared length,
+  which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
 

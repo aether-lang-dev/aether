@@ -1,0 +1,32 @@
+// The upstream sends the header block, pauses, then sends the body. A client
+// that reads to the end of THIS response waits for the declared body; one
+// that stops when the headers arrive returns a short one.
+
+import std.http
+import std.io
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if port == 0 {
+        fail("UPSTREAM_PORT not set")
+    }
+    url = "http://127.0.0.1:${port}/"
+
+    body, err = http.get(url)
+    if err != "" { fail("request: ${err}") }
+
+    want = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if string.equals(body, want) == 0 {
+        fail("body was '${body}' (${string.length(body)} bytes), want ${string.length(want)} bytes")
+    }
+
+    println("PASS: the full body was read across the split")
+}

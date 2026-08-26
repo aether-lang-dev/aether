@@ -1647,6 +1647,64 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
     return 0;
 }
 
+
+/* Has a complete HTTP/1.1 response accumulated in `buf`?
+ *
+ * Reading to end of connection only works when the connection is the
+ * delimiter, which is what made every request cost a fresh one (#1653). This
+ * reads to the end of THIS response: the header block, then exactly the body
+ * its framing declares. `f` carries what has been worked out so far across
+ * calls and starts zeroed.
+ *
+ * Shared deliberately. A caller that cannot block reads the same bytes in a
+ * different order, and a second copy of response framing would be a second
+ * place for chunked, Content-Length and the no-body statuses to disagree.
+ */
+typedef struct {
+    size_t header_bytes;
+    size_t body_target;
+    int    chunked;
+    int    definite;
+} HttpRespFraming;
+
+static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
+                                     const char* method) {
+    if (!f->header_bytes) {
+        /* The terminator is NUL-free ASCII and precedes any body byte. */
+        char* hend = strstr(buf, "\r\n\r\n");
+        if (!hend) return 0;
+        f->header_bytes = (size_t)((hend + 4) - buf);
+        char saved = *hend;
+        *hend = '\0';
+        char* te = http_extract_response_header(buf, "Transfer-Encoding");
+        if (te && http_value_has_chunked(te)) {
+            f->chunked = 1;
+            f->definite = 1;
+        } else {
+            char* cl = http_extract_response_header(buf, "Content-Length");
+            if (cl) {
+                long long declared = strtoll(cl, NULL, 10);
+                if (declared >= 0) {
+                    f->body_target = f->header_bytes + (size_t)declared;
+                    f->definite = 1;
+                }
+                free(cl);
+            }
+        }
+        free(te);
+        *hend = saved;
+        if (no_body_expected(response_status_of(buf), method)) {
+            f->body_target = f->header_bytes;
+            f->definite = 1;
+            f->chunked = 0;
+        }
+    }
+    if (!f->definite) return 0;
+    if (f->chunked)
+        return http_chunked_complete(buf + f->header_bytes, len - f->header_bytes);
+    return len >= f->body_target;
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -1891,10 +1949,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     size_t cap = 0;
     int    n = 0;
     int    recv_err = 0;
-    size_t header_bytes = 0;
-    size_t body_target = 0;
-    int    framing_chunked = 0;
-    int    framing_definite = 0;
+    HttpRespFraming framing = {0, 0, 0, 0};
     /* A pooled connection the peer closed while it sat idle is
      * indistinguishable from a live one until it is used: the liveness probe
      * catches almost all of them, and the rest fail with nothing received.
@@ -2081,44 +2136,8 @@ send_request:
         total_len += (size_t)n;
         full_response[total_len] = '\0';
 
-        if (!header_bytes) {
-            /* The terminator is NUL-free ASCII and precedes any body byte. */
-            char* hend = strstr(full_response, "\r\n\r\n");
-            if (!hend) continue;
-            header_bytes = (size_t)((hend + 4) - full_response);
-            char saved = *hend;
-            *hend = '\0';
-            char* te = http_extract_response_header(full_response, "Transfer-Encoding");
-            if (te && http_value_has_chunked(te)) {
-                framing_chunked = 1;
-                framing_definite = 1;
-            } else {
-                char* cl = http_extract_response_header(full_response, "Content-Length");
-                if (cl) {
-                    long long declared = strtoll(cl, NULL, 10);
-                    if (declared >= 0) {
-                        body_target = header_bytes + (size_t)declared;
-                        framing_definite = 1;
-                    }
-                    free(cl);
-                }
-            }
-            free(te);
-            *hend = saved;
-            if (no_body_expected(response_status_of(full_response), method)) {
-                body_target = header_bytes;
-                framing_definite = 1;
-                framing_chunked = 0;
-            }
-        }
-        if (framing_definite) {
-            if (framing_chunked) {
-                if (http_chunked_complete(full_response + header_bytes,
-                                          total_len - header_bytes)) break;
-            } else if (total_len >= body_target) {
-                break;
-            }
-        }
+        if (http_response_is_complete(&framing, full_response, total_len, method))
+            break;
     }
     /* Nothing at all came back on a connection that came from the pool: the
      * peer had closed it and our request went into the void. Redial once and
@@ -2149,10 +2168,10 @@ send_request:
             total_len = 0;
             cap = 0;
             recv_err = 0;
-            header_bytes = 0;
-            body_target = 0;
-            framing_chunked = 0;
-            framing_definite = 0;
+            framing.header_bytes = 0;
+            framing.body_target = 0;
+            framing.chunked = 0;
+            framing.definite = 0;
             goto send_request;
         }
         /* The redial failed too, so the upstream is gone rather than the
@@ -2195,11 +2214,11 @@ send_request:
      * (read-until-EOF framing, a truncated body, an I/O error) leaves the
      * next response's start position unknown, so the connection is retired. */
     {
-        int keep = pool_this && !recv_err && framing_definite &&
-                   (framing_chunked || total_len == body_target);
-        if (keep && header_bytes > 0) {
-            char saved = full_response[header_bytes - 4];
-            full_response[header_bytes - 4] = '\0';
+        int keep = pool_this && !recv_err && framing.definite &&
+                   (framing.chunked || total_len == framing.body_target);
+        if (keep && framing.header_bytes > 0) {
+            char saved = full_response[framing.header_bytes - 4];
+            full_response[framing.header_bytes - 4] = '\0';
             char* conn_hdr = http_extract_response_header(full_response, "Connection");
             if (conn_hdr) {
                 if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
@@ -2207,7 +2226,7 @@ send_request:
             } else if (strncmp(full_response, "HTTP/1.0", 8) == 0) {
                 keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
             }
-            full_response[header_bytes - 4] = saved;
+            full_response[framing.header_bytes - 4] = saved;
         } else {
             keep = 0;
         }
