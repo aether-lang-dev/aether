@@ -44,6 +44,16 @@ same comparison to 0.9%. Almost all of the "regression" was the running order.
 **It refuses to report a balancer that is not proxying.** A balancer answering
 errors quickly reads as fast. A run against dead backends once showed +26%.
 
+**It refuses to report a figure it could not measure.** A CPU or context
+switch figure it cannot read is printed as `cpu UNMEASURED`, never as 0.
+Zero is the most flattering number in the table and is never true of a
+process that served requests. nginx daemonizes, so its master pid comes from
+a pid file that is not written yet when the launcher returns; reading it
+straight away got the previous round's dead pid and reported 0 for the whole
+nginx column. Only nginx was affected, because aether runs in the foreground
+and haproxy is found by pgrep, so findings that compare aether against a
+baseline were never touched by it.
+
 ## Three instruments, and when to use which
 
 | script | measures | use it when |
