@@ -61,6 +61,7 @@ baseline were never touched by it.
 | `run.sh` | rps and CPU per request, with controls | judging a result |
 | `profile.sh` | where the balancer's CPU goes | choosing what to change |
 | `syscalls.sh` | syscalls per request, exactly | checking a syscall change |
+| `switches.sh` | which call asked to sleep, by name | chasing context switches |
 
 Throughput can be unresolvable on a shared or virtualised box: a run here has
 had its controls move 198% between rounds. Syscall counts do not care: they
@@ -75,6 +76,14 @@ per-request allocations of request parsing with a bump arena moved throughput
 by −0.9% and CPU per request by +3.4%: no benefit. `profile.sh` says the same
 thing from the other side: `malloc` is 1.29% of self time, while syscall
 entry is 67%. The arena was written, measured and dropped. See #1739.
+
+**The sleeps are voluntary, and two of them per request.** `switches.sh`
+attributes them: `transport_recv` 0.91 per request and `conn_serve` 0.65,
+against 0.06 for the whole parking lot and 0.05 involuntary. Both sleepers
+have one cause, a worker owning a single connection with nothing else to run.
+Two cheaper fixes were measured and dropped: shrinking the worker pool (there
+is no involuntary cost to recover) and removing the park grace poll (worse by
+0.57 switches and about 30% CPU per request, every round). See #1758.
 
 **Syscalls are where the cost is.** Baseline measured 10.07 per proxied
 request, against the ~5 that #1719 measured for nginx. Removing the poll that
