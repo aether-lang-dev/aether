@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`std.message` now has a regression test** (#1745). The ICU MessageFormat
+  module shipped with none, so its behaviour was unpinned and its recorded
+  leak figures were not reproducible — every measurement on the issue was
+  taken against a file that did not exist in the tree. The new
+  `tests/regression/test_message.ae` covers all eight exports: interpolation,
+  plural `one`/`other`, `select` including the `other` fall-through,
+  parse/format_pattern/pattern_free (including reuse of one parsed pattern),
+  malformed-pattern error reporting, and the catalogue including the
+  missing-id and null-catalogue paths. Measured against it on a clean build,
+  the module leaks nothing: 448 allocs, 448 frees, 0 bytes in use at exit.
+
 ## [0.583.0]
 
 ### Changed
