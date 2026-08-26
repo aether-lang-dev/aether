@@ -89,6 +89,24 @@ static int http_pool_worker_count(void) {
     if (cores < 1) cores = 1;
 
     long want = cores * 2;
+
+    /* Overridable, because cores * 2 is the right shape for handlers that
+     * compute and the wrong one for handlers that wait. A worker owns its
+     * connection for the whole of a request, so a reverse proxy — whose
+     * handler blocks for an upstream round trip — can have no more requests
+     * in flight than it has workers, however idle those threads are. Sizing
+     * that by core count bounds throughput at workers/latency and looks like
+     * a slow server rather than an idle one.
+     *
+     * The default is unchanged. This exists so the bound can be measured and
+     * so a proxy deployment can raise it without a rebuild. */
+    const char* env = getenv("AETHER_HTTP_WORKERS");
+    if (env && *env) {
+        char* end = NULL;
+        long from_env = strtol(env, &end, 10);
+        if (end && *end == '\0' && from_env > 0) want = from_env;
+    }
+
     if (want < HTTP_POOL_MIN_WORKERS) want = HTTP_POOL_MIN_WORKERS;
     if (want > HTTP_POOL_MAX_WORKERS) want = HTTP_POOL_MAX_WORKERS;
     return (int)want;
@@ -151,6 +169,48 @@ HttpConnectionPool* http_pool_create(HttpServer* server) {
     return pool;
 }
 
+/* Add one worker, if the pool is still short of its ceiling.
+ *
+ * A worker owns its connection for the whole of a request, so a handler that
+ * waits — a reverse proxy waiting on an upstream is the ordinary case — holds
+ * a thread without using a core. Sizing the pool at cores * 2 then caps
+ * requests in flight at twice the core count however idle those threads are.
+ * Measured on a 2-core-pinned proxy against two backends: 8 workers gave
+ * 18,621 rps, 16 gave 38,866, 32 gave 42,798 with p99 falling from 96ms to
+ * 11ms. The work was not CPU-bound at any of those points; it was waiting.
+ *
+ * Growing one at a time rather than in batches: each new worker changes the
+ * condition that asked for it, and a proxy that briefly queues two items does
+ * not need sixteen more threads.
+ *
+ * The ceiling stays HTTP_POOL_MAX_WORKERS. Past the point where waiting stops
+ * being the constraint, more threads cost more than they carry — the same
+ * measurement had 64 workers slower than 32. */
+static void http_pool_grow(HttpConnectionPool* pool) {
+    pthread_mutex_lock(&pool->lock);
+    if (pool->shutdown || pool->worker_count >= HTTP_POOL_MAX_WORKERS) {
+        pthread_mutex_unlock(&pool->lock);
+        return;
+    }
+    int slot = pool->worker_count;
+    /* Claimed before the thread exists so two submitters cannot take the same
+     * slot; rolled back below if the thread does not start. */
+    pool->worker_count++;
+    pthread_mutex_unlock(&pool->lock);
+
+    if (pthread_create(&pool->workers[slot], NULL, http_pool_worker, pool) != 0) {
+        pthread_mutex_lock(&pool->lock);
+        /* Only safe to give the slot back if nobody has claimed one after it;
+         * otherwise leave the count alone and let the gap stay unused rather
+         * than have http_pool_destroy join a pthread_t that was never
+         * initialised. */
+        if (pool->worker_count == slot + 1) pool->worker_count--;
+        pthread_mutex_unlock(&pool->lock);
+        return;
+    }
+    atomic_fetch_add(&http_pool_total_workers, 1);
+}
+
 static void http_pool_submit_item(HttpConnectionPool* pool, HttpPoolItem item) {
     pthread_mutex_lock(&pool->lock);
     while (pool->count >= HTTP_POOL_QUEUE_CAP && !pool->shutdown) {
@@ -166,8 +226,17 @@ static void http_pool_submit_item(HttpConnectionPool* pool, HttpPoolItem item) {
     pool->queue[pool->tail] = item;
     pool->tail = (pool->tail + 1) % HTTP_POOL_QUEUE_CAP;
     pool->count++;
+    /* Every worker busy and work still arriving means the pool is the
+     * bottleneck, not the machine. Decided under the lock, acted on outside
+     * it: pthread_create takes long enough that holding the queue lock across
+     * it would stall the submitters this is meant to unblock. */
+    int grow = (pool->worker_count < HTTP_POOL_MAX_WORKERS)
+            && (atomic_load(&http_pool_busy_workers) >= pool->worker_count)
+            && (pool->count > 1);
     pthread_cond_signal(&pool->not_empty);
     pthread_mutex_unlock(&pool->lock);
+
+    if (grow) http_pool_grow(pool);
 }
 
 void http_pool_submit(HttpConnectionPool* pool, int client_fd) {
