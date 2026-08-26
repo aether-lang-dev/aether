@@ -37,9 +37,9 @@ version number before tagging the release.
 
 - **A benchmark instrument that names which call put a worker to sleep.**
   `benchmarks/http/lbbench/switches.sh` records the scheduler tracepoint with
-  stacks, keeps only sleeps the code asked for, and attributes each to the
-  innermost frame in our own binary. Counting context switches said how many;
-  this says which calls, which is what a fix has to target.
+  stacks, keeps only the sleeps the code asked for, and attributes each to the
+  innermost frame in the balancer's own binary. Counting context switches gives
+  the number and the kind; this gives the call site a fix has to target.
 
 ## [0.586.0]
 

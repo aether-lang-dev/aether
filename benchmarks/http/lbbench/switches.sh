@@ -3,9 +3,8 @@
 #
 # run.sh counts context switches and splits voluntary from involuntary, which
 # says how many and of what kind but not where. This records the scheduler
-# tracepoint with stacks, so each sleep is attributed to the call that asked
-# for it. #1758 turns on removing two voluntary sleeps per request, and this
-# is what says which two they are rather than which two look likely.
+# tracepoint with stacks and attributes each sleep to the call that asked for
+# it, so a fix can target a call site rather than a likely-looking one.
 #
 # Voluntary only: a task leaving the CPU in state S (interruptible sleep) went
 # to sleep because the code asked. A task leaving in state R was preempted and
