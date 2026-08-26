@@ -16,7 +16,7 @@ version number before tagging the release.
 - **Pooled upstream connections are used, not probed first.** Reusing one
   polled the socket beforehand to catch a peer that had closed during the idle
   window: one syscall on every request through the pool. The read path already
-  handled that case, and handles it better — nothing coming back on a pooled
+  handled that case, and handles it better, because nothing coming back on a pooled
   connection means the request went into the void, so it redials and resends.
   The poll only moved the discovery earlier, at the cost of asking the kernel
   every time.
@@ -29,9 +29,17 @@ version number before tagging the release.
   again on a fresh one.
 
   Counted with `strace` over ~55,000 proxied requests: **5.19 syscalls per
-  request to 4.21**, with `ppoll` falling from 1.06 to 0.06 — the remainder
+  request to 4.21**, with `ppoll` falling from 1.06 to 0.06, the remainder
   being the paths that still poll, TLS and a saturated worker pool. For scale,
   the same measurement puts nginx at about 5.
+
+### Added
+
+- **A benchmark instrument that names which call put a worker to sleep.**
+  `benchmarks/http/lbbench/switches.sh` records the scheduler tracepoint with
+  stacks, keeps only sleeps the code asked for, and attributes each to the
+  innermost frame in our own binary. Counting context switches said how many;
+  this says which calls, which is what a fix has to target.
 
 ## [0.586.0]
 
