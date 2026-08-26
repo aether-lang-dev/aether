@@ -44,8 +44,17 @@ typedef enum {
     AETHER_PROXY_CB_HALF_OPEN = 2,
 } AetherProxyBreakerState;
 
+/* host:port of a base URL, malloc'd. Defined in aether_proxy_middleware.c;
+ * the pool calls it once per upstream at registration. */
+char* aether_proxy_authority_of(const char* url);
+
 typedef struct AetherUpstream {
     char* base_url;                   /* "http://10.0.0.1:8080" — owned */
+    char* authority;                  /* "10.0.0.1:8080" — the host:port slice
+                                       * of base_url, owned. Derived once here
+                                       * because base_url cannot change while
+                                       * the upstream exists, and the request
+                                       * path needs it on every forward. */
     int   weight;                     /* WRR; default 1 */
 
     /* Smooth weighted-RR running state — mutated under pool->lock. */

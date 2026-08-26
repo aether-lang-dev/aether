@@ -3640,6 +3640,38 @@ static int conn_next_request_imminent(HttpConn* conn) {
 #ifdef AETHER_HAS_OPENSSL
     if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
 #endif
+
+#if !defined(_WIN32)
+    /* Take the next request rather than asking whether one is there.
+     *
+     * A poll that answers yes is followed by a read of the same socket, so on
+     * a connection in use the poll is a syscall that learns what the read
+     * would have told us. Reading straight into the connection buffer
+     * collapses the pair: handle_one_request finds the bytes already there
+     * and does not read again.
+     *
+     * Profiling put two thirds of this balancer's time in syscall entry, and
+     * one poll per response is among the few syscalls nginx does not make.
+     *
+     * MSG_DONTWAIT rather than switching the socket to non-blocking: the flag
+     * is free, where fcntl would cost two more syscalls than the poll it
+     * replaces. TLS keeps the poll — SSL_read against a socket the library
+     * believes is blocking is a different contract. */
+    if (!conn->ssl && conn_buf_ensure(conn, HTTP_CONN_BUF_CAP) == 0) {
+        int space = conn->buf_cap - conn->write_pos - 1;
+        if (space > 0) {
+            ssize_t n = recv(conn->fd, conn->buf + conn->write_pos,
+                             (size_t)space, MSG_DONTWAIT);
+            if (n > 0) { conn->write_pos += (int)n; return 1; }
+            /* 0 is the peer closing; any error that is not "nothing yet" is a
+             * connection that will not serve another request. Both mean do
+             * not park it, which is what returning 0 does. */
+            if (n == 0) return 0;
+            if (errno != EAGAIN && errno != EWOULDBLOCK) return 0;
+        }
+    }
+#endif
+
     int grace_ms = http_pool_has_spare_worker() ? HTTP_PARK_GRACE_MS : 0;
 #if !defined(_WIN32)
     struct pollfd pfd = { .fd = conn->fd, .events = POLLIN, .revents = 0 };

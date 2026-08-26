@@ -165,8 +165,13 @@ static char* build_upstream_url(const char* base_url,
 
 /* Extract the host:port piece of a URL ("http://host:port/...") for
  * Host: rewriting. Returns malloc'd string, caller frees. NULL on
- * malformed. */
-static char* extract_authority(const char* url) {
+ * malformed.
+ *
+ * Called once per upstream when the pool registers it, not once per
+ * forwarded request: base_url cannot change while the upstream exists, and
+ * this was an allocation and a free on every request to recompute the same
+ * bytes (#1739). */
+char* aether_proxy_authority_of(const char* url) {
     if (!url) return NULL;
     const char* p = strstr(url, "://");
     if (!p) return NULL;
@@ -455,12 +460,8 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
         if (opts->preserve_host) {
             const char* h = http_get_header(req, "Host");
             if (h && *h) http_request_set_header_raw(outbound, "Host", h);
-        } else {
-            char* authority = extract_authority(u->base_url);
-            if (authority) {
-                http_request_set_header_raw(outbound, "Host", authority);
-                free(authority);
-            }
+        } else if (u->authority) {
+            http_request_set_header_raw(outbound, "Host", u->authority);
         }
 
         /* X-Forwarded-* injection. */

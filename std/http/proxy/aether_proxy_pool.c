@@ -49,6 +49,14 @@ static AetherUpstream* upstream_new(const char* base_url, int weight) {
     if (!u) return NULL;
     u->base_url = strdup(base_url);
     if (!u->base_url) { aether_caps_free(u, sizeof(AetherUpstream)); return NULL; }
+    /* The Host: header the proxy rewrites to is this slice of base_url, and
+     * it was recomputed on every forwarded request. */
+    u->authority = aether_proxy_authority_of(base_url);
+    if (!u->authority) {
+        free(u->base_url);
+        aether_caps_free(u, sizeof(AetherUpstream));
+        return NULL;
+    }
     u->weight           = weight > 0 ? weight : 1;
     u->effective_weight = u->weight;
     u->current_weight   = 0;
@@ -81,6 +89,7 @@ static AetherUpstream* upstream_new(const char* base_url, int weight) {
 static void upstream_free(AetherUpstream* u) {
     if (!u) return;
     pthread_mutex_destroy(&u->rl_lock);
+    free(u->authority);
     free(u->base_url);
     aether_caps_free(u, sizeof(AetherUpstream));
 }
