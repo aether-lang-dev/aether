@@ -13,6 +13,28 @@ version number before tagging the release.
 
 ### Changed
 
+- **The HTTP worker pool grows when its workers are all blocked.** A worker
+  owns its connection for the whole of a request, so a handler that *waits* —
+  a reverse proxy waiting on an upstream is the ordinary case — holds a thread
+  without using a core. Sizing the pool at `cores * 2` then caps requests in
+  flight at twice the core count however idle those threads are, which looks
+  like a slow server rather than an idle one.
+
+  Measured on a 2-core-pinned proxy against two backends, with the pool fixed
+  at each size: 8 workers 18,621 rps, 16 workers 38,866, 32 workers 42,798.
+  Nothing was CPU-bound at any of those points; it was waiting.
+
+  The pool now adds one worker when every worker is busy and work is still
+  queued, up to the ceiling it already had. Re-running the same sweep with
+  growth on, the starting size stops mattering: 35,486 / 35,857 / 36,778 /
+  39,215 for the same 8 / 16 / 32 / 64 starts, a spread of 1.1x where fixed
+  sizing spread 2.3x. `AETHER_HTTP_WORKERS` sets the starting size for anyone
+  who wants to pin it.
+
+  This raises a ceiling rather than removing it: a thread per in-flight
+  request is still a thread per in-flight request, and the proxy path blocks
+  on its upstream. Not blocking is the larger change, and this is not it.
+
 - **Pooled upstream connections are used, not probed first.** Reusing one
   polled the socket beforehand to catch a peer that had closed during the idle
   window: one syscall on every request through the pool. The read path already
