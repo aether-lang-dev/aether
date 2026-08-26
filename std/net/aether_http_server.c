@@ -3582,17 +3582,11 @@ void http_conn_close_owned(HttpConn* conn) {
     free(conn);
 }
 
-/* Per-recv socket timeout, applied whenever a worker is about to block on
- * this connection. Also the idle guard against a slow-loris client. */
-/* How long a worker waits for the next request before handing the connection
- * to the lot. Long enough that a client already mid-burst is never handed off
- * (a browser's next request on a warm connection lands in microseconds), short
- * enough that an idle connection does not hold a worker: at the measured
- * ceiling of 16 workers, 250ms bounds the stall a newly accepted connection
- * can see behind idle ones at a quarter second rather than the 30s idle
- * timeout. */
-/* How long a worker waits for a follow-up request before parking, while a
- * worker is free to take other work. */
+/* How long a worker waits for a follow-up request before handing the
+ * connection to the parking lot, and only while a spare worker exists to take
+ * other work. A client already mid-burst lands its next request in
+ * microseconds, so this is long enough to keep a warm connection on its
+ * worker, and short enough that an idle one does not hold that worker. */
 #define HTTP_PARK_GRACE_MS 2
 
 static int64_t conn_now_ms(void) {
@@ -3604,6 +3598,8 @@ static int64_t conn_now_ms(void) {
     return (int64_t)time(NULL) * 1000;
 }
 
+/* Per-recv socket timeout, applied whenever a worker is about to block on
+ * this connection. Also the idle guard against a slow-loris client. */
 static void conn_apply_recv_timeout(HttpServer* server, HttpConn* c) {
     int fd = c->fd;
     int idle_ms = server->keep_alive_idle_ms > 0

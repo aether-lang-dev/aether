@@ -67,6 +67,22 @@ stop_lb() {
     nginx -c /bench/nginx-lb.conf -p /tmp -s quit >/dev/null 2>&1
     pkill -x haproxy        >/dev/null 2>&1
     sleep 1
+    rm -f /tmp/lb.pid
+}
+
+# nginx daemonizes, so the pid of the process the shell started is not the
+# master's: the master's is in the pid file, and it is not written yet when
+# the launcher returns. Reading it straight away got the previous round's
+# stale pid, whose /proc entry is gone, and every per-request figure derived
+# from it came out 0.
+wait_pid_file() {                 # wait_pid_file <file>
+    local f="$1" i pid
+    for i in $(seq 1 60); do
+        pid=$(cat "$f" 2>/dev/null || true)
+        if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then echo "$pid"; return 0; fi
+        sleep 0.1
+    done
+    return 1
 }
 
 # Refuse to report a number for a balancer that is not actually proxying. A
@@ -80,11 +96,11 @@ verify() {
 
 # Context switches the balancer's threads made, from /proc. A thread-per-request
 # server pays these where an event loop does not, so this is the number that
-# prices the thread model — and it is what a move to non-blocking upstream I/O
+# prices the thread model, and it is what a move to non-blocking upstream I/O
 # would have to reduce to be worth doing.
 # Every pid in the balancer's process tree. nginx forks workers and does its
 # work there, so following the master alone reported 0 CPU and 0 context
-# switches for it — a flattering number that says nothing.
+# switches for it, a flattering number that says nothing.
 lb_pids() {                       # lb_pids <pid>
     local pid="$1" kids
     [ -d "/proc/$pid" ] || return
@@ -124,7 +140,7 @@ lb_cpu() {                        # lb_cpu <pid>
 measure() {                       # measure <label> [pid]
     local label="$1" pid="${2:-}" out rps p99 errs cpu0 cpu1 reqs cpu_us
     for _ in $(seq 1 40); do verify && break; sleep 0.25; done
-    verify || { say "  $label: NOT PROXYING — skipped"; echo "$label FAILED 0"; return; }
+    verify || { say "  $label: NOT PROXYING, skipped"; return; }
     taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$WARMUP" \
         http://127.0.0.1:18200/ >/dev/null 2>&1
 
@@ -141,16 +157,31 @@ measure() {                       # measure <label> [pid]
     # CPU microseconds the balancer spent per request it served. Far steadier
     # than rps on a shared box: rps depends on everything else running, this
     # depends on the work the code does. A jiffy is 10ms at the usual 100Hz.
-    cpu_us=""; ctx_per=""
-    if [ -n "$pid" ] && [ "${reqs:-0}" -gt 0 ] 2>/dev/null; then
-        cpu_us=$(awk -v d="$((cpu1 - cpu0))" -v r="$reqs" \
-                     'BEGIN { if (r > 0) printf "%.1f", d * 10000 / r }')
-        ctx_per=$(awk -v d="$((ctx1 - ctx0))" -v r="$reqs" \
-                     'BEGIN { if (r > 0) printf "%.2f", d / r }')
+    # A CPU figure this could not measure is reported as unmeasured, never as
+    # zero. A zero here reads as "burned no CPU", which is the most flattering
+    # number in the table and is never true of a process that served requests:
+    # it means the pid was wrong, and it once hid nginx's real cost entirely.
+    cpu_us=""; ctx_per=""; note=""
+    if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
+        note="cpu UNMEASURED (no live pid)  "
+    elif [ "${reqs:-0}" -gt 0 ] 2>/dev/null; then
+        if [ "$((cpu1 - cpu0))" -le 0 ]; then
+            note="cpu UNMEASURED (pid $pid burned none: wrong process?)  "
+        else
+            cpu_us=$(awk -v d="$((cpu1 - cpu0))" -v r="$reqs" \
+                         'BEGIN { if (r > 0) printf "%.1f", d * 10000 / r }')
+            ctx_per=$(awk -v d="$((ctx1 - ctx0))" -v r="$reqs" \
+                         'BEGIN { if (r > 0) printf "%.2f", d / r }')
+        fi
     fi
-    printf '%-10s %12s rps   p99 %-9s %s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
-        "${cpu_us:+cpu ${cpu_us}us/req  }" "${ctx_per:+ctxsw ${ctx_per}/req  }" "${errs:-}"
-    echo "$label $rps ${cpu_us:-0} ${ctx_per:-0}" >> /tmp/results.txt
+    # stderr, like every other line this prints. A result on stdout and the
+    # round header on stderr interleave once the output is piped, and a row
+    # then appears under the wrong round: one run showed a subject missing
+    # from round 2 and listed twice in round 3.
+    printf '%-10s %12s rps   p99 %-9s %s%s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
+        "$note" "${cpu_us:+cpu ${cpu_us}us/req  }" \
+        "${ctx_per:+ctxsw ${ctx_per}/req  }" "${errs:-}" >&2
+    echo "$label $rps ${cpu_us:-NA} ${ctx_per:-NA}" >> /tmp/results.txt
 }
 
 : > /tmp/results.txt
@@ -164,14 +195,14 @@ run_aether() {                    # run_aether <binary> <label>
 }
 
 # Rounds, so a slow patch of the box shows up as spread rather than as a
-# result. Every subject is measured once per round, in the same order.
+# result. Every subject is measured once per round.
 run_nginx()   { stop_lb; taskset -c "$LB_CPUS" nginx -c /bench/nginx-lb.conf -p /tmp
-                measure nginx "$(cat /tmp/lb.pid 2>/dev/null)"; }
+                measure nginx "$(wait_pid_file /tmp/lb.pid || true)"; }
 run_haproxy() { stop_lb; taskset -c "$LB_CPUS" haproxy -f /bench/haproxy-lb.cfg
                 measure haproxy "$(pgrep -x haproxy | head -1)"; }
 
 # The order is reversed on even rounds. Measuring A before B every time gives
-# any drift inside a round — the box warming, the page cache filling — to
+# any drift inside a round (the box warming, the page cache filling) to
 # whichever runs second, every time, and that is indistinguishable from B
 # being slower. Alternating cancels it instead of hoping it is absent.
 ROUNDS="${ROUNDS:-3}"
@@ -198,7 +229,8 @@ say ""
 # Written for mawk (Ubuntu's default awk): no arrays-of-arrays, which is a
 # gawk extension. Values are keyed "subject SUBSEP index" instead.
 awk '
-    { n[$1]++; v[$1 SUBSEP n[$1]] = $2 + 0; cpu[$1 SUBSEP n[$1]] = $3 + 0; cx[$1 SUBSEP n[$1]] = $4 + 0 }
+    { n[$1]++; v[$1 SUBSEP n[$1]] = $2 + 0
+      if ($3 == "NA") { na[$1] = 1 } else { cn[$1]++; cpu[$1 SUBSEP cn[$1]] = $3 + 0; cx[$1 SUBSEP cn[$1]] = $4 + 0 } }
     END {
         printf "%-10s %10s %10s %10s %6s\n", "subject", "median", "min", "max", "runs"
         for (s in n) {
@@ -210,19 +242,27 @@ awk '
                     }
             med = (c % 2) ? v[s SUBSEP int((c+1)/2)] \
                           : (v[s SUBSEP c/2] + v[s SUBSEP c/2+1]) / 2
-            # median cpu/req, sorted independently of the rps ordering
-            for (i = 1; i <= c; i++) cs[i] = cpu[s SUBSEP i]
-            for (i = 1; i <= c; i++)
-                for (j = i + 1; j <= c; j++)
+            # median cpu/req over the rounds that could be measured, sorted
+            # independently of the rps ordering
+            cc = cn[s]
+            for (i = 1; i <= cc; i++) cs[i] = cpu[s SUBSEP i]
+            for (i = 1; i <= cc; i++)
+                for (j = i + 1; j <= cc; j++)
                     if (cs[j] < cs[i]) { t = cs[i]; cs[i] = cs[j]; cs[j] = t }
-            cmed = (c % 2) ? cs[int((c+1)/2)] : (cs[c/2] + cs[c/2+1]) / 2
-            for (i = 1; i <= c; i++) xs[i] = cx[s SUBSEP i]
-            for (i = 1; i <= c; i++)
-                for (j = i + 1; j <= c; j++)
+            for (i = 1; i <= cc; i++) xs[i] = cx[s SUBSEP i]
+            for (i = 1; i <= cc; i++)
+                for (j = i + 1; j <= cc; j++)
                     if (xs[j] < xs[i]) { t = xs[i]; xs[i] = xs[j]; xs[j] = t }
-            xmed = (c % 2) ? xs[int((c+1)/2)] : (xs[c/2] + xs[c/2+1]) / 2
-            printf "%-10s %10.0f %10.0f %10.0f %6d   %8.1f us/req  %7.2f ctxsw/req\n", s, med, v[s SUBSEP 1], v[s SUBSEP c], c, cmed, xmed
-            m[s] = med; lo[s] = v[s SUBSEP 1]; hi[s] = v[s SUBSEP c]; mc[s] = cmed
+            printf "%-10s %10.0f %10.0f %10.0f %6d", s, med, v[s SUBSEP 1], v[s SUBSEP c], c
+            if (cc > 0) {
+                cmed = (cc % 2) ? cs[int((cc+1)/2)] : (cs[cc/2] + cs[cc/2+1]) / 2
+                xmed = (cc % 2) ? xs[int((cc+1)/2)] : (xs[cc/2] + xs[cc/2+1]) / 2
+                printf "   %8.1f us/req  %7.2f ctxsw/req", cmed, xmed
+                if (na[s]) printf "  (%d round(s) unmeasured)", n[s] - cc
+                mc[s] = cmed
+            } else printf "   %19s", "cpu UNMEASURED"
+            printf "\n"
+            m[s] = med; lo[s] = v[s SUBSEP 1]; hi[s] = v[s SUBSEP c]
         }
         if (m["nginx"] > 0 && m["aether"] > 0)
             printf "\naether is %.1f%% of nginx\n", 100 * m["aether"] / m["nginx"]

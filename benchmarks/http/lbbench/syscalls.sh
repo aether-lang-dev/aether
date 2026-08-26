@@ -2,7 +2,7 @@
 # Syscalls per proxied request, counted exactly.
 #
 # Throughput on a shared or virtualised box can be too noisy to resolve a
-# change worth a few percent — this harness has produced runs where the
+# change worth a few percent, and this harness has produced runs where the
 # controls moved 198%. Syscall counts do not vary with load: they are what the
 # code asks the kernel to do. When #1719 found aether making ~10 syscalls per
 # request against nginx's ~5, that was this measurement, and it is the one to
