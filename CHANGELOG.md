@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Pooled upstream connections are used, not probed first.** Reusing one
+  polled the socket beforehand to catch a peer that had closed during the idle
+  window: one syscall on every request through the pool. The read path already
+  handled that case, and handles it better — nothing coming back on a pooled
+  connection means the request went into the void, so it redials and resends.
+  The poll only moved the discovery earlier, at the cost of asking the kernel
+  every time.
+
+  It did also catch bytes waiting on a supposedly idle connection, which would
+  otherwise be read as the head of this response. That is now caught by
+  checking that what came back starts a response at all, which costs nothing
+  and knows more than the poll did: readable told us something was there, not
+  what it was. Either way the connection is retired and the request asked
+  again on a fresh one.
+
+  Counted with `strace` over ~55,000 proxied requests: **5.19 syscalls per
+  request to 4.21**, with `ppoll` falling from 1.06 to 0.06 — the remainder
+  being the paths that still poll, TLS and a saturated worker pool. For scale,
+  the same measurement puts nginx at about 5.
+
 ## [0.586.0]
 
 ### Changed
@@ -34,26 +58,6 @@ version number before tagging the release.
   This raises a ceiling rather than removing it: a thread per in-flight
   request is still a thread per in-flight request, and the proxy path blocks
   on its upstream. Not blocking is the larger change, and this is not it.
-
-- **Pooled upstream connections are used, not probed first.** Reusing one
-  polled the socket beforehand to catch a peer that had closed during the idle
-  window: one syscall on every request through the pool. The read path already
-  handled that case, and handles it better — nothing coming back on a pooled
-  connection means the request went into the void, so it redials and resends.
-  The poll only moved the discovery earlier, at the cost of asking the kernel
-  every time.
-
-  It did also catch bytes waiting on a supposedly idle connection, which would
-  otherwise be read as the head of this response. That is now caught by
-  checking that what came back starts a response at all, which costs nothing
-  and knows more than the poll did: readable told us something was there, not
-  what it was. Either way the connection is retired and the request asked
-  again on a fresh one.
-
-  Counted with `strace` over ~55,000 proxied requests: **5.19 syscalls per
-  request to 4.21**, with `ppoll` falling from 1.06 to 0.06 — the remainder
-  being the paths that still poll, TLS and a saturated worker pool. For scale,
-  the same measurement puts nginx at about 5.
 
 ## [0.585.0]
 

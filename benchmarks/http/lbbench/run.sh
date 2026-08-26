@@ -78,15 +78,45 @@ verify() {
     case "$body" in backend-*) return 0 ;; *) return 1 ;; esac
 }
 
+# Context switches the balancer's threads made, from /proc. A thread-per-request
+# server pays these where an event loop does not, so this is the number that
+# prices the thread model — and it is what a move to non-blocking upstream I/O
+# would have to reduce to be worth doing.
+# Every pid in the balancer's process tree. nginx forks workers and does its
+# work there, so following the master alone reported 0 CPU and 0 context
+# switches for it — a flattering number that says nothing.
+lb_pids() {                       # lb_pids <pid>
+    local pid="$1" kids
+    [ -d "/proc/$pid" ] || return
+    echo "$pid"
+    kids=$(pgrep -P "$pid" 2>/dev/null)
+    for k in $kids; do lb_pids "$k"; done
+}
+
+lb_ctxt() {                       # lb_ctxt <pid>
+    local pid="$1" total=0 t v p
+    [ -d "/proc/$pid" ] || { echo 0; return; }
+    for p in $(lb_pids "$pid"); do
+    for t in /proc/"$p"/task/*/status; do
+        [ -r "$t" ] || continue
+        v=$(awk '/^voluntary_ctxt_switches|^nonvoluntary_ctxt_switches/ {s += $2} END {print s+0}' "$t")
+        total=$((total + v))
+    done
+    done
+    echo "$total"
+}
+
 # CPU the balancer itself burned, in jiffies, from its own /proc entry. Summed
 # over the process and its threads.
 lb_cpu() {                        # lb_cpu <pid>
-    local pid="$1" total=0 t u s2
+    local pid="$1" total=0 t u s2 p
     [ -d "/proc/$pid" ] || { echo 0; return; }
-    for t in /proc/"$pid"/task/*/stat; do
+    for p in $(lb_pids "$pid"); do
+    for t in /proc/"$p"/task/*/stat; do
         [ -r "$t" ] || continue
         u=$(awk '{print $14}' "$t"); s2=$(awk '{print $15}' "$t")
         total=$((total + u + s2))
+    done
     done
     echo "$total"
 }
@@ -98,10 +128,10 @@ measure() {                       # measure <label> [pid]
     taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$WARMUP" \
         http://127.0.0.1:18200/ >/dev/null 2>&1
 
-    cpu0=$(lb_cpu "$pid")
+    cpu0=$(lb_cpu "$pid"); ctx0=$(lb_ctxt "$pid")
     out=$(taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" \
         --latency http://127.0.0.1:18200/ 2>&1)
-    cpu1=$(lb_cpu "$pid")
+    cpu1=$(lb_cpu "$pid"); ctx1=$(lb_ctxt "$pid")
 
     rps=$(printf '%s' "$out" | awk '/^Requests\/sec:/ {print $2}')
     p99=$(printf '%s' "$out" | awk '/99%/ {print $2; exit}')
@@ -111,14 +141,16 @@ measure() {                       # measure <label> [pid]
     # CPU microseconds the balancer spent per request it served. Far steadier
     # than rps on a shared box: rps depends on everything else running, this
     # depends on the work the code does. A jiffy is 10ms at the usual 100Hz.
-    cpu_us=""
+    cpu_us=""; ctx_per=""
     if [ -n "$pid" ] && [ "${reqs:-0}" -gt 0 ] 2>/dev/null; then
         cpu_us=$(awk -v d="$((cpu1 - cpu0))" -v r="$reqs" \
                      'BEGIN { if (r > 0) printf "%.1f", d * 10000 / r }')
+        ctx_per=$(awk -v d="$((ctx1 - ctx0))" -v r="$reqs" \
+                     'BEGIN { if (r > 0) printf "%.2f", d / r }')
     fi
-    printf '%-10s %12s rps   p99 %-9s %s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
-        "${cpu_us:+cpu ${cpu_us}us/req  }" "${errs:-}"
-    echo "$label $rps ${cpu_us:-0}" >> /tmp/results.txt
+    printf '%-10s %12s rps   p99 %-9s %s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
+        "${cpu_us:+cpu ${cpu_us}us/req  }" "${ctx_per:+ctxsw ${ctx_per}/req  }" "${errs:-}"
+    echo "$label $rps ${cpu_us:-0} ${ctx_per:-0}" >> /tmp/results.txt
 }
 
 : > /tmp/results.txt
@@ -166,7 +198,7 @@ say ""
 # Written for mawk (Ubuntu's default awk): no arrays-of-arrays, which is a
 # gawk extension. Values are keyed "subject SUBSEP index" instead.
 awk '
-    { n[$1]++; v[$1 SUBSEP n[$1]] = $2 + 0; cpu[$1 SUBSEP n[$1]] = $3 + 0 }
+    { n[$1]++; v[$1 SUBSEP n[$1]] = $2 + 0; cpu[$1 SUBSEP n[$1]] = $3 + 0; cx[$1 SUBSEP n[$1]] = $4 + 0 }
     END {
         printf "%-10s %10s %10s %10s %6s\n", "subject", "median", "min", "max", "runs"
         for (s in n) {
@@ -184,7 +216,12 @@ awk '
                 for (j = i + 1; j <= c; j++)
                     if (cs[j] < cs[i]) { t = cs[i]; cs[i] = cs[j]; cs[j] = t }
             cmed = (c % 2) ? cs[int((c+1)/2)] : (cs[c/2] + cs[c/2+1]) / 2
-            printf "%-10s %10.0f %10.0f %10.0f %6d   %8.1f us/req\n", s, med, v[s SUBSEP 1], v[s SUBSEP c], c, cmed
+            for (i = 1; i <= c; i++) xs[i] = cx[s SUBSEP i]
+            for (i = 1; i <= c; i++)
+                for (j = i + 1; j <= c; j++)
+                    if (xs[j] < xs[i]) { t = xs[i]; xs[i] = xs[j]; xs[j] = t }
+            xmed = (c % 2) ? xs[int((c+1)/2)] : (xs[c/2] + xs[c/2+1]) / 2
+            printf "%-10s %10.0f %10.0f %10.0f %6d   %8.1f us/req  %7.2f ctxsw/req\n", s, med, v[s SUBSEP 1], v[s SUBSEP c], c, cmed, xmed
             m[s] = med; lo[s] = v[s SUBSEP 1]; hi[s] = v[s SUBSEP c]; mc[s] = cmed
         }
         if (m["nginx"] > 0 && m["aether"] > 0)
