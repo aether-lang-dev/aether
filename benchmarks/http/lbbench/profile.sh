@@ -12,6 +12,9 @@
 # says which it got rather than silently profiling nothing.
 set -uo pipefail
 
+. /bench/use_mounted.sh
+lbbench_use_mounted profile.sh "$@"
+
 DURATION="${DURATION:-20}"
 CONNECTIONS="${CONNECTIONS:-50}"
 THREADS="${THREADS:-2}"

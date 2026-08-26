@@ -22,6 +22,9 @@ LB_CPUS="${LB_CPUS:-2,3}"
 say() { printf '%s\n' "$*" >&2; }
 die() { say "ERROR: $*"; exit 1; }
 
+. /bench/use_mounted.sh
+lbbench_use_mounted run.sh "$@"
+
 [ "$(nproc)" -ge 4 ] || die "need >= 4 CPUs, have $(nproc). Give the container more."
 
 # ---- backends (identical for every balancer) --------------------------------
@@ -109,13 +112,23 @@ lb_pids() {                       # lb_pids <pid>
     for k in $kids; do lb_pids "$k"; done
 }
 
-lb_ctxt() {                       # lb_ctxt <pid>
-    local pid="$1" total=0 t v p
+# Voluntary and involuntary switches are two different findings and are
+# counted separately. Voluntary means the code asked to sleep, which for this
+# path is the upstream call blocking a worker. Involuntary means the scheduler
+# took the CPU away, which is threads oversubscribing the cores. A single
+# summed figure cannot tell those apart, and they call for opposite fixes.
+lb_ctxt() {                       # lb_ctxt <pid> <voluntary|involuntary>
+    local pid="$1" which="$2" total=0 t v p key
+    case "$which" in
+        voluntary)   key='^voluntary_ctxt_switches' ;;
+        involuntary) key='^nonvoluntary_ctxt_switches' ;;
+        *) echo 0; return ;;
+    esac
     [ -d "/proc/$pid" ] || { echo 0; return; }
     for p in $(lb_pids "$pid"); do
     for t in /proc/"$p"/task/*/status; do
         [ -r "$t" ] || continue
-        v=$(awk '/^voluntary_ctxt_switches|^nonvoluntary_ctxt_switches/ {s += $2} END {print s+0}' "$t")
+        v=$(awk -v k="$key" '$0 ~ k {s += $2} END {print s+0}' "$t")
         total=$((total + v))
     done
     done
@@ -144,10 +157,12 @@ measure() {                       # measure <label> [pid]
     taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$WARMUP" \
         http://127.0.0.1:18200/ >/dev/null 2>&1
 
-    cpu0=$(lb_cpu "$pid"); ctx0=$(lb_ctxt "$pid")
+    cpu0=$(lb_cpu "$pid"); vol0=$(lb_ctxt "$pid" voluntary)
+    inv0=$(lb_ctxt "$pid" involuntary)
     out=$(taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" \
         --latency http://127.0.0.1:18200/ 2>&1)
-    cpu1=$(lb_cpu "$pid"); ctx1=$(lb_ctxt "$pid")
+    cpu1=$(lb_cpu "$pid"); vol1=$(lb_ctxt "$pid" voluntary)
+    inv1=$(lb_ctxt "$pid" involuntary)
 
     rps=$(printf '%s' "$out" | awk '/^Requests\/sec:/ {print $2}')
     p99=$(printf '%s' "$out" | awk '/99%/ {print $2; exit}')
@@ -161,7 +176,7 @@ measure() {                       # measure <label> [pid]
     # zero. A zero here reads as "burned no CPU", which is the most flattering
     # number in the table and is never true of a process that served requests:
     # it means the pid was wrong, and it once hid nginx's real cost entirely.
-    cpu_us=""; ctx_per=""; note=""
+    cpu_us=""; ctx_per=""; vol_per=""; inv_per=""; note=""
     if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
         note="cpu UNMEASURED (no live pid)  "
     elif [ "${reqs:-0}" -gt 0 ] 2>/dev/null; then
@@ -170,8 +185,12 @@ measure() {                       # measure <label> [pid]
         else
             cpu_us=$(awk -v d="$((cpu1 - cpu0))" -v r="$reqs" \
                          'BEGIN { if (r > 0) printf "%.1f", d * 10000 / r }')
-            ctx_per=$(awk -v d="$((ctx1 - ctx0))" -v r="$reqs" \
+            vol_per=$(awk -v d="$((vol1 - vol0))" -v r="$reqs" \
                          'BEGIN { if (r > 0) printf "%.2f", d / r }')
+            inv_per=$(awk -v d="$((inv1 - inv0))" -v r="$reqs" \
+                         'BEGIN { if (r > 0) printf "%.2f", d / r }')
+            ctx_per=$(awk -v a="$((vol1 - vol0))" -v b="$((inv1 - inv0))" \
+                         -v r="$reqs" 'BEGIN { if (r > 0) printf "%.2f", (a+b)/r }')
         fi
     fi
     # stderr, like every other line this prints. A result on stdout and the
@@ -180,7 +199,8 @@ measure() {                       # measure <label> [pid]
     # from round 2 and listed twice in round 3.
     printf '%-10s %12s rps   p99 %-9s %s%s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
         "$note" "${cpu_us:+cpu ${cpu_us}us/req  }" \
-        "${ctx_per:+ctxsw ${ctx_per}/req  }" "${errs:-}" >&2
+        "${ctx_per:+ctxsw ${ctx_per}/req (vol ${vol_per} inv ${inv_per})  }" \
+        "${errs:-}" >&2
     echo "$label $rps ${cpu_us:-NA} ${ctx_per:-NA}" >> /tmp/results.txt
 }
 

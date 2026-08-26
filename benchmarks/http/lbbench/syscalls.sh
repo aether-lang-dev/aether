@@ -11,6 +11,9 @@
 # AB_REF counts a second build from that commit, so the difference is exact.
 set -uo pipefail
 
+. /bench/use_mounted.sh
+lbbench_use_mounted syscalls.sh "$@"
+
 REQUESTS="${REQUESTS:-2000}"
 CONNECTIONS="${CONNECTIONS:-8}"
 
