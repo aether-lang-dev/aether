@@ -12,6 +12,18 @@
 
 #include "aether_http_evloop.h"
 #include "aether_http_server.h"
+
+/* The driver needs three things: threads to run on, a poller to wait in, and
+ * a pipe to hand it a descriptor without a lock. Windows has no descriptor a
+ * pipe and a socket can share a poller through, and wasi has no pipe at all,
+ * so on both the server keeps the per-connection path it already had and
+ * nothing here is compiled. Same shape as the parking lot's fallback. */
+#if !defined(_WIN32) && !defined(__wasi__) && !defined(__EMSCRIPTEN__)
+#define AETHER_EVLOOP_SUPPORTED 1
+#endif
+
+#if defined(AETHER_EVLOOP_SUPPORTED) && AETHER_HAS_THREADS
+
 #include "aether_http.h"
 #include "aether_http_internal.h"
 #include "../http/proxy/aether_proxy_internal.h"
@@ -795,3 +807,17 @@ void http_evloop_stop(HttpEvLoop* loop) {
     free(loop->drivers);
     free(loop);
 }
+
+#else /* no threads, no poller, or no pipe: the worker path is unchanged */
+
+HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
+    (void)server; (void)threads;
+    return NULL;   /* the caller keeps giving each connection a worker */
+}
+int  http_evloop_submit(HttpEvLoop* loop, int client_fd) {
+    (void)loop; (void)client_fd; return -1;
+}
+int  http_evloop_active(HttpEvLoop* loop) { (void)loop; return 0; }
+void http_evloop_stop(HttpEvLoop* loop)   { (void)loop; }
+
+#endif /* AETHER_EVLOOP_SUPPORTED && AETHER_HAS_THREADS */
