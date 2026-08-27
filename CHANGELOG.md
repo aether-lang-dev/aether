@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.588.0]
+## [current]
 
 ### Changed
 
@@ -105,6 +105,10 @@ version number before tagging the release.
   virtual-hosted server routes on (RFC 9110 7.2). Found by the request-head
   test above. A caller-set `Host` still wins, and the reverse proxy sets its
   own, so that path was never affected.
+
+## [0.588.0]
+
+### Fixed
 
 - **Reading the value of a call that returns none is now a diagnostic.** A
   function with no declared return type and no `return <value>` lowers to C
