@@ -306,4 +306,16 @@ int http_find_header_in_block(const char* block, const char* end,
                               const char* name, char* out, size_t out_cap,
                               int* differing);
 
+
+/* An upstream connection acquired without blocking, for a driver that runs
+ * many connections on one thread. `sockfd` is available immediately; when
+ * `connecting` is set the connection is not established yet and the driver
+ * waits for the descriptor to become writable, then calls
+ * http_upstream_connected to find out whether it succeeded. */
+typedef struct HttpUpstreamConnOpaque HttpUpstreamConn;
+
+int  http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out);
+int  http_upstream_connected(HttpUpstreamConn* c);
+void http_upstream_release(HttpUpstreamConn* c, int keep);
+
 #endif

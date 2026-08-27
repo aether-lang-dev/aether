@@ -1,5 +1,6 @@
 #include "aether_http_server.h"
 #include "aether_http.h"
+#include "../http/proxy/aether_proxy.h"
 #include "aether_net.h"
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
@@ -1791,6 +1792,21 @@ void http_response_set_status(HttpServerResponse* res, int code) {
     res->status_code = code;
     free(res->status_text);
     res->status_text = strdup(http_status_text(code));
+}
+
+/* The reverse proxy's options, if this server has one mounted.
+ *
+ * The event driver needs them because it runs the proxy exchange itself. It
+ * finds them by looking for the proxy's own middleware in the chain rather
+ * than being told, so a server that does not proxy simply has none and the
+ * driver is not used.
+ */
+void* http_server_proxy_opts(HttpServer* server) {
+    if (!server) return NULL;
+    for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {
+        if (n->middleware == aether_middleware_reverse_proxy) return n->user_data;
+    }
+    return NULL;
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {

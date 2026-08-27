@@ -735,4 +735,9 @@ const char* http_request_header_value(HttpRequest* req, int index);
 // static) so the locale-independence can be tested directly.
 void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
 
+
+/* The reverse proxy's options when one is mounted on this server, else NULL.
+ * The event driver runs the proxy exchange itself and needs them. */
+void* http_server_proxy_opts(HttpServer* server);
+
 #endif

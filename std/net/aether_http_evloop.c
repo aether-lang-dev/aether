@@ -1,0 +1,448 @@
+/* aether_http_evloop.c — the proxy driver that does not wait on one connection.
+ *
+ * See aether_http_evloop.h for why this exists. The short version: a worker
+ * that owns a single connection has nothing to run while that connection
+ * waits, so it sleeps, twice per proxied request. A thread holding many
+ * connections always has something else to do.
+ *
+ * One connection is one state machine. Every state ends either by making
+ * progress or by naming the descriptor and the readiness it needs next; the
+ * driver arms that and moves on to another connection. Nothing here blocks.
+ */
+
+#include "aether_http_evloop.h"
+#include "aether_http_server.h"
+#include "aether_http.h"
+#include "aether_http_internal.h"
+#include "../http/proxy/aether_proxy_internal.h"
+#include "../../runtime/scheduler/aether_io_poller.h"
+#include "../../runtime/utils/aether_thread.h"
+
+#include <errno.h>
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/socket.h>
+#endif
+
+typedef enum {
+    EV_READ_REQUEST,     /* reading a request from the client */
+    EV_UPSTREAM_DIAL,    /* a connect this driver started is still in flight */
+    EV_UPSTREAM_SEND,    /* writing the request to the upstream */
+    EV_UPSTREAM_RECV,    /* reading the response from the upstream */
+    EV_CLIENT_SEND,      /* writing the response to the client */
+    EV_CLOSING
+} EvState;
+
+typedef struct EvConn {
+    int      client_fd;
+    EvState  state;
+
+    char*    in;            /* request bytes from the client */
+    size_t   in_len, in_cap;
+
+    char*    out;           /* response bytes owed to the client */
+    size_t   out_len, out_sent;
+
+    HttpUpstreamConn up;
+    HttpExchange     x;
+    char*            head;       /* serialised upstream request */
+    size_t           head_len, head_cap;
+
+    HttpRequest*        req;     /* the parsed client request */
+    HttpServerResponse* res;     /* what the proxy fills in for the client */
+    AetherProxyExchange px;      /* the proxy's own resumable state */
+
+    struct EvConn* next;         /* free list / owner list */
+} EvConn;
+
+/* One driver: a thread, its poller, and the connections it owns.
+ *
+ * A connection belongs to exactly one driver for its whole life, and so does
+ * its upstream. That is the point of the design rather than a detail of it:
+ * the cost being removed here is work crossing a thread boundary, so nothing
+ * in a request may cross one. */
+typedef struct {
+    HttpEvLoop*    loop;
+    int            index;
+    pthread_t      thread;
+    AetherIoPoller poller;
+    EvConn**       by_fd;        /* descriptor -> the connection using it */
+    int            by_fd_cap;
+    int            wake_r;       /* a submitted descriptor arrives here */
+    int            wake_w;
+    int            started;
+} EvDriver;
+
+struct HttpEvLoop {
+    HttpServer* server;
+    EvDriver*   drivers;
+    int         driver_count;
+    atomic_int  active;
+    atomic_int  stopping;
+    atomic_int  next_driver;     /* round-robin placement of new connections */
+};
+
+static void ev_set_nonblocking(int fd) {
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(fd, FIONBIO, &nb);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+int http_evloop_active(HttpEvLoop* loop) {
+    return loop ? atomic_load(&loop->active) : 0;
+}
+
+/* ---- buffers ---- */
+
+static int ev_in_reserve(EvConn* c, size_t extra) {
+    if (c->in_len + extra + 1 <= c->in_cap) return 0;
+    size_t want = c->in_cap ? c->in_cap * 2 : 8192;
+    while (want < c->in_len + extra + 1) want *= 2;
+    char* grown = (char*)realloc(c->in, want);
+    if (!grown) return -1;
+    c->in = grown;
+    c->in_cap = want;
+    return 0;
+}
+
+static void ev_conn_reset_request(EvConn* c) {
+    c->in_len = 0;
+    free(c->head);
+    c->head = NULL;
+    c->head_len = c->head_cap = 0;
+    free(c->out);
+    c->out = NULL;
+    c->out_len = c->out_sent = 0;
+    memset(&c->x, 0, sizeof(c->x));
+}
+
+/* Remember which connection a descriptor belongs to. The poller reports a
+ * bare descriptor, so the driver needs the way back. */
+static int ev_track(EvDriver* d, int fd, EvConn* c) {
+    if (fd < 0) return -1;
+    if (fd >= d->by_fd_cap) {
+        int want = d->by_fd_cap ? d->by_fd_cap : 256;
+        while (want <= fd) want *= 2;
+        EvConn** grown = (EvConn**)realloc(d->by_fd, (size_t)want * sizeof(*grown));
+        if (!grown) return -1;
+        memset(grown + d->by_fd_cap, 0,
+               (size_t)(want - d->by_fd_cap) * sizeof(*grown));
+        d->by_fd = grown;
+        d->by_fd_cap = want;
+    }
+    d->by_fd[fd] = c;
+    return 0;
+}
+
+static void ev_untrack(EvDriver* d, int fd) {
+    if (fd >= 0 && fd < d->by_fd_cap) d->by_fd[fd] = NULL;
+}
+
+static void ev_conn_close(EvDriver* d, EvConn* c) {
+    if (!c) return;
+    if (c->up.t.sockfd >= 0) {
+        aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+        ev_untrack(d, c->up.t.sockfd);
+        http_upstream_release(&c->up, 0);
+    }
+    if (c->client_fd >= 0) {
+        aether_io_poller_remove(&d->poller, c->client_fd);
+        ev_untrack(d, c->client_fd);
+        close(c->client_fd);
+    }
+    ev_conn_reset_request(c);
+    free(c->in);
+    free(c);
+    atomic_fetch_sub(&d->loop->active, 1);
+}
+
+/* Is a whole request in the buffer yet?
+ *
+ * Deliberately the same question the worker path asks, and the answer has to
+ * match it: a driver that decided differently would accept a request the
+ * other rejects. Headers end at a blank line, then exactly the body the
+ * framing declares.
+ */
+static int ev_request_complete(EvConn* c, size_t* out_total) {
+    if (c->in_len == 0) return 0;
+    c->in[c->in_len] = '\0';
+    char* hdr_end = strstr(c->in, "\r\n\r\n");
+    if (!hdr_end) return 0;
+
+    size_t header_bytes = (size_t)((hdr_end + 4) - c->in);
+    char cl[64];
+    int differing = 0;
+    int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",
+                                          cl, sizeof(cl), &differing);
+    if (count == 0) { *out_total = header_bytes; return 1; }
+    if (differing) return -1;
+    char* endp = NULL;
+    long declared = strtol(cl, &endp, 10);
+    if (!endp || *endp != '\0' || endp == cl || declared < 0) return -1;
+    if (c->in_len < header_bytes + (size_t)declared) return 0;
+    *out_total = header_bytes + (size_t)declared;
+    return 1;
+}
+
+/* ---- the state machine ----
+ *
+ * Every step either makes progress or says which descriptor it needs to be
+ * ready before it can. The driver arms that and goes to another connection,
+ * so the thread only sleeps when no connection it owns has anything to do.
+ */
+
+static int ev_arm(EvDriver* d, int fd, uint32_t events, EvConn* c) {
+    if (ev_track(d, fd, c) != 0) return -1;
+    return aether_io_poller_add(&d->poller, fd, c, events);
+}
+
+/* Read whatever the client has, without waiting for it. */
+static int ev_step_read_request(EvDriver* d, EvConn* c) {
+    for (;;) {
+        if (ev_in_reserve(c, 4096) != 0) return -1;
+        ssize_t n = recv(c->client_fd, c->in + c->in_len,
+                         c->in_cap - c->in_len - 1, 0);
+        if (n > 0) {
+            c->in_len += (size_t)n;
+            size_t total = 0;
+            int complete = ev_request_complete(c, &total);
+            if (complete < 0) return -1;         /* framing it cannot resolve */
+            if (complete) return 1;              /* a whole request is here */
+            continue;
+        }
+        if (n == 0) return -1;                   /* the client is finished */
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return ev_arm(d, c->client_fd, AETHER_IO_READ, c) == 0 ? 0 : -1;
+        if (errno == EINTR) continue;
+        return -1;
+    }
+}
+
+/* Write what is owed to the client, without waiting for it to drain. */
+static int ev_step_client_send(EvDriver* d, EvConn* c) {
+    while (c->out_sent < c->out_len) {
+        ssize_t n = send(c->client_fd, c->out + c->out_sent,
+                         c->out_len - c->out_sent, 0);
+        if (n > 0) { c->out_sent += (size_t)n; continue; }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return ev_arm(d, c->client_fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+        if (n < 0 && errno == EINTR) continue;
+        return -1;
+    }
+    return 1;
+}
+
+/* Push the request at the upstream. The exchange is the same one the blocking
+ * client drives; on a non-blocking descriptor it reports what it is waiting
+ * for instead of waiting. */
+static int ev_step_upstream_send(EvDriver* d, EvConn* c) {
+    int r = http_exchange_send(&c->x);
+    if (r == AE_X_DONE) return 1;
+    if (r == AE_X_WANT_WRITE)
+        return ev_arm(d, c->up.t.sockfd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+    if (r == AE_X_WANT_READ)
+        return ev_arm(d, c->up.t.sockfd, AETHER_IO_READ, c) == 0 ? 0 : -1;
+    return -1;
+}
+
+static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
+    int r = http_exchange_recv(&c->x);
+    if (r == AE_X_DONE) return 1;
+    if (r == AE_X_WANT_READ)
+        return ev_arm(d, c->up.t.sockfd, AETHER_IO_READ, c) == 0 ? 0 : -1;
+    if (r == AE_X_WANT_WRITE)
+        return ev_arm(d, c->up.t.sockfd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+    return -1;
+}
+
+
+
+/* The proxy has produced a response. Turn it into bytes and hand it to the
+ * client-writing state, which is the only thing left to wait for. */
+static int ev_respond_from(EvDriver* d, EvConn* c) {
+    (void)d;
+    size_t len = 0;
+    char* bytes = http_response_serialize_len(c->res, &len);
+    if (!bytes) return -1;
+    free(c->out);
+    c->out = bytes;
+    c->out_len = len;
+    c->out_sent = 0;
+    c->state = EV_CLIENT_SEND;
+    return 0;
+}
+
+/* The proxy asked for another attempt, against whichever upstream it picked
+ * this time. Same path as the first attempt: a connection, a head, an
+ * exchange. */
+static int ev_begin_retry(EvDriver* d, EvConn* c) {
+    const char* url = http_request_url_of(c->px.outbound);
+    char host[256], path[1024];
+    int port = 0, use_tls = 0;
+    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
+        return -1;
+    if (use_tls) return -1;
+
+    int fd = http_upstream_acquire(host, port, &c->up);
+    if (fd < 0) return -1;
+
+    int body_len = 0;
+    const char* body = http_request_body_of(c->px.outbound, &body_len);
+    free(c->head);
+    HttpReqHead head_params = {
+        c->px.outbound, http_request_method_of(c->px.outbound), path,
+        host, port, 0, 0, body, body_len,
+        http_request_content_type_of(c->px.outbound), 1
+    };
+    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    if (!c->head) return -1;
+
+    memset(&c->x, 0, sizeof(c->x));
+    http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
+                       http_request_method_of(c->px.outbound));
+    c->state = c->up.connecting ? EV_UPSTREAM_DIAL : EV_UPSTREAM_SEND;
+    if (c->up.connecting)
+        return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+    return 0;
+}
+
+/* ---- the bridge to the proxy ----
+ *
+ * The proxy's own semantics (routing, upstream choice, retries, the breaker,
+ * the cache, header rewriting) live in one resumable exchange that the
+ * blocking path drives too. This driver supplies the send, which is the only
+ * part that differs, so the two cannot drift apart on what a proxied request
+ * means.
+ */
+
+/* The request is complete: run the proxy up to the point where it needs the
+ * upstream, then get a connection and a serialised head ready to go. */
+static int ev_begin_upstream(EvDriver* d, EvConn* c) {
+    HttpRequest* req = http_parse_request_n(c->in, c->in_len);
+    if (!req) return -1;
+
+    c->res = http_response_create();
+    if (!c->res) { http_request_free(req); return -1; }
+    c->req = req;
+
+    int r = aether_proxy_exchange_begin(&c->px, req, c->res,
+                                        http_server_proxy_opts(d->loop->server));
+    if (r != PX_NEED_SEND) {
+        /* Served without an upstream: a cache hit, a refusal, or a route this
+         * proxy does not own. The response is already filled in. */
+        return ev_respond_from(d, c);
+    }
+
+    const char* url = http_request_url_of(c->px.outbound);
+    char host[256], path[1024];
+    int port = 0, use_tls = 0;
+    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
+        return -1;
+    if (use_tls) return -1;      /* this driver is only mounted on plain HTTP */
+
+    int fd = http_upstream_acquire(host, port, &c->up);
+    if (fd < 0) return -1;
+
+    int body_len = 0;
+    const char* body = http_request_body_of(c->px.outbound, &body_len);
+    HttpReqHead head_params = {
+        c->px.outbound, http_request_method_of(c->px.outbound), path,
+        host, port, 0, 0, body, body_len,
+        http_request_content_type_of(c->px.outbound), 1
+    };
+    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    if (!c->head) return -1;
+
+    http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
+                       http_request_method_of(c->px.outbound));
+
+    c->state = c->up.connecting ? EV_UPSTREAM_DIAL : EV_UPSTREAM_SEND;
+    if (c->up.connecting)
+        return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+    return 0;
+}
+
+/* The upstream has answered. Hand the reply back to the proxy exchange, which
+ * decides whether it is the one to keep, and turn what it produced into bytes
+ * for the client. */
+static int ev_finish_upstream(EvDriver* d, EvConn* c) {
+    HttpResponse* resp = http_response_alloc_empty();
+    if (!resp) return -1;
+    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
+    c->px.resp = resp;
+
+    /* The connection is worth keeping only when the response ended where its
+     * own framing said it would. */
+    int keep = c->x.complete && !c->x.framing.invalid;
+    aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+    ev_untrack(d, c->up.t.sockfd);
+    http_upstream_release(&c->up, keep);
+
+    int r = aether_proxy_exchange_resume(&c->px, 0);
+    if (r == PX_NEED_SEND) {
+        /* A retry. The blocking driver would send again here; this one has to
+         * dial again, which is the same path as the first attempt. */
+        return ev_begin_retry(d, c);
+    }
+    return ev_respond_from(d, c);
+}
+
+/* Move a connection as far as it can go right now.
+ *
+ * Called when a descriptor it owns is ready, and again after each state
+ * completes, so a request that can run start to finish without waiting does
+ * so in one visit. Returns 0 when the connection is parked on a descriptor,
+ * -1 when it is finished with.
+ */
+static int ev_advance(EvDriver* d, EvConn* c) {
+    for (;;) {
+        switch (c->state) {
+        case EV_READ_REQUEST: {
+            int r = ev_step_read_request(d, c);
+            if (r <= 0) return r;
+            if (ev_begin_upstream(d, c) != 0) return -1;
+            continue;
+        }
+        case EV_UPSTREAM_DIAL: {
+            if (http_upstream_connected(&c->up) != 0) return -1;
+            c->state = EV_UPSTREAM_SEND;
+            continue;
+        }
+        case EV_UPSTREAM_SEND: {
+            int r = ev_step_upstream_send(d, c);
+            if (r <= 0) return r;
+            c->state = EV_UPSTREAM_RECV;
+            continue;
+        }
+        case EV_UPSTREAM_RECV: {
+            int r = ev_step_upstream_recv(d, c);
+            if (r <= 0) return r;
+            if (ev_finish_upstream(d, c) != 0) return -1;
+            c->state = EV_CLIENT_SEND;
+            continue;
+        }
+        case EV_CLIENT_SEND: {
+            int r = ev_step_client_send(d, c);
+            if (r <= 0) return r;
+            /* Done with this request. The connection stays, and the next one
+             * is read the same way the first was, so a client that keeps
+             * talking never costs another accept. */
+            ev_conn_reset_request(c);
+            c->state = EV_READ_REQUEST;
+            continue;
+        }
+        case EV_CLOSING:
+        default:
+            return -1;
+        }
+    }
+}
