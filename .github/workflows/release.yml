@@ -332,7 +332,21 @@ jobs:
     # -- Linux ---
     - name: Setup (Linux)
       if: matrix.os == 'ubuntu-22.04'
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc
+      run: |
+        sudo apt-get update && sudo apt-get install -y gcc make bc python3-pip
+        # The websocket suites check our RFC 6455 implementation against an
+        # independent one, and they fail rather than skip on a Linux CI runner
+        # because a silent skip would hide the only thing they exist for.
+        # This job runs them, so it has to provide the peer, and it did not:
+        # the release failed on a dependency the tests legitimately require
+        # while ci.yml had been installing it in its matrix all along.
+        #
+        # Same line ci.yml uses. Not the distribution package: this leg runs on
+        # 22.04 for glibc reasons (see the matrix above), and 22.04 ships
+        # websockets 9.1, which the probe rejects for good reason -- it passes
+        # asyncio's removed loop= argument and dies mid-handshake on Python
+        # 3.10+. pip gets a current one.
+        pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
     # -- Windows -- MinGW-w64 via MSYS2 ---
     - name: Setup (Windows)
