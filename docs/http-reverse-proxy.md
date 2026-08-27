@@ -314,6 +314,43 @@ Surface (HELP + TYPE blocks elided in this table):
 Latency is exposed as `_sum + _count` so a Grafana panel can
 compute average latency as `rate(_sum) / rate(_count)`.
 
+## How a proxied request is served
+
+A proxying server runs an event driver: a small number of threads, one per
+core, each holding a poller and many connections at once. A connection stays
+with the driver that accepted it for its whole life, and so does the upstream
+connection it uses.
+
+Requests move through it as a state machine:
+
+```
+read request -> dial or reuse upstream -> write upstream
+             -> read upstream -> write client -> read request
+```
+
+Every step either makes progress or names the descriptor it needs ready before
+it can continue. A thread only waits when nothing it holds can make progress,
+so an upstream that is slow to answer occupies a descriptor and some state
+rather than a thread.
+
+The driver serves plain HTTP proxying. These keep the per-connection worker
+path, and need no configuration to do so:
+
+- TLS-terminating servers
+- HTTP/2
+- connection upgrades and tunnels
+- streaming request bodies
+
+A request the proxy does not own, a health endpoint, an admin route, or
+anything another middleware answers, is handed to the general server path
+along with whatever has already been read from the socket. Routing, middleware
+and handlers behave exactly as they do without the driver.
+
+The upstream timeout (`proxy.pool_set_request_timeout`) applies as it always
+has. The driver keeps the deadline itself rather than taking it from the
+socket, and an upstream that does not answer within it produces the same `504`
+with `X-Aether-Proxy-Error: upstream_timeout`.
+
 ## Hop-by-Hop headers (RFC 7230 §6.1)
 
 Stripped on **both** directions:

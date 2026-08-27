@@ -16,6 +16,7 @@
 #include "aether_http_internal.h"
 #include "../http/proxy/aether_proxy_internal.h"
 #include "../../runtime/scheduler/aether_io_poller.h"
+#include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
 
 #include <errno.h>
@@ -125,15 +126,30 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
     return 0;
 }
 
+/* Everything one request owned, released before the next one starts.
+ *
+ * A connection serves many requests, so anything allocated per request has to
+ * be freed per request: what leaks here does not leak once, it leaks for as
+ * long as the client keeps talking. The head and the response accumulator go
+ * through the capability allocator, so they come back through it too, with
+ * the size they were charged at. */
 static void ev_conn_reset_request(EvConn* c) {
     c->in_len = 0;
-    free(c->head);
+
+    if (c->head) aether_caps_free(c->head, c->head_cap);
     c->head = NULL;
     c->head_len = c->head_cap = 0;
+
+    if (c->x.buf) aether_caps_free(c->x.buf, c->x.cap);
+    memset(&c->x, 0, sizeof(c->x));
+
     free(c->out);
     c->out = NULL;
     c->out_len = c->out_sent = 0;
-    memset(&c->x, 0, sizeof(c->x));
+
+    if (c->req) { http_request_free(c->req); c->req = NULL; }
+    if (c->res) { http_server_response_free(c->res); c->res = NULL; }
+    memset(&c->px, 0, sizeof(c->px));
 }
 
 /* Remember which connection a descriptor belongs to. The poller reports a

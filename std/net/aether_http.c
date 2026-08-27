@@ -2023,6 +2023,27 @@ const char* http_request_content_type_of(const HttpClientRequest* req) {
  * of them finishes with is available to the other, and a reused connection is
  * ready to write immediately.
  */
+/* The idle pool is shared with the blocking client, which reads its sockets
+ * expecting them to block. A driver that cannot block needs the opposite. So
+ * the mode belongs to the borrower, not to the pool: it is set on the way out
+ * and put back on the way in, and a connection either side finishes with is
+ * usable by the other.
+ *
+ * Without this a driver could take a blocking socket and wait on it, which is
+ * precisely the thing it exists not to do. */
+static void http_socket_set_nonblocking(int fd, int on) {
+    if (fd < 0) return;
+#ifdef _WIN32
+    u_long nb = on ? 1 : 0;
+    ioctlsocket(fd, FIONBIO, &nb);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return;
+    int want = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    if (want != flags) fcntl(fd, F_SETFL, want);
+#endif
+}
+
 int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
     memset(out, 0, sizeof(*out));
@@ -2033,6 +2054,7 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     if (http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
         out->reused = 1;
         out->connecting = 0;
+        http_socket_set_nonblocking(out->t.sockfd, 1);
         return out->t.sockfd;
     }
 
@@ -2093,6 +2115,7 @@ int http_upstream_connected(HttpUpstreamConn* c) {
 void http_upstream_release(HttpUpstreamConn* c, int keep) {
     if (!c || c->t.sockfd < 0) return;
     if (keep && http_pool_enabled) {
+        http_socket_set_nonblocking(c->t.sockfd, 0);   /* as the pool expects */
         http_pool_put(c->pool_key, &c->t);
     } else {
         transport_close(&c->t);

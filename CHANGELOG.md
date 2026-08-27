@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **A proxying server runs its connections on an event driver.** A connection
+  used to get a worker for its whole life, so whenever it waited, the thread
+  waited: measured at 1.96 voluntary context switches per proxied request,
+  against nginx's 0.00, from two sleeps with one cause between them. A thread
+  with one connection and nothing else to run can only sleep.
+
+  Requests now move through a state machine that never waits on a single
+  descriptor, on a small number of threads that each hold many connections.
+  Measured on the same box in the same run: **context switches per request
+  1.96 to 0.12, CPU per request 36.6us to 25.4us**, and throughput from 56% of
+  nginx to 70%.
+
+  It drives the same code the blocking path drives, so the two cannot disagree
+  about what a proxied request means. TLS, HTTP/2, upgrades and streaming
+  bodies keep the per-connection path, and a request the proxy does not own is
+  handed back to the general server path with the bytes already read from the
+  socket. Nothing to configure: the driver is used when the connection suits
+  it and not otherwise.
+
 ## [0.591.0]
 
 ### Added
