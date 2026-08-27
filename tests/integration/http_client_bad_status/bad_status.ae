@@ -1,0 +1,32 @@
+// The upstream answers with a status line whose code is not three digits. A
+// caller must be told the response could not be read, not handed a number.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if port == 0 {
+        println("FAIL: UPSTREAM_PORT not set")
+        exit(1)
+    }
+
+    req = client.request("GET", "http://127.0.0.1:${port}/")
+    client.set_timeout(req, 5s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+
+    if err == "" {
+        status = client.response_status(resp)
+        println("FAIL: an unreadable status line came back as a success, status ${status}")
+        exit(1)
+    }
+    if string.contains(err, "status line") == 0 {
+        println("FAIL: expected a status-line error, got '${err}'")
+        exit(1)
+    }
+    println("PASS: an unreadable status line is reported rather than returned")
+}

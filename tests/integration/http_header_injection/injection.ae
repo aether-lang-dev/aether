@@ -1,0 +1,58 @@
+// A CR LF in anything that is written into a head must not become a new line
+// of that head. Three ways in: a header value, a header name, and the URL,
+// which lands in the request line.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    if port == 0 {
+        println("FAIL: UPSTREAM_PORT not set")
+        exit(1)
+    }
+    base = "http://127.0.0.1:${port}/"
+
+    // 1. A value carrying a line ending is refused, and the request still goes.
+    req = client.request("GET", base)
+    client.set_timeout(req, 5s)
+    rc = client.set_header(req, "X-Probe", "ok\r\nX-Injected: yes")
+    if rc == 0 {
+        println("FAIL: set_header accepted a value containing CRLF")
+        exit(1)
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: transport ${err}")
+        exit(1)
+    }
+    head = string.concat(client.response_body(resp), "")
+    client.response_free(resp)
+    if string.contains(head, "X-Injected") != 0 {
+        println("FAIL: an injected header reached the wire. Head was:")
+        println(head)
+        exit(1)
+    }
+
+    // 2. A name that is not a token is refused.
+    req2 = client.request("GET", base)
+    rc2 = client.set_header(req2, "X-Bad\r\nX-Injected", "v")
+    client.request_free(req2)
+    if rc2 == 0 {
+        println("FAIL: set_header accepted a name containing CRLF")
+        exit(1)
+    }
+
+    // 3. A URL carrying a line ending never builds a request at all.
+    req3 = client.request("GET", "${base}a\r\nX-Injected: yes\r\n")
+    if req3 != null {
+        println("FAIL: request() accepted a URL containing CRLF")
+        exit(1)
+    }
+
+    println("PASS: header value, header name and URL all refuse a line ending")
+}

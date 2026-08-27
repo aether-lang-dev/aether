@@ -39,6 +39,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -833,8 +834,42 @@ struct HttpClientRequest {
 #define PROXY_MODE_EXPLICIT 2
 #define PROXY_MODE_IGNORE   3
 
+/* A header name has to be a token, and a value has to be free of the bytes
+ * that end a line.
+ *
+ * Without this, a value carrying CR LF is written into the request head
+ * verbatim and becomes additional headers: a caller that builds a value out
+ * of anything a user supplied hands that user the rest of the request, and a
+ * doubled CR LF ends the head entirely and starts a second request the peer
+ * will answer (CWE-93). The header is rejected rather than repaired, because
+ * silently sending something other than what was asked for is its own bug.
+ */
+int http_header_name_ok(const char* name) {
+    if (!name || !*name) return 0;
+    for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
+        /* RFC 9110 token: these punctuation marks, plus letters and digits. */
+        if (!(isalnum(*c) || strchr("!#$%&'*+-.^_`|~", (int)*c))) return 0;
+    }
+    return 1;
+}
+
+int http_header_value_ok(const char* value) {
+    if (!value) return 0;
+    for (const unsigned char* c = (const unsigned char*)value; *c; c++) {
+        if (*c == '\r' || *c == '\n') return 0;
+    }
+    return 1;
+}
+
 HttpClientRequest* http_request_raw(const char* method, const char* url) {
-    if (!method || !*method || !url || !*url) return NULL;
+    if (!url || !*url) return NULL;
+    /* The method is a token and the URL cannot carry a line ending, for the
+     * same reason a header value cannot: both are written into the request
+     * line, so a CR LF in either ends that line early and everything after it
+     * is read by the peer as headers of its own (CWE-93). A URL built from
+     * anything a user supplied is the ordinary way this happens. */
+    if (!http_header_name_ok(method)) return NULL;
+    if (!http_header_value_ok(url)) return NULL;
     HttpClientRequest* req = (HttpClientRequest*)calloc(1, sizeof(HttpClientRequest));
     if (!req) return NULL;
     req->method = strdup(method);
@@ -847,7 +882,8 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
 }
 
 int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
-    if (!req || !name || !*name || !value) return -1;
+    if (!req) return -1;
+    if (!http_header_name_ok(name) || !http_header_value_ok(value)) return -1;
     size_t nl = strlen(name), vl = strlen(value);
     HttpHeader* h = (HttpHeader*)malloc(sizeof(HttpHeader) + nl + 1 + vl + 1);
     if (!h) return -1;
@@ -1034,20 +1070,27 @@ void http_request_free_raw(HttpClientRequest* req) {
 }
 
 /* Forward decls — defined below the static request() function. */
-static int header_already_set(HttpClientRequest* req, const char* name);
+static int header_already_set(const HttpClientRequest* req, const char* name);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 /* Decode HTTP/1.1 chunked transfer-encoding. Returns a malloc'd decoded
  * buffer (NUL-terminated; *out_len excludes the NUL) or NULL on malformed
  * framing (caller then keeps the raw body). Binary-safe (copies by
  * length). Defined below. */
-static char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 static int http_value_has_chunked(const char* v);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
 /* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
  * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
  * which can appear inside chunk data. */
-static int http_chunked_complete(const char* buf, size_t len) {
+/* How many bytes does the complete chunked body at `buf` occupy, counting its
+ * framing and trailers, or 0 when it is not complete yet? A complete body is
+ * never zero-length (the terminal chunk alone is five bytes), so 0 is an
+ * unambiguous "not yet".
+ *
+ * The length matters as much as the fact: anything after it belongs to
+ * whatever the peer sent next, and a caller that assumes the body runs to the
+ * end of what it has read would swallow a pipelined message. */
+size_t http_chunked_frame_len(const char* buf, size_t len) {
     size_t off = 0;
     for (;;) {
         const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
@@ -1068,12 +1111,16 @@ static int http_chunked_complete(const char* buf, size_t len) {
                 size_t line_len = (size_t)(le - (buf + off));
                 int empty = line_len == 0 || (line_len == 1 && buf[off] == '\r');
                 off = (size_t)(le - buf) + 1;
-                if (empty) return 1;
+                if (empty) return off;
             }
         }
         off += (size_t)chunk + 2;   /* payload + its trailing CRLF */
         if (off > len) return 0;
     }
+}
+
+int http_chunked_complete(const char* buf, size_t len) {
+    return http_chunked_frame_len(buf, len) > 0;
 }
 
 /* Case-insensitive substring search, for header values. */
@@ -1095,9 +1142,19 @@ static const char* http_strcasestr_local(const char* hay, const char* needle) {
 }
 
 /* The status code from a response header block. */
+/* The status code from a status line, or 0 when the line does not carry one.
+ *
+ * It is exactly three digits (RFC 9112 4). Reading it with atoi instead
+ * accepts anything that starts with a digit and wraps on overflow, so an
+ * upstream answering "HTTP/1.1 999999999999 Weird" handed the caller a status
+ * of -727379969, and a proxy copied that onto the response it sent back. */
 static int response_status_of(const char* header_block) {
     const char* sp = strchr(header_block, ' ');
-    return sp ? atoi(sp + 1) : 0;
+    if (!sp) return 0;
+    const unsigned char* d = (const unsigned char*)sp + 1;
+    if (!isdigit(d[0]) || !isdigit(d[1]) || !isdigit(d[2])) return 0;
+    if (isdigit(d[3])) return 0;
+    return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
 /* RFC 9110: 1xx, 204 and 304 carry no body, and neither does any response to
@@ -1647,6 +1704,424 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
     return 0;
 }
 
+
+/* Find a header by name in a header block, anchored to the start of each line.
+ *
+ * Anchoring matters: a substring search over the whole block also matches
+ * inside another header's value, so a message carrying
+ * `X-Note: Content-Length: 9` would have had that read as its framing.
+ *
+ * Shared by the client and the server: a response frames its body the same way
+ * a request does, and two scanners would be two chances to disagree.
+ *
+ * Returns how many times the header appears, writes the first value into
+ * `out`, and sets *differing when two of them disagree. A framing header that
+ * appears twice with two answers has no single answer at all.
+ */
+int http_find_header_in_block(const char* block, const char* end,
+                            const char* name, char* out, size_t out_cap,
+                            int* differing) {
+    size_t name_len = strlen(name);
+    int count = 0;
+    if (differing) *differing = 0;
+    if (out && out_cap) out[0] = '\0';
+
+    for (const char* line = block; line && line < end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
+        const char* line_end = eol ? eol : end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
+            && line[name_len] == ':') {
+            const char* v = line + name_len + 1;
+            const char* v_end = line + line_len;
+            while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+            while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+            size_t vl = (size_t)(v_end - v);
+
+            char value[256];
+            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
+            memcpy(value, v, vl);
+            value[vl] = '\0';
+
+            if (count == 0) {
+                if (out && out_cap) {
+                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
+                    memcpy(out, value, copy);
+                    out[copy] = '\0';
+                }
+            } else if (differing && out && strcmp(out, value) != 0) {
+                *differing = 1;
+            }
+            count++;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return count;
+}
+
+/* Has a complete HTTP/1.1 response accumulated in `buf`?
+ *
+ * Reading to end of connection only works when the connection is the
+ * delimiter, which is what made every request cost a fresh one (#1653). This
+ * reads to the end of THIS response: the header block, then exactly the body
+ * its framing declares. `f` carries what has been worked out so far across
+ * calls and starts zeroed.
+ *
+ * Shared deliberately. A caller that cannot block reads the same bytes in a
+ * different order, and a second copy of response framing would be a second
+ * place for chunked, Content-Length and the no-body statuses to disagree.
+ */
+typedef struct {
+    size_t header_bytes;
+    size_t body_target;
+    int    chunked;
+    int    definite;
+    int    invalid;    /* the response did not say where its body ends */
+} HttpRespFraming;
+
+static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
+                                     const char* method) {
+    if (!f->header_bytes) {
+        /* The terminator is NUL-free ASCII and precedes any body byte. */
+        char* hend = strstr(buf, "\r\n\r\n");
+        if (!hend) return 0;
+        f->header_bytes = (size_t)((hend + 4) - buf);
+        char saved = *hend;
+        *hend = '\0';
+        char* te = http_extract_response_header(buf, "Transfer-Encoding");
+        if (te && http_value_has_chunked(te)) {
+            f->chunked = 1;
+            f->definite = 1;
+        } else {
+            /* Anchored, and counted: a response naming two different lengths
+             * has not said where its body ends, and picking one leaves the
+             * bytes of the other in a connection this client may hand to the
+             * next request. */
+            char cl[64];
+            int differing = 0;
+            int count = http_find_header_in_block(buf, hend, "Content-Length",
+                                                  cl, sizeof(cl), &differing);
+            if (count > 0) {
+                if (differing) {
+                    f->invalid = 1;
+                } else {
+                    char* endp = NULL;
+                    long long declared = strtoll(cl, &endp, 10);
+                    if (endp && *endp == '\0' && endp != cl && declared >= 0) {
+                        f->body_target = f->header_bytes + (size_t)declared;
+                        f->definite = 1;
+                    } else {
+                        f->invalid = 1;
+                    }
+                }
+            }
+        }
+        free(te);
+        *hend = saved;
+        if (no_body_expected(response_status_of(buf), method)) {
+            f->body_target = f->header_bytes;
+            f->definite = 1;
+            f->chunked = 0;
+        }
+    }
+    if (f->invalid) return 1;      /* stop reading; the driver reports it */
+    if (!f->definite) return 0;
+    if (f->chunked)
+        return http_chunked_complete(buf + f->header_bytes, len - f->header_bytes);
+    return len >= f->body_target;
+}
+
+/* Serialise a request head into a fresh capability-gated buffer.
+ *
+ * Shared so that a driver which sends without blocking puts exactly the same
+ * bytes on the wire as the blocking one. Returns NULL on allocation failure,
+ * with nothing to free; on success the caller owns the buffer and frees it
+ * with aether_caps_free(buf, *out_cap).
+ */
+typedef struct {
+    const HttpClientRequest* req;
+    const char* method;
+    const char* path;
+    const char* host;
+    int         port;
+    int         via_proxy;
+    int         use_tls;
+    const char* body;
+    int         body_len;
+    const char* content_type;
+    int         keep_alive;
+} HttpReqHead;
+
+static char* http_build_request_head(const HttpReqHead* p,
+                                     size_t* out_len, size_t* out_cap) {
+    size_t hdr_cap = 1024;
+    /* #461: gate the request-header build buffer through the cap. Self-
+     * contained — alloc, grow, and free all live in this function with
+     * hdr_cap tracking the live size, so accounting balances exactly. */
+    char* hdr = (char*)aether_caps_malloc(hdr_cap);
+    if (!hdr) return NULL;
+    size_t hdr_len = 0;
+
+    /* Helper: append a NUL-terminated string into hdr, growing as
+     * needed. Returns 0 on success, -1 on OOM. */
+    #define HDR_APPEND_STR(s) do { \
+        size_t _slen = strlen(s); \
+        if (hdr_len + _slen + 1 > hdr_cap) { \
+            size_t _nc = hdr_cap; \
+            while (_nc < hdr_len + _slen + 1) _nc *= 2; \
+            char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
+            if (!_nh) { aether_caps_free(hdr, hdr_cap); return NULL; } \
+            hdr = _nh; hdr_cap = _nc; \
+        } \
+        memcpy(hdr + hdr_len, s, _slen); \
+        hdr_len += _slen; \
+        hdr[hdr_len] = '\0'; \
+    } while (0)
+
+    /* Request line. For plain HTTP through a forward proxy, use the absolute
+     * form (`GET http://p->host[:p->port]/p->path HTTP/1.1`) so the proxy knows the
+     * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
+     * end-to-end to the origin), use the origin form (`GET /p->path`). */
+    HDR_APPEND_STR(p->method); HDR_APPEND_STR(" ");
+    if (p->via_proxy && !p->use_tls) {
+        char absline[1408];
+        if (p->port == 80) {
+            snprintf(absline, sizeof(absline), "http://%s%s", p->host, p->path);
+        } else {
+            snprintf(absline, sizeof(absline), "http://%s:%d%s", p->host, p->port, p->path);
+        }
+        HDR_APPEND_STR(absline);
+    } else {
+        HDR_APPEND_STR(p->path);
+    }
+    HDR_APPEND_STR(" HTTP/1.1\r\n");
+
+    /* Built-in Host (overridable via set_header).
+     *
+     * The authority, which includes the port whenever it is not the default
+     * for the scheme (RFC 9110 7.2). Sending the bare host to a server on
+     * another port names a different authority than the one being addressed,
+     * which a virtual-hosted server routes on. IPv6 literals would need
+     * brackets here; the connect path is IPv4-only (see the note above), so
+     * there is no such host to reach this. */
+    if (!header_already_set(p->req, "Host")) {
+        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(p->host);
+        if (p->port != (p->use_tls ? 443 : 80)) {
+            char port_suffix[16];
+            snprintf(port_suffix, sizeof(port_suffix), ":%d", p->port);
+            HDR_APPEND_STR(port_suffix);
+        }
+        HDR_APPEND_STR("\r\n");
+    }
+
+    /* Built-in Content-Length when p->body present (overridable, but
+     * setting it manually is almost always a bug — we still emit
+     * ours unless the caller explicitly overrode it). */
+    if (p->body && p->body_len > 0 && !header_already_set(p->req, "Content-Length")) {
+        char clen[32];
+        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", p->body_len);
+        HDR_APPEND_STR(clen);
+    }
+
+    /* Built-in Content-Type when p->body present, only if neither the
+     * builder's p->content_type nor an explicit Content-Type header is set. */
+    if (p->body && p->body_len > 0 && p->content_type
+        && !header_already_set(p->req, "Content-Type")) {
+        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_STR("\r\n");
+    } else if (p->body && p->body_len > 0 && !p->content_type
+        && !header_already_set(p->req, "Content-Type")) {
+        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
+    }
+
+    /* Persistent by default: the connection goes back to the idle pool when
+     * the response framing is definite. A caller who sets their own
+     * Connection header still gets exactly that. */
+    if (!header_already_set(p->req, "Connection")) {
+        HDR_APPEND_STR(p->keep_alive ? "Connection: keep-alive\r\n"
+                                 : "Connection: close\r\n");
+    }
+
+    /* Caller-provided headers, in insertion order. */
+    for (HttpHeader* h = p->req->headers; h; h = h->next) {
+        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
+    }
+
+    /* End-of-headers blank line. */
+    HDR_APPEND_STR("\r\n");
+
+    #undef HDR_APPEND_STR
+
+    *out_len = hdr_len;
+    *out_cap = hdr_cap;
+    return hdr;
+}
+
+/* Fill status, headers and body from a complete response buffer.
+ *
+ * Shared with any driver that accumulates the same bytes without blocking, so
+ * de-chunking and the header/body split cannot come out differently depending
+ * on who read the socket. `buf` is modified in place: the header terminator is
+ * NUL-terminated so the header block can be handed out as a string.
+ */
+static void http_response_fill_from_bytes(HttpResponse* response,
+                                          char* buf, size_t len) {
+    char* header_end = strstr(buf, "\r\n\r\n");
+    if (!header_end) {
+        response->body = string_new_with_length(buf, len);
+        return;
+    }
+    size_t header_bytes = (size_t)((header_end + 4) - buf);
+    size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
+    *header_end = '\0';
+    char* status_line = buf;
+    response->status_code = response_status_of(status_line);
+    if (response->status_code == 0 && !response->error) {
+        /* Headers arrived, but the first line does not carry a status, so
+         * this is not a response to hand back as a success: a proxy would
+         * copy the absent status straight onto its own reply. */
+        response->error = string_new("malformed status line in response");
+    }
+
+    response->headers = string_new(buf);
+
+    /* De-chunk a `Transfer-Encoding: chunked` body so consumers see
+     * the decoded payload, not the raw chunk framing
+     * (`13\r\n…\r\n0\r\n\r\n`). Without this, any unknown-length /
+     * streamed upstream response (no Content-Length) came back
+     * framed — corrupting e.g. VCR record-mode tapes
+     * (vcr_record_chunked_dechunk_wish.md). Gated on the header, so
+     * only chunked bodies — already garbled today — change shape;
+     * on malformed framing we keep the raw bytes. */
+    const char* body_start = header_end + 4;
+    char* te = http_extract_response_header(buf, "Transfer-Encoding");
+    char* dechunked = NULL;
+    size_t dechunked_len = 0;
+    if (te && http_value_has_chunked(te)) {
+        dechunked = http_dechunk(body_start, body_bytes, &dechunked_len);
+    }
+    free(te);
+    if (dechunked) {
+        response->body = string_new_with_length(dechunked, dechunked_len);
+        free(dechunked);
+    } else {
+        response->body = string_new_with_length(body_start, body_bytes);
+    }
+}
+
+/* ---- The upstream exchange: write the request, read one response ----
+ *
+ * Everything on a client call that waits for the peer happens here, and
+ * nothing else does. A driver that owns its thread loops until the exchange
+ * says DONE, and never sees a WANT because a blocking transport does not
+ * produce one. A driver that cannot block hands the descriptor to a poller on
+ * a WANT and comes back. Both run this code, so there is one implementation
+ * of what a request looks like on the wire and one of when a response has
+ * finished arriving.
+ *
+ * The exchange does not own the transport and does not close it: whether a
+ * failure is worth a redial is the driver's decision, and only the driver
+ * knows whether the connection came from the pool.
+ */
+#define AE_X_DONE        0
+#define AE_X_WANT_READ   1
+#define AE_X_WANT_WRITE  2
+#define AE_X_ERROR     (-1)
+
+typedef struct {
+    Transport*  t;
+    const char* head;
+    size_t      head_len;
+    size_t      head_sent;
+    const char* body;
+    int         body_len;
+    int         body_sent;
+    const char* method;
+
+    char*  buf;          /* accumulated response, owned by the exchange */
+    size_t len;
+    size_t cap;
+    HttpRespFraming framing;
+    int    peer_closed;  /* the peer ended the response by closing */
+    int    complete;     /* the response ended where its own framing said */
+    int    oom;          /* the allocator refused; nothing else went wrong */
+} HttpExchange;
+
+static void http_exchange_init(HttpExchange* x, Transport* t,
+                               const char* head, size_t head_len,
+                               const char* body, int body_len,
+                               const char* method) {
+    memset(x, 0, sizeof(*x));
+    x->t = t;
+    x->head = head;
+    x->head_len = head_len;
+    x->body = body;
+    x->body_len = body_len;
+    x->method = method;
+}
+
+/* Would this send/recv have blocked, rather than failed? */
+static int http_io_would_block(void) {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    return e == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+/* Write the request head, then the body. Bodies are written raw so embedded
+ * NULs survive. */
+static int http_exchange_send(HttpExchange* x) {
+    while (x->head_sent < x->head_len) {
+        int n = transport_send(x->t, x->head + x->head_sent,
+                               (int)(x->head_len - x->head_sent));
+        if (n > 0) { x->head_sent += (size_t)n; continue; }
+        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+    }
+    while (x->body && x->body_sent < x->body_len) {
+        int n = transport_send(x->t, x->body + x->body_sent,
+                               x->body_len - x->body_sent);
+        if (n > 0) { x->body_sent += n; continue; }
+        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+    }
+    return AE_X_DONE;
+}
+
+/* Read until this response ends where its own framing says it does, or until
+ * the peer closes, which is the framing when nothing else declares one. */
+static int http_exchange_recv(HttpExchange* x) {
+    char chunk[8192];
+    for (;;) {
+        int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
+        if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
+        if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+
+        if (x->len + (size_t)n + 1 > x->cap) {
+            size_t new_cap = x->cap ? x->cap * 2 : 16384;
+            while (new_cap < x->len + (size_t)n + 1) new_cap *= 2;
+            /* #461: the response body is attacker-controlled (a malicious
+             * server can flood it), so the doubling buffer is gated through
+             * the capability allocator. `cap` carries the old size for the
+             * realloc delta and for the error-path free. */
+            char* grown = (char*)aether_caps_realloc(x->buf, x->cap, new_cap);
+            if (!grown) { x->oom = 1; return AE_X_ERROR; }
+            x->buf = grown;
+            x->cap = new_cap;
+        }
+        memcpy(x->buf + x->len, chunk, (size_t)n);
+        x->len += (size_t)n;
+        x->buf[x->len] = '\0';
+
+        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method)) {
+            x->complete = 1;
+            return AE_X_DONE;
+        }
+    }
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -1793,108 +2268,27 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * survive (the previous "%s" snprintf path would have truncated
      * at the first NUL — wasn't a problem in practice because the
      * v1 wrappers only sent textual JSON, but v2 takes body+len). */
-    size_t hdr_cap = 1024;
-    /* #461: gate the request-header build buffer through the cap. Self-
-     * contained — alloc, grow, and free all live in this function with
-     * hdr_cap tracking the live size, so accounting balances exactly. */
-    char* hdr = (char*)aether_caps_malloc(hdr_cap);
+    size_t hdr_cap = 0, hdr_len = 0;
+    HttpReqHead head_params = {
+        req, method, path, host, port, via_proxy, use_tls,
+        body, body_len, content_type, pool_this
+    };
+    char* hdr = http_build_request_head(&head_params, &hdr_len, &hdr_cap);
     if (!hdr) {
         transport_close(&t);
         response->error = string_new("out of memory building request");
         return response;
     }
-    size_t hdr_len = 0;
-
-    /* Helper: append a NUL-terminated string into hdr, growing as
-     * needed. Returns 0 on success, -1 on OOM. */
-    #define HDR_APPEND_STR(s) do { \
-        size_t _slen = strlen(s); \
-        if (hdr_len + _slen + 1 > hdr_cap) { \
-            size_t _nc = hdr_cap; \
-            while (_nc < hdr_len + _slen + 1) _nc *= 2; \
-            char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
-            if (!_nh) { aether_caps_free(hdr, hdr_cap); transport_close(&t); \
-                       response->error = string_new("out of memory building request"); \
-                       return response; } \
-            hdr = _nh; hdr_cap = _nc; \
-        } \
-        memcpy(hdr + hdr_len, s, _slen); \
-        hdr_len += _slen; \
-        hdr[hdr_len] = '\0'; \
-    } while (0)
-
-    /* Request line. For plain HTTP through a forward proxy, use the absolute
-     * form (`GET http://host[:port]/path HTTP/1.1`) so the proxy knows the
-     * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
-     * end-to-end to the origin), use the origin form (`GET /path`). */
-    HDR_APPEND_STR(method); HDR_APPEND_STR(" ");
-    if (via_proxy && !use_tls) {
-        char absline[1408];
-        if (port == 80) {
-            snprintf(absline, sizeof(absline), "http://%s%s", host, path);
-        } else {
-            snprintf(absline, sizeof(absline), "http://%s:%d%s", host, port, path);
-        }
-        HDR_APPEND_STR(absline);
-    } else {
-        HDR_APPEND_STR(path);
-    }
-    HDR_APPEND_STR(" HTTP/1.1\r\n");
-
-    /* Built-in Host (overridable via set_header). */
-    if (!header_already_set(req, "Host")) {
-        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(host); HDR_APPEND_STR("\r\n");
-    }
-
-    /* Built-in Content-Length when body present (overridable, but
-     * setting it manually is almost always a bug — we still emit
-     * ours unless the caller explicitly overrode it). */
-    if (body && body_len > 0 && !header_already_set(req, "Content-Length")) {
-        char clen[32];
-        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", body_len);
-        HDR_APPEND_STR(clen);
-    }
-
-    /* Built-in Content-Type when body present, only if neither the
-     * builder's content_type nor an explicit Content-Type header is set. */
-    if (body && body_len > 0 && content_type
-        && !header_already_set(req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(content_type); HDR_APPEND_STR("\r\n");
-    } else if (body && body_len > 0 && !content_type
-        && !header_already_set(req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
-    }
-
-    /* Persistent by default: the connection goes back to the idle pool when
-     * the response framing is definite. A caller who sets their own
-     * Connection header still gets exactly that. */
-    if (!header_already_set(req, "Connection")) {
-        HDR_APPEND_STR(pool_this ? "Connection: keep-alive\r\n"
-                                 : "Connection: close\r\n");
-    }
-
-    /* Caller-provided headers, in insertion order. */
-    for (HttpHeader* h = req->headers; h; h = h->next) {
-        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
-    }
-
-    /* End-of-headers blank line. */
-    HDR_APPEND_STR("\r\n");
-
-    #undef HDR_APPEND_STR
 
     /* Accumulator for the buffered read below, declared here because the
      * reuse retry rewinds to `send_request` and has to reset it. */
-    char   buffer[8192];
     char*  full_response = NULL;
     size_t total_len = 0;
     size_t cap = 0;
     int    n = 0;
     int    recv_err = 0;
-    size_t header_bytes = 0;
-    size_t body_target = 0;
-    int    framing_chunked = 0;
-    int    framing_definite = 0;
+    int    truncated = 0;
+    HttpRespFraming framing = {0};
     /* A pooled connection the peer closed while it sat idle is
      * indistinguishable from a live one until it is used: the liveness probe
      * catches almost all of them, and the rest fail with nothing received.
@@ -1903,9 +2297,13 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * bounded to a connection that came from the pool and produced no
      * response byte, so the server cannot have acted on the request. */
     int retried = 0;
+    HttpExchange tx;
 
 send_request:
-    if (transport_send(&t, hdr, (int)hdr_len) < 0) {
+    http_exchange_init(&tx, &t, hdr, hdr_len, body, body_len, method);
+    /* A WANT here is SO_SNDTIMEO firing on a transport this driver owns
+     * outright, which is a failed write like any other. */
+    if (http_exchange_send(&tx) != AE_X_DONE) {
         if (reused && !retried) {
             retried = 1;
             reused = 0;
@@ -1925,30 +2323,6 @@ send_request:
         transport_close(&t);
         response->error = string_new("send failed");
         return response;
-    }
-
-    /* Body — emitted raw so embedded NULs survive. */
-    if (body && body_len > 0) {
-        if (transport_send(&t, body, body_len) < 0) {
-            if (reused && !retried) {
-                retried = 1;
-                reused = 0;
-                transport_close(&t);
-                char* rd_err = NULL;
-                /* Pooled connection, so the resolve was skipped; do it now. */
-                if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
-                                      &serv_addr_resolved)
-                    && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
-                    free(rd_err);
-                    goto send_request;
-                }
-                free(rd_err);
-            }
-            aether_caps_free(hdr, hdr_cap);
-            transport_close(&t);
-            response->error = string_new("send failed");
-            return response;
-        }
     }
 
     /* Streaming mode (#1004): read only the header block, then hand the
@@ -2000,8 +2374,7 @@ send_request:
         size_t over_len     = hlen - header_bytes;   /* body bytes already read */
         *hend = '\0';                                 /* isolate the header block */
 
-        char* space1 = strchr(hb, ' ');
-        if (space1) response->status_code = atoi(space1 + 1);
+        response->status_code = response_status_of(hb);
         response->headers = string_new(hb);
 
         /* Framing: chunked wins over Content-Length; neither => read-until-close. */
@@ -2056,69 +2429,47 @@ send_request:
      * byte count that ends the response, or 0 while it is still unknown.
      * The accumulator grows by doubling; a realloc per recv was quadratic on
      * large responses. */
-    while ((n = transport_recv(&t, buffer, sizeof(buffer) - 1)) > 0) {
-        if (total_len + (size_t)n + 1 > cap) {
-            size_t new_cap = cap ? cap * 2 : 16384;
-            while (new_cap < total_len + (size_t)n + 1) new_cap *= 2;
-            /* #461: the response body is attacker-controlled (a malicious
-             * server can flood it) — gate the doubling buffer through the
-             * capability allocator. `cap` carries the old size for the
-             * realloc delta and for the error-path free; the buffer is
-             * self-contained in this function (its bytes are copied into
-             * AetherStrings below, then it is freed here), so the
-             * accounting balances exactly. */
-            char* new_resp = (char*)aether_caps_realloc(full_response, cap, new_cap);
-            if (!new_resp) {
-                aether_caps_free(full_response, cap);
-                transport_close(&t);
-                response->error = string_new("out of memory reading response");
-                return response;
-            }
-            full_response = new_resp;
-            cap = new_cap;
+    {
+        HttpExchange rx;
+        http_exchange_init(&rx, &t, NULL, 0, NULL, 0, method);
+        int rc = http_exchange_recv(&rx);
+        full_response = rx.buf;
+        total_len     = rx.len;
+        cap           = rx.cap;
+        framing       = rx.framing;
+        /* A response that never said where its body ends is not one to hand
+         * back: the bytes it did not account for belong to nothing, and on a
+         * pooled connection they would be read as the head of the next
+         * response. */
+        if (rx.framing.invalid) {
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = string_new(
+                "response framing is ambiguous: the declared body length is not usable");
+            return response;
         }
-        memcpy(full_response + total_len, buffer, (size_t)n);
-        total_len += (size_t)n;
-        full_response[total_len] = '\0';
-
-        if (!header_bytes) {
-            /* The terminator is NUL-free ASCII and precedes any body byte. */
-            char* hend = strstr(full_response, "\r\n\r\n");
-            if (!hend) continue;
-            header_bytes = (size_t)((hend + 4) - full_response);
-            char saved = *hend;
-            *hend = '\0';
-            char* te = http_extract_response_header(full_response, "Transfer-Encoding");
-            if (te && http_value_has_chunked(te)) {
-                framing_chunked = 1;
-                framing_definite = 1;
-            } else {
-                char* cl = http_extract_response_header(full_response, "Content-Length");
-                if (cl) {
-                    long long declared = strtoll(cl, NULL, 10);
-                    if (declared >= 0) {
-                        body_target = header_bytes + (size_t)declared;
-                        framing_definite = 1;
-                    }
-                    free(cl);
-                }
-            }
-            free(te);
-            *hend = saved;
-            if (no_body_expected(response_status_of(full_response), method)) {
-                body_target = header_bytes;
-                framing_definite = 1;
-                framing_chunked = 0;
-            }
+        if (rx.oom) {
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = string_new("out of memory reading response");
+            return response;
         }
-        if (framing_definite) {
-            if (framing_chunked) {
-                if (http_chunked_complete(full_response + header_bytes,
-                                          total_len - header_bytes)) break;
-            } else if (total_len >= body_target) {
-                break;
-            }
-        }
+        /* A WANT on a blocking transport is SO_RCVTIMEO firing, not a socket
+         * with more to say later: this driver owns its thread and never asked
+         * for a non-blocking one. Treating it as anything but a failed read
+         * is what once let a timed-out request return an empty 0-status
+         * response that the caller could not tell from a silent server. */
+        if (rc == AE_X_ERROR || rc == AE_X_WANT_READ || rc == AE_X_WANT_WRITE)
+            recv_err = 1;
+        /* The response declared its own length and stopped short of it. The
+         * body we hold is a prefix of the real one, and handing that back as
+         * a successful response makes a truncated payload indistinguishable
+         * from a complete one: a proxy forwards a short body as if it were
+         * whole, and a caller parses whatever arrived. A response with no
+         * declared framing is not this case, because there the close IS the
+         * framing. */
+        truncated = rx.framing.definite && !rx.complete;
+        n = 0;
     }
     /* Nothing at all came back on a connection that came from the pool: the
      * peer had closed it and our request went into the void. Redial once and
@@ -2149,10 +2500,10 @@ send_request:
             total_len = 0;
             cap = 0;
             recv_err = 0;
-            header_bytes = 0;
-            body_target = 0;
-            framing_chunked = 0;
-            framing_definite = 0;
+            framing.header_bytes = 0;
+            framing.body_target = 0;
+            framing.chunked = 0;
+            framing.definite = 0;
             goto send_request;
         }
         /* The redial failed too, so the upstream is gone rather than the
@@ -2195,11 +2546,11 @@ send_request:
      * (read-until-EOF framing, a truncated body, an I/O error) leaves the
      * next response's start position unknown, so the connection is retired. */
     {
-        int keep = pool_this && !recv_err && framing_definite &&
-                   (framing_chunked || total_len == body_target);
-        if (keep && header_bytes > 0) {
-            char saved = full_response[header_bytes - 4];
-            full_response[header_bytes - 4] = '\0';
+        int keep = pool_this && !recv_err && framing.definite &&
+                   (framing.chunked || total_len == framing.body_target);
+        if (keep && framing.header_bytes > 0) {
+            char saved = full_response[framing.header_bytes - 4];
+            full_response[framing.header_bytes - 4] = '\0';
             char* conn_hdr = http_extract_response_header(full_response, "Connection");
             if (conn_hdr) {
                 if (http_strcasestr_local(conn_hdr, "close")) keep = 0;
@@ -2207,7 +2558,7 @@ send_request:
             } else if (strncmp(full_response, "HTTP/1.0", 8) == 0) {
                 keep = 0;   /* HTTP/1.0 closes unless it says otherwise */
             }
-            full_response[header_bytes - 4] = saved;
+            full_response[framing.header_bytes - 4] = saved;
         } else {
             keep = 0;
         }
@@ -2225,43 +2576,27 @@ send_request:
         response->error = string_new("recv timeout or I/O error");
         return response;
     }
-    if (header_end) {
-        size_t header_bytes = (size_t)((header_end + 4) - full_response);
-        size_t body_bytes = total_len >= header_bytes ? total_len - header_bytes : 0;
-        *header_end = '\0';
-        char* status_line = full_response;
-        char* space1 = strchr(status_line, ' ');
-        if (space1) {
-            response->status_code = atoi(space1 + 1);
-        }
-
-        response->headers = string_new(full_response);
-
-        /* De-chunk a `Transfer-Encoding: chunked` body so consumers see
-         * the decoded payload, not the raw chunk framing
-         * (`13\r\n…\r\n0\r\n\r\n`). Without this, any unknown-length /
-         * streamed upstream response (no Content-Length) came back
-         * framed — corrupting e.g. VCR record-mode tapes
-         * (vcr_record_chunked_dechunk_wish.md). Gated on the header, so
-         * only chunked bodies — already garbled today — change shape;
-         * on malformed framing we keep the raw bytes. */
-        const char* body_start = header_end + 4;
-        char* te = http_extract_response_header(full_response, "Transfer-Encoding");
-        char* dechunked = NULL;
-        size_t dechunked_len = 0;
-        if (te && http_value_has_chunked(te)) {
-            dechunked = http_dechunk(body_start, body_bytes, &dechunked_len);
-        }
-        free(te);
-        if (dechunked) {
-            response->body = string_new_with_length(dechunked, dechunked_len);
-            free(dechunked);
-        } else {
-            response->body = string_new_with_length(body_start, body_bytes);
-        }
-    } else {
-        response->body = string_new_with_length(full_response, total_len);
+    /* A response that stopped short of the length it declared is an error
+     * even though its headers arrived intact. Reporting only the no-headers
+     * case meant a read that died mid-body came back as a successful short
+     * response, which a caller cannot tell from a complete one. */
+    if (truncated) {
+        aether_caps_free(full_response, cap);
+        response->error = string_new(
+            recv_err ? "response truncated: read failed before the declared body length"
+                     : "response truncated: peer closed before the declared body length");
+        return response;
     }
+    /* Hand over exactly the body the response declared. A read can return
+     * more than that (a pipelined reply, or bytes a mis-framed response left
+     * behind), and counting those as body makes the payload something the
+     * sender never described. Chunked framing carries its own end, so it is
+     * left alone. */
+    size_t deliver_len = total_len;
+    if (framing.definite && !framing.chunked && framing.body_target > 0
+        && framing.body_target < deliver_len)
+        deliver_len = framing.body_target;
+    http_response_fill_from_bytes(response, full_response, deliver_len);
 
     aether_caps_free(full_response, cap);
     return response;
@@ -2282,7 +2617,7 @@ static int http_strcaseeq(const char* a, const char* b) {
     return *a == 0 && *b == 0;
 }
 
-static int header_already_set(HttpClientRequest* req, const char* name) {
+static int header_already_set(const HttpClientRequest* req, const char* name) {
     if (!req) return 0;
     for (HttpHeader* h = req->headers; h; h = h->next) {
         if (http_strcaseeq(h->name, name)) return 1;
@@ -2358,7 +2693,7 @@ static int http_value_has_chunked(const char* v) {
  * the payload is copied by length, never scanned for NUL. Chunk
  * extensions (`<size>;name=val`) are skipped; trailing trailers after
  * the terminating `0` chunk are ignored. */
-static char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
+char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
     if (!in || !out_len) return NULL;
     char* out = (char*)malloc(in_len + 1);   /* decoded payload <= input */
     if (!out) return NULL;

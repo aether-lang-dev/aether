@@ -1,0 +1,52 @@
+// The upstream echoes back the request head it was sent, so this asserts what
+// the client actually puts on the wire.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+main() {
+    up_port = io.getenv("UPSTREAM_PORT")
+    if up_port == 0 {
+        println("FAIL: UPSTREAM_PORT not set")
+        exit(1)
+    }
+    url = "http://127.0.0.1:${up_port}/echo/head"
+
+    req = client.request("GET", url)
+    client.set_timeout(req, 5s)
+    client.set_header(req, "X-Probe", "probe-value")
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: transport ${err} for ${url}")
+        exit(1)
+    }
+    head = string.concat(client.response_body(resp), "")
+    client.response_free(resp)
+
+    if string.contains(head, "GET /echo/head HTTP/1.1") == 0 {
+        println("FAIL: request line missing. Head was:")
+        println(head)
+        exit(1)
+    }
+    if string.contains(head, "Host: 127.0.0.1:${up_port}") == 0 {
+        println("FAIL: Host header missing or wrong. Head was:")
+        println(head)
+        exit(1)
+    }
+    if string.contains(head, "Connection: keep-alive") == 0 {
+        println("FAIL: the client did not ask to keep the connection. Head was:")
+        println(head)
+        exit(1)
+    }
+    if string.contains(head, "X-Probe: probe-value") == 0 {
+        println("FAIL: a caller-set header did not reach the wire. Head was:")
+        println(head)
+        exit(1)
+    }
+
+    println("PASS: request line, Host, Connection and caller headers are on the wire")
+}

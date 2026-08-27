@@ -1,0 +1,50 @@
+// MODE=short: the upstream declares 36 bytes and sends 10, then closes. That
+// is a truncated response and must be reported, not returned as a short 200.
+//
+// MODE=close: the upstream declares no framing, so the close ends the body and
+// the same 10 bytes are a complete response.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    mode = io.getenv("MODE")
+    if port == 0 || mode == 0 {
+        println("FAIL: UPSTREAM_PORT and MODE must be set")
+        exit(1)
+    }
+
+    req = client.request("GET", "http://127.0.0.1:${port}/")
+    client.set_timeout(req, 5s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+
+    if string.equals(mode, "short") != 0 {
+        if err == "" {
+            body = string.concat(client.response_body(resp), "")
+            println("FAIL: a body cut short of its declared length came back as a success (${string.length(body)} bytes)")
+            exit(1)
+        }
+        if string.contains(err, "truncated") == 0 {
+            println("FAIL: expected a truncation error, got '${err}'")
+            exit(1)
+        }
+        println("PASS: the short body was reported as truncated")
+        return
+    }
+
+    if err != "" {
+        println("FAIL: a response framed by the close was reported as '${err}'")
+        exit(1)
+    }
+    body = string.concat(client.response_body(resp), "")
+    if string.equals(body, "0123456789") == 0 {
+        println("FAIL: close-framed body was '${body}'")
+        exit(1)
+    }
+    println("PASS: the close-framed body was accepted whole")
+}

@@ -9,6 +9,195 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **Waiting for the peer on a client call happens in one place.** Writing the
+  request and reading one response back is now an exchange with explicit
+  states, driven by a caller. The blocking driver loops until it is done and
+  never sees a "would block", because a transport it owns outright does not
+  produce one; a driver that cannot block will hand the same descriptor to a
+  poller instead. Both run the same code, so there is one implementation of
+  what a request looks like on the wire and one of when a response has
+  finished arriving. No behavioural change.
+
+- **A completed response is turned into a response object in one place.**
+  Splitting the header block from the body, and de-chunking a chunked one, no
+  longer lives inside the blocking read path, so a driver that accumulates the
+  same bytes without blocking cannot arrive at a different answer. No
+  behavioural change.
+
+- **The request head is serialised in one place.** A driver that sends without
+  blocking has to put exactly the same bytes on the wire as the blocking one,
+  so building the head moved out of the send path into a function both can
+  call. No behavioural change.
+
+- **Response framing is decided in one place.** Reading to the end of a
+  response, rather than to the end of the connection, is what lets a
+  connection carry the next one. That logic (the header block, then chunked or
+  Content-Length or a status that carries no body) now lives in a single
+  helper instead of inside the blocking read loop, so a caller that reads the
+  same bytes in a different order cannot end up with a second opinion about
+  where a response ends. No behavioural change.
+
+- **The reverse proxy's request is now a resumable exchange.** One upstream
+  call is the only point on that path that waits on I/O, so it is the only
+  point that has to be suspendable. The request is split into the work before
+  the send, the send, and the work after it, which lets a caller that cannot
+  block drive the same code by supplying the send. Retries, breaker
+  accounting, caching and header rewriting stay inside the exchange, so the
+  proxy's semantics exist once rather than once per driver. No behavioural
+  change: the blocking server path performs the send itself, and the proxy
+  integration suites cover it unchanged.
+
+### Added
+
+- **A test for response framing from both sides**, one upstream naming two
+  lengths and one sending more than it declared.
+
+- **A test for a status line with no readable status.** The upstream can also
+  serve several other malformed shapes, which is how this one was found.
+
+- **A test for chunked request bodies and the two-lengths pair.** It drives
+  raw bytes at the server and asserts on what the handler received, alongside
+  a Content-Length request so the two framings are checked against each other.
+
+- **Tests for header injection and response splitting.** The request-side test
+  asserts against the head the upstream actually received, and the
+  response-side test reads the raw bytes off the socket, because what matters
+  is what the peer would parse rather than what the sender believed it sent.
+
+- **A test for a truncated response, and for the case it must not break.** One
+  upstream declares a length and closes short of it; the other declares no
+  framing and is ended by the close. The pair pins the distinction from both
+  sides.
+
+- **A test for the request head the client sends.** What goes on the wire is
+  the client's contract with every server and nothing asserted it: the
+  keep-alive test passes even when the client is made to send
+  `Connection: close`, because that upstream holds the socket open whatever it
+  is told. The new upstream answers with the head it received, so the request
+  line, `Host`, `Connection` and caller-set headers are all checked.
+
+- **A test for a response whose body arrives after its headers.** Every client
+  test sent a response small enough to arrive in a single segment, so a client
+  that stopped reading at the header block would have passed all of them. This
+  one forces the split and fails any client that ignores the declared length,
+  which is the guarantee that lets a connection carry more than one response.
+
+### Fixed
+
+- **The reverse proxy drops the headers a request names in its own
+  `Connection`.** Only a fixed hop-by-hop list was stripped, so a header the
+  sender marked connection-local was forwarded to the upstream anyway
+  (RFC 9110 7.6.1). A sender names a header there precisely so the next hop
+  does not see it, which means an upstream that trusts a header (an internal
+  authentication header, a client-address header) stayed reachable through an
+  intermediary that ignored the instruction. Headers not named in `Connection`
+  are forwarded exactly as before.
+
+- **A response has to say where its body ends, once.** Two `Content-Length`
+  headers that disagreed were accepted and one of them used, and a response
+  sending more bytes than it declared had the surplus delivered as part of its
+  body. Both leave bytes the response never accounted for in a connection this
+  client pools and hands to the next request, which is where the following
+  response's head is expected. A response naming two lengths, or a length that
+  is not a count of bytes, is a transport error now, and only the declared
+  body is delivered. Chunked framing carries its own end and is unchanged.
+
+  The header lookup behind this is the one the server already used, anchored
+  to the start of a line, so the two sides cannot disagree about what a
+  message declared.
+
+- **A request with more headers than the parser holds is refused, not
+  truncated.** The excess was dropped without a word, so a handler or a
+  middleware that inspects a header saw it as absent: padding a request with
+  enough headers before the interesting one was a way to hide it from whatever
+  reads it, which is a way past an authentication or content check that reads
+  a header. Too many headers is answered 431 now, and a request within the
+  count is served with all of them as before.
+
+- **A response whose status line carries no status code is reported rather
+  than returned.** The code was read with `atoi`, which accepts anything
+  beginning with a digit and wraps on overflow, so an upstream answering
+  `HTTP/1.1 999999999999 Weird` handed the caller a status of -727379969, and
+  the reverse proxy copied that onto the reply it sent to its own client. The
+  code is read as exactly three digits now (RFC 9112 4), and a line that does
+  not carry one is a transport error, so a proxy answers 502 instead of
+  forwarding a status that does not exist.
+
+- **An over-long request line or header line no longer crashes the server.**
+  Both were copied into fixed stack buffers using a length taken from the
+  request, so a long URL or a long header value wrote past the end of the
+  frame and killed the process. Any client could do it with one request. They
+  are answered 414 and 431 now, and the copies are bounded independently of
+  the caller that checks them.
+
+- **Header lines this server would read differently from the sender are
+  refused.** Whitespace between a field name and its colon (`Content-Length :
+  5`) was ignored, so this server saw no body where a laxer front end sees
+  one, and an obs-fold continuation line was accepted with the value silently
+  cut short. RFC 9112 requires rejecting both, for the reason that makes them
+  worth fixing: each one is a place where two recipients of the same bytes
+  disagree about the message.
+
+- **Request framing with no single answer is refused instead of guessed at.**
+  Two `Content-Length` headers that disagreed were accepted and the first one
+  used, leaving the rest of the body in the stream to be read as the next
+  request; a negative or non-numeric value was quietly treated as zero, with
+  the same result. Both are unrecoverable framing errors (RFC 9112 6.3) and
+  are answered 400 now, because guessing is exactly what lets a front end and
+  this server disagree about where one request ends and the next begins.
+  Duplicates that agree are still accepted, since they say the same thing.
+
+  The framing headers are also found by scanning the start of each line rather
+  than searching the whole block, so a request carrying
+  `X-Note: Content-Length: 99` is no longer read as declaring a body of 99.
+
+- **The server reads chunked request bodies, and refuses a message that
+  declares two lengths.** `Transfer-Encoding: chunked` was ignored on the way
+  in, so a chunked upload reached the handler as an empty body: the payload
+  was dropped silently, and the chunk bytes stayed in the stream to be read as
+  the start of the next request. Behind a front end that does honour the
+  header, that disagreement about where a request ends is request smuggling.
+  Chunked bodies are now decoded, using the same decoder the client already
+  used for responses, and a request carrying both `Content-Length` and
+  `Transfer-Encoding` is answered 400 rather than resolved in favour of one of
+  them, because that pair is what a smuggling attempt is built from. A chunked
+  body declares no length in advance, so one that never ends is answered 413
+  at a bounded size rather than buffered for as long as the sender keeps
+  writing, and anything arriving after the terminal chunk is kept as the next
+  pipelined request rather than folded into the body.
+
+- **A line ending can no longer be smuggled into a request or a response
+  head.** Header values, header names and request URLs were written into the
+  head verbatim, so a CR LF in any of them turned one header into several, and
+  a doubled one ended the head and began a second message the peer would act
+  on. On a request that is header injection and request smuggling (CWE-93); on
+  a response it is response splitting and cache poisoning (CWE-113). Any
+  application that puts user-supplied text into a header or a URL, which is
+  ordinary, could be made to do it. Both sides now reject the bytes: the
+  client's `set_header` and `request` fail, and the server does not emit the
+  header. Rejected rather than repaired, because sending something other than
+  what the caller asked for is its own bug.
+
+- **A response cut short of its declared length is now an error.** A server
+  that sent `Content-Length: 36` and closed after 10 bytes produced a
+  successful 200 carrying 10 bytes, which no caller could tell from a complete
+  response: a proxy forwarded the short body as whole, and a parser read
+  whatever had arrived. The same hole covered a read that timed out mid-body,
+  because the failure was only reported when no headers had arrived at all.
+  A response that declares no framing is unaffected, since there the close is
+  the framing.
+
+- **`Host` now carries the port when it is not the scheme's default.** The
+  client sent the bare host, so a request to a server on any other port named
+  a different authority than the one it was addressing, which is what a
+  virtual-hosted server routes on (RFC 9110 7.2). Found by the request-head
+  test above. A caller-set `Host` still wins, and the reverse proxy sets its
+  own, so that path was never affected.
+
 ## [0.588.0]
 
 ### Fixed

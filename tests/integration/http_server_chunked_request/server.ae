@@ -1,0 +1,20 @@
+// Echoes what the server decided the request body was, so the test asserts on
+// what a handler actually receives.
+
+import std.http
+import std.string
+
+extern http_server_start_raw(server: ptr) -> int
+
+handle(req: ptr, res: ptr, ud: ptr) {
+    body = http.request_body(req)
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "len=${string.length(body)} body=[${body}]")
+}
+
+main() {
+    s = http.http_server_create(18407)
+    http.http_server_post(s, "/upload", handle, 0)
+    _ = http_server_start_raw(s)
+}

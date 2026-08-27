@@ -1,4 +1,5 @@
 #include "aether_http_server.h"
+#include "aether_http.h"
 #include "aether_net.h"
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
@@ -206,6 +207,22 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
  * pattern silently drops anything past the first request's body
  * boundary in the same recv. */
 #define HTTP_CONN_BUF_CAP (16 * 1024)
+
+/* The parser copies the request line into a fixed buffer; this is that size,
+ * kept here so the check that answers 414 and the buffer that must hold the
+ * line cannot drift apart. */
+#define HTTP_MAX_REQUEST_LINE 2048
+
+/* The parser copies each header line into a fixed buffer; same reasoning as
+ * the request line above. */
+#define HTTP_MAX_HEADER_LINE 1024
+
+/* How many headers the parser's arrays hold. A request with more used to have
+ * the excess dropped without a word, so a handler or a middleware inspecting
+ * one of them saw it as absent: padding a request past this count was a way
+ * to hide a header from whatever reads it. Too many is refused now. */
+#define HTTP_MAX_HEADERS 50
+
 typedef struct HttpConn {
     int fd;
 #ifdef AETHER_HAS_OPENSSL
@@ -1444,9 +1461,18 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
         return NULL;
     }
     
-    char request_line[2048];
-    int line_len = line_end - raw_request;
-    strncpy(request_line, raw_request, line_len);
+    /* The request line is attacker-controlled and arbitrarily long: a URL
+     * longer than this buffer used to be copied into it anyway, off the end
+     * of the stack frame, which any client could do with one long path. The
+     * caller rejects an over-long line with 414 before reaching here; this
+     * bound is the one that has to hold whoever the caller turns out to be. */
+    char request_line[HTTP_MAX_REQUEST_LINE];
+    size_t line_len = (size_t)(line_end - raw_request);
+    if (line_len >= sizeof(request_line)) {
+        free(req);
+        return NULL;
+    }
+    memcpy(request_line, raw_request, line_len);
     request_line[line_len] = '\0';
     
     // Extract method
@@ -1502,8 +1528,8 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     req->http_version = strdup(version_start);
     
     // Parse headers
-    req->header_keys = (char**)malloc(sizeof(char*) * 50);
-    req->header_values = (char**)malloc(sizeof(char*) * 50);
+    req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+    req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
     req->header_count = 0;
     // If either array failed to allocate, drop both and skip storing headers
     // (the loop below still runs to advance past them to the body) rather than
@@ -1524,13 +1550,19 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
             break;
         }
         
-        char header_line[1024];
-        line_len = line_end - header_start;
-        strncpy(header_line, header_start, line_len);
+        /* A header line is attacker-controlled and arbitrarily long. Copying
+         * one longer than this buffer wrote off the end of the stack frame,
+         * which any client could do with one long header value. The caller
+         * answers 431 before reaching here; this bound is what holds if some
+         * other caller does not. */
+        char header_line[HTTP_MAX_HEADER_LINE];
+        line_len = (size_t)(line_end - header_start);
+        if (line_len >= sizeof(header_line)) break;
+        memcpy(header_line, header_start, line_len);
         header_line[line_len] = '\0';
         
         char* colon = strchr(header_line, ':');
-        if (colon && req->header_count < 50 && req->header_keys && req->header_values) {
+        if (colon && req->header_count < HTTP_MAX_HEADERS && req->header_keys && req->header_values) {
             *colon = '\0';
             char* key = header_line;
             char* value = colon + 1;
@@ -1762,7 +1794,15 @@ void http_response_set_status(HttpServerResponse* res, int code) {
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
-    if (!res || !key || !value) return;
+    if (!res) return;
+    /* A header carrying a line ending would be written into the response head
+     * verbatim and read back by the client as headers of its own, and a
+     * doubled one ends the head and starts a second response (CWE-113). An
+     * application that reflects anything a user supplied into a header is the
+     * ordinary way this happens. The header is dropped rather than repaired:
+     * this returns void, and emitting something other than what was asked for
+     * is worse than emitting nothing. */
+    if (!http_header_name_ok(key) || !http_header_value_ok(value)) return;
 
     // Lazy-allocate the header arrays. http_response_create() sets them
     // up eagerly, but external callers constructing the response struct
@@ -1831,7 +1871,9 @@ void http_response_clear_headers(HttpServerResponse* res) {
 //
 // 50-header cap is shared with `set_header`; over-cap silently drops.
 void http_response_add_header(HttpServerResponse* res, const char* key, const char* value) {
-    if (!res || !key || !value) return;
+    if (!res) return;
+    /* Same rejection as set_header: a line ending here splits the response. */
+    if (!http_header_name_ok(key) || !http_header_value_ok(value)) return;
     if (!res->header_keys || !res->header_values) {
         res->header_keys = (char**)calloc(50, sizeof(char*));
         res->header_values = (char**)calloc(50, sizeof(char*));
@@ -2882,6 +2924,119 @@ static void conn_resolve_addrs(HttpConn* c) {
     }
 }
 
+/* Is every header line in this block one this server will read the same way
+ * as whoever sent it?
+ *
+ * Two shapes are rejected rather than interpreted, because interpreting them
+ * is where recipients disagree and a disagreement about a framing header is
+ * request smuggling:
+ *
+ *   "Content-Length : 5"  whitespace between the name and the colon. RFC 9112
+ *                         5.1 requires a server to reject it. Ignoring it,
+ *                         which is what an exact-match scan does, means this
+ *                         server sees no body where a laxer front end sees one.
+ *
+ *   "X-Fold: a\r\n b"      an obs-fold continuation. RFC 9112 5.2 deprecated it
+ *                         and requires a server that does not support it to
+ *                         reject the message rather than guess at where the
+ *                         value ends.
+ */
+static int conn_headers_well_formed(const char* block, const char* end) {
+    int count = 0;
+    for (const char* line = block; line && line < end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
+        const char* line_end = eol ? eol : end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        if (line_len >= HTTP_MAX_HEADER_LINE) return -1;    /* too long to hold */
+        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return -1;
+        if (line_len > 0) {
+            if (line[0] == ' ' || line[0] == '\t') return 0;   /* obs-fold */
+            const char* colon = (const char*)memchr(line, ':', line_len);
+            if (!colon) return 0;                              /* no field name */
+            if (colon > line && (colon[-1] == ' ' || colon[-1] == '\t')) return 0;
+            size_t name_len = (size_t)(colon - line);
+            if (name_len == 0) return 0;
+            char name[128];
+            if (name_len >= sizeof(name)) return 0;
+            memcpy(name, line, name_len);
+            name[name_len] = '\0';
+            if (!http_header_name_ok(name)) return 0;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return 1;
+}
+
+/* Content-Length is a plain count of digits. Anything else, a sign, a spelled
+ * number, a value that will not fit, has no length in it, and RFC 9112 6.3
+ * calls that unrecoverable rather than something to guess at. */
+static int conn_parse_content_length(const char* text, long* out) {
+    if (!text || !*text) return -1;
+    long value = 0;
+    for (const unsigned char* c = (const unsigned char*)text; *c; c++) {
+        if (*c < '0' || *c > '9') return -1;
+        if (value > (LONG_MAX - (*c - '0')) / 10) return -1;
+        value = value * 10 + (*c - '0');
+    }
+    *out = value;
+    return 0;
+}
+
+/* The largest chunked request body this server will buffer. A chunked body
+ * declares no length in advance, so nothing else bounds it. */
+#define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
+
+static void conn_send_headers_too_large(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 431 Request Header Fields Too Large\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 24\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "header line is too long\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
+static void conn_send_uri_too_long(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 414 URI Too Long\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 26\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request line is too long\r\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
+static void conn_send_payload_too_large(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 413 Payload Too Large\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 34\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request body exceeds server limit\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
+/* Refuse a message whose framing this server will not guess at, and say so
+ * before closing. A framing error cannot be answered on a kept-alive
+ * connection, because where the next request starts is exactly what is in
+ * doubt. */
+static void conn_send_bad_framing(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 45\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request framing is ambiguous or unsupported\r\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     long t_start = http_now_us();
@@ -2963,12 +3118,70 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     int request_total = header_size;
 
     /* Resolve Content-Length and ensure the full body is buffered. */
-    const char* cl_hdr = http_strcasestr(conn->buf + conn->read_pos,
-                                         "Content-Length:");
+    const char* head_start = conn->buf + conn->read_pos;
+    /* A request line longer than the parser's line buffer is answered rather
+     * than dropped, and it is checked here so the parser's own bound is never
+     * the thing a client reaches. */
+    {
+        const char* rl_end = (const char*)memchr(head_start, '\n',
+                                                 (size_t)(hdr_end - head_start));
+        size_t rl_len = rl_end ? (size_t)(rl_end - head_start)
+                               : (size_t)(hdr_end - head_start);
+        if (rl_len >= HTTP_MAX_REQUEST_LINE) {
+            conn_send_uri_too_long(conn);
+            return 0;
+        }
+    }
+    /* Headers first: a line this server would read differently from the peer
+     * that sent it is refused before its framing is trusted. */
+    {
+        const char* first_header = (const char*)memchr(head_start, '\n',
+                                                       (size_t)(hdr_end - head_start));
+        if (first_header) {
+            int hdr_ok = conn_headers_well_formed(first_header + 1, hdr_end);
+            if (hdr_ok < 0) { conn_send_headers_too_large(conn); return 0; }
+            if (!hdr_ok)    { conn_send_bad_framing(conn);       return 0; }
+        }
+    }
+    char cl_value[64];
+    int cl_differing = 0;
+    int cl_count = http_find_header_in_block(head_start, hdr_end, "Content-Length",
+                                    cl_value, sizeof(cl_value), &cl_differing);
     long content_length = 0;
-    if (cl_hdr && cl_hdr < hdr_end) {
-        content_length = strtol(cl_hdr + 15, NULL, 10);
-        if (content_length < 0) content_length = 0;
+    if (cl_count > 0) {
+        /* Two lengths that disagree leave no single answer about where this
+         * message ends, and a value that is not a count of bytes leaves none
+         * either. Both are unrecoverable rather than something to pick from
+         * (RFC 9112 6.3): guessing is what lets a front end and this server
+         * disagree about where one request stops and the next begins. */
+        if (cl_differing || conn_parse_content_length(cl_value, &content_length) != 0) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
+    }
+
+    /* Transfer-Encoding decides where the body ends, and when it is present
+     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
+     * upload as having no body at all: the payload was dropped, and the chunk
+     * bytes stayed in the stream to be parsed as the beginning of the next
+     * request. Against a front end that does honour the header, that
+     * disagreement about where one request ends is request smuggling.
+     *
+     * A message carrying both is refused rather than resolved, because the
+     * two lengths are exactly what a smuggling pair is built from and no
+     * legitimate sender emits both. */
+    char te_value[128];
+    int te_count = http_find_header_in_block(head_start, hdr_end, "Transfer-Encoding",
+                                    te_value, sizeof(te_value), NULL);
+    int te_chunked = 0;
+    if (te_count > 0) {
+        te_chunked = http_strcasestr(te_value, "chunked") != NULL;
+        /* Both lengths present, or a coding this server cannot decode: refuse
+         * the message rather than pick one of the two answers. */
+        if (cl_count > 0 || !te_chunked) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
     }
     /* #626 (upload half) — streaming-body decision. A body whose
      * declared Content-Length exceeds one connection buffer (16 KiB)
@@ -2983,7 +3196,65 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * "small" body is exactly "fits without growing the buffer". */
     int stream_body = (content_length > HTTP_CONN_BUF_CAP);
 
-    if (content_length > 0 && !stream_body) {
+    /* A chunked body declares its length as it goes, so read until the
+     * terminal chunk is in the buffer and then decode in place. The decoded
+     * payload is shorter than the framing that carried it, so it fits where
+     * the chunks were, and the request is left looking exactly like one that
+     * arrived with a Content-Length. */
+    if (te_chunked) {
+        size_t frame_len = 0;
+        for (;;) {
+            int have = conn->write_pos - conn->read_pos - header_size;
+            if (have > 0) {
+                frame_len = http_chunked_frame_len(
+                    conn->buf + conn->read_pos + header_size, (size_t)have);
+                if (frame_len > 0) break;
+                /* A chunked body declares no length up front, so the only
+                 * bound on it is the one this server imposes. Without one, a
+                 * sender that never emits the terminal chunk grows this
+                 * buffer for as long as it cares to keep writing. */
+                if (have > HTTP_MAX_CHUNKED_BODY) {
+                    conn_send_payload_too_large(conn);
+                    return 0;
+                }
+            }
+            if (conn_buf_ensure(conn, conn->write_pos + HTTP_CONN_BUF_CAP + 1) != 0)
+                return 0;
+            int space = conn->buf_cap - conn->write_pos - 1;
+            if (space <= 0) return 0;
+            int n = conn_recv(conn, conn->buf + conn->write_pos, space);
+            if (n <= 0) return 0;              /* closed or timed out mid-body */
+            conn->write_pos += n;
+            conn->buf[conn->write_pos] = '\0';
+        }
+
+        size_t decoded_len = 0;
+        char* body_start = conn->buf + conn->read_pos + header_size;
+        char* decoded = http_dechunk(body_start, frame_len, &decoded_len);
+        if (!decoded) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
+        /* Anything past the terminal chunk is the next pipelined request, not
+         * this body, and it has to survive the rewrite. The decoded payload is
+         * never longer than the framing that carried it, so the tail moves
+         * down and nothing overlaps what has not been copied out yet. */
+        size_t tail_len = (size_t)(conn->write_pos - conn->read_pos - header_size)
+                        - frame_len;
+        if (tail_len > 0)
+            memmove(body_start + decoded_len, body_start + frame_len, tail_len);
+        memcpy(body_start, decoded, decoded_len);
+        free(decoded);
+
+        conn->write_pos = conn->read_pos + header_size
+                        + (int)decoded_len + (int)tail_len;
+        conn->buf[conn->write_pos] = '\0';
+        content_length = (long)decoded_len;
+        request_total  = header_size + (int)decoded_len;
+        stream_body    = 0;
+    }
+
+    if (!te_chunked && content_length > 0 && !stream_body) {
         int needed_total = header_size + (int)content_length;
         /* Make sure the buffer can hold (read_pos + needed_total)
          * bytes plus a NUL. */
