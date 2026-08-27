@@ -59,6 +59,12 @@ version number before tagging the release.
   directory on every run. Each step of the handler now tolerates its own
   failure.
 
+- **`ws_connect` works on Windows.** Winsock requires `WSAStartup` before any
+  socket call, and the only thing that had ever performed it was creating a
+  server. A client-only program never does that, so the first socket call
+  failed and the dial returned null with nothing to explain why. The client now
+  runs the same guarded, idempotent initialiser the server does.
+
 ## [0.589.0]
 
 

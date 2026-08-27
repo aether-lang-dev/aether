@@ -2693,6 +2693,13 @@ static char* ws_expected_accept(const char* client_key) {
 }
 
 HttpWsConn* http_ws_connect(const char* url) {
+    /* Winsock needs WSAStartup before any socket call, and until now the only
+     * thing that did it was creating a server. A client-only program never
+     * does that, so on Windows socket() failed here and the dial returned
+     * null with nothing to show for it. Harmless everywhere else: the
+     * initialiser is guarded and idempotent. */
+    http_server_init();
+
 #ifndef AETHER_HAS_OPENSSL
     (void)url;
     return NULL;   /* the accept hash needs SHA-1 */
