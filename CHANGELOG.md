@@ -85,6 +85,14 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A request with more headers than the parser holds is refused, not
+  truncated.** The excess was dropped without a word, so a handler or a
+  middleware that inspects a header saw it as absent: padding a request with
+  enough headers before the interesting one was a way to hide it from whatever
+  reads it, which is a way past an authentication or content check that reads
+  a header. Too many headers is answered 431 now, and a request within the
+  count is served with all of them as before.
+
 - **A response whose status line carries no status code is reported rather
   than returned.** The code was read with `atoi`, which accepts anything
   beginning with a digit and wraps on overflow, so an upstream answering

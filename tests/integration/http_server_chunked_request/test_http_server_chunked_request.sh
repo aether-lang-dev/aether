@@ -151,4 +151,30 @@ expect_body "the server stopped serving after the oversized requests" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' \
     'len=5 body=\[hello\]'
 
-echo "  [PASS] http_server_chunked_request: framing, header shape and oversized lines all refused safely"
+# More headers than the parser holds used to have the excess dropped in
+# silence, so a handler or a middleware inspecting one of them saw it as
+# absent. Padding a request past the count was a way to hide a header from
+# whatever reads it.
+{
+    printf 'GET /upload HTTP/1.1\r\nHost: x\r\n'
+    i=0
+    while [ "$i" -lt 60 ]; do printf 'X-Pad%d: v\r\n' "$i"; i=$((i + 1)); done
+    printf 'X-Marker: present\r\nConnection: close\r\n\r\n'
+} > "$TMPDIR/manyhdr.req"
+send "$TMPDIR/manyhdr.req" "$TMPDIR/manyhdr.out"
+grep -q "^HTTP/1.1 431" "$TMPDIR/manyhdr.out" \
+    || { head -2 "$TMPDIR/manyhdr.out"; fail "a request with more headers than the parser holds was not refused"; }
+
+# The count that fits is still served, headers and all, so the limit refuses
+# rather than simply becoming a smaller limit.
+{
+    printf 'POST /upload HTTP/1.1\r\nHost: x\r\n'
+    i=0
+    while [ "$i" -lt 40 ]; do printf 'X-Pad%d: v\r\n' "$i"; i=$((i + 1)); done
+    printf 'Content-Length: 5\r\nConnection: close\r\n\r\nhello'
+} > "$TMPDIR/fithdr.req"
+send "$TMPDIR/fithdr.req" "$TMPDIR/fithdr.out"
+grep -q "len=5 body=\[hello\]" "$TMPDIR/fithdr.out" \
+    || { cat "$TMPDIR/fithdr.out"; fail "a request within the header count was not served"; }
+
+echo "  [PASS] http_server_chunked_request: framing, header shape, size and count all refused safely"

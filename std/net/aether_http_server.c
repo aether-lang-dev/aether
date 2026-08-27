@@ -217,6 +217,12 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
  * the request line above. */
 #define HTTP_MAX_HEADER_LINE 1024
 
+/* How many headers the parser's arrays hold. A request with more used to have
+ * the excess dropped without a word, so a handler or a middleware inspecting
+ * one of them saw it as absent: padding a request past this count was a way
+ * to hide a header from whatever reads it. Too many is refused now. */
+#define HTTP_MAX_HEADERS 50
+
 typedef struct HttpConn {
     int fd;
 #ifdef AETHER_HAS_OPENSSL
@@ -1522,8 +1528,8 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     req->http_version = strdup(version_start);
     
     // Parse headers
-    req->header_keys = (char**)malloc(sizeof(char*) * 50);
-    req->header_values = (char**)malloc(sizeof(char*) * 50);
+    req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+    req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
     req->header_count = 0;
     // If either array failed to allocate, drop both and skip storing headers
     // (the loop below still runs to advance past them to the body) rather than
@@ -1556,7 +1562,7 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
         header_line[line_len] = '\0';
         
         char* colon = strchr(header_line, ':');
-        if (colon && req->header_count < 50 && req->header_keys && req->header_values) {
+        if (colon && req->header_count < HTTP_MAX_HEADERS && req->header_keys && req->header_values) {
             *colon = '\0';
             char* key = header_line;
             char* value = colon + 1;
@@ -2936,6 +2942,7 @@ static void conn_resolve_addrs(HttpConn* c) {
  *                         value ends.
  */
 static int conn_headers_well_formed(const char* block, const char* end) {
+    int count = 0;
     for (const char* line = block; line && line < end; ) {
         const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
         const char* line_end = eol ? eol : end;
@@ -2943,6 +2950,7 @@ static int conn_headers_well_formed(const char* block, const char* end) {
         if (line_len && line[line_len - 1] == '\r') line_len--;
 
         if (line_len >= HTTP_MAX_HEADER_LINE) return -1;    /* too long to hold */
+        if (line_len > 0 && ++count > HTTP_MAX_HEADERS) return -1;
         if (line_len > 0) {
             if (line[0] == ' ' || line[0] == '\t') return 0;   /* obs-fold */
             const char* colon = (const char*)memchr(line, ':', line_len);
