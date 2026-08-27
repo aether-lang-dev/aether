@@ -2893,6 +2893,21 @@ static void conn_resolve_addrs(HttpConn* c) {
     }
 }
 
+/* Refuse a message whose framing this server will not guess at, and say so
+ * before closing. A framing error cannot be answered on a kept-alive
+ * connection, because where the next request starts is exactly what is in
+ * doubt. */
+static void conn_send_bad_framing(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 45\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request framing is ambiguous or unsupported\r\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
 static int handle_one_request(HttpServer* server, HttpConn* conn,
                               int requests_served, int max_requests) {
     long t_start = http_now_us();
@@ -2981,6 +2996,37 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         content_length = strtol(cl_hdr + 15, NULL, 10);
         if (content_length < 0) content_length = 0;
     }
+
+    /* Transfer-Encoding decides where the body ends, and when it is present
+     * Content-Length does not (RFC 9112 6.3). Ignoring it read a chunked
+     * upload as having no body at all: the payload was dropped, and the chunk
+     * bytes stayed in the stream to be parsed as the beginning of the next
+     * request. Against a front end that does honour the header, that
+     * disagreement about where one request ends is request smuggling.
+     *
+     * A message carrying both is refused rather than resolved, because the
+     * two lengths are exactly what a smuggling pair is built from and no
+     * legitimate sender emits both. */
+    const char* te_hdr = http_strcasestr(conn->buf + conn->read_pos,
+                                         "Transfer-Encoding:");
+    int te_chunked = 0;
+    if (te_hdr && te_hdr < hdr_end) {
+        const char* eol = strstr(te_hdr, "\r\n");
+        if (!eol || eol > hdr_end) eol = hdr_end;
+        char te_value[128];
+        size_t vl = (size_t)(eol - te_hdr);
+        if (vl >= sizeof(te_value)) vl = sizeof(te_value) - 1;
+        memcpy(te_value, te_hdr, vl);
+        te_value[vl] = '\0';
+        te_chunked = http_strcasestr(te_value, "chunked") != NULL;
+
+        /* Both lengths present, or a coding this server cannot decode: refuse
+         * the message rather than pick one of the two answers. */
+        if ((cl_hdr && cl_hdr < hdr_end) || !te_chunked) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
+    }
     /* #626 (upload half) — streaming-body decision. A body whose
      * declared Content-Length exceeds one connection buffer (16 KiB)
      * is NOT fully buffered: we parse the headers, then hand the
@@ -2994,7 +3040,47 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * "small" body is exactly "fits without growing the buffer". */
     int stream_body = (content_length > HTTP_CONN_BUF_CAP);
 
-    if (content_length > 0 && !stream_body) {
+    /* A chunked body declares its length as it goes, so read until the
+     * terminal chunk is in the buffer and then decode in place. The decoded
+     * payload is shorter than the framing that carried it, so it fits where
+     * the chunks were, and the request is left looking exactly like one that
+     * arrived with a Content-Length. */
+    char* dechunked = NULL;
+    if (te_chunked) {
+        for (;;) {
+            int have = conn->write_pos - conn->read_pos - header_size;
+            if (have > 0 &&
+                http_chunked_complete(conn->buf + conn->read_pos + header_size,
+                                      (size_t)have))
+                break;
+            if (conn_buf_ensure(conn, conn->write_pos + HTTP_CONN_BUF_CAP + 1) != 0)
+                return 0;
+            int space = conn->buf_cap - conn->write_pos - 1;
+            if (space <= 0) return 0;          /* body larger than we will hold */
+            int n = conn_recv(conn, conn->buf + conn->write_pos, space);
+            if (n <= 0) return 0;              /* closed or timed out mid-body */
+            conn->write_pos += n;
+            conn->buf[conn->write_pos] = '\0';
+        }
+        size_t chunk_len = (size_t)(conn->write_pos - conn->read_pos - header_size);
+        size_t decoded_len = 0;
+        dechunked = http_dechunk(conn->buf + conn->read_pos + header_size,
+                                 chunk_len, &decoded_len);
+        if (!dechunked) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
+        memcpy(conn->buf + conn->read_pos + header_size, dechunked, decoded_len);
+        conn->write_pos = conn->read_pos + header_size + (int)decoded_len;
+        conn->buf[conn->write_pos] = '\0';
+        free(dechunked);
+        dechunked = NULL;
+        content_length = (long)decoded_len;
+        request_total  = header_size + (int)decoded_len;
+        stream_body    = 0;
+    }
+
+    if (!te_chunked && content_length > 0 && !stream_body) {
         int needed_total = header_size + (int)content_length;
         /* Make sure the buffer can hold (read_pos + needed_total)
          * bytes plus a NUL. */

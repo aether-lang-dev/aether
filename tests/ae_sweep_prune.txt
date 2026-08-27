@@ -120,6 +120,7 @@ tests/integration/http_server_background_quiet/
 tests/integration/http_server_connect_tunnel/
 tests/integration/http_server_h2_middleware/
 tests/integration/http_server_h2_tls/
+tests/integration/http_server_chunked_request/
 tests/integration/http_server_keepalive/
 tests/integration/http_server_observability/
 tests/integration/http_server_ops/

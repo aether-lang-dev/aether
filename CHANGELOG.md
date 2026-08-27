@@ -53,6 +53,10 @@ version number before tagging the release.
 
 ### Added
 
+- **A test for chunked request bodies and the two-lengths pair.** It drives
+  raw bytes at the server and asserts on what the handler received, alongside
+  a Content-Length request so the two framings are checked against each other.
+
 - **Tests for header injection and response splitting.** The request-side test
   asserts against the head the upstream actually received, and the
   response-side test reads the raw bytes off the socket, because what matters
@@ -77,6 +81,17 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **The server reads chunked request bodies, and refuses a message that
+  declares two lengths.** `Transfer-Encoding: chunked` was ignored on the way
+  in, so a chunked upload reached the handler as an empty body: the payload
+  was dropped silently, and the chunk bytes stayed in the stream to be read as
+  the start of the next request. Behind a front end that does honour the
+  header, that disagreement about where a request ends is request smuggling.
+  Chunked bodies are now decoded, using the same decoder the client already
+  used for responses, and a request carrying both `Content-Length` and
+  `Transfer-Encoding` is answered 400 rather than resolved in favour of one of
+  them, because that pair is what a smuggling attempt is built from.
 
 - **A line ending can no longer be smuggled into a request or a response
   head.** Header values, header names and request URLs were written into the

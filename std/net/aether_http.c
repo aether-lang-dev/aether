@@ -1076,14 +1076,13 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
  * buffer (NUL-terminated; *out_len excludes the NUL) or NULL on malformed
  * framing (caller then keeps the raw body). Binary-safe (copies by
  * length). Defined below. */
-static char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 static int http_value_has_chunked(const char* v);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
 /* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
  * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
  * which can appear inside chunk data. */
-static int http_chunked_complete(const char* buf, size_t len) {
+int http_chunked_complete(const char* buf, size_t len) {
     size_t off = 0;
     for (;;) {
         const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
@@ -2578,7 +2577,7 @@ static int http_value_has_chunked(const char* v) {
  * the payload is copied by length, never scanned for NUL. Chunk
  * extensions (`<size>;name=val`) are skipped; trailing trailers after
  * the terminating `0` chunk are ignored. */
-static char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
+char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
     if (!in || !out_len) return NULL;
     char* out = (char*)malloc(in_len + 1);   /* decoded payload <= input */
     if (!out) return NULL;
