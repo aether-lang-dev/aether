@@ -2726,7 +2726,16 @@ HttpWsConn* http_ws_connect(const char* url) {
     unsigned char nonce[16];
     {
         static unsigned int kseed = 0;
-        if (kseed == 0) kseed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
+        if (kseed == 0) {
+            /* getpid lives in <process.h> on MinGW, not <unistd.h>; the Win32
+             * spelling avoids pulling in another header for one call. */
+#ifdef _WIN32
+            unsigned int pid = (unsigned int)GetCurrentProcessId();
+#else
+            unsigned int pid = (unsigned int)getpid();
+#endif
+            kseed = (unsigned int)time(NULL) ^ pid;
+        }
         for (int i = 0; i < 16; i++) {
             kseed = kseed * 1103515245u + 12345u;
             nonce[i] = (unsigned char)((kseed >> 16) & 0xFF);
