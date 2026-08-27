@@ -92,6 +92,8 @@ tests/integration/http_client_forward_proxy/
 tests/integration/http_client_insecure_tls/
 tests/integration/http_client_keepalive/
 tests/integration/http_client_redirects/
+tests/integration/http_client_request_head/
+tests/integration/http_client_split_body/
 tests/integration/http_client_stream/
 tests/integration/http_client_stream_chunked/
 tests/integration/http_external_ptr/
