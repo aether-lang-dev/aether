@@ -1550,9 +1550,9 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
          * answers 431 before reaching here; this bound is what holds if some
          * other caller does not. */
         char header_line[HTTP_MAX_HEADER_LINE];
-        line_len = (int)(line_end - header_start);
-        if (line_len < 0 || (size_t)line_len >= sizeof(header_line)) break;
-        memcpy(header_line, header_start, (size_t)line_len);
+        line_len = (size_t)(line_end - header_start);
+        if (line_len >= sizeof(header_line)) break;
+        memcpy(header_line, header_start, line_len);
         header_line[line_len] = '\0';
         
         char* colon = strchr(header_line, ':');
