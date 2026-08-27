@@ -167,6 +167,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <netinet/tcp.h>       /* TCP_CORK / TCP_NOPUSH for sendfile coalescing */
+    #include <netdb.h>             /* getaddrinfo, for the WebSocket client dial */
     #include <unistd.h>
     #include <fcntl.h>
     #include <limits.h>
@@ -2198,6 +2199,14 @@ struct HttpWsConn {
      * convenience. The opcode of the in-progress message is
      * carried across continuation frames. */
     int    msg_opcode;    /* 0x1 text, 0x2 binary */
+    /* RFC 6455 s5.3: a CLIENT must mask every frame it sends; a server must
+     * not. Set for handles produced by http_ws_connect, clear for the ones
+     * the server upgrade produces, so both sides share one send path. */
+    int    mask_tx;
+    /* Owned by this handle when it came from http_ws_connect (the client
+     * dialled the socket, so nothing else will free it). Server-side handles
+     * borrow their HttpConn from the request loop and leave this 0. */
+    int    owns_conn;
 };
 
 void http_server_websocket(HttpServer* server, const char* path,
@@ -2352,19 +2361,23 @@ static int ws_recv_exact(HttpConn* conn, void* buf, int n) {
 
 /* Send a server-to-client frame (unmasked). opcode + payload bytes.
  * Returns 0 on success, -1 on transport error. */
-static int ws_send_frame(HttpConn* conn, int opcode,
-                         const void* payload, int payload_len) {
-    unsigned char hdr[10];
+/* `mask` is RFC 6455 s5.3: client-to-server frames MUST be masked with a
+ * fresh 32-bit key, server-to-client frames MUST NOT be. The receive path
+ * already handles both, so this is the only asymmetry between the two ends. */
+static int ws_send_frame_masked(HttpConn* conn, int opcode,
+                                const void* payload, int payload_len, int mask) {
+    unsigned char hdr[14];   /* 2 + 8 length + 4 mask key */
     int hlen = 0;
     hdr[hlen++] = (unsigned char)(0x80 | (opcode & 0x0F));  /* FIN=1 */
+    unsigned char mbit = mask ? 0x80 : 0x00;
     if (payload_len < 126) {
-        hdr[hlen++] = (unsigned char)payload_len;
+        hdr[hlen++] = (unsigned char)(mbit | (unsigned char)payload_len);
     } else if (payload_len <= 0xFFFF) {
-        hdr[hlen++] = 126;
+        hdr[hlen++] = (unsigned char)(mbit | 126);
         hdr[hlen++] = (unsigned char)((payload_len >> 8) & 0xFF);
         hdr[hlen++] = (unsigned char)(payload_len & 0xFF);
     } else {
-        hdr[hlen++] = 127;
+        hdr[hlen++] = (unsigned char)(mbit | 127);
         unsigned long long pl = (unsigned long long)payload_len;
         hdr[hlen++] = (unsigned char)((pl >> 56) & 0xFF);
         hdr[hlen++] = (unsigned char)((pl >> 48) & 0xFF);
@@ -2375,9 +2388,42 @@ static int ws_send_frame(HttpConn* conn, int opcode,
         hdr[hlen++] = (unsigned char)((pl >> 8) & 0xFF);
         hdr[hlen++] = (unsigned char)(pl & 0xFF);
     }
+    unsigned char key[4];
+    if (mask) {
+        /* A per-frame key. RFC 6455 wants it unpredictable; this is a
+         * framing requirement rather than a security boundary (the mask
+         * exists to defeat proxy cache-poisoning, not to hide payload),
+         * so a cheap source is appropriate and avoids pulling the CSPRNG
+         * into the send path. */
+        static unsigned int seed = 0;
+        if (seed == 0) seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)conn;
+        for (int i = 0; i < 4; i++) {
+            seed = seed * 1103515245u + 12345u;
+            key[i] = (unsigned char)((seed >> 16) & 0xFF);
+            hdr[hlen++] = key[i];
+        }
+    }
+
     if (conn_send(conn, hdr, hlen) != hlen) return -1;
     if (payload_len > 0) {
-        if (conn_send(conn, payload, payload_len) != payload_len) return -1;
+        if (!mask) {
+            if (conn_send(conn, payload, payload_len) != payload_len) return -1;
+        } else {
+            /* Mask into a scratch buffer rather than in place: `payload` is
+             * the caller's and must not be scribbled on. Chunked so a large
+             * frame does not need a second full-size allocation. */
+            unsigned char tmp[4096];
+            const unsigned char* src = (const unsigned char*)payload;
+            int done = 0;
+            while (done < payload_len) {
+                int chunk = payload_len - done;
+                if (chunk > (int)sizeof(tmp)) chunk = (int)sizeof(tmp);
+                for (int i = 0; i < chunk; i++)
+                    tmp[i] = (unsigned char)(src[done + i] ^ key[(done + i) & 3]);
+                if (conn_send(conn, tmp, chunk) != chunk) return -1;
+                done += chunk;
+            }
+        }
     }
     return 0;
 }
@@ -2385,12 +2431,13 @@ static int ws_send_frame(HttpConn* conn, int opcode,
 int http_ws_send_text(HttpWsConn* ws, const char* text) {
     if (!ws || !ws->conn || ws->closed) return -1;
     int n = text ? (int)strlen(text) : 0;
-    return ws_send_frame(ws->conn, WS_OP_TEXT, text ? text : "", n);
+    return ws_send_frame_masked(ws->conn, WS_OP_TEXT, text ? text : "", n,
+                                ws->mask_tx);
 }
 
 int http_ws_send_binary(HttpWsConn* ws, const void* data, int len) {
     if (!ws || !ws->conn || ws->closed) return -1;
-    return ws_send_frame(ws->conn, WS_OP_BIN, data, len);
+    return ws_send_frame_masked(ws->conn, WS_OP_BIN, data, len, ws->mask_tx);
 }
 
 void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
@@ -2406,7 +2453,7 @@ void http_ws_close(HttpWsConn* ws, int code, const char* reason) {
         if (rn > 123) rn = 123;
         memcpy(payload + 2, reason, rn);
     }
-    ws_send_frame(ws->conn, WS_OP_CLOSE, payload, 2 + rn);
+    ws_send_frame_masked(ws->conn, WS_OP_CLOSE, payload, 2 + rn, ws->mask_tx);
     ws->closed = 1;
 }
 
@@ -2493,7 +2540,8 @@ int http_ws_recv(HttpWsConn* ws) {
             /* Respond with a pong carrying the same payload (RFC 6455
              * §5.5.3). Free our buffer afterwards; caller doesn't see
              * control frames. */
-            ws_send_frame(ws->conn, WS_OP_PONG, frame_buf, (int)pl);
+            ws_send_frame_masked(ws->conn, WS_OP_PONG, frame_buf, (int)pl,
+                                 ws->mask_tx);
             aether_caps_free(frame_buf, frame_cap);
             continue;
         }
@@ -2504,7 +2552,8 @@ int http_ws_recv(HttpWsConn* ws) {
         if (opcode == WS_OP_CLOSE) {
             /* Echo close frame back (RFC 6455 §5.5.1) and report
              * to caller. */
-            ws_send_frame(ws->conn, WS_OP_CLOSE, frame_buf, (int)pl);
+            ws_send_frame_masked(ws->conn, WS_OP_CLOSE, frame_buf, (int)pl,
+                                 ws->mask_tx);
             aether_caps_free(frame_buf, frame_cap);
             ws->closed = 1;
             return -1;
@@ -2547,6 +2596,226 @@ int http_ws_recv(HttpWsConn* ws) {
 #include <openssl/sha.h>
 extern char* cryptography_base64_encode_raw(const char* data, int length);
 #endif
+
+/* ---------------------------------------------------------------- *
+ * WebSocket CLIENT (#1764 / asks/websocket-client-for-bidi.md)
+ *
+ * Everything below the handshake is shared with the server: the frame codec,
+ * the reassembly buffer, ping/pong and the close sequence all live on
+ * HttpWsConn and do not care which end dialled. The only genuinely new work
+ * is originating the connection —
+ *
+ *   1. dial the host,
+ *   2. send GET + Upgrade + a random Sec-WebSocket-Key,
+ *   3. read 101 and check Sec-WebSocket-Accept == base64(sha1(key + GUID)),
+ *   4. wrap the socket in an HttpConn and hand it to the existing codec.
+ *
+ * — plus masking on send, which is on ws_send_frame_masked above.
+ *
+ * ws:// only for now, deliberately: wss:// wants the client's TLS path and is
+ * a separate change. A wss:// URL is refused rather than silently downgraded.
+ * ---------------------------------------------------------------- */
+
+/* Parse ws://host[:port][/path] into its parts. Returns 0 on success.
+ * `path` defaults to "/" and `port` to 80, matching the scheme default. */
+static int ws_parse_url(const char* url, char* host, size_t host_sz,
+                        int* port, char* path, size_t path_sz) {
+    if (!url || !host || !port || !path) return -1;
+    const char* p = url;
+    if (strncmp(p, "ws://", 5) == 0) {
+        p += 5;
+    } else if (strncmp(p, "wss://", 6) == 0) {
+        return -2;   /* caller reports "wss not supported yet" distinctly */
+    } else {
+        return -1;
+    }
+
+    const char* slash = strchr(p, '/');
+    const char* hostend = slash ? slash : (p + strlen(p));
+
+    /* Optional :port, scanned inside the authority only so a path
+     * containing ':' cannot be mistaken for one. */
+    const char* colon = NULL;
+    for (const char* q = p; q < hostend; q++) if (*q == ':') colon = q;
+
+    size_t hlen = (size_t)((colon ? colon : hostend) - p);
+    if (hlen == 0 || hlen >= host_sz) return -1;
+    memcpy(host, p, hlen);
+    host[hlen] = '\0';
+
+    *port = 80;
+    if (colon) {
+        char portbuf[16];
+        size_t plen = (size_t)(hostend - colon - 1);
+        if (plen == 0 || plen >= sizeof(portbuf)) return -1;
+        memcpy(portbuf, colon + 1, plen);
+        portbuf[plen] = '\0';
+        *port = atoi(portbuf);
+        if (*port <= 0 || *port > 65535) return -1;
+    }
+
+    if (slash) {
+        if (strlen(slash) >= path_sz) return -1;
+        snprintf(path, path_sz, "%s", slash);
+    } else {
+        snprintf(path, path_sz, "/");
+    }
+    return 0;
+}
+
+/* base64(sha1(key + GUID)), the value the server must echo back. Returns a
+ * malloc'd string the caller frees, or NULL. Mirrors ws_send_handshake's
+ * computation exactly — including that the base64 wrapper is UNPADDED, so the
+ * single '=' that pads 20 bytes to a multiple of 4 is appended here too. */
+static char* ws_expected_accept(const char* client_key) {
+#ifdef AETHER_HAS_OPENSSL
+    static const char* GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    char concat[256];
+    int n = snprintf(concat, sizeof(concat), "%s%s", client_key, GUID);
+    if (n <= 0 || n >= (int)sizeof(concat)) return NULL;
+    unsigned char digest[SHA_DIGEST_LENGTH];
+    SHA1((const unsigned char*)concat, (size_t)n, digest);
+    char* b64 = cryptography_base64_encode_raw((const char*)digest,
+                                               SHA_DIGEST_LENGTH);
+    if (!b64) return NULL;
+    size_t bl = strlen(b64);
+    char* out = (char*)malloc(bl + 2);
+    if (!out) { free(b64); return NULL; }
+    memcpy(out, b64, bl);
+    out[bl] = '=';
+    out[bl + 1] = '\0';
+    free(b64);
+    return out;
+#else
+    (void)client_key;
+    return NULL;
+#endif
+}
+
+HttpWsConn* http_ws_connect(const char* url) {
+#ifndef AETHER_HAS_OPENSSL
+    (void)url;
+    return NULL;   /* the accept hash needs SHA-1 */
+#else
+    char host[256], path[1024];
+    int  port = 80;
+    int  pr = ws_parse_url(url, host, sizeof(host), &port, path, sizeof(path));
+    if (pr != 0) return NULL;
+
+    /* Resolve + connect. getaddrinfo rather than gethostbyname: the latter
+     * returns a pointer into a process-static struct, which two threads
+     * dialling at once would race on. */
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    char portstr[16];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return NULL;
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) { freeaddrinfo(res); return NULL; }
+    if (connect(fd, res->ai_addr, (socklen_t)res->ai_addrlen) != 0) {
+        close(fd); freeaddrinfo(res); return NULL;
+    }
+    freeaddrinfo(res);
+
+    /* Sec-WebSocket-Key: 16 random bytes, base64. Like the mask, this is a
+     * handshake nonce rather than a secret — it exists so a cached HTTP
+     * response cannot be mistaken for a successful upgrade. */
+    unsigned char nonce[16];
+    {
+        static unsigned int kseed = 0;
+        if (kseed == 0) kseed = (unsigned int)time(NULL) ^ (unsigned int)getpid();
+        for (int i = 0; i < 16; i++) {
+            kseed = kseed * 1103515245u + 12345u;
+            nonce[i] = (unsigned char)((kseed >> 16) & 0xFF);
+        }
+    }
+    char* key_b64 = cryptography_base64_encode_raw((const char*)nonce, 16);
+    if (!key_b64) { close(fd); return NULL; }
+    /* 16 bytes -> 22 unpadded chars; RFC 6455 wants the padded 24. */
+    char client_key[32];
+    snprintf(client_key, sizeof(client_key), "%s==", key_b64);
+    free(key_b64);
+
+    char req[2048];
+    int rn = snprintf(req, sizeof(req),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s:%d\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Key: %s\r\n"
+        "Sec-WebSocket-Version: 13\r\n"
+        "\r\n",
+        path, host, port, client_key);
+    if (rn <= 0 || rn >= (int)sizeof(req)) { close(fd); return NULL; }
+    if (send(fd, req, (size_t)rn, 0) != rn) { close(fd); return NULL; }
+
+    /* Read the response head. Byte-at-a-time to the terminator so no body or
+     * first frame is consumed into a discarded buffer — the server may send
+     * a frame immediately after the 101. */
+    char resp[2048];
+    int rlen = 0;
+    while (rlen < (int)sizeof(resp) - 1) {
+        int got = (int)recv(fd, resp + rlen, 1, 0);
+        if (got != 1) { close(fd); return NULL; }
+        rlen++;
+        if (rlen >= 4 && memcmp(resp + rlen - 4, "\r\n\r\n", 4) == 0) break;
+    }
+    resp[rlen] = '\0';
+
+    if (strncmp(resp, "HTTP/1.1 101", 12) != 0 &&
+        strncmp(resp, "HTTP/1.0 101", 12) != 0) { close(fd); return NULL; }
+
+    /* Validate the accept hash. Skipping this would let any 101 through,
+     * including one from a server that never saw our key. */
+    char* want = ws_expected_accept(client_key);
+    if (!want) { close(fd); return NULL; }
+    int ok = 0;
+    for (const char* line = resp; line && *line; ) {
+        const char* eol = strstr(line, "\r\n");
+        size_t llen = eol ? (size_t)(eol - line) : strlen(line);
+        if (llen > 21 && strncasecmp(line, "Sec-WebSocket-Accept:", 21) == 0) {
+            const char* v = line + 21;
+            while (*v == ' ' || *v == '\t') v++;
+            size_t vlen = llen - (size_t)(v - line);
+            while (vlen > 0 && (v[vlen-1] == ' ' || v[vlen-1] == '\t')) vlen--;
+            if (vlen == strlen(want) && strncmp(v, want, vlen) == 0) ok = 1;
+            break;
+        }
+        line = eol ? eol + 2 : NULL;
+    }
+    free(want);
+    if (!ok) { close(fd); return NULL; }
+
+    /* Hand the socket to the shared codec. The HttpConn is minimal on
+     * purpose: the frame path uses only fd and ssl (NULL here, so conn_send
+     * takes the plain-socket branch). */
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) { close(fd); return NULL; }
+    conn->fd = fd;
+
+    HttpWsConn* ws = (HttpWsConn*)calloc(1, sizeof(HttpWsConn));
+    if (!ws) { free(conn); close(fd); return NULL; }
+    ws->conn      = conn;
+    ws->mask_tx   = 1;   /* we are the client: every frame we send is masked */
+    ws->owns_conn = 1;   /* we dialled it, so we close and free it */
+    return ws;
+#endif
+}
+
+/* Release a handle from http_ws_connect. A server-side handle must NOT be
+ * passed here — the request loop owns those. */
+void http_ws_client_free(HttpWsConn* ws) {
+    if (!ws) return;
+    if (ws->owns_conn && ws->conn) {
+        if (ws->conn->fd >= 0) close(ws->conn->fd);
+        free(ws->conn);
+    }
+    if (ws->msg_buf) free(ws->msg_buf);
+    free(ws);
+}
 
 static int ws_send_handshake(HttpConn* conn, const char* client_key) {
 #ifdef AETHER_HAS_OPENSSL

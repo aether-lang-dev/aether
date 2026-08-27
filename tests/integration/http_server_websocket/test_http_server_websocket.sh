@@ -40,7 +40,26 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 0
 fi
 if ! python3 -c "import websockets" 2>/dev/null; then
-    echo "  [SKIP] python websockets library not installed (pip install websockets)"
+    # This is the only test in the tree that checks our WebSocket stack against
+    # an INDEPENDENT RFC 6455 implementation. The loopback test
+    # (tests/integration/ws_client_loopback) dials our own server, so it cannot
+    # catch an error both ends make together -- getting the mask direction
+    # backwards, say. That makes a silent skip here expensive.
+    #
+    # So: hard-fail on Linux CI, where the dependency is one 370KB apt package
+    # with no dependencies beyond python3 itself, and the workflow installs it.
+    # Skip elsewhere, where it would mean adding pip to a matrix that has none
+    # and the protocol behaviour under test is platform-independent anyway.
+    if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ]; then
+        echo "  [FAIL] python3-websockets is missing on a Linux CI runner."
+        echo "         This test is our only external RFC 6455 conformance check,"
+        echo "         so it must not silently skip here."
+        echo "         Install: sudo apt-get install -y python3-websockets"
+        exit 1
+    fi
+    echo "  [SKIP] websockets module not installed"
+    echo "         Debian/Ubuntu: sudo apt-get install python3-websockets (370KB)"
+    echo "         other: pip install websockets"
     exit 0
 fi
 

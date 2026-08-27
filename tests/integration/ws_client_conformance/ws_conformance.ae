@@ -1,0 +1,44 @@
+// Client half of the external conformance test: dial a Python `websockets`
+// server and round-trip. The peer is an INDEPENDENT RFC 6455 implementation,
+// which is what makes this different from ws_client_loopback — that one
+// dials our own server and so cannot catch an error both ends make together
+// (the mask direction being the obvious one).
+
+import std.http
+import std.string
+
+extern exit(code: int)
+
+main() {
+    port = 18146
+    w = http.ws_connect("ws://127.0.0.1:${port}/")
+    if w == null {
+        println("FAIL: ws_connect returned null")
+        exit(1)
+    }
+
+    // Three messages, so a fault that only shows on a reused connection
+    // (a stale mask key, a mis-tracked buffer) has a chance to appear.
+    msgs = ["alpha", "bravo", "charlie"]
+    i = 0
+    while i < 3 {
+        rc = http.ws_send_text(w, msgs[i])
+        if rc < 0 { println("FAIL: send ${i} returned ${rc}"); exit(1) }
+
+        kind = http.ws_recv(w)
+        if kind != 1 { println("FAIL: recv ${i} returned ${kind}, want 1"); exit(1) }
+
+        got = http.ws_message(w)
+        want = "echo:${msgs[i]}"
+        if string.compare(got, want) != 0 {
+            println("FAIL: got [${got}] want [${want}]")
+            exit(1)
+        }
+        i = i + 1
+    }
+
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: client conformance")
+    exit(0)
+}

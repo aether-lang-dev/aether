@@ -40,6 +40,7 @@ exports(
     sse_send, sse_send_id, sse_close,
     http_server_websocket, server_websocket,
     http_ws_send_text, http_ws_send_binary, http_ws_recv,
+    http_ws_connect, http_ws_client_free, ws_connect, ws_client_free,
     http_ws_message_data, http_ws_message_length, http_ws_close,
     ws_send_text, ws_send_binary, ws_recv,
     ws_message, ws_message_length, ws_close,
@@ -525,9 +526,36 @@ extern http_ws_recv(ws: ptr) -> int
 extern http_ws_message_data(ws: ptr) -> string
 extern http_ws_message_length(ws: ptr) -> int
 extern http_ws_close(ws: ptr, code: int, reason: string)
+extern http_ws_connect(url: string) -> ptr
+extern http_ws_client_free(ws: ptr)
 
 server_websocket(server: ptr, path: string, handler: ptr, user_data: ptr) {
     http_server_websocket(server, path, handler, user_data)
+}
+
+// WebSocket CLIENT: dial a ws:// endpoint and complete the upgrade.
+//
+// The returned handle takes the same verbs as a server-side one --
+// ws_send_text / ws_recv / ws_message / ws_close -- because the frame codec
+// underneath is shared. The only difference is invisible: RFC 6455 requires a
+// client to mask every frame it sends, and this handle does.
+//
+// Returns null when the URL is malformed, the host is unreachable, the
+// response is not 101, or the Sec-WebSocket-Accept hash does not match the
+// key we sent. That last check matters: without it any 101 would be accepted,
+// including from a server that never saw our handshake.
+//
+// ws:// only. A wss:// URL returns null rather than silently connecting in
+// the clear -- TLS is a separate change.
+//
+// Free with ws_client_free (NOT for server-side handles, which the request
+// loop owns).
+ws_connect(url: string) -> ptr {
+    return http_ws_connect(url)
+}
+
+ws_client_free(ws: ptr) {
+    http_ws_client_free(ws)
 }
 
 ws_send_text(ws: ptr, text: string) -> int {

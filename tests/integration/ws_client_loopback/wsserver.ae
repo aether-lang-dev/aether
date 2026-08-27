@@ -1,0 +1,55 @@
+// Echo peer for the WebSocket client loopback test.
+//
+// Deliberately the SERVER side of the shipped WS stack: the point of the test
+// is that a client dialled by ws_connect interoperates with the same codec
+// the server has always used, including that the server correctly unmasks the
+// client's frames (RFC 6455 requires a client to mask; a server must not).
+
+import std.http
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18142
+
+@c_callback echo_handler(req: ptr, ws: ptr, ud: ptr) {
+    n = 0
+    done = 0
+    while n < 5 && done == 0 {
+        kind = http.ws_recv(ws)
+        if kind == -1 {
+            done = 1
+        } else {
+            msg = http.ws_message(ws)
+            http.ws_send_text(ws, "echo: ${msg}")
+            n = n + 1
+        }
+    }
+}
+
+message StartSrv { raw: ptr }
+message Noop {}
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+}
+actor SchedHelper {
+    state x = 0
+    receive { Noop() -> { x = 1 } }
+}
+
+main() {
+    raw = http.server_create(PORT)
+    http.server_set_host(raw, "127.0.0.1")
+    if raw == 0 { println("FAIL: server_create"); exit(1) }
+
+    http.server_websocket(raw, "/echo", echo_handler, null)
+    println("READY")
+
+    spawn(SchedHelper())
+    a = spawn(SrvActor())
+    a ! StartSrv { raw: raw }
+
+    sleep(30000)
+    exit(0)
+}

@@ -11,6 +11,26 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **A WebSocket client, so a `ws://` endpoint can be dialled.** `std.http` had a
+  complete RFC 6455 server, but every entry point *accepted* a connection —
+  nothing originated one, which put protocols carried over a client-opened
+  socket (WebDriver-BiDi among them) out of reach. `http.ws_connect(url)`
+  performs the client-side upgrade and returns a handle that takes the same
+  verbs a server-side one does — `ws_send_text` / `ws_recv` / `ws_message` /
+  `ws_close` — because the frame codec underneath is shared. The one invisible
+  difference is required by §5.3: a client masks every frame it sends and a
+  server masks none, so both sides now run through a single send path carrying
+  a per-handle mask flag.
+
+  The handshake is verified rather than assumed: a reply is rejected unless its
+  `Sec-WebSocket-Accept` matches the key that was sent, so a `101` from a server
+  that never saw the handshake is refused. `wss://` returns null rather than
+  connecting in the clear — TLS is a separate change, and silently downgrading
+  would be the worse failure. Handles from `ws_connect` own their socket and are
+  released with `ws_client_free`.
+
 ### Changed
 
 - **Waiting for the peer on a client call happens in one place.** Writing the
