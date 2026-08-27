@@ -64,4 +64,29 @@ send "$TMPDIR/both.req" "$TMPDIR/both.out"
 grep -q "^HTTP/1.1 400" "$TMPDIR/both.out" \
     || { cat "$TMPDIR/both.out"; fail "a request carrying both lengths was not refused"; }
 
-echo "  [PASS] http_server_chunked_request: chunked decodes, both-lengths is refused"
+# Anything after the terminal chunk belongs to the next request, not to this
+# body. A decoder that assumed the body ran to the end of what it had read
+# would swallow it.
+printf 'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\nPOST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\nConnection: close\r\n\r\nSECOND!' > "$TMPDIR/pipelined.req"
+send "$TMPDIR/pipelined.req" "$TMPDIR/pipelined.out"
+grep -q "len=5 body=\[hello\]" "$TMPDIR/pipelined.out" \
+    || { cat "$TMPDIR/pipelined.out"; fail "the chunked body of a pipelined pair was wrong"; }
+grep -q "len=7 body=\[SECOND!\]" "$TMPDIR/pipelined.out" \
+    || { cat "$TMPDIR/pipelined.out"; fail "the request pipelined after a chunked body was lost"; }
+
+# A chunked body declares no length up front, so a sender that never sends the
+# terminal chunk is bounded only by what the server refuses to hold.
+{
+    printf 'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n'
+    i=0
+    while [ "$i" -lt 180 ]; do
+        printf '10000\r\n'
+        head -c 65536 /dev/zero | tr '\0' 'a'
+        printf '\r\n'
+        i=$((i + 1))
+    done
+} | nc 127.0.0.1 "$PORT" > "$TMPDIR/flood.out" 2>/dev/null
+grep -q "^HTTP/1.1 413" "$TMPDIR/flood.out" \
+    || { head -3 "$TMPDIR/flood.out"; fail "an endless chunked body was not refused"; }
+
+echo "  [PASS] http_server_chunked_request: decode, pipelining, size limit, both-lengths refused"

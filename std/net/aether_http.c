@@ -1082,7 +1082,15 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
 /* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
  * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
  * which can appear inside chunk data. */
-int http_chunked_complete(const char* buf, size_t len) {
+/* How many bytes does the complete chunked body at `buf` occupy, counting its
+ * framing and trailers, or 0 when it is not complete yet? A complete body is
+ * never zero-length (the terminal chunk alone is five bytes), so 0 is an
+ * unambiguous "not yet".
+ *
+ * The length matters as much as the fact: anything after it belongs to
+ * whatever the peer sent next, and a caller that assumes the body runs to the
+ * end of what it has read would swallow a pipelined message. */
+size_t http_chunked_frame_len(const char* buf, size_t len) {
     size_t off = 0;
     for (;;) {
         const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
@@ -1103,12 +1111,16 @@ int http_chunked_complete(const char* buf, size_t len) {
                 size_t line_len = (size_t)(le - (buf + off));
                 int empty = line_len == 0 || (line_len == 1 && buf[off] == '\r');
                 off = (size_t)(le - buf) + 1;
-                if (empty) return 1;
+                if (empty) return off;
             }
         }
         off += (size_t)chunk + 2;   /* payload + its trailing CRLF */
         if (off > len) return 0;
     }
+}
+
+int http_chunked_complete(const char* buf, size_t len) {
+    return http_chunked_frame_len(buf, len) > 0;
 }
 
 /* Case-insensitive substring search, for header values. */

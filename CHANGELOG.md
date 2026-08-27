@@ -91,7 +91,11 @@ version number before tagging the release.
   Chunked bodies are now decoded, using the same decoder the client already
   used for responses, and a request carrying both `Content-Length` and
   `Transfer-Encoding` is answered 400 rather than resolved in favour of one of
-  them, because that pair is what a smuggling attempt is built from.
+  them, because that pair is what a smuggling attempt is built from. A chunked
+  body declares no length in advance, so one that never ends is answered 413
+  at a bounded size rather than buffered for as long as the sender keeps
+  writing, and anything arriving after the terminal chunk is kept as the next
+  pipelined request rather than folded into the body.
 
 - **A line ending can no longer be smuggled into a request or a response
   head.** Header values, header names and request URLs were written into the

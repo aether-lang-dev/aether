@@ -2893,6 +2893,21 @@ static void conn_resolve_addrs(HttpConn* c) {
     }
 }
 
+/* The largest chunked request body this server will buffer. A chunked body
+ * declares no length in advance, so nothing else bounds it. */
+#define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
+
+static void conn_send_payload_too_large(HttpConn* conn) {
+    static const char msg[] =
+        "HTTP/1.1 413 Payload Too Large\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 34\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "request body exceeds server limit\n";
+    conn_send(conn, msg, (int)(sizeof(msg) - 1));
+}
+
 /* Refuse a message whose framing this server will not guess at, and say so
  * before closing. A framing error cannot be answered on a kept-alive
  * connection, because where the next request starts is exactly what is in
@@ -3045,36 +3060,54 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * payload is shorter than the framing that carried it, so it fits where
      * the chunks were, and the request is left looking exactly like one that
      * arrived with a Content-Length. */
-    char* dechunked = NULL;
     if (te_chunked) {
+        size_t frame_len = 0;
         for (;;) {
             int have = conn->write_pos - conn->read_pos - header_size;
-            if (have > 0 &&
-                http_chunked_complete(conn->buf + conn->read_pos + header_size,
-                                      (size_t)have))
-                break;
+            if (have > 0) {
+                frame_len = http_chunked_frame_len(
+                    conn->buf + conn->read_pos + header_size, (size_t)have);
+                if (frame_len > 0) break;
+                /* A chunked body declares no length up front, so the only
+                 * bound on it is the one this server imposes. Without one, a
+                 * sender that never emits the terminal chunk grows this
+                 * buffer for as long as it cares to keep writing. */
+                if (have > HTTP_MAX_CHUNKED_BODY) {
+                    conn_send_payload_too_large(conn);
+                    return 0;
+                }
+            }
             if (conn_buf_ensure(conn, conn->write_pos + HTTP_CONN_BUF_CAP + 1) != 0)
                 return 0;
             int space = conn->buf_cap - conn->write_pos - 1;
-            if (space <= 0) return 0;          /* body larger than we will hold */
+            if (space <= 0) return 0;
             int n = conn_recv(conn, conn->buf + conn->write_pos, space);
             if (n <= 0) return 0;              /* closed or timed out mid-body */
             conn->write_pos += n;
             conn->buf[conn->write_pos] = '\0';
         }
-        size_t chunk_len = (size_t)(conn->write_pos - conn->read_pos - header_size);
+
         size_t decoded_len = 0;
-        dechunked = http_dechunk(conn->buf + conn->read_pos + header_size,
-                                 chunk_len, &decoded_len);
-        if (!dechunked) {
+        char* body_start = conn->buf + conn->read_pos + header_size;
+        char* decoded = http_dechunk(body_start, frame_len, &decoded_len);
+        if (!decoded) {
             conn_send_bad_framing(conn);
             return 0;
         }
-        memcpy(conn->buf + conn->read_pos + header_size, dechunked, decoded_len);
-        conn->write_pos = conn->read_pos + header_size + (int)decoded_len;
+        /* Anything past the terminal chunk is the next pipelined request, not
+         * this body, and it has to survive the rewrite. The decoded payload is
+         * never longer than the framing that carried it, so the tail moves
+         * down and nothing overlaps what has not been copied out yet. */
+        size_t tail_len = (size_t)(conn->write_pos - conn->read_pos - header_size)
+                        - frame_len;
+        if (tail_len > 0)
+            memmove(body_start + decoded_len, body_start + frame_len, tail_len);
+        memcpy(body_start, decoded, decoded_len);
+        free(decoded);
+
+        conn->write_pos = conn->read_pos + header_size
+                        + (int)decoded_len + (int)tail_len;
         conn->buf[conn->write_pos] = '\0';
-        free(dechunked);
-        dechunked = NULL;
         content_length = (long)decoded_len;
         request_total  = header_size + (int)decoded_len;
         stream_body    = 0;

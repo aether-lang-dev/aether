@@ -294,7 +294,8 @@ int http_header_value_ok(const char* value);
  * http_chunked_complete: does `buf` hold a whole chunked body, terminal chunk
  * included? http_dechunk: decode one, returning a malloc'd buffer the caller
  * frees (*out_len excludes the NUL), or NULL on malformed framing. */
-int   http_chunked_complete(const char* buf, size_t len);
+int    http_chunked_complete(const char* buf, size_t len);
+size_t http_chunked_frame_len(const char* buf, size_t len);
 char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 
 #endif
