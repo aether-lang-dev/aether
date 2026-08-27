@@ -92,6 +92,7 @@ tests/integration/http_client_dechunk/
 tests/integration/http_client_forward_proxy/
 tests/integration/http_client_insecure_tls/
 tests/integration/http_client_keepalive/
+tests/integration/http_client_response_framing/
 tests/integration/http_client_redirects/
 tests/integration/http_client_request_head/
 tests/integration/http_client_split_body/

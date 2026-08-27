@@ -53,6 +53,9 @@ version number before tagging the release.
 
 ### Added
 
+- **A test for response framing from both sides**, one upstream naming two
+  lengths and one sending more than it declared.
+
 - **A test for a status line with no readable status.** The upstream can also
   serve several other malformed shapes, which is how this one was found.
 
@@ -84,6 +87,19 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **A response has to say where its body ends, once.** Two `Content-Length`
+  headers that disagreed were accepted and one of them used, and a response
+  sending more bytes than it declared had the surplus delivered as part of its
+  body. Both leave bytes the response never accounted for in a connection this
+  client pools and hands to the next request, which is where the following
+  response's head is expected. A response naming two lengths, or a length that
+  is not a count of bytes, is a transport error now, and only the declared
+  body is delivered. Chunked framing carries its own end and is unchanged.
+
+  The header lookup behind this is the one the server already used, anchored
+  to the start of a line, so the two sides cannot disagree about what a
+  message declared.
 
 - **A request with more headers than the parser holds is refused, not
   truncated.** The excess was dropped without a word, so a handler or a

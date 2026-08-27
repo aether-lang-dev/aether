@@ -1705,6 +1705,63 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
 }
 
 
+/* Find a header by name in a header block, anchored to the start of each line.
+ *
+ * Anchoring matters: a substring search over the whole block also matches
+ * inside another header's value, so a message carrying
+ * `X-Note: Content-Length: 9` would have had that read as its framing.
+ *
+ * Shared by the client and the server: a response frames its body the same way
+ * a request does, and two scanners would be two chances to disagree.
+ *
+ * Returns how many times the header appears, writes the first value into
+ * `out`, and sets *differing when two of them disagree. A framing header that
+ * appears twice with two answers has no single answer at all.
+ */
+int http_find_header_in_block(const char* block, const char* end,
+                            const char* name, char* out, size_t out_cap,
+                            int* differing) {
+    size_t name_len = strlen(name);
+    int count = 0;
+    if (differing) *differing = 0;
+    if (out && out_cap) out[0] = '\0';
+
+    for (const char* line = block; line && line < end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
+        const char* line_end = eol ? eol : end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
+            && line[name_len] == ':') {
+            const char* v = line + name_len + 1;
+            const char* v_end = line + line_len;
+            while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+            while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+            size_t vl = (size_t)(v_end - v);
+
+            char value[256];
+            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
+            memcpy(value, v, vl);
+            value[vl] = '\0';
+
+            if (count == 0) {
+                if (out && out_cap) {
+                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
+                    memcpy(out, value, copy);
+                    out[copy] = '\0';
+                }
+            } else if (differing && out && strcmp(out, value) != 0) {
+                *differing = 1;
+            }
+            count++;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return count;
+}
+
 /* Has a complete HTTP/1.1 response accumulated in `buf`?
  *
  * Reading to end of connection only works when the connection is the
@@ -1722,6 +1779,7 @@ typedef struct {
     size_t body_target;
     int    chunked;
     int    definite;
+    int    invalid;    /* the response did not say where its body ends */
 } HttpRespFraming;
 
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
@@ -1738,14 +1796,27 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
             f->chunked = 1;
             f->definite = 1;
         } else {
-            char* cl = http_extract_response_header(buf, "Content-Length");
-            if (cl) {
-                long long declared = strtoll(cl, NULL, 10);
-                if (declared >= 0) {
-                    f->body_target = f->header_bytes + (size_t)declared;
-                    f->definite = 1;
+            /* Anchored, and counted: a response naming two different lengths
+             * has not said where its body ends, and picking one leaves the
+             * bytes of the other in a connection this client may hand to the
+             * next request. */
+            char cl[64];
+            int differing = 0;
+            int count = http_find_header_in_block(buf, hend, "Content-Length",
+                                                  cl, sizeof(cl), &differing);
+            if (count > 0) {
+                if (differing) {
+                    f->invalid = 1;
+                } else {
+                    char* endp = NULL;
+                    long long declared = strtoll(cl, &endp, 10);
+                    if (endp && *endp == '\0' && endp != cl && declared >= 0) {
+                        f->body_target = f->header_bytes + (size_t)declared;
+                        f->definite = 1;
+                    } else {
+                        f->invalid = 1;
+                    }
                 }
-                free(cl);
             }
         }
         free(te);
@@ -1756,6 +1827,7 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
             f->chunked = 0;
         }
     }
+    if (f->invalid) return 1;      /* stop reading; the driver reports it */
     if (!f->definite) return 0;
     if (f->chunked)
         return http_chunked_complete(buf + f->header_bytes, len - f->header_bytes);
@@ -2216,7 +2288,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     int    n = 0;
     int    recv_err = 0;
     int    truncated = 0;
-    HttpRespFraming framing = {0, 0, 0, 0};
+    HttpRespFraming framing = {0};
     /* A pooled connection the peer closed while it sat idle is
      * indistinguishable from a live one until it is used: the liveness probe
      * catches almost all of them, and the rest fail with nothing received.
@@ -2365,6 +2437,17 @@ send_request:
         total_len     = rx.len;
         cap           = rx.cap;
         framing       = rx.framing;
+        /* A response that never said where its body ends is not one to hand
+         * back: the bytes it did not account for belong to nothing, and on a
+         * pooled connection they would be read as the head of the next
+         * response. */
+        if (rx.framing.invalid) {
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = string_new(
+                "response framing is ambiguous: the declared body length is not usable");
+            return response;
+        }
         if (rx.oom) {
             aether_caps_free(full_response, cap);
             transport_close(&t);
@@ -2504,7 +2587,16 @@ send_request:
                      : "response truncated: peer closed before the declared body length");
         return response;
     }
-    http_response_fill_from_bytes(response, full_response, total_len);
+    /* Hand over exactly the body the response declared. A read can return
+     * more than that (a pipelined reply, or bytes a mis-framed response left
+     * behind), and counting those as body makes the payload something the
+     * sender never described. Chunked framing carries its own end, so it is
+     * left alone. */
+    size_t deliver_len = total_len;
+    if (framing.definite && !framing.chunked && framing.body_target > 0
+        && framing.body_target < deliver_len)
+        deliver_len = framing.body_target;
+    http_response_fill_from_bytes(response, full_response, deliver_len);
 
     aether_caps_free(full_response, cap);
     return response;

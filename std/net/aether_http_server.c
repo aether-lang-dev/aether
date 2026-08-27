@@ -2970,62 +2970,6 @@ static int conn_headers_well_formed(const char* block, const char* end) {
     return 1;
 }
 
-/* Find a header by name across the request's header block, anchored to the
- * start of each line.
- *
- * Anchoring matters: a substring search over the whole block also matches
- * inside another header's value, so a request carrying
- * `X-Note: Content-Length: 9` would have had that read as its framing.
- *
- * Returns how many times the header appears, writes the first value into
- * `out`, and sets *differing when two of them disagree. A framing header that
- * appears twice with two answers has no single answer, which is the shape a
- * smuggling pair is built from.
- */
-static int conn_find_header(const char* block, const char* end,
-                            const char* name, char* out, size_t out_cap,
-                            int* differing) {
-    size_t name_len = strlen(name);
-    int count = 0;
-    if (differing) *differing = 0;
-    if (out && out_cap) out[0] = '\0';
-
-    for (const char* line = block; line && line < end; ) {
-        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
-        const char* line_end = eol ? eol : end;
-        size_t line_len = (size_t)(line_end - line);
-        if (line_len && line[line_len - 1] == '\r') line_len--;
-
-        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
-            && line[name_len] == ':') {
-            const char* v = line + name_len + 1;
-            const char* v_end = line + line_len;
-            while (v < v_end && (*v == ' ' || *v == '\t')) v++;
-            while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
-            size_t vl = (size_t)(v_end - v);
-
-            char value[256];
-            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
-            memcpy(value, v, vl);
-            value[vl] = '\0';
-
-            if (count == 0) {
-                if (out && out_cap) {
-                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
-                    memcpy(out, value, copy);
-                    out[copy] = '\0';
-                }
-            } else if (differing && out && strcmp(out, value) != 0) {
-                *differing = 1;
-            }
-            count++;
-        }
-        if (!eol) break;
-        line = eol + 1;
-    }
-    return count;
-}
-
 /* Content-Length is a plain count of digits. Anything else, a sign, a spelled
  * number, a value that will not fit, has no length in it, and RFC 9112 6.3
  * calls that unrecoverable rather than something to guess at. */
@@ -3201,7 +3145,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     }
     char cl_value[64];
     int cl_differing = 0;
-    int cl_count = conn_find_header(head_start, hdr_end, "Content-Length",
+    int cl_count = http_find_header_in_block(head_start, hdr_end, "Content-Length",
                                     cl_value, sizeof(cl_value), &cl_differing);
     long content_length = 0;
     if (cl_count > 0) {
@@ -3227,7 +3171,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
     char te_value[128];
-    int te_count = conn_find_header(head_start, hdr_end, "Transfer-Encoding",
+    int te_count = http_find_header_in_block(head_start, hdr_end, "Transfer-Encoding",
                                     te_value, sizeof(te_value), NULL);
     int te_chunked = 0;
     if (te_count > 0) {
