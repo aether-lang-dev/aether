@@ -1,8 +1,10 @@
 #include "aether_http_server.h"
 #include "aether_http.h"
+#include "../http/proxy/aether_proxy.h"
 #include "aether_net.h"
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
+#include "aether_http_evloop.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
@@ -780,6 +782,7 @@ HttpServer* http_server_create(int port) {
     server->release_fn = NULL;
     server->step_fn = NULL;
     server->park_lot = NULL;
+    server->evloop = NULL;
     server->conn_pool = NULL;
     server->accept_poller.fd = -1;
     server->accept_poller.backend_data = NULL;
@@ -1799,6 +1802,21 @@ void http_response_set_status(HttpServerResponse* res, int code) {
     res->status_code = code;
     free(res->status_text);
     res->status_text = strdup(http_status_text(code));
+}
+
+/* The reverse proxy's options, if this server has one mounted.
+ *
+ * The event driver needs them because it runs the proxy exchange itself. It
+ * finds them by looking for the proxy's own middleware in the chain rather
+ * than being told, so a server that does not proxy simply has none and the
+ * driver is not used.
+ */
+void* http_server_proxy_opts(HttpServer* server) {
+    if (!server) return NULL;
+    for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {
+        if (n->middleware == aether_middleware_reverse_proxy) return n->user_data;
+    }
+    return NULL;
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
@@ -4425,8 +4443,61 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
     conn_serve(server, conn);
 }
 
+/* Take a connection the event driver decided it does not own, along with the
+ * bytes it already read from it.
+ *
+ * The driver handles proxied plain HTTP. A request the proxy passes on, a
+ * health endpoint, an admin route, anything another middleware answers, has
+ * to reach the general path instead, and it has to reach it with the bytes
+ * that have already left the socket. That is the same handoff the parking lot
+ * performs, so it uses the same connection shape.
+ *
+ * Returns 0 when this took ownership of the descriptor.
+ */
+int http_server_adopt_connection(HttpServer* server, int client_fd,
+                                 const char* prebuffered, int prebuffered_len) {
+    if (!server || client_fd < 0) return -1;
+
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) return -1;
+    conn->fd = client_fd;
+    conn->applied_recv_timeout_ms = -1;
+
+    if (prebuffered && prebuffered_len > 0) {
+        if (conn_buf_ensure(conn, prebuffered_len + 1) != 0) {
+            free(conn);
+            return -1;
+        }
+        memcpy(conn->buf, prebuffered, (size_t)prebuffered_len);
+        conn->write_pos = prebuffered_len;
+        conn->buf[conn->write_pos] = '\0';
+    }
+
+    /* The descriptor was non-blocking for the driver; the worker path reads it
+     * with timeouts and expects it not to be. */
+#ifndef _WIN32
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
+
+    conn_serve(server, conn);
+    return 0;
+}
+
 void http_server_drain_connection(HttpServer* server, int client_fd) {
     if (!server || client_fd < 0) return;
+
+    /* A plain-HTTP connection to a server whose work is proxying goes to the
+     * event driver, which runs many connections on one thread rather than
+     * giving this one a thread of its own (#1758). Anything the driver does
+     * not cover, TLS especially, keeps the worker path: the check is what the
+     * connection needs, not a switch someone sets.
+     *
+     * A refusal costs nothing, because the connection has not been touched
+     * yet and the worker path is still right below. */
+    if (server->evloop && !server->tls_enabled && !server->h2_enabled) {
+        if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
+    }
 
     /* Heap-allocated because a parked connection outlives the worker that
      * parked it: the read buffer (with any bytes already pulled past the last
@@ -4745,6 +4816,21 @@ int http_server_start_raw(HttpServer* server) {
         if (pool) {
             server->park_lot = http_park_create(server, http_park_resume, 4096);
         }
+
+        /* The proxy driver, when this server proxies and its connections are
+         * plain HTTP. One driver per core is the shape that removes the cost:
+         * more threads than cores would put the sleeping back, and fewer would
+         * leave cores idle. It returns NULL when there is no proxy mounted or
+         * the platform has no poller, and then nothing below changes. */
+        if (!server->tls_enabled && !server->h2_enabled) {
+            long online = 1;
+#if !defined(_WIN32)
+            online = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+            int cores = (int)(online > 0 ? online : 1);
+            if (cores > 8) cores = 8;
+            server->evloop = http_evloop_start(server, cores);
+        }
 #endif
 
         // Fallback: poll + thread pool (non-Linux or no actor handler)
@@ -4779,6 +4865,12 @@ int http_server_start_raw(HttpServer* server) {
 #if AETHER_HAS_THREADS
         /* Stop parking before the pool: the lot resubmits into it, and a
          * connection woken into a destroyed pool would be closed twice. */
+        /* The driver holds connections of its own, so it stops before the
+         * lot: its threads are what close them. */
+        if (server->evloop) {
+            http_evloop_stop((HttpEvLoop*)server->evloop);
+            server->evloop = NULL;
+        }
         http_park_destroy((HttpParkLot*)server->park_lot);
         server->park_lot = NULL;
         http_pool_destroy(pool);

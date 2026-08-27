@@ -1,4 +1,5 @@
 #include "aether_http.h"
+#include "aether_http_internal.h"
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
 
@@ -57,6 +58,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>
+    #include <netinet/tcp.h>  /* TCP_NODELAY on an upstream this driver dials */
     #include <netdb.h>
     #include <unistd.h>
     #include <arpa/inet.h>
@@ -92,7 +94,7 @@ static void http_init(void) {
 //   https://foo.example/bar  →  host="foo.example" port=443 path="/bar" use_tls=1
 //   http://foo:8080/         →  host="foo"         port=8080 path="/"   use_tls=0
 // Returns 1 on success, 0 on malformed input.
-static int parse_url(const char* url, char* host, size_t host_size,
+int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
     if (!url || !host || !port || !path || !use_tls ||
         host_size == 0 || path_size == 0) return 0;
@@ -279,32 +281,6 @@ static char* ssl_err_string(const char* prefix) {
 // paths can use them as-is.
 // -----------------------------------------------------------------
 
-typedef struct {
-    int sockfd;
-    /* The SO_RCVTIMEO/SO_SNDTIMEO value currently on this socket, or -1 when
-     * nothing has been applied yet (#1719).
-     *
-     * A Transport travels with its connection into the idle pool, so a reused
-     * connection already carries the timeouts the last request set. Re-applying
-     * an identical value costs 2 setsockopt syscalls per request and changes
-     * nothing: under strace against the LB benchmark, setsockopt was the third
-     * costliest syscall at 202,552 calls for 20,000 requests -- roughly 10 per
-     * request, on sockets whose options were already correct.
-     *
-     * A sentinel of -1 rather than 0 because 0 is a legitimate timeout value
-     * meaning "block indefinitely", and a socket set to block forever must not
-     * be confused with one never configured. */
-    int64_t applied_timeout_ns;
-#ifdef AETHER_HAS_OPENSSL
-    SSL* ssl;
-    /* A per-request SSL_CTX, owned by this transport, or NULL when the
-     * shared process-wide CTX was used. Non-NULL only for the set_cafile
-     * pin path (#1107/#1110), which needs its own CTX whose trust store is
-     * loaded from the couriered CA. Freed in transport_close AFTER the SSL
-     * that references it. */
-    SSL_CTX* owned_ctx;
-#endif
-} Transport;
 
 static int transport_send(Transport* t, const void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
@@ -1784,13 +1760,6 @@ int http_find_header_in_block(const char* block, const char* end,
  * different order, and a second copy of response framing would be a second
  * place for chunked, Content-Length and the no-body statuses to disagree.
  */
-typedef struct {
-    size_t header_bytes;
-    size_t body_target;
-    int    chunked;
-    int    definite;
-    int    invalid;    /* the response did not say where its body ends */
-} HttpRespFraming;
 
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
@@ -1851,21 +1820,8 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
  * with nothing to free; on success the caller owns the buffer and frees it
  * with aether_caps_free(buf, *out_cap).
  */
-typedef struct {
-    const HttpClientRequest* req;
-    const char* method;
-    const char* path;
-    const char* host;
-    int         port;
-    int         via_proxy;
-    int         use_tls;
-    const char* body;
-    int         body_len;
-    const char* content_type;
-    int         keep_alive;
-} HttpReqHead;
 
-static char* http_build_request_head(const HttpReqHead* p,
+char* http_build_request_head(const HttpReqHead* p,
                                      size_t* out_len, size_t* out_cap) {
     size_t hdr_cap = 1024;
     /* #461: gate the request-header build buffer through the cap. Self-
@@ -1976,7 +1932,7 @@ static char* http_build_request_head(const HttpReqHead* p,
  * on who read the socket. `buf` is modified in place: the header terminator is
  * NUL-terminated so the header block can be handed out as a string.
  */
-static void http_response_fill_from_bytes(HttpResponse* response,
+void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
     char* header_end = strstr(buf, "\r\n\r\n");
     if (!header_end) {
@@ -2021,6 +1977,152 @@ static void http_response_fill_from_bytes(HttpResponse* response,
     }
 }
 
+/* An empty response object, the shape every path starts from. Shared so a
+ * driver filling one in from bytes it read itself starts from exactly what
+ * the blocking path starts from. */
+HttpResponse* http_response_alloc_empty(void) {
+    HttpResponse* response = (HttpResponse*)malloc(sizeof(HttpResponse));
+    if (!response) return NULL;
+    response->status_code = 0;
+    response->body = NULL;
+    response->headers = NULL;
+    response->error = NULL;
+    response->redirect_error = NULL;
+    response->effective_url = NULL;
+    response->stream = NULL;
+    return response;
+}
+
+/* ---- What a driver needs to read from an outbound request ---- */
+
+const char* http_request_method_of(const HttpClientRequest* req) {
+    return req ? req->method : NULL;
+}
+
+const char* http_request_url_of(const HttpClientRequest* req) {
+    return req ? req->url : NULL;
+}
+
+const char* http_request_body_of(const HttpClientRequest* req, int* out_len) {
+    if (out_len) *out_len = req ? req->body_len : 0;
+    return req ? req->body : NULL;
+}
+
+const char* http_request_content_type_of(const HttpClientRequest* req) {
+    return req ? req->content_type : NULL;
+}
+
+/* ---- Upstream connections for a driver that cannot block ----
+ *
+ * The blocking client dials inside its own call and waits there. A driver
+ * running many connections on one thread cannot: it needs the descriptor
+ * before the connection is established, so it can wait for that the same way
+ * it waits for everything else.
+ *
+ * The idle pool is the same pool the blocking path uses, so a connection one
+ * of them finishes with is available to the other, and a reused connection is
+ * ready to write immediately.
+ */
+/* The idle pool is shared with the blocking client, which reads its sockets
+ * expecting them to block. A driver that cannot block needs the opposite. So
+ * the mode belongs to the borrower, not to the pool: it is set on the way out
+ * and put back on the way in, and a connection either side finishes with is
+ * usable by the other.
+ *
+ * Without this a driver could take a blocking socket and wait on it, which is
+ * precisely the thing it exists not to do. */
+static void http_socket_set_nonblocking(int fd, int on) {
+    if (fd < 0) return;
+#ifdef _WIN32
+    u_long nb = on ? 1 : 0;
+    ioctlsocket(fd, FIONBIO, &nb);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return;
+    int want = on ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK);
+    if (want != flags) fcntl(fd, F_SETFL, want);
+#endif
+}
+
+int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
+    if (!out || !host || port <= 0) return -1;
+    memset(out, 0, sizeof(*out));
+    out->t.applied_timeout_ns = -1;
+
+    http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
+                  host, port, 0, NULL);
+    if (http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
+        out->reused = 1;
+        out->connecting = 0;
+        http_socket_set_nonblocking(out->t.sockfd, 1);
+        return out->t.sockfd;
+    }
+
+    struct sockaddr_in addr;
+    int resolved = 0;
+    if (!resolve_dial_addr(host, port, &addr, &resolved)) return -1;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(fd, FIONBIO, &nb);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
+
+    out->t.sockfd = fd;
+    out->reused = 0;
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+        out->connecting = 0;
+        return fd;
+    }
+#ifdef _WIN32
+    int err = WSAGetLastError();
+    int in_progress = (err == WSAEWOULDBLOCK || err == WSAEINPROGRESS);
+#else
+    int in_progress = (errno == EINPROGRESS || errno == EWOULDBLOCK);
+#endif
+    if (!in_progress) {
+        close(fd);
+        out->t.sockfd = -1;
+        return -1;
+    }
+    out->connecting = 1;      /* finished when the descriptor is writable */
+    return fd;
+}
+
+/* Did the connect this driver started actually succeed? A refused connection
+ * makes the descriptor writable too, with the reason in SO_ERROR, so
+ * writability alone is not the answer. */
+int http_upstream_connected(HttpUpstreamConn* c) {
+    if (!c || c->t.sockfd < 0) return -1;
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(c->t.sockfd, SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0)
+        return -1;
+    if (err != 0) return -1;
+    c->connecting = 0;
+    return 0;
+}
+
+/* Hand the connection back to the idle pool, or close it. A connection is
+ * only worth keeping when the response that came over it ended where its own
+ * framing said it would, which is the caller's decision to make. */
+void http_upstream_release(HttpUpstreamConn* c, int keep) {
+    if (!c || c->t.sockfd < 0) return;
+    if (keep && http_pool_enabled) {
+        http_socket_set_nonblocking(c->t.sockfd, 0);   /* as the pool expects */
+        http_pool_put(c->pool_key, &c->t);
+    } else {
+        transport_close(&c->t);
+    }
+    c->t.sockfd = -1;
+}
+
 /* ---- The upstream exchange: write the request, read one response ----
  *
  * Everything on a client call that waits for the peer happens here, and
@@ -2035,31 +2137,9 @@ static void http_response_fill_from_bytes(HttpResponse* response,
  * failure is worth a redial is the driver's decision, and only the driver
  * knows whether the connection came from the pool.
  */
-#define AE_X_DONE        0
-#define AE_X_WANT_READ   1
-#define AE_X_WANT_WRITE  2
-#define AE_X_ERROR     (-1)
 
-typedef struct {
-    Transport*  t;
-    const char* head;
-    size_t      head_len;
-    size_t      head_sent;
-    const char* body;
-    int         body_len;
-    int         body_sent;
-    const char* method;
 
-    char*  buf;          /* accumulated response, owned by the exchange */
-    size_t len;
-    size_t cap;
-    HttpRespFraming framing;
-    int    peer_closed;  /* the peer ended the response by closing */
-    int    complete;     /* the response ended where its own framing said */
-    int    oom;          /* the allocator refused; nothing else went wrong */
-} HttpExchange;
-
-static void http_exchange_init(HttpExchange* x, Transport* t,
+void http_exchange_init(HttpExchange* x, Transport* t,
                                const char* head, size_t head_len,
                                const char* body, int body_len,
                                const char* method) {
@@ -2084,7 +2164,7 @@ static int http_io_would_block(void) {
 
 /* Write the request head, then the body. Bodies are written raw so embedded
  * NULs survive. */
-static int http_exchange_send(HttpExchange* x) {
+int http_exchange_send(HttpExchange* x) {
     while (x->head_sent < x->head_len) {
         int n = transport_send(x->t, x->head + x->head_sent,
                                (int)(x->head_len - x->head_sent));
@@ -2102,7 +2182,7 @@ static int http_exchange_send(HttpExchange* x) {
 
 /* Read until this response ends where its own framing says it does, or until
  * the peer closes, which is the framing when nothing else declares one. */
-static int http_exchange_recv(HttpExchange* x) {
+int http_exchange_recv(HttpExchange* x) {
     char chunk[8192];
     for (;;) {
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);

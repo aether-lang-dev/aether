@@ -195,6 +195,7 @@ typedef struct HttpServer {
 
     // Middleware
     HttpMiddlewareNode* middleware_chain;
+    void* evloop;           /* HttpEvLoop*, when the proxy driver is running */
 
     // Response transformers (#260 Tier 1). Run after the route
     // handler, before serialization. See
@@ -742,5 +743,16 @@ const char* http_request_header_value(HttpRequest* req, int index);
 // locale's — CLF is a parseable interchange format. Exposed (rather than
 // static) so the locale-independence can be tested directly.
 void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
+
+
+/* The reverse proxy's options when one is mounted on this server, else NULL.
+ * The event driver runs the proxy exchange itself and needs them. */
+void* http_server_proxy_opts(HttpServer* server);
+
+
+/* Take a connection the event driver does not own, with the bytes it has
+ * already read from it. Returns 0 when ownership transferred. */
+int http_server_adopt_connection(HttpServer* server, int client_fd,
+                                 const char* prebuffered, int prebuffered_len);
 
 #endif
