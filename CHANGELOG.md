@@ -50,6 +50,15 @@ version number before tagging the release.
   anything. They now use it when present and run without it otherwise; the
   client sets its own receive timeout, so the wrapper was only ever a backstop.
 
+- **A cleanup handler no longer turns a passing test into a failing one.** The
+  WebSocket tests kill their peer and remove their temp directory from an `EXIT`
+  trap. Under `set -e` a failing command inside a trap abandons the rest of the
+  function, so on macOS — where the peer had already exited, making the `kill`
+  fail — the handler skipped its own cleanup and left a non-zero status behind.
+  The test printed `[PASS]` and then reported failure, while leaking a temp
+  directory on every run. Each step of the handler now tolerates its own
+  failure.
+
 ## [0.589.0]
 
 

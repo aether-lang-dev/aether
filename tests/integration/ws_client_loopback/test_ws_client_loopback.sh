@@ -23,8 +23,12 @@ AE="$ROOT/build/ae"
 TMP="$(mktemp -d)"
 SRV_PID=""
 cleanup() {
-    [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
-    rm -rf "$TMP"
+    # `|| :` on every line: under `set -e` a failing command inside a trap
+    # aborts the function, so a kill of an already-dead server would both skip
+    # the rm below (leaking the temp dir) and leave a non-zero status for the
+    # script to exit with -- reporting a failure after having printed [PASS].
+    if [ -n "$SRV_PID" ]; then kill "$SRV_PID" 2>/dev/null || :; fi
+    rm -rf "$TMP" || :
     return 0
 }
 trap cleanup EXIT
