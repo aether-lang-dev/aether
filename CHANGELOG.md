@@ -53,6 +53,11 @@ version number before tagging the release.
 
 ### Added
 
+- **A test for a truncated response, and for the case it must not break.** One
+  upstream declares a length and closes short of it; the other declares no
+  framing and is ended by the close. The pair pins the distinction from both
+  sides.
+
 - **A test for the request head the client sends.** What goes on the wire is
   the client's contract with every server and nothing asserted it: the
   keep-alive test passes even when the client is made to send
@@ -67,6 +72,15 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **A response cut short of its declared length is now an error.** A server
+  that sent `Content-Length: 36` and closed after 10 bytes produced a
+  successful 200 carrying 10 bytes, which no caller could tell from a complete
+  response: a proxy forwarded the short body as whole, and a parser read
+  whatever had arrived. The same hole covered a read that timed out mid-body,
+  because the failure was only reported when no headers had arrived at all.
+  A response that declares no framing is unaffected, since there the close is
+  the framing.
 
 - **`Host` now carries the port when it is not the scheme's default.** The
   client sent the bare host, so a request to a server on any other port named

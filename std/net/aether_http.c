@@ -1913,6 +1913,7 @@ typedef struct {
     size_t cap;
     HttpRespFraming framing;
     int    peer_closed;  /* the peer ended the response by closing */
+    int    complete;     /* the response ended where its own framing said */
     int    oom;          /* the allocator refused; nothing else went wrong */
 } HttpExchange;
 
@@ -1982,8 +1983,10 @@ static int http_exchange_recv(HttpExchange* x) {
         x->len += (size_t)n;
         x->buf[x->len] = '\0';
 
-        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method))
+        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method)) {
+            x->complete = 1;
             return AE_X_DONE;
+        }
     }
 }
 
@@ -2152,6 +2155,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     size_t cap = 0;
     int    n = 0;
     int    recv_err = 0;
+    int    truncated = 0;
     HttpRespFraming framing = {0, 0, 0, 0};
     /* A pooled connection the peer closed while it sat idle is
      * indistinguishable from a live one until it is used: the liveness probe
@@ -2315,6 +2319,14 @@ send_request:
          * response that the caller could not tell from a silent server. */
         if (rc == AE_X_ERROR || rc == AE_X_WANT_READ || rc == AE_X_WANT_WRITE)
             recv_err = 1;
+        /* The response declared its own length and stopped short of it. The
+         * body we hold is a prefix of the real one, and handing that back as
+         * a successful response makes a truncated payload indistinguishable
+         * from a complete one: a proxy forwards a short body as if it were
+         * whole, and a caller parses whatever arrived. A response with no
+         * declared framing is not this case, because there the close IS the
+         * framing. */
+        truncated = rx.framing.definite && !rx.complete;
         n = 0;
     }
     /* Nothing at all came back on a connection that came from the pool: the
@@ -2420,6 +2432,17 @@ send_request:
     if (recv_err && !header_end) {
         aether_caps_free(full_response, cap);
         response->error = string_new("recv timeout or I/O error");
+        return response;
+    }
+    /* A response that stopped short of the length it declared is an error
+     * even though its headers arrived intact. Reporting only the no-headers
+     * case meant a read that died mid-body came back as a successful short
+     * response, which a caller cannot tell from a complete one. */
+    if (truncated) {
+        aether_caps_free(full_response, cap);
+        response->error = string_new(
+            recv_err ? "response truncated: read failed before the declared body length"
+                     : "response truncated: peer closed before the declared body length");
         return response;
     }
     http_response_fill_from_bytes(response, full_response, total_len);
