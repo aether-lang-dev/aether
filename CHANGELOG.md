@@ -13,6 +13,15 @@ version number before tagging the release.
 
 ### Changed
 
+- **Waiting for the peer on a client call happens in one place.** Writing the
+  request and reading one response back is now an exchange with explicit
+  states, driven by a caller. The blocking driver loops until it is done and
+  never sees a "would block", because a transport it owns outright does not
+  produce one; a driver that cannot block will hand the same descriptor to a
+  poller instead. Both run the same code, so there is one implementation of
+  what a request looks like on the wire and one of when a response has
+  finished arriving. No behavioural change.
+
 - **A completed response is turned into a response object in one place.**
   Splitting the header block from the body, and de-chunking a chunked one, no
   longer lives inside the blocking read path, so a driver that accumulates the

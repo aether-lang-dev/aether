@@ -1879,6 +1879,114 @@ static void http_response_fill_from_bytes(HttpResponse* response,
     }
 }
 
+/* ---- The upstream exchange: write the request, read one response ----
+ *
+ * Everything on a client call that waits for the peer happens here, and
+ * nothing else does. A driver that owns its thread loops until the exchange
+ * says DONE, and never sees a WANT because a blocking transport does not
+ * produce one. A driver that cannot block hands the descriptor to a poller on
+ * a WANT and comes back. Both run this code, so there is one implementation
+ * of what a request looks like on the wire and one of when a response has
+ * finished arriving.
+ *
+ * The exchange does not own the transport and does not close it: whether a
+ * failure is worth a redial is the driver's decision, and only the driver
+ * knows whether the connection came from the pool.
+ */
+#define AE_X_DONE        0
+#define AE_X_WANT_READ   1
+#define AE_X_WANT_WRITE  2
+#define AE_X_ERROR     (-1)
+
+typedef struct {
+    Transport*  t;
+    const char* head;
+    size_t      head_len;
+    size_t      head_sent;
+    const char* body;
+    int         body_len;
+    int         body_sent;
+    const char* method;
+
+    char*  buf;          /* accumulated response, owned by the exchange */
+    size_t len;
+    size_t cap;
+    HttpRespFraming framing;
+    int    peer_closed;  /* the peer ended the response by closing */
+    int    oom;          /* the allocator refused; nothing else went wrong */
+} HttpExchange;
+
+static void http_exchange_init(HttpExchange* x, Transport* t,
+                               const char* head, size_t head_len,
+                               const char* body, int body_len,
+                               const char* method) {
+    memset(x, 0, sizeof(*x));
+    x->t = t;
+    x->head = head;
+    x->head_len = head_len;
+    x->body = body;
+    x->body_len = body_len;
+    x->method = method;
+}
+
+/* Would this send/recv have blocked, rather than failed? */
+static int http_io_would_block(void) {
+#ifdef _WIN32
+    int e = WSAGetLastError();
+    return e == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+/* Write the request head, then the body. Bodies are written raw so embedded
+ * NULs survive. */
+static int http_exchange_send(HttpExchange* x) {
+    while (x->head_sent < x->head_len) {
+        int n = transport_send(x->t, x->head + x->head_sent,
+                               (int)(x->head_len - x->head_sent));
+        if (n > 0) { x->head_sent += (size_t)n; continue; }
+        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+    }
+    while (x->body && x->body_sent < x->body_len) {
+        int n = transport_send(x->t, x->body + x->body_sent,
+                               x->body_len - x->body_sent);
+        if (n > 0) { x->body_sent += n; continue; }
+        return http_io_would_block() ? AE_X_WANT_WRITE : AE_X_ERROR;
+    }
+    return AE_X_DONE;
+}
+
+/* Read until this response ends where its own framing says it does, or until
+ * the peer closes, which is the framing when nothing else declares one. */
+static int http_exchange_recv(HttpExchange* x) {
+    char chunk[8192];
+    for (;;) {
+        int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
+        if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
+        if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
+
+        if (x->len + (size_t)n + 1 > x->cap) {
+            size_t new_cap = x->cap ? x->cap * 2 : 16384;
+            while (new_cap < x->len + (size_t)n + 1) new_cap *= 2;
+            /* #461: the response body is attacker-controlled (a malicious
+             * server can flood it), so the doubling buffer is gated through
+             * the capability allocator. `cap` carries the old size for the
+             * realloc delta and for the error-path free. */
+            char* grown = (char*)aether_caps_realloc(x->buf, x->cap, new_cap);
+            if (!grown) { x->oom = 1; return AE_X_ERROR; }
+            x->buf = grown;
+            x->cap = new_cap;
+        }
+        memcpy(x->buf + x->len, chunk, (size_t)n);
+        x->len += (size_t)n;
+        x->buf[x->len] = '\0';
+
+        if (http_response_is_complete(&x->framing, x->buf, x->len, x->method))
+            return AE_X_DONE;
+    }
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -2039,7 +2147,6 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
     /* Accumulator for the buffered read below, declared here because the
      * reuse retry rewinds to `send_request` and has to reset it. */
-    char   buffer[8192];
     char*  full_response = NULL;
     size_t total_len = 0;
     size_t cap = 0;
@@ -2054,9 +2161,13 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * bounded to a connection that came from the pool and produced no
      * response byte, so the server cannot have acted on the request. */
     int retried = 0;
+    HttpExchange tx;
 
 send_request:
-    if (transport_send(&t, hdr, (int)hdr_len) < 0) {
+    http_exchange_init(&tx, &t, hdr, hdr_len, body, body_len, method);
+    /* A WANT here is SO_SNDTIMEO firing on a transport this driver owns
+     * outright, which is a failed write like any other. */
+    if (http_exchange_send(&tx) != AE_X_DONE) {
         if (reused && !retried) {
             retried = 1;
             reused = 0;
@@ -2076,30 +2187,6 @@ send_request:
         transport_close(&t);
         response->error = string_new("send failed");
         return response;
-    }
-
-    /* Body — emitted raw so embedded NULs survive. */
-    if (body && body_len > 0) {
-        if (transport_send(&t, body, body_len) < 0) {
-            if (reused && !retried) {
-                retried = 1;
-                reused = 0;
-                transport_close(&t);
-                char* rd_err = NULL;
-                /* Pooled connection, so the resolve was skipped; do it now. */
-                if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
-                                      &serv_addr_resolved)
-                    && http_dial(req, &serv_addr, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
-                    free(rd_err);
-                    goto send_request;
-                }
-                free(rd_err);
-            }
-            aether_caps_free(hdr, hdr_cap);
-            transport_close(&t);
-            response->error = string_new("send failed");
-            return response;
-        }
     }
 
     /* Streaming mode (#1004): read only the header block, then hand the
@@ -2207,33 +2294,28 @@ send_request:
      * byte count that ends the response, or 0 while it is still unknown.
      * The accumulator grows by doubling; a realloc per recv was quadratic on
      * large responses. */
-    while ((n = transport_recv(&t, buffer, sizeof(buffer) - 1)) > 0) {
-        if (total_len + (size_t)n + 1 > cap) {
-            size_t new_cap = cap ? cap * 2 : 16384;
-            while (new_cap < total_len + (size_t)n + 1) new_cap *= 2;
-            /* #461: the response body is attacker-controlled (a malicious
-             * server can flood it) — gate the doubling buffer through the
-             * capability allocator. `cap` carries the old size for the
-             * realloc delta and for the error-path free; the buffer is
-             * self-contained in this function (its bytes are copied into
-             * AetherStrings below, then it is freed here), so the
-             * accounting balances exactly. */
-            char* new_resp = (char*)aether_caps_realloc(full_response, cap, new_cap);
-            if (!new_resp) {
-                aether_caps_free(full_response, cap);
-                transport_close(&t);
-                response->error = string_new("out of memory reading response");
-                return response;
-            }
-            full_response = new_resp;
-            cap = new_cap;
+    {
+        HttpExchange rx;
+        http_exchange_init(&rx, &t, NULL, 0, NULL, 0, method);
+        int rc = http_exchange_recv(&rx);
+        full_response = rx.buf;
+        total_len     = rx.len;
+        cap           = rx.cap;
+        framing       = rx.framing;
+        if (rx.oom) {
+            aether_caps_free(full_response, cap);
+            transport_close(&t);
+            response->error = string_new("out of memory reading response");
+            return response;
         }
-        memcpy(full_response + total_len, buffer, (size_t)n);
-        total_len += (size_t)n;
-        full_response[total_len] = '\0';
-
-        if (http_response_is_complete(&framing, full_response, total_len, method))
-            break;
+        /* A WANT on a blocking transport is SO_RCVTIMEO firing, not a socket
+         * with more to say later: this driver owns its thread and never asked
+         * for a non-blocking one. Treating it as anything but a failed read
+         * is what once let a timed-out request return an empty 0-status
+         * response that the caller could not tell from a silent server. */
+        if (rc == AE_X_ERROR || rc == AE_X_WANT_READ || rc == AE_X_WANT_WRITE)
+            recv_err = 1;
+        n = 0;
     }
     /* Nothing at all came back on a connection that came from the pool: the
      * peer had closed it and our request went into the void. Redial once and
