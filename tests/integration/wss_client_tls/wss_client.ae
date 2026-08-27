@@ -1,0 +1,45 @@
+// wss:// round-trip against a TLS peer, plus the two ways verification must
+// FAIL. A test that only proved the happy path would pass just as well with
+// certificate checking switched off entirely, which is the failure worth
+// guarding against here.
+//
+// Which case runs is chosen by argv so the shell driver can point each one at
+// a different peer and trust store.
+
+import std.http
+import std.string
+import std.os
+
+extern exit(code: int)
+
+main() {
+    mode = os.args_get(1)
+    port = os.args_get(2)
+    w = http.ws_connect("wss://localhost:${port}/")
+
+    if string.compare(mode, "expect-reject") == 0 {
+        if w == null {
+            println("PASS: rejected as expected")
+            exit(0)
+        }
+        println("FAIL: connected when verification should have refused")
+        http.ws_client_free(w)
+        exit(1)
+    }
+
+    if w == null { println("FAIL: ws_connect returned null"); exit(1) }
+    rc = http.ws_send_text(w, "over tls")
+    if rc < 0 { println("FAIL: send rc=${rc}"); exit(1) }
+    kind = http.ws_recv(w)
+    if kind != 1 { println("FAIL: recv=${kind}, want 1"); exit(1) }
+    got = http.ws_message(w)
+    want = "echo:over tls"
+    if string.compare(got, want) != 0 {
+        println("FAIL: got [${got}] want [${want}]")
+        exit(1)
+    }
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: wss round-trip")
+    exit(0)
+}

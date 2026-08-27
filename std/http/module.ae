@@ -545,8 +545,11 @@ server_websocket(server: ptr, path: string, handler: ptr, user_data: ptr) {
 // key we sent. That last check matters: without it any 101 would be accepted,
 // including from a server that never saw our handshake.
 //
-// ws:// only. A wss:// URL returns null rather than silently connecting in
-// the clear -- TLS is a separate change.
+// wss:// dials over TLS, reusing the HTTP client's trust store, so the same
+// system CA discovery and TLS floor apply as for https. The peer certificate
+// is verified AND pinned to the host in the URL; a cert with a valid chain
+// but the wrong host is refused. Default port follows the scheme: 80 for ws,
+// 443 for wss.
 //
 // Free with ws_client_free (NOT for server-side handles, which the request
 // loop owns).

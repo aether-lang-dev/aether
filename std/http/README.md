@@ -80,8 +80,11 @@ unreachable host, a response that is not `101`, or a `Sec-WebSocket-Accept`
 that does not match the key it sent. That last check is what stops any `101`
 being accepted, including one from a server that never saw the handshake.
 
-**`ws://` only for now.** A `wss://` URL returns `null` rather than silently
-connecting in the clear; TLS is a separate change.
+**`wss://` dials over TLS**, reusing the HTTP client's trust store — the same
+system CA discovery and TLS floor as `https`. The peer certificate is verified
+and pinned to the host in the URL, so a certificate with a valid chain but the
+wrong host is refused. The default port follows the scheme: 80 for `ws`, 443
+for `wss`.
 
 One asymmetry is invisible but required: RFC 6455 §5.3 says a client must mask
 every frame it sends and a server must not. The client handle does; the server
