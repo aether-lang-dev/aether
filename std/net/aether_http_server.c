@@ -198,6 +198,13 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #ifdef AETHER_HAS_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+/* x509v3.h for X509_VERIFY_PARAM_set1_host / the hostflags used when the
+ * WebSocket client pins a wss:// certificate to its host. */
+#include <openssl/x509v3.h>
+
+/* The HTTP client's shared SSL_CTX (aether_http.c). wss:// reuses it so the
+ * trust store and TLS floor are decided in exactly one place. Do not free. */
+SSL_CTX* aether_http_client_ssl_ctx(void);
 #endif
 
 /* Per-connection read buffer. Persists across requests on a
@@ -2618,14 +2625,36 @@ extern char* cryptography_base64_encode_raw(const char* data, int length);
 
 /* Parse ws://host[:port][/path] into its parts. Returns 0 on success.
  * `path` defaults to "/" and `port` to 80, matching the scheme default. */
+/* Handshake-time I/O. The frame codec gets conn_send/conn_recv via HttpConn,
+ * but the upgrade happens before an HttpConn exists, so these take the raw
+ * pair. Same branch, one connection earlier.
+ *
+ * Guarded as a whole rather than taking an SSL* and branching inside: without
+ * OpenSSL the type does not exist, so the signature itself would not compile.
+ * The dial is unreachable in that build anyway -- http_ws_connect returns
+ * early because the accept hash needs SHA-1. */
+#ifdef AETHER_HAS_OPENSSL
+static int ws_dial_send(SSL* ssl, int fd, const char* buf, int len) {
+    if (ssl) return SSL_write(ssl, buf, len);
+    return (int)send(fd, buf, (size_t)len, 0);
+}
+
+static int ws_dial_recv(SSL* ssl, int fd, char* buf, int len) {
+    if (ssl) return SSL_read(ssl, buf, len);
+    return (int)recv(fd, buf, (size_t)len, 0);
+}
+#endif
+
 static int ws_parse_url(const char* url, char* host, size_t host_sz,
-                        int* port, char* path, size_t path_sz) {
-    if (!url || !host || !port || !path) return -1;
+                        int* port, char* path, size_t path_sz, int* tls) {
+    if (!url || !host || !port || !path || !tls) return -1;
     const char* p = url;
+    *tls = 0;
     if (strncmp(p, "ws://", 5) == 0) {
         p += 5;
     } else if (strncmp(p, "wss://", 6) == 0) {
-        return -2;   /* caller reports "wss not supported yet" distinctly */
+        p += 6;
+        *tls = 1;
     } else {
         return -1;
     }
@@ -2643,7 +2672,9 @@ static int ws_parse_url(const char* url, char* host, size_t host_sz,
     memcpy(host, p, hlen);
     host[hlen] = '\0';
 
-    *port = 80;
+    /* Default port follows the scheme, as RFC 6455 s3 specifies: 80 for ws,
+     * 443 for wss. An explicit :port always wins. */
+    *port = *tls ? 443 : 80;
     if (colon) {
         char portbuf[16];
         size_t plen = (size_t)(hostend - colon - 1);
@@ -2706,7 +2737,8 @@ HttpWsConn* http_ws_connect(const char* url) {
 #else
     char host[256], path[1024];
     int  port = 80;
-    int  pr = ws_parse_url(url, host, sizeof(host), &port, path, sizeof(path));
+    int  tls  = 0;
+    int  pr = ws_parse_url(url, host, sizeof(host), &port, path, sizeof(path), &tls);
     if (pr != 0) return NULL;
 
     /* Resolve + connect. getaddrinfo rather than gethostbyname: the latter
@@ -2726,6 +2758,43 @@ HttpWsConn* http_ws_connect(const char* url) {
         close(fd); freeaddrinfo(res); return NULL;
     }
     freeaddrinfo(res);
+
+    /* wss:// -- wrap the connected socket before a single handshake byte
+     * moves. The CTX is the HTTP client's, so wss inherits the same trust
+     * store, the same Windows CA probing and the same TLS floor as https;
+     * there is no second policy to keep in step. Verification is left ON:
+     * an opt-out belongs behind an explicit call, not implied by the URL. */
+    SSL* ssl = NULL;
+    if (tls) {
+        SSL_CTX* ctx = aether_http_client_ssl_ctx();
+        if (!ctx) { close(fd); return NULL; }
+        ssl = SSL_new(ctx);
+        if (!ssl) { close(fd); return NULL; }
+
+        /* SNI, so a virtual-hosted endpoint returns the right certificate. */
+        SSL_set_tlsext_host_name(ssl, host);
+
+        /* Pin the certificate to the host we asked for. An IP literal needs
+         * set1_ip_asc: older OpenSSL's set1_host does not detect IPs, and
+         * silently pinning nothing is exactly the failure this prevents. */
+        X509_VERIFY_PARAM* vpm = SSL_get0_param(ssl);
+        X509_VERIFY_PARAM_set_hostflags(vpm, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+        struct in_addr  in4;
+        struct in6_addr in6;
+        if (inet_pton(AF_INET, host, &in4) == 1 ||
+            inet_pton(AF_INET6, host, &in6) == 1) {
+            X509_VERIFY_PARAM_set1_ip_asc(vpm, host);
+        } else {
+            X509_VERIFY_PARAM_set1_host(vpm, host, 0);
+        }
+
+        SSL_set_fd(ssl, fd);
+        if (SSL_connect(ssl) != 1) {
+            SSL_free(ssl);
+            close(fd);
+            return NULL;
+        }
+    }
 
     /* Sec-WebSocket-Key: 16 random bytes, base64. Like the mask, this is a
      * handshake nonce rather than a secret — it exists so a cached HTTP
@@ -2765,8 +2834,17 @@ HttpWsConn* http_ws_connect(const char* url) {
         "Sec-WebSocket-Version: 13\r\n"
         "\r\n",
         path, host, port, client_key);
-    if (rn <= 0 || rn >= (int)sizeof(req)) { close(fd); return NULL; }
-    if (send(fd, req, (size_t)rn, 0) != rn) { close(fd); return NULL; }
+    /* From here every failure must drop the SSL as well as the socket, so
+     * the bail-outs below go through one place rather than repeating the
+     * pair and eventually forgetting one. */
+#define WS_DIAL_FAIL() do { \
+        if (ssl) { SSL_free(ssl); } \
+        close(fd); \
+        return NULL; \
+    } while (0)
+
+    if (rn <= 0 || rn >= (int)sizeof(req)) WS_DIAL_FAIL();
+    if (ws_dial_send(ssl, fd, req, rn) != rn) WS_DIAL_FAIL();
 
     /* Read the response head. Byte-at-a-time to the terminator so no body or
      * first frame is consumed into a discarded buffer — the server may send
@@ -2774,20 +2852,20 @@ HttpWsConn* http_ws_connect(const char* url) {
     char resp[2048];
     int rlen = 0;
     while (rlen < (int)sizeof(resp) - 1) {
-        int got = (int)recv(fd, resp + rlen, 1, 0);
-        if (got != 1) { close(fd); return NULL; }
+        int got = ws_dial_recv(ssl, fd, resp + rlen, 1);
+        if (got != 1) WS_DIAL_FAIL();
         rlen++;
         if (rlen >= 4 && memcmp(resp + rlen - 4, "\r\n\r\n", 4) == 0) break;
     }
     resp[rlen] = '\0';
 
     if (strncmp(resp, "HTTP/1.1 101", 12) != 0 &&
-        strncmp(resp, "HTTP/1.0 101", 12) != 0) { close(fd); return NULL; }
+        strncmp(resp, "HTTP/1.0 101", 12) != 0) WS_DIAL_FAIL();
 
     /* Validate the accept hash. Skipping this would let any 101 through,
      * including one from a server that never saw our key. */
     char* want = ws_expected_accept(client_key);
-    if (!want) { close(fd); return NULL; }
+    if (!want) WS_DIAL_FAIL();
     int ok = 0;
     for (const char* line = resp; line && *line; ) {
         const char* eol = strstr(line, "\r\n");
@@ -2803,17 +2881,20 @@ HttpWsConn* http_ws_connect(const char* url) {
         line = eol ? eol + 2 : NULL;
     }
     free(want);
-    if (!ok) { close(fd); return NULL; }
+    if (!ok) WS_DIAL_FAIL();
 
-    /* Hand the socket to the shared codec. The HttpConn is minimal on
-     * purpose: the frame path uses only fd and ssl (NULL here, so conn_send
-     * takes the plain-socket branch). */
+    /* Hand the connection to the shared codec. The HttpConn is minimal on
+     * purpose: the frame path uses only fd and ssl, and conn_send/conn_recv
+     * already branch on ssl -- which is why the entire frame codec works
+     * over TLS without knowing TLS exists. */
     HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
-    if (!conn) { close(fd); return NULL; }
-    conn->fd = fd;
+    if (!conn) WS_DIAL_FAIL();
+    conn->fd  = fd;
+    conn->ssl = ssl;   /* NULL for ws://, so conn_send takes the plain branch */
 
     HttpWsConn* ws = (HttpWsConn*)calloc(1, sizeof(HttpWsConn));
-    if (!ws) { free(conn); close(fd); return NULL; }
+    if (!ws) { free(conn); WS_DIAL_FAIL(); }
+#undef WS_DIAL_FAIL
     ws->conn      = conn;
     ws->mask_tx   = 1;   /* we are the client: every frame we send is masked */
     ws->owns_conn = 1;   /* we dialled it, so we close and free it */
@@ -2826,6 +2907,16 @@ HttpWsConn* http_ws_connect(const char* url) {
 void http_ws_client_free(HttpWsConn* ws) {
     if (!ws) return;
     if (ws->owns_conn && ws->conn) {
+#ifdef AETHER_HAS_OPENSSL
+        /* wss:// handles own their SSL as well as the socket. Shut it down
+         * before closing the fd so the peer gets a close_notify rather than
+         * a truncated connection; the CTX is process-wide and stays. */
+        if (ws->conn->ssl) {
+            SSL_shutdown(ws->conn->ssl);
+            SSL_free(ws->conn->ssl);
+            ws->conn->ssl = NULL;
+        }
+#endif
         if (ws->conn->fd >= 0) close(ws->conn->fd);
         free(ws->conn);
     }

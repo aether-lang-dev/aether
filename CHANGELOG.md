@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`wss://`, so a WebSocket can be dialled over TLS.** `ws_connect` previously
+  refused a `wss://` URL rather than connect in the clear. It now completes the
+  TLS handshake before a single handshake byte moves, reusing the HTTP client's
+  shared `SSL_CTX` — so `wss` inherits the same trust store, the same system CA
+  discovery on Windows and the same TLS floor as `https`, with no second trust
+  policy to keep in step. The default port follows the scheme, 443 rather than
+  80.
+
+  Verification is on and cannot be implied away by the URL: the peer
+  certificate is checked against the trust store *and* pinned to the host that
+  was asked for, with the IP-specific pin used for IP literals because older
+  OpenSSL will not detect those on its own. A certificate with a perfectly
+  valid chain but the wrong host is refused — the case that would otherwise
+  pass silently, and the one the new test deliberately covers.
+
+  The frame codec needed no changes at all. Its send and receive path already
+  chose between TLS and a plain socket per connection, so it carries frames
+  over TLS without knowing TLS exists.
+
 ## [0.590.0]
 
 ### Added

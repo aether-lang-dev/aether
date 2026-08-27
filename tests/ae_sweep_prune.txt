@@ -192,5 +192,6 @@ tests/integration/wasm_emit_lib_exports/
 tests/integration/where_clause/
 tests/integration/ws_client_loopback/
 tests/integration/ws_client_conformance/
+tests/integration/wss_client_tls/
 tests/integration/wycheproof/
 tests/integration/zlib_roundtrip/
