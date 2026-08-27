@@ -251,6 +251,12 @@ request_free(req: ptr) { http_request_free_raw(req) }
 // `send` is a reserved keyword in Aether — actor message-send.
 // The longer name reads naturally at call sites: `client.send_request(req)`.)
 send_request(req: ptr) -> {
+    // A null request is a request that was never built: `request()` returns
+    // null when it rejects the method or the URL, and reporting that as an
+    // allocation failure sends the caller looking in the wrong place.
+    if req == null {
+        return null, "no request to send (request() rejected the method or URL)"
+    }
     resp = http_send_raw(req)
     if resp == null {
         return null, "out of memory"

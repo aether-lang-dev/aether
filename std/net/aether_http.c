@@ -39,6 +39,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <string.h>
 #include <stdatomic.h>
 #include <time.h>
@@ -833,8 +834,42 @@ struct HttpClientRequest {
 #define PROXY_MODE_EXPLICIT 2
 #define PROXY_MODE_IGNORE   3
 
+/* A header name has to be a token, and a value has to be free of the bytes
+ * that end a line.
+ *
+ * Without this, a value carrying CR LF is written into the request head
+ * verbatim and becomes additional headers: a caller that builds a value out
+ * of anything a user supplied hands that user the rest of the request, and a
+ * doubled CR LF ends the head entirely and starts a second request the peer
+ * will answer (CWE-93). The header is rejected rather than repaired, because
+ * silently sending something other than what was asked for is its own bug.
+ */
+int http_header_name_ok(const char* name) {
+    if (!name || !*name) return 0;
+    for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
+        /* RFC 9110 token: these punctuation marks, plus letters and digits. */
+        if (!(isalnum(*c) || strchr("!#$%&'*+-.^_`|~", (int)*c))) return 0;
+    }
+    return 1;
+}
+
+int http_header_value_ok(const char* value) {
+    if (!value) return 0;
+    for (const unsigned char* c = (const unsigned char*)value; *c; c++) {
+        if (*c == '\r' || *c == '\n') return 0;
+    }
+    return 1;
+}
+
 HttpClientRequest* http_request_raw(const char* method, const char* url) {
-    if (!method || !*method || !url || !*url) return NULL;
+    if (!url || !*url) return NULL;
+    /* The method is a token and the URL cannot carry a line ending, for the
+     * same reason a header value cannot: both are written into the request
+     * line, so a CR LF in either ends that line early and everything after it
+     * is read by the peer as headers of its own (CWE-93). A URL built from
+     * anything a user supplied is the ordinary way this happens. */
+    if (!http_header_name_ok(method)) return NULL;
+    if (!http_header_value_ok(url)) return NULL;
     HttpClientRequest* req = (HttpClientRequest*)calloc(1, sizeof(HttpClientRequest));
     if (!req) return NULL;
     req->method = strdup(method);
@@ -847,7 +882,8 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
 }
 
 int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
-    if (!req || !name || !*name || !value) return -1;
+    if (!req) return -1;
+    if (!http_header_name_ok(name) || !http_header_value_ok(value)) return -1;
     size_t nl = strlen(name), vl = strlen(value);
     HttpHeader* h = (HttpHeader*)malloc(sizeof(HttpHeader) + nl + 1 + vl + 1);
     if (!h) return -1;

@@ -277,4 +277,13 @@ const char* http_response_effective_url_raw(HttpResponse* response);
 // Issue #239.
 const char* http_response_redirect_error_raw(HttpResponse* response);
 
+
+/* Is this a usable header name, and a value free of the bytes that end a
+ * line? Shared by the client and the server: a CR or LF written into a head
+ * verbatim turns one header into several, and a doubled one ends the head and
+ * starts a whole extra message the peer will act on (CWE-93 on a request,
+ * CWE-113 on a response). Both sides reject rather than repair. */
+int http_header_name_ok(const char* name);
+int http_header_value_ok(const char* value);
+
 #endif

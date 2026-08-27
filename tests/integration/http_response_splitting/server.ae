@@ -1,0 +1,20 @@
+// A handler that tries to put a line ending into a response header, the way
+// an application reflecting user input into one would.
+
+import std.http
+
+extern http_server_start_raw(server: ptr) -> int
+
+handle(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_header(res, "X-Echo", "ok\r\nX-Injected: yes")
+    http.response_add_header(res, "X-Echo-Add", "ok\r\nX-Injected-Add: yes")
+    http.response_set_body(res, "hi")
+}
+
+main() {
+    s = http.http_server_create(18401)
+    http.http_server_get(s, "/", handle, 0)
+    _ = http_server_start_raw(s)
+}

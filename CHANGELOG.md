@@ -53,6 +53,11 @@ version number before tagging the release.
 
 ### Added
 
+- **Tests for header injection and response splitting.** The request-side test
+  asserts against the head the upstream actually received, and the
+  response-side test reads the raw bytes off the socket, because what matters
+  is what the peer would parse rather than what the sender believed it sent.
+
 - **A test for a truncated response, and for the case it must not break.** One
   upstream declares a length and closes short of it; the other declares no
   framing and is ended by the close. The pair pins the distinction from both
@@ -72,6 +77,18 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **A line ending can no longer be smuggled into a request or a response
+  head.** Header values, header names and request URLs were written into the
+  head verbatim, so a CR LF in any of them turned one header into several, and
+  a doubled one ended the head and began a second message the peer would act
+  on. On a request that is header injection and request smuggling (CWE-93); on
+  a response it is response splitting and cache poisoning (CWE-113). Any
+  application that puts user-supplied text into a header or a URL, which is
+  ordinary, could be made to do it. Both sides now reject the bytes: the
+  client's `set_header` and `request` fail, and the server does not emit the
+  header. Rejected rather than repaired, because sending something other than
+  what the caller asked for is its own bug.
 
 - **A response cut short of its declared length is now an error.** A server
   that sent `Content-Length: 36` and closed after 10 bytes produced a

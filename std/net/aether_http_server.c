@@ -1,4 +1,5 @@
 #include "aether_http_server.h"
+#include "aether_http.h"
 #include "aether_net.h"
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
@@ -1762,7 +1763,15 @@ void http_response_set_status(HttpServerResponse* res, int code) {
 }
 
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value) {
-    if (!res || !key || !value) return;
+    if (!res) return;
+    /* A header carrying a line ending would be written into the response head
+     * verbatim and read back by the client as headers of its own, and a
+     * doubled one ends the head and starts a second response (CWE-113). An
+     * application that reflects anything a user supplied into a header is the
+     * ordinary way this happens. The header is dropped rather than repaired:
+     * this returns void, and emitting something other than what was asked for
+     * is worse than emitting nothing. */
+    if (!http_header_name_ok(key) || !http_header_value_ok(value)) return;
 
     // Lazy-allocate the header arrays. http_response_create() sets them
     // up eagerly, but external callers constructing the response struct
@@ -1831,7 +1840,9 @@ void http_response_clear_headers(HttpServerResponse* res) {
 //
 // 50-header cap is shared with `set_header`; over-cap silently drops.
 void http_response_add_header(HttpServerResponse* res, const char* key, const char* value) {
-    if (!res || !key || !value) return;
+    if (!res) return;
+    /* Same rejection as set_header: a line ending here splits the response. */
+    if (!http_header_name_ok(key) || !http_header_value_ok(value)) return;
     if (!res->header_keys || !res->header_values) {
         res->header_keys = (char**)calloc(50, sizeof(char*));
         res->header_values = (char**)calloc(50, sizeof(char*));

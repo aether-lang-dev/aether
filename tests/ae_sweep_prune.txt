@@ -97,6 +97,8 @@ tests/integration/http_client_split_body/
 tests/integration/http_client_stream/
 tests/integration/http_client_stream_chunked/
 tests/integration/http_client_truncated/
+tests/integration/http_header_injection/
+tests/integration/http_response_splitting/
 tests/integration/http_external_ptr/
 tests/integration/http_head_and_middleware/
 tests/integration/http_h2_concurrent_dispatch/
