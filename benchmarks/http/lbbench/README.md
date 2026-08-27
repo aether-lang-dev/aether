@@ -28,9 +28,21 @@ another number from the same run.
 | `profile.sh` | where the balancer's CPU goes | choosing what to change |
 | `syscalls.sh` | syscalls per request, exactly | checking a syscall change |
 | `switches.sh` | which call asked to sleep, by name | chasing context switches |
+| `instructions.sh` | work done per request, in instructions | pricing a change in userspace work |
 
-`profile.sh` and `switches.sh` need `perf`, and `switches.sh` needs a
-privileged container for the scheduler tracepoint.
+`profile.sh`, `switches.sh` and `instructions.sh` need `perf`; `switches.sh`
+needs a privileged container for the scheduler tracepoint, and
+`instructions.sh` needs a hardware performance counter, which a virtual
+machine usually does not expose. It says so and stops rather than reporting a
+count it could not take.
+
+Reach for `instructions.sh` when the question is whether a change made the
+code do more work, rather than how fast it ran: CPU per request moves with
+everything else on the box, and on a loaded machine its medians have
+disagreed by more than 20% between two builds whose least-contended rounds
+differed by 1.5%. Instructions say nothing about stalls or time spent asleep,
+which is where most of this path's cost is, so it prices a change but does not
+judge a result.
 
 ## What `run.sh` reports
 
