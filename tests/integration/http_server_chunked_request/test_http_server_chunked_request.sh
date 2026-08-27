@@ -89,4 +89,38 @@ grep -q "len=7 body=\[SECOND!\]" "$TMPDIR/pipelined.out" \
 grep -q "^HTTP/1.1 413" "$TMPDIR/flood.out" \
     || { head -3 "$TMPDIR/flood.out"; fail "an endless chunked body was not refused"; }
 
-echo "  [PASS] http_server_chunked_request: decode, pipelining, size limit, both-lengths refused"
+# Framing that has no single answer is refused rather than guessed at. Two
+# lengths that disagree, or a value that is not a count of bytes, is what lets
+# a front end and this server disagree about where a request ends.
+expect_400() {                    # expect_400 <label> <payload>
+    printf '%b' "$2" > "$TMPDIR/case.req"
+    send "$TMPDIR/case.req" "$TMPDIR/case.out"
+    grep -q "^HTTP/1.1 400" "$TMPDIR/case.out" \
+        || { head -2 "$TMPDIR/case.out"; fail "$1 was not refused"; }
+}
+expect_body() {                   # expect_body <label> <payload> <expected>
+    printf '%b' "$2" > "$TMPDIR/case.req"
+    send "$TMPDIR/case.req" "$TMPDIR/case.out"
+    grep -q "$3" "$TMPDIR/case.out" \
+        || { cat "$TMPDIR/case.out"; fail "$1"; }
+}
+
+expect_400 "two Content-Length headers that disagree" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world'
+expect_400 "a negative Content-Length" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: -1\r\nConnection: close\r\n\r\nhello'
+expect_400 "a Content-Length that is not a number" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5abc\r\nConnection: close\r\n\r\nhello'
+
+# A header value mentioning another header is not that header. A search that
+# is not anchored to the start of a line reads this as the framing.
+expect_body "a Content-Length inside another header's value was read as framing" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nX-Note: Content-Length: 99\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' \
+    'len=5 body=\[hello\]'
+
+# Duplicates that agree say the same thing once, which RFC 9112 allows.
+expect_body "identical duplicate Content-Length headers were refused" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' \
+    'len=5 body=\[hello\]'
+
+echo "  [PASS] http_server_chunked_request: decode, pipelining, size limit, framing refused when ambiguous"

@@ -82,6 +82,19 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Request framing with no single answer is refused instead of guessed at.**
+  Two `Content-Length` headers that disagreed were accepted and the first one
+  used, leaving the rest of the body in the stream to be read as the next
+  request; a negative or non-numeric value was quietly treated as zero, with
+  the same result. Both are unrecoverable framing errors (RFC 9112 6.3) and
+  are answered 400 now, because guessing is exactly what lets a front end and
+  this server disagree about where one request ends and the next begins.
+  Duplicates that agree are still accepted, since they say the same thing.
+
+  The framing headers are also found by scanning the start of each line rather
+  than searching the whole block, so a request carrying
+  `X-Note: Content-Length: 99` is no longer read as declaring a body of 99.
+
 - **The server reads chunked request bodies, and refuses a message that
   declares two lengths.** `Transfer-Encoding: chunked` was ignored on the way
   in, so a chunked upload reached the handler as an empty body: the payload

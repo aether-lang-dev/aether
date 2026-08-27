@@ -2893,6 +2893,77 @@ static void conn_resolve_addrs(HttpConn* c) {
     }
 }
 
+/* Find a header by name across the request's header block, anchored to the
+ * start of each line.
+ *
+ * Anchoring matters: a substring search over the whole block also matches
+ * inside another header's value, so a request carrying
+ * `X-Note: Content-Length: 9` would have had that read as its framing.
+ *
+ * Returns how many times the header appears, writes the first value into
+ * `out`, and sets *differing when two of them disagree. A framing header that
+ * appears twice with two answers has no single answer, which is the shape a
+ * smuggling pair is built from.
+ */
+static int conn_find_header(const char* block, const char* end,
+                            const char* name, char* out, size_t out_cap,
+                            int* differing) {
+    size_t name_len = strlen(name);
+    int count = 0;
+    if (differing) *differing = 0;
+    if (out && out_cap) out[0] = '\0';
+
+    for (const char* line = block; line && line < end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
+        const char* line_end = eol ? eol : end;
+        size_t line_len = (size_t)(line_end - line);
+        if (line_len && line[line_len - 1] == '\r') line_len--;
+
+        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
+            && line[name_len] == ':') {
+            const char* v = line + name_len + 1;
+            const char* v_end = line + line_len;
+            while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+            while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+            size_t vl = (size_t)(v_end - v);
+
+            char value[256];
+            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
+            memcpy(value, v, vl);
+            value[vl] = '\0';
+
+            if (count == 0) {
+                if (out && out_cap) {
+                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
+                    memcpy(out, value, copy);
+                    out[copy] = '\0';
+                }
+            } else if (differing && out && strcmp(out, value) != 0) {
+                *differing = 1;
+            }
+            count++;
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    return count;
+}
+
+/* Content-Length is a plain count of digits. Anything else, a sign, a spelled
+ * number, a value that will not fit, has no length in it, and RFC 9112 6.3
+ * calls that unrecoverable rather than something to guess at. */
+static int conn_parse_content_length(const char* text, long* out) {
+    if (!text || !*text) return -1;
+    long value = 0;
+    for (const unsigned char* c = (const unsigned char*)text; *c; c++) {
+        if (*c < '0' || *c > '9') return -1;
+        if (value > (LONG_MAX - (*c - '0')) / 10) return -1;
+        value = value * 10 + (*c - '0');
+    }
+    *out = value;
+    return 0;
+}
+
 /* The largest chunked request body this server will buffer. A chunked body
  * declares no length in advance, so nothing else bounds it. */
 #define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
@@ -3004,12 +3075,22 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     int request_total = header_size;
 
     /* Resolve Content-Length and ensure the full body is buffered. */
-    const char* cl_hdr = http_strcasestr(conn->buf + conn->read_pos,
-                                         "Content-Length:");
+    const char* head_start = conn->buf + conn->read_pos;
+    char cl_value[64];
+    int cl_differing = 0;
+    int cl_count = conn_find_header(head_start, hdr_end, "Content-Length",
+                                    cl_value, sizeof(cl_value), &cl_differing);
     long content_length = 0;
-    if (cl_hdr && cl_hdr < hdr_end) {
-        content_length = strtol(cl_hdr + 15, NULL, 10);
-        if (content_length < 0) content_length = 0;
+    if (cl_count > 0) {
+        /* Two lengths that disagree leave no single answer about where this
+         * message ends, and a value that is not a count of bytes leaves none
+         * either. Both are unrecoverable rather than something to pick from
+         * (RFC 9112 6.3): guessing is what lets a front end and this server
+         * disagree about where one request stops and the next begins. */
+        if (cl_differing || conn_parse_content_length(cl_value, &content_length) != 0) {
+            conn_send_bad_framing(conn);
+            return 0;
+        }
     }
 
     /* Transfer-Encoding decides where the body ends, and when it is present
@@ -3022,22 +3103,15 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
      * A message carrying both is refused rather than resolved, because the
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
-    const char* te_hdr = http_strcasestr(conn->buf + conn->read_pos,
-                                         "Transfer-Encoding:");
+    char te_value[128];
+    int te_count = conn_find_header(head_start, hdr_end, "Transfer-Encoding",
+                                    te_value, sizeof(te_value), NULL);
     int te_chunked = 0;
-    if (te_hdr && te_hdr < hdr_end) {
-        const char* eol = strstr(te_hdr, "\r\n");
-        if (!eol || eol > hdr_end) eol = hdr_end;
-        char te_value[128];
-        size_t vl = (size_t)(eol - te_hdr);
-        if (vl >= sizeof(te_value)) vl = sizeof(te_value) - 1;
-        memcpy(te_value, te_hdr, vl);
-        te_value[vl] = '\0';
+    if (te_count > 0) {
         te_chunked = http_strcasestr(te_value, "chunked") != NULL;
-
         /* Both lengths present, or a coding this server cannot decode: refuse
          * the message rather than pick one of the two answers. */
-        if ((cl_hdr && cl_hdr < hdr_end) || !te_chunked) {
+        if (cl_count > 0 || !te_chunked) {
             conn_send_bad_framing(conn);
             return 0;
         }
