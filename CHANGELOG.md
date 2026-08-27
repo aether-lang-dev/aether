@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.589.0]
+## [current]
 
 ### Added
 
@@ -30,6 +30,28 @@ version number before tagging the release.
   connecting in the clear — TLS is a separate change, and silently downgrading
   would be the worse failure. Handles from `ws_connect` own their socket and are
   released with `ws_client_free`.
+
+### Fixed
+
+- **The WebSocket conformance test now runs on CI instead of quietly skipping.**
+  It guarded on whether `websockets` could be imported, which was the wrong
+  question: Ubuntu 22.04 ships version 9.1, which passes an argument to
+  `asyncio` that Python 3.10 removed, so it imports cleanly and then dies
+  mid-handshake. The peer never replies, which from the client side is
+  indistinguishable from a broken handshake — so the library's own bug read as
+  ours. The check now completes a real loopback round-trip and distinguishes
+  "not installed" from "installed but unusable", and on Linux CI a missing peer
+  fails rather than skips, because a conformance test that silently does not run
+  is worse than no test at all. This also means the existing server-side
+  WebSocket test, which had been skipping on every runner, now actually runs.
+
+- **`timeout` is no longer assumed to exist.** It is GNU coreutils and absent on
+  macOS, where the WebSocket tests died with "command not found" before dialling
+  anything. They now use it when present and run without it otherwise; the
+  client sets its own receive timeout, so the wrapper was only ever a backstop.
+
+## [0.589.0]
+
 
 ### Changed
 
