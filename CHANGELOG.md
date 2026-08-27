@@ -21,9 +21,16 @@ version number before tagging the release.
 
   Requests now move through a state machine that never waits on a single
   descriptor, on a small number of threads that each hold many connections.
-  Measured on the same box in the same run: **context switches per request
-  1.96 to 0.12, CPU per request 36.6us to 25.4us**, and throughput from 56% of
-  nginx to 70%.
+  **Context switches per request fall from about 2.0 to between 0.12 and
+  0.26**, measured against the previous code in the same run twice, with nginx
+  at 0.00 and haproxy at 0.01. CPU per request is lower in both runs, by 31%
+  and by 9%, so the direction is clear and the size is not.
+
+  Throughput is not claimed. One run put it 44% above the previous code and
+  the next put it level, on a box whose controls moved 117% between rounds,
+  which is the harness saying the number cannot be read there. What the
+  sleeping cost is settled; what removing it is worth in requests per second
+  needs a quiet machine.
 
   It drives the same code the blocking path drives, so the two cannot disagree
   about what a proxied request means. TLS, HTTP/2, upgrades and streaming
