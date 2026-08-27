@@ -1034,7 +1034,7 @@ void http_request_free_raw(HttpClientRequest* req) {
 }
 
 /* Forward decls — defined below the static request() function. */
-static int header_already_set(HttpClientRequest* req, const char* name);
+static int header_already_set(const HttpClientRequest* req, const char* name);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 /* Decode HTTP/1.1 chunked transfer-encoding. Returns a malloc'd decoded
  * buffer (NUL-terminated; *out_len excludes the NUL) or NULL on malformed
@@ -1705,6 +1705,131 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     return len >= f->body_target;
 }
 
+/* Serialise a request head into a fresh capability-gated buffer.
+ *
+ * Shared so that a driver which sends without blocking puts exactly the same
+ * bytes on the wire as the blocking one. Returns NULL on allocation failure,
+ * with nothing to free; on success the caller owns the buffer and frees it
+ * with aether_caps_free(buf, *out_cap).
+ */
+typedef struct {
+    const HttpClientRequest* req;
+    const char* method;
+    const char* path;
+    const char* host;
+    int         port;
+    int         via_proxy;
+    int         use_tls;
+    const char* body;
+    int         body_len;
+    const char* content_type;
+    int         keep_alive;
+} HttpReqHead;
+
+static char* http_build_request_head(const HttpReqHead* p,
+                                     size_t* out_len, size_t* out_cap) {
+    size_t hdr_cap = 1024;
+    /* #461: gate the request-header build buffer through the cap. Self-
+     * contained — alloc, grow, and free all live in this function with
+     * hdr_cap tracking the live size, so accounting balances exactly. */
+    char* hdr = (char*)aether_caps_malloc(hdr_cap);
+    if (!hdr) return NULL;
+    size_t hdr_len = 0;
+
+    /* Helper: append a NUL-terminated string into hdr, growing as
+     * needed. Returns 0 on success, -1 on OOM. */
+    #define HDR_APPEND_STR(s) do { \
+        size_t _slen = strlen(s); \
+        if (hdr_len + _slen + 1 > hdr_cap) { \
+            size_t _nc = hdr_cap; \
+            while (_nc < hdr_len + _slen + 1) _nc *= 2; \
+            char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
+            if (!_nh) { aether_caps_free(hdr, hdr_cap); return NULL; } \
+            hdr = _nh; hdr_cap = _nc; \
+        } \
+        memcpy(hdr + hdr_len, s, _slen); \
+        hdr_len += _slen; \
+        hdr[hdr_len] = '\0'; \
+    } while (0)
+
+    /* Request line. For plain HTTP through a forward proxy, use the absolute
+     * form (`GET http://p->host[:p->port]/p->path HTTP/1.1`) so the proxy knows the
+     * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
+     * end-to-end to the origin), use the origin form (`GET /p->path`). */
+    HDR_APPEND_STR(p->method); HDR_APPEND_STR(" ");
+    if (p->via_proxy && !p->use_tls) {
+        char absline[1408];
+        if (p->port == 80) {
+            snprintf(absline, sizeof(absline), "http://%s%s", p->host, p->path);
+        } else {
+            snprintf(absline, sizeof(absline), "http://%s:%d%s", p->host, p->port, p->path);
+        }
+        HDR_APPEND_STR(absline);
+    } else {
+        HDR_APPEND_STR(p->path);
+    }
+    HDR_APPEND_STR(" HTTP/1.1\r\n");
+
+    /* Built-in Host (overridable via set_header).
+     *
+     * The authority, which includes the port whenever it is not the default
+     * for the scheme (RFC 9110 7.2). Sending the bare host to a server on
+     * another port names a different authority than the one being addressed,
+     * which a virtual-hosted server routes on. IPv6 literals would need
+     * brackets here; the connect path is IPv4-only (see the note above), so
+     * there is no such host to reach this. */
+    if (!header_already_set(p->req, "Host")) {
+        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(p->host);
+        if (p->port != (p->use_tls ? 443 : 80)) {
+            char port_suffix[16];
+            snprintf(port_suffix, sizeof(port_suffix), ":%d", p->port);
+            HDR_APPEND_STR(port_suffix);
+        }
+        HDR_APPEND_STR("\r\n");
+    }
+
+    /* Built-in Content-Length when p->body present (overridable, but
+     * setting it manually is almost always a bug — we still emit
+     * ours unless the caller explicitly overrode it). */
+    if (p->body && p->body_len > 0 && !header_already_set(p->req, "Content-Length")) {
+        char clen[32];
+        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", p->body_len);
+        HDR_APPEND_STR(clen);
+    }
+
+    /* Built-in Content-Type when p->body present, only if neither the
+     * builder's p->content_type nor an explicit Content-Type header is set. */
+    if (p->body && p->body_len > 0 && p->content_type
+        && !header_already_set(p->req, "Content-Type")) {
+        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_STR("\r\n");
+    } else if (p->body && p->body_len > 0 && !p->content_type
+        && !header_already_set(p->req, "Content-Type")) {
+        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
+    }
+
+    /* Persistent by default: the connection goes back to the idle pool when
+     * the response framing is definite. A caller who sets their own
+     * Connection header still gets exactly that. */
+    if (!header_already_set(p->req, "Connection")) {
+        HDR_APPEND_STR(p->keep_alive ? "Connection: keep-alive\r\n"
+                                 : "Connection: close\r\n");
+    }
+
+    /* Caller-provided headers, in insertion order. */
+    for (HttpHeader* h = p->req->headers; h; h = h->next) {
+        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
+    }
+
+    /* End-of-headers blank line. */
+    HDR_APPEND_STR("\r\n");
+
+    #undef HDR_APPEND_STR
+
+    *out_len = hdr_len;
+    *out_cap = hdr_cap;
+    return hdr;
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -1851,95 +1976,17 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * survive (the previous "%s" snprintf path would have truncated
      * at the first NUL — wasn't a problem in practice because the
      * v1 wrappers only sent textual JSON, but v2 takes body+len). */
-    size_t hdr_cap = 1024;
-    /* #461: gate the request-header build buffer through the cap. Self-
-     * contained — alloc, grow, and free all live in this function with
-     * hdr_cap tracking the live size, so accounting balances exactly. */
-    char* hdr = (char*)aether_caps_malloc(hdr_cap);
+    size_t hdr_cap = 0, hdr_len = 0;
+    HttpReqHead head_params = {
+        req, method, path, host, port, via_proxy, use_tls,
+        body, body_len, content_type, pool_this
+    };
+    char* hdr = http_build_request_head(&head_params, &hdr_len, &hdr_cap);
     if (!hdr) {
         transport_close(&t);
         response->error = string_new("out of memory building request");
         return response;
     }
-    size_t hdr_len = 0;
-
-    /* Helper: append a NUL-terminated string into hdr, growing as
-     * needed. Returns 0 on success, -1 on OOM. */
-    #define HDR_APPEND_STR(s) do { \
-        size_t _slen = strlen(s); \
-        if (hdr_len + _slen + 1 > hdr_cap) { \
-            size_t _nc = hdr_cap; \
-            while (_nc < hdr_len + _slen + 1) _nc *= 2; \
-            char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
-            if (!_nh) { aether_caps_free(hdr, hdr_cap); transport_close(&t); \
-                       response->error = string_new("out of memory building request"); \
-                       return response; } \
-            hdr = _nh; hdr_cap = _nc; \
-        } \
-        memcpy(hdr + hdr_len, s, _slen); \
-        hdr_len += _slen; \
-        hdr[hdr_len] = '\0'; \
-    } while (0)
-
-    /* Request line. For plain HTTP through a forward proxy, use the absolute
-     * form (`GET http://host[:port]/path HTTP/1.1`) so the proxy knows the
-     * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
-     * end-to-end to the origin), use the origin form (`GET /path`). */
-    HDR_APPEND_STR(method); HDR_APPEND_STR(" ");
-    if (via_proxy && !use_tls) {
-        char absline[1408];
-        if (port == 80) {
-            snprintf(absline, sizeof(absline), "http://%s%s", host, path);
-        } else {
-            snprintf(absline, sizeof(absline), "http://%s:%d%s", host, port, path);
-        }
-        HDR_APPEND_STR(absline);
-    } else {
-        HDR_APPEND_STR(path);
-    }
-    HDR_APPEND_STR(" HTTP/1.1\r\n");
-
-    /* Built-in Host (overridable via set_header). */
-    if (!header_already_set(req, "Host")) {
-        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(host); HDR_APPEND_STR("\r\n");
-    }
-
-    /* Built-in Content-Length when body present (overridable, but
-     * setting it manually is almost always a bug — we still emit
-     * ours unless the caller explicitly overrode it). */
-    if (body && body_len > 0 && !header_already_set(req, "Content-Length")) {
-        char clen[32];
-        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", body_len);
-        HDR_APPEND_STR(clen);
-    }
-
-    /* Built-in Content-Type when body present, only if neither the
-     * builder's content_type nor an explicit Content-Type header is set. */
-    if (body && body_len > 0 && content_type
-        && !header_already_set(req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(content_type); HDR_APPEND_STR("\r\n");
-    } else if (body && body_len > 0 && !content_type
-        && !header_already_set(req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
-    }
-
-    /* Persistent by default: the connection goes back to the idle pool when
-     * the response framing is definite. A caller who sets their own
-     * Connection header still gets exactly that. */
-    if (!header_already_set(req, "Connection")) {
-        HDR_APPEND_STR(pool_this ? "Connection: keep-alive\r\n"
-                                 : "Connection: close\r\n");
-    }
-
-    /* Caller-provided headers, in insertion order. */
-    for (HttpHeader* h = req->headers; h; h = h->next) {
-        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
-    }
-
-    /* End-of-headers blank line. */
-    HDR_APPEND_STR("\r\n");
-
-    #undef HDR_APPEND_STR
 
     /* Accumulator for the buffered read below, declared here because the
      * reuse retry rewinds to `send_request` and has to reset it. */
@@ -2301,7 +2348,7 @@ static int http_strcaseeq(const char* a, const char* b) {
     return *a == 0 && *b == 0;
 }
 
-static int header_already_set(HttpClientRequest* req, const char* name) {
+static int header_already_set(const HttpClientRequest* req, const char* name) {
     if (!req) return 0;
     for (HttpHeader* h = req->headers; h; h = h->next) {
         if (http_strcaseeq(h->name, name)) return 1;

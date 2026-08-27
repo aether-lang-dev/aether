@@ -13,6 +13,11 @@ version number before tagging the release.
 
 ### Changed
 
+- **The request head is serialised in one place.** A driver that sends without
+  blocking has to put exactly the same bytes on the wire as the blocking one,
+  so building the head moved out of the send path into a function both can
+  call. No behavioural change.
+
 - **Response framing is decided in one place.** Reading to the end of a
   response, rather than to the end of the connection, is what lets a
   connection carry the next one. That logic (the header block, then chunked or
@@ -33,6 +38,13 @@ version number before tagging the release.
 
 ### Added
 
+- **A test for the request head the client sends.** What goes on the wire is
+  the client's contract with every server and nothing asserted it: the
+  keep-alive test passes even when the client is made to send
+  `Connection: close`, because that upstream holds the socket open whatever it
+  is told. The new upstream answers with the head it received, so the request
+  line, `Host`, `Connection` and caller-set headers are all checked.
+
 - **A test for a response whose body arrives after its headers.** Every client
   test sent a response small enough to arrive in a single segment, so a client
   that stopped reading at the header block would have passed all of them. This
@@ -40,6 +52,13 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **`Host` now carries the port when it is not the scheme's default.** The
+  client sent the bare host, so a request to a server on any other port named
+  a different authority than the one it was addressing, which is what a
+  virtual-hosted server routes on (RFC 9110 7.2). Found by the request-head
+  test above. A caller-set `Host` still wins, and the reverse proxy sets its
+  own, so that path was never affected.
 
 - **Reading the value of a call that returns none is now a diagnostic.** A
   function with no declared return type and no `return <value>` lowers to C
