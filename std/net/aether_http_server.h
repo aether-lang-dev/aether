@@ -511,6 +511,14 @@ const char* http_server_set_health_probes_raw(HttpServer* server,
 // outgoing messages. Returning from the handler closes the
 // connection cleanly with a 1000 (Normal Closure) frame.
 typedef struct HttpWsConn HttpWsConn;  /* opaque */
+
+/* WebSocket CLIENT: dial a ws:// URL, complete the client-side upgrade and
+ * return a handle the existing ws_send/recv/close verbs accept. Returns NULL
+ * on any failure (bad URL, unreachable host, non-101 response, or an accept
+ * hash that does not match the key we sent). ws:// only — a wss:// URL is
+ * refused rather than silently downgraded. Free with http_ws_client_free. */
+HttpWsConn* http_ws_connect(const char* url);
+void        http_ws_client_free(HttpWsConn* ws);
 typedef void (*HttpWsHandler)(HttpRequest* req, HttpWsConn* ws, void* user_data);
 
 void http_server_websocket(HttpServer* server, const char* path,

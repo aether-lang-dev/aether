@@ -1,0 +1,41 @@
+// The client half: dial the echo peer, round-trip a message, close.
+import std.http
+import std.string
+
+extern exit(code: int)
+
+main() {
+    w = http.ws_connect("ws://127.0.0.1:18142/echo")
+    if w == null {
+        println("FAIL: ws_connect returned null")
+        exit(1)
+    }
+
+    // Send a message the server will echo back with a prefix. Non-ASCII and
+    // a length past the 125-byte short-frame boundary are deliberately NOT
+    // used here: this proves the handshake and the mask, and a longer frame
+    // belongs in its own case once this is trusted.
+    rc = http.ws_send_text(w, "hello from the client")
+    if rc < 0 {
+        println("FAIL: ws_send_text returned ${rc}")
+        exit(1)
+    }
+
+    kind = http.ws_recv(w)
+    if kind != 1 {
+        println("FAIL: ws_recv returned ${kind}, want 1 (text)")
+        exit(1)
+    }
+
+    got = http.ws_message(w)
+    want = "echo: hello from the client"
+    if string.compare(got, want) != 0 {
+        println("FAIL: got [${got}] want [${want}]")
+        exit(1)
+    }
+
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: ws round-trip")
+    exit(0)
+}

@@ -39,8 +39,28 @@ if ! command -v python3 >/dev/null 2>&1; then
     echo "  [SKIP] python3 not on PATH"
     exit 0
 fi
-if ! python3 -c "import websockets" 2>/dev/null; then
-    echo "  [SKIP] python websockets library not installed (pip install websockets)"
+PROBE=0
+python3 "$ROOT/tests/integration/ws_probe_websockets.py" >/dev/null 2>&1 || PROBE=$?
+if [ "$PROBE" != "0" ]; then
+    # 2 = not installed, 3 = installed but unusable (Ubuntu 22.04 ships
+    # websockets 9.1, which is broken on Python 3.10+ -- see the probe).
+    #
+    # This is our only check against an INDEPENDENT RFC 6455 implementation,
+    # so a silent skip on Linux CI would hide the one thing it exists for.
+    if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ]; then
+        if [ "$PROBE" = "3" ]; then
+            echo "  [FAIL] the installed python websockets is unusable on this Python."
+            echo "         Ubuntu 22.04's python3-websockets (9.1) passes the removed"
+            echo "         loop= argument to asyncio and dies mid-handshake."
+            echo "         Install a current one: pip install websockets"
+        else
+            echo "  [FAIL] python websockets is missing on a Linux CI runner."
+            echo "         Install: pip install websockets"
+        fi
+        echo "         (this is our only external RFC 6455 conformance check)"
+        exit 1
+    fi
+    echo "  [SKIP] no usable python websockets module (pip install websockets)"
     exit 0
 fi
 

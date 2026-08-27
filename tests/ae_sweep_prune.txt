@@ -190,5 +190,7 @@ tests/integration/varargs_forward/
 tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/
 tests/integration/where_clause/
+tests/integration/ws_client_loopback/
+tests/integration/ws_client_conformance/
 tests/integration/wycheproof/
 tests/integration/zlib_roundtrip/

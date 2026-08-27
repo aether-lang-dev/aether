@@ -9,7 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **A WebSocket client, so a `ws://` endpoint can be dialled.** `std.http` had a
+  complete RFC 6455 server, but every entry point *accepted* a connection —
+  nothing originated one, which put protocols carried over a client-opened
+  socket (WebDriver-BiDi among them) out of reach. `http.ws_connect(url)`
+  performs the client-side upgrade and returns a handle that takes the same
+  verbs a server-side one does — `ws_send_text` / `ws_recv` / `ws_message` /
+  `ws_close` — because the frame codec underneath is shared. The one invisible
+  difference is required by §5.3: a client masks every frame it sends and a
+  server masks none, so both sides now run through a single send path carrying
+  a per-handle mask flag.
+
+  The handshake is verified rather than assumed: a reply is rejected unless its
+  `Sec-WebSocket-Accept` matches the key that was sent, so a `101` from a server
+  that never saw the handshake is refused. `wss://` returns null rather than
+  connecting in the clear — TLS is a separate change, and silently downgrading
+  would be the worse failure. Handles from `ws_connect` own their socket and are
+  released with `ws_client_free`.
+
+### Fixed
+
+- **The WebSocket conformance test now runs on CI instead of quietly skipping.**
+  It guarded on whether `websockets` could be imported, which was the wrong
+  question: Ubuntu 22.04 ships version 9.1, which passes an argument to
+  `asyncio` that Python 3.10 removed, so it imports cleanly and then dies
+  mid-handshake. The peer never replies, which from the client side is
+  indistinguishable from a broken handshake — so the library's own bug read as
+  ours. The check now completes a real loopback round-trip and distinguishes
+  "not installed" from "installed but unusable", and on Linux CI a missing peer
+  fails rather than skips, because a conformance test that silently does not run
+  is worse than no test at all. This also means the existing server-side
+  WebSocket test, which had been skipping on every runner, now actually runs.
+
+- **`timeout` is no longer assumed to exist.** It is GNU coreutils and absent on
+  macOS, where the WebSocket tests died with "command not found" before dialling
+  anything. They now use it when present and run without it otherwise; the
+  client sets its own receive timeout, so the wrapper was only ever a backstop.
+
+- **A cleanup handler no longer turns a passing test into a failing one.** The
+  WebSocket tests kill their peer and remove their temp directory from an `EXIT`
+  trap. Under `set -e` a failing command inside a trap abandons the rest of the
+  function, so on macOS — where the peer had already exited, making the `kill`
+  fail — the handler skipped its own cleanup and left a non-zero status behind.
+  The test printed `[PASS]` and then reported failure, while leaking a temp
+  directory on every run. Each step of the handler now tolerates its own
+  failure.
+
+- **`ws_connect` works on Windows.** Winsock requires `WSAStartup` before any
+  socket call, and the only thing that had ever performed it was creating a
+  server. A client-only program never does that, so the first socket call
+  failed and the dial returned null with nothing to explain why. The client now
+  runs the same guarded, idempotent initialiser the server does.
+
 ## [0.589.0]
+
 
 ### Changed
 
