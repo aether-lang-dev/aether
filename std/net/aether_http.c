@@ -1830,6 +1830,55 @@ static char* http_build_request_head(const HttpReqHead* p,
     return hdr;
 }
 
+/* Fill status, headers and body from a complete response buffer.
+ *
+ * Shared with any driver that accumulates the same bytes without blocking, so
+ * de-chunking and the header/body split cannot come out differently depending
+ * on who read the socket. `buf` is modified in place: the header terminator is
+ * NUL-terminated so the header block can be handed out as a string.
+ */
+static void http_response_fill_from_bytes(HttpResponse* response,
+                                          char* buf, size_t len) {
+    char* header_end = strstr(buf, "\r\n\r\n");
+    if (!header_end) {
+        response->body = string_new_with_length(buf, len);
+        return;
+    }
+    size_t header_bytes = (size_t)((header_end + 4) - buf);
+    size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
+    *header_end = '\0';
+    char* status_line = buf;
+    char* space1 = strchr(status_line, ' ');
+    if (space1) {
+        response->status_code = atoi(space1 + 1);
+    }
+
+    response->headers = string_new(buf);
+
+    /* De-chunk a `Transfer-Encoding: chunked` body so consumers see
+     * the decoded payload, not the raw chunk framing
+     * (`13\r\n…\r\n0\r\n\r\n`). Without this, any unknown-length /
+     * streamed upstream response (no Content-Length) came back
+     * framed — corrupting e.g. VCR record-mode tapes
+     * (vcr_record_chunked_dechunk_wish.md). Gated on the header, so
+     * only chunked bodies — already garbled today — change shape;
+     * on malformed framing we keep the raw bytes. */
+    const char* body_start = header_end + 4;
+    char* te = http_extract_response_header(buf, "Transfer-Encoding");
+    char* dechunked = NULL;
+    size_t dechunked_len = 0;
+    if (te && http_value_has_chunked(te)) {
+        dechunked = http_dechunk(body_start, body_bytes, &dechunked_len);
+    }
+    free(te);
+    if (dechunked) {
+        response->body = string_new_with_length(dechunked, dechunked_len);
+        free(dechunked);
+    } else {
+        response->body = string_new_with_length(body_start, body_bytes);
+    }
+}
+
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
     const char* method = req->method;
     const char* url    = req->url;
@@ -2291,43 +2340,7 @@ send_request:
         response->error = string_new("recv timeout or I/O error");
         return response;
     }
-    if (header_end) {
-        size_t header_bytes = (size_t)((header_end + 4) - full_response);
-        size_t body_bytes = total_len >= header_bytes ? total_len - header_bytes : 0;
-        *header_end = '\0';
-        char* status_line = full_response;
-        char* space1 = strchr(status_line, ' ');
-        if (space1) {
-            response->status_code = atoi(space1 + 1);
-        }
-
-        response->headers = string_new(full_response);
-
-        /* De-chunk a `Transfer-Encoding: chunked` body so consumers see
-         * the decoded payload, not the raw chunk framing
-         * (`13\r\n…\r\n0\r\n\r\n`). Without this, any unknown-length /
-         * streamed upstream response (no Content-Length) came back
-         * framed — corrupting e.g. VCR record-mode tapes
-         * (vcr_record_chunked_dechunk_wish.md). Gated on the header, so
-         * only chunked bodies — already garbled today — change shape;
-         * on malformed framing we keep the raw bytes. */
-        const char* body_start = header_end + 4;
-        char* te = http_extract_response_header(full_response, "Transfer-Encoding");
-        char* dechunked = NULL;
-        size_t dechunked_len = 0;
-        if (te && http_value_has_chunked(te)) {
-            dechunked = http_dechunk(body_start, body_bytes, &dechunked_len);
-        }
-        free(te);
-        if (dechunked) {
-            response->body = string_new_with_length(dechunked, dechunked_len);
-            free(dechunked);
-        } else {
-            response->body = string_new_with_length(body_start, body_bytes);
-        }
-    } else {
-        response->body = string_new_with_length(full_response, total_len);
-    }
+    http_response_fill_from_bytes(response, full_response, total_len);
 
     aether_caps_free(full_response, cap);
     return response;

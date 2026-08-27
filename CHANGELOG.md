@@ -13,6 +13,12 @@ version number before tagging the release.
 
 ### Changed
 
+- **A completed response is turned into a response object in one place.**
+  Splitting the header block from the body, and de-chunking a chunked one, no
+  longer lives inside the blocking read path, so a driver that accumulates the
+  same bytes without blocking cannot arrive at a different answer. No
+  behavioural change.
+
 - **The request head is serialised in one place.** A driver that sends without
   blocking has to put exactly the same bytes on the wire as the blocking one,
   so building the head moved out of the send path into a function both can
