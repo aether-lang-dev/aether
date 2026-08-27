@@ -82,6 +82,21 @@ version number before tagging the release.
 
 ### Fixed
 
+- **An over-long request line or header line no longer crashes the server.**
+  Both were copied into fixed stack buffers using a length taken from the
+  request, so a long URL or a long header value wrote past the end of the
+  frame and killed the process. Any client could do it with one request. They
+  are answered 414 and 431 now, and the copies are bounded independently of
+  the caller that checks them.
+
+- **Header lines this server would read differently from the sender are
+  refused.** Whitespace between a field name and its colon (`Content-Length :
+  5`) was ignored, so this server saw no body where a laxer front end sees
+  one, and an obs-fold continuation line was accepted with the value silently
+  cut short. RFC 9112 requires rejecting both, for the reason that makes them
+  worth fixing: each one is a place where two recipients of the same bytes
+  disagree about the message.
+
 - **Request framing with no single answer is refused instead of guessed at.**
   Two `Content-Length` headers that disagreed were accepted and the first one
   used, leaving the rest of the body in the stream to be read as the next

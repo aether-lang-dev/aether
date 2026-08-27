@@ -123,4 +123,32 @@ expect_body "identical duplicate Content-Length headers were refused" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' \
     'len=5 body=\[hello\]'
 
-echo "  [PASS] http_server_chunked_request: decode, pipelining, size limit, framing refused when ambiguous"
+# A header line this server would read differently from whoever sent it is
+# refused, because that disagreement is where smuggling lives.
+expect_400 "whitespace between a header name and its colon" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length : 5\r\nConnection: close\r\n\r\nhello'
+expect_400 "an obs-fold continuation line" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+
+# The request line and each header line are copied into fixed buffers. An
+# over-long one used to be copied in anyway, off the end of the stack frame,
+# which any client could reach with a long URL or a long header value. The
+# assertion is as much that the server is still answering afterwards.
+LONG_PATH=$(head -c 5000 /dev/zero | tr '\0' 'A')
+printf 'GET /%s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$LONG_PATH" > "$TMPDIR/longline.req"
+send "$TMPDIR/longline.req" "$TMPDIR/longline.out"
+grep -q "^HTTP/1.1 414" "$TMPDIR/longline.out" \
+    || { head -2 "$TMPDIR/longline.out"; fail "an over-long request line was not answered 414"; }
+
+LONG_HDR=$(head -c 3000 /dev/zero | tr '\0' 'B')
+printf 'GET /upload HTTP/1.1\r\nHost: x\r\nX-Long: %s\r\nConnection: close\r\n\r\n' "$LONG_HDR" > "$TMPDIR/longhdr.req"
+send "$TMPDIR/longhdr.req" "$TMPDIR/longhdr.out"
+grep -q "^HTTP/1.1 431" "$TMPDIR/longhdr.out" \
+    || { head -2 "$TMPDIR/longhdr.out"; fail "an over-long header line was not answered 431"; }
+
+# Still serving after all of the above, which is the point of the two checks.
+expect_body "the server stopped serving after the oversized requests" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello' \
+    'len=5 body=\[hello\]'
+
+echo "  [PASS] http_server_chunked_request: framing, header shape and oversized lines all refused safely"
