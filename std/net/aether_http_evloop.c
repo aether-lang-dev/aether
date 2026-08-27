@@ -23,7 +23,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdio.h>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -54,6 +53,9 @@ typedef struct EvConn {
     char*            head;       /* serialised upstream request */
     size_t           head_len, head_cap;
 
+    long     deadline_ms;        /* when the upstream call gives up, 0 = none */
+    int      heap_pos;           /* where this sits in its driver's heap, -1 out */
+
     HttpRequest*        req;     /* the parsed client request */
     HttpServerResponse* res;     /* what the proxy fills in for the client */
     AetherProxyExchange px;      /* the proxy's own resumable state */
@@ -77,6 +79,12 @@ typedef struct {
     int            wake_r;       /* a submitted descriptor arrives here */
     int            wake_w;
     int            started;
+
+    /* Connections with a deadline, earliest first. A proxy has to give up on
+     * an upstream that never answers, and the loop needs to know when the
+     * next one is due without walking everything it owns. */
+    EvConn**       timers;
+    int            timer_count, timer_cap;
 } EvDriver;
 
 struct HttpEvLoop {
@@ -87,6 +95,8 @@ struct HttpEvLoop {
     atomic_int  stopping;
     atomic_int  next_driver;     /* round-robin placement of new connections */
 };
+
+static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms);
 
 static void ev_set_nonblocking(int fd) {
 #ifdef _WIN32
@@ -160,6 +170,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
         ev_untrack(d, c->client_fd);
         close(c->client_fd);
     }
+    ev_timer_set(d, c, 0);
     ev_conn_reset_request(c);
     free(c->in);
     free(c);
@@ -193,6 +204,89 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
     *out_total = header_bytes + (size_t)declared;
     return 1;
 }
+
+
+/* ---- deadlines ----
+ *
+ * A binary heap ordered by deadline. The loop needs two things from it: the
+ * earliest deadline, to decide how long it may wait in poll, and every
+ * deadline that has passed. Both are what a heap is for.
+ */
+
+static void ev_timer_swap(EvDriver* d, int i, int j) {
+    EvConn* a = d->timers[i];
+    EvConn* b = d->timers[j];
+    d->timers[i] = b; b->heap_pos = i;
+    d->timers[j] = a; a->heap_pos = j;
+}
+
+static void ev_timer_up(EvDriver* d, int i) {
+    while (i > 0) {
+        int parent = (i - 1) / 2;
+        if (d->timers[parent]->deadline_ms <= d->timers[i]->deadline_ms) break;
+        ev_timer_swap(d, parent, i);
+        i = parent;
+    }
+}
+
+static void ev_timer_down(EvDriver* d, int i) {
+    for (;;) {
+        int l = 2 * i + 1, r = l + 1, small = i;
+        if (l < d->timer_count &&
+            d->timers[l]->deadline_ms < d->timers[small]->deadline_ms) small = l;
+        if (r < d->timer_count &&
+            d->timers[r]->deadline_ms < d->timers[small]->deadline_ms) small = r;
+        if (small == i) break;
+        ev_timer_swap(d, i, small);
+        i = small;
+    }
+}
+
+static void ev_timer_remove(EvDriver* d, EvConn* c) {
+    int i = c->heap_pos;
+    if (i < 0 || i >= d->timer_count || d->timers[i] != c) { c->heap_pos = -1; return; }
+    ev_timer_swap(d, i, d->timer_count - 1);
+    d->timer_count--;
+    c->heap_pos = -1;
+    if (i < d->timer_count) { ev_timer_up(d, i); ev_timer_down(d, i); }
+}
+
+static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms) {
+    ev_timer_remove(d, c);
+    c->deadline_ms = deadline_ms;
+    if (deadline_ms <= 0) return 0;
+    if (d->timer_count == d->timer_cap) {
+        int want = d->timer_cap ? d->timer_cap * 2 : 64;
+        EvConn** grown = (EvConn**)realloc(d->timers, (size_t)want * sizeof(*grown));
+        if (!grown) return -1;
+        d->timers = grown;
+        d->timer_cap = want;
+    }
+    d->timers[d->timer_count] = c;
+    c->heap_pos = d->timer_count;
+    d->timer_count++;
+    ev_timer_up(d, d->timer_count - 1);
+    return 0;
+}
+
+/* How long the loop may wait, given the next deadline. */
+static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
+    if (d->timer_count == 0) return cap_ms;
+    long wait = d->timers[0]->deadline_ms - aether_proxy_now_ms();
+    if (wait < 0) wait = 0;
+    return wait < cap_ms ? (int)wait : cap_ms;
+}
+
+/* Forward declarations: the states call each other, and a request that can
+ * run start to finish without waiting walks most of them in one visit. */
+static void ev_arm_deadline(EvDriver* d, EvConn* c);
+static int  ev_expire(EvDriver* d, EvConn* c);
+static int  ev_hand_back(EvDriver* d, EvConn* c);
+static int  ev_respond_from(EvDriver* d, EvConn* c);
+static int  ev_begin_upstream(EvDriver* d, EvConn* c);
+static int  ev_begin_retry(EvDriver* d, EvConn* c);
+static int  ev_finish_upstream(EvDriver* d, EvConn* c);
+static int  ev_advance(EvDriver* d, EvConn* c);
 
 /* ---- the state machine ----
  *
@@ -310,12 +404,62 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
+    ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
         return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
     }
     c->state = EV_UPSTREAM_SEND;
     return 1;
+}
+
+
+
+/* Give the connection to the general server path and stop tracking it here.
+ *
+ * Ownership moves whole: the descriptor leaves this driver's poller and its
+ * table before the other path sees it, so no event can arrive for a
+ * connection this driver no longer owns.
+ */
+static int ev_hand_back(EvDriver* d, EvConn* c) {
+    int fd = c->client_fd;
+    aether_io_poller_remove(&d->poller, fd);
+    ev_untrack(d, fd);
+    ev_timer_set(d, c, 0);
+    c->client_fd = -1;           /* ev_conn_close must not close it now */
+
+    int adopted = http_server_adopt_connection(d->loop->server, fd,
+                                               c->in, (int)c->in_len);
+    if (adopted != 0) close(fd);
+    return -1;                   /* finished with, as far as this driver goes */
+}
+
+/* The proxy's configured upstream timeout, as a moment to give up. A proxy
+ * that waits forever on an upstream is not one anybody can run: the blocking
+ * path gets this from the socket, and a driver that never blocks has to keep
+ * the time itself. */
+static void ev_arm_deadline(EvDriver* d, EvConn* c) {
+    AetherProxyOpts* opts = (AetherProxyOpts*)http_server_proxy_opts(d->loop->server);
+    int secs = (opts && opts->pool) ? opts->pool->request_timeout_sec : 0;
+    if (secs <= 0) { ev_timer_set(d, c, 0); return; }
+    ev_timer_set(d, c, aether_proxy_now_ms() + (long)secs * 1000);
+}
+
+/* The upstream did not answer in time. The client is owed an answer anyway,
+ * and it is the same one the blocking path gives. */
+static int ev_expire(EvDriver* d, EvConn* c) {
+    ev_timer_set(d, c, 0);
+    if (c->up.t.sockfd >= 0) {
+        aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+        ev_untrack(d, c->up.t.sockfd);
+        http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
+    }
+    if (!c->res) return -1;
+    http_response_set_status(c->res, 504);
+    http_response_set_header(c->res, "X-Aether-Proxy-Error", "upstream_timeout");
+    http_response_set_header(c->res, "Content-Type", "text/plain");
+    http_response_set_body(c->res, "upstream timed out\n");
+    return ev_respond_from(d, c);
 }
 
 /* ---- the bridge to the proxy ----
@@ -330,36 +474,36 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
 /* The request is complete: run the proxy up to the point where it needs the
  * upstream, then get a connection and a serialised head ready to go. */
 static int ev_begin_upstream(EvDriver* d, EvConn* c) {
-    int dbg = getenv("AE_EVLOOP_DEBUG") != NULL;
     HttpRequest* req = http_parse_request_n(c->in, c->in_len);
-    if (!req) { if (dbg) fprintf(stderr, "[ev] parse failed\n"); return -1; }
+    if (!req) return -1;
 
     c->res = http_response_create();
     if (!c->res) { http_request_free(req); return -1; }
     c->req = req;
 
     void* opts = http_server_proxy_opts(d->loop->server);
-    if (dbg) fprintf(stderr, "[ev] opts=%p\n", opts);
     int r = aether_proxy_exchange_begin(&c->px, req, c->res, opts);
-    if (dbg) fprintf(stderr, "[ev] begin -> %d\n", r);
+    if (r == 1) {
+        /* Not the proxy's request: a health endpoint, an admin route, or
+         * anything another middleware answers. This driver knows one kind of
+         * work, so the rest goes back to the path that knows the others,
+         * carrying the bytes already read off the socket. */
+        return ev_hand_back(d, c);
+    }
     if (r != PX_NEED_SEND) {
-        /* Served without an upstream: a cache hit, a refusal, or a route this
-         * proxy does not own. The response is already filled in. */
+        /* Served without an upstream: a cache hit or a refusal. The response
+         * is already filled in. */
         return ev_respond_from(d, c);   /* 1: the client write is next */
     }
 
     const char* url = http_request_url_of(c->px.outbound);
     char host[256], path[1024];
     int port = 0, use_tls = 0;
-    if (dbg) fprintf(stderr, "[ev] url=%s\n", url ? url : "(none)");
-    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls)) {
-        if (dbg) fprintf(stderr, "[ev] parse_url failed\n");
+    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
         return -1;
-    }
     if (use_tls) return -1;      /* this driver is only mounted on plain HTTP */
 
     int fd = http_upstream_acquire(host, port, &c->up);
-    if (dbg) fprintf(stderr, "[ev] acquire %s:%d -> fd=%d connecting=%d\n", host, port, fd, c->up.connecting);
     if (fd < 0) return -1;
 
     int body_len = 0;
@@ -375,6 +519,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
 
+    ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
         return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
@@ -387,6 +532,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
  * decides whether it is the one to keep, and turn what it produced into bytes
  * for the client. */
 static int ev_finish_upstream(EvDriver* d, EvConn* c) {
+    ev_timer_set(d, c, 0);       /* the upstream answered; nothing to give up on */
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;
     if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
@@ -481,6 +627,7 @@ static void ev_take_submissions(EvDriver* d) {
         if (!c) { close(fd); continue; }
         c->client_fd = fd;
         c->state = EV_READ_REQUEST;
+        c->heap_pos = -1;
         c->up.t.sockfd = -1;
         c->up.t.applied_timeout_ns = -1;
         ev_set_nonblocking(fd);
@@ -499,13 +646,26 @@ static void* ev_driver_main(void* arg) {
     aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
 
     while (!atomic_load(&d->loop->stopping)) {
-        int n = aether_io_poller_poll(&d->poller, events, 64, 200);
-        if (n <= 0) continue;
+        /* Wait no longer than the next deadline, so a timeout is answered
+         * when it is due rather than whenever the next event happens to
+         * arrive. With nothing due, the cap is what makes the stop flag
+         * visible. */
+        int n = aether_io_poller_poll(&d->poller, events, 64,
+                                      ev_next_timeout_ms(d, 200));
         for (int i = 0; i < n; i++) {
             int fd = events[i].fd;
             if (fd == d->wake_r) { ev_take_submissions(d); continue; }
             EvConn* c = (fd >= 0 && fd < d->by_fd_cap) ? d->by_fd[fd] : NULL;
             if (!c) continue;
+            if (ev_advance(d, c) < 0) ev_conn_close(d, c);
+        }
+
+        /* Everything whose deadline has passed, answered rather than dropped. */
+        long now = aether_proxy_now_ms();
+        while (d->timer_count > 0 && d->timers[0]->deadline_ms <= now) {
+            EvConn* c = d->timers[0];
+            int r = ev_expire(d, c);
+            if (r < 0) { ev_conn_close(d, c); continue; }
             if (ev_advance(d, c) < 0) ev_conn_close(d, c);
         }
     }
@@ -613,6 +773,7 @@ void http_evloop_stop(HttpEvLoop* loop) {
         EvDriver* d = &loop->drivers[i];
         if (!d->started) continue;
         pthread_join(d->thread, NULL);
+        free(d->timers);
         ev_driver_destroy(d);
     }
     free(loop->drivers);

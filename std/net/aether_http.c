@@ -1981,8 +1981,15 @@ void http_response_fill_from_bytes(HttpResponse* response,
  * driver filling one in from bytes it read itself starts from exactly what
  * the blocking path starts from. */
 HttpResponse* http_response_alloc_empty(void) {
-    HttpResponse* response = http_response_alloc_empty();
+    HttpResponse* response = (HttpResponse*)malloc(sizeof(HttpResponse));
     if (!response) return NULL;
+    response->status_code = 0;
+    response->body = NULL;
+    response->headers = NULL;
+    response->error = NULL;
+    response->redirect_error = NULL;
+    response->effective_url = NULL;
+    response->stream = NULL;
     return response;
 }
 

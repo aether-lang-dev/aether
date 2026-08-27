@@ -4443,6 +4443,47 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
     conn_serve(server, conn);
 }
 
+/* Take a connection the event driver decided it does not own, along with the
+ * bytes it already read from it.
+ *
+ * The driver handles proxied plain HTTP. A request the proxy passes on, a
+ * health endpoint, an admin route, anything another middleware answers, has
+ * to reach the general path instead, and it has to reach it with the bytes
+ * that have already left the socket. That is the same handoff the parking lot
+ * performs, so it uses the same connection shape.
+ *
+ * Returns 0 when this took ownership of the descriptor.
+ */
+int http_server_adopt_connection(HttpServer* server, int client_fd,
+                                 const char* prebuffered, int prebuffered_len) {
+    if (!server || client_fd < 0) return -1;
+
+    HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
+    if (!conn) return -1;
+    conn->fd = client_fd;
+    conn->applied_recv_timeout_ms = -1;
+
+    if (prebuffered && prebuffered_len > 0) {
+        if (conn_buf_ensure(conn, prebuffered_len + 1) != 0) {
+            free(conn);
+            return -1;
+        }
+        memcpy(conn->buf, prebuffered, (size_t)prebuffered_len);
+        conn->write_pos = prebuffered_len;
+        conn->buf[conn->write_pos] = '\0';
+    }
+
+    /* The descriptor was non-blocking for the driver; the worker path reads it
+     * with timeouts and expects it not to be. */
+#ifndef _WIN32
+    int flags = fcntl(client_fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
+
+    conn_serve(server, conn);
+    return 0;
+}
+
 void http_server_drain_connection(HttpServer* server, int client_fd) {
     if (!server || client_fd < 0) return;
 
