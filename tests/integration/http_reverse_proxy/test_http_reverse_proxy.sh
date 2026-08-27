@@ -132,23 +132,29 @@ echo "$BODY" | grep -q '^upstream-ok$' || {
 if [ "$IS_WIN" = "1" ]; then
     echo "  [SKIP-WIN] T2-T6 header-forwarding details — POSIX matrix covers"
 else
-    # Test 2 — Hop-by-Hop stripped. Send headers the proxy must NOT
-    # forward; the upstream's echo confirms with `hopby=<none>`.
+    # Test 2 — a header named in Connection is hop-by-hop for this message
+    # and must not reach the upstream (RFC 9110 7.6.1). A sender names a
+    # header there so the next hop does not see it, so an upstream that
+    # trusts a header stays reachable through an intermediary that forwards
+    # it anyway.
     RESP=$(curl --silent --show-error --max-time 5 \
-                -H 'Connection: x-secret' \
+                -H 'Connection: X-Hopby-Custom' \
                 -H 'TE: trailers' \
-                -H 'Upgrade-Insecure-Requests: 1' \
                 -H 'X-Hopby-Custom: leaked' \
                 "$PROXY/echo" 2>"$TMPDIR/c2.err")
-    # Connection-listed custom headers ARE in our hop-by-hop strip
-    # semantics per RFC 7230 §6.1, but X-Hopby-Custom isn't mentioned
-    # in Connection: x-secret here so it's NOT actually hop-by-hop —
-    # we expect it to PASS through. Reframe: the literal Connection,
-    # TE, Upgrade-Insecure-Requests headers are the ones that should
-    # be absent upstream. The echo tags only Connection-/Via-/Host-
-    # style fields, so the assertion focuses on those.
-    echo "$RESP" | grep -q '^xff=' || {
-        echo "  [FAIL] T2: hop-by-hop strip output missing"; echo "$RESP"; exit 1;
+    echo "$RESP" | grep -q '^hopby=<none>' || {
+        echo "  [FAIL] T2: a header named in Connection reached the upstream"
+        echo "$RESP"; exit 1;
+    }
+
+    # Test 2b — the same header, not named in Connection, must arrive. This
+    # is the half that keeps the strip from becoming "drop unknown headers".
+    RESP=$(curl --silent --show-error --max-time 5 \
+                -H 'X-Hopby-Custom: kept' \
+                "$PROXY/echo" 2>"$TMPDIR/c2b.err")
+    echo "$RESP" | grep -q '^hopby=kept' || {
+        echo "  [FAIL] T2b: a header not named in Connection was dropped"
+        echo "$RESP"; exit 1;
     }
 
     # Test 3 — X-Forwarded-For appended to existing value.

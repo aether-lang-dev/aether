@@ -88,6 +88,15 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The reverse proxy drops the headers a request names in its own
+  `Connection`.** Only a fixed hop-by-hop list was stripped, so a header the
+  sender marked connection-local was forwarded to the upstream anyway
+  (RFC 9110 7.6.1). A sender names a header there precisely so the next hop
+  does not see it, which means an upstream that trusts a header (an internal
+  authentication header, a client-address header) stayed reachable through an
+  intermediary that ignored the instruction. Headers not named in `Connection`
+  are forwarded exactly as before.
+
 - **A response has to say where its body ends, once.** Two `Content-Length`
   headers that disagreed were accepted and one of them used, and a response
   sending more bytes than it declared had the surplus delivered as part of its

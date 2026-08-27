@@ -82,6 +82,23 @@ static int token_list_contains(const char* csv, const char* needle) {
     return 0;
 }
 
+/* Is this header hop-by-hop for THIS message?
+ *
+ * The fixed list above is the always-hop-by-hop set. The rest is per-message:
+ * a sender names its own connection-local headers in `Connection`, and RFC
+ * 9110 7.6.1 requires an intermediary to drop every one of them.
+ *
+ * Passing them on is not merely untidy. A sender marks a header
+ * connection-local precisely so the next hop does not see it, so a backend
+ * that trusts a header (an internal auth header, a client-address header)
+ * stays reachable through an intermediary that ignores the instruction.
+ */
+static int is_hop_by_hop_for(const char* name, const char* connection_value) {
+    if (is_hop_by_hop(name)) return 1;
+    if (!connection_value || !*connection_value) return 0;
+    return token_list_contains(connection_value, name);
+}
+
 static int route_pattern_matches(const char* pattern, const char* path) {
     if (!pattern || !*pattern) return 1;
     if (!path) path = "/";
@@ -468,11 +485,13 @@ static int px_build(AetherProxyExchange* px) {
         http_request_set_timeout_raw(px->outbound, opts->pool->request_timeout_sec);
     }
 
-    /* Forward inbound headers minus hop-by-hop. */
+    /* Forward inbound headers minus hop-by-hop, including the ones this
+     * particular request named in its own Connection header. */
+    const char* inbound_connection = http_get_header(req, "Connection");
     for (int i = 0; i < req->header_count; i++) {
         const char* k = req->header_keys[i];
         const char* v = req->header_values[i];
-        if (!k || is_hop_by_hop(k)) continue;
+        if (!k || is_hop_by_hop_for(k, inbound_connection)) continue;
         if (strcasecmp(k, "Host") == 0) continue;
         /* Skip traceparent/tracestate here — the Trace-Context
          * branch below handles them so the inject_traceparent
