@@ -86,6 +86,7 @@ tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/
 tests/integration/http_auth/
+tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
 tests/integration/http_client_dechunk/
 tests/integration/http_client_forward_proxy/

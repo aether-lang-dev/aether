@@ -1142,9 +1142,19 @@ static const char* http_strcasestr_local(const char* hay, const char* needle) {
 }
 
 /* The status code from a response header block. */
+/* The status code from a status line, or 0 when the line does not carry one.
+ *
+ * It is exactly three digits (RFC 9112 4). Reading it with atoi instead
+ * accepts anything that starts with a digit and wraps on overflow, so an
+ * upstream answering "HTTP/1.1 999999999999 Weird" handed the caller a status
+ * of -727379969, and a proxy copied that onto the response it sent back. */
 static int response_status_of(const char* header_block) {
     const char* sp = strchr(header_block, ' ');
-    return sp ? atoi(sp + 1) : 0;
+    if (!sp) return 0;
+    const unsigned char* d = (const unsigned char*)sp + 1;
+    if (!isdigit(d[0]) || !isdigit(d[1]) || !isdigit(d[2])) return 0;
+    if (isdigit(d[3])) return 0;
+    return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
 /* RFC 9110: 1xx, 204 and 304 carry no body, and neither does any response to
@@ -1895,9 +1905,12 @@ static void http_response_fill_from_bytes(HttpResponse* response,
     size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
     *header_end = '\0';
     char* status_line = buf;
-    char* space1 = strchr(status_line, ' ');
-    if (space1) {
-        response->status_code = atoi(space1 + 1);
+    response->status_code = response_status_of(status_line);
+    if (response->status_code == 0 && !response->error) {
+        /* Headers arrived, but the first line does not carry a status, so
+         * this is not a response to hand back as a success: a proxy would
+         * copy the absent status straight onto its own reply. */
+        response->error = string_new("malformed status line in response");
     }
 
     response->headers = string_new(buf);
@@ -2289,8 +2302,7 @@ send_request:
         size_t over_len     = hlen - header_bytes;   /* body bytes already read */
         *hend = '\0';                                 /* isolate the header block */
 
-        char* space1 = strchr(hb, ' ');
-        if (space1) response->status_code = atoi(space1 + 1);
+        response->status_code = response_status_of(hb);
         response->headers = string_new(hb);
 
         /* Framing: chunked wins over Content-Length; neither => read-until-close. */

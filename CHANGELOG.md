@@ -53,6 +53,9 @@ version number before tagging the release.
 
 ### Added
 
+- **A test for a status line with no readable status.** The upstream can also
+  serve several other malformed shapes, which is how this one was found.
+
 - **A test for chunked request bodies and the two-lengths pair.** It drives
   raw bytes at the server and asserts on what the handler received, alongside
   a Content-Length request so the two framings are checked against each other.
@@ -81,6 +84,15 @@ version number before tagging the release.
   which is the guarantee that lets a connection carry more than one response.
 
 ### Fixed
+
+- **A response whose status line carries no status code is reported rather
+  than returned.** The code was read with `atoi`, which accepts anything
+  beginning with a digit and wraps on overflow, so an upstream answering
+  `HTTP/1.1 999999999999 Weird` handed the caller a status of -727379969, and
+  the reverse proxy copied that onto the reply it sent to its own client. The
+  code is read as exactly three digits now (RFC 9112 4), and a line that does
+  not carry one is a transport error, so a proxy answers 502 instead of
+  forwarding a status that does not exist.
 
 - **An over-long request line or header line no longer crashes the server.**
   Both were copied into fixed stack buffers using a length taken from the
