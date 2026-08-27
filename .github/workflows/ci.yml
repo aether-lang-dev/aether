@@ -26,13 +26,13 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev python3-websockets
+            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: Linux / Clang
             os: ubuntu-22.04
             cc: clang
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev python3-websockets
+            install: sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           # Hardened gcc build (issue #396). Same OS + compiler as
           # Linux / GCC but with HARDEN=1 set in the environment, which
@@ -46,7 +46,7 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "1"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev python3-websockets
+            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: macOS / Clang (ARM64)
             os: macos-latest
@@ -348,7 +348,7 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y \
-          gcc make bc pkg-config python3-websockets \
+          gcc make bc pkg-config \
           liblua5.3-dev \
           python3-dev \
           ruby-dev \
@@ -387,7 +387,8 @@ jobs:
     - name: Install build deps
       run: |
         sudo apt-get update
-        sudo apt-get install -y gcc make valgrind python3-websockets
+        sudo apt-get install -y gcc make valgrind
+        pip install --break-system-packages websockets 2>/dev/null || pip install websockets
         # contrib/vulkan needs the headers to build and a driver to run.
         # lavapipe is Mesa's CPU implementation, so the GPU path is exercised
         # on a runner that has no GPU. Without these the test skips itself and

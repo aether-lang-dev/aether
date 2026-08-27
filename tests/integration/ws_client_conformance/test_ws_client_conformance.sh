@@ -21,17 +21,28 @@ PORT=18146
 
 [ -x "$AE" ] || { echo "  [SKIP] ws_client_conformance: ae not built"; exit 0; }
 
-if ! python3 -c "import websockets" 2>/dev/null; then
-    # Same policy as http_server_websocket: this is external validation, so a
-    # silent skip on Linux CI would hide the one thing the test exists for.
+PROBE=0
+python3 "$ROOT/tests/integration/ws_probe_websockets.py" >/dev/null 2>&1 || PROBE=$?
+if [ "$PROBE" != "0" ]; then
+    # 2 = not installed, 3 = installed but unusable (Ubuntu 22.04 ships
+    # websockets 9.1, which is broken on Python 3.10+ -- see the probe).
+    #
+    # This is our only check against an INDEPENDENT RFC 6455 implementation,
+    # so a silent skip on Linux CI would hide the one thing it exists for.
     if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ]; then
-        echo "  [FAIL] python3-websockets is missing on a Linux CI runner."
-        echo "         Install: sudo apt-get install -y python3-websockets"
+        if [ "$PROBE" = "3" ]; then
+            echo "  [FAIL] the installed python websockets is unusable on this Python."
+            echo "         Ubuntu 22.04's python3-websockets (9.1) passes the removed"
+            echo "         loop= argument to asyncio and dies mid-handshake."
+            echo "         Install a current one: pip install websockets"
+        else
+            echo "  [FAIL] python websockets is missing on a Linux CI runner."
+            echo "         Install: pip install websockets"
+        fi
+        echo "         (this is our only external RFC 6455 conformance check)"
         exit 1
     fi
-    echo "  [SKIP] websockets module not installed"
-    echo "         Debian/Ubuntu: sudo apt-get install python3-websockets (370KB)"
-    echo "         other: pip install websockets"
+    echo "  [SKIP] no usable python websockets module (pip install websockets)"
     exit 0
 fi
 
@@ -44,6 +55,18 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
+
+# `timeout` is GNU coreutils and is absent on macOS; gtimeout exists there only
+# if coreutils is brewed. It is a backstop rather than the actual safety net --
+# the client sets its own recv timeout -- so running bare is an acceptable
+# fallback, and better than the test erroring out with "command not found".
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT="timeout 30"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT="gtimeout 30"
+else
+    TIMEOUT=""
+fi
 
 "$AE" build "$SCRIPT_DIR/ws_conformance.ae" -o "$TMP/wscli" >"$TMP/b.log" 2>&1 \
     || { sed -n '1,10p' "$TMP/b.log"; fail "client did not build"; }
@@ -62,7 +85,7 @@ grep -q READY "$TMP/srv.log" 2>/dev/null || {
     fail "python websockets peer never became READY"
 }
 
-OUT=$(timeout 30 "$TMP/wscli" 2>&1) || {
+OUT=$($TIMEOUT "$TMP/wscli" 2>&1) || {
     echo "$OUT" | sed 's/^/         /'
     sed -n '1,10p' "$TMP/srv.log" | sed 's/^/    srv: /'
     fail "client exited non-zero"
