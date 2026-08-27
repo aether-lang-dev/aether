@@ -209,6 +209,16 @@ static int load_windows_ca_bundle(SSL_CTX* ctx) {
 // Get (or lazily create) the shared SSL_CTX. Benign race on first call —
 // compare-exchange ensures at most one SSL_CTX is installed even if two
 // threads reach here simultaneously. Returns NULL on OpenSSL error.
+//
+// Not static: the WebSocket client in aether_http_server.c dials wss:// with
+// the same trust setup. Sharing this rather than building a second client CTX
+// there keeps one place where the trust store is decided -- the Windows CA
+// probing below was hard enough to get right once (#1107, #1110) that a
+// second copy would be a liability. The caller must NOT free it; the CTX is
+// process-wide and outlives any one connection.
+static SSL_CTX* get_ssl_ctx(void);
+SSL_CTX* aether_http_client_ssl_ctx(void) { return get_ssl_ctx(); }
+
 static SSL_CTX* get_ssl_ctx(void) {
     SSL_CTX* ctx = atomic_load(&g_ssl_ctx);
     if (ctx) return ctx;
