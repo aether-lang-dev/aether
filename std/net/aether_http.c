@@ -1109,6 +1109,8 @@ int http_chunked_complete(const char* buf, size_t len) {
     return http_chunked_frame_len(buf, len) > 0;
 }
 
+static void http_socket_set_nonblocking(int fd, int on);
+
 /* Case-insensitive substring search, for header values. */
 static const char* http_strcasestr_local(const char* hay, const char* needle) {
     if (!hay || !needle || !*needle) return NULL;
@@ -2024,13 +2026,14 @@ const char* http_request_content_type_of(const HttpClientRequest* req) {
  * ready to write immediately.
  */
 /* The idle pool is shared with the blocking client, which reads its sockets
- * expecting them to block. A driver that cannot block needs the opposite. So
- * the mode belongs to the borrower, not to the pool: it is set on the way out
- * and put back on the way in, and a connection either side finishes with is
- * usable by the other.
+ * expecting them to block. A driver that cannot block needs the opposite, so
+ * the mode belongs to the borrower and is set when it takes one.
  *
- * Without this a driver could take a blocking socket and wait on it, which is
- * precisely the thing it exists not to do. */
+ * It is only set when it differs. A pooled connection remembers the mode it
+ * carries, so a proxy, where the same borrower takes the same connections
+ * over and over, changes it once and never again; setting it unconditionally
+ * cost two fcntl calls per borrow in each direction, four per request, on
+ * sockets that were already right. */
 static void http_socket_set_nonblocking(int fd, int on) {
     if (fd < 0) return;
 #ifdef _WIN32
@@ -2054,7 +2057,10 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     if (http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
         out->reused = 1;
         out->connecting = 0;
-        http_socket_set_nonblocking(out->t.sockfd, 1);
+        if (out->t.nonblocking != 1) {
+            http_socket_set_nonblocking(out->t.sockfd, 1);
+            out->t.nonblocking = 1;
+        }
         return out->t.sockfd;
     }
 
@@ -2075,6 +2081,7 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&nodelay, sizeof(nodelay));
 
     out->t.sockfd = fd;
+    out->t.nonblocking = 1;      /* dialled non-blocking just above */
     out->reused = 0;
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
         out->connecting = 0;
@@ -2115,7 +2122,8 @@ int http_upstream_connected(HttpUpstreamConn* c) {
 void http_upstream_release(HttpUpstreamConn* c, int keep) {
     if (!c || c->t.sockfd < 0) return;
     if (keep && http_pool_enabled) {
-        http_socket_set_nonblocking(c->t.sockfd, 0);   /* as the pool expects */
+        /* Left as it is: whoever takes it next sets what it needs, and in a
+         * proxy that is this driver again. */
         http_pool_put(c->pool_key, &c->t);
     } else {
         transport_close(&c->t);
@@ -2318,6 +2326,14 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
                     !header_already_set(req, "Connection");
     int reused = 0;
     if (pool_this && http_pool_take(pool_key, &t)) {
+        /* This path reads with a timeout on the socket and expects it to
+         * block. A driver may have left this connection non-blocking, where
+         * a read that would wait returns EAGAIN, which this path reads as a
+         * timeout. Put it back, and only when it differs. */
+        if (t.nonblocking != 0) {
+            http_socket_set_nonblocking(t.sockfd, 0);
+            t.nonblocking = 0;
+        }
         /* Taken without probing it first (#1719).
          *
          * This used to poll the socket before reusing it, one syscall on

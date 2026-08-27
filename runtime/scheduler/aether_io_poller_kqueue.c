@@ -25,16 +25,17 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     if (poller->fd < 0) return -1;
     (void)actor;
 
-    // kqueue uses EV_ONESHOT for one-shot semantics (like EPOLLONESHOT)
+    // EV_ONESHOT matches EPOLLONESHOT; EV_CLEAR matches EPOLLET.
     struct kevent changes[2];
     int nchanges = 0;
+    unsigned short mode = (events & AETHER_IO_EDGE) ? EV_CLEAR : EV_ONESHOT;
 
     if (events & AETHER_IO_READ) {
-        EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+        EV_SET(&changes[nchanges], fd, EVFILT_READ, EV_ADD | mode, 0, 0, NULL);
         nchanges++;
     }
     if (events & AETHER_IO_WRITE) {
-        EV_SET(&changes[nchanges], fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+        EV_SET(&changes[nchanges], fd, EVFILT_WRITE, EV_ADD | mode, 0, 0, NULL);
         nchanges++;
     }
 

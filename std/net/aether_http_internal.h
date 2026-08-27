@@ -19,6 +19,11 @@
 
 typedef struct {
     int sockfd;
+    /* Whether this socket is currently non-blocking: -1 not yet known, 0 no,
+     * 1 yes. The two callers want opposite modes and both used to set it on
+     * every borrow, which is two fcntl calls each way on a connection whose
+     * mode had not changed since the last time. */
+    int nonblocking;
     /* The SO_RCVTIMEO/SO_SNDTIMEO value currently on this socket, or -1 when
      * nothing has been applied yet (#1719).
      *

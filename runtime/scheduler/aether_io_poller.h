@@ -11,6 +11,20 @@
 #define AETHER_IO_WRITE 0x004
 #define AETHER_IO_ERROR 0x008
 
+/* Stay registered, and report only on a change.
+ *
+ * Without this a registration is one-shot: it fires once and has to be armed
+ * again, which costs a syscall per wait. That suits a caller that waits on a
+ * descriptor occasionally, and it is what the scheduler wants. It does not
+ * suit a driver waiting on the same descriptors continuously, which pays the
+ * re-arm on every request.
+ *
+ * A caller asking for this must drain a descriptor until it would block,
+ * because nothing will report the same readiness twice. Backends that cannot
+ * express it stay level-triggered, which is safe for the same caller: it
+ * reports more often, never less. */
+#define AETHER_IO_EDGE  0x010
+
 // Single I/O event returned by aether_io_poller_poll
 typedef struct {
     int fd;

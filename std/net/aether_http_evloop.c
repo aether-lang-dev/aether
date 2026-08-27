@@ -67,6 +67,9 @@ typedef struct EvConn {
     size_t           head_len, head_cap;
 
     long     deadline_ms;        /* when the upstream call gives up, 0 = none */
+    int      up_writable_watched; /* write interest on the upstream, which is
+                                   * only wanted while a write is blocked */
+    int      up_watched;         /* registered with the poller at all */
     int      heap_pos;           /* where this sits in its driver's heap, -1 out */
 
     HttpRequest*        req;     /* the parsed client request */
@@ -310,6 +313,7 @@ static int ev_next_timeout_ms(EvDriver* d, int cap_ms) {
 static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
+static int  ev_watch_upstream(EvDriver* d, EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
 static int  ev_begin_upstream(EvDriver* d, EvConn* c);
 static int  ev_begin_retry(EvDriver* d, EvConn* c);
@@ -323,9 +327,44 @@ static int  ev_advance(EvDriver* d, EvConn* c);
  * so the thread only sleeps when no connection it owns has anything to do.
  */
 
-static int ev_arm(EvDriver* d, int fd, uint32_t events, EvConn* c) {
+/* Register a descriptor once and leave it registered.
+ *
+ * A one-shot registration has to be armed again after every event, which is a
+ * syscall on every wait: measured at 1.33 epoll_ctl per request, work the
+ * per-connection path never did. Edge-triggered registration reports a change
+ * and stays, so the common path costs nothing after the first call. The state
+ * machine already drains every descriptor until it would block, which is what
+ * edge triggering requires.
+ *
+ * Read interest is what stays. Write interest is added only when a write
+ * actually blocks and dropped once it drains, because a descriptor that is
+ * writable almost always would otherwise wake a level-triggered backend
+ * continuously for nothing. */
+static int ev_watch(EvDriver* d, int fd, EvConn* c) {
     if (ev_track(d, fd, c) != 0) return -1;
-    return aether_io_poller_add(&d->poller, fd, c, events);
+    return aether_io_poller_add(&d->poller, fd, c,
+                                AETHER_IO_READ | AETHER_IO_EDGE);
+}
+
+static int ev_watch_writable(EvDriver* d, int fd, EvConn* c) {
+    if (ev_track(d, fd, c) != 0) return -1;
+    return aether_io_poller_add(&d->poller, fd, c,
+                                AETHER_IO_READ | AETHER_IO_WRITE | AETHER_IO_EDGE);
+}
+
+/* Back to watching for readable only, now that the write has drained. */
+static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
+    return ev_watch(d, fd, c);
+}
+
+
+/* Register the upstream the first time this request has to wait on it, and
+ * not before. A request whose answer is already there never registers it at
+ * all, which is the common case against a fast upstream. */
+static int ev_watch_upstream(EvDriver* d, EvConn* c) {
+    if (c->up_watched) return 0;
+    c->up_watched = 1;
+    return ev_watch(d, c->up.t.sockfd, c) == 0 ? 0 : -1;
 }
 
 /* Read whatever the client has, without waiting for it. */
@@ -344,7 +383,7 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
         }
         if (n == 0) return -1;                   /* the client is finished */
         if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return ev_arm(d, c->client_fd, AETHER_IO_READ, c) == 0 ? 0 : -1;
+            return 0;      /* already watched; the next change wakes us */
         if (errno == EINTR) continue;
         return -1;
     }
@@ -357,7 +396,7 @@ static int ev_step_client_send(EvDriver* d, EvConn* c) {
                          c->out_len - c->out_sent, 0);
         if (n > 0) { c->out_sent += (size_t)n; continue; }
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-            return ev_arm(d, c->client_fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+            return ev_watch_writable(d, c->client_fd, c) == 0 ? 0 : -1;
         if (n < 0 && errno == EINTR) continue;
         return -1;
     }
@@ -369,21 +408,34 @@ static int ev_step_client_send(EvDriver* d, EvConn* c) {
  * for instead of waiting. */
 static int ev_step_upstream_send(EvDriver* d, EvConn* c) {
     int r = http_exchange_send(&c->x);
-    if (r == AE_X_DONE) return 1;
-    if (r == AE_X_WANT_WRITE)
-        return ev_arm(d, c->up.t.sockfd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
-    if (r == AE_X_WANT_READ)
-        return ev_arm(d, c->up.t.sockfd, AETHER_IO_READ, c) == 0 ? 0 : -1;
+    if (r == AE_X_DONE) {
+        /* Written; only the answer is awaited now. */
+        if (c->up_writable_watched) {
+            ev_unwatch_writable(d, c->up.t.sockfd, c);
+            c->up_writable_watched = 0;
+        }
+        return 1;
+    }
+    if (r == AE_X_WANT_WRITE) {
+        if (c->up_writable_watched) return 0;
+        c->up_writable_watched = 1;
+        c->up_watched = 1;
+        return ev_watch_writable(d, c->up.t.sockfd, c) == 0 ? 0 : -1;
+    }
+    if (r == AE_X_WANT_READ) return ev_watch_upstream(d, c);
     return -1;
 }
 
 static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
     int r = http_exchange_recv(&c->x);
     if (r == AE_X_DONE) return 1;
-    if (r == AE_X_WANT_READ)
-        return ev_arm(d, c->up.t.sockfd, AETHER_IO_READ, c) == 0 ? 0 : -1;
-    if (r == AE_X_WANT_WRITE)
-        return ev_arm(d, c->up.t.sockfd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+    if (r == AE_X_WANT_READ) return ev_watch_upstream(d, c);
+    if (r == AE_X_WANT_WRITE) {
+        if (c->up_writable_watched) return 0;
+        c->up_writable_watched = 1;
+        c->up_watched = 1;
+        return ev_watch_writable(d, c->up.t.sockfd, c) == 0 ? 0 : -1;
+    }
     return -1;
 }
 
@@ -435,10 +487,14 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
-        return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+        c->up_writable_watched = 1;
+        c->up_watched = 1;
+        return ev_watch_writable(d, fd, c) == 0 ? 0 : -1;
     }
+    c->up_writable_watched = 0;
+    c->up_watched = 0;
     c->state = EV_UPSTREAM_SEND;
-    return 1;
+    return ev_track(d, fd, c) == 0 ? 1 : -1;
 }
 
 
@@ -550,10 +606,14 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
-        return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
+        c->up_writable_watched = 1;
+        c->up_watched = 1;
+        return ev_watch_writable(d, fd, c) == 0 ? 0 : -1;
     }
+    c->up_writable_watched = 0;
+    c->up_watched = 0;
     c->state = EV_UPSTREAM_SEND;
-    return 1;
+    return ev_track(d, fd, c) == 0 ? 1 : -1;
 }
 
 /* The upstream has answered. Hand the reply back to the proxy exchange, which
@@ -569,8 +629,9 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     /* The connection is worth keeping only when the response ended where its
      * own framing said it would. */
     int keep = c->x.complete && !c->x.framing.invalid;
-    aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+    if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
+    c->up_watched = c->up_writable_watched = 0;
     http_upstream_release(&c->up, keep);
 
     int r = aether_proxy_exchange_resume(&c->px, 0);
@@ -661,6 +722,9 @@ static void ev_take_submissions(EvDriver* d) {
         ev_set_nonblocking(fd);
         atomic_fetch_add(&d->loop->active, 1);
 
+        /* Watched once, for as long as this driver owns it. Every later wait
+         * on this descriptor is then free. */
+        if (ev_watch(d, fd, c) != 0) { ev_conn_close(d, c); continue; }
         if (ev_advance(d, c) < 0) ev_conn_close(d, c);
     }
     /* One-shot registration: the pipe has to be armed again for the next one. */
