@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
-## [0.590.0]
+## [current]
 
 ### Added
 
@@ -32,6 +32,9 @@ version number before tagging the release.
   chose between TLS and a plain socket per connection, so it carries frames
   over TLS without knowing TLS exists.
 
+## [0.590.0]
+
+### Added
 
 - **A WebSocket client, so a `ws://` endpoint can be dialled.** `std.http` had a
   complete RFC 6455 server, but every entry point *accepted* a connection —
