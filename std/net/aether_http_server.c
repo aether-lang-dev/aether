@@ -4,6 +4,7 @@
 #include "aether_net.h"
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
+#include "aether_http_evloop.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
@@ -773,6 +774,7 @@ HttpServer* http_server_create(int port) {
     server->release_fn = NULL;
     server->step_fn = NULL;
     server->park_lot = NULL;
+    server->evloop = NULL;
     server->conn_pool = NULL;
     server->accept_poller.fd = -1;
     server->accept_poller.backend_data = NULL;
@@ -4068,6 +4070,18 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
 void http_server_drain_connection(HttpServer* server, int client_fd) {
     if (!server || client_fd < 0) return;
 
+    /* A plain-HTTP connection to a server whose work is proxying goes to the
+     * event driver, which runs many connections on one thread rather than
+     * giving this one a thread of its own (#1758). Anything the driver does
+     * not cover, TLS especially, keeps the worker path: the check is what the
+     * connection needs, not a switch someone sets.
+     *
+     * A refusal costs nothing, because the connection has not been touched
+     * yet and the worker path is still right below. */
+    if (server->evloop && !server->tls_enabled && !server->h2_enabled) {
+        if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
+    }
+
     /* Heap-allocated because a parked connection outlives the worker that
      * parked it: the read buffer (with any bytes already pulled past the last
      * request), the TLS session and the request count all have to survive the
@@ -4385,6 +4399,21 @@ int http_server_start_raw(HttpServer* server) {
         if (pool) {
             server->park_lot = http_park_create(server, http_park_resume, 4096);
         }
+
+        /* The proxy driver, when this server proxies and its connections are
+         * plain HTTP. One driver per core is the shape that removes the cost:
+         * more threads than cores would put the sleeping back, and fewer would
+         * leave cores idle. It returns NULL when there is no proxy mounted or
+         * the platform has no poller, and then nothing below changes. */
+        if (!server->tls_enabled && !server->h2_enabled) {
+            long online = 1;
+#if !defined(_WIN32)
+            online = sysconf(_SC_NPROCESSORS_ONLN);
+#endif
+            int cores = (int)(online > 0 ? online : 1);
+            if (cores > 8) cores = 8;
+            server->evloop = http_evloop_start(server, cores);
+        }
 #endif
 
         // Fallback: poll + thread pool (non-Linux or no actor handler)
@@ -4419,6 +4448,12 @@ int http_server_start_raw(HttpServer* server) {
 #if AETHER_HAS_THREADS
         /* Stop parking before the pool: the lot resubmits into it, and a
          * connection woken into a destroyed pool would be closed twice. */
+        /* The driver holds connections of its own, so it stops before the
+         * lot: its threads are what close them. */
+        if (server->evloop) {
+            http_evloop_stop((HttpEvLoop*)server->evloop);
+            server->evloop = NULL;
+        }
         http_park_destroy((HttpParkLot*)server->park_lot);
         server->park_lot = NULL;
         http_pool_destroy(pool);

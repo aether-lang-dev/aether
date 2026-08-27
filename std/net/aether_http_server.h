@@ -195,6 +195,7 @@ typedef struct HttpServer {
 
     // Middleware
     HttpMiddlewareNode* middleware_chain;
+    void* evloop;           /* HttpEvLoop*, when the proxy driver is running */
 
     // Response transformers (#260 Tier 1). Run after the route
     // handler, before serialization. See

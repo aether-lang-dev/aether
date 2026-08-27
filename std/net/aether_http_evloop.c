@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stdio.h>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -278,7 +279,7 @@ static int ev_respond_from(EvDriver* d, EvConn* c) {
     c->out_len = len;
     c->out_sent = 0;
     c->state = EV_CLIENT_SEND;
-    return 0;
+    return 1;
 }
 
 /* The proxy asked for another attempt, against whichever upstream it picked
@@ -309,10 +310,12 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
-    c->state = c->up.connecting ? EV_UPSTREAM_DIAL : EV_UPSTREAM_SEND;
-    if (c->up.connecting)
+    if (c->up.connecting) {
+        c->state = EV_UPSTREAM_DIAL;
         return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
-    return 0;
+    }
+    c->state = EV_UPSTREAM_SEND;
+    return 1;
 }
 
 /* ---- the bridge to the proxy ----
@@ -327,29 +330,36 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
 /* The request is complete: run the proxy up to the point where it needs the
  * upstream, then get a connection and a serialised head ready to go. */
 static int ev_begin_upstream(EvDriver* d, EvConn* c) {
+    int dbg = getenv("AE_EVLOOP_DEBUG") != NULL;
     HttpRequest* req = http_parse_request_n(c->in, c->in_len);
-    if (!req) return -1;
+    if (!req) { if (dbg) fprintf(stderr, "[ev] parse failed\n"); return -1; }
 
     c->res = http_response_create();
     if (!c->res) { http_request_free(req); return -1; }
     c->req = req;
 
-    int r = aether_proxy_exchange_begin(&c->px, req, c->res,
-                                        http_server_proxy_opts(d->loop->server));
+    void* opts = http_server_proxy_opts(d->loop->server);
+    if (dbg) fprintf(stderr, "[ev] opts=%p\n", opts);
+    int r = aether_proxy_exchange_begin(&c->px, req, c->res, opts);
+    if (dbg) fprintf(stderr, "[ev] begin -> %d\n", r);
     if (r != PX_NEED_SEND) {
         /* Served without an upstream: a cache hit, a refusal, or a route this
          * proxy does not own. The response is already filled in. */
-        return ev_respond_from(d, c);
+        return ev_respond_from(d, c);   /* 1: the client write is next */
     }
 
     const char* url = http_request_url_of(c->px.outbound);
     char host[256], path[1024];
     int port = 0, use_tls = 0;
-    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls))
+    if (dbg) fprintf(stderr, "[ev] url=%s\n", url ? url : "(none)");
+    if (!url || !parse_url(url, host, sizeof(host), &port, path, sizeof(path), &use_tls)) {
+        if (dbg) fprintf(stderr, "[ev] parse_url failed\n");
         return -1;
+    }
     if (use_tls) return -1;      /* this driver is only mounted on plain HTTP */
 
     int fd = http_upstream_acquire(host, port, &c->up);
+    if (dbg) fprintf(stderr, "[ev] acquire %s:%d -> fd=%d connecting=%d\n", host, port, fd, c->up.connecting);
     if (fd < 0) return -1;
 
     int body_len = 0;
@@ -365,10 +375,12 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
 
-    c->state = c->up.connecting ? EV_UPSTREAM_DIAL : EV_UPSTREAM_SEND;
-    if (c->up.connecting)
+    if (c->up.connecting) {
+        c->state = EV_UPSTREAM_DIAL;
         return ev_arm(d, fd, AETHER_IO_WRITE, c) == 0 ? 0 : -1;
-    return 0;
+    }
+    c->state = EV_UPSTREAM_SEND;
+    return 1;
 }
 
 /* The upstream has answered. Hand the reply back to the proxy exchange, which
@@ -409,7 +421,8 @@ static int ev_advance(EvDriver* d, EvConn* c) {
         case EV_READ_REQUEST: {
             int r = ev_step_read_request(d, c);
             if (r <= 0) return r;
-            if (ev_begin_upstream(d, c) != 0) return -1;
+            r = ev_begin_upstream(d, c);
+            if (r <= 0) return r;
             continue;
         }
         case EV_UPSTREAM_DIAL: {
@@ -426,8 +439,8 @@ static int ev_advance(EvDriver* d, EvConn* c) {
         case EV_UPSTREAM_RECV: {
             int r = ev_step_upstream_recv(d, c);
             if (r <= 0) return r;
-            if (ev_finish_upstream(d, c) != 0) return -1;
-            c->state = EV_CLIENT_SEND;
+            r = ev_finish_upstream(d, c);
+            if (r <= 0) return r;
             continue;
         }
         case EV_CLIENT_SEND: {
@@ -445,4 +458,163 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             return -1;
         }
     }
+}
+
+/* ---- the driver loop ----
+ *
+ * Poll, then move every connection the poller named as far as it can go. The
+ * thread sleeps only in the poll, and only when nothing it owns can make
+ * progress, which is the whole difference from a worker per connection.
+ */
+
+/* A submitted descriptor arrives down a pipe rather than through a lock: the
+ * accept path writes, the driver reads, and the driver's own poller is what
+ * tells it there is something to read. */
+static void ev_take_submissions(EvDriver* d) {
+    int fd = -1;
+    for (;;) {
+        ssize_t n = read(d->wake_r, &fd, sizeof(fd));
+        if (n != (ssize_t)sizeof(fd)) break;
+        if (fd < 0) continue;
+
+        EvConn* c = (EvConn*)calloc(1, sizeof(EvConn));
+        if (!c) { close(fd); continue; }
+        c->client_fd = fd;
+        c->state = EV_READ_REQUEST;
+        c->up.t.sockfd = -1;
+        c->up.t.applied_timeout_ns = -1;
+        ev_set_nonblocking(fd);
+        atomic_fetch_add(&d->loop->active, 1);
+
+        if (ev_advance(d, c) < 0) ev_conn_close(d, c);
+    }
+    /* One-shot registration: the pipe has to be armed again for the next one. */
+    aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
+}
+
+static void* ev_driver_main(void* arg) {
+    EvDriver* d = (EvDriver*)arg;
+    AetherIoEvent events[64];
+
+    aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
+
+    while (!atomic_load(&d->loop->stopping)) {
+        int n = aether_io_poller_poll(&d->poller, events, 64, 200);
+        if (n <= 0) continue;
+        for (int i = 0; i < n; i++) {
+            int fd = events[i].fd;
+            if (fd == d->wake_r) { ev_take_submissions(d); continue; }
+            EvConn* c = (fd >= 0 && fd < d->by_fd_cap) ? d->by_fd[fd] : NULL;
+            if (!c) continue;
+            if (ev_advance(d, c) < 0) ev_conn_close(d, c);
+        }
+    }
+
+    /* Shutting down: the connections this driver owns are its to close. */
+    for (int fd = 0; fd < d->by_fd_cap; fd++) {
+        EvConn* c = d->by_fd[fd];
+        if (c && c->client_fd == fd) ev_conn_close(d, c);
+    }
+    return NULL;
+}
+
+int http_evloop_submit(HttpEvLoop* loop, int client_fd) {
+    if (!loop || client_fd < 0 || atomic_load(&loop->stopping)) return -1;
+    /* Round-robin. A connection is placed once and then belongs to that
+     * driver, so this is the only point where the choice is made. */
+    int start = atomic_fetch_add(&loop->next_driver, 1);
+    for (int i = 0; i < loop->driver_count; i++) {
+        EvDriver* d = &loop->drivers[(start + i) % loop->driver_count];
+        if (!d->started) continue;
+        if (write(d->wake_w, &client_fd, sizeof(client_fd)) == (ssize_t)sizeof(client_fd))
+            return 0;
+    }
+    return -1;
+}
+
+/* ---- lifecycle ---- */
+
+static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
+    memset(d, 0, sizeof(*d));
+    d->loop = loop;
+    d->index = index;
+    d->wake_r = d->wake_w = -1;
+
+    if (aether_io_poller_init(&d->poller) != 0) return -1;
+
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        aether_io_poller_destroy(&d->poller);
+        return -1;
+    }
+    d->wake_r = pipefd[0];
+    d->wake_w = pipefd[1];
+    /* The driver must never block reading its own pipe, and the accept path
+     * must never block writing to it. */
+    ev_set_nonblocking(d->wake_r);
+    ev_set_nonblocking(d->wake_w);
+    return 0;
+}
+
+static void ev_driver_destroy(EvDriver* d) {
+    if (d->wake_r >= 0) close(d->wake_r);
+    if (d->wake_w >= 0) close(d->wake_w);
+    aether_io_poller_destroy(&d->poller);
+    free(d->by_fd);
+}
+
+HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
+    if (!server || threads <= 0) return NULL;
+    /* No proxy mounted means nothing for this driver to do, and it says so by
+     * not existing rather than by running empty. */
+    if (!http_server_proxy_opts(server)) return NULL;
+
+    HttpEvLoop* loop = (HttpEvLoop*)calloc(1, sizeof(HttpEvLoop));
+    if (!loop) return NULL;
+    loop->server = server;
+    loop->drivers = (EvDriver*)calloc((size_t)threads, sizeof(EvDriver));
+    if (!loop->drivers) { free(loop); return NULL; }
+    loop->driver_count = threads;
+    atomic_init(&loop->active, 0);
+    atomic_init(&loop->stopping, 0);
+    atomic_init(&loop->next_driver, 0);
+
+    int started = 0;
+    for (int i = 0; i < threads; i++) {
+        EvDriver* d = &loop->drivers[i];
+        if (ev_driver_init(loop, d, i) != 0) continue;
+        if (pthread_create(&d->thread, NULL, ev_driver_main, d) != 0) {
+            ev_driver_destroy(d);
+            continue;
+        }
+        d->started = 1;
+        started++;
+    }
+    if (started == 0) {
+        free(loop->drivers);
+        free(loop);
+        return NULL;      /* the caller keeps the worker path */
+    }
+    return loop;
+}
+
+void http_evloop_stop(HttpEvLoop* loop) {
+    if (!loop) return;
+    atomic_store(&loop->stopping, 1);
+    for (int i = 0; i < loop->driver_count; i++) {
+        EvDriver* d = &loop->drivers[i];
+        if (!d->started) continue;
+        /* Wake a driver parked in poll so it sees the stop. */
+        int sentinel = -1;
+        ssize_t ignored = write(d->wake_w, &sentinel, sizeof(sentinel));
+        (void)ignored;
+    }
+    for (int i = 0; i < loop->driver_count; i++) {
+        EvDriver* d = &loop->drivers[i];
+        if (!d->started) continue;
+        pthread_join(d->thread, NULL);
+        ev_driver_destroy(d);
+    }
+    free(loop->drivers);
+    free(loop);
 }
