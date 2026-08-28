@@ -13,6 +13,14 @@ version number before tagging the release.
 
 ### Changed
 
+- **A proxied connection keeps its response buffer between requests.** It
+  starts at 16 KiB and was allocated and freed on every request, so the heap
+  shrank and grew and the kernel handed back fresh pages and zeroed them:
+  clearing pages was the single largest entry in the driver's profile, larger
+  than any function in it. The buffer now belongs to the connection for its
+  life. CPU per request falls about 8% by the least-contended round and 13% by
+  the median.
+
 - **The proxy driver asks the kernel for about half as much.** It made fewer
   context switches than the path it replaced and more syscalls, 10.08 per
   request against 4.27, where nginx is about five. Registrations were one-shot,

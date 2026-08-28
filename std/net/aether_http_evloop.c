@@ -70,6 +70,13 @@ typedef struct EvConn {
     int      up_writable_watched; /* write interest on the upstream, which is
                                    * only wanted while a write is blocked */
     int      up_watched;         /* registered with the poller at all */
+
+    /* The response accumulator, kept between requests. It starts at 16 KiB,
+     * and allocating and freeing one per request had the kernel handing back
+     * fresh pages and zeroing them: page clearing was the single largest
+     * entry in the profile. A connection owns its buffer for its life. */
+    char*    rxbuf;
+    size_t   rxcap;
     int      heap_pos;           /* where this sits in its driver's heap, -1 out */
 
     HttpRequest*        req;     /* the parsed client request */
@@ -155,7 +162,13 @@ static void ev_conn_reset_request(EvConn* c) {
     c->head = NULL;
     c->head_len = c->head_cap = 0;
 
-    if (c->x.buf) aether_caps_free(c->x.buf, c->x.cap);
+    /* Keep the accumulator rather than returning it; the next request on this
+     * connection reuses it at whatever size it has grown to. */
+    if (c->x.buf) {
+        if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+        c->rxbuf = c->x.buf;
+        c->rxcap = c->x.cap;
+    }
     memset(&c->x, 0, sizeof(c->x));
 
     free(c->out);
@@ -203,6 +216,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     }
     ev_timer_set(d, c, 0);
     ev_conn_reset_request(c);
+    if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
     free(c->in);
     free(c);
     atomic_fetch_sub(&d->loop->active, 1);
@@ -314,6 +328,7 @@ static void ev_arm_deadline(EvDriver* d, EvConn* c);
 static int  ev_expire(EvDriver* d, EvConn* c);
 static int  ev_hand_back(EvDriver* d, EvConn* c);
 static int  ev_watch_upstream(EvDriver* d, EvConn* c);
+static void ev_lend_rxbuf(EvConn* c);
 static int  ev_respond_from(EvDriver* d, EvConn* c);
 static int  ev_begin_upstream(EvDriver* d, EvConn* c);
 static int  ev_begin_retry(EvDriver* d, EvConn* c);
@@ -357,6 +372,19 @@ static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
     return ev_watch(d, fd, c);
 }
 
+
+
+/* Hand the connection's accumulator to the exchange about to fill it. The
+ * exchange grows it as it needs; the connection takes it back when the
+ * request finishes, so a busy connection allocates one and reuses it. */
+static void ev_lend_rxbuf(EvConn* c) {
+    if (!c->rxbuf) return;
+    c->x.buf = c->rxbuf;
+    c->x.cap = c->rxcap;
+    c->x.len = 0;
+    c->rxbuf = NULL;
+    c->rxcap = 0;
+}
 
 /* Register the upstream the first time this request has to wait on it, and
  * not before. A request whose answer is already there never registers it at
@@ -484,6 +512,7 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
     memset(&c->x, 0, sizeof(c->x));
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
+    ev_lend_rxbuf(c);
     ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;
