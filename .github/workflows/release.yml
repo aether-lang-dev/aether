@@ -489,6 +489,20 @@ jobs:
         # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # The public headers that sit at the top of include/, libaether.h
+        # among them. The loop above only mirrors the runtime/ and std/
+        # SUBTREES, so anything directly in include/ was dropped.
+        #
+        # That matters because include/aether/ is itself an -I directory for
+        # an installed tree, and runtime/libaether_caps.c -- shipped in
+        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
+        # release therefore carried the .c that needs the header and not the
+        # header, so a fetched release could cross-compile hello.ae (which
+        # pulls no runtime .c) and failed on anything that linked the runtime
+        # with `fatal error: 'libaether.h' file not found`. A local install
+        # was fine: the Makefile's own staging has copied these since #1420,
+        # and this workflow reimplements that staging without the line.
+        cp include/*.h release/include/aether/ 2>/dev/null || true
         cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         cd release && tar -czf ../aether-${VERSION}-${{ matrix.target }}.tar.gz *
@@ -520,6 +534,20 @@ jobs:
         # from source at all.
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # The public headers that sit at the top of include/, libaether.h
+        # among them. The loop above only mirrors the runtime/ and std/
+        # SUBTREES, so anything directly in include/ was dropped.
+        #
+        # That matters because include/aether/ is itself an -I directory for
+        # an installed tree, and runtime/libaether_caps.c -- shipped in
+        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
+        # release therefore carried the .c that needs the header and not the
+        # header, so a fetched release could cross-compile hello.ae (which
+        # pulls no runtime .c) and failed on anything that linked the runtime
+        # with `fatal error: 'libaether.h' file not found`. A local install
+        # was fine: the Makefile's own staging has copied these since #1420,
+        # and this workflow reimplements that staging without the line.
+        cp include/*.h release/include/aether/ 2>/dev/null || true
         cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         cd release && zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
@@ -639,6 +667,20 @@ jobs:
         done
         cp -r runtime release/share/aether/
         cp -r std     release/share/aether/
+        # The public headers that sit at the top of include/, libaether.h
+        # among them. The loop above only mirrors the runtime/ and std/
+        # SUBTREES, so anything directly in include/ was dropped.
+        #
+        # That matters because include/aether/ is itself an -I directory for
+        # an installed tree, and runtime/libaether_caps.c -- shipped in
+        # share/aether/runtime/ above -- does `#include "libaether.h"`. The
+        # release therefore carried the .c that needs the header and not the
+        # header, so a fetched release could cross-compile hello.ae (which
+        # pulls no runtime .c) and failed on anything that linked the runtime
+        # with `fatal error: 'libaether.h' file not found`. A local install
+        # was fine: the Makefile's own staging has copied these since #1420,
+        # and this workflow reimplements that staging without the line.
+        cp include/*.h release/include/aether/ 2>/dev/null || true
         cp build/MANIFEST release/share/aether/
         cp LICENSE README.md VERSION release/
         # Note the cross-build in the archive so downstream users know it was

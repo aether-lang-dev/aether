@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A fetched release can cross-compile a program that links the runtime.**
+  The release shipped `share/aether/runtime/libaether_caps.c`, which does
+  `#include "libaether.h"`, but not the header — so a downstream that fetched
+  a release and cross-compiled anything beyond a trivial program died on
+  `fatal error: 'libaether.h' file not found`. `hello.ae` dodged it only
+  because it pulls no runtime `.c` at all, which is what made this look like
+  cross-compilation working.
+
+  A local install was always fine, and that is what hid it: the Makefile's
+  staging has copied the top-level headers since #1420, and the release
+  workflow reimplements that staging without the line. Its loop mirrors the
+  `runtime/` and `std/` subtrees of `include/`, so anything sitting directly
+  in `include/` was dropped. All three packaging paths — Unix, Windows and the
+  FreeBSD cross-build — now stage them, and a test asserts every packaging
+  block does, so a new target cannot omit it silently.
+
+
 ## [0.598.0]
 
 ### Added
