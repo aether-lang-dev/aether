@@ -24,7 +24,8 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     (void)actor; // Actor mapping is handled by the caller (io_map)
 
     struct epoll_event ev;
-    ev.events = EPOLLONESHOT;
+    /* One-shot unless the caller asked to stay registered. */
+    ev.events = (events & AETHER_IO_EDGE) ? EPOLLET : EPOLLONESHOT;
     ev.data.fd = fd;
     if (events & AETHER_IO_READ)  ev.events |= EPOLLIN;
     if (events & AETHER_IO_WRITE) ev.events |= EPOLLOUT;

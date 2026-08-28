@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Changed
+
+- **A proxied connection keeps its response buffer between requests.** It
+  starts at 16 KiB and was allocated and freed on every request, so the heap
+  shrank and grew and the kernel handed back fresh pages and zeroed them:
+  clearing pages was the single largest entry in the driver's profile, larger
+  than any function in it. The buffer now belongs to the connection for its
+  life. CPU per request falls about 8% by the least-contended round and 13% by
+  the median.
+
+- **The proxy driver asks the kernel for about half as much.** It made fewer
+  context switches than the path it replaced and more syscalls, 10.08 per
+  request against 4.27, where nginx is about five. Registrations were one-shot,
+  so each one had to be armed again after every event, and the socket mode was
+  set on every borrow from the idle pool in both directions.
+
+  Descriptors are registered once now, reporting a change rather than firing
+  once (`EPOLLET`, `EV_CLEAR`), which the state machine already suited because
+  it drains every descriptor until it would block. Write interest is added only
+  while a write is blocked. A pooled connection remembers the mode it carries,
+  so a proxy sets it once rather than four times per request.
+
+  **`fcntl` 4.00 to 0, `epoll_ctl` 1.42 to 0.24, total 10.08 to 4.85 syscalls
+  per request.** The scheduler's own registrations are untouched: the
+  persistent mode is a flag a caller asks for, not a change of default.
+
 ## [0.592.0]
 
 ### Changed
