@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.597.0]
+
 ### Changed
 
 - **A proxied connection reuses its request and response objects.** Building
