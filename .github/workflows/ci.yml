@@ -211,6 +211,58 @@ jobs:
             exit 1
           fi
           echo "The entry is under '## [current]'."
+
+          # Second half of the same failure. The check above catches a merge
+          # that left NO '[current]' behind; this catches the one that folded
+          # this branch's entry into an ALREADY-RELEASED section while leaving
+          # a '[current]' in place. That version is silent -- git auto-merges
+          # it without a conflict and nothing in the output hints at it -- so
+          # the corruption ships and cannot be repaired later without
+          # rewriting a tag.
+          #
+          # Compared against origin/main rather than the git tags. Editing a
+          # released section AFTER its tag is legitimate and routine here (3
+          # of the last 8 releases have such edits, e.g. 9b6c5580 recording
+          # shipped work against 0.584.0), so "differs from the tag" would red
+          # a third of all PRs and be switched off. The real invariant is
+          # narrower and is exactly the fold: THIS branch must not change a
+          # section that main already released.
+          #
+          # Whitespace is normalised so a merge that only reflowed spacing
+          # does not read as a fold. cksum rather than cmp: MSYS2 ships no
+          # diffutils, and `cmp -s` exits non-zero both when files differ AND
+          # when cmp is missing, reporting a false failure instead of a
+          # missing tool.
+          git fetch --quiet origin main || true
+          norm() { sed -e 's/[[:space:]]*$//' | cat -s; }
+          folded=""
+          for v in $(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+                       | tr -d '#[] ' | head -8); do
+            a=$(git show "origin/main:CHANGELOG.md" 2>/dev/null \
+                  | sed -n "/^## \[$v\]/,/^## \[0/p" | sed '$d' | norm)
+            [ -z "$a" ] && continue
+            b=$(sed -n "/^## \[$v\]/,/^## \[0/p" CHANGELOG.md | sed '$d' | norm)
+            if [ "$(printf '%s' "$a" | cksum)" != "$(printf '%s' "$b" | cksum)" ]; then
+              folded="$folded $v"
+            fi
+          done
+          if [ -n "$folded" ]; then
+            echo "::error::This PR rewrites already-released CHANGELOG section(s):$folded"
+            echo ""
+            echo "A release was almost certainly cut while this branch was open."
+            echo "The release job renames '## [current]' into the version"
+            echo "heading, so merging main folds this branch's entry INTO that"
+            echo "released section -- usually with no git conflict, which is why"
+            echo "nothing flagged it."
+            echo ""
+            echo "Move the entry back under a fresh '## [current]' and restore"
+            echo "the released section as main has it:"
+            for v in $folded; do
+              echo "  git show origin/main:CHANGELOG.md   # section [$v]"
+            done
+            exit 1
+          fi
+          echo "Released sections match main."
           exit 0
         fi
 
