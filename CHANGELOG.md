@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`--target=x86_64-linux-musl` and `aarch64-linux-musl`, for a Linux binary
+  with no libc floor.** The Linux triples mapped only to glibc, so every
+  cross-built Linux artifact carried the GLIBC symbol version of whatever
+  produced it and refused to start on an older distro — the portability
+  problem `docs/release-glibc-portability.md` already recommended static musl
+  to solve, with no way to ask `ae build` for it. zig bundles musl and links
+  it statically by default, so these targets need no sysroot and produce a
+  binary that runs on any Linux of the same architecture, Alpine included.
+  Measured on the same program: the glibc build names a versioned `GLIBC_`
+  symbol, the musl build names none and has no dynamic dependencies at all.
+
+  Separate target names rather than a flag, because the two are genuinely
+  different artifacts and the choice belongs to whoever publishes them. The
+  `arm64-`/`amd64-` spellings are accepted as everywhere else, and the
+  existing `-linux` targets are unchanged and still dynamic.
+
 ## [0.597.0]
 
 ### Changed
@@ -29,8 +47,6 @@ version number before tagging the release.
   Params and query arrays are released rather than kept, unlike the header
   arrays: they are allocated on demand at varying sizes, and holding a pointer
   to a differently sized array is how a reuse becomes a corruption.
-
-## [current]
 
 ## [0.596.0]
 
