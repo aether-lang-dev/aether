@@ -1460,15 +1460,19 @@ int http_server_port(HttpServer* server) {
 // this reason; the wrapper above terminates by construction). `len`
 // is consulted only for the body-bounds clamp — exactly the place
 // where binary payloads with embedded NULs need it.
-HttpRequest* http_parse_request_n(const char* buf, size_t len) {
-    if (!buf) return NULL;
+/* Parse into an object the caller owns.
+ *
+ * On failure it frees what it managed to fill in but never the object itself,
+ * because the caller may be reusing one it owns: freeing that would hand back
+ * a pointer to memory the caller still holds. */
+static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
+                                              const char* buf, size_t len) {
+    if (!buf || !req) return NULL;
     const char* raw_request = buf;
-    HttpRequest* req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
 
     // Parse request line: METHOD /path HTTP/1.1
     const char* line_end = strstr(raw_request, "\r\n");
     if (!line_end) {
-        free(req);
         return NULL;
     }
     
@@ -1480,7 +1484,6 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     char request_line[HTTP_MAX_REQUEST_LINE];
     size_t line_len = (size_t)(line_end - raw_request);
     if (line_len >= sizeof(request_line)) {
-        free(req);
         return NULL;
     }
     memcpy(request_line, raw_request, line_len);
@@ -1489,13 +1492,12 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     // Extract method
     char* space = strchr(request_line, ' ');
     if (!space) {
-        free(req);
         return NULL;
     }
     
     int method_len = space - request_line;
     req->method = (char*)malloc(method_len + 1);
-    if (!req->method) { free(req); return NULL; }
+    if (!req->method) return NULL;
     memcpy(req->method, request_line, method_len);
     req->method[method_len] = '\0';
 
@@ -1504,7 +1506,6 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     char* path_end = strchr(path_start, ' ');
     if (!path_end) {
         free(req->method);
-        free(req);
         return NULL;
     }
 
@@ -1513,14 +1514,14 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
         // Has query string
         int path_len = query - path_start;
         req->path = (char*)malloc(path_len + 1);
-        if (!req->path) { free(req->method); free(req); return NULL; }
+        if (!req->path) { free(req->method); req->method = NULL; return NULL; }
         memcpy(req->path, path_start, path_len);
         req->path[path_len] = '\0';
 
         int query_len = path_end - query - 1;
         req->query_string = (char*)malloc(query_len + 1);
         if (!req->query_string) {
-            free(req->path); free(req->method); free(req); return NULL;
+            free(req->path); req->path = NULL; free(req->method); req->method = NULL; return NULL;
         }
         memcpy(req->query_string, query + 1, query_len);
         req->query_string[query_len] = '\0';
@@ -1528,7 +1529,7 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
         // No query string
         int path_len = path_end - path_start;
         req->path = (char*)malloc(path_len + 1);
-        if (!req->path) { free(req->method); free(req); return NULL; }
+        if (!req->path) { free(req->method); req->method = NULL; return NULL; }
         memcpy(req->path, path_start, path_len);
         req->path[path_len] = '\0';
         req->query_string = NULL;
@@ -1539,8 +1540,13 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
     req->http_version = strdup(version_start);
     
     // Parse headers
-    req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
-    req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+    /* A reused request arrives with these already allocated, which is the
+     * point of reusing it: the arrays are fixed-size and outlive a request
+     * perfectly well. */
+    if (!req->header_keys)
+        req->header_keys = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
+    if (!req->header_values)
+        req->header_values = (char**)malloc(sizeof(char*) * HTTP_MAX_HEADERS);
     req->header_count = 0;
     // If either array failed to allocate, drop both and skip storing headers
     // (the loop below still runs to advance past them to the body) rather than
@@ -1737,6 +1743,75 @@ const char* http_get_path_param(HttpRequest* req, const char* key) {
     return NULL;
 }
 
+/* Return a request to the state a freshly parsed one starts from, keeping the
+ * arrays it fills.
+ *
+ * Parsing a request allocates the object, three pairs of pointer arrays, and
+ * a string per header name and value. A connection serves many requests, and
+ * the arrays are the same size every time, so they are kept and only what a
+ * request filled in is freed.
+ */
+void http_request_reset(HttpRequest* req) {
+    if (!req) return;
+
+    free(req->method);       req->method = NULL;
+    free(req->path);         req->path = NULL;
+    free(req->query_string); req->query_string = NULL;
+    free(req->http_version); req->http_version = NULL;
+    free(req->body);         req->body = NULL;
+    req->body_length = 0;
+
+    for (int i = 0; i < req->header_count; i++) {
+        free(req->header_keys[i]);   req->header_keys[i] = NULL;
+        free(req->header_values[i]); req->header_values[i] = NULL;
+    }
+    req->header_count = 0;
+
+    /* Params and query are allocated on demand and at varying sizes, so they
+     * are released rather than kept: holding a pointer to a differently sized
+     * array is how a reuse turns into a corruption. */
+    for (int i = 0; i < req->param_count; i++) {
+        free(req->param_keys[i]);
+        free(req->param_values[i]);
+    }
+    free(req->param_keys);   req->param_keys = NULL;
+    free(req->param_values); req->param_values = NULL;
+    req->param_count = 0;
+
+    for (int i = 0; i < req->query_count; i++) {
+        free(req->query_keys[i]);
+        free(req->query_values[i]);
+    }
+    free(req->query_keys);   req->query_keys = NULL;
+    free(req->query_values); req->query_values = NULL;
+    req->query_count = 0;
+
+    req->stream_conn = NULL;
+    req->stream_total = 0;
+    req->stream_consumed = 0;
+}
+
+/* Parse into an object the caller owns, reusing what it already holds. */
+HttpRequest* http_parse_request_into(HttpRequest* req, const char* buf, size_t len) {
+    if (!req) return NULL;
+    http_request_reset(req);
+    return http_parse_request_n_impl(req, buf, len);
+}
+
+
+/* Parse into a fresh object, which is what most callers want. */
+HttpRequest* http_parse_request_n(const char* buf, size_t len) {
+    if (!buf) return NULL;
+    HttpRequest* req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+    if (!req) return NULL;
+    HttpRequest* parsed = http_parse_request_n_impl(req, buf, len);
+    if (!parsed) {
+        http_request_free(req);
+        return NULL;
+    }
+    return parsed;
+}
+
 void http_request_free(HttpRequest* req) {
     if (!req) return;
     
@@ -1795,6 +1870,50 @@ HttpServerResponse* http_response_create() {
     http_response_set_header(res, "Server", "Aether/1.0");
 
     return res;
+}
+
+/* Return a response to the state a fresh one is in, keeping what does not
+ * change between requests.
+ *
+ * A connection serves many requests, and building a response for each one
+ * costs eight allocations: the object, its status text, two arrays of fifty
+ * header slots, and a string per key and value of the two default headers.
+ * The arrays outlive a request perfectly well, so this frees what a request
+ * filled in and leaves the rest in place.
+ *
+ * Deliberately not a memset: the header arrays and the body capacity are the
+ * point of reusing it, and zeroing them would leak both.
+ */
+void http_response_reset(HttpServerResponse* res) {
+    if (!res) return;
+
+    for (int i = 0; i < res->header_count; i++) {
+        free(res->header_keys[i]);
+        free(res->header_values[i]);
+        res->header_keys[i] = NULL;
+        res->header_values[i] = NULL;
+    }
+    res->header_count = 0;
+
+    aether_caps_free(res->body, res->body_cap);
+    res->body = NULL;
+    res->body_length = 0;
+    res->body_cap = 0;
+
+    if (res->sendfile_fd >= 0) {
+        close(res->sendfile_fd);
+        res->sendfile_fd = -1;
+    }
+    res->sendfile_size = 0;
+    res->takeover_conn = NULL;
+    res->takeover_taken = 0;
+
+    free(res->status_text);
+    res->status_text = strdup("OK");
+    res->status_code = 200;
+
+    http_response_set_header(res, "Content-Type", "text/html; charset=utf-8");
+    http_response_set_header(res, "Server", "Aether/1.0");
 }
 
 void http_response_set_status(HttpServerResponse* res, int code) {
