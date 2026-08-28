@@ -755,4 +755,16 @@ void* http_server_proxy_opts(HttpServer* server);
 int http_server_adopt_connection(HttpServer* server, int client_fd,
                                  const char* prebuffered, int prebuffered_len);
 
+
+/* Return a response to the state http_response_create leaves it in, keeping
+ * the header arrays and reusing the object. For a caller serving many
+ * requests on one connection. */
+void http_response_reset(HttpServerResponse* res);
+
+
+/* Parse into an object the caller owns and reuses. Returns NULL on a request
+ * it cannot parse, having freed what it filled in but not the object. */
+HttpRequest* http_parse_request_into(HttpRequest* req, const char* buf, size_t len);
+void http_request_reset(HttpRequest* req);
+
 #endif
