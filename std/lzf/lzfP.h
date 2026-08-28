@@ -177,16 +177,30 @@ using namespace std;
 #endif
 
 #ifndef LZF_USE_OFFSETS
-# ifdef _WIN32
-#  define LZF_USE_OFFSETS defined(_M_X64)
+/*
+ * Upstream special-cased _WIN32 as `defined(_M_X64)`. Two things are wrong
+ * with that once the build is not MSVC:
+ *
+ *  - `_M_X64` is an MSVC macro. clang targeting MinGW (which is what the
+ *    cross-build uses) defines neither `_M_X64` nor `_M_ARM64`, so the test
+ *    was false on 64-bit Windows too -- x64 was silently taking the 32-bit
+ *    pointer path, not just aarch64.
+ *  - Expanding to `defined(...)` inside a macro is undefined behaviour, and
+ *    clang says so: "macro expansion producing 'defined' has undefined
+ *    behavior". A warning today; the standard permits worse.
+ *
+ * The portable test the #else branch already used is correct everywhere,
+ * including MSVC (UINTPTR_MAX is C99 and present since VS2010), so there is
+ * nothing left for the Windows branch to special-case. Verified selecting
+ * 64-bit offsets on x86_64/aarch64 for windows, linux and macos, and the
+ * 32-bit path on x86-windows.
+ */
+# if __cplusplus > 199711L
+#  include <cstdint>
 # else
-#  if __cplusplus > 199711L
-#   include <cstdint>
-#  else
-#   include <stdint.h>
-#  endif
-#  define LZF_USE_OFFSETS (UINTPTR_MAX > 0xffffffffU)
+#  include <stdint.h>
 # endif
+# define LZF_USE_OFFSETS (UINTPTR_MAX > 0xffffffffU)
 #endif
 
 typedef unsigned char u8;

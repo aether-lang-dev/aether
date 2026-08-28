@@ -36,6 +36,28 @@ version number before tagging the release.
   was already there — `(true, "")` inserted, `(false, "")` duplicate, and
   `(false, error)` failed. `add` is unchanged for the many callers where a
   duplicate is the expected case.
+
+### Fixed
+
+- **`aarch64-windows` cross-builds no longer compile `std.lzf` with undefined
+  behaviour.** `LZF_USE_OFFSETS` was `defined(_M_X64)` under `_WIN32`, which is
+  wrong twice over. `_M_X64` is an MSVC macro, and clang targeting MinGW — what
+  the cross-build actually uses — defines neither it nor `_M_ARM64`, so the
+  64-bit path was being skipped on `x86_64-windows` as well, not just on ARM.
+  And a macro that expands to `defined(...)` is undefined behaviour; clang says
+  so. The Windows special case is gone: the portable `UINTPTR_MAX` test the
+  other branch already used is correct on every target, verified selecting
+  64-bit offsets for x86_64 and aarch64 across windows, linux and macos, and
+  the 32-bit path on `x86-windows`.
+
+- **A FreeBSD cross-build against a sysroot with no base system says so.**
+  Pointing `AETHER_SYSROOT` at a deps-only sysroot — one holding just
+  libssl/libz/libpcre2 — got past the "is it set?" check and then failed deep
+  in the link with `unable to find dynamic system library 'cap_dns'`, which
+  says nothing about the base being missing and sends people looking at the
+  library search path instead. The sysroot is now checked for a libc, in
+  either `usr/lib` or a flat `lib`, and the error names the script that
+  provisions the base.
 ## [0.594.0]
 
 ### Fixed

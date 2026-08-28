@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>   /* sysroot completeness probe, below */
 #ifdef _WIN32
 #  include <process.h>
 #  ifndef getpid
@@ -700,6 +701,40 @@ int run_cross_build(const char* c_file, const char* out_file,
                 "  then: AETHER_SYSROOT=<crossbuild>/bases/<cpu>-freebsd[ver] ae build ... --target=%s\n",
                 ztriple, ztriple);
             return 1;
+        }
+        /* AETHER_SYSROOT being SET is not the same as it being usable. A
+         * deps-only sysroot (aether-crossbuild provisions one from
+         * deps.lock, holding libssl/libz/libpcre2 and no base system) gets
+         * past the check above and then fails deep in the link with
+         * `unable to find dynamic system library 'cap_dns'` — a message that
+         * says nothing about the base being absent, and sends people looking
+         * at the library search path instead. Probing for libc here turns
+         * that into the one instruction that fixes it.
+         *
+         * Both layouts are accepted: a real FreeBSD tree keeps libc at
+         * usr/lib, and a flat staging dir at lib. Only the absence of BOTH
+         * means the base was never fetched. */
+        {
+            char probe[1024];
+            struct stat st;
+            int have_base = 0;
+            snprintf(probe, sizeof(probe), "%s/usr/lib/libc.a", sr);
+            if (stat(probe, &st) == 0) have_base = 1;
+            if (!have_base) {
+                snprintf(probe, sizeof(probe), "%s/lib/libc.a", sr);
+                if (stat(probe, &st) == 0) have_base = 1;
+            }
+            if (!have_base) {
+                fprintf(stderr,
+                    "Error: AETHER_SYSROOT=%s has no FreeBSD base (no libc.a in\n"
+                    "  either usr/lib or lib), so the link would fail on base symbols\n"
+                    "  such as cap_dns that libaether.a always references.\n"
+                    "  A deps-only sysroot is not enough; fetch the base as well:\n"
+                    "    ./scripts/fetch-freebsd-base.sh <cpu> [major]   # e.g. x86_64 15\n"
+                    "  then point AETHER_SYSROOT at <crossbuild>/bases/<cpu>-freebsd[ver].\n",
+                    sr);
+                return 1;
+            }
         }
         /* Zig 0.16 resolves target-root -L paths beneath --sysroot. Supplying
          * already-prefixed host paths makes it prefix the sysroot twice. Zig
