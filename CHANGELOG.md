@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.598.0]
+
 ### Added
 
 - **`--target=x86_64-linux-musl` and `aarch64-linux-musl`, for a Linux binary
