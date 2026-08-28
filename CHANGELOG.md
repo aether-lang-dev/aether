@@ -36,6 +36,17 @@ version number before tagging the release.
   was already there — `(true, "")` inserted, `(false, "")` duplicate, and
   `(false, error)` failed. `add` is unchanged for the many callers where a
   duplicate is the expected case.
+## [0.594.0]
+
+### Fixed
+
+- **The actor registry test waits for its answer instead of sleeping a fixed
+  time.** It synchronised with three `sleep(50)` calls, which is a guess about
+  how quickly the scheduler will deliver a message, and a loaded machine loses
+  that guess: it failed on a Windows CI runner while passing everywhere else,
+  blocking a pull request that touched neither actors nor the registry. It now
+  polls for the value with a deadline, so it passes as soon as the message
+  arrives and still fails if one genuinely goes nowhere.
 
 ## [0.593.0]
 
