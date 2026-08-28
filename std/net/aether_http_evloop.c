@@ -57,9 +57,18 @@ typedef struct EvConn {
 
     char*    in;            /* request bytes from the client */
     size_t   in_len, in_cap;
+    size_t   in_scanned;    /* how much of `in` has been searched for the
+                             * end of the headers; a read that arrives in
+                             * pieces would otherwise rescan from the start
+                             * every time */
+    size_t   in_hdr_end;    /* offset just past the header terminator, once
+                             * found. Kept because a request whose body is
+                             * still arriving is asked again, and resuming the
+                             * search would then look past the terminator and
+                             * never find it. 0 means not found yet */
 
     char*    out;           /* response bytes owed to the client */
-    size_t   out_len, out_sent;
+    size_t   out_len, out_sent, out_cap;
 
     HttpUpstreamConn up;
     HttpExchange     x;
@@ -164,6 +173,8 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
  * the size they were charged at. */
 static void ev_conn_reset_request(EvConn* c) {
     c->in_len = 0;
+    c->in_scanned = 0;
+    c->in_hdr_end = 0;
 
     if (c->head) aether_caps_free(c->head, c->head_cap);
     c->head = NULL;
@@ -178,8 +189,8 @@ static void ev_conn_reset_request(EvConn* c) {
     }
     memset(&c->x, 0, sizeof(c->x));
 
-    free(c->out);
-    c->out = NULL;
+    /* The buffer stays with the connection and is only grown; a connection
+     * serving many requests stops allocating and freeing one per request. */
     c->out_len = c->out_sent = 0;
 
     /* The request and the response objects stay with the connection. Each
@@ -230,6 +241,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
     if (c->arena_ready) http_arena_free(&c->arena);
+    free(c->out);
     free(c->in);
     free(c);
     atomic_fetch_sub(&d->loop->active, 1);
@@ -245,10 +257,23 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
 static int ev_request_complete(EvConn* c, size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
-    char* hdr_end = strstr(c->in, "\r\n\r\n");
-    if (!hdr_end) return 0;
 
-    size_t header_bytes = (size_t)((hdr_end + 4) - c->in);
+    /* Find the end of the headers once. The search resumes where the last
+     * one stopped, backing up three bytes so a terminator split across two
+     * reads is still found; without that every read rescans everything read
+     * so far. Once found the offset is kept, because a request whose body is
+     * still arriving comes back here and a resumed search would look past
+     * the terminator. */
+    if (!c->in_hdr_end) {
+        size_t from = c->in_scanned > 3 ? c->in_scanned - 3 : 0;
+        char* found = strstr(c->in + from, "\r\n\r\n");
+        c->in_scanned = c->in_len;
+        if (!found) return 0;
+        c->in_hdr_end = (size_t)((found + 4) - c->in);
+    }
+
+    size_t header_bytes = c->in_hdr_end;
+    char* hdr_end = c->in + header_bytes - 4;
     char cl[64];
     int differing = 0;
     int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",
@@ -487,10 +512,8 @@ static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
 static int ev_respond_from(EvDriver* d, EvConn* c) {
     (void)d;
     size_t len = 0;
-    char* bytes = http_response_serialize_len(c->res, &len);
-    if (!bytes) return -1;
-    free(c->out);
-    c->out = bytes;
+    if (!http_response_serialize_into(c->res, &c->out, &c->out_cap, &len))
+        return -1;
     c->out_len = len;
     c->out_sent = 0;
     c->state = EV_CLIENT_SEND;

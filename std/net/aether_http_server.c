@@ -5,6 +5,7 @@
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
 #include "aether_http_evloop.h"
+#include "../../runtime/utils/aether_cpu_available.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
 /* The portable thread shim, not raw <pthread.h> (see its header note).
@@ -2150,30 +2151,62 @@ void* http_response_accept_tunnel(HttpServerResponse* res) {
 // Length-aware serializer. The body may be binary (gzip-compressed,
 // other application/octet-stream payloads); the returned buffer is
 // NOT a C string — caller must use *out_len, never strlen.
-char* http_response_serialize_len(HttpServerResponse* res, size_t* out_len) {
-    if (!res) { if (out_len) *out_len = 0; return NULL; }
-    // Compute required size: status line + headers + blank line + body
-    size_t needed = 64;  // status line headroom
+char* http_response_serialize_into(HttpServerResponse* res, char** buf,
+                                   size_t* cap, size_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!res || !buf || !cap) return NULL;
+
+    const char* status_text = res->status_text ? res->status_text : "";
+
+    /* Size the status line from its parts rather than from a fixed headroom:
+     * a caller-set status text longer than the guess used to be silently
+     * truncated by snprintf. */
+    size_t needed = sizeof("HTTP/1.1 ") + 16 + strlen(status_text) + 2;
     for (int i = 0; i < res->header_count; i++)
         needed += strlen(res->header_keys[i]) + strlen(res->header_values[i]) + 4;
-    needed += 2;  // blank line
+    needed += 2;
     if (res->body) needed += res->body_length;
 
-    char* buf = malloc(needed + 1);
-    if (!buf) { if (out_len) *out_len = 0; return NULL; }
-
-    int off = snprintf(buf, needed + 1, "HTTP/1.1 %d %s\r\n",
-                       res->status_code, res->status_text);
-    for (int i = 0; i < res->header_count; i++)
-        off += snprintf(buf + off, needed + 1 - off, "%s: %s\r\n",
-                        res->header_keys[i], res->header_values[i]);
-    off += snprintf(buf + off, needed + 1 - off, "\r\n");
-    if (res->body && res->body_length > 0) {
-        memcpy(buf + off, res->body, res->body_length);
-        off += (int)res->body_length;
+    if (*cap < needed + 1) {
+        char* grown = (char*)realloc(*buf, needed + 1);
+        if (!grown) return NULL;
+        *buf = grown;
+        *cap = needed + 1;
     }
-    if (out_len) *out_len = (size_t)off;
-    return buf;
+
+    char* p = *buf;
+    int n = snprintf(p, *cap, "HTTP/1.1 %d %s\r\n", res->status_code, status_text);
+    if (n < 0) return NULL;
+    p += n;
+
+    /* memcpy with the lengths rather than snprintf per header: formatting a
+     * header this way showed up in the proxy profile, and every length here
+     * is already known. */
+    for (int i = 0; i < res->header_count; i++) {
+        size_t kl = strlen(res->header_keys[i]);
+        size_t vl = strlen(res->header_values[i]);
+        memcpy(p, res->header_keys[i], kl);      p += kl;
+        *p++ = ':'; *p++ = ' ';
+        memcpy(p, res->header_values[i], vl);    p += vl;
+        *p++ = '\r'; *p++ = '\n';
+    }
+    *p++ = '\r'; *p++ = '\n';
+    if (res->body && res->body_length > 0) {
+        memcpy(p, res->body, res->body_length);
+        p += res->body_length;
+    }
+    *p = '\0';
+
+    if (out_len) *out_len = (size_t)(p - *buf);
+    return *buf;
+}
+
+char* http_response_serialize_len(HttpServerResponse* res, size_t* out_len) {
+    char*  buf = NULL;
+    size_t cap = 0;
+    char*  r = http_response_serialize_into(res, &buf, &cap, out_len);
+    if (!r) free(buf);
+    return r;
 }
 
 // String-shaped legacy serializer. Equivalent to the length-aware
@@ -4794,8 +4827,7 @@ int http_server_start_raw(HttpServer* server) {
     if (use_actor_mode && server->multi_accept) {
         // Multi-accept mode (opt-in): one accept thread per core with SO_REUSEPORT.
         // Best for very high connection rates where accept() is the bottleneck.
-        int n_threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
-        if (n_threads <= 0) n_threads = 4;
+        int n_threads = aether_cpu_available();
         if (n_threads > 16) n_threads = 16;
 
         server->accept_listen_fds = calloc(n_threads, sizeof(int));
@@ -4942,11 +4974,7 @@ int http_server_start_raw(HttpServer* server) {
          * leave cores idle. It returns NULL when there is no proxy mounted or
          * the platform has no poller, and then nothing below changes. */
         if (!server->tls_enabled && !server->h2_enabled) {
-            long online = 1;
-#if !defined(_WIN32)
-            online = sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-            int cores = (int)(online > 0 ? online : 1);
+            int cores = aether_cpu_available();
             if (cores > 8) cores = 8;
             server->evloop = http_evloop_start(server, cores);
         }

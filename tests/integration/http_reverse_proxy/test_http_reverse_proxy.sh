@@ -12,6 +12,9 @@
 #   8. Refuses Upgrade-bearing requests with 502 +
 #      X-Aether-Proxy-Error: upgrade_unsupported
 #   9. Custom request header reaches upstream
+#  11. A request split across several writes, with the header
+#      terminator itself cut in half and the body arriving last,
+#      still completes
 #
 # Verifies (mode=timeout):
 #  10. Upstream sleep 3s vs proxy timeout 1s → 504 within ~1.5s
@@ -246,6 +249,22 @@ else
     }
 fi
 
+# Test 11 - fragmented request. curl cannot split a request across
+# writes, so this one speaks the socket directly. The event driver
+# reads whatever has arrived and asks whether a request is complete
+# yet, so the cut points here (inside the CRLFCRLF terminator, and
+# again before the body) are the cases where a driver that tracks how
+# far it has scanned can lose the terminator and wait forever.
+if command -v python3 >/dev/null 2>&1; then
+    if FRAG=$(python3 "$SCRIPT_DIR/fragment_probe.py" 19000 2>&1); then
+        :
+    else
+        echo "  [FAIL] T11 fragmented request: $FRAG"; exit 1
+    fi
+else
+    echo "  [SKIP] T11 fragmented request: python3 not on PATH"
+fi
+
 stop_servers
 
 # ----------------------------------------------------------------
@@ -268,7 +287,7 @@ ELAPSED=$((T1 - T0))
 stop_servers
 
 if [ "$IS_WIN" = "1" ]; then
-    echo "  [PASS] http_reverse_proxy: 4/10 win-reduced — basic, POST body, Upgrade refusal, timeout"
+    echo "  [PASS] http_reverse_proxy: 5/11 win-reduced - basic, POST body, Upgrade refusal, fragmented, timeout"
 else
-    echo "  [PASS] http_reverse_proxy: 10/10 — basic round-trip, headers, body, timeout"
+    echo "  [PASS] http_reverse_proxy: 11/11 - basic round-trip, headers, body, fragmented, timeout"
 fi

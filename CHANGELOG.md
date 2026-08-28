@@ -11,7 +11,44 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Thread pools are sized by the CPUs the process may use, not the CPUs the
+  machine has.** `sysconf(_SC_NPROCESSORS_ONLN)` reports the host's CPU count
+  whatever the process is allowed to run on, so a cpuset (`taskset`, `docker
+  --cpuset-cpus`, a pinned Kubernetes pod) or a CFS quota (`docker --cpus`, a
+  Kubernetes CPU limit) left every pool oversized: on a 64-CPU host with a
+  2-CPU limit, 64 threads contending for 2. The proxy driver, the accept
+  threads, the connection pool and the worker pool all sized themselves this
+  way, each with its own copy of the probe.
+
+  They now share one header-only helper that reads the process's CPU affinity
+  and clamps it by the cgroup v2 or v1 CPU quota. Threads that would have been
+  preempted are simply never started, so the scheduler time leaves the request
+  path.
+
 ### Changed
+
+- **A response is serialised into a buffer the connection keeps.** Every
+  response allocated a buffer and freed it a moment later, and wrote each
+  header with `snprintf` after measuring it with `strlen`. The buffer now
+  belongs to the connection and is only grown, and the headers are copied with
+  the lengths already computed for the sizing pass.
+
+  Sizing the status line from a fixed headroom rather than from its parts also
+  truncated any status text longer than the guess, which took the headers and
+  the body with it; it is now sized from the text.
+
+- **The end of a request's headers is found once.** The driver searched the
+  whole buffer for the terminator on every read, so a request arriving in
+  pieces rescanned everything already read, and it searched again for a request
+  whose headers were complete but whose body was still arriving.
+
+- **Hop-by-hop header matching compares lengths before strings.** Deciding
+  whether to forward a header ran up to nine `strcasecmp` calls against it, and
+  `__strcasecmp` was the largest single entry in the proxy's userspace profile.
+  The table now carries each name's length and first letter, which rules out
+  almost every candidate arithmetically.
 
 - **A proxied request builds its outbound headers in an arena.** Traced with
   `perf -e page-faults`, `http_request_set_header_raw` was the largest
@@ -29,7 +66,13 @@ version number before tagging the release.
   **Page faults per request 0.13 to 0.05**, CPU per request 21.4 to 19.3
   microseconds by the least-contended round, and 34.0 to 20.4 by the median.
 
-## [current]
+### Testing
+
+- A proxied request split across several writes, with the header terminator
+  itself cut in half and the body arriving last, is now covered. The existing
+  suite passed in full against a driver that hung forever on exactly that.
+
+## [0.597.0]
 
 ### Changed
 

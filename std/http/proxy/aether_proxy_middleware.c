@@ -44,23 +44,52 @@
 
 /* ----- hop-by-hop headers (RFC 7230 §6.1) ----- */
 
-static const char* HOP_HEADERS[] = {
-    "Connection",
-    "Keep-Alive",
-    "Proxy-Authenticate",
-    "Proxy-Authorization",
-    "TE",
-    "Trailer",
-    "Transfer-Encoding",
-    "Upgrade",
-    "Proxy-Connection",   /* legacy */
-    NULL
+/* The always-hop-by-hop headers, with their lengths and lowercased first
+ * letters alongside. Both are what lets the test below reject a header
+ * without comparing strings, and computing them here means not computing
+ * them on every header of every request. */
+typedef struct {
+    const char* name;
+    size_t      len;
+    char        first;
+} HopHeader;
+
+static const HopHeader HOP_HEADERS[] = {
+    { "Connection",          10, 'c' },
+    { "Keep-Alive",          10, 'k' },
+    { "Proxy-Authenticate",  18, 'p' },
+    { "Proxy-Authorization", 19, 'p' },
+    { "TE",                   2, 't' },
+    { "Trailer",              7, 't' },
+    { "Transfer-Encoding",   17, 't' },
+    { "Upgrade",              7, 'u' },
+    { "Proxy-Connection",    16, 'p' },   /* legacy */
+    { NULL,                   0, 0   }
 };
 
+/* Is this one of the always-hop-by-hop headers?
+ *
+ * Called for every header of every proxied request, and it used to run
+ * strcasecmp against all nine names each time: about ninety case-insensitive
+ * comparisons per request, which put __strcasecmp at the top of this path's
+ * userspace profile.
+ *
+ * The list is fixed and known, so almost every header can be rejected without
+ * comparing anything: no two entries share a length and a first letter except
+ * the three beginning with "Tr"/"TE" and the three with "Proxy", and a length
+ * test separates those. What reaches strcasecmp is a header that really might
+ * be one of them.
+ */
 static int is_hop_by_hop(const char* name) {
-    if (!name) return 0;
-    for (const char** p = HOP_HEADERS; *p; p++) {
-        if (strcasecmp(name, *p) == 0) return 1;
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    char first = (char)tolower((unsigned char)name[0]);
+
+    for (const HopHeader* p = HOP_HEADERS; p->name; p++) {
+        /* Length and first letter are a load and two compares, where
+         * strcasecmp walks both strings lowercasing as it goes. */
+        if (p->len != len || p->first != first) continue;
+        if (strcasecmp(name, p->name) == 0) return 1;
     }
     return 0;
 }
