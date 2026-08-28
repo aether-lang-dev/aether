@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.595.0]
+
 ### Fixed
 
 - **The actor registry test waits for its answer instead of sleeping a fixed
