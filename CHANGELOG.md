@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.596.0]
+
 ### Added
 
 - **`deque.try_push_back` / `try_push_front`, for when losing an element is a
