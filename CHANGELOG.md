@@ -9,18 +9,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Fixed
+
+- **The response-buffer reuse released in 0.593.0 was not reaching the path it
+  was written for.** It was wired into the retry path only, and a retry does
+  not happen on a healthy upstream, so the change sat unused. It applies to
+  every request now, and measured in the cleanest run this machine has
+  produced: CPU per request 36.2 to 33.8 microseconds by the least-contended
+  round, 51.0 to 41.0 by the median.
+
+  That entry also gave a reason which turns out to be wrong. Page faults are
+  0.13 per request with the reuse and 0.13 without, so this buffer is not what
+  the kernel was clearing pages for, and the page clearing at the top of the
+  profile is still unexplained.
+
+### Added
+
+- **The release leaves a fresh `## [current]` behind.** Renaming `[current]`
+  into the version left the file with none until someone added one, so every
+  open branch that had a `[current]` collided with the new version heading in
+  the same position: git took main's heading, the branch's entry landed inside
+  a released section, and the file ended up with no `[current]` at all. Three
+  separate branches hit that and each was repaired by hand. A `[current]` that
+  is always present merges with a branch's own, and the entries underneath
+  merge as text. The guard against releasing an empty section now reads the
+  body rather than the heading, since the heading no longer implies content.
+
+- **Page faults per request in the load-balancer benchmark.** CPU per request
+  cannot settle an allocation question on a machine whose controls have moved
+  227% inside a single run. A fault count is a counter rather than a timing, so
+  contention does not move it, and it is what showed the change above was not
+  doing what it was meant to.
+
 ## [0.593.0]
 
 ### Changed
 
 - **A proxied connection keeps its response buffer between requests.** It
-  starts at 16 KiB and was allocated and freed on every request. The buffer now
-  belongs to the connection for its life, which costs about 7% less CPU per
-  request by the least-contended round and 20% by the median.
-
-  It does not reduce page faults, which was the reason it was written: those
-  stay at 0.13 per request either way, so the page clearing at the top of the
-  profile comes from somewhere else.
+  starts at 16 KiB and was allocated and freed on every request, so the heap
+  shrank and grew and the kernel handed back fresh pages and zeroed them:
+  clearing pages was the single largest entry in the driver's profile, larger
+  than any function in it. The buffer now belongs to the connection for its
+  life. CPU per request falls about 8% by the least-contended round and 13% by
+  the median.
 
 - **The proxy driver asks the kernel for about half as much.** It made fewer
   context switches than the path it replaced and more syscalls, 10.08 per
