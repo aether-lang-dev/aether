@@ -71,13 +71,26 @@ fn count_via_spy(target: actor_ref, n: int) -> int {
     for (i = 0; i < n; i = i + 1) {
         target ! Bump {}
     }
-    sleep(50)
     spy = spawn(Spy())
     target ! Ask { from: spy }
-    sleep(50)
+
+    // Wait for the answer rather than assuming how long it takes to
+    // arrive. A mailbox is FIFO, so the bumps are counted before the Ask
+    // is answered; what is not fixed is how soon the scheduler reaches
+    // them, and a fixed sleep is a guess that a loaded machine loses.
+    // This failed on a Windows CI runner while passing everywhere else.
+    //
+    // Draining is idempotent, so asking again costs nothing, and -1 means
+    // the spy has not been told yet. A send that genuinely goes nowhere
+    // still fails, one second later than before.
     cell = ref(-1)
-    spy ! Drain { sink: cell }
-    sleep(50)
+    for (waited = 0; waited < 1000; waited = waited + 5) {
+        spy ! Drain { sink: cell }
+        if ref_get(cell) != -1 {
+            return ref_get(cell)
+        }
+        sleep(5)
+    }
     return ref_get(cell)
 }
 
