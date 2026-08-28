@@ -5584,6 +5584,7 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "Error: Unknown target '%s'.\n", target);
         fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
+                        "aarch64-linux-musl, x86_64-linux-musl, "
                         "aarch64-freebsd, x86_64-freebsd, x86_64-windows, "
                         "aarch64-windows, wasm32-wasi, aarch64-ios, "
                         "aarch64-ios-simulator, x86_64-ios-simulator).\n");
@@ -5635,7 +5636,9 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "             artifact (biggest win on --target, where zig emits DWARF\n");
         fprintf(stderr, "             by default: a wasm --emit=lib drops ~38x)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
-        fprintf(stderr, "             aarch64-linux, x86_64-linux, aarch64-freebsd, x86_64-freebsd,\n");
+        fprintf(stderr, "             aarch64-linux, x86_64-linux (glibc; carries a GLIBC floor),\n");
+        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl (static; no libc floor),\n");
+        fprintf(stderr, "             aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
         fprintf(stderr, "             (freebsd needs AETHER_SYSROOT=<base sysroot>; see aether-crossbuild)\n");
         fprintf(stderr, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator\n");

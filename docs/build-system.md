@@ -543,12 +543,22 @@ target sysroot, no per-host file juggling. The platform backend (`epoll` vs
 set serves every target.
 
 ```bash
-ae build --target=x86_64-linux  hello.ae -o hello      # ELF x86-64
-ae build --target=aarch64-macos hello.ae -o hello      # Mach-O arm64
+ae build --target=x86_64-linux      hello.ae -o hello  # ELF x86-64, glibc
+ae build --target=x86_64-linux-musl hello.ae -o hello  # ELF x86-64, static
+ae build --target=aarch64-macos     hello.ae -o hello  # Mach-O arm64
 ```
 
+**glibc or musl on Linux.** The `-linux` triples link against glibc
+dynamically, so the artifact carries the GLIBC symbol version of whatever
+built it and will not start on an older distro. The `-linux-musl` triples
+link musl statically instead: no dynamic libc dependency, no version floor,
+and the same binary runs on any Linux of that architecture — including Alpine
+and other musl distros. Prefer musl for anything you publish; see
+**[release-glibc-portability.md](release-glibc-portability.md)**.
+
 Supported triples: `aarch64-macos`, `x86_64-macos`, `aarch64-linux`,
-`x86_64-linux` (the `arm64-`/`amd64-` spellings are accepted too). Zig 0.16.0
+`x86_64-linux`, `aarch64-linux-musl`, `x86_64-linux-musl` (the
+`arm64-`/`amd64-` spellings are accepted too). Zig 0.16.0
 or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
 `scripts/get-zig.sh`); the build fails fast with an install hint otherwise.
 
