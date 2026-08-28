@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 `main`, the release pipeline automatically replaces `[current]` with the next
 version number before tagging the release.
 
+## [current]
+
+### Added
+
+- **`deque.try_push_back` / `try_push_front`, for when losing an element is a
+  bug rather than the point.** `std.deque` is a ring buffer: at capacity a
+  push overwrites the far end. That is exactly right for a rolling window of
+  the last N samples, and exactly wrong for a BFS frontier, a tree traversal
+  or a work queue, where the dropped item is pending work. Nothing reported
+  it, so an underestimated capacity did not fail — it returned an answer that
+  looked plausible and was wrong. A BFS over a 7-node graph with a capacity-4
+  deque visits 5 nodes and reports success.
+
+  The overwriting behaviour stays, under the same names, because a sliding
+  window genuinely wants it. The new pair refuses instead: on a full buffer
+  they return an error and leave the deque untouched, so a caller can grow
+  the capacity or fail loudly. Same graph, same capacity, now reports
+  `deque: full`.
+
+- **`set.try_add`, which separates a duplicate from a failure.** `set.add`
+  returns `false` both when the item was already present and when the insert
+  failed, so a caller cannot tell "this was a duplicate" from "this was never
+  stored". The layer underneath already knew: it returns 1, 0 and -1 for the
+  three cases, and the wrapper collapsed the last two. `try_add` surfaces what
+  was already there — `(true, "")` inserted, `(false, "")` duplicate, and
+  `(false, error)` failed. `add` is unchanged for the many callers where a
+  duplicate is the expected case.
+
 ## [0.593.0]
 
 ### Changed

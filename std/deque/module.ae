@@ -3,11 +3,22 @@
 // backs work queues, sliding windows, and FIFO/LIFO buffers uniformly).
 //
 // Circular-buffer backed: push/pop at either end are O(1) with no element
-// shuffling. `push_back` on a full buffer OVERWRITES the oldest element
-// (front), matching C3's `std::collections::ringbuffer` semantics — the
-// classic sliding-window behaviour. Use the fallible `pop_*` return to
-// distinguish empty. Values are `long`; store an int directly or a pointer
-// via std.mem.
+// shuffling. Values are `long`; store an int directly or a pointer via
+// std.mem.
+//
+// TWO PUSH FAMILIES, and picking the wrong one is the trap here:
+//
+//   push_back / push_front       on a full buffer OVERWRITE the far end,
+//                                matching C3's `std::collections::ringbuffer`
+//                                — the classic sliding-window behaviour.
+//   try_push_back / try_push_front   never overwrite; they return an error
+//                                when full and leave the deque unchanged.
+//
+// Use the overwriting pair when dropping the oldest sample IS the intent (a
+// rolling window of the last N readings). Use the `try_` pair whenever every
+// element matters — BFS frontiers, tree traversals, work queues — because an
+// underestimated capacity there does not fail loudly, it produces a plausible
+// wrong answer. Use the fallible `pop_*` return to distinguish empty.
 //
 // Modelled on C3's ringbuffer + deque (MIT, Copyright (c) 2022-2026
 // Christoffer Lernö and contributors), re-expressed for a concrete `long`
@@ -20,6 +31,7 @@ exports(
     new, free,
     len, cap, is_empty, is_full,
     push_back, push_front,
+    try_push_back, try_push_front,
     pop_front, pop_back,
     peek_front, peek_back,
     clear
@@ -90,6 +102,40 @@ push_front(d: Deque, value: long) -> Deque {
         r.count = r.count + 1
     }
     return r
+}
+
+// Append at the back WITHOUT overwriting. Returns (deque, "") on success and
+// (deque unchanged, error) when the buffer is full.
+//
+// This exists because the overwriting `push_back` is the right behaviour for
+// a sliding window and the wrong one for a work queue. A BFS frontier or a
+// tree traversal that outgrows its capacity does not want its oldest pending
+// item dropped: it wants to be told. Silently discarding it yields an answer
+// that looks plausible and is wrong, which is the worst way for a data
+// structure to fail. Use these when every element must survive; use the
+// plain push_* when dropping the far end is the point.
+try_push_back(d: Deque, value: long) -> (Deque, string) {
+    r = d
+    if r.count == r.capacity {
+        return r, "deque: full"
+    }
+    slot = wrap(r, r.count)
+    longarr.set(r.store, slot, value)
+    r.count = r.count + 1
+    return r, ""
+}
+
+// Prepend at the front WITHOUT overwriting. Returns (deque, "") on success
+// and (deque unchanged, error) when full.
+try_push_front(d: Deque, value: long) -> (Deque, string) {
+    r = d
+    if r.count == r.capacity {
+        return r, "deque: full"
+    }
+    r.head = wrap(r, -1)
+    longarr.set(r.store, r.head, value)
+    r.count = r.count + 1
+    return r, ""
 }
 
 // Remove and return the front element as (value, deque, ""), or
