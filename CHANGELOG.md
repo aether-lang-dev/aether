@@ -29,6 +29,8 @@ version number before tagging the release.
   `arm64-`/`amd64-` spellings are accepted as everywhere else, and the
   existing `-linux` targets are unchanged and still dynamic.
 
+## [0.597.0]
+
 ### Changed
 
 - **A proxied connection reuses its request and response objects.** Building
