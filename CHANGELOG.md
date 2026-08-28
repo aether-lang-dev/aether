@@ -13,6 +13,14 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The actor registry test waits for its answer instead of sleeping a fixed
+  time.** It synchronised with three `sleep(50)` calls, which is a guess about
+  how quickly the scheduler will deliver a message, and a loaded machine loses
+  that guess: it failed on a Windows CI runner while passing everywhere else,
+  blocking a pull request that touched neither actors nor the registry. It now
+  polls for the value with a deadline, so it passes as soon as the message
+  arrives and still fails if one genuinely goes nowhere.
+
 - **The response-buffer reuse released in 0.593.0 was not reaching the path it
   was written for.** It was wired into the retry path only, and a retry does
   not happen on a healthy upstream, so the change sat unused. It applies to
@@ -42,6 +50,7 @@ version number before tagging the release.
   227% inside a single run. A fault count is a counter rather than a timing, so
   contention does not move it, and it is what showed the change above was not
   doing what it was meant to.
+
 
 ## [0.593.0]
 
