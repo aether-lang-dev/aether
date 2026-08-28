@@ -631,7 +631,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
 
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
                        http_request_method_of(c->px.outbound));
-
+    ev_lend_rxbuf(c);
     ev_arm_deadline(d, c);
     if (c->up.connecting) {
         c->state = EV_UPSTREAM_DIAL;

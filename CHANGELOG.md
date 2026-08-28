@@ -14,12 +14,13 @@ version number before tagging the release.
 ### Changed
 
 - **A proxied connection keeps its response buffer between requests.** It
-  starts at 16 KiB and was allocated and freed on every request, so the heap
-  shrank and grew and the kernel handed back fresh pages and zeroed them:
-  clearing pages was the single largest entry in the driver's profile, larger
-  than any function in it. The buffer now belongs to the connection for its
-  life. CPU per request falls about 8% by the least-contended round and 13% by
-  the median.
+  starts at 16 KiB and was allocated and freed on every request. The buffer now
+  belongs to the connection for its life, which costs about 7% less CPU per
+  request by the least-contended round and 20% by the median.
+
+  It does not reduce page faults, which was the reason it was written: those
+  stay at 0.13 per request either way, so the page clearing at the top of the
+  profile comes from somewhere else.
 
 - **The proxy driver asks the kernel for about half as much.** It made fewer
   context switches than the path it replaced and more syscalls, 10.08 per
