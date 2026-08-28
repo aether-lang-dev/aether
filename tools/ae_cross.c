@@ -85,6 +85,20 @@ const char* cross_target_to_zig(const char* t) {
     if (!strcmp(t, "x86_64-macos")  || !strcmp(t, "amd64-macos"))  return "x86_64-macos-none";
     if (!strcmp(t, "aarch64-linux") || !strcmp(t, "arm64-linux"))  return "aarch64-linux-gnu";
     if (!strcmp(t, "x86_64-linux")  || !strcmp(t, "amd64-linux"))  return "x86_64-linux-gnu";
+    /* musl Linux (Tier A — self-contained): zig bundles musl, and links it
+     * statically by default, so these need no sysroot and produce a binary
+     * with no libc version floor. That is the difference worth naming: a gnu
+     * build carries the GLIBC symbol version of whatever built it and refuses
+     * to start on an older distro, while the musl artifact runs on any Linux
+     * of the same architecture.
+     *
+     * Separate target names rather than a flag on the gnu ones, because the
+     * two produce genuinely different artifacts and the choice belongs to
+     * whoever is publishing them. Everything downstream is unchanged: zig
+     * predefines __linux__ for musl exactly as for gnu, so the runtime's
+     * epoll/spawn_sandboxed_linux selection needs no musl case. */
+    if (!strcmp(t, "aarch64-linux-musl") || !strcmp(t, "arm64-linux-musl")) return "aarch64-linux-musl";
+    if (!strcmp(t, "x86_64-linux-musl")  || !strcmp(t, "amd64-linux-musl"))  return "x86_64-linux-musl";
     /* Windows (Tier A — self-contained): zig bundles the full MinGW-w64 target
      * (CRT, Win32 headers, import libs), so no base sysroot, no --sysroot, no
      * CRT/libc dance — identical to the linux/macos arms. The runtime's _WIN32

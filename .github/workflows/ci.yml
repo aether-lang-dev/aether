@@ -212,6 +212,27 @@ jobs:
           fi
           echo "The entry is under '## [current]'."
 
+          # Exactly one, too. A second '## [current]' is not cosmetic: the
+          # release job renames the FIRST one into the version, so a stray
+          # later one sits between two released sections and the NEXT release
+          # renames that -- burying entries inside an already-shipped version.
+          # This happened on main between 0.596.0 and 0.597.0, when a PR added
+          # a '[current]' without noticing the release job now leaves one.
+          n_current=$(grep -cE '^## \[current\]$' CHANGELOG.md || true)
+          if [ "$n_current" != "1" ]; then
+            echo "::error::CHANGELOG.md has $n_current '## [current]' headings; expected exactly 1."
+            echo ""
+            echo "The release job renames the FIRST '## [current]' into the new"
+            echo "version. A second one further down then gets renamed by the"
+            echo "NEXT release, which buries entries inside a section that has"
+            echo "already shipped."
+            echo ""
+            echo "Since the release now leaves a '[current]' behind, a PR should"
+            echo "add its entry UNDER the existing heading rather than adding a"
+            echo "new one. Merge the sections into one."
+            exit 1
+          fi
+
           # Second half of the same failure. The check above catches a merge
           # that left NO '[current]' behind; this catches the one that folded
           # this branch's entry into an ALREADY-RELEASED section while leaving
@@ -239,9 +260,9 @@ jobs:
           for v in $(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
                        | tr -d '#[] ' | head -8); do
             a=$(git show "origin/main:CHANGELOG.md" 2>/dev/null \
-                  | sed -n "/^## \[$v\]/,/^## \[0/p" | sed '$d' | norm)
+                  | sed -n "/^## \[$v\]/,/^## \[/{/^## \[$v\]/!{/^## \[/q};p}" | norm)
             [ -z "$a" ] && continue
-            b=$(sed -n "/^## \[$v\]/,/^## \[0/p" CHANGELOG.md | sed '$d' | norm)
+            b=$(sed -n "/^## \[$v\]/,/^## \[/{/^## \[$v\]/!{/^## \[/q};p}" CHANGELOG.md | norm)
             if [ "$(printf '%s' "$a" | cksum)" != "$(printf '%s' "$b" | cksum)" ]; then
               folded="$folded $v"
             fi
