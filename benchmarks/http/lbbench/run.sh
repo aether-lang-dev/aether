@@ -273,9 +273,15 @@ awk '
             if (cc > 0) {
                 cmed = (cc % 2) ? cs[int((cc+1)/2)] : (cs[cc/2] + cs[cc/2+1]) / 2
                 xmed = (cc % 2) ? xs[int((cc+1)/2)] : (xs[cc/2] + xs[cc/2+1]) / 2
-                printf "   %8.1f us/req  %7.2f ctxsw/req", cmed, xmed
+                # The least-contended round is the closest this box gets to
+                # the cost of the code alone. Contention only ever adds, so
+                # the smallest CPU per request is the better estimator on a
+                # busy machine and the median is the better one on a quiet
+                # one. Both are printed; a large gap between them is itself
+                # the warning.
+                printf "   %8.1f us/req (min %6.1f)  %7.2f ctxsw/req", cmed, cs[1], xmed
                 if (na[s]) printf "  (%d round(s) unmeasured)", n[s] - cc
-                mc[s] = cmed
+                mc[s] = cmed; mcmin[s] = cs[1]
             } else printf "   %19s", "cpu UNMEASURED"
             printf "\n"
             m[s] = med; lo[s] = v[s SUBSEP 1]; hi[s] = v[s SUBSEP c]
@@ -285,8 +291,9 @@ awk '
         if (m["baseline"] > 0 && m["aether"] > 0) {
             printf "aether vs baseline, rps:     %+.1f%%\n", 100 * (m["aether"] - m["baseline"]) / m["baseline"]
             if (mc["baseline"] > 0 && mc["aether"] > 0)
-                printf "aether vs baseline, cpu/req: %+.1f%%  (lower is better, and steadier than rps here)\n", \
-                    100 * (mc["aether"] - mc["baseline"]) / mc["baseline"]
+                printf "aether vs baseline, cpu/req: %+.1f%% by median, %+.1f%% by least-contended round\n", \
+                    100 * (mc["aether"] - mc["baseline"]) / mc["baseline"], \
+                    100 * (mcmin["aether"] - mcmin["baseline"]) / mcmin["baseline"]
         }
         if (m["nginx"] > 0) {
             spread = 100 * (hi["nginx"] - lo["nginx"]) / m["nginx"]
