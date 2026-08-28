@@ -77,6 +77,31 @@ main() {
     q = deque.clear(q)
     fails = fails + ck(deque.is_empty(q), "cleared")
 
+    // ---- try_push_*: full is an ERROR, not a silent eviction ----
+    // The overwriting push is right for a sliding window and wrong for a
+    // work queue, where a dropped element becomes a plausible wrong answer
+    // rather than a failure. These must refuse and leave the deque intact.
+    t = deque.new(2)
+    t, e1 = deque.try_push_back(t, 10)
+    t, e2 = deque.try_push_back(t, 20)
+    fails = fails + ck(e1 == "" && e2 == "", "try_push_back fits")
+    t, e3 = deque.try_push_back(t, 30)
+    fails = fails + ck(e3 != "", "try_push_back reports full")
+    fails = fails + ck(deque.len(t) == 2, "try_push_back kept length")
+    ta, t, _ = deque.pop_front(t)
+    tb, t, _ = deque.pop_front(t)
+    // The overwriting push_back would have left 20,30 here.
+    fails = fails + ck(ta == 10 && tb == 20, "try_push_back did not evict")
+    deque.free(t)
+
+    u = deque.new(1)
+    u, _ = deque.try_push_front(u, 1)
+    u, e4 = deque.try_push_front(u, 2)
+    fails = fails + ck(e4 != "", "try_push_front reports full")
+    uv, u, _ = deque.pop_front(u)
+    fails = fails + ck(uv == 1, "try_push_front did not evict")
+    deque.free(u)
+
     deque.free(d)
     deque.free(r)
     deque.free(q)

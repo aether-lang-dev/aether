@@ -26,7 +26,7 @@ exports(
     aether_set_new, aether_set_add, aether_set_has, aether_set_remove, aether_set_size, aether_set_clear, aether_set_free,
     aether_set_items_raw, aether_set_items_free,
     map_keys_size_raw, map_keys_get_raw,
-    new, add, contains, remove, size, clear, free, items, items_free,
+    new, add, try_add, contains, remove, size, clear, free, items, items_free,
     items_size, items_get
 )
 
@@ -53,9 +53,33 @@ new() -> ptr {
 }
 
 // Insert `item`. Returns true if it was added, false if it was already
-// present or the insert failed.
+// present OR the insert failed — the two are indistinguishable here, which
+// is why try_add exists. Keep using this where duplicate suppression is the
+// whole point and an allocation failure would take the process down anyway.
 add(set: ptr, item: string) -> bool {
     return aether_set_add(set, item) == 1
+}
+
+// Insert `item`, distinguishing the three outcomes the layer below already
+// knows about:
+//
+//   (true,  "")            inserted
+//   (false, "")            already present — normal, not an error
+//   (false, "set: ...")    the insert FAILED (null set, or out of memory)
+//
+// `add` collapses the last two into a bare false, so a caller who checks it
+// cannot tell "this was a duplicate" from "this was never stored". For a
+// dedupe filter that difference is invisible; for anything that must know
+// its data landed, it is the difference between correct and silently lossy.
+try_add(set: ptr, item: string) -> (bool, string) {
+    rc = aether_set_add(set, item)
+    if rc == 1 {
+        return true, ""
+    }
+    if rc == 0 {
+        return false, ""
+    }
+    return false, "set: insert failed"
 }
 
 // True when `item` is in the set.

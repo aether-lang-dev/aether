@@ -141,6 +141,31 @@ main() {
     set.free(null)
     println("PASS 8: null-set calls are safe")
 
+    // ---- try_add separates duplicate from failure ----
+    // `add` returns false for both, so a caller cannot tell "already there"
+    // from "never stored". The layer below already knows the difference.
+    t = set.new()
+    ok1, err1 = set.try_add(t, "alpha")
+    if ok1 != true || err1 != "" {
+        fail("try_add of a fresh item should be (true, \"\")")
+    }
+    ok2, err2 = set.try_add(t, "alpha")
+    if ok2 != false || err2 != "" {
+        fail("try_add of a duplicate should be (false, \"\") -- not an error")
+    }
+    ok3, err3 = set.try_add(null, "alpha")
+    if ok3 != false || err3 == "" {
+        fail("try_add on a null set should report an error")
+    }
+    if err2 == err3 {
+        fail("duplicate and failure must not report the same thing")
+    }
+    if set.size(t) != 1 {
+        fail("try_add duplicate must not grow the set")
+    }
+    set.free(t)
+    println("PASS 9: try_add distinguishes insert / duplicate / failure")
+
     set.free(s)
     println("=== All cases passed ===")
 }
