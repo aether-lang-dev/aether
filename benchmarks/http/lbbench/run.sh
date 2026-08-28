@@ -135,6 +135,22 @@ lb_ctxt() {                       # lb_ctxt <pid> <voluntary|involuntary>
 
 # CPU the balancer itself burned, in jiffies, from its own /proc entry. Summed
 # over the process and its threads.
+# Minor page faults the balancer's process tree took, from /proc. A fault is
+# the kernel handing over a fresh page, which it then has to zero, and page
+# clearing has been the largest single entry in this path's profile. Unlike
+# CPU per request it is a count, so a busy box does not move it: it measures
+# how much memory the code churns, which is what an allocation change is for.
+lb_faults() {                     # lb_faults <pid>
+    local pid="$1" total=0 p v
+    [ -d "/proc/$pid" ] || { echo 0; return; }
+    for p in $(lb_pids "$pid"); do
+        [ -r "/proc/$p/stat" ] || continue
+        v=$(awk '{print $10}' "/proc/$p/stat" 2>/dev/null)
+        total=$((total + ${v:-0}))
+    done
+    echo "$total"
+}
+
 lb_cpu() {                        # lb_cpu <pid>
     local pid="$1" total=0 t u s2 p
     [ -d "/proc/$pid" ] || { echo 0; return; }
@@ -156,11 +172,11 @@ measure() {                       # measure <label> [pid]
         http://127.0.0.1:18200/ >/dev/null 2>&1
 
     cpu0=$(lb_cpu "$pid"); vol0=$(lb_ctxt "$pid" voluntary)
-    inv0=$(lb_ctxt "$pid" involuntary)
+    inv0=$(lb_ctxt "$pid" involuntary); flt0=$(lb_faults "$pid")
     out=$(taskset -c "$GEN_CPUS" wrk -t"$THREADS" -c"$CONNECTIONS" -d"$DURATION" \
         --latency http://127.0.0.1:18200/ 2>&1)
     cpu1=$(lb_cpu "$pid"); vol1=$(lb_ctxt "$pid" voluntary)
-    inv1=$(lb_ctxt "$pid" involuntary)
+    inv1=$(lb_ctxt "$pid" involuntary); flt1=$(lb_faults "$pid")
 
     rps=$(printf '%s' "$out" | awk '/^Requests\/sec:/ {print $2}')
     p99=$(printf '%s' "$out" | awk '/99%/ {print $2; exit}')
@@ -173,7 +189,7 @@ measure() {                       # measure <label> [pid]
     # A CPU figure this could not measure is reported as unmeasured, never as
     # zero. Zero reads as "burned no CPU", which is never true of a process
     # that served requests, and it silently hides the subject's real cost.
-    cpu_us=""; ctx_per=""; vol_per=""; inv_per=""; note=""
+    cpu_us=""; ctx_per=""; vol_per=""; inv_per=""; flt_per=""; note=""
     if [ -z "$pid" ] || [ ! -d "/proc/$pid" ]; then
         note="cpu UNMEASURED (no live pid)  "
     elif [ "${reqs:-0}" -gt 0 ] 2>/dev/null; then
@@ -188,16 +204,18 @@ measure() {                       # measure <label> [pid]
                          'BEGIN { if (r > 0) printf "%.2f", d / r }')
             ctx_per=$(awk -v a="$((vol1 - vol0))" -v b="$((inv1 - inv0))" \
                          -v r="$reqs" 'BEGIN { if (r > 0) printf "%.2f", (a+b)/r }')
+            flt_per=$(awk -v d="$((flt1 - flt0))" -v r="$reqs" \
+                         'BEGIN { if (r > 0) printf "%.2f", d / r }')
         fi
     fi
     # stderr, like every other line this prints. A result on stdout and the
     # round header on stderr interleave once the output is piped, which files
     # a row under the wrong round.
-    printf '%-10s %12s rps   p99 %-9s %s%s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
+    printf '%-10s %12s rps   p99 %-9s %s%s%s%s%s\n' "$label" "${rps:-?}" "${p99:-?}" \
         "$note" "${cpu_us:+cpu ${cpu_us}us/req  }" \
         "${ctx_per:+ctxsw ${ctx_per}/req (vol ${vol_per} inv ${inv_per})  }" \
-        "${errs:-}" >&2
-    echo "$label $rps ${cpu_us:-NA} ${ctx_per:-NA}" >> /tmp/results.txt
+        "${flt_per:+faults ${flt_per}/req  }" "${errs:-}" >&2
+    echo "$label $rps ${cpu_us:-NA} ${ctx_per:-NA} ${flt_per:-0}" >> /tmp/results.txt
 }
 
 : > /tmp/results.txt
@@ -246,7 +264,7 @@ say ""
 # gawk extension. Values are keyed "subject SUBSEP index" instead.
 awk '
     { n[$1]++; v[$1 SUBSEP n[$1]] = $2 + 0
-      if ($3 == "NA") { na[$1] = 1 } else { cn[$1]++; cpu[$1 SUBSEP cn[$1]] = $3 + 0; cx[$1 SUBSEP cn[$1]] = $4 + 0 } }
+      if ($3 == "NA") { na[$1] = 1 } else { cn[$1]++; cpu[$1 SUBSEP cn[$1]] = $3 + 0; cx[$1 SUBSEP cn[$1]] = $4 + 0; fl[$1 SUBSEP cn[$1]] = $5 + 0 } }
     END {
         printf "%-10s %10s %10s %10s %6s\n", "subject", "median", "min", "max", "runs"
         for (s in n) {
@@ -279,7 +297,12 @@ awk '
                 # busy machine and the median is the better one on a quiet
                 # one. Both are printed; a large gap between them is itself
                 # the warning.
-                printf "   %8.1f us/req (min %6.1f)  %7.2f ctxsw/req", cmed, cs[1], xmed
+                for (i = 1; i <= cc; i++) fs[i] = fl[s SUBSEP i]
+                for (i = 1; i <= cc; i++)
+                    for (j = i + 1; j <= cc; j++)
+                        if (fs[j] < fs[i]) { t = fs[i]; fs[i] = fs[j]; fs[j] = t }
+                fmed = (cc % 2) ? fs[int((cc+1)/2)] : (fs[cc/2] + fs[cc/2+1]) / 2
+                printf "   %8.1f us/req (min %6.1f)  %7.2f ctxsw/req  %6.2f faults/req", cmed, cs[1], xmed, fmed
                 if (na[s]) printf "  (%d round(s) unmeasured)", n[s] - cc
                 mc[s] = cmed; mcmin[s] = cs[1]
             } else printf "   %19s", "cpu UNMEASURED"
