@@ -135,4 +135,36 @@ typedef struct {
 
 char* http_build_request_head(const HttpReqHead* p, size_t* out_len, size_t* out_cap);
 
+
+/* A bump allocator for building one outbound request.
+ *
+ * A proxied request builds a request object and a header node per forwarded
+ * header, and frees them all a moment later. Traced with `perf -e
+ * page-faults`, http_request_set_header_raw was the largest identifiable
+ * source of faults on the path: not because a malloc is slow, but because the
+ * churn keeps handing pages back to the kernel and taking them again.
+ *
+ * The lifetime is exactly one request, so a bump allocator fits it: allocate
+ * by moving a pointer, release everything by resetting one offset. A caller
+ * that serves many requests keeps the block and resets it each time.
+ *
+ * Falls back to malloc when a request is not arena-backed, so nothing that
+ * builds a request the ordinary way has to change.
+ */
+typedef struct HttpArena {
+    char*  block;
+    size_t cap;
+    size_t used;
+    int    overflowed;   /* an allocation did not fit; that one used malloc */
+} HttpArena;
+
+int   http_arena_init(HttpArena* a, size_t cap);
+void* http_arena_alloc(HttpArena* a, size_t n);
+void  http_arena_reset(HttpArena* a);
+void  http_arena_free(HttpArena* a);
+
+/* Build this request's headers in `arena`, and do not free them individually.
+ * The caller owns the arena and outlives the request. */
+void http_request_use_arena(HttpClientRequest* req, HttpArena* arena);
+
 #endif // AETHER_HTTP_INTERNAL_H

@@ -303,6 +303,11 @@ typedef struct {
     int                 status;
     int                 attempt;
     int                 max_attempts;
+    /* Optional. A driver serving many requests on one connection points this
+     * at an arena it owns, and the outbound request's headers are built there
+     * instead of one malloc each. NULL means the ordinary allocator, which is
+     * what the blocking driver uses. */
+    struct HttpArena*   arena;
 } AetherProxyExchange;
 
 /* Returns 0 or 1, the middleware's own result, when the exchange is finished,
@@ -312,7 +317,8 @@ typedef struct {
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpRequest* req,
                                 HttpServerResponse* res,
-                                void* user_data);
+                                void* user_data,
+                                struct HttpArena* arena);
 int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms);
 
 #endif  /* AETHER_PROXY_INTERNAL_H */

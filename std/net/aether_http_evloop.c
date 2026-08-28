@@ -77,6 +77,13 @@ typedef struct EvConn {
      * entry in the profile. A connection owns its buffer for its life. */
     char*    rxbuf;
     size_t   rxcap;
+
+    /* Where the outbound request's headers are built. One request's worth of
+     * small allocations, released by resetting an offset rather than by a
+     * free per header: building them was the largest identifiable source of
+     * page faults on this path. */
+    HttpArena arena;
+    int       arena_ready;
     int      heap_pos;           /* where this sits in its driver's heap, -1 out */
 
     HttpRequest*        req;     /* the parsed client request */
@@ -222,6 +229,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->req) http_request_free(c->req);
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+    if (c->arena_ready) http_arena_free(&c->arena);
     free(c->in);
     free(c);
     atomic_fetch_sub(&d->loop->active, 1);
@@ -598,6 +606,14 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     }
     if (!http_parse_request_into(c->req, c->in, c->in_len)) return -1;
 
+    if (!c->arena_ready) {
+        /* Sized for a request's headers with room to spare. An outlier that
+         * does not fit falls back to malloc for the part that overflows. */
+        c->arena_ready = http_arena_init(&c->arena, 8192) == 0;
+    } else {
+        http_arena_reset(&c->arena);
+    }
+
     if (!c->res) {
         c->res = http_response_create();
         if (!c->res) return -1;
@@ -606,7 +622,8 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     }
 
     void* opts = http_server_proxy_opts(d->loop->server);
-    int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts);
+    int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts,
+                                        c->arena_ready ? &c->arena : NULL);
     if (r == 1) {
         /* Not the proxy's request: a health endpoint, an admin route, or
          * anything another middleware answers. This driver knows one kind of

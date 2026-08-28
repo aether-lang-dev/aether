@@ -40,6 +40,7 @@
  * prototypes, which meant the compiler could not check them against the real
  * definitions. */
 #include "../../net/aether_http.h"
+#include "../../net/aether_http_internal.h"
 
 /* ----- hop-by-hop headers (RFC 7230 §6.1) ----- */
 
@@ -331,8 +332,12 @@ static int px_copy(AetherProxyExchange* px);
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpRequest* req,
                                 HttpServerResponse* res,
-                                void* user_data) {
+                                void* user_data,
+                                struct HttpArena* arena) {
     memset(px, 0, sizeof(*px));
+    /* Set before anything builds an outbound request, because begin() builds
+     * the first one itself. NULL is the ordinary allocator. */
+    px->arena = arena;
     AetherProxyOpts* opts = (AetherProxyOpts*)user_data;
     if (!opts || !opts->pool) return 1;  /* misconfigured — pass through */
     if (!req || !res) return 1;
@@ -470,6 +475,7 @@ static int px_build(AetherProxyExchange* px) {
                                           req->query_string);
     px->outbound = px->upstream_url ?
         http_request_raw(req->method ? req->method : "GET", px->upstream_url) : NULL;
+    if (px->outbound && px->arena) http_request_use_arena(px->outbound, px->arena);
     if (!px->outbound) {
         free(px->upstream_url);
         px->upstream_url = NULL;
@@ -758,7 +764,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
                                     HttpServerResponse* res,
                                     void* user_data) {
     AetherProxyExchange px;
-    int r = aether_proxy_exchange_begin(&px, req, res, user_data);
+    int r = aether_proxy_exchange_begin(&px, req, res, user_data, NULL);
     while (r == PX_NEED_SEND) {
         long t0 = aether_proxy_now_ms();
         px.resp = http_send_raw(px.outbound);

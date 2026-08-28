@@ -13,6 +13,26 @@ version number before tagging the release.
 
 ### Changed
 
+- **A proxied request builds its outbound headers in an arena.** Traced with
+  `perf -e page-faults`, `http_request_set_header_raw` was the largest
+  identifiable source of page faults on the proxy path, with the request
+  object behind it: one allocation per forwarded header, freed a moment later,
+  churning memory back to the kernel and taking it again. Two earlier attempts
+  at the fault count aimed at the inbound side and moved it not at all, which
+  is what sent this one to the trace instead.
+
+  The outbound request's lifetime is exactly one request, so a connection owns
+  a small arena and the headers are bump-allocated from it and released by
+  resetting an offset. A request that is not arena-backed still uses the
+  ordinary allocator, so nothing else changes.
+
+  **Page faults per request 0.13 to 0.05**, CPU per request 21.4 to 19.3
+  microseconds by the least-contended round, and 34.0 to 20.4 by the median.
+
+## [current]
+
+### Changed
+
 - **A proxied connection reuses its request and response objects.** Building
   them cost about a dozen allocations per request between them: two objects,
   four fixed-size arrays of header slots that are identical every time, and a

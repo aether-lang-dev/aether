@@ -771,12 +771,18 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
  * The pointers stay rather than being computed from the node, because every
  * reader is `h->name` / `h->value` and this keeps them working unchanged. */
 typedef struct HttpHeader {
+    /* Set when this node came from a request's arena, so freeing the request
+     * leaves it alone: the arena releases it wholesale. */
+    int arena_backed;
     char* name;
     char* value;
     struct HttpHeader* next;
 } HttpHeader;
 
 struct HttpClientRequest {
+    /* Optional. When set, header nodes are bump-allocated from it and freed
+     * by whoever owns it, not by http_request_free_raw. */
+    struct HttpArena* arena;
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
@@ -867,12 +873,59 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
     return req;
 }
 
+/* ---- the outbound-request arena ---- */
+
+int http_arena_init(HttpArena* a, size_t cap) {
+    if (!a) return -1;
+    a->block = (char*)malloc(cap);
+    if (!a->block) { a->cap = a->used = 0; a->overflowed = 0; return -1; }
+    a->cap = cap;
+    a->used = 0;
+    a->overflowed = 0;
+    return 0;
+}
+
+/* Bump, aligned for anything this allocates. Returns NULL when the request
+ * does not fit, and the caller falls back to malloc for that one: a header
+ * block larger than the arena is a request worth serving, not worth failing. */
+void* http_arena_alloc(HttpArena* a, size_t n) {
+    if (!a || !a->block) return NULL;
+    size_t aligned = (n + (sizeof(void*) - 1)) & ~(sizeof(void*) - 1);
+    if (a->used + aligned > a->cap) { a->overflowed = 1; return NULL; }
+    void* p = a->block + a->used;
+    a->used += aligned;
+    return p;
+}
+
+void http_arena_reset(HttpArena* a) {
+    if (!a) return;
+    a->used = 0;
+    a->overflowed = 0;
+}
+
+void http_arena_free(HttpArena* a) {
+    if (!a) return;
+    free(a->block);
+    a->block = NULL;
+    a->cap = a->used = 0;
+}
+
+void http_request_use_arena(HttpClientRequest* req, HttpArena* arena) {
+    if (req) req->arena = arena;
+}
+
 int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
     if (!req) return -1;
     if (!http_header_name_ok(name) || !http_header_value_ok(value)) return -1;
     size_t nl = strlen(name), vl = strlen(value);
-    HttpHeader* h = (HttpHeader*)malloc(sizeof(HttpHeader) + nl + 1 + vl + 1);
+    size_t need = sizeof(HttpHeader) + nl + 1 + vl + 1;
+    /* One allocation holds the node, the name and the value. From the arena
+     * when this request has one, which makes it a pointer bump. */
+    HttpHeader* h = req->arena ? (HttpHeader*)http_arena_alloc(req->arena, need) : NULL;
+    int from_arena = h != NULL;
+    if (!h) h = (HttpHeader*)malloc(need);
     if (!h) return -1;
+    h->arena_backed = from_arena;
     h->name = (char*)(h + 1);
     memcpy(h->name, name, nl + 1);
     h->value = h->name + nl + 1;
@@ -1047,7 +1100,10 @@ void http_request_free_raw(HttpClientRequest* req) {
     HttpHeader* h = req->headers;
     while (h) {
         HttpHeader* next = h->next;
-        free(h);          /* name and value live in this same block */
+        /* Arena-backed nodes are released by resetting the arena, which the
+         * caller that owns it does. Freeing one here would hand the allocator
+         * a pointer into the middle of a block it never gave out. */
+        if (!h->arena_backed) free(h);
         h = next;
     }
     req->headers = NULL;
