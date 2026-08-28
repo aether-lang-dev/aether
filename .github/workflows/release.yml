@@ -194,7 +194,14 @@ jobs:
           exit 1
         fi
 
-        if grep -q '^## \[current\]' CHANGELOG.md; then
+        # Does [current] actually say anything, or is it just a heading?
+        # Once the release leaves a fresh empty [current] behind (below), the
+        # presence of the heading stops meaning there is something to ship,
+        # so the emptiness guard has to look at the body instead.
+        CURRENT_BODY=$(awk '/^## \[current\]$/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md \
+                       | grep -vE '^[[:space:]]*$|^### ' | head -1)
+
+        if [ -n "$CURRENT_BODY" ]; then
           # Anchored to line-start and limited to the first match. An
           # unanchored, unlimited `s/## \[current\]/.../` rewrites every
           # occurrence in the file — including ones inside prose. That is not
@@ -203,6 +210,34 @@ jobs:
           # rename step and quoted `## [current]` in its body, so the release
           # corrupted the one entry documenting its own bug.
           sed -i "0,/^## \[current\]$/s//## [${VERSION}]/" CHANGELOG.md
+
+          # Leave a fresh, empty [current] above the version just cut.
+          #
+          # Without this, main has no [current] between releases, and every
+          # open branch that added one collides with the new version heading
+          # in the same position: git resolves it by taking main's heading,
+          # so the branch's entry lands inside a released section and the
+          # file ends up with no [current] at all. That has happened to three
+          # separate branches, each fixed by hand.
+          #
+          # With a [current] always present, a branch's [current] merges with
+          # main's rather than against a version heading, and the entries
+          # underneath merge as text.
+          printf '## [current]\n\n' > /tmp/changelog.new
+          awk -v v="## [${VERSION}]" '
+              $0 == v && !done { print; done = 1; next }
+              { print }
+          ' CHANGELOG.md >> /tmp/changelog.new
+          # Splice: everything before the new version heading is the preamble,
+          # so the empty [current] goes immediately above it.
+          awk -v v="## [${VERSION}]" '
+              BEGIN { inserted = 0 }
+              $0 == v && !inserted { print "## [current]"; print ""; inserted = 1 }
+              { print }
+          ' CHANGELOG.md > /tmp/changelog.spliced
+          mv /tmp/changelog.spliced CHANGELOG.md
+          rm -f /tmp/changelog.new
+
           git add CHANGELOG.md
         elif [ "$SKIP_CHANGELOG" = "1" ]; then
           echo "No [current] section, and the trigger commit says [skip changelog]."
