@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A proxied connection reuses its request and response objects.** Building
+  them cost about a dozen allocations per request between them: two objects,
+  four fixed-size arrays of header slots that are identical every time, and a
+  string for each default header. A connection serves many requests, so both
+  now live for the connection and are reset in place.
+
+  The request parser gained an entry point that fills an object the caller
+  owns. Its failure paths free what they filled in and never the object
+  itself, because freeing a caller's object on a parse error hands back a
+  pointer the caller still holds.
+
+  Params and query arrays are released rather than kept, unlike the header
+  arrays: they are allocated on demand at varying sizes, and holding a pointer
+  to a differently sized array is how a reuse becomes a corruption.
+
+## [current]
+
 ## [0.596.0]
 
 ### Added

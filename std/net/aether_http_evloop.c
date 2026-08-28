@@ -175,8 +175,11 @@ static void ev_conn_reset_request(EvConn* c) {
     c->out = NULL;
     c->out_len = c->out_sent = 0;
 
-    if (c->req) { http_request_free(c->req); c->req = NULL; }
-    if (c->res) { http_server_response_free(c->res); c->res = NULL; }
+    /* The request and the response objects stay with the connection. Each
+     * one costs a handful of allocations to build, including two fixed-size
+     * arrays of header slots that are identical every time, and a connection
+     * serves many requests. They are reset in place when the next request
+     * arrives rather than freed and built again. */
     memset(&c->px, 0, sizeof(c->px));
 }
 
@@ -216,6 +219,8 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     }
     ev_timer_set(d, c, 0);
     ev_conn_reset_request(c);
+    if (c->req) http_request_free(c->req);
+    if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
     free(c->in);
     free(c);
@@ -587,15 +592,21 @@ static int ev_expire(EvDriver* d, EvConn* c) {
 /* The request is complete: run the proxy up to the point where it needs the
  * upstream, then get a connection and a serialised head ready to go. */
 static int ev_begin_upstream(EvDriver* d, EvConn* c) {
-    HttpRequest* req = http_parse_request_n(c->in, c->in_len);
-    if (!req) return -1;
+    if (!c->req) {
+        c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+        if (!c->req) return -1;
+    }
+    if (!http_parse_request_into(c->req, c->in, c->in_len)) return -1;
 
-    c->res = http_response_create();
-    if (!c->res) { http_request_free(req); return -1; }
-    c->req = req;
+    if (!c->res) {
+        c->res = http_response_create();
+        if (!c->res) return -1;
+    } else {
+        http_response_reset(c->res);
+    }
 
     void* opts = http_server_proxy_opts(d->loop->server);
-    int r = aether_proxy_exchange_begin(&c->px, req, c->res, opts);
+    int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts);
     if (r == 1) {
         /* Not the proxy's request: a health endpoint, an admin route, or
          * anything another middleware answers. This driver knows one kind of
