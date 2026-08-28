@@ -33,7 +33,19 @@
 #endif
 
 #if defined(__linux__)
-#include <sched.h>
+/* The affinity mask is read through the raw system call rather than
+ * sched_getaffinity(3) and CPU_COUNT. Those need _GNU_SOURCE to be defined
+ * before <sched.h> is first pulled in by anything in the translation unit,
+ * and a header cannot guarantee it got there first: when it does not, the
+ * macros are absent, the calls compile as implicit declarations and the
+ * build fails at link time. The system call has no such requirement. */
+#include <sys/syscall.h>
+
+/* Declared here rather than taken from <unistd.h>, which only exposes it when
+ * a feature-test macro was set before the first include in the translation
+ * unit. Every libc this builds against declares it exactly this way, and a
+ * second identical declaration is harmless. */
+extern long syscall(long, ...);
 #endif
 
 #if defined(__FreeBSD__)
@@ -42,6 +54,25 @@
 #endif
 
 #if defined(__linux__)
+/* CPUs in this process's affinity mask; 0 when it cannot be read. The call
+ * reports how many bytes of mask it wrote, and only those are counted. */
+static inline int aether_affinity_count(void) {
+    unsigned long mask[128];   /* 8192 CPUs, well past any real machine */
+    memset(mask, 0, sizeof(mask));
+    long written = syscall(SYS_sched_getaffinity, 0, (unsigned)sizeof(mask), mask);
+    if (written <= 0) return 0;
+
+    size_t words = (size_t)written / sizeof(unsigned long);
+    if (words > sizeof(mask) / sizeof(mask[0])) words = sizeof(mask) / sizeof(mask[0]);
+
+    int n = 0;
+    for (size_t i = 0; i < words; i++) {
+        unsigned long w = mask[i];
+        while (w) { n += (int)(w & 1UL); w >>= 1; }
+    }
+    return n;
+}
+
 /* A cgroup CPU limit, in whole CPUs, rounded up; 0 when there is none.
  * Rounded up because a limit of 1.5 CPUs can still keep two threads busy,
  * while rounding down to 1 would leave half the allowance unused. */
@@ -96,10 +127,8 @@ static inline int aether_cpu_available(void) {
     }
 #else
 #if defined(__linux__)
-    cpu_set_t set;
-    CPU_ZERO(&set);
-    if (sched_getaffinity(0, sizeof(set), &set) == 0) n = CPU_COUNT(&set);
-#elif defined(__FreeBSD__)
+    n = aether_affinity_count();
+#elif defined(__FreeBSD__) && defined(CPU_COUNT)
     cpuset_t set;
     CPU_ZERO(&set);
     if (cpuset_getaffinity(CPU_LEVEL_WHICH, CPU_WHICH_PID, -1,
