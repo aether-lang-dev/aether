@@ -65,6 +65,21 @@ handle_upstream_echo_post(req: ptr, res: ptr, ud: ptr) {
     }
 }
 
+handle_upstream_longheader(req: ptr, res: ptr, ud: ptr) {
+    // Longer than the proxy's stack buffer for a header value, so the
+    // heap path that copies an outsized value is the one under test.
+    big = ""
+    i = 0
+    while i < 100 {
+        big = "${big}0123456789"
+        i = i + 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_header(res, "X-Long-Value", big)
+    http.response_set_body(res, "long-ok\n")
+}
+
 handle_upstream_slow(req: ptr, res: ptr, ud: ptr) {
     sleep(3000) // 3s — exceeds the 1s proxy timeout
     http.response_set_status(res, 200)
@@ -106,6 +121,7 @@ run_upstream() {
     if ka != "" { println("FAIL: keepalive: ${ka}"); exit(1) }
     http.server_get(up, "/echo", handle_upstream_echo, 0)
     http.server_post(up, "/echo", handle_upstream_echo_post, 0)
+    http.server_get(up, "/longheader", handle_upstream_longheader, 0)
     http.server_get(up, "/slow", handle_upstream_slow, 0)
     println("READY")
     run_server(up)

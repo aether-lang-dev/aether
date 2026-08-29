@@ -8,6 +8,7 @@
 
 #include "aether_proxy_internal.h"
 #include "../../../runtime/aether_resource_caps.h"
+#include "../../net/aether_http.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,12 @@ AetherProxyOpts* aether_proxy_opts_new(void) {
     o->add_xfh = 1;
     o->preserve_host  = 0;
     o->max_body_bytes = 8 * 1024 * 1024;
+
+    /* Mounting a proxy changes what the connection pool is for: its upstream
+     * connections are held for one request and handed back, where a client's
+     * are kept for a few hosts. Left at the client's caps, every connection
+     * past the eighth to a backend was closed on release and redialled. */
+    http_client_pool_size_for_proxy();
     return o;
 }
 

@@ -453,6 +453,13 @@ char* http_response_serialize(HttpServerResponse* res);  // caller must free()
 // binary (e.g. gzip-compressed). The returned buffer is NOT NUL-
 // terminated as a string; pass *out_len bytes to send. Caller free()s.
 char* http_response_serialize_len(HttpServerResponse* res, size_t* out_len);
+
+/* Serialise into a caller-owned buffer, growing it only when the response
+ * does not fit. A connection serving many requests then stops allocating and
+ * freeing a response buffer for each one. Returns *buf, or NULL on failure
+ * (in which case *buf is still the caller's to free). */
+char* http_response_serialize_into(HttpServerResponse* res, char** buf,
+                                   size_t* cap, size_t* out_len);
 void http_server_response_free(HttpServerResponse* res);
 
 // Helpers

@@ -1,6 +1,17 @@
 #include "test_harness.h"
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
+/* The connect-completion contract below is exercised only where the driver
+ * that depends on it is built. That driver needs a poller and a pipe, so it
+ * is POSIX-only, and on Windows http_upstream_connected has no caller. */
+#if !defined(_WIN32)
+#include "../../std/net/aether_http_internal.h"
+#include "../../std/http/proxy/aether_proxy.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <string.h>
+#endif
 
 TEST_CATEGORY(http_response_structure, TEST_CATEGORY_NETWORK) {
     HttpResponse* resp = (HttpResponse*)calloc(1, sizeof(HttpResponse));
@@ -140,3 +151,92 @@ TEST_CATEGORY(http_accessors_boundary_status_codes, TEST_CATEGORY_NETWORK) {
 
     http_response_free(resp);
 }
+
+/* http_upstream_connected has to separate a connect that has finished from
+ * one still in flight. SO_ERROR is 0 for both, so a check built on it alone
+ * called a socket with no peer "connected", and the request was then written
+ * into it and failed with ENOTCONN. A poller may wake a caller for another
+ * descriptor or for nothing at all, so the question gets asked when the
+ * answer is genuinely still "not yet". */
+#if !defined(_WIN32)
+TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(listener >= 0);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;                       /* any free port */
+    ASSERT_EQ(0, bind(listener, (struct sockaddr*)&addr, sizeof(addr)));
+    ASSERT_EQ(0, listen(listener, 4));
+
+    socklen_t alen = sizeof(addr);
+    ASSERT_EQ(0, getsockname(listener, (struct sockaddr*)&addr, &alen));
+
+    /* A socket that has never been connected: still in flight, not ready. */
+    HttpUpstreamConn idle;
+    memset(&idle, 0, sizeof(idle));
+    idle.t.sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(idle.t.sockfd >= 0);
+    ASSERT_EQ(0, http_upstream_connected(&idle));
+    close(idle.t.sockfd);
+
+    /* A socket with a peer: connected. This is the one the old check got
+     * wrong, reporting the same value it gave for a socket with no peer. */
+    HttpUpstreamConn live;
+    memset(&live, 0, sizeof(live));
+    live.t.sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(live.t.sockfd >= 0);
+    ASSERT_EQ(0, connect(live.t.sockfd, (struct sockaddr*)&addr, sizeof(addr)));
+    ASSERT_EQ(1, http_upstream_connected(&live));
+    close(live.t.sockfd);
+
+    /* A closed descriptor is a failure, not a wait. */
+    HttpUpstreamConn gone;
+    memset(&gone, 0, sizeof(gone));
+    gone.t.sockfd = -1;
+    ASSERT_EQ(-1, http_upstream_connected(&gone));
+
+    close(listener);
+}
+#endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* A reverse proxy holds an upstream connection for the length of one request
+ * and hands it back, so it needs as many as it has requests in flight. Left
+ * at the client's cap of eight per host, every connection past the eighth was
+ * closed on release and dialled again for the next request: measured as 5.61
+ * TCP segments per request against nginx's 4.02, and a TIME_WAIT socket every
+ * sixth request. Mounting a proxy has to resize the pool.
+ */
+TEST_CATEGORY(http_pool_sized_for_proxy, TEST_CATEGORY_NETWORK) {
+    /* Start from the client's defaults, whatever an earlier test left. */
+    http_client_pool_configure_raw(64, 8, -1);
+
+    int idle = 0, per_host = 0;
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_EQ(64, idle);
+    ASSERT_EQ(8, per_host);
+
+    AetherProxyOpts* opts = aether_proxy_opts_new();
+    ASSERT_NOT_NULL(opts);
+
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_TRUE(idle >= 64);
+    /* The point of the fix: one backend may take the whole pool, so the
+     * per-host cap must rise with it rather than stay at the client's eight. */
+    ASSERT_TRUE(per_host >= 64);
+    ASSERT_EQ(idle, per_host);
+
+    /* Caps are only ever raised, so a deliberate configuration survives. */
+    http_client_pool_configure_raw(4096, 4096, -1);
+    aether_proxy_opts_free(aether_proxy_opts_new());
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_EQ(4096, idle);
+    ASSERT_EQ(4096, per_host);
+
+    aether_proxy_opts_free(opts);
+    http_client_pool_configure_raw(64, 8, -1);
+}
+#endif  /* !_WIN32 */

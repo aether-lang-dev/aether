@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <stdatomic.h>
+#include "../../runtime/utils/aether_cpu_available.h"
 
 #if defined(_WIN32)
     #include <winsock2.h>
@@ -74,19 +75,9 @@ struct HttpConnectionPool {
 };
 
 /* Connection handlers block on socket I/O rather than burning CPU, so the
- * pool is sized above the core count. aether_cpu_detect lives in the
- * runtime, which the compiler does not link against this file, so the
- * probe is done directly here. */
+ * pool is sized above the core count. */
 static int http_pool_worker_count(void) {
-    long cores = 0;
-#if defined(_WIN32)
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    cores = (long)si.dwNumberOfProcessors;
-#elif defined(_SC_NPROCESSORS_ONLN)
-    cores = sysconf(_SC_NPROCESSORS_ONLN);
-#endif
-    if (cores < 1) cores = 1;
+    long cores = aether_cpu_available();
 
     long want = cores * 2;
 

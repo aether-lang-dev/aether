@@ -84,6 +84,10 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     return 0;
 }
 
+int aether_io_poller_edge_capable(void) {
+    return 0;   /* poll() has no edge mode */
+}
+
 void aether_io_poller_remove(AetherIoPoller* poller, int fd) {
     PollBackend* pb = (PollBackend*)poller->backend_data;
     if (!pb) return;

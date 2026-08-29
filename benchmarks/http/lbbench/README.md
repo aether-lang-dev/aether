@@ -29,8 +29,15 @@ another number from the same run.
 | `syscalls.sh` | syscalls per request, exactly | checking a syscall change |
 | `switches.sh` | which call asked to sleep, by name | chasing context switches |
 | `instructions.sh` | work done per request, in instructions | pricing a change in userspace work |
+| `split.sh` | user vs kernel cycles per request, every subject | deciding which half the gap is in |
 
-`profile.sh`, `switches.sh` and `instructions.sh` need `perf`; `switches.sh`
+Reach for `split.sh` when the counters disagree about where a gap can be:
+the same syscalls per request as nginx and twice the CPU means the extra is
+either in the calls or before them, and that decides what to change. It counts
+rather than samples, so the split survives a noisy box even though the
+absolute cycles per request do not.
+
+`profile.sh`, `switches.sh`, `instructions.sh` and `split.sh` need `perf`; `switches.sh`
 needs a privileged container for the scheduler tracepoint, and
 `instructions.sh` needs a hardware performance counter, which a virtual
 machine usually does not expose. It says so and stops rather than reporting a

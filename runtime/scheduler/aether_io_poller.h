@@ -45,6 +45,14 @@ int  aether_io_poller_init(AetherIoPoller* poller);
 // Returns 0 on success, -1 on failure.
 int  aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t events);
 
+/* Whether this backend really does what AETHER_IO_EDGE asks, rather than
+ * staying level-triggered. A caller that wants to register write interest
+ * once and leave it there has to know: on an edge-triggered backend that
+ * costs nothing, and on a level-triggered one a writable descriptor reports
+ * ready every single wait. It is a property of the backend compiled in, not
+ * of an instance. */
+int  aether_io_poller_edge_capable(void);
+
 // Remove fd from monitoring.
 void aether_io_poller_remove(AetherIoPoller* poller, int fd);
 

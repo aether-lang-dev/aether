@@ -40,26 +40,56 @@
  * prototypes, which meant the compiler could not check them against the real
  * definitions. */
 #include "../../net/aether_http.h"
+#include "../../net/aether_http_internal.h"
 
 /* ----- hop-by-hop headers (RFC 7230 §6.1) ----- */
 
-static const char* HOP_HEADERS[] = {
-    "Connection",
-    "Keep-Alive",
-    "Proxy-Authenticate",
-    "Proxy-Authorization",
-    "TE",
-    "Trailer",
-    "Transfer-Encoding",
-    "Upgrade",
-    "Proxy-Connection",   /* legacy */
-    NULL
+/* The always-hop-by-hop headers, with their lengths and lowercased first
+ * letters alongside. Both are what lets the test below reject a header
+ * without comparing strings, and computing them here means not computing
+ * them on every header of every request. */
+typedef struct {
+    const char* name;
+    size_t      len;
+    char        first;
+} HopHeader;
+
+static const HopHeader HOP_HEADERS[] = {
+    { "Connection",          10, 'c' },
+    { "Keep-Alive",          10, 'k' },
+    { "Proxy-Authenticate",  18, 'p' },
+    { "Proxy-Authorization", 19, 'p' },
+    { "TE",                   2, 't' },
+    { "Trailer",              7, 't' },
+    { "Transfer-Encoding",   17, 't' },
+    { "Upgrade",              7, 'u' },
+    { "Proxy-Connection",    16, 'p' },   /* legacy */
+    { NULL,                   0, 0   }
 };
 
+/* Is this one of the always-hop-by-hop headers?
+ *
+ * Called for every header of every proxied request, and it used to run
+ * strcasecmp against all nine names each time: about ninety case-insensitive
+ * comparisons per request, which put __strcasecmp at the top of this path's
+ * userspace profile.
+ *
+ * The list is fixed and known, so almost every header can be rejected without
+ * comparing anything: no two entries share a length and a first letter except
+ * the three beginning with "Tr"/"TE" and the three with "Proxy", and a length
+ * test separates those. What reaches strcasecmp is a header that really might
+ * be one of them.
+ */
 static int is_hop_by_hop(const char* name) {
-    if (!name) return 0;
-    for (const char** p = HOP_HEADERS; *p; p++) {
-        if (strcasecmp(name, *p) == 0) return 1;
+    if (!name || !*name) return 0;
+    size_t len = strlen(name);
+    char first = (char)tolower((unsigned char)name[0]);
+
+    for (const HopHeader* p = HOP_HEADERS; p->name; p++) {
+        /* Length and first letter are a load and two compares, where
+         * strcasecmp walks both strings lowercasing as it goes. */
+        if (p->len != len || p->first != first) continue;
+        if (strcasecmp(name, p->name) == 0) return 1;
     }
     return 0;
 }
@@ -331,8 +361,12 @@ static int px_copy(AetherProxyExchange* px);
 int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 HttpRequest* req,
                                 HttpServerResponse* res,
-                                void* user_data) {
+                                void* user_data,
+                                struct HttpArena* arena) {
     memset(px, 0, sizeof(*px));
+    /* Set before anything builds an outbound request, because begin() builds
+     * the first one itself. NULL is the ordinary allocator. */
+    px->arena = arena;
     AetherProxyOpts* opts = (AetherProxyOpts*)user_data;
     if (!opts || !opts->pool) return 1;  /* misconfigured — pass through */
     if (!req || !res) return 1;
@@ -470,6 +504,7 @@ static int px_build(AetherProxyExchange* px) {
                                           req->query_string);
     px->outbound = px->upstream_url ?
         http_request_raw(req->method ? req->method : "GET", px->upstream_url) : NULL;
+    if (px->outbound && px->arena) http_request_use_arena(px->outbound, px->arena);
     if (!px->outbound) {
         free(px->upstream_url);
         px->upstream_url = NULL;
@@ -683,10 +718,14 @@ static int px_copy(AetherProxyExchange* px) {
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
-            const char* eol = strstr(p, "\r\n");
-            if (!eol) break;
-            const char* colon = strchr(p, ':');
-            if (colon && colon < eol) {
+            /* strchr for the carriage return rather than strstr for the pair:
+             * the setup a two-byte needle costs is paid once per header, and
+             * this loop runs for every header of every proxied response. */
+            const char* cr = strchr(p, '\r');
+            if (!cr || cr[1] != '\n') break;
+            const char* eol = cr;
+            const char* colon = memchr(p, ':', (size_t)(eol - p));
+            if (colon) {
                 size_t kl = (size_t)(colon - p);
                 char keybuf[128];
                 if (kl < sizeof(keybuf)) {
@@ -696,14 +735,23 @@ static int px_copy(AetherProxyExchange* px) {
                         const char* v = colon + 1;
                         while (v < eol && (*v == ' ' || *v == '\t')) v++;
                         size_t vl = (size_t)(eol - v);
-                        char* val = (char*)malloc(vl + 1);
-                        if (val) {
-                            memcpy(val, v, vl);
-                            val[vl] = '\0';
-                            http_response_set_header(res, keybuf, val);
-                            if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
-                            free(val);
+
+                        /* The value only has to be NUL-terminated for the
+                         * setter. Doing that with an allocation cost a
+                         * malloc and a free for every header of every
+                         * response; a header value longer than this is rare
+                         * enough to be worth one. */
+                        char  stackval[512];
+                        char* val = stackval;
+                        if (vl >= sizeof(stackval)) {
+                            val = (char*)malloc(vl + 1);
+                            if (!val) { p = eol + 2; continue; }
                         }
+                        memcpy(val, v, vl);
+                        val[vl] = '\0';
+                        http_response_set_header(res, keybuf, val);
+                        if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
+                        if (val != stackval) free(val);
                     }
                 }
             }
@@ -758,7 +806,7 @@ int aether_middleware_reverse_proxy(HttpRequest* req,
                                     HttpServerResponse* res,
                                     void* user_data) {
     AetherProxyExchange px;
-    int r = aether_proxy_exchange_begin(&px, req, res, user_data);
+    int r = aether_proxy_exchange_begin(&px, req, res, user_data, NULL);
     while (r == PX_NEED_SEND) {
         long t0 = aether_proxy_now_ms();
         px.resp = http_send_raw(px.outbound);
