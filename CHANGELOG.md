@@ -13,6 +13,30 @@ version number before tagging the release.
 
 ### Added
 
+- **The TLS 1.3 handshake module can read a ClientHello and write a
+  ServerHello.** `tls13_hs` built ClientHellos and parsed ServerHellos —
+  the client's half of the conversation and nothing else — so a pure-Aether
+  TLS *server* had no way to start. The record layer and key schedule were
+  already role-neutral (the key schedule is label-driven, so `"s hs traffic"`
+  is the same call as `"c hs traffic"`), signing already existed, and the
+  `"TLS 1.3, server CertificateVerify"` context string was already there.
+  The gap was one layer, and it was the inverse of parsers that already
+  existed.
+
+  This is not about dropping OpenSSL, which stays the default where present.
+  It is that three of the four client/server × OpenSSL/pure permutations
+  worked and the fourth was empty, so our TLS was never exercised against
+  our TLS — only against static vectors and OpenSSL peers. A bug both halves
+  made together had nowhere to show up. It also means a cross-built binary
+  cannot serve HTTPS at all today, which is the same hole the client side
+  was filed about.
+
+  `parse_client_hello` reads a **real OpenSSL ClientHello** captured off the
+  wire, not just one we built ourselves, and `server_hello` round-trips
+  through the independently-written `parse_server_hello`. HelloRetryRequest
+  is not implemented: a client offering only groups we cannot complete gets
+  a clear error rather than a silently wrong negotiation.
+
 - **A pure-Aether TLS 1.3 client verifies a server by IP address.**
   `check_hostname` matched `dNSName` SANs only — `iPAddress` SANs were never
   parsed — so connecting to a server by address, which is the normal case for

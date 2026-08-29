@@ -36,6 +36,7 @@ extern string_length(s: string) -> int
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 exports(
+    ChParsed, parse_client_hello, free_ch, server_hello,
     client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
@@ -502,6 +503,251 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 // Parse a ServerHello (RFC 8446 §4.1.3) into `out`. Returns "" on success or
 // an error string. `msg` includes the 4-byte handshake header. On success,
 // out.key_share (if present) is a fresh buffer the caller must free.
+// ---- server side: building a ServerHello -------------------------------
+//
+// The inverse of parse_server_hello. RFC 8446 s4.1.3: legacy_version is
+// always 0x0303, the session id is echoed back verbatim, compression is
+// null, and the negotiated version travels in supported_versions rather than
+// the version field -- which is why a TLS 1.3 ServerHello looks like a TLS
+// 1.2 one to a middlebox.
+//
+// Returns a fresh bytes buffer holding the complete handshake message
+// (4-byte header + body); caller frees.
+server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
+             group: int, pubkey: ptr, pubkey_len: int) -> ptr {
+    buf = bytes.new(512)
+    bytes.set(buf, 511, 0) // force full zero-fill
+
+    body = 4 // reserve the handshake header; length filled at the end
+
+    // legacy_version
+    off = put16(buf, body, 0x0303)
+    // random[32]
+    off = put_bytes(buf, off, random, 32)
+    // legacy_session_id_echo<0..32> -- verbatim, or empty when the client
+    // sent none. Echoing it is what makes a middlebox believe this is a
+    // resumed TLS 1.2 session and leave the connection alone.
+    off = put8(buf, off, sid_len)
+    if sid_len > 0 { off = put_bytes(buf, off, session_id, sid_len) }
+    // cipher_suite
+    off = put16(buf, off, cipher_suite)
+    // legacy_compression_method
+    off = put8(buf, off, 0)
+
+    // extensions: supported_versions + key_share, which is the complete set
+    // a TLS 1.3 ServerHello may carry (everything else moved into
+    // EncryptedExtensions).
+    ext_len_at = off
+    off = put16(buf, off, 0) // patched below
+
+    ext_start = off
+    // supported_versions: selected_version only (no list, unlike the CH)
+    off = put16(buf, off, 0x002b)
+    off = put16(buf, off, 2)
+    off = put16(buf, off, 0x0304)
+    // key_share: server_share = { group(2), len(2), key }
+    off = put16(buf, off, 0x0033)
+    off = put16(buf, off, 4 + pubkey_len)
+    off = put16(buf, off, group)
+    off = put16(buf, off, pubkey_len)
+    off = put_bytes(buf, off, pubkey, pubkey_len)
+
+    // patch the extensions length
+    ext_total = off - ext_start
+    put16(buf, ext_len_at, ext_total)
+
+    // handshake header: type + 3-byte body length
+    put8(buf, 0, HS_SERVER_HELLO)
+    put24(buf, 1, off - 4)
+
+    out = bytes.new(off)
+    bytes.copy_from_bytes(out, 0, buf, 0, off)
+    bytes.free(buf)
+    return out
+}
+
+// ---- server side: parsing a ClientHello -------------------------------
+//
+// The inverse of client_hello_full. A server needs the client's random (for
+// the transcript), the session id (echoed verbatim), which cipher suites and
+// groups were offered, and the key_share it can complete. Everything else in
+// a ClientHello is either ignored in TLS 1.3 or advisory.
+//
+// Deliberately narrow: this reads the extensions a TLS 1.3 handshake needs
+// and skips the rest rather than rejecting them, because a real client sends
+// plenty we do not care about (ALPN, session_ticket, padding) and refusing an
+// unknown extension would fail handshakes that are perfectly valid.
+struct ChParsed {
+    random: ptr        // 32 bytes, fresh (caller frees) or null
+    session_id: ptr    // legacy_session_id, fresh (caller frees) or null
+    session_id_len: int
+    cipher_suite: int  // the first offered suite we support, else 0
+    group: int         // the key_share group we can complete, else 0
+    key_share: ptr     // the client's public for `group`, fresh, or null
+    key_share_len: int
+    has_sni: int       // 1 if a server_name extension was present
+    saw_supported_versions: int // 1 if the client offered TLS 1.3
+}
+
+// Free the buffers a ChParsed owns. Idempotent.
+free_ch(c: *ChParsed) {
+    if c.random != null { bytes.free(c.random) c.random = null }
+    if c.session_id != null { bytes.free(c.session_id) c.session_id = null }
+    if c.key_share != null { bytes.free(c.key_share) c.key_share = null }
+}
+
+// Parse a ClientHello handshake message. Returns "" on success.
+//
+// Suite and group selection happen here rather than in the caller because
+// both are "first offered thing we support", and doing it during the single
+// pass avoids keeping the whole offered list alive just to choose from it.
+parse_client_hello(msg: ptr, len: int, out: *ChParsed) -> string {
+    out.random = null
+    out.session_id = null
+    out.session_id_len = 0
+    out.cipher_suite = 0
+    out.group = 0
+    out.key_share = null
+    out.key_share_len = 0
+    out.has_sni = 0
+    out.saw_supported_versions = 0
+
+    if len < 4 { return "client hello: truncated header" }
+    if get8(msg, 0) != HS_CLIENT_HELLO { return "client hello: wrong msg type" }
+    body_len = get24(msg, 1)
+    if body_len + 4 > len { return "client hello: length overruns buffer" }
+
+    p = 4
+    // legacy_version (2) -- always 0x0303 in TLS 1.3; the real version is in
+    // the supported_versions extension.
+    if p + 2 > len { return "client hello: truncated version" }
+    p = p + 2
+
+    // random[32]
+    if p + 32 > len { return "client hello: truncated random" }
+    rnd = bytes.new(32)
+    bytes.copy_from_bytes(rnd, 0, msg, p, 32)
+    out.random = rnd
+    p = p + 32
+
+    // legacy_session_id<0..32>
+    if p + 1 > len { return "client hello: truncated session id len" }
+    sid_len = get8(msg, p)
+    p = p + 1
+    if sid_len > 32 { return "client hello: session id too long" }
+    if p + sid_len > len { return "client hello: truncated session id" }
+    if sid_len > 0 {
+        sid = bytes.new(sid_len)
+        bytes.copy_from_bytes(sid, 0, msg, p, sid_len)
+        out.session_id = sid
+    }
+    out.session_id_len = sid_len
+    p = p + sid_len
+
+    // cipher_suites<2..2^16-2>: take the first one we implement, in the
+    // CLIENT's order. Server-preference ordering is a policy choice and this
+    // has no policy to express yet.
+    if p + 2 > len { return "client hello: truncated cipher suites length" }
+    cs_len = get16(msg, p)
+    p = p + 2
+    if p + cs_len > len { return "client hello: cipher suites overrun" }
+    cs_end = p + cs_len
+    while p + 1 < cs_end {
+        cs = get16(msg, p)
+        if out.cipher_suite == 0 {
+            if cs == TLS_AES_128_GCM_SHA256 { out.cipher_suite = cs }
+            if cs == TLS_AES_256_GCM_SHA384 { out.cipher_suite = cs }
+            if cs == TLS_CHACHA20_POLY1305_SHA256 { out.cipher_suite = cs }
+        }
+        p = p + 2
+    }
+    p = cs_end
+    if out.cipher_suite == 0 { return "client hello: no mutually supported cipher suite" }
+
+    // legacy_compression_methods<1..2^8-1> -- must contain only null(0).
+    if p + 1 > len { return "client hello: truncated compression" }
+    comp_len = get8(msg, p)
+    p = p + 1
+    if p + comp_len > len { return "client hello: compression overrun" }
+    p = p + comp_len
+
+    // extensions<8..2^16-1>
+    if p + 2 > len { return "client hello: truncated extensions length" }
+    ext_total = get16(msg, p)
+    p = p + 2
+    ext_end = p + ext_total
+    if ext_end > len { return "client hello: extensions overrun" }
+
+    while p + 4 <= ext_end {
+        ext_type = get16(msg, p)
+        ext_len = get16(msg, p + 2)
+        d = p + 4
+        if d + ext_len > ext_end { return "client hello: extension overruns" }
+
+        if ext_type == 0x0000 {
+            // server_name: presence is all a server needs here; the name
+            // itself only matters once there is more than one certificate.
+            out.has_sni = 1
+        }
+        if ext_type == 0x002b {
+            // supported_versions<2..254>: list of 2-byte versions, preceded
+            // by a 1-byte length. 0x0304 is TLS 1.3.
+            if ext_len >= 1 {
+                sv_len = get8(msg, d)
+                q = d + 1
+                sv_end = q + sv_len
+                if sv_end > d + ext_len { sv_end = d + ext_len }
+                while q + 1 < sv_end {
+                    if get16(msg, q) == 0x0304 { out.saw_supported_versions = 1 }
+                    q = q + 2
+                }
+            }
+        }
+        if ext_type == 0x0033 {
+            // key_share: client_shares<0..2^16-1> of { group(2), len(2), key }.
+            // Take the first entry whose group we can complete.
+            if ext_len >= 2 {
+                ks_total = get16(msg, d)
+                q = d + 2
+                ks_end = q + ks_total
+                if ks_end > d + ext_len { ks_end = d + ext_len }
+                while q + 4 <= ks_end {
+                    g = get16(msg, q)
+                    klen = get16(msg, q + 2)
+                    kstart = q + 4
+                    if kstart + klen > ks_end { q = ks_end } else {
+                        if out.group == 0 {
+                            if g == GROUP_X25519 {
+                                if klen == 32 {
+                                    kb = bytes.new(klen)
+                                    bytes.copy_from_bytes(kb, 0, msg, kstart, klen)
+                                    out.group = g
+                                    out.key_share = kb
+                                    out.key_share_len = klen
+                                }
+                            }
+                        }
+                        q = kstart + klen
+                    }
+                }
+            }
+        }
+        p = d + ext_len
+    }
+
+    if out.saw_supported_versions == 0 {
+        return "client hello: no supported_versions offering TLS 1.3"
+    }
+    if out.group == 0 {
+        // A real server answers this with a HelloRetryRequest naming a group
+        // it does support. Not implemented: this returns a clear error so the
+        // caller fails the handshake rather than silently negotiating
+        // something it cannot complete.
+        return "client hello: no key_share for a supported group (HelloRetryRequest not implemented)"
+    }
+    return ""
+}
+
 parse_server_hello(msg: ptr, len: int, out: *ShParsed) -> string {
     out.version = 0
     out.cipher_suite = 0
