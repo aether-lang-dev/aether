@@ -1302,9 +1302,12 @@ int cmd_version_doctor(int do_fix) {
             fprintf(f, "main() {\n    println(\"ok\")\n    return 0\n}\n");
             fclose(f);
             if (get_exe_path(self, sizeof(self))) {
-                snprintf(cmd, sizeof(cmd), "\"%s\" build \"%s\" -o \"%s\" >/dev/null 2>&1",
-                         self, src, exe);
-                int rc = system(cmd);
+                int cn = snprintf(cmd, sizeof(cmd),
+                                  "\"%s\" build \"%s\" -o \"%s\" >/dev/null 2>&1",
+                                  self, src, exe);
+                /* A truncated command line is a different command. Running it
+                 * would report on something other than the probe. */
+                int rc = (cn > 0 && (size_t)cn < sizeof(cmd)) ? system(cmd) : -1;
                 if (rc == 0 && doc_is_file(exe)) {
                     doc_ok("a real program compiles and links");
                 } else {
