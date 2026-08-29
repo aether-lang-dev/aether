@@ -79,6 +79,15 @@ void http_response_free(HttpResponse* response);
  * only when the response framing was definite and neither side asked to close.
  * `max_idle` 0 disables reuse and drops what is held, -1 leaves a setting
  * alone. */
+/* Raise the connection pool's caps to suit a reverse proxy, whose upstream
+ * connections are held for the length of a request and returned, not kept for
+ * a handful of hosts. Sized from the descriptor budget; only ever raises, so
+ * a deliberate configuration is preserved. */
+void http_client_pool_size_for_proxy(void);
+
+/* The pool's current caps. */
+void http_client_pool_caps_raw(int* max_idle, int* max_per_host);
+
 const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
                                            int64_t idle_ns);
 void http_client_pool_clear_raw(void);

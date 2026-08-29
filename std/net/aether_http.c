@@ -46,6 +46,9 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
 #include <limits.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <stdint.h>   /* INT64_MAX, for the pool expiry watermark */
 
 #ifdef _WIN32
@@ -552,6 +555,60 @@ void http_client_pool_clear_raw(void) {
         free(c);
         c = next;
     }
+}
+
+/* Size the pool for a reverse proxy rather than for a client.
+ *
+ * The caps below are a client library's: a program fetching pages keeps a few
+ * connections per host and holding more would waste descriptors it will never
+ * use. A reverse proxy is the opposite. Every request in flight holds one
+ * upstream connection and returns it on completion, so a proxy serving N
+ * concurrent requests needs about N of them; with the client default of 8 per
+ * host, every connection past the eighth was closed on release and dialled
+ * again for the next request.
+ *
+ * That churn was not visible as CPU in any profile. It showed up as TCP
+ * segments: 5.61 per request against nginx's 4.02, with a TIME_WAIT socket
+ * created every sixth request, because each replacement connection pays a
+ * handshake and a shutdown that carry no HTTP at all.
+ *
+ * The size comes from the descriptor budget rather than a constant, because
+ * that is the resource being spent and it is what differs between a container
+ * with 256 descriptors and a tuned host with a million. A quarter of the
+ * budget leaves the rest for the connections being served. Caps are only ever
+ * raised: a caller who has configured the pool deliberately keeps its
+ * settings.
+ */
+/* The pool's current caps, for reporting and for tests that need to know
+ * whether mounting a proxy resized it. */
+void http_client_pool_caps_raw(int* max_idle, int* max_per_host) {
+    pthread_mutex_lock(http_pool_lock());
+    if (max_idle)     *max_idle = http_pool_max_idle;
+    if (max_per_host) *max_per_host = http_pool_max_per_key;
+    pthread_mutex_unlock(http_pool_lock());
+}
+
+void http_client_pool_size_for_proxy(void) {
+    int budget = 1024;
+#if !defined(_WIN32)
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 0) {
+        budget = (rl.rlim_cur > (rlim_t)INT_MAX) ? INT_MAX : (int)rl.rlim_cur;
+    }
+#endif
+    int want = budget / 4;
+    if (want < 64)   want = 64;
+    if (want > 1024) want = 1024;
+
+    pthread_mutex_lock(http_pool_lock());
+    if (http_pool_enabled) {
+        if (http_pool_max_idle < want)    http_pool_max_idle = want;
+        /* One backend may legitimately take the whole pool: a proxy with a
+         * single upstream is the ordinary case, and a per-host cap below the
+         * total would reintroduce exactly the churn this removes. */
+        if (http_pool_max_per_key < want) http_pool_max_per_key = want;
+    }
+    pthread_mutex_unlock(http_pool_lock());
 }
 
 /* Reconfigure the pool. `max_idle` 0 turns reuse off (and clears what is

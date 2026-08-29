@@ -13,6 +13,34 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Mounting a reverse proxy sizes the connection pool for a proxy.** The
+  pool's caps were a client library's: 8 idle connections per host, 64 in
+  total. A client fetching pages wants that, because holding more would waste
+  descriptors it will never use. A proxy is the opposite case, since every
+  request in flight holds one upstream connection and returns it on
+  completion, so serving 50 concurrent requests needs about 50 of them. Every
+  connection past the eighth to a backend was therefore closed on release and
+  dialled again for the next request.
+
+  None of this was visible as CPU in a profile, which is why three earlier
+  passes over this path missed it. It was visible in TCP counters:
+  **5.61 segments per request against nginx's 4.02**, 4.33 data segments where
+  4.00 is the minimum, 0.67 pure acknowledgements, and a **TIME_WAIT socket
+  created every sixth request** where nginx creates none. Each replacement
+  connection pays a handshake and a shutdown carrying no HTTP at all, and the
+  kernel pays full TCP processing for every one of those segments. That is
+  what made the kernel half of a request cost about twice nginx's while making
+  slightly *fewer* system calls and sending *fewer* bytes.
+
+  With the pool sized for the job, this path sends **4.01 segments per
+  request** and creates no TIME_WAIT sockets, which is nginx's behaviour
+  exactly.
+
+  The size comes from the process's descriptor budget rather than a constant,
+  because descriptors are the resource being spent and the right number
+  differs between a container with 256 and a tuned host with far more. Caps
+  are only ever raised, so a deliberate configuration is preserved.
+
 - **An accepted connection asks for TCP_NODELAY.** The upstream socket the
   proxy dials has had it since it was first written; the connection accepted
   from the client never did. Nagle then held the response back until the

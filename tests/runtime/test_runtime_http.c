@@ -6,6 +6,7 @@
  * is POSIX-only, and on Windows http_upstream_connected has no caller. */
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
+#include "../../std/http/proxy/aether_proxy.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -198,5 +199,44 @@ TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(-1, http_upstream_connected(&gone));
 
     close(listener);
+}
+#endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* A reverse proxy holds an upstream connection for the length of one request
+ * and hands it back, so it needs as many as it has requests in flight. Left
+ * at the client's cap of eight per host, every connection past the eighth was
+ * closed on release and dialled again for the next request: measured as 5.61
+ * TCP segments per request against nginx's 4.02, and a TIME_WAIT socket every
+ * sixth request. Mounting a proxy has to resize the pool.
+ */
+TEST_CATEGORY(http_pool_sized_for_proxy, TEST_CATEGORY_NETWORK) {
+    /* Start from the client's defaults, whatever an earlier test left. */
+    http_client_pool_configure_raw(64, 8, -1);
+
+    int idle = 0, per_host = 0;
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_EQ(64, idle);
+    ASSERT_EQ(8, per_host);
+
+    AetherProxyOpts* opts = aether_proxy_opts_new();
+    ASSERT_NOT_NULL(opts);
+
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_TRUE(idle >= 64);
+    /* The point of the fix: one backend may take the whole pool, so the
+     * per-host cap must rise with it rather than stay at the client's eight. */
+    ASSERT_TRUE(per_host >= 64);
+    ASSERT_EQ(idle, per_host);
+
+    /* Caps are only ever raised, so a deliberate configuration survives. */
+    http_client_pool_configure_raw(4096, 4096, -1);
+    aether_proxy_opts_free(aether_proxy_opts_new());
+    http_client_pool_caps_raw(&idle, &per_host);
+    ASSERT_EQ(4096, idle);
+    ASSERT_EQ(4096, per_host);
+
+    aether_proxy_opts_free(opts);
+    http_client_pool_configure_raw(64, 8, -1);
 }
 #endif  /* !_WIN32 */
