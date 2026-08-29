@@ -1,0 +1,9 @@
+extern println(s: string)
+pair(a: int, b: int) -> { return a + b, "" }
+via_fn(f: fn, a: int, b: int) -> {
+    return f(a, b)
+}
+main() {
+    y, e2 = via_fn(pair, 2, 3)
+    println("via fn: ${y} '${e2}'")
+}

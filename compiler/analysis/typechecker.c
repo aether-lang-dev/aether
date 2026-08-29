@@ -4954,6 +4954,30 @@ static void check_match_arm_reachability(ASTNode* stmt) {
     }
 }
 
+/* #1778 diagnostic helper: is `rhs` a call to a function that has a BARE `fn`
+ * parameter (a TYPE_FUNCTION with no return-type signature)? That is the shape
+ * that erases a tuple return — `via_fn(f: fn, ...) -> { return f(...) }` types
+ * the inner call `void` because a bare `fn` carries no signature, so `via_fn`'s
+ * inferred return is void and the destructure at the call site fails. Used only
+ * to steer the error message toward the signatured-`fn` fix; conservative (a
+ * false negative just yields the generic hint, never a wrong one). */
+static int rhs_returns_void_via_bare_fn(ASTNode* rhs, SymbolTable* table) {
+    if (!rhs || rhs->type != AST_FUNCTION_CALL || !rhs->value) return 0;
+    Symbol* callee = lookup_symbol(table, rhs->value);
+    if (!callee || !callee->is_function || !callee->node) return 0;
+    ASTNode* def = callee->node;
+    /* Params are the def's children except the trailing body; a bare `fn` is a
+     * param whose type is TYPE_FUNCTION with no populated return_type. */
+    for (int i = 0; i < def->child_count - 1; i++) {
+        ASTNode* p = def->children[i];
+        if (p && p->node_type && p->node_type->kind == TYPE_FUNCTION &&
+            p->node_type->return_type == NULL) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
     if (!stmt) return 0;
 
@@ -4978,9 +5002,38 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     "cannot destructure, '%s' returns '%s', not a tuple",
                     rhs->value ? rhs->value : "expression",
                     type_to_string(rhs_type));
-                aether_error_with_suggestion(msg, stmt->line, stmt->column,
-                    "use single assignment instead, or ensure the function returns multiple values");
+                /* #1778: a tuple-returning function passed through a BARE `fn`
+                 * param loses its return type — a bare `fn` carries no
+                 * signature, so a call through it is typed `void`, and the
+                 * failure surfaces here at the destructure rather than at the
+                 * fn boundary that erased it. Detect that shape (the callee's
+                 * return came from calling a bare-fn parameter) and point at the
+                 * real fix: give the `fn` a signature. */
+                const char* hint =
+                    "use single assignment instead, or ensure the function "
+                    "returns multiple values";
+                if (rhs_returns_void_via_bare_fn(rhs, table)) {
+                    hint =
+                        "a value passed through a bare `fn` parameter loses its "
+                        "return type (a bare `fn` has no signature), so the call "
+                        "is typed `void`. Give the parameter a signature so the "
+                        "tuple survives, e.g. `f: fn(int, int) -> (int, string)`.";
+                }
+                aether_error_with_suggestion(msg, stmt->line, stmt->column, hint);
                 error_count++;
+                /* Still bind the target names (with an unknown/void type) so a
+                 * later use of `y`/`e2` does not cascade into a misleading
+                 * "Undefined variable" reported at a bogus location (#1778's
+                 * secondary observation: those follow-ons pointed at line 1). */
+                for (int j = 0; j < var_count; j++) {
+                    ASTNode* var = stmt->children[j];
+                    if (var->value && strcmp(var->value, "_") != 0) {
+                        add_symbol(table, var->value,
+                                   rhs_type ? clone_type(rhs_type)
+                                            : create_type(TYPE_VOID),
+                                   0, 0, 0);
+                    }
+                }
                 if (rhs_type) free_type(rhs_type);
                 return 0;
             }
