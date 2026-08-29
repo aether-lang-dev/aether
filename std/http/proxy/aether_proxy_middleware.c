@@ -800,6 +800,205 @@ static int px_copy(AetherProxyExchange* px) {
     return 0;
 }
 
+/* ---- answering without copying the response (#1758) --------------------- */
+
+/* Append into a caller-owned buffer, growing it. Returns 0, or -1 when the
+ * allocator refuses. */
+static int dh_put(char** buf, size_t* cap, size_t* len, const char* s, size_t n) {
+    if (*len + n + 1 > *cap) {
+        size_t want = *cap ? *cap : 1024;
+        while (want < *len + n + 1) want *= 2;
+        char* grown = (char*)realloc(*buf, want);
+        if (!grown) return -1;
+        *buf = grown;
+        *cap = want;
+    }
+    memcpy(*buf + *len, s, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 0;
+}
+
+/* The status a response line carries, or 0 when it does not carry one. Same
+ * shape as the copying path's check: exactly three digits after the version. */
+static int direct_status_of(const char* raw, size_t raw_len) {
+    if (raw_len < 12 || strncmp(raw, "HTTP/", 5) != 0) return 0;
+    const char* sp = memchr(raw, ' ', raw_len);
+    if (!sp) return 0;
+    const char* d = sp + 1;
+    if ((size_t)(d - raw) + 3 > raw_len) return 0;
+    if (!isdigit((unsigned char)d[0]) || !isdigit((unsigned char)d[1]) ||
+        !isdigit((unsigned char)d[2])) return 0;
+    if ((size_t)(d - raw) + 3 < raw_len && isdigit((unsigned char)d[3])) return 0;
+    return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
+}
+
+int aether_proxy_direct_ok(const AetherProxyExchange* px) {
+    if (!px || !px->opts) return 0;
+    /* A cache has to keep the headers and body, and a transformer has to be
+     * able to change them. Both need the object this path does not build. */
+    if (px->opts->cache) return 0;
+    if (px->opts->direct_disabled) return 0;
+    return 1;
+}
+
+int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
+                             const char* raw, size_t raw_len,
+                             size_t header_bytes, AetherProxyDirect* out) {
+    if (!px || !px->opts || !raw || !out) return -1;
+    if (header_bytes < 4 || header_bytes > raw_len) return -1;
+
+    int status = direct_status_of(raw, header_bytes);
+    if (status == 0) return -1;      /* no status line: not ours to pass on */
+
+    /* The same bookkeeping the copying path does for a response that arrived,
+     * in the same order, so the two cannot report differently. */
+    atomic_fetch_add(&px->u->metric_latency_sum_ms, elapsed_ms);
+    atomic_fetch_add(&px->u->metric_latency_count, 1);
+
+    if      (status >= 200 && status < 300) atomic_fetch_add(&px->u->metric_requests_2xx, 1);
+    else if (status >= 300 && status < 400) atomic_fetch_add(&px->u->metric_requests_3xx, 1);
+    else if (status >= 400 && status < 500) atomic_fetch_add(&px->u->metric_requests_4xx, 1);
+    else if (status >= 500)                 atomic_fetch_add(&px->u->metric_requests_5xx, 1);
+
+    aether_proxy_breaker_record(px->opts->pool, px->u, status >= 200 && status < 500);
+    aether_proxy_inflight_dec(px->u);
+
+    px->status      = status;
+    out->status     = status;
+    out->body       = raw + header_bytes;
+    out->body_len   = raw_len - header_bytes;
+
+    if ((long)out->body_len > (long)px->opts->max_body_bytes) return -1;
+    return 0;
+}
+
+int aether_proxy_direct_head(AetherProxyExchange* px,
+                             const AetherProxyDirect* d,
+                             const char* raw, size_t header_bytes,
+                             char** buf, size_t* cap, size_t* out_len) {
+    if (!px || !d || !raw || !buf || !cap || !out_len) return -1;
+    *out_len = 0;
+
+    /* The status line carries our own reason phrase, not the upstream's,
+     * because that is what the copying path emits: it sets the status by
+     * number and the serializer looks the text up. */
+    char line[96];
+    int n = snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\n",
+                     d->status, http_status_text(d->status));
+    if (n < 0 || (size_t)n >= sizeof(line)) return -1;
+    if (dh_put(buf, cap, out_len, line, (size_t)n) != 0) return -1;
+
+    /* Content-Type and Server come first and always exist, because the
+     * response object is created holding both and an upstream header of the
+     * same name replaces the value in place rather than appending. Emitting
+     * them here in that order is what keeps these bytes identical to the
+     * copying path's. */
+    const char* hstart = memchr(raw, '\n', header_bytes);
+    if (!hstart) return -1;
+    hstart += 1;
+    const char* hend = raw + header_bytes - 2;   /* at the terminating CRLF */
+    if (hend < hstart) return -1;
+
+    const char* ct = NULL; size_t ct_len = 0;
+    const char* sv = NULL; size_t sv_len = 0;
+
+    for (const char* p = hstart; p < hend; ) {
+        const char* cr = memchr(p, '\r', (size_t)(hend - p));
+        if (!cr || cr + 1 >= raw + header_bytes || cr[1] != '\n') break;
+        const char* colon = memchr(p, ':', (size_t)(cr - p));
+        if (colon) {
+            size_t kl = (size_t)(colon - p);
+            const char* v = colon + 1;
+            while (v < cr && (*v == ' ' || *v == '\t')) v++;
+            if (kl == 12 && strncasecmp(p, "Content-Type", 12) == 0) {
+                ct = v; ct_len = (size_t)(cr - v);
+            } else if (kl == 6 && strncasecmp(p, "Server", 6) == 0) {
+                sv = v; sv_len = (size_t)(cr - v);
+            }
+        }
+        p = cr + 2;
+    }
+
+    if (dh_put(buf, cap, out_len, "Content-Type: ", 14) != 0) return -1;
+    if (ct) { if (dh_put(buf, cap, out_len, ct, ct_len) != 0) return -1; }
+    /* No upstream Content-Type: the copying path replaces the created
+     * default with this one rather than leaving text/html. */
+    else    { if (dh_put(buf, cap, out_len, "application/octet-stream", 24) != 0) return -1; }
+    if (dh_put(buf, cap, out_len, "\r\n", 2) != 0) return -1;
+
+    if (dh_put(buf, cap, out_len, "Server: ", 8) != 0) return -1;
+    if (sv) { if (dh_put(buf, cap, out_len, sv, sv_len) != 0) return -1; }
+    else    { if (dh_put(buf, cap, out_len, "Aether/1.0", 10) != 0) return -1; }
+    if (dh_put(buf, cap, out_len, "\r\n", 2) != 0) return -1;
+
+    /* Everything else the upstream sent, in arrival order, minus the two
+     * already emitted and minus the hop-by-hop headers, which belong to the
+     * connection this proxy terminated and not to the message. */
+    int saw_content_length = 0;
+    for (const char* p = hstart; p < hend; ) {
+        const char* cr = memchr(p, '\r', (size_t)(hend - p));
+        if (!cr || cr + 1 >= raw + header_bytes || cr[1] != '\n') break;
+        const char* colon = memchr(p, ':', (size_t)(cr - p));
+        if (!colon) { p = cr + 2; continue; }
+
+        size_t kl = (size_t)(colon - p);
+        if ((kl == 12 && strncasecmp(p, "Content-Type", 12) == 0) ||
+            (kl == 6  && strncasecmp(p, "Server", 6) == 0)) { p = cr + 2; continue; }
+
+        char keybuf[128];
+        if (kl >= sizeof(keybuf)) { p = cr + 2; continue; }
+        memcpy(keybuf, p, kl);
+        keybuf[kl] = '\0';
+        if (is_hop_by_hop(keybuf)) { p = cr + 2; continue; }
+
+        /* Content-Length describes the body being sent, which is this
+         * proxy's to state and not the upstream's to be repeated: the
+         * copying path sets it from the bytes it holds, so a HEAD response,
+         * whose upstream length describes a body that is not being
+         * forwarded, comes out as 0 rather than as that length. Emitted here
+         * in the upstream's position so the header order matches. */
+        if (kl == 14 && strncasecmp(p, "Content-Length", 14) == 0) {
+            char cl[32];
+            int cn = snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", d->body_len);
+            if (cn < 0 || (size_t)cn >= sizeof(cl)) return -1;
+            if (dh_put(buf, cap, out_len, cl, (size_t)cn) != 0) return -1;
+            saw_content_length = 1;
+            p = cr + 2;
+            continue;
+        }
+
+        const char* v = colon + 1;
+        while (v < cr && (*v == ' ' || *v == '\t')) v++;
+        size_t vl = (size_t)(cr - v);
+
+        /* A name or value carrying a line ending would end the head early and
+         * let the rest be read as a second response (CWE-113). The copying
+         * path drops such a header; so does this one. */
+        if (!http_header_name_ok(keybuf) || memchr(v, '\r', vl) || memchr(v, '\n', vl)) {
+            p = cr + 2; continue;
+        }
+
+        if (dh_put(buf, cap, out_len, keybuf, kl) != 0) return -1;
+        if (dh_put(buf, cap, out_len, ": ", 2) != 0) return -1;
+        if (vl && dh_put(buf, cap, out_len, v, vl) != 0) return -1;
+        if (dh_put(buf, cap, out_len, "\r\n", 2) != 0) return -1;
+        p = cr + 2;
+    }
+
+    /* An upstream that sent no Content-Length still gets one, appended, which
+     * is where the copying path puts it when the header did not already
+     * exist to be replaced. */
+    if (!saw_content_length) {
+        char cl[32];
+        int cn = snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", d->body_len);
+        if (cn < 0 || (size_t)cn >= sizeof(cl)) return -1;
+        if (dh_put(buf, cap, out_len, cl, (size_t)cn) != 0) return -1;
+    }
+
+    return dh_put(buf, cap, out_len, "\r\n", 2);
+}
+
 /* The blocking driver: the server's worker owns the thread for the whole
  * request, so it simply performs the send itself. */
 int aether_middleware_reverse_proxy(HttpRequest* req,

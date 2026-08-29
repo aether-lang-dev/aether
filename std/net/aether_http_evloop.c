@@ -30,6 +30,7 @@
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
@@ -72,6 +73,12 @@ typedef struct EvConn {
 
     char*    out;           /* response bytes owed to the client */
     size_t   out_len, out_sent, out_cap;
+    /* A pass-through answers from the bytes the upstream sent: the head is
+     * built into `out` and the body is sent straight from the receive buffer,
+     * so it is never copied. NULL when the response was copied the ordinary
+     * way and `out` already holds all of it. */
+    const char* out_body;
+    size_t      out_body_len, out_body_sent;
 
     HttpUpstreamConn up;
     HttpExchange     x;
@@ -213,6 +220,8 @@ static void ev_conn_reset_request(EvConn* c) {
     /* The buffer stays with the connection and is only grown; a connection
      * serving many requests stops allocating and freeing one per request. */
     c->out_len = c->out_sent = 0;
+    c->out_body = NULL;
+    c->out_body_len = c->out_body_sent = 0;
 
     /* The request and the response objects stay with the connection. Each
      * one costs a handful of allocations to build, including two fixed-size
@@ -513,16 +522,39 @@ static int ev_step_read_request(EvDriver* d, EvConn* c) {
 
 /* Write what is owed to the client, without waiting for it to drain. */
 static int ev_step_client_send(EvDriver* d, EvConn* c) {
-    while (c->out_sent < c->out_len) {
-        ssize_t n = send(c->client_fd, c->out + c->out_sent,
-                         c->out_len - c->out_sent, 0);
-        if (n > 0) { c->out_sent += (size_t)n; continue; }
-        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+    for (;;) {
+        struct iovec iov[2];
+        int n_iov = 0;
+        if (c->out_sent < c->out_len) {
+            iov[n_iov].iov_base = c->out + c->out_sent;
+            iov[n_iov].iov_len  = c->out_len - c->out_sent;
+            n_iov++;
+        }
+        if (c->out_body && c->out_body_sent < c->out_body_len) {
+            iov[n_iov].iov_base = (void*)(c->out_body + c->out_body_sent);
+            iov[n_iov].iov_len  = c->out_body_len - c->out_body_sent;
+            n_iov++;
+        }
+        if (n_iov == 0) return 1;
+
+        /* One call for both, so a pass-through does not pay an extra send to
+         * put the body on the wire after the head, and does not have to copy
+         * the body into the head's buffer to avoid that. */
+        ssize_t w = writev(c->client_fd, iov, n_iov);
+        if (w > 0) {
+            size_t left = (size_t)w;
+            size_t head_left = c->out_len - c->out_sent;
+            size_t took = left < head_left ? left : head_left;
+            c->out_sent += took;
+            left -= took;
+            if (left) c->out_body_sent += left;
+            continue;
+        }
+        if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             return ev_watch_writable(d, c->client_fd, c) == 0 ? 0 : -1;
-        if (n < 0 && errno == EINTR) continue;
+        if (w < 0 && errno == EINTR) continue;
         return -1;
     }
-    return 1;
 }
 
 /* Push the request at the upstream. The exchange is the same one the blocking
@@ -761,21 +793,72 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
 /* The upstream has answered. Hand the reply back to the proxy exchange, which
  * decides whether it is the one to keep, and turn what it produced into bytes
  * for the client. */
+/* Answer straight from the bytes the upstream sent.
+ *
+ * The copying path materialises a response three times: into an HttpResponse,
+ * then header by header onto the HttpServerResponse, then into the bytes that
+ * go out. The last two exist so a handler could have looked at it. When
+ * nothing will, the bytes already in the receive buffer are the answer: the
+ * head is rewritten into `out` and the body is sent from where it landed.
+ *
+ * Only for a response whose own framing said where it ended, and which is not
+ * chunked -- a chunked body would have to be decoded to be forwarded, which is
+ * a copy again. Everything else falls back, so this narrows what it handles
+ * rather than changing what the proxy means.
+ *
+ * Returns 1 when it answered, 0 when the caller should take the copying path.
+ */
+static int ev_try_direct(EvDriver* d, EvConn* c) {
+    (void)d;
+    if (!aether_proxy_direct_ok(&c->px))                     return 0;
+    if (!c->x.complete || c->x.framing.invalid)              return 0;
+    if (c->x.framing.chunked || !c->x.framing.definite)      return 0;
+    if (!c->x.buf || c->x.framing.header_bytes == 0)         return 0;
+    /* A transformer is entitled to rewrite the response, and cannot if the
+     * response was never built. */
+    if (http_server_has_response_transformer(d->loop->server)) return 0;
+
+    AetherProxyDirect direct;
+    if (aether_proxy_direct_take(&c->px, 0, c->x.buf, c->x.len,
+                                 c->x.framing.header_bytes, &direct) != 0) return 0;
+
+    size_t head_len = 0;
+    if (aether_proxy_direct_head(&c->px, &direct, c->x.buf,
+                                 c->x.framing.header_bytes,
+                                 &c->out, &c->out_cap, &head_len) != 0) return 0;
+
+    c->out_len       = head_len;
+    c->out_sent      = 0;
+    c->out_body      = direct.body;
+    c->out_body_len  = direct.body_len;
+    c->out_body_sent = 0;
+    c->state = EV_CLIENT_SEND;
+    return 1;
+}
+
 static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);       /* the upstream answered; nothing to give up on */
-    HttpResponse* resp = http_response_alloc_empty();
-    if (!resp) return -1;
-    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
-    c->px.resp = resp;
 
     /* The connection is worth keeping only when the response ended where its
-     * own framing said it would. */
+     * own framing said it would. Released before the response is looked at,
+     * because nothing about releasing it depends on that. */
     int keep = c->x.complete && !c->x.framing.invalid;
     if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
     c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
     http_upstream_release(&c->up, keep);
+
+    /* Answer from the upstream's own bytes when nothing needs the response
+     * object. Tried before it is built, because building it is the copy this
+     * avoids. The receive buffer stays with the connection until the response
+     * has been written, so the body can be sent from where it landed. */
+    if (ev_try_direct(d, c)) return 1;
+
+    HttpResponse* resp = http_response_alloc_empty();
+    if (!resp) return -1;
+    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
+    c->px.resp = resp;
 
     int r = aether_proxy_exchange_resume(&c->px, 0);
     if (r == PX_NEED_SEND) {

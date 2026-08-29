@@ -13,6 +13,45 @@ version number before tagging the release.
 
 ### Changed
 
+- **A proxied response is answered from the upstream's own bytes.** The path
+  materialised every response three times over: into an `HttpResponse`, then
+  header by header onto the `HttpServerResponse`, then into the bytes that go
+  out. The last two copies exist so that a handler could have looked at the
+  response. When nothing is going to, the bytes already in the receive buffer
+  are the answer.
+
+  The head is now rewritten straight into the outgoing buffer and the body is
+  sent from where it arrived, with one `writev` carrying both. **Body copies
+  per response go from three to none, and header copies from three to one.**
+
+  It applies when nothing needs the response object, meaning no cache and no
+  response transformer, and when the response said where it ended and is not
+  chunked; a chunked body would have to be decoded to be forwarded, which is a
+  copy again. Everything else takes the copying path, so this narrows what it
+  handles rather than changing what the proxy means.
+
+  **CPU per request 17.0 to 15.6 microseconds** by the least-contended round,
+  better in all eight rank-matched rounds. The benchmark's backend returns
+  twelve bytes, so almost none of that is the body copies: those show on
+  response sizes a proxy actually carries.
+
+### Testing
+
+- The two paths are compared byte for byte, over four response shapes, by
+  running the same requests with `AETHER_PROXY_DIRECT=1` and `0`. That
+  comparison is the test rather than a check of the fast path alone, because a
+  fast path that silently never runs passes every single-path test.
+
+  It earned its place immediately: on `HEAD` the copying path states the length
+  of the body it is sending, which is none, while forwarding the upstream's
+  `Content-Length` advertised a body that never arrives. A response whose
+  framing disagrees with its bytes is the shape request smuggling is built
+  from. The header is now emitted from the body being sent, in the upstream's
+  position so the order still matches.
+
+
+### Changed
+
 - **A proxied request's own strings come from an arena.** Parsing a request
   allocated the method, the path, the query, the version and a pair per
   header, then freed them a moment later: about two dozen allocations and as
