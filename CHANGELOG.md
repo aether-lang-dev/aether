@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.604.0]
+
 ### Changed
 
 - **A proxied request's own strings come from an arena.** Parsing a request
