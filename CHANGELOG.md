@@ -13,6 +13,26 @@ version number before tagging the release.
 
 ### Fixed
 
+- **An accepted connection asks for TCP_NODELAY.** The upstream socket the
+  proxy dials has had it since it was first written; the connection accepted
+  from the client never did. Nagle then held the response back until the
+  client acknowledged what was already in flight, and the client, with nothing
+  of its own to send, only acknowledged when its delayed-ACK timer said so.
+  Each direction gained a standalone acknowledgement carrying no data, and the
+  kernel pays full TCP receive processing for every segment.
+
+  Found by counting segments rather than by reading the code: a proxied
+  request needs four, nginx sends **4.02**, and this path was sending
+  **5.94**. That is why the kernel half of a request cost roughly twice
+  nginx's while making slightly *fewer* system calls and sending *fewer*
+  bytes. With TCP_NODELAY it is **5.61**, so Nagle was part of it and about
+  1.6 segments per request remain unexplained.
+
+  CPU per request 18.1 to 17.9 microseconds by the least-contended round,
+  better in four of six rank-matched rounds. A small number for a real cause:
+  the segment count is the measurement that moved, and it is the one to keep
+  watching.
+
 - **A proxied connection no longer trusts that a wakeup means the descriptor
   it was waiting for is ready.** `http_upstream_connected` decided whether a
   connect had finished from `SO_ERROR` alone, which is 0 both for a connect
@@ -112,6 +132,14 @@ version number before tagging the release.
   microseconds by the least-contended round, and 34.0 to 20.4 by the median.
 
 ### Testing
+
+- Two instruments added to the load-balancer bench. `split.sh` reports CPU per
+  request split into user and kernel for every subject, which is what showed
+  the gap was mostly kernel-side; it reads utime and stime from `/proc`
+  because a virtual machine usually exposes no hardware counter, and cycles
+  read `<not supported>` on the one this was written on. `threads.sh` reports
+  CPU per thread, because `/proc` sums every thread of a process and a server
+  with background threads would otherwise charge their cost to a request.
 
 - A response header value too long for that stack buffer is covered, so the
   path that falls back to the heap is exercised rather than assumed. Against a

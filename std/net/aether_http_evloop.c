@@ -30,6 +30,8 @@
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -138,6 +140,23 @@ struct HttpEvLoop {
 };
 
 static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms);
+
+/* Nagle holds a small write back until the peer acknowledges what is already
+ * in flight. On a proxied connection the response is one such write, and the
+ * peer, having nothing to send, only acknowledges when its delayed-ACK timer
+ * says so. The two together add a standalone acknowledgement in each
+ * direction that carries no data, and the kernel pays full TCP receive
+ * processing for each: measured at 5.94 segments per request against nginx's
+ * 4.02, which is the number a proxied request needs.
+ *
+ * The upstream socket has had this since it was first dialled; the accepted
+ * one never did. */
+static void ev_set_nodelay(int fd) {
+#if defined(TCP_NODELAY)
+    int on = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void*)&on, sizeof(on));
+#endif
+}
 
 static void ev_set_nonblocking(int fd) {
 #ifdef _WIN32
@@ -842,6 +861,7 @@ static void ev_take_submissions(EvDriver* d) {
         c->up.t.sockfd = -1;
         c->up.t.applied_timeout_ns = -1;
         ev_set_nonblocking(fd);
+        ev_set_nodelay(fd);
         atomic_fetch_add(&d->loop->active, 1);
 
         /* Watched once, for as long as this driver owns it. Every later wait
