@@ -2168,8 +2168,23 @@ int http_upstream_connected(HttpUpstreamConn* c) {
     if (getsockopt(c->t.sockfd, SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0)
         return -1;
     if (err != 0) return -1;
+
+    /* SO_ERROR is 0 for a connect that has finished and for one still in
+     * flight alike, so on its own it cannot tell them apart. A socket with no
+     * peer yet fails getpeername with ENOTCONN, which does.
+     *
+     * This matters because a caller is woken by a poller, and a poller may
+     * wake it for another descriptor, or for no reason at all: both epoll and
+     * kqueue are allowed to report spurious readiness. Reading any wakeup as
+     * "the connect finished" writes the request into a socket that has no
+     * peer, which fails with ENOTCONN and looks like the upstream refusing. */
+    struct sockaddr_storage peer;
+    socklen_t peerlen = sizeof(peer);
+    if (getpeername(c->t.sockfd, (struct sockaddr*)&peer, &peerlen) != 0)
+        return errno == ENOTCONN ? 0 : -1;
+
     c->connecting = 0;
-    return 0;
+    return 1;
 }
 
 /* Hand the connection back to the idle pool, or close it. A connection is

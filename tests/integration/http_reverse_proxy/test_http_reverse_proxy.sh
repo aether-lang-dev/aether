@@ -255,9 +255,10 @@ fi
 # yet, so the cut points here (inside the CRLFCRLF terminator, and
 # again before the body) are the cases where a driver that tracks how
 # far it has scanned can lose the terminator and wait forever.
+FRAG_RAN=0
 if command -v python3 >/dev/null 2>&1; then
     if FRAG=$(python3 "$SCRIPT_DIR/fragment_probe.py" 19000 2>&1); then
-        :
+        FRAG_RAN=1
     else
         echo "  [FAIL] T11 fragmented request: $FRAG"; exit 1
     fi
@@ -287,7 +288,15 @@ ELAPSED=$((T1 - T0))
 stop_servers
 
 if [ "$IS_WIN" = "1" ]; then
-    echo "  [PASS] http_reverse_proxy: 5/11 win-reduced - basic, POST body, Upgrade refusal, fragmented, timeout"
+    if [ "$FRAG_RAN" = "1" ]; then
+        echo "  [PASS] http_reverse_proxy: 5/11 win-reduced - basic, POST body, Upgrade refusal, fragmented, timeout"
+    else
+        echo "  [PASS] http_reverse_proxy: 4/11 win-reduced - basic, POST body, Upgrade refusal, timeout (fragmented skipped)"
+    fi
 else
-    echo "  [PASS] http_reverse_proxy: 11/11 - basic round-trip, headers, body, fragmented, timeout"
+    if [ "$FRAG_RAN" = "1" ]; then
+        echo "  [PASS] http_reverse_proxy: 11/11 - basic round-trip, headers, body, fragmented, timeout"
+    else
+        echo "  [PASS] http_reverse_proxy: 10/11 - basic round-trip, headers, body, timeout (fragmented skipped)"
+    fi
 fi

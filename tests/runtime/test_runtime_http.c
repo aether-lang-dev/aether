@@ -1,6 +1,11 @@
 #include "test_harness.h"
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
+#include "../../std/net/aether_http_internal.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <string.h>
 
 TEST_CATEGORY(http_response_structure, TEST_CATEGORY_NETWORK) {
     HttpResponse* resp = (HttpResponse*)calloc(1, sizeof(HttpResponse));
@@ -139,4 +144,52 @@ TEST_CATEGORY(http_accessors_boundary_status_codes, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(0, http_response_ok(resp));  // 5xx
 
     http_response_free(resp);
+}
+
+/* http_upstream_connected has to separate a connect that has finished from
+ * one still in flight. SO_ERROR is 0 for both, so a check built on it alone
+ * called a socket with no peer "connected", and the request was then written
+ * into it and failed with ENOTCONN. A poller may wake a caller for another
+ * descriptor or for nothing at all, so the question gets asked when the
+ * answer is genuinely still "not yet". */
+TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
+    int listener = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(listener >= 0);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;                       /* any free port */
+    ASSERT_EQ(0, bind(listener, (struct sockaddr*)&addr, sizeof(addr)));
+    ASSERT_EQ(0, listen(listener, 4));
+
+    socklen_t alen = sizeof(addr);
+    ASSERT_EQ(0, getsockname(listener, (struct sockaddr*)&addr, &alen));
+
+    /* A socket that has never been connected: still in flight, not ready. */
+    HttpUpstreamConn idle;
+    memset(&idle, 0, sizeof(idle));
+    idle.t.sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(idle.t.sockfd >= 0);
+    ASSERT_EQ(0, http_upstream_connected(&idle));
+    close(idle.t.sockfd);
+
+    /* A socket with a peer: connected. This is the one the old check got
+     * wrong, reporting the same value it gave for a socket with no peer. */
+    HttpUpstreamConn live;
+    memset(&live, 0, sizeof(live));
+    live.t.sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    ASSERT_TRUE(live.t.sockfd >= 0);
+    ASSERT_EQ(0, connect(live.t.sockfd, (struct sockaddr*)&addr, sizeof(addr)));
+    ASSERT_EQ(1, http_upstream_connected(&live));
+    close(live.t.sockfd);
+
+    /* A closed descriptor is a failure, not a wait. */
+    HttpUpstreamConn gone;
+    memset(&gone, 0, sizeof(gone));
+    gone.t.sockfd = -1;
+    ASSERT_EQ(-1, http_upstream_connected(&gone));
+
+    close(listener);
 }

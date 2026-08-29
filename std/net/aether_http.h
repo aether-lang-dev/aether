@@ -315,6 +315,9 @@ int http_find_header_in_block(const char* block, const char* end,
 typedef struct HttpUpstreamConnOpaque HttpUpstreamConn;
 
 int  http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out);
+/* 1 when the connect has completed, 0 when it is still in flight, -1 when it
+ * failed. A caller woken by a poller must handle 0 by waiting again: a wakeup
+ * does not promise this descriptor is the one that became ready. */
 int  http_upstream_connected(HttpUpstreamConn* c);
 void http_upstream_release(HttpUpstreamConn* c, int keep);
 

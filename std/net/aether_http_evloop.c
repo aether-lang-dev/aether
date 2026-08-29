@@ -61,6 +61,7 @@ typedef struct EvConn {
                              * end of the headers; a read that arrives in
                              * pieces would otherwise rescan from the start
                              * every time */
+    int      client_in_poller, up_in_poller;
     size_t   in_hdr_end;    /* offset just past the header terminator, once
                              * found. Kept because a request whose body is
                              * still arriving is asked again, and resuming the
@@ -113,6 +114,7 @@ typedef struct {
     int            index;
     pthread_t      thread;
     AetherIoPoller poller;
+    int            edge_triggered;   /* backend honours AETHER_IO_EDGE */
     EvConn**       by_fd;        /* descriptor -> the connection using it */
     int            by_fd_cap;
     int            wake_r;       /* a submitted descriptor arrives here */
@@ -228,11 +230,13 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
+        c->up_in_poller = 0;
         http_upstream_release(&c->up, 0);
     }
     if (c->client_fd >= 0) {
         aether_io_poller_remove(&d->poller, c->client_fd);
         ev_untrack(d, c->client_fd);
+        c->client_in_poller = 0;
         close(c->client_fd);
     }
     ev_timer_set(d, c, 0);
@@ -393,20 +397,53 @@ static int  ev_advance(EvDriver* d, EvConn* c);
  * actually blocks and dropped once it drains, because a descriptor that is
  * writable almost always would otherwise wake a level-triggered backend
  * continuously for nothing. */
+/* Which of this connection's two descriptors the poller currently holds.
+ * Kept here rather than read off the callers' flags, which say what the
+ * exchange is waiting for and are set before the registration is attempted. */
+static void ev_mark_in_poller(EvConn* c, int fd, int in) {
+    if (fd == c->client_fd) c->client_in_poller = in;
+    else                    c->up_in_poller = in;
+}
+
+static int ev_in_poller(const EvConn* c, int fd) {
+    return fd == c->client_fd ? c->client_in_poller : c->up_in_poller;
+}
+
 static int ev_watch(EvDriver* d, int fd, EvConn* c) {
     if (ev_track(d, fd, c) != 0) return -1;
-    return aether_io_poller_add(&d->poller, fd, c,
-                                AETHER_IO_READ | AETHER_IO_EDGE);
+    ev_mark_in_poller(c, fd, 1);
+    /* On an edge-triggered backend, write interest costs nothing to leave in
+     * place: EPOLLOUT and EV_CLEAR report the transition to writable, not the
+     * state, so an idle writable descriptor never wakes anything. Registering
+     * it once here is what removes the pair of epoll_ctl calls a blocking
+     * write used to pay, which the profile put at 1.7% of the driver's time
+     * in do_epoll_ctl.
+     *
+     * A level-triggered backend must not carry it: there a writable
+     * descriptor is ready on every single wait. */
+    uint32_t events = AETHER_IO_READ | AETHER_IO_EDGE;
+    if (d->edge_triggered) events |= AETHER_IO_WRITE;
+    return aether_io_poller_add(&d->poller, fd, c, events);
 }
 
 static int ev_watch_writable(EvDriver* d, int fd, EvConn* c) {
+    /* On an edge-triggered backend ev_watch asked for write interest already,
+     * so a descriptor that is in the poller needs no call here. One that is
+     * not in it yet -- the upstream, before its first wait -- still does, and
+     * ev_watch gives it both interests at once. */
+    if (d->edge_triggered)
+        return ev_in_poller(c, fd) ? 0 : ev_watch(d, fd, c);
+
     if (ev_track(d, fd, c) != 0) return -1;
+    ev_mark_in_poller(c, fd, 1);
     return aether_io_poller_add(&d->poller, fd, c,
                                 AETHER_IO_READ | AETHER_IO_WRITE | AETHER_IO_EDGE);
 }
 
-/* Back to watching for readable only, now that the write has drained. */
+/* Back to watching for readable only, now that the write has drained. On an
+ * edge-triggered backend there is nothing to undo. */
 static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
+    if (d->edge_triggered) return 0;
     return ev_watch(d, fd, c);
 }
 
@@ -574,6 +611,7 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     int fd = c->client_fd;
     aether_io_poller_remove(&d->poller, fd);
     ev_untrack(d, fd);
+    c->client_in_poller = 0;
     ev_timer_set(d, c, 0);
     c->client_fd = -1;           /* ev_conn_close must not close it now */
 
@@ -601,6 +639,7 @@ static int ev_expire(EvDriver* d, EvConn* c) {
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
+        c->up_in_poller = 0;
         http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
     }
     if (!c->res) return -1;
@@ -711,6 +750,7 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     int keep = c->x.complete && !c->x.framing.invalid;
     if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
+    c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
     http_upstream_release(&c->up, keep);
 
@@ -741,7 +781,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             continue;
         }
         case EV_UPSTREAM_DIAL: {
-            if (http_upstream_connected(&c->up) != 0) return -1;
+            int done = http_upstream_connected(&c->up);
+            if (done < 0) return -1;
+            if (done == 0) return 0;   /* woken for something else; keep waiting */
             c->state = EV_UPSTREAM_SEND;
             continue;
         }
@@ -873,6 +915,7 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     d->wake_r = d->wake_w = -1;
 
     if (aether_io_poller_init(&d->poller) != 0) return -1;
+    d->edge_triggered = aether_io_poller_edge_capable();
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {

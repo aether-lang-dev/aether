@@ -13,6 +13,19 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A proxied connection no longer trusts that a wakeup means the descriptor
+  it was waiting for is ready.** `http_upstream_connected` decided whether a
+  connect had finished from `SO_ERROR` alone, which is 0 both for a connect
+  that completed and for one still in flight. Any wakeup while a connect was
+  outstanding was therefore read as the connect finishing, and the request was
+  written into a socket with no peer, failing with `ENOTCONN` and looking like
+  the upstream refusing it.
+
+  Both epoll and kqueue are allowed to report readiness spuriously, and a
+  connection has two descriptors that wake the same state machine, so the
+  assumption was never sound. The check now confirms the socket has a peer,
+  and the caller waits again when it has not.
+
 - **Thread pools are sized by the CPUs the process may use, not the CPUs the
   machine has.** `sysconf(_SC_NPROCESSORS_ONLN)` reports the host's CPU count
   whatever the process is allowed to run on, so a cpuset (`taskset`, `docker
@@ -28,6 +41,18 @@ version number before tagging the release.
   path.
 
 ### Changed
+
+- **Write interest is registered once instead of being added and dropped
+  around every blocking write.** On an edge-triggered backend `EPOLLOUT` and
+  `EV_CLEAR` report the transition to writable rather than the state, so an
+  idle writable descriptor wakes nothing and the interest costs nothing to
+  leave in place. It used to be added when a write blocked and removed when it
+  drained, a pair of `epoll_ctl` calls per blocked write, and the profile put
+  `do_epoll_ctl` at 1.7% of the driver's time.
+
+  A backend that cannot honour edge triggering keeps the old behaviour, since
+  there a writable descriptor is ready on every wait; the poller now says
+  which it is rather than the driver assuming.
 
 - **A response is serialised into a buffer the connection keeps.** Every
   response allocated a buffer and freed it a moment later, and wrote each
