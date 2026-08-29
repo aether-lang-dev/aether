@@ -25,8 +25,6 @@ version number before tagging the release.
   enough would start refusing allocations that the machine had memory for,
   and nothing about the symptom would point back at retries.
 
-## [0.604.0]
-
 ### Changed
 
 - **A proxied response is answered from the upstream's own bytes.** The path
@@ -75,6 +73,7 @@ version number before tagging the release.
   from. The header is now emitted from the body being sent, in the upstream's
   position so the order still matches.
 
+## [0.604.0]
 
 ### Changed
 
