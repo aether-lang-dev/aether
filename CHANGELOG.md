@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.602.0]
+
 ### Added
 
 - **`ae version doctor`, which checks the install by compiling something.**
