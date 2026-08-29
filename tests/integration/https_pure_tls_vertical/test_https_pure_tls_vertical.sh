@@ -44,6 +44,12 @@ fail() { echo "  [FAIL] $1"; exit 1; }
 # A self-signed cert for 127.0.0.1. The client authenticates the server for
 # real -- chain, validity and hostname -- so the cert has to carry an IP SAN
 # and be handed to the client as its trust anchor.
+# MSYS2_ARG_CONV_EXCL: on MSYS2 the shell rewrites any argument that looks
+# like a POSIX path, so `-subj "/CN=127.0.0.1"` reaches openssl as
+# "D:/a/_temp/msys64/CN=127.0.0.1" and it refuses the subject. The variable is
+# inert everywhere else -- verified on Linux, where the subject and both SANs
+# come out identical with and without it.
+MSYS2_ARG_CONV_EXCL='*' \
 openssl req -x509 -newkey rsa:2048 -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
     -days 2 -nodes -subj "/CN=127.0.0.1" \
     -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" >"$TMP/ssl.log" 2>&1 \
