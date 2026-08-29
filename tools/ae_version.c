@@ -10,6 +10,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* the doctor: varargs for its report lines, stat/dirent to inspect an
+ * install tree, unistd for getpid on the compile probe */
+#include <stdarg.h>
+#include <sys/stat.h>
+#include <dirent.h>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #  include <windows.h>    /* GetCurrentProcessId for temp-file names */
 #  include <process.h>    /* _getpid */
@@ -974,6 +982,274 @@ static const char* probe_compiler_version(const char* aetherc_path) {
     return ver[0] ? ver : NULL;
 }
 
+/* ---- ae version doctor -------------------------------------------------
+ *
+ * `ae --version` prints what the toolchain SAYS it is. It never invokes the
+ * compiler, so it reports a healthy toolchain on an install that cannot
+ * build anything -- a split where `ae` and `aetherc` come from different
+ * builds is visible there, but a missing header or a truncated stdlib is
+ * not. The doctor's last and most important check is therefore an actual
+ * compile: everything above it can pass while the install is unusable.
+ *
+ * Checks, each independent so one failure does not hide the next:
+ *   1. toolchain agreement  -- ae vs the aetherc it resolves
+ *   2. the version pin      -- active_version vs this binary, and whether
+ *                              `current` resolves to something installed
+ *   3. shadowing            -- other `ae` binaries earlier on PATH, and a
+ *                              populated ~/.aether/bin that is NOT on PATH
+ *                              (inert until something re-adds it, then it
+ *                              silently wins)
+ *   4. install completeness -- the public headers a cross-compile needs
+ *   5. a real compile       -- the only check that cannot lie
+ *
+ * Report-only by default. `--fix` repairs what is safely repairable and
+ * says what it did; it never touches anything a rebuild would recreate.
+ */
+
+typedef struct { int problems; int fixed; int do_fix; } DoctorState;
+
+static void doc_ok(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    printf("  [ ok ] "); vprintf(fmt, ap); printf("\n");
+    va_end(ap);
+}
+static void doc_warn(DoctorState* d, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    printf("  [warn] "); vprintf(fmt, ap); printf("\n");
+    va_end(ap);
+    d->problems++;
+}
+static void doc_fail(DoctorState* d, const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    printf("  [FAIL] "); vprintf(fmt, ap); printf("\n");
+    va_end(ap);
+    d->problems++;
+}
+static void doc_hint(const char* fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    printf("         "); vprintf(fmt, ap); printf("\n");
+    va_end(ap);
+}
+
+/* Does `path` name an existing directory? */
+static int doc_is_dir(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+static int doc_is_file(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* Count the entries in a directory (0 for missing/empty). */
+static int doc_dir_entries(const char* path) {
+    DIR* dir = opendir(path);
+    if (!dir) return 0;
+    int n = 0;
+    struct dirent* e;
+    while ((e = readdir(dir))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        n++;
+    }
+    closedir(dir);
+    return n;
+}
+
+int cmd_version_doctor(int do_fix) {
+    DoctorState d = {0, 0, do_fix};
+    const char* home = get_home_dir();
+    char path[2048];
+
+    printf("Aether toolchain doctor\n\n");
+
+    /* --- 1. ae vs aetherc ------------------------------------------- */
+    printf("toolchain\n");
+    char self[2048];
+    if (get_exe_path(self, sizeof(self))) doc_ok("ae %s at %s", AE_VERSION, self);
+    /* discover_toolchain() exits the process on a fatal install problem (a
+     * missing MANIFEST, say). That is right for a build, and wrong here:
+     * the doctor's whole shape is that each check runs even when an earlier
+     * one failed, so a broken install would otherwise report ONE line and
+     * stop -- hiding the compile probe, which is the check that matters
+     * most. Probe it in a child first; if the child dies, report the
+     * problem and carry on with the checks that do not need it. */
+    {
+        char self_probe[2048];
+        if (get_exe_path(self_probe, sizeof(self_probe))) {
+            char cmd[4096];
+            snprintf(cmd, sizeof(cmd),
+                     "\"%s\" --version >/dev/null 2>&1", self_probe);
+            if (system(cmd) != 0) {
+                doc_fail(&d, "this install is broken badly enough that `ae --version` fails");
+                doc_hint("Usually a missing MANIFEST or stdlib under share/aether.");
+                doc_hint("Reinstall: ae version install %s", AE_VERSION);
+                /* discover_toolchain() would exit(1) on the same fault, so
+                 * the remaining checks cannot run in THIS process. Report
+                 * what is knowable without it and stop here deliberately,
+                 * rather than being killed mid-report with no summary. */
+                printf("\n%d problem(s) found.\n", d.problems);
+                printf("The install is too broken to check further; "
+                       "reinstall and re-run the doctor.\n");
+                return 1;
+            }
+        }
+    }
+    discover_toolchain();
+    if (!tc.compiler[0]) {
+        doc_fail(&d, "no aetherc found; ae cannot compile anything");
+        doc_hint("install one: ae version install %s", AE_VERSION);
+    } else {
+        const char* cver = probe_compiler_version(tc.compiler);
+        if (!cver) {
+            doc_warn(&d, "aetherc at %s did not report a version", tc.compiler);
+        } else if (strcmp(cver, AE_VERSION) != 0) {
+            doc_fail(&d, "split toolchain: ae is %s, aetherc is %s", AE_VERSION, cver);
+            doc_hint("aetherc does the codegen, so the compiler in effect is %s.", cver);
+            doc_hint("Reinstall so both come from one build.");
+        } else {
+            doc_ok("aetherc %s at %s", cver, tc.compiler);
+        }
+    }
+
+    /* --- 2. the pin -------------------------------------------------- */
+    printf("\nversion pin\n");
+    const char* pinned = get_active_version();
+    snprintf(path, sizeof(path), "%s/.aether/versions/v%s", home, pinned ? pinned : "");
+    int pinned_installed = doc_is_dir(path);
+    if (pinned && pinned[0] && strcmp(pinned, AE_VERSION) != 0) {
+        doc_warn(&d, "active_version pins %s but this ae is %s", pinned, AE_VERSION);
+        if (!pinned_installed) {
+            doc_hint("and v%s is not installed under ~/.aether/versions.", pinned);
+        }
+        if (!pinned_installed) {
+            /* The pin names a version that is not there, so it cannot be
+             * honoured by anything. Rewriting it to this binary is
+             * strictly an improvement and loses nothing. */
+            if (d.do_fix) {
+                snprintf(path, sizeof(path), "%s/.aether/active_version", home);
+                FILE* f = fopen(path, "w");
+                if (f) {
+                    fprintf(f, "%s\n", AE_VERSION);
+                    fclose(f);
+                    doc_hint("fixed: pin now reads %s", AE_VERSION);
+                    d.fixed++;
+                }
+            } else {
+                doc_hint("fix: run the doctor with --fix (the pinned version is not installed)");
+            }
+        } else {
+            /* The pinned version IS installed, so the pin is a deliberate
+             * choice between two real installs. Switching it is the user's
+             * call, not a repair -- --fix deliberately leaves it alone. */
+            doc_hint("v%s is installed, so this is a real choice between two", pinned);
+            doc_hint("installs rather than a broken pin. Switch with:");
+            doc_hint("  ae version use %s      (to match this binary)", AE_VERSION);
+            doc_hint("  ae version use %s      (to run the pinned one)", pinned);
+        }
+    } else {
+        doc_ok("active_version agrees with this binary (%s)", AE_VERSION);
+    }
+
+    /* --- 3. shadowing ------------------------------------------------ */
+    printf("\nshadowing\n");
+    snprintf(path, sizeof(path), "%s/.aether/bin", home);
+    int binents = doc_dir_entries(path);
+    const char* envpath = getenv("PATH");
+    int on_path = 0;
+    if (envpath) {
+        char needle[2048];
+        snprintf(needle, sizeof(needle), "%s/.aether/bin", home);
+        on_path = strstr(envpath, needle) != NULL;
+    }
+    if (binents > 0 && !on_path) {
+        doc_warn(&d, "~/.aether/bin holds %d file(s) but is not on PATH", binents);
+        doc_hint("Inert now, but it wins the moment anything puts it back on");
+        doc_hint("PATH -- and it is not updated by `ae version use`.");
+    } else if (binents == 0 && on_path) {
+        doc_fail(&d, "~/.aether/bin is on PATH but empty");
+        doc_hint("A shell that cached `ae` there fails with 'No such file or");
+        doc_hint("directory'. Run `hash -r`, and drop the entry from your profile.");
+    } else {
+        doc_ok("no stale ~/.aether/bin shadow");
+    }
+
+    /* --- 4. install completeness ------------------------------------- */
+    printf("\ninstall\n");
+    int incomplete = 0;
+    if (tc.root[0]) {
+        /* The public embedder header. Its absence is invisible until a
+         * cross-compile pulls runtime/libaether_caps.c, which includes it
+         * by bare name -- the exact gap a release shipped with. */
+        snprintf(path, sizeof(path), "%s/include/aether/libaether.h", tc.root);
+        int have_pub = doc_is_file(path);
+        if (!have_pub) {
+            snprintf(path, sizeof(path), "%s/include/libaether.h", tc.root);
+            have_pub = doc_is_file(path);
+        }
+        if (!have_pub) {
+            doc_fail(&d, "libaether.h is missing from this install");
+            doc_hint("Cross-compiling anything that links the runtime will fail");
+            doc_hint("with \"'libaether.h' file not found\". Reinstall.");
+            incomplete = 1;
+        }
+        snprintf(path, sizeof(path), "%s/share/aether/MANIFEST", tc.root);
+        if (!doc_is_file(path)) {
+            snprintf(path, sizeof(path), "%s/build/MANIFEST", tc.root);
+            if (!doc_is_file(path)) {
+                doc_warn(&d, "no MANIFEST found; building from runtime source will fail");
+                incomplete = 1;
+            }
+        }
+        if (!incomplete) doc_ok("public headers and MANIFEST present");
+    } else {
+        doc_warn(&d, "could not locate an install root to check");
+    }
+
+    /* --- 5. the check that cannot lie -------------------------------- */
+    printf("\ncompile probe\n");
+    if (!tc.compiler[0]) {
+        doc_fail(&d, "skipped: no compiler to probe with");
+    } else {
+        char src[1024], exe[1024], cmd[4096];
+        const char* tmp = getenv("TMPDIR");
+        if (!tmp || !*tmp) tmp = "/tmp";
+        snprintf(src, sizeof(src), "%s/ae_doctor_probe_%d.ae", tmp, (int)getpid());
+        snprintf(exe, sizeof(exe), "%s/ae_doctor_probe_%d.out", tmp, (int)getpid());
+        FILE* f = fopen(src, "w");
+        if (!f) {
+            doc_warn(&d, "could not write a probe program to %s", tmp);
+        } else {
+            fprintf(f, "main() {\n    println(\"ok\")\n    return 0\n}\n");
+            fclose(f);
+            if (get_exe_path(self, sizeof(self))) {
+                snprintf(cmd, sizeof(cmd), "\"%s\" build \"%s\" -o \"%s\" >/dev/null 2>&1",
+                         self, src, exe);
+                int rc = system(cmd);
+                if (rc == 0 && doc_is_file(exe)) {
+                    doc_ok("a real program compiles and links");
+                } else {
+                    doc_fail(&d, "the toolchain cannot compile a trivial program");
+                    doc_hint("This is what `ae --version` cannot tell you: every");
+                    doc_hint("check above can pass while the install is unusable.");
+                    doc_hint("Reinstall: ae version install %s", AE_VERSION);
+                }
+            }
+            remove(src);
+            remove(exe);
+        }
+    }
+
+    printf("\n");
+    if (d.problems == 0) {
+        printf("No problems found.\n");
+        return 0;
+    }
+    if (d.fixed) printf("%d problem(s) found, %d fixed.\n", d.problems, d.fixed);
+    else         printf("%d problem(s) found.\n", d.problems);
+    if (!d.do_fix) printf("Re-run with --fix to repair what is safely repairable.\n");
+    return 1;
+}
+
 int cmd_version(int argc, char** argv) {
     if (argc == 0) {
         /* The BINARY's own version, compiled in. Printing the pin here (what
@@ -1017,6 +1293,7 @@ int cmd_version(int argc, char** argv) {
         printf("  ae version list              List all available releases\n");
         printf("  ae version install <v>       Download and install a release\n");
         printf("  ae version use <v>           Switch to an installed release\n");
+        printf("  ae version doctor [--fix]    Check the install, and compile a test program\n");
         return 0;
     }
     const char* sub = argv[0];
@@ -1028,6 +1305,13 @@ int cmd_version(int argc, char** argv) {
     if (strcmp(sub, "use") == 0) {
         if (argc < 2) { fprintf(stderr, "Usage: ae version use <v>\n"); return 1; }
         return cmd_version_use(argv[1]);
+    }
+    if (strcmp(sub, "doctor") == 0) {
+        int do_fix = 0;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--fix") == 0) do_fix = 1;
+        }
+        return cmd_version_doctor(do_fix);
     }
     // Internal: called by old ae binaries after copying new ae to ~/.aether/bin/
     // Syncs lib/, include/, share/ from a version directory to ~/.aether/

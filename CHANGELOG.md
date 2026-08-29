@@ -13,6 +13,40 @@ version number before tagging the release.
 
 ### Added
 
+- **`ae version doctor`, which checks the install by compiling something.**
+  `ae --version` prints what the toolchain says it is and never invokes the
+  compiler, so it reports a healthy install that cannot build anything —
+  a missing header or a truncated stdlib is invisible to it. The doctor
+  runs the string comparisons too, but its last and most important check is
+  an actual compile, because everything above it can pass while the install
+  is unusable.
+
+  It reports a split toolchain, a version pin that disagrees with the
+  binary, a stale `~/.aether/bin` that shadows the real install (or is on
+  `PATH` while empty, which is what makes a shell say "No such file or
+  directory" for a tool that is installed), and public headers missing from
+  an install — the gap that shipped in a release and only showed when
+  someone cross-compiled something real.
+
+  `--fix` repairs what is safely repairable and says what it did. It
+  deliberately will not rewrite a pin whose version IS installed: that is a
+  choice between two real installs rather than a fault.
+
+### Fixed
+
+- **Installing no longer writes through hardlinks.** `make install` copied
+  `runtime`, `std`, `include` and `contrib` over any existing install with
+  `cp -R`, and `cp` opens an existing destination with `O_TRUNC` and writes
+  *through* it. Anything sharing those inodes — a deduplicated version store
+  (#1783), or a user's own linking — had every peer silently rewritten by a
+  reinstall, corrupting other installed versions with no error. Each
+  destination is now removed before the copy, which is what `install -m`
+  already did and what `cp --remove-destination` would do if it were
+  portable. Verified by hardlinking a staged install and reinstalling over
+  it: the peer is untouched and the link count drops to one.
+
+### Added
+
 - **The FreeBSD cross sysroot ships as a release asset.** Every other target
   in the matrix cross-builds from a fetched release, because zig bundles what
   they need. FreeBSD does not: a cross-link wants FreeBSD's own base
