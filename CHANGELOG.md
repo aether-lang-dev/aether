@@ -11,6 +11,183 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Mounting a reverse proxy sizes the connection pool for a proxy.** The
+  pool's caps were a client library's: 8 idle connections per host, 64 in
+  total. A client fetching pages wants that, because holding more would waste
+  descriptors it will never use. A proxy is the opposite case, since every
+  request in flight holds one upstream connection and returns it on
+  completion, so serving 50 concurrent requests needs about 50 of them. Every
+  connection past the eighth to a backend was therefore closed on release and
+  dialled again for the next request.
+
+  None of this was visible as CPU in a profile, which is why three earlier
+  passes over this path missed it. It was visible in TCP counters:
+  **5.61 segments per request against nginx's 4.02**, 4.33 data segments where
+  4.00 is the minimum, 0.67 pure acknowledgements, and a **TIME_WAIT socket
+  created every sixth request** where nginx creates none. Each replacement
+  connection pays a handshake and a shutdown carrying no HTTP at all, and the
+  kernel pays full TCP processing for every one of those segments. That is
+  what made the kernel half of a request cost about twice nginx's while making
+  slightly *fewer* system calls and sending *fewer* bytes.
+
+  With the pool sized for the job, this path sends **4.01 segments per
+  request** and creates no TIME_WAIT sockets, which is nginx's behaviour
+  exactly.
+
+  The size comes from the process's descriptor budget rather than a constant,
+  because descriptors are the resource being spent and the right number
+  differs between a container with 256 and a tuned host with far more. Caps
+  are only ever raised, so a deliberate configuration is preserved.
+
+- **An accepted connection asks for TCP_NODELAY.** The upstream socket the
+  proxy dials has had it since it was first written; the connection accepted
+  from the client never did. Nagle then held the response back until the
+  client acknowledged what was already in flight, and the client, with nothing
+  of its own to send, only acknowledged when its delayed-ACK timer said so.
+  Each direction gained a standalone acknowledgement carrying no data, and the
+  kernel pays full TCP receive processing for every segment.
+
+  Found by counting segments rather than by reading the code: a proxied
+  request needs four, nginx sends **4.02**, and this path was sending
+  **5.94**. That is why the kernel half of a request cost roughly twice
+  nginx's while making slightly *fewer* system calls and sending *fewer*
+  bytes. With TCP_NODELAY it is **5.61**, so Nagle was part of it and about
+  1.6 segments per request remain unexplained.
+
+  CPU per request 18.1 to 17.9 microseconds by the least-contended round,
+  better in four of six rank-matched rounds. A small number for a real cause:
+  the segment count is the measurement that moved, and it is the one to keep
+  watching.
+
+- **A proxied connection no longer trusts that a wakeup means the descriptor
+  it was waiting for is ready.** `http_upstream_connected` decided whether a
+  connect had finished from `SO_ERROR` alone, which is 0 both for a connect
+  that completed and for one still in flight. Any wakeup while a connect was
+  outstanding was therefore read as the connect finishing, and the request was
+  written into a socket with no peer, failing with `ENOTCONN` and looking like
+  the upstream refusing it.
+
+  Both epoll and kqueue are allowed to report readiness spuriously, and a
+  connection has two descriptors that wake the same state machine, so the
+  assumption was never sound. The check now confirms the socket has a peer,
+  and the caller waits again when it has not.
+
+- **Thread pools are sized by the CPUs the process may use, not the CPUs the
+  machine has.** `sysconf(_SC_NPROCESSORS_ONLN)` reports the host's CPU count
+  whatever the process is allowed to run on, so a cpuset (`taskset`, `docker
+  --cpuset-cpus`, a pinned Kubernetes pod) or a CFS quota (`docker --cpus`, a
+  Kubernetes CPU limit) left every pool oversized: on a 64-CPU host with a
+  2-CPU limit, 64 threads contending for 2. The proxy driver, the accept
+  threads, the connection pool and the worker pool all sized themselves this
+  way, each with its own copy of the probe.
+
+  They now share one header-only helper that reads the process's CPU affinity
+  and clamps it by the cgroup v2 or v1 CPU quota. Threads that would have been
+  preempted are simply never started, so the scheduler time leaves the request
+  path.
+
+### Changed
+
+- **Releasing a pooled connection no longer walks the pool.** The per-key cap
+  was recomputed by comparing the key against every idle entry, which was
+  cheap while a host could hold only eight and stopped being cheap once the
+  pool was sized for a proxy: `strcmp` became the largest single userspace
+  cost on the path at 1.9% of the profile. The count cannot bind when the
+  per-key cap is at or above the global cap, because the entries sharing a key
+  are a subset of the pool, so that case skips the walk. A client, which keeps
+  the two caps apart, still walks and breaks at the cap exactly as before.
+
+- **Copying an upstream response's headers no longer allocates per header.**
+  Each one was copied into a fresh allocation purely to NUL-terminate its
+  value for the setter, so a response with a dozen headers cost a dozen
+  mallocs and frees; `cfree` was 1.2% of the driver's profile. Values now go
+  into a small buffer on the stack, and only an outsized one takes an
+  allocation. The end of each header line is found with `strchr` for the
+  carriage return rather than `strstr` for the pair, which pays a two-byte
+  needle's setup once per header of every proxied response.
+
+  **CPU per request 18.5 to 18.0 microseconds** by the least-contended round.
+  The median moved further but the controls moved more than that, so the
+  least-contended round is the figure quoted.
+
+- **Write interest is registered once instead of being added and dropped
+  around every blocking write.** On an edge-triggered backend `EPOLLOUT` and
+  `EV_CLEAR` report the transition to writable rather than the state, so an
+  idle writable descriptor wakes nothing and the interest costs nothing to
+  leave in place. It used to be added when a write blocked and removed when it
+  drained, a pair of `epoll_ctl` calls per blocked write, and the profile put
+  `do_epoll_ctl` at 1.7% of the driver's time.
+
+  A backend that cannot honour edge triggering keeps the old behaviour, since
+  there a writable descriptor is ready on every wait; the poller now says
+  which it is rather than the driver assuming.
+
+  Measured against the previous commit, the effect on CPU per request was
+  **within the noise**: rank-matched across six rounds it was better in one
+  and worse in another. It is kept because it removes work that is provably
+  there and costs nothing, not because the benchmark could see it. What the
+  change did do is expose the connect-completion bug above, by giving the
+  client descriptor a wakeup it had never had before.
+
+- **A response is serialised into a buffer the connection keeps.** Every
+  response allocated a buffer and freed it a moment later, and wrote each
+  header with `snprintf` after measuring it with `strlen`. The buffer now
+  belongs to the connection and is only grown, and the headers are copied with
+  the lengths already computed for the sizing pass.
+
+  Sizing the status line from a fixed headroom rather than from its parts also
+  truncated any status text longer than the guess, which took the headers and
+  the body with it; it is now sized from the text.
+
+- **The end of a request's headers is found once.** The driver searched the
+  whole buffer for the terminator on every read, so a request arriving in
+  pieces rescanned everything already read, and it searched again for a request
+  whose headers were complete but whose body was still arriving.
+
+- **Hop-by-hop header matching compares lengths before strings.** Deciding
+  whether to forward a header ran up to nine `strcasecmp` calls against it, and
+  `__strcasecmp` was the largest single entry in the proxy's userspace profile.
+  The table now carries each name's length and first letter, which rules out
+  almost every candidate arithmetically.
+
+- **A proxied request builds its outbound headers in an arena.** Traced with
+  `perf -e page-faults`, `http_request_set_header_raw` was the largest
+  identifiable source of page faults on the proxy path, with the request
+  object behind it: one allocation per forwarded header, freed a moment later,
+  churning memory back to the kernel and taking it again. Two earlier attempts
+  at the fault count aimed at the inbound side and moved it not at all, which
+  is what sent this one to the trace instead.
+
+  The outbound request's lifetime is exactly one request, so a connection owns
+  a small arena and the headers are bump-allocated from it and released by
+  resetting an offset. A request that is not arena-backed still uses the
+  ordinary allocator, so nothing else changes.
+
+  **Page faults per request 0.13 to 0.05**, CPU per request 21.4 to 19.3
+  microseconds by the least-contended round, and 34.0 to 20.4 by the median.
+
+### Testing
+
+- Two instruments added to the load-balancer bench. `split.sh` reports CPU per
+  request split into user and kernel for every subject, which is what showed
+  the gap was mostly kernel-side; it reads utime and stime from `/proc`
+  because a virtual machine usually exposes no hardware counter, and cycles
+  read `<not supported>` on the one this was written on. `threads.sh` reports
+  CPU per thread, because `/proc` sums every thread of a process and a server
+  with background threads would otherwise charge their cost to a request.
+
+- A response header value too long for that stack buffer is covered, so the
+  path that falls back to the heap is exercised rather than assumed. Against a
+  build that truncates instead, the test reports 511 bytes where 1000 were
+  sent.
+
+- A proxied request split across several writes, with the header terminator
+  itself cut in half and the body arriving last, is now covered. The existing
+  suite passed in full against a driver that hung forever on exactly that.
+
+
 ## [0.599.0]
 
 ### Fixed

@@ -30,6 +30,8 @@
 #include "../../runtime/scheduler/aether_io_poller.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -57,9 +59,19 @@ typedef struct EvConn {
 
     char*    in;            /* request bytes from the client */
     size_t   in_len, in_cap;
+    size_t   in_scanned;    /* how much of `in` has been searched for the
+                             * end of the headers; a read that arrives in
+                             * pieces would otherwise rescan from the start
+                             * every time */
+    int      client_in_poller, up_in_poller;
+    size_t   in_hdr_end;    /* offset just past the header terminator, once
+                             * found. Kept because a request whose body is
+                             * still arriving is asked again, and resuming the
+                             * search would then look past the terminator and
+                             * never find it. 0 means not found yet */
 
     char*    out;           /* response bytes owed to the client */
-    size_t   out_len, out_sent;
+    size_t   out_len, out_sent, out_cap;
 
     HttpUpstreamConn up;
     HttpExchange     x;
@@ -77,6 +89,13 @@ typedef struct EvConn {
      * entry in the profile. A connection owns its buffer for its life. */
     char*    rxbuf;
     size_t   rxcap;
+
+    /* Where the outbound request's headers are built. One request's worth of
+     * small allocations, released by resetting an offset rather than by a
+     * free per header: building them was the largest identifiable source of
+     * page faults on this path. */
+    HttpArena arena;
+    int       arena_ready;
     int      heap_pos;           /* where this sits in its driver's heap, -1 out */
 
     HttpRequest*        req;     /* the parsed client request */
@@ -97,6 +116,7 @@ typedef struct {
     int            index;
     pthread_t      thread;
     AetherIoPoller poller;
+    int            edge_triggered;   /* backend honours AETHER_IO_EDGE */
     EvConn**       by_fd;        /* descriptor -> the connection using it */
     int            by_fd_cap;
     int            wake_r;       /* a submitted descriptor arrives here */
@@ -120,6 +140,23 @@ struct HttpEvLoop {
 };
 
 static int ev_timer_set(EvDriver* d, EvConn* c, long deadline_ms);
+
+/* Nagle holds a small write back until the peer acknowledges what is already
+ * in flight. On a proxied connection the response is one such write, and the
+ * peer, having nothing to send, only acknowledges when its delayed-ACK timer
+ * says so. The two together add a standalone acknowledgement in each
+ * direction that carries no data, and the kernel pays full TCP receive
+ * processing for each: measured at 5.94 segments per request against nginx's
+ * 4.02, which is the number a proxied request needs.
+ *
+ * The upstream socket has had this since it was first dialled; the accepted
+ * one never did. */
+static void ev_set_nodelay(int fd) {
+#if defined(TCP_NODELAY)
+    int on = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (const void*)&on, sizeof(on));
+#endif
+}
 
 static void ev_set_nonblocking(int fd) {
 #ifdef _WIN32
@@ -157,6 +194,8 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
  * the size they were charged at. */
 static void ev_conn_reset_request(EvConn* c) {
     c->in_len = 0;
+    c->in_scanned = 0;
+    c->in_hdr_end = 0;
 
     if (c->head) aether_caps_free(c->head, c->head_cap);
     c->head = NULL;
@@ -171,8 +210,8 @@ static void ev_conn_reset_request(EvConn* c) {
     }
     memset(&c->x, 0, sizeof(c->x));
 
-    free(c->out);
-    c->out = NULL;
+    /* The buffer stays with the connection and is only grown; a connection
+     * serving many requests stops allocating and freeing one per request. */
     c->out_len = c->out_sent = 0;
 
     /* The request and the response objects stay with the connection. Each
@@ -210,11 +249,13 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
+        c->up_in_poller = 0;
         http_upstream_release(&c->up, 0);
     }
     if (c->client_fd >= 0) {
         aether_io_poller_remove(&d->poller, c->client_fd);
         ev_untrack(d, c->client_fd);
+        c->client_in_poller = 0;
         close(c->client_fd);
     }
     ev_timer_set(d, c, 0);
@@ -222,6 +263,8 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->req) http_request_free(c->req);
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+    if (c->arena_ready) http_arena_free(&c->arena);
+    free(c->out);
     free(c->in);
     free(c);
     atomic_fetch_sub(&d->loop->active, 1);
@@ -237,10 +280,23 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
 static int ev_request_complete(EvConn* c, size_t* out_total) {
     if (c->in_len == 0) return 0;
     c->in[c->in_len] = '\0';
-    char* hdr_end = strstr(c->in, "\r\n\r\n");
-    if (!hdr_end) return 0;
 
-    size_t header_bytes = (size_t)((hdr_end + 4) - c->in);
+    /* Find the end of the headers once. The search resumes where the last
+     * one stopped, backing up three bytes so a terminator split across two
+     * reads is still found; without that every read rescans everything read
+     * so far. Once found the offset is kept, because a request whose body is
+     * still arriving comes back here and a resumed search would look past
+     * the terminator. */
+    if (!c->in_hdr_end) {
+        size_t from = c->in_scanned > 3 ? c->in_scanned - 3 : 0;
+        char* found = strstr(c->in + from, "\r\n\r\n");
+        c->in_scanned = c->in_len;
+        if (!found) return 0;
+        c->in_hdr_end = (size_t)((found + 4) - c->in);
+    }
+
+    size_t header_bytes = c->in_hdr_end;
+    char* hdr_end = c->in + header_bytes - 4;
     char cl[64];
     int differing = 0;
     int count = http_find_header_in_block(c->in, hdr_end, "Content-Length",
@@ -360,20 +416,53 @@ static int  ev_advance(EvDriver* d, EvConn* c);
  * actually blocks and dropped once it drains, because a descriptor that is
  * writable almost always would otherwise wake a level-triggered backend
  * continuously for nothing. */
+/* Which of this connection's two descriptors the poller currently holds.
+ * Kept here rather than read off the callers' flags, which say what the
+ * exchange is waiting for and are set before the registration is attempted. */
+static void ev_mark_in_poller(EvConn* c, int fd, int in) {
+    if (fd == c->client_fd) c->client_in_poller = in;
+    else                    c->up_in_poller = in;
+}
+
+static int ev_in_poller(const EvConn* c, int fd) {
+    return fd == c->client_fd ? c->client_in_poller : c->up_in_poller;
+}
+
 static int ev_watch(EvDriver* d, int fd, EvConn* c) {
     if (ev_track(d, fd, c) != 0) return -1;
-    return aether_io_poller_add(&d->poller, fd, c,
-                                AETHER_IO_READ | AETHER_IO_EDGE);
+    ev_mark_in_poller(c, fd, 1);
+    /* On an edge-triggered backend, write interest costs nothing to leave in
+     * place: EPOLLOUT and EV_CLEAR report the transition to writable, not the
+     * state, so an idle writable descriptor never wakes anything. Registering
+     * it once here is what removes the pair of epoll_ctl calls a blocking
+     * write used to pay, which the profile put at 1.7% of the driver's time
+     * in do_epoll_ctl.
+     *
+     * A level-triggered backend must not carry it: there a writable
+     * descriptor is ready on every single wait. */
+    uint32_t events = AETHER_IO_READ | AETHER_IO_EDGE;
+    if (d->edge_triggered) events |= AETHER_IO_WRITE;
+    return aether_io_poller_add(&d->poller, fd, c, events);
 }
 
 static int ev_watch_writable(EvDriver* d, int fd, EvConn* c) {
+    /* On an edge-triggered backend ev_watch asked for write interest already,
+     * so a descriptor that is in the poller needs no call here. One that is
+     * not in it yet -- the upstream, before its first wait -- still does, and
+     * ev_watch gives it both interests at once. */
+    if (d->edge_triggered)
+        return ev_in_poller(c, fd) ? 0 : ev_watch(d, fd, c);
+
     if (ev_track(d, fd, c) != 0) return -1;
+    ev_mark_in_poller(c, fd, 1);
     return aether_io_poller_add(&d->poller, fd, c,
                                 AETHER_IO_READ | AETHER_IO_WRITE | AETHER_IO_EDGE);
 }
 
-/* Back to watching for readable only, now that the write has drained. */
+/* Back to watching for readable only, now that the write has drained. On an
+ * edge-triggered backend there is nothing to undo. */
 static int ev_unwatch_writable(EvDriver* d, int fd, EvConn* c) {
+    if (d->edge_triggered) return 0;
     return ev_watch(d, fd, c);
 }
 
@@ -479,10 +568,8 @@ static int ev_step_upstream_recv(EvDriver* d, EvConn* c) {
 static int ev_respond_from(EvDriver* d, EvConn* c) {
     (void)d;
     size_t len = 0;
-    char* bytes = http_response_serialize_len(c->res, &len);
-    if (!bytes) return -1;
-    free(c->out);
-    c->out = bytes;
+    if (!http_response_serialize_into(c->res, &c->out, &c->out_cap, &len))
+        return -1;
     c->out_len = len;
     c->out_sent = 0;
     c->state = EV_CLIENT_SEND;
@@ -543,6 +630,7 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     int fd = c->client_fd;
     aether_io_poller_remove(&d->poller, fd);
     ev_untrack(d, fd);
+    c->client_in_poller = 0;
     ev_timer_set(d, c, 0);
     c->client_fd = -1;           /* ev_conn_close must not close it now */
 
@@ -570,6 +658,7 @@ static int ev_expire(EvDriver* d, EvConn* c) {
     if (c->up.t.sockfd >= 0) {
         aether_io_poller_remove(&d->poller, c->up.t.sockfd);
         ev_untrack(d, c->up.t.sockfd);
+        c->up_in_poller = 0;
         http_upstream_release(&c->up, 0);   /* never pool a connection mid-answer */
     }
     if (!c->res) return -1;
@@ -598,6 +687,14 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     }
     if (!http_parse_request_into(c->req, c->in, c->in_len)) return -1;
 
+    if (!c->arena_ready) {
+        /* Sized for a request's headers with room to spare. An outlier that
+         * does not fit falls back to malloc for the part that overflows. */
+        c->arena_ready = http_arena_init(&c->arena, 8192) == 0;
+    } else {
+        http_arena_reset(&c->arena);
+    }
+
     if (!c->res) {
         c->res = http_response_create();
         if (!c->res) return -1;
@@ -606,7 +703,8 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
     }
 
     void* opts = http_server_proxy_opts(d->loop->server);
-    int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts);
+    int r = aether_proxy_exchange_begin(&c->px, c->req, c->res, opts,
+                                        c->arena_ready ? &c->arena : NULL);
     if (r == 1) {
         /* Not the proxy's request: a health endpoint, an admin route, or
          * anything another middleware answers. This driver knows one kind of
@@ -671,6 +769,7 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
     int keep = c->x.complete && !c->x.framing.invalid;
     if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
+    c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
     http_upstream_release(&c->up, keep);
 
@@ -701,7 +800,9 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             continue;
         }
         case EV_UPSTREAM_DIAL: {
-            if (http_upstream_connected(&c->up) != 0) return -1;
+            int done = http_upstream_connected(&c->up);
+            if (done < 0) return -1;
+            if (done == 0) return 0;   /* woken for something else; keep waiting */
             c->state = EV_UPSTREAM_SEND;
             continue;
         }
@@ -760,6 +861,7 @@ static void ev_take_submissions(EvDriver* d) {
         c->up.t.sockfd = -1;
         c->up.t.applied_timeout_ns = -1;
         ev_set_nonblocking(fd);
+        ev_set_nodelay(fd);
         atomic_fetch_add(&d->loop->active, 1);
 
         /* Watched once, for as long as this driver owns it. Every later wait
@@ -833,6 +935,7 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     d->wake_r = d->wake_w = -1;
 
     if (aether_io_poller_init(&d->poller) != 0) return -1;
+    d->edge_triggered = aether_io_poller_edge_capable();
 
     int pipefd[2];
     if (pipe(pipefd) != 0) {

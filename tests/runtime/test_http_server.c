@@ -366,3 +366,71 @@ TEST(http_server_middleware_chain) {
 
     http_server_free(server);
 }
+
+TEST(http_response_serialize_long_status_text) {
+    HttpServerResponse* resp = http_response_create();
+    ASSERT_NOT_NULL(resp);
+
+    /* Sizing the status line from a fixed headroom truncated a status text
+     * longer than the guess, and the response went out with a cut status
+     * line and no headers at all. */
+    const char* long_text =
+        "Unprocessable Entity With A Deliberately Very Long Reason Phrase Indeed";
+    free(resp->status_text);
+    resp->status_text = strdup(long_text);
+    ASSERT_NOT_NULL(resp->status_text);
+    resp->status_code = 422;
+    http_response_set_header(resp, "X-Probe", "kept");
+    http_response_set_body(resp, "body-here");
+
+    size_t len = 0;
+    char* raw = http_response_serialize_len(resp, &len);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_TRUE(strstr(raw, long_text) != NULL);
+    ASSERT_TRUE(strstr(raw, "X-Probe: kept") != NULL);
+    ASSERT_TRUE(strstr(raw, "body-here") != NULL);
+    ASSERT_EQ((int)strlen(raw), (int)len);
+
+    free(raw);
+    http_server_response_free(resp);
+}
+
+TEST(http_response_serialize_into_reuses_buffer) {
+    HttpServerResponse* resp = http_response_create();
+    ASSERT_NOT_NULL(resp);
+    http_response_set_status(resp, 200);
+    http_response_set_header(resp, "Content-Type", "text/plain");
+    http_response_set_body(resp, "0123456789012345678901234567890123456789");
+
+    char*  buf = NULL;
+    size_t cap = 0, len = 0;
+
+    ASSERT_NOT_NULL(http_response_serialize_into(resp, &buf, &cap, &len));
+    char*  first_buf = buf;
+    size_t first_cap = cap;
+    ASSERT_TRUE(first_cap > 0);
+    ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
+    ASSERT_EQ((int)strlen(buf), (int)len);
+
+    /* A smaller response reuses the same allocation rather than taking a new
+     * one: this is the whole point of the entry point. */
+    http_response_set_body(resp, "hi");
+    ASSERT_NOT_NULL(http_response_serialize_into(resp, &buf, &cap, &len));
+    ASSERT_TRUE(buf == first_buf);
+    ASSERT_EQ((int)first_cap, (int)cap);
+    ASSERT_EQ((int)strlen(buf), (int)len);
+    ASSERT_TRUE(strstr(buf, "\r\n\r\nhi") != NULL);
+
+    /* A bigger one grows it, and the content is still right. */
+    char big[4096];
+    memset(big, 'x', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    http_response_set_body(resp, big);
+    ASSERT_NOT_NULL(http_response_serialize_into(resp, &buf, &cap, &len));
+    ASSERT_TRUE(cap > first_cap);
+    ASSERT_EQ((int)strlen(buf), (int)len);
+    ASSERT_TRUE(strstr(buf, big) != NULL);
+
+    free(buf);
+    http_server_response_free(resp);
+}

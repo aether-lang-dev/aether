@@ -14,6 +14,7 @@
  * `done` closure — we never touch it. */
 #include "aether_worker.h"
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_cpu_available.h"
 
 #include <stdio.h>   /* the wait() poster diagnostic */
 #include <stdlib.h>
@@ -220,12 +221,7 @@ static void* worker_entry(void* arg) {
 /* ---- bounded pool (#1205) ---------------------------------------------- */
 
 static int default_pool_size(void) {
-#if defined(_WIN32)
-    int n = 4;
-#else
-    long n = sysconf(_SC_NPROCESSORS_ONLN);
-    if (n < 1) n = 4;
-#endif
+    int n = aether_cpu_available();
     if (n < 2)  n = 2;
     if (n > 32) n = 32;
     return (int)n;

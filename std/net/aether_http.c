@@ -46,6 +46,9 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
 #include <limits.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 #include <stdint.h>   /* INT64_MAX, for the pool expiry watermark */
 
 #ifdef _WIN32
@@ -508,7 +511,17 @@ static void http_pool_put(const char* key, Transport* t) {
      * stop at the cap instead of walking to the end -- and skip the walk
      * entirely when the global cap already rejects this connection. */
     int per_key = 0;
-    if (http_pool_count < http_pool_max_idle) {
+    /* The per-key cap cannot bind when it is at or above the global cap: the
+     * entries sharing a key are a subset of the pool, so their count is below
+     * the global cap already, and the test below would always be false. Under
+     * a proxy the two caps are equal, and skipping the walk there is what
+     * keeps this loop from growing with the pool: it compares a key against
+     * every entry, and sizing the pool for a proxy made it the largest single
+     * userspace cost on the path (strcmp, 1.9% of the profile).
+     *
+     * A client keeps the two caps apart and still walks, breaking early at
+     * the cap as before. */
+    if (http_pool_count < http_pool_max_idle && http_pool_max_per_key < http_pool_max_idle) {
         for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
             if (strcmp(e->key, key) == 0 && ++per_key >= http_pool_max_per_key)
                 break;
@@ -552,6 +565,60 @@ void http_client_pool_clear_raw(void) {
         free(c);
         c = next;
     }
+}
+
+/* Size the pool for a reverse proxy rather than for a client.
+ *
+ * The caps below are a client library's: a program fetching pages keeps a few
+ * connections per host and holding more would waste descriptors it will never
+ * use. A reverse proxy is the opposite. Every request in flight holds one
+ * upstream connection and returns it on completion, so a proxy serving N
+ * concurrent requests needs about N of them; with the client default of 8 per
+ * host, every connection past the eighth was closed on release and dialled
+ * again for the next request.
+ *
+ * That churn was not visible as CPU in any profile. It showed up as TCP
+ * segments: 5.61 per request against nginx's 4.02, with a TIME_WAIT socket
+ * created every sixth request, because each replacement connection pays a
+ * handshake and a shutdown that carry no HTTP at all.
+ *
+ * The size comes from the descriptor budget rather than a constant, because
+ * that is the resource being spent and it is what differs between a container
+ * with 256 descriptors and a tuned host with a million. A quarter of the
+ * budget leaves the rest for the connections being served. Caps are only ever
+ * raised: a caller who has configured the pool deliberately keeps its
+ * settings.
+ */
+/* The pool's current caps, for reporting and for tests that need to know
+ * whether mounting a proxy resized it. */
+void http_client_pool_caps_raw(int* max_idle, int* max_per_host) {
+    pthread_mutex_lock(http_pool_lock());
+    if (max_idle)     *max_idle = http_pool_max_idle;
+    if (max_per_host) *max_per_host = http_pool_max_per_key;
+    pthread_mutex_unlock(http_pool_lock());
+}
+
+void http_client_pool_size_for_proxy(void) {
+    int budget = 1024;
+#if !defined(_WIN32)
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur > 0) {
+        budget = (rl.rlim_cur > (rlim_t)INT_MAX) ? INT_MAX : (int)rl.rlim_cur;
+    }
+#endif
+    int want = budget / 4;
+    if (want < 64)   want = 64;
+    if (want > 1024) want = 1024;
+
+    pthread_mutex_lock(http_pool_lock());
+    if (http_pool_enabled) {
+        if (http_pool_max_idle < want)    http_pool_max_idle = want;
+        /* One backend may legitimately take the whole pool: a proxy with a
+         * single upstream is the ordinary case, and a per-host cap below the
+         * total would reintroduce exactly the churn this removes. */
+        if (http_pool_max_per_key < want) http_pool_max_per_key = want;
+    }
+    pthread_mutex_unlock(http_pool_lock());
 }
 
 /* Reconfigure the pool. `max_idle` 0 turns reuse off (and clears what is
@@ -771,12 +838,18 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
  * The pointers stay rather than being computed from the node, because every
  * reader is `h->name` / `h->value` and this keeps them working unchanged. */
 typedef struct HttpHeader {
+    /* Set when this node came from a request's arena, so freeing the request
+     * leaves it alone: the arena releases it wholesale. */
+    int arena_backed;
     char* name;
     char* value;
     struct HttpHeader* next;
 } HttpHeader;
 
 struct HttpClientRequest {
+    /* Optional. When set, header nodes are bump-allocated from it and freed
+     * by whoever owns it, not by http_request_free_raw. */
+    struct HttpArena* arena;
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
@@ -867,12 +940,59 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
     return req;
 }
 
+/* ---- the outbound-request arena ---- */
+
+int http_arena_init(HttpArena* a, size_t cap) {
+    if (!a) return -1;
+    a->block = (char*)malloc(cap);
+    if (!a->block) { a->cap = a->used = 0; a->overflowed = 0; return -1; }
+    a->cap = cap;
+    a->used = 0;
+    a->overflowed = 0;
+    return 0;
+}
+
+/* Bump, aligned for anything this allocates. Returns NULL when the request
+ * does not fit, and the caller falls back to malloc for that one: a header
+ * block larger than the arena is a request worth serving, not worth failing. */
+void* http_arena_alloc(HttpArena* a, size_t n) {
+    if (!a || !a->block) return NULL;
+    size_t aligned = (n + (sizeof(void*) - 1)) & ~(sizeof(void*) - 1);
+    if (a->used + aligned > a->cap) { a->overflowed = 1; return NULL; }
+    void* p = a->block + a->used;
+    a->used += aligned;
+    return p;
+}
+
+void http_arena_reset(HttpArena* a) {
+    if (!a) return;
+    a->used = 0;
+    a->overflowed = 0;
+}
+
+void http_arena_free(HttpArena* a) {
+    if (!a) return;
+    free(a->block);
+    a->block = NULL;
+    a->cap = a->used = 0;
+}
+
+void http_request_use_arena(HttpClientRequest* req, HttpArena* arena) {
+    if (req) req->arena = arena;
+}
+
 int http_request_set_header_raw(HttpClientRequest* req, const char* name, const char* value) {
     if (!req) return -1;
     if (!http_header_name_ok(name) || !http_header_value_ok(value)) return -1;
     size_t nl = strlen(name), vl = strlen(value);
-    HttpHeader* h = (HttpHeader*)malloc(sizeof(HttpHeader) + nl + 1 + vl + 1);
+    size_t need = sizeof(HttpHeader) + nl + 1 + vl + 1;
+    /* One allocation holds the node, the name and the value. From the arena
+     * when this request has one, which makes it a pointer bump. */
+    HttpHeader* h = req->arena ? (HttpHeader*)http_arena_alloc(req->arena, need) : NULL;
+    int from_arena = h != NULL;
+    if (!h) h = (HttpHeader*)malloc(need);
     if (!h) return -1;
+    h->arena_backed = from_arena;
     h->name = (char*)(h + 1);
     memcpy(h->name, name, nl + 1);
     h->value = h->name + nl + 1;
@@ -1047,7 +1167,10 @@ void http_request_free_raw(HttpClientRequest* req) {
     HttpHeader* h = req->headers;
     while (h) {
         HttpHeader* next = h->next;
-        free(h);          /* name and value live in this same block */
+        /* Arena-backed nodes are released by resetting the arena, which the
+         * caller that owns it does. Freeing one here would hand the allocator
+         * a pointer into the middle of a block it never gave out. */
+        if (!h->arena_backed) free(h);
         h = next;
     }
     req->headers = NULL;
@@ -2112,8 +2235,23 @@ int http_upstream_connected(HttpUpstreamConn* c) {
     if (getsockopt(c->t.sockfd, SOL_SOCKET, SO_ERROR, (char*)&err, &len) != 0)
         return -1;
     if (err != 0) return -1;
+
+    /* SO_ERROR is 0 for a connect that has finished and for one still in
+     * flight alike, so on its own it cannot tell them apart. A socket with no
+     * peer yet fails getpeername with ENOTCONN, which does.
+     *
+     * This matters because a caller is woken by a poller, and a poller may
+     * wake it for another descriptor, or for no reason at all: both epoll and
+     * kqueue are allowed to report spurious readiness. Reading any wakeup as
+     * "the connect finished" writes the request into a socket that has no
+     * peer, which fails with ENOTCONN and looks like the upstream refusing. */
+    struct sockaddr_storage peer;
+    socklen_t peerlen = sizeof(peer);
+    if (getpeername(c->t.sockfd, (struct sockaddr*)&peer, &peerlen) != 0)
+        return errno == ENOTCONN ? 0 : -1;
+
     c->connecting = 0;
-    return 0;
+    return 1;
 }
 
 /* Hand the connection back to the idle pool, or close it. A connection is

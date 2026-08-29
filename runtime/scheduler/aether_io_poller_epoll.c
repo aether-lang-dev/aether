@@ -41,6 +41,10 @@ int aether_io_poller_add(AetherIoPoller* poller, int fd, void* actor, uint32_t e
     return 0;
 }
 
+int aether_io_poller_edge_capable(void) {
+    return 1;   /* EPOLLET */
+}
+
 void aether_io_poller_remove(AetherIoPoller* poller, int fd) {
     if (poller->fd >= 0) {
         epoll_ctl(poller->fd, EPOLL_CTL_DEL, fd, NULL);
