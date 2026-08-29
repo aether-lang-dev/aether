@@ -514,7 +514,7 @@ client_hello_psk(random: ptr, session_id: ptr, sid_len: int, x25519_pub: ptr, ho
 // Returns a fresh bytes buffer holding the complete handshake message
 // (4-byte header + body); caller frees.
 server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
-             group: int, pubkey: ptr, pubkey_len: int) -> ptr {
+    group: int, pubkey: ptr, pubkey_len: int) -> ptr {
     buf = bytes.new(512)
     bytes.set(buf, 511, 0) // force full zero-fill
 
@@ -578,14 +578,14 @@ server_hello(random: ptr, session_id: ptr, sid_len: int, cipher_suite: int,
 // plenty we do not care about (ALPN, session_ticket, padding) and refusing an
 // unknown extension would fail handshakes that are perfectly valid.
 struct ChParsed {
-    random: ptr        // 32 bytes, fresh (caller frees) or null
-    session_id: ptr    // legacy_session_id, fresh (caller frees) or null
+    random: ptr // 32 bytes, fresh (caller frees) or null
+    session_id: ptr // legacy_session_id, fresh (caller frees) or null
     session_id_len: int
-    cipher_suite: int  // the first offered suite we support, else 0
-    group: int         // the key_share group we can complete, else 0
-    key_share: ptr     // the client's public for `group`, fresh, or null
+    cipher_suite: int // the first offered suite we support, else 0
+    group: int // the key_share group we can complete, else 0
+    key_share: ptr // the client's public for `group`, fresh, or null
     key_share_len: int
-    has_sni: int       // 1 if a server_name extension was present
+    has_sni: int // 1 if a server_name extension was present
     saw_supported_versions: int // 1 if the client offered TLS 1.3
 }
 

@@ -410,7 +410,7 @@ struct LeafCert {
     not_after: ptr // validity notAfter, raw time bytes or null
     not_after_len: int
     dns_names: ptr // std.list of dNSName BYTES buffers (SAN), or null
-    ip_addrs: ptr  // std.list of iPAddress SAN BYTES buffers (4 or 16 bytes), or null
+    ip_addrs: ptr // std.list of iPAddress SAN BYTES buffers (4 or 16 bytes), or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.

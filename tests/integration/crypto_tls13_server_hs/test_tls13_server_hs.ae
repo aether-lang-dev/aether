@@ -55,7 +55,7 @@ main() {
     sh = tls13_hs.server_hello(rnd, sid, 32, 0x1301, 0x001d, pub, 32)
     shn = bytes.length(sh)
     sp = ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null,
-                    key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
+        key_share_len: 0, is_hello_retry: 0, psk_accepted: 0 }
     serr = tls13_hs.parse_server_hello(sh, shn, &sp)
     if serr != "" {
         println("FAIL 1: parse_server_hello rejected our ServerHello: ${serr}")
@@ -90,8 +90,8 @@ main() {
     ch = tls13_hs.client_hello_sni(r2, s2, 32, p2, "example.com")
     chn = bytes.length(ch)
     c = ChParsed { random: null, session_id: null, session_id_len: 0,
-                   cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
-                   has_sni: 0, saw_supported_versions: 0 }
+        cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+        has_sni: 0, saw_supported_versions: 0 }
     cerr = tls13_hs.parse_client_hello(ch, chn, &c)
     if cerr != "" {
         println("FAIL 2: parse_client_hello rejected our own ClientHello: ${cerr}")
@@ -126,8 +126,8 @@ main() {
     real = from_hex("010000d80303a26f0f61fa6b6244e1548db0188f0fa57f107488d1c4713fcc9afe43ec1706b720482e35a004944c80913a161b0640236fe2187f0a1c5f44b5dfbfba42598a5c3b000813021303130100ff01000087000b000403000102000a00160014001d0017001e0019001801000101010201030104002300000016000000170000000d001e001c040305030603080708080809080a080b080408050806040105010601002b0003020304002d00020101003300260024001d0020d226a9273e4dfbbe7d79136fe6ca97d08bf5f3130def8ff16b6aa5f6b620bd4d")
     rn = bytes.length(real)
     rc = ChParsed { random: null, session_id: null, session_id_len: 0,
-                    cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
-                    has_sni: 0, saw_supported_versions: 0 }
+        cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+        has_sni: 0, saw_supported_versions: 0 }
     rerr = tls13_hs.parse_client_hello(real, rn, &rc)
     if rerr != "" {
         println("FAIL 3: rejected a real OpenSSL ClientHello: ${rerr}")
@@ -159,8 +159,8 @@ main() {
     // the shapes a hostile or broken peer actually sends.
     tiny = bytes.new(2)
     tc = ChParsed { random: null, session_id: null, session_id_len: 0, cipher_suite: 0,
-                    group: 0, key_share: null, key_share_len: 0, has_sni: 0,
-                    saw_supported_versions: 0 }
+        group: 0, key_share: null, key_share_len: 0, has_sni: 0,
+        saw_supported_versions: 0 }
     if tls13_hs.parse_client_hello(tiny, 2, &tc) == "" {
         println("FAIL 4: a 2-byte message was accepted as a ClientHello")
         fails = fails + 1

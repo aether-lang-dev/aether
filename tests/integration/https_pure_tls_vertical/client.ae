@@ -19,7 +19,7 @@ import std.os
 extern exit(code: int)
 
 main() {
-    host = "127.0.0.1"   // exercises iPAddress-SAN matching
+    host = "127.0.0.1" // exercises iPAddress-SAN matching
     port = 18447
 
     priv = bytes.new(32)
