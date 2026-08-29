@@ -82,6 +82,18 @@
 // PLUS pure helpers exposed for testing:
 //   transcript_new() / transcript_add(t, msg, len) / transcript_hash(t)
 
+// CONVENTION, and the one that costs people time: every buffer argument and
+// return in this module is a std.bytes HANDLE -- what bytes.new() gives you --
+// and never bytes.data(b). Aether has no separate type for the two, so they
+// both spell as `ptr`, and passing the raw data pointer compiles cleanly and
+// then segfaults somewhere unrelated. conn_recv likewise RETURNS a handle
+// ("fresh bytes; caller frees"), so read it with bytes.to_string(p, n) rather
+// than bytes.string_from_ptr.
+//
+//     rb = bytes.new(n)                       // fill it
+//     tls13_client.conn_send(conn, rb, n)     // right
+//     tls13_client.conn_send(conn, bytes.data(rb), n)   // compiles, crashes
+
 import std.bytes
 import std.string
 import std.cryptography.sha2
@@ -1312,6 +1324,9 @@ fn hs_handshake_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.handshake_s
 // ---- application data over a completed connection ----
 
 // Send application data as one encrypted record.
+//
+// `data` is a std.bytes HANDLE, not bytes.data(b) -- see the module header.
+// Passing the raw data pointer compiles and segfaults inside seal_record.
 conn_send(conn: ptr, data: ptr, len: int) -> string {
     c = conn as *ClientConn
     rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data, len)
@@ -2231,7 +2246,7 @@ fn parse_intermediates(body: ptr, body_len: int, out: ptr) {
                 der = bytes.new(cert_len)
                 if cert_len > 0 { bytes.set(der, cert_len - 1, 0) }
                 bytes.copy_from_bytes(der, 0, body, p, cert_len)
-                mc = malloc(136) as *LeafCert
+                mc = malloc(tls13_cert.LEAFCERT_SIZE) as *LeafCert
                 init_intermediate(mc)
                 cerr = tls13_cert.parse_certificate(der, cert_len, mc)
                 if string.equals(cerr, "") == 1 {
@@ -2256,16 +2271,11 @@ fn parse_intermediates(body: ptr, body_len: int, out: ptr) {
 }
 
 // Zero a heap LeafCert (matches tls13_cert's internal init).
+// The intermediates this parses are initialised by tls13_cert's own
+// init_leaf rather than a local copy, so a field added to LeafCert cannot be
+// cleared in one file and forgotten in the other.
 fn init_intermediate(l: *LeafCert) {
-    l.tbs = null; l.tbs_len = 0
-    l.sig_alg_oid = null
-    l.signature = null; l.signature_len = 0
-    l.spki_algo_oid = null; l.spki_key = null; l.spki_key_len = 0
-    l.issuer = null; l.issuer_len = 0
-    l.subject = null; l.subject_len = 0
-    l.not_before = null; l.not_before_len = 0
-    l.not_after = null; l.not_after_len = 0
-    l.dns_names = null
+    tls13_cert.init_leaf(l)
 }
 
 // Free a list of heap-allocated *LeafCert intermediates and the list itself.

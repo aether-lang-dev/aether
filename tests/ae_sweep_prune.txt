@@ -127,6 +127,7 @@ tests/integration/http_server_keepalive/
 tests/integration/http_server_observability/
 tests/integration/http_server_ops/
 tests/integration/http_server_sse/
+tests/integration/https_pure_tls_vertical/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
 tests/integration/http_stream_upload/
@@ -198,3 +199,4 @@ tests/integration/zlib_roundtrip/
 tests/integration/condition_continuation_pipe/
 tests/integration/self_shadowing_import/
 tests/integration/tuple_through_fn/
+tests/integration/crypto_tls13_server_hs/

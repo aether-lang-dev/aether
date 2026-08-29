@@ -5,6 +5,9 @@
 #include <locale.h>
 #include <time.h>
 #include "../../std/net/aether_http_server.h"
+#if !defined(_WIN32)
+#include "../../std/net/aether_http_internal.h"
+#endif
 
 // HTTP Server Tests - Real tests for implemented functionality
 
@@ -434,3 +437,103 @@ TEST(http_response_serialize_into_reuses_buffer) {
     free(buf);
     http_server_response_free(resp);
 }
+
+#if !defined(_WIN32)
+/* Parsing a request allocated about two dozen strings and freed them a moment
+ * later: the method, path, version and a pair per header. With an arena they
+ * come from one block and are released by resetting an offset.
+ *
+ * The rule the reset depends on is that a parse takes ALL of its strings from
+ * the arena or none of them, because their origin is one flag. These cases
+ * cover both sides of that decision and the reuse across it.
+ */
+TEST(http_request_parse_arena) {
+    HttpArena arena;
+    ASSERT_EQ(0, http_arena_init(&arena, 16384));
+
+    HttpRequest req;
+    memset(&req, 0, sizeof(req));
+
+    const char* simple =
+        "GET /a/b?x=1 HTTP/1.1\r\nHost: h\r\nAccept: */*\r\n\r\n";
+    ASSERT_NOT_NULL(http_parse_request_arena(&req, simple, strlen(simple), &arena));
+    ASSERT_EQ(1, req.arena_backed);
+    ASSERT_STREQ("GET", req.method);
+    ASSERT_STREQ("/a/b", req.path);
+    ASSERT_STREQ("x=1", req.query_string);
+    ASSERT_EQ(2, req.header_count);
+
+    /* A header-heavy request: the reservation must cover a terminator and the
+     * alignment rounding for every one of them, or the parse runs out of
+     * arena partway and the request is refused. */
+    char big[8192];
+    int off = snprintf(big, sizeof(big), "POST /p HTTP/1.1\r\n");
+    for (int i = 0; i < 40 && off < (int)sizeof(big) - 64; i++)
+        off += snprintf(big + off, sizeof(big) - off, "X-H%02d: v%02d\r\n", i, i);
+    snprintf(big + off, sizeof(big) - off, "\r\n");
+
+    http_arena_reset(&arena);
+    ASSERT_NOT_NULL(http_parse_request_arena(&req, big, strlen(big), &arena));
+    ASSERT_EQ(1, req.arena_backed);
+    ASSERT_EQ(40, req.header_count);
+    ASSERT_STREQ("v39", req.header_values[39]);
+
+    /* Whenever the parse decides to take the arena, the arena must hold
+     * everything it then asks for: req_alloc has no fallback, so a
+     * reservation that is too small fails the parse and drops the request.
+     *
+     * Swept across arena sizes rather than aimed at one, because the size
+     * where a short reservation starts to bite depends on how many strings
+     * the request has and how much each wastes on alignment. Headers are
+     * padded to the maximum waste (a length just past the alignment) to make
+     * the arena's true need as large as the request allows. */
+    {
+        char pad[8192];
+        int  po = snprintf(pad, sizeof(pad), "GET /p HTTP/1.1\r\n");
+        for (int i = 0; i < 50 && po < (int)sizeof(pad) - 64; i++)
+            po += snprintf(pad + po, sizeof(pad) - po,
+                           "AAAAAAAA%d: bbbbbbbbb\r\n", i % 10);
+        snprintf(pad + po, sizeof(pad) - po, "\r\n");
+        size_t plen = strlen(pad);
+
+        for (size_t cap = 64; cap <= 4096; cap += 8) {
+            HttpArena sweep;
+            if (http_arena_init(&sweep, cap) != 0) continue;
+            http_request_reset(&req);
+            HttpRequest* got = http_parse_request_arena(&req, pad, plen, &sweep);
+            /* Whichever way it decided, it has to have produced the request. */
+            ASSERT_NOT_NULL(got);
+            ASSERT_EQ(50, req.header_count);
+            ASSERT_STREQ("bbbbbbbbb", req.header_values[49]);
+            http_request_reset(&req);
+            http_arena_free(&sweep);
+        }
+    }
+
+    /* An arena too small for the request must not be used at all: a parse
+     * that took some strings from it and the rest from malloc could not be
+     * freed correctly afterwards. */
+    HttpArena tiny;
+    ASSERT_EQ(0, http_arena_init(&tiny, 64));
+    http_request_reset(&req);
+    ASSERT_NOT_NULL(http_parse_request_arena(&req, big, strlen(big), &tiny));
+    ASSERT_EQ(0, req.arena_backed);
+    ASSERT_EQ(40, req.header_count);
+    ASSERT_STREQ("v39", req.header_values[39]);
+
+    /* Reuse back onto the arena, then off it again: each reset frees under
+     * the rule the parse that filled it actually used. */
+    http_arena_reset(&arena);
+    ASSERT_NOT_NULL(http_parse_request_arena(&req, simple, strlen(simple), &arena));
+    ASSERT_EQ(1, req.arena_backed);
+    ASSERT_NOT_NULL(http_parse_request_into(&req, simple, strlen(simple)));
+    ASSERT_EQ(0, req.arena_backed);
+    ASSERT_STREQ("GET", req.method);
+
+    http_request_reset(&req);
+    free(req.header_keys);
+    free(req.header_values);
+    http_arena_free(&tiny);
+    http_arena_free(&arena);
+}
+#endif  /* !_WIN32 */

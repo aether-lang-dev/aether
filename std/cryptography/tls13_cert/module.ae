@@ -50,6 +50,8 @@ extern malloc(size: int) -> ptr
 extern free(p: ptr)
 
 exports(
+    init_leaf,
+    LEAFCERT_SIZE,
     cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256,
     verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     split_ecdsa_sig,
@@ -373,6 +375,23 @@ verify_cert_verify_rsa_pss(spki_key: ptr, spki_len: int, transcript_hash: ptr, t
 // bytes buffers free deterministically via bytes.free. So OIDs, validity
 // times, and dNSNames are held as bytes; compare via bytes, or stringify a
 // transient copy when needed.
+// Byte size to malloc for a LeafCert. Aether has no sizeof, so callers that
+// heap-allocate one (trust_store_load, the delegated-responder path, and the
+// client's intermediate parser) carried the number 136 inline, arrived at by
+// counting fields by hand.
+//
+// That is a heap-corruption bug waiting for the next field: adding one
+// pointer makes the struct 144 bytes while three separate mallocs still ask
+// for 136, and the overflow only shows as a double-free inside free_leaf,
+// a long way from the edit that caused it. One constant, exported, so the
+// count lives next to the definition it has to track.
+//
+// Sized with headroom rather than exactly: 11 ptr (8) + 7 int (4) padded is
+// 144, and the slack absorbs the next field or two without another silent
+// overflow. A few spare bytes per certificate is the right trade against
+// corrupting the heap.
+const LEAFCERT_SIZE = 192
+
 struct LeafCert {
     tbs: ptr // full tbsCertificate DER (tag+len+content)
     tbs_len: int
@@ -391,6 +410,7 @@ struct LeafCert {
     not_after: ptr // validity notAfter, raw time bytes or null
     not_after_len: int
     dns_names: ptr // std.list of dNSName BYTES buffers (SAN), or null
+    ip_addrs: ptr // std.list of iPAddress SAN BYTES buffers (4 or 16 bytes), or null
 }
 
 // Parse a DER Certificate into `out`. Returns "" on success or an error.
@@ -416,6 +436,7 @@ parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
     out.not_after = null
     out.not_after_len = 0
     out.dns_names = null
+    out.ip_addrs = null
 
     view = bytes.new(len)
     if len > 0 { bytes.set(view, len - 1, 0) }
@@ -542,6 +563,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     // Remaining: optional [1]/[2] unique IDs and [3] extensions. Scan for the
     // [3] EXPLICIT extensions wrapper (tag 0xA3) and parse SAN out of it.
     out.dns_names = list_new()
+    out.ip_addrs = list_new()
     while asn1.reader_eof(tbsr) != 1 {
         ext_content, eerr = asn1.read_tlv(tbsr)
         if string.equals(eerr, "") != 1 { break }
@@ -646,6 +668,17 @@ fn decode_san_dnsnames(octet_content: ptr, out: *LeafCert) {
         name_content, nerr = asn1.read_tlv(gr)
         if string.equals(nerr, "") != 1 { break }
         tag = asn1.last_tag(gr)
+        if tag == 0x87 {
+            // iPAddress [7] IMPLICIT OCTET STRING -- 4 bytes for IPv4, 16 for
+            // IPv6, raw network order (RFC 5280 s4.2.1.6). Any other length is
+            // malformed; skip it rather than match against it.
+            alen = bytes.length(name_content)
+            if alen == 4 || alen == 16 {
+                ip = bytes.new(alen)
+                bytes.copy_from_bytes(ip, 0, name_content, 0, alen)
+                list_add_raw(out.ip_addrs, ip)
+            }
+        }
         if tag == 0x82 {
             // dNSName IA5String content
             nlen = bytes.length(name_content)
@@ -725,6 +758,16 @@ free_leaf(c: *LeafCert) {
             i = i + 1
         }
         list_free(c.dns_names)
+    }
+    if c.ip_addrs != null {
+        m = list_size(c.ip_addrs)
+        j = 0
+        while j < m {
+            a = list_get_raw(c.ip_addrs, j) as ptr
+            bytes.free(a)
+            j = j + 1
+        }
+        list_free(c.ip_addrs)
     }
 }
 
@@ -870,10 +913,88 @@ fn dnsname_matches(pat: ptr, plen: int, host: string, hlen: int) -> int {
 
 // Verify the leaf certificate identifies `host`. Checks every SAN dNSName
 // (RFC 6125; SAN-only, no CN fallback). Returns "" on a match, else an error.
+// Parse a dotted-quad into 4 bytes, or null when `host` is not an IPv4
+// literal -- which is the signal to fall through to dNSName matching.
+fn parse_ipv4(host: string, hlen: int) -> ptr {
+    out = bytes.new(4)
+    octet = 0
+    digits = 0
+    idx = 0
+    i = 0
+    bad = 0
+    while i < hlen {
+        ch = string_char_at_n(host, hlen, i) & 0xFF
+        if ch == 46 {
+            if digits == 0 { bad = 1 }
+            if idx > 2 { bad = 1 }
+            if bad == 0 {
+                bytes.set(out, idx, octet)
+                idx = idx + 1
+                octet = 0
+                digits = 0
+            }
+        } else {
+            if ch < 48 { bad = 1 }
+            if ch > 57 { bad = 1 }
+            if bad == 0 {
+                octet = octet * 10 + (ch - 48)
+                digits = digits + 1
+                if octet > 255 { bad = 1 }
+                if digits > 3 { bad = 1 }
+            }
+        }
+        i = i + 1
+    }
+    if digits == 0 { bad = 1 }
+    if idx != 3 { bad = 1 }
+    if bad == 1 {
+        bytes.free(out)
+        return null
+    }
+    bytes.set(out, 3, octet)
+    return out
+}
+
 check_hostname(c: *LeafCert, host: string) -> string {
+    hlen0 = string.length(host)
+    if hlen0 == 0 { return "empty hostname" }
+    // An IP literal is matched against iPAddress SANs and never against
+    // dNSNames: a certificate naming the DNS name "10.0.0.1" does not
+    // authorise the address 10.0.0.1, and RFC 6125 s1.7.2 keeps the two
+    // namespaces apart deliberately. Connecting by IP to a local or internal
+    // endpoint is common enough that refusing every such certificate -- which
+    // is what dNSName-only matching did -- is a real gap rather than a
+    // conservative default.
+    ipv4 = parse_ipv4(host, hlen0)
+    if ipv4 != null {
+        if c.ip_addrs == null {
+            bytes.free(ipv4)
+            return "certificate has no iPAddress SAN for this address"
+        }
+        n4 = list_size(c.ip_addrs)
+        hit = 0
+        i4 = 0
+        while i4 < n4 {
+            cand = list_get_raw(c.ip_addrs, i4) as ptr
+            if cand != null {
+                if bytes.length(cand) == 4 {
+                    same = 1
+                    b = 0
+                    while b < 4 {
+                        if (bytes.get(cand, b) & 0xFF) != (bytes.get(ipv4, b) & 0xFF) { same = 0 }
+                        b = b + 1
+                    }
+                    if same == 1 { hit = 1 }
+                }
+            }
+            i4 = i4 + 1
+        }
+        bytes.free(ipv4)
+        if hit == 1 { return "" }
+        return "certificate is not valid for the requested address"
+    }
     if c.dns_names == null { return "certificate has no subjectAltName dNSNames" }
     hlen = string.length(host)
-    if hlen == 0 { return "empty hostname" }
     n = list_size(c.dns_names)
     if n == 0 { return "certificate has no subjectAltName dNSNames" }
     i = 0
@@ -1100,7 +1221,7 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
                 cert_der = bytes.new(cert_der_len)
                 if cert_der_len > 0 { bytes.set(cert_der, cert_der_len - 1, 0) }
                 bytes.copy_from_bytes(cert_der, 0, der, cso, cert_der_len)
-                d = malloc(136) as *LeafCert // sizeof(LeafCert), per trust_store_load
+                d = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(d)
                 perr = parse_certificate(cert_der, cert_der_len, d)
                 bytes.free(cert_der)
@@ -1634,7 +1755,7 @@ trust_store_load(path: string) -> (ptr, string) {
             if der != null {
                 // sizeof(LeafCert) = 136 on LP64 (9 ptr @8 + 8 int @4, C-packed;
                 // measured via element-stride of a *LeafCert array).
-                leaf = malloc(136) as *LeafCert
+                leaf = malloc(LEAFCERT_SIZE) as *LeafCert
                 init_leaf(leaf)
                 dlen = bytes.length(der)
                 cerr = parse_certificate(der, dlen, leaf)
@@ -1653,7 +1774,14 @@ trust_store_load(path: string) -> (ptr, string) {
 }
 
 // Zero every field of a heap-allocated LeafCert.
-fn init_leaf(l: *LeafCert) {
+//
+// Exported, and the ONLY initialiser: tls13_client had a byte-identical
+// private copy for the intermediates it parses, so a new field had to be
+// remembered in two files. Missing one leaves that field holding whatever
+// malloc returned, and free_leaf then frees a garbage pointer -- which
+// surfaces as a double-free far from the omission. One initialiser, next to
+// the struct and to free_leaf, so the three stay in step.
+init_leaf(l: *LeafCert) {
     l.tbs = null; l.tbs_len = 0
     l.sig_alg_oid = null
     l.signature = null; l.signature_len = 0
@@ -1663,6 +1791,7 @@ fn init_leaf(l: *LeafCert) {
     l.not_before = null; l.not_before_len = 0
     l.not_after = null; l.not_after_len = 0
     l.dns_names = null
+    l.ip_addrs = null
 }
 
 // Free a trust-anchor list built by trust_store_load: each *LeafCert's buffers,

@@ -858,6 +858,16 @@ scalar_mult(scalar: ptr, u: ptr) -> (ptr, string) {
 }
 
 // base_point(scalar32) -> pubkey32. Public key = scalar * basepoint (u = 9).
+//
+// `scalar` is a std.bytes HANDLE (what bytes.new returns), NOT bytes.data(b).
+// Aether has no distinct type for the two, so `ptr` here reads as "any
+// pointer" and passing the raw data pointer compiles cleanly and then
+// SEGFAULTS inside the ladder. Every buffer argument in this module means the
+// handle; the same holds across std.cryptography.
+//
+//     b = bytes.new(32)          // fill it
+//     pub = x25519.base_point(b) // right
+//     pub = x25519.base_point(bytes.data(b))  // compiles, crashes
 base_point(scalar: ptr) -> ptr {
     u = bytes.new(POINT_BYTES)
     // bytes.new does NOT zero the buffer — only bytes up to the highest

@@ -685,15 +685,19 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         c->req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
         if (!c->req) return -1;
     }
-    if (!http_parse_request_into(c->req, c->in, c->in_len)) return -1;
-
+    /* The arena is emptied before the parse, not after it: the parse takes
+     * this request's strings from it, and resetting afterwards would hand the
+     * proxy pointers into a block that had just been handed back. It holds
+     * both the inbound request's strings and the outbound request's headers,
+     * so it is sized for two requests rather than one. */
     if (!c->arena_ready) {
-        /* Sized for a request's headers with room to spare. An outlier that
-         * does not fit falls back to malloc for the part that overflows. */
-        c->arena_ready = http_arena_init(&c->arena, 8192) == 0;
+        c->arena_ready = http_arena_init(&c->arena, 16384) == 0;
     } else {
         http_arena_reset(&c->arena);
     }
+
+    if (!http_parse_request_arena(c->req, c->in, c->in_len,
+                                  c->arena_ready ? &c->arena : NULL)) return -1;
 
     if (!c->res) {
         c->res = http_response_create();
