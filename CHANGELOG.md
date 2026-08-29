@@ -25,6 +25,7 @@ version number before tagging the release.
   enough would start refusing allocations that the machine had memory for,
   and nothing about the symptom would point back at retries.
 
+## [0.604.0]
 
 ### Changed
 
