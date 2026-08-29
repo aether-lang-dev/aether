@@ -30,10 +30,16 @@ version number before tagging the release.
   copy again. Everything else takes the copying path, so this narrows what it
   handles rather than changing what the proxy means.
 
-  **CPU per request 17.0 to 15.6 microseconds** by the least-contended round,
-  better in all eight rank-matched rounds. The benchmark's backend returns
-  twelve bytes, so almost none of that is the body copies: those show on
-  response sizes a proxy actually carries.
+  On the standard bench, whose backend returns twelve bytes, **CPU per request
+  17.0 to 15.6 microseconds** by the least-contended round and better in all
+  eight rank-matched rounds. Almost none of that is the body copies, because
+  there is barely a body to copy.
+
+  On 64 KiB responses, which is a size a proxy actually carries, **page faults
+  per request 2.46 to 0.05** and **CPU per request 40.1 to 32.7
+  microseconds**. At that size this path costs 32.7 against haproxy's 32.2 and
+  nginx's 34.3 by the least-contended round: level with one and slightly ahead
+  of the other, where before it was behind both.
 
 ### Testing
 
@@ -41,6 +47,10 @@ version number before tagging the release.
   running the same requests with `AETHER_PROXY_DIRECT=1` and `0`. That
   comparison is the test rather than a check of the fast path alone, because a
   fast path that silently never runs passes every single-path test.
+
+  Five shapes are compared, including a 64 KiB body, because a write that
+  large does not finish in one call and is the only one that exercises the
+  accounting for a partially written body.
 
   It earned its place immediately: on `HEAD` the copying path states the length
   of the body it is sending, which is none, while forwarding the upstream's
