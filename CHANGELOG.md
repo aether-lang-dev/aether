@@ -11,6 +11,47 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **A pure-Aether TLS 1.3 client verifies a server by IP address.**
+  `check_hostname` matched `dNSName` SANs only — `iPAddress` SANs were never
+  parsed — so connecting to a server by address, which is the normal case for
+  a local or internal endpoint, could not succeed however the certificate was
+  issued. IP literals now match against `iPAddress` SANs and never against
+  DNS names, because a certificate naming the DNS name `10.0.0.1` does not
+  authorise the address (RFC 6125 §1.7.2 keeps the namespaces apart).
+
+- **A test showing HTTPS end to end with no OpenSSL on the client side.**
+  `std.http.client` terminates TLS with OpenSSL, so a `--target` cross build,
+  which links none, fails at runtime with "HTTPS requested but the build has
+  no OpenSSL support". A downstream port read that, concluded HTTPS was
+  impossible in a cross build, and asked for a pure TLS backend to be
+  written. Most of it already existed: `std.cryptography.tls13_client` is a
+  complete pure-Aether TLS 1.3 client with full server authentication, and it
+  cross-builds. What was missing was anything demonstrating it. The new test
+  drives our own `std.http` server from that client and frames an HTTP/1.1
+  exchange over the raw TLS stream, which is the piece `std.http.client`
+  would own if the two were wired together.
+
+### Fixed
+
+- **Adding a field to a certificate struct no longer corrupts the heap.**
+  Three separate `malloc(136)` calls sized `LeafCert` by hand, and two
+  byte-identical initialisers cleared its fields in two different modules.
+  Adding one pointer makes the struct larger while the allocations still ask
+  for 136, and the overflow surfaces as a double-free inside `free_leaf`, a
+  long way from the edit that caused it. There is now one exported size
+  constant next to the struct and one exported initialiser, so a new field
+  has one place to be accounted for rather than five.
+
+- **The buffer convention in `std.cryptography` is written down.** Every
+  buffer argument there is a `std.bytes` handle, never `bytes.data(b)`, but
+  Aether has no separate type for the two so both spell as `ptr` — and
+  passing the raw data pointer compiles cleanly and then segfaults somewhere
+  unrelated. `conn_recv` likewise returns a handle rather than a pointer.
+  Stated in the module header and at the functions where getting it wrong
+  crashes.
+
 ## [0.602.0]
 
 ### Added
