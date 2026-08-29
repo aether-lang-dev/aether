@@ -13,6 +13,7 @@
 //   ae help                 Show help
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -854,6 +855,23 @@ static int append_manifest_srcs(char** out, size_t* cap,
 }
 
 
+/* snprintf, with truncation reported rather than ignored.
+ *
+ * A path or a URL built by truncation names something other than what was
+ * asked for. In a download-and-verify path that is worse than failing: a
+ * shortened asset name fetches the wrong artifact, and a shortened checksum
+ * URL turns a verified download into an unverified one. Callers check the
+ * result and refuse rather than proceed under the wrong name.
+ *
+ * Returns 0 when the whole string fitted, -1 when it did not. */
+static int ae_sprintf(char* buf, size_t cap, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, cap, fmt, ap);
+    va_end(ap);
+    return (n >= 0 && (size_t)n < cap) ? 0 : -1;
+}
+
 bool path_exists(const char* path) {
 #ifdef _WIN32
     DWORD attrs = GetFileAttributesA(path);
@@ -1115,8 +1133,8 @@ void discover_toolchain(void) {
             if (!tail_sep) tail_sep = strrchr(parent_dir, '\\');
             if (tail_sep) *tail_sep = '\0';
             char runtime_dir[1024];
-            snprintf(runtime_dir, sizeof(runtime_dir), "%s/runtime", parent_dir);
-            if (dir_exists(runtime_dir)) {
+            if (ae_sprintf(runtime_dir, sizeof(runtime_dir), "%s/runtime", parent_dir) == 0
+                && dir_exists(runtime_dir)) {
                 strncpy(tc.root, parent_dir, sizeof(tc.root) - 1);
                 tc.root[sizeof(tc.root) - 1] = '\0';
                 strncpy(tc.compiler, candidate, sizeof(tc.compiler) - 1);
@@ -6779,8 +6797,14 @@ static const char* ae_pkg_basename(const char* package) {
 static int ae_verify_sha256(const char* archive, const char* url_base,
                             const char* asset, const char* tmp_dir) {
     char sum_url[2048], sum_path[1024], cmd[4096];
-    snprintf(sum_url, sizeof(sum_url), "%s/%s.sha256", url_base, asset);
-    snprintf(sum_path, sizeof(sum_path), "%s/%s.sha256", tmp_dir, asset);
+    /* Refused rather than reported as unpublished: a caller told there is no
+     * checksum carries on with an unverified artifact, and that is not what
+     * happened here. */
+    if (ae_sprintf(sum_url, sizeof(sum_url), "%s/%s.sha256", url_base, asset) != 0 ||
+        ae_sprintf(sum_path, sizeof(sum_path), "%s/%s.sha256", tmp_dir, asset) != 0) {
+        fprintf(stderr, "error: checksum location for %s does not fit\n", asset);
+        return -1;
+    }
     if (ae_download(sum_url, sum_path) != 0 || !path_exists(sum_path)) {
         return 0;   /* publisher shipped no checksum */
     }
@@ -6798,7 +6822,10 @@ static int ae_verify_sha256(const char* archive, const char* url_base,
      * shell, so pipelines and $(...) are not available here — write the
      * digest to a file and read it back. */
     char got_path[1024];
-    snprintf(got_path, sizeof(got_path), "%s/.ae_sha256.out", tmp_dir);
+    if (ae_sprintf(got_path, sizeof(got_path), "%s/.ae_sha256.out", tmp_dir) != 0) {
+        fprintf(stderr, "error: digest path under %s does not fit\n", tmp_dir);
+        return -1;
+    }
     remove(got_path);
 
     const char* hashers[2] = { "sha256sum", "shasum -a 256" };
@@ -6866,9 +6893,11 @@ static int ae_try_release_asset(const char* package, const char* version,
     const char* exts[2] = { "tar.gz", "zip" };
     for (int i = 0; i < 2; i++) {
         char asset[512], url[2048], archive[1024];
-        snprintf(asset, sizeof(asset), "%s-%s-%s.%s", repo, tag, triple, exts[i]);
-        snprintf(url, sizeof(url), "%s/%s", url_base, asset);
-        snprintf(archive, sizeof(archive), "%s/%s", tmp_dir, asset);
+        if (ae_sprintf(asset, sizeof(asset), "%s-%s-%s.%s", repo, tag, triple, exts[i]) != 0 ||
+            ae_sprintf(url, sizeof(url), "%s/%s", url_base, asset) != 0 ||
+            ae_sprintf(archive, sizeof(archive), "%s/%s", tmp_dir, asset) != 0) {
+            continue;               /* cannot name this artifact; try the next */
+        }
 
         if (ae_download(url, archive) != 0 || !path_exists(archive)) {
             continue;                   /* no such asset — try the next */

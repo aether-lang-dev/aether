@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Paths and URLs built by `snprintf` no longer ignore truncation.** Seven
+  places in `ae` and `ae version` formatted a path or a URL into a fixed
+  buffer and used the result without checking whether it fitted, which gcc
+  reported as `-Wformat-truncation` on every Linux build.
+
+  Truncation there is not cosmetic. A shortened asset name downloads a
+  different artifact; a shortened checksum URL turns a verified download into
+  an unverified one, and the caller is told no checksum was published rather
+  than that none could be fetched; a shortened command line runs a different
+  command than the one the doctor meant to test. Each site now checks and
+  refuses: an artifact that cannot be named is skipped, a checksum that cannot
+  be located is an error rather than an absence, and a toolchain root that
+  cannot be formed is not probed.
+
+
 ## [0.602.0]
 
 ### Added
