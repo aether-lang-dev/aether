@@ -964,6 +964,11 @@ void* http_arena_alloc(HttpArena* a, size_t n) {
     return p;
 }
 
+size_t http_arena_avail(const HttpArena* a) {
+    if (!a || !a->block || a->used > a->cap) return 0;
+    return a->cap - a->used;
+}
+
 void http_arena_reset(HttpArena* a) {
     if (!a) return;
     a->used = 0;

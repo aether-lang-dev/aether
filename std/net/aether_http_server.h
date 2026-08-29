@@ -64,6 +64,15 @@ typedef struct {
     void* stream_conn;
     long  stream_total;
     long  stream_consumed;
+
+    /* An arena the caller owns, for the strings a parse fills in. Set through
+     * http_request_parse_arena before parsing; NULL means the ordinary
+     * allocator. `arena_backed` records what the LAST parse actually used, so
+     * a reset frees only what it must: a parse takes the arena for all of its
+     * strings or none of them, never a mixture. Trailing fields, so this does
+     * not move anything a C consumer already reads. */
+    void* arena;
+    int   arena_backed;
 } HttpRequest;
 
 // HTTP Response
@@ -772,6 +781,12 @@ void http_response_reset(HttpServerResponse* res);
 /* Parse into an object the caller owns and reuses. Returns NULL on a request
  * it cannot parse, having freed what it filled in but not the object. */
 HttpRequest* http_parse_request_into(HttpRequest* req, const char* buf, size_t len);
+
+/* Parse into an object the caller owns, taking the strings from `arena` when
+ * they fit. The arena must outlive the request and must not be reset while it
+ * is still being read. */
+HttpRequest* http_parse_request_arena(HttpRequest* req, const char* buf,
+                                      size_t len, void* arena);
 void http_request_reset(HttpRequest* req);
 
 #endif
