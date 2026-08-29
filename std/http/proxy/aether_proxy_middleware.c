@@ -851,6 +851,19 @@ int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
     int status = direct_status_of(raw, header_bytes);
     if (status == 0) return -1;      /* no status line: not ours to pass on */
 
+    /* Everything that can decline is decided before anything is recorded.
+     * A decline sends the caller down the copying path, which does its own
+     * recording, and a metric counted here as well would be counted twice. */
+
+    /* A 5xx with retry budget left is not an answer, it is a failover the
+     * copying path is about to perform against another upstream. Passing it
+     * straight back to the client would turn a retried request into a served
+     * error. */
+    if (status >= 500 && (px->attempt + 1) < px->max_attempts) return -1;
+
+    size_t body_len = raw_len - header_bytes;
+    if ((long)body_len > (long)px->opts->max_body_bytes) return -1;
+
     /* The same bookkeeping the copying path does for a response that arrived,
      * in the same order, so the two cannot report differently. */
     atomic_fetch_add(&px->u->metric_latency_sum_ms, elapsed_ms);
@@ -864,12 +877,10 @@ int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
     aether_proxy_breaker_record(px->opts->pool, px->u, status >= 200 && status < 500);
     aether_proxy_inflight_dec(px->u);
 
-    px->status      = status;
-    out->status     = status;
-    out->body       = raw + header_bytes;
-    out->body_len   = raw_len - header_bytes;
-
-    if ((long)out->body_len > (long)px->opts->max_body_bytes) return -1;
+    px->status    = status;
+    out->status   = status;
+    out->body     = raw + header_bytes;
+    out->body_len = body_len;
     return 0;
 }
 
