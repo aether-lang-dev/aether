@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.601.0]
+
 ### Added
 
 - **The FreeBSD cross sysroot ships as a release asset.** Every other target
