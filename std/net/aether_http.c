@@ -511,7 +511,17 @@ static void http_pool_put(const char* key, Transport* t) {
      * stop at the cap instead of walking to the end -- and skip the walk
      * entirely when the global cap already rejects this connection. */
     int per_key = 0;
-    if (http_pool_count < http_pool_max_idle) {
+    /* The per-key cap cannot bind when it is at or above the global cap: the
+     * entries sharing a key are a subset of the pool, so their count is below
+     * the global cap already, and the test below would always be false. Under
+     * a proxy the two caps are equal, and skipping the walk there is what
+     * keeps this loop from growing with the pool: it compares a key against
+     * every entry, and sizing the pool for a proxy made it the largest single
+     * userspace cost on the path (strcmp, 1.9% of the profile).
+     *
+     * A client keeps the two caps apart and still walks, breaking early at
+     * the cap as before. */
+    if (http_pool_count < http_pool_max_idle && http_pool_max_per_key < http_pool_max_idle) {
         for (HttpIdleConn* e = http_pool_head; e; e = e->next) {
             if (strcmp(e->key, key) == 0 && ++per_key >= http_pool_max_per_key)
                 break;

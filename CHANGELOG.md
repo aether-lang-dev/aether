@@ -90,6 +90,15 @@ version number before tagging the release.
 
 ### Changed
 
+- **Releasing a pooled connection no longer walks the pool.** The per-key cap
+  was recomputed by comparing the key against every idle entry, which was
+  cheap while a host could hold only eight and stopped being cheap once the
+  pool was sized for a proxy: `strcmp` became the largest single userspace
+  cost on the path at 1.9% of the profile. The count cannot bind when the
+  per-key cap is at or above the global cap, because the entries sharing a key
+  are a subset of the pool, so that case skips the walk. A client, which keeps
+  the two caps apart, still walks and breaks at the cap exactly as before.
+
 - **Copying an upstream response's headers no longer allocates per header.**
   Each one was copied into a fresh allocation purely to NUL-terminate its
   value for the setter, so a response with a dozen headers cost a dozen
