@@ -18,7 +18,7 @@ header comment is the authoritative description.
 | `std.audit` | Query the sandbox audit trail. | 9 | [guide](../std/audit/README.md) · [source](../std/audit/module.ae) |
 | `std.bignum` | Arbitrary-precision integers. | 27 | [guide](../std/bignum/README.md) · [source](../std/bignum/module.ae) |
 | `std.bits` | Unsigned bit operations: rotates, shifts, popcount, leading zeros, unsigned divide. | 34 | [guide](../std/bits/README.md) · [source](../std/bits/module.ae) |
-| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 50 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
+| `std.bytes` | Mutable byte buffer with random access and overlap-safe copies. | 52 | [guide](../std/bytes/README.md) · [source](../std/bytes/module.ae) |
 | `std.capsicum` | FreeBSD Capsicum capability-mode bindings. | 33 | [guide](../std/capsicum/README.md) · [source](../std/capsicum/module.ae) |
 | `std.cas` | Content-addressed store keyed by the sha256 of file contents. | 7 | [guide](../std/cas/README.md) · [source](../std/cas/module.ae) |
 | `std.casper` | FreeBSD Casper service delegation. | 16 | [guide](../std/casper/README.md) · [source](../std/casper/module.ae) |

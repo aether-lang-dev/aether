@@ -40,7 +40,7 @@ and corrupts the heap. Use `bytes.set`/`bytes.get`, or allocate through
 There is deliberately no `ptr as string` cast (they are different types).
 `std.bytes` is the bridge. The two crossings, each now one call:
 
-```aether
+```aether,fragment
 // ptr -> string  (I have a raw buffer + length, I want a binary string)
 s = bytes.string_from_ptr(p, n)
 
@@ -54,7 +54,7 @@ p = bytes.data(b)
 
 The longhand still works and is useful when you build a buffer incrementally:
 
-```aether
+```aether,fragment
 b = bytes.new(n)
 p = bytes.data(b)               // raw region, already zero-filled to capacity
 // ... write n bytes through p ...
