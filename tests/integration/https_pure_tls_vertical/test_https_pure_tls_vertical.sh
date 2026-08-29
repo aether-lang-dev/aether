@@ -46,10 +46,15 @@ fail() { echo "  [FAIL] $1"; exit 1; }
 # and be handed to the client as its trust anchor.
 # MSYS2_ARG_CONV_EXCL: on MSYS2 the shell rewrites any argument that looks
 # like a POSIX path, so `-subj "/CN=127.0.0.1"` reaches openssl as
-# "D:/a/_temp/msys64/CN=127.0.0.1" and it refuses the subject. The variable is
-# inert everywhere else -- verified on Linux, where the subject and both SANs
-# come out identical with and without it.
-MSYS2_ARG_CONV_EXCL='*' \
+# "C:/Program Files/Git/CN=127.0.0.1" and it refuses the subject.
+#
+# Scoped to the subject prefix rather than '*'. Excluding everything also
+# stops the -keyout/-out paths being converted, and openssl then cannot open
+# "/tmp/tmp.XXXX/key.pem" on Windows at all -- which swaps one failure for
+# another. Verified both ways on a real MINGW64 box: '*' reproduces
+# `Can't open ... for writing`, '/CN=' produces the right subject and both
+# SANs. Inert on Linux, where the output is identical with and without it.
+MSYS2_ARG_CONV_EXCL='/CN=' \
 openssl req -x509 -newkey rsa:2048 -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
     -days 2 -nodes -subj "/CN=127.0.0.1" \
     -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" >"$TMP/ssl.log" 2>&1 \
