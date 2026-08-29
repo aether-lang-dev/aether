@@ -791,6 +791,16 @@ jobs:
         # check uses the host copy set aside before the cross-build. No
         # fallback to build/ae: silently checking with a binary that cannot
         # run would report success without testing anything.
+        # `ae` locates zig by running `zig version`, so the provisioned one
+        # has to be ON PATH here. The build steps above never needed that --
+        # they pass ZIG=<path> to make -- which is why this only showed when
+        # the verification step invoked ae directly, and it failed the
+        # 0.601.0 release rather than shipping an unverified sysroot.
+        ZIG_BIN="${{ steps.prov.outputs.zig }}"
+        PATH="$(dirname "$ZIG_BIN"):$PATH"
+        export PATH
+        zig version || { echo "::error::provisioned zig is not runnable at $ZIG_BIN"; exit 1; }
+
         HOST_AE="$PWD/host-toolchain/ae"
         [ -x "$HOST_AE" ] || { echo "::error::host ae missing; cannot verify the sysroot"; exit 1; }
         file "$HOST_AE" | grep -q 'FreeBSD' \
