@@ -11,6 +11,21 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A proxy retry no longer leaks the memory cap's accounting.** The outbound
+  request head is allocated through `aether_caps_malloc`, and the retry path
+  released it with a plain `free()`. The memory came back, but the counter
+  that decides whether the next allocation is permitted went on believing
+  those bytes were live.
+
+  The drift is small per retry and unbounded over time, and it accumulates
+  fastest exactly when the proxy is already in trouble, because retries are
+  what upstream failures cause. A server that had been failing over for long
+  enough would start refusing allocations that the machine had memory for,
+  and nothing about the symptom would point back at retries.
+
+
 ### Changed
 
 - **A proxied request's own strings come from an arena.** Parsing a request
