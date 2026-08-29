@@ -51,6 +51,10 @@ version number before tagging the release.
   carriage return rather than `strstr` for the pair, which pays a two-byte
   needle's setup once per header of every proxied response.
 
+  **CPU per request 18.5 to 18.0 microseconds** by the least-contended round.
+  The median moved further but the controls moved more than that, so the
+  least-contended round is the figure quoted.
+
 - **Write interest is registered once instead of being added and dropped
   around every blocking write.** On an edge-triggered backend `EPOLLOUT` and
   `EV_CLEAR` report the transition to writable rather than the state, so an

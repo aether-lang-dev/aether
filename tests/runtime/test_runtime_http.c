@@ -1,11 +1,16 @@
 #include "test_harness.h"
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
+/* The connect-completion contract below is exercised only where the driver
+ * that depends on it is built. That driver needs a poller and a pipe, so it
+ * is POSIX-only, and on Windows http_upstream_connected has no caller. */
+#if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include <string.h>
+#endif
 
 TEST_CATEGORY(http_response_structure, TEST_CATEGORY_NETWORK) {
     HttpResponse* resp = (HttpResponse*)calloc(1, sizeof(HttpResponse));
@@ -152,6 +157,7 @@ TEST_CATEGORY(http_accessors_boundary_status_codes, TEST_CATEGORY_NETWORK) {
  * into it and failed with ENOTCONN. A poller may wake a caller for another
  * descriptor or for nothing at all, so the question gets asked when the
  * answer is genuinely still "not yet". */
+#if !defined(_WIN32)
 TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
     int listener = socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(listener >= 0);
@@ -193,3 +199,4 @@ TEST_CATEGORY(http_upstream_connected_contract, TEST_CATEGORY_NETWORK) {
 
     close(listener);
 }
+#endif  /* !_WIN32 */
