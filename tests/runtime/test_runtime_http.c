@@ -6,6 +6,7 @@
  * is POSIX-only, and on Windows http_upstream_connected has no caller. */
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
+#include "../../runtime/aether_resource_caps.h"
 #include "../../std/http/proxy/aether_proxy.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -238,5 +239,38 @@ TEST_CATEGORY(http_pool_sized_for_proxy, TEST_CATEGORY_NETWORK) {
 
     aether_proxy_opts_free(opts);
     http_client_pool_configure_raw(64, 8, -1);
+}
+#endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* http_build_request_head allocates through the resource cap, so its buffer
+ * has to be released through the cap too. Freeing it with plain free() hands
+ * the memory back but leaves the counter believing those bytes are still
+ * live, and the counter is what decides whether the next allocation is
+ * allowed. The proxy's retry path did exactly that, so a server whose
+ * upstreams were failing drifted upward until the cap started refusing
+ * allocations the machine had memory for.
+ *
+ * This pins the contract rather than the call site: it says the buffer is
+ * accounted, which is what makes a plain free() wrong. */
+TEST_CATEGORY(http_request_head_is_cap_accounted, TEST_CATEGORY_NETWORK) {
+    HttpClientRequest* req = http_request_raw("GET", "http://127.0.0.1:1/x");
+    ASSERT_NOT_NULL(req);
+
+    uint64_t base = aether_caps_used_bytes();
+
+    size_t len = 0, cap = 0;
+    HttpReqHead p = { req, "GET", "/x", "127.0.0.1", 80, 0, 0, NULL, 0, NULL, 1 };
+    char* head = http_build_request_head(&p, &len, &cap);
+    ASSERT_NOT_NULL(head);
+    ASSERT_TRUE(cap > 0);
+    /* The build is accounted: the counter moved. */
+    ASSERT_TRUE(aether_caps_used_bytes() > base);
+
+    aether_caps_free(head, cap);
+    /* And releasing it through the cap returns the counter exactly. */
+    ASSERT_EQ(base, aether_caps_used_bytes());
+
+    http_request_free_raw(req);
 }
 #endif  /* !_WIN32 */
