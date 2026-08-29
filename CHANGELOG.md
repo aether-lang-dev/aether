@@ -186,6 +186,12 @@ version number before tagging the release.
 - A proxied request split across several writes, with the header terminator
   itself cut in half and the body arriving last, is now covered. The existing
   suite passed in full against a driver that hung forever on exactly that.
+
+
+## [0.599.0]
+
+### Fixed
+
 - **A fetched release can cross-compile a program that links the runtime.**
   The release shipped `share/aether/runtime/libaether_caps.c`, which does
   `#include "libaether.h"`, but not the header — so a downstream that fetched
