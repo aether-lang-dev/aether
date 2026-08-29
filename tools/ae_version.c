@@ -1112,7 +1112,16 @@ int cmd_version_doctor(int do_fix) {
     }
 
     /* --- 2. the pin -------------------------------------------------- */
+    /* Only meaningful for an INSTALLED toolchain. A dev tree resolves its
+     * compiler next to its own binary and never consults the pin, and its
+     * version is a working build that `ae version use` could not switch to
+     * even if you wanted it -- there is no such release. Warning about a
+     * disagreement here would be telling a developer to run a command that
+     * cannot work, about a setting that does not govern them. */
     printf("\nversion pin\n");
+    if (tc.dev_mode) {
+        doc_ok("not applicable: this is a source tree, which ignores the pin");
+    } else {
     const char* pinned = get_active_version();
     snprintf(path, sizeof(path), "%s/.aether/versions/v%s", home, pinned ? pinned : "");
     int pinned_installed = doc_is_dir(path);
@@ -1142,12 +1151,24 @@ int cmd_version_doctor(int do_fix) {
              * choice between two real installs. Switching it is the user's
              * call, not a repair -- --fix deliberately leaves it alone. */
             doc_hint("v%s is installed, so this is a real choice between two", pinned);
-            doc_hint("installs rather than a broken pin. Switch with:");
-            doc_hint("  ae version use %s      (to match this binary)", AE_VERSION);
+            doc_hint("installs rather than a broken pin.");
+            /* Only offer `use <this binary>` when that version is actually
+             * installed. A locally built or hand-placed ae has no matching
+             * release, so suggesting it would send the user at a command
+             * that fails -- the same fault as recommending a version that
+             * was never fetched. */
+            snprintf(path, sizeof(path), "%s/.aether/versions/v%s", home, AE_VERSION);
+            if (doc_is_dir(path)) {
+                doc_hint("  ae version use %s      (to match this binary)", AE_VERSION);
+            } else {
+                doc_hint("(v%s is not an installed release, so the pin cannot", AE_VERSION);
+                doc_hint(" be switched to it -- this ae was built or placed by hand.)");
+            }
             doc_hint("  ae version use %s      (to run the pinned one)", pinned);
         }
     } else {
         doc_ok("active_version agrees with this binary (%s)", AE_VERSION);
+    }
     }
 
     /* --- 3. shadowing ------------------------------------------------ */
@@ -1161,6 +1182,65 @@ int cmd_version_doctor(int do_fix) {
         snprintf(needle, sizeof(needle), "%s/.aether/bin", home);
         on_path = strstr(envpath, needle) != NULL;
     }
+    /* The one that actually bites a developer: `ae` on PATH resolving to
+     * something OTHER than the tree you are working in. You edit the
+     * compiler, type `ae`, and test a months-old binary -- with no
+     * indication that is what happened, because both are called ae and
+     * both work. Checked in a dev tree specifically, where the mismatch is
+     * expected to exist and is the whole problem; for an installed
+     * toolchain the earlier version checks already cover it. */
+    if (tc.dev_mode && envpath) {
+        char probe[2048];
+        const char* p = envpath;
+        int reported = 0;
+        while (*p && !reported) {
+            const char* colon = strchr(p, ':');
+            size_t len = colon ? (size_t)(colon - p) : strlen(p);
+            if (len > 0 && len < sizeof(probe) - 8) {
+                memcpy(probe, p, len);
+                probe[len] = '\0';
+                strncat(probe, "/ae", sizeof(probe) - strlen(probe) - 1);
+                if (doc_is_file(probe)) {
+                    /* Only interesting when it is NOT this tree's build. */
+                    char mine[2048];
+                    snprintf(mine, sizeof(mine), "%s/build/ae", tc.root);
+                    if (strcmp(probe, mine) != 0) {
+                        /* `ae --version` prints "ae 0.596.0 (...)", with no
+                         * leading v, so the aetherc parser (which looks for
+                         * v<digit>) returns nothing for it. Read the second
+                         * field instead. */
+                        char pv_buf[64]; pv_buf[0] = '\0';
+                        {
+                            char vcmd[2200];
+                            snprintf(vcmd, sizeof(vcmd), "\"%s\" --version 2>/dev/null", probe);
+                            FILE* vp = popen(vcmd, "r");
+                            if (vp) {
+                                char line[256];
+                                if (fgets(line, sizeof(line), vp)) {
+                                    if (sscanf(line, "ae %63[0-9.]", pv_buf) != 1) pv_buf[0] = '\0';
+                                }
+                                pclose(vp);
+                            }
+                        }
+                        const char* pv = pv_buf[0] ? pv_buf : NULL;
+                        doc_warn(&d, "`ae` on PATH is %s, not this tree's build",
+                                 probe);
+                        if (pv && strcmp(pv, AE_VERSION) != 0) {
+                            doc_hint("It reports %s; this tree builds %s.", pv, AE_VERSION);
+                        }
+                        doc_hint("Typing `ae` here runs that one, so a change you just");
+                        doc_hint("built is not what gets tested. Use ./build/ae, or put");
+                        doc_hint("%s/build first on PATH.", tc.root);
+                        reported = 1;
+                    }
+                }
+            }
+            if (!colon) break;
+            p = colon + 1;
+        }
+        if (!reported) doc_ok("`ae` on PATH is this tree's build");
+    }
+
     if (binents > 0 && !on_path) {
         doc_warn(&d, "~/.aether/bin holds %d file(s) but is not on PATH", binents);
         doc_hint("Inert now, but it wins the moment anything puts it back on");

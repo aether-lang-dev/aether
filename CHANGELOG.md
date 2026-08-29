@@ -21,12 +21,25 @@ version number before tagging the release.
   an actual compile, because everything above it can pass while the install
   is unusable.
 
-  It reports a split toolchain, a version pin that disagrees with the
-  binary, a stale `~/.aether/bin` that shadows the real install (or is on
-  `PATH` while empty, which is what makes a shell say "No such file or
-  directory" for a tool that is installed), and public headers missing from
-  an install — the gap that shipped in a release and only showed when
-  someone cross-compiled something real.
+  It reports a split toolchain, a stale `~/.aether/bin` that shadows the real
+  install (or is on `PATH` while empty, which is what makes a shell say "No
+  such file or directory" for a tool that is installed), and public headers
+  missing from an install — the gap that shipped in a release and only
+  showed when someone cross-compiled something real.
+
+  Version pins, `current` and `ae version use` are release machinery, so the
+  doctor treats them as such: a source tree resolves its compiler next to its
+  own binary and never consults the pin, and its version is a working build
+  with no matching release. Warning about a pin disagreement there would tell
+  a developer to run a command that cannot succeed, so it says the pin does
+  not apply instead. The same rule holds in an installed tree: it only ever
+  suggests `ae version use <v>` for a version that is actually installed.
+
+  What it checks for a developer instead is the shadowing that actually
+  costs them time — `ae` on `PATH` resolving to something other than the
+  tree they are working in. You edit the compiler, type `ae`, and test a
+  months-old binary, with no indication that is what happened because both
+  are called `ae` and both work. It names both versions.
 
   `--fix` repairs what is safely repairable and says what it did. It
   deliberately will not rewrite a pin whose version IS installed: that is a

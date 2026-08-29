@@ -31,16 +31,27 @@ trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
 # --- a broken pin is repaired, an installed one is not --------------------
+# The pin only governs an INSTALLED toolchain: a source tree resolves its
+# compiler next to its own binary and never reads the pin, so these cases
+# need an `ae` that is not in dev mode. Copy the binary somewhere with no
+# runtime/ beside it AND run from a directory that is not a source tree --
+# detection falls back to the CWD, so running from $ROOT is dev mode however
+# the binary was invoked.
+mkdir -p "$TMP/notdev/bin"
+cp "$AE" "$TMP/notdev/bin/ae"
+NOTDEV="$TMP/notdev/bin/ae"
+mkdir -p "$TMP/elsewhere"
+
 mkdir -p "$TMP/h1/.aether/versions"
 echo "0.111.0" > "$TMP/h1/.aether/active_version"
-HOME="$TMP/h1" "$AE" version doctor --fix >"$TMP/o1" 2>&1 || true
+( cd "$TMP/elsewhere" && HOME="$TMP/h1" "$NOTDEV" version doctor --fix ) >"$TMP/o1" 2>&1 || true
 grep -q 'fixed: pin now reads' "$TMP/o1" \
     || { sed 's/^/    /' "$TMP/o1"; fail "--fix did not repair a pin naming an uninstalled version"; }
 
 # Same pin, but the version IS installed: --fix must NOT rewrite it.
 mkdir -p "$TMP/h2/.aether/versions/v0.111.0"
 echo "0.111.0" > "$TMP/h2/.aether/active_version"
-HOME="$TMP/h2" "$AE" version doctor --fix >"$TMP/o2" 2>&1 || true
+( cd "$TMP/elsewhere" && HOME="$TMP/h2" "$NOTDEV" version doctor --fix ) >"$TMP/o2" 2>&1 || true
 if grep -q 'fixed: pin now reads' "$TMP/o2"; then
     sed 's/^/    /' "$TMP/o2"
     fail "--fix rewrote a pin whose version is installed; that is a choice, not a fault"
@@ -71,4 +82,27 @@ if AETHER_HOME="$TMP/bad" "$TMP/bad/bin/ae" version doctor >/dev/null 2>&1; then
     fail "doctor exited 0 on a broken install"
 fi
 
-echo "  [PASS] version_doctor: probe fails on a broken toolchain; --fix repairs only a broken pin"
+# --- a dev tree is not an installed toolchain -----------------------------
+# The pin governs INSTALLED toolchains. A source tree resolves its compiler
+# next to its own binary and never consults it, and its version is a working
+# build with no matching release -- so warning about a pin disagreement here
+# would tell a developer to run `ae version use <version>` for a version that
+# cannot be installed. The doctor must say the pin does not apply instead.
+DEVOUT="$TMP/dev.out"
+( cd "$ROOT" && "$AE" version doctor ) >"$DEVOUT" 2>&1 || true
+grep -q 'not applicable: this is a source tree' "$DEVOUT" \
+    || { sed 's/^/    /' "$DEVOUT"; fail "doctor applied the version pin to a source tree"; }
+
+# And it must never propose a version that is not installed, in either mode.
+while IFS= read -r line; do
+    case "$line" in
+        *"ae version use "*)
+            v=$(printf '%s\n' "$line" | sed 's/.*ae version use \([0-9.]*\).*/\1/')
+            [ -n "$v" ] || continue
+            [ -d "$HOME/.aether/versions/v$v" ] \
+                || fail "doctor suggested 'ae version use $v', which is not installed"
+            ;;
+    esac
+done < "$DEVOUT"
+
+echo "  [PASS] version_doctor: probe fails on a broken toolchain; --fix repairs only a broken pin; dev trees exempt from the pin"
