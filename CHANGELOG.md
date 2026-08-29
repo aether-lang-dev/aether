@@ -11,6 +11,71 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **The TLS 1.3 handshake module can read a ClientHello and write a
+  ServerHello.** `tls13_hs` built ClientHellos and parsed ServerHellos —
+  the client's half of the conversation and nothing else — so a pure-Aether
+  TLS *server* had no way to start. The record layer and key schedule were
+  already role-neutral (the key schedule is label-driven, so `"s hs traffic"`
+  is the same call as `"c hs traffic"`), signing already existed, and the
+  `"TLS 1.3, server CertificateVerify"` context string was already there.
+  The gap was one layer, and it was the inverse of parsers that already
+  existed.
+
+  This is not about dropping OpenSSL, which stays the default where present.
+  It is that three of the four client/server × OpenSSL/pure permutations
+  worked and the fourth was empty, so our TLS was never exercised against
+  our TLS — only against static vectors and OpenSSL peers. A bug both halves
+  made together had nowhere to show up. It also means a cross-built binary
+  cannot serve HTTPS at all today, which is the same hole the client side
+  was filed about.
+
+  `parse_client_hello` reads a **real OpenSSL ClientHello** captured off the
+  wire, not just one we built ourselves, and `server_hello` round-trips
+  through the independently-written `parse_server_hello`. HelloRetryRequest
+  is not implemented: a client offering only groups we cannot complete gets
+  a clear error rather than a silently wrong negotiation.
+
+- **A pure-Aether TLS 1.3 client verifies a server by IP address.**
+  `check_hostname` matched `dNSName` SANs only — `iPAddress` SANs were never
+  parsed — so connecting to a server by address, which is the normal case for
+  a local or internal endpoint, could not succeed however the certificate was
+  issued. IP literals now match against `iPAddress` SANs and never against
+  DNS names, because a certificate naming the DNS name `10.0.0.1` does not
+  authorise the address (RFC 6125 §1.7.2 keeps the namespaces apart).
+
+- **A test showing HTTPS end to end with no OpenSSL on the client side.**
+  `std.http.client` terminates TLS with OpenSSL, so a `--target` cross build,
+  which links none, fails at runtime with "HTTPS requested but the build has
+  no OpenSSL support". A downstream port read that, concluded HTTPS was
+  impossible in a cross build, and asked for a pure TLS backend to be
+  written. Most of it already existed: `std.cryptography.tls13_client` is a
+  complete pure-Aether TLS 1.3 client with full server authentication, and it
+  cross-builds. What was missing was anything demonstrating it. The new test
+  drives our own `std.http` server from that client and frames an HTTP/1.1
+  exchange over the raw TLS stream, which is the piece `std.http.client`
+  would own if the two were wired together.
+
+### Fixed
+
+- **Adding a field to a certificate struct no longer corrupts the heap.**
+  Three separate `malloc(136)` calls sized `LeafCert` by hand, and two
+  byte-identical initialisers cleared its fields in two different modules.
+  Adding one pointer makes the struct larger while the allocations still ask
+  for 136, and the overflow surfaces as a double-free inside `free_leaf`, a
+  long way from the edit that caused it. There is now one exported size
+  constant next to the struct and one exported initialiser, so a new field
+  has one place to be accounted for rather than five.
+
+- **The buffer convention in `std.cryptography` is written down.** Every
+  buffer argument there is a `std.bytes` handle, never `bytes.data(b)`, but
+  Aether has no separate type for the two so both spell as `ptr` — and
+  passing the raw data pointer compiles cleanly and then segfaults somewhere
+  unrelated. `conn_recv` likewise returns a handle rather than a pointer.
+  Stated in the module header and at the functions where getting it wrong
+  crashes.
+
 ## [0.602.0]
 
 ### Added

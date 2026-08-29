@@ -5,11 +5,27 @@ pure, offline pieces of `std.cryptography.tls13_client` against the canonical
 RFC 8448 §3 trace: the transcript-hash accumulator, the handshake key
 derivation, and the Finished key/verify-data. No network.
 
-## Live-server handshake check (manual)
+`../https_pure_tls_vertical/` — the **automated end-to-end** test. Stands up
+our own `std.http` server with TLS and drives a full socket handshake against
+it from this client, then frames an HTTP/1.1 exchange over the encrypted
+stream. That covers the socket path the KAT above deliberately does not: a
+real ServerHello, a real certificate chain, hostname verification (by IP, via
+an `iPAddress` SAN) and application data both ways. No OpenSSL on the client
+side, which is what makes it the check that a cross build still has working
+HTTPS.
 
-The full socket-driven handshake is verified against a real TLS 1.3 server
-(OpenSSL `s_server`) rather than in CI, because a live-server integration test
-is inherently flakier than a KAT. To reproduce:
+`../crypto_tls13_server_hs/` — the server-direction handshake messages,
+including parsing a **real ClientHello captured from `openssl s_client`**, so
+the wire format is validated against another implementation rather than only
+against ourselves.
+
+## Live-server handshake check against OpenSSL (manual)
+
+The two automated tests above cover our own peers. This reproduces a handshake
+against OpenSSL's `s_server` specifically, which is worth doing by hand when
+touching the handshake: it is the check that catches a mistake both of our
+halves make together. Kept manual rather than in CI because a live-server
+integration test is inherently flakier than a KAT. To reproduce:
 
 ```sh
 # 1. a P-256 self-signed cert (exercises the ECDSA CertificateVerify path)
