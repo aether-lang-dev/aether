@@ -11,6 +11,31 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A proxied request's own strings come from an arena.** Parsing a request
+  allocated the method, the path, the query, the version and a pair per
+  header, then freed them a moment later: about two dozen allocations and as
+  many frees for every request. The connection already owned an arena for the
+  outbound headers, and the inbound ones now share it.
+
+  A parse takes all of its strings from the arena or none of them, because
+  their origin is recorded by one flag on the request, and the decision is
+  made up front from the size of the request being parsed. The reservation
+  covers the worst case exactly: at most four fixed strings plus a pair per
+  header, each with a terminator and rounded up to the arena's alignment. It
+  has to, because there is no fallback once a parse has started, and a first
+  attempt at that bound reserved 456 bytes where 832 were needed.
+
+  The arena is now emptied before the parse rather than after it, since the
+  parse is what fills it, and it is sized for two requests rather than one
+  because it holds the inbound strings and the outbound headers together.
+
+  **Page faults per request 0.13 to 0.05**, the same in all six rounds. CPU
+  per request improved in five of six rank-matched rounds; the controls moved
+  133% in that run, so the fault count is the figure quoted.
+
+
 ## [0.602.0]
 
 ### Added
