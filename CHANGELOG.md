@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.600.0]
+
 ### Fixed
 
 - **Mounting a reverse proxy sizes the connection pool for a proxy.** The
