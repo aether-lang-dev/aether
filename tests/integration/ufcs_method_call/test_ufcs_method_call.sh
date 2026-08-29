@@ -16,13 +16,25 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 # --- Positive: the probe program runs and prints the pinned transcript --
-out=$(AETHER_HOME="" "$AE" run "$SCRIPT_DIR/probe.ae" 2>&1)
+# stdout only. This pins the PROGRAM's transcript, and compiler diagnostics
+# go to stderr -- folding them in with 2>&1 made the comparison depend on
+# whether the toolchain happened to be chatty. It did once #1780 stopped
+# `ae run` swallowing compiler warnings: probe.ae trips a pre-existing
+# "unresolved type in codegen" warning (aetherc emits it on main too; `ae`
+# was hiding it), and a diagnostic that has nothing to do with UFCS started
+# failing a UFCS transcript. stderr is captured separately so a genuine error
+# is still shown when something goes wrong.
+err_file="${TMPDIR:-/tmp}/ae_ufcs_probe_err.$$"
+out=$(AETHER_HOME="" "$AE" run "$SCRIPT_DIR/probe.ae" 2>"$err_file")
 rc=$?
 if [ "$rc" -ne 0 ]; then
     echo "ufcs_method_call: FAIL (probe errored, rc=$rc)"
     echo "$out" | head -20 | sed 's/^/  /'
+    sed -n '1,20p' "$err_file" | sed 's/^/  stderr: /'
+    rm -f "$err_file"
     exit 1
 fi
+rm -f "$err_file"
 expected="eq ok
 eq ok
 eq ok

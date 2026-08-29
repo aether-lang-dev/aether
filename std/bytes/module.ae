@@ -35,11 +35,13 @@ exports(
     set_le16, get_le16, set_le32, get_le32, set_le64, get_le64,
     set_be16, get_be16, set_be32, get_be32, set_be64, get_be64,
     copy_from_string, copy_from_bytes, copy_within, finish, to_string, free,
-    data, capacity, set_length
+    data, capacity, set_length, from_ptr, string_from_ptr
 )
 
 // ---- Raw externs ----
 extern aether_bytes_new(initial_capacity: int) -> ptr
+extern aether_bytes_from_ptr(src: ptr, length: int) -> ptr
+extern aether_bytes_string_from_ptr(src: ptr, length: int) -> string @heap
 extern aether_bytes_length(b: ptr) -> int
 extern aether_bytes_capacity(b: ptr) -> int
 extern aether_bytes_set_length(b: ptr, length: int) -> int
@@ -99,6 +101,20 @@ set_length(b: ptr, length: int) -> int { return aether_bytes_set_length(b, lengt
 
 new(initial_capacity: int) -> ptr {
     return aether_bytes_new(initial_capacity)
+}
+
+// One-call ptr -> bytes crossing: a fresh length-aware bytes holding a COPY of
+// `length` bytes from a raw pointer `src`. The common "I have a raw buffer,
+// give me a bytes I can finish() / walk" case in one call (issue #1782).
+from_ptr(src: ptr, length: int) -> ptr {
+    return aether_bytes_from_ptr(src, length)
+}
+
+// One-call ptr -> string crossing: a fresh refcounted binary string copying
+// `length` bytes from a raw pointer `src`, without an intermediate bytes.
+// The direct answer to "I have a ptr + len, I want a string" (issue #1782).
+string_from_ptr(src: ptr, length: int) -> string {
+    return aether_bytes_string_from_ptr(src, length)
 }
 
 // Number of bytes the buffer logically contains. Returns -1 if `b`

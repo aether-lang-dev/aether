@@ -977,6 +977,12 @@ ASTNode* parse_closure_expression(Parser* parser) {
     Token* start = peek_token(parser);
     int line = start->line, col = start->column;
 
+    // Line of the token immediately before `start`, captured before we consume
+    // anything, so the #1781 diagnostic below can tell whether this `||` opened
+    // its own line (a wrapped condition) vs continued one. -1 if none.
+    Token* start_prev = peek_ahead(parser, -1);
+    int start_prev_line = start_prev ? start_prev->line : -1;
+
     ASTNode* closure = create_ast_node(AST_CLOSURE, NULL, line, col);
 
     if (start->type == TOKEN_OR) {
@@ -1047,7 +1053,29 @@ ASTNode* parse_closure_expression(Parser* parser) {
         ASTNode* body = parse_block(parser);
         add_child(closure, body);
     } else {
-        parser_error(parser, "Expected '->' or '{' after closure parameters");
+        // #1781: a boolean condition wrapped so the continuation line begins
+        // with `||` is misread as closure parameters — the `||` looked like an
+        // empty param list, and the operand after it is neither `->` nor `{`.
+        // Aether continues an expression only when the operator sits at the END
+        // of the previous line (see operator_starts_newline); a leading operator
+        // starts a fresh expression, so `|| b == 2 {` parses as a closure. When
+        // this `||` opened its own line (its line is past the token before it),
+        // that wrapped-condition mistake is by far the likeliest cause — say so,
+        // instead of a bare "closure parameters" error far from the real problem.
+        int opened_new_line = 0;
+        if (start->type == TOKEN_OR && start_prev_line >= 0 &&
+            start->line > start_prev_line) {
+            opened_new_line = 1;
+        }
+        if (opened_new_line) {
+            parser_error(parser,
+                "a line starting with `||` is read as closure parameters; "
+                "to continue a wrapped condition, put the operator at the END "
+                "of the previous line (`a == 1 ||`) or parenthesise the whole "
+                "condition");
+        } else {
+            parser_error(parser, "Expected '->' or '{' after closure parameters");
+        }
         free_ast_node(closure);
         return NULL;
     }

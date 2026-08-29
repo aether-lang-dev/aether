@@ -1,0 +1,3 @@
+import audio
+extern println(s: string)
+main() { println("nb=${audio.is_null_backend()}") }

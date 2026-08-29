@@ -70,6 +70,31 @@ AetherBytes* aether_bytes_new(int initial_capacity) {
     return b;
 }
 
+/* One-call ptr -> bytes crossing (#1782): copy `length` bytes from a raw
+ * pointer into a fresh AetherBytes whose logical length is set, so a following
+ * finish/to_string/get all see the data. Saves the new()+manual-copy idiom for
+ * the common "I have a raw buffer, give me a length-aware bytes" case. */
+AetherBytes* aether_bytes_from_ptr(void* src, int length) {
+    if (length < 0) return NULL;
+    AetherBytes* b = aether_bytes_new(length);
+    if (!b) return NULL;
+    if (length > 0 && src) {
+        memcpy(b->data, src, (size_t)length);
+        b->length = (size_t)length;
+    }
+    return b;
+}
+
+/* One-call ptr -> string crossing (#1782): mint a fresh refcounted AetherString
+ * copying `length` bytes from a raw pointer, without the caller building an
+ * intermediate AetherBytes. This is the direct answer to "I have a ptr + len,
+ * I want a length-aware binary string". */
+void* aether_bytes_string_from_ptr(void* src, int length) {
+    if (length < 0) return NULL;
+    if (length == 0 || !src) return (void*)string_new_with_length("", 0);
+    return (void*)string_new_with_length((const char*)src, (size_t)length);
+}
+
 int aether_bytes_length(AetherBytes* b) {
     if (is_aether_string(b)) return -1;
     if (!b) return -1;
@@ -376,7 +401,16 @@ void* aether_bytes_finish(AetherBytes* b, int length) {
     if (is_aether_string(b)) return NULL;
     if (!b) return NULL;
     size_t use_length = (length < 0) ? 0 : (size_t)length;
-    if (use_length > b->length) use_length = b->length;
+    /* Clamp to CAPACITY, not the logical length. The caller passed an explicit
+     * `length` asking for that many bytes; a common and correct idiom is to
+     * write directly through aether_bytes_data() and then finish(b, n) without
+     * a preceding set_length(b, n). Those direct writes land in the buffer (it
+     * is allocated and zero-filled up to capacity by bytes_reserve) but do not
+     * advance b->length, so clamping to b->length silently truncated an
+     * explicitly-requested finish to an empty/short string — the trap in #1782.
+     * Honour the request up to what was actually allocated. Anything past
+     * capacity is still clamped (safe: never reads past the buffer). */
+    if (use_length > b->capacity) use_length = b->capacity;
     /* Hand the bytes off to an AetherString. We can't transfer the
      * existing buffer directly because string_new_with_length
      * allocates its own (and frees on release_string). Copy +
@@ -394,10 +428,13 @@ void* aether_bytes_to_string(AetherBytes* b, int length) {
      * buffer, so the caller can keep owning the AetherBytes and call this
      * repeatedly. string_new_with_length copies, so the returned string is
      * independent of `b`. Returns NULL if `b` is NULL or `length` is
-     * negative; clamps `length` to the buffer's logical length. */
+     * negative; clamps `length` to the buffer's capacity. */
     if (!b) return NULL;
     size_t use_length = (length < 0) ? 0 : (size_t)length;
-    if (use_length > b->length) use_length = b->length;
+    /* Clamp to CAPACITY, not the logical length — same reasoning as
+     * aether_bytes_finish above (#1782): honour an explicitly-requested length
+     * for the direct-data()-write idiom, still never read past the buffer. */
+    if (use_length > b->capacity) use_length = b->capacity;
     return (void*)string_new_with_length(b->data, use_length);
 }
 

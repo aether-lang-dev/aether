@@ -1,0 +1,3 @@
+import sound
+extern println(s: string)
+main() { println("nb=${sound.nb()}") }

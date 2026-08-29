@@ -627,8 +627,20 @@ jobs:
         echo "zig=$ZIG"       >> "$GITHUB_OUTPUT"
         echo "sysroot=$SR"    >> "$GITHUB_OUTPUT"
 
+    # A host `ae`, built and set aside BEFORE the cross-build overwrites
+    # build/ with FreeBSD binaries. The sysroot verification later in this
+    # job needs an `ae` that RUNS on this Linux runner, and by then build/ae
+    # is a FreeBSD ELF. Cheap: this job already compiles the tree once.
+    - name: Build a host ae for the sysroot check
+      run: |
+        make -s compiler ae stdlib
+        mkdir -p host-toolchain
+        cp build/ae build/aetherc host-toolchain/
+        file host-toolchain/ae
+
     - name: Cross-build (FREEBSD=1)
       run: |
+        make clean >/dev/null 2>&1 || true
         make compiler ae stdlib \
           FREEBSD=1 \
           ZIG="${{ steps.prov.outputs.zig }}" \
@@ -689,11 +701,116 @@ jobs:
           > release/FREEBSD-CROSS-BUILD.txt
         cd release && tar -czf "../aether-${VERSION}-${TARGET}.tar.gz" *
 
+    # A FreeBSD CROSS sysroot, so a Linux box can cross-link a FreeBSD binary.
+    #
+    # This is not the same thing as the tarball above. That one is a NATIVE
+    # FreeBSD toolchain meant to run ON FreeBSD, and it rightly carries no
+    # libc -- the target host has one. Point AETHER_SYSROOT at it from Linux
+    # and the link fails on FreeBSD base symbols. Every other target in the
+    # matrix (windows, macos, linux-musl) cross-builds from a fetched release
+    # because zig bundles what they need; FreeBSD is the one that needs a
+    # base, and nothing published carried it.
+    #
+    # No extra compute: fetch-freebsd-base.sh already ran above for the
+    # cross-build itself, so this is tar-and-upload of a directory that is
+    # already on disk.
+    #
+    # LEAN, not the whole ~477MB base. zig supplies the CRT and libc for the
+    # link (adding the base startup objects would duplicate _start), so what
+    # a cross-link actually needs from the base is: the platform libraries
+    # ae_cross.c names on the link line, a libc.a to satisfy the sysroot
+    # completeness probe, and the headers. The verification step below is
+    # what makes "lean" safe rather than a guess -- if this set is short by
+    # one library, the release fails here instead of shipping an asset that
+    # cannot link.
+    - name: Package FreeBSD cross sysroot
+      run: |
+        VERSION=$(cat VERSION | tr -d '[:space:]')
+        SR="${{ steps.prov.outputs.sysroot }}"
+        OUT="$PWD/fbsd-sysroot"
+        # BOTH lib/ and usr/lib/, mirroring the base's own layout. FreeBSD
+        # puts the runtime .so.N in /lib and a development symlink in
+        # /usr/lib pointing at ../../lib/<name>.so.N -- flattening the two
+        # into one directory breaks that relative link, and the linker then
+        # reports the library as missing even though the file is present.
+        mkdir -p "$OUT/lib" "$OUT/usr/lib" "$OUT/usr/include"
+
+        # The libraries the FreeBSD link line references (tools/ae_cross.c:
+        # -lthr, plus the casper set libaether.a always pulls), and libc,
+        # which the AETHER_SYSROOT completeness check probes for.
+        # Copy each library into the SAME subdirectory it came from, so the
+        # relative symlinks keep resolving. -a preserves the links
+        # themselves; the targets are copied by the .so.N pass below.
+        for lib in c thr m casper cap_pwd cap_sysctl cap_grp cap_dns \
+                   ssl crypto z pcre2-8 execinfo elf util; do
+          for sub in lib usr/lib; do
+            [ -d "$SR/$sub" ] || continue
+            for f in "$SR/$sub/lib$lib.a" "$SR/$sub/lib$lib.so" \
+                     "$SR/$sub/lib$lib".so.[0-9]*; do
+              [ -e "$f" ] || continue
+              cp -a "$f" "$OUT/$sub/" 2>/dev/null || true
+            done
+          done
+        done
+
+        # Headers: a cross-compile of the runtime includes FreeBSD system
+        # headers, so these are not optional.
+        if [ -d "$SR/usr/include" ]; then
+          cp -a "$SR/usr/include/." "$OUT/usr/include/"
+        elif [ -d "$SR/include" ]; then
+          cp -a "$SR/include/." "$OUT/usr/include/"
+        fi
+
+        {
+          printf '%s\n' 'FreeBSD cross sysroot for `ae build --target=x86_64-freebsd` from a'
+          printf '%s\n' 'non-FreeBSD host.'
+          printf '%s\n' ''
+          printf '%s\n' '    tar xJf aether-<v>-freebsd-x86_64-sysroot.tar.xz'
+          printf '%s\n' '    AETHER_SYSROOT=$PWD/fbsd-sysroot ae build --target=x86_64-freebsd hello.ae -o hello'
+          printf '%s\n' ''
+          printf '%s\n' 'This carries only what a cross-LINK needs -- the FreeBSD base'
+          printf '%s\n' 'libraries the link line references, and the system headers. zig'
+          printf '%s\n' 'supplies the CRT and libc for the link itself. It is NOT a FreeBSD'
+          printf '%s\n' 'userland and is not runnable.'
+          printf '%s\n' ''
+          printf '%s\n' 'The FreeBSD base is redistributable under the FreeBSD license; see'
+          printf '%s\n' 'the FreeBSD project for the full base distribution.'
+        } > "$OUT/README-SYSROOT.txt"
+
+        tar -cJf "aether-${VERSION}-freebsd-x86_64-sysroot.tar.xz" fbsd-sysroot
+        ls -la "aether-${VERSION}-freebsd-x86_64-sysroot.tar.xz"
+        du -sh "$OUT"
+
+    # Prove the lean sysroot can actually link before publishing it. Without
+    # this the asset could ship one library short and only fail for whoever
+    # downloaded it -- which is exactly the failure mode the libaether.h gap
+    # had, where the release looked fine because nothing exercised it.
+    - name: Verify the sysroot cross-links a real program
+      run: |
+        # build/ae is a FreeBSD ELF by now (this job cross-built it), so the
+        # check uses the host copy set aside before the cross-build. No
+        # fallback to build/ae: silently checking with a binary that cannot
+        # run would report success without testing anything.
+        HOST_AE="$PWD/host-toolchain/ae"
+        [ -x "$HOST_AE" ] || { echo "::error::host ae missing; cannot verify the sysroot"; exit 1; }
+        file "$HOST_AE" | grep -q 'FreeBSD' \
+          && { echo "::error::host ae is a FreeBSD binary; it cannot run here"; exit 1; }
+
+        printf 'import std.fs\nmain() {\n    _, e = fs.read("/etc/hostname")\n    if e != "" { println("e") }\n    println("ok")\n    return 0\n}\n' > /tmp/sysroot_probe.ae
+        AETHER_SYSROOT="$PWD/fbsd-sysroot" \
+          "$HOST_AE" build /tmp/sysroot_probe.ae --target=x86_64-freebsd -o /tmp/sysroot_probe \
+          || { echo "::error::the packaged lean FreeBSD sysroot cannot cross-link a runtime-linking program"; exit 1; }
+        file /tmp/sysroot_probe
+        file /tmp/sysroot_probe | grep -q 'FreeBSD' \
+          || { echo "::error::the sysroot probe did not produce a FreeBSD binary"; exit 1; }
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: aether-freebsd-x86_64
-        path: aether-*-freebsd-x86_64.tar.gz
+        path: |
+          aether-*-freebsd-x86_64.tar.gz
+          aether-*-freebsd-x86_64-sysroot.tar.xz
         retention-days: 7
 
   # ================================================================== #
@@ -752,6 +869,7 @@ jobs:
         files: |
           aether-*.tar.gz
           aether-*.zip
+          aether-*-sysroot.tar.xz
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

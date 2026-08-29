@@ -1173,6 +1173,52 @@ static int check_selective_import_shadow(ASTNode* ast,
     return 1;
 }
 
+/* Last `.`-separated segment of a module path: "std.audio" -> "audio",
+ * "audio" -> "audio". Returns a pointer into `path`. */
+static const char* module_last_segment(const char* path) {
+    if (!path) return "";
+    const char* dot = strrchr(path, '.');
+    return dot ? dot + 1 : path;
+}
+
+/* #1780: a module named `X` that does `import std.X` (no alias) self-shadows —
+ * a qualified `X.name(...)` call resolves to the CURRENT module first, so a
+ * wrapper forwarding to the stdlib function of the same name calls itself, and
+ * the program segfaults on infinite recursion with no diagnostic. `import X as
+ * Y` aliasing already exists, so warn at the import site and point at it. This
+ * is the qualified-`mod.fn` sibling of check_selective_import_shadow's
+ * bare-name (#436) check. Warning, not error: the resolution rule is unchanged,
+ * we only make the trap visible. `self_name` is the importing module's name. */
+static void warn_self_shadowing_import(const char* self_name,
+                                       ASTNode* import_child) {
+    if (!self_name || !import_child || !import_child->value) return;
+    /* An `as`-alias frees the wrapper to name the stdlib module — no trap. */
+    for (int k = 0; k < import_child->child_count; k++) {
+        ASTNode* c = import_child->children[k];
+        if (c && c->annotation && strcmp(c->annotation, "module_alias") == 0)
+            return;
+    }
+    const char* self_seg = module_last_segment(self_name);
+    const char* imp_seg = module_last_segment(import_child->value);
+    /* Only when the imported path is DIFFERENT from the module's own name but
+     * shares the last segment (e.g. module `audio` importing `std.audio`).
+     * A module importing literally itself is a separate cycle error. */
+    if (strcmp(import_child->value, self_name) == 0) return;
+    if (strcmp(self_seg, imp_seg) != 0) return;
+    fprintf(stderr,
+        "warning: module '%s' imports '%s'; a qualified call to '%s.<name>' "
+        "resolves to THIS module first, not '%s'\n",
+        self_name, import_child->value, self_seg, import_child->value);
+    fprintf(stderr,
+        "  so a wrapper forwarding to '%s.<name>' of the same name calls "
+        "itself — infinite recursion at runtime, with no other signal.\n",
+        import_child->value);
+    fprintf(stderr,
+        "  fix: alias the import so the wrapper can name what it wraps, e.g. "
+        "`import %s as %s_std` and call `%s_std.<name>`.\n",
+        import_child->value, self_seg, self_seg);
+}
+
 // Recursive helper: load a single module and its transitive imports
 static int orchestrate_module(const char* module_name, const char* file_path,
                               DependencyGraph* graph) {
@@ -1287,6 +1333,7 @@ static int orchestrate_module(const char* module_name, const char* file_path,
         char* sub_file = resolve_import_path(child);
         const char* sub_path = child->value;
 
+        warn_self_shadowing_import(module_name, child);   /* #1780 */
         dependency_graph_add_edge(graph, module_name, sub_path);
         module_add_import(mod, sub_path);
 

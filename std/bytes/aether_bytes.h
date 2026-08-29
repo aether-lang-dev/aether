@@ -37,6 +37,14 @@ typedef struct AetherBytes AetherBytes;
  * Initial length is 0. */
 AetherBytes* aether_bytes_new(int initial_capacity);
 
+/* One-call ptr -> bytes crossing: a fresh AetherBytes copying `length` bytes
+ * from `src`, with its logical length set. NULL on negative length / OOM. */
+AetherBytes* aether_bytes_from_ptr(void* src, int length);
+
+/* One-call ptr -> string crossing: a fresh refcounted AetherString copying
+ * `length` bytes from `src`. NULL on negative length. */
+void* aether_bytes_string_from_ptr(void* src, int length);
+
 /* Number of bytes the buffer logically contains. -1 if `b` is NULL. */
 int aether_bytes_length(AetherBytes* b);
 

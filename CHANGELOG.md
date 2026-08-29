@@ -11,6 +11,64 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **The FreeBSD cross sysroot ships as a release asset.** Every other target
+  in the matrix cross-builds from a fetched release, because zig bundles what
+  they need. FreeBSD does not: a cross-link wants FreeBSD's own base
+  libraries, and nothing published carried them. The
+  `aether-<v>-freebsd-x86_64.tar.gz` asset is a *native* toolchain meant to
+  run on FreeBSD and rightly has no libc of its own, so pointing
+  `AETHER_SYSROOT` at it from Linux failed on base symbols.
+
+  This costs no extra build time — the release already fetches that base to
+  cross-build the FreeBSD tarball, so the asset is a tar of a directory
+  already on disk. It carries only what a cross-link needs rather than the
+  whole ~477MB base: 22MB compressed. The release now cross-links a
+  runtime-linking program against the packaged sysroot and fails if that does
+  not work, which is what makes trimming it safe — the first version was one
+  broken symlink short, and the check caught it rather than shipping it.
+
+### Fixed
+
+- **A tuple returned through a bare `fn` parameter now fails with a diagnostic
+  that names the cause and the fix (#1778).** `via_fn(f: fn, …) -> { return
+  f(…) }` typed the inner call `void` — a bare `fn` carries no signature — so
+  the destructure at the call site failed with a generic "not a tuple", plus
+  misleading "Undefined variable" follow-ons attributed to line 1. The
+  signatured form `f: fn(int, int) -> (int, string)` already preserves the
+  tuple; the error now says so and shows it, and the failed destructure still
+  binds its target names so the line-1 cascade is gone.
+
+- **A module that imports the std module of its own name now warns instead of
+  segfaulting (#1780).** In a module named `audio`, `import std.audio` makes a
+  qualified `audio.<name>` resolve to the current module first, so a wrapper
+  forwarding to the stdlib function of the same name calls itself — an infinite
+  recursion that built cleanly and crashed with signal 11 and no diagnostic. It
+  now warns at the import site, naming the trap and the existing alias fix
+  (`import std.audio as audio_std`). Relatedly, `ae run`/`ae build` compiled the
+  `.ae` with stderr suppressed, so this (and every other) compiler warning was
+  invisible in the common path; the aetherc step now keeps stderr, matching the
+  gcc step.
+
+- **A boolean condition wrapped so the continuation line begins with `||` gives
+  a clear diagnostic (#1781).** `if a == 1` <newline> `|| b == 2 {` was
+  misparsed as closure parameters ("Expected '->' or '{' after closure
+  parameters"), far from the real cause. Aether continues an expression only
+  when the operator sits at the end of the previous line; that rule is
+  intentional, so the error now explains it — put the operator at the end of the
+  previous line (`a == 1 ||`) or parenthesise the condition.
+
+- **`std.bytes.finish`/`to_string` honour the requested length to capacity, and
+  the ptr↔string bridge is documented (#1782).** Writing directly through
+  `bytes.data()` and then `finish(b, n)` silently produced an empty/short string
+  because the count was clamped to the buffer's logical length (a raw `data()`
+  write does not advance it). It now clamps to capacity, so the direct-write
+  idiom works without a preceding `set_length`; the buffer is zero-filled to
+  capacity, so this never reads uninitialised memory. Added `bytes.from_ptr` /
+  `bytes.string_from_ptr` for the one-call crossings, and a "crossing between
+  `ptr` and `string`" section to the std.bytes docs.
+
 ## [0.600.0]
 
 ### Fixed
