@@ -42,6 +42,15 @@ version number before tagging the release.
 
 ### Changed
 
+- **Copying an upstream response's headers no longer allocates per header.**
+  Each one was copied into a fresh allocation purely to NUL-terminate its
+  value for the setter, so a response with a dozen headers cost a dozen
+  mallocs and frees; `cfree` was 1.2% of the driver's profile. Values now go
+  into a small buffer on the stack, and only an outsized one takes an
+  allocation. The end of each header line is found with `strchr` for the
+  carriage return rather than `strstr` for the pair, which pays a two-byte
+  needle's setup once per header of every proxied response.
+
 - **Write interest is registered once instead of being added and dropped
   around every blocking write.** On an edge-triggered backend `EPOLLOUT` and
   `EV_CLEAR` report the transition to writable rather than the state, so an
@@ -53,6 +62,13 @@ version number before tagging the release.
   A backend that cannot honour edge triggering keeps the old behaviour, since
   there a writable descriptor is ready on every wait; the poller now says
   which it is rather than the driver assuming.
+
+  Measured against the previous commit, the effect on CPU per request was
+  **within the noise**: rank-matched across six rounds it was better in one
+  and worse in another. It is kept because it removes work that is provably
+  there and costs nothing, not because the benchmark could see it. What the
+  change did do is expose the connect-completion bug above, by giving the
+  client descriptor a wakeup it had never had before.
 
 - **A response is serialised into a buffer the connection keeps.** Every
   response allocated a buffer and freed it a moment later, and wrote each
@@ -92,6 +108,11 @@ version number before tagging the release.
   microseconds by the least-contended round, and 34.0 to 20.4 by the median.
 
 ### Testing
+
+- A response header value too long for that stack buffer is covered, so the
+  path that falls back to the heap is exercised rather than assumed. Against a
+  build that truncates instead, the test reports 511 bytes where 1000 were
+  sent.
 
 - A proxied request split across several writes, with the header terminator
   itself cut in half and the body arriving last, is now covered. The existing

@@ -718,10 +718,14 @@ static int px_copy(AetherProxyExchange* px) {
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
-            const char* eol = strstr(p, "\r\n");
-            if (!eol) break;
-            const char* colon = strchr(p, ':');
-            if (colon && colon < eol) {
+            /* strchr for the carriage return rather than strstr for the pair:
+             * the setup a two-byte needle costs is paid once per header, and
+             * this loop runs for every header of every proxied response. */
+            const char* cr = strchr(p, '\r');
+            if (!cr || cr[1] != '\n') break;
+            const char* eol = cr;
+            const char* colon = memchr(p, ':', (size_t)(eol - p));
+            if (colon) {
                 size_t kl = (size_t)(colon - p);
                 char keybuf[128];
                 if (kl < sizeof(keybuf)) {
@@ -731,14 +735,23 @@ static int px_copy(AetherProxyExchange* px) {
                         const char* v = colon + 1;
                         while (v < eol && (*v == ' ' || *v == '\t')) v++;
                         size_t vl = (size_t)(eol - v);
-                        char* val = (char*)malloc(vl + 1);
-                        if (val) {
-                            memcpy(val, v, vl);
-                            val[vl] = '\0';
-                            http_response_set_header(res, keybuf, val);
-                            if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
-                            free(val);
+
+                        /* The value only has to be NUL-terminated for the
+                         * setter. Doing that with an allocation cost a
+                         * malloc and a free for every header of every
+                         * response; a header value longer than this is rare
+                         * enough to be worth one. */
+                        char  stackval[512];
+                        char* val = stackval;
+                        if (vl >= sizeof(stackval)) {
+                            val = (char*)malloc(vl + 1);
+                            if (!val) { p = eol + 2; continue; }
                         }
+                        memcpy(val, v, vl);
+                        val[vl] = '\0';
+                        http_response_set_header(res, keybuf, val);
+                        if (strcasecmp(keybuf, "Content-Type") == 0) seen_content_type = 1;
+                        if (val != stackval) free(val);
                     }
                 }
             }
