@@ -1,4 +1,4 @@
-exports (is_null_backend)
+exports(is_null_backend)
 import std.audio
 is_null_backend() -> int {
     if audio.is_null_backend() { return 1 }
