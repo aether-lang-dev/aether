@@ -68,5 +68,12 @@ main() {
     }
     println("  PASS: bytes.from_ptr (ptr -> bytes in one call, length set)")
 
+    // `src` is the one buffer here that is never handed to finish, which
+    // consumes the buffer (b, b2 and cp all go that way). It has to be freed
+    // explicitly or it leaks -- the macOS leaks gate caught exactly this.
+    // Free it AFTER the from_ptr/string_from_ptr work above, which reads
+    // through `ps`, a pointer into src's storage.
+    bytes.free(src)
+
     println("=== All cases passed ===")
 }

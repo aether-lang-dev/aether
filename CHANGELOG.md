@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **The FreeBSD cross sysroot ships as a release asset.** Every other target
+  in the matrix cross-builds from a fetched release, because zig bundles what
+  they need. FreeBSD does not: a cross-link wants FreeBSD's own base
+  libraries, and nothing published carried them. The
+  `aether-<v>-freebsd-x86_64.tar.gz` asset is a *native* toolchain meant to
+  run on FreeBSD and rightly has no libc of its own, so pointing
+  `AETHER_SYSROOT` at it from Linux failed on base symbols.
+
+  This costs no extra build time — the release already fetches that base to
+  cross-build the FreeBSD tarball, so the asset is a tar of a directory
+  already on disk. It carries only what a cross-link needs rather than the
+  whole ~477MB base: 22MB compressed. The release now cross-links a
+  runtime-linking program against the packaged sysroot and fails if that does
+  not work, which is what makes trimming it safe — the first version was one
+  broken symlink short, and the check caught it rather than shipping it.
+
 ### Fixed
 
 - **A tuple returned through a bare `fn` parameter now fails with a diagnostic
