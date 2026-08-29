@@ -1,0 +1,3 @@
+exports (nb)
+import std.audio
+nb() -> int { if audio.is_null_backend() { return 1 } return 0 }

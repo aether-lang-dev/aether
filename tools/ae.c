@@ -3513,7 +3513,11 @@ static int cmd_run(int argc, char** argv) {
     if (tc.verbose) printf("Compiling %s...\n", file);
     build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
 
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_quiet(cmd);
+    // Show compiler warnings (stderr), hide the normal stdout chatter — the
+    // aetherc step can emit warnings (e.g. #1780 self-shadowing import) that a
+    // plain `ae run` must not swallow. Mirrors the gcc step below, which already
+    // uses run_cmd_show_warnings. (run_cmd_quiet dropped stderr, hiding them.)
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
     if (aetherc_ret != 0) {
         // Re-run with output visible so user can see the error
         build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
@@ -5991,8 +5995,10 @@ static int cmd_build(int argc, char** argv) {
     // Step 1: .ae to .c
     build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
 
-    // Always run visible on failure; print diagnostic on Windows
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_quiet(cmd);
+    // Always run visible on failure; print diagnostic on Windows. Keep stderr
+    // so compiler warnings (e.g. #1780 self-shadowing import) survive a plain
+    // `ae build`; run_cmd_quiet had dropped them.
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
     if (aetherc_ret != 0) {
         fprintf(stderr, "[diag] aetherc returned %d for: %s\n", aetherc_ret, file);
         fprintf(stderr, "[diag] cmd: %s\n", cmd);
