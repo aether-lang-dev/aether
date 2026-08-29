@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.599.0]
+
 ### Fixed
 
 - **A fetched release can cross-compile a program that links the runtime.**
