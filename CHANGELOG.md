@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.603.0]
+
 ### Added
 
 - **The TLS 1.3 handshake module can read a ClientHello and write a
