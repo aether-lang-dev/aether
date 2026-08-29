@@ -1,0 +1,9 @@
+extern println(s: string)
+main() {
+    a = 1
+    b = 2
+    if a == 1 ||
+        b == 2 {
+        println("yes")
+    }
+}
