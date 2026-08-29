@@ -11,8 +11,6 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.601.0]
-
 ### Added
 
 - **`ae version doctor`, which checks the install by compiling something.**
@@ -46,6 +44,9 @@ version number before tagging the release.
   already did and what `cp --remove-destination` would do if it were
   portable. Verified by hardlinking a staged install and reinstalling over
   it: the peer is untouched and the link count drops to one.
+
+## [0.601.0]
+
 
 ### Added
 
