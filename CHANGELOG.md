@@ -11,7 +11,55 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ae version doctor`, which checks the install by compiling something.**
+  `ae --version` prints what the toolchain says it is and never invokes the
+  compiler, so it reports a healthy install that cannot build anything —
+  a missing header or a truncated stdlib is invisible to it. The doctor
+  runs the string comparisons too, but its last and most important check is
+  an actual compile, because everything above it can pass while the install
+  is unusable.
+
+  It reports a split toolchain, a stale `~/.aether/bin` that shadows the real
+  install (or is on `PATH` while empty, which is what makes a shell say "No
+  such file or directory" for a tool that is installed), and public headers
+  missing from an install — the gap that shipped in a release and only
+  showed when someone cross-compiled something real.
+
+  Version pins, `current` and `ae version use` are release machinery, so the
+  doctor treats them as such: a source tree resolves its compiler next to its
+  own binary and never consults the pin, and its version is a working build
+  with no matching release. Warning about a pin disagreement there would tell
+  a developer to run a command that cannot succeed, so it says the pin does
+  not apply instead. The same rule holds in an installed tree: it only ever
+  suggests `ae version use <v>` for a version that is actually installed.
+
+  What it checks for a developer instead is the shadowing that actually
+  costs them time — `ae` on `PATH` resolving to something other than the
+  tree they are working in. You edit the compiler, type `ae`, and test a
+  months-old binary, with no indication that is what happened because both
+  are called `ae` and both work. It names both versions.
+
+  `--fix` repairs what is safely repairable and says what it did. It
+  deliberately will not rewrite a pin whose version IS installed: that is a
+  choice between two real installs rather than a fault.
+
+### Fixed
+
+- **Installing no longer writes through hardlinks.** `make install` copied
+  `runtime`, `std`, `include` and `contrib` over any existing install with
+  `cp -R`, and `cp` opens an existing destination with `O_TRUNC` and writes
+  *through* it. Anything sharing those inodes — a deduplicated version store
+  (#1783), or a user's own linking — had every peer silently rewritten by a
+  reinstall, corrupting other installed versions with no error. Each
+  destination is now removed before the copy, which is what `install -m`
+  already did and what `cp --remove-destination` would do if it were
+  portable. Verified by hardlinking a staged install and reinstalling over
+  it: the peer is untouched and the link count drops to one.
+
 ## [0.601.0]
+
 
 ### Added
 

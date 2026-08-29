@@ -2026,6 +2026,16 @@ install: $(VERSION_HEADER) release ae stdlib
 	@# path, list, map, host, intarr, tcp) — needs its module.ae
 	@# present here for the install to be functional.
 	@install -d $(PREFIX)/share/aether
+	@# Remove each destination subtree before copying over it. `cp` opens an
+	@# existing destination file with O_TRUNC and writes THROUGH it, so if
+	@# anything has hardlinked these files — a deduplicated ~/.aether/versions
+	@# store (#1783), or a user's own linking — a reinstall silently rewrites
+	@# every peer that shares the inode, corrupting other installed versions.
+	@# `install -m` is safe because it unlinks first; plain `cp` is not, and
+	@# `cp --remove-destination` is GNU-only, so remove-then-copy is the
+	@# portable form. Cheap: these are re-copied wholesale anyway.
+	@-$(RM_DIR) $(PREFIX)/share/aether/runtime
+	@-$(RM_DIR) $(PREFIX)/share/aether/std
 	@cp -R runtime $(PREFIX)/share/aether/
 	@cp -R std     $(PREFIX)/share/aether/
 	@# include/ too: share/aether/runtime/libaether_caps.c does
@@ -2036,6 +2046,7 @@ install: $(VERSION_HEADER) release ae stdlib
 	@# path (which reuses tc.include_flags) does not, so a caps-runtime
 	@# cross-build died on `'../include/libaether.h' file not found`. Mirror
 	@# the source layout so the relative include resolves either way.
+	@-$(RM_DIR) $(PREFIX)/share/aether/include
 	@cp -R include $(PREFIX)/share/aether/
 	@# Contrib module.ae descriptors + headers (issue #334). With these
 	@# in place, `import contrib.X` resolves the same way `import std.X`
@@ -2046,6 +2057,7 @@ install: $(VERSION_HEADER) release ae stdlib
 	@# probes for system dependencies (sqlite3-dev, etc.); without that
 	@# step a link of `import contrib.sqlite` will fail loudly — fine,
 	@# the resolver-side pain Paul filed is the one that's silent.
+	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
 	@# Trim source-tree noise from the contrib install: tests, benchmarks,
 	@# example .ae, build/CI scripts, and the .c/.m files (those compile
@@ -2217,6 +2229,7 @@ install-contrib: contrib
 	@# CI scripts, and the modules we don't ship in v1
 	@# (host/{java,go} — see contrib: target comment).
 	@# host/{tinygo,factor,aether} and tinyweb ARE shipped.
+	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
 	@rm -rf $(PREFIX)/share/aether/contrib/host/java
 	@rm -rf $(PREFIX)/share/aether/contrib/host/go
