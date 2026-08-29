@@ -592,7 +592,15 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
-    free(c->head);
+    /* Freed through the cap, because it was allocated through it. A plain
+     * free() returns the memory but leaves the accounting counter believing
+     * the bytes are still live, and this is the retry path: it runs when an
+     * upstream is failing, so the drift accumulates fastest exactly when the
+     * proxy is already under strain, until the cap refuses allocations that
+     * the machine has memory for. */
+    aether_caps_free(c->head, c->head_cap);
+    c->head = NULL;
+    c->head_len = c->head_cap = 0;
     HttpReqHead head_params = {
         c->px.outbound, http_request_method_of(c->px.outbound), path,
         host, port, 0, 0, body, body_len,
