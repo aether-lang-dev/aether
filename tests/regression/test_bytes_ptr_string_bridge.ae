@@ -1,0 +1,72 @@
+// Regression test for #1782 — std.bytes ptr<->string bridge.
+//
+// Two halves of the issue:
+//  (a) finish/to_string used to clamp the requested length to the buffer's
+//      LOGICAL length, so writing directly through bytes.data() (which does
+//      not advance the logical length) and then finish(b, n) silently produced
+//      an empty/short string. finish now honours n up to CAPACITY.
+//  (b) the one-call crossings bytes.from_ptr / bytes.string_from_ptr.
+
+import std.bytes
+import std.string
+import std.mem
+
+extern exit(code: int)
+
+main() {
+    println("=== #1782 bytes ptr<->string bridge ===")
+
+    // Case (a): write through data() WITHOUT set_length, then finish(b, n).
+    // Pre-fix this returned "" because logical length stayed 0.
+    b = bytes.new(4)
+    p = bytes.data(b)
+    mem.set_byte(p, 0, 65) // 'A'
+    mem.set_byte(p, 1, 66) // 'B'
+    mem.set_byte(p, 2, 67) // 'C'
+    s = bytes.finish(b, 3)
+    if s != "ABC" {
+        println("  FAIL a: direct data() write + finish got '${s}', expected 'ABC'")
+        exit(1)
+    }
+    println("  PASS: finish honours requested length after a raw data() write (no set_length)")
+
+    // finish still clamps a request past CAPACITY (safe, never over-reads).
+    // Note the allocator over-provisions (a 16-byte floor), so capacity can
+    // exceed the new() argument; the guarantee is only "never past capacity".
+    b2 = bytes.new(2)
+    cap2 = bytes.capacity(b2)
+    s2 = bytes.finish(b2, 999)
+    if string.length(s2) > cap2 {
+        println("  FAIL a2: over-capacity finish not clamped, len=${string.from_int(string.length(s2))} cap=${string.from_int(cap2)}")
+        exit(1)
+    }
+    println("  PASS: finish clamps a request to capacity (never over-reads)")
+
+    // Case (b): string_from_ptr — ptr -> string in one call.
+    src = bytes.new(3)
+    ps = bytes.data(src)
+    mem.set_byte(ps, 0, 120) // 'x'
+    mem.set_byte(ps, 1, 121) // 'y'
+    mem.set_byte(ps, 2, 122) // 'z'
+    fromp = bytes.string_from_ptr(ps, 3)
+    if fromp != "xyz" {
+        println("  FAIL b: string_from_ptr got '${fromp}', expected 'xyz'")
+        exit(1)
+    }
+    println("  PASS: bytes.string_from_ptr (ptr -> string in one call)")
+
+    // Case (b): from_ptr — ptr -> length-aware bytes in one call.
+    cp = bytes.from_ptr(ps, 3)
+    if bytes.length(cp) != 3 {
+        println("  FAIL b2: from_ptr length=${string.from_int(bytes.length(cp))}, expected 3")
+        exit(1)
+    }
+    round = bytes.finish(cp, 3)
+    if round != "xyz" {
+        println("  FAIL b3: from_ptr round-trip got '${round}'")
+        exit(1)
+    }
+    println("  PASS: bytes.from_ptr (ptr -> bytes in one call, length set)")
+
+    println("=== All cases passed ===")
+}
