@@ -144,15 +144,15 @@ serve(host: string, port: int, algo: string, backends: string, hc: ptr, br: ptr,
 // certificate, so the same pool, health checks, breaker and cache apply; only
 // the listener differs.
 serve_tls(host: string, port: int, algo: string, backends: string,
-          cert_path: string, key_path: string,
-          hc: ptr, br: ptr, ca: ptr) -> string {
+    cert_path: string, key_path: string,
+    hc: ptr, br: ptr, ca: ptr) -> string {
     return serve_tls_at(host, port, algo, backends, "/", cert_path, key_path, hc, br, ca)
 }
 
 // serve_tls_at — serve_tls mounted at `prefix`.
 serve_tls_at(host: string, port: int, algo: string, backends: string, prefix: string,
-             cert_path: string, key_path: string,
-             hc: ptr, br: ptr, ca: ptr) -> string {
+    cert_path: string, key_path: string,
+    hc: ptr, br: ptr, ca: ptr) -> string {
     return _serve(host, port, algo, backends, prefix, cert_path, key_path, hc, br, ca)
 }
 
@@ -164,7 +164,7 @@ serve_at(host: string, port: int, algo: string, backends: string, prefix: string
 // One implementation. Empty cert and key mean a cleartext listener, which is
 // the only difference between the two entry points above.
 _serve(host: string, port: int, algo: string, backends: string, prefix: string,
-       cert_path: string, key_path: string, hc: ptr, br: ptr, ca: ptr) -> string {
+    cert_path: string, key_path: string, hc: ptr, br: ptr, ca: ptr) -> string {
     if string_length(backends) == 0 {
         return "lb: no backends"
     }
