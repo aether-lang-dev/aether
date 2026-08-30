@@ -27,6 +27,18 @@
 #include <linux/fiemap.h>
 #endif
 #ifdef _WIN32
+/* MinGW has neither lstat nor S_ISLNK. stat() is the right substitute here:
+ * Windows symlinks need a privilege to create and do not appear in a release
+ * tarball, and the two callers only use it to skip symlinks and to read a
+ * size -- both of which stat() answers correctly for every file we will
+ * actually meet. Without this the Windows leg fails on -Werror rather than
+ * merely warning. */
+#  define lstat(p, b) stat((p), (b))
+#  ifndef S_ISLNK
+#    define S_ISLNK(m) (0)
+#  endif
+#endif
+#ifdef _WIN32
 #  include <windows.h>    /* GetCurrentProcessId for temp-file names */
 #  include <process.h>    /* _getpid */
 #  ifndef getpid
@@ -1359,17 +1371,20 @@ static int ae_collect_files(const char* dir, DedupeFile* out, int* n, int max) {
  */
 static int ae_shares_extents(const char* a, const char* b) {
 #if defined(__linux__)
-    struct { struct fiemap fm; struct fiemap_extent ext; } qa, qb;
-    unsigned long long pa = 0, pb = 0;
-    const char* paths[2]; paths[0] = a; paths[1] = b;
-    unsigned long long* outs[2]; outs[0] = &pa; outs[1] = &pb;
-    void* qs[2]; qs[0] = &qa; qs[1] = &qb;
+    /* struct fiemap ends in a flexible array, so the extent buffer follows it
+     * in one allocation. A struct with the array member inline would be a GNU
+     * extension that clang rejects under -Werror, hence the byte buffer. */
+    unsigned char buf[2][sizeof(struct fiemap) + sizeof(struct fiemap_extent)];
+    unsigned long long phys[2] = {0, 0};
+    const char* paths[2];
+    paths[0] = a;
+    paths[1] = b;
 
     for (int i = 0; i < 2; i++) {
         int fd = open(paths[i], O_RDONLY);
         if (fd < 0) return 0;
-        struct fiemap* fm = (struct fiemap*)qs[i];
-        memset(qs[i], 0, sizeof(qa));
+        memset(buf[i], 0, sizeof(buf[i]));
+        struct fiemap* fm = (struct fiemap*)buf[i];
         fm->fm_start = 0;
         fm->fm_length = ~0ULL;
         fm->fm_flags = 0;
@@ -1377,8 +1392,9 @@ static int ae_shares_extents(const char* a, const char* b) {
         int rc = ioctl(fd, FS_IOC_FIEMAP, fm);
         close(fd);
         if (rc != 0 || fm->fm_mapped_extents < 1) return 0;
-        *outs[i] = ((struct fiemap_extent*)(fm + 1))->fe_physical;
+        phys[i] = fm->fm_extents[0].fe_physical;
     }
+    unsigned long long pa = phys[0], pb = phys[1];
     if (pa == 0 || pb == 0) return 0;
     return pa == pb;
 #else
@@ -1419,6 +1435,7 @@ static int ae_link_over(const char* keep, const char* dup, int* used_reflink) {
         remove(tmp);
     }
 #else
+    (void)used_reflink;   /* no reflink mechanism on Windows */
     if (CreateHardLinkA(tmp, keep, NULL)) {
         remove(dup);
         if (rename(tmp, dup) == 0) return 1;
