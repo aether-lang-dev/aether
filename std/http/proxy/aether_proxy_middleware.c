@@ -884,11 +884,10 @@ int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
     return 0;
 }
 
-int aether_proxy_direct_head(AetherProxyExchange* px,
-                             const AetherProxyDirect* d,
+int aether_proxy_direct_head(const AetherProxyDirect* d,
                              const char* raw, size_t header_bytes,
                              char** buf, size_t* cap, size_t* out_len) {
-    if (!px || !d || !raw || !buf || !cap || !out_len) return -1;
+    if (!d || !raw || !buf || !cap || !out_len) return -1;
     *out_len = 0;
 
     /* The status line carries our own reason phrase, not the upstream's,

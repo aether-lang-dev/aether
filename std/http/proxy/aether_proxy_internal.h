@@ -363,8 +363,7 @@ int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
 /* Write the response head into `buf`, growing it as needed. The bytes are
  * what the copying path would have produced for the same response. Returns 0
  * on success. */
-int aether_proxy_direct_head(AetherProxyExchange* px,
-                             const AetherProxyDirect* d,
+int aether_proxy_direct_head(const AetherProxyDirect* d,
                              const char* raw, size_t header_bytes,
                              char** buf, size_t* cap, size_t* out_len);
 

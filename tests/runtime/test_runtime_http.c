@@ -7,6 +7,7 @@
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../std/http/proxy/aether_proxy_internal.h"
 #include "../../std/http/proxy/aether_proxy.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -272,5 +273,103 @@ TEST_CATEGORY(http_request_head_is_cap_accounted, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(base, aether_caps_used_bytes());
 
     http_request_free_raw(req);
+}
+#endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* The head a pass-through emits, for the responses an integration test does
+ * not reach: an upstream sending no headers at all, sending only hop-by-hop
+ * ones, repeating a header, or putting a line ending inside a value.
+ *
+ * These bytes are what a client reads, and the emitter writes them itself
+ * rather than serialising a response object, so they are pinned exactly
+ * rather than checked for plausibility. */
+static char* direct_head_of(const char* raw, size_t body_len) {
+    const char* end = strstr(raw, "\r\n\r\n");
+    if (!end) return NULL;
+    size_t header_bytes = (size_t)((end + 4) - raw);
+
+    AetherProxyDirect d;
+    memset(&d, 0, sizeof(d));
+    d.status = 200;
+    d.body = raw + header_bytes;
+    d.body_len = body_len;
+
+    char*  buf = NULL;
+    size_t cap = 0, len = 0;
+    if (aether_proxy_direct_head(&d, raw, header_bytes, &buf, &cap, &len) != 0) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+TEST_CATEGORY(http_proxy_direct_head_bytes, TEST_CATEGORY_NETWORK) {
+    char* h;
+
+    /* No headers at all. Content-Type and Server always appear, because the
+     * response object the copying path builds is created holding both. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\n\r\n", 5);
+    ASSERT_NOT_NULL(h);
+    ASSERT_STREQ("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/octet-stream\r\n"
+                 "Server: Aether/1.0\r\n"
+                 "Content-Length: 5\r\n\r\n", h);
+    free(h);
+
+    /* The upstream's values replace both defaults, in the default positions. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: text/plain\r\n"
+                       "X-Tag: keep\r\nContent-Length: 99\r\n\r\n", 5);
+    ASSERT_NOT_NULL(h);
+    ASSERT_STREQ("HTTP/1.1 200 OK\r\n"
+                 "Content-Type: text/plain\r\n"
+                 "Server: nginx\r\n"
+                 "X-Tag: keep\r\n"
+                 "Content-Length: 5\r\n\r\n", h);   /* ours, not the upstream's 99 */
+    free(h);
+
+    /* Hop-by-hop headers belong to the connection this proxy terminated, and
+     * must not be forwarded onto the next one. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\nConnection: close\r\nKeep-Alive: timeout=5\r\n"
+                       "Transfer-Encoding: chunked\r\nUpgrade: h2c\r\nX-Kept: yes\r\n\r\n", 0);
+    ASSERT_NOT_NULL(h);
+    ASSERT_TRUE(strstr(h, "X-Kept: yes\r\n") != NULL);
+    ASSERT_TRUE(strstr(h, "Connection:") == NULL);
+    ASSERT_TRUE(strstr(h, "Keep-Alive:") == NULL);
+    ASSERT_TRUE(strstr(h, "Transfer-Encoding:") == NULL);
+    ASSERT_TRUE(strstr(h, "Upgrade:") == NULL);
+    free(h);
+
+    /* A bare carriage return inside a value would end the head early and let
+     * what follows be read as a second response (CWE-113). Parsing stops at
+     * the malformed line and everything after it is dropped, which is what
+     * the copying path's loop does too: it takes the first CR as the end of
+     * the line and gives up when no LF follows. Truncating is safe; emitting
+     * the value is not. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\nX-Bad: a\rInjected: yes\r\nX-Good: b\r\n\r\n", 0);
+    ASSERT_NOT_NULL(h);
+    ASSERT_TRUE(strstr(h, "Injected") == NULL);
+    ASSERT_TRUE(strstr(h, "X-Bad") == NULL);
+    ASSERT_TRUE(strstr(h, "X-Good") == NULL);   /* parsing stopped, as above */
+    /* And the head is still well formed: it ends with the blank line. */
+    {
+        size_t hn = strlen(h);
+        ASSERT_TRUE(hn >= 4 && strcmp(h + hn - 4, "\r\n\r\n") == 0);
+    }
+    free(h);
+
+    /* An empty value stays an empty value rather than becoming a malformed
+     * line. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\nX-Empty:\r\n\r\n", 0);
+    ASSERT_NOT_NULL(h);
+    ASSERT_TRUE(strstr(h, "X-Empty: \r\n") != NULL);
+    free(h);
+
+    /* The head always ends with the blank line that separates it from a body. */
+    h = direct_head_of("HTTP/1.1 200 OK\r\nX-A: 1\r\n\r\n", 0);
+    ASSERT_NOT_NULL(h);
+    size_t n = strlen(h);
+    ASSERT_TRUE(n >= 4 && strcmp(h + n - 4, "\r\n\r\n") == 0);
+    free(h);
 }
 #endif  /* !_WIN32 */
