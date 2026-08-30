@@ -1144,7 +1144,12 @@ static int ae_list_installed(InstalledVersion* out, int max) {
 
 /* The version `current` resolves to, or "" when there is no symlink. Kept
  * separate from the pin: the two can disagree, and removal has to refuse
- * either. */
+ * either.
+ *
+ * Always "" on Windows, and correctly so -- there is no `current` symlink
+ * there, because `ae version use` copies into ~/.aether/bin/ instead. The
+ * active version is still protected on Windows: `use` writes
+ * ~/.aether/active_version on every platform, and the pin guard reads it. */
 static const char* ae_current_version(void) {
     static char cur[64];
     cur[0] = '\0';

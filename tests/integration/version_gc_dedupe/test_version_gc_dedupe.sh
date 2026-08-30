@@ -50,15 +50,38 @@ for v in v0.9.0 v0.10.0 v0.11.0 v0.2.0; do
     cp "$VS/$v/include/aether/common.h" "$VS/$v/share/aether/common.h"
     echo "unique to $v" > "$VS/$v/bin/unique.txt"
 done
-ln -s "$VS/v0.11.0" "$TMP/home/.aether/current"
+# How "the version in use" is recorded differs by platform: a `current`
+# symlink on Unix, and on Windows the ~/.aether/active_version pin, because
+# `ae version use` copies into ~/.aether/bin/ rather than symlinking. Use
+# whichever this platform actually reads, so the guard is tested for real
+# rather than skipped.
+IN_USE_KIND="current"
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) IN_USE_KIND="pin" ;;
+esac
+if [ "$IN_USE_KIND" = "current" ]; then
+    ln -s "$VS/v0.11.0" "$TMP/home/.aether/current"
+else
+    echo "0.11.0" > "$TMP/home/.aether/active_version"
+fi
 
-export HOME="$TMP/home"
+# The home directory is USERPROFILE on Windows (get_home_dir checks it
+# BEFORE HOME) and HOME elsewhere, so both must be set or the Windows leg
+# reads the runner's real profile, finds no versions, and every assertion
+# below fails. Same pattern as version_identity.
+HOME="$TMP/home"; USERPROFILE="$TMP/home"; export HOME USERPROFILE
 
 # --- installed ------------------------------------------------------------
 OUT="$("$AE" version installed 2>&1)" || fail "version installed exited non-zero"
 echo "$OUT" | grep -q "v0.11.0" || fail "installed did not list v0.11.0"
 echo "$OUT" | grep -q "v0.2.0"  || fail "installed did not list v0.2.0"
-echo "$OUT" | grep "v0.11.0" | grep -q "current" || fail "installed did not mark current"
+if [ "$IN_USE_KIND" = "current" ]; then
+    echo "$OUT" | grep "v0.11.0" | grep -q "current" \
+        || fail "installed did not mark the current version"
+else
+    echo "$OUT" | grep "v0.11.0" | grep -q "pinned" \
+        || fail "installed did not mark the pinned version"
+fi
 
 # Numeric ordering: v0.11.0 must come before v0.9.0 in the newest-first list.
 ORDER="$(echo "$OUT" | grep -o 'v0\.[0-9]*\.0' | head -4 | tr '\n' ' ')"
@@ -67,21 +90,25 @@ case "$ORDER" in
     *) fail "versions not ordered numerically (got: $ORDER)" ;;
 esac
 
-# --- remove refuses the current version -----------------------------------
+# --- remove refuses the version in use -------------------------------------
 if "$AE" version remove 0.11.0 >"$TMP/out" 2>&1; then
-    fail "remove allowed deleting the current version"
+    fail "remove allowed deleting the version in use"
 fi
 grep -qi "refus" "$TMP/out" || fail "remove did not explain why it refused"
-[ -d "$VS/v0.11.0" ] || fail "remove deleted the current version anyway"
+[ -d "$VS/v0.11.0" ] || fail "remove deleted the version in use anyway"
 
 # --- remove refuses the pinned version ------------------------------------
-# current and the pin can disagree; both must be protected.
-echo "0.9.0" > "$TMP/home/.aether/active_version"
-if "$AE" version remove 0.9.0 >"$TMP/out" 2>&1; then
-    fail "remove allowed deleting the pinned version"
+# On Unix the pin is a SECOND thing to protect: it and `current` can name
+# different versions, and both must be refused. On Windows the pin is the
+# only mechanism, and v0.11.0 above already covered it.
+if [ "$IN_USE_KIND" = "current" ]; then
+    echo "0.9.0" > "$TMP/home/.aether/active_version"
+    if "$AE" version remove 0.9.0 >"$TMP/out" 2>&1; then
+        fail "remove allowed deleting the pinned version"
+    fi
+    [ -d "$VS/v0.9.0" ] || fail "remove deleted the pinned version anyway"
+    rm -f "$TMP/home/.aether/active_version"
 fi
-[ -d "$VS/v0.9.0" ] || fail "remove deleted the pinned version anyway"
-rm -f "$TMP/home/.aether/active_version"
 
 # --- remove deletes an unused version -------------------------------------
 "$AE" version remove 0.2.0 >"$TMP/out" 2>&1 || fail "remove of an unused version failed"
