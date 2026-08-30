@@ -22,7 +22,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }
 ```
 
@@ -40,8 +40,24 @@ arithmetic
 output with ANSI escapes, which do not belong in an asserted `output`
 block.)
 
-`run_summary` exits non-zero when anything failed, so a suite works as a test
-binary without extra wiring.
+`run_summary` **returns** the verdict — `0` all-green, `1` if anything failed —
+and you should `return` it from `main()`. A bare `main()` takes no return
+annotation (`main() -> int` is a parse error) and its return value becomes the
+process exit status, so the suite works as a test binary with no extra wiring.
+
+**Return it.** Dropping the value turns a failing suite green, because `main()`
+then falls through and exits 0. If you have cleanup to do after the run, keep
+the verdict and return it last:
+
+```aether,fragment
+_rc = spec.run_summary(fw)
+arena.destroy(ar)
+return _rc
+```
+
+It used to `exit(1)` on failure instead of returning, which skipped exactly
+that cleanup on exactly the runs where a leaked arena or an orphaned listener
+does the most damage.
 
 ## Assertions
 

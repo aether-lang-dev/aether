@@ -29,10 +29,21 @@ version number before tagging the release.
   finalizers — and exiting would silently skip it, surfacing as a leak under
   the ASan/Valgrind gates or an orphaned listener squatting its port.
 
-  The failure path deliberately keeps `exit(1)` rather than returning 1: all
-  55 callers end in a bare `spec.run_summary(fw)` whose value is discarded, so
-  returning there made failing suites exit 0 — verified, and CI would have gone
-  green on genuinely failing tests.
+### Changed
+
+- **`std.spec`'s `run_summary` now returns its verdict on both paths instead of
+  `exit(1)`-ing on failure**, and all 55 callers were converted to propagate it.
+  Exiting skipped whatever cleanup followed the call — `arena.destroy`,
+  `http.server_stop`, `sqlite.close`, the embedded-interpreter finalizers — on
+  exactly the runs where a leaked arena or an orphaned listener does the most
+  damage. Callers whose suite is the last statement now read
+  `return spec.run_summary(fw)`; the 20 with trailing cleanup capture the
+  verdict, clean up, then return it.
+
+  **Return the value.** `main()` takes no return annotation (`main() -> int` is
+  a parse error) and a bare `return N` becomes the process exit status, so a
+  dropped verdict silently turns a failing suite green. Verified: all 55
+  callers produce byte-identical exit codes before and after.
 
 ### Changed
 
