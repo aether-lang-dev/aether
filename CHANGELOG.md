@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.610.0]
+
 ### Changed
 
 - **`ae version doctor --fix` now says when it repaired nothing.** Reported
