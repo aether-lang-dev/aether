@@ -27,6 +27,8 @@ version number before tagging the release.
   repair only when there is one to make, and says how many of the findings it
   covers.
 
+## [0.609.0]
+
 ### Testing
 
 - **The bytes a pass-through emits are pinned directly.** The head it sends is
