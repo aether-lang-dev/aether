@@ -28,6 +28,7 @@ version number before tagging the release.
 
   The emitter never used the exchange it was handed, so it now takes only the
   response it describes, which is also what makes it testable on its own.
+## [0.608.0]
 
 ### Added
 
