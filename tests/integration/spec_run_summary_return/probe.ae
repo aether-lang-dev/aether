@@ -27,7 +27,13 @@ node_all_green(s: ptr) -> int {
             spec.assert_eq(3 * 4, 12, "3*4 == 12")
         }
     }
-    spec.run_summary(fw)
+    // `return`, not a bare call. A bare trailing call in an `-> int` function
+    // leaves the return value undefined -- clang warns "non-void function does
+    // not return a value", and it is genuinely platform-dependent: this probe
+    // originally omitted the return and got 0 on Linux but 1 on macOS ARM64,
+    // failing its own assertion. That undefined fall-through is the whole
+    // class of bug this test guards, so the probe must not depend on it.
+    return spec.run_summary(fw)
 }
 
 main() {
