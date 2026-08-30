@@ -373,3 +373,48 @@ TEST_CATEGORY(http_proxy_direct_head_bytes, TEST_CATEGORY_NETWORK) {
     free(h);
 }
 #endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* A connection builds a request head per request. It used to take a fresh
+ * allocation each time and release it a moment later; it now reuses one
+ * buffer, released when the connection ends.
+ *
+ * That moves the buffer's lifetime from a request to a connection, and the
+ * cap's accounting has to follow: a build that reused the buffer must not
+ * account for it again, or a long-lived connection drifts upward until the
+ * cap refuses allocations the machine has memory for. */
+TEST_CATEGORY(http_request_head_reuse_is_accounted, TEST_CATEGORY_NETWORK) {
+    HttpClientRequest* req = http_request_raw("GET", "http://127.0.0.1:1/x");
+    ASSERT_NOT_NULL(req);
+
+    uint64_t base = aether_caps_used_bytes();
+
+    char*  buf = NULL;
+    size_t cap = 0, len = 0;
+    HttpReqHead p = { req, "GET", "/x", "127.0.0.1", 80, 0, 0, NULL, 0, NULL, 1 };
+
+    ASSERT_NOT_NULL(http_build_request_head_into(&p, &buf, &cap, &len));
+    uint64_t after_first = aether_caps_used_bytes();
+    ASSERT_TRUE(after_first > base);
+    char*  first_buf = buf;
+    size_t first_cap = cap;
+    size_t first_len = len;
+
+    /* Many more builds into the same buffer: same pointer, same capacity,
+     * same accounted total. Nothing new is taken. */
+    for (int i = 0; i < 64; i++) {
+        ASSERT_NOT_NULL(http_build_request_head_into(&p, &buf, &cap, &len));
+        ASSERT_TRUE(buf == first_buf);
+        ASSERT_EQ((int)first_cap, (int)cap);
+        ASSERT_EQ((int)first_len, (int)len);   /* and it rebuilds, not appends */
+    }
+    ASSERT_EQ(after_first, aether_caps_used_bytes());
+
+    /* One release, with the capacity the buffer actually reached, returns the
+     * counter exactly. */
+    aether_caps_free(buf, cap);
+    ASSERT_EQ(base, aether_caps_used_bytes());
+
+    http_request_free_raw(req);
+}
+#endif  /* !_WIN32 */

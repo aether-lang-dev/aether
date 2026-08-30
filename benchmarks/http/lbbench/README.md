@@ -22,6 +22,13 @@ another number from the same run.
 
 ## The instruments
 
+All three balancers are configured to do the same job, which took a correction:
+the aether one adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`
+and `Via` to every forwarded request and the controls originally added none of
+them. A comparison where one side builds four headers and the others forward
+as-is measures the configuration, not the code. The controls now add the same
+four.
+
 | script | measures | use it when |
 |---|---|---|
 | `run.sh` | rps and CPU per request, with controls | judging a result |

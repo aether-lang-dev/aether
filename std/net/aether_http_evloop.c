@@ -226,9 +226,10 @@ static void ev_conn_reset_request(EvConn* c) {
     c->in_scanned = 0;
     c->in_hdr_end = 0;
 
-    if (c->head) aether_caps_free(c->head, c->head_cap);
-    c->head = NULL;
-    c->head_len = c->head_cap = 0;
+    /* The head buffer stays with the connection and is only grown. Every
+     * request on it builds a head of about the same size, so after the first
+     * there is nothing to allocate. */
+    c->head_len = 0;
 
     /* Keep the accumulator rather than returning it; the next request on this
      * connection reuses it at whatever size it has grown to. */
@@ -304,6 +305,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
         c->ssl = NULL;
     }
 #endif
+    if (c->head) aether_caps_free(c->head, c->head_cap);
     free(c->out);
     free(c->in);
     free(c);
@@ -747,21 +749,18 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
-    /* Freed through the cap, because it was allocated through it. A plain
-     * free() returns the memory but leaves the accounting counter believing
-     * the bytes are still live, and this is the retry path: it runs when an
-     * upstream is failing, so the drift accumulates fastest exactly when the
-     * proxy is already under strain, until the cap refuses allocations that
-     * the machine has memory for. */
-    aether_caps_free(c->head, c->head_cap);
-    c->head = NULL;
-    c->head_len = c->head_cap = 0;
+    /* Rebuilt in place rather than released and taken again. The buffer
+     * belongs to the connection now, and is returned through the cap when the
+     * connection ends -- which is what the accounting requires, and what a
+     * plain free() here used to get wrong. */
+    c->head_len = 0;
     HttpReqHead head_params = {
         c->px.outbound, http_request_method_of(c->px.outbound), path,
         host, port, 0, 0, body, body_len,
         http_request_content_type_of(c->px.outbound), 1
     };
-    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
+                                           &c->head_len);
     if (!c->head) return -1;
 
     memset(&c->x, 0, sizeof(c->x));
@@ -915,7 +914,8 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         host, port, 0, 0, body, body_len,
         http_request_content_type_of(c->px.outbound), 1
     };
-    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
+                                           &c->head_len);
     if (!c->head) return -1;
 
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
