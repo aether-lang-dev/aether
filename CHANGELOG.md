@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.608.0]
+
 ### Added
 
 - **`ae version remove`, `gc` and `dedupe`, to prune and deduplicate the
