@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.606.0]
+
 ### Added
 
 - **A pure-Aether TLS 1.3 server, so a binary with no OpenSSL can serve
