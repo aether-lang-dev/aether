@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.609.0]
+
 ### Testing
 
 - **The bytes a pass-through emits are pinned directly.** The head it sends is
