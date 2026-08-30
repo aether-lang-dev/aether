@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **`ae version doctor --fix` now says when it repaired nothing.** Reported
+  from real use: on a set of findings that were all decisions rather than
+  faults — a split toolchain, an empty `~/.aether/bin` early on PATH, and a
+  pin naming another genuinely installed version — `--fix` printed
+  "3 problem(s) found." and exited 1, leaving no way to tell whether it had
+  tried and failed or declined by design. Declining is correct for all three
+  (repairing them would mean installing a release, editing PATH, or choosing
+  between two real installs on the user's behalf), and exiting 1 is correct
+  because the problems are real — but the silence was not. It now states that
+  none were safely auto-repairable and points at the per-finding hints. The
+  offer is honest in the other direction too: without `--fix` it advertises a
+  repair only when there is one to make, and says how many of the findings it
+  covers.
+
 ## [0.609.0]
 
 ### Testing
