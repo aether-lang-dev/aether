@@ -11,6 +11,29 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`std.spec`'s `run_summary` now returns 0 on success instead of falling off
+  the end** (asks/spec-run-summary-should-exit-0-on-success.md). It has always
+  `exit(1)`-ed on failure, but the success path just ended, leaving whatever
+  was in the return slot — measured at 24 for a suite where every assertion
+  passed. Invisible when a test binary is run for its process status (the
+  fall-through still exits 0), and wrong the moment a caller *captures* the
+  value: aeb's fan-out orchestrator rewrites each test into
+  `<fn>(s: ptr) -> int` and uses the return as that node's result, so 132
+  all-green suites reported FAILED.
+
+  The ask proposed `exit(0)` here, which would have been a regression: 17 of
+  the 55 `run_summary` callers in this tree do real work after the call —
+  `arena.destroy`, `http.server_stop`, `sqlite.close`, the embedded-interpreter
+  finalizers — and exiting would silently skip it, surfacing as a leak under
+  the ASan/Valgrind gates or an orphaned listener squatting its port.
+
+  The failure path deliberately keeps `exit(1)` rather than returning 1: all
+  55 callers end in a bare `spec.run_summary(fw)` whose value is discarded, so
+  returning there made failing suites exit 0 — verified, and CI would have gone
+  green on genuinely failing tests.
+
 ### Changed
 
 - **`ae version doctor --fix` now says when it repaired nothing.** Reported
