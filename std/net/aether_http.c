@@ -1953,12 +1953,34 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
 
 char* http_build_request_head(const HttpReqHead* p,
                                      size_t* out_len, size_t* out_cap) {
-    size_t hdr_cap = 1024;
-    /* #461: gate the request-header build buffer through the cap. Self-
-     * contained — alloc, grow, and free all live in this function with
-     * hdr_cap tracking the live size, so accounting balances exactly. */
-    char* hdr = (char*)aether_caps_malloc(hdr_cap);
-    if (!hdr) return NULL;
+    char*  buf = NULL;
+    size_t cap = 0;
+    char*  r = http_build_request_head_into(p, &buf, &cap, out_len);
+    if (out_cap) *out_cap = cap;
+    return r;
+}
+
+/* The same builder, over a buffer the caller keeps.
+ *
+ * A connection serving many requests built this head into a fresh allocation
+ * every time and released it a moment later. The head of one request is the
+ * same size as the head of the next, so after the first there is nothing to
+ * allocate: the buffer is reused at whatever size it reached.
+ *
+ * `*buf` is NULL on the first call and the caller's afterwards, released with
+ * aether_caps_free and `*cap` when the connection ends -- through the cap,
+ * because that is how it was taken. */
+char* http_build_request_head_into(const HttpReqHead* p,
+                                     char** io_buf, size_t* io_cap,
+                                     size_t* out_len) {
+    size_t hdr_cap = *io_cap;
+    char*  hdr     = *io_buf;
+    if (!hdr) {
+        hdr_cap = 1024;
+        /* #461: gate the request-header build buffer through the cap. */
+        hdr = (char*)aether_caps_malloc(hdr_cap);
+        if (!hdr) return NULL;
+    }
     size_t hdr_len = 0;
 
     /* Helper: append a NUL-terminated string into hdr, growing as
@@ -1969,7 +1991,8 @@ char* http_build_request_head(const HttpReqHead* p,
             size_t _nc = hdr_cap; \
             while (_nc < hdr_len + _slen + 1) _nc *= 2; \
             char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
-            if (!_nh) { aether_caps_free(hdr, hdr_cap); return NULL; } \
+            if (!_nh) { aether_caps_free(hdr, hdr_cap); \
+                        *io_buf = NULL; *io_cap = 0; return NULL; } \
             hdr = _nh; hdr_cap = _nc; \
         } \
         memcpy(hdr + hdr_len, s, _slen); \
@@ -2051,7 +2074,10 @@ char* http_build_request_head(const HttpReqHead* p,
     #undef HDR_APPEND_STR
 
     *out_len = hdr_len;
-    *out_cap = hdr_cap;
+    /* The buffer goes back to the caller at whatever size it reached, so the
+     * next request on this connection builds into it without allocating. */
+    *io_buf = hdr;
+    *io_cap = hdr_cap;
     return hdr;
 }
 
