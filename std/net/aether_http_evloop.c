@@ -31,8 +31,22 @@
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_thread.h"
 #include <sys/uio.h>
+
+/* Linux names this on the call; the BSDs and macOS have SO_NOSIGPIPE on the
+ * socket instead and no flag, where zero is right and the server's ignored
+ * disposition is what covers it. */
+#if defined(MSG_NOSIGNAL)
+#define AE_SEND_NOSIGNAL MSG_NOSIGNAL
+#else
+#define AE_SEND_NOSIGNAL 0
+#endif
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+
+#ifdef AETHER_HAS_OPENSSL
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#endif
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -46,6 +60,7 @@
 #endif
 
 typedef enum {
+    EV_TLS_HANDSHAKE,    /* completing a TLS handshake with the client */
     EV_READ_REQUEST,     /* reading a request from the client */
     EV_UPSTREAM_DIAL,    /* a connect this driver started is still in flight */
     EV_UPSTREAM_SEND,    /* writing the request to the upstream */
@@ -65,6 +80,13 @@ typedef struct EvConn {
                              * pieces would otherwise rescan from the start
                              * every time */
     int      client_in_poller, up_in_poller;
+#ifdef AETHER_HAS_OPENSSL
+    /* The client's TLS session, when this connection has one. A TLS
+     * connection used to be refused by this driver and given a thread of its
+     * own instead, which is the cost the driver exists to remove and the
+     * shape most proxied traffic actually arrives in. */
+    SSL*     ssl;
+#endif
     size_t   in_hdr_end;    /* offset just past the header terminator, once
                              * found. Kept because a request whose body is
                              * still arriving is asked again, and resuming the
@@ -273,6 +295,15 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
     if (c->res) http_server_response_free(c->res);
     if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
     if (c->arena_ready) http_arena_free(&c->arena);
+#ifdef AETHER_HAS_OPENSSL
+    if (c->ssl) {
+        /* No SSL_shutdown exchange: this driver never waits, and a close
+         * notify that would block is not worth a slot. The peer sees the
+         * connection close, which every client handles. */
+        SSL_free(c->ssl);
+        c->ssl = NULL;
+    }
+#endif
     free(c->out);
     free(c->in);
     free(c);
@@ -498,12 +529,84 @@ static int ev_watch_upstream(EvDriver* d, EvConn* c) {
     return ev_watch(d, c->up.t.sockfd, c) == 0 ? 0 : -1;
 }
 
+/* Client I/O, over TLS or not.
+ *
+ * Both return what a socket call would: bytes moved, or -1 with errno set to
+ * EAGAIN when the caller should wait. OpenSSL reports the same condition as
+ * SSL_ERROR_WANT_READ or WANT_WRITE, and a TLS record can need the socket
+ * readable to finish a write or writable to finish a read; the driver keeps
+ * both interests registered on an edge-triggered backend, so either wake
+ * brings it back here and the distinction does not have to be carried.
+ */
+static ssize_t ev_client_read(EvConn* c, void* buf, size_t n) {
+#ifdef AETHER_HAS_OPENSSL
+    if (c->ssl) {
+        ERR_clear_error();
+        int r = SSL_read(c->ssl, buf, (int)n);
+        if (r > 0) return r;
+        int e = SSL_get_error(c->ssl, r);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            errno = EAGAIN;
+            return -1;
+        }
+        if (e == SSL_ERROR_ZERO_RETURN) return 0;   /* the peer closed cleanly */
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return recv(c->client_fd, buf, n, 0);
+}
+
+static ssize_t ev_client_write(EvConn* c, const void* buf, size_t n) {
+#ifdef AETHER_HAS_OPENSSL
+    if (c->ssl) {
+        ERR_clear_error();
+        int r = SSL_write(c->ssl, buf, (int)n);
+        if (r > 0) return r;
+        int e = SSL_get_error(c->ssl, r);
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
+            errno = EAGAIN;
+            return -1;
+        }
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return send(c->client_fd, buf, n, AE_SEND_NOSIGNAL);
+}
+
+#ifdef AETHER_HAS_OPENSSL
+/* Carry the handshake as far as it will go without waiting.
+ *
+ * Returns 1 when it is done, 0 when the descriptor has to be waited on, and
+ * -1 when the peer is not speaking TLS this way -- which is ordinary traffic,
+ * not an error worth logging: a plain-HTTP request to a TLS port arrives here
+ * and the connection is simply closed.
+ */
+static int ev_step_tls_handshake(EvDriver* d, EvConn* c) {
+    ERR_clear_error();
+    int r = SSL_accept(c->ssl);
+    if (r == 1) {
+        c->state = EV_READ_REQUEST;
+        return 1;
+    }
+    int e = SSL_get_error(c->ssl, r);
+    if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE)
+        return ev_watch_writable(d, c->client_fd, c) == 0 ? 0 : -1;
+
+    /* Drain the error queue, or the next handshake on this thread starts with
+     * someone else's failure still on it. */
+    ERR_clear_error();
+    return -1;
+}
+#endif
+
 /* Read whatever the client has, without waiting for it. */
 static int ev_step_read_request(EvDriver* d, EvConn* c) {
     for (;;) {
         if (ev_in_reserve(c, 4096) != 0) return -1;
-        ssize_t n = recv(c->client_fd, c->in + c->in_len,
-                         c->in_cap - c->in_len - 1, 0);
+        ssize_t n = ev_client_read(c, c->in + c->in_len,
+                                   c->in_cap - c->in_len - 1);
         if (n > 0) {
             c->in_len += (size_t)n;
             size_t total = 0;
@@ -537,10 +640,30 @@ static int ev_step_client_send(EvDriver* d, EvConn* c) {
         }
         if (n_iov == 0) return 1;
 
-        /* One call for both, so a pass-through does not pay an extra send to
-         * put the body on the wire after the head, and does not have to copy
-         * the body into the head's buffer to avoid that. */
-        ssize_t w = writev(c->client_fd, iov, n_iov);
+        ssize_t w;
+#ifdef AETHER_HAS_OPENSSL
+        if (c->ssl) {
+            /* TLS has no scatter write: the two segments go out in order, and
+             * the loop comes back for the second once the first is away. */
+            w = ev_client_write(c, iov[0].iov_base, iov[0].iov_len);
+        } else
+#endif
+        {
+            /* One call for both, so a pass-through does not pay an extra send
+             * to put the body on the wire after the head, and does not have to
+             * copy the body into the head's buffer to avoid that.
+             *
+             * sendmsg rather than writev because it takes flags: a peer that
+             * went away raises SIGPIPE on the write otherwise, and the default
+             * disposition for that is to kill the process. The server ignores
+             * SIGPIPE when it starts, and this asks for the same per call so
+             * an embedder that sets its own disposition is still safe. */
+            struct msghdr msg;
+            memset(&msg, 0, sizeof(msg));
+            msg.msg_iov    = iov;
+            msg.msg_iovlen = (size_t)n_iov;
+            w = sendmsg(c->client_fd, &msg, AE_SEND_NOSIGNAL);
+        }
         if (w > 0) {
             size_t left = (size_t)w;
             size_t head_left = c->out_len - c->out_sent;
@@ -674,9 +797,22 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     ev_timer_set(d, c, 0);
     c->client_fd = -1;           /* ev_conn_close must not close it now */
 
-    int adopted = http_server_adopt_connection(d->loop->server, fd,
-                                               c->in, (int)c->in_len);
-    if (adopted != 0) close(fd);
+    /* The session goes with it, and this connection stops owning it: the
+     * handshake is done and the socket carries ciphertext, so a worker handed
+     * only the descriptor would read bytes it cannot decode. */
+    void* ssl = NULL;
+#ifdef AETHER_HAS_OPENSSL
+    ssl = c->ssl;
+    c->ssl = NULL;
+#endif
+    int adopted = http_server_adopt_tls_connection(d->loop->server, fd, ssl,
+                                                   c->in, (int)c->in_len);
+    if (adopted != 0) {
+#ifdef AETHER_HAS_OPENSSL
+        if (ssl) SSL_free(ssl);
+#endif
+        close(fd);
+    }
     return -1;                   /* finished with, as far as this driver goes */
 }
 
@@ -893,6 +1029,13 @@ static int ev_advance(EvDriver* d, EvConn* c) {
             if (r <= 0) return r;
             continue;
         }
+#ifdef AETHER_HAS_OPENSSL
+        case EV_TLS_HANDSHAKE: {
+            int r = ev_step_tls_handshake(d, c);
+            if (r <= 0) return r;
+            continue;
+        }
+#endif
         case EV_UPSTREAM_DIAL: {
             int done = http_upstream_connected(&c->up);
             if (done < 0) return -1;
@@ -956,6 +1099,25 @@ static void ev_take_submissions(EvDriver* d) {
         c->up.t.applied_timeout_ns = -1;
         ev_set_nonblocking(fd);
         ev_set_nodelay(fd);
+
+#ifdef AETHER_HAS_OPENSSL
+        /* A TLS server hands this driver an accepted socket with nothing read
+         * from it yet, so the handshake is this driver's to carry. It is done
+         * without waiting, like everything else here: a connection mid
+         * handshake costs a slot, not a thread. */
+        if (d->loop->server && d->loop->server->tls_enabled) {
+            SSL_CTX* ctx = (SSL_CTX*)d->loop->server->tls_ctx;
+            if (!ctx) { close(fd); free(c); continue; }
+            c->ssl = SSL_new(ctx);
+            if (!c->ssl || SSL_set_fd(c->ssl, fd) != 1) {
+                if (c->ssl) SSL_free(c->ssl);
+                close(fd);
+                free(c);
+                continue;
+            }
+            c->state = EV_TLS_HANDSHAKE;
+        }
+#endif
         atomic_fetch_add(&d->loop->active, 1);
 
         /* Watched once, for as long as this driver owns it. Every later wait

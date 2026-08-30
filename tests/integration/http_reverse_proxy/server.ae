@@ -144,6 +144,26 @@ run_upstream() {
     run_server(up)
 }
 
+// A TLS-terminating proxy, so the event driver's TLS path is exercised: it
+// carries the handshake itself and reads and writes through the session,
+// where a TLS listener used to fall back to a thread per connection.
+run_proxy_tls(cert_path: string, key_path: string) {
+    p = http.server_create(PROXY_PORT)
+    if p == 0 {
+        println("FAIL: proxy server_create")
+        exit(1)
+    }
+    http.server_set_host(p, "127.0.0.1")
+    terr = http.server_set_tls(p, cert_path, key_path)
+    if terr != "" { println("FAIL: set_tls: ${terr}"); exit(1) }
+    ka = http.server_set_keepalive(p, 1, 0, 5000ms)
+    if ka != "" { println("FAIL: keepalive: ${ka}"); exit(1) }
+    err = proxy.mount_simple(p, "/", "http://localhost:19001", 30)
+    if err != "" { println("FAIL: mount_simple: ${err}"); exit(1) }
+    println("READY")
+    run_server(p)
+}
+
 run_proxy(timeout_sec: int) {
     p = http.server_create(PROXY_PORT)
     if p == 0 {
@@ -177,6 +197,10 @@ main() {
     }
     if role == "proxy_timeout" {
         run_proxy(1)
+        return
+    }
+    if role == "proxy_tls" {
+        run_proxy_tls(aether_args_get(2), aether_args_get(3))
         return
     }
     println("FAIL: unknown role: ${role}")

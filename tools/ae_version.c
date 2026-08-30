@@ -1127,11 +1127,20 @@ static int ae_list_installed(InstalledVersion* out, int max) {
     struct dirent* e;
     while ((e = readdir(d)) && n < max) {
         if (e->d_name[0] != 'v') continue;
+
+        /* A name that does not fit is not a version this could have
+         * installed, and a truncated one names a different directory and a
+         * different version than the one on disk: skipped rather than
+         * reported under a shortened name. */
         char full[1200];
-        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        int fn = snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        if (fn < 0 || (size_t)fn >= sizeof(full)) continue;
         if (!doc_is_dir(full)) continue;
-        snprintf(out[n].tag, sizeof(out[n].tag), "%s", e->d_name);
-        snprintf(out[n].ver, sizeof(out[n].ver), "%s", e->d_name + 1);
+
+        int tn = snprintf(out[n].tag, sizeof(out[n].tag), "%s", e->d_name);
+        if (tn < 0 || (size_t)tn >= sizeof(out[n].tag)) continue;
+        int vn = snprintf(out[n].ver, sizeof(out[n].ver), "%s", e->d_name + 1);
+        if (vn < 0 || (size_t)vn >= sizeof(out[n].ver)) continue;
         n++;
     }
     closedir(d);

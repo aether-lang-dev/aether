@@ -13,6 +13,6 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /bench
-COPY run.sh profile.sh syscalls.sh workers.sh switches.sh instructions.sh split.sh threads.sh use_mounted.sh backends.conf nginx-lb.conf haproxy-lb.cfg ./
+COPY run.sh profile.sh syscalls.sh workers.sh switches.sh instructions.sh split.sh threads.sh tls.sh use_mounted.sh backends.conf nginx-lb.conf nginx-lb-tls.conf haproxy-lb.cfg ./
 RUN chmod +x run.sh profile.sh syscalls.sh workers.sh
 ENTRYPOINT ["/bench/run.sh"]
