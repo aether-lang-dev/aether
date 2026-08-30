@@ -29,6 +29,35 @@ version number before tagging the release.
   The emitter never used the exchange it was handed, so it now takes only the
   response it describes, which is also what makes it testable on its own.
 
+### Added
+
+- **`ae version remove`, `gc` and `dedupe`, to prune and deduplicate the
+  version store** (#1805, #1783). Each installed release occupies its full
+  size, so a store of several releases gets large — on a real box, 7 versions
+  took 136MB. `ae version remove <v>...` deletes releases, `ae version gc
+  [--keep N] [--dry-run]` keeps the newest N and removes the rest, and `ae
+  version dedupe` reclaims space without removing anything by pointing
+  identical files at the same storage. Measured on a three-version store:
+  38.3MB of 66MB shared, confirmed against `df`.
+
+  Both `remove` and `gc` refuse to delete the release in use — the one
+  `current` points at *or* the one `~/.aether/active_version` pins, since the
+  two can disagree. Versions are ordered numerically rather than
+  lexicographically, so `--keep 2` no longer risks deleting v0.10.0 while
+  keeping v0.9.0.
+
+  `dedupe` prefers copy-on-write reflinks (btrfs, XFS with `reflink=1`, APFS)
+  and falls back to hardlinks, degrading to a no-op where the filesystem
+  supports neither rather than failing. It is idempotent: a second run detects
+  already-shared extents and does nothing. Note that after a reflink dedupe
+  `du` still reports the old size — it counts each reflinked file at full size
+  — while `df` shows the space genuinely returned.
+
+- **`ae version installed`**, listing what is on disk rather than what is
+  available to download. `ae version list` queries GitHub and marks the
+  releases it also finds locally, so on a box whose installs have aged out of
+  the release window every Status is blank; this answers the local question
+  directly, and works offline.
 
 ## [0.607.0]
 
