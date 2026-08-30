@@ -87,6 +87,9 @@ void http_server_websocket(HttpServer* s, const char* p, HttpWsHandler h, void* 
 int http_ws_send_text(HttpWsConn* w, const char* t) { (void)w; (void)t; return -1; }
 int http_ws_send_binary(HttpWsConn* w, const void* d, int l) { (void)w; (void)d; (void)l; return -1; }
 int http_ws_recv(HttpWsConn* w) { (void)w; return -1; }
+int http_ws_recv_timeout(HttpWsConn* w, int t) { (void)w; (void)t; return -1; }
+int http_ws_poll(HttpWsConn* w, int t) { (void)w; (void)t; return -1; }
+int http_ws_fd(HttpWsConn* w) { (void)w; return -1; }
 const char* http_ws_message_data(HttpWsConn* w) { (void)w; return ""; }
 int http_ws_message_length(HttpWsConn* w) { (void)w; return 0; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
@@ -2792,11 +2795,167 @@ int http_ws_message_length(HttpWsConn* ws) {
     return ws ? ws->msg_len : 0;
 }
 
-int http_ws_recv(HttpWsConn* ws) {
+/* Monotonic milliseconds; defined further down with the connection-park
+ * helpers. Forward-declared rather than duplicated so both users share one
+ * clock (and one CLOCK_MONOTONIC fallback). */
+static int64_t conn_now_ms(void);
+
+/* ---- non-blocking / bounded WebSocket receive (BiDi demux) --------------
+ *
+ * A multiplexed protocol (WebDriver-BiDi is the motivating case) needs one
+ * reader that routes each frame to either an id-keyed reply table or an event
+ * queue, without a thread parked in a blocking recv. These three calls are
+ * that primitive.
+ *
+ * The subtlety, and the reason ws_fd alone is not enough: readability of the
+ * SOCKET is not the same question as "is a frame available". Bytes reach us
+ * through three layers, and any of them can hold a complete frame while the
+ * one below it is quiet:
+ *
+ *   1. conn->buf      -- ws_recv_exact drains this before touching the
+ *                        socket. Filled on the SERVER side, where the header
+ *                        scan can read past the request boundary and pull in
+ *                        the client's first frame.
+ *   2. the SSL object -- for wss://, OpenSSL decrypts a whole TLS record at a
+ *                        time, so several frames can be sitting in SSL's
+ *                        buffer with nothing pending on the fd. This is the
+ *                        classic SSL_pending trap.
+ *   3. the socket     -- only here does poll(2) have anything to say.
+ *
+ * So a caller doing select(fd) then ws_recv can block forever on a frame that
+ * already arrived. ws_ready_now() below asks all three layers in order, and
+ * ws_poll/ws_recv_timeout are built on it. ws_fd IS exposed, because
+ * asyncio.add_reader and friends want a descriptor rather than a poll call --
+ * but it carries a documented contract: treat readability as a hint and drain
+ * with ws_recv_timeout(ws, 0) until it returns 0.
+ */
+
+/* Is a frame byte available without blocking? Returns 1 yes, 0 no (timed out),
+ * -1 on error/EOF. timeout_ms 0 polls, negative blocks indefinitely. */
+static int ws_ready_now(HttpConn* conn, int timeout_ms) {
+    if (!conn) return -1;
+
+    /* Layer 1: bytes already sitting in the connection's read buffer.
+     *
+     * Reachable for SERVER-side handles: handle_one_request scans for the
+     * header terminator with a buffering read that can pull past it, so an
+     * upgrade request arriving in the same packet as the client's first frame
+     * leaves that frame here. ws_recv_exact drains this before the socket,
+     * so poll(2) on the fd alone would report "not ready" while a complete
+     * frame is in hand.
+     *
+     * NOT reachable for client handles dialled by http_ws_connect: that
+     * handshake reads the 101 response one byte at a time precisely so it
+     * cannot swallow a following frame, and ws_recv_exact never over-reads.
+     * Kept unconditional anyway because both handle kinds share this path and
+     * the check is one comparison.
+     *
+     * Consequently this line is NOT covered by the ws_client_nonblocking
+     * tests -- confirmed by mutation, deleting it leaves both green. Its
+     * coverage would have to come from a server-side handle whose upgrade
+     * request shared a packet with the client's first frame. Said plainly
+     * here so the next reader does not mistake those tests for proof of it. */
+    if (conn->buf && conn->write_pos > conn->read_pos) return 1;
+
+    /* Layer 2: decrypted-but-unread TLS payload. Without this, a frame that
+     * arrived as the tail of a TLS record is invisible to poll(2). */
+#ifdef AETHER_HAS_OPENSSL
+    if (conn->ssl && SSL_pending((SSL*)conn->ssl) > 0) return 1;
+#endif
+    /* The pure-Aether TLS backend buffers per record too, but exposes no
+     * pending count, so we cannot answer "ready" for it without consuming.
+     * Report not-ready and let the caller's timeout drive; a bounded recv
+     * still makes progress because the socket wakes when the next record
+     * lands. */
+
+    if (conn->fd < 0) return -1;
+
+    /* Layer 3: the socket itself. */
+#ifdef _WIN32
+    fd_set rf;
+    FD_ZERO(&rf);
+    FD_SET((SOCKET)conn->fd, &rf);
+    struct timeval tv;
+    struct timeval* ptv = NULL;
+    if (timeout_ms >= 0) {
+        tv.tv_sec  = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        ptv = &tv;
+    }
+    int r = select(0, &rf, NULL, NULL, ptv);
+#else
+    struct pollfd pfd;
+    pfd.fd      = conn->fd;
+    pfd.events  = POLLIN;
+    pfd.revents = 0;
+    int r;
+    do {
+        r = poll(&pfd, 1, timeout_ms);
+    } while (r < 0 && errno == EINTR);   /* a signal is not a timeout */
+#endif
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    return 1;
+}
+
+/* The underlying socket. See the contract above: this is a readiness HINT
+ * only, because a frame can be buffered above the socket. -1 when closed. */
+int http_ws_fd(HttpWsConn* ws) {
+    if (!ws || !ws->conn || ws->closed) return -1;
+    return ws->conn->fd;
+}
+
+/* Wait until a frame is readable. 1 = readable now, 0 = timed out,
+ * -1 = closed/error. Does not consume anything. */
+int http_ws_poll(HttpWsConn* ws, int timeout_ms) {
+    if (!ws || !ws->conn || ws->closed) return -1;
+    return ws_ready_now(ws->conn, timeout_ms);
+}
+
+/* Bounded receive. Returns 1 text / 2 binary / 0 nothing arrived in time /
+ * -1 closed or error.
+ *
+ * timeout_ms bounds the wait for the START of a frame only. Once a frame
+ * header has been consumed the rest of that frame is read to completion,
+ * blocking if it has to: the WebSocket framing layer is a byte stream with no
+ * resynchronisation point, so abandoning a half-read frame would leave the
+ * next read interpreting payload as a header. Same for the continuation
+ * frames of a fragmented message, and for a ping arriving mid-wait -- both
+ * are handled internally and the timeout is NOT restarted, so the call still
+ * returns within roughly timeout_ms rather than being extended indefinitely
+ * by a chatty peer.
+ *
+ * timeout_ms < 0 blocks indefinitely, which is exactly http_ws_recv. */
+int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms) {
     if (!ws || !ws->conn || ws->closed) return -1;
     ws->msg_len = 0;  /* reset for this message */
 
+    /* Deadline for the whole call, so ping floods or fragmentation cannot
+     * extend it. Only consulted before a frame starts. */
+    long long deadline = (timeout_ms >= 0)
+                       ? conn_now_ms() + (long long)timeout_ms
+                       : -1;
+    int first_frame = 1;
+
     for (;;) {
+        /* Bound the wait for the next frame header. Mid-message (a
+         * continuation) we still respect the deadline, but a message already
+         * in progress cannot be handed back half-built, so a timeout there
+         * reports "no frame" only when nothing at all has been accumulated. */
+        if (deadline >= 0) {
+            long long remain = deadline - conn_now_ms();
+            if (remain < 0) remain = 0;
+            int r = ws_ready_now(ws->conn, (int)remain);
+            if (r < 0) { ws->closed = 1; return -1; }
+            if (r == 0) {
+                if (first_frame) return 0;         /* clean "nothing yet" */
+                /* A fragmented message stalled midway. We cannot return a
+                 * partial message and we cannot un-read what we consumed, so
+                 * keep waiting for the rest -- the alternative is a corrupt
+                 * stream. */
+            }
+        }
+        first_frame = 0;
         unsigned char hdr2[2];
         if (ws_recv_exact(ws->conn, hdr2, 2) != 0) { ws->closed = 1; return -1; }
         int fin    = (hdr2[0] >> 7) & 1;
@@ -2894,6 +3053,12 @@ int http_ws_recv(HttpWsConn* ws) {
     }
     return ws->msg_opcode == WS_OP_TEXT ? 1 : 2;
 }
+
+/* Blocking receive -- the original API, unchanged in behaviour. */
+int http_ws_recv(HttpWsConn* ws) {
+    return http_ws_recv_timeout(ws, -1);
+}
+
 
 /* RFC 6455 handshake. Server responds 101 Switching Protocols with
  * Sec-WebSocket-Accept = Base64(SHA-1(client_key + magic-uuid)). We
