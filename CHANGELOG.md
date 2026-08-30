@@ -45,6 +45,8 @@ version number before tagging the release.
   dropped verdict silently turns a failing suite green. Verified: all 55
   callers produce byte-identical exit codes before and after.
 
+## [0.610.0]
+
 ### Changed
 
 - **`ae version doctor --fix` now says when it repaired nothing.** Reported
