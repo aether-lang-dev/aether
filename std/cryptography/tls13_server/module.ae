@@ -3,11 +3,24 @@
 //
 // std.cryptography.tls13_server — a pure-Aether TLS 1.3 server (RFC 8446).
 // NO externs to OpenSSL.
+//
+// CONSTRAINTS, so they are found here rather than in a failed handshake:
+//
+//   - The server key must be ECDSA P-256. CertificateVerify is signed with
+//     sign_server_cert_verify_ecdsa_p256 and there is no RSA path, so an RSA
+//     key fails at the signature step and the peer just sees the connection
+//     drop. Generate with:
+//       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+//   - X25519 key exchange only. A client offering only other groups is
+//     refused by parse_client_hello; HelloRetryRequest is not implemented,
+//     so there is no renegotiation to a group we do support.
+//   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
+//     header of tls13_client for why that distinction bites.
 
 import std.bytes
 import std.string
-import std.list (list_new, list_free, list_add_raw, list_get_raw, list_size)
-import std.mem (copy)
+import std.list(list_new, list_free, list_add_raw, list_get_raw, list_size)
+import std.mem(copy)
 import std.fs
 import std.net
 import std.cryptography.sha2
@@ -15,7 +28,7 @@ import std.cryptography.hmac
 import std.cryptography.x25519
 import std.cryptography.p256
 import std.cryptography.tls13_kdf
-import std.cryptography.tls13_client (HsKeys)
+import std.cryptography.tls13_client(HsKeys)
 import std.cryptography.tls13_ks
 import std.cryptography.tls13_hs
 import std.cryptography.tls13_cert
@@ -164,13 +177,19 @@ fn send_record_raw(sock: ptr, rec: ptr) -> string {
     return ""
 }
 
+// Fresh randomness, or null. Returning null on failure is deliberate and the
+// callers MUST check: every use here is security-critical -- the server
+// random, the ECDSA-P256 signing nonce, and the X25519 private key. Silently
+// handing back a zero-filled buffer when the CSPRNG fails would make the
+// nonce predictable, and a predictable ECDSA nonce discloses the private key
+// outright (RFC 6979 s1). Failing the handshake is the only safe answer.
 fn rand_into(n: int) -> ptr {
     s, sn, err = cryptography.random_bytes(n)
+    if string.equals(err, "") != 1 { return null }
+    if sn < n { return null }
     b = bytes.new(n)
     if n > 0 { bytes.set(b, n - 1, 0) }
-    if string.equals(err, "") == 1 {
-        bytes.copy_from_string(b, 0, s, n)
-    }
+    bytes.copy_from_string(b, 0, s, n)
     return b
 }
 
@@ -249,14 +268,11 @@ accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: p
     rio = recio_new(sock)
 
     // 1. Read ClientHello
-    println("[server] 1. reading ClientHello...")
     chrec, chlen, cherr = recio_next_hs(rio)
     if string.equals(cherr, "") != 1 {
-        println("[server] 1. error reading ClientHello: ${cherr}")
         recio_free(rio)
         return null, cherr
     }
-    println("[server] 1. ClientHello read ok, len=${chlen}")
     ch_msg_len = chlen - 5
     ch_msg = bytes.new(ch_msg_len)
     bytes.copy_from_bytes(ch_msg, 0, chrec, 5, ch_msg_len)
@@ -284,17 +300,21 @@ accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: p
 
     // 3. Build and send ServerHello (plaintext)
     srnd = rand_into(32)
+    if srnd == null {
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg)
+        tls13_client.transcript_free(tr); recio_free(rio)
+        bytes.free(x25519_pub); bytes.free(shared)
+        return null, "no randomness available for the server random"
+    }
     sh = tls13_hs.server_hello(srnd, ch_parsed.session_id, ch_parsed.session_id_len,
         ch_parsed.cipher_suite, ch_parsed.group, x25519_pub, 32)
     sh_len = bytes.length(sh)
     sherr = send_plaintext_handshake(sock, sh, sh_len)
     if string.equals(sherr, "") != 1 {
-        println("[server] 3. error sending ServerHello: ${sherr}")
         bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
         tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
         return null, sherr
     }
-    println("[server] 3. ServerHello sent ok")
     tls13_client.transcript_add(tr, sh, sh_len)
 
     // 4. Key Schedule
@@ -329,6 +349,12 @@ accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: p
     // c. CertificateVerify
     th_cert = transcript_hash_algo(tr, hash_algo)
     knonce = rand_into(32)
+    if knonce == null {
+        // Signing with a predictable nonce would disclose the private key;
+        // there is no safe fallback, so the handshake ends here.
+        bytes.free(th_cert)
+        return null, "no randomness available for the signing nonce"
+    }
     sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, th_cert, hash_len, knonce)
     cv_msg = tls13_hs.certificate_verify_msg(0x0403, sig, bytes.length(sig))
     cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cv_msg, bytes.length(cv_msg))
@@ -350,7 +376,6 @@ accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: p
 
     cf_rec, cf_rec_len, cf_err = recio_next_hs(rio)
     if string.equals(cf_err, "") != 1 {
-        println("[server] 6. error reading Client Finished: ${cf_err}")
     }
     fin_ok = 0
     if string.equals(cf_err, "") == 1 {
@@ -589,14 +614,18 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
 
     chain_list, lens_list = parse_cert_chain_pem(cert_text)
     if chain_list == null {
-        println("[pure_tls_server] parse_cert_chain_pem failed")
         net.tcp_close(sock)
         return null
     }
 
+    // EC P-256 keys only. The handshake signs CertificateVerify with
+    // sign_server_cert_verify_ecdsa_p256, so an RSA key cannot be used even
+    // though the certificate would otherwise be valid -- the handshake fails
+    // at the signature step and the peer sees a dropped connection. Generate
+    // the pair with:
+    //   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
     priv_key = parse_ec_private_key_pem(key_text)
     if priv_key == null {
-        println("[pure_tls_server] parse_ec_private_key_pem failed")
         free_cert_chain(chain_list)
         list_free(lens_list)
         net.tcp_close(sock)
@@ -604,6 +633,15 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     }
 
     x25519_priv = rand_into(32)
+    if x25519_priv == null {
+        // An all-zeros X25519 private key would make the shared secret
+        // trivially recoverable, so refuse rather than fall back.
+        bytes.free(priv_key)
+        free_cert_chain(chain_list)
+        list_free(lens_list)
+        net.tcp_close(sock)
+        return null
+    }
 
     sconn, err = accept(sock, chain_list, lens_list, priv_key, x25519_priv)
 
@@ -613,7 +651,6 @@ pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
     list_free(lens_list)
 
     if err != "" {
-        println("[pure_tls_server] accept error: ${err}")
         if sconn != null { close_conn(sconn) }
         return null
     }
