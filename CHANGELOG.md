@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.612.0]
+
 ### Fixed
 
 - **`std.spec`'s `run_summary` conversion actually landed.** The 0.611.0 entry
