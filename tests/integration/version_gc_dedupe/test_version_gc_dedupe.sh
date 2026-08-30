@@ -156,9 +156,16 @@ cp -a "$VS" "$TMP/pristine"
 # "dedupe altered file content", which is exactly the wrong diagnosis. cksum
 # is POSIX and present everywhere this suite runs.
 tree_fingerprint() {
-    ( cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+    # Sort the finished LINES rather than trusting find's order, and strip any
+    # CR so a shell or tool that writes in text mode cannot make two identical
+    # trees compare unequal. The Windows leg failed with before/after output
+    # that rendered identically while the comparison still disagreed -- the
+    # signature of exactly that kind of invisible difference; normalising here
+    # is cheaper than continuing to chase which tool introduced it, and costs
+    # nothing on the platforms that were already fine.
+    ( cd "$1" && find . -type f | while IFS= read -r f; do
         printf '%s %s\n' "$f" "$(cksum < "$f")"
-      done )
+      done ) | tr -d '\r' | LC_ALL=C sort
 }
 
 "$AE" version dedupe >"$TMP/out" 2>&1 || fail "dedupe failed"
@@ -168,21 +175,25 @@ tree_fingerprint() {
 # On a failure, print what dedupe said and how the trees differ -- a bare
 # "altered file content" is undiagnosable from a CI log, which cost a round
 # trip to Windows to find out.
-tree_fingerprint "$TMP/pristine" > "$TMP/fp_before"
-tree_fingerprint "$VS"             > "$TMP/fp_after"
-if ! cmp "$TMP/fp_before" "$TMP/fp_after" >/dev/null 2>&1; then
+FP_BEFORE="$(tree_fingerprint "$TMP/pristine")"
+FP_AFTER="$(tree_fingerprint "$VS")"
+printf '%s\n' "$FP_BEFORE" > "$TMP/fp_before"
+printf '%s\n' "$FP_AFTER"  > "$TMP/fp_after"
+# Shell string comparison, NOT cmp. cmp ships in diffutils -- the same package
+# that provides diff, and the same package MSYS2 does not have. Replacing diff
+# with cksum but then comparing the results with cmp just moved the missing
+# tool one layer down, and `2>&1` swallowed the "command not found" that would
+# have said so: a missing comparator and a real difference are indistinguish-
+# able to `if !`. That is twice now, so this uses no external comparator.
+if [ "$FP_BEFORE" != "$FP_AFTER" ]; then
     echo "  --- dedupe output ---"; sed 's/^/    /' "$TMP/out"
     echo "  --- before ---"; sed 's/^/    /' "$TMP/fp_before" | head -10
     echo "  --- after ----"; sed 's/^/    /' "$TMP/fp_after"  | head -10
     # The rendered lines can look identical when the difference is a byte the
     # terminal does not show (a CR, a trailing space) or a size mismatch, so
-    # print what cmp actually objected to rather than leaving the reader to
-    # infer it from two blocks that appear the same.
-    echo "  --- cmp says ---"; cmp "$TMP/fp_before" "$TMP/fp_after" 2>&1 | sed 's/^/    /'
-    echo "  --- sizes ---";    wc -c "$TMP/fp_before" "$TMP/fp_after" 2>&1 | sed 's/^/    /'
-    # Rendered text can hide the byte that actually differs (a CR from a
-    # Windows-mode write, a trailing space). Dump both so the next failure
-    # names it instead of needing another CI round trip.
+    # print the raw bytes rather than leaving the reader to infer the
+    # difference from two blocks that appear identical.
+    # Rendered text can hide the byte that actually differs, so dump both.
     echo "  --- before, octal ---"; od -c "$TMP/fp_before" 2>&1 | sed 's/^/    /' | head -12
     echo "  --- after, octal ---";  od -c "$TMP/fp_after"  2>&1 | sed 's/^/    /' | head -12
     fail "dedupe altered file content"
@@ -197,8 +208,9 @@ if grep -qi "Reclaimed" "$TMP/out2"; then
     grep -qi "no duplicate content" "$TMP/out2" \
         || fail "second dedupe re-reported a saving it did not make"
 fi
-tree_fingerprint "$VS" > "$TMP/fp_after2"
-if ! cmp "$TMP/fp_before" "$TMP/fp_after2" >/dev/null 2>&1; then
+FP_AFTER2="$(tree_fingerprint "$VS")"
+printf '%s\n' "$FP_AFTER2" > "$TMP/fp_after2"
+if [ "$FP_BEFORE" != "$FP_AFTER2" ]; then
     echo "  --- second dedupe output ---"; sed 's/^/    /' "$TMP/out2"
     echo "  --- before ---"; sed 's/^/    /' "$TMP/fp_before"  | head -10
     echo "  --- after ----"; sed 's/^/    /' "$TMP/fp_after2" | head -10
