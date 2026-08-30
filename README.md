@@ -163,6 +163,9 @@ ae upgrade               # Install the latest release and switch to it
 ae install <v>           # Install a specific release (latest if omitted)
 ae use <v>               # Switch to an installed version
 ae version list          # List all available releases
+ae version installed     # List only the releases installed locally
+ae version gc --keep 3   # Prune the store to the newest 3
+ae version dedupe        # Share identical files across versions
 ae help                  # Show all commands
 ```
 

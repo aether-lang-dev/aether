@@ -635,6 +635,7 @@ ae install v0.25.0      # Install a specific release (latest if omitted)
 ae use v0.25.0          # Switch to an installed version
 ae version              # Show current version
 ae version list         # List all available releases (marks installed/active)
+ae version installed    # List only what is installed locally
 ```
 
 `ae install` / `ae use` are the short forms of `ae version install` /
@@ -642,6 +643,45 @@ ae version list         # List all available releases (marks installed/active)
 no-op when you are already on the latest release.
 
 Versions are stored in `~/.aether/versions/`. The active version is symlinked to `~/.aether/current` (Linux/macOS) or copied to `~/.aether/bin/` (Windows).
+
+`ae version list` asks GitHub what exists and marks the releases it also finds
+locally, so it answers "what could I install?". `ae version installed` reads
+only the disk, which is the question to ask when your installs have aged out of
+the release window (they will show no Status in `list`) or when you are offline.
+
+### Reclaiming disk space
+
+Each release occupies its full size, so a store of several releases gets large.
+Two commands prune it:
+
+```bash
+ae version remove v0.25.0        # Remove one or more installed releases
+ae version gc --dry-run          # Show what gc would remove
+ae version gc --keep 3           # Keep the newest 3, remove the rest
+ae version gc --keep 3 --dedupe  # ...and share identical files afterwards
+ae version dedupe                # Share identical files, remove nothing
+```
+
+Both `remove` and `gc` refuse to delete the release you are actually using —
+whether that is the one `current` points at or the one `~/.aether/active_version`
+pins — so the worst case is that they decline. Versions are ordered numerically,
+not alphabetically, so `--keep 2` on a store containing v0.9.0 and v0.10.0 keeps
+v0.10.0.
+
+`dedupe` reclaims space without removing anything, by pointing identical files
+at the same storage. Roughly 70% of a multi-version store is byte-identical, and
+about 20% of a *single* version is duplicated between `include/aether/` and
+`share/aether/`, so it is worth running even with one release installed. It
+prefers copy-on-write reflinks (btrfs, XFS with `reflink=1`, APFS) and falls
+back to hardlinks; where the filesystem supports neither — FAT, some network
+mounts, a Windows account without Developer Mode — it reports that and changes
+nothing. It never alters file contents, and it is safe to re-run: a second pass
+finds nothing left to share.
+
+One reporting quirk worth knowing: after a reflink dedupe, `du` still reports
+the old size, because it counts every reflinked file at full size even though
+the space really has come back. `df` shows the truth. After a *hardlink* dedupe
+`du` drops, because it counts a shared inode once.
 
 ## Troubleshooting
 
