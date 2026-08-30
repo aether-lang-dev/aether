@@ -1402,13 +1402,38 @@ static int ae_shares_extents(const char* a, const char* b) {
     unsigned long long pa = phys[0], pb = phys[1];
     if (pa == 0 || pb == 0) return 0;
     return pa == pb;
+#elif defined(_WIN32)
+    /* MinGW's stat() reports st_ino as 0 for EVERY file, so the inode check
+     * upstream cannot recognise a hardlink dedupe itself created -- measured
+     * on a real Win11 box, it re-linked and re-reported the same 37200 bytes
+     * on run after run. GetFileInformationByHandle returns the true NTFS file
+     * index, which does identify them. */
+    HANDLE ha, hb;
+    BY_HANDLE_FILE_INFORMATION ia, ib;
+    int same = 0;
+    ha = CreateFileA(a, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (ha == INVALID_HANDLE_VALUE) return 0;
+    hb = CreateFileA(b, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hb == INVALID_HANDLE_VALUE) { CloseHandle(ha); return 0; }
+    if (GetFileInformationByHandle(ha, &ia) &&
+        GetFileInformationByHandle(hb, &ib)) {
+        same = (ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber &&
+                ia.nFileIndexHigh == ib.nFileIndexHigh &&
+                ia.nFileIndexLow  == ib.nFileIndexLow);
+    }
+    CloseHandle(ha);
+    CloseHandle(hb);
+    return same;
 #else
     /* Other platforms: no probe, so a CoW copy is not recognised as
      * already-shared and a repeat run re-links files it had already shared --
      * wasteful and over-reported, but never incorrect (content is unaffected
      * and the space stays reclaimed). Hardlinks are still caught by the inode
-     * check upstream. Deliberately conservative: claiming two files share when
-     * they do not would silently skip real dedupe, which is the worse error. */
+     * check upstream, where st_ino is meaningful. Deliberately conservative:
+     * claiming two files share when they do not would silently skip real
+     * dedupe, which is the worse error. */
     (void)a; (void)b;
     return 0;
 #endif
@@ -1459,9 +1484,17 @@ static int ae_link_over(const char* keep, const char* dup, int* used_reflink) {
         remove(tmp);
     }
 #else
+    /* MoveFileExA(..., MOVEFILE_REPLACE_EXISTING), not remove-then-rename.
+     * Windows rename() refuses to replace an existing destination, so the
+     * obvious remove(dup) first -- which is what this did originally -- opens
+     * a window where a failed rename leaves NO file at dup at all: the
+     * original was already deleted and the temp gets cleaned up after. That
+     * is data loss, and it is what the Windows leg caught as "dedupe altered
+     * file content". MoveFileEx replaces in one step, so a failure leaves the
+     * original untouched. Same primitive cache_publish uses for the same
+     * reason (tools/ae_cache.c). */
     if (CreateHardLinkA(tmp, keep, NULL)) {
-        remove(dup);
-        if (rename(tmp, dup) == 0) return 1;
+        if (MoveFileExA(tmp, dup, MOVEFILE_REPLACE_EXISTING)) return 1;
         remove(tmp);
     }
 #endif
@@ -1507,8 +1540,15 @@ static long long ae_dedupe_store(int dry_run, int verbose) {
             if (files[j].hash == 0) continue;
             if (files[j].size != files[i].size) continue;
             if (files[j].hash != files[i].hash) continue;
-            /* already the same inode -- hardlinked on an earlier run */
-            if (files[j].dev == files[i].dev && files[j].ino == files[i].ino) {
+            /* Already the same inode -- hardlinked on an earlier run.
+             *
+             * ino == 0 does NOT mean "same file": MinGW's stat() reports
+             * st_ino as 0 for EVERY file, so without that guard this test
+             * matched every candidate pair and dedupe silently found nothing
+             * on all three Windows legs while reporting success. Verified on
+             * a real Win11 box: two distinct files both give dev=2 ino=0. */
+            if (files[i].ino != 0 && files[j].ino != 0 &&
+                files[j].dev == files[i].dev && files[j].ino == files[i].ino) {
                 files[j].hash = 0;
                 continue;
             }
@@ -1517,7 +1557,9 @@ static long long ae_dedupe_store(int dry_run, int verbose) {
                 files[j].hash = 0;
                 continue;
             }
-            /* hardlinks cannot cross devices, and a reflink cannot either */
+            /* Hardlinks cannot cross devices, and neither can a reflink. Safe
+             * to trust even where st_ino is not: a wrong dev here only skips
+             * a link that would have failed anyway. */
             if (files[j].dev != files[i].dev) continue;
             if (!ae_files_identical(files[i].path, files[j].path)) continue;
 

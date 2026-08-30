@@ -155,8 +155,14 @@ cp -a "$VS" "$TMP/pristine"
 
 # Every file byte-identical afterwards. This is the assertion that matters:
 # a dedupe that saves space by changing content is a corruption, not a win.
-diff -r "$TMP/pristine" "$VS" >/dev/null 2>&1 \
-    || fail "dedupe altered file content"
+# On a failure, print what dedupe said and how the trees differ -- a bare
+# "altered file content" is undiagnosable from a CI log, which cost a round
+# trip to Windows to find out.
+if ! diff -r "$TMP/pristine" "$VS" >"$TMP/diff.out" 2>&1; then
+    echo "  --- dedupe output ---"; sed 's/^/    /' "$TMP/out"
+    echo "  --- tree difference ---"; sed 's/^/    /' "$TMP/diff.out" | head -20
+    fail "dedupe altered file content"
+fi
 
 # --- dedupe is idempotent -------------------------------------------------
 # A second run must find nothing. Without a shared-extent check, reflinks
@@ -167,7 +173,10 @@ if grep -qi "Reclaimed" "$TMP/out2"; then
     grep -qi "no duplicate content" "$TMP/out2" \
         || fail "second dedupe re-reported a saving it did not make"
 fi
-diff -r "$TMP/pristine" "$VS" >/dev/null 2>&1 \
-    || fail "second dedupe altered file content"
+if ! diff -r "$TMP/pristine" "$VS" >"$TMP/diff2.out" 2>&1; then
+    echo "  --- second dedupe output ---"; sed 's/^/    /' "$TMP/out2"
+    echo "  --- tree difference ---"; sed 's/^/    /' "$TMP/diff2.out" | head -20
+    fail "second dedupe altered file content"
+fi
 
 echo "  [PASS] version_gc_dedupe: remove/gc guards, numeric ordering, dedupe integrity"
