@@ -15,5 +15,5 @@ main() {
             spec.assert_eq(1, 2, "one should equal two")
         }
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

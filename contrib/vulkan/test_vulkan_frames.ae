@@ -234,11 +234,12 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if pipe != null { vulkan.pipeline_destroy(pipe) }
     if t != null { vulkan.target_destroy(t) }
     string.free(vs)
     string.free(fs_)
     if dev != null { vulkan.device_destroy(dev) }
+    return _rc
 }

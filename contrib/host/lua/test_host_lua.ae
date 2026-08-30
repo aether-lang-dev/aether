@@ -68,7 +68,8 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if have_lua == 1 { lua.lua_finalize() }
+    return _rc
 }

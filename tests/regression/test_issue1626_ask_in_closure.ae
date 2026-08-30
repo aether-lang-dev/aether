@@ -70,6 +70,6 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
-    exit(0)
+    _rc = spec.run_summary(fw)
+    exit(_rc)
 }

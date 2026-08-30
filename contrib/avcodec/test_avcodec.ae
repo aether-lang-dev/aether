@@ -181,8 +181,9 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if have == 1 { _d1 = fs.delete(clip) }
     if have_av == 1 { _d2 = fs.delete(aclip) }
+    return _rc
 }
