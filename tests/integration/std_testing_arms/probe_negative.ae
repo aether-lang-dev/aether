@@ -33,5 +33,5 @@ main() {
     // trailing block trips a DSL parse quirk; called plainly it's fine.)
     eventually_case()
 
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

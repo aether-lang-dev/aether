@@ -9,5 +9,5 @@ main() {
         spec.it("adds") callback { spec.assert_eq(2 + 2, 4, "2+2") }
         spec.it("multiplies") callback { spec.assert_eq(3 * 3, 9, "3*3") }
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

@@ -483,7 +483,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if mat_mip != null { vulkan.material_destroy(mat_mip) }
     if mat_flat != null { vulkan.material_destroy(mat_flat) }
@@ -498,4 +498,5 @@ main() {
     if lay != null { vulkan.layout_destroy(lay) }
     if target != null { vulkan.target_destroy(target) }
     if dev != null { vulkan.device_destroy(dev) }
+    return _rc
 }

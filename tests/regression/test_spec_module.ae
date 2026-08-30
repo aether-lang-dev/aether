@@ -165,5 +165,5 @@ main() {
     }
 
     ref_free(hook_runs)
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

@@ -971,8 +971,9 @@ expect_list_every(xs: ptr, pred: fn, msg: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Runner — print summary, emit an opt-in structured report, exit(1) if
-// anything failed
+// Runner — print summary, emit an opt-in structured report, and RETURN the
+// verdict (0 all-green, 1 something failed). Return it from main(): the value
+// is the process exit status, and dropping it turns a failing suite green.
 // ---------------------------------------------------------------------------
 
 // Free the whole framework tree (the leaks-gate contract: zero at
@@ -1061,17 +1062,20 @@ run_summary(fw: ptr) -> int {
     ref_free(depth_ref)
     _teardown(fw)
 
+    // Return the verdict on BOTH paths; do not exit. Exiting on failure
+    // skipped whatever cleanup followed the call -- arena.destroy,
+    // http.server_stop, sqlite.close, the embedded-interpreter finalizers --
+    // on exactly the runs where a leaked arena or an orphaned listener
+    // matters most.
+    //
+    // This works only because every caller propagates the value. `main()`
+    // takes no return annotation (`main() -> int` is a parse error) and a
+    // bare `return N` from it becomes the process exit status, so a test
+    // ending in `return spec.run_summary(fw)` still exits 1 on failure. A
+    // caller that DROPS the value silently turns a failing suite green, so
+    // the rule for every caller is: return it.
     if failed > 0 {
-        // exit(1), NOT `return 1`. Every one of the 55 run_summary callers in
-        // this tree ends in a BARE `spec.run_summary(fw)` whose value is
-        // discarded, so returning here would make a failing suite exit 0 --
-        // measured: the process status went from 1 to 0 and CI would go green
-        // on genuinely failing tests. Returning the verdict only works for a
-        // caller that writes `return spec.run_summary(fw)`, which none of them
-        // do. The cost is that the failure path still skips whatever cleanup
-        // follows the call; that is the lesser evil, and a caller that wants
-        // its cleanup on both paths can capture the value and return it.
-        exit(1)
+        return 1
     }
     // Return 0 explicitly rather than falling off the end.
     //
@@ -1083,13 +1087,8 @@ run_summary(fw: ptr) -> int {
     // `<fn>(s: ptr) -> int` and uses the return as the node's result, so 132
     // all-green suites reported FAILED.
     //
-    // Deliberately NOT exit(0), which the ask proposed. 17 of the 55
-    // run_summary callers in this tree do real cleanup after it --
-    // arena.destroy, http.server_stop, sqlite.close, the embedded-interpreter
-    // finalizers -- and exiting here would silently skip all of it. Skipping
-    // arena.destroy would surface as a leak under the ASan/Valgrind gates,
-    // and skipping server_stop can orphan a listener that squats its port.
-    // The failure path keeps exit(1) for the reason given above.
+    // Deliberately NOT exit(0), which the ask proposed: 17 of the callers do
+    // real cleanup after this call, and exiting would silently skip it.
     //
     // Why a plain int and not an enum: an enum return does cross the module
     // boundary and does compare correctly as an int on the far side (tested),

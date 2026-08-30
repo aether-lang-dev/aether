@@ -69,7 +69,8 @@ assert builtins.aether_sum == 35, 'wrong'"), 0,
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if have_python == 1 { python.python_finalize() }
+    return _rc
 }

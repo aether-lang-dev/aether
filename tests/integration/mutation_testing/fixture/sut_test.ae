@@ -12,5 +12,5 @@ main() {
         }
         // mul is intentionally NOT tested -> MUL->DIV survives.
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

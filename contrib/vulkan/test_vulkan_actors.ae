@@ -208,12 +208,12 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if dev != null { vulkan.device_destroy(dev) }
 
     // The two painters are still alive with nothing left to receive, and a
     // process kept alive by idle actors is a quiet one — the sandbox watchdog
     // reaps it before the summary reaches the terminal. Leave deliberately.
-    exit(0)
+    exit(_rc)
 }

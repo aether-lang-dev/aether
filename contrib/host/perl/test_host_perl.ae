@@ -68,7 +68,8 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if have_perl == 1 { perl.perl_finalize() }
+    return _rc
 }

@@ -134,7 +134,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     // Scrub the scratch store and its fixtures. Enumerate-and-delete
     // rather than shelling out to rm -rf: the native Windows build has
@@ -150,4 +150,5 @@ main() {
         dir.dir_list_free(entries)
     }
     fs.delete_dir(root)
+    return _rc
 }

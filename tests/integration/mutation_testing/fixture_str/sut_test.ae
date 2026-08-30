@@ -10,5 +10,5 @@ main() {
             spec.assert_str_eq(sut.name(), "alice", "name")
         }
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }
