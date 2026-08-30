@@ -11,6 +11,40 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`std.spec`'s `run_summary` now returns 0 on success instead of falling off
+  the end** (asks/spec-run-summary-should-exit-0-on-success.md). It has always
+  `exit(1)`-ed on failure, but the success path just ended, leaving whatever
+  was in the return slot — measured at 24 for a suite where every assertion
+  passed. Invisible when a test binary is run for its process status (the
+  fall-through still exits 0), and wrong the moment a caller *captures* the
+  value: aeb's fan-out orchestrator rewrites each test into
+  `<fn>(s: ptr) -> int` and uses the return as that node's result, so 132
+  all-green suites reported FAILED.
+
+  The ask proposed `exit(0)` here, which would have been a regression: 17 of
+  the 55 `run_summary` callers in this tree do real work after the call —
+  `arena.destroy`, `http.server_stop`, `sqlite.close`, the embedded-interpreter
+  finalizers — and exiting would silently skip it, surfacing as a leak under
+  the ASan/Valgrind gates or an orphaned listener squatting its port.
+
+### Changed
+
+- **`std.spec`'s `run_summary` now returns its verdict on both paths instead of
+  `exit(1)`-ing on failure**, and all 55 callers were converted to propagate it.
+  Exiting skipped whatever cleanup followed the call — `arena.destroy`,
+  `http.server_stop`, `sqlite.close`, the embedded-interpreter finalizers — on
+  exactly the runs where a leaked arena or an orphaned listener does the most
+  damage. Callers whose suite is the last statement now read
+  `return spec.run_summary(fw)`; the 20 with trailing cleanup capture the
+  verdict, clean up, then return it.
+
+  **Return the value.** `main()` takes no return annotation (`main() -> int` is
+  a parse error) and a bare `return N` becomes the process exit status, so a
+  dropped verdict silently turns a failing suite green. Verified: all 55
+  callers produce byte-identical exit codes before and after.
+
 ## [0.610.0]
 
 ### Changed
