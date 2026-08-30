@@ -136,6 +136,55 @@ One asymmetry is invisible but required: RFC 6455 §5.3 says a client must mask
 every frame it sends and a server must not. The client handle does; the server
 handle does not.
 
+### Reading without blocking
+
+`ws_recv` blocks until a frame arrives, which is fine for a request/response
+exchange and wrong for a **multiplexed** one. WebDriver-BiDi is the motivating
+case: many commands in flight at once, each awaited by `id`, plus unsolicited
+events on the same socket. That needs one reader routing frames to an id-keyed
+table or an event queue — and built on a blocking `ws_recv`, that reader has to
+own a thread.
+
+Three calls avoid it:
+
+```aether,fragment
+// Bounded: 1 text, 2 binary, 0 nothing arrived in time, -1 closed.
+k = http.ws_recv_timeout(w, 50)
+if k == 0 { return }          // nothing yet, come back later
+if k < 0 { return }           // peer gone
+
+// Readiness, consuming nothing: 1 readable, 0 timed out, -1 closed.
+if http.ws_poll(w, 50) == 1 {
+    _ = http.ws_recv(w)       // guaranteed not to block
+}
+```
+
+`ws_recv_timeout(w, 0)` is a true poll and never blocks, which makes it the
+building block for a pump: call it, route whatever comes back, return.
+
+The timeout bounds the wait for the **start** of a frame. Once a header has
+been read the frame is finished even if that blocks, because WebSocket framing
+has no resynchronisation point — abandoning a half-read frame would leave the
+next read treating payload as a header. Pings and continuation frames handled
+during the wait do not restart the clock, so a chatty peer cannot extend the
+call.
+
+**`ws_fd(w)` exposes the underlying socket** for a native event loop
+(`asyncio.add_reader`, epoll, kqueue), and it comes with a contract:
+
+> The descriptor is a readiness **hint**, not an authority. A frame can be
+> sitting in the connection's buffer, or decrypted inside the TLS layer, with
+> nothing pending on the socket. Always drain with `ws_recv_timeout(w, 0)`
+> until it returns `0`, then go back to waiting.
+
+That is not a theoretical caveat. Over `wss://`, OpenSSL decrypts an entire
+TLS record at once, so a peer that writes two frames together leaves the
+second one decrypted and waiting while `poll(2)` on the descriptor reports
+nothing — measured, not assumed. `ws_poll` checks the connection buffer, then
+the TLS layer, then the socket, so it cannot answer "not ready" while a frame
+is already in hand. Prefer it whenever you want one authoritative answer;
+reach for `ws_fd` only when an event loop needs a real descriptor.
+
 ## Exports
 
 Server: `server_create`, `server_get`, `server_post`, `server_put`,

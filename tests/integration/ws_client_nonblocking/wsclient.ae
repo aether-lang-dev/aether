@@ -1,0 +1,151 @@
+// The non-blocking client half: ws_recv_timeout / ws_poll / ws_fd.
+//
+// What each check is actually for:
+//
+//   1. A bounded recv against a quiet socket must return 0 -- not block, not
+//      report an error, and not claim a frame. This is the call the whole
+//      BiDi demux is built on, and 0 is the value that distinguishes "keep
+//      pumping" from "the peer went away".
+//   2. ws_poll must agree with ws_recv_timeout about emptiness, and must NOT
+//      consume the frame it reports -- a poll that eats the message would
+//      break every caller that polls before reading.
+//   3. Once a frame really is there, the bounded recv must return it with the
+//      same kind and payload the blocking recv would have.
+//   4. ws_recv_timeout(ws, 0) must be a true poll: usable in a drain loop
+//      without ever blocking. This is the exact call the documented ws_fd
+//      contract tells event-loop callers to use.
+//   5. ws_fd must hand back a real descriptor while open.
+//
+// Timing note: the assertions are about ORDER and RETURN VALUES, not wall
+// clock, apart from one deliberately generous bound. A test that asserted
+// "returned in 100ms +/- 10" would be a flake generator on a loaded CI box.
+
+import std.http
+import std.string
+
+extern exit(code: int)
+
+fn fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    w = http.ws_connect("ws://127.0.0.1:18251/slow")
+    if w == null { fail("ws_connect returned null") }
+
+    // --- 5. the descriptor is real while the connection is open -----------
+    fd = http.ws_fd(w)
+    if fd < 0 { fail("ws_fd returned ${fd} on an open connection") }
+
+    // --- 1. bounded recv on a quiet socket ---------------------------------
+    // Nothing has been sent yet, so the peer has nothing to say. This must
+    // come back 0, and must come back at all -- a hang here is the bug this
+    // whole feature exists to avoid.
+    k = http.ws_recv_timeout(w, 150)
+    if k != 0 { fail("ws_recv_timeout on a quiet socket returned ${k}, want 0") }
+
+    // --- 2. poll agrees, and consumes nothing ------------------------------
+    p = http.ws_poll(w, 100)
+    if p != 0 { fail("ws_poll on a quiet socket returned ${p}, want 0") }
+
+    // Now ask for something. The peer waits ~900ms before its first reply.
+    rc = http.ws_send_text(w, "ping one")
+    if rc < 0 { fail("ws_send_text returned ${rc}") }
+
+    // A short bound while the peer is still sleeping: still 0. This is the
+    // case that would break if the timeout were restarted per frame or if
+    // the deadline were ignored once a wait began.
+    k = http.ws_recv_timeout(w, 100)
+    if k != 0 { fail("ws_recv_timeout during the peer's pause returned ${k}, want 0") }
+
+    // --- 3. a generous bound does deliver the frame ------------------------
+    // 5s against a ~900ms pause: enough slack that a loaded runner does not
+    // turn this into a flake, while still failing outright if the frame is
+    // never delivered.
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("ws_recv_timeout returned ${k}, want 1 (text)") }
+    got = http.ws_message(w)
+    want = "echo: ping one"
+    if string.compare(got, want) != 0 { fail("got [${got}] want [${want}]") }
+
+    // --- 2b. poll reports a real frame, and leaves it there ----------------
+    rc = http.ws_send_text(w, "ping two")
+    if rc < 0 { fail("second ws_send_text returned ${rc}") }
+    p = http.ws_poll(w, 5000)
+    if p != 1 { fail("ws_poll returned ${p} with a frame inbound, want 1") }
+    // The frame must still be readable: poll promised without consuming.
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("ws_recv_timeout after a positive poll returned ${k}; poll consumed the frame?") }
+    got = http.ws_message(w)
+    want = "echo: ping two"
+    if string.compare(got, want) != 0 { fail("after poll: got [${got}] want [${want}]") }
+
+    // --- 6. two frames sent back-to-back are both delivered, in order ------
+    // The peer answers "burst" with a second frame immediately after the
+    // first, with no pause between. Both may arrive in one TCP segment, so
+    // this covers the case where a bounded recv must return exactly ONE
+    // message and leave the next intact rather than concatenating them or
+    // dropping the tail.
+    //
+    // Note on what this does NOT cover: for a CLIENT handle, conn->buf is
+    // always empty -- ws_connect reads the 101 response a byte at a time so
+    // it cannot swallow a following frame, and ws_recv_exact never
+    // over-reads. The buffered-bytes layer in ws_ready_now is reachable only
+    // for SERVER-side handles, where the header scan can pull the first frame
+    // in with the request. Verified by mutation: deleting that layer leaves
+    // this test green, so it is exercised by the server-side ws tests rather
+    // than here, and the comment is here so the next person does not read
+    // this case as covering it.
+    rc = http.ws_send_text(w, "burst please")
+    if rc < 0 { fail("burst ws_send_text returned ${rc}") }
+
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("burst first frame: got ${k}, want 1") }
+    got = http.ws_message(w)
+    want = "echo: burst please"
+    if string.compare(got, want) != 0 { fail("burst first: got [${got}] want [${want}]") }
+
+    // The second frame may already be readable, or still in flight; either
+    // way it must become readable. A zero-timeout poll first, so the fast
+    // path is exercised when the two frames did share a segment.
+    p = http.ws_poll(w, 0)
+    if p != 1 {
+        p = http.ws_poll(w, 5000)
+        if p != 1 { fail("second burst frame never became readable (poll=${p})") }
+    }
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("burst second frame: got ${k}, want 1") }
+    got = http.ws_message(w)
+    want = "second: burst please"
+    if string.compare(got, want) != 0 { fail("burst second: got [${got}] want [${want}]") }
+
+    // --- 4. zero timeout is a true non-blocking poll -----------------------
+    // The drain-loop shape the ws_fd contract documents. Nothing is pending,
+    // so this must return 0 immediately rather than blocking.
+    k = http.ws_recv_timeout(w, 0)
+    if k != 0 { fail("ws_recv_timeout(0) on an empty socket returned ${k}, want 0") }
+
+    // And the same call must still work as a drain once a frame lands.
+    rc = http.ws_send_text(w, "ping three")
+    if rc < 0 { fail("third ws_send_text returned ${rc}") }
+    p = http.ws_poll(w, 5000)
+    if p != 1 { fail("ws_poll before drain returned ${p}, want 1") }
+    drained = 0
+    tries = 0
+    while drained == 0 && tries < 200 {
+        k = http.ws_recv_timeout(w, 0)
+        if k == 1 { drained = 1 }
+        if k < 0 { fail("drain loop saw ${k}") }
+        tries = tries + 1
+    }
+    if drained == 0 { fail("drain loop never saw the frame after a positive poll") }
+    got = http.ws_message(w)
+    want = "echo: ping three"
+    if string.compare(got, want) != 0 { fail("drained: got [${got}] want [${want}]") }
+
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: ws non-blocking recv / poll / fd")
+    exit(0)
+}

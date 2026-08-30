@@ -55,9 +55,11 @@ exports(
     sse_send, sse_send_id, sse_close,
     http_server_websocket, server_websocket,
     http_ws_send_text, http_ws_send_binary, http_ws_recv,
+    http_ws_recv_timeout, http_ws_poll, http_ws_fd,
     http_ws_connect, http_ws_client_free, ws_connect, ws_client_free,
     http_ws_message_data, http_ws_message_length, http_ws_close,
     ws_send_text, ws_send_binary, ws_recv,
+    ws_recv_timeout, ws_poll, ws_fd,
     ws_message, ws_message_length, ws_close,
     server_bind, server_start, server_start_background,
     http_server_add_route, http_server_get, http_server_post,
@@ -538,6 +540,9 @@ extern http_server_websocket(server: ptr, path: string, handler: ptr, user_data:
 extern http_ws_send_text(ws: ptr, text: string) -> int
 extern http_ws_send_binary(ws: ptr, data: ptr, length: int) -> int
 extern http_ws_recv(ws: ptr) -> int
+extern http_ws_recv_timeout(ws: ptr, timeout_ms: int) -> int
+extern http_ws_poll(ws: ptr, timeout_ms: int) -> int
+extern http_ws_fd(ws: ptr) -> int
 extern http_ws_message_data(ws: ptr) -> string
 extern http_ws_message_length(ws: ptr) -> int
 extern http_ws_close(ws: ptr, code: int, reason: string)
@@ -590,6 +595,63 @@ ws_send_binary(ws: ptr, data: ptr, length: int) -> int {
 // ws_send / ws_close call.
 ws_recv(ws: ptr) -> int {
     return http_ws_recv(ws)
+}
+
+// Bounded receive, for a reader that multiplexes many logical streams over
+// one socket and so cannot park a thread in a blocking ws_recv. A
+// WebDriver-BiDi demux is the motivating shape: one reader routes each frame
+// to either an id-keyed pending-reply table or an event queue, and the caller
+// drives the wait with its own event loop.
+//
+// Returns 1 (text), 2 (binary), -1 (closed) exactly as ws_recv, plus 0 for
+// "nothing arrived in time". timeout_ms of 0 polls; negative blocks.
+//
+// The timeout bounds the wait for the START of a frame. Once a frame header
+// has been read the rest of that frame is read to completion, because
+// WebSocket framing is a byte stream with no resynchronisation point --
+// abandoning a half-read frame would leave the next read treating payload as
+// a header. Pings and continuation frames handled during the wait do not
+// restart the clock, so a chatty peer cannot extend the call indefinitely.
+ws_recv_timeout(ws: ptr, timeout_ms: int) -> int {
+    return http_ws_recv_timeout(ws, timeout_ms)
+}
+
+// Is a frame readable without blocking? 1 = yes, 0 = timed out,
+// -1 = closed/error. Consumes nothing, so a 1 is always followed by a
+// ws_recv that does not block.
+//
+// This asks all three places bytes can be waiting -- the connection's read
+// buffer, the TLS layer's decrypted-but-unread payload, and the socket -- so
+// unlike polling ws_fd yourself it cannot answer "not ready" while a complete
+// frame is already buffered above the socket.
+ws_poll(ws: ptr, timeout_ms: int) -> int {
+    return http_ws_poll(ws, timeout_ms)
+}
+
+// The underlying socket, for a native event loop (asyncio.add_reader, epoll,
+// kqueue). Returns -1 when closed.
+//
+// CONTRACT -- read this before using it. The descriptor is a readiness HINT,
+// not an authority: a frame can sit in the connection buffer, or decrypted
+// inside the TLS layer, with nothing pending on the socket. An event loop
+// that waits on this fd alone will eventually miss a frame that has already
+// arrived, and then block. The safe pattern is:
+//
+//   when your event loop reports the fd readable, drain it dry:
+//
+//     draining = 1
+//     while draining == 1 {
+//         k = http.ws_recv_timeout(ws, 0)   // never blocks
+//         if k == 0 { draining = 0 }        // nothing left; go back to waiting
+//         if k > 0 { route(k) }
+//         if k < 0 { draining = 0 }         // peer gone
+//     }
+//
+// i.e. treat readability as "go look", and let ws_recv_timeout(ws, 0) be the
+// authority on whether a frame is actually there. If you want one call that
+// answers authoritatively, use ws_poll instead.
+ws_fd(ws: ptr) -> int {
+    return http_ws_fd(ws)
 }
 
 ws_message(ws: ptr) -> string {

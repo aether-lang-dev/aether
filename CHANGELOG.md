@@ -11,6 +11,36 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ws_recv_timeout`, `ws_poll` and `ws_fd` on the WebSocket client**, so a
+  multiplexed reader does not need a thread
+  (asks/ws-client-nonblocking-recv-for-bidi-demux.md). WebDriver-BiDi is the
+  motivating shape: many commands in flight at once, each awaited by `id`,
+  plus unsolicited events on the same socket. One reader has to route each
+  frame to an id-keyed table or an event queue, and on a blocking `ws_recv`
+  that reader must own a thread.
+
+  `ws_recv_timeout(w, ms)` returns `1`/`2`/`-1` as `ws_recv` does, plus `0`
+  for "nothing arrived in time"; `ws_recv_timeout(w, 0)` is a true poll.
+  `ws_poll(w, ms)` answers readiness without consuming. `ws_fd(w)` exposes the
+  socket for `asyncio.add_reader` and friends.
+
+  The timeout bounds the wait for the *start* of a frame: once a header has
+  been read the frame is finished, because WebSocket framing has no
+  resynchronisation point and abandoning a half-read frame would leave the
+  next read treating payload as a header. Pings and continuations during the
+  wait do not restart the clock.
+
+  `ws_fd` is documented as a readiness **hint**, not an authority, and the
+  reason is measured rather than theoretical: over `wss://` OpenSSL decrypts a
+  whole TLS record at once, so a peer that writes two frames together leaves
+  the second decrypted and waiting while `poll(2)` on the descriptor reports
+  nothing. `ws_poll` consults the connection buffer, then the TLS layer, then
+  the socket, so it cannot report "not ready" while a frame is already in
+  hand. Callers using `ws_fd` must drain with `ws_recv_timeout(w, 0)` until it
+  returns `0`.
+
 ## [0.606.0]
 
 ### Added

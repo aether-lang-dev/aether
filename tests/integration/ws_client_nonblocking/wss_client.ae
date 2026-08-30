@@ -1,0 +1,74 @@
+// The wss:// half of the non-blocking client test.
+//
+// Its whole reason to exist is the TLS buffering case, which the ws://
+// half CANNOT reach: OpenSSL decrypts an entire TLS record at once, so two
+// frames the peer sent back-to-back arrive together and the second sits
+// decrypted inside the SSL object with NOTHING pending on the socket.
+//
+// A readiness check that only consults poll(2) on the descriptor answers
+// "not ready" there, and a caller that trusted it would block on a frame it
+// already has. That is the SSL_pending layer in ws_ready_now, and it is why
+// ws_fd is documented as a hint rather than an authority.
+
+import std.http
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    port = os.args_get(1)
+    url = "wss://localhost:${port}/"
+    w = http.ws_connect(url)
+    if w == null { fail("ws_connect(${url}) returned null") }
+
+    // A quiet socket over TLS still has to time out cleanly rather than
+    // blocking or mistaking "no data" for an error.
+    k = http.ws_recv_timeout(w, 150)
+    if k != 0 { fail("ws_recv_timeout on a quiet TLS socket returned ${k}, want 0") }
+
+    // Ask for the burst: the peer sends two frames with no await between,
+    // so they are very likely to share one TLS record.
+    rc = http.ws_send_text(w, "burst")
+    if rc < 0 { fail("ws_send_text returned ${rc}") }
+
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("first burst frame: got ${k}, want 1") }
+    got = http.ws_message(w)
+    if string.compare(got, "echo:burst") != 0 { fail("first: got [${got}] want [echo:burst]") }
+
+    // THE case. If both frames shared a record, the second is decrypted and
+    // waiting inside OpenSSL right now, and the socket has nothing pending.
+    // A zero-timeout poll must still find it.
+    // STRICT: a zero-timeout poll must find it. No fallback to a longer
+    // wait here -- that fallback is what made this test pass with the
+    // SSL_pending check deleted, because the socket does eventually look
+    // readable at the TCP layer and a patient poll succeeds for the wrong
+    // reason. Measured with and without that check: poll(0) returns 1 with
+    // it and 0 without, so this assertion is the one that holds the layer in
+    // place.
+    //
+    // If the peer ever split the two frames across separate TLS records this
+    // would be a false failure. It does not: peer_tls_burst.py sends them
+    // back-to-back with no await between, and the payloads are a few dozen
+    // bytes -- far inside one record.
+    p = http.ws_poll(w, 0)
+    if p != 1 {
+        fail("zero-timeout ws_poll returned ${p} while a decrypted frame was buffered in TLS -- SSL_pending not consulted?")
+    }
+
+    k = http.ws_recv_timeout(w, 5000)
+    if k != 1 { fail("second burst frame: got ${k}, want 1") }
+    got = http.ws_message(w)
+    if string.compare(got, "second:burst") != 0 { fail("second: got [${got}] want [second:burst]") }
+
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    println("PASS: wss non-blocking recv / poll")
+    exit(0)
+}

@@ -567,6 +567,40 @@ int http_ws_send_binary(HttpWsConn* ws, const void* data, int len);
 // is valid until the next ws_recv / ws_send / ws_close call.
 int http_ws_recv(HttpWsConn* ws);
 
+// Bounded receive, for a multiplexed reader that cannot park a thread in a
+// blocking recv (a WebDriver-BiDi style demux is the motivating case).
+//
+// Returns 1 / 2 / -1 exactly as http_ws_recv, plus:
+//    0  — nothing arrived within timeout_ms
+//
+// timeout_ms < 0 blocks indefinitely (identical to http_ws_recv); 0 polls.
+// The timeout bounds the wait for the START of a frame: once a header has
+// been consumed the frame is read to completion, because the framing layer
+// has no resynchronisation point and a half-read frame would desynchronise
+// the stream. Pings and continuation frames handled during the wait do NOT
+// restart the clock.
+int http_ws_recv_timeout(HttpWsConn* ws, int timeout_ms);
+
+// Is a frame readable without blocking? 1 = yes, 0 = timed out,
+// -1 = closed/error. Consumes nothing.
+//
+// Checks all three places bytes can be waiting -- the connection's own read
+// buffer, the TLS layer's decrypted-but-unread payload, and finally the
+// socket -- so unlike a bare poll() on http_ws_fd it cannot report
+// "not ready" while a complete frame is already buffered above the socket.
+int http_ws_poll(HttpWsConn* ws, int timeout_ms);
+
+// The underlying socket, for integration with a native event loop
+// (asyncio.add_reader, epoll, kqueue). -1 when closed.
+//
+// CONTRACT: this is a readiness HINT, not an authority. A frame can be
+// sitting in the connection buffer or in the TLS layer with nothing pending
+// on this descriptor, so an event loop that waits on it alone can miss a
+// frame that already arrived. Always drain with http_ws_recv_timeout(ws, 0)
+// in a loop until it returns 0, then go back to waiting. Callers that want
+// a single authoritative answer should use http_ws_poll instead.
+int http_ws_fd(HttpWsConn* ws);
+
 // Accessors for the message read by the most recent ws_recv. Both
 // safe to call after ws_recv returned 1 or 2; undefined behaviour
 // otherwise.
