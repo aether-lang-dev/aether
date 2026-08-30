@@ -11,6 +11,18 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`std.spec`'s `run_summary` conversion actually landed.** The 0.611.0 entry
+  below describes `run_summary` returning its verdict on both paths with all
+  55 callers converted to propagate it — but the commit that shipped contained
+  only the CHANGELOG and README changes, so 0.611.0 documented a contract its
+  code did not implement: the module still `exit(1)`-ed on failure and every
+  caller still discarded the value with a bare call. This lands the code that
+  entry describes. Nothing broke in the interim — the old behaviour simply
+  persisted — but `std/spec/README.md` was telling callers to write
+  `return spec.run_summary(fw)` against a module that did not yet honour it.
+
 ## [0.611.0]
 
 ### Fixed
