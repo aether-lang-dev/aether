@@ -11,6 +11,114 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.605.0]
+
+### Fixed
+
+- **A proxy retry no longer leaks the memory cap's accounting.** The outbound
+  request head is allocated through `aether_caps_malloc`, and the retry path
+  released it with a plain `free()`. The memory came back, but the counter
+  that decides whether the next allocation is permitted went on believing
+  those bytes were live.
+
+  The drift is small per retry and unbounded over time, and it accumulates
+  fastest exactly when the proxy is already in trouble, because retries are
+  what upstream failures cause. A server that had been failing over for long
+  enough would start refusing allocations that the machine had memory for,
+  and nothing about the symptom would point back at retries.
+
+### Changed
+
+- **A proxied response is answered from the upstream's own bytes.** The path
+  materialised every response three times over: into an `HttpResponse`, then
+  header by header onto the `HttpServerResponse`, then into the bytes that go
+  out. The last two copies exist so that a handler could have looked at the
+  response. When nothing is going to, the bytes already in the receive buffer
+  are the answer.
+
+  The head is now rewritten straight into the outgoing buffer and the body is
+  sent from where it arrived, with one `writev` carrying both. **Body copies
+  per response go from three to none, and header copies from three to one.**
+
+  It applies when nothing needs the response object, meaning no cache and no
+  response transformer, and when the response said where it ended and is not
+  chunked; a chunked body would have to be decoded to be forwarded, which is a
+  copy again. Everything else takes the copying path, so this narrows what it
+  handles rather than changing what the proxy means.
+
+  On the standard bench, whose backend returns twelve bytes, **CPU per request
+  17.0 to 15.6 microseconds** by the least-contended round and better in all
+  eight rank-matched rounds. Almost none of that is the body copies, because
+  there is barely a body to copy.
+
+  On 64 KiB responses, which is a size a proxy actually carries, **page faults
+  per request 2.46 to 0.05** and **CPU per request 40.1 to 32.7
+  microseconds**. At that size this path costs 32.7 against haproxy's 32.2 and
+  nginx's 34.3 by the least-contended round: level with one and slightly ahead
+  of the other, where before it was behind both.
+
+### Testing
+
+- The two paths are compared byte for byte, over four response shapes, by
+  running the same requests with `AETHER_PROXY_DIRECT=1` and `0`. That
+  comparison is the test rather than a check of the fast path alone, because a
+  fast path that silently never runs passes every single-path test.
+
+  Five shapes are compared, including a 64 KiB body, because a write that
+  large does not finish in one call and is the only one that exercises the
+  accounting for a partially written body.
+
+  It earned its place immediately: on `HEAD` the copying path states the length
+  of the body it is sending, which is none, while forwarding the upstream's
+  `Content-Length` advertised a body that never arrives. A response whose
+  framing disagrees with its bytes is the shape request smuggling is built
+  from. The header is now emitted from the body being sent, in the upstream's
+  position so the order still matches.
+
+## [0.604.0]
+
+### Changed
+
+- **A proxied request's own strings come from an arena.** Parsing a request
+  allocated the method, the path, the query, the version and a pair per
+  header, then freed them a moment later: about two dozen allocations and as
+  many frees for every request. The connection already owned an arena for the
+  outbound headers, and the inbound ones now share it.
+
+  A parse takes all of its strings from the arena or none of them, because
+  their origin is recorded by one flag on the request, and the decision is
+  made up front from the size of the request being parsed. The reservation
+  covers the worst case exactly: at most four fixed strings plus a pair per
+  header, each with a terminator and rounded up to the arena's alignment. It
+  has to, because there is no fallback once a parse has started, and a first
+  attempt at that bound reserved 456 bytes where 832 were needed.
+
+  The arena is now emptied before the parse rather than after it, since the
+  parse is what fills it, and it is sized for two requests rather than one
+  because it holds the inbound strings and the outbound headers together.
+
+  **Page faults per request 0.13 to 0.05**, the same in all six rounds. CPU
+  per request improved in five of six rank-matched rounds; the controls moved
+  133% in that run, so the fault count is the figure quoted.
+
+### Fixed
+
+- **Paths and URLs built by `snprintf` no longer ignore truncation.** Seven
+  places in `ae` and `ae version` formatted a path or a URL into a fixed
+  buffer and used the result without checking whether it fitted, which gcc
+  reported as `-Wformat-truncation` on every Linux build.
+
+  Truncation there is not cosmetic. A shortened asset name downloads a
+  different artifact; a shortened checksum URL turns a verified download into
+  an unverified one, and the caller is told no checksum was published rather
+  than that none could be fetched; a shortened command line runs a different
+  command than the one the doctor meant to test. Each site now checks and
+  refuses: an artifact that cannot be named is skipped, a checksum that cannot
+  be located is an error rather than an absence, and a toolchain root that
+  cannot be formed is not probed.
+
+## [0.603.0]
+
 ### Added
 
 - **The TLS 1.3 handshake module can read a ClientHello and write a

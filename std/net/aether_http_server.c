@@ -5,6 +5,7 @@
 #include "aether_http_pool.h"
 #include "aether_http_park.h"
 #include "aether_http_evloop.h"
+#include "aether_http_internal.h"
 #include "../../runtime/utils/aether_cpu_available.h"
 #if !defined(_WIN32)
 #include <signal.h>    /* pthread_sigmask / sigset_t for the embedded-server signal mask */
@@ -1518,9 +1519,51 @@ int http_server_port(HttpServer* server) {
  * On failure it frees what it managed to fill in but never the object itself,
  * because the caller may be reusing one it owns: freeing that would hand back
  * a pointer to memory the caller still holds. */
+/* The strings a parse fills in come from the request's arena when it has one
+ * and they fit, and from the ordinary allocator otherwise. A parse takes all
+ * of them from one place or the other, never a mixture, because their origin
+ * is recorded by a single flag on the request; req_arena_ready decides that
+ * once, up front, from the size of the request being parsed.
+ *
+ * A proxied request allocated about two dozen of these and freed them a
+ * moment later: the method, the path, the version, and a pair per header. */
+static char* req_alloc(HttpRequest* req, size_t n) {
+    if (req->arena_backed) {
+        void* p = http_arena_alloc((HttpArena*)req->arena, n);
+        if (p) return (char*)p;
+        /* Cannot happen: req_arena_ready reserved room for the whole request
+         * before the flag was set. Falling back would mix origins, so the
+         * parse fails instead of leaving a pointer the reset cannot classify. */
+        return NULL;
+    }
+    return (char*)malloc(n);
+}
+
+static void req_release(HttpRequest* req, void* p) {
+    if (!req->arena_backed) free(p);
+}
+
+/* Every string this parse produces is a copy of part of the request, so the
+ * request's own length bounds the bytes they hold. Each also carries a
+ * terminator and is rounded up to the arena's alignment, and there are at
+ * most four fixed strings plus a pair per header.
+ *
+ * The reservation has to cover the worst case exactly, because req_alloc has
+ * nowhere to go if the arena runs out mid-parse: falling back to malloc would
+ * mix origins that a single flag cannot describe, so it fails the parse and
+ * the connection is dropped. Reserving all of it up front is what makes that
+ * branch unreachable. */
+static void req_arena_ready(HttpRequest* req, size_t len) {
+    HttpArena* a = (HttpArena*)req->arena;
+    const size_t strings = 4u + 2u * (size_t)HTTP_MAX_HEADERS;
+    const size_t slack   = strings * (1u + sizeof(void*) - 1u);
+    req->arena_backed = (a && http_arena_avail(a) >= len + slack) ? 1 : 0;
+}
+
 static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
                                               const char* buf, size_t len) {
     if (!buf || !req) return NULL;
+    req_arena_ready(req, len);
     const char* raw_request = buf;
 
     // Parse request line: METHOD /path HTTP/1.1
@@ -1549,7 +1592,7 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     }
     
     int method_len = space - request_line;
-    req->method = (char*)malloc(method_len + 1);
+    req->method = req_alloc(req, (size_t)method_len + 1);
     if (!req->method) return NULL;
     memcpy(req->method, request_line, method_len);
     req->method[method_len] = '\0';
@@ -1558,7 +1601,7 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     char* path_start = space + 1;
     char* path_end = strchr(path_start, ' ');
     if (!path_end) {
-        free(req->method);
+        req_release(req, req->method);
         return NULL;
     }
 
@@ -1566,23 +1609,23 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     if (query && query < path_end) {
         // Has query string
         int path_len = query - path_start;
-        req->path = (char*)malloc(path_len + 1);
-        if (!req->path) { free(req->method); req->method = NULL; return NULL; }
+        req->path = req_alloc(req, (size_t)path_len + 1);
+        if (!req->path) { req_release(req, req->method); req->method = NULL; return NULL; }
         memcpy(req->path, path_start, path_len);
         req->path[path_len] = '\0';
 
         int query_len = path_end - query - 1;
-        req->query_string = (char*)malloc(query_len + 1);
+        req->query_string = req_alloc(req, (size_t)query_len + 1);
         if (!req->query_string) {
-            free(req->path); req->path = NULL; free(req->method); req->method = NULL; return NULL;
+            req_release(req, req->path); req->path = NULL; req_release(req, req->method); req->method = NULL; return NULL;
         }
         memcpy(req->query_string, query + 1, query_len);
         req->query_string[query_len] = '\0';
     } else {
         // No query string
         int path_len = path_end - path_start;
-        req->path = (char*)malloc(path_len + 1);
-        if (!req->path) { free(req->method); req->method = NULL; return NULL; }
+        req->path = req_alloc(req, (size_t)path_len + 1);
+        if (!req->path) { req_release(req, req->method); req->method = NULL; return NULL; }
         memcpy(req->path, path_start, path_len);
         req->path[path_len] = '\0';
         req->query_string = NULL;
@@ -1590,7 +1633,9 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     
     // Extract HTTP version
     char* version_start = path_end + 1;
-    req->http_version = strdup(version_start);
+    size_t version_len = strlen(version_start);
+    req->http_version = req_alloc(req, version_len + 1);
+    if (req->http_version) memcpy(req->http_version, version_start, version_len + 1);
     
     // Parse headers
     /* A reused request arrives with these already allocated, which is the
@@ -1642,15 +1687,18 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
 
             // Store only if both copies succeed; a NULL key/value would later
             // crash header lookup (strcasecmp) or serialization (strlen).
-            char* kd = strdup(key);
-            char* vd = strdup(value);
+            size_t kl = strlen(key), vl = strlen(value);
+            char* kd = req_alloc(req, kl + 1);
+            char* vd = req_alloc(req, vl + 1);
+            if (kd) memcpy(kd, key, kl + 1);
+            if (vd) memcpy(vd, value, vl + 1);
             if (kd && vd) {
                 req->header_keys[req->header_count] = kd;
                 req->header_values[req->header_count] = vd;
                 req->header_count++;
             } else {
-                free(kd);
-                free(vd);
+                req_release(req, kd);
+                req_release(req, vd);
             }
         }
         
@@ -1807,18 +1855,33 @@ const char* http_get_path_param(HttpRequest* req, const char* key) {
 void http_request_reset(HttpRequest* req) {
     if (!req) return;
 
-    free(req->method);       req->method = NULL;
-    free(req->path);         req->path = NULL;
-    free(req->query_string); req->query_string = NULL;
-    free(req->http_version); req->http_version = NULL;
+    /* Strings the last parse took from an arena are released by resetting the
+     * arena, and handing one to free() would give the allocator a pointer into
+     * the middle of a block it never issued. The body is never arena-backed:
+     * it is one allocation and can be megabytes. */
+    if (!req->arena_backed) {
+        free(req->method);
+        free(req->path);
+        free(req->query_string);
+        free(req->http_version);
+    }
+    req->method = NULL;
+    req->path = NULL;
+    req->query_string = NULL;
+    req->http_version = NULL;
     free(req->body);         req->body = NULL;
     req->body_length = 0;
 
     for (int i = 0; i < req->header_count; i++) {
-        free(req->header_keys[i]);   req->header_keys[i] = NULL;
-        free(req->header_values[i]); req->header_values[i] = NULL;
+        if (!req->arena_backed) {
+            free(req->header_keys[i]);
+            free(req->header_values[i]);
+        }
+        req->header_keys[i] = NULL;
+        req->header_values[i] = NULL;
     }
     req->header_count = 0;
+    req->arena_backed = 0;
 
     /* Params and query are allocated on demand and at varying sizes, so they
      * are released rather than kept: holding a pointer to a differently sized
@@ -1848,6 +1911,15 @@ void http_request_reset(HttpRequest* req) {
 HttpRequest* http_parse_request_into(HttpRequest* req, const char* buf, size_t len) {
     if (!req) return NULL;
     http_request_reset(req);
+    req->arena = NULL;
+    return http_parse_request_n_impl(req, buf, len);
+}
+
+HttpRequest* http_parse_request_arena(HttpRequest* req, const char* buf,
+                                      size_t len, void* arena) {
+    if (!req) return NULL;
+    http_request_reset(req);     /* frees the last parse under ITS own rule */
+    req->arena = arena;
     return http_parse_request_n_impl(req, buf, len);
 }
 
@@ -1868,15 +1940,19 @@ HttpRequest* http_parse_request_n(const char* buf, size_t len) {
 void http_request_free(HttpRequest* req) {
     if (!req) return;
     
-    free(req->method);
-    free(req->path);
-    free(req->query_string);
-    free(req->http_version);
+    if (!req->arena_backed) {
+        free(req->method);
+        free(req->path);
+        free(req->query_string);
+        free(req->http_version);
+    }
     free(req->body);
-    
+
     for (int i = 0; i < req->header_count; i++) {
-        free(req->header_keys[i]);
-        free(req->header_values[i]);
+        if (!req->arena_backed) {
+            free(req->header_keys[i]);
+            free(req->header_values[i]);
+        }
     }
     free(req->header_keys);
     free(req->header_values);
@@ -1983,6 +2059,10 @@ void http_response_set_status(HttpServerResponse* res, int code) {
  * than being told, so a server that does not proxy simply has none and the
  * driver is not used.
  */
+int http_server_has_response_transformer(HttpServer* server) {
+    return server && server->response_transformer_chain != NULL;
+}
+
 void* http_server_proxy_opts(HttpServer* server) {
     if (!server) return NULL;
     for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {

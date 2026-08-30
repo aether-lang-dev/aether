@@ -163,6 +163,11 @@ void* http_arena_alloc(HttpArena* a, size_t n);
 void  http_arena_reset(HttpArena* a);
 void  http_arena_free(HttpArena* a);
 
+/* Bytes still available in the block. A caller that must not have some of its
+ * allocations come from the arena and the rest from malloc, because it tracks
+ * their origin with a single flag, asks first and takes all or none. */
+size_t http_arena_avail(const HttpArena* a);
+
 /* Build this request's headers in `arena`, and do not free them individually.
  * The caller owns the arena and outlives the request. */
 void http_request_use_arena(HttpClientRequest* req, HttpArena* arena);

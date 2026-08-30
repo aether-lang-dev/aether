@@ -234,6 +234,13 @@ struct AetherProxyOpts {
      * 1 = if no inbound traceparent, generate a new trace-id and
      *     stamp `traceparent: 00-<trace_id>-<span_id>-01` outbound. */
     int   trace_context_inject;
+
+    /* Answer proxied responses from the upstream's own bytes rather than by
+     * copying them through a response object. On by default. Setting
+     * AETHER_PROXY_DIRECT=0 turns it off, which is what lets the two paths be
+     * compared byte for byte in a test, and lets an operator rule it out
+     * without a rebuild. */
+    int   direct_disabled;
 };
 
 /* ----- Cross-file helpers ----- */
@@ -320,5 +327,45 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
                                 void* user_data,
                                 struct HttpArena* arena);
 int aether_proxy_exchange_resume(AetherProxyExchange* px, long elapsed_ms);
+
+/* ---- answering without copying the response (#1758) ---------------------
+ *
+ * The copying path materialises an upstream response three times over: into
+ * an HttpResponse, then header by header onto the HttpServerResponse, then
+ * into the bytes that go out. For a proxy that is the whole job, and the last
+ * two copies exist only so that a handler could have looked at the response.
+ *
+ * When nothing is going to look at it, the raw bytes the driver already holds
+ * are the answer. These entry points do the bookkeeping the copying path does
+ * -- latency and status metrics, breaker, in-flight -- and then write the head
+ * the copying path would have produced, leaving the body where it arrived so
+ * the caller can send it from there.
+ */
+typedef struct {
+    int         status;
+    const char* body;       /* into the caller's receive buffer, not a copy */
+    size_t      body_len;
+} AetherProxyDirect;
+
+/* Whether this exchange can answer without materialising the response.
+ * False when something downstream needs the object: a cache to store, or a
+ * response transformer to run. */
+int aether_proxy_direct_ok(const AetherProxyExchange* px);
+
+/* The success half of resume for a response the caller still holds as raw
+ * bytes. Returns 0 when `out` is filled and the head should be written,
+ * or -1 when this response is not one to pass through and the caller should
+ * take the copying path instead. */
+int aether_proxy_direct_take(AetherProxyExchange* px, long elapsed_ms,
+                             const char* raw, size_t raw_len,
+                             size_t header_bytes, AetherProxyDirect* out);
+
+/* Write the response head into `buf`, growing it as needed. The bytes are
+ * what the copying path would have produced for the same response. Returns 0
+ * on success. */
+int aether_proxy_direct_head(AetherProxyExchange* px,
+                             const AetherProxyDirect* d,
+                             const char* raw, size_t header_bytes,
+                             char** buf, size_t* cap, size_t* out_len);
 
 #endif  /* AETHER_PROXY_INTERNAL_H */
