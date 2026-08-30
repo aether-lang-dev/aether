@@ -35,6 +35,13 @@ version number before tagging the release.
   implemented**, so a client offering only other groups is refused rather
   than renegotiated.
 
+  The pure backend is opt-in at the application (`import
+  std.cryptography.tls13_server`) rather than pulled in by `std.http`. It
+  reads the certificate and key itself, so importing it from `std.http` gave
+  every HTTP user a filesystem capability they had not asked for — enough
+  that `--emit=lib --with=net` began rejecting `import std.http`, because the
+  module graph now reached `std.os`.
+
 - **`@c_callback` functions survive dead-code pruning.** They are called from
   C, so nothing in the Aether AST references them and the pruner removed them
   — which is why the server's four entry points could not be reached from the

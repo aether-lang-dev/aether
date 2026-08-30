@@ -44,6 +44,52 @@ turns that off if a regression needs bisecting.
 For the client, `http.get` / `http.post` return a response object that must be
 freed with `http_response_free`. Connection reuse is on by default.
 
+## TLS
+
+`server_set_tls(server, cert_path, key_path)` before `server_start` turns a
+server into an HTTPS one. It returns an error string, `""` on success — check
+it, because a bad path or an unreadable key is the common failure and the
+server otherwise starts happily in plaintext.
+
+```aether,fragment
+err = http.server_set_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+if err != "" {
+    println("TLS setup failed: ${err}")
+    return
+}
+```
+
+**Two backends.** OpenSSL is the default wherever it is compiled in. The other
+is a pure-Aether TLS 1.3 implementation with no OpenSSL dependency at all,
+selected with `AETHER_PURE_TLS=1` — and used automatically when the build has
+no OpenSSL, which is what lets a cross-compiled binary (`ae build --target=…`,
+which links none) serve HTTPS at all.
+
+The pure backend is **opt-in at the application**, because it reads the
+certificate and key itself and so needs filesystem capability that a plain
+`std.http` user should not inherit:
+
+```aether,fragment
+import std.http
+import std.cryptography.tls13_server   // pure TLS server; needs --with=fs
+```
+
+The pure backend has constraints the OpenSSL one does not, and each fails as a
+**dropped connection rather than a message**, so they are worth knowing before
+debugging one:
+
+- the server key must be **ECDSA P-256** — there is no RSA signing path, so an
+  RSA certificate produces a server that fails at the signature step
+  (`openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1`)
+- key exchange is **X25519 only**
+- **HelloRetryRequest is not implemented**, so a client offering only other
+  groups is refused rather than renegotiated
+
+The client side is the mirror: `std.http.client` does HTTPS through OpenSSL,
+and `std.cryptography.tls13_client` is the pure path that survives a cross
+build. Wiring the pure client under `std.http.client` is not done yet, so a
+cross-built HTTPS *client* currently drives `tls13_client` directly.
+
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.
 

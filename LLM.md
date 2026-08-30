@@ -99,6 +99,11 @@ plays that role), no interfaces.
   is the (implemented and shipped) `ae help <script>` companion that
   catches operator-side mistakes in those scripts, built into the `ae`
   driver via `tools/ae_help.c`, dispatched from `tools/ae.c`.
+- `docs/writing-security-sensitive-code.md` the rules for crypto / TLS /
+  auth code, each written from a real defect in this tree. Read it before
+  touching `std.cryptography` or anything comparing a secret. Its point is
+  that these failures **pass their tests**: a handshake completes, a
+  signature verifies, and the key is still disclosed.
 - `docs/next-steps.md` roadmap, in priority order. Check it before
   speccing a new stdlib addition, but treat its "done" ticks as
   authoritative over its priority labels, the `std.fs` completeness
@@ -186,6 +191,39 @@ plays that role), no interfaces.
   `fs_try_read_binary(path) -> int` writes into a TLS buffer,
   `fs_get_read_binary()` / `fs_get_read_binary_length()` / `fs_release_read_binary()`
   drain it. Mirrors the paths_index / checksum pattern elsewhere.
+- **A `ptr` parameter usually means a `std.bytes` HANDLE, not `bytes.data(b)`.**
+  Aether has no distinct type for the two, so both spell as `ptr`, and passing
+  the raw data pointer where a handle is wanted **compiles cleanly and then
+  segfaults** somewhere unrelated (inside the X25519 ladder, inside
+  `seal_record`). Every buffer argument across `std.cryptography` — 50+ modules
+  — is a handle. Functions like `tls13_client.conn_recv` also *return* handles
+  ("fresh bytes; caller frees"), so read them with `bytes.to_string(p, n)`, never
+  `bytes.string_from_ptr`. Rule of thumb: if the signature says `ptr` and the
+  module deals in buffers, pass what `bytes.new()` gave you, not what
+  `bytes.data()` gave you. Note `std/bytes/README.md` shows `bytes.data(b)`
+  prominently for the direct-write idiom, which is correct there and misleading
+  as a general habit. This cost five failed attempts to call shipped APIs with
+  the source open.
+- **`malloc(N) as *T` is sized BY HAND; adding a field to `T` corrupts the
+  heap.** There is no `sizeof` in Aether, so heap-allocated structs carry a
+  literal byte count at each allocation site — `malloc(128) as *Sha`,
+  `malloc(136) as *LeafCert` — and 40+ crypto modules do this. Add one pointer
+  and the struct outgrows the number while the allocation does not, which
+  surfaces as a **double-free inside the free function, far from the edit**.
+  Before adding a field: grep for *every* `malloc(` of that type (there are
+  usually several, in more than one module) and every initialiser that clears
+  its fields (a missed one leaves the field holding whatever `malloc` returned).
+  The repaired shape is one exported size constant and one exported initialiser
+  beside the struct — `LEAFCERT_SIZE` / `init_leaf` in
+  `std/cryptography/tls13_cert` is the worked example.
+- **`make test` does not run the gates that redden CI fastest.** `fmt_gate`
+  covers `std/` as well as `tests/` and fails every platform in under two
+  minutes; `check-docs` checks per-module export counts, module READMEs and
+  runnable doc blocks. Before pushing: `ae fmt std examples tests`, then `make
+  check-docs`. And any new test directory whose `.ae` files are not standalone
+  programs (a client needing a peer, a server that blocks) must be added to
+  `tests/ae_sweep_prune.txt`, or the bulk sweep runs them and CI fails while the
+  shell tests pass locally — the classic "green here, red there" tell.
 - **Strings are length-aware internally**, but `string_concat("", raw)`
   treats `raw` as C-string (strlen-bounded) and will truncate at the
   first embedded NUL. Binary-safe reads must go through the raw
