@@ -151,6 +151,16 @@ for v in v0.20.0 v0.21.0; do
 done
 cp -a "$VS" "$TMP/pristine"
 
+# Compare two trees by content, without diffutils. MSYS2 ships no `diff`, and
+# the Windows leg failed with "diff: command not found" -- reported as
+# "dedupe altered file content", which is exactly the wrong diagnosis. cksum
+# is POSIX and present everywhere this suite runs.
+tree_fingerprint() {
+    ( cd "$1" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+        printf '%s %s\n' "$f" "$(cksum < "$f")"
+      done )
+}
+
 "$AE" version dedupe >"$TMP/out" 2>&1 || fail "dedupe failed"
 
 # Every file byte-identical afterwards. This is the assertion that matters:
@@ -158,9 +168,12 @@ cp -a "$VS" "$TMP/pristine"
 # On a failure, print what dedupe said and how the trees differ -- a bare
 # "altered file content" is undiagnosable from a CI log, which cost a round
 # trip to Windows to find out.
-if ! diff -r "$TMP/pristine" "$VS" >"$TMP/diff.out" 2>&1; then
+tree_fingerprint "$TMP/pristine" > "$TMP/fp_before"
+tree_fingerprint "$VS"             > "$TMP/fp_after"
+if ! cmp "$TMP/fp_before" "$TMP/fp_after" >/dev/null 2>&1; then
     echo "  --- dedupe output ---"; sed 's/^/    /' "$TMP/out"
-    echo "  --- tree difference ---"; sed 's/^/    /' "$TMP/diff.out" | head -20
+    echo "  --- before ---"; sed 's/^/    /' "$TMP/fp_before" | head -10
+    echo "  --- after ----"; sed 's/^/    /' "$TMP/fp_after"  | head -10
     fail "dedupe altered file content"
 fi
 
@@ -173,9 +186,11 @@ if grep -qi "Reclaimed" "$TMP/out2"; then
     grep -qi "no duplicate content" "$TMP/out2" \
         || fail "second dedupe re-reported a saving it did not make"
 fi
-if ! diff -r "$TMP/pristine" "$VS" >"$TMP/diff2.out" 2>&1; then
+tree_fingerprint "$VS" > "$TMP/fp_after2"
+if ! cmp "$TMP/fp_before" "$TMP/fp_after2" >/dev/null 2>&1; then
     echo "  --- second dedupe output ---"; sed 's/^/    /' "$TMP/out2"
-    echo "  --- tree difference ---"; sed 's/^/    /' "$TMP/diff2.out" | head -20
+    echo "  --- before ---"; sed 's/^/    /' "$TMP/fp_before"  | head -10
+    echo "  --- after ----"; sed 's/^/    /' "$TMP/fp_after2" | head -10
     fail "second dedupe altered file content"
 fi
 
