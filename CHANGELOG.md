@@ -11,6 +11,36 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **A pure-Aether TLS 1.3 server, so a binary with no OpenSSL can serve
+  HTTPS.** `std.cryptography.tls13_server` completes the handshake — reads a
+  ClientHello, sends ServerHello, EncryptedExtensions, Certificate,
+  CertificateVerify and Finished, verifies the client's Finished MAC, then
+  switches to application traffic keys. Wired into the HTTP server behind
+  weak symbols, so the C stays independent of whether the Aether module is
+  linked, and selected by `AETHER_PURE_TLS=1` with OpenSSL remaining the
+  default where it is compiled in. A build **without** OpenSSL now takes the
+  pure path automatically instead of returning "TLS unavailable".
+
+  This closes the last of the four client/server × OpenSSL/pure
+  permutations. The one that matters is `curl` against the pure server:
+  everything else passes even if our two halves agree on a wire format
+  nobody else speaks, and curl does not. A cross-built server binary, linking
+  no OpenSSL at all, now answers `curl` with `HTTP/1.1 200 OK`.
+
+  Constraints, stated because each fails as a dropped connection rather than
+  a message: the server key must be **ECDSA P-256** (CertificateVerify has no
+  RSA path), key exchange is **X25519 only**, and **HelloRetryRequest is not
+  implemented**, so a client offering only other groups is refused rather
+  than renegotiated.
+
+- **`@c_callback` functions survive dead-code pruning.** They are called from
+  C, so nothing in the Aether AST references them and the pruner removed them
+  — which is why the server's four entry points could not be reached from the
+  HTTP server's C. Verified not to over-retain: a small program builds to
+  byte-identical size with and without the change.
+
 ## [0.605.0]
 
 ### Fixed
