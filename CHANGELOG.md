@@ -27,6 +27,54 @@ version number before tagging the release.
   enough would start refusing allocations that the machine had memory for,
   and nothing about the symptom would point back at retries.
 
+### Changed
+
+- **A proxied response is answered from the upstream's own bytes.** The path
+  materialised every response three times over: into an `HttpResponse`, then
+  header by header onto the `HttpServerResponse`, then into the bytes that go
+  out. The last two copies exist so that a handler could have looked at the
+  response. When nothing is going to, the bytes already in the receive buffer
+  are the answer.
+
+  The head is now rewritten straight into the outgoing buffer and the body is
+  sent from where it arrived, with one `writev` carrying both. **Body copies
+  per response go from three to none, and header copies from three to one.**
+
+  It applies when nothing needs the response object, meaning no cache and no
+  response transformer, and when the response said where it ended and is not
+  chunked; a chunked body would have to be decoded to be forwarded, which is a
+  copy again. Everything else takes the copying path, so this narrows what it
+  handles rather than changing what the proxy means.
+
+  On the standard bench, whose backend returns twelve bytes, **CPU per request
+  17.0 to 15.6 microseconds** by the least-contended round and better in all
+  eight rank-matched rounds. Almost none of that is the body copies, because
+  there is barely a body to copy.
+
+  On 64 KiB responses, which is a size a proxy actually carries, **page faults
+  per request 2.46 to 0.05** and **CPU per request 40.1 to 32.7
+  microseconds**. At that size this path costs 32.7 against haproxy's 32.2 and
+  nginx's 34.3 by the least-contended round: level with one and slightly ahead
+  of the other, where before it was behind both.
+
+### Testing
+
+- The two paths are compared byte for byte, over four response shapes, by
+  running the same requests with `AETHER_PROXY_DIRECT=1` and `0`. That
+  comparison is the test rather than a check of the fast path alone, because a
+  fast path that silently never runs passes every single-path test.
+
+  Five shapes are compared, including a 64 KiB body, because a write that
+  large does not finish in one call and is the only one that exercises the
+  accounting for a partially written body.
+
+  It earned its place immediately: on `HEAD` the copying path states the length
+  of the body it is sending, which is none, while forwarding the upstream's
+  `Content-Length` advertised a body that never arrives. A response whose
+  framing disagrees with its bytes is the shape request smuggling is built
+  from. The header is now emitted from the body being sent, in the upstream's
+  position so the order still matches.
+
 ## [0.604.0]
 
 ### Changed

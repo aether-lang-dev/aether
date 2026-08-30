@@ -2007,6 +2007,10 @@ void http_response_set_status(HttpServerResponse* res, int code) {
  * than being told, so a server that does not proxy simply has none and the
  * driver is not used.
  */
+int http_server_has_response_transformer(HttpServer* server) {
+    return server && server->response_transformer_chain != NULL;
+}
+
 void* http_server_proxy_opts(HttpServer* server) {
     if (!server) return NULL;
     for (HttpMiddlewareNode* n = server->middleware_chain; n; n = n->next) {

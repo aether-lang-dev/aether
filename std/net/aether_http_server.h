@@ -765,6 +765,11 @@ void http_format_clf_time(char* out, size_t out_size, const struct tm* tmv);
  * The event driver runs the proxy exchange itself and needs them. */
 void* http_server_proxy_opts(HttpServer* server);
 
+/* Whether any response transformer is registered. A driver that answers a
+ * proxied request from the upstream's own bytes must not do so when one is,
+ * because a transformer rewrites the response object it would not build. */
+int http_server_has_response_transformer(HttpServer* server);
+
 
 /* Take a connection the event driver does not own, with the bytes it has
  * already read from it. Returns 0 when ownership transferred. */

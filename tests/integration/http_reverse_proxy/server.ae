@@ -80,6 +80,22 @@ handle_upstream_longheader(req: ptr, res: ptr, ud: ptr) {
     http.response_set_body(res, "long-ok\n")
 }
 
+handle_upstream_bigbody(req: ptr, res: ptr, ud: ptr) {
+    // Large enough that the proxy's write does not finish in one call, which
+    // is what exercises the partial-write accounting when a body is sent from
+    // the receive buffer rather than copied into the outgoing one.
+    chunk = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    body = ""
+    i = 0
+    while i < 1024 {
+        body = "${body}${chunk}"
+        i = i + 1
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body(res, body)
+}
+
 handle_upstream_slow(req: ptr, res: ptr, ud: ptr) {
     sleep(3000) // 3s — exceeds the 1s proxy timeout
     http.response_set_status(res, 200)
@@ -122,6 +138,7 @@ run_upstream() {
     http.server_get(up, "/echo", handle_upstream_echo, 0)
     http.server_post(up, "/echo", handle_upstream_echo_post, 0)
     http.server_get(up, "/longheader", handle_upstream_longheader, 0)
+    http.server_get(up, "/bigbody", handle_upstream_bigbody, 0)
     http.server_get(up, "/slow", handle_upstream_slow, 0)
     println("READY")
     run_server(up)
