@@ -68,6 +68,22 @@ fi
 [ "$(cat "$TMP/h2/.aether/active_version")" = "0.111.0" ] \
     || fail "--fix modified an installed pin on disk"
 
+# ...and it must SAY it repaired nothing, rather than exiting 1 in silence.
+# Reported from real use: --fix on a set of findings that are all decisions
+# rather than faults printed "3 problem(s) found." and exited 1, leaving the
+# user unable to tell whether it had tried and failed or declined by design.
+# Exit 1 is right (the problems are real); the silence was not.
+grep -qi 'repaired nothing' "$TMP/o2" \
+    || { sed 's/^/    /' "$TMP/o2"; fail "--fix repaired nothing but did not say so"; }
+
+# The offer must also be honest in the other direction: without --fix, only
+# advertise a repair when there is actually one to make.
+( cd "$TMP/elsewhere" && HOME="$TMP/h2" "$NOTDEV" version doctor ) >"$TMP/o2b" 2>&1 || true
+if grep -q 'Re-run with --fix' "$TMP/o2b"; then
+    sed 's/^/    /' "$TMP/o2b"
+    fail "doctor offered --fix when nothing it found was auto-repairable"
+fi
+
 # --- the compile probe must be able to FAIL -------------------------------
 # A doctor whose probe cannot fail proves nothing. The tree has to be
 # COMPLETE (a stdlib, a MANIFEST) so the earlier checks pass and execution
