@@ -18,6 +18,26 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
+#if defined(__linux__)
+/* FIEMAP: tells us whether two files already share physical extents, so a
+ * repeated dedupe does not re-link (and re-report) what it already shared */
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+#include <linux/fiemap.h>
+#endif
+#ifdef _WIN32
+/* MinGW has neither lstat nor S_ISLNK. stat() is the right substitute here:
+ * Windows symlinks need a privilege to create and do not appear in a release
+ * tarball, and the two callers only use it to skip symlinks and to read a
+ * size -- both of which stat() answers correctly for every file we will
+ * actually meet. Without this the Windows leg fails on -Werror rather than
+ * merely warning. */
+#  define lstat(p, b) stat((p), (b))
+#  ifndef S_ISLNK
+#    define S_ISLNK(m) (0)
+#  endif
+#endif
 #ifdef _WIN32
 #  include <windows.h>    /* GetCurrentProcessId for temp-file names */
 #  include <process.h>    /* _getpid */
@@ -1055,6 +1075,659 @@ static int doc_dir_entries(const char* path) {
     return n;
 }
 
+/* ---- installed-version enumeration, shared by list / remove / gc --------
+ *
+ * `ae version list` asks GitHub what exists and marks the ones it finds
+ * locally, which answers "what could I install?" and never "what did I
+ * install?" -- on a box whose installs have aged out of the release window
+ * the two sets do not intersect at all and every Status is blank. remove and
+ * gc need the local side, so it lives here.
+ */
+
+#define AE_MAX_VERSIONS 512
+
+typedef struct {
+    char tag[64];   /* "v0.601.0" -- the directory name */
+    char ver[64];   /* "0.601.0"  -- the tag without its v */
+} InstalledVersion;
+
+/* Numeric, component-wise. A plain strcmp puts v0.9.0 above v0.10.0, which
+ * for `gc --keep N` means deleting the wrong releases -- the reason this is
+ * not a sort(1) call. Returns <0, 0, >0 like strcmp. */
+static int ae_vercmp(const char* a, const char* b) {
+    while (*a || *b) {
+        long na = 0, nb = 0;
+        while (*a >= '0' && *a <= '9') { na = na * 10 + (*a - '0'); a++; }
+        while (*b >= '0' && *b <= '9') { nb = nb * 10 + (*b - '0'); b++; }
+        if (na != nb) return (na < nb) ? -1 : 1;
+        /* skip one separator on each side */
+        if (*a == '.') a++;
+        if (*b == '.') b++;
+        if (!*a && !*b) break;
+        if (!*a) return -1;
+        if (!*b) return 1;
+    }
+    return 0;
+}
+
+/* Fill `out` with the installed versions, newest first. Returns the count. */
+static int ae_list_installed(InstalledVersion* out, int max) {
+    const char* home = get_home_dir();
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/.aether/versions", home);
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+
+    int n = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) && n < max) {
+        if (e->d_name[0] != 'v') continue;
+        char full[1200];
+        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        if (!doc_is_dir(full)) continue;
+        snprintf(out[n].tag, sizeof(out[n].tag), "%s", e->d_name);
+        snprintf(out[n].ver, sizeof(out[n].ver), "%s", e->d_name + 1);
+        n++;
+    }
+    closedir(d);
+
+    /* newest first */
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (ae_vercmp(out[i].ver, out[j].ver) < 0) {
+                InstalledVersion t = out[i]; out[i] = out[j]; out[j] = t;
+            }
+        }
+    }
+    return n;
+}
+
+/* The version `current` resolves to, or "" when there is no symlink. Kept
+ * separate from the pin: the two can disagree, and removal has to refuse
+ * either.
+ *
+ * Always "" on Windows, and correctly so -- there is no `current` symlink
+ * there, because `ae version use` copies into ~/.aether/bin/ instead. The
+ * active version is still protected on Windows: `use` writes
+ * ~/.aether/active_version on every platform, and the pin guard reads it. */
+static const char* ae_current_version(void) {
+    static char cur[64];
+    cur[0] = '\0';
+    const char* home = get_home_dir();
+    char link[1024];
+    snprintf(link, sizeof(link), "%s/.aether/current", home);
+#ifndef _WIN32
+    char target[1024];
+    ssize_t k = readlink(link, target, sizeof(target) - 1);
+    if (k > 0) {
+        target[k] = '\0';
+        const char* slash = strrchr(target, '/');
+        const char* base = slash ? slash + 1 : target;
+        if (base[0] == 'v') snprintf(cur, sizeof(cur), "%s", base + 1);
+    }
+#endif
+    return cur;
+}
+
+/* Recursively delete a directory. Returns the bytes reclaimed. */
+static long long ae_rm_rf(const char* path) {
+    long long freed = 0;
+    DIR* d = opendir(path);
+    if (!d) {
+        struct stat st;
+        if (stat(path, &st) == 0) {
+            freed = (long long)st.st_size;
+            remove(path);
+        }
+        return freed;
+    }
+    struct dirent* e;
+    while ((e = readdir(d))) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[2048];
+        snprintf(child, sizeof(child), "%s/%s", path, e->d_name);
+        struct stat st;
+        if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+            freed += ae_rm_rf(child);
+        } else {
+            /* st_blocks is what the filesystem actually gave back; st_size
+             * over-reports a sparse or hardlinked file. Hardlinks matter
+             * here: with a deduplicated store (#1783) removing one of two
+             * links frees nothing, and reporting st_size would claim
+             * otherwise. */
+            if (lstat(child, &st) == 0 && st.st_nlink <= 1) {
+                freed += (long long)st.st_size;
+            }
+            remove(child);
+        }
+    }
+    closedir(d);
+    rmdir(path);
+    return freed;
+}
+
+static void ae_print_reclaimed(long long bytes) {
+    if (bytes >= 1024LL * 1024LL) {
+        printf("Reclaimed %.1f MB.\n", (double)bytes / (1024.0 * 1024.0));
+    } else if (bytes > 0) {
+        printf("Reclaimed %lld bytes.\n", bytes);
+    } else {
+        printf("Reclaimed nothing (the files were shared with another "
+               "install, or already gone).\n");
+    }
+}
+
+/* Remove one installed version, refusing the one in use. `quiet` suppresses
+ * the per-version line so gc can print its own summary. */
+static int ae_remove_one(const char* ver, int quiet, long long* freed_out) {
+    const char* home = get_home_dir();
+    const char* cur = ae_current_version();
+    const char* pin = get_active_version();
+
+    if (cur && cur[0] && strcmp(cur, ver) == 0) {
+        fprintf(stderr,
+            "Refusing to remove %s: it is the version `current` points at.\n"
+            "  Switch first, then remove:  ae version use <other>\n", ver);
+        return 1;
+    }
+    if (pin && pin[0] && strcmp(pin, ver) == 0) {
+        fprintf(stderr,
+            "Refusing to remove %s: ~/.aether/active_version pins it.\n"
+            "  Switch the pin first:  ae version use <other>\n", ver);
+        return 1;
+    }
+
+    char dir[1024];
+    snprintf(dir, sizeof(dir), "%s/.aether/versions/v%s", home, ver);
+    if (!doc_is_dir(dir)) {
+        fprintf(stderr, "Not installed: %s\n", ver);
+        return 1;
+    }
+
+    long long freed = ae_rm_rf(dir);
+    if (freed_out) *freed_out += freed;
+    if (!quiet) {
+        printf("Removed %s.\n", ver);
+        ae_print_reclaimed(freed);
+    }
+    return 0;
+}
+
+/* ---- content dedupe (#1783) --------------------------------------------
+ *
+ * The version store is ~70% byte-identical across releases, and ~20% of a
+ * SINGLE version is duplicated between include/aether/ and share/aether/.
+ * Compression is the wrong lever (a zip of all seven versions saves no more
+ * than seven separate zips -- members compress independently), and a version
+ * directory has to stay a real tree because one `ae run` opens ~18k paths
+ * under it. Sharing is the lever: link identical files to one inode.
+ *
+ * Two mechanisms, in order of preference:
+ *
+ *   reflink  -- copy-on-write. Writing through one copy splits the extents,
+ *               so a stray in-place write cannot corrupt a peer. btrfs, XFS
+ *               with reflink=1, APFS.
+ *   hardlink -- same saving, but peers share one inode, so a truncate-in-place
+ *               write through ANY version corrupts every other version sharing
+ *               that file. Safe here only because #1800 made every writer in
+ *               this tree unlink-before-write (`cp -R` -> remove-then-copy,
+ *               `install -m`); do not reintroduce a plain `cp -r` over an
+ *               existing install.
+ *
+ * Neither is universal -- FAT has no hardlinks, Windows may need Developer
+ * Mode, network mounts vary -- so every failure path here degrades to leaving
+ * the file alone. Dedupe never fails a command; it just reclaims less.
+ */
+
+/* FNV-1a over the file contents, plus the size, as the identity key. A hash
+ * collision would link two different files together, so candidates are
+ * confirmed with a full byte comparison before anything is linked -- the hash
+ * only narrows the field. */
+static int ae_hash_file(const char* path, unsigned long long* out, long long* size_out) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned long long h = 1469598103934665603ULL;
+    long long n = 0;
+    char buf[65536];
+    size_t got;
+    while ((got = fread(buf, 1, sizeof(buf), f)) > 0) {
+        for (size_t i = 0; i < got; i++) {
+            h ^= (unsigned char)buf[i];
+            h *= 1099511628211ULL;
+        }
+        n += (long long)got;
+    }
+    fclose(f);
+    *out = h;
+    *size_out = n;
+    return 1;
+}
+
+static int ae_files_identical(const char* a, const char* b) {
+    FILE* fa = fopen(a, "rb");
+    if (!fa) return 0;
+    FILE* fb = fopen(b, "rb");
+    if (!fb) { fclose(fa); return 0; }
+    char ba[32768], bb[32768];
+    int same = 1;
+    for (;;) {
+        size_t na = fread(ba, 1, sizeof(ba), fa);
+        size_t nb = fread(bb, 1, sizeof(bb), fb);
+        if (na != nb) { same = 0; break; }
+        if (na == 0) break;
+        if (memcmp(ba, bb, na) != 0) { same = 0; break; }
+    }
+    fclose(fa);
+    fclose(fb);
+    return same;
+}
+
+typedef struct {
+    char path[1024];
+    unsigned long long hash;
+    long long size;
+    unsigned long long dev;
+    unsigned long long ino;
+    unsigned long nlink;
+} DedupeFile;
+
+#define AE_MAX_DEDUPE_FILES 40000
+#define AE_DEDUPE_MIN_SIZE  4096   /* below this the inode overhead dominates */
+
+static int ae_collect_files(const char* dir, DedupeFile* out, int* n, int max) {
+    DIR* d = opendir(dir);
+    if (!d) return 0;
+    struct dirent* e;
+    while ((e = readdir(d)) && *n < max) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        char child[1024];
+        if ((int)(strlen(dir) + strlen(e->d_name) + 2) > (int)sizeof(child)) continue;
+        snprintf(child, sizeof(child), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (lstat(child, &st) != 0) continue;
+        if (S_ISLNK(st.st_mode)) continue;          /* never rewrite a symlink */
+        if (S_ISDIR(st.st_mode)) { ae_collect_files(child, out, n, max); continue; }
+        if (!S_ISREG(st.st_mode)) continue;
+        if (st.st_size < AE_DEDUPE_MIN_SIZE) continue;
+        DedupeFile* f = &out[*n];
+        snprintf(f->path, sizeof(f->path), "%s", child);
+        f->size  = (long long)st.st_size;
+        f->dev   = (unsigned long long)st.st_dev;
+        f->ino   = (unsigned long long)st.st_ino;
+        f->nlink = (unsigned long)st.st_nlink;
+        f->hash  = 0;
+        (*n)++;
+    }
+    closedir(d);
+    return 1;
+}
+
+/* Are these two files already sharing their storage?
+ *
+ * The inode check upstream catches hardlinks, but a reflink gives the copy a
+ * NEW inode -- identical content, distinct inode, extents shared. Without this
+ * probe every run re-reflinks the same files and re-reports the same saving:
+ * measured, a second run claimed 38.3 MB while `df` moved by 0 KB.
+ *
+ * Compares the first extent's physical offset via FIEMAP. Two files at the
+ * same physical block share storage. Conservative in the right direction: on
+ * any error it returns 0 ("not shared"), so we re-link something already
+ * shared, which is wasteful but harmless -- never the reverse.
+ */
+static int ae_shares_extents(const char* a, const char* b) {
+#if defined(__linux__)
+    /* struct fiemap ends in a flexible array, so the extent buffer follows it
+     * in one allocation. A struct with the array member inline would be a GNU
+     * extension that clang rejects under -Werror, hence the byte buffer. */
+    unsigned char buf[2][sizeof(struct fiemap) + sizeof(struct fiemap_extent)];
+    unsigned long long phys[2] = {0, 0};
+    const char* paths[2];
+    paths[0] = a;
+    paths[1] = b;
+
+    for (int i = 0; i < 2; i++) {
+        int fd = open(paths[i], O_RDONLY);
+        if (fd < 0) return 0;
+        memset(buf[i], 0, sizeof(buf[i]));
+        struct fiemap* fm = (struct fiemap*)buf[i];
+        fm->fm_start = 0;
+        fm->fm_length = ~0ULL;
+        fm->fm_flags = 0;
+        fm->fm_extent_count = 1;
+        int rc = ioctl(fd, FS_IOC_FIEMAP, fm);
+        close(fd);
+        if (rc != 0 || fm->fm_mapped_extents < 1) return 0;
+        phys[i] = fm->fm_extents[0].fe_physical;
+    }
+    unsigned long long pa = phys[0], pb = phys[1];
+    if (pa == 0 || pb == 0) return 0;
+    return pa == pb;
+#elif defined(_WIN32)
+    /* MinGW's stat() reports st_ino as 0 for EVERY file, so the inode check
+     * upstream cannot recognise a hardlink dedupe itself created -- measured
+     * on a real Win11 box, it re-linked and re-reported the same 37200 bytes
+     * on run after run. GetFileInformationByHandle returns the true NTFS file
+     * index, which does identify them. */
+    HANDLE ha, hb;
+    BY_HANDLE_FILE_INFORMATION ia, ib;
+    int same = 0;
+    ha = CreateFileA(a, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (ha == INVALID_HANDLE_VALUE) return 0;
+    hb = CreateFileA(b, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hb == INVALID_HANDLE_VALUE) { CloseHandle(ha); return 0; }
+    if (GetFileInformationByHandle(ha, &ia) &&
+        GetFileInformationByHandle(hb, &ib)) {
+        same = (ia.dwVolumeSerialNumber == ib.dwVolumeSerialNumber &&
+                ia.nFileIndexHigh == ib.nFileIndexHigh &&
+                ia.nFileIndexLow  == ib.nFileIndexLow);
+    }
+    CloseHandle(ha);
+    CloseHandle(hb);
+    return same;
+#else
+    /* Other platforms: no probe, so a CoW copy is not recognised as
+     * already-shared and a repeat run re-links files it had already shared --
+     * wasteful and over-reported, but never incorrect (content is unaffected
+     * and the space stays reclaimed). Hardlinks are still caught by the inode
+     * check upstream, where st_ino is meaningful. Deliberately conservative:
+     * claiming two files share when they do not would silently skip real
+     * dedupe, which is the worse error. */
+    (void)a; (void)b;
+    return 0;
+#endif
+}
+
+/* Replace `dup` with a link to `keep`. Writes to a temp name in the same
+ * directory and renames over the target, so an interrupted dedupe leaves the
+ * original file intact rather than a half-written one. Returns 1 on success. */
+static int ae_link_over(const char* keep, const char* dup, int* used_reflink) {
+    /* Only the Linux reflink path ever sets this; macOS and Windows hardlink
+     * unconditionally (see below), so the parameter is otherwise unread. */
+    (void)used_reflink;
+    char tmp[1100];
+    snprintf(tmp, sizeof(tmp), "%s.aedd%d", dup, (int)getpid());
+    remove(tmp);
+
+#ifndef _WIN32
+    /* Reflink first where we can recognise one afterwards, hardlink otherwise.
+     *
+     * Linux only, deliberately. macOS APFS does support clones (`cp -c`), but
+     * ae_shares_extents has no probe for an existing clone -- st_blocks
+     * accounting for APFS clones is not something this could verify without a
+     * real APFS box -- and an unrecognised clone makes every run re-share and
+     * re-report the same files, because a clone gets its own inode and so
+     * defeats the inode check too. Hardlinks ARE recognised, so macOS takes
+     * that path and stays idempotent. The trade is the mutation hazard, which
+     * #1800 already closed by making every writer in this tree
+     * unlink-before-write. Worth revisiting with an APFS box to measure.
+     *
+     * No plain-`cp` fallback on the reflink attempt: it would silently make a
+     * full copy, saving nothing while reporting a saving. Failure here just
+     * falls through to the hardlink below. */
+#  ifndef __APPLE__
+    char cmd[2600];
+    snprintf(cmd, sizeof(cmd), "cp --reflink=always '%s' '%s' 2>/dev/null", keep, tmp);
+    if (system(cmd) == 0) {
+        struct stat st;
+        if (stat(tmp, &st) == 0 && rename(tmp, dup) == 0) {
+            if (used_reflink) *used_reflink = 1;
+            return 1;
+        }
+    }
+    remove(tmp);
+#  endif
+
+    if (link(keep, tmp) == 0) {
+        if (rename(tmp, dup) == 0) return 1;
+        remove(tmp);
+    }
+#else
+    /* MoveFileExA(..., MOVEFILE_REPLACE_EXISTING), not remove-then-rename.
+     * Windows rename() refuses to replace an existing destination, so the
+     * obvious remove(dup) first -- which is what this did originally -- opens
+     * a window where a failed rename leaves NO file at dup at all: the
+     * original was already deleted and the temp gets cleaned up after. That
+     * is data loss, and it is what the Windows leg caught as "dedupe altered
+     * file content". MoveFileEx replaces in one step, so a failure leaves the
+     * original untouched. Same primitive cache_publish uses for the same
+     * reason (tools/ae_cache.c). */
+    if (CreateHardLinkA(tmp, keep, NULL)) {
+        if (MoveFileExA(tmp, dup, MOVEFILE_REPLACE_EXISTING)) return 1;
+        remove(tmp);
+    }
+#endif
+    return 0;
+}
+
+/* Deduplicate the whole store. Returns bytes reclaimed. */
+static long long ae_dedupe_store(int dry_run, int verbose) {
+    const char* home = get_home_dir();
+    char root[1024];
+    snprintf(root, sizeof(root), "%s/.aether/versions", home);
+    if (!doc_is_dir(root)) {
+        printf("No version store at %s.\n", root);
+        return 0;
+    }
+
+    DedupeFile* files = (DedupeFile*)malloc(sizeof(DedupeFile) * AE_MAX_DEDUPE_FILES);
+    if (!files) {
+        fprintf(stderr, "dedupe: out of memory\n");
+        return 0;
+    }
+    int n = 0;
+    ae_collect_files(root, files, &n, AE_MAX_DEDUPE_FILES);
+    if (n == 0) { free(files); return 0; }
+    if (n >= AE_MAX_DEDUPE_FILES) {
+        printf("Note: only the first %d files were considered.\n", n);
+    }
+
+    printf("Scanning %d file(s) >= %d bytes...\n", n, AE_DEDUPE_MIN_SIZE);
+    for (int i = 0; i < n; i++) {
+        long long sz = 0;
+        if (!ae_hash_file(files[i].path, &files[i].hash, &sz)) files[i].hash = 0;
+    }
+
+    /* Group by (size, hash). O(n^2) over ~5k eligible files is a fraction of a
+     * second and keeps this dependency-free; a sort would be faster but this
+     * runs once, by hand. */
+    long long freed = 0;
+    int linked = 0, reflinked = 0;
+    for (int i = 0; i < n; i++) {
+        if (files[i].hash == 0) continue;
+        for (int j = i + 1; j < n; j++) {
+            if (files[j].hash == 0) continue;
+            if (files[j].size != files[i].size) continue;
+            if (files[j].hash != files[i].hash) continue;
+            /* Already the same inode -- hardlinked on an earlier run.
+             *
+             * ino == 0 does NOT mean "same file": MinGW's stat() reports
+             * st_ino as 0 for EVERY file, so without that guard this test
+             * matched every candidate pair and dedupe silently found nothing
+             * on all three Windows legs while reporting success. Verified on
+             * a real Win11 box: two distinct files both give dev=2 ino=0. */
+            if (files[i].ino != 0 && files[j].ino != 0 &&
+                files[j].dev == files[i].dev && files[j].ino == files[i].ino) {
+                files[j].hash = 0;
+                continue;
+            }
+            /* ...or already reflinked, which keeps distinct inodes */
+            if (ae_shares_extents(files[i].path, files[j].path)) {
+                files[j].hash = 0;
+                continue;
+            }
+            /* Hardlinks cannot cross devices, and neither can a reflink. Safe
+             * to trust even where st_ino is not: a wrong dev here only skips
+             * a link that would have failed anyway. */
+            if (files[j].dev != files[i].dev) continue;
+            if (!ae_files_identical(files[i].path, files[j].path)) continue;
+
+            if (verbose) {
+                printf("  %s\n    <- %s\n", files[i].path, files[j].path);
+            }
+            if (dry_run) {
+                freed += files[i].size;
+                linked++;
+                files[j].hash = 0;
+                continue;
+            }
+            int rf = 0;
+            if (ae_link_over(files[i].path, files[j].path, &rf)) {
+                freed += files[i].size;
+                linked++;
+                if (rf) reflinked++;
+                files[j].hash = 0;
+            } else if (linked == 0 && reflinked == 0) {
+                /* First attempt failed: neither mechanism is available here
+                 * (FAT, a restricted Windows account, an odd mount). Say so
+                 * once and stop rather than repeating the failure 5000 times. */
+                printf("This filesystem supports neither reflinks nor hardlinks "
+                       "here; nothing to do.\n");
+                free(files);
+                return 0;
+            }
+        }
+    }
+    free(files);
+
+    if (linked == 0) {
+        printf("No duplicate content found.\n");
+        return 0;
+    }
+    if (dry_run) {
+        printf("%d duplicate file(s) could be shared, reclaiming %.1f MB.\n",
+               linked, (double)freed / (1024.0 * 1024.0));
+        return 0;
+    }
+    printf("Shared %d file(s)", linked);
+    if (reflinked > 0 && reflinked < linked) {
+        printf(" (%d by reflink, %d by hardlink)", reflinked, linked - reflinked);
+    } else if (reflinked > 0) {
+        printf(" by reflink");
+    } else {
+        printf(" by hardlink");
+    }
+    printf(".\n");
+    /* `du` disagrees with both mechanisms, in opposite directions, so say
+     * which one ran rather than leaving the user to reconcile the numbers:
+     * du counts a hardlinked inode once (so it drops), but counts every
+     * reflinked file at full size (so it does not move at all, even though
+     * the space really did come back off the device -- measured). */
+    if (reflinked > 0) {
+        printf("Note: these are copy-on-write reflinks, so `du` will still "
+               "report the old size;\n      the space is genuinely free "
+               "(check with `df`).\n");
+    }
+    return freed;
+}
+
+int cmd_version_remove(int argc, char** argv) {
+    if (argc < 1) {
+        fprintf(stderr, "Usage: ae version remove <version> [<version>...]\n");
+        return 1;
+    }
+    int rc = 0;
+    long long freed = 0;
+    int removed = 0;
+    for (int i = 0; i < argc; i++) {
+        const char* v = argv[i][0] == 'v' ? argv[i] + 1 : argv[i];
+        if (ae_remove_one(v, argc > 1, &freed) == 0) removed++;
+        else rc = 1;
+    }
+    if (argc > 1 && removed > 0) {
+        printf("Removed %d version(s).\n", removed);
+        ae_print_reclaimed(freed);
+    }
+    return rc;
+}
+
+int cmd_version_gc(int keep, int dry_run, int dedupe) {
+    InstalledVersion iv[AE_MAX_VERSIONS];
+    int n = ae_list_installed(iv, AE_MAX_VERSIONS);
+    if (n == 0) {
+        printf("No installed versions found under ~/.aether/versions.\n");
+        return 0;
+    }
+
+    const char* cur = ae_current_version();
+    const char* pin = get_active_version();
+
+    printf("%d installed version(s); keeping the newest %d%s.\n",
+           n, keep, dry_run ? " (dry run, nothing will be removed)" : "");
+
+    long long freed = 0;
+    int removed = 0;
+    for (int i = 0; i < n; i++) {
+        int protected_by_current = (cur && cur[0] && strcmp(cur, iv[i].ver) == 0);
+        int protected_by_pin     = (pin && pin[0] && strcmp(pin, iv[i].ver) == 0);
+        const char* why = protected_by_current ? " (current)"
+                        : protected_by_pin     ? " (pinned)"
+                                               : "";
+
+        if (i < keep || protected_by_current || protected_by_pin) {
+            printf("  keep    %s%s\n", iv[i].tag, why);
+            continue;
+        }
+        if (dry_run) {
+            printf("  would remove %s\n", iv[i].tag);
+            removed++;
+            continue;
+        }
+        printf("  remove  %s\n", iv[i].tag);
+        if (ae_remove_one(iv[i].ver, 1, &freed) == 0) removed++;
+    }
+
+    if (removed == 0) {
+        printf("Nothing to remove.\n");
+        if (dedupe) {
+            printf("\n");
+            ae_dedupe_store(dry_run, 0);
+        }
+        return 0;
+    }
+    if (dry_run) {
+        printf("%d version(s) would be removed. Re-run without --dry-run.\n", removed);
+        if (dedupe) {
+            printf("\n");
+            ae_dedupe_store(1, 0);
+        }
+        return 0;
+    }
+    printf("Removed %d version(s).\n", removed);
+    ae_print_reclaimed(freed);
+    if (dedupe) {
+        printf("\n");
+        freed += ae_dedupe_store(dry_run, 0);
+    }
+    return 0;
+}
+
+/* `ae version installed` -- the local half of `list`, always answerable. */
+int cmd_version_installed(void) {
+    InstalledVersion iv[AE_MAX_VERSIONS];
+    int n = ae_list_installed(iv, AE_MAX_VERSIONS);
+    if (n == 0) {
+        printf("No versions installed under ~/.aether/versions.\n");
+        return 0;
+    }
+    const char* cur = ae_current_version();
+    const char* pin = get_active_version();
+
+    printf("\nInstalled Aether versions (newest first):\n\n");
+    printf("  %-16s  %s\n", "Version", "Status");
+    printf("  %-16s  %s\n", "-------", "------");
+    for (int i = 0; i < n; i++) {
+        const char* status = "";
+        if (cur && cur[0] && strcmp(cur, iv[i].ver) == 0)      status = "* current";
+        else if (pin && pin[0] && strcmp(pin, iv[i].ver) == 0) status = "  pinned";
+        printf("  %-16s  %s\n", iv[i].tag, status);
+    }
+    printf("\n%d installed. Remove with `ae version remove <v>` or "
+           "`ae version gc --keep N`.\n\n", n);
+    return 0;
+}
+
 int cmd_version_doctor(int do_fix) {
     DoctorState d = {0, 0, do_fix};
     const char* home = get_home_dir();
@@ -1376,6 +2049,10 @@ int cmd_version(int argc, char** argv) {
         printf("  ae version list              List all available releases\n");
         printf("  ae version install <v>       Download and install a release\n");
         printf("  ae version use <v>           Switch to an installed release\n");
+        printf("  ae version installed         List versions installed locally\n");
+        printf("  ae version remove <v>...     Remove installed version(s)\n");
+        printf("  ae version gc [--keep N]     Remove all but the newest N (default 2)\n");
+        printf("  ae version dedupe            Share identical files across versions\n");
         printf("  ae version doctor [--fix]    Check the install, and compile a test program\n");
         return 0;
     }
@@ -1388,6 +2065,47 @@ int cmd_version(int argc, char** argv) {
     if (strcmp(sub, "use") == 0) {
         if (argc < 2) { fprintf(stderr, "Usage: ae version use <v>\n"); return 1; }
         return cmd_version_use(argv[1]);
+    }
+    if (strcmp(sub, "installed") == 0) return cmd_version_installed();
+    if (strcmp(sub, "dedupe") == 0) {
+        int dry = 0, verbose = 0;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--dry-run") == 0) { dry = 1; continue; }
+            if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+                verbose = 1; continue;
+            }
+            fprintf(stderr, "ae version dedupe: unknown argument '%s'\n", argv[i]);
+            fprintf(stderr, "Usage: ae version dedupe [--dry-run] [-v]\n");
+            return 1;
+        }
+        long long f = ae_dedupe_store(dry, verbose);
+        if (!dry && f > 0) ae_print_reclaimed(f);
+        return 0;
+    }
+    if (strcmp(sub, "remove") == 0 || strcmp(sub, "rm") == 0) {
+        return cmd_version_remove(argc - 1, argv + 1);
+    }
+    if (strcmp(sub, "gc") == 0) {
+        int keep = 2;
+        int dry = 0;
+        int dedupe = 0;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--dry-run") == 0) { dry = 1; continue; }
+            if (strcmp(argv[i], "--dedupe") == 0) { dedupe = 1; continue; }
+            if (strcmp(argv[i], "--keep") == 0 && i + 1 < argc) {
+                keep = atoi(argv[++i]);
+                if (keep < 1) {
+                    fprintf(stderr, "ae version gc: --keep must be at least 1 "
+                                    "(the active version is kept regardless)\n");
+                    return 1;
+                }
+                continue;
+            }
+            fprintf(stderr, "ae version gc: unknown argument '%s'\n", argv[i]);
+            fprintf(stderr, "Usage: ae version gc [--keep N] [--dedupe] [--dry-run]\n");
+            return 1;
+        }
+        return cmd_version_gc(keep, dry, dedupe);
     }
     if (strcmp(sub, "doctor") == 0) {
         int do_fix = 0;
