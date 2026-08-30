@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.611.0]
+
 ### Fixed
 
 - **`std.spec`'s `run_summary` now returns 0 on success instead of falling off
