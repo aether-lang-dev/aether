@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.605.0]
+
 ### Fixed
 
 - **A proxy retry no longer leaks the memory cap's accounting.** The outbound
