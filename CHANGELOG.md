@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Testing
+
+- **The bytes a pass-through emits are pinned directly.** The head it sends is
+  written by hand rather than serialised from a response object, so those bytes
+  are the contract. The cases covered are the ones no integration test reaches
+  through a real upstream: a response with no headers at all, one carrying only
+  hop-by-hop headers, an empty header value, and a bare carriage return inside
+  a value.
+
+  Two were written expecting the wrong answer and corrected against what the
+  copying path actually does: a bare carriage return stops the parse and drops
+  what follows, in both paths, because each takes the first `CR` as the end of
+  the line and gives up when no `LF` follows. Truncating there is safe;
+  emitting the value is what CWE-113 is.
+
+  The emitter never used the exchange it was handed, so it now takes only the
+  response it describes, which is also what makes it testable on its own.
 ## [0.608.0]
 
 ### Added

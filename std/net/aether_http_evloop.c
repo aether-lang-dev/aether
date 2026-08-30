@@ -831,8 +831,7 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
                                  c->x.framing.header_bytes, &direct) != 0) return 0;
 
     size_t head_len = 0;
-    if (aether_proxy_direct_head(&c->px, &direct, c->x.buf,
-                                 c->x.framing.header_bytes,
+    if (aether_proxy_direct_head(&direct, c->x.buf, c->x.framing.header_bytes,
                                  &c->out, &c->out_cap, &head_len) != 0) return 0;
 
     c->out_len       = head_len;
