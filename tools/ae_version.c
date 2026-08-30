@@ -1398,6 +1398,12 @@ static int ae_shares_extents(const char* a, const char* b) {
     if (pa == 0 || pb == 0) return 0;
     return pa == pb;
 #else
+    /* Other platforms: no probe, so a CoW copy is not recognised as
+     * already-shared and a repeat run re-links files it had already shared --
+     * wasteful and over-reported, but never incorrect (content is unaffected
+     * and the space stays reclaimed). Hardlinks are still caught by the inode
+     * check upstream. Deliberately conservative: claiming two files share when
+     * they do not would silently skip real dedupe, which is the worse error. */
     (void)a; (void)b;
     return 0;
 #endif
@@ -1407,20 +1413,32 @@ static int ae_shares_extents(const char* a, const char* b) {
  * directory and renames over the target, so an interrupted dedupe leaves the
  * original file intact rather than a half-written one. Returns 1 on success. */
 static int ae_link_over(const char* keep, const char* dup, int* used_reflink) {
+    /* Only the Linux reflink path ever sets this; macOS and Windows hardlink
+     * unconditionally (see below), so the parameter is otherwise unread. */
+    (void)used_reflink;
     char tmp[1100];
     snprintf(tmp, sizeof(tmp), "%s.aedd%d", dup, (int)getpid());
     remove(tmp);
 
 #ifndef _WIN32
-    /* Try a reflink first via cp; the flag differs per platform and a plain
-     * `cp` fallback would silently make a full copy, so no fallback here --
-     * failure just means we try the hardlink below. */
+    /* Reflink first where we can recognise one afterwards, hardlink otherwise.
+     *
+     * Linux only, deliberately. macOS APFS does support clones (`cp -c`), but
+     * ae_shares_extents has no probe for an existing clone -- st_blocks
+     * accounting for APFS clones is not something this could verify without a
+     * real APFS box -- and an unrecognised clone makes every run re-share and
+     * re-report the same files, because a clone gets its own inode and so
+     * defeats the inode check too. Hardlinks ARE recognised, so macOS takes
+     * that path and stays idempotent. The trade is the mutation hazard, which
+     * #1800 already closed by making every writer in this tree
+     * unlink-before-write. Worth revisiting with an APFS box to measure.
+     *
+     * No plain-`cp` fallback on the reflink attempt: it would silently make a
+     * full copy, saving nothing while reporting a saving. Failure here just
+     * falls through to the hardlink below. */
+#  ifndef __APPLE__
     char cmd[2600];
-#  ifdef __APPLE__
-    snprintf(cmd, sizeof(cmd), "cp -c '%s' '%s' 2>/dev/null", keep, tmp);
-#  else
     snprintf(cmd, sizeof(cmd), "cp --reflink=always '%s' '%s' 2>/dev/null", keep, tmp);
-#  endif
     if (system(cmd) == 0) {
         struct stat st;
         if (stat(tmp, &st) == 0 && rename(tmp, dup) == 0) {
@@ -1429,13 +1447,13 @@ static int ae_link_over(const char* keep, const char* dup, int* used_reflink) {
         }
     }
     remove(tmp);
+#  endif
 
     if (link(keep, tmp) == 0) {
         if (rename(tmp, dup) == 0) return 1;
         remove(tmp);
     }
 #else
-    (void)used_reflink;   /* no reflink mechanism on Windows */
     if (CreateHardLinkA(tmp, keep, NULL)) {
         remove(dup);
         if (rename(tmp, dup) == 0) return 1;
