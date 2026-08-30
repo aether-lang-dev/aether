@@ -31,5 +31,5 @@ main() {
             spec.expect_int(4).not_().to_equal(4, "must differ from the default")
         }
     }
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

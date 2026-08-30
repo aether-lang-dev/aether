@@ -270,6 +270,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
     arena.destroy(ar)
+    return _rc
 }

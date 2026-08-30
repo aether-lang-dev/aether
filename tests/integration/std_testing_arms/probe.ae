@@ -330,10 +330,11 @@ main() {
     fw = spec.init()
     run_process_section(fw)
     run_http_section(fw)
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
     // The fixture server runs on a detached actor thread that never
     // returns, so without an explicit exit the process would hang —
     // holding port 18130 and making the next run fail to bind.
-    // run_summary already exit(1)s on failure; force a clean 0 here.
-    exit(0)
+    // run_summary returns the verdict now rather than exiting, so pass it
+    // through: exiting 0 unconditionally here would hide a failing suite.
+    exit(_rc)
 }

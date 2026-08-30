@@ -234,13 +234,13 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     schema.schema_free(user)
 
     // The server actor keeps the process alive after the specs finish, so
-    // exit explicitly — as the original driver did. run_summary has
-    // already exited non-zero if anything failed, so reaching here means
-    // the run was green.
-    exit(0)
+    // exit explicitly — as the original driver did — carrying run_summary's
+    // verdict. It returns the result now rather than exiting, so a bare
+    // exit(0) here would hide a failing suite.
+    exit(_rc)
 }

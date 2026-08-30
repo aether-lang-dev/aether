@@ -81,7 +81,7 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     // Finalize ONCE, after the suite. Deliberately not followed by another
     // init: CRuby's ruby_finalize() tears the VM down permanently, and the
@@ -90,4 +90,5 @@ main() {
     // in the README and left untested on purpose, so a future fix has a
     // baseline to change rather than a test to fight.
     if have_ruby == 1 { ruby.ruby_finalize_host() }
+    return _rc
 }

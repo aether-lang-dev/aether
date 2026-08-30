@@ -100,5 +100,5 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

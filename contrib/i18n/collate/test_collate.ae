@@ -169,5 +169,5 @@ main() {
     }
 
     // Returns normally on success — see the leak-gate note in the header.
-    spec.run_summary(fw)
+    return spec.run_summary(fw)
 }

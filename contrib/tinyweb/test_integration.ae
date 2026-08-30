@@ -159,9 +159,10 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     http.server_stop(raw)
     sleep(200)
     http.server_free(raw)
+    return _rc
 }

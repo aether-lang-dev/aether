@@ -212,10 +212,10 @@ main() {
 
     if connected == 1 { tcp.close(sock) }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     // The accept-loop actor keeps the process alive once the specs finish,
-    // so exit explicitly — run_summary has already exited non-zero if
-    // anything failed.
-    exit(0)
+    // so exit explicitly, carrying run_summary's verdict: it returns the
+    // result now rather than exiting, so a bare exit(0) would hide a failure.
+    exit(_rc)
 }

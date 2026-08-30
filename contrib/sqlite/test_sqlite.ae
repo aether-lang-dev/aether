@@ -215,7 +215,8 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if have_sqlite == 1 { sqlite.close(db) }
+    return _rc
 }

@@ -299,10 +299,11 @@ main() {
         }
     }
 
-    spec.run_summary(fw)
+    _rc = spec.run_summary(fw)
 
     if binds != null { vulkan.bindings_destroy(binds) }
     if lay != null { vulkan.layout_destroy(lay) }
     if target != null { vulkan.target_destroy(target) }
     if dev != null { vulkan.device_destroy(dev) }
+    return _rc
 }
