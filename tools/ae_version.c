@@ -1026,7 +1026,12 @@ static const char* probe_compiler_version(const char* aetherc_path) {
  * says what it did; it never touches anything a rebuild would recreate.
  */
 
-typedef struct { int problems; int fixed; int do_fix; } DoctorState;
+/* `fixable` counts findings this command COULD repair on its own; `fixed`
+ * counts the ones it did. Tracking both is what lets the summary distinguish
+ * "--fix declined by design" from "--fix tried and failed" -- a run that
+ * simply reported "3 problem(s) found" after --fix left users unable to tell
+ * which had happened. */
+typedef struct { int problems; int fixed; int fixable; int do_fix; } DoctorState;
 
 static void doc_ok(const char* fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -1729,7 +1734,7 @@ int cmd_version_installed(void) {
 }
 
 int cmd_version_doctor(int do_fix) {
-    DoctorState d = {0, 0, do_fix};
+    DoctorState d = {0, 0, 0, do_fix};
     const char* home = get_home_dir();
     char path[2048];
 
@@ -1807,6 +1812,7 @@ int cmd_version_doctor(int do_fix) {
             /* The pin names a version that is not there, so it cannot be
              * honoured by anything. Rewriting it to this binary is
              * strictly an improvement and loses nothing. */
+            d.fixable++;
             if (d.do_fix) {
                 snprintf(path, sizeof(path), "%s/.aether/active_version", home);
                 FILE* f = fopen(path, "w");
@@ -2002,7 +2008,27 @@ int cmd_version_doctor(int do_fix) {
     }
     if (d.fixed) printf("%d problem(s) found, %d fixed.\n", d.problems, d.fixed);
     else         printf("%d problem(s) found.\n", d.problems);
-    if (!d.do_fix) printf("Re-run with --fix to repair what is safely repairable.\n");
+
+    if (!d.do_fix) {
+        if (d.fixable) {
+            printf("Re-run with --fix to repair what is safely repairable "
+                   "(%d of %d).\n", d.fixable, d.problems);
+        } else {
+            printf("None of these are safely auto-repairable, so --fix would "
+                   "not change them.\n");
+            printf("Each one above carries the command or the decision it "
+                   "needs.\n");
+        }
+    } else if (d.fixed == 0) {
+        /* --fix ran and changed nothing. Say so explicitly: silence here
+         * reads as "it tried and failed" when the truth is that repairing
+         * these would mean guessing at the user's intent -- installing a
+         * release, choosing between two real installs, or editing PATH. */
+        printf("--fix repaired nothing: none of these are safely "
+               "auto-repairable.\n");
+        printf("They need a decision or an install, not a rewrite -- see the "
+               "hints above.\n");
+    }
     return 1;
 }
 
