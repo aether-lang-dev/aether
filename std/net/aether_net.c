@@ -46,6 +46,7 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t
     #include <unistd.h>
     #include <arpa/inet.h>
     #include <poll.h>
+    #include <fcntl.h>
 #endif
 
 /* recv returned <= 0: distinguish "peer idle, socket still alive"
@@ -340,6 +341,10 @@ int tcp_server_fd_raw(TcpServer* server) {
 TcpSocket* tcp_socket_from_fd_owned(int fd) {
     if (fd < 0) return NULL;
     net_init();
+#ifndef _WIN32
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
     net_set_socket_timeouts(fd, 30);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));

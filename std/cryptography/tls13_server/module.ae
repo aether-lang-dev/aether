@@ -1,0 +1,692 @@
+// MIT License (https://opensource.org/licenses/MIT)
+// Portions copyright (c) 2026 Aether Developers.
+//
+// std.cryptography.tls13_server — a pure-Aether TLS 1.3 server (RFC 8446).
+// NO externs to OpenSSL.
+//
+// CONSTRAINTS, so they are found here rather than in a failed handshake:
+//
+//   - The server key must be ECDSA P-256. CertificateVerify is signed with
+//     sign_server_cert_verify_ecdsa_p256 and there is no RSA path, so an RSA
+//     key fails at the signature step and the peer just sees the connection
+//     drop. Generate with:
+//       openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+//   - X25519 key exchange only. A client offering only other groups is
+//     refused by parse_client_hello; HelloRetryRequest is not implemented,
+//     so there is no renegotiation to a group we do support.
+//   - Buffer arguments are std.bytes HANDLES, never bytes.data(b) -- see the
+//     header of tls13_client for why that distinction bites.
+
+import std.bytes
+import std.string
+import std.list(list_new, list_free, list_add_raw, list_get_raw, list_size)
+import std.mem(copy)
+import std.fs
+import std.net
+import std.cryptography.sha2
+import std.cryptography.hmac
+import std.cryptography.x25519
+import std.cryptography.p256
+import std.cryptography.tls13_kdf
+import std.cryptography.tls13_client(HsKeys)
+import std.cryptography.tls13_ks
+import std.cryptography.tls13_hs
+import std.cryptography.tls13_cert
+import std.cryptography.tls13_record
+import std.cryptography.pem
+import std.cryptography.asn1
+import std.cryptography.bignum
+import std.cryptography
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_length(s: string) -> int
+extern tcp_socket_from_fd_owned(fd: int) -> ptr
+
+exports(
+    accept, conn_send, conn_recv, close_conn,
+    ServerConn,
+    parse_cert_chain_pem, parse_ec_private_key_pem,
+    pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_close
+)
+
+struct ServerConn {
+    sock: ptr
+    rio: ptr // *RecordIO
+    app_send: ptr // *tls13_record.RecordCtx
+    app_recv: ptr // *tls13_record.RecordCtx
+}
+
+// RecordIO framing over a raw TCP socket.
+struct RecordIO {
+    sock: ptr
+    buf: ptr // std.bytes accumulator
+    len: int
+    off: int
+}
+
+fn recio_new(sock: ptr) -> *RecordIO {
+    r = malloc(32) as *RecordIO
+    r.sock = sock
+    r.buf = bytes.new(4096)
+    bytes.set(r.buf, 0, 0)
+    r.len = 0
+    r.off = 0
+    return r
+}
+
+fn recio_free(r: *RecordIO) {
+    bytes.free(r.buf)
+    libc_free(r as ptr)
+}
+
+fn recio_fill(r: *RecordIO) -> int {
+    tries = 0
+    filling = 1
+    result = -1
+    while filling == 1 {
+        chunk, n, err = net.tcp_receive_n_raw(r.sock, 4096)
+        if string.equals(err, "") == 1 {
+            if n <= 0 { result = n; filling = 0 } else {
+                bytes.copy_from_string(r.buf, r.len, chunk, n)
+                r.len = r.len + n
+                result = n
+                filling = 0
+            }
+        } else {
+            if string.equals(err, "timeout") == 1 {
+                tries = tries + 1
+                if tries >= 500 {
+                    result = -1
+                    filling = 0
+                } else {
+                    sleep(10)
+                }
+            } else {
+                result = -1
+                filling = 0
+            }
+        }
+    }
+    return result
+}
+
+fn recio_next(r: *RecordIO) -> (ptr, int, string) {
+    loop = 1
+    while loop == 1 {
+        avail = r.len - r.off
+        if avail >= 5 {
+            plen = ((bytes.get(r.buf, r.off + 3) & 0xFF) << 8) | (bytes.get(r.buf, r.off + 4) & 0xFF)
+            total = 5 + plen
+            if avail >= total {
+                rec = bytes.new(total)
+                bytes.set(rec, total - 1, 0)
+                bytes.copy_from_bytes(rec, 0, r.buf, r.off, total)
+                r.off = r.off + total
+                return rec, total, ""
+            }
+        }
+        got = recio_fill(r)
+        if got <= 0 {
+            return null, 0, "record: connection closed before a full record"
+        }
+    }
+    return null, 0, "unreachable"
+}
+
+fn recio_next_hs(r: *RecordIO) -> (ptr, int, string) {
+    looking = 1
+    rec = null
+    rlen = 0
+    err = ""
+    while looking == 1 {
+        rec, rlen, err = recio_next(r)
+        if string.equals(err, "") != 1 { looking = 0 } else {
+            if (bytes.get(rec, 0) & 0xFF) == 0x14 {
+                bytes.free(rec) // skip ChangeCipherSpec
+            } else {
+                looking = 0
+            }
+        }
+    }
+    return rec, rlen, err
+}
+
+fn send_plaintext_handshake(sock: ptr, msg: ptr, msg_len: int) -> string {
+    total = 5 + msg_len
+    rec = bytes.new(total)
+    bytes.set(rec, total - 1, 0)
+    bytes.set(rec, 0, 0x16) // handshake
+    bytes.set(rec, 1, 0x03)
+    bytes.set(rec, 2, 0x03) // legacy_record_version 0x0303
+    bytes.set(rec, 3, (msg_len >> 8) & 0xFF)
+    bytes.set(rec, 4, msg_len & 0xFF)
+    bytes.copy_from_bytes(rec, 5, msg, 0, msg_len)
+    s = bytes.to_string(rec, total)
+    n = net.tcp_send_n_raw(sock, s, total)
+    bytes.free(rec)
+    if n != total { return "failed to send handshake record" }
+    return ""
+}
+
+fn send_record_raw(sock: ptr, rec: ptr) -> string {
+    rlen = bytes.length(rec)
+    s = bytes.to_string(rec, rlen)
+    n = net.tcp_send_n_raw(sock, s, rlen)
+    if n != rlen { return "failed to send record" }
+    return ""
+}
+
+// Fresh randomness, or null. Returning null on failure is deliberate and the
+// callers MUST check: every use here is security-critical -- the server
+// random, the ECDSA-P256 signing nonce, and the X25519 private key. Silently
+// handing back a zero-filled buffer when the CSPRNG fails would make the
+// nonce predictable, and a predictable ECDSA nonce discloses the private key
+// outright (RFC 6979 s1). Failing the handshake is the only safe answer.
+fn rand_into(n: int) -> ptr {
+    s, sn, err = cryptography.random_bytes(n)
+    if string.equals(err, "") != 1 { return null }
+    if sn < n { return null }
+    b = bytes.new(n)
+    if n > 0 { bytes.set(b, n - 1, 0) }
+    bytes.copy_from_string(b, 0, s, n)
+    return b
+}
+
+fn bytes_equal(a: ptr, b: ptr, n: int) -> int {
+    diff = 0
+    i = 0
+    while i < n {
+        diff = diff | ((bytes.get(a, i) ^ bytes.get(b, i)) & 0xFF)
+        i = i + 1
+    }
+    if diff == 0 { return 1 }
+    return 0
+}
+
+fn suite_params(cipher_suite: int) -> (int, int, string, int, string) {
+    if cipher_suite == tls13_hs.TLS_CHACHA20_POLY1305_SHA256 {
+        return tls13_record.AEAD_CHACHA20_POLY1305, 32, "sha256", 32, ""
+    }
+    if cipher_suite == tls13_hs.TLS_AES_128_GCM_SHA256 {
+        return tls13_record.AEAD_AES_128_GCM, 16, "sha256", 32, ""
+    }
+    if cipher_suite == tls13_hs.TLS_AES_256_GCM_SHA384 {
+        return tls13_record.AEAD_AES_256_GCM, 32, "sha384", 48, ""
+    }
+    return 0, 0, "", 0, "client offered unsupported cipher suite"
+}
+
+fn derive_handshake_keys_algo(ecdhe: ptr, ec_len: int, th: ptr, th_len: int, key_len: int, hash_algo: string) -> ptr {
+    early = tls13_ks.early_secret(hash_algo)
+    hs = tls13_ks.handshake_secret(hash_algo, early, ecdhe, ec_len)
+
+    c_hs = tls13_ks.traffic_secret(hash_algo, hs, "c hs traffic", th, th_len)
+    s_hs = tls13_ks.traffic_secret(hash_algo, hs, "s hs traffic", th, th_len)
+
+    ck = tls13_ks.write_key(hash_algo, c_hs, key_len)
+    civ = tls13_ks.write_iv(hash_algo, c_hs)
+    sk = tls13_ks.write_key(hash_algo, s_hs, key_len)
+    siv = tls13_ks.write_iv(hash_algo, s_hs)
+
+    k = malloc(56) as *HsKeys
+    k.client_hs_secret = c_hs
+    k.server_hs_secret = s_hs
+    k.client_key = ck
+    k.client_iv = civ
+    k.server_key = sk
+    k.server_iv = siv
+    k.handshake_secret = hs
+
+    bytes.free(early)
+    return k as ptr
+}
+
+fn hs_server_key(k: ptr) -> ptr { return tls13_client.hs_server_key(k) }
+fn hs_server_iv(k: ptr) -> ptr { return tls13_client.hs_server_iv(k) }
+fn hs_client_key(k: ptr) -> ptr { return tls13_client.hs_client_key(k) }
+fn hs_client_iv(k: ptr) -> ptr { return tls13_client.hs_client_iv(k) }
+fn hs_server_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.server_hs_secret }
+fn hs_client_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.client_hs_secret }
+fn hs_handshake_secret(k: ptr) -> ptr { kk = k as *HsKeys; return kk.handshake_secret }
+
+fn finished_verify_data_algo(secret: ptr, th: ptr, th_len: int, hash_algo: string, hlen: int) -> ptr {
+    return tls13_client.finished_verify_data_algo(secret, th, th_len, hash_algo, hlen)
+}
+
+fn transcript_hash_algo(tr: ptr, algo: string) -> ptr {
+    return tls13_client.transcript_hash_algo(tr, algo)
+}
+
+// Perform the TLS 1.3 server handshake over `sock`.
+accept(sock: ptr, cert_chain: ptr, cert_lens: ptr, priv_key: ptr, x25519_priv: ptr) -> (ptr, string) {
+    if sock == null { return null, "socket is null" }
+    if cert_chain == null { return null, "certificate chain is null" }
+    if priv_key == null { return null, "private key is null" }
+    if x25519_priv == null { return null, "x25519_priv is null" }
+
+    rio = recio_new(sock)
+
+    // 1. Read ClientHello
+    chrec, chlen, cherr = recio_next_hs(rio)
+    if string.equals(cherr, "") != 1 {
+        recio_free(rio)
+        return null, cherr
+    }
+    ch_msg_len = chlen - 5
+    ch_msg = bytes.new(ch_msg_len)
+    bytes.copy_from_bytes(ch_msg, 0, chrec, 5, ch_msg_len)
+    bytes.free(chrec)
+
+    ch_parsed = tls13_hs.ChParsed { random: null, session_id: null, session_id_len: 0,
+        cipher_suite: 0, group: 0, key_share: null, key_share_len: 0,
+        has_sni: 0, saw_supported_versions: 0 }
+    perr = tls13_hs.parse_client_hello(ch_msg, ch_msg_len, &ch_parsed)
+    if string.equals(perr, "") != 1 {
+        bytes.free(ch_msg); recio_free(rio)
+        return null, perr
+    }
+
+    tr = tls13_client.transcript_new()
+    tls13_client.transcript_add(tr, ch_msg, ch_msg_len)
+
+    // 2. Compute X25519 shared secret
+    shared, agerr = x25519.agree(x25519_priv, ch_parsed.key_share)
+    if string.equals(agerr, "") != 1 {
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        return null, agerr
+    }
+    x25519_pub = x25519.base_point(x25519_priv)
+
+    // 3. Build and send ServerHello (plaintext)
+    srnd = rand_into(32)
+    if srnd == null {
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg)
+        tls13_client.transcript_free(tr); recio_free(rio)
+        bytes.free(x25519_pub); bytes.free(shared)
+        return null, "no randomness available for the server random"
+    }
+    sh = tls13_hs.server_hello(srnd, ch_parsed.session_id, ch_parsed.session_id_len,
+        ch_parsed.cipher_suite, ch_parsed.group, x25519_pub, 32)
+    sh_len = bytes.length(sh)
+    sherr = send_plaintext_handshake(sock, sh, sh_len)
+    if string.equals(sherr, "") != 1 {
+        bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        return null, sherr
+    }
+    tls13_client.transcript_add(tr, sh, sh_len)
+
+    // 4. Key Schedule
+    rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(ch_parsed.cipher_suite)
+    if string.equals(suite_err, "") != 1 {
+        bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        return null, suite_err
+    }
+
+    th_chsh = transcript_hash_algo(tr, hash_algo)
+    keys = derive_handshake_keys_algo(shared, 32, th_chsh, hash_len, rec_key_len, hash_algo)
+
+    srv_hs_ctx = tls13_record.new_aead(rec_aead, hs_server_key(keys), rec_key_len, hs_server_iv(keys))
+    cli_hs_ctx = tls13_record.new_aead(rec_aead, hs_client_key(keys), rec_key_len, hs_client_iv(keys))
+
+    // 5. Send Encrypted Flight
+    // a. EncryptedExtensions
+    ee = tls13_hs.encrypted_extensions()
+    ee_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, ee, bytes.length(ee))
+    send_record_raw(sock, ee_rec)
+    tls13_client.transcript_add(tr, ee, bytes.length(ee))
+    bytes.free(ee); bytes.free(ee_rec)
+
+    // b. Certificate
+    cert_msg = tls13_hs.certificate_msg(cert_chain, cert_lens, 0)
+    cert_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cert_msg, bytes.length(cert_msg))
+    send_record_raw(sock, cert_rec)
+    tls13_client.transcript_add(tr, cert_msg, bytes.length(cert_msg))
+    bytes.free(cert_msg); bytes.free(cert_rec)
+
+    // c. CertificateVerify
+    th_cert = transcript_hash_algo(tr, hash_algo)
+    knonce = rand_into(32)
+    if knonce == null {
+        // Signing with a predictable nonce would disclose the private key;
+        // there is no safe fallback, so the handshake ends here.
+        bytes.free(th_cert)
+        return null, "no randomness available for the signing nonce"
+    }
+    sig = tls13_cert.sign_server_cert_verify_ecdsa_p256(priv_key, th_cert, hash_len, knonce)
+    cv_msg = tls13_hs.certificate_verify_msg(0x0403, sig, bytes.length(sig))
+    cv_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, cv_msg, bytes.length(cv_msg))
+    send_record_raw(sock, cv_rec)
+    tls13_client.transcript_add(tr, cv_msg, bytes.length(cv_msg))
+    bytes.free(th_cert); bytes.free(knonce); bytes.free(sig); bytes.free(cv_msg); bytes.free(cv_rec)
+
+    // d. Server Finished
+    th_cv = transcript_hash_algo(tr, hash_algo)
+    svd = finished_verify_data_algo(hs_server_secret(keys), th_cv, hash_len, hash_algo, hash_len)
+    fin_msg = tls13_hs.finished_msg(svd, hash_len)
+    fin_rec = tls13_record.seal_record(srv_hs_ctx, tls13_record.CONTENT_HANDSHAKE, fin_msg, bytes.length(fin_msg))
+    send_record_raw(sock, fin_rec)
+    tls13_client.transcript_add(tr, fin_msg, bytes.length(fin_msg))
+    bytes.free(th_cv); bytes.free(svd); bytes.free(fin_msg); bytes.free(fin_rec)
+
+    // 6. Read and verify Client Finished
+    th_sf = transcript_hash_algo(tr, hash_algo)
+
+    cf_rec, cf_rec_len, cf_err = recio_next_hs(rio)
+    if string.equals(cf_err, "") != 1 {
+    }
+    fin_ok = 0
+    if string.equals(cf_err, "") == 1 {
+        opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+        oerr = tls13_record.open_record(cli_hs_ctx, cf_rec, cf_rec_len, &opened)
+        bytes.free(cf_rec)
+        if string.equals(oerr, "") == 1 {
+            if opened.content_type == 22 && opened.plaintext_len >= 4 {
+                if (bytes.get(opened.plaintext, 0) & 0xFF) == tls13_hs.HS_FINISHED {
+                    cvd_len = opened.plaintext_len - 4
+                    cvd = bytes.new(cvd_len)
+                    bytes.copy_from_bytes(cvd, 0, opened.plaintext, 4, cvd_len)
+                    expected_cvd = finished_verify_data_algo(hs_client_secret(keys), th_sf, hash_len, hash_algo, hash_len)
+                    if bytes_equal(expected_cvd, cvd, hash_len) == 1 {
+                        fin_ok = 1
+                        tls13_client.transcript_add(tr, opened.plaintext, opened.plaintext_len)
+                    }
+                    bytes.free(cvd); bytes.free(expected_cvd)
+                }
+            }
+            if opened.plaintext != null { bytes.free(opened.plaintext) }
+        }
+    }
+
+    if fin_ok == 0 {
+        bytes.free(th_sf); bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+        tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr); recio_free(rio)
+        tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+        tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+        return null, "client Finished MAC verification failed"
+    }
+
+    // 7. Derive Application Traffic Keys
+    ms = tls13_ks.master_secret(hash_algo, hs_handshake_secret(keys))
+    c_ap = tls13_ks.traffic_secret(hash_algo, ms, "c ap traffic", th_sf, hash_len)
+    s_ap = tls13_ks.traffic_secret(hash_algo, ms, "s ap traffic", th_sf, hash_len)
+
+    ck = tls13_ks.write_key(hash_algo, c_ap, rec_key_len)
+    civ = tls13_ks.write_iv(hash_algo, c_ap)
+    sk = tls13_ks.write_key(hash_algo, s_ap, rec_key_len)
+    siv = tls13_ks.write_iv(hash_algo, s_ap)
+
+    app_send = tls13_record.new_aead(rec_aead, sk, rec_key_len, siv)
+    app_recv = tls13_record.new_aead(rec_aead, ck, rec_key_len, civ)
+
+    // Cleanup handshake state
+    bytes.free(ck); bytes.free(civ); bytes.free(sk); bytes.free(siv)
+    bytes.free(ms); bytes.free(c_ap); bytes.free(s_ap); bytes.free(th_sf)
+    bytes.free(srnd); bytes.free(x25519_pub); bytes.free(shared); bytes.free(sh)
+    tls13_hs.free_ch(&ch_parsed); bytes.free(ch_msg); tls13_client.transcript_free(tr)
+    tls13_record.free_ctx(srv_hs_ctx); tls13_record.free_ctx(cli_hs_ctx)
+    tls13_client.free_hs_keys(keys); bytes.free(th_chsh)
+
+    conn = malloc(32) as *ServerConn
+    conn.sock = sock
+    conn.rio = rio as ptr
+    conn.app_send = app_send as ptr
+    conn.app_recv = app_recv as ptr
+
+    return conn as ptr, ""
+}
+
+// Send application data as one encrypted record.
+conn_send(conn: ptr, data: ptr, len: int) -> string {
+    c = conn as *ServerConn
+    rec = tls13_record.seal_record(c.app_send as ptr, tls13_record.CONTENT_APPLICATION_DATA, data, len)
+    s = bytes.to_string(rec, bytes.length(rec))
+    n = net.tcp_send_n_raw(c.sock, s, bytes.length(rec))
+    tot = bytes.length(rec)
+    bytes.free(rec)
+    if n != tot { return "send failed" }
+    return ""
+}
+
+// Receive application data record.
+conn_recv(conn: ptr) -> (ptr, int, string) {
+    c = conn as *ServerConn
+    rio = c.rio as *RecordIO
+    looking = 1
+    out = null
+    outlen = 0
+    rerr = ""
+    while looking == 1 {
+        rec, rlen, e = recio_next(rio)
+        if string.equals(e, "") != 1 { rerr = e; looking = 0 } else {
+            ct = bytes.get(rec, 0) & 0xFF
+            if ct == 0x14 { bytes.free(rec) } else {
+                opened = tls13_record.OpenedRecord { content_type: 0, plaintext: null, plaintext_len: 0 }
+                oerr = tls13_record.open_record(c.app_recv as ptr, rec, rlen, &opened)
+                bytes.free(rec)
+                if string.equals(oerr, "") != 1 { rerr = oerr; looking = 0 } else {
+                    if opened.content_type == tls13_record.CONTENT_APPLICATION_DATA {
+                        out = opened.plaintext
+                        outlen = opened.plaintext_len
+                        looking = 0
+                    } else {
+                        if opened.content_type == tls13_record.CONTENT_ALERT {
+                            desc = 0
+                            if opened.plaintext_len >= 2 { desc = bytes.get(opened.plaintext, 1) & 0xFF }
+                            if desc != tls13_client.ALERT_CLOSE_NOTIFY {
+                                rerr = string.concat("tls alert: ", tls13_client.alert_name(desc))
+                            }
+                            looking = 0
+                        }
+                        if opened.plaintext != null { bytes.free(opened.plaintext) }
+                    }
+                }
+            }
+        }
+    }
+    return out, outlen, rerr
+}
+
+close_conn(conn: ptr) {
+    c = conn as *ServerConn
+    if c == null { return }
+    tls13_record.free_ctx(c.app_send as ptr)
+    tls13_record.free_ctx(c.app_recv as ptr)
+    recio_free(c.rio as *RecordIO)
+    net.tcp_close(c.sock)
+    libc_free(conn)
+}
+
+// ---- PEM helpers ----
+
+parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
+    chain = list_new()
+    lens = list_new()
+    end_marker = "-----END CERTIFICATE-----"
+    tlen = string_length(pem_text)
+    mlen = string_length(end_marker)
+    pos = 0
+    while pos < tlen {
+        e = string.index_of_from(pem_text, end_marker, pos)
+        if e < 0 { break }
+        block_end = e + mlen
+        block = string.substring_n(pem_text, tlen, pos, block_end)
+        der, label, perr = pem.parse(block)
+        if string.equals(perr, "") == 1 && der != null {
+            list_add_raw(chain, der)
+            list_add_raw(lens, null)
+        }
+        pos = block_end
+    }
+    if list_size(chain) == 0 {
+        list_free(chain)
+        list_free(lens)
+        return null, null
+    }
+    return chain, lens
+}
+
+parse_ec_private_key_pem(pem_text: string) -> ptr {
+    der, label, err = pem.parse(pem_text)
+    if string.equals(err, "") != 1 || der == null {
+        if der != null { bytes.free(der) }
+        return null
+    }
+    dlen = bytes.length(der)
+    if dlen == 32 { return der }
+
+    r = asn1.reader_new(der)
+    sub, body, serr = asn1.read_sequence(r)
+    if string.equals(serr, "") != 1 {
+        asn1.reader_free(r); bytes.free(der)
+        return null
+    }
+
+    // Check version
+    ver_bn, verr = asn1.read_integer(sub)
+    if string.equals(verr, "") != 1 {
+        asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+        return null
+    }
+    bignum.free(ver_bn)
+
+    priv = null
+    if string.equals(label, "EC PRIVATE KEY") == 1 {
+        // ECPrivateKey ::= SEQUENCE { version INTEGER, privateKey OCTET STRING, ... }
+        oct, oerr = asn1.read_octet_string(sub)
+        if string.equals(oerr, "") == 1 { priv = oct }
+    } else {
+        if string.equals(label, "PRIVATE KEY") == 1 {
+            // PKCS#8 PrivateKeyInfo ::= SEQUENCE { version INTEGER, privateKeyAlgorithm AlgId, privateKey OCTET STRING }
+            sa, saerr = asn1.read_tlv(sub)
+            if string.equals(saerr, "") == 1 { bytes.free(sa) }
+            inner_oct, ioerr = asn1.read_octet_string(sub)
+            if string.equals(ioerr, "") == 1 {
+                // Parse inner ECPrivateKey
+                ir = asn1.reader_new(inner_oct)
+                isub, ibody, iserr = asn1.read_sequence(ir)
+                if string.equals(iserr, "") == 1 {
+                    iver_bn, iverr = asn1.read_integer(isub)
+                    if string.equals(iverr, "") == 1 { bignum.free(iver_bn) }
+                    poct, poerr = asn1.read_octet_string(isub)
+                    if string.equals(poerr, "") == 1 { priv = poct }
+                    asn1.reader_free(isub); bytes.free(ibody)
+                }
+                asn1.reader_free(ir); bytes.free(inner_oct)
+            }
+        }
+    }
+
+    asn1.reader_free(sub); asn1.reader_free(r); bytes.free(der); bytes.free(body)
+    return priv
+}
+
+fn free_cert_chain(chain: ptr) {
+    if chain == null { return }
+    n = list_size(chain)
+    i = 0
+    while i < n {
+        c = list_get_raw(chain, i) as ptr
+        if c != null { bytes.free(c) }
+        i = i + 1
+    }
+    list_free(chain)
+}
+
+// ---- @extern C entry points ----
+
+@c_callback("aether_pure_tls_server_accept")
+pure_tls_server_accept(fd: int, cert_path: string, key_path: string) -> ptr {
+    sock = tcp_socket_from_fd_owned(fd)
+    if sock == null { return null }
+
+    fh_c = fs.file_open_raw(cert_path, "r")
+    if fh_c == null { net.tcp_close(sock); return null }
+    cert_text = fs.file_read_all_raw(fh_c)
+    fs.file_close(fh_c)
+
+    fh_k = fs.file_open_raw(key_path, "r")
+    if fh_k == null { net.tcp_close(sock); return null }
+    key_text = fs.file_read_all_raw(fh_k)
+    fs.file_close(fh_k)
+
+    chain_list, lens_list = parse_cert_chain_pem(cert_text)
+    if chain_list == null {
+        net.tcp_close(sock)
+        return null
+    }
+
+    // EC P-256 keys only. The handshake signs CertificateVerify with
+    // sign_server_cert_verify_ecdsa_p256, so an RSA key cannot be used even
+    // though the certificate would otherwise be valid -- the handshake fails
+    // at the signature step and the peer sees a dropped connection. Generate
+    // the pair with:
+    //   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1
+    priv_key = parse_ec_private_key_pem(key_text)
+    if priv_key == null {
+        free_cert_chain(chain_list)
+        list_free(lens_list)
+        net.tcp_close(sock)
+        return null
+    }
+
+    x25519_priv = rand_into(32)
+    if x25519_priv == null {
+        // An all-zeros X25519 private key would make the shared secret
+        // trivially recoverable, so refuse rather than fall back.
+        bytes.free(priv_key)
+        free_cert_chain(chain_list)
+        list_free(lens_list)
+        net.tcp_close(sock)
+        return null
+    }
+
+    sconn, err = accept(sock, chain_list, lens_list, priv_key, x25519_priv)
+
+    bytes.free(priv_key)
+    bytes.free(x25519_priv)
+    free_cert_chain(chain_list)
+    list_free(lens_list)
+
+    if err != "" {
+        if sconn != null { close_conn(sconn) }
+        return null
+    }
+    return sconn
+}
+
+@c_callback("aether_pure_tls_server_send")
+pure_tls_server_send(sconn: ptr, buf: ptr, len: int) -> int {
+    if sconn == null || buf == null || len <= 0 { return -1 }
+    b = bytes.new(len)
+    bytes.set(b, len - 1, 0)
+    mem.copy(bytes.data(b), buf, len as long)
+    err = conn_send(sconn, b, len)
+    bytes.free(b)
+    if err != "" { return -1 }
+    return len
+}
+
+@c_callback("aether_pure_tls_server_recv")
+pure_tls_server_recv(sconn: ptr, buf: ptr, len: int) -> int {
+    if sconn == null || buf == null || len <= 0 { return -1 }
+    p, n, err = conn_recv(sconn)
+    if err != "" || n <= 0 {
+        if p != null { bytes.free(p) }
+        return -1
+    }
+    copy_n = n
+    if copy_n > len { copy_n = len }
+    mem.copy(buf, bytes.data(p), copy_n as long)
+    bytes.free(p)
+    return copy_n
+}
+
+@c_callback("aether_pure_tls_server_close")
+pure_tls_server_close(sconn: ptr) {
+    if sconn != null {
+        close_conn(sconn)
+    }
+}

@@ -176,6 +176,68 @@ main() {
     bytes.free(wrong)
     println("ok   malformed ClientHellos are refused")
 
+    // ---- 5. the four server flight builders ----
+    // These are exercised indirectly by the full handshake, but a bug in one
+    // shows up there as a vague connection failure. Asserting the wire shape
+    // directly names which message is wrong.
+    ee = tls13_hs.encrypted_extensions()
+    eelen = bytes.length(ee)
+    if eelen < 4 {
+        println("FAIL 5: encrypted_extensions too short (${eelen})")
+        fails = fails + 1
+    } else {
+        if (bytes.get(ee, 0) & 0xFF) != tls13_hs.HS_ENCRYPTED_EXTENSIONS {
+            println("FAIL 5: encrypted_extensions has the wrong msg type")
+            fails = fails + 1
+        }
+        // header(4) + a 2-byte empty extensions block
+        body = ((bytes.get(ee, 1) & 0xFF) << 16) | ((bytes.get(ee, 2) & 0xFF) << 8) | (bytes.get(ee, 3) & 0xFF)
+        if body != eelen - 4 {
+            println("FAIL 5: encrypted_extensions length ${body} != body ${eelen - 4}")
+            fails = fails + 1
+        }
+    }
+    bytes.free(ee)
+
+    vd = filled(32, 3)
+    fin = tls13_hs.finished_msg(vd, 32)
+    finlen = bytes.length(fin)
+    if (bytes.get(fin, 0) & 0xFF) != tls13_hs.HS_FINISHED {
+        println("FAIL 5: finished_msg has the wrong msg type")
+        fails = fails + 1
+    }
+    fbody = ((bytes.get(fin, 1) & 0xFF) << 16) | ((bytes.get(fin, 2) & 0xFF) << 8) | (bytes.get(fin, 3) & 0xFF)
+    if fbody != 32 {
+        println("FAIL 5: finished_msg body ${fbody}, want 32")
+        fails = fails + 1
+    }
+    if finlen != 36 {
+        println("FAIL 5: finished_msg total ${finlen}, want 36")
+        fails = fails + 1
+    }
+    bytes.free(fin)
+    bytes.free(vd)
+
+    sig = filled(70, 5)
+    cv = tls13_hs.certificate_verify_msg(0x0403, sig, 70)
+    if (bytes.get(cv, 0) & 0xFF) != tls13_hs.HS_CERTIFICATE_VERIFY {
+        println("FAIL 5: certificate_verify_msg has the wrong msg type")
+        fails = fails + 1
+    }
+    // body = scheme(2) + siglen(2) + sig
+    cvbody = ((bytes.get(cv, 1) & 0xFF) << 16) | ((bytes.get(cv, 2) & 0xFF) << 8) | (bytes.get(cv, 3) & 0xFF)
+    if cvbody != 74 {
+        println("FAIL 5: certificate_verify_msg body ${cvbody}, want 74")
+        fails = fails + 1
+    }
+    if ((bytes.get(cv, 4) & 0xFF) << 8 | (bytes.get(cv, 5) & 0xFF)) != 0x0403 {
+        println("FAIL 5: certificate_verify_msg did not carry the scheme")
+        fails = fails + 1
+    }
+    bytes.free(cv)
+    bytes.free(sig)
+    println("ok   the server flight builders emit well-formed messages")
+
     if fails != 0 {
         println("tls13_server_hs: ${fails} failure(s)")
         exit(1)

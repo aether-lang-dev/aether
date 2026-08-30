@@ -173,6 +173,9 @@ typedef struct HttpServer {
     // that don't need it. Lazy-allocated by http_server_set_tls.
     int tls_enabled;
     void* tls_ctx;
+    int is_pure_tls;
+    char* cert_path;
+    char* key_path;
 
     // HTTP/2 (#260 Tier 2). When h2_enabled == 1:
     //   - The TLS context advertises "h2" + "http/1.1" via ALPN so

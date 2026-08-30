@@ -52,7 +52,7 @@ extern free(p: ptr)
 exports(
     init_leaf,
     LEAFCERT_SIZE,
-    cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256,
+    cert_verify_content, client_cert_verify_content, sign_client_cert_verify_ecdsa_p256, sign_server_cert_verify_ecdsa_p256,
     verify_cert_verify, verify_cert_verify_rsa_pss, parse_certificate, free_leaf,
     split_ecdsa_sig,
     LeafCert,
@@ -122,6 +122,30 @@ sign_client_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int,
     bytes.copy_from_bytes(body, bytes.length(rder), sder, 0, bytes.length(sder))
     // NOTE: asn1.encode_sequence -> wrap_tlv CONSUMES (frees) `body`, so we must
     // NOT free it again here (double-free). rder/sder are our own copies.
+    sig = asn1.encode_sequence(body)
+    bytes.free(content); bytes.free(digest)
+    bytes.free(r32); bytes.free(s32)
+    bignum.free(rbn); bignum.free(sbn)
+    bytes.free(rder); bytes.free(sder)
+    return sig
+}
+
+// Sign a server CertificateVerify with an ECDSA-P256 server key. Builds the
+// §4.4.3 server content ("TLS 1.3, server CertificateVerify"), SHA-256 hashes it,
+// ECDSA-signs with `priv` (32-byte scalar) and per-message nonce `k` (32 bytes),
+// and returns the DER ECDSA-Sig-Value SEQUENCE { r INTEGER, s INTEGER } (caller frees).
+sign_server_cert_verify_ecdsa_p256(priv: ptr, transcript_hash: ptr, th_len: int, k: ptr) -> ptr {
+    content, clen = cert_verify_content(transcript_hash, th_len)
+    digest = sha256_of_bytes(content, clen)
+    r32, s32 = p256.ecdsa_sign(priv, digest, k)
+    rbn = bignum.from_bytes_unsigned(r32, 32)
+    sbn = bignum.from_bytes_unsigned(s32, 32)
+    rder = asn1.encode_integer(rbn)
+    sder = asn1.encode_integer(sbn)
+    body = bytes.new(bytes.length(rder) + bytes.length(sder))
+    if bytes.length(body) > 0 { bytes.set(body, bytes.length(body) - 1, 0) }
+    bytes.copy_from_bytes(body, 0, rder, 0, bytes.length(rder))
+    bytes.copy_from_bytes(body, bytes.length(rder), sder, 0, bytes.length(sder))
     sig = asn1.encode_sequence(body)
     bytes.free(content); bytes.free(digest)
     bytes.free(r32); bytes.free(s32)

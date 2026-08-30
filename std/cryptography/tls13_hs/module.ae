@@ -29,6 +29,7 @@
 // Wire helpers (put8/16/24, opaque vectors) live here too.
 
 import std.bytes
+import std.list
 
 extern malloc(size: int) -> ptr
 extern free(p: ptr)
@@ -40,7 +41,9 @@ exports(
     client_hello, client_hello_sni, client_hello_full, client_hello_pq, client_hello_psk, PskCh, parse_server_hello,
     ShParsed,
     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384,
-    GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768
+    GROUP_X25519, GROUP_SECP256R1, GROUP_X25519MLKEM768,
+    HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
+    encrypted_extensions, certificate_msg, certificate_verify_msg, finished_msg
 )
 
 // Cipher suites (RFC 8446 appendix B.4).
@@ -65,6 +68,10 @@ const SIG_ED25519 = 0x0807
 // Handshake message types (RFC 8446 §4).
 const HS_CLIENT_HELLO = 1
 const HS_SERVER_HELLO = 2
+const HS_ENCRYPTED_EXTENSIONS = 8
+const HS_CERTIFICATE = 11
+const HS_CERTIFICATE_VERIFY = 15
+const HS_FINISHED = 20
 
 // Result of parsing a ServerHello.
 struct ShParsed {
@@ -862,4 +869,80 @@ fn is_hrr_random(msg: ptr, off: int) -> int {
     }
     bytes.free(hrr)
     return same
+}
+
+// EncryptedExtensions handshake message (RFC 8446 §4.3.1)
+// Body: extensions<2> (empty in our subset)
+encrypted_extensions() -> ptr {
+    m = bytes.new(6)
+    bytes.set(m, 5, 0)
+    bytes.set(m, 0, HS_ENCRYPTED_EXTENSIONS)
+    bytes.set(m, 1, 0)
+    bytes.set(m, 2, 0)
+    bytes.set(m, 3, 2)
+    bytes.set(m, 4, 0)
+    bytes.set(m, 5, 0)
+    return m
+}
+
+// Certificate handshake message (RFC 8446 §4.4.2)
+// cert_chain: list of DER byte buffers
+// cert_lens: list of lengths
+// ctx_len: context length (0 for server)
+certificate_msg(cert_chain: ptr, cert_lens: ptr, ctx_len: int) -> ptr {
+    n = list.list_size(cert_chain)
+    entries_len = 0
+    i = 0
+    while i < n {
+        c = list.list_get_raw(cert_chain, i)
+        c_len = bytes.length(c)
+        entries_len = entries_len + 3 + c_len + 2
+        i = i + 1
+    }
+    body_len = 1 + ctx_len + 3 + entries_len
+    m = bytes.new(4 + body_len)
+    bytes.set(m, 4 + body_len - 1, 0)
+    bytes.set(m, 0, HS_CERTIFICATE)
+    put24(m, 1, body_len)
+    bytes.set(m, 4, ctx_len)
+    p = 5 + ctx_len
+    put24(m, p, entries_len)
+    p = p + 3
+    i = 0
+    while i < n {
+        c = list.list_get_raw(cert_chain, i)
+        c_len = bytes.length(c)
+        put24(m, p, c_len)
+        p = p + 3
+        bytes.copy_from_bytes(m, p, c, 0, c_len)
+        p = p + c_len
+        put16(m, p, 0)
+        p = p + 2
+        i = i + 1
+    }
+    return m
+}
+
+// CertificateVerify handshake message (RFC 8446 §4.4.3)
+certificate_verify_msg(scheme: int, sig: ptr, sig_len: int) -> ptr {
+    body_len = 2 + 2 + sig_len
+    total = 4 + body_len
+    m = bytes.new(total)
+    bytes.set(m, total - 1, 0)
+    bytes.set(m, 0, HS_CERTIFICATE_VERIFY)
+    put24(m, 1, body_len)
+    put16(m, 4, scheme)
+    put16(m, 6, sig_len)
+    bytes.copy_from_bytes(m, 8, sig, 0, sig_len)
+    return m
+}
+
+// Finished handshake message (RFC 8446 §4.4.4)
+finished_msg(vd: ptr, vd_len: int) -> ptr {
+    m = bytes.new(4 + vd_len)
+    bytes.set(m, 4 + vd_len - 1, 0)
+    bytes.set(m, 0, HS_FINISHED)
+    put24(m, 1, vd_len)
+    bytes.copy_from_bytes(m, 4, vd, 0, vd_len)
+    return m
 }

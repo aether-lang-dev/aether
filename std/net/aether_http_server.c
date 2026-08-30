@@ -211,6 +211,29 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 SSL_CTX* aether_http_client_ssl_ctx(void);
 #endif
 
+/* Pure TLS Server weak stubs (overridden when linking Aether std.cryptography.tls13_server) */
+#if defined(__GNUC__) || defined(__clang__)
+#define AETHER_WEAK __attribute__((weak))
+#else
+#define AETHER_WEAK
+#endif
+
+AETHER_WEAK void* aether_pure_tls_server_accept(int fd, const char* cert_path, const char* key_path) {
+    (void)fd; (void)cert_path; (void)key_path;
+    return NULL;
+}
+AETHER_WEAK int aether_pure_tls_server_send(void* pure_conn, const void* buf, int len) {
+    (void)pure_conn; (void)buf; (void)len;
+    return -1;
+}
+AETHER_WEAK int aether_pure_tls_server_recv(void* pure_conn, void* buf, int len) {
+    (void)pure_conn; (void)buf; (void)len;
+    return -1;
+}
+AETHER_WEAK void aether_pure_tls_server_close(void* pure_conn) {
+    (void)pure_conn;
+}
+
 /* Per-connection read buffer. Persists across requests on a
  * keep-alive connection so that pipelined bytes (the start of
  * request N+1 already received while reading request N) are not
@@ -242,6 +265,7 @@ typedef struct HttpConn {
 #else
     void* ssl;    /* layout-stable placeholder for the no-TLS build */
 #endif
+    void* pure_tls; /* non-NULL when using pure TLS server connection */
     /* HTTP/2 (#260 Tier 2). Set to 1 either via ALPN selecting "h2"
      * during the TLS handshake or via an HTTP/1.1 → h2c upgrade
      * negotiated on a plain socket. When set, the request loop
@@ -304,6 +328,9 @@ typedef struct HttpConn {
 int http_conn_fd(HttpConn* conn) { return conn ? conn->fd : -1; }
 
 static int conn_recv(HttpConn* c, void* buf, int len) {
+    if (c->pure_tls) {
+        return aether_pure_tls_server_recv(c->pure_tls, buf, len);
+    }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         int n = SSL_read(c->ssl, buf, len);
@@ -315,6 +342,9 @@ static int conn_recv(HttpConn* c, void* buf, int len) {
 }
 
 static int conn_send(HttpConn* c, const void* buf, int len) {
+    if (c->pure_tls) {
+        return aether_pure_tls_server_send(c->pure_tls, buf, len);
+    }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         int n = SSL_write(c->ssl, buf, len);
@@ -447,6 +477,7 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
  * request (slice-aware sendfile is v2). */
 static int sendfile_eligible(HttpConn* c, HttpRequest* req) {
     if (!c) return 0;
+    if (c->pure_tls) return 0;
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) return 0;
 #endif
@@ -578,6 +609,10 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
 }
 
 static void conn_close(HttpConn* c) {
+    if (c->pure_tls) {
+        aether_pure_tls_server_close(c->pure_tls);
+        c->pure_tls = NULL;
+    }
 #ifdef AETHER_HAS_OPENSSL
     if (c->ssl) {
         /* Best-effort graceful shutdown — ignore the result; we're
@@ -795,6 +830,9 @@ HttpServer* http_server_create(int port) {
     server->accept_pollers = NULL;
     server->tls_enabled = 0;
     server->tls_ctx = NULL;
+    server->is_pure_tls = 0;
+    server->cert_path = NULL;
+    server->key_path = NULL;
     server->h2_enabled = 0;
     server->h2_max_concurrent_streams = 0;  /* nghttp2 default 100 when 0 */
     /* HTTP/1.1 is persistent by default (RFC 9112 section 9.3), and a proxy
@@ -1277,6 +1315,19 @@ const char* http_server_set_tls_raw(HttpServer* server,
     if (!server) return "server is null";
     if (!cert_path || !*cert_path) return "cert_path is empty";
     if (!key_path  || !*key_path)  return "key_path is empty";
+
+    if (server->cert_path) free(server->cert_path);
+    if (server->key_path) free(server->key_path);
+    server->cert_path = strdup(cert_path);
+    server->key_path = strdup(key_path);
+
+    const char* env_pure = getenv("AETHER_PURE_TLS");
+    if (env_pure && (strcmp(env_pure, "1") == 0 || strcasecmp(env_pure, "true") == 0)) {
+        server->is_pure_tls = 1;
+        server->tls_enabled = 1;
+        return "";
+    }
+
 #ifdef AETHER_HAS_OPENSSL
     server_openssl_init_once();
 
@@ -1319,8 +1370,9 @@ const char* http_server_set_tls_raw(HttpServer* server,
     server->tls_enabled = 1;
     return "";
 #else
-    (void)cert_path; (void)key_path;
-    return "TLS unavailable: built without OpenSSL";
+    server->is_pure_tls = 1;
+    server->tls_enabled = 1;
+    return "";
 #endif
 }
 
@@ -2196,7 +2248,7 @@ void* http_response_accept_tunnel(HttpServerResponse* res) {
 #ifdef AETHER_HAS_OPENSSL
     /* std.tcp operates on raw sockets; a TLS-wrapped HTTP connection
      * needs a different stream handle that preserves SSL_read/write. */
-    if (conn->ssl) return NULL;
+    if (conn->ssl || conn->pure_tls) return NULL;
 #endif
 
     /* A raw TcpSocket cannot replay bytes the HTTP parser has already
@@ -3981,7 +4033,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             req->local_addr = strdup(conn->local_addr);
             req->local_port = conn->local_port;
         }
-        req->is_tls = (conn->ssl != NULL) ? 1 : 0;
+        req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
     }
 
     // Create response
@@ -4749,15 +4801,26 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      * indefinitely"; the guard must see "nothing applied yet" instead. */
     conn->applied_recv_timeout_ms = -1;
 
-#ifdef AETHER_HAS_OPENSSL
-    if (server->tls_enabled && server->tls_ctx) {
-        if (conn_tls_accept(conn, (SSL_CTX*)server->tls_ctx) != 0) {
-            close(client_fd);
-            free(conn);
-            return;
+    if (server->tls_enabled) {
+        if (server->is_pure_tls) {
+            void* pure_conn = aether_pure_tls_server_accept(conn->fd, server->cert_path, server->key_path);
+            if (!pure_conn) {
+                close(client_fd);
+                free(conn);
+                return;
+            }
+            conn->pure_tls = pure_conn;
         }
-    }
+#ifdef AETHER_HAS_OPENSSL
+        else if (server->tls_ctx) {
+            if (conn_tls_accept(conn, (SSL_CTX*)server->tls_ctx) != 0) {
+                close(client_fd);
+                free(conn);
+                return;
+            }
+        }
 #endif
+    }
     conn_serve(server, conn);
 }
 
@@ -5195,6 +5258,8 @@ void http_server_free(HttpServer* server) {
     http_server_stop(server);
 
 
+    if (server->cert_path) free(server->cert_path);
+    if (server->key_path) free(server->key_path);
     free(server->host);
     
     // Free routes

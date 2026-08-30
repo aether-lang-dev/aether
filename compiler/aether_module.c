@@ -3385,7 +3385,12 @@ void module_prune_unreachable(ASTNode* program) {
                 break;
             case AST_FUNCTION_DEFINITION:
             case AST_BUILDER_FUNCTION:
-                if (!c->is_imported) {
+                if (!c->is_imported || (c->annotation && strncmp(c->annotation, "c_callback:", 11) == 0)) {
+                    if (c->value) {
+                        if (nameset_add(&reachable, c->value)) {
+                            nameset_add(&worklist, c->value);
+                        }
+                    }
                     prune_collect_calls(c, &reachable, &worklist);
                 }
                 break;

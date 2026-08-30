@@ -6,6 +6,9 @@
 
 import std.http
 import std.os
+// Opt in to the pure TLS backend; std.http no longer pulls it in, because
+// doing so gave every std.http user an fs capability requirement.
+import std.cryptography.tls13_server
 
 extern exit(code: int)
 // Use raw form: actor receive handlers can't cleanly discard the

@@ -1,5 +1,20 @@
 // std.http - HTTP Client & Server (alias for std.net)
 //
+// NB the pure-Aether TLS backends are deliberately NOT imported here.
+// std.cryptography.tls13_server reads the certificate and key with std.fs, so
+// importing it from this module gave every std.http user an fs/os capability
+// requirement they had not asked for -- `--emit=lib --with=net` started
+// rejecting `import std.http` because the graph now reached std.os. Serving
+// TLS genuinely does need file access, so the opt-in belongs at the
+// application that wants it:
+//
+//     import std.http
+//     import std.cryptography.tls13_server   // pure TLS server, needs --with=fs
+//
+// The C side reaches the implementation through weak symbols
+// (aether_pure_tls_server_* in aether_http_server.c), so the import is purely
+// what pulls the definitions into the link; nothing here calls them.
+//
 // This is a convenience module that re-exports HTTP functions from std.net.
 // You can use either:
 //   import std.http  (this module)
