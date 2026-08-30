@@ -1023,7 +1023,7 @@ fn _teardown(fw: ptr) {
     current_fw = null
 }
 
-run_summary(fw: ptr) {
+run_summary(fw: ptr) -> int {
     passed_ref = map.get_raw(fw, "passed")
     failed_ref = map.get_raw(fw, "failed")
     skipped_ref = map.get_raw(fw, "skipped")
@@ -1062,8 +1062,44 @@ run_summary(fw: ptr) {
     _teardown(fw)
 
     if failed > 0 {
+        // exit(1), NOT `return 1`. Every one of the 55 run_summary callers in
+        // this tree ends in a BARE `spec.run_summary(fw)` whose value is
+        // discarded, so returning here would make a failing suite exit 0 --
+        // measured: the process status went from 1 to 0 and CI would go green
+        // on genuinely failing tests. Returning the verdict only works for a
+        // caller that writes `return spec.run_summary(fw)`, which none of them
+        // do. The cost is that the failure path still skips whatever cleanup
+        // follows the call; that is the lesser evil, and a caller that wants
+        // its cleanup on both paths can capture the value and return it.
         exit(1)
     }
+    // Return 0 explicitly rather than falling off the end.
+    //
+    // Falling through leaves the return slot holding whatever happened to be
+    // there -- measured, a test whose every assertion passed handed back 24.
+    // That is invisible when the binary is run for its process exit status
+    // (the fall-through path still exits 0), and wrong the moment a caller
+    // CAPTURES the value: aeb's fan-out orchestrator rewrites each test into
+    // `<fn>(s: ptr) -> int` and uses the return as the node's result, so 132
+    // all-green suites reported FAILED.
+    //
+    // Deliberately NOT exit(0), which the ask proposed. 17 of the 55
+    // run_summary callers in this tree do real cleanup after it --
+    // arena.destroy, http.server_stop, sqlite.close, the embedded-interpreter
+    // finalizers -- and exiting here would silently skip all of it. Skipping
+    // arena.destroy would surface as a leak under the ASan/Valgrind gates,
+    // and skipping server_stop can orphan a listener that squats its port.
+    // The failure path keeps exit(1) for the reason given above.
+    //
+    // Why a plain int and not an enum: an enum return does cross the module
+    // boundary and does compare correctly as an int on the far side (tested),
+    // but the MEMBERS do not come with it -- a caller cannot write
+    // `spec.Verdict.Passed`, because types are not part of a module's
+    // exports() surface. So an enum here would hand callers a value they can
+    // still only compare against a bare 0 or 1: the magic numbers stay, and a
+    // type nobody can name gets added on top. 0/1 is also what the callers
+    // actually want, since this value becomes a process exit status.
+    return 0
 }
 
 // _emit_report — write a machine-readable report to AE_SPEC_REPORT in

@@ -1,0 +1,51 @@
+// std.spec: run_summary's RETURN VALUE, not just the process exit status.
+//
+// The two are different questions, and only the first was ever checked. A
+// test binary run for its exit code passed either way, because falling off
+// the end of run_summary still let main() exit 0. But a caller that CAPTURES
+// the value -- aeb's fan-out orchestrator rewrites each test into
+// `<fn>(s: ptr) -> int` and uses the return as that node's result -- got
+// whatever happened to be in the return slot. Measured before the fix: 24,
+// from a suite where every assertion passed, so 132 green suites reported
+// FAILED.
+//
+// This probe captures the value the way that orchestrator does.
+
+import std.spec
+import std.os
+
+extern exit(code: int)
+
+// Mirrors the orchestrator's node shape: takes a ptr, returns an int.
+node_all_green(s: ptr) -> int {
+    fw = spec.init()
+    spec.describe(fw, "arithmetic") {
+        spec.it("adds") callback {
+            spec.assert_eq(1 + 1, 2, "1+1 == 2")
+        }
+        spec.it("multiplies") callback {
+            spec.assert_eq(3 * 4, 12, "3*4 == 12")
+        }
+    }
+    // `return`, not a bare call. A bare trailing call in an `-> int` function
+    // leaves the return value undefined -- clang warns "non-void function does
+    // not return a value", and it is genuinely platform-dependent: this probe
+    // originally omitted the return and got 0 on Linux but 1 on macOS ARM64,
+    // failing its own assertion. That undefined fall-through is the whole
+    // class of bug this test guards, so the probe must not depend on it.
+    return spec.run_summary(fw)
+}
+
+main() {
+    rc = node_all_green(null)
+    if rc != 0 {
+        println("FAIL: an all-green suite returned ${rc}, want 0")
+        exit(1)
+    }
+    // Cleanup after run_summary must still run on the success path: 17 of the
+    // callers in this tree do real work here (arena.destroy, server_stop,
+    // sqlite.close), which an exit(0) in run_summary would have skipped.
+    println("CLEANUP-REACHED")
+    println("PASS: run_summary returned 0 and execution continued")
+    exit(0)
+}

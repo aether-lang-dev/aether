@@ -171,6 +171,7 @@ tests/integration/size_mode/
 tests/integration/source_location/
 tests/integration/source_location_default_capture/
 tests/integration/spec_format_reporting/
+tests/integration/spec_run_summary_return/
 tests/integration/spec_why_message/
 tests/integration/std_dl/
 tests/integration/std_ipc_bash_chain/
