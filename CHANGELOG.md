@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.607.0]
+
 ### Added
 
 - **`ws_recv_timeout`, `ws_poll` and `ws_fd` on the WebSocket client**, so a
