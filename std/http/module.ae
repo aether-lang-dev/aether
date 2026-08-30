@@ -1,3 +1,6 @@
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
 // std.http - HTTP Client & Server (alias for std.net)
 //
 // This is a convenience module that re-exports HTTP functions from std.net.

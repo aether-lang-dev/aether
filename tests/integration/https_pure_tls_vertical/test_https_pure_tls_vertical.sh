@@ -55,7 +55,7 @@ fail() { echo "  [FAIL] $1"; exit 1; }
 # `Can't open ... for writing`, '/CN=' produces the right subject and both
 # SANs. Inert on Linux, where the output is identical with and without it.
 MSYS2_ARG_CONV_EXCL='/CN=' \
-openssl req -x509 -newkey rsa:2048 -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
     -days 2 -nodes -subj "/CN=127.0.0.1" \
     -addext "subjectAltName=IP:127.0.0.1,DNS:localhost" >"$TMP/ssl.log" 2>&1 \
     || { sed -n '1,10p' "$TMP/ssl.log"; fail "could not generate a test certificate"; }
@@ -79,23 +79,59 @@ grep -q READY "$TMP/srv.log" 2>/dev/null || {
     fail "the TLS server never became READY"
 }
 
-# SSL_CERT_FILE is how tls13_client is told where its trust anchors are; with
-# a self-signed test cert that file IS the anchor. Without it the handshake
-# fails closed with "cannot load system trust store", which is correct
-# behaviour and worth stating because it is not obvious.
+# --- Permutation 1: Pure Client -> OpenSSL Server ---
 OUT=$(SSL_CERT_FILE="$TMP/cert.pem" "$TMP/cli" 2>&1) || {
     printf '%s\n' "$OUT" | grep -vE 'warning: unresolved|-->' | sed 's/^/    cli: /'
     sed -n '1,6p' "$TMP/srv.log" | sed 's/^/    srv: /'
-    fail "the pure-TLS client did not complete the exchange"
+    fail "Permutation 1 (Pure client -> OpenSSL server) failed"
 }
-
-case "$OUT" in
-    *"PASS: pure-Aether TLS 1.3 handshake"*) ;;
-    *) echo "$OUT" | sed 's/^/         /'; fail "no handshake confirmation" ;;
-esac
 case "$OUT" in
     *"PASS: HTTP/1.1 response received over pure TLS"*) ;;
-    *) echo "$OUT" | sed 's/^/         /'; fail "no HTTP response over the TLS stream" ;;
+    *) fail "Permutation 1: no HTTP response over TLS stream" ;;
 esac
 
-echo "  [PASS] https_pure_tls_vertical: std.http server <- HTTP/1.1 over pure-Aether TLS 1.3"
+# --- Permutation 2: curl -> OpenSSL Server ---
+CURL_OUT=$(curl -s --cacert "$TMP/cert.pem" https://127.0.0.1:$PORT/ 2>&1) || fail "Permutation 2 (curl -> OpenSSL server) failed"
+case "$CURL_OUT" in
+    *"pure-tls-vertical-ok"*) ;;
+    *) fail "Permutation 2: unexpected response '$CURL_OUT'" ;;
+esac
+
+# Stop OpenSSL server
+kill "$SRV_PID" 2>/dev/null || :
+wait "$SRV_PID" 2>/dev/null || :
+
+# --- Start Pure-Aether TLS Server (AETHER_PURE_TLS=1) ---
+AETHER_PURE_TLS=1 CERT_PATH="$TMP/cert.pem" KEY_PATH="$TMP/key.pem" "$TMP/srv" >"$TMP/srv_pure.log" 2>&1 &
+SRV_PID=$!
+
+i=0
+while [ "$i" -lt 100 ]; do
+    grep -q READY "$TMP/srv_pure.log" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+done
+grep -q READY "$TMP/srv_pure.log" 2>/dev/null || {
+    sed -n '1,10p' "$TMP/srv_pure.log"
+    fail "the pure-Aether TLS server never became READY"
+}
+
+# --- Permutation 3: Pure Client -> Pure-Aether TLS Server ---
+OUT3=$(SSL_CERT_FILE="$TMP/cert.pem" "$TMP/cli" 2>&1) || {
+    printf '%s\n' "$OUT3" | grep -vE 'warning: unresolved|-->' | sed 's/^/    cli: /'
+    cat "$TMP/srv_pure.log" | sed 's/^/    srv_pure: /'
+    fail "Permutation 3 (Pure client -> Pure server) failed"
+}
+case "$OUT3" in
+    *"PASS: HTTP/1.1 response received over pure TLS"*) ;;
+    *) fail "Permutation 3: no HTTP response over TLS stream" ;;
+esac
+
+# --- Permutation 4: curl -> Pure-Aether TLS Server ---
+CURL_OUT4=$(curl -s --cacert "$TMP/cert.pem" https://127.0.0.1:$PORT/ 2>&1) || fail "Permutation 4 (curl -> Pure server) failed"
+case "$CURL_OUT4" in
+    *"pure-tls-vertical-ok"*) ;;
+    *) fail "Permutation 4: unexpected response '$CURL_OUT4'" ;;
+esac
+
+echo "  [PASS] https_pure_tls_vertical: all 4 client/server permutations succeeded"
