@@ -174,6 +174,17 @@ if ! cmp "$TMP/fp_before" "$TMP/fp_after" >/dev/null 2>&1; then
     echo "  --- dedupe output ---"; sed 's/^/    /' "$TMP/out"
     echo "  --- before ---"; sed 's/^/    /' "$TMP/fp_before" | head -10
     echo "  --- after ----"; sed 's/^/    /' "$TMP/fp_after"  | head -10
+    # The rendered lines can look identical when the difference is a byte the
+    # terminal does not show (a CR, a trailing space) or a size mismatch, so
+    # print what cmp actually objected to rather than leaving the reader to
+    # infer it from two blocks that appear the same.
+    echo "  --- cmp says ---"; cmp "$TMP/fp_before" "$TMP/fp_after" 2>&1 | sed 's/^/    /'
+    echo "  --- sizes ---";    wc -c "$TMP/fp_before" "$TMP/fp_after" 2>&1 | sed 's/^/    /'
+    # Rendered text can hide the byte that actually differs (a CR from a
+    # Windows-mode write, a trailing space). Dump both so the next failure
+    # names it instead of needing another CI round trip.
+    echo "  --- before, octal ---"; od -c "$TMP/fp_before" 2>&1 | sed 's/^/    /' | head -12
+    echo "  --- after, octal ---";  od -c "$TMP/fp_after"  2>&1 | sed 's/^/    /' | head -12
     fail "dedupe altered file content"
 fi
 
