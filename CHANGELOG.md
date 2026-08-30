@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A proxied request's head is built into a buffer the connection keeps.** It
+  was allocated through the memory cap and released again for every request,
+  the last per-request allocation left on this path. Every head on a connection
+  is about the same size, so after the first there is nothing to allocate.
+
+  That moves the buffer's lifetime from a request to a connection, and the
+  cap's accounting follows: a build that reuses the buffer must not account for
+  it again, or a long-lived connection drifts upward until the cap refuses
+  allocations the machine has memory for. The retry path rebuilds in place
+  rather than releasing and taking again, which removes the release that had to
+  be got right there.
+
+  **CPU per request 13.2 to 12.9 microseconds** by the least-contended round,
+  better in five of eight rank-matched rounds. Against the controls in the same
+  run: 12.9 to haproxy's 12.3 and nginx's 7.8.
+
+
 ### Testing
 
 - **The bytes a pass-through emits are pinned directly.** The head it sends is
