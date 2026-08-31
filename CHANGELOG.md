@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.616.0]
+
 ### Changed
 
 - **The proxy's hot path no longer formats anything through `printf`.** A
