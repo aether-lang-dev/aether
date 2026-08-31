@@ -27,6 +27,18 @@ version number before tagging the release.
   do not depend on machine load, which is what makes a change this size
   measurable at all.
 
+- **Header names are validated against a table, and the connection pool's key
+  is built without formatting.** Deciding whether a byte may appear in a header
+  name cost an `isalnum` call plus a `strchr` across sixteen punctuation marks,
+  for every character of every header the proxy forwards, and the pool key that
+  decides which idle connection may be reused was rendered with a seven field
+  `snprintf` on every upstream acquire. The table also pins the rule to RFC
+  9110's `token` grammar, where `isalnum` answers for whatever locale happens
+  to be active. A further **9.19% fewer instructions per request** (23,148 to
+  21,031), for **13.7% below where this started**. A new unit test walks all
+  255 byte values against the grammar spelled out independently, so a single
+  mistyped table entry fails the build.
+
 ### Fixed
 
 - **A request pipelined into the same segment as the one before it was

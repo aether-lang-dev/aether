@@ -462,10 +462,37 @@ static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 static void http_pool_key(char* out, size_t n, const char* host, int port,
                           int use_tls, const char* dial_host, int dial_port,
                           int insecure, const char* cafile) {
-    snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
-             host ? host : "", port,
-             dial_host ? dial_host : "", dial_port,
-             use_tls ? 1 : 0, insecure ? 1 : 0, cafile ? cafile : "");
+    const char* h  = host      ? host      : "";
+    const char* dh = dial_host ? dial_host : "";
+    const char* ca = cafile    ? cafile    : "";
+    size_t hl = strlen(h), dhl = strlen(dh), cal = strlen(ca);
+
+    /* This string is the pool's identity for a connection, so the bytes have
+     * to be exactly what the format produced. Anything that would not fit, or
+     * a port that is not a plain number, goes back through snprintf rather
+     * than being rendered differently here. */
+    if (port < 0 || dial_port < 0 || hl + dhl + cal + 48 > n) {
+        snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
+                 h, port, dh, dial_port,
+                 use_tls ? 1 : 0, insecure ? 1 : 0, ca);
+        return;
+    }
+
+    char* p = out;
+    memcpy(p, h, hl); p += hl;
+    *p++ = ':';
+    p += http_write_dec(p, (unsigned long long)port);
+    *p++ = '|';
+    memcpy(p, dh, dhl); p += dhl;
+    *p++ = ':';
+    p += http_write_dec(p, (unsigned long long)dial_port);
+    *p++ = '|';
+    *p++ = use_tls  ? '1' : '0';
+    *p++ = '|';
+    *p++ = insecure ? '1' : '0';
+    *p++ = '|';
+    memcpy(p, ca, cal); p += cal;
+    *p = '\0';
 }
 
 /* Caller holds the lock. Drops every entry idle past the timeout.
@@ -929,11 +956,36 @@ struct HttpClientRequest {
  * will answer (CWE-93). The header is rejected rather than repaired, because
  * silently sending something other than what was asked for is its own bug.
  */
+/* RFC 9110 token characters: letters, digits, and "!#$%&'*+-.^_`|~".
+ *
+ * A table, because the proxy validates every character of every header name it
+ * forwards, and the readable spelling of this test costs an isalnum call plus
+ * a strchr across sixteen punctuation marks per character. Fixing the set here
+ * also pins it to the grammar: isalnum answers for the active locale, and a
+ * header name is a token in every locale. */
+static const unsigned char http_tchar[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
 int http_header_name_ok(const char* name) {
     if (!name || !*name) return 0;
     for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
-        /* RFC 9110 token: these punctuation marks, plus letters and digits. */
-        if (!(isalnum(*c) || strchr("!#$%&'*+-.^_`|~", (int)*c))) return 0;
+        if (!http_tchar[*c]) return 0;
     }
     return 1;
 }

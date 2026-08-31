@@ -455,3 +455,44 @@ TEST_CATEGORY(http_clock_pin_contract, TEST_CATEGORY_NETWORK) {
     ASSERT_TRUE(http_clock_ms() > c);
 }
 #endif  /* !_WIN32 */
+
+/* The token test is a table now, and a table is only as good as the grammar it
+ * was written from. This walks every byte value and compares against RFC 9110's
+ * token rule spelled out independently, so a mistyped entry cannot pass. A
+ * character wrongly accepted here is a header name the proxy would forward
+ * unaltered. */
+TEST_CATEGORY(http_header_name_token_set, TEST_CATEGORY_NETWORK) {
+    for (int i = 1; i < 256; i++) {
+        char one[2] = { (char)i, '\0' };
+        int alpha = (i >= 'A' && i <= 'Z') || (i >= 'a' && i <= 'z');
+        int digit = (i >= '0' && i <= '9');
+        int punct = strchr("!#$%&'*+-.^_`|~", i) != NULL && i != 0;
+        int want  = (alpha || digit || punct) ? 1 : 0;
+        ASSERT_EQ(want, http_header_name_ok(one) ? 1 : 0);
+    }
+
+    /* The empty name and a NULL are not tokens either. */
+    ASSERT_EQ(0, http_header_name_ok(""));
+    ASSERT_EQ(0, http_header_name_ok(NULL));
+
+    /* A whole name, and one with a single bad byte in it. */
+    ASSERT_EQ(1, http_header_name_ok("X-Forwarded-For"));
+    ASSERT_EQ(0, http_header_name_ok("X-Forwarded For"));
+    ASSERT_EQ(0, http_header_name_ok("X-Bad\r\nInjected"));
+}
+
+/* The digits the proxy now writes itself instead of asking snprintf for. */
+TEST_CATEGORY(http_write_dec_digits, TEST_CATEGORY_NETWORK) {
+    struct { unsigned long long v; const char* want; } cases[] = {
+        { 0, "0" }, { 7, "7" }, { 10, "10" }, { 80, "80" }, { 443, "443" },
+        { 19001, "19001" }, { 65535, "65535" }, { 4294967295ULL, "4294967295" },
+        { 18446744073709551615ULL, "18446744073709551615" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char buf[32];
+        size_t n = http_write_dec(buf, cases[i].v);
+        buf[n] = '\0';
+        ASSERT_EQ(strlen(cases[i].want), n);
+        ASSERT_STREQ(cases[i].want, buf);
+    }
+}
