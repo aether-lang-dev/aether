@@ -418,3 +418,40 @@ TEST_CATEGORY(http_request_head_reuse_is_accounted, TEST_CATEGORY_NETWORK) {
     http_request_free_raw(req);
 }
 #endif  /* !_WIN32 */
+
+#if !defined(_WIN32)
+/* A driver pins the clock for one pass of its loop so the several readers in a
+ * request share one counter access. The contract is narrow and worth stating:
+ * pinned, everyone sees the same millisecond; unpinned, everyone sees the real
+ * clock; and pinning again takes a fresh reading. Getting the last one wrong
+ * would freeze every deadline in the process. */
+TEST_CATEGORY(http_clock_pin_contract, TEST_CATEGORY_NETWORK) {
+    http_clock_unpin();
+
+    struct timespec nap = { 0, 3 * 1000 * 1000 };   /* 3ms, clear of a tick */
+
+    /* Unpinned, it moves. */
+    uint64_t a = http_clock_ms();
+    nanosleep(&nap, NULL);
+    uint64_t b = http_clock_ms();
+    ASSERT_TRUE(b > a);
+
+    /* Pinned, it does not, however long the pass takes. */
+    http_clock_pin();
+    uint64_t p1 = http_clock_ms();
+    nanosleep(&nap, NULL);
+    ASSERT_EQ(p1, http_clock_ms());
+    ASSERT_TRUE(p1 >= b);
+
+    /* Pinning again reads afresh: a loop that never advanced its pinned clock
+     * would never time anything out. */
+    http_clock_pin();
+    ASSERT_TRUE(http_clock_ms() > p1);
+
+    /* And releasing it goes back to the real clock. */
+    http_clock_unpin();
+    uint64_t c = http_clock_ms();
+    nanosleep(&nap, NULL);
+    ASSERT_TRUE(http_clock_ms() > c);
+}
+#endif  /* !_WIN32 */

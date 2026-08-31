@@ -45,6 +45,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <stdatomic.h>
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_compiler.h"
 #include <limits.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -420,14 +421,39 @@ static int64_t         http_pool_idle_ms = 15000;
  * never a missed expiry. */
 static int64_t         http_pool_next_expiry_ms = INT64_MAX;
 
-static int64_t http_now_ms(void) {
-    struct timespec ts;
-#if defined(CLOCK_MONOTONIC)
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
-        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
-    return (int64_t)time(NULL) * 1000;
+/* A millisecond clock pinned for one pass of an event loop.
+ *
+ * A driver reads the clock several times per request: arming a deadline,
+ * computing the next timeout, expiring idle pooled connections, recording when
+ * an upstream was picked. Each read is a counter the kernel serialises, and on
+ * a single core arch_counter_get_cntvct is 4.9% of this path's profile -- the
+ * largest entry that is not TCP receive processing.
+ *
+ * Within one pass those readers do not need different answers: the pass takes
+ * microseconds and every deadline they compare against is milliseconds or
+ * seconds away. So the driver pins one value for the pass and they share it.
+ *
+ * Defined here rather than in a header because a static thread-local in a
+ * header is a separate variable per translation unit, and the thread that pins
+ * it is not in the file that reads it. A thread that never pins reads the real
+ * clock, which is every thread but a driver. */
+AETHER_TLS_SHARED uint64_t aether_http_pinned_ms = 0;
+
+void http_clock_pin(void) {
+    uint64_t ms = aether_now_ns() / 1000000ULL;
+    /* Zero means "not pinned", so a clock reading exactly zero pins a
+     * millisecond later rather than not at all. */
+    aether_http_pinned_ms = ms ? ms : 1;
 }
+
+void http_clock_unpin(void) { aether_http_pinned_ms = 0; }
+
+uint64_t http_clock_ms(void) {
+    return aether_http_pinned_ms ? aether_http_pinned_ms
+                                 : (aether_now_ns() / 1000000ULL);
+}
+
+static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 
 /* Everything that makes two connections non-interchangeable: the origin, the
  * endpoint actually dialled (proxy or origin), TLS, and the verification the

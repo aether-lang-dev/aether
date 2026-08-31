@@ -35,6 +35,27 @@ version number before tagging the release.
   them, so every CPU-per-request figure taken before this compared one side
   building four headers with two forwarding as-is. That is the configuration
   being measured, not the code.
+- **A driver pins the clock for one pass of its event loop.** It reads the
+  clock several times per request -- arming a deadline, computing the next
+  timeout, expiring idle pooled connections, recording when an upstream was
+  picked -- and each read is a counter the kernel serialises. On a single core
+  `arch_counter_get_cntvct` was **4.9% of this path's profile**, the largest
+  entry that is not TCP receive processing.
+
+  Within one pass those readers do not need different answers: the pass takes
+  microseconds and every deadline they compare against is milliseconds or
+  seconds away. The clock is pinned after the wait and released before the
+  next one, so a poll that blocks for its timeout cannot leave the pass reading
+  a time from before it.
+
+  **CPU per request 14.2 to 12.7 microseconds** on a single core, better in
+  seven of eight rank-matched rounds.
+
+  This was written once, measured at exactly zero on a two-core configuration,
+  and reverted. The profile said 4.9% and the profile was right: with two
+  driver threads the reads overlap other work, and on one core they are on the
+  critical path. The lesson is about where a change is measured, not whether
+  it was worth making.
 
 
 ## [0.613.0]

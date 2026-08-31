@@ -1142,6 +1142,12 @@ static void* ev_driver_main(void* arg) {
          * visible. */
         int n = aether_io_poller_poll(&d->poller, events, 64,
                                       ev_next_timeout_ms(d, 200));
+
+        /* Pin the clock for this pass, after the wait and not before: the poll
+         * above can block for its whole timeout. Everything below then shares
+         * one counter access rather than taking one to arm each deadline,
+         * expire each idle pooled connection and record each upstream pick. */
+        http_clock_pin();
         for (int i = 0; i < n; i++) {
             int fd = events[i].fd;
             if (fd == d->wake_r) { ev_take_submissions(d); continue; }
@@ -1158,6 +1164,10 @@ static void* ev_driver_main(void* arg) {
             if (r < 0) { ev_conn_close(d, c); continue; }
             if (ev_advance(d, c) < 0) ev_conn_close(d, c);
         }
+
+        /* Released before waiting again, so the next wait's timeout is
+         * computed from the real clock rather than from this pass's. */
+        http_clock_unpin();
     }
 
     /* Shutting down: the connections this driver owns are its to close. */
