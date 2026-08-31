@@ -39,6 +39,15 @@ version number before tagging the release.
   255 byte values against the grammar spelled out independently, so a single
   mistyped table entry fails the build.
 
+- **The outbound request itself comes from the arena the proxy already keeps.**
+  Its struct, method and URL were three `malloc`s and three `free`s on every
+  proxied request, next to the header nodes that were already bump-allocated
+  from the connection's arena. They now share it, and ownership of the method
+  and URL is tracked per pointer rather than inferred, so the redirect path,
+  which replaces the URL with one it allocated itself, still frees exactly what
+  it owns. Another **3.62%** (21,004 to 20,245), for **16.9% below where this
+  branch started**. The macOS `leaks(1)` gate is clean across all 305 programs.
+
 ### Fixed
 
 - **A request pipelined into the same segment as the one before it was

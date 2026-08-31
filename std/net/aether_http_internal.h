@@ -179,4 +179,11 @@ size_t http_arena_avail(const HttpArena* a);
  * The caller owns the arena and outlives the request. */
 void http_request_use_arena(HttpClientRequest* req, HttpArena* arena);
 
+/* Create a request whose struct, method and URL are bump-allocated from
+ * `arena`, which the caller resets when the request is done. Falls back to the
+ * owning allocations of http_request_raw when there is no arena or it is full,
+ * so the caller frees the result the same way either way. */
+HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
+                                          HttpArena* arena);
+
 #endif // AETHER_HTTP_INTERNAL_H

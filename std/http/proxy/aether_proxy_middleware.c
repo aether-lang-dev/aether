@@ -503,8 +503,8 @@ static int px_build(AetherProxyExchange* px) {
     px->upstream_url = build_upstream_url(px->u->base_url, px->forward_path,
                                           req->query_string);
     px->outbound = px->upstream_url ?
-        http_request_raw(req->method ? req->method : "GET", px->upstream_url) : NULL;
-    if (px->outbound && px->arena) http_request_use_arena(px->outbound, px->arena);
+        http_request_raw_arena(req->method ? req->method : "GET",
+                               px->upstream_url, px->arena) : NULL;
     if (!px->outbound) {
         free(px->upstream_url);
         px->upstream_url = NULL;

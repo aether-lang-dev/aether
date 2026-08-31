@@ -18,6 +18,7 @@ const char* http_response_error(HttpResponse* r) { (void)r; return "networking d
 int http_response_ok(HttpResponse* r) { (void)r; return 0; }
 struct HttpClientRequest { int unused; };
 HttpClientRequest* http_request_raw(const char* m, const char* u) { (void)m; (void)u; return NULL; }
+HttpClientRequest* http_request_raw_arena(const char* m, const char* u, struct HttpArena* a) { (void)m; (void)u; (void)a; return NULL; }
 int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
 int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
 int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
@@ -903,6 +904,13 @@ struct HttpClientRequest {
     /* Optional. When set, header nodes are bump-allocated from it and freed
      * by whoever owns it, not by http_request_free_raw. */
     struct HttpArena* arena;
+    /* The struct came out of that arena, so it must not be handed to free():
+     * the allocator never gave it out. `method_owned` and `url_owned` say the
+     * same of those two pointers separately, because the redirect path
+     * replaces the URL with one it allocated itself. */
+    int   arena_backed;
+    int   method_owned;
+    int   url_owned;
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
@@ -1011,10 +1019,39 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
     if (!req) return NULL;
     req->method = strdup(method);
     req->url    = strdup(url);
+    req->method_owned = 1;
+    req->url_owned    = 1;
     if (!req->method || !req->url) {
         http_request_free_raw(req);
         return NULL;
     }
+    return req;
+}
+
+HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
+                                          HttpArena* arena) {
+    if (!url || !*url) return NULL;
+    if (!http_header_name_ok(method)) return NULL;
+    if (!http_header_value_ok(url)) return NULL;
+
+    size_t ml = strlen(method), ul = strlen(url);
+    char* block = arena ? (char*)http_arena_alloc(
+                      arena, sizeof(HttpClientRequest) + ml + 1 + ul + 1)
+                        : NULL;
+    if (!block) {
+        HttpClientRequest* req = http_request_raw(method, url);
+        if (req) req->arena = arena;
+        return req;
+    }
+
+    HttpClientRequest* req = (HttpClientRequest*)block;
+    memset(req, 0, sizeof(*req));
+    req->arena = arena;
+    req->arena_backed = 1;
+    req->method = block + sizeof(HttpClientRequest);
+    memcpy(req->method, method, ml + 1);
+    req->url = req->method + ml + 1;
+    memcpy(req->url, url, ul + 1);
     return req;
 }
 
@@ -1238,8 +1275,8 @@ int http_request_ignore_http_proxy_raw(HttpClientRequest* req) {
 
 void http_request_free_raw(HttpClientRequest* req) {
     if (!req) return;
-    free(req->method);
-    free(req->url);
+    if (req->method_owned) free(req->method);
+    if (req->url_owned) free(req->url);
     /* Body was alloc'd via aether_caps_malloc in
      * http_request_set_body_raw; pair the free with the recorded
      * length so cap accounting stays at current-usage. */
@@ -1258,6 +1295,7 @@ void http_request_free_raw(HttpClientRequest* req) {
     }
     req->headers = NULL;
     req->headers_tail = NULL;
+    if (req->arena_backed) return;
     free(req);
 }
 
@@ -3295,8 +3333,9 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
         free(current_url);
         current_url = strdup(next_url);
 
-        free(req->url);
+        if (req->url_owned) free(req->url);
         req->url = next_url;  /* takes ownership */
+        req->url_owned = 1;
 
         http_response_free(resp);
         resp = http_request_internal(req);
