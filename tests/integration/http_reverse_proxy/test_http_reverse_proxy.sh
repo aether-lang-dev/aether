@@ -17,6 +17,7 @@
 #  11. A request split across several writes, with the header
 #      terminator itself cut in half and the body arriving last,
 #      still completes
+#  13. Two requests pipelined into one segment both get answered
 #
 # Verifies (mode=timeout):
 #  10. Upstream sleep 3s vs proxy timeout 1s → 504 within ~1.5s
@@ -295,8 +296,12 @@ if command -v python3 >/dev/null 2>&1; then
     else
         echo "  [FAIL] T11 fragmented request: $FRAG"; exit 1
     fi
+    if ! PIPE=$(python3 "$SCRIPT_DIR/pipeline_probe.py" 19000 2>&1); then
+        echo "  [FAIL] T13 pipelined requests: $PIPE"; exit 1
+    fi
 else
     echo "  [SKIP] T11 fragmented request: python3 not on PATH"
+    echo "  [SKIP] T13 pipelined requests: python3 not on PATH"
 fi
 
 stop_servers
@@ -322,14 +327,14 @@ stop_servers
 
 if [ "$IS_WIN" = "1" ]; then
     if [ "$FRAG_RAN" = "1" ]; then
-        echo "  [PASS] http_reverse_proxy: 5/12 win-reduced - basic, POST body, Upgrade refusal, fragmented, timeout"
+        echo "  [PASS] http_reverse_proxy: 6/13 win-reduced - basic, POST body, Upgrade refusal, fragmented, pipelined, timeout"
     else
-        echo "  [PASS] http_reverse_proxy: 4/12 win-reduced - basic, POST body, Upgrade refusal, timeout (fragmented skipped)"
+        echo "  [PASS] http_reverse_proxy: 4/13 win-reduced - basic, POST body, Upgrade refusal, timeout (python3 probes skipped)"
     fi
 else
     if [ "$FRAG_RAN" = "1" ]; then
-        echo "  [PASS] http_reverse_proxy: 12/12 - basic round-trip, headers, body, long header, fragmented, timeout"
+        echo "  [PASS] http_reverse_proxy: 13/13 - basic round-trip, headers, body, long header, fragmented, pipelined, timeout"
     else
-        echo "  [PASS] http_reverse_proxy: 11/12 - basic round-trip, headers, body, long header, timeout (fragmented skipped)"
+        echo "  [PASS] http_reverse_proxy: 11/13 - basic round-trip, headers, body, long header, timeout (python3 probes skipped)"
     fi
 fi

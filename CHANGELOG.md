@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A request pipelined into the same segment as the one before it was
+  dropped.** HTTP/1.1 lets a client send the next request without waiting for
+  the previous answer, and the event-driven proxy read both into one buffer,
+  answered the first, then emptied the buffer before looking at the rest. The
+  second request was discarded and the client waited for a response that was
+  never going to come, until its own timeout. The connection now keeps the
+  bytes past the request it just served and parses them before reading the
+  socket again, and the parse is given the request's own length rather than
+  everything buffered, so a body is framed by its `Content-Length` and never
+  by whatever followed it. Covered by a new probe that sends two requests in
+  one segment, asks for two different paths so the second answer proves the
+  second request was really served, and repeats it with a `POST` body sitting
+  directly in front of the next request.
+
 ## [0.614.0]
 
 ### Changed
