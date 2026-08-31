@@ -18,7 +18,9 @@ const char* http_response_error(HttpResponse* r) { (void)r; return "networking d
 int http_response_ok(HttpResponse* r) { (void)r; return 0; }
 struct HttpClientRequest { int unused; };
 HttpClientRequest* http_request_raw(const char* m, const char* u) { (void)m; (void)u; return NULL; }
-HttpClientRequest* http_request_raw_arena(const char* m, const char* u, struct HttpArena* a) { (void)m; (void)u; (void)a; return NULL; }
+/* No arena to bump-allocate from in a build without networking, so this is
+ * the plain constructor, which is itself a stub here. */
+HttpClientRequest* http_request_raw_arena(const char* m, const char* u, struct HttpArena* a) { (void)a; return http_request_raw(m, u); }
 int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
 int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
 int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
