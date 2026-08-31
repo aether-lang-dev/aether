@@ -2014,11 +2014,24 @@ int http_find_header_in_block(const char* block, const char* end,
  * place for chunked, Content-Length and the no-body statuses to disagree.
  */
 
+const char* http_find_header_end(const char* buf, size_t len) {
+    if (!buf || len < 4) return NULL;
+    const char* p = buf;
+    /* A match has to start at or before this, so that all four bytes exist. */
+    const char* last = buf + len - 3;
+    while (p < last) {
+        const char* cr = (const char*)memchr(p, '\r', (size_t)(last - p));
+        if (!cr) return NULL;
+        if (cr[1] == '\n' && cr[2] == '\r' && cr[3] == '\n') return cr;
+        p = cr + 1;
+    }
+    return NULL;
+}
+
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
-        /* The terminator is NUL-free ASCII and precedes any body byte. */
-        char* hend = strstr(buf, "\r\n\r\n");
+        char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
         char saved = *hend;

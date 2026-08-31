@@ -541,3 +541,39 @@ TEST_CATEGORY(http_find_header_in_block_matching, TEST_CATEGORY_NETWORK) {
                                            out, sizeof(out), &differing));
     ASSERT_EQ(1, differing);
 }
+
+/* The header-block terminator is found by scanning for CR rather than with
+ * strstr. An off-by-one here either misses a complete header block, hanging
+ * the read, or reports one that is not there, which is a framing error. The
+ * boundary cases are what this covers. */
+TEST_CATEGORY(http_find_header_end_boundaries, TEST_CATEGORY_NETWORK) {
+    const char* full = "GET / HTTP/1.1\r\nHost: x\r\n\r\nbody";
+    const char* hit = http_find_header_end(full, strlen(full));
+    ASSERT_NOT_NULL(hit);
+    ASSERT_EQ(0, memcmp(hit, "\r\n\r\n", 4));
+    ASSERT_STREQ("body", hit + 4);
+
+    /* Terminator sitting exactly at the end of the buffer. */
+    const char* exact = "A: b\r\n\r\n";
+    ASSERT_NOT_NULL(http_find_header_end(exact, strlen(exact)));
+
+    /* One byte short of a terminator is not one. */
+    ASSERT_NULL(http_find_header_end("A: b\r\n\r", 7));
+    ASSERT_NULL(http_find_header_end("\r\n\r", 3));
+    ASSERT_NULL(http_find_header_end("", 0));
+    ASSERT_NULL(http_find_header_end("\r\n\r\n", 3));
+
+    /* The shortest possible match, and a lone CR before it. */
+    ASSERT_NOT_NULL(http_find_header_end("\r\n\r\n", 4));
+    const char* decoy = "\rX\r\n\r\n";
+    ASSERT_EQ(2, (int)(http_find_header_end(decoy, strlen(decoy)) - decoy));
+
+    /* A CR run that only completes on the last possible byte. */
+    const char* run = "\r\r\r\r\n\r\n";
+    ASSERT_EQ(3, (int)(http_find_header_end(run, strlen(run)) - run));
+
+    /* Not present at all, and binary-safe past an embedded NUL. */
+    ASSERT_NULL(http_find_header_end("no terminator here", 18));
+    const char nul[] = { 'A', '\0', '\r', '\n', '\r', '\n' };
+    ASSERT_EQ(2, (int)(http_find_header_end(nul, sizeof(nul)) - nul));
+}

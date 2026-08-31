@@ -55,8 +55,15 @@ version number before tagging the release.
   over-permissive, never wrong, because two bytes that are equal ignoring case
   always agree on it. A further **2.02%** (20,238 to 19,829).
 
-  Together these bring the proxy to **18.6% fewer instructions per request**
-  than this branch started with, 24,368 down to 19,829. That is user-space
+- **The end of a response's header block is found with `memchr` rather than
+  `strstr`.** glibc's `strstr` runs a two-way-algorithm setup before it looks at
+  a single byte, which is a poor trade for a four byte needle scanned once per
+  response. Scanning for the CR and checking the three bytes behind it is
+  **2.69%** cheaper (19,832 to 19,299), and is length-bounded rather than
+  relying on the buffer being NUL-terminated.
+
+  Together these bring the proxy to **20.8% fewer instructions per request**
+  than this branch started with, 24,368 down to 19,299. That is user-space
   work only: the four syscalls per request are unchanged, so the effect on wall
   clock is smaller than the instruction count and is worth measuring on real
   hardware rather than predicting.

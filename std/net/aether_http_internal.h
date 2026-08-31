@@ -186,4 +186,9 @@ void http_request_use_arena(HttpClientRequest* req, HttpArena* arena);
 HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
                                           HttpArena* arena);
 
+/* The CR LF CR LF that ends a header block, or NULL. Length-bounded rather
+ * than NUL-terminated, and cheaper than strstr, which pays a two-way-algorithm
+ * setup before it looks at a single byte of a four byte needle. */
+const char* http_find_header_end(const char* buf, size_t len);
+
 #endif // AETHER_HTTP_INTERNAL_H
