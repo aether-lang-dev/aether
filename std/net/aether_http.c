@@ -1309,6 +1309,7 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
  * framing (caller then keeps the raw body). Binary-safe (copies by
  * length). Defined below. */
 static int http_value_has_chunked(const char* v);
+static int http_value_has_chunked_n(const char* v, size_t len);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
 /* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
@@ -1952,9 +1953,10 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
  * `out`, and sets *differing when two of them disagree. A framing header that
  * appears twice with two answers has no single answer at all.
  */
-int http_find_header_in_block(const char* block, const char* end,
-                            const char* name, char* out, size_t out_cap,
-                            int* differing) {
+int http_find_header_span(const char* block, const char* end,
+                          const char* name, char* out, size_t out_cap,
+                          int* differing,
+                          const char** out_v, size_t* out_vl) {
     size_t name_len = strlen(name);
     int count = 0;
     if (differing) *differing = 0;
@@ -1981,19 +1983,28 @@ int http_find_header_in_block(const char* block, const char* end,
             while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
             size_t vl = (size_t)(v_end - v);
 
-            char value[256];
-            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
-            memcpy(value, v, vl);
-            value[vl] = '\0';
-
+            /* The span is the value where it lies, so a caller that only
+             * needs to look at it is not limited by any buffer size. */
             if (count == 0) {
-                if (out && out_cap) {
-                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
-                    memcpy(out, value, copy);
-                    out[copy] = '\0';
+                if (out_v)  *out_v  = v;
+                if (out_vl) *out_vl = vl;
+            }
+
+            if (out || differing) {
+                char value[256];
+                size_t cv = vl < sizeof(value) - 1 ? vl : sizeof(value) - 1;
+                memcpy(value, v, cv);
+                value[cv] = '\0';
+
+                if (count == 0) {
+                    if (out && out_cap) {
+                        size_t copy = cv < out_cap - 1 ? cv : out_cap - 1;
+                        memcpy(out, value, copy);
+                        out[copy] = '\0';
+                    }
+                } else if (differing && out && strcmp(out, value) != 0) {
+                    *differing = 1;
                 }
-            } else if (differing && out && strcmp(out, value) != 0) {
-                *differing = 1;
             }
             count++;
         }
@@ -2001,6 +2012,13 @@ int http_find_header_in_block(const char* block, const char* end,
         line = eol + 1;
     }
     return count;
+}
+
+int http_find_header_in_block(const char* block, const char* end,
+                            const char* name, char* out, size_t out_cap,
+                            int* differing) {
+    return http_find_header_span(block, end, name, out, out_cap, differing,
+                                 NULL, NULL);
 }
 
 /* Has a complete HTTP/1.1 response accumulated in `buf`?
@@ -2036,10 +2054,16 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
         char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
-        char saved = *hend;
-        *hend = '\0';
-        char* te = http_extract_response_header(buf, "Transfer-Encoding");
-        if (te && http_value_has_chunked(te)) {
+
+        /* Read Transfer-Encoding where it lies. Copying it out meant an
+         * allocation and a free per response, and any buffer it was copied
+         * into would have put a length limit on a header whose contents
+         * decide how the body is framed. */
+        const char* te = NULL;
+        size_t te_len = 0;
+        http_find_header_span(buf, hend, "Transfer-Encoding",
+                              NULL, 0, NULL, &te, &te_len);
+        if (te && http_value_has_chunked_n(te, te_len)) {
             f->chunked = 1;
             f->definite = 1;
         } else {
@@ -2066,8 +2090,6 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                 }
             }
         }
-        free(te);
-        *hend = saved;
         if (no_body_expected(response_status_of(buf), method)) {
             f->body_target = f->header_bytes;
             f->definite = 1;
@@ -3098,17 +3120,24 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
 /* Case-insensitive: does the Transfer-Encoding value name `chunked`?
  * `chunked` is the final (and in practice only) transfer coding we
  * decode; a comma-list like "gzip, chunked" still matches. */
-static int http_value_has_chunked(const char* v) {
-    if (!v) return 0;
-    for (const char* p = v; *p; p++) {
-        if ((*p == 'c' || *p == 'C') &&
-            (p[1] == 'h' || p[1] == 'H') && (p[2] == 'u' || p[2] == 'U') &&
-            (p[3] == 'n' || p[3] == 'N') && (p[4] == 'k' || p[4] == 'K') &&
-            (p[5] == 'e' || p[5] == 'E') && (p[6] == 'd' || p[6] == 'D')) {
+static int http_value_has_chunked_n(const char* v, size_t len) {
+    if (!v || len < 7) return 0;
+    /* Only the seven letters can produce these values with 0x20 set, so this
+     * is an exact case-insensitive compare and not a loose one. */
+    for (size_t i = 0; i + 7 <= len; i++) {
+        const char* p = v + i;
+        if ((p[0] | 0x20) == 'c' && (p[1] | 0x20) == 'h' &&
+            (p[2] | 0x20) == 'u' && (p[3] | 0x20) == 'n' &&
+            (p[4] | 0x20) == 'k' && (p[5] | 0x20) == 'e' &&
+            (p[6] | 0x20) == 'd') {
             return 1;
         }
     }
     return 0;
+}
+
+static int http_value_has_chunked(const char* v) {
+    return v ? http_value_has_chunked_n(v, strlen(v)) : 0;
 }
 
 /* Decode HTTP/1.1 chunked transfer-encoding (RFC 7230 §4.1). `in` /

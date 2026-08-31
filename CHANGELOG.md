@@ -62,8 +62,19 @@ version number before tagging the release.
   **2.69%** cheaper (19,832 to 19,299), and is length-bounded rather than
   relying on the buffer being NUL-terminated.
 
-  Together these bring the proxy to **20.8% fewer instructions per request**
-  than this branch started with, 24,368 down to 19,299. That is user-space
+- **Response framing reads `Transfer-Encoding` where it lies.** It was copied
+  out to a heap allocation and freed again on every response, and the framing
+  code borrowed the caller's buffer to NUL-terminate it while it did so. A
+  header scan that reports the value as a span into the block removes both.
+  This is a correctness change more than a speed one, worth only **0.54%**
+  (19,301 to 19,198): the whole value decides how the body is framed, and any
+  fixed buffer it were copied into would truncate, so a `chunked` past the cut
+  would be missed. That is the disagreement request smuggling is built on. A
+  test pins the span to a 309 byte value ending in `chunked` and shows the
+  copying form stops at 63.
+
+  Together these bring the proxy to **21.2% fewer instructions per request**
+  than this branch started with, 24,368 down to 19,198. That is user-space
   work only: the four syscalls per request are unchanged, so the effect on wall
   clock is smaller than the instruction count and is worth measuring on real
   hardware rather than predicting.

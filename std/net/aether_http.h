@@ -340,6 +340,16 @@ char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
  * because that one is included only on POSIX and this is not POSIX-only. */
 const char* http_find_header_end(const char* buf, size_t len);
 
+/* As http_find_header_in_block, and additionally reports the first matching
+ * value as a span into `block` itself. A caller that only reads the value is
+ * then not bounded by any buffer size, which matters for headers whose whole
+ * contents decide framing. `out`, `differing`, `out_v` and `out_vl` are each
+ * optional. */
+int http_find_header_span(const char* block, const char* end,
+                          const char* name, char* out, size_t out_cap,
+                          int* differing,
+                          const char** out_v, size_t* out_vl);
+
 int http_find_header_in_block(const char* block, const char* end,
                               const char* name, char* out, size_t out_cap,
                               int* differing);

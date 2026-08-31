@@ -577,3 +577,49 @@ TEST_CATEGORY(http_find_header_end_boundaries, TEST_CATEGORY_NETWORK) {
     const char nul[] = { 'A', '\0', '\r', '\n', '\r', '\n' };
     ASSERT_EQ(2, (int)(http_find_header_end(nul, sizeof(nul)) - nul));
 }
+
+/* Response framing reads Transfer-Encoding where it lies rather than copying
+ * it out. That matters because the whole value decides how the body is framed:
+ * a copy into a fixed buffer truncates, and a "chunked" past the cut would be
+ * missed, which is the framing disagreement request smuggling is built on.
+ * This pins the span to the full value and shows the copying form does not
+ * reach that far. */
+TEST_CATEGORY(http_find_header_span_is_untruncated, TEST_CATEGORY_NETWORK) {
+    char block[1024];
+    int n = snprintf(block, sizeof(block), "Server: x\r\nTransfer-Encoding: ");
+    for (int i = 0; i < 300; i++) block[n++] = 'a';
+    n += snprintf(block + n, sizeof(block) - (size_t)n, ", chunked\r\n");
+    const char* end = block + n;
+
+    const char* v = NULL;
+    size_t vl = 0;
+    ASSERT_EQ(1, http_find_header_span(block, end, "Transfer-Encoding",
+                                       NULL, 0, NULL, &v, &vl));
+    ASSERT_NOT_NULL(v);
+    ASSERT_EQ((size_t)(300 + 9), vl);              /* padding + ", chunked" */
+    ASSERT_EQ(0, memcmp(v + vl - 7, "chunked", 7));
+
+    /* The copying form stops well before that, which is why framing uses the
+     * span and not this. */
+    char small[64];
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Transfer-Encoding",
+                                           small, sizeof(small), NULL));
+    ASSERT_EQ((size_t)63, strlen(small));
+    ASSERT_NULL(strstr(small, "chunked"));
+
+    /* The span still reports a value the copying form can hold. */
+    const char* plain = "Transfer-Encoding: chunked\r\n";
+    v = NULL; vl = 0;
+    ASSERT_EQ(1, http_find_header_span(plain, plain + strlen(plain),
+                                       "transfer-encoding",
+                                       NULL, 0, NULL, &v, &vl));
+    ASSERT_EQ((size_t)7, vl);
+    ASSERT_EQ(0, memcmp(v, "chunked", 7));
+
+    /* Absent means no span written and a zero count. */
+    v = (const char*)0x1; vl = 99;
+    ASSERT_EQ(0, http_find_header_span(plain, plain + strlen(plain),
+                                       "Content-Length", NULL, 0, NULL,
+                                       &v, &vl));
+    ASSERT_EQ((size_t)99, vl);
+}
