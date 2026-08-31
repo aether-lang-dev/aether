@@ -73,8 +73,18 @@ version number before tagging the release.
   test pins the span to a 309 byte value ending in `chunked` and shows the
   copying form stops at 63.
 
-  Together these bring the proxy to **21.2% fewer instructions per request**
-  than this branch started with, 24,368 down to 19,198. That is user-space
+- **The fixed header names the proxy matches are compared inline.** Deciding
+  whether a response header is `Content-Type`, `Server` or `Content-Length` went
+  through `strncasecmp` for six to fourteen bytes, where the call itself is most
+  of the cost. The length guards in front of these already reject every other
+  header, so there were no wasted calls to remove, only the calls themselves.
+  Worth **2.53%** (19,187 to 18,701). A test walks all 65,536 byte pairs against
+  `strncasecmp` to show the inline form gives the same answer, including the
+  pairs a naive `0x20` trick gets wrong (`^` and `~`, `@` and a backtick, `-`
+  and CR).
+
+  Together these bring the proxy to **23.3% fewer instructions per request**
+  than this branch started with, 24,368 down to 18,701. That is user-space
   work only: the four syscalls per request are unchanged, so the effect on wall
   clock is smaller than the instruction count and is worth measuring on real
   hardware rather than predicting.

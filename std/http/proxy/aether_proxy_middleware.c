@@ -929,9 +929,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
             size_t kl = (size_t)(colon - p);
             const char* v = colon + 1;
             while (v < cr && (*v == ' ' || *v == '\t')) v++;
-            if (kl == 12 && strncasecmp(p, "Content-Type", 12) == 0) {
+            if (kl == 12 && http_ci_eq(p, "Content-Type", 12)) {
                 ct = v; ct_len = (size_t)(cr - v);
-            } else if (kl == 6 && strncasecmp(p, "Server", 6) == 0) {
+            } else if (kl == 6 && http_ci_eq(p, "Server", 6)) {
                 sv = v; sv_len = (size_t)(cr - v);
             }
         }
@@ -961,8 +961,8 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
         if (!colon) { p = cr + 2; continue; }
 
         size_t kl = (size_t)(colon - p);
-        if ((kl == 12 && strncasecmp(p, "Content-Type", 12) == 0) ||
-            (kl == 6  && strncasecmp(p, "Server", 6) == 0)) { p = cr + 2; continue; }
+        if ((kl == 12 && http_ci_eq(p, "Content-Type", 12)) ||
+            (kl == 6  && http_ci_eq(p, "Server", 6))) { p = cr + 2; continue; }
 
         char keybuf[128];
         if (kl >= sizeof(keybuf)) { p = cr + 2; continue; }
@@ -976,7 +976,7 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * whose upstream length describes a body that is not being
          * forwarded, comes out as 0 rather than as that length. Emitted here
          * in the upstream's position so the header order matches. */
-        if (kl == 14 && strncasecmp(p, "Content-Length", 14) == 0) {
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14)) {
             char cl[48];
             size_t cn = 16;
             memcpy(cl, "Content-Length: ", 16);

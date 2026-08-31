@@ -623,3 +623,35 @@ TEST_CATEGORY(http_find_header_span_is_untruncated, TEST_CATEGORY_NETWORK) {
                                        &v, &vl));
     ASSERT_EQ((size_t)99, vl);
 }
+
+/* The inline case-insensitive compare replaces strncasecmp on the proxy's hot
+ * path, so it has to agree with it on every input, not merely on the names it
+ * happens to be used with. The interesting pairs are bytes differing only in
+ * 0x20 that are not letters: '^' and '~', '@' and '`', '-' and CR. A compare
+ * that treats those as equal would match a header name that is not the one it
+ * was looking for. This walks all 65,536 byte pairs. */
+TEST_CATEGORY(http_ci_eq_matches_strncasecmp, TEST_CATEGORY_NETWORK) {
+    int mismatches = 0;
+    for (int i = 0; i < 256; i++) {
+        for (int j = 0; j < 256; j++) {
+            char a[2] = { (char)i, '\0' };
+            char b[2] = { (char)j, '\0' };
+            int want = (strncasecmp(a, b, 1) == 0) ? 1 : 0;
+            if (http_ci_eq(a, b, 1) != want) mismatches++;
+        }
+    }
+    ASSERT_EQ(0, mismatches);
+
+    /* The pairs that a naive 0x20 trick gets wrong, called out by name. */
+    ASSERT_EQ(0, http_ci_eq("^", "~", 1));
+    ASSERT_EQ(0, http_ci_eq("@", "`", 1));
+    ASSERT_EQ(0, http_ci_eq("\r", "-", 1));
+    ASSERT_EQ(0, http_ci_eq("\0", " ", 1));
+
+    /* And the names it is actually used on. */
+    ASSERT_EQ(1, http_ci_eq("content-type", "Content-Type", 12));
+    ASSERT_EQ(1, http_ci_eq("CONTENT-LENGTH", "Content-Length", 14));
+    ASSERT_EQ(1, http_ci_eq("server", "Server", 6));
+    ASSERT_EQ(0, http_ci_eq("servel", "Server", 6));
+    ASSERT_EQ(1, http_ci_eq("anything", "anything", 0));
+}
