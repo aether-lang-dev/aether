@@ -11,6 +11,32 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A proxied request's head is built into a buffer the connection keeps.** It
+  was allocated through the memory cap and released again for every request.
+  A `perf -e page-faults` trace put **89% of the faults this path still takes**
+  on that one allocation, which is the last load-independent difference against
+  nginx: 0.05 faults per request against its 0.00.
+
+  Every head on a connection is about the same size, so after the first there
+  is nothing to allocate. Moving the buffer's lifetime from a request to a
+  connection means the cap's accounting follows it, or a long-lived connection
+  drifts upward until the cap refuses allocations the machine has memory for.
+
+  This landed once before and was lost in a merge; the trace found it again by
+  naming the allocation rather than by anyone noticing the code had gone.
+
+### Testing
+
+- The benchmark's controls now add the same four forwarded headers the aether
+  balancer does. It adds `X-Forwarded-For`, `X-Forwarded-Proto`,
+  `X-Forwarded-Host` and `Via` to every request and the controls added none of
+  them, so every CPU-per-request figure taken before this compared one side
+  building four headers with two forwarding as-is. That is the configuration
+  being measured, not the code.
+
+
 ## [0.613.0]
 
 ### Fixed
