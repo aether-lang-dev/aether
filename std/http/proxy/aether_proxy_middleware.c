@@ -166,14 +166,33 @@ static const char* client_ip_for_xff(HttpRequest* req) {
     return "unknown";
 }
 
-/* Append `value` to an existing comma-separated header value.
- * Returns a malloc'd string the caller frees. */
-static char* append_csv(const char* existing, const char* value) {
-    if (!existing || !*existing) return strdup(value ? value : "");
-    size_t a = strlen(existing);
+/* Append `value` to an existing comma-separated header value, writing into
+ * `buf` when the result fits there.
+ *
+ * The result is handed straight to set_header_raw, which copies it into the
+ * request's arena, so allocating it here was a malloc and a free per header
+ * per request for a string thrown away immediately. `*heap` is what the caller
+ * must free, and is NULL in the ordinary case. */
+static const char* append_csv_into(char* buf, size_t cap, const char* existing,
+                                   const char* value, char** heap) {
+    *heap = NULL;
+    if (!value) value = "";
     size_t b = strlen(value);
-    char* out = (char*)malloc(a + 2 + b + 1);
-    if (!out) return NULL;
+
+    if (!existing || !*existing) {
+        if (b + 1 <= cap) { memcpy(buf, value, b + 1); return buf; }
+        *heap = strdup(value);
+        return *heap;
+    }
+
+    size_t a = strlen(existing);
+    size_t need = a + 2 + b + 1;
+    char* out = buf;
+    if (need > cap) {
+        out = (char*)malloc(need);
+        if (!out) return NULL;
+        *heap = out;
+    }
     memcpy(out, existing, a);
     out[a] = ',';
     out[a + 1] = ' ';
@@ -533,6 +552,18 @@ static int px_build(AetherProxyExchange* px) {
          * generation path can run when absent. */
         if (strcasecmp(k, "traceparent") == 0) continue;
         if (strcasecmp(k, "tracestate")  == 0) continue;
+        /* Skip the forwarded headers this proxy sets for itself below.
+         * Copying the client's copy as well sends two of each, and the first
+         * of the two is the one the client supplied. An upstream that reads
+         * the first, which is what reading a header normally means, would be
+         * trusting a value the client chose and never see the hop this proxy
+         * appended, which is the only part of the chain that carries any
+         * authority. Where the proxy is not injecting its own, the client's
+         * is forwarded untouched as before. */
+        if (opts->add_xff && strcasecmp(k, "X-Forwarded-For") == 0) continue;
+        if (opts->add_xfp && strcasecmp(k, "X-Forwarded-Proto") == 0) continue;
+        if (opts->add_xfh && strcasecmp(k, "X-Forwarded-Host") == 0) continue;
+        if (strcasecmp(k, "Via") == 0) continue;
         http_request_set_header_raw(px->outbound, k, v ? v : "");
     }
 
@@ -548,11 +579,14 @@ static int px_build(AetherProxyExchange* px) {
     if (opts->add_xff) {
         const char* prior = http_get_header(req, "X-Forwarded-For");
         const char* client = client_ip_for_xff(req);
-        char* xff = append_csv(prior, client);
+        char xff_buf[256];
+        char* xff_heap = NULL;
+        const char* xff = append_csv_into(xff_buf, sizeof(xff_buf),
+                                          prior, client, &xff_heap);
         if (xff) {
             http_request_set_header_raw(px->outbound, "X-Forwarded-For", xff);
-            free(xff);
         }
+        free(xff_heap);
     }
     if (opts->add_xfp) {
         http_request_set_header_raw(px->outbound, "X-Forwarded-Proto", "http");
@@ -563,11 +597,15 @@ static int px_build(AetherProxyExchange* px) {
     }
     {
         const char* prior_via = http_get_header(req, "Via");
-        char* via = append_csv(prior_via, "1.1 aether-proxy");
+        char via_buf[256];
+        char* via_heap = NULL;
+        const char* via = append_csv_into(via_buf, sizeof(via_buf),
+                                          prior_via, "1.1 aether-proxy",
+                                          &via_heap);
         if (via) {
             http_request_set_header_raw(px->outbound, "Via", via);
-            free(via);
         }
+        free(via_heap);
     }
 
     /* W3C Trace-Context: pass inbound through verbatim if present;

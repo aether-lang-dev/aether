@@ -83,13 +83,37 @@ version number before tagging the release.
   pairs a naive `0x20` trick gets wrong (`^` and `~`, `@` and a backtick, `-`
   and CR).
 
-  Together these bring the proxy to **23.3% fewer instructions per request**
-  than this branch started with, 24,368 down to 18,701. That is user-space
+- **The forwarded headers are built without allocating.** `X-Forwarded-For` and
+  `Via` are each appended to whatever arrived and then handed to the request,
+  which copies them into its arena, so building them on the heap was a `malloc`
+  and a `free` per header per request for a string discarded immediately. They
+  are built in place now, falling back to the heap only for a chain too long to
+  fit.
+
+  Together these bring the proxy to **24.5% fewer instructions per request**
+  than this branch started with, 24,368 down to 18,409. That is user-space
   work only: the four syscalls per request are unchanged, so the effect on wall
   clock is smaller than the instruction count and is worth measuring on real
   hardware rather than predicting.
 
 ### Fixed
+
+- **The proxy sent the client's `X-Forwarded-For` upstream alongside its own,
+  and the client's came first.** Every inbound header was copied to the
+  upstream and the proxy then appended its own `X-Forwarded-For`,
+  `X-Forwarded-Proto`, `X-Forwarded-Host` and `Via`, so a client that sent any
+  of those caused two of them to arrive. Reading a header means reading its
+  first occurrence, which is what Aether's own server does, so an upstream read
+  the value the client chose and never saw the hop the proxy appended. That
+  inverts the header's purpose: a client could claim any address and an upstream
+  allow-listing, rate limiting or audit logging on it would believe the claim.
+  RFC 9110 section 5.3 also requires appending to the existing field rather than
+  emitting a second one. The proxy no longer forwards the client's copy of a
+  header it sets itself; where it is not injecting its own, the client's is
+  forwarded untouched as before. Found by pointing the proxy at a listener that
+  prints the raw upstream request. The existing test missed it by asserting a
+  prefix, which the client's own copy satisfies, and now asserts the whole value
+  and that exactly one arrives.
 
 - **A request pipelined into the same segment as the one before it was
   dropped.** HTTP/1.1 lets a client send the next request without waiting for

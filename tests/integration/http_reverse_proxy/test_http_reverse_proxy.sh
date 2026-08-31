@@ -18,6 +18,7 @@
 #      terminator itself cut in half and the body arriving last,
 #      still completes
 #  13. Two requests pipelined into one segment both get answered
+#  14. A forwarded chain too long for the append buffer survives whole
 #
 # Verifies (mode=timeout):
 #  10. Upstream sleep 3s vs proxy timeout 1s → 504 within ~1.5s
@@ -167,8 +168,19 @@ else
     RESP=$(curl --silent --show-error --max-time 5 \
                 -H 'X-Forwarded-For: 1.2.3.4' \
                 "$PROXY/echo" 2>"$TMPDIR/c3.err")
-    echo "$RESP" | grep -q '^xff=1.2.3.4' || {
-        echo "  [FAIL] T3 XFF: expected '1.2.3.4' prefix"; echo "$RESP"; exit 1;
+    # The whole value, not a prefix of it. A prefix passes even when the
+    # client's own header is forwarded alongside the proxy's and the upstream
+    # reads the client's, which is the value it must not trust.
+    echo "$RESP" | grep -q '^xff=1.2.3.4, unknown$' || {
+        echo "  [FAIL] T3 XFF: expected '1.2.3.4, unknown', this hop appended"
+        echo "$RESP"; exit 1;
+    }
+    # And exactly one of it: two X-Forwarded-For headers reaching the upstream
+    # means the first one, the client's, is what a reader sees.
+    XFF_COUNT=$(echo "$RESP" | grep -c '^xff=')
+    [ "$XFF_COUNT" = "1" ] || {
+        echo "  [FAIL] T3 XFF: upstream saw $XFF_COUNT X-Forwarded-For values"
+        echo "$RESP"; exit 1;
     }
 
     # Test 4 — X-Forwarded-Proto and X-Forwarded-Host present.
@@ -289,6 +301,35 @@ else
     esac
 fi
 
+# Test 14 — a forwarded chain longer than the buffer the proxy appends into.
+# X-Forwarded-For is built by appending this hop to whatever arrived; that is
+# done in a stack buffer with a heap fallback, and the fallback is the branch
+# that would truncate or leak. 300 characters of prior chain forces it.
+LONG_XFF=""
+I=0
+while [ "$I" -lt 30 ]; do
+    LONG_XFF="${LONG_XFF}10.0.0.${I}, "
+    I=$((I + 1))
+done
+LONG_XFF="${LONG_XFF}192.168.1.1"
+XFF_BODY=$(curl --silent --show-error --max-time 10 \
+                -H "X-Forwarded-For: $LONG_XFF" \
+                "$PROXY/echo" 2>"$TMPDIR/c14.err") || true
+XFF_SEEN=$(printf '%s' "$XFF_BODY" | sed -n 's/^xff=//p')
+case "$XFF_SEEN" in
+    "$LONG_XFF"*)
+        : ;;
+    *)
+        echo "  [FAIL] T14 long forwarded chain: expected it to start with the"
+        echo "         chain sent (${#LONG_XFF} chars), got: $XFF_SEEN"
+        exit 1 ;;
+esac
+# The proxy appends its own hop after the chain it received.
+case "$XFF_SEEN" in
+    *", unknown") : ;;
+    *) echo "  [FAIL] T14 long forwarded chain: this hop was not appended: $XFF_SEEN"; exit 1 ;;
+esac
+
 FRAG_RAN=0
 if command -v python3 >/dev/null 2>&1; then
     if FRAG=$(python3 "$SCRIPT_DIR/fragment_probe.py" 19000 2>&1); then
@@ -327,14 +368,14 @@ stop_servers
 
 if [ "$IS_WIN" = "1" ]; then
     if [ "$FRAG_RAN" = "1" ]; then
-        echo "  [PASS] http_reverse_proxy: 6/13 win-reduced - basic, POST body, Upgrade refusal, fragmented, pipelined, timeout"
+        echo "  [PASS] http_reverse_proxy: 7/14 win-reduced - basic, POST body, Upgrade refusal, forwarded chain, fragmented, pipelined, timeout"
     else
-        echo "  [PASS] http_reverse_proxy: 4/13 win-reduced - basic, POST body, Upgrade refusal, timeout (python3 probes skipped)"
+        echo "  [PASS] http_reverse_proxy: 5/14 win-reduced - basic, POST body, Upgrade refusal, forwarded chain, timeout (python3 probes skipped)"
     fi
 else
     if [ "$FRAG_RAN" = "1" ]; then
-        echo "  [PASS] http_reverse_proxy: 13/13 - basic round-trip, headers, body, long header, fragmented, pipelined, timeout"
+        echo "  [PASS] http_reverse_proxy: 14/14 - basic round-trip, headers, body, long header, long forwarded chain, fragmented, pipelined, timeout"
     else
-        echo "  [PASS] http_reverse_proxy: 11/13 - basic round-trip, headers, body, long header, timeout (python3 probes skipped)"
+        echo "  [PASS] http_reverse_proxy: 12/14 - basic round-trip, headers, body, long header, long forwarded chain, timeout (python3 probes skipped)"
     fi
 fi
