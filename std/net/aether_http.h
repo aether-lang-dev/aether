@@ -332,6 +332,14 @@ char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 /* Find a header by name in a header block, anchored to the start of each line.
  * Returns how many times it appears, writes the first value into `out`, and
  * sets *differing when two of them disagree. */
+/* The CR LF CR LF that ends a header block, or NULL. Length-bounded rather
+ * than NUL-terminated, and cheaper than strstr, which pays a two-way-algorithm
+ * setup before it looks at a single byte of a four byte needle.
+ *
+ * Declared here beside http_find_header_in_block, not in the internal header,
+ * because that one is included only on POSIX and this is not POSIX-only. */
+const char* http_find_header_end(const char* buf, size_t len);
+
 int http_find_header_in_block(const char* block, const char* end,
                               const char* name, char* out, size_t out_cap,
                               int* differing);
