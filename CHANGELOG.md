@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.614.0]
+
 ### Changed
 
 - **A proxied request's head is built into a buffer the connection keeps.** It
