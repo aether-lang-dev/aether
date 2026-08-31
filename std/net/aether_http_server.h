@@ -813,6 +813,14 @@ int http_server_has_response_transformer(HttpServer* server);
 int http_server_adopt_connection(HttpServer* server, int client_fd,
                                  const char* prebuffered, int prebuffered_len);
 
+/* The same, for a connection whose TLS handshake has already been done.
+ * `ssl` is an SSL* the caller stops owning; the bytes handed over are what was
+ * read through it, not off the socket. Without this a driver that terminates
+ * TLS could not give a connection back, because the session would be lost and
+ * the socket carries ciphertext the worker path cannot read. */
+int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ssl,
+                                     const char* prebuffered, int prebuffered_len);
+
 
 /* Return a response to the state http_response_create leaves it in, keeping
  * the header arrays and reusing the object. For a caller serving many

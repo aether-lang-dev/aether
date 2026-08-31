@@ -18,8 +18,18 @@ main() {
     if no_reuse != 0 && string.length(no_reuse) > 0 {
         http.client_pool_disable()
     }
-    err = lb.serve("127.0.0.1", string.get_int(port_s), "round_robin", backends,
-        lb.no_health(), lb.no_breaker(), lb.no_cache())
+    // TLS_CERT/TLS_KEY turn the listener into a TLS terminator, so the same
+    // binary measures the cleartext and the TLS path.
+    cert = io.getenv("TLS_CERT")
+    key = io.getenv("TLS_KEY")
+    err = ""
+    if cert != 0 && string.length(cert) > 0 && key != 0 && string.length(key) > 0 {
+        err = lb.serve_tls("127.0.0.1", string.get_int(port_s), "round_robin", backends,
+            cert, key, lb.no_health(), lb.no_breaker(), lb.no_cache())
+    } else {
+        err = lb.serve("127.0.0.1", string.get_int(port_s), "round_robin", backends,
+            lb.no_health(), lb.no_breaker(), lb.no_cache())
+    }
     if err != "" {
         println("lb: ${err}")
     }

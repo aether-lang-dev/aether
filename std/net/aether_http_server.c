@@ -4905,6 +4905,12 @@ void http_server_resume_connection(HttpServer* server, HttpConn* conn) {
  */
 int http_server_adopt_connection(HttpServer* server, int client_fd,
                                  const char* prebuffered, int prebuffered_len) {
+    return http_server_adopt_tls_connection(server, client_fd, NULL,
+                                            prebuffered, prebuffered_len);
+}
+
+int http_server_adopt_tls_connection(HttpServer* server, int client_fd, void* ssl,
+                                     const char* prebuffered, int prebuffered_len) {
     if (!server || client_fd < 0) return -1;
 
     HttpConn* conn = (HttpConn*)calloc(1, sizeof(HttpConn));
@@ -4929,6 +4935,15 @@ int http_server_adopt_connection(HttpServer* server, int client_fd,
     if (flags >= 0) fcntl(client_fd, F_SETFL, flags & ~O_NONBLOCK);
 #endif
 
+#ifdef AETHER_HAS_OPENSSL
+    /* The session comes across with the socket. The handshake is already done
+     * and the socket carries ciphertext, so a worker given the descriptor
+     * without the session would read bytes it cannot make sense of. */
+    conn->ssl = (SSL*)ssl;
+#else
+    (void)ssl;
+#endif
+
     conn_serve(server, conn);
     return 0;
 }
@@ -4944,7 +4959,7 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      *
      * A refusal costs nothing, because the connection has not been touched
      * yet and the worker path is still right below. */
-    if (server->evloop && !server->tls_enabled && !server->h2_enabled) {
+    if (server->evloop && !server->h2_enabled) {
         if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
     }
 
@@ -5131,6 +5146,21 @@ int http_server_start_raw(HttpServer* server) {
     server->is_running = 1;
 
 #if !defined(_WIN32)
+    /* A peer that goes away between a server deciding to answer and the answer
+     * reaching the wire raises SIGPIPE on the write, and the default
+     * disposition for SIGPIPE is to kill the process. That is not a rare race:
+     * it is a client pressing stop, a load balancer timing out, or a
+     * benchmark closing connections, and over TLS it killed this server at
+     * eight concurrent connections.
+     *
+     * A server has to ignore it and read the EPIPE from the write instead,
+     * which every one of them does. Set here, where a process becomes a
+     * server, rather than at load time, so linking the library into something
+     * that is not one does not change its signal handling. */
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
+#if !defined(_WIN32)
     int use_actor_mode = (server->spawn_fn && server->send_fn && server->step_fn);
     if (use_actor_mode && server->multi_accept) {
         // Multi-accept mode (opt-in): one accept thread per core with SO_REUSEPORT.
@@ -5281,7 +5311,7 @@ int http_server_start_raw(HttpServer* server) {
          * more threads than cores would put the sleeping back, and fewer would
          * leave cores idle. It returns NULL when there is no proxy mounted or
          * the platform has no poller, and then nothing below changes. */
-        if (!server->tls_enabled && !server->h2_enabled) {
+        if (!server->h2_enabled) {
             int cores = aether_cpu_available();
             if (cores > 8) cores = 8;
             server->evloop = http_evloop_start(server, cores);

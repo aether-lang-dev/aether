@@ -19,21 +19,31 @@
 // the built-in through aether_sleep_ms — a stable, prefixed symbol —
 // removes the collision class without changing user-visible behavior.
 // See GitHub issue #233.
+#include <errno.h>
+
+#include <time.h>
+
 void aether_sleep_ms(int ms) {
     if (ms <= 0) return;
 #ifdef _WIN32
     Sleep((DWORD)ms);
 #else
-    // usleep takes microseconds; ms can hit ~2 billion before overflow,
-    // so promote through unsigned long long defensively.
-    unsigned long long usec = (unsigned long long)ms * 1000ull;
-    // Cap at ~999 seconds per call to stay inside usleep's documented
-    // limit (it's only required to support up to 1e6); split longer waits.
-    while (usec > 999000000ull) {
-        usleep(999000000u);
-        usec -= 999000000ull;
+    // A signal delivered while this is waiting cuts the wait short, and the
+    // old usleep loop took that as the wait being over: a program that asked
+    // for a minute could return in a millisecond because something -- a
+    // profiler, a job-control signal, a thread the runtime started -- happened
+    // to arrive, and it had no way to tell. A server whose main task slept and
+    // then exited would exit under load and look like a crash.
+    //
+    // nanosleep reports how much of the request is left when that happens, so
+    // the wait resumes with the remainder and the full duration is honoured.
+    struct timespec req, rem;
+    req.tv_sec  = (time_t)(ms / 1000);
+    req.tv_nsec = (long)(ms % 1000) * 1000000L;
+    while (nanosleep(&req, &rem) != 0) {
+        if (errno != EINTR) break;   // nothing else here is recoverable
+        req = rem;
     }
-    if (usec > 0) usleep((useconds_t)usec);
 #endif
 }
 

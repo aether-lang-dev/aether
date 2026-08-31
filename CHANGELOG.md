@@ -11,6 +11,55 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A client that goes away no longer takes the server with it.** Writing to a
+  peer that has closed raises `SIGPIPE`, whose default disposition is to kill
+  the process. Nothing ignored it and exactly one send in the whole codebase
+  passed `MSG_NOSIGNAL`, so a client pressing stop, a load balancer timing out
+  or a health check hanging up early could end the server.
+
+  Found by putting a TLS listener under load for the first time, where it died
+  at **eight concurrent connections** with exit status 141. It was never
+  TLS-specific: the regression test is plain HTTP and the unfixed build dies
+  there too. A server now ignores SIGPIPE where a process becomes one, and the
+  driver's writes ask for the same per call so an embedder that sets its own
+  disposition is still covered.
+
+- **`sleep` waits for as long as it was asked to.** A signal delivered while it
+  was waiting cut it short and the old loop took that as the wait being over,
+  so a program that asked for a minute could return in a millisecond because
+  something happened to arrive. It now resumes with the remainder.
+
+- **Paths and version tags that do not fit are skipped rather than
+  truncated.** Two more `snprintf` sites in `ae version` used a result that may
+  have been cut short; a truncated name is a different directory and a
+  different version than the one on disk.
+
+### Changed
+
+- **The event driver terminates TLS.** A TLS connection used to be refused by
+  the driver and given a thread of its own, which is the cost the driver exists
+  to remove, on the shape most proxied traffic actually arrives in. The driver
+  now carries the handshake without waiting and reads and writes through the
+  session; a connection mid-handshake costs a slot rather than a thread.
+  HTTP/2 still takes the worker path, since this driver speaks HTTP/1.1.
+
+  **CPU per request over TLS 35.1 to 19.7 microseconds** and throughput 56,748
+  to 100,874 requests a second, which is past nginx's 82,112 in the same
+  rounds. Against nginx's CPU per request it goes from 2.85x to 1.61x.
+
+- **A load balancer can terminate TLS.** `lb.serve_tls` and `lb.serve_tls_at`,
+  because a balancer in front of a service is usually the thing holding the
+  certificate, and because the TLS path could not be measured without one.
+
+### Testing
+
+- A TLS reverse proxy is covered end to end, including twenty-four connections
+  at once: the failure this path had was not a wrong answer but a server that
+  stopped existing, and one request at a time never showed it.
+- Forty clients reset mid-answer, after which the proxy must still serve. It
+  reports the process gone against a build that does not ignore SIGPIPE.
 ## [0.612.0]
 
 ### Fixed

@@ -1,0 +1,27 @@
+// A TLS-terminating reverse proxy for the integration test.
+//
+// Deliberately not built on the shared reverse-proxy test server: that one
+// spawns actors, sleeps and exits, which is fine for sequential requests and
+// unstable under a burst of concurrent ones. lb.serve_tls blocks in the server
+// the way a real deployment does, which is what this test needs to hold still.
+
+import std.http.server.lb
+import std.io
+import std.string
+
+main() {
+    port_s = io.getenv("PORT")
+    backends = io.getenv("BACKENDS")
+    cert = io.getenv("TLS_CERT")
+    key = io.getenv("TLS_KEY")
+    if port_s == 0 || backends == 0 || cert == 0 || key == 0 {
+        println("PORT, BACKENDS, TLS_CERT and TLS_KEY must be set")
+        return
+    }
+    println("READY")
+    err = lb.serve_tls("127.0.0.1", string.get_int(port_s), "round_robin", backends,
+        cert, key, lb.no_health(), lb.no_breaker(), lb.no_cache())
+    if err != "" {
+        println("lb: ${err}")
+    }
+}

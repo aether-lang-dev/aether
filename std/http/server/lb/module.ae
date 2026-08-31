@@ -81,14 +81,14 @@
 
 import std.http(http_server_create, http_server_set_host, http_server_start_raw,
     http_server_use_middleware, request_path, request_body,
-    http_response_set_status, http_response_set_body)
+    http_response_set_status, http_response_set_body, http_server_set_tls_raw)
 import std.http.proxy(upstream_pool_new, upstream_add, health_checks_enable,
     breaker_configure, cache_new, opts_new, opts_bind_cache, mount,
     upstream_drain, upstream_undrain)
 import std.string(string_length, string_get_int, string_index_of, string_substring)
 
 exports(
-    serve, serve_at,
+    serve, serve_at, serve_tls, serve_tls_at,
     health, no_health, breaker, no_breaker, cache, no_cache,
     config_free,
     parse_backends,
@@ -138,8 +138,33 @@ serve(host: string, port: int, algo: string, backends: string, hc: ptr, br: ptr,
     return serve_at(host, port, algo, backends, "/", hc, br, ca)
 }
 
+// serve_tls — like serve, terminating TLS with `cert_path`/`key_path`.
+//
+// A load balancer in front of a service is usually the thing holding the
+// certificate, so the same pool, health checks, breaker and cache apply; only
+// the listener differs.
+serve_tls(host: string, port: int, algo: string, backends: string,
+    cert_path: string, key_path: string,
+    hc: ptr, br: ptr, ca: ptr) -> string {
+    return serve_tls_at(host, port, algo, backends, "/", cert_path, key_path, hc, br, ca)
+}
+
+// serve_tls_at — serve_tls mounted at `prefix`.
+serve_tls_at(host: string, port: int, algo: string, backends: string, prefix: string,
+    cert_path: string, key_path: string,
+    hc: ptr, br: ptr, ca: ptr) -> string {
+    return _serve(host, port, algo, backends, prefix, cert_path, key_path, hc, br, ca)
+}
+
 // serve_at — like serve but mounts the proxy at `prefix` (default "/").
 serve_at(host: string, port: int, algo: string, backends: string, prefix: string, hc: ptr, br: ptr, ca: ptr) -> string {
+    return _serve(host, port, algo, backends, prefix, "", "", hc, br, ca)
+}
+
+// One implementation. Empty cert and key mean a cleartext listener, which is
+// the only difference between the two entry points above.
+_serve(host: string, port: int, algo: string, backends: string, prefix: string,
+    cert_path: string, key_path: string, hc: ptr, br: ptr, ca: ptr) -> string {
     if string_length(backends) == 0 {
         return "lb: no backends"
     }
@@ -172,6 +197,12 @@ serve_at(host: string, port: int, algo: string, backends: string, prefix: string
         return "lb: server_create failed on ${port}"
     }
     http_server_set_host(server, host)
+    if string_length(cert_path) > 0 {
+        terr = http_server_set_tls_raw(server, cert_path, key_path)
+        if string_length(terr) > 0 {
+            return "lb: tls: ${terr}"
+        }
+    }
     opts = opts_new()
 
     if _cfg_kind(ca) == "c" {
