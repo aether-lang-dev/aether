@@ -135,6 +135,13 @@ typedef struct {
 
 char* http_build_request_head(const HttpReqHead* p, size_t* out_len, size_t* out_cap);
 
+/* The same builder over a buffer the caller keeps, so a connection serving
+ * many requests allocates one head and reuses it. `*buf` is NULL on the first
+ * call and the caller's afterwards; release it with aether_caps_free and
+ * `*cap` when the connection ends, because that is how it was taken. */
+char* http_build_request_head_into(const HttpReqHead* p,
+                                   char** buf, size_t* cap, size_t* out_len);
+
 
 /* A bump allocator for building one outbound request.
  *

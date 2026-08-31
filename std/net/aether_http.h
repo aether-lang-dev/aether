@@ -83,6 +83,14 @@ void http_response_free(HttpResponse* response);
  * connections are held for the length of a request and returned, not kept for
  * a handful of hosts. Sized from the descriptor budget; only ever raises, so
  * a deliberate configuration is preserved. */
+/* A millisecond clock a driver may pin for one pass of its event loop, so the
+ * several readers in a request share one counter access. Pin AFTER waiting: a
+ * poll that blocks for its timeout would otherwise leave the pass looking at a
+ * time from before it. A thread that never pins reads the real clock. */
+void     http_clock_pin(void);
+void     http_clock_unpin(void);
+uint64_t http_clock_ms(void);
+
 void http_client_pool_size_for_proxy(void);
 
 /* The pool's current caps. */

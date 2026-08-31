@@ -20,6 +20,7 @@
 #include <string.h>
 #include <time.h>
 #include "../../../runtime/utils/aether_thread.h"
+#include "../../net/aether_http.h"
 
 /* ----- helpers exposed to other proxy .c files ----- */
 
@@ -27,7 +28,7 @@ long aether_proxy_now_ms(void) {
     /* Only differences matter here (health-check and breaker timings).
      * Delegates to the shared monotonic clock so Windows uses the
      * overflow-free QueryPerformanceCounter split in one place. */
-    return (long)(aether_now_ns() / 1000000ULL);
+    return (long)http_clock_ms();
 }
 
 /* ----- LB algo string mapping ----- */

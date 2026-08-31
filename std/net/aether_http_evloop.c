@@ -226,9 +226,10 @@ static void ev_conn_reset_request(EvConn* c) {
     c->in_scanned = 0;
     c->in_hdr_end = 0;
 
-    if (c->head) aether_caps_free(c->head, c->head_cap);
-    c->head = NULL;
-    c->head_len = c->head_cap = 0;
+    /* The head buffer stays with the connection and is only grown. Every
+     * request on it builds a head of about the same size, so after the first
+     * there is nothing to allocate. */
+    c->head_len = 0;
 
     /* Keep the accumulator rather than returning it; the next request on this
      * connection reuses it at whatever size it has grown to. */
@@ -304,6 +305,7 @@ static void ev_conn_close(EvDriver* d, EvConn* c) {
         c->ssl = NULL;
     }
 #endif
+    if (c->head) aether_caps_free(c->head, c->head_cap);
     free(c->out);
     free(c->in);
     free(c);
@@ -747,21 +749,18 @@ static int ev_begin_retry(EvDriver* d, EvConn* c) {
 
     int body_len = 0;
     const char* body = http_request_body_of(c->px.outbound, &body_len);
-    /* Freed through the cap, because it was allocated through it. A plain
-     * free() returns the memory but leaves the accounting counter believing
-     * the bytes are still live, and this is the retry path: it runs when an
-     * upstream is failing, so the drift accumulates fastest exactly when the
-     * proxy is already under strain, until the cap refuses allocations that
-     * the machine has memory for. */
-    aether_caps_free(c->head, c->head_cap);
-    c->head = NULL;
-    c->head_len = c->head_cap = 0;
+    /* Rebuilt in place rather than released and taken again. The buffer
+     * belongs to the connection now, and is returned through the cap when the
+     * connection ends -- which is what the accounting requires, and what a
+     * plain free() here used to get wrong. */
+    c->head_len = 0;
     HttpReqHead head_params = {
         c->px.outbound, http_request_method_of(c->px.outbound), path,
         host, port, 0, 0, body, body_len,
         http_request_content_type_of(c->px.outbound), 1
     };
-    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
+                                           &c->head_len);
     if (!c->head) return -1;
 
     memset(&c->x, 0, sizeof(c->x));
@@ -915,7 +914,8 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         host, port, 0, 0, body, body_len,
         http_request_content_type_of(c->px.outbound), 1
     };
-    c->head = http_build_request_head(&head_params, &c->head_len, &c->head_cap);
+    c->head = http_build_request_head_into(&head_params, &c->head, &c->head_cap,
+                                           &c->head_len);
     if (!c->head) return -1;
 
     http_exchange_init(&c->x, &c->up.t, c->head, c->head_len, body, body_len,
@@ -1142,6 +1142,12 @@ static void* ev_driver_main(void* arg) {
          * visible. */
         int n = aether_io_poller_poll(&d->poller, events, 64,
                                       ev_next_timeout_ms(d, 200));
+
+        /* Pin the clock for this pass, after the wait and not before: the poll
+         * above can block for its whole timeout. Everything below then shares
+         * one counter access rather than taking one to arm each deadline,
+         * expire each idle pooled connection and record each upstream pick. */
+        http_clock_pin();
         for (int i = 0; i < n; i++) {
             int fd = events[i].fd;
             if (fd == d->wake_r) { ev_take_submissions(d); continue; }
@@ -1158,6 +1164,10 @@ static void* ev_driver_main(void* arg) {
             if (r < 0) { ev_conn_close(d, c); continue; }
             if (ev_advance(d, c) < 0) ev_conn_close(d, c);
         }
+
+        /* Released before waiting again, so the next wait's timeout is
+         * computed from the real clock rather than from this pass's. */
+        http_clock_unpin();
     }
 
     /* Shutting down: the connections this driver owns are its to close. */

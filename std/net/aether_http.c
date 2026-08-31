@@ -45,6 +45,7 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
 #include <stdatomic.h>
 #include <time.h>
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_compiler.h"
 #include <limits.h>
 #if !defined(_WIN32)
 #include <sys/resource.h>
@@ -420,14 +421,39 @@ static int64_t         http_pool_idle_ms = 15000;
  * never a missed expiry. */
 static int64_t         http_pool_next_expiry_ms = INT64_MAX;
 
-static int64_t http_now_ms(void) {
-    struct timespec ts;
-#if defined(CLOCK_MONOTONIC)
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
-        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
-    return (int64_t)time(NULL) * 1000;
+/* A millisecond clock pinned for one pass of an event loop.
+ *
+ * A driver reads the clock several times per request: arming a deadline,
+ * computing the next timeout, expiring idle pooled connections, recording when
+ * an upstream was picked. Each read is a counter the kernel serialises, and on
+ * a single core arch_counter_get_cntvct is 4.9% of this path's profile -- the
+ * largest entry that is not TCP receive processing.
+ *
+ * Within one pass those readers do not need different answers: the pass takes
+ * microseconds and every deadline they compare against is milliseconds or
+ * seconds away. So the driver pins one value for the pass and they share it.
+ *
+ * Defined here rather than in a header because a static thread-local in a
+ * header is a separate variable per translation unit, and the thread that pins
+ * it is not in the file that reads it. A thread that never pins reads the real
+ * clock, which is every thread but a driver. */
+AETHER_TLS_SHARED uint64_t aether_http_pinned_ms = 0;
+
+void http_clock_pin(void) {
+    uint64_t ms = aether_now_ns() / 1000000ULL;
+    /* Zero means "not pinned", so a clock reading exactly zero pins a
+     * millisecond later rather than not at all. */
+    aether_http_pinned_ms = ms ? ms : 1;
 }
+
+void http_clock_unpin(void) { aether_http_pinned_ms = 0; }
+
+uint64_t http_clock_ms(void) {
+    return aether_http_pinned_ms ? aether_http_pinned_ms
+                                 : (aether_now_ns() / 1000000ULL);
+}
+
+static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 
 /* Everything that makes two connections non-interchangeable: the origin, the
  * endpoint actually dialled (proxy or origin), TLS, and the verification the
@@ -1953,12 +1979,34 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
 
 char* http_build_request_head(const HttpReqHead* p,
                                      size_t* out_len, size_t* out_cap) {
-    size_t hdr_cap = 1024;
-    /* #461: gate the request-header build buffer through the cap. Self-
-     * contained — alloc, grow, and free all live in this function with
-     * hdr_cap tracking the live size, so accounting balances exactly. */
-    char* hdr = (char*)aether_caps_malloc(hdr_cap);
-    if (!hdr) return NULL;
+    char*  buf = NULL;
+    size_t cap = 0;
+    char*  r = http_build_request_head_into(p, &buf, &cap, out_len);
+    if (out_cap) *out_cap = cap;
+    return r;
+}
+
+/* The same builder, over a buffer the caller keeps.
+ *
+ * A connection serving many requests built this head into a fresh allocation
+ * every time and released it a moment later. The head of one request is the
+ * same size as the head of the next, so after the first there is nothing to
+ * allocate: the buffer is reused at whatever size it reached.
+ *
+ * `*buf` is NULL on the first call and the caller's afterwards, released with
+ * aether_caps_free and `*cap` when the connection ends -- through the cap,
+ * because that is how it was taken. */
+char* http_build_request_head_into(const HttpReqHead* p,
+                                     char** io_buf, size_t* io_cap,
+                                     size_t* out_len) {
+    size_t hdr_cap = *io_cap;
+    char*  hdr     = *io_buf;
+    if (!hdr) {
+        hdr_cap = 1024;
+        /* #461: gate the request-header build buffer through the cap. */
+        hdr = (char*)aether_caps_malloc(hdr_cap);
+        if (!hdr) return NULL;
+    }
     size_t hdr_len = 0;
 
     /* Helper: append a NUL-terminated string into hdr, growing as
@@ -1969,7 +2017,8 @@ char* http_build_request_head(const HttpReqHead* p,
             size_t _nc = hdr_cap; \
             while (_nc < hdr_len + _slen + 1) _nc *= 2; \
             char* _nh = (char*)aether_caps_realloc(hdr, hdr_cap, _nc); \
-            if (!_nh) { aether_caps_free(hdr, hdr_cap); return NULL; } \
+            if (!_nh) { aether_caps_free(hdr, hdr_cap); \
+                        *io_buf = NULL; *io_cap = 0; return NULL; } \
             hdr = _nh; hdr_cap = _nc; \
         } \
         memcpy(hdr + hdr_len, s, _slen); \
@@ -2051,7 +2100,10 @@ char* http_build_request_head(const HttpReqHead* p,
     #undef HDR_APPEND_STR
 
     *out_len = hdr_len;
-    *out_cap = hdr_cap;
+    /* The buffer goes back to the caller at whatever size it reached, so the
+     * next request on this connection builds into it without allocating. */
+    *io_buf = hdr;
+    *io_cap = hdr_cap;
     return hdr;
 }
 
