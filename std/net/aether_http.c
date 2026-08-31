@@ -2011,8 +2011,9 @@ char* http_build_request_head_into(const HttpReqHead* p,
 
     /* Helper: append a NUL-terminated string into hdr, growing as
      * needed. Returns 0 on success, -1 on OOM. */
-    #define HDR_APPEND_STR(s) do { \
-        size_t _slen = strlen(s); \
+    #define HDR_APPEND_N(s, len) do { \
+        const char* _s = (s); \
+        size_t _slen = (len); \
         if (hdr_len + _slen + 1 > hdr_cap) { \
             size_t _nc = hdr_cap; \
             while (_nc < hdr_len + _slen + 1) _nc *= 2; \
@@ -2021,16 +2022,21 @@ char* http_build_request_head_into(const HttpReqHead* p,
                         *io_buf = NULL; *io_cap = 0; return NULL; } \
             hdr = _nh; hdr_cap = _nc; \
         } \
-        memcpy(hdr + hdr_len, s, _slen); \
+        memcpy(hdr + hdr_len, _s, _slen); \
         hdr_len += _slen; \
         hdr[hdr_len] = '\0'; \
     } while (0)
+
+    /* A literal's length is known while compiling; measuring it again at run
+     * time is work this path takes once per header emitted. */
+    #define HDR_APPEND_LIT(s) HDR_APPEND_N("" s, sizeof(s) - 1)
+    #define HDR_APPEND_STR(s) do { const char* _t = (s); HDR_APPEND_N(_t, strlen(_t)); } while (0)
 
     /* Request line. For plain HTTP through a forward proxy, use the absolute
      * form (`GET http://p->host[:p->port]/p->path HTTP/1.1`) so the proxy knows the
      * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
      * end-to-end to the origin), use the origin form (`GET /p->path`). */
-    HDR_APPEND_STR(p->method); HDR_APPEND_STR(" ");
+    HDR_APPEND_STR(p->method); HDR_APPEND_LIT(" ");
     if (p->via_proxy && !p->use_tls) {
         char absline[1408];
         if (p->port == 80) {
@@ -2042,7 +2048,7 @@ char* http_build_request_head_into(const HttpReqHead* p,
     } else {
         HDR_APPEND_STR(p->path);
     }
-    HDR_APPEND_STR(" HTTP/1.1\r\n");
+    HDR_APPEND_LIT(" HTTP/1.1\r\n");
 
     /* Built-in Host (overridable via set_header).
      *
@@ -2053,32 +2059,37 @@ char* http_build_request_head_into(const HttpReqHead* p,
      * brackets here; the connect path is IPv4-only (see the note above), so
      * there is no such host to reach this. */
     if (!header_already_set(p->req, "Host")) {
-        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(p->host);
+        HDR_APPEND_LIT("Host: "); HDR_APPEND_STR(p->host);
         if (p->port != (p->use_tls ? 443 : 80)) {
-            char port_suffix[16];
-            snprintf(port_suffix, sizeof(port_suffix), ":%d", p->port);
-            HDR_APPEND_STR(port_suffix);
+            char port_suffix[24];
+            size_t pn = 0;
+            port_suffix[pn++] = ':';
+            pn += http_write_dec(port_suffix + pn, (unsigned long long)p->port);
+            HDR_APPEND_N(port_suffix, pn);
         }
-        HDR_APPEND_STR("\r\n");
+        HDR_APPEND_LIT("\r\n");
     }
 
     /* Built-in Content-Length when p->body present (overridable, but
      * setting it manually is almost always a bug — we still emit
      * ours unless the caller explicitly overrode it). */
     if (p->body && p->body_len > 0 && !header_already_set(p->req, "Content-Length")) {
-        char clen[32];
-        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", p->body_len);
-        HDR_APPEND_STR(clen);
+        char clen[48];
+        size_t cn = 16;
+        memcpy(clen, "Content-Length: ", 16);
+        cn += http_write_dec(clen + cn, (unsigned long long)p->body_len);
+        clen[cn++] = '\r'; clen[cn++] = '\n';
+        HDR_APPEND_N(clen, cn);
     }
 
     /* Built-in Content-Type when p->body present, only if neither the
      * builder's p->content_type nor an explicit Content-Type header is set. */
     if (p->body && p->body_len > 0 && p->content_type
         && !header_already_set(p->req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_STR("\r\n");
+        HDR_APPEND_LIT("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_LIT("\r\n");
     } else if (p->body && p->body_len > 0 && !p->content_type
         && !header_already_set(p->req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
+        HDR_APPEND_LIT("Content-Type: application/x-www-form-urlencoded\r\n");
     }
 
     /* Persistent by default: the connection goes back to the idle pool when
@@ -2091,13 +2102,15 @@ char* http_build_request_head_into(const HttpReqHead* p,
 
     /* Caller-provided headers, in insertion order. */
     for (HttpHeader* h = p->req->headers; h; h = h->next) {
-        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
+        HDR_APPEND_STR(h->name); HDR_APPEND_LIT(": "); HDR_APPEND_STR(h->value); HDR_APPEND_LIT("\r\n");
     }
 
     /* End-of-headers blank line. */
-    HDR_APPEND_STR("\r\n");
+    HDR_APPEND_LIT("\r\n");
 
     #undef HDR_APPEND_STR
+    #undef HDR_APPEND_LIT
+    #undef HDR_APPEND_N
 
     *out_len = hdr_len;
     /* The buffer goes back to the caller at whatever size it reached, so the

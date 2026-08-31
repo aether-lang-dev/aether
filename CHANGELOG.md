@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **The proxy's hot path no longer formats anything through `printf`.** A
+  callgrind profile of the reverse proxy put about 5.9% of all instructions in
+  the `vfprintf` machinery, reached from three `snprintf` calls that run once
+  per proxied request: the upstream request's port suffix, and the response's
+  status line and `Content-Length`. Each formats one small integer, which
+  `snprintf` charges thousands of instructions for. They now write their digits
+  directly, and the header builder appends string literals by their compile
+  time length instead of measuring each one with `strlen` again at run time.
+  Worth **5.00% fewer instructions per proxied request** (24,368 to 23,148),
+  measured under callgrind as the difference between a 3,000 request run and a
+  1,000 request run so process startup cancels out exactly. Instruction counts
+  do not depend on machine load, which is what makes a change this size
+  measurable at all.
+
 ### Fixed
 
 - **A request pipelined into the same segment as the one before it was

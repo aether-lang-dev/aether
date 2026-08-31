@@ -894,10 +894,18 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
      * because that is what the copying path emits: it sets the status by
      * number and the serializer looks the text up. */
     char line[96];
-    int n = snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\n",
-                     d->status, http_status_text(d->status));
-    if (n < 0 || (size_t)n >= sizeof(line)) return -1;
-    if (dh_put(buf, cap, out_len, line, (size_t)n) != 0) return -1;
+    const char* stxt = http_status_text(d->status);
+    size_t stl = strlen(stxt);
+    if (d->status < 0 || stl + 32 > sizeof(line)) return -1;
+    size_t n = 9;
+    memcpy(line, "HTTP/1.1 ", 9);
+    n += http_write_dec(line + n, (unsigned long long)d->status);
+    line[n++] = ' ';
+    memcpy(line + n, stxt, stl);
+    n += stl;
+    line[n++] = '\r';
+    line[n++] = '\n';
+    if (dh_put(buf, cap, out_len, line, n) != 0) return -1;
 
     /* Content-Type and Server come first and always exist, because the
      * response object is created holding both and an upstream header of the
@@ -969,10 +977,13 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * forwarded, comes out as 0 rather than as that length. Emitted here
          * in the upstream's position so the header order matches. */
         if (kl == 14 && strncasecmp(p, "Content-Length", 14) == 0) {
-            char cl[32];
-            int cn = snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", d->body_len);
-            if (cn < 0 || (size_t)cn >= sizeof(cl)) return -1;
-            if (dh_put(buf, cap, out_len, cl, (size_t)cn) != 0) return -1;
+            char cl[48];
+            size_t cn = 16;
+            memcpy(cl, "Content-Length: ", 16);
+            cn += http_write_dec(cl + cn, (unsigned long long)d->body_len);
+            cl[cn++] = '\r';
+            cl[cn++] = '\n';
+            if (dh_put(buf, cap, out_len, cl, cn) != 0) return -1;
             saw_content_length = 1;
             p = cr + 2;
             continue;
@@ -1000,10 +1011,13 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
      * is where the copying path puts it when the header did not already
      * exist to be replaced. */
     if (!saw_content_length) {
-        char cl[32];
-        int cn = snprintf(cl, sizeof(cl), "Content-Length: %zu\r\n", d->body_len);
-        if (cn < 0 || (size_t)cn >= sizeof(cl)) return -1;
-        if (dh_put(buf, cap, out_len, cl, (size_t)cn) != 0) return -1;
+        char cl[48];
+        size_t cn = 16;
+        memcpy(cl, "Content-Length: ", 16);
+        cn += http_write_dec(cl + cn, (unsigned long long)d->body_len);
+        cl[cn++] = '\r';
+        cl[cn++] = '\n';
+        if (dh_put(buf, cap, out_len, cl, cn) != 0) return -1;
     }
 
     return dh_put(buf, cap, out_len, "\r\n", 2);

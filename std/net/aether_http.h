@@ -3,6 +3,19 @@
 
 #include "../string/aether_string.h"
 #include <stdint.h>
+#include <stddef.h>
+
+/* Decimal digits of `v` into `out`, no terminator, returning how many were
+ * written; `out` needs room for 20. Formatting one small integer through
+ * snprintf costs thousands of instructions, and the proxy's hot path formats
+ * three of them per request. */
+static inline size_t http_write_dec(char* out, unsigned long long v) {
+    char tmp[20];
+    size_t n = 0;
+    do { tmp[n++] = (char)('0' + (unsigned)(v % 10)); v /= 10; } while (v);
+    for (size_t i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
 
 /* #1004: opaque streaming-body handle (defined in aether_http.c). Non-NULL on
  * a response returned by a request that opted into streaming; carries the
