@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.613.0]
+
 ### Fixed
 
 - **A client that goes away no longer takes the server with it.** Writing to a
