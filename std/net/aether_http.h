@@ -381,6 +381,11 @@ int http_find_header_in_block(const char* block, const char* end,
 typedef struct HttpUpstreamConnOpaque HttpUpstreamConn;
 
 int  http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out);
+/* As above, but `allow_pool` 0 forces a fresh connection. Use it when a pooled
+ * connection has just been found closed: the pool may hold more of them, and
+ * spending a retry on another corpse is how a client ends up with nothing. */
+int  http_upstream_acquire_ex(const char* host, int port, int allow_pool,
+                              HttpUpstreamConn* out);
 /* 1 when the connect has completed, 0 when it is still in flight, -1 when it
  * failed. A caller woken by a poller must handle 0 by waiting again: a wakeup
  * does not promise this descriptor is the one that became ready. */
