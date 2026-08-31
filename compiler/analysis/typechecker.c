@@ -625,6 +625,15 @@ static void check_interp_operand(ASTNode* child, SymbolTable* table,
         }
     }
 
+    /* Stay quiet once something else has already failed. A cascading
+     * diagnostic on a broken parse or a failed inference is worse than
+     * silence: tests/integration/tuple_through_fn/bare_fn.ae is a deliberate
+     * negative fixture whose whole point is that a bare `fn` parameter gets
+     * ONE targeted hint and no follow-on noise, and without this guard the
+     * destructured string `e2` there was reported as a function value --
+     * true of its (bogus) inferred type, misleading about the code. */
+    if (error_count > 0) return;
+
     Type* t = child->node_type;
     if (!t || interp_kind_is_renderable(t->kind)) return;
 
