@@ -30,7 +30,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/server.ae" \
+# The reverse-proxy suite's driver, not a copy of it: it already has the proxy
+# role this test needs, and a second copy would be a second thing to keep in
+# step. It also keeps this directory free of any .ae file, which the sweep that
+# runs every .ae as a standalone program would otherwise pick up and run with
+# no arguments.
+SERVER_SRC="$SCRIPT_DIR/../http_reverse_proxy/server.ae"
+if [ ! -f "$SERVER_SRC" ]; then
+    echo "  [FAIL] missing $SERVER_SRC"; exit 1
+fi
+if ! AETHER_HOME="$ROOT" "$AE" build "$SERVER_SRC" \
         -o "$TMPDIR/server" >"$TMPDIR/build.log" 2>&1; then
     echo "  [FAIL] build:"; head -30 "$TMPDIR/build.log"; exit 1
 fi
