@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.615.0]
+
 ### Fixed
 
 - **String interpolation now checks the kind of each operand.** `"${expr}"`
