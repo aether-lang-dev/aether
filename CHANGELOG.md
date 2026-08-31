@@ -48,6 +48,19 @@ version number before tagging the release.
   it owns. Another **3.62%** (21,004 to 20,245), for **16.9% below where this
   branch started**. The macOS `leaks(1)` gate is clean across all 305 programs.
 
+- **The header-block scan rejects a line before comparing it.** Finding one
+  header in a response meant a `strncasecmp` call against every line in the
+  block. Where the colon has to fall, and the first letter, now reject almost
+  all of them for the cost of two loads. The first-letter test can only ever be
+  over-permissive, never wrong, because two bytes that are equal ignoring case
+  always agree on it. A further **2.02%** (20,238 to 19,829).
+
+  Together these bring the proxy to **18.6% fewer instructions per request**
+  than this branch started with, 24,368 down to 19,829. That is user-space
+  work only: the four syscalls per request are unchanged, so the effect on wall
+  clock is smaller than the instruction count and is worth measuring on real
+  hardware rather than predicting.
+
 ### Fixed
 
 - **A request pipelined into the same segment as the one before it was

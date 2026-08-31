@@ -1964,8 +1964,15 @@ int http_find_header_in_block(const char* block, const char* end,
         size_t line_len = (size_t)(line_end - line);
         if (line_len && line[line_len - 1] == '\r') line_len--;
 
-        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
-            && line[name_len] == ':') {
+        /* Where the colon has to fall, and the first letter, reject almost
+         * every line for two loads. strncasecmp is a call that lowercases as
+         * it walks, and this scan runs over every header of every response.
+         * The first-letter test can only be over-permissive, never wrong: two
+         * bytes equal ignoring case always agree on it. */
+        if (line_len > name_len && line[name_len] == ':'
+            && (((unsigned char)line[0] | 0x20)
+                == ((unsigned char)name[0] | 0x20))
+            && strncasecmp(line, name, name_len) == 0) {
             const char* v = line + name_len + 1;
             const char* v_end = line + line_len;
             while (v < v_end && (*v == ' ' || *v == '\t')) v++;

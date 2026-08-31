@@ -496,3 +496,48 @@ TEST_CATEGORY(http_write_dec_digits, TEST_CATEGORY_NETWORK) {
         ASSERT_STREQ(cases[i].want, buf);
     }
 }
+
+/* The header-block scan rejects most lines on the colon position and the first
+ * letter before it compares the name properly. A prefilter that is too eager
+ * drops a header the proxy is required to see, so this checks the cases that
+ * would expose one: mixed case, a name that is a prefix of another, a first
+ * letter differing only in case, and a value that must still be read whole. */
+TEST_CATEGORY(http_find_header_in_block_matching, TEST_CATEGORY_NETWORK) {
+    const char* block =
+        "Content-Length: 42\r\n"
+        "content-type: text/plain\r\n"
+        "X-Long-Name: kept\r\n"
+        "X: short\r\n";
+    const char* end = block + strlen(block);
+    char out[64];
+    int differing = 0;
+
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Content-Length",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("42", out);
+
+    /* Matching is case-insensitive in both directions. */
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "CONTENT-LENGTH",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("42", out);
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Content-Type",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("text/plain", out);
+
+    /* A one-character name must not match a longer one starting with it. */
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "X",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("short", out);
+
+    /* A name that is not there is not found. */
+    ASSERT_EQ(0, http_find_header_in_block(block, end, "Server",
+                                           out, sizeof(out), &differing));
+
+    /* Two of the same name, disagreeing, is what `differing` reports: the
+     * proxy refuses a request framed by two different Content-Lengths. */
+    const char* dup = "Content-Length: 1\r\nContent-Length: 2\r\n";
+    ASSERT_EQ(2, http_find_header_in_block(dup, dup + strlen(dup),
+                                           "Content-Length",
+                                           out, sizeof(out), &differing));
+    ASSERT_EQ(1, differing);
+}
