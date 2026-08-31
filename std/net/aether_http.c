@@ -2375,13 +2375,22 @@ static void http_socket_set_nonblocking(int fd, int on) {
 }
 
 int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
+    return http_upstream_acquire_ex(host, port, 1, out);
+}
+
+/* `allow_pool` is 0 when the caller has just been burned by a pooled
+ * connection the upstream had closed. Taking another one from the same pool
+ * could hand it a second corpse, and the retry after that is the one the
+ * client never gets an answer from. */
+int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
+                             HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
     memset(out, 0, sizeof(*out));
     out->t.applied_timeout_ns = -1;
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
-    if (http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
+    if (allow_pool && http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
         out->reused = 1;
         out->connecting = 0;
         if (out->t.nonblocking != 1) {

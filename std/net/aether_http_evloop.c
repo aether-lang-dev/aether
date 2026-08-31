@@ -117,6 +117,10 @@ typedef struct EvConn {
     int      up_writable_watched; /* write interest on the upstream, which is
                                    * only wanted while a write is blocked */
     int      up_watched;         /* registered with the poller at all */
+    /* A connection taken from the pool that turned out to be closed has been
+     * dialled again once. One retry only: a fresh connection that answers
+     * nothing is the upstream's answer, not a stale descriptor. */
+    int      up_stale_retried;
 
     /* The response accumulator, kept between requests. It starts at 16 KiB,
      * and allocating and freeing one per request had the kernel handing back
@@ -534,6 +538,31 @@ static void ev_lend_rxbuf(EvConn* c) {
 /* Register the upstream the first time this request has to wait on it, and
  * not before. A request whose answer is already there never registers it at
  * all, which is the common case against a fast upstream. */
+/* Take the accumulator back from the exchange, which is what ev_begin_retry
+ * needs before it clears the exchange: the buffer is lent, not owned, and a
+ * memset over the exchange would drop the only pointer to it. */
+static void ev_reclaim_rxbuf(EvConn* c) {
+    if (!c->x.buf) return;
+    if (c->rxbuf) aether_caps_free(c->rxbuf, c->rxcap);
+    c->rxbuf = c->x.buf;
+    c->rxcap = c->x.cap;
+    c->x.buf = NULL;
+    c->x.cap = 0;
+    c->x.len = 0;
+}
+
+/* Close and forget the upstream, without pooling it. It is being abandoned
+ * because it failed, and a failed descriptor must never go back into the pool
+ * for the next request to inherit. */
+static void ev_drop_upstream(EvDriver* d, EvConn* c) {
+    if (c->up.t.sockfd < 0) return;
+    if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
+    ev_untrack(d, c->up.t.sockfd);
+    c->up_in_poller = 0;
+    c->up_watched = c->up_writable_watched = 0;
+    http_upstream_release(&c->up, 0);
+}
+
 static int ev_watch_upstream(EvDriver* d, EvConn* c) {
     if (c->up_watched) return 0;
     c->up_watched = 1;
@@ -1007,11 +1036,27 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * own framing said it would. Released before the response is looked at,
      * because nothing about releasing it depends on that. */
     int keep = c->x.complete && !c->x.framing.invalid;
+    int was_reused = c->up.reused;
+    size_t got = c->x.len;
     if (c->up_watched) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
     ev_untrack(d, c->up.t.sockfd);
     c->up_in_poller = 0;
     c->up_watched = c->up_writable_watched = 0;
     http_upstream_release(&c->up, keep);
+
+    /* An idle pooled connection can be closed by the upstream at any moment,
+     * and the close is only discoverable by using it: the send appears to
+     * succeed into a socket buffer and the read then returns nothing. Zero
+     * bytes is not an empty response, it is no response, and the request
+     * cannot have been acted on twice from here, so it goes again down a
+     * fresh connection. The blocking client does exactly this; without it the
+     * empty buffer is parsed as status 0 and the client is sent
+     * "HTTP/1.1 0 Unknown". */
+    if (got == 0 && was_reused && !c->up_stale_retried) {
+        c->up_stale_retried = 1;
+        ev_reclaim_rxbuf(c);
+        return ev_begin_retry(d, c);
+    }
 
     /* Answer from the upstream's own bytes when nothing needs the response
      * object. Tried before it is built, because building it is the copy this
@@ -1066,12 +1111,37 @@ static int ev_advance(EvDriver* d, EvConn* c) {
         }
         case EV_UPSTREAM_SEND: {
             int r = ev_step_upstream_send(d, c);
+            /* The same stale pooled connection as below, found on the write
+             * instead of the read: the peer had already gone, and the write
+             * is what discovers it. Nothing was delivered, so the request
+             * goes again down a fresh connection rather than the client
+             * being dropped without an answer. */
+            if (r < 0 && c->up.reused && !c->up_stale_retried) {
+                c->up_stale_retried = 1;
+                ev_drop_upstream(d, c);
+                ev_reclaim_rxbuf(c);
+                r = ev_begin_retry(d, c);
+                if (r <= 0) return r;
+                continue;
+            }
             if (r <= 0) return r;
             c->state = EV_UPSTREAM_RECV;
             continue;
         }
         case EV_UPSTREAM_RECV: {
             int r = ev_step_upstream_recv(d, c);
+            /* The third way a closed pooled connection announces itself: the
+             * peer sent a reset rather than a clean end, so the read fails
+             * instead of returning nothing. Same conclusion as the other two,
+             * since nothing had arrived: dial fresh and send once more. */
+            if (r < 0 && c->x.len == 0 && c->up.reused && !c->up_stale_retried) {
+                c->up_stale_retried = 1;
+                ev_drop_upstream(d, c);
+                ev_reclaim_rxbuf(c);
+                r = ev_begin_retry(d, c);
+                if (r <= 0) return r;
+                continue;
+            }
             if (r <= 0) return r;
             r = ev_finish_upstream(d, c);
             if (r <= 0) return r;
