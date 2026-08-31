@@ -837,8 +837,12 @@ static Type* parse_type_unsuffixed(Parser* parser) {
 // Returns AST_STRING_INTERP with alternating children:
 //   - AST_LITERAL (TYPE_STRING) for literal text segments
 //   - expression nodes for ${...} parts
-static ASTNode* parse_interp_string_expr(const char* raw) {
-    ASTNode* interp = create_ast_node(AST_STRING_INTERP, NULL, 0, 0);
+static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) {
+    /* Carry the string's own position. It used to be created at 0,0, so any
+     * diagnostic about an interpolated expression pointed at line 0 -- or, if
+     * it fell back to the operand's node, at wherever that identifier was
+     * DECLARED rather than where it was misused. */
+    ASTNode* interp = create_ast_node(AST_STRING_INTERP, NULL, line, column);
 
     const char* p = raw;
     int lit_cap = 256;
@@ -1137,7 +1141,7 @@ ASTNode* parse_primary_expression(Parser* parser) {
 
         case TOKEN_INTERP_STRING: {
             Token* t = advance_token(parser);
-            return parse_interp_string_expr(t->value);
+            return parse_interp_string_expr(t->value, t->line, t->column);
         }
             
         // Type keywords used as namespace names: string.new(), int.parse(), etc.

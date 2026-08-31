@@ -538,6 +538,138 @@ void type_error(const char* message, int line, int column) {
 
 void type_warning(const char* message, int line, int column);
 
+/* ---- string-interpolation operand check -------------------------------
+ *
+ * `"${expr}"` used to accept ANY type: the typechecker walked the operands
+ * and discarded the result, so codegen emitted a `%s`-shaped read of whatever
+ * bits arrived. Three kinds produced garbage instead of a diagnostic:
+ *
+ *   ${zero_arg_fn}  -> the function's ADDRESS read as a string. The bytes are
+ *                      an x86 prologue ("UH\x89\xe5..."), and this was found
+ *                      in the wild only when such a string reached /bin/sh --
+ *                      i.e. it is memory disclosure, not a formatting wart.
+ *   ${struct_value} -> silently printed the first field.
+ *   ${bytes_handle} -> read the handle as a char*, printing nothing.
+ *
+ * The check is a WHITELIST of renderable kinds, not a blocklist of bad ones:
+ * a blocklist lets the next type added to the language silently join the
+ * garbage list, which is how this shipped in the first place.
+ *
+ * TYPE_TUPLE is admitted because the type is often simply WRONG rather than
+ * the value being un-renderable. `x = f()` where f returns `(int, string)`
+ * binds the FIRST element -- verified: it prints 42, not a tuple -- but the
+ * slot keeps the tuple type. Rejecting it flagged a working example in
+ * std/tcp/README.md. Fixing that inference is a separate change; until then a
+ * tuple operand is far more likely to be a correctly-bound scalar than a real
+ * attempt to render a tuple.
+ *
+ * TYPE_PTR is admitted despite being the `${bytes_handle}` case above, and
+ * that is a deliberate scope decision rather than an oversight. Interpolating
+ * a `ptr` is an established idiom here: 21 sites across std/, contrib/,
+ * examples/ and tests/ do it -- including std/spec and every std.map consumer
+ * -- because map/pqueue/schema return `ptr` for values that really are
+ * `char*`, and those render correctly today. Rejecting them would break
+ * working code, and there is no sanctioned replacement to migrate to (a
+ * `ptr`-to-string binding does not currently compile). Narrowing this is its
+ * own change: it needs a conversion for callers to move to, and a sweep of
+ * those 21 sites. Filed rather than smuggled in behind a bug fix.
+ */
+static int interp_kind_is_renderable(TypeKind k) {
+    switch (k) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64:
+        case TYPE_UINT32: case TYPE_UINT16: case TYPE_UINT8:
+        case TYPE_BYTE: case TYPE_BOOL:
+        case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_LONGDOUBLE:
+        case TYPE_DURATION:
+        case TYPE_STRING:
+        case TYPE_ENUM:      /* integer-backed; renders as its numeric value */
+        case TYPE_UNKNOWN:   /* inference already failed and reported */
+        case TYPE_PTR:       /* see below -- deliberately admitted */
+        case TYPE_TUPLE:     /* see below -- deliberately admitted */
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Reject an un-renderable operand, naming the fix. The message matters more
+ * than the rejection: each of these has an obvious intended spelling, and
+ * saying it turns a silent wrong answer into a one-line correction.
+ *
+ * fb_line/fb_col are the enclosing interpolation's position. Prefer them: an
+ * identifier inside `${...}` carries the position of the DECLARATION it
+ * resolves to, so reporting the child's own line sent the reader to where the
+ * function was defined rather than to the string that misuses it. */
+static void check_interp_operand(ASTNode* child, SymbolTable* table,
+                                 int fb_line, int fb_col) {
+    if (!child) return;
+    if (child->type == AST_LITERAL) return;   /* the literal text segments */
+
+    int line = fb_line > 0 ? fb_line : child->line;
+    int col  = fb_line > 0 ? fb_col  : child->column;
+
+    /* A bare reference to a function. Caught by NAME before consulting the
+     * inferred type, because a bare function identifier infers as its RETURN
+     * type -- so `${cmd}` looks like a perfectly good string here -- and
+     * "did you mean cmd()?" is the whole value of the diagnostic. */
+    if (child->type == AST_IDENTIFIER && child->value) {
+        Symbol* sym = lookup_symbol(table, child->value);
+        if (sym && sym->is_function) {
+            char msg[320];
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate '%s': it is a function, so `${%s}` renders "
+                "its ADDRESS, not a value. Did you mean `${%s()}`?",
+                child->value, child->value, child->value);
+            type_error(msg, line, col);
+            return;
+        }
+    }
+
+    /* Stay quiet once something else has already failed. A cascading
+     * diagnostic on a broken parse or a failed inference is worse than
+     * silence: tests/integration/tuple_through_fn/bare_fn.ae is a deliberate
+     * negative fixture whose whole point is that a bare `fn` parameter gets
+     * ONE targeted hint and no follow-on noise, and without this guard the
+     * destructured string `e2` there was reported as a function value --
+     * true of its (bogus) inferred type, misleading about the code. */
+    if (error_count > 0) return;
+
+    Type* t = child->node_type;
+    if (!t || interp_kind_is_renderable(t->kind)) return;
+
+    char msg[320];
+    switch (t->kind) {
+        case TYPE_STRUCT:
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate a struct%s%s: interpolate a field instead, "
+                "e.g. `${value.field}`",
+                t->struct_name ? " " : "", t->struct_name ? t->struct_name : "");
+            break;
+        case TYPE_ARRAY:
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate an array: interpolate an element, "
+                "e.g. `${a[0]}`");
+            break;
+        case TYPE_FUNCTION:
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate a function value: `${f}` renders its "
+                "address. Call it (`${f()}`) to interpolate its result");
+            break;
+        case TYPE_VOID:
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate a void value: this expression returns "
+                "nothing to render");
+            break;
+        default:
+            snprintf(msg, sizeof(msg),
+                "cannot interpolate this value: its type has no string "
+                "rendering");
+            break;
+    }
+    type_error(msg, line, col);
+}
+
+
 /* #1140 — can this function signal failure to its caller? True for Aether's
  * Go-style `(value, err)` convention (a tuple whose last element is the error
  * string) and hence for `T!`, which is represented as exactly that tuple with
@@ -6782,9 +6914,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return 1;
 
         case AST_STRING_INTERP:
-            // Type check all sub-expressions inside the interpolation
+            /* Type check each sub-expression, then check it is a KIND that
+             * can actually be rendered -- see check_interp_operand.
+             *
+             * NB a diagnostic from here prints more than once. That is
+             * pre-existing and general (an unrelated `as *Missing` error
+             * repeats identically), not something this check introduces. */
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
+                check_interp_operand(expr->children[i], table,
+                                     expr->line, expr->column);
             }
             set_node_type(expr, create_type(TYPE_STRING));
             return 1;

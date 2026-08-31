@@ -26,6 +26,33 @@ version number before tagging the release.
   one segment, asks for two different paths so the second answer proves the
   second request was really served, and repeats it with a `POST` body sitting
   directly in front of the next request.
+## [0.615.0]
+
+### Fixed
+
+- **String interpolation now checks the kind of each operand.** `"${expr}"`
+  accepted any type — the typechecker walked the operands and discarded the
+  result — so codegen emitted a `%s`-shaped read of whatever bits arrived. The
+  serious case was a bare zero-arg function name: `${cmd}` rendered the
+  function's *address* as a string, and since those bytes are an x86 prologue
+  the result looked like `UH‰åSH‰û…`. It surfaced in the wild only when such a
+  string reached `/bin/sh`, which makes it memory disclosure rather than a
+  formatting wart — and it was silent, where the same mistake in `x = cmd` at
+  least produced a C warning. `${struct}` silently printed the first field.
+
+  Both are now compile errors that name the fix (`${cmd}` →
+  *"Did you mean `${cmd()}`?"*). Interpolation nodes also carry a real source
+  position for the first time: they were created at line 0, so a diagnostic
+  fell back to the operand's own node and pointed at where a function was
+  *declared* rather than the string that misuses it.
+
+  The check is a whitelist of renderable kinds, so a type added to the
+  language later cannot silently join the garbage list. `ptr` and tuple
+  operands are deliberately admitted — 21 in-tree sites interpolate a `ptr`
+  that genuinely holds a `char*`, and a single-bound tuple (`x = f()` where
+  `f` returns a pair) binds the first element correctly while the slot keeps
+  the tuple type. Narrowing either needs its own change: a conversion for
+  `ptr` callers to move to, and an inference fix for the tuple case.
 
 ## [0.614.0]
 
