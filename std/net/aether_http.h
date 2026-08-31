@@ -3,6 +3,37 @@
 
 #include "../string/aether_string.h"
 #include <stdint.h>
+#include <stddef.h>
+
+/* ASCII case-insensitive compare of exactly `n` bytes, inline.
+ *
+ * Same answer as strncasecmp on the names this compares, without the call: the
+ * proxy runs this over a handful of short fixed names on every response, where
+ * the call overhead is most of the cost. Two bytes differing only in 0x20 are
+ * equal only when they are letters, which is what keeps this exact rather than
+ * merely close. */
+static inline int http_ci_eq(const char* a, const char* b, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x == y) continue;
+        unsigned char lx = (unsigned char)(x | 0x20);
+        if (lx != (unsigned char)(y | 0x20)) return 0;
+        if (lx < 'a' || lx > 'z') return 0;
+    }
+    return 1;
+}
+
+/* Decimal digits of `v` into `out`, no terminator, returning how many were
+ * written; `out` needs room for 20. Formatting one small integer through
+ * snprintf costs thousands of instructions, and the proxy's hot path formats
+ * three of them per request. */
+static inline size_t http_write_dec(char* out, unsigned long long v) {
+    char tmp[20];
+    size_t n = 0;
+    do { tmp[n++] = (char)('0' + (unsigned)(v % 10)); v /= 10; } while (v);
+    for (size_t i = 0; i < n; i++) out[i] = tmp[n - 1 - i];
+    return n;
+}
 
 /* #1004: opaque streaming-body handle (defined in aether_http.c). Non-NULL on
  * a response returned by a request that opted into streaming; carries the
@@ -319,6 +350,24 @@ char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 /* Find a header by name in a header block, anchored to the start of each line.
  * Returns how many times it appears, writes the first value into `out`, and
  * sets *differing when two of them disagree. */
+/* The CR LF CR LF that ends a header block, or NULL. Length-bounded rather
+ * than NUL-terminated, and cheaper than strstr, which pays a two-way-algorithm
+ * setup before it looks at a single byte of a four byte needle.
+ *
+ * Declared here beside http_find_header_in_block, not in the internal header,
+ * because that one is included only on POSIX and this is not POSIX-only. */
+const char* http_find_header_end(const char* buf, size_t len);
+
+/* As http_find_header_in_block, and additionally reports the first matching
+ * value as a span into `block` itself. A caller that only reads the value is
+ * then not bounded by any buffer size, which matters for headers whose whole
+ * contents decide framing. `out`, `differing`, `out_v` and `out_vl` are each
+ * optional. */
+int http_find_header_span(const char* block, const char* end,
+                          const char* name, char* out, size_t out_cap,
+                          int* differing,
+                          const char** out_v, size_t* out_vl);
+
 int http_find_header_in_block(const char* block, const char* end,
                               const char* name, char* out, size_t out_cap,
                               int* differing);

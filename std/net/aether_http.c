@@ -18,6 +18,9 @@ const char* http_response_error(HttpResponse* r) { (void)r; return "networking d
 int http_response_ok(HttpResponse* r) { (void)r; return 0; }
 struct HttpClientRequest { int unused; };
 HttpClientRequest* http_request_raw(const char* m, const char* u) { (void)m; (void)u; return NULL; }
+/* No arena to bump-allocate from in a build without networking, so this is
+ * the plain constructor, which is itself a stub here. */
+HttpClientRequest* http_request_raw_arena(const char* m, const char* u, struct HttpArena* a) { (void)a; return http_request_raw(m, u); }
 int http_request_set_header_raw(HttpClientRequest* r, const char* n, const char* v) { (void)r; (void)n; (void)v; return -1; }
 int http_request_set_body_raw(HttpClientRequest* r, const char* b, int l, const char* c) { (void)r; (void)b; (void)l; (void)c; return -1; }
 int http_request_set_timeout_raw(HttpClientRequest* r, int s) { (void)r; (void)s; return -1; }
@@ -462,10 +465,37 @@ static int64_t http_now_ms(void) { return (int64_t)http_clock_ms(); }
 static void http_pool_key(char* out, size_t n, const char* host, int port,
                           int use_tls, const char* dial_host, int dial_port,
                           int insecure, const char* cafile) {
-    snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
-             host ? host : "", port,
-             dial_host ? dial_host : "", dial_port,
-             use_tls ? 1 : 0, insecure ? 1 : 0, cafile ? cafile : "");
+    const char* h  = host      ? host      : "";
+    const char* dh = dial_host ? dial_host : "";
+    const char* ca = cafile    ? cafile    : "";
+    size_t hl = strlen(h), dhl = strlen(dh), cal = strlen(ca);
+
+    /* This string is the pool's identity for a connection, so the bytes have
+     * to be exactly what the format produced. Anything that would not fit, or
+     * a port that is not a plain number, goes back through snprintf rather
+     * than being rendered differently here. */
+    if (port < 0 || dial_port < 0 || hl + dhl + cal + 48 > n) {
+        snprintf(out, n, "%s:%d|%s:%d|%d|%d|%s",
+                 h, port, dh, dial_port,
+                 use_tls ? 1 : 0, insecure ? 1 : 0, ca);
+        return;
+    }
+
+    char* p = out;
+    memcpy(p, h, hl); p += hl;
+    *p++ = ':';
+    p += http_write_dec(p, (unsigned long long)port);
+    *p++ = '|';
+    memcpy(p, dh, dhl); p += dhl;
+    *p++ = ':';
+    p += http_write_dec(p, (unsigned long long)dial_port);
+    *p++ = '|';
+    *p++ = use_tls  ? '1' : '0';
+    *p++ = '|';
+    *p++ = insecure ? '1' : '0';
+    *p++ = '|';
+    memcpy(p, ca, cal); p += cal;
+    *p = '\0';
 }
 
 /* Caller holds the lock. Drops every entry idle past the timeout.
@@ -876,6 +906,13 @@ struct HttpClientRequest {
     /* Optional. When set, header nodes are bump-allocated from it and freed
      * by whoever owns it, not by http_request_free_raw. */
     struct HttpArena* arena;
+    /* The struct came out of that arena, so it must not be handed to free():
+     * the allocator never gave it out. `method_owned` and `url_owned` say the
+     * same of those two pointers separately, because the redirect path
+     * replaces the URL with one it allocated itself. */
+    int   arena_backed;
+    int   method_owned;
+    int   url_owned;
     char* method;        /* "GET", "POST", etc. — owned, NUL-terminated */
     char* url;           /* full URL — owned, NUL-terminated */
     HttpHeader* headers; /* singly-linked, in insertion order */
@@ -929,11 +966,36 @@ struct HttpClientRequest {
  * will answer (CWE-93). The header is rejected rather than repaired, because
  * silently sending something other than what was asked for is its own bug.
  */
+/* RFC 9110 token characters: letters, digits, and "!#$%&'*+-.^_`|~".
+ *
+ * A table, because the proxy validates every character of every header name it
+ * forwards, and the readable spelling of this test costs an isalnum call plus
+ * a strchr across sixteen punctuation marks per character. Fixing the set here
+ * also pins it to the grammar: isalnum answers for the active locale, and a
+ * header name is a token in every locale. */
+static const unsigned char http_tchar[256] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
 int http_header_name_ok(const char* name) {
     if (!name || !*name) return 0;
     for (const unsigned char* c = (const unsigned char*)name; *c; c++) {
-        /* RFC 9110 token: these punctuation marks, plus letters and digits. */
-        if (!(isalnum(*c) || strchr("!#$%&'*+-.^_`|~", (int)*c))) return 0;
+        if (!http_tchar[*c]) return 0;
     }
     return 1;
 }
@@ -959,10 +1021,39 @@ HttpClientRequest* http_request_raw(const char* method, const char* url) {
     if (!req) return NULL;
     req->method = strdup(method);
     req->url    = strdup(url);
+    req->method_owned = 1;
+    req->url_owned    = 1;
     if (!req->method || !req->url) {
         http_request_free_raw(req);
         return NULL;
     }
+    return req;
+}
+
+HttpClientRequest* http_request_raw_arena(const char* method, const char* url,
+                                          HttpArena* arena) {
+    if (!url || !*url) return NULL;
+    if (!http_header_name_ok(method)) return NULL;
+    if (!http_header_value_ok(url)) return NULL;
+
+    size_t ml = strlen(method), ul = strlen(url);
+    char* block = arena ? (char*)http_arena_alloc(
+                      arena, sizeof(HttpClientRequest) + ml + 1 + ul + 1)
+                        : NULL;
+    if (!block) {
+        HttpClientRequest* req = http_request_raw(method, url);
+        if (req) req->arena = arena;
+        return req;
+    }
+
+    HttpClientRequest* req = (HttpClientRequest*)block;
+    memset(req, 0, sizeof(*req));
+    req->arena = arena;
+    req->arena_backed = 1;
+    req->method = block + sizeof(HttpClientRequest);
+    memcpy(req->method, method, ml + 1);
+    req->url = req->method + ml + 1;
+    memcpy(req->url, url, ul + 1);
     return req;
 }
 
@@ -1186,8 +1277,8 @@ int http_request_ignore_http_proxy_raw(HttpClientRequest* req) {
 
 void http_request_free_raw(HttpClientRequest* req) {
     if (!req) return;
-    free(req->method);
-    free(req->url);
+    if (req->method_owned) free(req->method);
+    if (req->url_owned) free(req->url);
     /* Body was alloc'd via aether_caps_malloc in
      * http_request_set_body_raw; pair the free with the recorded
      * length so cap accounting stays at current-usage. */
@@ -1206,6 +1297,7 @@ void http_request_free_raw(HttpClientRequest* req) {
     }
     req->headers = NULL;
     req->headers_tail = NULL;
+    if (req->arena_backed) return;
     free(req);
 }
 
@@ -1217,6 +1309,7 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
  * framing (caller then keeps the raw body). Binary-safe (copies by
  * length). Defined below. */
 static int http_value_has_chunked(const char* v);
+static int http_value_has_chunked_n(const char* v, size_t len);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
 /* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
@@ -1860,9 +1953,10 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
  * `out`, and sets *differing when two of them disagree. A framing header that
  * appears twice with two answers has no single answer at all.
  */
-int http_find_header_in_block(const char* block, const char* end,
-                            const char* name, char* out, size_t out_cap,
-                            int* differing) {
+int http_find_header_span(const char* block, const char* end,
+                          const char* name, char* out, size_t out_cap,
+                          int* differing,
+                          const char** out_v, size_t* out_vl) {
     size_t name_len = strlen(name);
     int count = 0;
     if (differing) *differing = 0;
@@ -1874,27 +1968,43 @@ int http_find_header_in_block(const char* block, const char* end,
         size_t line_len = (size_t)(line_end - line);
         if (line_len && line[line_len - 1] == '\r') line_len--;
 
-        if (line_len > name_len && strncasecmp(line, name, name_len) == 0
-            && line[name_len] == ':') {
+        /* Where the colon has to fall, and the first letter, reject almost
+         * every line for two loads. strncasecmp is a call that lowercases as
+         * it walks, and this scan runs over every header of every response.
+         * The first-letter test can only be over-permissive, never wrong: two
+         * bytes equal ignoring case always agree on it. */
+        if (line_len > name_len && line[name_len] == ':'
+            && (((unsigned char)line[0] | 0x20)
+                == ((unsigned char)name[0] | 0x20))
+            && strncasecmp(line, name, name_len) == 0) {
             const char* v = line + name_len + 1;
             const char* v_end = line + line_len;
             while (v < v_end && (*v == ' ' || *v == '\t')) v++;
             while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
             size_t vl = (size_t)(v_end - v);
 
-            char value[256];
-            if (vl >= sizeof(value)) vl = sizeof(value) - 1;
-            memcpy(value, v, vl);
-            value[vl] = '\0';
-
+            /* The span is the value where it lies, so a caller that only
+             * needs to look at it is not limited by any buffer size. */
             if (count == 0) {
-                if (out && out_cap) {
-                    size_t copy = vl < out_cap - 1 ? vl : out_cap - 1;
-                    memcpy(out, value, copy);
-                    out[copy] = '\0';
+                if (out_v)  *out_v  = v;
+                if (out_vl) *out_vl = vl;
+            }
+
+            if (out || differing) {
+                char value[256];
+                size_t cv = vl < sizeof(value) - 1 ? vl : sizeof(value) - 1;
+                memcpy(value, v, cv);
+                value[cv] = '\0';
+
+                if (count == 0) {
+                    if (out && out_cap) {
+                        size_t copy = cv < out_cap - 1 ? cv : out_cap - 1;
+                        memcpy(out, value, copy);
+                        out[copy] = '\0';
+                    }
+                } else if (differing && out && strcmp(out, value) != 0) {
+                    *differing = 1;
                 }
-            } else if (differing && out && strcmp(out, value) != 0) {
-                *differing = 1;
             }
             count++;
         }
@@ -1902,6 +2012,13 @@ int http_find_header_in_block(const char* block, const char* end,
         line = eol + 1;
     }
     return count;
+}
+
+int http_find_header_in_block(const char* block, const char* end,
+                            const char* name, char* out, size_t out_cap,
+                            int* differing) {
+    return http_find_header_span(block, end, name, out, out_cap, differing,
+                                 NULL, NULL);
 }
 
 /* Has a complete HTTP/1.1 response accumulated in `buf`?
@@ -1917,17 +2034,36 @@ int http_find_header_in_block(const char* block, const char* end,
  * place for chunked, Content-Length and the no-body statuses to disagree.
  */
 
+const char* http_find_header_end(const char* buf, size_t len) {
+    if (!buf || len < 4) return NULL;
+    const char* p = buf;
+    /* A match has to start at or before this, so that all four bytes exist. */
+    const char* last = buf + len - 3;
+    while (p < last) {
+        const char* cr = (const char*)memchr(p, '\r', (size_t)(last - p));
+        if (!cr) return NULL;
+        if (cr[1] == '\n' && cr[2] == '\r' && cr[3] == '\n') return cr;
+        p = cr + 1;
+    }
+    return NULL;
+}
+
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
-        /* The terminator is NUL-free ASCII and precedes any body byte. */
-        char* hend = strstr(buf, "\r\n\r\n");
+        char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
-        char saved = *hend;
-        *hend = '\0';
-        char* te = http_extract_response_header(buf, "Transfer-Encoding");
-        if (te && http_value_has_chunked(te)) {
+
+        /* Read Transfer-Encoding where it lies. Copying it out meant an
+         * allocation and a free per response, and any buffer it was copied
+         * into would have put a length limit on a header whose contents
+         * decide how the body is framed. */
+        const char* te = NULL;
+        size_t te_len = 0;
+        http_find_header_span(buf, hend, "Transfer-Encoding",
+                              NULL, 0, NULL, &te, &te_len);
+        if (te && http_value_has_chunked_n(te, te_len)) {
             f->chunked = 1;
             f->definite = 1;
         } else {
@@ -1954,8 +2090,6 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                 }
             }
         }
-        free(te);
-        *hend = saved;
         if (no_body_expected(response_status_of(buf), method)) {
             f->body_target = f->header_bytes;
             f->definite = 1;
@@ -2011,8 +2145,9 @@ char* http_build_request_head_into(const HttpReqHead* p,
 
     /* Helper: append a NUL-terminated string into hdr, growing as
      * needed. Returns 0 on success, -1 on OOM. */
-    #define HDR_APPEND_STR(s) do { \
-        size_t _slen = strlen(s); \
+    #define HDR_APPEND_N(s, len) do { \
+        const char* _s = (s); \
+        size_t _slen = (len); \
         if (hdr_len + _slen + 1 > hdr_cap) { \
             size_t _nc = hdr_cap; \
             while (_nc < hdr_len + _slen + 1) _nc *= 2; \
@@ -2021,16 +2156,21 @@ char* http_build_request_head_into(const HttpReqHead* p,
                         *io_buf = NULL; *io_cap = 0; return NULL; } \
             hdr = _nh; hdr_cap = _nc; \
         } \
-        memcpy(hdr + hdr_len, s, _slen); \
+        memcpy(hdr + hdr_len, _s, _slen); \
         hdr_len += _slen; \
         hdr[hdr_len] = '\0'; \
     } while (0)
+
+    /* A literal's length is known while compiling; measuring it again at run
+     * time is work this path takes once per header emitted. */
+    #define HDR_APPEND_LIT(s) HDR_APPEND_N("" s, sizeof(s) - 1)
+    #define HDR_APPEND_STR(s) do { const char* _t = (s); HDR_APPEND_N(_t, strlen(_t)); } while (0)
 
     /* Request line. For plain HTTP through a forward proxy, use the absolute
      * form (`GET http://p->host[:p->port]/p->path HTTP/1.1`) so the proxy knows the
      * origin. Direct requests, and HTTPS-through-a-CONNECT-tunnel (which talks
      * end-to-end to the origin), use the origin form (`GET /p->path`). */
-    HDR_APPEND_STR(p->method); HDR_APPEND_STR(" ");
+    HDR_APPEND_STR(p->method); HDR_APPEND_LIT(" ");
     if (p->via_proxy && !p->use_tls) {
         char absline[1408];
         if (p->port == 80) {
@@ -2042,7 +2182,7 @@ char* http_build_request_head_into(const HttpReqHead* p,
     } else {
         HDR_APPEND_STR(p->path);
     }
-    HDR_APPEND_STR(" HTTP/1.1\r\n");
+    HDR_APPEND_LIT(" HTTP/1.1\r\n");
 
     /* Built-in Host (overridable via set_header).
      *
@@ -2053,32 +2193,37 @@ char* http_build_request_head_into(const HttpReqHead* p,
      * brackets here; the connect path is IPv4-only (see the note above), so
      * there is no such host to reach this. */
     if (!header_already_set(p->req, "Host")) {
-        HDR_APPEND_STR("Host: "); HDR_APPEND_STR(p->host);
+        HDR_APPEND_LIT("Host: "); HDR_APPEND_STR(p->host);
         if (p->port != (p->use_tls ? 443 : 80)) {
-            char port_suffix[16];
-            snprintf(port_suffix, sizeof(port_suffix), ":%d", p->port);
-            HDR_APPEND_STR(port_suffix);
+            char port_suffix[24];
+            size_t pn = 0;
+            port_suffix[pn++] = ':';
+            pn += http_write_dec(port_suffix + pn, (unsigned long long)p->port);
+            HDR_APPEND_N(port_suffix, pn);
         }
-        HDR_APPEND_STR("\r\n");
+        HDR_APPEND_LIT("\r\n");
     }
 
     /* Built-in Content-Length when p->body present (overridable, but
      * setting it manually is almost always a bug — we still emit
      * ours unless the caller explicitly overrode it). */
     if (p->body && p->body_len > 0 && !header_already_set(p->req, "Content-Length")) {
-        char clen[32];
-        snprintf(clen, sizeof(clen), "Content-Length: %d\r\n", p->body_len);
-        HDR_APPEND_STR(clen);
+        char clen[48];
+        size_t cn = 16;
+        memcpy(clen, "Content-Length: ", 16);
+        cn += http_write_dec(clen + cn, (unsigned long long)p->body_len);
+        clen[cn++] = '\r'; clen[cn++] = '\n';
+        HDR_APPEND_N(clen, cn);
     }
 
     /* Built-in Content-Type when p->body present, only if neither the
      * builder's p->content_type nor an explicit Content-Type header is set. */
     if (p->body && p->body_len > 0 && p->content_type
         && !header_already_set(p->req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_STR("\r\n");
+        HDR_APPEND_LIT("Content-Type: "); HDR_APPEND_STR(p->content_type); HDR_APPEND_LIT("\r\n");
     } else if (p->body && p->body_len > 0 && !p->content_type
         && !header_already_set(p->req, "Content-Type")) {
-        HDR_APPEND_STR("Content-Type: application/x-www-form-urlencoded\r\n");
+        HDR_APPEND_LIT("Content-Type: application/x-www-form-urlencoded\r\n");
     }
 
     /* Persistent by default: the connection goes back to the idle pool when
@@ -2091,13 +2236,15 @@ char* http_build_request_head_into(const HttpReqHead* p,
 
     /* Caller-provided headers, in insertion order. */
     for (HttpHeader* h = p->req->headers; h; h = h->next) {
-        HDR_APPEND_STR(h->name); HDR_APPEND_STR(": "); HDR_APPEND_STR(h->value); HDR_APPEND_STR("\r\n");
+        HDR_APPEND_STR(h->name); HDR_APPEND_LIT(": "); HDR_APPEND_STR(h->value); HDR_APPEND_LIT("\r\n");
     }
 
     /* End-of-headers blank line. */
-    HDR_APPEND_STR("\r\n");
+    HDR_APPEND_LIT("\r\n");
 
     #undef HDR_APPEND_STR
+    #undef HDR_APPEND_LIT
+    #undef HDR_APPEND_N
 
     *out_len = hdr_len;
     /* The buffer goes back to the caller at whatever size it reached, so the
@@ -2973,17 +3120,24 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
 /* Case-insensitive: does the Transfer-Encoding value name `chunked`?
  * `chunked` is the final (and in practice only) transfer coding we
  * decode; a comma-list like "gzip, chunked" still matches. */
-static int http_value_has_chunked(const char* v) {
-    if (!v) return 0;
-    for (const char* p = v; *p; p++) {
-        if ((*p == 'c' || *p == 'C') &&
-            (p[1] == 'h' || p[1] == 'H') && (p[2] == 'u' || p[2] == 'U') &&
-            (p[3] == 'n' || p[3] == 'N') && (p[4] == 'k' || p[4] == 'K') &&
-            (p[5] == 'e' || p[5] == 'E') && (p[6] == 'd' || p[6] == 'D')) {
+static int http_value_has_chunked_n(const char* v, size_t len) {
+    if (!v || len < 7) return 0;
+    /* Only the seven letters can produce these values with 0x20 set, so this
+     * is an exact case-insensitive compare and not a loose one. */
+    for (size_t i = 0; i + 7 <= len; i++) {
+        const char* p = v + i;
+        if ((p[0] | 0x20) == 'c' && (p[1] | 0x20) == 'h' &&
+            (p[2] | 0x20) == 'u' && (p[3] | 0x20) == 'n' &&
+            (p[4] | 0x20) == 'k' && (p[5] | 0x20) == 'e' &&
+            (p[6] | 0x20) == 'd') {
             return 1;
         }
     }
     return 0;
+}
+
+static int http_value_has_chunked(const char* v) {
+    return v ? http_value_has_chunked_n(v, strlen(v)) : 0;
 }
 
 /* Decode HTTP/1.1 chunked transfer-encoding (RFC 7230 §4.1). `in` /
@@ -3230,8 +3384,9 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
         free(current_url);
         current_url = strdup(next_url);
 
-        free(req->url);
+        if (req->url_owned) free(req->url);
         req->url = next_url;  /* takes ownership */
+        req->url_owned = 1;
 
         http_response_free(resp);
         resp = http_request_internal(req);

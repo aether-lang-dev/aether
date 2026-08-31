@@ -93,6 +93,12 @@ typedef struct EvConn {
                              * search would then look past the terminator and
                              * never find it. 0 means not found yet */
 
+    /* Bytes of `in` belonging to the request being served. A client may send
+     * the next request in the same segment; what sits past this offset is
+     * that request, and dropping it strands a request the client is waiting
+     * on. */
+    size_t   in_total;
+
     char*    out;           /* response bytes owed to the client */
     size_t   out_len, out_sent, out_cap;
     /* A pass-through answers from the bytes the upstream sent: the head is
@@ -222,7 +228,10 @@ static int ev_in_reserve(EvConn* c, size_t extra) {
  * through the capability allocator, so they come back through it too, with
  * the size they were charged at. */
 static void ev_conn_reset_request(EvConn* c) {
-    c->in_len = 0;
+    size_t carried = c->in_len > c->in_total ? c->in_len - c->in_total : 0;
+    if (carried) memmove(c->in, c->in + c->in_total, carried);
+    c->in_len = carried;
+    c->in_total = 0;
     c->in_scanned = 0;
     c->in_hdr_end = 0;
 
@@ -606,15 +615,24 @@ static int ev_step_tls_handshake(EvDriver* d, EvConn* c) {
 /* Read whatever the client has, without waiting for it. */
 static int ev_step_read_request(EvDriver* d, EvConn* c) {
     for (;;) {
+        /* Parse what is already buffered before asking the kernel for more:
+         * after a pipelined request the next one is here already, and reading
+         * first would block it behind bytes that never come. */
+        if (c->in_len > 0) {
+            size_t total = 0;
+            int complete = ev_request_complete(c, &total);
+            if (complete < 0) return -1;         /* framing it cannot resolve */
+            if (complete) {                      /* a whole request is here */
+                c->in_total = total;
+                return 1;
+            }
+        }
+
         if (ev_in_reserve(c, 4096) != 0) return -1;
         ssize_t n = ev_client_read(c, c->in + c->in_len,
                                    c->in_cap - c->in_len - 1);
         if (n > 0) {
             c->in_len += (size_t)n;
-            size_t total = 0;
-            int complete = ev_request_complete(c, &total);
-            if (complete < 0) return -1;         /* framing it cannot resolve */
-            if (complete) return 1;              /* a whole request is here */
             continue;
         }
         if (n == 0) return -1;                   /* the client is finished */
@@ -804,6 +822,9 @@ static int ev_hand_back(EvDriver* d, EvConn* c) {
     ssl = c->ssl;
     c->ssl = NULL;
 #endif
+    /* Every buffered byte goes with it, not just this request's: a client
+     * may have pipelined the next one into the same segment, and the worker
+     * taking over is the only thing that will ever read it. */
     int adopted = http_server_adopt_tls_connection(d->loop->server, fd, ssl,
                                                    c->in, (int)c->in_len);
     if (adopted != 0) {
@@ -871,7 +892,7 @@ static int ev_begin_upstream(EvDriver* d, EvConn* c) {
         http_arena_reset(&c->arena);
     }
 
-    if (!http_parse_request_arena(c->req, c->in, c->in_len,
+    if (!http_parse_request_arena(c->req, c->in, c->in_total,
                                   c->arena_ready ? &c->arena : NULL)) return -1;
 
     if (!c->res) {

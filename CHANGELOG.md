@@ -11,6 +11,123 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **The proxy's hot path no longer formats anything through `printf`.** A
+  callgrind profile of the reverse proxy put about 5.9% of all instructions in
+  the `vfprintf` machinery, reached from three `snprintf` calls that run once
+  per proxied request: the upstream request's port suffix, and the response's
+  status line and `Content-Length`. Each formats one small integer, which
+  `snprintf` charges thousands of instructions for. They now write their digits
+  directly, and the header builder appends string literals by their compile
+  time length instead of measuring each one with `strlen` again at run time.
+  Worth **5.00% fewer instructions per proxied request** (24,368 to 23,148),
+  measured under callgrind as the difference between a 3,000 request run and a
+  1,000 request run so process startup cancels out exactly. Instruction counts
+  do not depend on machine load, which is what makes a change this size
+  measurable at all.
+
+- **Header names are validated against a table, and the connection pool's key
+  is built without formatting.** Deciding whether a byte may appear in a header
+  name cost an `isalnum` call plus a `strchr` across sixteen punctuation marks,
+  for every character of every header the proxy forwards, and the pool key that
+  decides which idle connection may be reused was rendered with a seven field
+  `snprintf` on every upstream acquire. The table also pins the rule to RFC
+  9110's `token` grammar, where `isalnum` answers for whatever locale happens
+  to be active. A further **9.19% fewer instructions per request** (23,148 to
+  21,031), for **13.7% below where this started**. A new unit test walks all
+  255 byte values against the grammar spelled out independently, so a single
+  mistyped table entry fails the build.
+
+- **The outbound request itself comes from the arena the proxy already keeps.**
+  Its struct, method and URL were three `malloc`s and three `free`s on every
+  proxied request, next to the header nodes that were already bump-allocated
+  from the connection's arena. They now share it, and ownership of the method
+  and URL is tracked per pointer rather than inferred, so the redirect path,
+  which replaces the URL with one it allocated itself, still frees exactly what
+  it owns. Another **3.62%** (21,004 to 20,245), for **16.9% below where this
+  branch started**. The macOS `leaks(1)` gate is clean across all 305 programs.
+
+- **The header-block scan rejects a line before comparing it.** Finding one
+  header in a response meant a `strncasecmp` call against every line in the
+  block. Where the colon has to fall, and the first letter, now reject almost
+  all of them for the cost of two loads. The first-letter test can only ever be
+  over-permissive, never wrong, because two bytes that are equal ignoring case
+  always agree on it. A further **2.02%** (20,238 to 19,829).
+
+- **The end of a response's header block is found with `memchr` rather than
+  `strstr`.** glibc's `strstr` runs a two-way-algorithm setup before it looks at
+  a single byte, which is a poor trade for a four byte needle scanned once per
+  response. Scanning for the CR and checking the three bytes behind it is
+  **2.69%** cheaper (19,832 to 19,299), and is length-bounded rather than
+  relying on the buffer being NUL-terminated.
+
+- **Response framing reads `Transfer-Encoding` where it lies.** It was copied
+  out to a heap allocation and freed again on every response, and the framing
+  code borrowed the caller's buffer to NUL-terminate it while it did so. A
+  header scan that reports the value as a span into the block removes both.
+  This is a correctness change more than a speed one, worth only **0.54%**
+  (19,301 to 19,198): the whole value decides how the body is framed, and any
+  fixed buffer it were copied into would truncate, so a `chunked` past the cut
+  would be missed. That is the disagreement request smuggling is built on. A
+  test pins the span to a 309 byte value ending in `chunked` and shows the
+  copying form stops at 63.
+
+- **The fixed header names the proxy matches are compared inline.** Deciding
+  whether a response header is `Content-Type`, `Server` or `Content-Length` went
+  through `strncasecmp` for six to fourteen bytes, where the call itself is most
+  of the cost. The length guards in front of these already reject every other
+  header, so there were no wasted calls to remove, only the calls themselves.
+  Worth **2.53%** (19,187 to 18,701). A test walks all 65,536 byte pairs against
+  `strncasecmp` to show the inline form gives the same answer, including the
+  pairs a naive `0x20` trick gets wrong (`^` and `~`, `@` and a backtick, `-`
+  and CR).
+
+- **The forwarded headers are built without allocating.** `X-Forwarded-For` and
+  `Via` are each appended to whatever arrived and then handed to the request,
+  which copies them into its arena, so building them on the heap was a `malloc`
+  and a `free` per header per request for a string discarded immediately. They
+  are built in place now, falling back to the heap only for a chain too long to
+  fit.
+
+  Together these bring the proxy to **24.5% fewer instructions per request**
+  than this branch started with, 24,368 down to 18,409. That is user-space
+  work only: the four syscalls per request are unchanged, so the effect on wall
+  clock is smaller than the instruction count and is worth measuring on real
+  hardware rather than predicting.
+
+### Fixed
+
+- **The proxy sent the client's `X-Forwarded-For` upstream alongside its own,
+  and the client's came first.** Every inbound header was copied to the
+  upstream and the proxy then appended its own `X-Forwarded-For`,
+  `X-Forwarded-Proto`, `X-Forwarded-Host` and `Via`, so a client that sent any
+  of those caused two of them to arrive. Reading a header means reading its
+  first occurrence, which is what Aether's own server does, so an upstream read
+  the value the client chose and never saw the hop the proxy appended. That
+  inverts the header's purpose: a client could claim any address and an upstream
+  allow-listing, rate limiting or audit logging on it would believe the claim.
+  RFC 9110 section 5.3 also requires appending to the existing field rather than
+  emitting a second one. The proxy no longer forwards the client's copy of a
+  header it sets itself; where it is not injecting its own, the client's is
+  forwarded untouched as before. Found by pointing the proxy at a listener that
+  prints the raw upstream request. The existing test missed it by asserting a
+  prefix, which the client's own copy satisfies, and now asserts the whole value
+  and that exactly one arrives.
+
+- **A request pipelined into the same segment as the one before it was
+  dropped.** HTTP/1.1 lets a client send the next request without waiting for
+  the previous answer, and the event-driven proxy read both into one buffer,
+  answered the first, then emptied the buffer before looking at the rest. The
+  second request was discarded and the client waited for a response that was
+  never going to come, until its own timeout. The connection now keeps the
+  bytes past the request it just served and parses them before reading the
+  socket again, and the parse is given the request's own length rather than
+  everything buffered, so a body is framed by its `Content-Length` and never
+  by whatever followed it. Covered by a new probe that sends two requests in
+  one segment, asks for two different paths so the second answer proves the
+  second request was really served, and repeats it with a `POST` body sitting
+  directly in front of the next request.
 ## [0.615.0]
 
 ### Fixed

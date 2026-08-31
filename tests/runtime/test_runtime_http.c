@@ -455,3 +455,203 @@ TEST_CATEGORY(http_clock_pin_contract, TEST_CATEGORY_NETWORK) {
     ASSERT_TRUE(http_clock_ms() > c);
 }
 #endif  /* !_WIN32 */
+
+/* The token test is a table now, and a table is only as good as the grammar it
+ * was written from. This walks every byte value and compares against RFC 9110's
+ * token rule spelled out independently, so a mistyped entry cannot pass. A
+ * character wrongly accepted here is a header name the proxy would forward
+ * unaltered. */
+TEST_CATEGORY(http_header_name_token_set, TEST_CATEGORY_NETWORK) {
+    for (int i = 1; i < 256; i++) {
+        char one[2] = { (char)i, '\0' };
+        int alpha = (i >= 'A' && i <= 'Z') || (i >= 'a' && i <= 'z');
+        int digit = (i >= '0' && i <= '9');
+        int punct = strchr("!#$%&'*+-.^_`|~", i) != NULL && i != 0;
+        int want  = (alpha || digit || punct) ? 1 : 0;
+        ASSERT_EQ(want, http_header_name_ok(one) ? 1 : 0);
+    }
+
+    /* The empty name and a NULL are not tokens either. */
+    ASSERT_EQ(0, http_header_name_ok(""));
+    ASSERT_EQ(0, http_header_name_ok(NULL));
+
+    /* A whole name, and one with a single bad byte in it. */
+    ASSERT_EQ(1, http_header_name_ok("X-Forwarded-For"));
+    ASSERT_EQ(0, http_header_name_ok("X-Forwarded For"));
+    ASSERT_EQ(0, http_header_name_ok("X-Bad\r\nInjected"));
+}
+
+/* The digits the proxy now writes itself instead of asking snprintf for. */
+TEST_CATEGORY(http_write_dec_digits, TEST_CATEGORY_NETWORK) {
+    struct { unsigned long long v; const char* want; } cases[] = {
+        { 0, "0" }, { 7, "7" }, { 10, "10" }, { 80, "80" }, { 443, "443" },
+        { 19001, "19001" }, { 65535, "65535" }, { 4294967295ULL, "4294967295" },
+        { 18446744073709551615ULL, "18446744073709551615" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char buf[32];
+        size_t n = http_write_dec(buf, cases[i].v);
+        buf[n] = '\0';
+        ASSERT_EQ(strlen(cases[i].want), n);
+        ASSERT_STREQ(cases[i].want, buf);
+    }
+}
+
+/* The header-block scan rejects most lines on the colon position and the first
+ * letter before it compares the name properly. A prefilter that is too eager
+ * drops a header the proxy is required to see, so this checks the cases that
+ * would expose one: mixed case, a name that is a prefix of another, a first
+ * letter differing only in case, and a value that must still be read whole. */
+TEST_CATEGORY(http_find_header_in_block_matching, TEST_CATEGORY_NETWORK) {
+    const char* block =
+        "Content-Length: 42\r\n"
+        "content-type: text/plain\r\n"
+        "X-Long-Name: kept\r\n"
+        "X: short\r\n";
+    const char* end = block + strlen(block);
+    char out[64];
+    int differing = 0;
+
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Content-Length",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("42", out);
+
+    /* Matching is case-insensitive in both directions. */
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "CONTENT-LENGTH",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("42", out);
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Content-Type",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("text/plain", out);
+
+    /* A one-character name must not match a longer one starting with it. */
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "X",
+                                           out, sizeof(out), &differing));
+    ASSERT_STREQ("short", out);
+
+    /* A name that is not there is not found. */
+    ASSERT_EQ(0, http_find_header_in_block(block, end, "Server",
+                                           out, sizeof(out), &differing));
+
+    /* Two of the same name, disagreeing, is what `differing` reports: the
+     * proxy refuses a request framed by two different Content-Lengths. */
+    const char* dup = "Content-Length: 1\r\nContent-Length: 2\r\n";
+    ASSERT_EQ(2, http_find_header_in_block(dup, dup + strlen(dup),
+                                           "Content-Length",
+                                           out, sizeof(out), &differing));
+    ASSERT_EQ(1, differing);
+}
+
+/* The header-block terminator is found by scanning for CR rather than with
+ * strstr. An off-by-one here either misses a complete header block, hanging
+ * the read, or reports one that is not there, which is a framing error. The
+ * boundary cases are what this covers. */
+TEST_CATEGORY(http_find_header_end_boundaries, TEST_CATEGORY_NETWORK) {
+    const char* full = "GET / HTTP/1.1\r\nHost: x\r\n\r\nbody";
+    const char* hit = http_find_header_end(full, strlen(full));
+    ASSERT_NOT_NULL(hit);
+    ASSERT_EQ(0, memcmp(hit, "\r\n\r\n", 4));
+    ASSERT_STREQ("body", hit + 4);
+
+    /* Terminator sitting exactly at the end of the buffer. */
+    const char* exact = "A: b\r\n\r\n";
+    ASSERT_NOT_NULL(http_find_header_end(exact, strlen(exact)));
+
+    /* One byte short of a terminator is not one. */
+    ASSERT_NULL(http_find_header_end("A: b\r\n\r", 7));
+    ASSERT_NULL(http_find_header_end("\r\n\r", 3));
+    ASSERT_NULL(http_find_header_end("", 0));
+    ASSERT_NULL(http_find_header_end("\r\n\r\n", 3));
+
+    /* The shortest possible match, and a lone CR before it. */
+    ASSERT_NOT_NULL(http_find_header_end("\r\n\r\n", 4));
+    const char* decoy = "\rX\r\n\r\n";
+    ASSERT_EQ(2, (int)(http_find_header_end(decoy, strlen(decoy)) - decoy));
+
+    /* A CR run that only completes on the last possible byte. */
+    const char* run = "\r\r\r\r\n\r\n";
+    ASSERT_EQ(3, (int)(http_find_header_end(run, strlen(run)) - run));
+
+    /* Not present at all, and binary-safe past an embedded NUL. */
+    ASSERT_NULL(http_find_header_end("no terminator here", 18));
+    const char nul[] = { 'A', '\0', '\r', '\n', '\r', '\n' };
+    ASSERT_EQ(2, (int)(http_find_header_end(nul, sizeof(nul)) - nul));
+}
+
+/* Response framing reads Transfer-Encoding where it lies rather than copying
+ * it out. That matters because the whole value decides how the body is framed:
+ * a copy into a fixed buffer truncates, and a "chunked" past the cut would be
+ * missed, which is the framing disagreement request smuggling is built on.
+ * This pins the span to the full value and shows the copying form does not
+ * reach that far. */
+TEST_CATEGORY(http_find_header_span_is_untruncated, TEST_CATEGORY_NETWORK) {
+    char block[1024];
+    int n = snprintf(block, sizeof(block), "Server: x\r\nTransfer-Encoding: ");
+    for (int i = 0; i < 300; i++) block[n++] = 'a';
+    n += snprintf(block + n, sizeof(block) - (size_t)n, ", chunked\r\n");
+    const char* end = block + n;
+
+    const char* v = NULL;
+    size_t vl = 0;
+    ASSERT_EQ(1, http_find_header_span(block, end, "Transfer-Encoding",
+                                       NULL, 0, NULL, &v, &vl));
+    ASSERT_NOT_NULL(v);
+    ASSERT_EQ((size_t)(300 + 9), vl);              /* padding + ", chunked" */
+    ASSERT_EQ(0, memcmp(v + vl - 7, "chunked", 7));
+
+    /* The copying form stops well before that, which is why framing uses the
+     * span and not this. */
+    char small[64];
+    ASSERT_EQ(1, http_find_header_in_block(block, end, "Transfer-Encoding",
+                                           small, sizeof(small), NULL));
+    ASSERT_EQ((size_t)63, strlen(small));
+    ASSERT_NULL(strstr(small, "chunked"));
+
+    /* The span still reports a value the copying form can hold. */
+    const char* plain = "Transfer-Encoding: chunked\r\n";
+    v = NULL; vl = 0;
+    ASSERT_EQ(1, http_find_header_span(plain, plain + strlen(plain),
+                                       "transfer-encoding",
+                                       NULL, 0, NULL, &v, &vl));
+    ASSERT_EQ((size_t)7, vl);
+    ASSERT_EQ(0, memcmp(v, "chunked", 7));
+
+    /* Absent means no span written and a zero count. */
+    v = (const char*)0x1; vl = 99;
+    ASSERT_EQ(0, http_find_header_span(plain, plain + strlen(plain),
+                                       "Content-Length", NULL, 0, NULL,
+                                       &v, &vl));
+    ASSERT_EQ((size_t)99, vl);
+}
+
+/* The inline case-insensitive compare replaces strncasecmp on the proxy's hot
+ * path, so it has to agree with it on every input, not merely on the names it
+ * happens to be used with. The interesting pairs are bytes differing only in
+ * 0x20 that are not letters: '^' and '~', '@' and '`', '-' and CR. A compare
+ * that treats those as equal would match a header name that is not the one it
+ * was looking for. This walks all 65,536 byte pairs. */
+TEST_CATEGORY(http_ci_eq_matches_strncasecmp, TEST_CATEGORY_NETWORK) {
+    int mismatches = 0;
+    for (int i = 0; i < 256; i++) {
+        for (int j = 0; j < 256; j++) {
+            char a[2] = { (char)i, '\0' };
+            char b[2] = { (char)j, '\0' };
+            int want = (strncasecmp(a, b, 1) == 0) ? 1 : 0;
+            if (http_ci_eq(a, b, 1) != want) mismatches++;
+        }
+    }
+    ASSERT_EQ(0, mismatches);
+
+    /* The pairs that a naive 0x20 trick gets wrong, called out by name. */
+    ASSERT_EQ(0, http_ci_eq("^", "~", 1));
+    ASSERT_EQ(0, http_ci_eq("@", "`", 1));
+    ASSERT_EQ(0, http_ci_eq("\r", "-", 1));
+    ASSERT_EQ(0, http_ci_eq("\0", " ", 1));
+
+    /* And the names it is actually used on. */
+    ASSERT_EQ(1, http_ci_eq("content-type", "Content-Type", 12));
+    ASSERT_EQ(1, http_ci_eq("CONTENT-LENGTH", "Content-Length", 14));
+    ASSERT_EQ(1, http_ci_eq("server", "Server", 6));
+    ASSERT_EQ(0, http_ci_eq("servel", "Server", 6));
+    ASSERT_EQ(1, http_ci_eq("anything", "anything", 0));
+}
