@@ -590,7 +590,15 @@ static void http_pool_put(const char* key, Transport* t) {
         return;
     }
     c->t = *t;
-    snprintf(c->key, sizeof(c->key), "%s", key);
+    /* A bounded copy, not a formatted one. This runs every time a connection
+     * goes back to the pool, which is once per proxied request, and asking
+     * snprintf to move a string brings the whole formatting machinery with it:
+     * the profile put 15% of this path's last-level write misses in vfprintf,
+     * reached from here. Truncation behaves as the format did. */
+    size_t kl = strlen(key);
+    if (kl >= sizeof(c->key)) kl = sizeof(c->key) - 1;
+    memcpy(c->key, key, kl);
+    c->key[kl] = '\0';
     c->idle_since_ms = now;
     c->next = http_pool_head;
     http_pool_head = c;
@@ -2375,13 +2383,36 @@ static void http_socket_set_nonblocking(int fd, int on) {
 }
 
 int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
+    return http_upstream_acquire_ex(host, port, 1, out);
+}
+
+/* `allow_pool` is 0 when the caller has just been burned by a pooled
+ * connection the upstream had closed. Taking another one from the same pool
+ * could hand it a second corpse, and the retry after that is the one the
+ * client never gets an answer from. */
+int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
+                             HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
-    memset(out, 0, sizeof(*out));
+    /* Field by field, not memset over the struct. Most of this object is a
+     * 512 byte pool key, and blanking it wrote nine cache lines per request
+     * that the very next line overwrites with about forty bytes. Those lines
+     * are cold once more than a handful of connections are in flight, which
+     * is where this path's last-level misses were coming from. Every field the
+     * code goes on to read is still given the value the memset gave it. */
+    out->t.sockfd = 0;
+    out->t.nonblocking = 0;
     out->t.applied_timeout_ns = -1;
+#ifdef AETHER_HAS_OPENSSL
+    out->t.ssl = NULL;
+    out->t.owned_ctx = NULL;
+#endif
+    out->reused = 0;
+    out->connecting = 0;
+    out->pool_key[0] = '\0';
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
-    if (http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
+    if (allow_pool && http_pool_enabled && http_pool_take(out->pool_key, &out->t)) {
         out->reused = 1;
         out->connecting = 0;
         if (out->t.nonblocking != 1) {

@@ -9,7 +9,16 @@ lbbench_use_mounted() {           # lbbench_use_mounted <script-name> "$@"
     local src=/src/benchmarks/http/lbbench
     [ -z "${LBBENCH_FROM_SRC:-}" ] || return 0
     [ -f "$src/$name" ] || return 0
-    cmp -s "$src/$name" "/bench/$name" && return 0
+    # Every file that gets copied below, not just the script being run. A
+    # config is as easy to edit as a script and the effect of missing one is
+    # the same silent wrong answer: nginx kept running with the worker count
+    # baked into the image while the mounted config said something else.
+    differs=0
+    for f in "$src"/*.sh "$src"/*.conf "$src"/*.cfg; do
+        [ -f "$f" ] || continue
+        cmp -s "$f" "/bench/$(basename "$f")" || { differs=1; break; }
+    done
+    [ "$differs" -eq 0 ] && return 0
     printf '%s\n' "harness: running $name from the mounted tree, not the image" >&2
     export LBBENCH_FROM_SRC=1
     cp "$src"/*.sh "$src"/*.conf "$src"/*.cfg /bench/ 2>/dev/null || true

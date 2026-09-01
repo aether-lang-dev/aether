@@ -37,6 +37,7 @@ four.
 | `switches.sh` | which call asked to sleep, by name | chasing context switches |
 | `instructions.sh` | work done per request, in instructions | pricing a change in userspace work |
 | `split.sh` | user vs kernel cycles per request, every subject | deciding which half the gap is in |
+| `cachemisses.sh` | cache misses per request, aether and the controls | when fewer instructions are not faster |
 
 Reach for `split.sh` when the counters disagree about where a gap can be:
 the same syscalls per request as nginx and twice the CPU means the extra is
@@ -49,6 +50,34 @@ needs a privileged container for the scheduler tracepoint, and
 `instructions.sh` needs a hardware performance counter, which a virtual
 machine usually does not expose. It says so and stops rather than reporting a
 count it could not take.
+
+### Fewer instructions is not the same as faster
+
+`cachemisses.sh` exists because an instruction count sent an optimisation
+effort in the wrong direction. aether executes **fewer** instructions per
+request than nginx and is still slower per core:
+
+| per request, 50 connections | instructions | L1 data misses | last-level misses |
+|---|---|---|---|
+| aether | 18,469 | 185 | **90** |
+| nginx | 23,743 | 492 | **12** |
+
+An L1 miss is answered by L2 or L3 and costs tens of cycles. A last-level miss
+goes to memory and costs hundreds. Nearly all of nginx's references are
+answered by cache; ninety of ours per request are not, and at roughly 80ns
+each that is several microseconds, which is the whole of the gap. Work on this
+path should be judged on that column, not on instructions.
+
+Two things about measuring it, both learned by getting them wrong first:
+
+- **Concurrency is not optional.** Driving a single connection shows aether
+  ahead of nginx on every cache metric. The misses only appear when many
+  connections take turns and each one's memory has gone cold in between, which
+  is what the real benchmark does and what a one-connection probe cannot see.
+- **Buffer size is not working set.** Shrinking the per-connection buffers
+  from 16 KiB to 4 KiB moved this measurement by nothing, because the pages
+  past what a request actually touches were never read or written. Only
+  touched bytes are working set, and that change was reverted.
 
 Reach for `instructions.sh` when the question is whether a change made the
 code do more work, rather than how fast it ran: CPU per request moves with
