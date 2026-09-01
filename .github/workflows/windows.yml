@@ -1,12 +1,26 @@
 name: Windows Build
 
+# A change that touches only VERSION and CHANGELOG.md is a release bump, and
+# that tree was already built and tested on main before the release was cut.
+# Running the full matrix on it again gains nothing and costs twice over: the
+# runs queue behind main's, and the release PR is merged before they are given
+# a runner, so every release leaves abandoned runs recorded as failures. Every
+# release branch from v0.614.0 onward shows three of them, while the releases
+# themselves published fine.
+#
+# Skipping also frees the runners the Release workflow queues behind, which is
+# what left v0.617.0 unpublished for a quarter of an hour after its tag
+# existed. paths-ignore skips only when every changed file matches, so a commit
+# that touches code and the changelog together still runs in full.
 on:
   # push to main also runs so the merge build can FILL the miniaudio object
   # cache (PR runs only read it; see the Restore/Save split below).
   push:
     branches: [ main ]
+    paths-ignore: [ 'CHANGELOG.md', 'VERSION' ]
   pull_request:
     branches: [ main, develop ]
+    paths-ignore: [ 'CHANGELOG.md', 'VERSION' ]
   workflow_dispatch:
 
 # Build the Aether compiler and ae CLI on Windows using MinGW (GCC).
