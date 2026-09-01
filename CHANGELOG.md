@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.617.0]
+
 ### Fixed
 
 - **A request could get `HTTP/1.1 0 Unknown`, or no answer at all, when the
