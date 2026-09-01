@@ -11,6 +11,27 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A request could get `HTTP/1.1 0 Unknown`, or no answer at all, when the
+  upstream had closed a pooled connection.** An idle keep-alive connection is
+  closed by the upstream whenever it likes, nginx does it after
+  `keepalive_timeout`, and the close is only discoverable by using the
+  connection. Nothing had been delivered, so there was nothing to be careful
+  about: the request simply had to go again down a fresh connection, which is
+  what the blocking client already did. The event-driven path the reverse proxy
+  uses did not, so the empty read was parsed as status 0 and serialized to the
+  client as `HTTP/1.1 0 Unknown`, or the connection was dropped with no answer.
+
+  A closed connection announces itself three ways and all three are now
+  handled: a clean end of file on the read, a reset on the read, and a failed
+  write. A retry also dials fresh rather than taking from the pool again, since
+  the pool can hold more than one connection the upstream has closed and
+  spending the single retry on another of them is how a client ends up with
+  nothing. Covered by a test that makes sixty requests through an upstream
+  closing after every response, which fails on the previous code.
+
+
 ## [0.616.0]
 
 ### Changed
@@ -99,24 +120,6 @@ version number before tagging the release.
   hardware rather than predicting.
 
 ### Fixed
-
-- **A request could get `HTTP/1.1 0 Unknown`, or no answer at all, when the
-  upstream had closed a pooled connection.** An idle keep-alive connection is
-  closed by the upstream whenever it likes, nginx does it after
-  `keepalive_timeout`, and the close is only discoverable by using the
-  connection. Nothing had been delivered, so there was nothing to be careful
-  about: the request simply had to go again down a fresh connection, which is
-  what the blocking client already did. The event-driven path the reverse proxy
-  uses did not, so the empty read was parsed as status 0 and serialized to the
-  client as `HTTP/1.1 0 Unknown`, or the connection was dropped with no answer.
-
-  A closed connection announces itself three ways and all three are now
-  handled: a clean end of file on the read, a reset on the read, and a failed
-  write. A retry also dials fresh rather than taking from the pool again, since
-  the pool can hold more than one connection the upstream has closed and
-  spending the single retry on another of them is how a client ends up with
-  nothing. Covered by a test that makes sixty requests through an upstream
-  closing after every response, which fails on the previous code.
 
 - **The proxy sent the client's `X-Forwarded-For` upstream alongside its own,
   and the client's came first.** Every inbound header was copied to the
