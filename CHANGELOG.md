@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.619.0]
+
 ### Changed
 
 - **A reverse proxy no longer starts eight worker threads that cannot receive
