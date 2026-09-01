@@ -31,6 +31,25 @@ version number before tagging the release.
   `'thread' attribute directive ignored`, which would have quietly dropped the
   thread-locality of the scheduler's per-thread state rather than failing to
   link. `-Werror` caught that before it shipped.
+## [0.619.0]
+
+### Changed
+
+- **A reverse proxy no longer starts eight worker threads that cannot receive
+  work.** It ran 12 threads on two cores where nginx runs 2 and haproxy 3.
+  Eight were connection-pool workers, and the event driver serves every proxied
+  request on a driver thread, so none of them could ever be handed one; the
+  pool exists for the path where a worker is held for a whole upstream round
+  trip, and `HTTP_POOL_MIN_WORKERS` is 8 so that floor applied even on two
+  cores. The pool is now sized knowing whether the driver is running, and still
+  serves the hand-back path. **12 threads to 6.**
+
+  This is not recorded as a wall-clock win: two paired A/B runs had the controls
+  moving 37.6% and 103.9% between rounds, which the harness says makes any delta
+  unreadable. What it provably does is stop creating eight threads that cannot
+  serve a proxied request. The reason to look here is `split.sh`, which puts the
+  whole of the gap against nginx and haproxy in kernel time while our user time
+  is the lowest of the three and we make the fewest syscalls.
 
 ## [0.618.0]
 

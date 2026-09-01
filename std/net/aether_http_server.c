@@ -5297,6 +5297,21 @@ int http_server_start_raw(HttpServer* server) {
         }
 
 #if AETHER_HAS_THREADS
+        /* The proxy driver, when this server proxies and its connections are
+         * plain HTTP. One driver per core is the shape that removes the cost:
+         * more threads than cores would put the sleeping back, and fewer would
+         * leave cores idle. It returns NULL when there is no proxy mounted or
+         * the platform has no poller, and then nothing below changes.
+         *
+         * Started before the pool, not after, so the pool can be sized knowing
+         * whether proxied connections will ever reach it. It reads only the
+         * mounted proxy options at this point and nothing the pool owns. */
+        if (!server->h2_enabled) {
+            int cores = aether_cpu_available();
+            if (cores > 8) cores = 8;
+            server->evloop = http_evloop_start(server, cores);
+        }
+
         HttpConnectionPool* pool = http_pool_create(server);
         server->conn_pool = pool;
         /* The lot resubmits woken connections into the same pool. Capacity is
@@ -5304,17 +5319,6 @@ int http_server_start_raw(HttpServer* server) {
          * idle keep-alive clients cost a table slot each. */
         if (pool) {
             server->park_lot = http_park_create(server, http_park_resume, 4096);
-        }
-
-        /* The proxy driver, when this server proxies and its connections are
-         * plain HTTP. One driver per core is the shape that removes the cost:
-         * more threads than cores would put the sleeping back, and fewer would
-         * leave cores idle. It returns NULL when there is no proxy mounted or
-         * the platform has no poller, and then nothing below changes. */
-        if (!server->h2_enabled) {
-            int cores = aether_cpu_available();
-            if (cores > 8) cores = 8;
-            server->evloop = http_evloop_start(server, cores);
         }
 #endif
 

@@ -76,10 +76,25 @@ struct HttpConnectionPool {
 
 /* Connection handlers block on socket I/O rather than burning CPU, so the
  * pool is sized above the core count. */
-static int http_pool_worker_count(void) {
+/* `evloop_owns` is true when the event driver is running, which means every
+ * proxied request is served on a driver thread and never occupies a worker
+ * here. The sizing below exists for the opposite case, where a worker is held
+ * for a whole upstream round trip, so with the driver present it buys nothing
+ * and costs a thread apiece. A pure reverse proxy was starting eight idle
+ * workers on two cores, which is where most of its thread count came from. */
+static int http_pool_worker_count(int evloop_owns) {
     long cores = aether_cpu_available();
 
     long want = cores * 2;
+    long floor = HTTP_POOL_MIN_WORKERS;
+    if (evloop_owns) {
+        /* Enough to keep the hand-back path moving: a request the proxy
+         * declines, a health or admin route on the same server, a drained
+         * connection. None of those is the hot path when a driver is running,
+         * and the queue in front of these absorbs a burst. */
+        want = 2;
+        floor = 2;
+    }
 
     /* Overridable, because cores * 2 is the right shape for handlers that
      * compute and the wrong one for handlers that wait. A worker owns its
@@ -98,7 +113,7 @@ static int http_pool_worker_count(void) {
         if (end && *end == '\0' && from_env > 0) want = from_env;
     }
 
-    if (want < HTTP_POOL_MIN_WORKERS) want = HTTP_POOL_MIN_WORKERS;
+    if (want < floor) want = floor;
     if (want > HTTP_POOL_MAX_WORKERS) want = HTTP_POOL_MAX_WORKERS;
     return (int)want;
 }
@@ -137,7 +152,7 @@ HttpConnectionPool* http_pool_create(HttpServer* server) {
     pthread_cond_init(&pool->not_empty, NULL);
     pthread_cond_init(&pool->not_full, NULL);
 
-    int want = http_pool_worker_count();
+    int want = http_pool_worker_count(server->evloop != NULL);
     for (int i = 0; i < want; i++) {
         /* CRITICAL: only count threads that actually started. Joining an
          * uninitialised pthread_t in http_pool_destroy is undefined
