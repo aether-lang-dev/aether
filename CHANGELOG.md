@@ -41,6 +41,7 @@ version number before tagging the release.
   Usable for provisioning-style fetches, not per-request work, and long enough
   that the default request timeout can expire mid-handshake.
 
+## [0.619.0]
 
 ### Changed
 
