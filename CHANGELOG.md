@@ -24,13 +24,13 @@ version number before tagging the release.
   has. A user on ucrt64 with GCC 15.2 had a compiler that emulated and an
   archive that did not.
 
-  Windows now uses `__declspec(thread)` on every toolchain, MSVC and MinGW
-  alike, which puts the variable in the PE `.tls` section under its own name.
-  The keyword decides the model rather than each compiler's default, and both
-  the archive and the generated code take it from the same header, so they
-  cannot disagree. Reproduced by cross-compiling one side native and the other
-  with `-femulated-tls`, which fails exactly as reported and links cleanly with
-  this change.
+  Both sides now name `-femulated-tls` explicitly: the Makefile builds the
+  runtime with it, and `ae` passes it when compiling the generated program, so
+  the two agree whatever each compiler would have chosen. `__declspec(thread)`
+  is not the answer here, and was tried first: GCC on MinGW ignores it with
+  `'thread' attribute directive ignored`, which would have quietly dropped the
+  thread-locality of the scheduler's per-thread state rather than failing to
+  link. `-Werror` caught that before it shipped.
 
 ## [0.618.0]
 

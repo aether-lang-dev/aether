@@ -86,23 +86,7 @@
 // THREAD-LOCAL STORAGE
 // ============================================================================
 
-#if defined(_WIN32)
-// Every Windows toolchain, MSVC and MinGW alike, gets the native keyword.
-//
-// MinGW's GCC accepts __thread but implements it with emulated TLS, which
-// turns `int x` into a `__emutls_v.x` control object owned by whichever
-// translation unit defined it. That only links if the definition and the
-// reference were compiled by toolchains that agree on emulating it, and
-// aether does not control both sides: libaether.a ships prebuilt with the
-// release, while the generated C is compiled by whatever GCC the user has.
-// A user on ucrt64 with GCC 15.2 hit exactly that (#1751) -- their compile
-// asked for __emutls_v.current_core_id and the shipped archive had no such
-// symbol, so `ae init` followed by `ae run` could not link at all.
-//
-// __declspec(thread) puts the variable in the PE .tls section and names it
-// plainly, so the archive and the generated object agree whatever GCC each
-// was built with. Both include this header, so the keyword is decided here
-// once rather than by each toolchain's default.
+#if defined(_MSC_VER)
 #  define AETHER_TLS __declspec(thread)
 #elif AETHER_GCC_COMPAT
 // __thread predates _Thread_local and is supported by all GCC/Clang versions

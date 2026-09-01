@@ -370,6 +370,21 @@ endif
 # translation units (which use snprintf/vsnprintf in os/json/etc.).
 ifdef IS_WINDOWS
 EXTRA_CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
+# Emulated TLS, explicitly, on both sides of the archive boundary.
+#
+# MinGW's GCC decides for itself whether __thread becomes a native .tls
+# variable or a __emutls_v. control object, and the two do not link against
+# each other. libaether.a ships prebuilt with the release while the generated C
+# is compiled by whatever GCC the user has, so leaving that to each compiler's
+# default is a coin flip: #1751 was a user on ucrt64 with GCC 15.2 whose
+# compile emulated against an archive that had not, and `ae init` + `ae run`
+# could not link at all. `ae` passes the same flag when it compiles the
+# generated program, so the two always agree.
+#
+# __declspec(thread) is not the answer here: GCC on MinGW ignores it
+# ('thread' attribute directive ignored) and would quietly drop the
+# thread-locality of the scheduler's per-thread state.
+EXTRA_CFLAGS += -femulated-tls
 endif
 
 # Optional OpenSSL detection (enables HTTPS client). Probes pkg-config;
