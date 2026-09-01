@@ -101,6 +101,17 @@ static void http_init(void) {
 //   https://foo.example/bar  →  host="foo.example" port=443 path="/bar" use_tls=1
 //   http://foo:8080/         →  host="foo"         port=8080 path="/"   use_tls=0
 // Returns 1 on success, 0 on malformed input.
+/* A bounded string copy. snprintf(dst, n, "%s", src) does the same thing and
+ * brings the whole formatting machinery with it, which parse_url paid for
+ * three times on a path that runs once per proxied request. */
+static void url_copy(char* dst, size_t cap, const char* src) {
+    if (!cap) return;
+    size_t n = strlen(src);
+    if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
     if (!url || !host || !port || !path || !use_tls ||
@@ -131,19 +142,19 @@ int parse_url(const char* url, char* host, size_t host_size,
         host[host_len] = '\0';
         *port = atoi(colon + 1);
         if (slash) {
-            snprintf(path, path_size, "%s", slash);
+            url_copy(path, path_size, slash);
         } else {
-            snprintf(path, path_size, "/");
+            url_copy(path, path_size, "/");
         }
     } else if (slash) {
         size_t host_len = slash - start;
         if (host_len >= host_size) host_len = host_size - 1;
         memcpy(host, start, host_len);
         host[host_len] = '\0';
-        snprintf(path, path_size, "%s", slash);
+        url_copy(path, path_size, slash);
     } else {
-        snprintf(host, host_size, "%s", start);
-        snprintf(path, path_size, "/");
+        url_copy(host, host_size, start);
+        url_copy(path, path_size, "/");
     }
 
     return 1;
