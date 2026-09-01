@@ -10,9 +10,10 @@ RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
         build-essential ca-certificates curl git pkg-config \
         libssl-dev zlib1g-dev \
         nginx haproxy wrk procps linux-tools-generic strace gawk \
+        valgrind python3 iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /bench
-COPY run.sh profile.sh syscalls.sh workers.sh switches.sh instructions.sh split.sh threads.sh tls.sh faults.sh use_mounted.sh backends.conf nginx-lb.conf nginx-lb-tls.conf haproxy-lb.cfg ./
-RUN chmod +x run.sh profile.sh syscalls.sh workers.sh
+COPY run.sh profile.sh syscalls.sh workers.sh switches.sh instructions.sh split.sh threads.sh tls.sh faults.sh cachemisses.sh use_mounted.sh backends.conf nginx-lb.conf nginx-lb-tls.conf haproxy-lb.cfg ./
+RUN chmod +x run.sh profile.sh syscalls.sh workers.sh cachemisses.sh
 ENTRYPOINT ["/bench/run.sh"]
