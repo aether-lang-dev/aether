@@ -5658,14 +5658,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             } else if (gen->current_actor == NULL) {
                                 fprintf(gen->output, "scheduler_send_remote(");
                                 emit_send_target(gen, target, "ActorBase*");
-                                fprintf(gen->output, ", _imsg, current_core_id); }");
+                                fprintf(gen->output, ", _imsg, aether_core_id_get()); }");
                             } else {
                                 fprintf(gen->output, "ActorBase* _send_target = ");
                                 emit_send_target(gen, target, "ActorBase*");
                                 fprintf(gen->output, "; ");
-                                fprintf(gen->output, "if (current_core_id >= 0 && current_core_id == _send_target->assigned_core) { ");
+                                fprintf(gen->output, "{ int _cid = aether_core_id_get(); if (_cid >= 0 && _cid == _send_target->assigned_core) { ");
                                 fprintf(gen->output, "scheduler_send_local(_send_target, _imsg); } else { ");
-                                fprintf(gen->output, "scheduler_send_remote(_send_target, _imsg, current_core_id); } }");
+                                fprintf(gen->output, "scheduler_send_remote(_send_target, _imsg, _cid); } } }");
                             }
                         } else {
                             // Heap-allocated path (2+ fields or non-scalar types).

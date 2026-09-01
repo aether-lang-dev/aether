@@ -416,7 +416,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     // runtime helpers like ae_io_await() (std/net/aether_actor_bridge.c)
     // can identify the caller without an explicit parameter. Declared
     // in runtime/scheduler/multicore_scheduler.h.
-    print_line(gen, "g_current_step_actor = self;");
+    print_line(gen, "aether_step_actor_set(self);");
 
     // Timeout check — fires if idle longer than timeout_ns
     if (timeout_arm) {
@@ -468,7 +468,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "self->timeout_ns = 0;");
         print_line(gen, "self->last_activity_ns = 0;");
     }
-    print_line(gen, "g_current_reply_slot = msg._reply_slot;");
+    print_line(gen, "aether_reply_slot_set(msg._reply_slot);");
     print_line(gen, "");
     
     if (pattern_count > 0) {
@@ -777,13 +777,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "void send_%s(%s* actor, int type, int payload) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "Message msg = {type, 0, payload, NULL};");
-    print_line(gen, "if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == current_core_id) {");
+    print_line(gen, "if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == aether_core_id_get()) {");
     indent(gen);
     print_line(gen, "scheduler_send_local((ActorBase*)actor, msg);");
     unindent(gen);
     print_line(gen, "} else {");
     indent(gen);
-    print_line(gen, "scheduler_send_remote((ActorBase*)actor, msg, current_core_id);");
+    print_line(gen, "scheduler_send_remote((ActorBase*)actor, msg, aether_core_id_get());");
     unindent(gen);
     print_line(gen, "}");
     unindent(gen);

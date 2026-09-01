@@ -2455,17 +2455,11 @@ void build_gcc_cmd(char* cmd, size_t size,
 #endif
     char opt[768];
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
-    /* -femulated-tls: the same flag the runtime archive is built with. MinGW's
-     * GCC otherwise decides per-compiler whether __thread is a native .tls
-     * variable or a __emutls_v. object, and libaether.a ships prebuilt while
-     * this compile uses whatever GCC the user has. When the two disagree the
-     * link fails on __emutls_v.current_core_id and friends (#1751). Naming it
-     * on both sides removes the coin flip. */
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static -femulated-tls %s%s%s %s%s", opt_flags(optimize),
+        snprintf(opt, sizeof(opt), "-static %s%s%s %s%s", opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static -femulated-tls %s%s%s%s", opt_flags(optimize),
+        snprintf(opt, sizeof(opt), "-static %s%s%s%s", opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), trace_def);
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
