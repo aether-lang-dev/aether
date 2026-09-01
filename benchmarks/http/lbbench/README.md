@@ -51,6 +51,35 @@ needs a privileged container for the scheduler tracepoint, and
 machine usually does not expose. It says so and stops rather than reporting a
 count it could not take.
 
+### The gap is in the kernel, and our user space is already the fastest
+
+Run `split.sh` before optimising anything on this path. At 50 connections:
+
+| | total | user | kernel |
+|---|---|---|---|
+| aether | 18.5 us/req | **4.9 (26.6%)** | **13.5 (73.4%)** |
+| nginx | 16.5 us/req | 5.7 (34.4%) | 10.8 (65.6%) |
+| haproxy | 16.6 us/req | 7.0 (42.0%) | 9.6 (58.0%) |
+
+We have the **lowest user time of the three** and the highest kernel time. We also
+make the **fewest syscalls**: 4.58 per request against nginx's 5.14 and haproxy's
+6.29. So the whole of the gap is kernel time at fewer calls, meaning our calls cost
+more, not that we make too many.
+
+That is why a long run of user-space optimisation moved counters and not the clock:
+it was tuning the half we were already winning. Two further things are known about
+it:
+
+- It is concurrency-dependent. At 2 connections all three sit within 5% of each
+  other on kernel time (38.9, 37.0, 38.6) and aether is fastest overall. The gap
+  only appears at 50.
+- It is not buffer size. Shrinking the per-connection buffers by 4x left the split
+  at 26.7/73.3, unchanged, and left the ratio to nginx's kernel time at 1.26.
+
+What has not been established is why the calls cost more. `perf` cannot run on the
+usual dev box (no PMU, and it is broken against the linuxkit kernel), and that is
+the instrument this needs.
+
 ### Fewer instructions is not the same as faster
 
 `cachemisses.sh` exists because an instruction count sent an optimisation
