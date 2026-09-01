@@ -11,6 +11,27 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A new project would not link on Windows/MinGW.** `ae init` followed by
+  `ae run` failed with `undefined reference to __emutls_v.current_core_id`, and
+  two more like it, for any program using an actor, which the generated project
+  template is. MinGW's GCC accepts `__thread` but implements it with emulated
+  TLS, turning the variable into a `__emutls_v.` control object owned by
+  whichever translation unit defined it. That links only if both sides agree to
+  emulate, and aether does not control both sides: `libaether.a` ships prebuilt
+  with the release while the generated C is compiled by whatever GCC the user
+  has. A user on ucrt64 with GCC 15.2 had a compiler that emulated and an
+  archive that did not.
+
+  Windows now uses `__declspec(thread)` on every toolchain, MSVC and MinGW
+  alike, which puts the variable in the PE `.tls` section under its own name.
+  The keyword decides the model rather than each compiler's default, and both
+  the archive and the generated code take it from the same header, so they
+  cannot disagree. Reproduced by cross-compiling one side native and the other
+  with `-femulated-tls`, which fails exactly as reported and links cleanly with
+  this change.
+
 ## [0.618.0]
 
 ### Changed
