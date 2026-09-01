@@ -21,6 +21,14 @@
 #     nginx on every cache metric; the misses only appear when fifty
 #     connections take turns and each one's memory has gone cold in between.
 #     The default here is deliberately not 1.
+#   - The misses are a capacity cliff, not a constant. Sweeping CONNECTIONS
+#     gives 0.6 last-level misses per request at 1, 6.5 at 4, 79.6 at 16, and
+#     82.3 at 50, with instructions flat at ~18.1k throughout. The per-request
+#     working set stops fitting in last-level cache somewhere between 4 and 16
+#     connections and everything after that is the plateau. Roughly 5 KiB per
+#     request goes cold, spread over the eight separate allocations a
+#     connection owns, which is what a single contiguous per-request pool of
+#     the kind nginx uses would collapse.
 #   - Buffer size is not working set. Shrinking the per-connection buffers from
 #     16 KiB to 4 KiB changed nothing here, because the pages beyond what a
 #     request touches were never read or written in the first place.

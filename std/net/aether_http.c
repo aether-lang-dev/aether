@@ -590,7 +590,15 @@ static void http_pool_put(const char* key, Transport* t) {
         return;
     }
     c->t = *t;
-    snprintf(c->key, sizeof(c->key), "%s", key);
+    /* A bounded copy, not a formatted one. This runs every time a connection
+     * goes back to the pool, which is once per proxied request, and asking
+     * snprintf to move a string brings the whole formatting machinery with it:
+     * the profile put 15% of this path's last-level write misses in vfprintf,
+     * reached from here. Truncation behaves as the format did. */
+    size_t kl = strlen(key);
+    if (kl >= sizeof(c->key)) kl = sizeof(c->key) - 1;
+    memcpy(c->key, key, kl);
+    c->key[kl] = '\0';
     c->idle_since_ms = now;
     c->next = http_pool_head;
     http_pool_head = c;
