@@ -242,11 +242,56 @@ jobs:
         elif [ "$SKIP_CHANGELOG" = "1" ]; then
           echo "No [current] section, and the trigger commit says [skip changelog]."
         else
-          echo "::error::No '## [current]' section in CHANGELOG.md, so ${VERSION}"
-          echo "would ship with nothing recorded. Add the entry under a"
-          echo "'## [current]' heading, or put [skip changelog] in the"
-          echo "release-trigger commit if this release is genuinely empty."
-          exit 1
+          # Nothing recorded under [current]. Whether that is a mistake depends
+          # on what has actually changed since the last release.
+          #
+          # A release leaves [current] empty behind it, so the very next merge
+          # to main arrives with nothing under the heading. When that merge is
+          # a chore, a docs change or a test, there is no release to cut and
+          # nothing is wrong: failing there turns every such merge into a red
+          # run and stops releases being generated until someone happens to
+          # merge a change that adds an entry. That is what happened after
+          # 0.616.0, where merging a chore PR failed this job.
+          #
+          # A merge that touches shipping code with nothing recorded is still
+          # the error it always was: that is how 0.506.0 through 0.509.0 went
+          # out with their work recorded nowhere, and silence stays unavailable
+          # for those.
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$LAST_TAG" ]; then
+            CHANGED=$(git diff --name-only "${LAST_TAG}..HEAD")
+          else
+            CHANGED=$(git diff --name-only HEAD~1..HEAD 2>/dev/null || true)
+          fi
+          # Everything that is not shipped to a user of the language: docs,
+          # tests, benchmarks, CI, and the changelog itself.
+          SHIPPING=$(printf '%s\n' "$CHANGED" \
+                     | grep -vE '^(docs/|tests/|benchmarks/|examples/|\.github/)' \
+                     | grep -vE '(^|/)[^/]*\.md$' \
+                     | grep -vE '^$' | head -1)
+
+          if [ -n "$SHIPPING" ]; then
+            echo "::error::No '## [current]' section in CHANGELOG.md, so ${VERSION}"
+            echo "would ship with nothing recorded, and shipping code changed"
+            echo "since ${LAST_TAG:-the last release} (for example ${SHIPPING})."
+            echo "Add the entry under a '## [current]' heading, or put"
+            echo "[skip changelog] in the release-trigger commit if this"
+            echo "release is genuinely empty."
+            exit 1
+          fi
+
+          echo "::notice::Nothing under [current], and nothing outside docs,"
+          echo "tests, benchmarks and CI has changed since ${LAST_TAG:-the last"
+          echo "release}. There is no release to cut, so this run stops here"
+          echo "rather than failing."
+          {
+            echo "### No release cut"
+            echo ""
+            echo "\`## [current]\` is empty and only non-shipping paths changed"
+            echo "since \`${LAST_TAG:-the last release}\`, so there is nothing to"
+            echo "release. The next merge that records an entry will cut one."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
         fi
 
         # Only commit if there are staged changes
