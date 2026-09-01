@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.618.0]
+
 ### Changed
 
 - **The client's request headers are scanned with `memchr`, and URLs are copied
