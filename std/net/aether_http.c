@@ -2393,8 +2393,22 @@ int http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out) {
 int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
                              HttpUpstreamConn* out) {
     if (!out || !host || port <= 0) return -1;
-    memset(out, 0, sizeof(*out));
+    /* Field by field, not memset over the struct. Most of this object is a
+     * 512 byte pool key, and blanking it wrote nine cache lines per request
+     * that the very next line overwrites with about forty bytes. Those lines
+     * are cold once more than a handful of connections are in flight, which
+     * is where this path's last-level misses were coming from. Every field the
+     * code goes on to read is still given the value the memset gave it. */
+    out->t.sockfd = 0;
+    out->t.nonblocking = 0;
     out->t.applied_timeout_ns = -1;
+#ifdef AETHER_HAS_OPENSSL
+    out->t.ssl = NULL;
+    out->t.owned_ctx = NULL;
+#endif
+    out->reused = 0;
+    out->connecting = 0;
+    out->pool_key[0] = '\0';
 
     http_pool_key(out->pool_key, sizeof(out->pool_key), host, port, 0,
                   host, port, 0, NULL);
