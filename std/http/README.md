@@ -85,10 +85,30 @@ debugging one:
 - **HelloRetryRequest is not implemented**, so a client offering only other
   groups is refused rather than renegotiated
 
-The client side is the mirror: `std.http.client` does HTTPS through OpenSSL,
-and `std.cryptography.tls13_client` is the pure path that survives a cross
-build. Wiring the pure client under `std.http.client` is not done yet, so a
-cross-built HTTPS *client* currently drives `tls13_client` directly.
+The client side is the mirror, and is now wired the same way (#1849):
+`std.http.client` does HTTPS through OpenSSL where it is compiled in, and
+falls back to `std.cryptography.tls13_client` where it is not — which is every
+`ae build --target=` cross-build, since zig bundles no TLS. Add
+
+```aether,fragment
+import std.cryptography.tls13_client
+```
+
+to the program and `https://` works in a cross-built binary that links no TLS
+library at all. `set_insecure` and `set_cafile` are honoured on the pure path
+too, and an https request through a forward proxy works because the CONNECT
+tunnel is established before the handshake either way.
+
+Without that import the pure client is not linked, and an https request in a
+no-OpenSSL build fails with an error naming the missing import rather than
+returning an empty body.
+
+**The pure handshake is slow** — measured at 12–22 seconds against
+`example.com`, against milliseconds for OpenSSL — because the X25519/P-256
+work is pure Aether. That is inherent to the pure client and predates this
+wiring; it is fine for provisioning-style fetches and unsuitable for anything
+per-request. Raise the request timeout accordingly: the default is short
+enough that a pure handshake can exceed it.
 
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.

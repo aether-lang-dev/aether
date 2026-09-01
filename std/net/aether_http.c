@@ -76,6 +76,63 @@ const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (v
     #include <sys/time.h>    /* struct timeval                            */
 #endif
 
+/* ---- pure-Aether TLS 1.3 client bridge (#1849) --------------------------
+ *
+ * HTTPS in this file is otherwise entirely under AETHER_HAS_OPENSSL, so a
+ * cross-compiled binary -- which never links OpenSSL, because zig bundles
+ * none -- could not make an https request at all. It failed with a named
+ * error rather than silently, but a cross-built HTTPS client was simply
+ * impossible, which is what blocked shipping an engine as a .dylib/.so built
+ * on one box for another.
+ *
+ * std.cryptography.tls13_client already implements the whole client: full
+ * certificate verification, hostname pinning, chain-to-a-trusted-anchor, and
+ * RFC 8448 known-answer tests. It is Aether, and this is C, so the two are
+ * joined the same way the SERVER side already joins them (#1813): weak stubs
+ * here, overridden at link time by the @c_callback exports in the Aether
+ * module when a program imports it.
+ *
+ * Weak rather than a build flag because the C must link and behave whether or
+ * not the Aether module is present -- a program that never imports
+ * tls13_client gets these stubs, and `pure_tls_available()` reports false so
+ * https fails with a message naming the fix instead of crashing.
+ */
+#if defined(__GNUC__) || defined(__clang__)
+#define AETHER_WEAK __attribute__((weak))
+#else
+#define AETHER_WEAK
+#endif
+
+/* Establish TLS over an ALREADY-CONNECTED socket. The socket may be a direct
+ * connection or a forward-proxy CONNECT tunnel -- http_dial completes the
+ * tunnel before calling this, so proxying needs no separate path.
+ *
+ * verify_mode: 0 = full verification, 1 = skip it (set_insecure).
+ * cafile: a pinned CA bundle path (set_cafile), or NULL for the default store.
+ * Returns an opaque connection, or NULL on failure. */
+AETHER_WEAK void* aether_pure_tls_client_connect(int fd, const char* host,
+                                                 int verify_mode,
+                                                 const char* cafile) {
+    (void)fd; (void)host; (void)verify_mode; (void)cafile;
+    return NULL;
+}
+AETHER_WEAK int aether_pure_tls_client_send(void* conn, const void* buf, int len) {
+    (void)conn; (void)buf; (void)len;
+    return -1;
+}
+AETHER_WEAK int aether_pure_tls_client_recv(void* conn, void* buf, int len) {
+    (void)conn; (void)buf; (void)len;
+    return -1;
+}
+AETHER_WEAK void aether_pure_tls_client_close(void* conn) {
+    (void)conn;
+}
+/* Distinguishes "the Aether module is linked" from "a connect attempt failed",
+ * so the error can name the actual fix. */
+AETHER_WEAK int aether_pure_tls_client_available(void) {
+    return 0;
+}
+
 #ifdef AETHER_HAS_OPENSSL
     #include <openssl/ssl.h>
     #include <openssl/err.h>
@@ -304,6 +361,7 @@ static int transport_send(Transport* t, const void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
     if (t->ssl) return SSL_write(t->ssl, buf, len);
 #endif
+    if (t->pure_tls) return aether_pure_tls_client_send(t->pure_tls, buf, len);
     return (int)send(t->sockfd, buf, len, 0);
 }
 
@@ -311,6 +369,7 @@ static int transport_recv(Transport* t, void* buf, int len) {
 #ifdef AETHER_HAS_OPENSSL
     if (t->ssl) return SSL_read(t->ssl, buf, len);
 #endif
+    if (t->pure_tls) return aether_pure_tls_client_recv(t->pure_tls, buf, len);
     return (int)recv(t->sockfd, buf, len, 0);
 }
 
@@ -327,6 +386,15 @@ static void transport_close(Transport* t) {
         t->owned_ctx = NULL;
     }
 #endif
+    /* The pure connection owns the socket once the handshake succeeds, so it
+     * closes the fd itself; clearing sockfd here stops the close() below from
+     * closing a descriptor twice (and, worse, one the process may have already
+     * reused). */
+    if (t->pure_tls) {
+        aether_pure_tls_client_close(t->pure_tls);
+        t->pure_tls = NULL;
+        t->sockfd = -1;
+    }
     if (t->sockfd >= 0) {
         close(t->sockfd);
         t->sockfd = -1;
@@ -1850,6 +1918,46 @@ static int http_dial(HttpClientRequest* req, struct sockaddr_in* serv_addr_in,
         /* Tunnel open. TLS handshake below runs against `host` end-to-end. */
     }
 
+    out->pure_tls = NULL;
+
+#ifndef AETHER_HAS_OPENSSL
+    /* No OpenSSL in this build -- every `ae build --target=` cross-compile,
+     * because zig bundles no TLS. Drive the pure-Aether TLS 1.3 client
+     * instead (#1849). The socket is already connected, and already tunnelled
+     * when a forward proxy applies, so the handshake runs end-to-end against
+     * `host` either way and proxying needs no separate path.
+     *
+     * Verification is the pure client's own: certificate chain to a trusted
+     * anchor, validity window, and hostname/SAN pinned to `host`. set_insecure
+     * skips it; set_cafile pins a couriered bundle. */
+    if (use_tls) {
+        if (!aether_pure_tls_client_available()) {
+            close(sockfd);
+            ae_set_err(out_err,
+                "HTTPS requested but this build has no TLS backend: it was "
+                "built without OpenSSL (every --target= cross-build is), and "
+                "the pure-Aether client is not linked. Add "
+                "`import std.cryptography.tls13_client` to the program.");
+            return -1;
+        }
+        void* pc = aether_pure_tls_client_connect(sockfd, host,
+                                                  req && req->insecure ? 1 : 0,
+                                                  req ? req->cafile : NULL);
+        if (!pc) {
+            close(sockfd);
+            ae_set_err(out_err, "pure TLS handshake failed");
+            return -1;
+        }
+        /* The pure connection owns the socket from here; transport_close
+         * releases both through aether_pure_tls_client_close. */
+        out->pure_tls = pc;
+        out->sockfd   = sockfd;
+        out->nonblocking = -1;
+        out->applied_timeout_ns = -1;
+        return 0;
+    }
+#endif
+
 #ifdef AETHER_HAS_OPENSSL
     out->ssl = NULL;
     out->owned_ctx = NULL;
@@ -2632,12 +2740,11 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         return response;
     }
 
-    if (use_tls) {
-#ifndef AETHER_HAS_OPENSSL
-        response->error = string_new("HTTPS requested but the build has no OpenSSL support (rebuild with OpenSSL installed)");
-        return response;
-#endif
-    }
+    /* No early rejection of https in a no-OpenSSL build any more (#1849).
+     * http_dial now drives the pure-Aether TLS 1.3 client there, and reports
+     * a named error itself when that client is not linked -- so the decision
+     * lives in one place, next to the handshake it describes, rather than
+     * being pre-empted here. */
 
     /* Forward-proxy resolution (aether#1012). Default is direct. When a proxy
      * applies, we CONNECT to the proxy's host/port instead of the target's;

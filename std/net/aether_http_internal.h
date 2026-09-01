@@ -47,6 +47,12 @@ typedef struct {
      * that references it. */
     SSL_CTX* owned_ctx;
 #endif
+    /* A pure-Aether TLS 1.3 connection (#1849), or NULL. Set only in a build
+     * without OpenSSL, where it is the ONLY way to do https. Deliberately not
+     * inside the AETHER_HAS_OPENSSL guard: the field must exist in every build
+     * so the transport layout does not change with the TLS backend, and so an
+     * OpenSSL build can still fall back if its handshake is unavailable. */
+    void* pure_tls;
 } Transport;
 
 typedef struct {
