@@ -68,6 +68,20 @@ answered by cache; ninety of ours per request are not, and at roughly 80ns
 each that is several microseconds, which is the whole of the gap. Work on this
 path should be judged on that column, not on instructions.
 
+**And it does not predict wall clock either.** Removing the client-side
+`strstr` and the `snprintf`-to-copy-a-string in `parse_url` took last-level
+misses from ~71 to ~58 per request and instructions from ~17.9k to ~17.4k, and
+moved a paired eight-round A/B by +0.0% on the least-contended round. The
+memset change earlier in the same effort moved misses by a similar amount and
+was worth -12% CPU per request. So misses removed off the critical path, which
+the hardware was already absorbing through prefetch and out-of-order execution,
+look identical here to misses that mattered.
+
+The order to trust, then: a paired A/B in `run.sh` decides whether a change is
+worth having. `cachemisses.sh` and `instructions.sh` say what a change did to
+the work done, which is useful for understanding and useless as a verdict.
+Three separate rounds of this effort optimised a counter and bought nothing.
+
 Two things about measuring it, both learned by getting them wrong first:
 
 - **Concurrency is not optional.** Driving a single connection shows aether

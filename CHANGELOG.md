@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **The client's request headers are scanned with `memchr`, and URLs are copied
+  without `printf`.** Two remaining instances of patterns already fixed
+  elsewhere on this path. `ev_request_complete` looked for the header
+  terminator with `strstr`, where the response side had already been converted;
+  it now takes a length rather than trusting the buffer to be NUL-terminated.
+  `parse_url` used `snprintf(dst, n, "%s", src)` three times to copy strings,
+  and it runs once per proxied request.
+
+  This is **not a speedup and is not recorded as one**. It takes last-level
+  cache misses from about 71 to about 58 per request and instructions from
+  ~17.9k to ~17.4k, and moves a paired eight-round A/B by +0.0% on the
+  least-contended round. It is here because replacing `strstr` on a four byte
+  needle and `printf` on a string copy is better code either way. The
+  benchmark README now records what that cost to learn: neither instruction
+  counts nor simulated cache misses predict wall clock on this path, and only
+  a paired A/B decides.
+
 ## [0.617.0]
 
 ### Fixed

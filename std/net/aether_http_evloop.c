@@ -344,7 +344,11 @@ static int ev_request_complete(EvConn* c, size_t* out_total) {
      * the terminator. */
     if (!c->in_hdr_end) {
         size_t from = c->in_scanned > 3 ? c->in_scanned - 3 : 0;
-        char* found = strstr(c->in + from, "\r\n\r\n");
+        /* memchr for the CR, like the response side already does: strstr pays
+         * a two-way-algorithm setup before it looks at a byte, which is a poor
+         * trade for a four byte needle, and this runs on every request the
+         * client sends. Length-bounded rather than trusting the NUL. */
+        const char* found = http_find_header_end(c->in + from, c->in_len - from);
         c->in_scanned = c->in_len;
         if (!found) return 0;
         c->in_hdr_end = (size_t)((found + 4) - c->in);
