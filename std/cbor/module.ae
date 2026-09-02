@@ -7,7 +7,6 @@
 import std.list
 import std.string
 import std.bytes
-import std.heap
 import std.mem
 import std.encoding
 

@@ -2335,10 +2335,31 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * `_heap_<field>` trackers to mis-seed, but calloc keeps every
              * scalar / ptr / array field a clean zero. Cast to T* so member
              * access (`p.field`) and `heap.free(p)` see the right type. */
-            const char* struct_c = "void";
+            /* #1860: the struct name is on the node itself (the parser puts
+             * it there), so use it whenever the inferred pointer type is not
+             * available — which is exactly the `return heap.new(T)` case
+             * outside main, where the node's type never got resolved. Falling
+             * back to "void" emitted `calloc(1, sizeof(void))`: a ONE BYTE
+             * allocation for the whole struct. Every field write then ran past
+             * the end of it and the `_heap_<field>` ownership trackers read
+             * back as zero, so the box's destructor believed it owned nothing.
+             * The reported string leak was the visible symptom of that. */
+            const char* struct_c = NULL;
             if (expr->node_type && expr->node_type->kind == TYPE_PTR &&
                 expr->node_type->element_type) {
                 struct_c = get_c_type(expr->node_type->element_type);
+            }
+            if ((!struct_c || strcmp(struct_c, "void") == 0) && expr->value) {
+                struct_c = expr->value;
+            }
+            if (!struct_c || strcmp(struct_c, "void") == 0) {
+                /* Never silently allocate one byte and call it a struct. */
+                aether_error_full(
+                    "heap.new: cannot determine the struct type to allocate",
+                    expr->line, expr->column,
+                    "name the struct explicitly, e.g. heap.new(MyStruct)",
+                    "in heap.new", AETHER_ERR_NONE);
+                struct_c = "void";
             }
             fprintf(gen->output, "((%s*)calloc(1, sizeof(%s)))",
                     struct_c, struct_c);

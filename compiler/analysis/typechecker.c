@@ -3256,6 +3256,43 @@ int typecheck_program(ASTNode* program) {
                     free_type(ctype);
                     ctype = clone_type(child->children[0]->node_type);
                 }
+                /* #1857: a numeric literal is deliberately parsed as UNKNOWN
+                 * ("let inference decide int or float"), and the const node is
+                 * only typed in the second pass. Imported consts land at the
+                 * END of the merged tree, so every function binding one to a
+                 * local was checked FIRST and inferred UNKNOWN from this
+                 * symbol. Codegen then defaulted the local to int: right by
+                 * luck for an int const, a silent truncation for a float one
+                 * (`k = fl.SCALE` with SCALE = 2.5 emitted `int k`, printing 4
+                 * where the answer is 5). Type the literal here, with the same
+                 * helper inference uses, so registration does not depend on
+                 * which pass has run. */
+                if (ctype->kind == TYPE_UNKNOWN && child->child_count > 0 &&
+                    child->children[0]->type == AST_LITERAL &&
+                    child->children[0]->value) {
+                    Type* lit = infer_from_literal(child->children[0]->value);
+                    if (lit) {
+                        if (lit->kind != TYPE_UNKNOWN) {
+                            free_type(ctype);
+                            ctype = lit;
+                            /* Stamp the nodes too, so the second pass and
+                             * codegen agree with what was registered. */
+                            if (!child->children[0]->node_type ||
+                                child->children[0]->node_type->kind == TYPE_UNKNOWN) {
+                                if (child->children[0]->node_type)
+                                    free_type(child->children[0]->node_type);
+                                child->children[0]->node_type = clone_type(ctype);
+                            }
+                            if (!child->node_type ||
+                                child->node_type->kind == TYPE_UNKNOWN) {
+                                if (child->node_type) free_type(child->node_type);
+                                child->node_type = clone_type(ctype);
+                            }
+                        } else {
+                            free_type(lit);
+                        }
+                    }
+                }
                 add_symbol(global_table, child->value, ctype, 0, 0, 0);
                 /* #929: a module-scope `var x = 0` is a global_var whose type
                  * was inferred 32-bit int from a bare initializer. Carry the

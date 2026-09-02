@@ -11,6 +11,59 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A struct field typed by a transitively imported module produced C that
+  would not compile.** Codegen emitted struct bodies in the order the modules
+  were merged, which puts an importing module's struct ahead of the struct it
+  imported whenever the inner one was reached transitively. A forward typedef
+  is enough for a pointer field and not for one held by value, so the generated
+  C failed with `field has incomplete type`. Bodies now emit in
+  field-dependency order: a struct waits for every struct it holds by value. A
+  pointer field is not a dependency, so a cycle through pointers stays legal,
+  and anything still unplaced when a pass makes no progress is emitted in its
+  original order rather than looping.
+
+- **An import that resolved to no module was accepted silently.** `import
+  a3d.does_not_exist` compiled, linked and ran. A typo stayed invisible until a
+  call through the namespace failed somewhere else entirely, and for a module
+  exporting only constants or types it could go unnoticed for good, since those
+  uses can resolve through other paths. It is reported where it is written, and
+  says which roots were searched.
+
+  Reporting it immediately found two: `std.cbor` and `std.msgpack` each carried
+  `import std.heap`, and there has never been a `std/heap` module. `heap.new`
+  and `heap.free` are compiler builtins handled in the parser and need no
+  import at all, so both lines were dead and are removed. They compiled only
+  because an unresolved import was ignored, which is the thing this change
+  stops.
+
+- **An imported const bound to a local outside `main` was silently truncated to
+  `int`.** Reported as a spurious "unresolved type in codegen" warning; the
+  warning was the harmless half. A numeric literal parses as UNKNOWN so that
+  inference can decide int or float, and the const node is typed in the second
+  pass, but imported consts land at the END of the merged tree, so every
+  function that bound one to a local was checked first and inferred UNKNOWN
+  from that symbol. Codegen then defaulted the local to `int`: correct by
+  accident for an int const, and a silent narrowing for a float one, so
+  `k = fl.SCALE` with `SCALE = 2.5` emitted `int k` and the program printed 4
+  where the answer is 5. A const now types its literal at registration, using
+  the same helper inference uses, so the result no longer depends on which pass
+  has run.
+
+- **`heap.new(T)` allocated one byte when its type could not be inferred, and
+  a box lost ownership of its string fields across a function boundary.**
+  Reported as `heap.free` leaking. `return heap.new(T)` outside `main` left the
+  node's pointer type unresolved and fell back to `calloc(1, sizeof(void))` for
+  the whole struct, so every field write ran past the end of the allocation and
+  the hidden `_heap_<field>` trackers read back as zero. `heap.new` now uses the
+  struct name the parser records, and reports rather than guessing when it has
+  none, so a byte-sized struct can no longer be emitted silently. Separately,
+  box provenance was per-function, so `b = build_box()` lost it and
+  `b.name = ...` degraded to a bare store that never claimed ownership;
+  provenance now survives a call whose every `return` is a `heap.new`, which
+  keeps the existing guard against a raw `malloc as *T` (whose trackers are
+  garbage) exactly as strict.
 ## [0.622.0]
 
 ### Fixed

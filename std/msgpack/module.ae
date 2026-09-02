@@ -21,7 +21,6 @@ import std.bytes
 import std.bytes.cursor
 import std.string
 import std.list
-import std.heap
 import std.mem
 
 exports(
