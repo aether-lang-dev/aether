@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **A small response leaves the proxy in one `send()` instead of a scatter
+  list.** A pass-through answered with a two-segment `sendmsg`, the head from
+  the connection's buffer and the body from wherever the upstream's bytes
+  landed. That is the right shape for a large body, which is why the
+  pass-through exists, and the wrong one for a small one, where the `msghdr`
+  the kernel walks costs more than copying a few dozen bytes. A body of 2 KiB
+  or less now joins the head; a larger one still leaves from where it landed.
+  **Syscalls per request 4.58 to 4.30**, with `sendmsg` gone from the profile.
+  That count does not vary with load, which is why it is quoted and no
+  wall-clock claim is: the ratio of this proxy's kernel time to nginx's swung
+  between 1.25 and 1.37 across runs that changed nothing.
+
 ## [0.620.0]
 
 ### Fixed
