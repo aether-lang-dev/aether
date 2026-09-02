@@ -5255,10 +5255,66 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // C errors like "invalid use of incomplete typedef".  Hoisting
     // here matches what a user would write in a hand-rolled .c file:
     // typedef + full body up top, function bodies below.
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* sd = program->children[i];
-        if (sd && sd->type == AST_STRUCT_DEFINITION) {
-            generate_struct_definition(gen, sd);
+    //
+    // Emitted in field-dependency order, not in the order the modules were
+    // merged (#1856). A struct that holds another BY VALUE needs that one's
+    // body already in scope: a forward typedef is not enough for a field, and
+    // the merge order puts an importing module's struct ahead of the struct it
+    // imported whenever the inner one was reached transitively. The result was
+    // C that would not compile, "field has incomplete type".
+    //
+    // A field that is a pointer needs only the forward typedef, so it is not a
+    // dependency and a cycle through pointers stays legal. Anything still
+    // unplaced after no pass makes progress is emitted in its original order:
+    // that is a by-value cycle, which is not representable in C and is the
+    // type checker's to reject, not this loop's to hang on.
+    {
+        int n = program->child_count;
+        char* emitted = (char*)calloc((size_t)(n > 0 ? n : 1), 1);
+        if (emitted) {
+            int placed;
+            do {
+                placed = 0;
+                for (int i = 0; i < n; i++) {
+                    ASTNode* sd = program->children[i];
+                    if (emitted[i] || !sd || sd->type != AST_STRUCT_DEFINITION) continue;
+
+                    int ready = 1;
+                    for (int f = 0; f < sd->child_count && ready; f++) {
+                        ASTNode* fld = sd->children[f];
+                        if (!fld || fld->type != AST_STRUCT_FIELD) continue;
+                        if (!fld->node_type || fld->node_type->kind != TYPE_STRUCT) continue;
+                        const char* dep = get_c_type(fld->node_type);
+                        if (!dep) continue;
+                        /* A struct this program also defines, and not yet out. */
+                        for (int j = 0; j < n; j++) {
+                            ASTNode* other = program->children[j];
+                            if (j == i || emitted[j] || !other ||
+                                other->type != AST_STRUCT_DEFINITION || !other->value)
+                                continue;
+                            if (strcmp(other->value, dep) == 0) { ready = 0; break; }
+                        }
+                    }
+                    if (!ready) continue;
+
+                    generate_struct_definition(gen, sd);
+                    emitted[i] = 1;
+                    placed = 1;
+                }
+            } while (placed);
+
+            for (int i = 0; i < n; i++) {
+                ASTNode* sd = program->children[i];
+                if (!emitted[i] && sd && sd->type == AST_STRUCT_DEFINITION)
+                    generate_struct_definition(gen, sd);
+            }
+            free(emitted);
+        } else {
+            for (int i = 0; i < n; i++) {
+                ASTNode* sd = program->children[i];
+                if (sd && sd->type == AST_STRUCT_DEFINITION)
+                    generate_struct_definition(gen, sd);
+            }
         }
     }
 

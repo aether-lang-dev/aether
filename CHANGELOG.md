@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A struct field typed by a transitively imported module produced C that
+  would not compile.** Codegen emitted struct bodies in the order the modules
+  were merged, which puts an importing module's struct ahead of the struct it
+  imported whenever the inner one was reached transitively. A forward typedef
+  is enough for a pointer field and not for a field held by value, so the
+  generated C failed with `field has incomplete type`. Bodies are now emitted
+  in field-dependency order: a struct waits for every struct it holds by value.
+  A pointer field is not a dependency, so a cycle through pointers stays legal,
+  and anything still unplaced when no pass makes progress is emitted in its
+  original order rather than looping. Covered by a test with three modules,
+  `top` to `mid` to `leaf`, which fails on the previous codegen.
+
 ## [0.621.0]
 
 ### Changed

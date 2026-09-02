@@ -3256,6 +3256,26 @@ int typecheck_program(ASTNode* program) {
                     free_type(ctype);
                     ctype = clone_type(child->children[0]->node_type);
                 }
+                /* #1857: the initializer's node_type is only filled in by the
+                 * second pass, so a const whose type has to come from its
+                 * value was registered UNKNOWN here and stayed that way. Any
+                 * function binding it to a local then inferred UNKNOWN too and
+                 * codegen warned "unresolved type, defaulting to int" —
+                 * spuriously, since the default happened to be right. Infer it
+                 * from the expression directly so registration does not depend
+                 * on which pass has run. */
+                if (ctype->kind == TYPE_UNKNOWN && child->child_count > 0) {
+                    Type* inferred = infer_type(child->children[0], global_table);
+                    if (inferred) {
+                        if (inferred->kind != TYPE_UNKNOWN) {
+                            free_type(ctype);
+                            ctype = inferred;
+                        } else {
+                            free_type(inferred);
+                        }
+                    }
+                }
+                if (getenv("AE_DEBUG_CONST")) fprintf(stderr, "[const] name=%s kind=%d children=%d child0type=%d child0nt=%d\n", child->value, ctype ? ctype->kind : -1, child->child_count, child->child_count>0?child->children[0]->type:-1, (child->child_count>0 && child->children[0]->node_type)?child->children[0]->node_type->kind:-1);
                 add_symbol(global_table, child->value, ctype, 0, 0, 0);
                 /* #929: a module-scope `var x = 0` is a global_var whose type
                  * was inferred 32-bit int from a bare initializer. Carry the
