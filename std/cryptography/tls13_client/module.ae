@@ -111,7 +111,12 @@ import std.net
 import std.list
 import std.os
 import std.fs
-import std.mem
+// SELECTIVE, not `import std.mem`. A whole-module import drags std.mem's
+// types into the shared struct namespace, and that collided with a local in
+// std/cryptography/tls13_cert -- its `octet` began typing as `void*`, so
+// `octet * 10` failed to compile in a file this one never touches. The
+// selective form takes the three functions and nothing else.
+import std.mem(copy, ptr_to_long, long_to_ptr)
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
@@ -2414,7 +2419,7 @@ pure_tls_client_send(pcp: ptr, buf: ptr, len: int) -> int {
     pc = pcp as *PureClientConn
     b = bytes.new(len)
     bytes.set(b, len - 1, 0)
-    mem.copy(bytes.data(b), buf, len as long)
+    copy(bytes.data(b), buf, len as long)
     err = conn_send(pc.conn, b, len)
     bytes.free(b)
     if string.equals(err, "") != 1 { return -1 }
@@ -2434,8 +2439,8 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
         if take > len { take = len }
         // No mem.offset in std.mem; go through the long round-trip, which is
         // the tree's idiom for pointer arithmetic.
-        src = mem.long_to_ptr(mem.ptr_to_long(bytes.data(pc.pending)) + (pc.pending_off as long))
-        mem.copy(buf, src, take as long)
+        src = long_to_ptr(ptr_to_long(bytes.data(pc.pending)) + (pc.pending_off as long))
+        copy(buf, src, take as long)
         pc.pending_off = pc.pending_off + take
         if pc.pending_off >= pc.pending_len {
             bytes.free(pc.pending)
@@ -2459,7 +2464,7 @@ pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
 
     take = n
     if take > len { take = len }
-    mem.copy(buf, bytes.data(p), take as long)
+    copy(buf, bytes.data(p), take as long)
     if take < n {
         pc.pending = p
         pc.pending_len = n
