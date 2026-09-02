@@ -461,7 +461,11 @@ else ifeq ($(PCRE2),1)
   PCRE2_CFLAGS := $(shell pkg-config --cflags libpcre2-8 2>/dev/null)
   PCRE2_LDFLAGS := $(shell pkg-config --libs libpcre2-8 2>/dev/null)
 else
-  PCRE2_CFLAGS :=
+  # PCRE2=0 — regex deliberately disabled. std.regex now REFUSES to compile its
+  # no-op stubs unless asked by name, so that a build which merely forgot the
+  # defines fails loudly instead of stubbing every regex call at runtime. This
+  # is the one build that genuinely wants them, so it opts in explicitly.
+  PCRE2_CFLAGS := -DAETHER_REGEX_ALLOW_STUB
   PCRE2_LDFLAGS :=
 endif
 ifneq ($(PCRE2_LDFLAGS),)

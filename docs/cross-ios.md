@@ -1,8 +1,10 @@
 # Cross-compiling for iOS (arm64)
 
 `ae build --target=aarch64-ios` builds Mach-O arm64 artifacts for iPhone and
-iPad, and `--target=aarch64-ios-simulator` / `--target=x86_64-ios-simulator`
-build for the simulator. Unlike every other cross target, iOS is driven by the
+iPad, `--target=aarch64-ios-simulator` / `--target=x86_64-ios-simulator`
+build for the simulator, and `--target=aarch64-ios-macabi` /
+`--target=x86_64-ios-macabi` build for **Mac Catalyst** (a UIKit app running on
+a Mac). Unlike every other cross target, all of these are driven by the
 **Xcode toolchain** rather than by `zig cc`.
 
 ## Why iOS is not a zig target
@@ -19,9 +21,11 @@ one. `--target=aarch64-ios` therefore shells to `xcrun clang` with the SDK
 - `xcrun` is asked for the SDK path rather than hardcoding
   `/Applications/Xcode.app/...`, so a relocated Xcode, a beta Xcode, or a
   `DEVELOPER_DIR` override all work.
-- Device and simulator are **separate targets**, not a flag on one target. They
-  use different SDKs and stamp different Mach-O platforms (`IOS` vs
-  `IOSSIMULATOR`); a binary built for one will not load on the other.
+- Device, simulator and Catalyst are **separate targets**, not flags on one
+  target. They use different SDKs and stamp different Mach-O platforms (`IOS`,
+  `IOSSIMULATOR`, `MACCATALYST`); a binary built for one will not load on
+  another. Catalyst is the odd one: its triple carries `-ios` like the device
+  arm, but it builds against the **macOS** SDK (`xcrun --sdk macosx`).
 
 ## What to build: usually a library, not an executable
 
@@ -30,7 +34,14 @@ iOS does not run loose executables. A binary only launches from inside a signed
 Xcode links into an app**, not a standalone program:
 
 ```bash
-# A Mach-O dylib with the aether_<name>() C ABI, ready to embed in an app.
+# A static archive with the aether_<name>() C ABI. THIS is what an App Store
+# build links: iOS forbids third-party dynamic libraries, so a shipped app must
+# link Aether statically. The .a holds your code AND the Aether runtime/stdlib,
+# so Xcode needs exactly one file in "Link Binary With Libraries".
+ae build --target=aarch64-ios --emit=staticlib mylib.ae -o libmylib.a
+
+# A Mach-O dylib with the same C ABI. Fine for local development and for
+# Catalyst, but NOT shippable to the App Store (see above).
 ae build --target=aarch64-ios --emit=lib mylib.ae -o libmylib.dylib
 
 # An executable, if you really want one (still needs signing + a bundle).
@@ -43,7 +54,13 @@ ae build --target=aarch64-ios --emit=obj mylib.ae -o mylib.o
 ae build --target=aarch64-ios --emit=csrc mylib.ae -o mylib
 ```
 
-`--emit=lib` is **supported on iOS** — it is the primary case — whereas the zig
+`--emit=staticlib` is the primary case on iOS. Apple does not allow
+third-party dynamic libraries inside an App Store binary, so a dylib is a
+development convenience rather than a shipping artifact; `--emit=staticlib`
+produces a single `.a` containing the program objects together with the Aether
+runtime and stdlib compiled for that triple.
+
+`--emit=lib` is also **supported on iOS**, whereas the zig
 cross targets still reject it. The dylib is linked with
 `-install_name @rpath/<leaf>`, which is what an Xcode *Embed Frameworks* phase
 expects; without it the load command would record the build-machine path and the
@@ -70,7 +87,9 @@ with `aether_string_data()`.
 ## Deployment target
 
 The deployment target is part of the clang triple, so it is fixed at build
-time. The default is **iOS 15.0**; override it with `AETHER_IOS_MIN`:
+time. The default is **iOS 15.0** for the device and simulator targets and
+**iOS 13.1** for Catalyst (the `macabi` ABI does not exist before 13.1, and
+clang rejects a lower one). Override either with `AETHER_IOS_MIN`:
 
 ```bash
 AETHER_IOS_MIN=17.0 ae build --target=aarch64-ios --emit=lib mylib.ae -o libmylib.dylib
@@ -105,14 +124,16 @@ It is 0 on iOS/tvOS/watchOS and can be forced off anywhere with
 `ae` emits one slice per invocation. Combine them with Apple's own tools:
 
 ```bash
-ae build --target=aarch64-ios           --emit=lib mylib.ae -o device/libmylib.dylib
-ae build --target=aarch64-ios-simulator --emit=lib mylib.ae -o sim/libmylib.dylib
+ae build --target=aarch64-ios           --emit=staticlib mylib.ae -o device/libmylib.a
+ae build --target=aarch64-ios-simulator --emit=staticlib mylib.ae -o sim/libmylib.a
+ae build --target=aarch64-ios-macabi    --emit=staticlib mylib.ae -o catalyst/libmylib.a
 
 # Device and simulator slices cannot go in one fat binary (same arch, different
 # platform) — that is exactly what an XCFramework is for.
 xcodebuild -create-xcframework \
-    -library device/libmylib.dylib \
-    -library sim/libmylib.dylib \
+    -library device/libmylib.a \
+    -library sim/libmylib.a \
+    -library catalyst/libmylib.a \
     -output MyLib.xcframework
 ```
 

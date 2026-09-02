@@ -11,6 +11,41 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`--emit=staticlib` cross target: one `.a` holding the program and the
+  runtime.** iOS forbids third-party dynamic libraries in App Store binaries,
+  so the Mach-O dylib `--emit=lib` produces cannot ship inside an `.app` — an
+  iOS app has to link Aether statically, and there was no way to ask for that.
+  `--emit=staticlib` archives the program's objects together with the
+  runtime and stdlib already compiled for the target, so Xcode needs exactly
+  one file in *Link Binary With Libraries*. Cross targets only: the native
+  build links against a prebuilt `libaether.a` rather than compiling one, so
+  there is no equivalent object set to archive, and asking for it natively is
+  rejected rather than quietly producing a shared library under a `.a` name.
+
+- **Mac Catalyst cross targets** — `aarch64-ios-macabi` / `x86_64-ios-macabi`
+  (with `arm64-`/`amd64-` spellings). Catalyst is a third Apple platform
+  alongside device and simulator, not a variant of either: its triple carries
+  `-ios` but it builds against the **macOS** SDK and stamps platform
+  `MACCATALYST`. Its deployment-target floor is its own — 13.1, since the
+  `macabi` ABI does not exist before it — and `AETHER_IOS_MIN` overrides it as
+  for the other Apple triples.
+
+### Fixed
+
+- **A build that forgot the PCRE2 defines silently stubbed out every regex
+  call.** `std/regex/aether_regex.c` compiles to no-op stubs unless
+  `AETHER_HAS_PCRE2` is defined; the pcre2 objects link fine without it, so
+  nothing failed at build time and every `regex.compile` returned an error at
+  *runtime* instead. That is a real cost to anyone building libaether by hand
+  (an Xcode target, a bespoke cross recipe): it cost the aether-ui line a day
+  when an SVG path normalizer silently matched nothing and a scene rendered as
+  bare background. Stub mode must now be requested by name with
+  `AETHER_REGEX_ALLOW_STUB` — `make PCRE2=0`, the one build that genuinely
+  wants it, passes it — so a build that merely forgot the defines gets a
+  compile error naming the fix instead of a runtime mystery.
+
 ## [0.623.0]
 
 ### Fixed

@@ -51,7 +51,19 @@
 static bool cross_target_is_ios_alias(const char* t) {
     return !strcmp(t, "aarch64-ios")           || !strcmp(t, "arm64-ios")           ||
            !strcmp(t, "aarch64-ios-simulator") || !strcmp(t, "arm64-ios-simulator") ||
-           !strcmp(t, "x86_64-ios-simulator")  || !strcmp(t, "amd64-ios-simulator");
+           !strcmp(t, "x86_64-ios-simulator")  || !strcmp(t, "amd64-ios-simulator") ||
+           !strcmp(t, "aarch64-ios-macabi")    || !strcmp(t, "arm64-ios-macabi")    ||
+           !strcmp(t, "x86_64-ios-macabi")     || !strcmp(t, "amd64-ios-macabi");
+}
+
+/* Mac Catalyst ("macabi") is a third Apple platform alongside device and
+ * simulator, not a variant of either: an iOS-derived UIKit app built against
+ * the MACOS SDK and run on a Mac. It therefore pairs an -ios<ver>-macabi
+ * triple with `xcrun --sdk macosx`, which is why the SDK cannot be derived
+ * from the "-ios" in the triple alone. aether-ui builds and pixel-tests its
+ * UIKit backend on Catalyst, so this is the triple its CI actually links. */
+static bool cross_target_is_macabi(const char* t) {
+    return t && strstr(t, "-macabi") != NULL;
 }
 
 /* Compose the clang triple for an iOS alias, e.g. "arm64-apple-ios15.0" or
@@ -65,14 +77,21 @@ static bool cross_target_is_ios_alias(const char* t) {
  * every other arm returns: one resolved target per build is the only use, and
  * a second call for a different iOS alias would overwrite the first result. */
 #define CROSS_IOS_MIN_DEFAULT "15.0"
+/* Catalyst's floor is its own: the macabi ABI does not exist before iOS 13.1,
+ * and clang rejects a lower -macabi deployment target outright. */
+#define CROSS_MACABI_MIN_DEFAULT "13.1"
 static const char* cross_ios_triple(const char* t) {
     static char triple[64];
+    bool macabi = cross_target_is_macabi(t);
     const char* minv = getenv("AETHER_IOS_MIN");
-    if (!minv || !*minv) minv = CROSS_IOS_MIN_DEFAULT;
+    if (!minv || !*minv) minv = macabi ? CROSS_MACABI_MIN_DEFAULT : CROSS_IOS_MIN_DEFAULT;
     const char* arch = (!strncmp(t, "x86_64", 6) || !strncmp(t, "amd64", 5))
                        ? "x86_64" : "arm64";
-    const char* sim = strstr(t, "-simulator") ? "-simulator" : "";
-    snprintf(triple, sizeof(triple), "%s-apple-ios%s%s", arch, minv, sim);
+    /* Exactly one of these suffixes applies — the alias list admits no target
+     * that is both. */
+    const char* variant = macabi ? "-macabi"
+                        : (strstr(t, "-simulator") ? "-simulator" : "");
+    snprintf(triple, sizeof(triple), "%s-apple-ios%s%s", arch, minv, variant);
     return triple;
 }
 
@@ -193,6 +212,11 @@ static bool cross_apple_sdk_path(const char* sdk, char* out, size_t osz) {
  * from the architecture alone. */
 const char* cross_apple_sdk(const char* triple) {
     if (!cross_target_is_apple(triple)) return NULL;
+    /* Catalyst is checked first: its triple carries "-ios" like the device
+     * arm, but it builds against the macOS SDK. Testing "-simulator" or
+     * "-ios" ahead of it would send it to the wrong SDK and fail the link
+     * on missing UIKit-for-macabi stubs. */
+    if (cross_target_is_macabi(triple)) return "macosx";
     return strstr(triple, "-simulator") ? "iphonesimulator" : "iphoneos";
 }
 
@@ -610,7 +634,8 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
 
 int run_cross_build(const char* c_file, const char* out_file,
                            bool optimize, const char* extra,
-                           const char* ztriple, bool emit_lib) {
+                           const char* ztriple, bool emit_lib,
+                           bool emit_staticlib) {
     char manifest[2048], base[1024];
     if (!cross_find_manifest(manifest, sizeof(manifest), base, sizeof(base))) {
         fprintf(stderr,
@@ -968,6 +993,47 @@ int run_cross_build(const char* c_file, const char* out_file,
         /* Clear any stale output so the FreeBSD "output exists == linked"
          * success signal below can't be fooled by a prior build's binary. */
         remove(out_file);
+
+        /* 2b. --emit=staticlib stops here: compile the program's own C to an
+         *     object and archive it TOGETHER with the runtime objects, so the
+         *     result is one self-contained .a. There is no link step — a
+         *     static library is not linked, and running the linker would
+         *     demand the `main` that lib-style codegen deliberately omits.
+         *
+         *     One archive rather than "libaether.a plus yours" is deliberate:
+         *     Xcode drops a single file into "Link Binary With Libraries",
+         *     and a split would make the app author responsible for getting
+         *     two archives into the right order on the link line. */
+        if (emit_staticlib) {
+            char user_obj[2048];
+            snprintf(user_obj, sizeof(user_obj), "%s/__aether_program.o", objdir);
+            if (!cross_cmd_fmt(&cmd, &cmd_cap,
+                "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+                cc_cmd, sysroot_flag, opt, feature_defs, user_cflags,
+                tc.include_flags, c_file, user_obj)) {
+                fprintf(stderr, "Error: out of memory building the static-library compile command.\n");
+                break;
+            }
+            if (run_cmd_show_warnings(cmd) != 0) {
+                fprintf(stderr, "Error: compiling %s for %s failed.\n", c_file, ztriple);
+                break;
+            }
+            /* `ar rcs <out> <program>.o <runtime objs...>`. The runtime
+             * objects are re-listed rather than the objdir archive being
+             * copied: ar cannot nest archives portably, and an .a of .a
+             * files is not linkable. */
+            if (!cross_cmd_fmt(&cmd, &cmd_cap,
+                "%s rcs \"%s\" \"%s\" %s", ar_cmd, out_file, user_obj, objlist)) {
+                fprintf(stderr, "Error: out of memory building the static-library archive command.\n");
+                break;
+            }
+            if (run_cmd_show_warnings(cmd) != 0) {
+                fprintf(stderr, "Error: archiving the static library for %s failed.\n", ztriple);
+                break;
+            }
+            rc = 0;
+            break;
+        }
 
         /* 3. Link the program against the archive. FreeBSD adds libthr and its
          *    platform libraries from the base sysroot. */

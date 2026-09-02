@@ -566,10 +566,14 @@ or newer must be on `PATH` (`brew install zig`, or use the checksum-pinned
 
 iOS is the one cross target that does **not** go through zig: the Apple SDKs are
 Xcode-licensed and not redistributable, so `aarch64-ios`,
-`aarch64-ios-simulator` and `x86_64-ios-simulator` shell to `xcrun clang`
-instead and require a macOS host with Xcode. `--emit=lib` there produces an
-`@rpath`-installed Mach-O dylib, because an iOS app is built by Xcode and what
-it wants from Aether is a library, not a standalone binary. Full details, including the sandbox restrictions that apply
+`aarch64-ios-simulator`, `x86_64-ios-simulator` and the Mac Catalyst triples
+(`aarch64-ios-macabi`, `x86_64-ios-macabi`) shell to `xcrun clang`
+instead and require a macOS host with Xcode. `--emit=staticlib` produces a
+single `.a` holding the program plus the Aether runtime and stdlib — the shape
+an App Store build needs, since iOS forbids third-party dynamic libraries —
+and `--emit=lib` produces an `@rpath`-installed Mach-O dylib for local
+development. Either way an iOS app is built by Xcode, and what it wants from
+Aether is a library, not a standalone binary. Full details, including the sandbox restrictions that apply
 at runtime, are in **[cross-ios.md](cross-ios.md)**.
 
 **How it links.** The full runtime and standard library are compiled from
@@ -771,7 +775,8 @@ so an installed toolchain never ships a silently-stubbed regex.
 | WASM | `PLATFORM=wasm` | Cooperative scheduler, Emscripten |
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
 | Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
-| iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=lib` supported — see [cross-ios.md](cross-ios.md) |
+| iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=staticlib` (App Store) / `--emit=lib` — see [cross-ios.md](cross-ios.md) |
+| Mac Catalyst | `ae build --target=aarch64-ios-macabi` | Xcode/`xcrun` backend on the macOS SDK, platform `MACCATALYST`, min 13.1 — see [cross-ios.md](cross-ios.md) |
 | Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend; executables + `--emit=csrc`/`--emit=obj` |
 
 ## Hardening (`HARDEN=1`)
