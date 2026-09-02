@@ -40,6 +40,9 @@ version number before tagging the release.
   seconds (X25519/P-256 in pure Aether) against milliseconds for OpenSSL.
   Usable for provisioning-style fetches, not per-request work, and long enough
   that the default request timeout can expire mid-handshake.
+- **Main locals no longer leak into imported function type inference.** A local
+  in `main` could leave its inferred type in the shared symbol table and make a
+  same-named local in an imported function emit with the wrong C type.
 
 ## [0.621.0]
 

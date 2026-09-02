@@ -971,7 +971,9 @@ Type* infer_return_type_from_body(ASTNode* body, SymbolTable* symbols) {
 // function body is visited, so they sit beneath the snapshot and are
 // unaffected.
 void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
-    if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
+    if (!node || (node->type != AST_FUNCTION_DEFINITION &&
+                  node->type != AST_BUILDER_FUNCTION &&
+                  node->type != AST_MAIN_FUNCTION)) return;
 
     Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
 
@@ -1063,6 +1065,7 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             
         case AST_BUILDER_FUNCTION:
         case AST_FUNCTION_DEFINITION:
+        case AST_MAIN_FUNCTION:
             collect_function_constraints(node, ctx);
             break;
 
