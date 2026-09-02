@@ -1,0 +1,58 @@
+// A struct string field must be owned the same way however it was assigned (#1866).
+//
+// The ownership wrapper only fired when the assignment was written against a
+// LOCAL heap-box pointer. A setter takes the box as a parameter, so its
+// assignment was a bare store that never set the `_heap_<field>` tracker, and
+// the box's destructor then believed it owned nothing.
+//
+// That left no correct way to write a destructor: freeing the field by hand
+// double-frees in the local case and leaks in the setter case.
+//
+// Both styles below must free exactly once, so the program has to run to
+// completion (a double free aborts) AND report no leak.
+
+import std.heap
+import std.string
+
+struct Entry { path: string }
+struct Uniform { name: string, kind: int }
+
+// Style A: assignment written on the local pointer.
+make_entry(value: string) -> *Entry {
+    e = heap.new(Entry)
+    e.path = string.copy(value)
+    return e
+}
+
+// Style B: assignment through a pointer parameter, which is what a setter is.
+// It does NOT free the previous value by hand: the field is owned by the box,
+// so the assignment releases whatever was there. That is the same rule the
+// local-pointer style follows, which is the point of the fix -- before it, a
+// setter had to free by hand or leak, and a local had to not free or double
+// free, so the two styles needed opposite code.
+uniform_set_name(u: *Uniform, value: string) {
+    u.name = string.copy(value)
+}
+
+upsert(value: string) -> *Uniform {
+    u = heap.new(Uniform)
+    uniform_set_name(u, value)
+    u.kind = 1
+    return u
+}
+
+main() {
+    e = make_entry("local")
+    println("${e.path}")
+    heap.free(e)
+
+    u = upsert("setter")
+    println("${u.name}")
+    // Reassign through the setter: the previous value must be released by
+    // `own`, and the final one by heap.free.
+    uniform_set_name(u, "setter-again")
+    println("${u.name}")
+    heap.free(u)
+
+    println("both freed")
+}

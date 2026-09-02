@@ -1436,6 +1436,40 @@ static void emit_return_escape_drains_for_unreturned(CodeGenerator* gen,
  * assignment), 0 if the LHS shape isn't one of the recognised
  * struct-field patterns (caller falls through to the existing
  * bare-assignment emission). */
+/* #1866: is `name` a POINTER-TO-STRUCT PARAMETER of the function being
+ * emitted? A setter takes the box as a parameter, so the field assignment
+ * inside it is written through a parameter rather than a local, and the
+ * ownership wrapper below used to skip it: the tracker was never set and the
+ * box's destructor believed it owned nothing. That left no correct way to
+ * write a destructor at all, since freeing the field by hand double-frees
+ * when the assignment was written on a local and leaks when it went through a
+ * setter.
+ *
+ * Locals stay excluded, so a raw `malloc(...) as *T` local keeps the #790
+ * treatment. That guard is narrower than it looks either way: the generated
+ * destructor reads the same `_heap_<field>` tracker unconditionally at free
+ * time, so a non-zeroed box is already unsound there regardless of what this
+ * assignment site does. heap.new zero-inits, which is the documented way to
+ * make one. */
+static int is_ptr_struct_param(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->current_function || !name) return 0;
+    ASTNode* fn = gen->current_function;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        /* Parameters come from parse_pattern, so a plain `name: T` is a
+         * pattern-variable node rather than a dedicated parameter node. The
+         * body is the last child and is not a parameter. */
+        if (!p || !p->value) continue;
+        if (p->type != AST_PATTERN_VARIABLE && p->type != AST_IDENTIFIER) continue;
+        if (strcmp(p->value, name) != 0) continue;
+        Type* t = p->node_type;
+        return t && t->kind == TYPE_PTR && t->element_type &&
+               t->element_type->kind == TYPE_STRUCT &&
+               t->element_type->struct_name != NULL;
+    }
+    return 0;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
@@ -1458,7 +1492,8 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     } else if (obj_type->kind == TYPE_PTR && obj_type->element_type &&
                obj_type->element_type->kind == TYPE_STRUCT &&
                obj_type->element_type->struct_name &&
-               is_heap_box_var(gen, obj->value)) {
+               (is_heap_box_var(gen, obj->value) ||
+                is_ptr_struct_param(gen, obj->value))) {
         /* Only a heap.new(T) box has zero-initialised `_heap_<field>`
          * trackers, so only there is reading/freeing the previous field
          * value safe. A raw `malloc(...) as *T` has garbage trackers — its
