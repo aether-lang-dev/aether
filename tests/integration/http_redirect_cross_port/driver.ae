@@ -1,0 +1,61 @@
+// Does a redirect to another PORT on the same host carry the credentials?
+//
+// The client compared the parsed host and nothing else, so a hop from
+// 127.0.0.1:18221 to 127.0.0.1:18222 kept Authorization and Cookie and
+// handed them to a different service on the same machine (#1741). An origin
+// is scheme + host + port together, which is the rule curl applies.
+//
+// Two hops, one assertion each, same host name throughout:
+//   /start -> 127.0.0.1:18222  (port differs: must be stripped)
+//   /same  -> 127.0.0.1:18221  (identical origin: must survive)
+//
+// The same-origin hop is what makes the cross-port result meaningful:
+// without it, a client that dropped the headers unconditionally would pass.
+
+import std.http.client
+import std.string
+
+check(url: string, want: string, label: string) -> int {
+    req = client.request("GET", url)
+    client.set_header(req, "Authorization", "Bearer test-token")
+    client.set_header(req, "Cookie", "session=abc123")
+    err_follow = client.set_follow_redirects(req, 3)
+    if err_follow != "" {
+        println("FAIL: ${label}: set_follow_redirects: ${err_follow}")
+        client.request_free(req)
+        return 1
+    }
+    resp, err = client.send_request(req)
+    if err != "" {
+        println("FAIL: ${label}: send_request: ${err}")
+        client.request_free(req)
+        return 1
+    }
+    status = client.response_status(resp)
+    body = client.response_body(resp)
+    client.response_free(resp)
+    client.request_free(req)
+    if status != 200 {
+        println("FAIL: ${label}: status ${status}, expected 200")
+        return 1
+    }
+    if string.contains(body, want) == 0 {
+        println("FAIL: ${label}: landing saw '${body}', expected '${want}'")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    bad = 0
+    // The port differs: a different service, so the credentials must not
+    // be replayed there.
+    bad = bad + check("http://127.0.0.1:18221/start",
+        "auth=absent cookie=absent", "cross-port")
+    // Identical origin: dropping them here would break ordinary redirects.
+    bad = bad + check("http://127.0.0.1:18221/same",
+        "auth=present cookie=present", "same-origin")
+    if bad == 0 {
+        println("PASS: credentials dropped across ports, kept within one origin")
+    }
+}

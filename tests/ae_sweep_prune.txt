@@ -108,6 +108,7 @@ tests/integration/http_middleware_d1/
 tests/integration/http_middleware_d2/
 tests/integration/http_park_idle_connections/
 tests/integration/http_redirect_cross_host/
+tests/integration/http_redirect_cross_port/
 tests/integration/http_real_ip/
 tests/integration/http_request_conn_accessors/
 tests/integration/http_request_header_iter/

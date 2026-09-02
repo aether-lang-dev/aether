@@ -3509,18 +3509,32 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
             break;
         }
 
-        /* Strip cross-host auth headers if the host changed.
-         * parse_url returns 1 on success — same inverted-check bug
-         * as http_resolve_location had above; without this fix the
-         * strip path never fired in practice (because parse_url
-         * always succeeds for well-formed URLs). */
+        /* Strip credentials when the redirect leaves the ORIGIN, which is
+         * scheme + host + port together, not the host alone (#1741). The port
+         * and TLS flag were parsed here and then never compared, so a redirect
+         * from http://host:8080/ to http://host:9090/ replayed the caller's
+         * Authorization and Cookie headers at a different service on the same
+         * machine, owned by whoever holds that port. An http -> https upgrade
+         * changes the origin the same way. This is curl's rule: any of the
+         * three changing drops the credentials.
+         *
+         * parse_url always fills the port from the scheme (80 / 443) and lets
+         * an explicit :port override it, so http://host and http://host:80
+         * compare equal and only a real origin change strips.
+         *
+         * parse_url returns 1 on success — same inverted-check bug as
+         * http_resolve_location had above; without that fix the strip path
+         * never fired in practice (because parse_url always succeeds for
+         * well-formed URLs). */
         char curr_host[256], next_host[256], dummy_path[1024];
         int curr_port = 0, next_port = 0, curr_tls = 0, next_tls = 0;
         if (parse_url(current_url, curr_host, sizeof(curr_host), &curr_port,
                       dummy_path, sizeof(dummy_path), &curr_tls) != 0 &&
             parse_url(next_url, next_host, sizeof(next_host), &next_port,
                       dummy_path, sizeof(dummy_path), &next_tls) != 0) {
-            if (strcmp(curr_host, next_host) != 0) {
+            if (strcmp(curr_host, next_host) != 0 ||
+                curr_port != next_port ||
+                curr_tls != next_tls) {
                 http_strip_cross_host_headers(req);
             }
         }

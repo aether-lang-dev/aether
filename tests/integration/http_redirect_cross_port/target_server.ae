@@ -1,0 +1,36 @@
+// Target fixture for the cross-PORT redirect check (#1741): a second service
+// on a different port of the same host, standing in for the neighbour that
+// must never receive the caller's credentials.
+
+import std.http
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18222
+
+echo_handler(req: ptr, res: ptr, ud: ptr) {
+    auth = http.get_header(req, "Authorization")
+    cookie = http.get_header(req, "Cookie")
+    body = "auth=present"
+    if auth == null {
+        body = "auth=absent"
+    }
+    if cookie == null {
+        body = "${body} cookie=absent"
+    } else {
+        body = "${body} cookie=present"
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "${body}\n")
+}
+
+main() {
+    s = http.server_create(PORT)
+    http.server_set_host(s, "127.0.0.1")
+    http.server_get(s, "/landing", echo_handler, 0)
+    println("READY")
+    http_server_start_raw(s)
+    exit(0)
+}

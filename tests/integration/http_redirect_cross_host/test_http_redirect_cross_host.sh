@@ -13,9 +13,9 @@
 # that dropped the headers unconditionally would satisfy the first assertion
 # and fail the second.
 #
-# The rule the client implements compares the parsed host and nothing else,
-# so the port is held equal across both hops to isolate it. A change of port
-# alone does NOT strip today; that is filed separately.
+# The port is held equal across both hops so this test isolates the host.
+# A port change strips too, since #1741 made the decision compare the whole
+# origin; tests/integration/http_redirect_cross_port covers that half.
 
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
