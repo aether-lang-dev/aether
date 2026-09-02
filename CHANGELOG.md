@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.622.0]
+
 ### Fixed
 
 - **`std.http.client` now does HTTPS on OpenSSL-less builds** (#1849). Every
