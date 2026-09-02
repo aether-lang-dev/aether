@@ -111,9 +111,18 @@ import std.net
 import std.list
 import std.os
 import std.fs
+// SELECTIVE, not `import std.mem`. A whole-module import drags std.mem's
+// types into the shared struct namespace, and that collided with a local in
+// std/cryptography/tls13_cert -- its `octet` began typing as `void*`, so
+// `octet * 10` failed to compile in a file this one never touches. The
+// selective form takes the three functions and nothing else.
+import std.mem(copy, ptr_to_long, long_to_ptr)
 
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
+// Adopt an already-connected fd (the http client hands us one, possibly a
+// forward-proxy CONNECT tunnel). Declared here as the server module does.
+extern tcp_socket_from_fd_owned(fd: int) -> ptr
 extern string_length(s: string) -> int
 
 exports(
@@ -638,7 +647,33 @@ connect_mtls(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client
 }
 
 fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
-    sock = net.tcp_connect_raw(host, port)
+    return connect_full(host, port, x25519_priv, client_cert, client_cert_len, client_key, null, 0, "")
+}
+
+// The full-control entry point. Everything above funnels here.
+//
+//   adopt_sock  an ALREADY-CONNECTED socket to run the handshake over, or
+//               null to dial `host:port`. Adoption is what lets std.http.client
+//               drive this over a forward-proxy CONNECT tunnel (#1849): the
+//               tunnel is established in C, and the handshake then runs
+//               end-to-end against `host` through it.
+//   insecure    1 skips certificate verification entirely. Present for parity
+//               with the OpenSSL backend's set_insecure; it is exactly as
+//               dangerous here as there.
+//   cafile      a PEM bundle to trust INSTEAD of the system store (parity with
+//               set_cafile), or "" for the normal resolution.
+fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: ptr, insecure: int, cafile: string) -> (ptr, string) {
+    // Dial into a FRESH name and pick afterwards, rather than assigning to
+    // `sock` twice. A conditional re-assignment here left the slot's type
+    // unresolved ("unresolved type in codegen, defaulting to int"), and that
+    // unresolved slot propagated far enough to retype an unrelated local in
+    // std/cryptography/tls13_cert as void*.
+    dialled = null
+    if adopt_sock == null {
+        dialled = net.tcp_connect_raw(host, port)
+    }
+    sock = adopt_sock
+    if adopt_sock == null { sock = dialled }
     if sock == null { return null, "connect failed" }
     // Initial key exchange group is x25519, using the caller's private scalar.
     // On a HelloRetryRequest we may switch to secp256r1 with a fresh scalar.
@@ -783,7 +818,7 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 
     // Derive keys from the (classical) 32-byte ECDHE secret and run the shared
     // post-ServerHello handshake tail (flight read, auth, Finished).
-    result, result_err = run_handshake_tail(sock, rio, tr, host, shared, 32, parsed.cipher_suite, client_cert, client_cert_len, client_key)
+    result, result_err = run_handshake_tail(sock, rio, tr, host, shared, 32, parsed.cipher_suite, client_cert, client_cert_len, client_key, insecure, cafile)
 
     bytes.free(shared)
     if parsed.key_share != null { bytes.free(parsed.key_share) }
@@ -897,7 +932,7 @@ connect_pq(host: string, port: int) -> (ptr, string) {
             result_err = sherr2
             if string.equals(sherr2, "") == 1 { result_err = "PQ key exchange failed" }
         } else {
-            result, result_err = run_handshake_tail(sock, rio, tr, host, shared, shared_len, parsed.cipher_suite, null, 0, null)
+            result, result_err = run_handshake_tail(sock, rio, tr, host, shared, shared_len, parsed.cipher_suite, null, 0, null, 0, "")
             bytes.free(shared)
         }
     }
@@ -921,9 +956,12 @@ connect_pq(host: string, port: int) -> (ptr, string) {
 // cleanup; on success ownership of sock+rio moves into the returned conn.
 // Returns (conn, "") or (null, err). Does NOT free `shared`, `tr`, sh/shrec,
 // or the ClientHello — the caller does.
+// insecure: 1 skips server authentication entirely (set_insecure parity).
+// cafile:   a PEM bundle to trust instead of the system store, or "".
 fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
     shared: ptr, shared_len: int, cipher_suite: int,
-    client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
+    client_cert: ptr, client_cert_len: int, client_key: ptr,
+    insecure: int, cafile: string) -> (ptr, string) {
     rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(cipher_suite)
     if string.equals(suite_err, "") != 1 { return null, suite_err }
 
@@ -973,12 +1011,22 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
     result_err = ferr
     if string.equals(ferr, "") == 1 {
         auth_err = ""
-        anchors, tsErr = tls13_cert.trust_store_load(trust_store_path())
-        if anchors == null {
-            auth_err = "cannot load system trust store"
+        if insecure == 1 {
+            // set_insecure parity: no chain, no validity window, no hostname
+            // pin. The connection is encrypted but UNAUTHENTICATED, so an
+            // active attacker is undetectable -- exactly as dangerous as the
+            // OpenSSL backend's equivalent, and offered for the same reason.
+            auth_err = ""
         } else {
-            auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors)
-            tls13_cert.free_anchors(anchors)
+            store = trust_store_path()
+            if string.equals(cafile, "") != 1 { store = cafile }
+            anchors, tsErr = tls13_cert.trust_store_load(store)
+            if anchors == null {
+                auth_err = "cannot load trust store"
+            } else {
+                auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors)
+                tls13_cert.free_anchors(anchors)
+            }
         }
         if string.equals(auth_err, "") != 1 {
             result_err = auth_err
@@ -2038,9 +2086,18 @@ fn split_ec_point(spki_key: ptr, key_len: int) -> (ptr, ptr, int, string) {
 // (so trust_store_load produces a clear "cannot load" error if nothing is
 // present, rather than us guessing).
 fn trust_store_path() -> string {
+    // os_getenv returns a NULL pointer for an unset variable, and comparing
+    // that against "" does not catch it -- the value interpolates as the
+    // literal text "(null)", which was then returned AS THE PATH. The
+    // fallbacks below were unreachable whenever SSL_CERT_FILE was unset, so
+    // the pure client could not load a trust store on a stock Debian box even
+    // though /etc/ssl/certs/ca-certificates.crt was sitting right there. The
+    // null check has to come first, exactly as std/cas/module.ae does it.
     env = os.os_getenv("SSL_CERT_FILE")
-    if string.equals(env, "") != 1 {
-        return env
+    if env != null {
+        if string.length(env) > 0 {
+            return env
+        }
     }
     debian = "/etc/ssl/certs/ca-certificates.crt" // Debian/Ubuntu/Alpine
     if fs.file_exists(debian) == 1 { return debian }
@@ -2305,4 +2362,131 @@ verify_flight_auth(fl: ptr, flen: int, th_thru_cert: ptr) -> string {
     // CertificateVerify but not the RFC 5280/6125 policy. connect() enforces
     // the full policy via a loaded trust store.
     return authenticate_server(fl, flen, th_thru_cert, 32, "", null)
+}
+
+// ---- @c_callback bridge for std.http.client (#1849) -------------------------
+//
+// std/net/aether_http.c puts its entire https path under AETHER_HAS_OPENSSL, so
+// a cross-compiled binary -- which never links OpenSSL, because zig bundles
+// none -- could not make an https request at all. These entry points let that C
+// drive this client instead, joined by weak symbols exactly as the SERVER side
+// is (#1813): the C declares them weak and gets inert stubs, and linking this
+// module overrides them.
+//
+// The C owns the socket up to the handshake (including a forward-proxy CONNECT
+// tunnel, which is why connect adopts an fd rather than dialling); this module
+// owns it afterwards, and pure_tls_client_close releases both.
+
+// A connection plus the tail of the last record read.
+//
+// conn_recv returns whole TLS records, and HTTP reads in small chunks -- a
+// 16KB record handed to a 4KB read would lose three quarters of itself. So
+// what the caller could not take is carried here until the next call. (The
+// server-side bridge has this bug; it survives only because its callers happen
+// to read header-sized pieces.)
+struct PureClientConn {
+    conn: ptr // *ClientConn
+    pending: ptr // bytes not yet handed to the caller, or null
+    pending_len: int
+    pending_off: int
+}
+
+@c_callback("aether_pure_tls_client_available")
+pure_tls_client_available() -> int {
+    return 1
+}
+
+@c_callback("aether_pure_tls_client_connect")
+pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string) -> ptr {
+    sock = tcp_socket_from_fd_owned(fd)
+    if sock == null { return null }
+
+    priv = rand_into(32)
+    if priv == null { net.tcp_close(sock); return null }
+
+    ca = ""
+    if cafile != null { ca = cafile }
+    conn, err = connect_full(host, 443, priv, null, 0, null, sock, verify_mode, ca)
+    bytes.free(priv)
+    if string.equals(err, "") != 1 { return null }
+    if conn == null { return null }
+
+    pc = malloc(32) as *PureClientConn
+    if pc == null { close_conn(conn); return null }
+    pc.conn = conn
+    pc.pending = null
+    pc.pending_len = 0
+    pc.pending_off = 0
+    return pc as ptr
+}
+
+@c_callback("aether_pure_tls_client_send")
+pure_tls_client_send(pcp: ptr, buf: ptr, len: int) -> int {
+    if pcp == null || buf == null || len <= 0 { return -1 }
+    pc = pcp as *PureClientConn
+    b = bytes.new(len)
+    bytes.set(b, len - 1, 0)
+    copy(bytes.data(b), buf, len as long)
+    err = conn_send(pc.conn, b, len)
+    bytes.free(b)
+    if string.equals(err, "") != 1 { return -1 }
+    return len
+}
+
+@c_callback("aether_pure_tls_client_recv")
+pure_tls_client_recv(pcp: ptr, buf: ptr, len: int) -> int {
+    if pcp == null || buf == null || len <= 0 { return -1 }
+    pc = pcp as *PureClientConn
+
+    // Drain the previous record's tail before reading another. Without this a
+    // record larger than the caller's buffer loses everything past `len`.
+    if pc.pending != null {
+        avail = pc.pending_len - pc.pending_off
+        take = avail
+        if take > len { take = len }
+        // No mem.offset in std.mem; go through the long round-trip, which is
+        // the tree's idiom for pointer arithmetic.
+        src = long_to_ptr(ptr_to_long(bytes.data(pc.pending)) + (pc.pending_off as long))
+        copy(buf, src, take as long)
+        pc.pending_off = pc.pending_off + take
+        if pc.pending_off >= pc.pending_len {
+            bytes.free(pc.pending)
+            pc.pending = null
+            pc.pending_len = 0
+            pc.pending_off = 0
+        }
+        return take
+    }
+
+    p, n, err = conn_recv(pc.conn)
+    if string.equals(err, "") != 1 {
+        if p != null { bytes.free(p) }
+        return -1
+    }
+    // A clean close_notify is EOF, which recv() reports as 0 -- not an error.
+    if n <= 0 {
+        if p != null { bytes.free(p) }
+        return 0
+    }
+
+    take = n
+    if take > len { take = len }
+    copy(buf, bytes.data(p), take as long)
+    if take < n {
+        pc.pending = p
+        pc.pending_len = n
+        pc.pending_off = take
+    } else {
+        bytes.free(p)
+    }
+    return take
+}
+
+@c_callback("aether_pure_tls_client_close")
+pure_tls_client_close(pcp: ptr) {
+    if pcp == null { return }
+    pc = pcp as *PureClientConn
+    if pc.pending != null { bytes.free(pc.pending) }
+    if pc.conn != null { close_conn(pc.conn) }
+    libc_free(pcp)
 }

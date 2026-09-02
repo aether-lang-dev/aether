@@ -11,6 +11,39 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`std.http.client` now does HTTPS on OpenSSL-less builds** (#1849). Every
+  `ae build --target=` cross-compile links no TLS — zig bundles none — and the
+  client's entire https path was under `AETHER_HAS_OPENSSL`, so a cross-built
+  binary could not make an https request at all. It now falls back to
+  `std.cryptography.tls13_client`, joined to the C by weak symbols exactly as
+  the server side already is (#1813). Verified end to end: a cross-built binary
+  with **zero TLS libraries linked** fetches 5MB of JSON over https.
+
+  Add `import std.cryptography.tls13_client` to link the pure client; without
+  it an https request in a no-OpenSSL build fails with an error naming that
+  import rather than returning an empty body. `set_insecure` and `set_cafile`
+  are honoured on the pure path, and https through a forward proxy works
+  because the CONNECT tunnel is established before the handshake either way.
+
+- **The pure TLS client could not find a trust store on a stock Linux box.**
+  `os_getenv` returns a null pointer for an unset variable, and
+  `trust_store_path()` compared it against `""` instead of null — so an unset
+  `SSL_CERT_FILE` was returned *as the path* (interpolating as the literal
+  `"(null)"`), and the `/etc/ssl/...` fallbacks below were unreachable. Every
+  pure-TLS connection failed with "cannot load system trust store" unless
+  `SSL_CERT_FILE` happened to be set. Pre-existing, and independent of the
+  wiring above.
+
+  Known limitation, not introduced here: the pure handshake takes 12–22
+  seconds (X25519/P-256 in pure Aether) against milliseconds for OpenSSL.
+  Usable for provisioning-style fetches, not per-request work, and long enough
+  that the default request timeout can expire mid-handshake.
+- **Main locals no longer leak into imported function type inference.** A local
+  in `main` could leave its inferred type in the shared symbol table and make a
+  same-named local in an imported function emit with the wrong C type.
+
 ## [0.621.0]
 
 ### Changed

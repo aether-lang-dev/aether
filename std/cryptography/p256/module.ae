@@ -63,9 +63,115 @@ bn_hex(h: string) -> ptr {
 }
 
 // ---- field ops mod p ----
-fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = bignum.mod(s, p); bignum.free(s); return r }
-fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(d, p); bignum.free(d); return r }
-fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
+// ---- field reduction mod the P-256 prime, without division ----------------
+//
+// Every point operation reduces a product mod p, and std.bignum's generic
+// `mod` is a BIT-SERIAL long division: ~512 iterations for a 512-bit
+// product, each doing a shift, a compare and possibly a subtract, with 4-6
+// heap allocations per bit. Measured on this box: bignum.multiply x500 =
+// 0 ms, bignum.mod(p) x500 = 166 ms -- the reduction was 100% of the
+// field-op cost, ~0.33 ms each, and a P-256 verify does thousands of them.
+// One ECDSA verify cost ~1.4 s; a depth-4 all-ECDSA chain (Cloudflare's)
+// ~13 s, long enough to trip the peer's handshake deadline and fail a
+// pure-TLS connect outright.
+//
+// The NIST prime has the special form
+//     p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+// so  2^256 = 2^224 - 2^192 - 2^96 + 1  (mod p). A value c = hi*2^256 + lo
+// therefore reduces to  lo + hi*(2^224 - 2^192 - 2^96 + 1)  with shifts and
+// adds only. Two passes of that identity take a 512-bit product below
+// ~2^260; a few conditional subtractions of p finish it. This is the same
+// identity the textbook 9-term Solinas table is derived from -- it is
+// implemented as the derivation rather than as a recalled table, and it is
+// pinned by the FIPS 186 KAT in tests/integration/crypto_p256 and the
+// Wycheproof ECDSA vectors. Anything not reduced mod the curve prime (the
+// order-n arithmetic in ecdsa_verify) still goes through bignum.mod.
+fn reduce_p256(c: ptr, p: ptr) -> ptr {
+    // Fold 2^256 -> (2^224 - 2^192 - 2^96 + 1) until the value fits in 256
+    // bits. The subtracted terms can drive an intermediate NEGATIVE, and
+    // std.bignum's shift_right is FLOOR division: on a negative input it
+    // returns -1 forever, never 0, so a naive "loop until the high part is
+    // zero" spins without end -- which is exactly how the first version of
+    // this function hung the KAT. So the fold always operates on the
+    // MAGNITUDE and carries the sign separately; |x| shrinks monotonically
+    // and the loop is guaranteed to terminate.
+    zero = bignum.from_int(0)
+    x = bignum.clone(c)
+    neg = 0
+    if bignum.compare(x, zero) < 0 {
+        neg = 1
+        y = bignum.subtract(zero, x); bignum.free(x); x = y
+    }
+    guard = 0
+    folding = 1
+    while folding == 1 {
+        hi = bignum.shift_right(x, 256)
+        if bignum.is_zero(hi) == 1 {
+            bignum.free(hi)
+            folding = 0
+        } else {
+            hsh = bignum.shift_left(hi, 256)
+            lo = bignum.subtract(x, hsh)
+            bignum.free(hsh)
+            t224 = bignum.shift_left(hi, 224)
+            t192 = bignum.shift_left(hi, 192)
+            t96 = bignum.shift_left(hi, 96)
+            acc1 = bignum.add(lo, t224)
+            acc2 = bignum.subtract(acc1, t192)
+            acc3 = bignum.subtract(acc2, t96)
+            acc4 = bignum.add(acc3, hi)
+            bignum.free(x); bignum.free(hi); bignum.free(lo)
+            bignum.free(t224); bignum.free(t192); bignum.free(t96)
+            bignum.free(acc1); bignum.free(acc2); bignum.free(acc3)
+            x = acc4
+            // the fold can flip the sign again; keep folding the magnitude
+            // and fold the sign into `neg`
+            if bignum.compare(x, zero) < 0 {
+                neg = 1 - neg
+                y = bignum.subtract(zero, x); bignum.free(x); x = y
+            }
+            guard = guard + 1
+            if guard > 8 { folding = 0 }
+        }
+    }
+    // reapply sign, then normalise into [0, p). Both loops are bounded:
+    // |x| < 2^257 here, so at most a couple of iterations each.
+    if neg == 1 {
+        y = bignum.subtract(zero, x); bignum.free(x); x = y
+    }
+    guard = 0
+    while bignum.compare(x, zero) < 0 && guard < 8 {
+        y = bignum.add(x, p); bignum.free(x); x = y
+        guard = guard + 1
+    }
+    guard = 0
+    while bignum.compare(x, p) >= 0 && guard < 8 {
+        y = bignum.subtract(x, p); bignum.free(x); x = y
+        guard = guard + 1
+    }
+    bignum.free(zero)
+    return x
+}
+
+// Is `p` the P-256 curve prime? The field ops below take the modulus as a
+// parameter, so the fast reduction must only fire for the value it is
+// derived for; anything else falls back to the generic division.
+fn is_curve_prime(p: ptr) -> int {
+    cp = bn_hex(P_HEX())
+    eq = 0
+    if bignum.compare(p, cp) == 0 { eq = 1 }
+    bignum.free(cp)
+    return eq
+}
+
+fn fmod(v: ptr, p: ptr) -> ptr {
+    if is_curve_prime(p) == 1 { return reduce_p256(v, p) }
+    return bignum.mod(v, p)
+}
+
+fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = fmod(s, p); bignum.free(s); return r }
+fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = fmod(d, p); bignum.free(d); return r }
+fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = fmod(m, p); bignum.free(m); return r }
 finv(a: ptr, p: ptr) -> ptr {
     two = bignum.from_int(2)
     e = bignum.subtract(p, two)
@@ -217,16 +323,33 @@ jac_mul(k: ptr, P: *EcPt, p: ptr) -> *EcPt {
         dbl = pt_double(q, p)
         pt_free(q)
         q = dbl
-        ki = bignum.shift_right(k, i)
-        if bit0(ki) == 1 {
+        if bit_at(k, i) == 1 {
             sum = pt_add(q, P, p)
             pt_free(q)
             q = sum
         }
-        bignum.free(ki)
         i = i - 1
     }
     return q
+}
+
+// Bit i of a non-negative bignum, read straight from its limb array in O(1).
+//
+// jac_mul used to read each scalar bit as `bit0(shift_right(k, i))`: a fresh
+// 256-bit allocation per bit, then a full `mod 2` on it, ~256 times per
+// scalar multiplication. That overhead, not the curve arithmetic, made one
+// P-256 verify cost ~2 s and a depth-4 all-ECDSA chain (Cloudflare's) ~13 s
+// -- long enough to trip the peer's handshake deadline and fail the TLS
+// connect outright. Every scalar reaching here is reduced mod n, so it is
+// non-negative and `sign` needs no handling. Limbs are 32-bit, big-endian
+// (mag[0] is the MSB), matching std.bignum's BN layout.
+bit_at(n: ptr, i: int) -> int {
+    bn = n as *BN
+    if bn.len <= 0 || i < 0 { return 0 }
+    li = bn.len - 1 - (i / 32)
+    if li < 0 { return 0 }
+    w = bignum.limb(bn.mag, li)
+    return ((w >> (i % 32)) & 1) as int
 }
 
 bit0(n: ptr) -> int {
