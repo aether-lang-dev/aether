@@ -663,10 +663,17 @@ fn connect_ex(host: string, port: int, x25519_priv: ptr, client_cert: ptr, clien
 //   cafile      a PEM bundle to trust INSTEAD of the system store (parity with
 //               set_cafile), or "" for the normal resolution.
 fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client_cert_len: int, client_key: ptr, adopt_sock: ptr, insecure: int, cafile: string) -> (ptr, string) {
-    sock = adopt_sock
-    if sock == null {
-        sock = net.tcp_connect_raw(host, port)
+    // Dial into a FRESH name and pick afterwards, rather than assigning to
+    // `sock` twice. A conditional re-assignment here left the slot's type
+    // unresolved ("unresolved type in codegen, defaulting to int"), and that
+    // unresolved slot propagated far enough to retype an unrelated local in
+    // std/cryptography/tls13_cert as void*.
+    dialled = null
+    if adopt_sock == null {
+        dialled = net.tcp_connect_raw(host, port)
     }
+    sock = adopt_sock
+    if adopt_sock == null { sock = dialled }
     if sock == null { return null, "connect failed" }
     // Initial key exchange group is x25519, using the caller's private scalar.
     // On a HelloRetryRequest we may switch to secp256r1 with a fresh scalar.
