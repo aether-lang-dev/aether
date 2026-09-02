@@ -103,12 +103,14 @@ Without that import the pure client is not linked, and an https request in a
 no-OpenSSL build fails with an error naming the missing import rather than
 returning an empty body.
 
-**The pure handshake is slow** — measured at 12–22 seconds against
-`example.com`, against milliseconds for OpenSSL — because the X25519/P-256
-work is pure Aether. That is inherent to the pure client and predates this
-wiring; it is fine for provisioning-style fetches and unsuitable for anything
-per-request. Raise the request timeout accordingly: the default is short
-enough that a pure handshake can exceed it.
+**Performance.** A pure handshake against a real CDN (a P-256 leaf over
+secp384r1 intermediates) completes in about 1.3 seconds, and a full cross-built
+HTTPS request in under a second. That is slower than OpenSSL but well inside any
+server's handshake deadline. An earlier version of this note measured 12–22
+seconds and warned that the default request timeout could expire mid-handshake;
+that cost was `std.bignum`'s bit-serial division inside every P-256 and P-384
+field reduction, and it is gone — both curves now reduce mod their prime with
+shifts and adds. No timeout adjustment is needed.
 
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.
