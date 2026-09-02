@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.623.0]
+
 ### Fixed
 
 - **A struct field typed by a transitively imported module produced C that
