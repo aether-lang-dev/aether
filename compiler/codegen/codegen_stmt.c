@@ -3974,6 +3974,43 @@ static int emit_optional_chain_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode*
     return 1;
 }
 
+/* #1860: does every `return` in this function hand back a heap.new(T) box?
+ * Box provenance was per-function, so `b = build_box()` lost the fact that the
+ * value is a zero-initialised box and the field-assign wrapper was skipped:
+ * `b.name = ...` became a bare store that never set `_heap_<field>`, so the
+ * box's destructor believed it owned nothing and every owned string field
+ * leaked. Requiring ALL returns to be heap.new keeps the #790 guard exactly as
+ * strict: a function that can also hand back a raw `malloc as *T` (garbage
+ * trackers) does not qualify. */
+static int returns_only_heap_new(ASTNode* node, int* saw_return) {
+    if (!node) return 1;
+    if (node->type == AST_RETURN_STATEMENT) {
+        *saw_return = 1;
+        if (node->child_count == 0 || !node->children[0]) return 0;
+        return node->children[0]->type == AST_HEAP_NEW;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (!returns_only_heap_new(node->children[i], saw_return)) return 0;
+    }
+    return 1;
+}
+
+static int call_yields_heap_box(CodeGenerator* gen, ASTNode* init) {
+    if (!gen || !gen->program || !init) return 0;
+    if (init->type != AST_FUNCTION_CALL || !init->value) return 0;
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* fn = gen->program->children[i];
+        if (!fn || fn->type != AST_FUNCTION_DEFINITION) continue;
+        if (!fn->value || strcmp(fn->value, init->value) != 0) continue;
+        if (fn->child_count == 0) return 0;
+        ASTNode* body = fn->children[fn->child_count - 1];
+        int saw_return = 0;
+        int ok = returns_only_heap_new(body, &saw_return);
+        return ok && saw_return;
+    }
+    return 0;
+}
+
 void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
@@ -4271,7 +4308,8 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
              * be owned; rebinding it to anything else drops that status. */
             if (stmt->value && strcmp(stmt->value, "_") != 0 &&
                 stmt->child_count > 0 && stmt->children[0]) {
-                if (stmt->children[0]->type == AST_HEAP_NEW)
+                if (stmt->children[0]->type == AST_HEAP_NEW ||
+                    call_yields_heap_box(gen, stmt->children[0]))
                     mark_heap_box_var(gen, stmt->value);
                 else
                     unmark_heap_box_var(gen, stmt->value);
@@ -5478,7 +5516,11 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                  * provenance (a member-access LHS like `box.field = ...` does
                  * not — it is a field store, handled below). */
                 if (lhs && lhs->type == AST_IDENTIFIER && lhs->value) {
-                    if (rhs && rhs->type == AST_HEAP_NEW)
+                    /* #1860: a call whose every return is heap.new(T) hands
+                     * back that same zero-initialised box, so provenance has
+                     * to survive the call. */
+                    if (rhs && (rhs->type == AST_HEAP_NEW ||
+                                call_yields_heap_box(gen, rhs)))
                         mark_heap_box_var(gen, lhs->value);
                     else
                         unmark_heap_box_var(gen, lhs->value);
