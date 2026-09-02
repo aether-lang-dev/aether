@@ -4857,6 +4857,17 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
     print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
+    /* #1704: the sandbox permission stack is SEPARATE from the builder
+     * context stack above. They used to be the same array, so entering any
+     * trailing block pushed that builder's config object onto the stack the
+     * permission checker walks. The checker then read the config as a
+     * permission list, found no entries, and denied everything: the same
+     * grant that worked in a plain function was refused inside a
+     * `spec.describe` block. Two different things were sharing one stack. */
+    print_line(gen, "static void* _aether_sandbox_stack[64];");
+    print_line(gen, "static int _aether_sandbox_depth = 0;");
+    print_line(gen, "static inline void _aether_sandbox_push(void* ctx) { if (_aether_sandbox_depth < 64) _aether_sandbox_stack[_aether_sandbox_depth++] = ctx; }");
+    print_line(gen, "static inline void _aether_sandbox_pop(void) { if (_aether_sandbox_depth > 0) _aether_sandbox_depth--; }");
     // Only emit sandbox bridge code if the program actually uses sandbox builtins.
     // This avoids preamble bloat and the list_size/list_get dependency for programs
     // that don't use sandboxing.
@@ -4894,20 +4905,20 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "}");
         print_line(gen, "extern void aether_sandbox_audit(const char*, const char*, int);");
         print_line(gen, "static int _aether_sandbox_check_impl(const char* category, const char* resource) {");
-        print_line(gen, "    if (_aether_ctx_depth <= 0) return 1;");
+        print_line(gen, "    if (_aether_sandbox_depth <= 0) return 1;");
         print_line(gen, "    int _allowed = 1;");
-        print_line(gen, "    for (int level = 0; level < _aether_ctx_depth; level++) {");
-        print_line(gen, "        if (!_aether_perms_allow(_aether_ctx_stack[level], category, resource)) { _allowed = 0; break; }");
+        print_line(gen, "    for (int level = 0; level < _aether_sandbox_depth; level++) {");
+        print_line(gen, "        if (!_aether_perms_allow(_aether_sandbox_stack[level], category, resource)) { _allowed = 0; break; }");
         print_line(gen, "    }");
         // Audit every in-process permission check — allowed and denied.
         // The sink is opt-in (AETHER_SANDBOX_AUDIT) and the ring buffer
         // is cheap, so this is unconditional. Note this runs only when a
-        // sandbox is active (_aether_ctx_depth > 0).
+        // sandbox is active (_aether_sandbox_depth > 0).
         print_line(gen, "    aether_sandbox_audit(category, resource, _allowed);");
         print_line(gen, "    return _allowed;");
         print_line(gen, "}");
         print_line(gen, "static void _aether_sandbox_install(void) { _aether_sandbox_checker = _aether_sandbox_check_impl; }");
-        print_line(gen, "static void _aether_sandbox_uninstall(void) { if (_aether_ctx_depth <= 0) _aether_sandbox_checker = 0; }");
+        print_line(gen, "static void _aether_sandbox_uninstall(void) { if (_aether_sandbox_depth <= 0) _aether_sandbox_checker = 0; }");
         print_line(gen, "extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);");
     }
     print_line(gen, "");

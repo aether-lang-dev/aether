@@ -4226,12 +4226,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 // ctx_push(ptr) / ctx_pop() — explicit context stack manipulation
                 else if (strcmp(func_name, "sandbox_push") == 0 && expr->child_count == 1) {
-                    fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)");
+                    fprintf(gen->output, "_aether_sandbox_push((void*)(intptr_t)");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
                 else if (strcmp(func_name, "sandbox_pop") == 0 && expr->child_count == 0) {
-                    fprintf(gen->output, "_aether_ctx_pop()");
+                    fprintf(gen->output, "_aether_sandbox_pop()");
                 }
                 // sandbox_install() — activate runtime sandbox checking
                 else if (strcmp(func_name, "sandbox_install") == 0 && expr->child_count == 0) {

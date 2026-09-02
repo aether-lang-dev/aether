@@ -1,0 +1,49 @@
+// A sandbox grant must be honoured inside a trailing block (#1704).
+//
+// The permission stack and the BUILDER context stack used to be the same
+// array, so entering any trailing block pushed that builder's config object
+// onto the stack the permission checker walks. The checker read the config as
+// a permission list, found no entries, and denied: the identical grant that
+// worked in a plain function was refused inside `spec.describe`.
+//
+// The same helper runs in three places. All three must agree.
+
+import std.spec
+import std.audit
+import std.list
+import std.os
+
+fn add_perm(t: ptr, c: string, p: string) {
+    list.add(t, c)
+    list.add(t, p)
+}
+
+fn run_sandboxed(perms: ptr, code: fn) {
+    sandbox_push(perms)
+    sandbox_install()
+    call(code, perms)
+    sandbox_uninstall()
+    sandbox_pop()
+}
+
+fn check(label: string) {
+    audit.clear()
+    perms = list.new()
+    add_perm(perms, "env", "HOME")
+    w = | _ctx: ptr | { os_getenv("HOME") }
+    run_sandboxed(perms, w)
+    c, r, a = audit.entry(0)
+    println("${label} allowed=${a}")
+}
+
+main() {
+    fw = spec.init()
+    check("outside")
+    spec.describe(fw, "d") {
+        check("in-describe")
+        spec.it("t") callback {
+            check("in-it")
+        }
+    }
+    return spec.run_summary(fw)
+}
