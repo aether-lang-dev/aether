@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.621.0]
+
 ### Changed
 
 - **A small response leaves the proxy in one `send()` instead of a scatter
