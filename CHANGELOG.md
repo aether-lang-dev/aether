@@ -38,6 +38,67 @@ version number before tagging the release.
   because an unresolved import was ignored, which is the thing this change
   stops.
 
+- **An imported const bound to a local outside `main` was silently truncated to
+  `int`.** Reported as a spurious "unresolved type in codegen" warning; the
+  warning was the harmless half. A numeric literal parses as UNKNOWN so that
+  inference can decide int or float, and the const node is typed in the second
+  pass, but imported consts land at the END of the merged tree, so every
+  function that bound one to a local was checked first and inferred UNKNOWN
+  from that symbol. Codegen then defaulted the local to `int`: correct by
+  accident for an int const, and a silent narrowing for a float one, so
+  `k = fl.SCALE` with `SCALE = 2.5` emitted `int k` and the program printed 4
+  where the answer is 5. A const now types its literal at registration, using
+  the same helper inference uses, so the result no longer depends on which pass
+  has run.
+
+- **`heap.new(T)` allocated one byte when its type could not be inferred, and
+  a box lost ownership of its string fields across a function boundary.**
+  Reported as `heap.free` leaking. `return heap.new(T)` outside `main` left the
+  node's pointer type unresolved and fell back to `calloc(1, sizeof(void))` for
+  the whole struct, so every field write ran past the end of the allocation and
+  the hidden `_heap_<field>` trackers read back as zero. `heap.new` now uses the
+  struct name the parser records, and reports rather than guessing when it has
+  none, so a byte-sized struct can no longer be emitted silently. Separately,
+  box provenance was per-function, so `b = build_box()` lost it and
+  `b.name = ...` degraded to a bare store that never claimed ownership;
+  provenance now survives a call whose every `return` is a `heap.new`, which
+  keeps the existing guard against a raw `malloc as *T` (whose trackers are
+  garbage) exactly as strict.
+## [0.622.0]
+
+### Fixed
+
+- **`std.http.client` now does HTTPS on OpenSSL-less builds** (#1849). Every
+  `ae build --target=` cross-compile links no TLS — zig bundles none — and the
+  client's entire https path was under `AETHER_HAS_OPENSSL`, so a cross-built
+  binary could not make an https request at all. It now falls back to
+  `std.cryptography.tls13_client`, joined to the C by weak symbols exactly as
+  the server side already is (#1813). Verified end to end: a cross-built binary
+  with **zero TLS libraries linked** fetches 5MB of JSON over https.
+
+  Add `import std.cryptography.tls13_client` to link the pure client; without
+  it an https request in a no-OpenSSL build fails with an error naming that
+  import rather than returning an empty body. `set_insecure` and `set_cafile`
+  are honoured on the pure path, and https through a forward proxy works
+  because the CONNECT tunnel is established before the handshake either way.
+
+- **The pure TLS client could not find a trust store on a stock Linux box.**
+  `os_getenv` returns a null pointer for an unset variable, and
+  `trust_store_path()` compared it against `""` instead of null — so an unset
+  `SSL_CERT_FILE` was returned *as the path* (interpolating as the literal
+  `"(null)"`), and the `/etc/ssl/...` fallbacks below were unreachable. Every
+  pure-TLS connection failed with "cannot load system trust store" unless
+  `SSL_CERT_FILE` happened to be set. Pre-existing, and independent of the
+  wiring above.
+
+  Known limitation, not introduced here: the pure handshake takes 12–22
+  seconds (X25519/P-256 in pure Aether) against milliseconds for OpenSSL.
+  Usable for provisioning-style fetches, not per-request work, and long enough
+  that the default request timeout can expire mid-handshake.
+- **Main locals no longer leak into imported function type inference.** A local
+  in `main` could leave its inferred type in the shared symbol table and make a
+  same-named local in an imported function emit with the wrong C type.
+
 ## [0.621.0]
 
 ### Changed

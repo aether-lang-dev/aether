@@ -1,0 +1,30 @@
+// A local in main must not leak into imported function inference.
+//
+// `ch` is a bytes handle here, while tls13_cert.parse_ipv4 has an integer
+// character named `ch`.  Keeping both in one compilation used to make the
+// imported `ch` resolve as ptr, which then widened its neighbouring `octet`
+// accumulator and emitted invalid C.
+
+import std.cryptography.tls13_cert
+import std.bytes
+import std.list
+
+extern exit(code: int)
+
+main() {
+    ch = bytes.new(1)
+    leaf = tls13_cert.LeafCert {
+        tbs: null, tbs_len: 0,
+        sig_alg_oid: null, signature: null, signature_len: 0,
+        spki_algo_oid: null, spki_key: null, spki_key_len: 0,
+        issuer: null, issuer_len: 0,
+        subject: null, subject_len: 0,
+        not_before: null, not_before_len: 0,
+        not_after: null, not_after_len: 0,
+        dns_names: null, ip_addrs: null
+    }
+    err = tls13_cert.check_hostname(&leaf, "127.0.0.1")
+    bytes.free(ch)
+    if err == "" { println("FAIL: empty certificate unexpectedly matched"); exit(1) }
+    println("main scope inference: ok")
+}

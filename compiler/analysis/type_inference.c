@@ -1352,13 +1352,48 @@ static int is_literal_zero(ASTNode* init) {
     return 1;
 }
 
+/* Is this RHS a GENUINE pointer source, as opposed to an expression that
+ * merely carries a (possibly wrong) TYPE_PTR annotation?
+ *
+ * The widen pass below exists for the `out = 0 ... out = <heap>` idiom, so
+ * it should only fire when a later write is unmistakably a pointer: `null`,
+ * a call (which returns whatever its signature says), a cast, heap.new, or
+ * a bare identifier / member bound elsewhere. It must NOT trust the
+ * node_type of arithmetic on the very variable being examined.
+ *
+ * That last case is the #1855 miscompile. In tls13_cert's parse_ipv4,
+ * `octet = octet * 10 + (ch - 48)` is a BINARY_EXPRESSION whose node_type
+ * had become TYPE_PTR -- only because `octet` had leaked as a ptr from an
+ * unrelated scope into the shared symbol table. Treating that as a "ptr
+ * write" widened the `octet = 0` declaration to void*, gcc then rejected
+ * `void* * int`, and the loop was self-reinforcing: the widening was its own
+ * evidence. Arithmetic that READS the name can never prove the name is a
+ * pointer, so a BINARY_EXPRESSION (and any other non-source shape) is
+ * rejected outright rather than consulted. */
+static int rhs_is_genuine_ptr_source(ASTNode* rhs) {
+    if (!rhs) return 0;
+    switch (rhs->type) {
+        case AST_NULL_LITERAL:
+        case AST_FUNCTION_CALL:
+        case AST_HEAP_NEW:
+        case AST_IDENTIFIER:
+        case AST_MEMBER_ACCESS:
+        case AST_PTR_AS_STRUCT_CAST:
+        case AST_PTR_AS_ARRAY_CAST:
+        case AST_PTR_AS_FN_CAST:
+            return rhs->node_type && rhs->node_type->kind == TYPE_PTR;
+        default:
+            return 0;
+    }
+}
+
 static int assignment_to_is_ptr(ASTNode* node, const char* name) {
     if (!node) return 0;
     if (node->type == AST_ASSIGNMENT && node->child_count >= 2) {
         ASTNode* lhs = node->children[0];
         ASTNode* rhs = node->children[1];
         if (lhs && lhs->value && strcmp(lhs->value, name) == 0 &&
-            rhs && rhs->node_type && rhs->node_type->kind == TYPE_PTR) {
+            rhs_is_genuine_ptr_source(rhs)) {
             return 1;
         }
     }
@@ -1367,7 +1402,7 @@ static int assignment_to_is_ptr(ASTNode* node, const char* name) {
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         strcmp(node->value, name) == 0 && node->child_count > 0) {
         ASTNode* rhs = node->children[0];
-        if (rhs && rhs->node_type && rhs->node_type->kind == TYPE_PTR) {
+        if (rhs_is_genuine_ptr_source(rhs)) {
             return 1;
         }
     }
