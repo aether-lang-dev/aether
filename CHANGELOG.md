@@ -27,6 +27,20 @@ version number before tagging the release.
   wall-clock claim is: the ratio of this proxy's kernel time to nginx's swung
   between 1.25 and 1.37 across runs that changed nothing.
 
+- **The upstream connection pool is no longer locked on every proxied
+  request.** The pool is one list behind one mutex, and a request took it
+  twice: once to borrow a connection and once to return it. Every driver thread
+  did that on every request, so it was the piece of this path that got worse as
+  threads were added, and the cost landed in kernel time where this proxy is
+  already behind both controls. A connection belongs to one driver for its
+  whole life, so the thread that returns it is the thread that wants it next: a
+  few per thread are now kept in front of the shared pool and the steady state
+  never takes the lock. **`futex` disappears from the syscall profile.**
+  Anything the cache cannot hold falls through to the shared pool exactly as
+  before, so the caps, the expiry sweep and the HTTP client's own use of the
+  pool are unchanged, and a cached connection is checked against the same idle
+  timeout the sweep uses so a stale one is closed rather than handed out.
+
 ## [0.620.0]
 
 ### Fixed

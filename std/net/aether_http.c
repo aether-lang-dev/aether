@@ -537,8 +537,66 @@ static void http_pool_expire_locked(int64_t now) {
 
 /* Take an idle connection for `key`, newest first (the most recently used is
  * the one the peer is least likely to have closed). Returns 1 on a hit. */
+/* A few connections kept on the thread that last used them, in front of the
+ * shared pool.
+ *
+ * The shared pool is one list behind one mutex, and a proxied request takes it
+ * twice: once to borrow an upstream and once to give it back. Every driver
+ * thread does that on every request, so the lock is the piece of this path
+ * that gets worse as threads are added, and the cost lands in kernel time
+ * where this proxy is already behind both controls.
+ *
+ * A connection belongs to one driver for its whole life, so the thread that
+ * returns it is the thread that will want it next: a handful per thread serves
+ * the steady state without touching the lock. Anything the cache cannot hold
+ * falls through to the shared pool exactly as before, so the caps, the expiry
+ * sweep and the client's own use of the pool are unchanged.
+ *
+ * Entries are checked against the same idle timeout the sweep uses, so a
+ * cached connection that went stale is closed here rather than handed out. */
+#define HTTP_TCACHE_MAX 4
+
+typedef struct {
+    Transport t;
+    char      key[HTTP_POOL_KEY_MAX];
+    int64_t   idle_since_ms;
+} HttpTCacheSlot;
+
+static AETHER_TLS HttpTCacheSlot http_tcache[HTTP_TCACHE_MAX];
+static AETHER_TLS int            http_tcache_n = 0;
+
+static int http_tcache_take(const char* key, Transport* out, int64_t now) {
+    for (int i = http_tcache_n - 1; i >= 0; i--) {
+        if (strcmp(http_tcache[i].key, key) != 0) continue;
+        Transport t = http_tcache[i].t;
+        int64_t idle = http_tcache[i].idle_since_ms;
+        http_tcache[i] = http_tcache[--http_tcache_n];
+        if (now - idle >= http_pool_idle_ms) {
+            transport_close(&t);
+            return 0;                  /* stale: the caller dials instead */
+        }
+        *out = t;
+        return 1;
+    }
+    return 0;
+}
+
+static int http_tcache_put(const char* key, Transport* t, int64_t now) {
+    if (http_tcache_n >= HTTP_TCACHE_MAX) return 0;
+    size_t kl = strlen(key);
+    if (kl >= HTTP_POOL_KEY_MAX) return 0;
+    HttpTCacheSlot* s = &http_tcache[http_tcache_n];
+    s->t = *t;
+    memcpy(s->key, key, kl);
+    s->key[kl] = '\0';
+    s->idle_since_ms = now;
+    http_tcache_n++;
+    return 1;
+}
+
 static int http_pool_take(const char* key, Transport* out) {
     if (!http_pool_enabled) return 0;
+    if (http_tcache_take(key, out, http_now_ms())) return 1;
     int found = 0;
     pthread_mutex_lock(http_pool_lock());
     http_pool_expire_locked(http_now_ms());
@@ -566,6 +624,7 @@ static void http_pool_put(const char* key, Transport* t) {
         transport_close(t);
         return;
     }
+    if (http_tcache_put(key, t, http_now_ms())) return;
     HttpIdleConn* c = (HttpIdleConn*)malloc(sizeof(HttpIdleConn));
     if (!c) {
         transport_close(t);
