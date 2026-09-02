@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.620.0]
+
 ### Fixed
 
 - **A new project would not link on Windows/MinGW.** `ae init` followed by
