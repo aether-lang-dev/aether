@@ -31,6 +31,13 @@ version number before tagging the release.
   uses can resolve through other paths. It is reported where it is written, and
   says which roots were searched.
 
+  Reporting it immediately found two: `std.cbor` and `std.msgpack` each carried
+  `import std.heap`, and there has never been a `std/heap` module. `heap.new`
+  and `heap.free` are compiler builtins handled in the parser and need no
+  import at all, so both lines were dead and are removed. They compiled only
+  because an unresolved import was ignored, which is the thing this change
+  stops.
+
 ## [0.621.0]
 
 ### Changed
