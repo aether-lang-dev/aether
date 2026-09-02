@@ -54,6 +54,19 @@ version number before tagging the release.
   release build failed at runtime while the build itself stayed clean.
   `make docs-server` had the same omission. Both now pass the capability flags.
 
+- **A struct's `string` field was owned only when the assignment was written on
+  a local pointer, not through a setter.** The ownership wrapper that sets the
+  hidden `_heap_<field>` tracker fired for an assignment written against a
+  local heap-box pointer and not for one written through a pointer parameter,
+  which is what every setter has. The box's destructor then believed it owned
+  nothing and the field leaked. The practical consequence was that no single
+  destructor was correct: freeing the field by hand double-freed in the first
+  case and not freeing it leaked in the second, so a codebase using both styles
+  could not be right either way. The wrapper now fires for a pointer-to-struct
+  parameter as well. A setter that freed the previous value by hand as a
+  workaround must stop doing so: the field is owned by the box, the assignment
+  releases what was there, and freeing it again is a double free.
+
 ## [0.623.0]
 
 ### Fixed
