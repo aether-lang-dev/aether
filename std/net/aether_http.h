@@ -381,6 +381,10 @@ int http_find_header_in_block(const char* block, const char* end,
 typedef struct HttpUpstreamConnOpaque HttpUpstreamConn;
 
 int  http_upstream_acquire(const char* host, int port, HttpUpstreamConn* out);
+/* Let this thread keep a few upstream connections of its own in front of the
+ * shared pool. Only for a thread that owns its connections for their whole
+ * life; see the note on the cache itself. */
+void http_pool_thread_cache_enable(void);
 /* As above, but `allow_pool` 0 forces a fresh connection. Use it when a pooled
  * connection has just been found closed: the pool may hold more of them, and
  * spending a retry on another corpse is how a client ends up with nothing. */

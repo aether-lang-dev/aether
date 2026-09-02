@@ -564,8 +564,17 @@ typedef struct {
 
 static AETHER_TLS HttpTCacheSlot http_tcache[HTTP_TCACHE_MAX];
 static AETHER_TLS int            http_tcache_n = 0;
+/* Off unless this thread owns its connections for their whole life, which is
+ * true of an event-driver thread and of nothing else. The HTTP client's work
+ * moves between scheduler threads, so a connection parked on the thread that
+ * returned it would be invisible to the thread that asks next and the shared
+ * pool would never see it either: the client would dial every time. */
+static AETHER_TLS int            http_tcache_on = 0;
+
+void http_pool_thread_cache_enable(void) { http_tcache_on = 1; }
 
 static int http_tcache_take(const char* key, Transport* out, int64_t now) {
+    if (!http_tcache_on) return 0;
     for (int i = http_tcache_n - 1; i >= 0; i--) {
         if (strcmp(http_tcache[i].key, key) != 0) continue;
         Transport t = http_tcache[i].t;
@@ -582,6 +591,7 @@ static int http_tcache_take(const char* key, Transport* out, int64_t now) {
 }
 
 static int http_tcache_put(const char* key, Transport* t, int64_t now) {
+    if (!http_tcache_on) return 0;
     if (http_tcache_n >= HTTP_TCACHE_MAX) return 0;
     size_t kl = strlen(key);
     if (kl >= HTTP_POOL_KEY_MAX) return 0;

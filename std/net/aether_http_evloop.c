@@ -1248,6 +1248,9 @@ static void ev_take_submissions(EvDriver* d) {
 
 static void* ev_driver_main(void* arg) {
     EvDriver* d = (EvDriver*)arg;
+    /* This thread owns each of its connections from accept to close, so an
+     * upstream it returns is one it will want again. */
+    http_pool_thread_cache_enable();
     AetherIoEvent events[64];
 
     aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
