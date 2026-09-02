@@ -41,6 +41,44 @@ version number before tagging the release.
   Usable for provisioning-style fetches, not per-request work, and long enough
   that the default request timeout can expire mid-handshake.
 
+## [0.621.0]
+
+### Changed
+
+- **A small response leaves the proxy in one `send()` instead of a scatter
+  list.** A pass-through answered with a two-segment `sendmsg`, the head from
+  the connection's buffer and the body from wherever the upstream's bytes
+  landed. That is the right shape for a large body, which is why the
+  pass-through exists, and the wrong one for a small one, where the `msghdr`
+  the kernel walks costs more than copying a few dozen bytes. A body of 2 KiB
+  or less now joins the head; a larger one still leaves from where it landed.
+  **Syscalls per request 4.58 to 4.30**, with `sendmsg` gone from the profile.
+  That count does not vary with load, which is why it is quoted and no
+  wall-clock claim is: the ratio of this proxy's kernel time to nginx's swung
+  between 1.25 and 1.37 across runs that changed nothing.
+
+## [0.620.0]
+
+### Fixed
+
+- **A new project would not link on Windows/MinGW.** `ae init` followed by
+  `ae run` failed with `undefined reference to __emutls_v.current_core_id`, and
+  two more like it, for any program using an actor, which the generated project
+  template is. MinGW's GCC accepts `__thread` but implements it with emulated
+  TLS, turning the variable into a `__emutls_v.` control object owned by
+  whichever translation unit defined it. That links only if both sides agree to
+  emulate, and aether does not control both sides: `libaether.a` ships prebuilt
+  with the release while the generated C is compiled by whatever GCC the user
+  has. A user on ucrt64 with GCC 15.2 had a compiler that emulated and an
+  archive that did not.
+
+  Both sides now name `-femulated-tls` explicitly: the Makefile builds the
+  runtime with it, and `ae` passes it when compiling the generated program, so
+  the two agree whatever each compiler would have chosen. `__declspec(thread)`
+  is not the answer here, and was tried first: GCC on MinGW ignores it with
+  `'thread' attribute directive ignored`, which would have quietly dropped the
+  thread-locality of the scheduler's per-thread state rather than failing to
+  link. `-Werror` caught that before it shipped.
 ## [0.619.0]
 
 ### Changed

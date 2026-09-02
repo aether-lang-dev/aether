@@ -711,11 +711,19 @@ static int ev_step_client_send(EvDriver* d, EvConn* c) {
              * disposition for that is to kill the process. The server ignores
              * SIGPIPE when it starts, and this asks for the same per call so
              * an embedder that sets its own disposition is still safe. */
-            struct msghdr msg;
-            memset(&msg, 0, sizeof(msg));
-            msg.msg_iov    = iov;
-            msg.msg_iovlen = (size_t)n_iov;
-            w = sendmsg(c->client_fd, &msg, AE_SEND_NOSIGNAL);
+            if (n_iov == 1) {
+                /* One segment needs no scatter list. send() skips the msghdr
+                 * the kernel would otherwise have to walk, and takes the same
+                 * flags. */
+                w = send(c->client_fd, iov[0].iov_base, iov[0].iov_len,
+                         AE_SEND_NOSIGNAL);
+            } else {
+                struct msghdr msg;
+                memset(&msg, 0, sizeof(msg));
+                msg.msg_iov    = iov;
+                msg.msg_iovlen = (size_t)n_iov;
+                w = sendmsg(c->client_fd, &msg, AE_SEND_NOSIGNAL);
+            }
         }
         if (w > 0) {
             size_t left = (size_t)w;
@@ -1029,6 +1037,20 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     c->out_body      = direct.body;
     c->out_body_len  = direct.body_len;
     c->out_body_sent = 0;
+
+    /* A body small enough to copy joins the head, so the response leaves in
+     * one send() rather than a two-segment sendmsg. The copy is a few dozen
+     * bytes; the scatter list it removes is a msghdr the kernel walks on every
+     * response. A large body still goes out from where it landed, which is the
+     * whole point of the pass-through. */
+    if (direct.body && direct.body_len > 0 && direct.body_len <= 2048 &&
+        head_len + (size_t)direct.body_len + 1 <= c->out_cap) {
+        memcpy(c->out + head_len, direct.body, (size_t)direct.body_len);
+        c->out_len      = head_len + (size_t)direct.body_len;
+        c->out_body     = NULL;
+        c->out_body_len = 0;
+    }
+
     c->state = EV_CLIENT_SEND;
     return 1;
 }

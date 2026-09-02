@@ -346,3 +346,11 @@ int scheduler_io_register(int core_id, int fd, void* actor, uint32_t events) {
 void scheduler_io_unregister(int core_id, int fd) {
     (void)core_id; (void)fd;
 }
+
+
+/* See multicore_scheduler.h: generated code reaches these through calls, never
+ * by naming the thread-local, so the TLS model stays inside this archive. */
+int  aether_core_id_get(void)            { return current_core_id; }
+void aether_core_id_set(int core_id)     { current_core_id = core_id; }
+void aether_reply_slot_set(void* slot)   { g_current_reply_slot = slot; }
+void aether_step_actor_set(void* actor)  { g_current_step_actor = actor; }
