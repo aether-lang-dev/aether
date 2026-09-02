@@ -1022,6 +1022,25 @@ ASTNode* module_parse_file(const char* file_path) {
 // AST_IDENTIFIER first child (matching the shape of the parenthesised
 // `import mod (a, b)` selective form). Caller owns the returned file
 // path on success; returns NULL on failure.
+/* #1858: an import that resolves to nothing used to be accepted silently, so a
+ * typo stayed invisible until a call through the namespace failed somewhere
+ * else entirely. Worse for a module exporting only constants or types, whose
+ * uses can resolve through other paths, letting a misspelt import go unnoticed
+ * for good. Report it where it is written, and say where we looked. */
+static void report_unresolved_import(ASTNode* import_node) {
+    const char* name = import_node && import_node->value ? import_node->value : "?";
+    char msg[512];
+    const char* roots =
+        strncmp(name, "std.", 4) == 0     ? "the standard library" :
+        strncmp(name, "contrib.", 8) == 0 ? "contrib" :
+                                            "src/, the project root, and installed packages";
+    snprintf(msg, sizeof(msg),
+             "unresolved import '%s': no module of that name was found in %s",
+             name, roots);
+    aether_error_simple(msg, import_node ? import_node->line : 0,
+                        import_node ? import_node->column : 0);
+}
+
 static char* resolve_import_path(ASTNode* import_node) {
     const char* module_path = import_node->value;
     if (!module_path) return NULL;
@@ -1343,6 +1362,8 @@ static int orchestrate_module(const char* module_name, const char* file_path,
                 return 0;
             }
             free(sub_file);
+        } else {
+            report_unresolved_import(child);
         }
     }
 
@@ -1387,8 +1408,9 @@ int module_orchestrate(ASTNode* program) {
                 return 0;
             }
             free(file_path);
+        } else {
+            report_unresolved_import(child);
         }
-        // If file not found: silently continue (backwards compat)
     }
 
     // Check for cycles

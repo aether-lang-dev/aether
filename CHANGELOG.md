@@ -11,6 +11,26 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A struct field typed by a transitively imported module produced C that
+  would not compile.** Codegen emitted struct bodies in the order the modules
+  were merged, which puts an importing module's struct ahead of the struct it
+  imported whenever the inner one was reached transitively. A forward typedef
+  is enough for a pointer field and not for one held by value, so the generated
+  C failed with `field has incomplete type`. Bodies now emit in
+  field-dependency order: a struct waits for every struct it holds by value. A
+  pointer field is not a dependency, so a cycle through pointers stays legal,
+  and anything still unplaced when a pass makes no progress is emitted in its
+  original order rather than looping.
+
+- **An import that resolved to no module was accepted silently.** `import
+  a3d.does_not_exist` compiled, linked and ran. A typo stayed invisible until a
+  call through the namespace failed somewhere else entirely, and for a module
+  exporting only constants or types it could go unnoticed for good, since those
+  uses can resolve through other paths. It is reported where it is written, and
+  says which roots were searched.
+
 ## [0.621.0]
 
 ### Changed
