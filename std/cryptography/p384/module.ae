@@ -63,9 +63,96 @@ bn_hex(h: string) -> ptr {
 }
 
 // ---- field ops mod p ----
-fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = bignum.mod(s, p); bignum.free(s); return r }
-fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = bignum.mod(d, p); bignum.free(d); return r }
-fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = bignum.mod(m, p); bignum.free(m); return r }
+// ---- field reduction mod the P-384 prime, without division ----------------
+//
+// Same defect and same cure as std.cryptography.p256: std.bignum's generic
+// `mod` is a bit-serial long division with several heap allocations per
+// bit, and every point operation reduces a 768-bit product through it. On
+// the wire this is worse than P-256 because real chains are MIXED --
+// example.com's is P-256 leaf, then secp384r1 intermediates -- so the
+// expensive links of a chain walk ran here regardless of the P-256 fix,
+// at ~1.85 s per verify. The NIST prime has the special form
+//     p = 2^384 - 2^128 - 2^96 + 2^32 - 1
+// so  2^384 = 2^128 + 2^96 - 2^32 + 1  (mod p), and a value hi*2^384 + lo
+// folds to  lo + hi*(2^128 + 2^96 - 2^32 + 1)  with shifts and adds only.
+// Derived from the prime's hex form above, not recalled. Pinned by the
+// crypto_tls13_cert_p384 and Wycheproof P-384 vectors.
+//
+// The subtracted term can drive an intermediate negative, and
+// bignum.shift_right is FLOOR division (returns -1 forever on a negative
+// input), so the fold runs on the MAGNITUDE with the sign carried
+// separately; |x| shrinks monotonically and every loop is bounded.
+fn reduce_p384(c: ptr, p: ptr) -> ptr {
+    zero = bignum.from_int(0)
+    x = bignum.clone(c)
+    neg = 0
+    if bignum.compare(x, zero) < 0 {
+        neg = 1
+        y = bignum.subtract(zero, x); bignum.free(x); x = y
+    }
+    guard = 0
+    folding = 1
+    while folding == 1 {
+        hi = bignum.shift_right(x, 384)
+        if bignum.is_zero(hi) == 1 {
+            bignum.free(hi)
+            folding = 0
+        } else {
+            hsh = bignum.shift_left(hi, 384)
+            lo = bignum.subtract(x, hsh)
+            bignum.free(hsh)
+            t128 = bignum.shift_left(hi, 128)
+            t96 = bignum.shift_left(hi, 96)
+            t32 = bignum.shift_left(hi, 32)
+            acc1 = bignum.add(lo, t128)
+            acc2 = bignum.add(acc1, t96)
+            acc3 = bignum.subtract(acc2, t32)
+            acc4 = bignum.add(acc3, hi)
+            bignum.free(x); bignum.free(hi); bignum.free(lo)
+            bignum.free(t128); bignum.free(t96); bignum.free(t32)
+            bignum.free(acc1); bignum.free(acc2); bignum.free(acc3)
+            x = acc4
+            if bignum.compare(x, zero) < 0 {
+                neg = 1 - neg
+                y = bignum.subtract(zero, x); bignum.free(x); x = y
+            }
+            guard = guard + 1
+            if guard > 8 { folding = 0 }
+        }
+    }
+    if neg == 1 {
+        y = bignum.subtract(zero, x); bignum.free(x); x = y
+    }
+    guard = 0
+    while bignum.compare(x, zero) < 0 && guard < 8 {
+        y = bignum.add(x, p); bignum.free(x); x = y
+        guard = guard + 1
+    }
+    guard = 0
+    while bignum.compare(x, p) >= 0 && guard < 8 {
+        y = bignum.subtract(x, p); bignum.free(x); x = y
+        guard = guard + 1
+    }
+    bignum.free(zero)
+    return x
+}
+
+fn is_curve_prime(p: ptr) -> int {
+    cp = bn_hex(P_HEX())
+    eq = 0
+    if bignum.compare(p, cp) == 0 { eq = 1 }
+    bignum.free(cp)
+    return eq
+}
+
+fn fmod(v: ptr, p: ptr) -> ptr {
+    if is_curve_prime(p) == 1 { return reduce_p384(v, p) }
+    return bignum.mod(v, p)
+}
+
+fadd(a: ptr, b: ptr, p: ptr) -> ptr { s = bignum.add(a, b); r = fmod(s, p); bignum.free(s); return r }
+fsub(a: ptr, b: ptr, p: ptr) -> ptr { d = bignum.subtract(a, b); r = fmod(d, p); bignum.free(d); return r }
+fmul(a: ptr, b: ptr, p: ptr) -> ptr { m = bignum.multiply(a, b); r = fmod(m, p); bignum.free(m); return r }
 finv(a: ptr, p: ptr) -> ptr {
     two = bignum.from_int(2)
     e = bignum.subtract(p, two)
