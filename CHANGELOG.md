@@ -11,6 +11,12 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Main locals no longer leak into imported function type inference.** A local
+  in `main` could leave its inferred type in the shared symbol table and make a
+  same-named local in an imported function emit with the wrong C type.
+
 ## [0.621.0]
 
 ### Changed
