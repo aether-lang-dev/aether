@@ -1701,7 +1701,10 @@ docs-server: compiler
 	@echo "Building Documentation Server ($(DETECTED_OS))"
 	@echo "==================================="
 	@./build/aetherc$(EXE_EXT) tools/docgen/server.ae build/docs_server_gen.c
-	@$(CC) -O2 -o build/docs-server$(EXE_EXT) build/docs_server_gen.c tools/docgen/server_ffi.c \
+	@# $(AETHER_REQUIRED_CFLAGS) for the same reason as the `release` target:
+	@# this line compiles $(STD_SRC) directly, so without it the capability
+	@# defines are absent and std/regex silently became no-op stubs.
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) -O2 -o build/docs-server$(EXE_EXT) build/docs_server_gen.c tools/docgen/server_ffi.c \
 		$(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@rm -f build/docs_server_gen.c
 	@echo "✓ Documentation server built: build/docs-server$(EXE_EXT)"
@@ -1957,8 +1960,16 @@ release: clean $(STDLIB_SYMS_HEADER)
 	@# wrong version. The dev-build aetherc (compiled via the standard
 	@# $(CFLAGS) pattern rule on line 133) has the flag and is correct;
 	@# only the release-target hand-rolled gcc invocation was missing it.
+	@# The capability CFLAGS have to come along: this hand-rolled line compiles
+	@# $(STD_SRC) itself rather than reusing the pattern rule, so anything only
+	@# $(AETHER_REQUIRED_CFLAGS) carries is otherwise absent. Missing
+	@# $(PCRE2_CFLAGS) built std/regex as silent no-op stubs — every
+	@# regex.compile in the SHIPPED aetherc failed at runtime while the build
+	@# stayed clean. std.regex now refuses to compile stubs unless asked, which
+	@# is what surfaced this. The matching LDFLAGS are already in $(LDFLAGS).
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
+		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
 		runtime/aether_locale_num.c \
 		-o build/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)

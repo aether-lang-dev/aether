@@ -46,6 +46,14 @@ version number before tagging the release.
   wants it, passes it — so a build that merely forgot the defines gets a
   compile error naming the fix instead of a runtime mystery.
 
+- **The shipped `aetherc` had regex silently stubbed out.** Found by the guard
+  above on its first outing. `make release` — the binary `make install` ships —
+  compiles `$(STD_SRC)` on a hand-rolled `$(CC)` line rather than through the
+  pattern rule, and that line carried none of the capability CFLAGS, so
+  `AETHER_HAS_PCRE2` was absent and every `regex.compile` in an installed
+  release build failed at runtime while the build itself stayed clean.
+  `make docs-server` had the same omission. Both now pass the capability flags.
+
 ## [0.623.0]
 
 ### Fixed
