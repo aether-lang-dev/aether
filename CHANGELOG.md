@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.624.0]
+
 - **A struct's `string` field was owned only when the assignment was written on
   a local pointer, not through a setter.** The ownership wrapper that sets the
   hidden `_heap_<field>` tracker fired for an assignment written against a
