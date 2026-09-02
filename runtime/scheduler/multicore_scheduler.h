@@ -50,6 +50,24 @@ typedef struct {
 // variable is set for every step call on every thread.
 extern AETHER_TLS void* g_current_step_actor;
 
+/* Accessors for the three thread-local slots the generated program touches.
+ *
+ * The variables themselves must not be named from generated code. MinGW's GCC
+ * chooses per-version whether __thread is a native .tls variable or a
+ * __emutls_v. control object, and the two do not link against each other;
+ * libaether.a ships prebuilt while the generated C is compiled by whatever GCC
+ * the user has, so referencing the variable across that boundary is a coin
+ * flip that came up wrong in #1751. A function call has one ABI either way.
+ *
+ * Neither escape hatch works: GCC on MinGW ignores __declspec(thread)
+ * ('thread' attribute directive ignored), which would silently drop the
+ * thread-locality rather than fail, and -femulated-tls is a Clang option that
+ * GCC rejects outright. */
+int  aether_core_id_get(void);
+void aether_core_id_set(int core_id);
+void aether_reply_slot_set(void* slot);
+void aether_step_actor_set(void* actor);
+
 typedef struct {
     int type;       // MSG_IO_READY (must be first field)
     int fd;         // File descriptor that became ready

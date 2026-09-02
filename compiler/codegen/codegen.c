@@ -3814,7 +3814,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         print_line(gen, "#endif");
         print_line(gen, "");
         print_line(gen, "scheduler_start();");
-        print_line(gen, "current_core_id = -1;  // Main thread is not a scheduler thread");
+        print_line(gen, "aether_core_id_set(-1);  // Main thread is not a scheduler thread");
         print_line(gen, "");
     }
     
@@ -4946,7 +4946,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "#include \"aether_runtime_types.h\"");
         print_line(gen, "#include \"aether_compiler.h\"");
         print_line(gen, "");
-        print_line(gen, "extern AETHER_TLS int current_core_id;");
+        print_line(gen, "/* current_core_id and friends are reached through calls, never named:");
+        print_line(gen, "   the TLS model differs between the shipped archive and the user's");
+        print_line(gen, "   compiler on MinGW, and a call has one ABI either way (#1751). */");
         print_line(gen, "");
         print_line(gen, "// Benchmark timing function");
         print_line(gen, "static inline uint64_t rdtsc() {");
