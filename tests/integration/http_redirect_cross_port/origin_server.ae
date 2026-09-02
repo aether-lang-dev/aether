@@ -1,0 +1,64 @@
+// Origin fixture for the cross-PORT redirect check (#1741).
+//
+// Same host name on both hops, different port. That isolates the port: the
+// client used to compare only the parsed host, so a redirect to another port
+// on the same machine replayed the caller's Authorization and Cookie at a
+// service the user never authorised, owned by whoever holds that port.
+//
+// /start redirects to the OTHER port, /same redirects to this one as the
+// control, and /landing echoes so the same-origin hop can be checked here.
+
+import std.http
+
+extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+const PORT = 18221
+const TARGET_PORT = 18222
+
+cross_port_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 302)
+    http.response_set_header(res, "Location",
+        "http://127.0.0.1:18222/landing")
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "moved\n")
+}
+
+// Same host AND same port: the credentials must survive this one, or the
+// cross-port assertion would also pass for a client that strips everything.
+same_origin_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 302)
+    http.response_set_header(res, "Location",
+        "http://127.0.0.1:18221/landing")
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "moved\n")
+}
+
+echo_handler(req: ptr, res: ptr, ud: ptr) {
+    // An absent header comes back as null, not "".
+    auth = http.get_header(req, "Authorization")
+    cookie = http.get_header(req, "Cookie")
+    body = "auth=present"
+    if auth == null {
+        body = "auth=absent"
+    }
+    if cookie == null {
+        body = "${body} cookie=absent"
+    } else {
+        body = "${body} cookie=present"
+    }
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "${body}\n")
+}
+
+main() {
+    s = http.server_create(PORT)
+    http.server_set_host(s, "127.0.0.1")
+    http.server_get(s, "/start", cross_port_handler, 0)
+    http.server_get(s, "/same", same_origin_handler, 0)
+    http.server_get(s, "/landing", echo_handler, 0)
+    println("READY")
+    http_server_start_raw(s)
+    exit(0)
+}

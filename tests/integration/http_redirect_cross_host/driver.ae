@@ -9,8 +9,9 @@
 //   /start -> localhost:18211   (host name differs: must be stripped)
 //   /same  -> 127.0.0.1:18211   (host name identical: must survive)
 //
-// Port is deliberately equal on both hops: the implemented rule compares the
-// parsed host and nothing else, so keeping the port fixed isolates it.
+// Port is deliberately equal on both hops so this test isolates the host.
+// The rule compares the whole origin (scheme, host and port) since #1741;
+// http_redirect_cross_port covers the port half.
 //
 // The same-host hop is what makes the cross-host result meaningful: without
 // it, a client that dropped the header unconditionally would also pass.
