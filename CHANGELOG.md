@@ -39,6 +39,46 @@ version number before tagging the release.
   than a working one and a stub. The contract is unchanged and verified
   against the RFC 4648 vectors, and invalid input now reports an error instead
   of quietly returning empty.
+### Fixed
+
+- **A test suite in `tests/` reported green against code it never compiled**
+  (#1882). Module resolution is CWD-relative, so a project-root module resolves
+  for an entry file anywhere — but the cache key hashed only the directory the
+  *entry* sits in. That is the project root when you run `ae run main.ae`, and
+  is not when you run `ae run tests/suite.ae`, where it hashed `tests/` and
+  never saw the module that actually got compiled. Editing the module under
+  test left the key unchanged, so the suite re-ran the previous binary and
+  reported its results.
+
+  `tests/<suite>.ae` importing a module from the project root is the ordinary
+  layout for an Aether project's own test suite, so this sat on the default
+  path rather than an exotic one. The working directory is now hashed too, and
+  skipped when it is already the entry's own directory so the common case does
+  not hash the same tree twice. Same failure shape as #1421, one resolution
+  root over.
+
+## [0.629.0]
+
+### Fixed
+
+- **A typed pointer (`*T`) could not be assigned to a bare `ptr`** (#1880),
+  which failed with `error[E0200]: Type mismatch in variable initialization` at
+  a post-inlining line number that exists in no source file. `ptr` is
+  documented as "void* for C interop", and `int`, arrays and function pointers
+  all convert to it freely — but two `TYPE_PTR`s fell through to `types_equal`,
+  which recurses into the element type and compared `struct T` against `NULL`.
+  The reverse (`ptr` → `*T`) already worked.
+
+  A bare `ptr` on either side is now the universal pointer, matching the rule
+  bare `actor_ref` already had. Two *typed* pointers still compare
+  structurally, so `*Foo` → `*Bar` remains an error.
+
+  This blocked the native (no-FFI) Aether WebDriver binding and anything
+  reusing it: `std.cryptography`'s `tls13_cert` assigns a `*LeafCert` into a
+  slot inferred as bare `ptr`, so any program whose import graph reached that
+  function failed to typecheck. It presented as "binding the call's result
+  fails, discarding it succeeds", because discarding the result meant the
+  function was never typechecked at all.
 
 ## [0.628.0]
 
