@@ -49,7 +49,7 @@ header comment is the authoritative description.
 | `std.longarr` | Fixed-size packed-long buffer. | 13 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
 | `std.lzf` | One-shot LZF compression and decompression. | 12 | [guide](../std/lzf/README.md) · [source](../std/lzf/module.ae) |
 | `std.map` | Hash map, re-exported from `std.collections`, with readable key snapshots. | 18 | [guide](../std/map/README.md) · [source](../std/map/module.ae) |
-| `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 31 | [full section](#math-stdmath) |
+| `std.math` | Arithmetic, trigonometry, rounding and floating-point helpers. | 32 | [full section](#math-stdmath) |
 | `std.mem` | Byte-level reads and writes over caller-allocated raw pointers. | 102 | [guide](../std/mem/README.md) · [source](../std/mem/module.ae) |
 | `std.message` | ICU MessageFormat formatting and message catalogues. | 8 | [guide](../std/message/README.md) · [source](../std/message/module.ae) |
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 35 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |

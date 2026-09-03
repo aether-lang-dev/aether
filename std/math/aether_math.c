@@ -89,6 +89,29 @@ double math_round(double x) {
     return round(x);
 }
 
+/* Round to nearest and return an INTEGER type, unlike math_round which rounds
+ * correctly but hands back a double that the caller must then cast.
+ *
+ * This exists so callers do not declare `extern lrint` themselves. An Aether
+ * extern cannot spell libm's prototype: `-> long` emits int64_t and `-> int`
+ * emits int, and C `long` is neither, so every such declaration collides with
+ * <math.h> and clang warns (-Wincompatible-library-redeclaration) in every
+ * generated program that uses it. Declaring it once here, in C, against the
+ * real header is the only place the prototype can be correct.
+ *
+ * int64_t, not long, is the return type: it is what an Aether `-> long` binds
+ * to, and it is the same width on every LP64 target while being well-defined
+ * on LLP64 (Windows) where long is 32 bits and would silently narrow.
+ *
+ * NB this rounds half-to-EVEN (lrint honours the current rounding mode, which
+ * defaults to FE_TONEAREST), whereas math_round rounds half-away-from-zero:
+ * math_lrint(0.5) == 0 but math_round(0.5) == 1.0. That is the documented
+ * difference between the two, not an accident — callers converting a
+ * hand-rolled `extern lrint` keep their existing behaviour by using this. */
+int64_t math_lrint(double x) {
+    return (int64_t)llrint(x);
+}
+
 double math_log(double x) {
     return log(x);
 }

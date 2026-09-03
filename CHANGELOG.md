@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`math.lrint(x) -> long`** — round-to-nearest returning an integer directly,
+  so callers stop declaring `extern lrint` themselves. An Aether extern cannot
+  spell libm's prototype: `-> long` emits `int64_t` and `-> int` emits `int`,
+  and C `long` is neither. The resulting redeclaration is invisible on Linux,
+  where `int64_t` *is* `long`, and a hard **error** on macOS/iOS, where
+  `int64_t` is `long long` — which is why it surfaced only on Apple targets
+  (reported by the aether-ui line, whose `vg/` tree carried 30 such externs).
+  Declaring it once in C against the real `<math.h>` is the only place the
+  prototype can be correct.
+
+  It rounds half-to-**even** (`lrint(0.5)` is `0`, `lrint(1.5)` is `2`),
+  matching libm, whereas `math.round` rounds half-away-from-zero and returns a
+  `float` the caller must then cast. The two are not interchangeable: an 8-bit
+  colour channel computed as `lrint(v * 255.0)` is off by one at exact halves
+  if it silently becomes `round`.
+
 ## [0.625.0]
 
 ### Added
