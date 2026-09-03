@@ -95,7 +95,12 @@
 
 // Download url → dest file. Uses curl/wget on POSIX, PowerShell on Windows.
 // Creates parent directories of dest if they don't exist.
-int ae_download(const char* url, const char* dest) {
+/* max_seconds caps the whole transfer; 0 means no cap, for release archives
+ * whose size makes any fixed ceiling wrong. The connect timeout and the stall
+ * detector below apply either way: without them a network that accepts the
+ * connection and then drops every packet, a captive portal or a firewall that
+ * blackholes, hangs the command indefinitely rather than failing. */
+int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     // Ensure parent directory exists (e.g. ~/.aether/ for releases.json)
     {
         char parent[1024];
@@ -112,11 +117,14 @@ int ae_download(const char* url, const char* dest) {
     snprintf(ps_path, sizeof(ps_path), "%s\\%s", get_temp_dir(), tmp);
     FILE* ps = fopen(ps_path, "w");
     if (!ps) return 1;
+    char ps_timeout[48] = "";
+    if (max_seconds > 0)
+        snprintf(ps_timeout, sizeof(ps_timeout), " -TimeoutSec %d", max_seconds);
     fprintf(ps,
         "$ProgressPreference='SilentlyContinue'\n"
         "Invoke-WebRequest -Uri '%s' -OutFile '%s' "
-        "-Headers @{'User-Agent'='ae-cli'}\n",
-        url, dest);
+        "-Headers @{'User-Agent'='ae-cli'}%s\n",
+        url, dest, ps_timeout);
     fclose(ps);
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
@@ -125,13 +133,25 @@ int ae_download(const char* url, const char* dest) {
     remove(ps_path);
     return r;
 #else
+    char cap[32] = "";
     char cmd[2048];
-    if (system("curl --version >/dev/null 2>&1") == 0)
-        snprintf(cmd, sizeof(cmd), "curl -fsSL -o \"%s\" \"%s\" 2>/dev/null", dest, url);
-    else
-        snprintf(cmd, sizeof(cmd), "wget -q --no-verbose -O \"%s\" \"%s\" 2>/dev/null", dest, url);
+    if (system("curl --version >/dev/null 2>&1") == 0) {
+        if (max_seconds > 0) snprintf(cap, sizeof(cap), " --max-time %d", max_seconds);
+        snprintf(cmd, sizeof(cmd),
+                 "curl -fsSL --connect-timeout 5 --speed-limit 1024 --speed-time 20%s"
+                 " -o \"%s\" \"%s\" 2>/dev/null", cap, dest, url);
+    } else {
+        if (max_seconds > 0) snprintf(cap, sizeof(cap), " --read-timeout=%d", max_seconds);
+        snprintf(cmd, sizeof(cmd),
+                 "wget -q --no-verbose --timeout=5 --tries=2%s"
+                 " -O \"%s\" \"%s\" 2>/dev/null", cap, dest, url);
+    }
     return system(cmd);
 #endif
+}
+
+int ae_download(const char* url, const char* dest) {
+    return ae_download_ex(url, dest, 0);
 }
 
 // Extract archive → dest_dir.
@@ -897,7 +917,7 @@ static int fetch_latest_release_tag(char* out, size_t outlen) {
     char url[256];
     snprintf(url, sizeof(url),
         "https://api.github.com/repos/" AE_GITHUB_REPO "/releases?per_page=5");
-    if (ae_download(url, json_path) != 0) return -1;
+    if (ae_download_ex(url, json_path, 15) != 0) return -1;
     FILE* f = fopen(json_path, "r");
     if (!f) { remove(json_path); return -1; }
     char buf[65536];
@@ -947,7 +967,7 @@ static int version_is_older(const char* a, const char* b) {
  * Asked at most once a day and cached, because `ae version` should not need
  * the network to answer. Every failure is silent: offline, rate-limited, or a
  * cache that cannot be written all leave the output exactly as it was. */
-static void report_newer_release(void) {
+void ae_report_newer_release(FILE* out) {
     const char* home = getenv("HOME");
     if (!home || !home[0]) return;
 
@@ -956,33 +976,36 @@ static void report_newer_release(void) {
     snprintf(cache, sizeof(cache), "%s/latest_release", cache_dir);
 
     char latest[64] = {0};
-    int have = 0;
     struct stat st;
-    if (stat(cache, &st) == 0 && (time(NULL) - st.st_mtime) < 24 * 60 * 60) {
+    int fresh = stat(cache, &st) == 0 && (time(NULL) - st.st_mtime) < 24 * 60 * 60;
+
+    if (fresh) {
         FILE* f = fopen(cache, "r");
         if (f) {
             if (fgets(latest, sizeof(latest), f)) {
                 char* nl = strchr(latest, '\n');
                 if (nl) *nl = '\0';
-                have = latest[0] != '\0';
             }
             fclose(f);
         }
-    }
-
-    if (!have) {
-        if (fetch_latest_release_tag(latest, sizeof(latest)) != 0) return;
+    } else {
+        /* A failed attempt is cached as an empty file, so the 24h gate covers
+         * attempts and not just successes. Without that, a network that never
+         * answers would be re-dialled on every single compile failure, and the
+         * connect timeout would be charged to each one. */
+        int ok = fetch_latest_release_tag(latest, sizeof(latest)) == 0;
         FILE* f = fopen(cache, "w");
-        if (f) { fprintf(f, "%s\n", latest); fclose(f); }
+        if (f) { if (ok) fprintf(f, "%s\n", latest); fclose(f); }
+        if (!ok) return;
     }
 
     const char* lv = (latest[0] == 'v') ? latest + 1 : latest;
     if (!lv[0] || !version_is_older(AE_VERSION, lv)) return;
 
-    printf("\nA newer release is available: %s (this is %s).\n", lv, AE_VERSION);
-    printf("         `ae upgrade` installs it and switches to it.\n");
-    printf("         Until then `ae run` uses the older stdlib, so anything\n");
-    printf("         added since %s resolves as undefined.\n", AE_VERSION);
+    fprintf(out, "\nA newer release is available: %s (this is %s).\n", lv, AE_VERSION);
+    fprintf(out, "  `ae upgrade` installs it. Until then `ae run` resolves the\n");
+    fprintf(out, "  stdlib from %s, so anything added since is undefined here.\n",
+            AE_VERSION);
 }
 
 // "ae install [<version>]" — install a release into ~/.aether/versions/.
@@ -2149,7 +2172,7 @@ int cmd_version(int argc, char** argv) {
             printf("         binary keeps reporting and behaving as %s.\n", AE_VERSION);
         }
 
-        report_newer_release();
+        ae_report_newer_release(stdout);
 
         printf("\nSubcommands:\n");
         printf("  ae version list              List all available releases\n");

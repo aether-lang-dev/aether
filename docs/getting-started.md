@@ -644,6 +644,16 @@ no-op when you are already on the latest release.
 
 Versions are stored in `~/.aether/versions/`. The active version is symlinked to `~/.aether/current` (Linux/macOS) or copied to `~/.aether/bin/` (Windows).
 
+`ae version` tells you when a newer release exists, naming it and pointing at
+`ae upgrade`. It matters more than it sounds: `ae run` resolves the standard
+library from the install rather than from a checkout, so on a toolchain that has
+aged the stdlib answers too, and a function added since resolves as undefined.
+The same line appears when a build fails, which is where that symptom shows up.
+The check asks GitHub at most once a day and caches the answer in
+`~/.aether/cache`, so `ae version` still answers offline, and it says nothing at
+all when the check cannot be made. Nothing updates itself; the decision is
+yours.
+
 `ae version list` asks GitHub what exists and marks the releases it also finds
 locally, so it answers "what could I install?". `ae version installed` reads
 only the disk, which is the question to ask when your installs have aged out of

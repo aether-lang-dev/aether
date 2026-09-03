@@ -3543,10 +3543,8 @@ static int cmd_run(int argc, char** argv) {
     // uses run_cmd_show_warnings. (run_cmd_quiet dropped stderr, hiding them.)
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
     if (aetherc_ret != 0) {
-        // Re-run with output visible so user can see the error
-        build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
-        run_cmd(cmd);
         fprintf(stderr, "Compilation failed.\n");
+        ae_report_newer_release(stderr);
         return 1;
     }
 
@@ -6004,7 +6002,13 @@ static int cmd_build(int argc, char** argv) {
     // (emcc emits .js + .wasm) and --emit=lib produces a different artefact
     // type; both deserve their own cache shape later. --namespace mode
     // produces SDKs in subdirectories, also out of scope.
-    bool cache_eligible = !is_wasm && !is_cross && g_emit_exe && !g_emit_lib;
+    /* --coverage is never cacheable. The instrumented binary has the ABSOLUTE
+     * path of its .gcno baked in at compile time and writes the matching .gcda
+     * beside it, so a cached coverage binary reused from another directory
+     * silently deposits its results back where it was first compiled, leaving
+     * the caller with a binary that ran and no data next to it. */
+    bool cache_eligible = !is_wasm && !is_cross && g_emit_exe && !g_emit_lib &&
+                          !g_coverage;
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
     if (cache_eligible) {
@@ -6015,9 +6019,19 @@ static int cmd_build(int argc, char** argv) {
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
         char build_salt[4096];
+        /* Every flag that changes the emitted code, not just --trace. A
+         * --coverage build after a plain build of the same source was served
+         * the cached uninstrumented binary: it ran, produced no .gcno and no
+         * .gcda, and reported zero coverage for code that was in fact tested.
+         * --profile and --size had the same silent hole. */
+        char build_mode[64] = "build";
+        if (g_trace)    strncat(build_mode, "+trace",    sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_coverage) strncat(build_mode, "+coverage", sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_profile)  strncat(build_mode, "+profile",  sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
-                                      ae_define_salt(g_trace ? "build+trace" : "build",
+                                      ae_define_salt(build_mode,
                                                      build_salt, sizeof(build_salt)));
         if (cache_key != 0) {
             init_cache_dir();
@@ -6038,6 +6052,10 @@ static int cmd_build(int argc, char** argv) {
 
     if (is_cross)      printf("Building %s (cross: %s)...\n", file, target);
     else               printf("Building %s%s...\n", file, is_wasm ? " (wasm)" : "");
+    /* stdout is block-buffered when piped, stderr is not, so without this a
+     * failing build prints its diagnostics before the line saying what was
+     * being built. */
+    fflush(stdout);
 
     // Binary-import prepass: synthesize interface stubs for any
     // `import foo` resolving to a precompiled libfoo.so, link it in.
@@ -6055,13 +6073,8 @@ static int cmd_build(int argc, char** argv) {
     // `ae build`; run_cmd_quiet had dropped them.
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
     if (aetherc_ret != 0) {
-        fprintf(stderr, "[diag] aetherc returned %d for: %s\n", aetherc_ret, file);
-        fprintf(stderr, "[diag] cmd: %s\n", cmd);
-        // Retry visible
-        build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
-        int retry_ret = run_cmd(cmd);
-        fprintf(stderr, "[diag] retry returned %d\n", retry_ret);
         fprintf(stderr, "Compilation failed.\n");
+        ae_report_newer_release(stderr);
         return 1;
     }
 
@@ -6171,14 +6184,6 @@ static int cmd_build(int argc, char** argv) {
          * fully quiet compile would hide them. Errors still re-run loud. */
         build_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
         if (build_ret != 0) {
-            // Retry with visible output for error messages
-            if (is_wasm) {
-                build_wasm_cmd(cmd, sizeof(cmd), c_file, exe_file);
-            } else {
-                const char* extra = extra_files[0] ? extra_files : NULL;
-                build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, !quick, extra);
-            }
-            run_cmd(cmd);
             fprintf(stderr, "Build failed.\n");
             return 1;
         }
@@ -6197,7 +6202,16 @@ static int cmd_build(int argc, char** argv) {
      *
      * cmd_build_namespace does its own install_name fixup after its
      * post-rename step — this block is for direct `ae build --emit=lib`. */
-    if (g_emit_lib && !g_emit_exe) {
+    /* Only a Mach-O dylib has an install_name. A static archive has none, and
+     * neither does a dylib for a non-Darwin target, so running the tool on
+     * either fails and prints a warning about dlopen for output nothing will
+     * ever dlopen. A cross Darwin target still needs the fixup, since the
+     * install_name is baked by the linker regardless of which host ran it. */
+    int target_is_darwin = !is_cross ||
+                           (target && (strstr(target, "macos") ||
+                                       strstr(target, "darwin") ||
+                                       strstr(target, "ios")));
+    if (g_emit_lib && !g_emit_exe && !g_emit_staticlib && target_is_darwin) {
         const char* base = strrchr(exe_file, '/');
         base = base ? base + 1 : exe_file;
         char id_cmd[4096];

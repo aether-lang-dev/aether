@@ -13,8 +13,9 @@ version number before tagging the release.
 
 ### Added
 
-- **`ae version` says when a newer release exists.** `ae upgrade` has always
-  worked; nothing ever said to run it. Every check in `ae version` compared the
+- **`ae version`, and a failed build, say when a newer release exists.**
+  `ae upgrade` has always worked; nothing ever said to run it. Every check in
+  `ae version` compared the
   binary against its own siblings, the `aetherc` it resolves and the
   `active_version` pin, and never against what had been released, so an install
   75 releases behind reported itself healthy. That is not cosmetic: `ae run`
@@ -23,7 +24,62 @@ version number before tagging the release.
   on the stale toolchain. Asked at most once a day and cached, because
   `ae version` should not need the network to answer, and silent on every
   failure: offline, rate-limited, or an unwritable cache all leave the output
-  exactly as it was.
+  exactly as it was. A failed attempt is cached too, so a network that never
+  answers is dialled once a day rather than on every compile error.
+
+### Fixed
+
+- **Downloads had no timeout of any kind.** A network that accepts the
+  connection and then drops every packet, a captive portal or a firewall that
+  blackholes, hung `ae upgrade`, `ae install`, `ae add` and `ae version list`
+  indefinitely with no output. Every transfer now has a 5 second connect
+  timeout and aborts if throughput stays under 1 KB/s for 20 seconds, and the
+  small metadata fetches additionally cap the whole request at 15 seconds.
+  Release archives keep no total cap, because their size makes any fixed
+  ceiling wrong. Measured against an unroutable address: unbounded before (no
+  ceiling at all), 5 seconds after.
+
+- **Every failed compile printed its diagnostics twice, plus three lines of
+  internal `[diag]` output.** `ae build` and `ae run` re-ran the whole compile
+  on failure "so the user can see the error", left over from a Windows
+  debugging session and redundant since the first run already shows stderr. So
+  every error, every warning and every hint arrived doubled, at the cost of
+  compiling the file a second time. The retry and the `[diag]` lines are gone.
+
+- **A piped `ae build` printed its diagnostics above the line naming the file
+  being built**, because stdout is block-buffered when piped while stderr is
+  not. The banner is flushed now.
+
+- **`ae checksec --require <typo>` exited 0.** An unrecognised property name
+  read back as "n/a", and n/a satisfies the gate by design, so `--require
+  canery` reported success and a CI hardening gate that still looked like a
+  gate protected nothing. Unknown names are now an error naming the valid set.
+  A PE carrying a COFF symbol table is also reported unstripped, which is a
+  definitive signal and does not depend on a section-name scan that an 8-byte
+  PE name field can truncate.
+
+- **`ae build --coverage` could return an uninstrumented binary from the build
+  cache.** The cache key covered `--trace` but not `--coverage`, `--profile` or
+  `--size`, all of which change the emitted code, so a coverage build after a
+  plain build of the same source was served the cached binary: it ran, wrote no
+  `.gcda`, and reported zero coverage for code that was in fact tested.
+  Coverage builds are now excluded from the cache entirely, because an
+  instrumented binary has the absolute path of its `.gcno` baked in and a
+  cached copy reused elsewhere deposits its results back where it was first
+  compiled. `--profile` and `--size` reach the key.
+
+- **An untaken `else` could report as covered.** `if` statements and their
+  `else` blocks carried no source position, so codegen emitted no `#line`
+  before the generated `} else {`; that C line inherited the line count
+  drifting on from the then-branch and landed on the first line of the else
+  BODY. gcov charged the branch counter there, and a branch that never ran
+  showed as executed. Both now carry the position of the keyword that
+  introduces them.
+
+- **`install_name_tool` ran on static archives and non-Darwin cross output**,
+  failing and warning that "consumers may fail to dlopen" for artifacts nothing
+  can dlopen. An install_name belongs to a Mach-O dylib; the fixup is now
+  limited to one.
 
 ## [0.627.0]
 

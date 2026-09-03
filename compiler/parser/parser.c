@@ -3023,6 +3023,9 @@ ASTNode* parse_when_statement(Parser* parser) {
 }
 
 ASTNode* parse_if_statement(Parser* parser) {
+    Token* if_tok = peek_token(parser);
+    int if_line = if_tok ? if_tok->line : 0;
+    int if_col  = if_tok ? if_tok->column : 0;
     advance_token(parser); // if
     int saved_in_condition = parser->in_condition;
     parser->in_condition = 1;
@@ -3033,13 +3036,25 @@ ASTNode* parse_if_statement(Parser* parser) {
     ASTNode* then_branch = parse_statement(parser);
     if (!then_branch) return NULL;
     
-    ASTNode* if_stmt = create_ast_node(AST_IF_STATEMENT, NULL, 0, 0);
+    ASTNode* if_stmt = create_ast_node(AST_IF_STATEMENT, NULL, if_line, if_col);
     add_child(if_stmt, condition);
     add_child(if_stmt, then_branch);
-    
+
+    /* The else block needs a position of its own. Codegen emits a #line before
+     * `} else {`, and with no position there the C line inherits the count
+     * drifting on from the then-branch and lands on the first line of the ELSE
+     * BODY. gcov then charges the branch-decision counter to a statement that
+     * never ran, and an untaken else reports as covered. */
+    Token* else_tok = peek_token(parser);
+    int else_line = else_tok ? else_tok->line : 0;
+    int else_col  = else_tok ? else_tok->column : 0;
     if (match_token(parser, TOKEN_ELSE)) {
         ASTNode* else_branch = parse_statement(parser);
         if (else_branch) {
+            if (else_branch->line <= 0) {
+                else_branch->line = else_line;
+                else_branch->column = else_col;
+            }
             add_child(if_stmt, else_branch);
         }
     }

@@ -16,6 +16,8 @@
 #     the executable suffix produced a valid DLL under a name nothing loads
 #   - a cross EXE still gets .exe (the naming fix must not leak)
 #   - --emit=both is still rejected, with a message naming the workaround
+#   - a static archive and a non-Darwin dylib get no install_name fixup, and
+#     so no warning about dlopen for output nothing can dlopen
 #   - --emit=staticlib produces an ar archive that holds the program object
 #     AND the runtime/stdlib objects, and that a C program can actually link
 #     against and RUN (the shape an iOS/Xcode app needs, since Apple forbids
@@ -143,14 +145,37 @@ esac
 
 # ---- 5. --emit=staticlib: archive it, then LINK AND RUN it ------------
 # The end-to-end assertion is the point: a well-formed .a that nothing can
-# link is exactly the failure this feature exists to avoid. x86_64-linux-musl
-# is used because a static musl binary runs on this (glibc) host, so the test
-# can execute the result rather than only inspecting it — the iOS target
-# proper needs a Mac, and is asserted in tests/integration/cross_ios.
-if ! "$AE" build --target=x86_64-linux-musl --emit=staticlib "$LIB" \
+# link is exactly the failure this feature exists to avoid. The triple is
+# matched to the host so the result can actually be executed here; it was
+# hardcoded to x86_64-linux-musl, which runs on a glibc x86 host and is
+# unexecutable anywhere else, so the run assertion could not pass on macOS or
+# on an arm Linux box. --emit=staticlib still requires --target, which is why
+# the host's own triple is named explicitly. The iOS target proper needs a Mac
+# and is asserted in tests/integration/cross_ios.
+case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64)         SL_TARGET=aarch64-macos ;;
+    Darwin/x86_64)        SL_TARGET=x86_64-macos ;;
+    Linux/aarch64)        SL_TARGET=aarch64-linux-musl ;;
+    Linux/x86_64|*)       SL_TARGET=x86_64-linux-musl ;;
+esac
+if ! "$AE" build --target="$SL_TARGET" --emit=staticlib "$LIB" \
         -o "$TMPDIR_T/libgreet.a" > "$TMPDIR_T/sl.log" 2>&1; then
     echo "  [FAIL] cross_emit_lib: --emit=staticlib did not build"
     sed 's/^/    /' "$TMPDIR_T/sl.log" | head -15
+    exit 1
+fi
+
+# install_name_tool applies to Mach-O dylibs. An archive has no install_name,
+# and neither does a dylib for a non-Darwin target, so running it on either
+# failed and warned about dlopen for output that is never dlopen'd.
+if grep -q 'install_name_tool' "$TMPDIR_T/sl.log"; then
+    echo "  [FAIL] cross_emit_lib: install_name_tool run on a static archive"
+    grep 'install_name_tool' "$TMPDIR_T/sl.log" | sed 's/^/    /'
+    exit 1
+fi
+if grep -q 'install_name_tool' "$TMPDIR_T/elf.log"; then
+    echo "  [FAIL] cross_emit_lib: install_name_tool run on a non-Darwin dylib"
+    grep 'install_name_tool' "$TMPDIR_T/elf.log" | sed 's/^/    /'
     exit 1
 fi
 
@@ -166,11 +191,18 @@ esac
 
 # The program object alone would be a useless .a: the consumer links this one
 # file and expects the runtime to come with it.
-if ! ar t "$TMPDIR_T/libgreet.a" 2>/dev/null | grep -q '__aether_program.o'; then
+#
+# Listed with `zig ar`, not the host `ar`. zig ar writes a GNU archive, whose
+# member names live in an extended string table; BSD ar cannot decode that and
+# prints the raw offset references (`/`, `//`, `/0`, `/20`) instead of names.
+# So this assertion passed on Linux and failed on macOS against a byte-identical
+# archive that links and runs fine on both.
+if ! zig ar t "$TMPDIR_T/libgreet.a" 2>/dev/null | grep -q '__aether_program.o'; then
     echo "  [FAIL] cross_emit_lib: static archive lacks the program object"
+    zig ar t "$TMPDIR_T/libgreet.a" 2>/dev/null | head -10 | sed 's/^/    /'
     exit 1
 fi
-MEMBERS=$(ar t "$TMPDIR_T/libgreet.a" 2>/dev/null | wc -l)
+MEMBERS=$(zig ar t "$TMPDIR_T/libgreet.a" 2>/dev/null | wc -l)
 if [ "$MEMBERS" -le 10 ]; then
     echo "  [FAIL] cross_emit_lib: static archive holds only $MEMBERS members;"
     echo "         the runtime/stdlib objects are missing"
@@ -183,7 +215,7 @@ cat > "$TMPDIR_T/host.c" <<'CEOF'
 extern int aether_greet(void);
 int main(void) { printf("greet=%d\n", aether_greet()); return 0; }
 CEOF
-if ! zig cc -target x86_64-linux-musl "$TMPDIR_T/host.c" "$TMPDIR_T/libgreet.a" \
+if ! zig cc -target "$SL_TARGET" "$TMPDIR_T/host.c" "$TMPDIR_T/libgreet.a" \
         -lm -o "$TMPDIR_T/hostprog" > "$TMPDIR_T/link.log" 2>&1; then
     echo "  [FAIL] cross_emit_lib: C program could not link the static archive"
     sed 's/^/    /' "$TMPDIR_T/link.log" | head -15
