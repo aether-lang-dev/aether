@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.625.0]
+
 ### Added
 
 - **`--emit=staticlib` cross target: one `.a` holding the program and the
