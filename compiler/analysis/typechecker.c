@@ -1283,6 +1283,30 @@ int is_type_compatible(Type* from, Type* to) {
     // (`ids = static_ids; ... ids = heap`) type-checks.
     if (from->kind == TYPE_ARRAY && to->kind == TYPE_PTR) return 1;
 
+    // #1877: pointer compatibility, with a BARE `ptr` on either side acting as
+    // the universal pointer — exactly as `void*` does in C, and exactly as the
+    // bare-actor_ref rule immediately below already does for actor refs.
+    //
+    // `types_equal` recurses into element_type, so `*LeafCert` vs bare `ptr`
+    // compared element `struct LeafCert` against NULL and failed. Nothing then
+    // permitted the widening, even though `int`, arrays and function pointers
+    // all convert to `ptr` freely a few lines up. So a bare-`ptr` slot handed a
+    // typed pointer was rejected with E0200 "Type mismatch in variable
+    // initialization" — while the reverse (`ptr` into `*T`) and every other
+    // conversion to `ptr` were fine.
+    //
+    // That is what blocked the native WebDriver binding: std.cryptography's
+    // tls13_cert has `responder = issuer` (bare ptr) followed by
+    // `responder = delegated` (*LeafCert), a plain C-style "maybe a delegated
+    // responder" pattern that had no legal spelling.
+    //
+    // Two typed pointers still compare structurally, so `*Foo` vs `*Bar` stays
+    // an error: this widens only to and from the deliberately-untyped `ptr`.
+    if (from->kind == TYPE_PTR && to->kind == TYPE_PTR) {
+        if (!from->element_type || !to->element_type) return 1;
+        return is_type_compatible(from->element_type, to->element_type);
+    }
+
     // Actor reference compatibility
     // Bare actor_ref (no type parameter) is compatible with any actor_ref
     if (from->kind == TYPE_ACTOR_REF && to->kind == TYPE_ACTOR_REF) {

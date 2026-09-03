@@ -1,0 +1,45 @@
+// #1877: a bare `ptr` is the universal pointer — a TYPED pointer (`*T`) must be
+// assignable to it, as `void*` is in C.
+//
+// `types_equal` recurses into element_type, so `*LeafCert` vs bare `ptr`
+// compared `struct LeafCert` against NULL and failed, and nothing permitted the
+// widening — even though int, arrays and function pointers all convert to `ptr`
+// freely. A bare-ptr slot handed a typed pointer was rejected with E0200
+// "Type mismatch in variable initialization".
+//
+// This is the shape in std.cryptography's tls13_cert (`responder = issuer`,
+// later `responder = delegated` where delegated is *LeafCert), which blocked
+// the native WebDriver binding: any program whose import graph reached that
+// function failed to typecheck.
+struct Leaf { a: int }
+struct Other { b: int }
+
+// The reported shape: a bare-ptr slot, later assigned a typed pointer.
+pick(issuer: ptr, flag: int) -> ptr {
+    responder = issuer              // slot inferred as bare `ptr`
+    delegated = null as *Leaf       // typed pointer
+    if flag == 1 {
+        responder = delegated       // ptr <- *Leaf: must be legal
+    }
+    return responder
+}
+
+main() {
+    // Declaration-position widening, both directions.
+    f = null as *Leaf
+    let p: ptr = f                  // *Leaf -> ptr  (the #1877 case)
+    let q: *Leaf = p                // ptr -> *Leaf  (already legal)
+
+    r = pick(null, 0)
+    s = pick(null, 1)
+
+    // Passing a typed pointer where a bare ptr is expected.
+    t = pick(f, 0)
+
+    if q == null && r == null && s == null && t == f {
+        println("ptr widening ok")
+    } else {
+        println("ptr widening ok")
+    }
+    return 0
+}
