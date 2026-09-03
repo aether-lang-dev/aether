@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.630.0]
+
 ### Fixed
 
 - **A test suite in `tests/` reported green against code it never compiled**
