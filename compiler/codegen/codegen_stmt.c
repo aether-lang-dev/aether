@@ -1486,6 +1486,10 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
      * destructor reclaims it. */
     const char* acc;
     const char* struct_name;
+    /* Whether `_heap_<field>` is known zero-initialised, and so safe to READ
+     * in order to release the previous value (#1873). A value struct and a
+     * heap.new box both qualify; a pointer parameter does not. */
+    int tracker_is_trustworthy = 1;
     if (obj_type->kind == TYPE_STRUCT && obj_type->struct_name) {
         acc = ".";
         struct_name = obj_type->struct_name;
@@ -1494,6 +1498,13 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
                obj_type->element_type->struct_name &&
                (is_heap_box_var(gen, obj->value) ||
                 is_ptr_struct_param(gen, obj->value))) {
+        /* #1873: a PARAMETER is not a promise that the box was zeroed — the
+         * caller may have handed us `malloc(n) as *T`, whose `_heap_<field>`
+         * tracker is garbage. Reading it to decide whether to free the
+         * previous value then frees a garbage pointer. Only a local we can
+         * SEE was made by heap.new carries that guarantee, so remember which
+         * branch we are on and suppress just the free for the other. */
+        tracker_is_trustworthy = is_heap_box_var(gen, obj->value);
         /* Only a heap.new(T) box has zero-initialised `_heap_<field>`
          * trackers, so only there is reading/freeing the previous field
          * value safe. A raw `malloc(...) as *T` has garbage trackers — its
@@ -1520,6 +1531,20 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
 
     int rhs_is_heap = is_heap_string_expr(gen, rhs);
     print_indent(gen);
+    if (!tracker_is_trustworthy) {
+        /* #1873: store and SET the tracker (so the destructor still reclaims
+         * this value — #1866's leak fix is preserved), but do not read the
+         * pre-existing tracker to free the old value. On a hand-malloc'd box
+         * that read is uninitialised memory, and acting on it frees a garbage
+         * pointer. Not freeing here can leak a previous value on a box that
+         * was genuinely zeroed; that is strictly better than a segfault, and
+         * the caller can use heap.new to get the releasing behaviour. */
+        fprintf(gen->output, "{ %s%s%s = ", obj->value, acc, lhs->value);
+        generate_expression(gen, rhs);
+        fprintf(gen->output, "; %s%s_heap_%s = %d; }\n",
+                obj->value, acc, lhs->value, rhs_is_heap ? 1 : 0);
+        return 1;
+    }
     fprintf(gen->output,
             "{ const char* _tmp_old = %s%s%s; %s%s%s = ",
             obj->value, acc, lhs->value,

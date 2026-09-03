@@ -1,0 +1,46 @@
+// #1873: a string field assigned through a pointer-to-struct PARAMETER, on a
+// box made by hand with malloc rather than heap.new.
+//
+// #1866 made that assignment release the previous value, which requires
+// reading the box's `_heap_<field>` tracker. A malloc'd box has never had
+// that tracker initialised, so a non-zero garbage value made the store free
+// a garbage pointer — segfault. This is the shape that crashed aether-ui's
+// font_picker on 0.626.0 while 0.613.0 survived.
+//
+// The padding matters: glibc writes free-list metadata over the first ~16
+// bytes of a freed block, which zeroes the tracker in a smaller struct and
+// masks the bug. A small-struct version of this test passes even when the
+// defect is live.
+@extern("malloc") malloc(n: int) -> ptr
+@extern("free") c_free(p: ptr)
+@extern("memset") memset(p: ptr, c: int, n: int) -> ptr
+
+struct Box {
+    p0: int
+    p1: int
+    p2: int
+    p3: int
+    p4: int
+    p5: int
+    p6: int
+    p7: int
+    s: string
+}
+
+set_it(b: *Box) {
+    b.s = "hello"
+}
+
+main() {
+    // Dirty a block, free it, then take it back: the tracker slot now holds
+    // 0xAB bytes rather than incidental zeros.
+    dirty = malloc(128)
+    _x = memset(dirty, 171, 128)
+    c_free(dirty)
+
+    b = malloc(128) as *Box
+    b.p0 = 1
+    set_it(b)
+    println("survived: ${b.s}")
+    return 0
+}
