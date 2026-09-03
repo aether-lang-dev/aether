@@ -55,6 +55,7 @@ version number before tagging the release.
   `AETHER_HAS_PCRE2` was absent and every `regex.compile` in an installed
   release build failed at runtime while the build itself stayed clean.
   `make docs-server` had the same omission. Both now pass the capability flags.
+## [0.624.0]
 
 - **A struct's `string` field was owned only when the assignment was written on
   a local pointer, not through a setter.** The ownership wrapper that sets the
