@@ -39,6 +39,8 @@ version number before tagging the release.
   than a working one and a stub. The contract is unchanged and verified
   against the RFC 4648 vectors, and invalid input now reports an error instead
   of quietly returning empty.
+## [0.630.0]
+
 ### Fixed
 
 - **A test suite in `tests/` reported green against code it never compiled**
