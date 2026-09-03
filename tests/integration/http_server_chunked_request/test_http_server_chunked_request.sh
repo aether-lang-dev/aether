@@ -76,18 +76,44 @@ grep -q "len=7 body=\[SECOND!\]" "$TMPDIR/pipelined.out" \
 
 # A chunked body declares no length up front, so a sender that never sends the
 # terminal chunk is bounded only by what the server refuses to hold.
-{
-    printf 'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n'
-    i=0
-    while [ "$i" -lt 180 ]; do
-        printf '10000\r\n'
-        head -c 65536 /dev/zero | tr '\0' 'a'
-        printf '\r\n'
-        i=$((i + 1))
-    done
-} | nc 127.0.0.1 "$PORT" > "$TMPDIR/flood.out" 2>/dev/null
-grep -q "^HTTP/1.1 413" "$TMPDIR/flood.out" \
-    || { head -3 "$TMPDIR/flood.out"; fail "an endless chunked body was not refused"; }
+#
+# Not nc: the server answers 413 and closes while the sender is still writing,
+# so nc dies of EPIPE and can exit before it has drained the response it just
+# provoked. That made this case pass on an idle machine and fail on a busy one,
+# blaming the server for a race in the client. This writes until the socket
+# refuses more, stops writing, and only then reads, which is the exchange the
+# assertion is actually about.
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$PORT" > "$TMPDIR/flood.out" 2>/dev/null <<'FLOOD'
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
+s.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+chunk = b"10000\r\n" + b"a" * 65536 + b"\r\n"
+try:
+    for _ in range(180):
+        s.sendall(chunk)
+except OSError:
+    pass                      # the server refused the body and closed: expected
+try:
+    s.shutdown(socket.SHUT_WR)
+except OSError:
+    pass
+buf = b""
+try:
+    while True:
+        b_ = s.recv(65536)
+        if not b_:
+            break
+        buf += b_
+except OSError:
+    pass
+sys.stdout.write(buf.decode("latin1"))
+FLOOD
+    grep -q "^HTTP/1.1 413" "$TMPDIR/flood.out" \
+        || { head -3 "$TMPDIR/flood.out"; fail "an endless chunked body was not refused"; }
+else
+    echo "  [SKIP] endless-chunked-body case: python3 not on PATH"
+fi
 
 # Framing that has no single answer is refused rather than guessed at. Two
 # lengths that disagree, or a value that is not a count of bytes, is what lets

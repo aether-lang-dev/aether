@@ -5845,6 +5845,12 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                     // Restore: else-branch sees only pre-if declarations.
                     truncate_declared_vars(gen, saved_var_count);
 
+                    /* Anchor the `} else {` line. Without a directive here
+                     * it inherits the then-branch's drifting count and lands
+                     * on the line of the ELSE BODY, so gcov charges the
+                     * branch-decision counter to a statement that never ran
+                     * and an untaken branch reports as covered. */
+                    codegen_maybe_emit_line(gen, stmt->children[2]);
                     print_line(gen, "} else {");
                     indent(gen);
                     generate_statement(gen, stmt->children[2]);

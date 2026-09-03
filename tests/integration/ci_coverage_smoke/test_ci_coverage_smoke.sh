@@ -69,14 +69,25 @@ if ! grep -q '^#line .* "[^"]*cov_demo\.ae"' "$tmpdir/cov_demo.c"; then
     exit 1
 fi
 
-# Build with gcc --coverage so .gcno is produced alongside the
-# object, and .gcda is written when the binary runs.
+# Build with --coverage so .gcno is produced alongside the object, and .gcda
+# is written when the binary runs.
+#
+# Compile and link as two steps. In one step, clang derives the notes-file
+# name from the OUTPUT binary rather than the source (cov_demo-cov_demo.gcno),
+# and `gcov cov_demo.c` then finds nothing; gcc names it after the source
+# either way. Splitting the steps gives cov_demo.gcno under both compilers,
+# which is also how any real build system invokes them.
 INC_FLAGS=$(find "$PREFIX/include/aether" -type d 2>/dev/null | sed 's|^|-I|' | tr '\n' ' ')
-if ! gcc --coverage -O0 -g $INC_FLAGS \
-        "$tmpdir/cov_demo.c" \
+if ! (cd "$tmpdir" && gcc --coverage -O0 -g $INC_FLAGS \
+        -c cov_demo.c -o cov_demo.o 2>"$tmpdir/link.err"); then
+    echo "  [FAIL] ci_coverage_smoke: gcc --coverage compile failed"
+    head -5 "$tmpdir/link.err"
+    exit 1
+fi
+if ! (cd "$tmpdir" && gcc --coverage cov_demo.o \
         -L"$PREFIX/lib/aether" -laether \
         -lpthread -lm -ldl \
-        -o "$tmpdir/cov_demo" 2>"$tmpdir/link.err"; then
+        -o cov_demo 2>"$tmpdir/link.err"); then
     echo "  [FAIL] ci_coverage_smoke: gcc --coverage link failed"
     head -5 "$tmpdir/link.err"
     exit 1
@@ -113,7 +124,11 @@ if ! grep -qE '^[ ]*([0-9]+|#####)[ ]*:[ ]*[0-9]+:' "$ae_gcov"; then
 fi
 
 # Specifically verify the unreached `else` branch is flagged.
-# Line 8 in cov_demo.ae is `println("small")` inside the else.
+# Line 8 in cov_demo.ae is `println("small")` inside the else. This failed
+# while the `if` and its else block carried no source position: codegen emitted
+# no #line before `} else {`, so that C line inherited the then-branch's
+# drifting count, landed on line 8, and the branch counter marked a statement
+# that never ran as covered.
 if ! grep -qE '^[ ]*#####[ ]*:[ ]*8:' "$ae_gcov"; then
     echo "  [FAIL] ci_coverage_smoke: line 8 (unreached else) not flagged as ##### in .ae.gcov"
     grep ':[[:space:]]*[78]:' "$ae_gcov"
@@ -150,9 +165,40 @@ if ! (cd "$ae_demo_dir" && ./demo >/dev/null 2>&1); then
     exit 1
 fi
 
-if [ ! -f "$ae_demo_dir/demo.gcda" ]; then
-    echo "  [FAIL] ci_coverage_smoke: 'ae build --coverage' did not produce demo.gcda"
+# The .gcda name is the compiler's to choose: compiling and linking in one
+# step, clang writes demo-demo.gcda and gcc 11+ does the same, while older gcc
+# writes demo.gcda. Asserting a name tested the compiler, so assert the
+# outcome instead -- data was written, gcov reads it, and the .ae source gets a
+# report with the untaken branch flagged.
+gcda=$(find "$ae_demo_dir" -name '*.gcda' | head -1)
+if [ -z "$gcda" ]; then
+    echo "  [FAIL] ci_coverage_smoke: 'ae build --coverage' produced no .gcda"
     ls "$ae_demo_dir"
+    exit 1
+fi
+
+if ! (cd "$ae_demo_dir" && gcov -p -b "$(basename "$gcda")" >"$tmpdir/ae_gcov.log" 2>&1); then
+    echo "  [FAIL] ci_coverage_smoke: gcov failed on the 'ae build --coverage' data"
+    cat "$tmpdir/ae_gcov.log"
+    exit 1
+fi
+
+ae_demo_gcov=$(find "$ae_demo_dir" -name '*demo.ae*.gcov' | head -1)
+if [ -z "$ae_demo_gcov" ]; then
+    echo "  [FAIL] ci_coverage_smoke: 'ae build --coverage' data yielded no .ae.gcov"
+    ls "$ae_demo_dir"
+    exit 1
+fi
+
+# n == 42, so the else never runs. Line 8 is `println("nope")` inside it.
+# This is the assertion with teeth: the `} else {` line carries the branch
+# counter, and with no source position on the else the C line inherited the
+# then-branch's drifting count and landed here, reporting an untaken branch as
+# covered.
+if ! grep -qE '^[ ]*#####[ ]*:[ ]*8:' "$ae_demo_gcov"; then
+    echo "  [FAIL] ci_coverage_smoke: unreached else not flagged in the"
+    echo "         'ae build --coverage' report"
+    grep -E ':[[:space:]]*[678]:' "$ae_demo_gcov"
     exit 1
 fi
 

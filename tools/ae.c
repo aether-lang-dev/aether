@@ -489,7 +489,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
 // Space-splits the command string into argv (no shell quoting supported,
 // but our controlled commands never need it).
 // quiet=0: show all output, quiet=1: hide stdout+stderr, quiet=2: hide stdout only (keep stderr for warnings)
-static int posix_run(const char* cmd_str, int quiet) {
+static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
@@ -522,6 +522,9 @@ static int posix_run(const char* cmd_str, int quiet) {
     } else if (quiet == 2) {
         // Hide stdout but keep stderr (so gcc warnings are visible)
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    } else if (quiet == 3 && capture) {
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, capture,
+                                         O_WRONLY | O_CREAT | O_TRUNC, 0600);
     }
 
     pid_t pid;
@@ -543,6 +546,8 @@ static int posix_run(const char* cmd_str, int quiet) {
 #ifdef _WIN32
 #include <process.h>
 #include <io.h>
+#include <fcntl.h>     // _O_CREAT / _O_TRUNC for the stdout capture
+#include <sys/stat.h>  // _S_IREAD / _S_IWRITE for the file it creates
 #ifndef _O_WRONLY
 #define _O_WRONLY 1
 #endif
@@ -557,7 +562,22 @@ static int posix_run(const char* cmd_str, int quiet) {
 #ifndef _O_BINARY
 #define _O_BINARY 0x8000
 #endif
-static int win_run(const char* cmd_str, int quiet) {
+/* Same gate, same fallback, for the flags the stdout capture creates its file
+ * with. The cross-build leg failed on exactly this: <fcntl.h> is included
+ * above, and _O_CREAT still was not visible. */
+#ifndef _O_CREAT
+#define _O_CREAT 0x0100
+#endif
+#ifndef _O_TRUNC
+#define _O_TRUNC 0x0200
+#endif
+#ifndef _S_IREAD
+#define _S_IREAD 0x0100
+#endif
+#ifndef _S_IWRITE
+#define _S_IWRITE 0x0080
+#endif
+static int win_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
@@ -636,6 +656,12 @@ static int win_run(const char* cmd_str, int quiet) {
         int nul = _open("nul", _O_WRONLY);
         if (nul >= 0) { _dup2(nul, 1); _close(nul); }
     }
+    if (quiet == 3 && capture) {
+        fflush(stdout);
+        saved_stdout = _dup(1);
+        int fd = _open(capture, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+        if (fd >= 0) { _dup2(fd, 1); _close(fd); }
+    }
     if (quiet == 1) {
         fflush(stderr);
         saved_stderr = _dup(2);
@@ -655,27 +681,62 @@ static int win_run(const char* cmd_str, int quiet) {
 
 int run_cmd(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 0);
+    return posix_run(cmd, 0, NULL);
 #else
-    return win_run(cmd, 0);
+    return win_run(cmd, 0, NULL);
 #endif
 }
 
 // Run a command, suppressing all output (quiet mode)
 int run_cmd_quiet(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 1);
+    return posix_run(cmd, 1, NULL);
 #else
-    return win_run(cmd, 1);
+    return win_run(cmd, 1, NULL);
 #endif
+}
+
+/* Where a compile step's stdout is parked so a failure can print it. */
+static const char* compile_log_path(char* buf, size_t size) {
+    snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
+    return buf;
+}
+
+/* Run a command with stderr passing through and stdout captured to `path`.
+ *
+ * The compile steps hide stdout so a successful build is quiet, and on failure
+ * the driver used to re-run the ENTIRE compile just to show what was hidden:
+ * a second compile of the same file, and every stderr diagnostic printed
+ * twice. Capturing instead costs one temp file, and the caller prints it only
+ * when the command fails. Dropping stdout outright is not an option, since a
+ * C compiler that reports through it (emcc does) would fail with no
+ * explanation at all. */
+int run_cmd_capture_stdout(const char* cmd, const char* path) {
+#ifndef _WIN32
+    return posix_run(cmd, 3, path);
+#else
+    return win_run(cmd, 3, path);
+#endif
+}
+
+/* Print a captured stdout log to stderr, so it interleaves with the
+ * diagnostics that streamed through live. Silent when there is nothing. */
+void dump_captured_stdout(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) fwrite(buf, 1, n, stderr);
+    fclose(f);
+    fflush(stderr);
 }
 
 // Run a command, showing stderr (warnings) but hiding stdout
 int run_cmd_show_warnings(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 2);
+    return posix_run(cmd, 2, NULL);
 #else
-    return win_run(cmd, 2);
+    return win_run(cmd, 2, NULL);
 #endif
 }
 
@@ -713,7 +774,7 @@ int run_cmd_forwarding(const char* cmd) {
 #ifdef _WIN32
     /* Windows has no SIGTERM-to-child model that matches this; the
      * orphaning report is POSIX-specific (kill $! in a shell test). */
-    return win_run(cmd, 0);
+    return win_run(cmd, 0, NULL);
 #else
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
     char buf[AE_CMD_BUF];
@@ -3541,14 +3602,17 @@ static int cmd_run(int argc, char** argv) {
     // aetherc step can emit warnings (e.g. #1780 self-shadowing import) that a
     // plain `ae run` must not swallow. Mirrors the gcc step below, which already
     // uses run_cmd_show_warnings. (run_cmd_quiet dropped stderr, hiding them.)
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char clog[1024];
+    compile_log_path(clog, sizeof(clog));
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
-        // Re-run with output visible so user can see the error
-        build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
-        run_cmd(cmd);
+        if (!tc.verbose) dump_captured_stdout(clog);
+        remove(clog);
         fprintf(stderr, "Compilation failed.\n");
+        ae_report_newer_release(stderr);
         return 1;
     }
+    remove(clog);
 
     // Step 2: Compile .c to executable with runtime (-O0 for fast dev builds).
     // toml [[bin]] extra_sources were already merged into extra_files above
@@ -3556,17 +3620,19 @@ static int cmd_run(int argc, char** argv) {
     const char* run_extra = extra_files[0] ? extra_files : NULL;
     build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, run_extra);
     // Show stderr (gcc warnings like -Wformat) even in non-verbose mode
-    int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char glog[1024];
+    compile_log_path(glog, sizeof(glog));
+    int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, glog);
     if (gcc_ret != 0) {
-        // Re-run with output for error diagnosis
-        build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, run_extra);
-        run_cmd(cmd);
+        if (!tc.verbose) dump_captured_stdout(glog);
+        remove(glog);
         fprintf(stderr, "Build failed.\n");
         remove(c_file);
         remove(exe_file);  // partial link output, if any
         remove_dsym_bundle(exe_file);
         return 1;
     }
+    remove(glog);
 
     // Clean up temp .c file (exe stays in cache if caching, else clean up too)
     remove(c_file);
@@ -5341,6 +5407,13 @@ int cmd_build_namespace(int argc, char** argv) {
                 fprintf(stderr, "Warning: install_name_tool failed on %s; "
                                 "consumers may fail to dlopen.\n", out_path);
             }
+            /* Rewriting the id modifies the file, which invalidates the ad-hoc
+             * signature ld64 attaches to everything it links on Apple silicon.
+             * dyld does not report that as an error: the kernel SIGKILLs the
+             * process that dlopens it, with no message, so a host program died
+             * on load and the library looked fine on disk. Re-sign after every
+             * modification. */
+            macos_prepare_binary(out_path);
         }
 #endif
         printf("Built namespace: %s\n", out_path);
@@ -6004,7 +6077,13 @@ static int cmd_build(int argc, char** argv) {
     // (emcc emits .js + .wasm) and --emit=lib produces a different artefact
     // type; both deserve their own cache shape later. --namespace mode
     // produces SDKs in subdirectories, also out of scope.
-    bool cache_eligible = !is_wasm && !is_cross && g_emit_exe && !g_emit_lib;
+    /* --coverage is never cacheable. The instrumented binary has the ABSOLUTE
+     * path of its .gcno baked in at compile time and writes the matching .gcda
+     * beside it, so a cached coverage binary reused from another directory
+     * silently deposits its results back where it was first compiled, leaving
+     * the caller with a binary that ran and no data next to it. */
+    bool cache_eligible = !is_wasm && !is_cross && g_emit_exe && !g_emit_lib &&
+                          !g_coverage;
     char cached_exe[1024] = "";
     unsigned long long cache_key = 0;
     if (cache_eligible) {
@@ -6015,9 +6094,19 @@ static int cmd_build(int argc, char** argv) {
          * (#1421). Any flag that changes the emitted code has to reach the
          * key. */
         char build_salt[4096];
+        /* Every flag that changes the emitted code, not just --trace. A
+         * --coverage build after a plain build of the same source was served
+         * the cached uninstrumented binary: it ran, produced no .gcno and no
+         * .gcda, and reported zero coverage for code that was in fact tested.
+         * --profile and --size had the same silent hole. */
+        char build_mode[64] = "build";
+        if (g_trace)    strncat(build_mode, "+trace",    sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_coverage) strncat(build_mode, "+coverage", sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_profile)  strncat(build_mode, "+profile",  sizeof(build_mode) - strlen(build_mode) - 1);
+        if (g_size)     strncat(build_mode, "+size",     sizeof(build_mode) - strlen(build_mode) - 1);
         cache_key = compute_cache_key(file, extra_files,
                                       quick ? "O0" : "O2",
-                                      ae_define_salt(g_trace ? "build+trace" : "build",
+                                      ae_define_salt(build_mode,
                                                      build_salt, sizeof(build_salt)));
         if (cache_key != 0) {
             init_cache_dir();
@@ -6038,6 +6127,10 @@ static int cmd_build(int argc, char** argv) {
 
     if (is_cross)      printf("Building %s (cross: %s)...\n", file, target);
     else               printf("Building %s%s...\n", file, is_wasm ? " (wasm)" : "");
+    /* stdout is block-buffered when piped, stderr is not, so without this a
+     * failing build prints its diagnostics before the line saying what was
+     * being built. */
+    fflush(stdout);
 
     // Binary-import prepass: synthesize interface stubs for any
     // `import foo` resolving to a precompiled libfoo.so, link it in.
@@ -6053,17 +6146,17 @@ static int cmd_build(int argc, char** argv) {
     // Always run visible on failure; print diagnostic on Windows. Keep stderr
     // so compiler warnings (e.g. #1780 self-shadowing import) survive a plain
     // `ae build`; run_cmd_quiet had dropped them.
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char clog[1024];
+    compile_log_path(clog, sizeof(clog));
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
-        fprintf(stderr, "[diag] aetherc returned %d for: %s\n", aetherc_ret, file);
-        fprintf(stderr, "[diag] cmd: %s\n", cmd);
-        // Retry visible
-        build_aetherc_cmd(cmd, sizeof(cmd), file, c_file);
-        int retry_ret = run_cmd(cmd);
-        fprintf(stderr, "[diag] retry returned %d\n", retry_ret);
+        if (!tc.verbose) dump_captured_stdout(clog);
+        remove(clog);
         fprintf(stderr, "Compilation failed.\n");
+        ae_report_newer_release(stderr);
         return 1;
     }
+    remove(clog);
 
     /* #1243 --emit=obj: aetherc has written the generated C; compile it to a
      * single object and stop. No link, no `main`, so the caller drops the .o
@@ -6169,19 +6262,16 @@ static int cmd_build(int argc, char** argv) {
         /* Warnings-visible like the `ae run` path: with #1252 fixed the C
          * compiler's -Wformat findings map to the user's .ae lines, and a
          * fully quiet compile would hide them. Errors still re-run loud. */
-        build_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+        char blog[1024];
+        compile_log_path(blog, sizeof(blog));
+        build_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, blog);
         if (build_ret != 0) {
-            // Retry with visible output for error messages
-            if (is_wasm) {
-                build_wasm_cmd(cmd, sizeof(cmd), c_file, exe_file);
-            } else {
-                const char* extra = extra_files[0] ? extra_files : NULL;
-                build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, !quick, extra);
-            }
-            run_cmd(cmd);
+            if (!tc.verbose) dump_captured_stdout(blog);
+            remove(blog);
             fprintf(stderr, "Build failed.\n");
             return 1;
         }
+        remove(blog);
     }
 
     // Clean up intermediate C file — ae build produces a binary, not C source
@@ -6197,7 +6287,16 @@ static int cmd_build(int argc, char** argv) {
      *
      * cmd_build_namespace does its own install_name fixup after its
      * post-rename step — this block is for direct `ae build --emit=lib`. */
-    if (g_emit_lib && !g_emit_exe) {
+    /* Only a Mach-O dylib has an install_name. A static archive has none, and
+     * neither does a dylib for a non-Darwin target, so running the tool on
+     * either fails and prints a warning about dlopen for output nothing will
+     * ever dlopen. A cross Darwin target still needs the fixup, since the
+     * install_name is baked by the linker regardless of which host ran it. */
+    int target_is_darwin = !is_cross ||
+                           (target && (strstr(target, "macos") ||
+                                       strstr(target, "darwin") ||
+                                       strstr(target, "ios")));
+    if (g_emit_lib && !g_emit_exe && !g_emit_staticlib && target_is_darwin) {
         const char* base = strrchr(exe_file, '/');
         base = base ? base + 1 : exe_file;
         char id_cmd[4096];
@@ -6208,6 +6307,10 @@ static int cmd_build(int argc, char** argv) {
             fprintf(stderr, "Warning: install_name_tool failed on %s; "
                             "consumers may fail to dlopen.\n", exe_file);
         }
+        /* See cmd_build_namespace: the id rewrite invalidates ld64's ad-hoc
+         * signature, and the loader's answer to that is SIGKILL, not an
+         * error. */
+        macos_prepare_binary(exe_file);
     }
 #endif
 

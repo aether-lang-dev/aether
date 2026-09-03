@@ -32,6 +32,97 @@ version number before tagging the release.
   fails, discarding it succeeds", because discarding the result meant the
   function was never typechecked at all.
 
+## [0.628.0]
+
+### Added
+
+- **`ae version`, and a failed build, say when a newer release exists.**
+  `ae upgrade` has always worked; nothing ever said to run it. Every check in
+  `ae version` compared the
+  binary against its own siblings, the `aetherc` it resolves and the
+  `active_version` pin, and never against what had been released, so an install
+  75 releases behind reported itself healthy. That is not cosmetic: `ae run`
+  resolves the stdlib from the install, so a function added since silently
+  resolves as `undefined`, and the report lands on whoever added it rather than
+  on the stale toolchain. Asked at most once a day and cached, because
+  `ae version` should not need the network to answer, and silent on every
+  failure: offline, rate-limited, or an unwritable cache all leave the output
+  exactly as it was. A failed attempt is cached too, so a network that never
+  answers is dialled once a day rather than on every compile error.
+
+### Fixed
+
+- **Downloads had no timeout of any kind.** A network that accepts the
+  connection and then drops every packet, a captive portal or a firewall that
+  blackholes, hung `ae upgrade`, `ae install`, `ae add` and `ae version list`
+  indefinitely with no output. Every transfer now has a 5 second connect
+  timeout and aborts if throughput stays under 1 KB/s for 20 seconds, and the
+  small metadata fetches additionally cap the whole request at 15 seconds.
+  Release archives keep no total cap, because their size makes any fixed
+  ceiling wrong. Measured against an unroutable address: unbounded before (no
+  ceiling at all), 5 seconds after.
+
+- **Every failed compile printed its diagnostics twice, plus three lines of
+  internal `[diag]` output.** `ae build` and `ae run` re-ran the whole compile
+  on failure "so the user can see the error", left over from a Windows
+  debugging session. So every error, every warning and every hint arrived
+  doubled, at the cost of compiling the file a second time. The compile steps
+  now capture stdout to a temp file and print it only when the command fails,
+  which keeps what the retry existed to show, a C compiler that reports through
+  stdout rather than stderr, without compiling anything twice.
+
+- **A piped `ae build` printed its diagnostics above the line naming the file
+  being built**, because stdout is block-buffered when piped while stderr is
+  not. The banner is flushed now.
+
+- **`ae checksec --require <typo>` exited 0.** An unrecognised property name
+  read back as "n/a", and n/a satisfies the gate by design, so `--require
+  canery` reported success and a CI hardening gate that still looked like a
+  gate protected nothing. Unknown names are now an error naming the valid set.
+  A PE carrying a COFF symbol table is also reported unstripped, which is a
+  definitive signal and does not depend on a section-name scan that an 8-byte
+  PE name field can truncate.
+
+- **`ae build --coverage` could return an uninstrumented binary from the build
+  cache.** The cache key covered `--trace` but not `--coverage`, `--profile` or
+  `--size`, all of which change the emitted code, so a coverage build after a
+  plain build of the same source was served the cached binary: it ran, wrote no
+  `.gcda`, and reported zero coverage for code that was in fact tested.
+  Coverage builds are now excluded from the cache entirely, because an
+  instrumented binary has the absolute path of its `.gcno` baked in and a
+  cached copy reused elsewhere deposits its results back where it was first
+  compiled. `--profile` and `--size` reach the key.
+
+- **An untaken `else` could report as covered.** `if` statements and their
+  `else` blocks carried no source position, so codegen emitted no `#line`
+  before the generated `} else {`; that C line inherited the line count
+  drifting on from the then-branch and landed on the first line of the else
+  BODY. gcov charged the branch counter there, and a branch that never ran
+  showed as executed. Both now carry the position of the keyword that
+  introduces them.
+
+- **Every `ae build --namespace` library on macOS killed the process that
+  loaded it.** `ae` rewrites the library's install_name after linking, and that
+  modification invalidates the ad-hoc signature ld64 attaches to everything it
+  links on Apple silicon. dyld does not report that as an error: the kernel
+  SIGKILLs the loading process with no message at all, so a Python, Ruby or C
+  host died on `dlopen` while the library looked healthy on disk and
+  `codesign -v` was never consulted. The library is re-signed after the
+  rewrite, and `--emit=lib` does the same, where a newer `install_name_tool`
+  happens to re-sign on its own but older ones do not.
+
+- **`ae build --target=wasm32-wasi --emit=lib` could not link.** A wasi library
+  is a reactor, not a command: left in command mode zig links wasi-libc's
+  startup object, which demands a `main` the library has not got, and
+  `--no-entry` does not prevent it being pulled in. The link failed with
+  `undefined symbol: main`. Libraries for wasi now build as reactors, which
+  also fixes `--size` for that target.
+
+- **`install_name_tool` ran on static archives and non-Darwin cross output**,
+  failing and warning that "consumers may fail to dlopen" for artifacts nothing
+  can dlopen. An install_name belongs to a Mach-O dylib; the fixup is now
+  limited to one.
+
 ## [0.627.0]
 
 ### Fixed
