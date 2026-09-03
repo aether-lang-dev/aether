@@ -39,15 +39,16 @@ the constants `pi`, `tau`, `e`.
 
 | | returns | halfway cases |
 |---|---|---|
-| `round(x)` | `float` | away from zero — `round(0.5)` is `1.0` |
-| `lrint(x)` | `long` | to even — `lrint(0.5)` is `0`, `lrint(1.5)` is `2` |
+| `round(x)` | float | away from zero — `round(0.5)` is 1.0 |
+| `lrint(x)` | long | to even — `lrint(0.5)` is 0, `lrint(1.5)` is 2 |
 
 Use `lrint` when you want an integer out, rather than `round(x) as int`: it
 saves the cast, and `as int` truncates, so `round` composed with a cast is only
 correct because `round` has already moved the value to a whole number.
 
 `lrint` also exists so callers do not declare `extern lrint` themselves. An
-Aether extern cannot spell libm's prototype — `-> long` emits `int64_t` and
-`-> int` emits `int`, and C `long` is neither — so such a declaration collides
-with `<math.h>`. It is invisible on Linux, where `int64_t` *is* `long`, and a
-hard error on macOS/iOS, where `int64_t` is `long long`.
+Aether extern cannot spell libm's prototype: an Aether long return emits C
+int64_t and an int return emits C int, and C's own long type is neither — so
+such a declaration collides with the one in math.h. The collision is invisible
+on Linux, where int64_t and long are the same type, and a hard error on
+macOS/iOS, where int64_t is long long.
