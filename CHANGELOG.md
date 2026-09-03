@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A test suite in `tests/` reported green against code it never compiled**
+  (#1882). Module resolution is CWD-relative, so a project-root module resolves
+  for an entry file anywhere — but the cache key hashed only the directory the
+  *entry* sits in. That is the project root when you run `ae run main.ae`, and
+  is not when you run `ae run tests/suite.ae`, where it hashed `tests/` and
+  never saw the module that actually got compiled. Editing the module under
+  test left the key unchanged, so the suite re-ran the previous binary and
+  reported its results.
+
+  `tests/<suite>.ae` importing a module from the project root is the ordinary
+  layout for an Aether project's own test suite, so this sat on the default
+  path rather than an exotic one. The working directory is now hashed too, and
+  skipped when it is already the entry's own directory so the common case does
+  not hash the same tree twice. Same failure shape as #1421, one resolution
+  root over.
+
 ## [0.629.0]
 
 ### Fixed

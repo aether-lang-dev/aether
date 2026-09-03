@@ -350,6 +350,52 @@ unsigned long long compute_cache_key(const char* ae_file,
             pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
                             ":src=%016llx", src_tree);
         }
+
+        /* #1882: the WORKING DIRECTORY tree, when it is not the entry's own.
+         *
+         * Module resolution is CWD-relative (aether_module.c "Try 3-6":
+         * `src/<m>/module.ae`, `<m>/module.ae`, `<m>.ae`, all probed from the
+         * process's cwd), so a project-root module resolves for an entry file
+         * anywhere. The block above hashes only the directory the ENTRY sits
+         * in, which is the project root when you run `ae run main.ae` and is
+         * NOT when you run `ae run tests/suite.ae` — there it hashes `tests/`
+         * and never sees the module that actually got compiled.
+         *
+         * `tests/<suite>.ae` importing a module from the project root is the
+         * ordinary layout for an Aether project's own test suite, so this sat
+         * on the default path: editing the module under test left the key
+         * unchanged and the suite re-ran the PREVIOUS binary, reporting green
+         * against code it never compiled. Same failure shape as #1421, one
+         * resolution root over.
+         *
+         * Skipped when cwd IS the entry dir, so the ordinary root-entry case
+         * does not hash the same tree twice. */
+        {
+            char cwd[1024];
+            if (getcwd(cwd, sizeof(cwd))) {
+                char entry_abs[1024];
+                int same = 0;
+                if (entry_dir[0] == '/' ) {
+                    same = (strcmp(entry_dir, cwd) == 0);
+                } else if (strcmp(entry_dir, ".") == 0) {
+                    same = 1;
+                } else {
+                    /* A relative entry_dir names a path UNDER cwd, so it can
+                     * only be the same directory when it resolves to it. */
+                    snprintf(entry_abs, sizeof(entry_abs), "%s/%s", cwd, entry_dir);
+                    same = (strcmp(entry_abs, cwd) == 0);
+                }
+                if (!same) {
+                    unsigned long long cwd_tree = 0;
+                    int cwd_count = 0;
+                    hash_lib_dir_entries(cwd, "", &cwd_tree, &cwd_count, 0);
+                    if (cwd_count > 0) {
+                        pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                                        ":cwd=%016llx", cwd_tree);
+                    }
+                }
+            }
+        }
     }
 
     /* Issue #413: include the --lib search path in the cache key.
