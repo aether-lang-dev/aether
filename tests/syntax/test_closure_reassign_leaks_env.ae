@@ -36,7 +36,7 @@ main() {
     if r3 != -5 { println("FAIL: op v3"); exit(1) }
 
     // Reassign 100 more times to ensure no accumulating harm.
-    for (i = 0; i < 100; i ++) {
+    for (i = 0; i < 100; i++) {
         op = | x: int | { return x + i }
     }
     r4 = call(op, 1)

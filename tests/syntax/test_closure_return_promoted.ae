@@ -10,7 +10,7 @@ compute_sum(stop: int) {
     total = 0
     // Closure writes `total` — promotes it in compute_sum's scope.
     add = | n: int | { total = total + n }
-    for (i = 1; i <= stop; i ++) {
+    for (i = 1; i <= stop; i++) {
         call(add, i)
     }
     // Return the promoted var — just the int value, cell freed on exit.

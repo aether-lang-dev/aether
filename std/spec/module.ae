@@ -198,7 +198,7 @@ describe(_ctx: ptr, description: string) -> ptr {
     fw = _fw_of(_ctx)
     depth_ref = map.get_raw(fw, "depth")
     d = ref_get(depth_ref)
-    for (i = 0; i < d; i ++) { print("  ") }
+    for (i = 0; i < d; i++) { print("  ") }
     println(description)
     ref_set(depth_ref, d + 1)
 
@@ -238,7 +238,7 @@ _run_befores(s: ptr) {
     }
     befores = map.get_raw(s, "befores")
     n = list.size(befores)
-    for (i = 0; i < n; i ++) {
+    for (i = 0; i < n; i++) {
         bh = list.get_raw(befores, i)
         call(unbox_closure(bh))
     }
@@ -249,7 +249,7 @@ _run_befores(s: ptr) {
 _run_afters(s: ptr) {
     afters = map.get_raw(s, "afters")
     n = list.size(afters)
-    for (i = 0; i < n; i ++) {
+    for (i = 0; i < n; i++) {
         ah = list.get_raw(afters, i)
         call(unbox_closure(ah))
     }
@@ -303,7 +303,7 @@ _record_skip(_ctx: ptr, description: string, reason: string) {
     its_list = map.get_raw(fw, "its")
 
     d = ref_get(depth_ref)
-    for (i = 0; i < d; i ++) { print("  ") }
+    for (i = 0; i < d; i++) { print("  ") }
     if string.equals(reason, "") == 1 {
         print("\x1b[33m  ⊘\x1b[0m ${description}\n")
     } else {
@@ -450,7 +450,7 @@ _it_end(_ctx: ptr, description: string, it_rec: ptr, old_failed: int, t_start_ns
 
     // Indent + result line
     d = ref_get(depth_ref)
-    for (i = 0; i < d; i ++) { print("  ") }
+    for (i = 0; i < d; i++) { print("  ") }
     is_fail = 0
     if ref_get(failed_ref) == old_failed {
         print("\x1b[32m  ✓\x1b[0m ${description}\n")
