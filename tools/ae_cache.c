@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/stat.h>
 #include <time.h>
 #ifdef _WIN32
@@ -281,6 +282,148 @@ static int hash_lib_dir_entries(const char* dir, const char* rel,
 }
 #endif
 
+
+/* ---------------------------------------------------------------- *
+ *  SPIKE (#1882 follow-up): import-closure cache key.
+ *
+ *  The key below hashes whole DIRECTORY TREES that a module might resolve
+ *  from -- the entry's dir, the cwd, every --lib dir. That is why five
+ *  separate bugs (#623, #623-followup, #1025, #1421, #1882) have all been the
+ *  same shape: a resolution root nobody remembered to hash. It is also
+ *  needlessly coarse: a program importing one module rehashes thousands of
+ *  files, and any unrelated edit in those trees busts the cache.
+ *
+ *  This walks the actual import graph instead. It is a SCANNER, not a parser:
+ *  `import <dotted.name>` is lexically trivial in Aether (top level, no
+ *  wildcards, no renaming), so a line match extracts it with no AST.
+ *
+ *  Conditional imports are deliberately OVER-approximated: `when defined(X)
+ *  { import a } else { import b }` hashes both. The key must be a superset of
+ *  what is compiled -- hashing an uncompiled file costs a spurious rebuild,
+ *  missing a compiled one serves a stale binary. The -D flags are already in
+ *  the key's salt, so the two configurations never share a slot anyway.
+ *
+ *  An import that CANNOT be resolved returns failure, and the caller must
+ *  rebuild. Hashing the module NAME as a stand-in would turn "I could not
+ *  find this file" into "this file never changes" -- silent
+ *  under-approximation, which is exactly the #1882 failure.
+ *
+ *  Enable with AETHER_CACHE_IMPORT_SCAN=1.
+ * ---------------------------------------------------------------- */
+#define SCAN_MAX_FILES 4096
+#define SCAN_MAX_DEPTH 32
+
+typedef struct {
+    char   seen[SCAN_MAX_FILES][1024];
+    int    seen_n;
+    int    files;
+    int    unresolved;
+} ScanState;
+
+static int scan_seen(ScanState* st, const char* p) {
+    for (int i = 0; i < st->seen_n; i++) if (!strcmp(st->seen[i], p)) return 1;
+    return 0;
+}
+
+/* Mirror module_resolve_local_path()'s order (aether_module.c "Try 1-6"),
+ * plus the std/contrib package roots. Kept here rather than calling the
+ * compiler's resolver because `ae` does not link libaether_compiler.a; a
+ * real implementation should share one function instead of two copies --
+ * that duplication is precisely what caused the bugs listed above. */
+static int scan_resolve(const char* mod, char* out, size_t osz) {
+    char conv[512];
+    snprintf(conv, sizeof(conv), "%s", mod);
+    for (char* p = conv; *p; p++) if (*p == '.') *p = '/';
+
+    /* std.* / contrib.* -> package roots, local tree first then the install. */
+    const char* pkg_root = NULL;
+    const char* sub = NULL;
+    if (!strncmp(conv, "std/", 4))          { pkg_root = "std";     sub = conv + 4; }
+    else if (!strncmp(conv, "contrib/", 8)) { pkg_root = "contrib"; sub = conv + 8; }
+    if (pkg_root) {
+        snprintf(out, osz, "%s/%s/module.ae", pkg_root, sub);
+        if (access(out, F_OK) == 0) return 1;
+        const char* ah = getenv("AETHER_HOME");
+        if (ah && ah[0]) {
+            snprintf(out, osz, "%s/share/aether/%s/%s/module.ae", ah, pkg_root, sub);
+            if (access(out, F_OK) == 0) return 1;
+        }
+        char exe[1200];
+        if (get_exe_path(exe, sizeof(exe))) {
+            char* cut = strrchr(exe, '/');
+            if (cut) {
+                *cut = '\0';
+                snprintf(out, osz, "%s/../share/aether/%s/%s/module.ae", exe, pkg_root, sub);
+                if (access(out, F_OK) == 0) return 1;
+            }
+        }
+        const char* home = getenv("HOME");
+        if (home && home[0]) {
+            snprintf(out, osz, "%s/.aether/share/aether/%s/%s/module.ae", home, pkg_root, sub);
+            if (access(out, F_OK) == 0) return 1;
+        }
+    }
+
+    /* Try 1/2: every --lib entry, in order, both shapes. */
+    for (int i = 0; i < tc.lib_dir_count; i++) {
+        snprintf(out, osz, "%s/%s/module.ae", tc.lib_dirs[i], conv);
+        if (access(out, F_OK) == 0) return 1;
+        snprintf(out, osz, "%s/%s.ae", tc.lib_dirs[i], conv);
+        if (access(out, F_OK) == 0) return 1;
+    }
+    /* Try 3-6: src/ then the project root, both shapes. */
+    snprintf(out, osz, "src/%s/module.ae", conv);  if (access(out, F_OK) == 0) return 1;
+    snprintf(out, osz, "src/%s.ae", conv);         if (access(out, F_OK) == 0) return 1;
+    snprintf(out, osz, "%s/module.ae", conv);      if (access(out, F_OK) == 0) return 1;
+    snprintf(out, osz, "%s.ae", conv);             if (access(out, F_OK) == 0) return 1;
+    return 0;
+}
+
+static void scan_walk(ScanState* st, const char* path,
+                      unsigned long long* h, int depth) {
+    if (depth > SCAN_MAX_DEPTH || st->seen_n >= SCAN_MAX_FILES) return;
+    if (scan_seen(st, path)) return;                 /* cycles + diamonds */
+    snprintf(st->seen[st->seen_n++], 1024, "%s", path);
+
+    unsigned long long fh = fnv64_file(path);
+    if (fh == 0) { st->unresolved++; return; }
+    *h ^= fh; *h *= 1099511628211ULL;
+    st->files++;
+
+    FILE* f = fopen(path, "rb");
+    if (!f) { st->unresolved++; return; }
+    char line[4096];
+    while (fgets(line, sizeof(line), f)) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') p++;          /* `when defined` bodies */
+        if (strncmp(p, "import", 6) != 0) continue;
+        if (p[6] != ' ' && p[6] != '\t') continue;
+        p += 6;
+        while (*p == ' ' || *p == '\t') p++;
+        char mod[512]; int i = 0;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.') && i < 511)
+            mod[i++] = *p++;
+        mod[i] = '\0';
+        if (!i) continue;
+        char rp[1024];
+        if (scan_resolve(mod, rp, sizeof(rp))) scan_walk(st, rp, h, depth + 1);
+        else st->unresolved++;                        /* never hash the name */
+    }
+    fclose(f);
+}
+
+/* Returns 0 when the closure could not be determined, so the caller falls
+ * back to the directory-tree key rather than trusting a partial answer. */
+static unsigned long long scan_import_closure(const char* entry, int* out_files) {
+    static ScanState st;                              /* 4 MB; not on the stack */
+    memset(&st, 0, sizeof(st));
+    unsigned long long h = 1469598103934665603ULL;
+    scan_walk(&st, entry, &h, 0);
+    if (out_files) *out_files = st.files;
+    if (st.unresolved) return 0;
+    return h ? h : 1ULL;
+}
+
 unsigned long long compute_cache_key(const char* ae_file,
                                             const char* extra_files,
                                             const char* opt_level,
@@ -314,6 +457,27 @@ unsigned long long compute_cache_key(const char* ae_file,
         }
     }
 
+    /* SPIKE: AETHER_CACHE_IMPORT_SCAN=1 replaces the directory-tree hashes
+     * below with the actual import closure. Falls back automatically when the
+     * closure cannot be determined (an unresolved import), so a failure is a
+     * rebuild, never a wrong key. Everything else in the key -- compiler and
+     * driver mtimes, --extra files, --lib identity, opt level, -D salt --
+     * still applies: this replaces only the SOURCE portion. */
+    int scan_ok = 0;
+    if (getenv("AETHER_CACHE_IMPORT_SCAN")) {
+        int nf = 0;
+        unsigned long long ch = scan_import_closure(ae_file, &nf);
+        if (ch) {
+            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
+                            ":imp=%016llx:n=%d", ch, nf);
+            scan_ok = 1;
+            if (getenv("AETHER_CACHE_SCAN_DEBUG"))
+                fprintf(stderr, "[scan] %s -> %d files, imp=%016llx\n", ae_file, nf, ch);
+        } else if (getenv("AETHER_CACHE_SCAN_DEBUG")) {
+            fprintf(stderr, "[scan] %s -> UNRESOLVED, falling back to tree hash\n", ae_file);
+        }
+    }
+
     /* #1421: the entry file's OWN directory tree.
      *
      * The key hashed the entry file's content and the lib dirs, but a
@@ -332,7 +496,7 @@ unsigned long long compute_cache_key(const char* ae_file,
      * edit to any project source bumps the key. Over-invalidating costs a
      * rebuild; under-invalidating costs a wrong answer.
      */
-    {
+    if (!scan_ok) {
         char entry_dir[1024];
         snprintf(entry_dir, sizeof(entry_dir), "%s", ae_file);
         char* cut = strrchr(entry_dir, '/');
