@@ -1,0 +1,53 @@
+// math.lrint: round-to-nearest returning an integer directly.
+//
+// Exists so callers need not declare `extern lrint` themselves. An Aether
+// extern cannot spell libm's prototype (`-> long` emits int64_t, `-> int`
+// emits int, and C `long` is neither), so such a declaration collides with
+// <math.h>: invisible on Linux where int64_t IS long, a hard error on
+// macOS/iOS where int64_t is long long. Declaring it in C against the real
+// header is the only place the prototype can be correct.
+//
+// Asserts half-to-EVEN rounding, which is what distinguishes it from
+// math.round (half-away-from-zero) and is what an `lrint` caller expects.
+import std.math
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    // Ordinary rounding, both directions.
+    a = math.lrint(3.7)
+    if a != 4 { fail("lrint(3.7) = ${a}, want 4") }
+    b = math.lrint(3.2)
+    if b != 3 { fail("lrint(3.2) = ${b}, want 3") }
+    c = math.lrint(-3.7)
+    if c != -4 { fail("lrint(-3.7) = ${c}, want -4") }
+
+    // Halfway cases round to EVEN, unlike math.round which rounds away from
+    // zero. This is the documented difference between the two.
+    d = math.lrint(0.5)
+    if d != 0 { fail("lrint(0.5) = ${d}, want 0 (half-to-even)") }
+    e = math.lrint(1.5)
+    if e != 2 { fail("lrint(1.5) = ${e}, want 2 (half-to-even)") }
+    f = math.lrint(2.5)
+    if f != 2 { fail("lrint(2.5) = ${f}, want 2 (half-to-even)") }
+    g = math.lrint(-2.5)
+    if g != -2 { fail("lrint(-2.5) = ${g}, want -2 (half-to-even)") }
+
+    // math.round differs on exactly those inputs, so the two are not
+    // interchangeable: a colour channel computed as lrint(v * 255.0) is off
+    // by one if it silently becomes round().
+    h = math.round(0.5)
+    if h != 1.0 { fail("round(0.5) = ${h}, want 1.0 (half-away-from-zero)") }
+
+    // The motivating case: 8-bit colour channel conversion.
+    i = math.lrint(255.0 * 0.5)
+    if i != 128 { fail("lrint(127.5) = ${i}, want 128") }
+
+    println("test_math_lrint: OK")
+    return 0
+}

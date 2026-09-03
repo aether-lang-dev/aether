@@ -1,6 +1,8 @@
 #ifndef AETHER_MATH_H
 #define AETHER_MATH_H
 
+#include <stdint.h>   /* int64_t, for math_lrint's return type */
+
 // Basic math operations
 int math_abs_int(int x);
 double math_abs_float(double x);
@@ -24,6 +26,8 @@ double math_atan2(double y, double x);
 double math_floor(double x);
 double math_ceil(double x);
 double math_round(double x);
+/* Round half-to-even and return an integer (see the note in aether_math.c). */
+int64_t math_lrint(double x);
 double math_log(double x);
 double math_log10(double x);
 double math_exp(double x);
