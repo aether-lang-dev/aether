@@ -1,6 +1,8 @@
 #ifndef AE_INTERNAL_H
 #define AE_INTERNAL_H
 
+#include <stdio.h>   // ae_report_newer_release takes a FILE*
+
 /* Shared surface between the `ae` driver's translation units (#1221).
  * ae.c was one 8.5k-line TU, so any edit recompiled everything; command
  * clusters now move into their own ae_*.c files and reach the driver's
@@ -65,6 +67,8 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
 
 /* ae.c helpers shared across TUs. */
 int  run_cmd_show_warnings(const char* cmd);
+int  run_cmd_capture_stdout(const char* cmd, const char* path);
+void dump_captured_stdout(const char* path);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
 const char* get_cflags(void);
@@ -101,6 +105,8 @@ int cmd_version(int argc, char** argv);
  * Expand-Archive) and return 0 on success. Shared with `ae add`'s
  * release-artifact path (#1360). */
 int ae_download(const char* url, const char* dest);
+int ae_download_ex(const char* url, const char* dest, int max_seconds);
+void ae_report_newer_release(FILE* out);
 int ae_extract(const char* archive, const char* dest_dir);
 int cmd_version_use(const char* version);
 int cmd_install(int argc, char** argv);

@@ -1081,6 +1081,14 @@ int run_cross_build(const char* c_file, const char* out_file,
             if (strstr(ztriple, "wasm") && emit_lib) {
                 wasm_lib_flags = wasm_export_flags(c_file, g_wasm_exports);
             }
+            /* A wasi library is a reactor, not a command. Left in command mode
+             * zig links wasi-libc's startup object, which demands a `main` the
+             * library has not got, and --no-entry does not stop it being
+             * pulled in: `--emit=lib` for wasm32-wasi could not link at all.
+             * Only wasi has an exec model to choose; freestanding has no libc
+             * and rejects the flag. */
+            const char* wasi_model = (emit_lib && strstr(ztriple, "wasi"))
+                                         ? "-mexec-model=reactor " : "";
             /* --emit=lib on an ordinary ELF/PE target (#1648): the same
              * -fPIC -shared the native path uses, chosen by the TARGET
              * rather than by the host, since that is the whole point of
@@ -1116,8 +1124,8 @@ int run_cross_build(const char* c_file, const char* out_file,
                 : (is_apple ? "-Wl,-x -Wl,-dead_strip"
                             : "-Wl,--strip-all -Wl,--gc-sections");
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
-                cc_cmd, sysroot_flag, apple_lib_flags,
+                "%s %s %s %s%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                cc_cmd, sysroot_flag, apple_lib_flags, wasi_model,
                 wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags, size_link,
                 opt, feature_defs, tc.include_flags, c_file, ex, objdir,
                 crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;

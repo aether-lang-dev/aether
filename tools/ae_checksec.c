@@ -238,7 +238,12 @@ static int inspect_pe(const unsigned char* b, size_t len, Checksec* out) {
                  : num_symbols == 0           ? PROP_NA
                                               : PROP_NO;
     if (out->canary == PROP_NO && num_symbols == 0) out->canary = PROP_NA;
-    out->stripped = has_name(b, len, ".debug_info") ? PROP_NO : PROP_YES;
+    /* A COFF symbol table is a definitive unstripped signal, and cheaper to
+     * trust than a name scan: long section names are truncated to 8 bytes in a
+     * PE image, so ".debug_info" is only found when a string table happens to
+     * carry it in full. */
+    out->stripped = (num_symbols != 0 || has_name(b, len, ".debug_info"))
+                        ? PROP_NO : PROP_YES;
     return 0;
 }
 
@@ -280,14 +285,17 @@ static const char* remedy(const char* prop, PropState s) {
     return "";
 }
 
-static PropState prop_by_name(const Checksec* c, const char* name) {
-    if (strcmp(name, "pie") == 0)     return c->pie;
-    if (strcmp(name, "nx") == 0)      return c->nx;
-    if (strcmp(name, "relro") == 0)   return c->relro;
-    if (strcmp(name, "canary") == 0)  return c->canary;
-    if (strcmp(name, "fortify") == 0) return c->fortify;
-    if (strcmp(name, "stripped") == 0) return c->stripped;
-    return PROP_NA;
+/* -1 for a name that is not a property at all, which the caller must reject.
+ * Returning n/a for it made `--require canery` exit 0, so a typo in a CI
+ * hardening gate protected nothing while still reading like a gate. */
+static int prop_by_name(const Checksec* c, const char* name, PropState* out) {
+    if (strcmp(name, "pie") == 0)     { *out = c->pie;      return 0; }
+    if (strcmp(name, "nx") == 0)       { *out = c->nx;       return 0; }
+    if (strcmp(name, "relro") == 0)    { *out = c->relro;    return 0; }
+    if (strcmp(name, "canary") == 0)   { *out = c->canary;   return 0; }
+    if (strcmp(name, "fortify") == 0)  { *out = c->fortify;  return 0; }
+    if (strcmp(name, "stripped") == 0) { *out = c->stripped; return 0; }
+    return -1;
 }
 
 static void print_row(const char* label, const char* key, PropState s) {
@@ -358,7 +366,13 @@ int cmd_checksec(int argc, char** argv) {
         char* dash = strstr(name, "-full");
         if (dash) { *dash = '\0'; want_full = 1; }
 
-        PropState s = prop_by_name(&c, name);
+        PropState s;
+        if (prop_by_name(&c, name, &s) != 0) {
+            fprintf(stderr, "ae checksec: unknown property '%s'\n", name);
+            fprintf(stderr, "  known: pie, nx, relro (or relro-full), canary, "
+                            "fortify, stripped\n");
+            return 2;
+        }
         /* n/a passes: the format cannot express the property, so demanding it
          * would make one gate unwritable across formats, and the report says
          * n/a in plain sight either way. `-full` is about the distinction the

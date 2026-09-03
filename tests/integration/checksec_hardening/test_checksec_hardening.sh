@@ -193,10 +193,26 @@ esac
 "$AE" checksec --require "pie,nx,relro-full,canary,fortify" "$PROBE" >/dev/null 2>&1 \
     || fail "--require rejected a binary the report says is hardened"
 
-# And the gate is a gate: something the binary cannot have must fail it.
-if "$AE" checksec --require stripped "$PROBE" >/dev/null 2>&1; then
-    fail "--require stripped passed on an unstripped binary, so the gate proves nothing"
+# And the gate is a gate: something the report says the binary lacks must fail
+# it. The property is taken from the report rather than hardcoded, because
+# which ones are expressible differs by format: `stripped` was hardcoded here
+# and a release-built PE genuinely IS stripped (no DWARF, no COFF symbols), so
+# the gate correctly passed and the assertion, not the tool, was wrong.
+missing="$(printf '%s\n' "$report" | awk 'tolower($2)=="no" {print tolower($1); exit}')"
+if [ -n "$missing" ]; then
+    if "$AE" checksec --require "$missing" "$PROBE" >/dev/null 2>&1; then
+        fail "--require $missing passed on a binary the report says lacks it, so the gate proves nothing"
+    fi
 fi
+
+# A property that does not exist is an error, never a pass. `--require canery`
+# used to exit 0: an unknown name read back as n/a, and n/a satisfies the gate,
+# so one typo turned a CI hardening gate into a no-op that still looked like a
+# gate.
+"$AE" checksec --require canery "$PROBE" >/dev/null 2>&1 \
+    && fail "--require accepted a misspelled property, so a typo silently disables the gate"
+"$AE" checksec --require "pie,nosuchproperty" "$PROBE" >/dev/null 2>&1 \
+    && fail "--require accepted an unknown property alongside a valid one"
 
 # A file that is not a binary is an error, not a silent pass.
 echo "not a binary" > "$TMP/text"
