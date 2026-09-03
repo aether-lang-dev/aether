@@ -489,7 +489,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
 // Space-splits the command string into argv (no shell quoting supported,
 // but our controlled commands never need it).
 // quiet=0: show all output, quiet=1: hide stdout+stderr, quiet=2: hide stdout only (keep stderr for warnings)
-static int posix_run(const char* cmd_str, int quiet) {
+static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
@@ -522,6 +522,9 @@ static int posix_run(const char* cmd_str, int quiet) {
     } else if (quiet == 2) {
         // Hide stdout but keep stderr (so gcc warnings are visible)
         posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    } else if (quiet == 3 && capture) {
+        posix_spawn_file_actions_addopen(&fa, STDOUT_FILENO, capture,
+                                         O_WRONLY | O_CREAT | O_TRUNC, 0600);
     }
 
     pid_t pid;
@@ -557,7 +560,7 @@ static int posix_run(const char* cmd_str, int quiet) {
 #ifndef _O_BINARY
 #define _O_BINARY 0x8000
 #endif
-static int win_run(const char* cmd_str, int quiet) {
+static int win_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
     char buf[AE_CMD_BUF];
     strncpy(buf, cmd_str, sizeof(buf) - 1);
@@ -636,6 +639,12 @@ static int win_run(const char* cmd_str, int quiet) {
         int nul = _open("nul", _O_WRONLY);
         if (nul >= 0) { _dup2(nul, 1); _close(nul); }
     }
+    if (quiet == 3 && capture) {
+        fflush(stdout);
+        saved_stdout = _dup(1);
+        int fd = _open(capture, _O_WRONLY | _O_CREAT | _O_TRUNC, _S_IREAD | _S_IWRITE);
+        if (fd >= 0) { _dup2(fd, 1); _close(fd); }
+    }
     if (quiet == 1) {
         fflush(stderr);
         saved_stderr = _dup(2);
@@ -655,27 +664,62 @@ static int win_run(const char* cmd_str, int quiet) {
 
 int run_cmd(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 0);
+    return posix_run(cmd, 0, NULL);
 #else
-    return win_run(cmd, 0);
+    return win_run(cmd, 0, NULL);
 #endif
 }
 
 // Run a command, suppressing all output (quiet mode)
 int run_cmd_quiet(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 1);
+    return posix_run(cmd, 1, NULL);
 #else
-    return win_run(cmd, 1);
+    return win_run(cmd, 1, NULL);
 #endif
+}
+
+/* Where a compile step's stdout is parked so a failure can print it. */
+static const char* compile_log_path(char* buf, size_t size) {
+    snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
+    return buf;
+}
+
+/* Run a command with stderr passing through and stdout captured to `path`.
+ *
+ * The compile steps hide stdout so a successful build is quiet, and on failure
+ * the driver used to re-run the ENTIRE compile just to show what was hidden:
+ * a second compile of the same file, and every stderr diagnostic printed
+ * twice. Capturing instead costs one temp file, and the caller prints it only
+ * when the command fails. Dropping stdout outright is not an option, since a
+ * C compiler that reports through it (emcc does) would fail with no
+ * explanation at all. */
+int run_cmd_capture_stdout(const char* cmd, const char* path) {
+#ifndef _WIN32
+    return posix_run(cmd, 3, path);
+#else
+    return win_run(cmd, 3, path);
+#endif
+}
+
+/* Print a captured stdout log to stderr, so it interleaves with the
+ * diagnostics that streamed through live. Silent when there is nothing. */
+void dump_captured_stdout(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return;
+    char buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) fwrite(buf, 1, n, stderr);
+    fclose(f);
+    fflush(stderr);
 }
 
 // Run a command, showing stderr (warnings) but hiding stdout
 int run_cmd_show_warnings(const char* cmd) {
 #ifndef _WIN32
-    return posix_run(cmd, 2);
+    return posix_run(cmd, 2, NULL);
 #else
-    return win_run(cmd, 2);
+    return win_run(cmd, 2, NULL);
 #endif
 }
 
@@ -713,7 +757,7 @@ int run_cmd_forwarding(const char* cmd) {
 #ifdef _WIN32
     /* Windows has no SIGTERM-to-child model that matches this; the
      * orphaning report is POSIX-specific (kill $! in a shell test). */
-    return win_run(cmd, 0);
+    return win_run(cmd, 0, NULL);
 #else
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd);
     char buf[AE_CMD_BUF];
@@ -3541,12 +3585,17 @@ static int cmd_run(int argc, char** argv) {
     // aetherc step can emit warnings (e.g. #1780 self-shadowing import) that a
     // plain `ae run` must not swallow. Mirrors the gcc step below, which already
     // uses run_cmd_show_warnings. (run_cmd_quiet dropped stderr, hiding them.)
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char clog[1024];
+    compile_log_path(clog, sizeof(clog));
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        if (!tc.verbose) dump_captured_stdout(clog);
+        remove(clog);
         fprintf(stderr, "Compilation failed.\n");
         ae_report_newer_release(stderr);
         return 1;
     }
+    remove(clog);
 
     // Step 2: Compile .c to executable with runtime (-O0 for fast dev builds).
     // toml [[bin]] extra_sources were already merged into extra_files above
@@ -6071,12 +6120,17 @@ static int cmd_build(int argc, char** argv) {
     // Always run visible on failure; print diagnostic on Windows. Keep stderr
     // so compiler warnings (e.g. #1780 self-shadowing import) survive a plain
     // `ae build`; run_cmd_quiet had dropped them.
-    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char clog[1024];
+    compile_log_path(clog, sizeof(clog));
+    int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        if (!tc.verbose) dump_captured_stdout(clog);
+        remove(clog);
         fprintf(stderr, "Compilation failed.\n");
         ae_report_newer_release(stderr);
         return 1;
     }
+    remove(clog);
 
     /* #1243 --emit=obj: aetherc has written the generated C; compile it to a
      * single object and stop. No link, no `main`, so the caller drops the .o
@@ -6182,11 +6236,16 @@ static int cmd_build(int argc, char** argv) {
         /* Warnings-visible like the `ae run` path: with #1252 fixed the C
          * compiler's -Wformat findings map to the user's .ae lines, and a
          * fully quiet compile would hide them. Errors still re-run loud. */
-        build_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+        char blog[1024];
+        compile_log_path(blog, sizeof(blog));
+        build_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, blog);
         if (build_ret != 0) {
+            if (!tc.verbose) dump_captured_stdout(blog);
+            remove(blog);
             fprintf(stderr, "Build failed.\n");
             return 1;
         }
+        remove(blog);
     }
 
     // Clean up intermediate C file — ae build produces a binary, not C source

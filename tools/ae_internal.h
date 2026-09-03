@@ -67,6 +67,8 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
 
 /* ae.c helpers shared across TUs. */
 int  run_cmd_show_warnings(const char* cmd);
+int  run_cmd_capture_stdout(const char* cmd, const char* path);
+void dump_captured_stdout(const char* path);
 bool path_exists(const char* path);
 void mkdirs(const char* path);
 const char* get_cflags(void);

@@ -42,9 +42,11 @@ version number before tagging the release.
 - **Every failed compile printed its diagnostics twice, plus three lines of
   internal `[diag]` output.** `ae build` and `ae run` re-ran the whole compile
   on failure "so the user can see the error", left over from a Windows
-  debugging session and redundant since the first run already shows stderr. So
-  every error, every warning and every hint arrived doubled, at the cost of
-  compiling the file a second time. The retry and the `[diag]` lines are gone.
+  debugging session. So every error, every warning and every hint arrived
+  doubled, at the cost of compiling the file a second time. The compile steps
+  now capture stdout to a temp file and print it only when the command fails,
+  which keeps what the retry existed to show, a C compiler that reports through
+  stdout rather than stderr, without compiling anything twice.
 
 - **A piped `ae build` printed its diagnostics above the line naming the file
   being built**, because stdout is block-buffered when piped while stderr is
