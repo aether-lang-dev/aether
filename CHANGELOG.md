@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.629.0]
+
 ### Fixed
 
 - **A typed pointer (`*T`) could not be assigned to a bare `ptr`** (#1880),
