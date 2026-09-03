@@ -77,16 +77,26 @@ static bool cross_target_is_macabi(const char* t) {
  * every other arm returns: one resolved target per build is the only use, and
  * a second call for a different iOS alias would overwrite the first result. */
 #define CROSS_IOS_MIN_DEFAULT "15.0"
-/* Catalyst's floor is its own: the macabi ABI does not exist before iOS 13.1,
- * and clang rejects a lower -macabi deployment target outright. */
-#define CROSS_MACABI_MIN_DEFAULT "13.1"
+/* Catalyst's floor is its own, and it differs by ARCH. The macabi ABI does not
+ * exist before iOS 13.1, so that is the x86_64 floor. arm64 Catalyst did not
+ * exist until Apple Silicon: clang silently RAISES any lower arm64 -macabi
+ * request to 14.0, so asking for 13.1 there produces a binary stamped 14.0 and
+ * a triple that does not describe its own output. Ask for what will actually
+ * be stamped. */
+#define CROSS_MACABI_MIN_DEFAULT     "13.1"  /* x86_64 */
+#define CROSS_MACABI_ARM64_MIN_DEFAULT "14.0"  /* arm64 — Apple Silicon floor */
 static const char* cross_ios_triple(const char* t) {
     static char triple[64];
     bool macabi = cross_target_is_macabi(t);
-    const char* minv = getenv("AETHER_IOS_MIN");
-    if (!minv || !*minv) minv = macabi ? CROSS_MACABI_MIN_DEFAULT : CROSS_IOS_MIN_DEFAULT;
     const char* arch = (!strncmp(t, "x86_64", 6) || !strncmp(t, "amd64", 5))
                        ? "x86_64" : "arm64";
+    bool is_x86 = !strcmp(arch, "x86_64");
+    const char* minv = getenv("AETHER_IOS_MIN");
+    if (!minv || !*minv) {
+        minv = macabi ? (is_x86 ? CROSS_MACABI_MIN_DEFAULT
+                                : CROSS_MACABI_ARM64_MIN_DEFAULT)
+                      : CROSS_IOS_MIN_DEFAULT;
+    }
     /* Exactly one of these suffixes applies — the alias list admits no target
      * that is both. */
     const char* variant = macabi ? "-macabi"

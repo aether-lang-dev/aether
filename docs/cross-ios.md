@@ -87,9 +87,12 @@ with `aether_string_data()`.
 ## Deployment target
 
 The deployment target is part of the clang triple, so it is fixed at build
-time. The default is **iOS 15.0** for the device and simulator targets and
-**iOS 13.1** for Catalyst (the `macabi` ABI does not exist before 13.1, and
-clang rejects a lower one). Override either with `AETHER_IOS_MIN`:
+time. The default is **iOS 15.0** for the device and simulator targets. Catalyst
+has its own floor, and it differs by architecture: **13.1** on x86_64 (the
+`macabi` ABI does not exist before it) and **14.0** on arm64, since arm64
+Catalyst did not exist until Apple Silicon — clang silently raises anything
+lower to 14.0, so asking for less produces a triple that does not describe its
+own output. Override any of them with `AETHER_IOS_MIN`:
 
 ```bash
 AETHER_IOS_MIN=17.0 ae build --target=aarch64-ios --emit=lib mylib.ae -o libmylib.dylib

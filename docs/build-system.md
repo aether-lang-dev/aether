@@ -776,7 +776,7 @@ so an installed toolchain never ships a silently-stubbed regex.
 | Embedded | `PLATFORM=embedded` | Cooperative scheduler, no OS |
 | Cross-OS/arch | `ae build --target=<triple>` | `zig cc` backend, POSIX host, executables + `--emit=csrc`/`--emit=obj` |
 | iOS arm64 | `ae build --target=aarch64-ios` | Xcode/`xcrun` backend, macOS host, `--emit=staticlib` (App Store) / `--emit=lib` — see [cross-ios.md](cross-ios.md) |
-| Mac Catalyst | `ae build --target=aarch64-ios-macabi` | Xcode/`xcrun` backend on the macOS SDK, platform `MACCATALYST`, min 13.1 — see [cross-ios.md](cross-ios.md) |
+| Mac Catalyst | `ae build --target=aarch64-ios-macabi` | Xcode/`xcrun` backend on the macOS SDK, platform `MACCATALYST`, min 13.1 (x86_64) / 14.0 (arm64) — see [cross-ios.md](cross-ios.md) |
 | Cross-wasm | `ae build --target=wasm32-wasi` | `zig cc` backend; executables + `--emit=csrc`/`--emit=obj` |
 
 ## Hardening (`HARDEN=1`)

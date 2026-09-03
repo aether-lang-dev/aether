@@ -28,9 +28,11 @@ version number before tagging the release.
   (with `arm64-`/`amd64-` spellings). Catalyst is a third Apple platform
   alongside device and simulator, not a variant of either: its triple carries
   `-ios` but it builds against the **macOS** SDK and stamps platform
-  `MACCATALYST`. Its deployment-target floor is its own — 13.1, since the
-  `macabi` ABI does not exist before it — and `AETHER_IOS_MIN` overrides it as
-  for the other Apple triples.
+  `MACCATALYST`. Its deployment-target floor is its own and differs by
+  architecture — 13.1 on x86_64 (the `macabi` ABI does not exist before it) and
+  14.0 on arm64, where clang raises anything lower because arm64 Catalyst did
+  not exist until Apple Silicon — and `AETHER_IOS_MIN` overrides it as for the
+  other Apple triples.
 
 ### Fixed
 

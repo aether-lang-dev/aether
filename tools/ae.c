@@ -5697,7 +5697,7 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "              --emit=lib gives a dylib, --emit=staticlib a .a -- an App\n");
         fprintf(stderr, "              Store build needs the .a, as iOS forbids 3rd-party dylibs;\n");
         fprintf(stderr, "              AETHER_IOS_MIN sets the deployment target, default 15.0\n");
-        fprintf(stderr, "              for iOS and 13.1 for Catalyst)\n");
+        fprintf(stderr, "              for iOS; Catalyst 13.1 x86_64 / 14.0 arm64)\n");
         return 1;
     }
 

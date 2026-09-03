@@ -150,10 +150,24 @@ file "$TMP/cat.o" | grep -q 'Mach-O 64-bit object arm64' \
     || fail "Catalyst object is not arm64 Mach-O: $(file "$TMP/cat.o")"
 [ "$(macho_platform "$TMP/cat.o")" = "MACCATALYST" ] \
     || fail "Catalyst object platform is '$(macho_platform "$TMP/cat.o")', expected MACCATALYST"
-# Catalyst's floor is 13.1, not the 15.0 the device/simulator arms default to:
-# the macabi ABI does not exist before it.
-[ "$(macho_minos "$TMP/cat.o")" = "13.1" ] \
-    || fail "Catalyst default minos is '$(macho_minos "$TMP/cat.o")', expected 13.1"
+# Catalyst's floor is its own, and differs by arch: the macabi ABI does not
+# exist before iOS 13.1 (x86_64), and arm64 Catalyst did not exist until Apple
+# Silicon, where clang RAISES anything lower to 14.0. Asking for 13.1 on arm64
+# would produce a binary stamped 14.0 — a triple that does not describe its own
+# output. Assert what each arch actually stamps.
+[ "$(macho_minos "$TMP/cat.o")" = "14.0" ] \
+    || fail "Catalyst arm64 default minos is '$(macho_minos "$TMP/cat.o")', expected 14.0"
+
+build_obj x86_64-ios-macabi "$TMP/cat64.o"
+[ "$(macho_platform "$TMP/cat64.o")" = "MACCATALYST" ] \
+    || fail "x86_64 Catalyst platform is '$(macho_platform "$TMP/cat64.o")', expected MACCATALYST"
+[ "$(macho_minos "$TMP/cat64.o")" = "13.1" ] \
+    || fail "Catalyst x86_64 default minos is '$(macho_minos "$TMP/cat64.o")', expected 13.1"
+
+# AETHER_IOS_MIN still overrides on Catalyst, as on the other Apple triples.
+build_obj aarch64-ios-macabi "$TMP/catmin.o" AETHER_IOS_MIN=16.0
+[ "$(macho_minos "$TMP/catmin.o")" = "16.0" ] \
+    || fail "AETHER_IOS_MIN=16.0 on Catalyst gave minos '$(macho_minos "$TMP/catmin.o")'"
 
 # --- 5. --emit=staticlib: the shape an App Store build actually links ---
 # iOS forbids third-party dynamic libraries, so the dylib in section 3 cannot
