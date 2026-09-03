@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.628.0]
+
 ### Added
 
 - **`ae version`, and a failed build, say when a newer release exists.**
