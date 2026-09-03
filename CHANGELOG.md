@@ -11,6 +11,35 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **Windows RUNTIME coverage, from a Linux runner.** Nothing ran Windows
+  behaviour earlier than the MSYS2 legs, roughly 25 minutes into a run: the
+  fast lane proves the toolchain cross-BUILDS, so a test that built for
+  Windows and then behaved differently there had no earlier signal at all.
+  The new lane cross-builds each test to a `.exe` on the Linux host and lets
+  Wine merely EXECUTE it. An earlier attempt was deferred because it ran `ae`
+  itself under Wine, and `ae` is a compile-and-run driver, so it went looking
+  for a PE `gcc.exe` and tried to download 250 MB of MinGW mid-job; drawing
+  the split this way means Wine never compiles anything. The sweep checks each
+  artifact really is a PE before trusting a pass, and its exclusion list gives
+  a reason per entry, because a test failing due to a genuine Windows
+  difference is the finding, not an exclusion. `make test-windows-wine` runs
+  the same sweep locally and self-skips without zig or wine.
+
+### Fixed
+
+- **base64 silently returned nothing in any build without OpenSSL.** It was
+  implemented only inside `#ifdef AETHER_HAS_OPENSSL`, and the fallback branch
+  returned NULL from encode and 0 from decode, so a program that encoded
+  anything got `(null)` back and nothing reported a problem. The Windows
+  cross-build is such a build, which is how the new Wine lane found it on its
+  first run. base64 is a transform, not a cipher: it is now implemented
+  directly and lives outside that split, so there is one implementation rather
+  than a working one and a stub. The contract is unchanged and verified
+  against the RFC 4648 vectors, and invalid input now reports an error instead
+  of quietly returning empty.
+
 ## [0.628.0]
 
 ### Added
