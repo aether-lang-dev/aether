@@ -1139,6 +1139,12 @@ test-manual-runtime: compiler
 test-cross: ae stdlib
 	@bash tests/scripts/cross_compile.sh
 
+# Windows RUNTIME sweep (#1876): cross-build each test to a .exe on this host
+# and execute it under Wine. Self-skips when zig or wine is missing, so it is
+# safe to run anywhere. Not part of the default gate; CI runs it on Linux.
+test-windows-wine: ae stdlib
+	@bash tests/scripts/windows_wine_sweep.sh
+
 # Test .ae source files - compiles and runs each test file
 ifdef WINDOWS_NATIVE
 test-ae: compiler ae stdlib
