@@ -3620,17 +3620,19 @@ static int cmd_run(int argc, char** argv) {
     const char* run_extra = extra_files[0] ? extra_files : NULL;
     build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, run_extra);
     // Show stderr (gcc warnings like -Wformat) even in non-verbose mode
-    int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_show_warnings(cmd);
+    char glog[1024];
+    compile_log_path(glog, sizeof(glog));
+    int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, glog);
     if (gcc_ret != 0) {
-        // Re-run with output for error diagnosis
-        build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, false, run_extra);
-        run_cmd(cmd);
+        if (!tc.verbose) dump_captured_stdout(glog);
+        remove(glog);
         fprintf(stderr, "Build failed.\n");
         remove(c_file);
         remove(exe_file);  // partial link output, if any
         remove_dsym_bundle(exe_file);
         return 1;
     }
+    remove(glog);
 
     // Clean up temp .c file (exe stays in cache if caching, else clean up too)
     remove(c_file);

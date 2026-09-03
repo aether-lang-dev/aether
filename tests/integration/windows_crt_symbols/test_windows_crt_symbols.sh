@@ -78,7 +78,16 @@ fi
 
 INC="-Iinclude -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils
      -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math
-     -Istd/net -Istd/collections -Istd/json"
+     -Istd/net -Istd/collections -Istd/json -Istd/regex"
+
+# The same feature defines the driver and the Makefile always pass. std.regex
+# refuses to build without them by design, because the alternative is a regex
+# engine whose every call silently returns no-match at runtime; compiling it
+# here with a guessed flag set reported the source as broken when it is the
+# flag set that was incomplete. AETHER_HAS_PCRE2 is unconditional on the real
+# build paths (tools/ae_cross.c), backed by the vendored engine, which needs no
+# system library.
+DEFS="-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2"
 
 if [ "$USE_ARCHIVE" -eq 1 ]; then
     subject="$ARCHIVE"
@@ -90,7 +99,7 @@ else
     for src in $(grep -v '^#' "$MANIFEST" | grep -v '^[[:space:]]*$'); do
         [ -f "$src" ] || continue
         obj="$TMP/objs/$(echo "$src" | tr '/' '_' | sed 's/\.c$/.o/')"
-        if ! $CC_WIN -O2 $INC -DAETHER_VERSION='"test"' -c "$src" -o "$obj" 2>"$TMP/cc.log"; then
+        if ! $CC_WIN -O2 $INC $DEFS -DAETHER_VERSION='"test"' -c "$src" -o "$obj" 2>"$TMP/cc.log"; then
             echo "  [FAIL] windows_crt_symbols: $src does not cross-compile for Windows"
             sed 's/^/        /' "$TMP/cc.log" | head -8
             exit 1

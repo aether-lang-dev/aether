@@ -78,6 +78,13 @@ version number before tagging the release.
   showed as executed. Both now carry the position of the keyword that
   introduces them.
 
+- **`ae build --target=wasm32-wasi --emit=lib` could not link.** A wasi library
+  is a reactor, not a command: left in command mode zig links wasi-libc's
+  startup object, which demands a `main` the library has not got, and
+  `--no-entry` does not prevent it being pulled in. The link failed with
+  `undefined symbol: main`. Libraries for wasi now build as reactors, which
+  also fixes `--size` for that target.
+
 - **`install_name_tool` ran on static archives and non-Darwin cross output**,
   failing and warning that "consumers may fail to dlopen" for artifacts nothing
   can dlopen. An install_name belongs to a Mach-O dylib; the fixup is now
