@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.627.0]
+
 ### Fixed
 
 - **Assigning a `string` field through a setter segfaulted on a hand-malloc'd
