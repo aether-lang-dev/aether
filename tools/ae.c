@@ -546,6 +546,8 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
 #ifdef _WIN32
 #include <process.h>
 #include <io.h>
+#include <fcntl.h>     // _O_CREAT / _O_TRUNC for the stdout capture
+#include <sys/stat.h>  // _S_IREAD / _S_IWRITE for the file it creates
 #ifndef _O_WRONLY
 #define _O_WRONLY 1
 #endif
@@ -559,6 +561,21 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
  * `_O_WRONLY` above. */
 #ifndef _O_BINARY
 #define _O_BINARY 0x8000
+#endif
+/* Same gate, same fallback, for the flags the stdout capture creates its file
+ * with. The cross-build leg failed on exactly this: <fcntl.h> is included
+ * above, and _O_CREAT still was not visible. */
+#ifndef _O_CREAT
+#define _O_CREAT 0x0100
+#endif
+#ifndef _O_TRUNC
+#define _O_TRUNC 0x0200
+#endif
+#ifndef _S_IREAD
+#define _S_IREAD 0x0100
+#endif
+#ifndef _S_IWRITE
+#define _S_IWRITE 0x0080
 #endif
 static int win_run(const char* cmd_str, int quiet, const char* capture) {
     if (tc.verbose) fprintf(stderr, "[cmd] %s\n", cmd_str);
