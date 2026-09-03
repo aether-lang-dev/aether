@@ -14,6 +14,7 @@
  * install tree, unistd for getpid on the compile probe */
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <time.h>     // report_newer_release: 24h cache gate
 #include <dirent.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -914,6 +915,74 @@ static int fetch_latest_release_tag(char* out, size_t outlen) {
     memcpy(out, q, len);
     out[len] = '\0';
     return 0;
+}
+
+/* Is `a` an older release than `b`? Both are dotted numbers, no leading v.
+ * Compared field by field as integers: a string compare puts 0.552 above
+ * 0.627 at the second field and would have reported an install 75 releases
+ * behind as up to date. */
+static int version_is_older(const char* a, const char* b) {
+    while (a && b && *a && *b) {
+        long x = strtol(a, NULL, 10);
+        long y = strtol(b, NULL, 10);
+        if (x != y) return x < y;
+        const char* na = strchr(a, '.');
+        const char* nb = strchr(b, '.');
+        if (!na || !nb) return (!na && nb) ? 1 : 0;
+        a = na + 1;
+        b = nb + 1;
+    }
+    return 0;
+}
+
+/* Tell the reader when a newer release exists (#stale-install).
+ *
+ * `ae upgrade` has always worked; nothing ever said to run it. An install
+ * sitting 75 releases behind reported itself healthy, because every check here
+ * compares this binary against its own siblings, never against what has been
+ * released. The cost of that is not abstract: an old stdlib silently answers
+ * `ae run`, so a function added since resolves as "undefined" and the report
+ * lands on whoever added it.
+ *
+ * Asked at most once a day and cached, because `ae version` should not need
+ * the network to answer. Every failure is silent: offline, rate-limited, or a
+ * cache that cannot be written all leave the output exactly as it was. */
+static void report_newer_release(void) {
+    const char* home = getenv("HOME");
+    if (!home || !home[0]) return;
+
+    char cache_dir[1024], cache[1200];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/.aether/cache", home);
+    snprintf(cache, sizeof(cache), "%s/latest_release", cache_dir);
+
+    char latest[64] = {0};
+    int have = 0;
+    struct stat st;
+    if (stat(cache, &st) == 0 && (time(NULL) - st.st_mtime) < 24 * 60 * 60) {
+        FILE* f = fopen(cache, "r");
+        if (f) {
+            if (fgets(latest, sizeof(latest), f)) {
+                char* nl = strchr(latest, '\n');
+                if (nl) *nl = '\0';
+                have = latest[0] != '\0';
+            }
+            fclose(f);
+        }
+    }
+
+    if (!have) {
+        if (fetch_latest_release_tag(latest, sizeof(latest)) != 0) return;
+        FILE* f = fopen(cache, "w");
+        if (f) { fprintf(f, "%s\n", latest); fclose(f); }
+    }
+
+    const char* lv = (latest[0] == 'v') ? latest + 1 : latest;
+    if (!lv[0] || !version_is_older(AE_VERSION, lv)) return;
+
+    printf("\nA newer release is available: %s (this is %s).\n", lv, AE_VERSION);
+    printf("         `ae upgrade` installs it and switches to it.\n");
+    printf("         Until then `ae run` uses the older stdlib, so anything\n");
+    printf("         added since %s resolves as undefined.\n", AE_VERSION);
 }
 
 // "ae install [<version>]" — install a release into ~/.aether/versions/.
@@ -2079,6 +2148,8 @@ int cmd_version(int argc, char** argv) {
             printf("         `ae version use %s` switches the pinned install; this\n", pinned);
             printf("         binary keeps reporting and behaving as %s.\n", AE_VERSION);
         }
+
+        report_newer_release();
 
         printf("\nSubcommands:\n");
         printf("  ae version list              List all available releases\n");

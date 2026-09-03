@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ae version` says when a newer release exists.** `ae upgrade` has always
+  worked; nothing ever said to run it. Every check in `ae version` compared the
+  binary against its own siblings, the `aetherc` it resolves and the
+  `active_version` pin, and never against what had been released, so an install
+  75 releases behind reported itself healthy. That is not cosmetic: `ae run`
+  resolves the stdlib from the install, so a function added since silently
+  resolves as `undefined`, and the report lands on whoever added it rather than
+  on the stale toolchain. Asked at most once a day and cached, because
+  `ae version` should not need the network to answer, and silent on every
+  failure: offline, rate-limited, or an unwritable cache all leave the output
+  exactly as it was.
+
 ## [0.627.0]
 
 ### Fixed
