@@ -16,10 +16,10 @@ struct Other { b: int }
 
 // The reported shape: a bare-ptr slot, later assigned a typed pointer.
 pick(issuer: ptr, flag: int) -> ptr {
-    responder = issuer              // slot inferred as bare `ptr`
-    delegated = null as *Leaf       // typed pointer
+    responder = issuer // slot inferred as bare `ptr`
+    delegated = null as *Leaf // typed pointer
     if flag == 1 {
-        responder = delegated       // ptr <- *Leaf: must be legal
+        responder = delegated // ptr <- *Leaf: must be legal
     }
     return responder
 }
@@ -27,8 +27,8 @@ pick(issuer: ptr, flag: int) -> ptr {
 main() {
     // Declaration-position widening, both directions.
     f = null as *Leaf
-    let p: ptr = f                  // *Leaf -> ptr  (the #1877 case)
-    let q: *Leaf = p                // ptr -> *Leaf  (already legal)
+    let p: ptr = f // *Leaf -> ptr  (the #1877 case)
+    let q: *Leaf = p // ptr -> *Leaf  (already legal)
 
     r = pick(null, 0)
     s = pick(null, 1)
