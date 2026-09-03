@@ -11,6 +11,27 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A typed pointer (`*T`) could not be assigned to a bare `ptr`** (#1880),
+  which failed with `error[E0200]: Type mismatch in variable initialization` at
+  a post-inlining line number that exists in no source file. `ptr` is
+  documented as "void* for C interop", and `int`, arrays and function pointers
+  all convert to it freely — but two `TYPE_PTR`s fell through to `types_equal`,
+  which recurses into the element type and compared `struct T` against `NULL`.
+  The reverse (`ptr` → `*T`) already worked.
+
+  A bare `ptr` on either side is now the universal pointer, matching the rule
+  bare `actor_ref` already had. Two *typed* pointers still compare
+  structurally, so `*Foo` → `*Bar` remains an error.
+
+  This blocked the native (no-FFI) Aether WebDriver binding and anything
+  reusing it: `std.cryptography`'s `tls13_cert` assigns a `*LeafCert` into a
+  slot inferred as bare `ptr`, so any program whose import graph reached that
+  function failed to typecheck. It presented as "binding the call's result
+  fails, discarding it succeeds", because discarding the result meant the
+  function was never typechecked at all.
+
 ## [0.628.0]
 
 ### Added
