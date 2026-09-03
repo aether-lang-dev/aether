@@ -237,6 +237,12 @@ static void ae_define_append(const char* name) {
 static bool g_emit_exe = true;
 static bool g_emit_lib = false;
 static bool g_emit_csrc = false;  // #996 --emit=csrc: emit .c + catalog .h, no gcc
+/* --emit=staticlib: one .a holding the program's objects AND the runtime +
+ * stdlib objects, rather than a shared library. iOS is the motivating target:
+ * Apple forbids third-party dynamic libraries in App Store binaries, so the
+ * dylib --emit=lib produces cannot ship — the app must link Aether statically.
+ * Cross-only for now; the native path keeps its .so/.dylib shapes. */
+static bool g_emit_staticlib = false;
 
 /* Explicit wasm export list, from --export=<sym> (repeatable) or
  * --exports=a,b,c. REPLACES the catalog-derived set when present rather than
@@ -5548,6 +5554,13 @@ static int cmd_build(int argc, char** argv) {
                 g_emit_exe = false;
                 g_emit_lib = true;
                 g_emit_obj = true;
+            } else if (strcmp(val, "staticlib") == 0) {
+                /* Same lib-style codegen as --emit=lib (no `main`, the
+                 * aether_<name> catalog exported), but archived instead of
+                 * linked. See g_emit_staticlib for why iOS needs this. */
+                g_emit_exe = false;
+                g_emit_lib = true;
+                g_emit_staticlib = true;
             } else if (strcmp(val, "csrc") == 0) {
                 /* #996: --emit=csrc — emit the portable generated C + a catalog
                  * header, and STOP (no gcc). Uses --emit=lib codegen (same
@@ -5557,7 +5570,7 @@ static int cmd_build(int argc, char** argv) {
                 g_emit_lib = true;
                 g_emit_csrc = true;
             } else {
-                fprintf(stderr, "Error: --emit must be one of: exe, lib, both, obj, csrc (got '%s')\n", val);
+                fprintf(stderr, "Error: --emit must be one of: exe, lib, staticlib, both, obj, csrc (got '%s')\n", val);
                 return 1;
             }
         } else if (strcmp(argv[i], "--namespace") == 0 && i + 1 < argc) {
@@ -5609,7 +5622,8 @@ static int cmd_build(int argc, char** argv) {
                         "aarch64-linux-musl, x86_64-linux-musl, "
                         "aarch64-freebsd, x86_64-freebsd, x86_64-windows, "
                         "aarch64-windows, wasm32-wasi, aarch64-ios, "
-                        "aarch64-ios-simulator, x86_64-ios-simulator).\n");
+                        "aarch64-ios-simulator, x86_64-ios-simulator, "
+                        "aarch64-ios-macabi, x86_64-ios-macabi).\n");
         return 1;
     }
     int is_wasm = target && strcmp(target, "wasm") == 0;
@@ -5620,6 +5634,20 @@ static int cmd_build(int argc, char** argv) {
         g_wasm_lib_wants_catalog = true;
     }
     int is_cross = ztriple != NULL;
+
+    /* --emit=staticlib is implemented on the cross path only: it archives the
+     * per-target runtime objects that path already builds. The native build
+     * links against a prebuilt libaether.a instead of compiling one, so there
+     * is no equivalent object set to archive here. Rejecting is the honest
+     * answer — falling through would emit a .so under a .a name. */
+    if (g_emit_staticlib && !is_cross) {
+        fprintf(stderr,
+            "Error: --emit=staticlib requires a cross target (e.g. "
+            "--target=aarch64-ios).\n"
+            "  For a native static library, link your objects against the "
+            "installed libaether.a — see `ae cflags`.\n");
+        return 1;
+    }
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
     if (file && dir_exists(file)) {
@@ -5663,9 +5691,13 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "             aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");
         fprintf(stderr, "             (freebsd needs AETHER_SYSROOT=<base sysroot>; see aether-crossbuild)\n");
-        fprintf(stderr, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator\n");
-        fprintf(stderr, "             (iOS uses Xcode/xcrun, not zig; macOS host only, --emit=lib ok;\n");
-        fprintf(stderr, "              AETHER_IOS_MIN sets the deployment target, default 15.0)\n");
+        fprintf(stderr, "             aarch64-ios, aarch64-ios-simulator, x86_64-ios-simulator,\n");
+        fprintf(stderr, "             aarch64-ios-macabi, x86_64-ios-macabi (Mac Catalyst)\n");
+        fprintf(stderr, "             (iOS uses Xcode/xcrun, not zig; macOS host only;\n");
+        fprintf(stderr, "              --emit=lib gives a dylib, --emit=staticlib a .a -- an App\n");
+        fprintf(stderr, "              Store build needs the .a, as iOS forbids 3rd-party dylibs;\n");
+        fprintf(stderr, "              AETHER_IOS_MIN sets the deployment target, default 15.0\n");
+        fprintf(stderr, "              for iOS; Catalyst 13.1 x86_64 / 14.0 arm64)\n");
         return 1;
     }
 
@@ -5744,6 +5776,10 @@ static int cmd_build(int argc, char** argv) {
     // --emit=obj shares the lib codegen but produces a `.o`, not a shared
     // library, so the lib prefix and extension do not apply to it.
     if (g_emit_lib && !g_emit_exe && !is_wasm && !output_name && !g_emit_obj) {
+        /* A static archive is ".a" for every target this path serves, so it
+         * overrides the host-conditional shared-library extension below —
+         * which describes the HOST, and would name a cross-built iOS archive
+         * after whatever machine happened to build it. */
 #ifdef __APPLE__
         const char* lib_ext = ".dylib";
 #elif defined(_WIN32)
@@ -5751,6 +5787,7 @@ static int cmd_build(int argc, char** argv) {
 #else
         const char* lib_ext = ".so";
 #endif
+        if (g_emit_staticlib) lib_ext = ".a";
         // Find the basename portion in exe_file and insert "lib" prefix.
         // Strategy: walk back from the end to the last separator, copy the
         // prefix, append "lib", then the basename with its extension swapped.
@@ -6114,7 +6151,8 @@ static int cmd_build(int argc, char** argv) {
     int build_ret;
     if (is_cross) {
         const char* extra = extra_files[0] ? extra_files : NULL;
-        build_ret = run_cross_build(c_file, exe_file, !quick, extra, ztriple, g_emit_lib != 0);
+        build_ret = run_cross_build(c_file, exe_file, !quick, extra, ztriple,
+                                    g_emit_lib != 0, g_emit_staticlib != 0);
         if (build_ret != 0) {
             fprintf(stderr, "Build failed.\n");
             return 1;

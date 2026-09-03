@@ -2,11 +2,11 @@
  * std.regex — Perl-compatible regular expressions via libpcre2-8.
  *
  * Detection: AETHER_HAS_PCRE2 is defined by the Makefile when
- * `pkg-config libpcre2-8` succeeds. Without it, every entry point
- * compiles to a safe stub and `regex.last_error()` returns
- * "regex: built without libpcre2-8 (install libpcre2-dev and rebuild)" —
- * so consumers of std.regex never break the build; they just see a
- * clean diagnostic at runtime.
+ * `pkg-config libpcre2-8` succeeds, and unconditionally when the vendored
+ * engine is used (#1389) — which needs no system library, so a normal build
+ * always has it. Building WITHOUT it is therefore an error by default: see
+ * the AETHER_REGEX_ALLOW_STUB block below, which explains why the old silent
+ * fallback to no-op stubs was worth giving up.
  *
  * Handles:
  *   - RegexHandle   — opaque, holds the compiled pcre2_code*.
@@ -326,6 +326,27 @@ const char* aether_regex_replace_all(void* h_, const void* s_, const void* repl_
 }
 
 #else /* !AETHER_HAS_PCRE2 — stub mode: every call returns a safe sentinel. */
+
+/* Stub mode is a real configuration (a host with no libpcre2-8 and no vendored
+ * engine selected), but it is almost never the INTENDED one: `ae` and the
+ * Makefile both pass -DAETHER_HAS_PCRE2 unconditionally — the vendored engine
+ * needs no system library, so there is no target on which stubbing is the
+ * normal outcome. Reaching here therefore usually means a hand-rolled build
+ * (an app linking libaether's sources directly, an Xcode target, a bespoke
+ * cross recipe) simply forgot the defines.
+ *
+ * That failure is silent and expensive: the pcre2 objects link fine, nothing
+ * errors at build time, and every regex.compile then returns the stub error at
+ * RUNTIME — which cost the aether-ui line a day when vg's SVG path normalizer
+ * silently matched nothing and a scene rendered as bare background.
+ *
+ * So stub mode must now be asked for by name. A build that genuinely wants it
+ * defines AETHER_REGEX_ALLOW_STUB and gets the old behaviour; a build that
+ * merely forgot the defines gets a compile error naming the fix instead of a
+ * runtime mystery. */
+#ifndef AETHER_REGEX_ALLOW_STUB
+#error "std.regex: built without AETHER_HAS_PCRE2 — every regex call would silently fail at runtime. Add -DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 -I<aether>/std/regex (the vendored engine needs no system library), or define AETHER_REGEX_ALLOW_STUB to deliberately build the no-op stubs."
+#endif
 
 static void set_unavailable(void) {
     set_last_error("regex: built without libpcre2-8 (install libpcre2-dev and rebuild)");

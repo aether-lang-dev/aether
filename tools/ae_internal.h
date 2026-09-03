@@ -141,6 +141,6 @@ int  run_cross_compile_obj(const char* c_file, const char* obj_file,
                            bool optimize, const char* ztriple);
 int  run_cross_build(const char* c_file, const char* out_file,
                      bool optimize, const char* extra_files,
-                     const char* ztriple, bool emit_lib);
+                     const char* ztriple, bool emit_lib, bool emit_staticlib);
 
 #endif /* AE_INTERNAL_H */
