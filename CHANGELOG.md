@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.626.0]
+
 ### Added
 
 - **`math.lrint(x) -> long`** — round-to-nearest returning an integer directly,
