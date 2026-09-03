@@ -5407,6 +5407,13 @@ int cmd_build_namespace(int argc, char** argv) {
                 fprintf(stderr, "Warning: install_name_tool failed on %s; "
                                 "consumers may fail to dlopen.\n", out_path);
             }
+            /* Rewriting the id modifies the file, which invalidates the ad-hoc
+             * signature ld64 attaches to everything it links on Apple silicon.
+             * dyld does not report that as an error: the kernel SIGKILLs the
+             * process that dlopens it, with no message, so a host program died
+             * on load and the library looked fine on disk. Re-sign after every
+             * modification. */
+            macos_prepare_binary(out_path);
         }
 #endif
         printf("Built namespace: %s\n", out_path);
@@ -6300,6 +6307,10 @@ static int cmd_build(int argc, char** argv) {
             fprintf(stderr, "Warning: install_name_tool failed on %s; "
                             "consumers may fail to dlopen.\n", exe_file);
         }
+        /* See cmd_build_namespace: the id rewrite invalidates ld64's ad-hoc
+         * signature, and the loader's answer to that is SIGKILL, not an
+         * error. */
+        macos_prepare_binary(exe_file);
     }
 #endif
 

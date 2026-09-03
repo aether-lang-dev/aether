@@ -78,6 +78,16 @@ version number before tagging the release.
   showed as executed. Both now carry the position of the keyword that
   introduces them.
 
+- **Every `ae build --namespace` library on macOS killed the process that
+  loaded it.** `ae` rewrites the library's install_name after linking, and that
+  modification invalidates the ad-hoc signature ld64 attaches to everything it
+  links on Apple silicon. dyld does not report that as an error: the kernel
+  SIGKILLs the loading process with no message at all, so a Python, Ruby or C
+  host died on `dlopen` while the library looked healthy on disk and
+  `codesign -v` was never consulted. The library is re-signed after the
+  rewrite, and `--emit=lib` does the same, where a newer `install_name_tool`
+  happens to re-sign on its own but older ones do not.
+
 - **`ae build --target=wasm32-wasi --emit=lib` could not link.** A wasi library
   is a reactor, not a command: left in command mode zig links wasi-libc's
   startup object, which demands a `main` the library has not got, and
