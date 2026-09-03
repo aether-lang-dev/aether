@@ -69,6 +69,14 @@ export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:-mscoree=d;mshtml=d}"
 for d in "${DIRS[@]}"; do
     [ -d "$d" ] && find "$d" -name '*.ae' -print >> "$tmpdir/all.txt"
 done
+# A library module has no main(), so `ae build` cannot produce a runnable
+# binary from it and it would report BUILDFAIL as a harness artifact rather
+# than a finding. The sweep is about programs that RUN, so drop them here.
+: > "$tmpdir/runnable.txt"
+while IFS= read -r f; do
+    grep -qE '^[[:space:]]*main[[:space:]]*\(' "$f" && printf '%s\n' "$f" >> "$tmpdir/runnable.txt"
+done < "$tmpdir/all.txt"
+mv "$tmpdir/runnable.txt" "$tmpdir/all.txt"
 sort -o "$tmpdir/all.txt" "$tmpdir/all.txt"
 
 if [ -f "$EXCLUDE_FILE" ]; then
