@@ -11,6 +11,28 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Assigning a `string` field through a setter segfaulted on a hand-malloc'd
+  box** (#1873, regression in 0.624.0). #1866 correctly made the ownership
+  wrapper fire for a pointer-to-struct *parameter*, so a setter's store takes
+  ownership like a local's does. But the emitted store also reads the box's
+  `_heap_<field>` tracker to decide whether to release the previous value, and
+  a box made with `malloc(n) as *T` has never had that tracker initialised —
+  so a non-zero garbage value made it call `aether_heap_str_free()` on a
+  garbage pointer.
+
+  The parameter case now stores and sets the tracker (keeping #1866's leak
+  fix) without reading the uninitialised one, since a parameter is no promise
+  that the caller zeroed the box. `heap.new` boxes are unaffected and keep the
+  releasing behaviour.
+
+  This shipped: it crashed aether-ui's font_picker on the first click under
+  0.626.0 while 0.613.0 survived, pinning that line to the older toolchain.
+  The existing test used a zeroed box, so CI stayed green; the new one uses a
+  hand-malloc'd box with padding, because glibc's free-list metadata zeroes
+  the tracker in a smaller struct and masks the bug.
+
 ## [0.626.0]
 
 ### Added
