@@ -92,8 +92,13 @@ got=$("$AE" run root_entry.ae 2>&1 | tail -1)
 # itself hit a warm entry built earlier in this test. A hit reuses an entry and
 # a miss creates one, so the entry count answers the question exactly, on every
 # machine, with no timing at all.
-CACHE_DIR="${AETHER_CACHE_DIR:-$HOME/.aether/cache}"
-count_entries() { ls -1 "$CACHE_DIR" 2>/dev/null | wc -l | tr -d ' '; }
+# Ask `ae` how many builds it has cached rather than counting files under a
+# path we guessed. The guess was "$HOME/.aether/cache", which is wrong on
+# Windows: ae resolves the cache under USERPROFILE (C:\Users\...), while a
+# shell under MSYS2 reports $HOME as /home/... -- two different directories, so
+# the count was 0 on both sides and the assertion compared 0 to 0. `ae cache`
+# prints "Cache: N build(s), ..." from the same code that writes them.
+count_entries() { "$AE" cache 2>/dev/null | sed -n 's/^Cache: *\([0-9][0-9]*\) build.*/\1/p'; }
 
 # Unique per run: a fixed body would already have a cache entry from an
 # earlier invocation of this test, so "did the count grow" would answer no for
