@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.635.0]
+
 ### Added
 
 - **`contrib.tinyweb` can serve HTTPS** — `with_tls(server, cert, key)`.
