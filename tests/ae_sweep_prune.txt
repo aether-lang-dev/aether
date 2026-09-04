@@ -131,6 +131,7 @@ tests/integration/http_server_sse/
 tests/integration/https_pure_tls_vertical/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
+tests/integration/tinyweb_tls/
 tests/integration/http_stream_upload/
 tests/integration/import_error_attribution/
 tests/integration/inferred_narrowing/
