@@ -77,8 +77,12 @@ case "$ERR" in
   *"newer release is available"*) ;;
   *) fail "failed build: no hint on stderr" ;;
 esac
-N="$(printf '%s\n' "$ERR" | grep -c 'no_such_function_anywhere' || :)"
-[ "$N" -le 2 ] || fail "failed build: diagnostics repeated ($N mentions, expected the error once)"
+# Count the DIAGNOSTIC HEADER, not every mention of the name. A diagnostic
+# also renders the offending source line, which contains the name, so
+# counting mentions conflates "printed twice" with "printed once, with a
+# snippet" and breaks the moment a diagnostic gains context.
+N="$(printf '%s\n' "$ERR" | grep -c "^error\[.*Undefined function 'no_such_function_anywhere'" || :)"
+[ "$N" -eq 1 ] || fail "failed build: diagnostics repeated ($N times, expected the error once)"
 printf '%s\n' "$ERR" | grep -q '\[diag\]' && fail "failed build: internal [diag] output shipped to the user"
 
 # --- `ae run` fails the same way, once ------------------------------------
@@ -90,8 +94,8 @@ case "$ERR" in
   *"newer release is available"*) ;;
   *) fail "failed run: no hint on stderr" ;;
 esac
-N="$(printf '%s\n' "$ERR" | grep -c 'no_such_function_anywhere' || :)"
-[ "$N" -le 2 ] || fail "failed run: diagnostics repeated ($N mentions)"
+N="$(printf '%s\n' "$ERR" | grep -c "^error\[.*Undefined function 'no_such_function_anywhere'" || :)"
+[ "$N" -eq 1 ] || fail "failed run: diagnostics repeated ($N times)"
 printf '%s\n' "$ERR" | grep -q '\[diag\]' && fail "failed run: internal [diag] output shipped"
 
 # --- level: a failed build stays silent -----------------------------------
