@@ -1,0 +1,76 @@
+// #1890: streaming deflate — one stream held open across many flushes.
+//
+// The one-shot calls each emit a COMPLETE stream, which is wrong for a
+// long-lived response: an SSE connection carrying many small events needs ONE
+// deflate stream, flushed at each event boundary, so the client sees a single
+// continuous stream. N independently-compressed events concatenated is not
+// something any `Content-Encoding: gzip` client will decode.
+//
+// The assertion that matters is therefore NOT a round-trip of one chunk --
+// per-event compression passes that and is still broken. It is that every
+// flushed chunk CONCATENATED decodes as one stream.
+import std.zlib
+import std.string
+
+main() {
+    if zlib.available() == 0 {
+        println("zlib streaming ok (skipped: no backend)")
+        return 0
+    }
+
+    s, err = zlib.stream_new(zlib.GZIP, 6)
+    if err != "" { println("FAIL stream_new: ${err}") return 1 }
+
+    expected = ""
+    all = ""
+    first_flush = 0
+    later_flush = 0
+
+    i = 0
+    while i < 4 {
+        ev = "event: patch\ndata: chunk-${i}\n\n"
+        expected = string.concat(expected, ev)
+
+        c1, n1, e1 = zlib.stream_write(s, ev, string.length(ev))
+        if e1 != "" { println("FAIL stream_write: ${e1}") return 1 }
+        if n1 > 0 { all = string.concat(all, c1) }
+
+        c2, n2, e2 = zlib.stream_flush(s)
+        if e2 != "" { println("FAIL stream_flush: ${e2}") return 1 }
+        if n2 > 0 { all = string.concat(all, c2) }
+
+        // A flush must actually emit something, or the peer never sees
+        // the event until the connection closes -- which is the whole bug.
+        if n1 + n2 == 0 { println("FAIL: flush ${i} emitted nothing") return 1 }
+        if i == 0 { first_flush = n1 + n2 } else { later_flush = later_flush + n1 + n2 }
+        i = i + 1
+    }
+
+    t, tn, e3 = zlib.stream_finish(s)
+    if e3 != "" { println("FAIL stream_finish: ${e3}") return 1 }
+    if tn > 0 { all = string.concat(all, t) }
+    zlib.stream_free(s)
+
+    total = string.length(all)
+
+    // THE test: the whole concatenation decodes as ONE gzip stream.
+    out, on, e4 = zlib.gzip_inflate(all, total)
+    if e4 != "" { println("FAIL: concatenated chunks did not decode: ${e4}") return 1 }
+    if out != expected {
+        println("FAIL: decoded ${on} bytes, content mismatch")
+        return 1
+    }
+
+    // The window must be SHARED across flushes: later events repeat the
+    // earlier ones almost exactly, so they must cost far less than the
+    // first. Independent per-event compression would cost about the same
+    // each time -- this is what distinguishes streaming from N streams.
+    if later_flush >= first_flush * 3 {
+        println("FAIL: later flushes cost ${later_flush} vs first ${first_flush} —")
+        println("      the window does not look shared across flushes")
+        return 1
+    }
+
+    println("zlib streaming ok")
+    return 0
+}

@@ -11,6 +11,37 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **Streaming deflate in `std.zlib`** (#1890) — a handle that stays open across
+  writes, so a long-lived response is ONE compressed stream rather than many.
+
+  The existing calls are one-shot: each runs `deflateInit2` →
+  `deflate(Z_FINISH)` → `deflateEnd` and so emits a *complete* stream. That is
+  wrong for an SSE connection carrying many small events, which needs one
+  deflate stream held open and flushed at each event boundary. Compressing each
+  event independently produces N complete streams concatenated, which no
+  `Content-Encoding: gzip` client will decode — so the failure is a response
+  the browser rejects, not merely a worse ratio.
+
+  `stream_new(format, level)` → `stream_write` → `stream_flush` →
+  `stream_finish` → `stream_free`, with `RAW` / `ZLIB` / `GZIP` framing.
+  `stream_write` usually emits nothing (deflate buffers for ratio);
+  `stream_flush` is what emits a decodable boundary while keeping the window,
+  so later events cost far less than the first — three repetitive events
+  compress to 34, 12 and 11 bytes. Each handle owns its output buffer, so two
+  streams can be open on one thread without fighting over it.
+
+  Verified against **real `gunzip`**, not only our own inflate: our decoder
+  agreeing with our encoder would prove little, since the point of RFC 1952
+  framing is that a foreign decoder reads it. Streaming *inflate* is not
+  included; the one-shot readers handle a complete stream, including one
+  assembled from flushed chunks.
+
+  This also unblocks compressing a chunked or streaming HTTP response: the
+  gzip middleware in `std/http/middleware` compresses a complete `res->body`
+  in one call and has the same limitation from the other direction.
+
 ## [0.632.0]
 
 ### Added

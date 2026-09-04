@@ -27,7 +27,11 @@ exports(
     zlib_try_inflate, zlib_get_inflate_bytes, zlib_get_inflate_length,
     zlib_release_inflate,
     zlib_try_gzip_deflate, zlib_try_gzip_inflate,
-    available, deflate, inflate, gzip_deflate, gzip_inflate
+    zlib_try_stream_new, zlib_try_stream_write, zlib_try_stream_flush,
+    zlib_try_stream_finish, zlib_get_stream_bytes, zlib_get_stream_length,
+    zlib_release_stream,
+    available, deflate, inflate, gzip_deflate, gzip_inflate,
+    stream_new, stream_write, stream_flush, stream_finish, stream_free
 )
 
 // Probe: returns 1 when the toolchain was built with zlib detected,
@@ -53,6 +57,17 @@ extern zlib_release_inflate()
 
 extern zlib_try_gzip_deflate(data: string, length: int, level: int) -> int
 extern zlib_try_gzip_inflate(data: string, length: int) -> int
+
+// Streaming deflate (#1890). The handle keeps ONE deflate stream open
+// across many writes, so a long-lived response (an SSE connection, a
+// chunked body) is a single continuous stream the client can decode.
+extern zlib_try_stream_new(format: int, level: int) -> ptr
+extern zlib_try_stream_write(handle: ptr, data: string, length: int) -> int
+extern zlib_try_stream_flush(handle: ptr) -> int
+extern zlib_try_stream_finish(handle: ptr) -> int
+extern zlib_get_stream_bytes(handle: ptr) -> string
+extern zlib_get_stream_length(handle: ptr) -> int
+extern zlib_release_stream(handle: ptr)
 
 // Length-preserving string constructor from std.string — takes an
 // explicit byte count so binary payloads with embedded NULs survive
@@ -132,4 +147,87 @@ gzip_inflate(data: string, length: int) -> {
     owned = string_new_with_length(raw, n)
     zlib_release_inflate()
     return owned, n, ""
+}
+
+// ---- Streaming deflate (#1890) -------------------------------------
+//
+// The one-shot calls above each emit a COMPLETE stream, which is wrong
+// for a long-lived response: an SSE connection carrying many events
+// needs one stream held open and flushed at each event boundary. N
+// independently-compressed events concatenated is not a stream any
+// `Content-Encoding: gzip` client will decode.
+//
+//   s, err = zlib.stream_new(zlib.GZIP, 6)
+//   _, _, err = zlib.stream_write(s, event, string.length(event))
+//   chunk, n, err = zlib.stream_flush(s)     // send these bytes now
+//   ...                                       // more events, same stream
+//   tail, n, err = zlib.stream_finish(s)      // at connection close
+//   zlib.stream_free(s)
+
+// Framing for stream_new. RAW is bare DEFLATE (RFC 1951), ZLIB adds the
+// RFC 1950 wrapper, GZIP the RFC 1952 one -- the last is what
+// `Content-Encoding: gzip` means.
+const RAW = 0
+const ZLIB = 1
+const GZIP = 2
+
+// Open a stream. Returns (handle, "") on success, (null, error) when
+// zlib is absent, the format/level is out of range, or allocation
+// fails. Every other stream call needs the handle, so an unavailable
+// backend fails HERE rather than silently producing nothing later.
+stream_new(format: int, level: int) -> {
+    if zlib_backend_available() == 0 {
+        return null, "zlib unavailable"
+    }
+    h = zlib_try_stream_new(format, level)
+    if h == null {
+        return null, "zlib stream_new failed"
+    }
+    return h, ""
+}
+
+// Feed bytes into the stream. Returns (bytes, byte_count, "") -- and
+// the byte count is USUALLY 0, because deflate buffers internally for
+// compression ratio. Emit whatever comes back, then call stream_flush
+// when the event is complete.
+stream_write(handle: ptr, data: string, length: int) -> {
+    if handle == null { return "", 0, "zlib stream: null handle" }
+    ok = zlib_try_stream_write(handle, data, length)
+    if ok == 0 { return "", 0, "zlib stream_write failed" }
+    return stream_take(handle)
+}
+
+// Z_SYNC_FLUSH: emit everything buffered and end on a byte boundary the
+// decoder can consume, WITHOUT closing the stream. This is the call
+// that makes per-event streaming work.
+stream_flush(handle: ptr) -> {
+    if handle == null { return "", 0, "zlib stream: null handle" }
+    ok = zlib_try_stream_flush(handle)
+    if ok == 0 { return "", 0, "zlib stream_flush failed" }
+    return stream_take(handle)
+}
+
+// Z_FINISH: emit the tail and any trailer. The handle takes no further
+// writes; calling it twice is harmless and yields no bytes the second
+// time. Still requires stream_free afterwards.
+stream_finish(handle: ptr) -> {
+    if handle == null { return "", 0, "zlib stream: null handle" }
+    ok = zlib_try_stream_finish(handle)
+    if ok == 0 { return "", 0, "zlib stream_finish failed" }
+    return stream_take(handle)
+}
+
+// Copy the borrowed C buffer into an owned, length-aware AetherString.
+// Shared by write/flush/finish so the ownership rule lives in one place.
+stream_take(handle: ptr) -> {
+    raw = zlib_get_stream_bytes(handle)
+    n = zlib_get_stream_length(handle)
+    if n == 0 { return "", 0, "" }
+    owned = string_new_with_length(raw, n)
+    return owned, n, ""
+}
+
+// Release the handle. Safe on null.
+stream_free(handle: ptr) {
+    if handle != null { zlib_release_stream(handle) }
 }

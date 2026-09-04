@@ -81,7 +81,7 @@ header comment is the authoritative description.
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 16 | [full section](#compression-stdzlib) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
