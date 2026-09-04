@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.636.0]
+
 ### Fixed
 
 - **A diagnostic that knew its line printed no location at all.** Both
