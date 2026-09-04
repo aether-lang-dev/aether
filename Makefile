@@ -272,6 +272,8 @@ ifeq ($(FREEBSD),1)
   NGHTTP2 := 0
   PCRE2 := 0
   YAML := 0
+  BROTLI := 0
+  ZSTD := 0
   # Link the FreeBSD-only libraries from the base sysroot. Zig supplies the
   # CRT and libc for this target; adding the base's startup objects as well
   # would duplicate `_start`. Overrides the native LDFLAGS assembly below.
@@ -315,6 +317,11 @@ ifeq ($(WINDOWS),1)
   ZLIB := 0
   NGHTTP2 := 0
   YAML := 0
+  # Same reason as the four above: the HOST's pkg-config would happily report
+  # a libbrotlienc/libzstd that the cross toolchain has no headers for, and
+  # the source then #includes a header zig cannot find. Both stub cleanly.
+  BROTLI := 0
+  ZSTD := 0
   # PCRE2 has a vendored in-tree fallback (no host library involved), so
   # std.regex survives the cross build.
   PCRE2 := vendored
