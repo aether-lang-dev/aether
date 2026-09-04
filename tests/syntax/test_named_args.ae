@@ -1,7 +1,7 @@
 // Test: named arguments in function calls
 
 greet(name: string, count: int) {
-    for (i = 0; i < count; i ++) {
+    for (i = 0; i < count; i++) {
         println(name)
     }
 }

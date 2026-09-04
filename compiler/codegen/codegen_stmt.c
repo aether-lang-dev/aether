@@ -1559,6 +1559,34 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     return 1;
 }
 
+/* datastar#4: is this initialiser a builder call carrying a trailing block?
+ *
+ * Such a call is lowered TWICE by design: the declaration emits it so the
+ * variable has a value, and the builder handler further down re-emits it with
+ * the filled config and reassigns. The ordinary declaration path already
+ * suppresses its half for exactly this reason (`defer_with_trailing`, which
+ * emits ` = 0`), but the heap-STRING reassignment path did not -- so a builder
+ * declaring a `string` return ran its body twice, once with a NULL config.
+ *
+ * Silent, and side-effecting: the assigned value is correct because the second
+ * write wins, so only a builder that DOES something reveals it. The datastar
+ * port hit it as every SSE patch being streamed twice, once without its
+ * selector.
+ *
+ * `err = sse.patch_elements(html) { ... }` is the natural shape for any
+ * builder reporting an error Go-style, so this is on a common path. */
+static int init_is_builder_with_trailing(CodeGenerator* gen, ASTNode* init) {
+    if (!gen || !init) return 0;
+    if (init->type != AST_FUNCTION_CALL || !init->value) return 0;
+    if (!is_builder_func_reg(gen, init->value)) return 0;
+    for (int i = 0; i < init->child_count; i++) {
+        ASTNode* a = init->children[i];
+        if (a && a->type == AST_CLOSURE && a->value &&
+            strcmp(a->value, "trailing") == 0) return 1;
+    }
+    return 0;
+}
+
 /* Struct-reassignment helper (#465). For `<var> = <struct_literal>`
  * where `<var>` is a struct local with heap-string fields, emit
  * `<Struct>_destroy(&<var>)` BEFORE the bare assignment so the
@@ -4769,7 +4797,19 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                      * for escaped seqs (returned / raw-stored) exactly like
                      * the heap-string escape gate. */
                     int var_is_seq = is_seq_var(gen, stmt->value);
-                    if (var_is_seq && stmt->child_count > 0) {
+                    /* datastar#4: a builder call with a trailing block is
+                     * re-emitted with the filled config by the builder handler
+                     * below, which assigns the real value. Emitting it here as
+                     * well runs the builder's BODY twice -- once with a NULL
+                     * config -- which is silent whenever the body has side
+                     * effects. The plain declaration path already suppresses
+                     * its half (`defer_with_trailing`); these ownership-aware
+                     * paths did not. */
+                    int builder_defers = init_is_builder_with_trailing(
+                        gen, stmt->child_count > 0 ? stmt->children[0] : NULL);
+                    if (builder_defers) {
+                        /* declared already; the builder handler assigns. */
+                    } else if (var_is_seq && stmt->child_count > 0) {
                         ASTNode* srhs = stmt->children[0];
                         int srhs_owning = is_seq_owning_expr(gen, srhs);
                         int srhs_alias = (srhs->type == AST_IDENTIFIER &&

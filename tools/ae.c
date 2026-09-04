@@ -5798,6 +5798,23 @@ static int cmd_build(int argc, char** argv) {
         // Explicit -o: use the path as-is
         snprintf(c_file, sizeof(c_file), "%s.c", output_name);
         snprintf(exe_file, sizeof(exe_file), "%s" EXE_EXT, output_name);
+        /* datastar#9: create the parent directory, as `cc -o`, `go build -o`
+         * and `cargo --target-dir` all effectively do. Without this,
+         * `ae build -o target/foo x.ae` failed with "Error opening output
+         * file: No such file or directory" -- a message naming neither the
+         * path nor the missing directory, and reporting a `.c` the user never
+         * asked for (the intermediate), so the first guess is a compiler bug
+         * rather than a missing mkdir. */
+        {
+            char odir[2048];
+            snprintf(odir, sizeof(odir), "%s", output_name);
+            char* cut = strrchr(odir, '/');
+#ifdef _WIN32
+            char* bcut = strrchr(odir, '\\');
+            if (!cut || (bcut && bcut > cut)) cut = bcut;
+#endif
+            if (cut && cut != odir) { *cut = '\0'; mkdirs(odir); }
+        }
     } else if (path_exists("aether.toml")) {
         // Project mode: output to target/
         mkdirs("target");

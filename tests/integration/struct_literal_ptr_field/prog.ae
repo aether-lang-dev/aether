@@ -1,0 +1,47 @@
+// datastar#10: reading a field off a `*T` inside a STRUCT LITERAL must emit
+// `->`, not `.`.
+//
+// Member access picks the accessor from the base's resolved type. That type is
+// present for a `*T` parameter and for a cast local in ordinary statement
+// position, but a cast local used inside a struct-literal initialiser arrived
+// with TYPE_UNKNOWN, so the deref lowered to `.` and gcc rejected the
+// generated C: "'c' is a pointer; did you mean to use '->'?". The Aether
+// source is valid and the error names C the user never wrote.
+import std.heap
+
+struct Config { auth_code: string }
+struct Result { code: string }
+
+// The reported shape: `as *T` assigned to a local, then read in a literal.
+from_cast(p: ptr) -> Result {
+    c = p as *Config
+    return Result { code: c.auth_code }
+}
+
+// A prior statement-position read must not change the outcome either way.
+from_cast_after_use(p: ptr) -> Result {
+    c = p as *Config
+    x = c.auth_code
+    if x != "" {}
+    return Result { code: c.auth_code }
+}
+
+// A typed pointer PARAMETER always worked; keep it covered so a future change
+// cannot regress the case that was fine.
+from_param(c: *Config) -> Result {
+    return Result { code: c.auth_code }
+}
+
+main() {
+    cfg = heap.new(Config)
+    cfg.auth_code = "AC"
+    a = from_cast(cfg as ptr)
+    b = from_cast_after_use(cfg as ptr)
+    d = from_param(cfg)
+    if a.code == "AC" && b.code == "AC" && d.code == "AC" {
+        println("struct literal ptr field ok")
+    } else {
+        println("WRONG: ${a.code} ${b.code} ${d.code}")
+    }
+    return 0
+}

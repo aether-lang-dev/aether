@@ -49,7 +49,7 @@ main() {
 
     buf = bytes.new(n)
     i = 0
-    for (i = 0; i < n; i ++) {
+    for (i = 0; i < n; i++) {
         bytes.set(buf, i, 0)
     }
     _ = bytes.set_length(buf, n)

@@ -26,7 +26,7 @@ render(g: ptr, val: int, cursor: int, op: int, prev: int) {
     print("\x1b[H\x1b[2J  \x1b[1;36mCalculator\x1b[0m\n\n")
     println("  \x1b[44;97;1m  ${val}                \x1b[0m\n")
     n = list.size(labs)
-    for (i = 0; i < n; i ++) {
+    for (i = 0; i < n; i++) {
         b, _ = list.get(labs, i)
         col = i - (i / 4) * 4
         if col == 0 { print("  ") }

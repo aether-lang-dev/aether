@@ -39,6 +39,45 @@ version number before tagging the release.
   than a working one and a stub. The contract is unchanged and verified
   against the RFC 4648 vectors, and invalid input now reports an error instead
   of quietly returning empty.
+
+## [0.631.0]
+
+### Fixed
+
+- **A value-returning `builder` with a trailing block ran its body TWICE in
+  assignment position.** The declaration emitted the call so the variable had a
+  value, then the builder handler re-emitted it with the filled config and
+  reassigned — and both ran, the first with a NULL config. The plain
+  declaration path already suppressed its half; the ownership-aware paths,
+  which is where a `string`-returning builder lands, did not. Silent, because
+  the second write wins so the assigned value is correct: only a builder whose
+  body has side effects reveals it. `err = sse.patch_elements(html) { ... }` is
+  the natural shape for any builder reporting an error Go-style, so this sat on
+  a common path — the Datastar port hit it as every SSE event being streamed
+  twice, once without its selector.
+
+- **A `*T` field read inside a struct literal emitted `.` instead of `->`.**
+  Member access picks its accessor from the base's resolved type, which is
+  present for a `*T` parameter and for a cast local in ordinary statement
+  position — but a cast local used inside a struct-literal initialiser arrived
+  untyped, so the deref lowered to `.` and GCC rejected the generated C
+  (`'c' is a pointer; did you mean to use '->'?`). Valid Aether, an error
+  naming C the author never wrote.
+
+- **`ae build -o dir/name` no longer fails when `dir` does not exist.** It
+  now creates the parent directory, as `cc -o`, `go build -o` and
+  `cargo --target-dir` all effectively do. The old failure was
+  `Error opening output file: No such file or directory`, naming neither the
+  path nor the missing directory, and reporting a `.c` the user never asked for
+  (the intermediate) — so the first guess was a compiler bug rather than a
+  missing `mkdir`.
+
+- **`ae fmt` no longer writes `i ++` for a postfix increment.** `++` and `--`
+  now bind tight to their operand in both prefix and postfix position, which is
+  how every hand-written Aether source in this tree spells it; the formatter had
+  been disagreeing with the code it exists to normalise. 18 files reformat as a
+  result.
+
 ## [0.630.0]
 
 ### Fixed
