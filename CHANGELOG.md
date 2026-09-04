@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.633.0]
+
 ### Added
 
 - **`std.zstd` — Zstandard compression (RFC 8878), streaming and one-shot**
