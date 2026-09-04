@@ -2573,8 +2573,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         else
             contrib_L[0] = '\0';
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s -L\"%s\" %s-laether -o \"%s\" %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, contrib_L, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s \"%s\" %s -L\"%s\" %s-laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, contrib_L, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
@@ -2582,8 +2582,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         }
     } else {
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s \"%s\" %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
