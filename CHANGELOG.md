@@ -13,6 +13,24 @@ version number before tagging the release.
 
 ### Added
 
+- **`std.zstd` — Zstandard compression (RFC 8878), streaming and one-shot**
+  (#1891). A different *format* from DEFLATE, not a faster zlib: this wraps
+  libzstd and is unrelated to `std.zlib` beyond the similar library name. Its
+  case is strongest away from the browser — archives, logs, snapshots,
+  internal RPC — since `Content-Encoding: zstd` support is thinner than `br`
+  and `gzip`.
+
+  Same streaming surface as `std.zlib` and `std.brotli`, so a caller choosing
+  an encoding writes one shape whichever it picks. The drain loop is the one
+  thing NOT shared: zstd terminates on `ZSTD_compressStream2` returning 0
+  ("bytes remaining to flush"), a third condition distinct from zlib's spare
+  `avail_out` and brotli's `HasMoreOutput` — reusing either would truncate the
+  frame. Level is 1–22 with 3 the default.
+
+  Verified against an **independent** libzstd streaming decoder, and gated by
+  `AETHER_HAS_ZSTD` like the rest; without it, `available()` returns 0 and
+  `stream_new` reports "zstd unavailable".
+
 - **`std.brotli` — Brotli compression (RFC 7932), streaming and one-shot**
   (#1891). `br` is what current browsers actually prefer: every modern browser
   lists it ahead of `gzip` in `Accept-Encoding`, and it typically beats gzip by

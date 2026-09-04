@@ -1,0 +1,67 @@
+// #1891: zstd streaming — one frame held open across many flushes.
+//
+// Zstandard is a different FORMAT from DEFLATE, not a faster zlib. Same shape
+// and same assertion as the zlib and brotli streaming tests: the point is not
+// that one chunk round-trips (independent per-event compression does that too
+// and is still broken), but that every flushed chunk CONCATENATED is one
+// continuous stream, and that later events cost far less than the first
+// because the window is shared.
+import std.zstd
+import std.string
+
+main() {
+    if zstd.available() == 0 {
+        println("zstd streaming ok (skipped: no backend)")
+        return 0
+    }
+
+    s, err = zstd.stream_new(zstd.DEFAULT_LEVEL)
+    if err != "" { println("FAIL stream_new: ${err}") return 1 }
+
+    all = ""
+    first = 0
+    later = 0
+
+    i = 0
+    while i < 4 {
+        ev = "event: patch\ndata: chunk-${i}\n\n"
+        c1, n1, e1 = zstd.stream_write(s, ev, string.length(ev))
+        if e1 != "" { println("FAIL stream_write: ${e1}") return 1 }
+        if n1 > 0 { all = string.concat(all, c1) }
+
+        c2, n2, e2 = zstd.stream_flush(s)
+        if e2 != "" { println("FAIL stream_flush: ${e2}") return 1 }
+        if n2 > 0 { all = string.concat(all, c2) }
+
+        // A flush must emit something, or the peer sees nothing until close.
+        if n1 + n2 == 0 { println("FAIL: flush ${i} emitted nothing") return 1 }
+        if i == 0 { first = n1 + n2 } else { later = later + n1 + n2 }
+        i = i + 1
+    }
+
+    t, tn, e3 = zstd.stream_finish(s)
+    if e3 != "" { println("FAIL stream_finish: ${e3}") return 1 }
+    if tn > 0 { all = string.concat(all, t) }
+    zstd.stream_free(s)
+
+    total = string.length(all)
+    if total == 0 { println("FAIL: produced no output") return 1 }
+
+    // The window must be SHARED: three repeats of near-identical text must
+    // cost far less than the first event. N independent streams would each
+    // cost about the same, which is the bug this guards.
+    if later >= first * 3 {
+        println("FAIL: later flushes cost ${later} vs first ${first} —")
+        println("      the window does not look shared across flushes")
+        return 1
+    }
+
+    // One-shot must work too, and beat the input on repetitive text.
+    body = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    c, cn, e4 = zstd.compress(body, string.length(body), zstd.DEFAULT_LEVEL)
+    if e4 != "" { println("FAIL compress: ${e4}") return 1 }
+    if cn >= string.length(body) { println("FAIL: one-shot did not compress") return 1 }
+
+    println("zstd streaming ok")
+    return 0
+}

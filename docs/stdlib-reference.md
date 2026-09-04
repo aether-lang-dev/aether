@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (72 modules)
+## Module index (73 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -83,6 +83,7 @@ header comment is the authoritative description.
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
 | `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 19 | — |
+| `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | — |
 
 > **Note:** The standard library follows the canonical module pattern in [stdlib-module-pattern.md](stdlib-module-pattern.md), fallible operations expose a `_raw` extern plus a Go-style `(value, err)` Aether wrapper; pure/infallible operations stay raw without a suffix. See the [error handling example](../examples/basics/error-handling.ae) for how the pattern is used from user code, and [std/fs/module.ae](../std/fs/module.ae) for the reference implementation.
 
