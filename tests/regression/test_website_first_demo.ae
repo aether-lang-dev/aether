@@ -1,0 +1,39 @@
+// #1751 — the first demo on the website, as a test.
+//
+// A user on Windows (MSYS2 / ucrt64, gcc 15.2) ran `ae init` and then this
+// exact program from the front page, and it failed to LINK:
+//
+//   undefined reference to `__emutls_v.current_core_id'
+//   undefined reference to `__emutls_v.g_current_reply_slot'
+//   undefined reference to `__emutls_v.g_current_step_actor'
+//
+// Those are thread-local variables in the actor scheduler. The generated C
+// used to NAME them, and __thread lowers to emulated TLS on MinGW, so the
+// program depended on the shipped archive and the user's compiler agreeing
+// about the TLS model. They did not. Codegen now reaches those variables
+// through calls instead, which has one ABI either way.
+//
+// The program is unchanged from the website, deliberately: it is the first
+// thing a new user runs, and it had no test. It lives in tests/regression so
+// the Windows/Wine sweep (#1876) builds and runs it for Windows too, which
+// is the platform the report came from.
+
+extern exit(code: int)
+
+message Inc { n: int }
+
+actor Counter {
+    state count = 0
+    receive {
+        Inc(n) -> {
+            count = count + n
+            println("count = ${count}")
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Inc { n: 41 }
+    c ! Inc { n: 1 }
+}
