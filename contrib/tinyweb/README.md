@@ -42,7 +42,24 @@ server_start(server)
 - **Attributes** — `ctx_set_attribute` / `ctx_get_attribute` for filter-to-endpoint data
 - **Error callbacks** — `on_error`, `on_server_error`, `on_ws_timeout`, `on_ws_error`
 - **Statistics** — `on_stats(server) |stats| { ... }`
-- **Config** — `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`
+- **Config** — `with_timeout`, `with_backlog`, `with_ws_backlog`, `with_keep_alive`, `with_tls`
+
+### TLS
+
+```aether
+server = tinyweb.web_server_host("0.0.0.0", 443) {
+    tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
+        tinyweb.response_write(res, "hello over https")
+    }
+}
+_ = tinyweb.with_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+err = tinyweb.tw_start(server)
+```
+
+Both paths are PEM. `tw_start` applies them before registering routes, so a
+missing file or a malformed pair is a **start-up error** rather than a server
+that quietly serves plaintext on a port callers believe is encrypted — passing
+a cert without a key is refused for the same reason.
 - **Declarative JSON APIs** (`schema_api`) — mount a [`std.schema`](../../std/schema/)
   resource as a validated JSON API; see below.
 

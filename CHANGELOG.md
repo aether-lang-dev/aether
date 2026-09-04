@@ -11,6 +11,19 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`contrib.tinyweb` can serve HTTPS** — `with_tls(server, cert, key)`.
+  tinyweb wraps `std.http`, whose server has had `server_set_tls` all along;
+  tinyweb simply never surfaced it, so every tinyweb app was plaintext-only for
+  no deeper reason than a missing setter. `tw_start` applies the pair before
+  registering routes.
+
+  A bad or half-configured pair is a **start-up error**, not a silent skip: a
+  server that quietly downgrades to plaintext on a port the caller believes is
+  encrypted is worse than one that refuses to start. Passing a cert without a
+  key is refused for the same reason.
+
 ## [0.634.0]
 
 ### Added

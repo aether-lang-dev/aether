@@ -1,0 +1,18 @@
+// Half-configured TLS must REFUSE to start. A server that silently downgrades
+// to plaintext on a port the caller believes is HTTPS is worse than one that
+// will not start.
+import contrib.tinyweb
+import std.os
+
+main() {
+    cert = os.getenv("TW_TLS_CERT")
+    server = tinyweb.web_server_host("127.0.0.1", 18846) {
+        tinyweb.end_point(tinyweb.GET, "/x") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.response_write(res, "x")
+        }
+    }
+    _ = tinyweb.with_tls(server, cert, "") // cert but no key
+    err = tinyweb.tw_start(server)
+    println("result=[${err}]")
+    return 0
+}
