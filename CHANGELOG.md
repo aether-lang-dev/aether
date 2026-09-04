@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.631.0]
+
 ### Fixed
 
 - **A value-returning `builder` with a trailing block ran its body TWICE in
