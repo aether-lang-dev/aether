@@ -60,9 +60,17 @@ typedef struct {
 } ZstdStream;
 
 static int clamp_level(int level) {
-    int lo = ZSTD_minCLevel();
+    /* ZSTD_maxCLevel() is present in every libzstd. ZSTD_minCLevel() needs
+     * v1.4.0+, and this file already tripped over a version-gated symbol
+     * (ZSTD_defaultCLevel, v1.5.0+) breaking every older-libzstd CI box, so
+     * take the documented floor of 1 rather than call it. Negative levels are
+     * a zstd extension we deliberately do not expose. */
+    int lo = 1;
     int hi = ZSTD_maxCLevel();
-    if (level < lo || level > hi) return ZSTD_defaultCLevel();
+    /* ZSTD_CLEVEL_DEFAULT is a plain macro (guarded, 3) present in every
+     * libzstd; ZSTD_defaultCLevel() is a function requiring v1.5.0+, and
+     * calling it broke the build on every CI box with an older library. */
+    if (level < lo || level > hi) return ZSTD_CLEVEL_DEFAULT;
     return level;
 }
 
