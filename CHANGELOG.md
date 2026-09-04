@@ -11,6 +11,31 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A diagnostic that knew its line printed no location at all.** Both
+  reporters printed the `--> file:line:column` header and the source snippet
+  only when the caller had filled in `filename` and `source_code`, and a
+  diagnostic built by hand leaves those NULL while knowing its line and column
+  perfectly well. The result was a bare `warning[W1001]: unused variable
+  'digest'` with no file, no line and no snippet, which is unactionable in a
+  build compiling hundreds of modules: the reader cannot even tell which file
+  it came from. Both reporters now fall back to the active source context,
+  which is exactly the file being compiled when the diagnostic fires, so every
+  hand-built diagnostic gained a location rather than one call site being
+  patched.
+
+- **Every caret pointed one token past the thing it described.** Tokens were
+  stamped with the position reached AFTER consuming them, so an unused
+  `digest` at column 5 reported column 11, the column of the `=` that follows
+  it. Tokens now carry the position where they START, which also points an
+  unterminated-literal error at its opening quote instead of at the end of
+  input.
+
+- **"Undefined function 'f'" underlined the parenthesis, not the name.** A
+  call node was anchored on its `(`, so the one token the message is about was
+  the one token not underlined. Call nodes now anchor on their callee.
+
 ### Added
 
 - **The website's first demo is now a test.** A Windows user (MSYS2 / ucrt64)

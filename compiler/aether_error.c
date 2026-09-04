@@ -130,6 +130,15 @@ void aether_error_report(AetherError* error) {
     if (!error) return;
     
     error_count_global++;
+
+    /* A diagnostic built by hand often leaves filename and source_code NULL
+     * even though it knows its line and column, and the location was then
+     * simply not printed: the reader got "unused variable 'digest'" with no
+     * file, no line and no snippet, which is unactionable in a build that
+     * compiles hundreds of modules. Fall back to the active source context,
+     * which is exactly the file being compiled when the diagnostic fires. */
+    const char* e_file = error->filename ? error->filename : current_filename;
+    const char* e_src  = error->source_code ? error->source_code : current_source;
     
     // Print error header with code
     if (error->code != AETHER_ERR_NONE) {
@@ -146,19 +155,19 @@ void aether_error_report(AetherError* error) {
     }
     
     // Print location
-    if (error->filename) {
+    if (e_file) {
         fprintf(stderr, "  %s-->%s %s:%d:%d\n",
                 AETHER_COLOR_BLUE,
                 AETHER_COLOR_RESET,
-                error->filename,
+                e_file,
                 error->line,
                 error->column);
     }
     
     // Print source context
-    if (error->source_code && error->line > 0) {
+    if (e_src && error->line > 0) {
         int line_length;
-        const char* line = get_line(error->source_code, error->line, &line_length);
+        const char* line = get_line(e_src, error->line, &line_length);
         
         if (line) {
             // Line number width
@@ -210,6 +219,11 @@ void aether_warning_report(AetherError* warning) {
     if (!warning) return;
     
     warning_count_global++;
+
+    /* Same fallback as aether_error_report: a warning that knows its line but
+     * not its file still names the file being compiled. */
+    const char* w_file = warning->filename ? warning->filename : current_filename;
+    const char* w_src  = warning->source_code ? warning->source_code : current_source;
     
     // Print warning header (yellow instead of red)
     if (warning->code >= 1000) {
@@ -226,19 +240,19 @@ void aether_warning_report(AetherError* warning) {
     }
     
     // Print location
-    if (warning->filename) {
+    if (w_file) {
         fprintf(stderr, "  %s-->%s %s:%d:%d\n",
                 AETHER_COLOR_BLUE,
                 AETHER_COLOR_RESET,
-                warning->filename,
+                w_file,
                 warning->line,
                 warning->column);
     }
     
     // Print source context (same as error)
-    if (warning->source_code && warning->line > 0) {
+    if (w_src && warning->line > 0) {
         int line_length;
-        const char* line = get_line(warning->source_code, warning->line, &line_length);
+        const char* line = get_line(w_src, warning->line, &line_length);
         
         if (line) {
             int line_num_width = snprintf(NULL, 0, "%d", warning->line);

@@ -2077,7 +2077,13 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
 
             advance_token(parser); // consume '('
 
-            ASTNode* func_call = create_ast_node(AST_FUNCTION_CALL, func_name, op->line, op->column);
+            /* Anchor the call on its CALLEE, not on the '('. The caret for
+             * "Undefined function 'f'" pointed at the parenthesis after the
+             * name, so the one token the message is about was the one token
+             * not underlined. */
+            int call_line = expr ? expr->line   : op->line;
+            int call_col  = expr ? expr->column : op->column;
+            ASTNode* func_call = create_ast_node(AST_FUNCTION_CALL, func_name, call_line, call_col);
             /* create_ast_node strdups its value; this working copy leaked
              * once per parsed call expression. */
             free((void*)func_name);

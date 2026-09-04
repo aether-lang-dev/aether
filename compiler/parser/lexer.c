@@ -15,12 +15,23 @@ static int current_pos;
 static int current_line;
 static int current_column;
 
+/* Where the token being scanned STARTED. Tokens used to be stamped with the
+ * position reached after consuming them, so every caret in every diagnostic
+ * pointed one token past the thing it described: an unused `digest` reported
+ * the column of the `=` that follows it. Readers stamp their token with this
+ * instead, which also points an unterminated-literal error at the opening
+ * quote rather than at the end of the file. */
+static int token_start_line = 1;
+static int token_start_column = 1;
+
 void lexer_init(const char* src) {
     source = src;
     source_length = strlen(src);
     current_pos = 0;
     current_line = 1;
     current_column = 1;
+    token_start_line = 1;
+    token_start_column = 1;
 }
 
 void lexer_save(LexerState* out) {
@@ -120,7 +131,7 @@ Token* read_string() {
         if (i >= capacity - 3) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
-            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); }
+            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             buffer = new_buf;
         }
         if (peek() == '$' && current_pos + 1 < source_length && source[current_pos + 1] == '{') {
@@ -147,7 +158,7 @@ Token* read_string() {
             buffer[i++] = advance(); // opening "
             bool closed = false;
             while (current_pos < source_length) {
-                if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                 if (peek() == '"') {
                     buffer[i++] = advance(); // closing "
                     closed = true;
@@ -168,7 +179,7 @@ Token* read_string() {
             }
             if (!closed) {
                 free(buffer);
-                return create_token(TOKEN_ERROR, "unterminated string literal", current_line, current_column);
+                return create_token(TOKEN_ERROR, "unterminated string literal", token_start_line, token_start_column);
             }
         } else if (interp_depth > 0 && peek() == '{') {
             interp_depth++;
@@ -188,7 +199,7 @@ Token* read_string() {
                         int d = 0;
                         while (d < 2 && current_pos < source_length &&
                                isxdigit((unsigned char)peek())) {
-                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                             buffer[i++] = advance();
                             d++;
                         }
@@ -197,7 +208,7 @@ Token* read_string() {
                         int d = 0;
                         while (d < 2 && current_pos < source_length &&
                                peek() >= '0' && peek() <= '7') {
-                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                            if (i >= capacity - 3) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                             buffer[i++] = advance();
                             d++;
                         }
@@ -249,12 +260,12 @@ Token* read_string() {
     } else {
         // Unterminated string
         free(buffer);
-        return create_token(TOKEN_ERROR, "unterminated string literal", current_line, current_column);
+        return create_token(TOKEN_ERROR, "unterminated string literal", token_start_line, token_start_column);
     }
 
     buffer[i] = '\0';
     AeTokenType tok_type = has_interp ? TOKEN_INTERP_STRING : TOKEN_STRING_LITERAL;
-    Token* token = create_token(tok_type, buffer, current_line, current_column);
+    Token* token = create_token(tok_type, buffer, token_start_line, token_start_column);
     free(buffer);
     return token;
 }
@@ -273,11 +284,11 @@ Token* read_number() {
             buffer[i++] = advance(); // 'x'
             while (current_pos < source_length && (isxdigit((unsigned char)peek()) || peek() == '_')) {
                 if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                 buffer[i++] = advance();
             }
             buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, current_line, current_column);
+            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
             free(buffer);
             return token;
         } else if (next == 'o' || next == 'O') {
@@ -286,11 +297,11 @@ Token* read_number() {
             buffer[i++] = advance(); // 'o'
             while (current_pos < source_length && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
                 if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                 buffer[i++] = advance();
             }
             buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, current_line, current_column);
+            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
             free(buffer);
             return token;
         } else if (next == 'b' || next == 'B') {
@@ -299,11 +310,11 @@ Token* read_number() {
             buffer[i++] = advance(); // 'b'
             while (current_pos < source_length && (peek() == '0' || peek() == '1' || peek() == '_')) {
                 if (peek() == '_') { advance(); continue; }
-                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); } buffer = nb; }
+                if (i >= capacity - 1) { capacity *= 2; char* nb = realloc(buffer, capacity); if (!nb) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); } buffer = nb; }
                 buffer[i++] = advance();
             }
             buffer[i] = '\0';
-            Token* token = create_token(TOKEN_NUMBER, buffer, current_line, current_column);
+            Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
             free(buffer);
             return token;
         }
@@ -315,7 +326,7 @@ Token* read_number() {
         if (i >= capacity - 1) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
-            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); }
+            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             buffer = new_buf;
         }
         buffer[i++] = advance();
@@ -345,7 +356,7 @@ Token* read_number() {
             if (i >= capacity - 1) {
                 capacity *= 2;
                 char* new_buf = realloc(buffer, capacity);
-                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); }
+                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
                 buffer = new_buf;
             }
             buffer[i++] = advance();
@@ -356,7 +367,7 @@ Token* read_number() {
             if (i >= capacity - 1) {
                 capacity *= 2;
                 char* new_buf = realloc(buffer, capacity);
-                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); }
+                if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
                 buffer = new_buf;
             }
             buffer[i++] = advance();
@@ -364,7 +375,7 @@ Token* read_number() {
     }
 
     buffer[i] = '\0';
-    Token* token = create_token(TOKEN_NUMBER, buffer, current_line, current_column);
+    Token* token = create_token(TOKEN_NUMBER, buffer, token_start_line, token_start_column);
     free(buffer);
     return token;
 }
@@ -378,7 +389,7 @@ Token* read_identifier() {
         if (i >= capacity - 1) {
             capacity *= 2;
             char* new_buf = realloc(buffer, capacity);
-            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", current_line, current_column); }
+            if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
             buffer = new_buf;
         }
         buffer[i++] = advance();
@@ -388,70 +399,70 @@ Token* read_identifier() {
 
     // Check if it's a keyword - create token then free buffer
     Token* token;
-    if (strcmp(buffer, "actor") == 0) token = create_token(TOKEN_ACTOR, buffer, current_line, current_column);
-    else if (strcmp(buffer, "main") == 0) token = create_token(TOKEN_MAIN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "func") == 0) token = create_token(TOKEN_FUNC, buffer, current_line, current_column);
-    else if (strcmp(buffer, "let") == 0) token = create_token(TOKEN_LET, buffer, current_line, current_column);
-    else if (strcmp(buffer, "var") == 0) token = create_token(TOKEN_VAR, buffer, current_line, current_column);
-    else if (strcmp(buffer, "if") == 0) token = create_token(TOKEN_IF, buffer, current_line, current_column);
-    else if (strcmp(buffer, "else") == 0) token = create_token(TOKEN_ELSE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "for") == 0) token = create_token(TOKEN_FOR, buffer, current_line, current_column);
-    else if (strcmp(buffer, "while") == 0) token = create_token(TOKEN_WHILE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "switch") == 0) token = create_token(TOKEN_SWITCH, buffer, current_line, current_column);
-    else if (strcmp(buffer, "case") == 0) token = create_token(TOKEN_CASE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "default") == 0) token = create_token(TOKEN_DEFAULT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "break") == 0) token = create_token(TOKEN_BREAK, buffer, current_line, current_column);
-    else if (strcmp(buffer, "continue") == 0) token = create_token(TOKEN_CONTINUE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "return") == 0) token = create_token(TOKEN_RETURN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "defer") == 0) token = create_token(TOKEN_DEFER, buffer, current_line, current_column);
-    else if (strcmp(buffer, "builder") == 0) token = create_token(TOKEN_BUILDER, buffer, current_line, current_column);
-    else if (strcmp(buffer, "match") == 0) token = create_token(TOKEN_MATCH, buffer, current_line, current_column);
-    else if (strcmp(buffer, "when") == 0) token = create_token(TOKEN_WHEN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "receive") == 0) token = create_token(TOKEN_RECEIVE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "send") == 0) token = create_token(TOKEN_SEND, buffer, current_line, current_column);
-    else if (strcmp(buffer, "spawn_actor") == 0) token = create_token(TOKEN_SPAWN_ACTOR, buffer, current_line, current_column);
-    else if (strcmp(buffer, "spawn") == 0) token = create_token(TOKEN_SPAWN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "make") == 0) token = create_token(TOKEN_MAKE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "self") == 0) token = create_token(TOKEN_SELF, buffer, current_line, current_column);
-    else if (strcmp(buffer, "state") == 0) token = create_token(TOKEN_STATE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "struct") == 0) token = create_token(TOKEN_STRUCT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "union") == 0) token = create_token(TOKEN_UNION, buffer, current_line, current_column);
-    else if (strcmp(buffer, "import") == 0) token = create_token(TOKEN_IMPORT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "as") == 0) token = create_token(TOKEN_AS, buffer, current_line, current_column);
-    else if (strcmp(buffer, "export") == 0) token = create_token(TOKEN_EXPORT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "exports") == 0) token = create_token(TOKEN_EXPORTS, buffer, current_line, current_column);
-    else if (strcmp(buffer, "module") == 0) token = create_token(TOKEN_MODULE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "message") == 0) token = create_token(TOKEN_MESSAGE_KEYWORD, buffer, current_line, current_column);
-    else if (strcmp(buffer, "reply") == 0) token = create_token(TOKEN_REPLY, buffer, current_line, current_column);
-    else if (strcmp(buffer, "extern") == 0) token = create_token(TOKEN_EXTERN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "null") == 0) token = create_token(TOKEN_NULL, buffer, current_line, current_column);
-    else if (strcmp(buffer, "const") == 0) token = create_token(TOKEN_CONST, buffer, current_line, current_column);
-    else if (strcmp(buffer, "in") == 0) token = create_token(TOKEN_IN, buffer, current_line, current_column);
-    else if (strcmp(buffer, "after") == 0) token = create_token(TOKEN_AFTER, buffer, current_line, current_column);
-    else if (strcmp(buffer, "callback") == 0) token = create_token(TOKEN_CALLBACK, buffer, current_line, current_column);
-    else if (strcmp(buffer, "hide") == 0) token = create_token(TOKEN_HIDE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "seal") == 0) token = create_token(TOKEN_SEAL, buffer, current_line, current_column);
-    else if (strcmp(buffer, "except") == 0) token = create_token(TOKEN_EXCEPT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "try") == 0) token = create_token(TOKEN_TRY, buffer, current_line, current_column);
-    else if (strcmp(buffer, "catch") == 0) token = create_token(TOKEN_CATCH, buffer, current_line, current_column);
-    else if (strcmp(buffer, "panic") == 0) token = create_token(TOKEN_PANIC, buffer, current_line, current_column);
-    else if (strcmp(buffer, "requires") == 0) token = create_token(TOKEN_REQUIRES, buffer, current_line, current_column);
-    else if (strcmp(buffer, "ensures") == 0) token = create_token(TOKEN_ENSURES, buffer, current_line, current_column);
-    else if (strcmp(buffer, "ptr") == 0) token = create_token(TOKEN_PTR, buffer, current_line, current_column);
-    else if (strcmp(buffer, "int") == 0) token = create_token(TOKEN_INT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "long") == 0) token = create_token(TOKEN_INT64, buffer, current_line, current_column);
-    else if (strcmp(buffer, "uint64") == 0) token = create_token(TOKEN_UINT64, buffer, current_line, current_column);
-    else if (strcmp(buffer, "Duration") == 0) token = create_token(TOKEN_DURATION, buffer, current_line, current_column);
-    else if (strcmp(buffer, "float") == 0) token = create_token(TOKEN_FLOAT, buffer, current_line, current_column);
-    else if (strcmp(buffer, "bool") == 0) token = create_token(TOKEN_BOOL, buffer, current_line, current_column);
-    else if (strcmp(buffer, "byte") == 0) token = create_token(TOKEN_BYTE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "string") == 0) token = create_token(TOKEN_STRING, buffer, current_line, current_column);
-    else if (strcmp(buffer, "ActorRef") == 0 || strcmp(buffer, "actor_ref") == 0) token = create_token(TOKEN_ACTOR_REF, buffer, current_line, current_column);
-    else if (strcmp(buffer, "Message") == 0) token = create_token(TOKEN_MESSAGE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "true") == 0) token = create_token(TOKEN_TRUE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "false") == 0) token = create_token(TOKEN_FALSE, buffer, current_line, current_column);
-    else if (strcmp(buffer, "print") == 0) token = create_token(TOKEN_PRINT, buffer, current_line, current_column);
-    else token = create_token(TOKEN_IDENTIFIER, buffer, current_line, current_column);
+    if (strcmp(buffer, "actor") == 0) token = create_token(TOKEN_ACTOR, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "main") == 0) token = create_token(TOKEN_MAIN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "func") == 0) token = create_token(TOKEN_FUNC, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "let") == 0) token = create_token(TOKEN_LET, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "var") == 0) token = create_token(TOKEN_VAR, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "if") == 0) token = create_token(TOKEN_IF, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "else") == 0) token = create_token(TOKEN_ELSE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "for") == 0) token = create_token(TOKEN_FOR, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "while") == 0) token = create_token(TOKEN_WHILE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "switch") == 0) token = create_token(TOKEN_SWITCH, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "case") == 0) token = create_token(TOKEN_CASE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "default") == 0) token = create_token(TOKEN_DEFAULT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "break") == 0) token = create_token(TOKEN_BREAK, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "continue") == 0) token = create_token(TOKEN_CONTINUE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "return") == 0) token = create_token(TOKEN_RETURN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "defer") == 0) token = create_token(TOKEN_DEFER, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "builder") == 0) token = create_token(TOKEN_BUILDER, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "match") == 0) token = create_token(TOKEN_MATCH, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "when") == 0) token = create_token(TOKEN_WHEN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "receive") == 0) token = create_token(TOKEN_RECEIVE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "send") == 0) token = create_token(TOKEN_SEND, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "spawn_actor") == 0) token = create_token(TOKEN_SPAWN_ACTOR, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "spawn") == 0) token = create_token(TOKEN_SPAWN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "make") == 0) token = create_token(TOKEN_MAKE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "self") == 0) token = create_token(TOKEN_SELF, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "state") == 0) token = create_token(TOKEN_STATE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "struct") == 0) token = create_token(TOKEN_STRUCT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "union") == 0) token = create_token(TOKEN_UNION, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "import") == 0) token = create_token(TOKEN_IMPORT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "as") == 0) token = create_token(TOKEN_AS, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "export") == 0) token = create_token(TOKEN_EXPORT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "exports") == 0) token = create_token(TOKEN_EXPORTS, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "module") == 0) token = create_token(TOKEN_MODULE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "message") == 0) token = create_token(TOKEN_MESSAGE_KEYWORD, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "reply") == 0) token = create_token(TOKEN_REPLY, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "extern") == 0) token = create_token(TOKEN_EXTERN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "null") == 0) token = create_token(TOKEN_NULL, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "const") == 0) token = create_token(TOKEN_CONST, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "in") == 0) token = create_token(TOKEN_IN, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "after") == 0) token = create_token(TOKEN_AFTER, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "callback") == 0) token = create_token(TOKEN_CALLBACK, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "hide") == 0) token = create_token(TOKEN_HIDE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "seal") == 0) token = create_token(TOKEN_SEAL, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "except") == 0) token = create_token(TOKEN_EXCEPT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "try") == 0) token = create_token(TOKEN_TRY, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "catch") == 0) token = create_token(TOKEN_CATCH, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "panic") == 0) token = create_token(TOKEN_PANIC, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "requires") == 0) token = create_token(TOKEN_REQUIRES, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "ensures") == 0) token = create_token(TOKEN_ENSURES, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "ptr") == 0) token = create_token(TOKEN_PTR, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "int") == 0) token = create_token(TOKEN_INT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "long") == 0) token = create_token(TOKEN_INT64, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "uint64") == 0) token = create_token(TOKEN_UINT64, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "Duration") == 0) token = create_token(TOKEN_DURATION, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "float") == 0) token = create_token(TOKEN_FLOAT, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "bool") == 0) token = create_token(TOKEN_BOOL, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "byte") == 0) token = create_token(TOKEN_BYTE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "string") == 0) token = create_token(TOKEN_STRING, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "ActorRef") == 0 || strcmp(buffer, "actor_ref") == 0) token = create_token(TOKEN_ACTOR_REF, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "Message") == 0) token = create_token(TOKEN_MESSAGE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "true") == 0) token = create_token(TOKEN_TRUE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "false") == 0) token = create_token(TOKEN_FALSE, buffer, token_start_line, token_start_column);
+    else if (strcmp(buffer, "print") == 0) token = create_token(TOKEN_PRINT, buffer, token_start_line, token_start_column);
+    else token = create_token(TOKEN_IDENTIFIER, buffer, token_start_line, token_start_column);
 
     free(buffer);
     return token;
@@ -503,9 +514,12 @@ Token* read_raw_identifier(void) {
 
 Token* next_token() {
     skip_whitespace();
+
+    token_start_line = current_line;
+    token_start_column = current_column;
     
     if (current_pos >= source_length) {
-        return create_token(TOKEN_EOF, NULL, current_line, current_column);
+        return create_token(TOKEN_EOF, NULL, token_start_line, token_start_column);
     }
     
     char c = peek();
@@ -543,76 +557,76 @@ Token* next_token() {
             advance();
             if (peek() == '+') {
                 advance();
-                return create_token(TOKEN_INCREMENT, "++", current_line, current_column);
+                return create_token(TOKEN_INCREMENT, "++", token_start_line, token_start_column);
             }
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_PLUS_ASSIGN, "+=", current_line, current_column);
+                return create_token(TOKEN_PLUS_ASSIGN, "+=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_PLUS, "+", current_line, current_column);
+            return create_token(TOKEN_PLUS, "+", token_start_line, token_start_column);
         case '-':
             advance();
             if (peek() == '>') {
                 advance();
-                return create_token(TOKEN_ARROW, "->", current_line, current_column);
+                return create_token(TOKEN_ARROW, "->", token_start_line, token_start_column);
             }
             if (peek() == '-') {
                 advance();
-                return create_token(TOKEN_DECREMENT, "--", current_line, current_column);
+                return create_token(TOKEN_DECREMENT, "--", token_start_line, token_start_column);
             }
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_MINUS_ASSIGN, "-=", current_line, current_column);
+                return create_token(TOKEN_MINUS_ASSIGN, "-=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_MINUS, "-", current_line, current_column);
+            return create_token(TOKEN_MINUS, "-", token_start_line, token_start_column);
         case '*':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_MULTIPLY_ASSIGN, "*=", current_line, current_column);
+                return create_token(TOKEN_MULTIPLY_ASSIGN, "*=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_MULTIPLY, "*", current_line, current_column);
+            return create_token(TOKEN_MULTIPLY, "*", token_start_line, token_start_column);
         case '/':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_DIVIDE_ASSIGN, "/=", current_line, current_column);
+                return create_token(TOKEN_DIVIDE_ASSIGN, "/=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_DIVIDE, "/", current_line, current_column);
+            return create_token(TOKEN_DIVIDE, "/", token_start_line, token_start_column);
         case '%':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_MODULO_ASSIGN, "%=", current_line, current_column);
+                return create_token(TOKEN_MODULO_ASSIGN, "%=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_MODULO, "%", current_line, current_column);
+            return create_token(TOKEN_MODULO, "%", token_start_line, token_start_column);
         case '=':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_EQUALS, "==", current_line, current_column);
+                return create_token(TOKEN_EQUALS, "==", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_ASSIGN, "=", current_line, current_column);
+            return create_token(TOKEN_ASSIGN, "=", token_start_line, token_start_column);
         case '!':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_NOT_EQUALS, "!=", current_line, current_column);
+                return create_token(TOKEN_NOT_EQUALS, "!=", token_start_line, token_start_column);
             }
             // In Actor V2, ! is the fire-and-forget operator
             // Also used as logical NOT - context determines usage
-            return create_token(TOKEN_EXCLAIM, "!", current_line, current_column);
+            return create_token(TOKEN_EXCLAIM, "!", token_start_line, token_start_column);
         case '<':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_LESS_EQUAL, "<=", current_line, current_column);
+                return create_token(TOKEN_LESS_EQUAL, "<=", token_start_line, token_start_column);
             }
             if (peek() == '<') {
                 advance();
                 if (peek() == '=') {
                     advance();
-                    return create_token(TOKEN_LSHIFT_ASSIGN, "<<=", current_line, current_column);
+                    return create_token(TOKEN_LSHIFT_ASSIGN, "<<=", token_start_line, token_start_column);
                 }
                 // Heredoc: <<MARKER ... MARKER
                 // Content is a literal string (no interpolation).
@@ -635,7 +649,7 @@ Token* next_token() {
                     int start_line = current_line;
                     int buf_capacity = 4096;
                     char* buf = malloc(buf_capacity);
-                    if (!buf) return create_token(TOKEN_ERROR, "out of memory", current_line, current_column);
+                    if (!buf) return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column);
                     int blen = 0;
                     // Close detection (#922). Scan line by line. A line closes
                     // the heredoc only when it is, in full, optional leading
@@ -701,7 +715,7 @@ Token* next_token() {
                                     char* new_buf = realloc(buf, buf_capacity);
                                     if (!new_buf) {
                                         free(buf);
-                                        return create_token(TOKEN_ERROR, "heredoc too large", current_line, current_column);
+                                        return create_token(TOKEN_ERROR, "heredoc too large", token_start_line, token_start_column);
                                     }
                                     buf = new_buf;
                                 }
@@ -715,7 +729,7 @@ Token* next_token() {
                                 char* new_buf = realloc(buf, buf_capacity);
                                 if (!new_buf) {
                                     free(buf);
-                                    return create_token(TOKEN_ERROR, "heredoc too large", current_line, current_column);
+                                    return create_token(TOKEN_ERROR, "heredoc too large", token_start_line, token_start_column);
                                 }
                                 buf = new_buf;
                             }
@@ -824,96 +838,96 @@ Token* next_token() {
                     free(buf);
                     return tok;
                 }
-                return create_token(TOKEN_LSHIFT, "<<", current_line, current_column);
+                return create_token(TOKEN_LSHIFT, "<<", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_LESS, "<", current_line, current_column);
+            return create_token(TOKEN_LESS, "<", token_start_line, token_start_column);
         case '>':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_GREATER_EQUAL, ">=", current_line, current_column);
+                return create_token(TOKEN_GREATER_EQUAL, ">=", token_start_line, token_start_column);
             }
             if (peek() == '>') {
                 advance();
                 if (peek() == '=') {
                     advance();
-                    return create_token(TOKEN_RSHIFT_ASSIGN, ">>=", current_line, current_column);
+                    return create_token(TOKEN_RSHIFT_ASSIGN, ">>=", token_start_line, token_start_column);
                 }
-                return create_token(TOKEN_RSHIFT, ">>", current_line, current_column);
+                return create_token(TOKEN_RSHIFT, ">>", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_GREATER, ">", current_line, current_column);
+            return create_token(TOKEN_GREATER, ">", token_start_line, token_start_column);
         case '&':
             advance();
             if (peek() == '&') {
                 advance();
-                return create_token(TOKEN_AND, "&&", current_line, current_column);
+                return create_token(TOKEN_AND, "&&", token_start_line, token_start_column);
             }
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_AND_ASSIGN, "&=", current_line, current_column);
+                return create_token(TOKEN_AND_ASSIGN, "&=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_AMPERSAND, "&", current_line, current_column);
+            return create_token(TOKEN_AMPERSAND, "&", token_start_line, token_start_column);
         case '|':
             advance();
             if (peek() == '|') {
                 advance();
-                return create_token(TOKEN_OR, "||", current_line, current_column);
+                return create_token(TOKEN_OR, "||", token_start_line, token_start_column);
             }
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_OR_ASSIGN, "|=", current_line, current_column);
+                return create_token(TOKEN_OR_ASSIGN, "|=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_PIPE, "|", current_line, current_column);
+            return create_token(TOKEN_PIPE, "|", token_start_line, token_start_column);
         case '^':
             advance();
             if (peek() == '=') {
                 advance();
-                return create_token(TOKEN_XOR_ASSIGN, "^=", current_line, current_column);
+                return create_token(TOKEN_XOR_ASSIGN, "^=", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_CARET, "^", current_line, current_column);
-        case '~': advance(); return create_token(TOKEN_TILDE, "~", current_line, current_column);
-        case '(': advance(); return create_token(TOKEN_LEFT_PAREN, "(", current_line, current_column);
-        case ')': advance(); return create_token(TOKEN_RIGHT_PAREN, ")", current_line, current_column);
-        case '{': advance(); return create_token(TOKEN_LEFT_BRACE, "{", current_line, current_column);
-        case '}': advance(); return create_token(TOKEN_RIGHT_BRACE, "}", current_line, current_column);
-        case '[': advance(); return create_token(TOKEN_LEFT_BRACKET, "[", current_line, current_column);
-        case ']': advance(); return create_token(TOKEN_RIGHT_BRACKET, "]", current_line, current_column);
-        case ';': advance(); return create_token(TOKEN_SEMICOLON, ";", current_line, current_column);
-        case ',': advance(); return create_token(TOKEN_COMMA, ",", current_line, current_column);
+            return create_token(TOKEN_CARET, "^", token_start_line, token_start_column);
+        case '~': advance(); return create_token(TOKEN_TILDE, "~", token_start_line, token_start_column);
+        case '(': advance(); return create_token(TOKEN_LEFT_PAREN, "(", token_start_line, token_start_column);
+        case ')': advance(); return create_token(TOKEN_RIGHT_PAREN, ")", token_start_line, token_start_column);
+        case '{': advance(); return create_token(TOKEN_LEFT_BRACE, "{", token_start_line, token_start_column);
+        case '}': advance(); return create_token(TOKEN_RIGHT_BRACE, "}", token_start_line, token_start_column);
+        case '[': advance(); return create_token(TOKEN_LEFT_BRACKET, "[", token_start_line, token_start_column);
+        case ']': advance(); return create_token(TOKEN_RIGHT_BRACKET, "]", token_start_line, token_start_column);
+        case ';': advance(); return create_token(TOKEN_SEMICOLON, ";", token_start_line, token_start_column);
+        case ',': advance(); return create_token(TOKEN_COMMA, ",", token_start_line, token_start_column);
         case '.':
             advance();
             if (peek() == '.') {
                 advance();
                 if (peek() == '.') {
                     advance();
-                    return create_token(TOKEN_DOTDOTDOT, "...", current_line, current_column);
+                    return create_token(TOKEN_DOTDOTDOT, "...", token_start_line, token_start_column);
                 }
                 /* #1047: `..=` inclusive and `..<` half-open range operators for
                  * match/switch case labels. Plain `..` stays exclusive (for). */
                 if (peek() == '=') {
                     advance();
-                    return create_token(TOKEN_DOTDOT_EQ, "..=", current_line, current_column);
+                    return create_token(TOKEN_DOTDOT_EQ, "..=", token_start_line, token_start_column);
                 }
                 if (peek() == '<') {
                     advance();
-                    return create_token(TOKEN_DOTDOT_LT, "..<", current_line, current_column);
+                    return create_token(TOKEN_DOTDOT_LT, "..<", token_start_line, token_start_column);
                 }
-                return create_token(TOKEN_DOTDOT, "..", current_line, current_column);
+                return create_token(TOKEN_DOTDOT, "..", token_start_line, token_start_column);
             }
-            return create_token(TOKEN_DOT, ".", current_line, current_column);
-        case ':': advance(); return create_token(TOKEN_COLON, ":", current_line, current_column);
+            return create_token(TOKEN_DOT, ".", token_start_line, token_start_column);
+        case ':': advance(); return create_token(TOKEN_COLON, ":", token_start_line, token_start_column);
         case '?':
             advance();
             // #340: `??` null-coalesce, `?.` optional-chain. A lone `?` stays
             // the actor-ask operator.
-            if (peek() == '?') { advance(); return create_token(TOKEN_QUESTION_QUESTION, "??", current_line, current_column); }
-            if (peek() == '.') { advance(); return create_token(TOKEN_QUESTION_DOT, "?.", current_line, current_column); }
-            return create_token(TOKEN_QUESTION, "?", current_line, current_column);
-        case '@': advance(); return create_token(TOKEN_AT, "@", current_line, current_column);
+            if (peek() == '?') { advance(); return create_token(TOKEN_QUESTION_QUESTION, "??", token_start_line, token_start_column); }
+            if (peek() == '.') { advance(); return create_token(TOKEN_QUESTION_DOT, "?.", token_start_line, token_start_column); }
+            return create_token(TOKEN_QUESTION, "?", token_start_line, token_start_column);
+        case '@': advance(); return create_token(TOKEN_AT, "@", token_start_line, token_start_column);
         default: {
             advance();
             char err_ch[2] = { c, '\0' };
-            return create_token(TOKEN_ERROR, err_ch, current_line, current_column);
+            return create_token(TOKEN_ERROR, err_ch, token_start_line, token_start_column);
         }
     }
 }
