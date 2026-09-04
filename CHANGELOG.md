@@ -11,6 +11,19 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **The website's first demo is now a test.** A Windows user (MSYS2 / ucrt64)
+  ran `ae init` and the front-page actor program and it failed to link, with
+  `undefined reference to __emutls_v.current_core_id` and two siblings: the
+  generated C named thread-local scheduler variables, `__thread` lowers to
+  emulated TLS on MinGW, and the shipped archive and the user's compiler did
+  not agree about the model. Codegen already reaches those through calls
+  instead, which has one ABI either way. What was missing was a test: the
+  first program every new user runs had none. It sits in `tests/regression`,
+  so the Windows/Wine sweep builds and runs it for Windows too, which is the
+  platform the report came from.
+
 ## [0.633.0]
 
 ### Added
