@@ -41,7 +41,17 @@ if ! command -v gunzip >/dev/null 2>&1; then
     exit 0
 fi
 
-# Heredoc is UNQUOTED so $TMP expands here; ${...} in the Aether source is
+# The fixture writes through the NATIVE `ae`, which on MSYS does not understand
+# an /tmp/... MSYS path -- fs.write_binary just reports "binary write failed".
+# Convert with cygpath where it exists, as tests/integration/http_middleware_d2
+# does for the same reason.
+if command -v cygpath >/dev/null 2>&1; then
+    OUT_GZ="$(cygpath -m "$TMP")/out.gz"
+else
+    OUT_GZ="$TMP/out.gz"
+fi
+
+# Heredoc is UNQUOTED so $OUT_GZ expands here; ${...} in the Aether source is
 # escaped as \${...} so the shell leaves interpolation alone.
 cat > "$TMP/emit.ae" <<AEOF
 import std.zlib
@@ -65,7 +75,7 @@ main() {
     t, tn, e3 = zlib.stream_finish(s)
     if tn > 0 { all = string.concat(all, t) }
     zlib.stream_free(s)
-    werr = fs.write_binary("$TMP/out.gz", all, string.length(all))
+    werr = fs.write_binary("$OUT_GZ", all, string.length(all))
     if werr != "" { println("write: \${werr}") return 1 }
     return 0
 }
