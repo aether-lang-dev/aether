@@ -80,6 +80,11 @@ int http_sse_send_event(HttpSseConn* c, const char* n, const char* d) {
 int http_sse_send_event_id(HttpSseConn* c, const char* n, const char* d, const char* i) {
     (void)c; (void)n; (void)d; (void)i; return -1;
 }
+int http_sse_send_event_full(HttpSseConn* c, const char* n, const char* d,
+                             const char* i, int r) {
+    (void)c; (void)n; (void)d; (void)i; (void)r; return -1;
+}
+HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* r) { (void)r; return NULL; }
 void http_sse_close(HttpSseConn* c) { (void)c; }
 void http_server_websocket(HttpServer* s, const char* p, HttpWsHandler h, void* u) {
     (void)s; (void)p; (void)h; (void)u;
@@ -2355,6 +2360,7 @@ char* http_response_serialize(HttpServerResponse* res) {
 }
 
 void http_server_response_free(HttpServerResponse* res) {
+    if (res && res->sse_upgrade) { free(res->sse_upgrade); res->sse_upgrade = NULL; }
     if (!res) return;
 
     free(res->status_text);
@@ -2489,6 +2495,48 @@ struct HttpSseConn {
     int       closed;
 };
 
+HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* res) {
+    if (!res || res->takeover_taken || !res->takeover_conn) return NULL;
+
+    /* A handler that already committed a body has answered the request; we
+     * will not silently discard it. Headers ARE discarded (see the header
+     * comment) because the SSE head is fixed and a stale Content-Length
+     * would corrupt the stream, but a body is data the caller believes it
+     * sent. */
+    if (res->body && res->body_length > 0) return NULL;
+
+    HttpConn* conn = (HttpConn*)res->takeover_conn;
+    if (!conn || conn->fd < 0) return NULL;
+
+    /* Deliberately NO TLS guard, unlike http_response_accept_tunnel: that
+     * function hands back a raw std.tcp socket, which cannot carry TLS
+     * framing. Here every write goes through conn_send, which unwraps TLS
+     * when the connection has it -- so an upgraded SSE stream works over
+     * https where a tunnel cannot. */
+
+    /* Same fixed head the route-level SSE path sends (see the sse_routes
+     * dispatch): no Content-Length, because the body is open-ended. */
+    static const char* head =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    int hlen = (int)strlen(head);
+    if (conn_send(conn, head, hlen) != hlen) return NULL;
+
+    HttpSseConn* sse = (HttpSseConn*)calloc(1, sizeof(HttpSseConn));
+    if (!sse) return NULL;
+    sse->conn = conn;
+    sse->closed = 0;
+
+    /* Mark the response as taken over so the dispatcher does not serialize
+     * a second response over the stream we just opened. */
+    res->takeover_taken = 1;
+    res->sse_upgrade = sse;
+    return sse;
+}
+
 /* WebSocket route node (#260 Tier 2 / E2). */
 struct HttpWsRoute {
     char* path;
@@ -2555,6 +2603,14 @@ int http_sse_send_event_id(HttpSseConn* sse,
                            const char* event_name,
                            const char* data,
                            const char* id) {
+    return http_sse_send_event_full(sse, event_name, data, id, 0);
+}
+
+int http_sse_send_event_full(HttpSseConn* sse,
+                             const char* event_name,
+                             const char* data,
+                             const char* id,
+                             int retry_ms) {
     if (!sse || !sse->conn || sse->closed) return -1;
 
     /* Build an SSE chunk:
@@ -2574,7 +2630,8 @@ int http_sse_send_event_id(HttpSseConn* sse,
      * below — so it threads cleanly through the caps allocator. */
     size_t cap = data_len * 4 + 256
                + (event_name ? strlen(event_name) + 16 : 0)
-               + (id ? strlen(id) + 16 : 0);
+               + (id ? strlen(id) + 16 : 0)
+               + (retry_ms > 0 ? 32 : 0);   /* "retry: " + int + \n */
     char* buf = (char*)aether_caps_malloc(cap);
     if (!buf) return -1;
     size_t off = 0;
@@ -2584,6 +2641,12 @@ int http_sse_send_event_id(HttpSseConn* sse,
     }
     if (event_name && *event_name) {
         off += (size_t)snprintf(buf + off, cap - off, "event: %s\n", event_name);
+    }
+    /* retry: must precede the blank line that dispatches the event, so it
+     * goes here rather than after the data lines. <= 0 omits it, which is
+     * what send_event / send_event_id pass. */
+    if (retry_ms > 0) {
+        off += (size_t)snprintf(buf + off, cap - off, "retry: %d\n", retry_ms);
     }
     if (data && *data) {
         const char* line_start = data;

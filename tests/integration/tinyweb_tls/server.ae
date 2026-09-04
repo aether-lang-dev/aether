@@ -1,0 +1,27 @@
+// tinyweb over TLS. `with_tls` records a PEM cert/key pair on the server
+// config; tw_start applies it via http.server_set_tls before registering
+// routes, so a bad pair fails start-up rather than serving plaintext on a port
+// the caller believes is encrypted.
+import contrib.tinyweb
+import std.os
+
+main() {
+    cert = os.getenv("TW_TLS_CERT")
+    key = os.getenv("TW_TLS_KEY")
+    if cert == "" || key == "" {
+        println("FAIL: TW_TLS_CERT / TW_TLS_KEY not set")
+        return 1
+    }
+
+    server = tinyweb.web_server_host("127.0.0.1", 18845) {
+        tinyweb.end_point(tinyweb.GET, "/hello") | req: ptr, res: ptr, ctx: ptr | {
+            tinyweb.response_write(res, "secure hello")
+        }
+    }
+    _ = tinyweb.with_tls(server, cert, key)
+
+    println("READY")
+    err = tinyweb.tw_start(server)
+    if err != "" { println("start failed: ${err}") return 1 }
+    return 0
+}

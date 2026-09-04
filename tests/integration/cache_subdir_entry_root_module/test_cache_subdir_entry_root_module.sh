@@ -82,20 +82,48 @@ got=$("$AE" run root_entry.ae 2>&1 | tail -1)
 # --- 3. and the cache must still HIT when nothing changed ----------------
 # Over-invalidating would pass every check above while making each run a full
 # rebuild, so measure that an unchanged re-run is materially faster.
-write_greeter "S1"
+# The cache must still HIT when nothing changed. Over-invalidating would
+# satisfy every check above while making each run a full rebuild.
+#
+# Asserted by COUNTING CACHE ENTRIES, not by timing. Two earlier attempts used
+# a clock and both were wrong: an absolute "< 80ms" encoded the speed of the
+# box it was written on (a slow macOS runner needed 159ms for a genuine hit),
+# and a rebuild-vs-hit ratio was flaky because the "forced rebuild" could
+# itself hit a warm entry built earlier in this test. A hit reuses an entry and
+# a miss creates one, so the entry count answers the question exactly, on every
+# machine, with no timing at all.
+# Ask `ae` how many builds it has cached rather than counting files under a
+# path we guessed. The guess was "$HOME/.aether/cache", which is wrong on
+# Windows: ae resolves the cache under USERPROFILE (C:\Users\...), while a
+# shell under MSYS2 reports $HOME as /home/... -- two different directories, so
+# the count was 0 on both sides and the assertion compared 0 to 0. `ae cache`
+# prints "Cache: N build(s), ..." from the same code that writes them.
+count_entries() { "$AE" cache 2>/dev/null | sed -n 's/^Cache: *\([0-9][0-9]*\) build.*/\1/p'; }
+
+# Unique per run: a fixed body would already have a cache entry from an
+# earlier invocation of this test, so "did the count grow" would answer no for
+# the wrong reason.
+STAMP="S$$-$(date +%s)"
+write_greeter "$STAMP"
 "$AE" run tests/test_it.ae >/dev/null 2>&1          # populate
-t0=$(date +%s%N 2>/dev/null || echo 0)
+before=$(count_entries)
+"$AE" run tests/test_it.ae >/dev/null 2>&1          # unchanged: must reuse
+after=$(count_entries)
+[ "$before" = "$after" ] || {
+    echo "  [FAIL] cache_subdir_entry_root_module: an unchanged re-run added a cache"
+    echo "         entry ($before -> $after) — the cache never hits, so every run rebuilds"
+    exit 1
+}
+
+# And the converse, so the check above cannot pass by the cache being broken
+# in the other direction: a real edit MUST add an entry.
+write_greeter "${STAMP}-edited"
 "$AE" run tests/test_it.ae >/dev/null 2>&1
-t1=$(date +%s%N 2>/dev/null || echo 0)
-if [ "$t0" != "0" ] && [ "$t1" != "0" ]; then
-    ms=$(( (t1 - t0) / 1000000 ))
-    # A real rebuild of even this trivial program is >100ms; a cache hit is
-    # a handful. 80ms leaves generous headroom on a loaded CI runner.
-    [ "$ms" -lt 80 ] || {
-        echo "  [FAIL] cache_subdir_entry_root_module: an unchanged re-run took ${ms}ms;"
-        echo "         the cache appears never to hit, so every run is a rebuild"
-        exit 1
-    }
-fi
+edited=$(count_entries)
+[ "$edited" -gt "$after" ] || {
+    echo "  [FAIL] cache_subdir_entry_root_module: editing the module added no cache"
+    echo "         entry ($after -> $edited) — the key did not change"
+    exit 1
+}
 
 echo "  [PASS] cache_subdir_entry_root_module: a root module edit invalidates a subdir entry's cache, and the cache still hits"

@@ -36,6 +36,50 @@ version number before tagging the release.
   call node was anchored on its `(`, so the one token the message is about was
   the one token not underlined. Call nodes now anchor on their callee.
 
+## [0.635.0]
+
+### Added
+
+- **`contrib.tinyweb` can serve HTTPS** — `with_tls(server, cert, key)`.
+  tinyweb wraps `std.http`, whose server has had `server_set_tls` all along;
+  tinyweb simply never surfaced it, so every tinyweb app was plaintext-only for
+  no deeper reason than a missing setter. `tw_start` applies the pair before
+  registering routes.
+
+  A bad or half-configured pair is a **start-up error**, not a silent skip: a
+  server that quietly downgrades to plaintext on a port the caller believes is
+  encrypted is worse than one that refuses to start. Passing a cert without a
+  key is refused for the same reason.
+
+## [0.634.0]
+
+### Added
+
+- **`http.response_upgrade_sse` — turn an in-flight response into an SSE
+  stream.** `server_sse` registers a whole *route* as SSE, so the decision is
+  made before the request is parsed. A handler that must be able to answer 400
+  on a malformed body and only *then* stream could not use it, and had to seize
+  the raw socket with `response_accept_tunnel` instead — which returns NULL on
+  a TLS connection, so every SSE endpoint built that way was silently
+  plaintext-only. The upgrade writes through the connection's own send path, so
+  it works over `https`.
+
+  Contract when the handler has already touched the response: headers set
+  earlier are **discarded** (the SSE head is fixed, and a stale
+  `Content-Length` would corrupt the stream), and if a body was already set the
+  upgrade is **refused** — that body is data the caller believes it sent.
+
+- **`http.sse_send_full` — SSE events carrying `retry:`.** That field is the
+  spec's own reconnection-backoff mechanism, and it was emitted nowhere: the
+  surface could write `id:`, `event:` and `data:` but gave a server no way to
+  tell a client how long to wait before reconnecting. `sse_send` and
+  `sse_send_id` are unchanged, passing 0 to omit the field. Field order on the
+  wire is id, event, retry, data — every field must precede the blank line that
+  dispatches the event.
+
+  Both were asked for by the Datastar SDK port, whose cross-SDK conformance
+  goldens require `retry:` in 5 of 20 cases.
+
 ### Added
 
 - **The website's first demo is now a test.** A Windows user (MSYS2 / ucrt64)

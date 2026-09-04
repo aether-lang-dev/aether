@@ -52,7 +52,9 @@ exports(
     http_server_set_metrics_raw, server_set_metrics,
     http_server_sse, server_sse,
     http_sse_send_event, http_sse_send_event_id, http_sse_close,
-    sse_send, sse_send_id, sse_close,
+    http_sse_send_event_full, http_response_sse_upgrade_raw,
+    sse_send, sse_send_id, sse_send_full, sse_close,
+    response_upgrade_sse,
     http_server_websocket, server_websocket,
     http_ws_send_text, http_ws_send_binary, http_ws_recv,
     http_ws_recv_timeout, http_ws_poll, http_ws_fd,
@@ -503,6 +505,8 @@ server_set_metrics(server: ptr, metrics_endpoint: string) -> {
 extern http_server_sse(server: ptr, path: string, handler: ptr, user_data: ptr)
 extern http_sse_send_event(sse: ptr, event_name: string, data: string) -> int
 extern http_sse_send_event_id(sse: ptr, event_name: string, data: string, id: string) -> int
+extern http_sse_send_event_full(sse: ptr, event_name: string, data: string, id: string, retry_ms: int) -> int
+extern http_response_sse_upgrade_raw(res: ptr) -> ptr
 extern http_sse_close(sse: ptr)
 
 server_sse(server: ptr, path: string, handler: ptr, user_data: ptr) {
@@ -515,6 +519,45 @@ sse_send(sse: ptr, event_name: string, data: string) -> int {
 
 sse_send_id(sse: ptr, event_name: string, data: string, id: string) -> int {
     return http_sse_send_event_id(sse, event_name, data, id)
+}
+
+// Full SSE event, including `retry:` -- the spec's own reconnection-backoff
+// field (WHATWG HTML, server-sent events). Without it a client can only use
+// its default backoff and the server has no way to say otherwise, so an SSE
+// surface emitting id/event/data but not retry is incomplete rather than
+// merely minimal. 5 of the 20 Datastar cross-SDK conformance goldens require
+// it, which is how the gap surfaced.
+//
+// `retry_ms` <= 0 omits the field; sse_send and sse_send_id pass 0, so their
+// behaviour is unchanged. Field order on the wire is id, event, retry, data --
+// retry must precede the blank line that dispatches the event.
+sse_send_full(sse: ptr, event_name: string, data: string, id: string, retry_ms: int) -> int {
+    return http_sse_send_event_full(sse, event_name, data, id, retry_ms)
+}
+
+// Turn an in-flight ordinary response into an SSE stream.
+//
+// `server_sse` registers a whole ROUTE as SSE, which forces the decision
+// before the request is parsed -- so a handler that must be able to answer 400
+// on a malformed body and only THEN stream cannot use it. This is that seam.
+//
+// Unlike `response_accept_tunnel` this does NOT hand back a raw socket, so it
+// works over TLS: writes go through the connection's own send path.
+//
+// Contract when the handler has already touched `res`: headers set earlier are
+// DISCARDED (the SSE head is fixed, and a stale Content-Length would corrupt
+// the stream), and if a body was already set the upgrade is REFUSED -- that
+// body is data the caller believes it sent.
+//
+// Returns (sse, "") on success, (null, error) when the response is not on a
+// live connection, has already been taken over, or has a body.
+response_upgrade_sse(res: ptr) -> {
+    if res == null { return null, "no response" }
+    sse = http_response_sse_upgrade_raw(res)
+    if sse == null {
+        return null, "sse upgrade failed (no live connection, already taken over, or body already set)"
+    }
+    return sse, ""
 }
 
 sse_close(sse: ptr) {

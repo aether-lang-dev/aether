@@ -114,6 +114,11 @@ typedef struct {
      * close a socket now owned by the handler. */
     void* takeover_conn;
     int   takeover_taken;
+    /* SSE upgrade (#sse-upgrade). http_response_sse_upgrade_raw allocates one
+     * HttpSseConn here and returns it; freed with the response. Kept on the
+     * response rather than returned by value because the handler holds it
+     * across many sse_send calls. */
+    void* sse_upgrade;
 } HttpServerResponse;
 
 // Route handler callback
@@ -642,6 +647,46 @@ int http_sse_send_event_id(HttpSseConn* sse,
                            const char* event_name,
                            const char* data,
                            const char* id);
+
+// Full SSE event: adds `retry:`, the spec's own reconnection-backoff field
+// (WHATWG HTML "server-sent events", the `retry` field). Without it a client
+// falls back to its default backoff, and a server cannot tell it otherwise —
+// so an SSE surface that emits id/event/data but not retry is incomplete
+// rather than merely minimal.
+//
+// `retry_ms` <= 0 omits the field, which is what every existing caller wants;
+// http_sse_send_event and _id are thin wrappers that pass 0, so their
+// behaviour is unchanged. Field order is id, event, retry, data — retry
+// before data because the spec dispatches the event at the blank line, so
+// every field must precede it, and grouping the metadata reads better on the
+// wire.
+int http_sse_send_event_full(HttpSseConn* sse,
+                             const char* event_name,
+                             const char* data,
+                             const char* id,
+                             int retry_ms);
+
+// Turn an in-flight ordinary response into an SSE stream (#sse-upgrade).
+//
+// http_server_sse registers a whole ROUTE as an SSE endpoint, which forces the
+// decision before the request is parsed. A handler that must be able to answer
+// 400 on a malformed body and only THEN stream cannot use it. This is that
+// seam: call it from an ordinary handler once the request has been validated.
+//
+// Unlike http_response_accept_tunnel, this does NOT hand back a raw socket, so
+// it works over TLS -- writes go through the connection's own send path.
+//
+// Contract when the handler has already touched `res`:
+//   - headers set earlier are DISCARDED. The SSE head is fixed
+//     (200, text/event-stream, no-cache, close) and a stale Content-Type or
+//     Content-Length would corrupt the stream.
+//   - if a body was already set, the upgrade is REFUSED (returns NULL): the
+//     handler has committed to a non-streaming response, and silently
+//     dropping it would lose data the caller believed it had sent.
+// Returns NULL if the response is not attached to a live connection, has
+// already been taken over, or has a body. The returned handle is owned by the
+// server and is valid until http_sse_close or the handler returns.
+HttpSseConn* http_response_sse_upgrade_raw(HttpServerResponse* res);
 
 // Best-effort close. Idempotent. After this call, send_event
 // returns -1.
