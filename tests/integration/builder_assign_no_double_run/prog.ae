@@ -1,0 +1,55 @@
+// datastar#4: a value-returning `builder` with a trailing block, in ASSIGNMENT
+// position, must run its body exactly ONCE.
+//
+// It was lowered twice: the declaration emitted the call so the variable had a
+// value, and the builder handler then re-emitted it with the filled config and
+// reassigned. Both ran. The plain declaration path already suppressed its half
+// (`defer_with_trailing`); the ownership-aware paths -- which is where a
+// `string`-returning builder lands -- did not.
+//
+// Silent, because the second write wins so the assigned VALUE is right. Only a
+// builder whose body has side effects reveals it. The datastar port hit it as
+// every SSE patch being streamed twice, once without its selector.
+import std.heap
+
+struct Opts { selector: string }
+opts_new() -> ptr { o = heap.new(Opts); o.selector = ""; return o as ptr }
+with_selector(_ctx: ptr, s: string) {
+    if _ctx != null { o = _ctx as *Opts; o.selector = s }
+}
+
+// The side-effect counter lives in a heap cell, because a builder body cannot
+// see a caller's local and Aether has no module-level mutable.
+struct Counter { n: int }
+
+builder mk(c: ptr, body: string): string with opts_new {
+    ctr = c as *Counter
+    ctr.n = ctr.n + 1
+    sel = ""
+    if _builder != null { o = _builder as *Opts; sel = o.selector }
+    return "[${body}:${sel}]"
+}
+
+main() {
+    ctr = heap.new(Counter)
+
+    // Assignment position with a trailing block -- the reported case.
+    ctr.n = 0
+    r = mk(ctr as ptr, "c") { with_selector("#c") }
+    if ctr.n != 1 { println("WRONG: assignment ran body ${ctr.n} times, want 1") return 1 }
+    if r != "[c:#c]" { println("WRONG: assignment value ${r}") return 1 }
+
+    // Statement position was always correct; keep it covered.
+    ctr.n = 0
+    mk(ctr as ptr, "b") { with_selector("#b") }
+    if ctr.n != 1 { println("WRONG: statement ran body ${ctr.n} times, want 1") return 1 }
+
+    // No trailing block: one run, empty config.
+    ctr.n = 0
+    n = mk(ctr as ptr, "d")
+    if ctr.n != 1 { println("WRONG: blockless ran body ${ctr.n} times, want 1") return 1 }
+    if n != "[d:]" { println("WRONG: blockless value ${n}") return 1 }
+
+    println("builder assign runs once")
+    return 0
+}

@@ -280,6 +280,24 @@ static int spaces_before(const char* prev, const char* prevprev, const char* cur
     // purely cosmetic; preserve the author's spacing so we never guess wrong.
     if (eq(cur,"!") || eq(prev,"!")) return cur_had_space ? 1 : 0;
     if (eq(cur,"?") || eq(prev,"?")) return cur_had_space ? 1 : 0;
+    // datastar#5: `++`/`--` bind tight to their operand. A POSTFIX increment
+    // follows a value (`i++`), and a PREFIX one precedes it (`++i`); either
+    // way the operator and its operand are written together, which is how
+    // every hand-written Aether source in this tree spells it. Without this
+    // the formatter rendered `for (i = 0; i < n; i++)` as `... n; i ++)`,
+    // disagreeing with the code it exists to normalise.
+    if (eq(cur,"++") || eq(cur,"--")) {
+        // `i++` / `x[0]++` -- no space when it follows a value.
+        if (prev && is_value_end(prev)) return 0;
+        return 1;                       // `n = ++i` keeps the space before it
+    }
+    if (eq(prev,"++") || eq(prev,"--")) {
+        // Prefix form: `++i` binds to what follows. After a postfix use the
+        // next token starts something new (`i++; j`), and the `;`/`,` rules
+        // above have already returned for those.
+        if (prevprev == NULL || !is_value_end(prevprev)) return 0;
+        return 1;
+    }
     // No space after a unary +/-/~/*/& (prev token was the operator and the
     // token before it does not end a value, so it is prefix, not infix).
     if ((eq(prev,"-")||eq(prev,"+")||eq(prev,"~")||eq(prev,"*")||eq(prev,"&")) &&

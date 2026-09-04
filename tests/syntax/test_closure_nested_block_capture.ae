@@ -19,7 +19,7 @@ main() {
 
     // Same with a for-loop: multiple closures across iterations all hit
     // the same heap cell.
-    for (i = 0; i < 3; i ++) {
+    for (i = 0; i < 3; i++) {
         step = || { n = n + 1 }
         call(step)
     }

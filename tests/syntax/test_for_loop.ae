@@ -1,7 +1,7 @@
 main() {
     print("Testing for loop without inline declaration\n");
     int i;
-    for (i = 1; i <= 3; i ++) {
+    for (i = 1; i <= 3; i++) {
         print("i = %d\n", i);
     }
     print("Done\n");

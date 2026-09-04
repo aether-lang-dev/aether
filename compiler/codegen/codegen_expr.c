@@ -73,6 +73,45 @@ static int name_is_enclosing_param(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
+/* #datastar-10: does `name` come from `<name> = <expr> as *Struct` in the
+ * function being emitted?
+ *
+ * Member access decides `->` vs `.` from the base's node_type. That type is
+ * resolved for a `*T` PARAMETER, and for a cast local in ordinary statement
+ * position -- but a cast local used inside a STRUCT LITERAL initialiser
+ * arrives with TYPE_UNKNOWN, so the pointer deref silently lowered to `.` and
+ * gcc rejected the generated C ("'c' is a pointer; did you mean to use '->'?").
+ * The Aether source is valid and the error names C the user never wrote.
+ *
+ * Recovering the declaration here keeps the fix at the point of use and cannot
+ * change any case that already had a resolved type: this is consulted ONLY on
+ * the fallback path, after every typed branch has declined. */
+static int name_is_ptr_struct_cast_local(CodeGenerator* gen, const char* name) {
+    if (!gen || !gen->current_function || !name) return 0;
+    ASTNode* fn = gen->current_function;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* blk = fn->children[i];
+        if (!blk || blk->type != AST_BLOCK) continue;
+        for (int j = 0; j < blk->child_count; j++) {
+            ASTNode* st = blk->children[j];
+            if (!st) continue;
+            /* `c = p as *Config` parses as a declaration or an assignment
+             * depending on context; accept both shapes. */
+            ASTNode* rhs = NULL;
+            if (st->type == AST_VARIABLE_DECLARATION && st->value &&
+                !strcmp(st->value, name) && st->child_count > 0) {
+                rhs = st->children[0];
+            } else if (st->type == AST_ASSIGNMENT && st->child_count >= 2 &&
+                       st->children[0] && st->children[0]->type == AST_IDENTIFIER &&
+                       st->children[0]->value && !strcmp(st->children[0]->value, name)) {
+                rhs = st->children[1];
+            }
+            if (rhs && rhs->type == AST_PTR_AS_STRUCT_CAST) return 1;
+        }
+    }
+    return 0;
+}
+
 static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
     if (!gen || !gen->program || !node ||
         node->type != AST_IDENTIFIER || !node->value) return NULL;
@@ -2965,6 +3004,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * Produced by `expr as *StructName`, by `*T` type
                      * annotations on locals/params, and by struct fields
                      * of pointer-to-struct type. */
+                    generate_expression(gen, child);
+                    fprintf(gen->output, "->%s", expr->value);
+                } else if (child->type == AST_IDENTIFIER && child->value &&
+                           (!child->node_type ||
+                            child->node_type->kind == TYPE_UNKNOWN) &&
+                           name_is_ptr_struct_cast_local(gen, child->value)) {
+                    /* #datastar-10: an `as *Struct` local whose type did not
+                     * survive into this context (a struct-literal initialiser
+                     * is the case that bit). It is still a pointer. */
                     generate_expression(gen, child);
                     fprintf(gen->output, "->%s", expr->value);
                 } else {

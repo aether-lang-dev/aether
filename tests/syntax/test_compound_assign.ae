@@ -46,7 +46,7 @@ main() {
 
     // Compound assignment in a loop
     sum = 0
-    for (k = 1; k <= 10; k ++) {
+    for (k = 1; k <= 10; k++) {
         sum += k
     }
     println(sum) // expect: 55
