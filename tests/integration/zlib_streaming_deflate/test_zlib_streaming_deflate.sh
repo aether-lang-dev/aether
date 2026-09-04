@@ -41,7 +41,9 @@ if ! command -v gunzip >/dev/null 2>&1; then
     exit 0
 fi
 
-cat > "$TMP/emit.ae" <<'AEOF'
+# Heredoc is UNQUOTED so $TMP expands here; ${...} in the Aether source is
+# escaped as \${...} so the shell leaves interpolation alone.
+cat > "$TMP/emit.ae" <<AEOF
 import std.zlib
 import std.string
 import std.fs
@@ -49,11 +51,11 @@ import std.fs
 main() {
     if zlib.available() == 0 { return 0 }
     s, err = zlib.stream_new(zlib.GZIP, 6)
-    if err != "" { println("new: ${err}") return 1 }
+    if err != "" { println("new: \${err}") return 1 }
     all = ""
     i = 0
     while i < 3 {
-        ev = "event: patch\ndata: chunk-${i}\n\n"
+        ev = "event: patch\ndata: chunk-\${i}\n\n"
         c1, n1, e1 = zlib.stream_write(s, ev, string.length(ev))
         if n1 > 0 { all = string.concat(all, c1) }
         c2, n2, e2 = zlib.stream_flush(s)
@@ -63,14 +65,11 @@ main() {
     t, tn, e3 = zlib.stream_finish(s)
     if tn > 0 { all = string.concat(all, t) }
     zlib.stream_free(s)
-    werr = fs.write_binary(OUT_PATH, all, string.length(all))
-    if werr != "" { println("write: ${werr}") return 1 }
+    werr = fs.write_binary("$TMP/out.gz", all, string.length(all))
+    if werr != "" { println("write: \${werr}") return 1 }
     return 0
 }
 AEOF
-# Substitute the output path (no argv plumbing needed for a fixture).
-sed -i "s|OUT_PATH|\"$TMP/out.gz\"|" "$TMP/emit.ae"
-
 "$AE" run "$TMP/emit.ae" >"$TMP/emit.log" 2>&1 || {
     echo "  [FAIL] zlib_streaming_deflate: fixture did not run"
     sed 's/^/    /' "$TMP/emit.log" | head -8; exit 1; }
