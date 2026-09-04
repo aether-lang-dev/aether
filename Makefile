@@ -3195,7 +3195,7 @@ ci-riscv64: clean
 	@$(MAKE) compiler ae stdlib \
 	    CC=riscv64-linux-gnu-gcc \
 	    EXTRA_CFLAGS="-march=rv64gc -mabi=lp64d" \
-	    OPENSSL=0 ZLIB=0 NGHTTP2=0 PCRE2=0
+	    OPENSSL=0 ZLIB=0 NGHTTP2=0 PCRE2=0 BROTLI=0 ZSTD=0
 	@echo ""
 	@echo "[2/3] Verifying cross-built binaries are riscv64 ELF..."
 	@file build/aetherc | grep -q "RISC-V" || { echo "  FAIL: aetherc not riscv64 ELF"; file build/aetherc; exit 1; }
