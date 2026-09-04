@@ -355,154 +355,6 @@ void cryptography_digest_free_raw(void* handle) {
     if (handle) EVP_MD_CTX_free((EVP_MD_CTX*)handle);
 }
 
-/* ---- Base64 ----
- *
- * Standard alphabet (RFC 4648 §4), unpadded. OpenSSL's EVP_EncodeBlock
- * pads the output with '=' to a multiple of 4 — we strip the trailing
- * pad bytes after the call to satisfy the unpadded-output contract.
- * EVP_DecodeBlock handles padded-or-unpadded input, but it always
- * decodes in 4-byte groups: an unpadded input length must be padded
- * up to a multiple of 4 with '=' before passing to libcrypto, then
- * the trailing zero bytes from the decoded buffer get trimmed. */
-
-char* cryptography_base64_encode_raw(const char* data, int length) {
-    if (length < 0) return NULL;
-    size_t want;
-    const unsigned char* bytes = cryptography_unwrap_bytes(data, length, &want);
-    if (want > 0 && !bytes) return NULL;
-
-    /* EVP_EncodeBlock writes ((n+2)/3)*4 bytes plus a NUL.
-     * Cap-aware (#343): the input length is caller-supplied and can
-     * be plugin-host-controlled in --emit=lib scenarios. Gate the
-     * allocation. The caller frees with plain `free()` per the
-     * caller-owned-return contract (aether_resource_caps.h:89-94);
-     * the counter drifts up on these paths, same as string_concat. */
-    size_t out_cap = ((want + 2) / 3) * 4 + 1;
-    char* out = (char*)aether_caps_malloc(out_cap);
-    if (!out) return NULL;
-
-    int written = EVP_EncodeBlock((unsigned char*)out, bytes, (int)want);
-    if (written < 0) { aether_caps_free(out, out_cap); return NULL; }
-    out[written] = '\0';
-
-    /* Strip trailing '=' padding for the unpadded contract. */
-    while (written > 0 && out[written - 1] == '=') {
-        out[--written] = '\0';
-    }
-    return out;
-}
-
-/* Padded sibling — RFC 4648 §4 standard alphabet WITH `=` padding to
- * a multiple of 4 bytes. Used by callers whose wire format expects
- * padded base64 (most decoders that aren't RFC-strict; some auth
- * headers; common JSON-encoded blob formats). The output is exactly
- * what EVP_EncodeBlock produces — same allocation cost, just no
- * trailing-`=` strip. */
-char* cryptography_base64_encode_padded_raw(const char* data, int length) {
-    if (length < 0) return NULL;
-    size_t want;
-    const unsigned char* bytes = cryptography_unwrap_bytes(data, length, &want);
-    if (want > 0 && !bytes) return NULL;
-
-    /* Cap-aware (#343): same gating rationale as the unpadded
-     * sibling above. */
-    size_t out_cap = ((want + 2) / 3) * 4 + 1;
-    char* out = (char*)aether_caps_malloc(out_cap);
-    if (!out) return NULL;
-
-    int written = EVP_EncodeBlock((unsigned char*)out, bytes, (int)want);
-    if (written < 0) { aether_caps_free(out, out_cap); return NULL; }
-    out[written] = '\0';
-    return out;
-}
-
-/* TLS-owned decode buffer + length, mirroring std.fs.read_binary's
- * split-accessor shape. Tracked per-thread so concurrent decodes on
- * different threads don't clobber each other; lifetime is until the
- * next call on the same thread. Aether-side wrappers are expected to
- * copy the bytes out via string_new_with_length before calling
- * back into the C side. Cap tracked alongside (#343) so the release
- * path correctly decrements the cap counter rather than drifting. */
-static __thread unsigned char* g_b64_buf = NULL;
-static __thread size_t         g_b64_cap = 0;
-static __thread int            g_b64_len = 0;
-
-static void release_b64_locked(void) {
-    if (g_b64_buf) aether_caps_free(g_b64_buf, g_b64_cap);
-    g_b64_buf = NULL;
-    g_b64_cap = 0;
-    g_b64_len = 0;
-}
-
-void cryptography_release_base64_decode(void) {
-    release_b64_locked();
-}
-
-int cryptography_base64_decode_raw(const char* b64) {
-    release_b64_locked();
-    if (!b64) return 0;
-
-    size_t in_len;
-    const unsigned char* in = cryptography_unwrap_bytes(b64, -1, &in_len);
-    if (in_len == 0) {
-        /* Decoding "" is a valid request — yields zero bytes. Allocate
-         * a 1-byte buffer so the caller can distinguish "decoded 0
-         * bytes" from "no data" via the length accessor. */
-        g_b64_buf = (unsigned char*)aether_caps_malloc(1);
-        if (!g_b64_buf) return 0;
-        g_b64_cap = 1;
-        g_b64_buf[0] = 0;
-        g_b64_len = 0;
-        return 1;
-    }
-
-    /* EVP_DecodeBlock requires the input length to be a multiple of
-     * 4. Pad up with '=' if the caller passed an unpadded string.
-     * Cap-aware (#343): input length is untrusted in plugin-host
-     * scenarios; both the pad-up buffer and the decode-output buffer
-     * are gated and freed through the caps allocator. */
-    size_t padded_len = (in_len + 3) / 4 * 4;
-    unsigned char* padded = (unsigned char*)aether_caps_malloc(padded_len);
-    if (!padded) return 0;
-    memcpy(padded, in, in_len);
-    for (size_t i = in_len; i < padded_len; i++) padded[i] = '=';
-
-    /* Output is at most 3/4 of input. */
-    size_t out_cap = (padded_len / 4) * 3;
-    size_t out_alloc = out_cap > 0 ? out_cap : 1;
-    unsigned char* out = (unsigned char*)aether_caps_malloc(out_alloc);
-    if (!out) { aether_caps_free(padded, padded_len); return 0; }
-
-    int written = EVP_DecodeBlock(out, padded, (int)padded_len);
-    aether_caps_free(padded, padded_len);
-    if (written < 0) { aether_caps_free(out, out_alloc); return 0; }
-
-    /* Trim trailing zero bytes that correspond to the padding we
-     * added. EVP_DecodeBlock decodes '=' as 0, so the original
-     * input's trailing-pad count tells us how many bytes to drop. */
-    int pad_added = (int)(padded_len - in_len);
-    int extra_pad_in_input = 0;
-    while (extra_pad_in_input < (int)in_len &&
-           in[in_len - 1 - extra_pad_in_input] == '=') {
-        extra_pad_in_input++;
-    }
-    int trim = pad_added + extra_pad_in_input;
-    if (trim > written) trim = written;
-    written -= trim;
-
-    g_b64_buf = out;
-    g_b64_cap = out_alloc;
-    g_b64_len = written;
-    return 1;
-}
-
-const char* cryptography_get_base64_decode(void) {
-    return g_b64_buf ? (const char*)g_b64_buf : "";
-}
-
-int cryptography_get_base64_decode_length(void) {
-    return g_b64_len;
-}
 
 #else /* !AETHER_HAS_OPENSSL */
 
@@ -518,18 +370,6 @@ char* cryptography_hash_hex_raw(const char* algo, const char* data, int length) 
 int cryptography_hash_supported(const char* algo) {
     (void)algo; return 0;
 }
-char* cryptography_base64_encode_raw(const char* data, int length) {
-    (void)data; (void)length; return NULL;
-}
-char* cryptography_base64_encode_padded_raw(const char* data, int length) {
-    (void)data; (void)length; return NULL;
-}
-int cryptography_base64_decode_raw(const char* b64) {
-    (void)b64; return 0;
-}
-const char* cryptography_get_base64_decode(void) { return ""; }
-int cryptography_get_base64_decode_length(void) { return 0; }
-void cryptography_release_base64_decode(void) {}
 
 char* cryptography_md4_hex_raw(const char* data, int length) {
     (void)data; (void)length; return NULL;
@@ -581,6 +421,144 @@ void cryptography_digest_free_raw(void* handle) {
 }
 
 #endif /* AETHER_HAS_OPENSSL */
+
+/* ---- Base64 (portable, not OpenSSL) ----
+ *
+ * Base64 is a transform, not a cipher: it needs no crypto library, and
+ * requiring one meant every build WITHOUT OpenSSL silently answered NULL
+ * from encode and 0 from decode. The Windows cross-build is such a build,
+ * which is how the Wine runtime lane (#1876) found this — a program that
+ * encodes anything got '(null)' back and nothing reported a problem.
+ *
+ * Deliberately outside the AETHER_HAS_OPENSSL split, so there is ONE
+ * implementation and no chance of the two drifting.
+ *
+ * Contract kept exactly as it was on the OpenSSL path: encode_raw is
+ * unpadded and encode_padded_raw pads to a multiple of 4 (RFC 4648 §4);
+ * decode accepts padded or unpadded input and publishes its result through
+ * the thread-local accessor trio. Allocation stays cap-aware (#343). */
+
+static const char AE_B64_ALPHA[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int ae_b64_value(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static char* ae_b64_encode(const char* data, int length, int pad) {
+    if (length < 0) return NULL;
+    size_t want;
+    const unsigned char* bytes = cryptography_unwrap_bytes(data, length, &want);
+    if (want > 0 && !bytes) return NULL;
+
+    size_t out_cap = ((want + 2) / 3) * 4 + 1;
+    char* out = (char*)aether_caps_malloc(out_cap);
+    if (!out) return NULL;
+
+    size_t i = 0, o = 0;
+    while (want >= 3 && i + 3 <= want) {
+        unsigned v = ((unsigned)bytes[i] << 16) |
+                     ((unsigned)bytes[i + 1] << 8) |
+                      (unsigned)bytes[i + 2];
+        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = AE_B64_ALPHA[(v >> 6) & 63];
+        out[o++] = AE_B64_ALPHA[v & 63];
+        i += 3;
+    }
+    size_t rem = want - i;
+    if (rem == 1) {
+        unsigned v = (unsigned)bytes[i] << 16;
+        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
+        if (pad) { out[o++] = '='; out[o++] = '='; }
+    } else if (rem == 2) {
+        unsigned v = ((unsigned)bytes[i] << 16) | ((unsigned)bytes[i + 1] << 8);
+        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = AE_B64_ALPHA[(v >> 6) & 63];
+        if (pad) out[o++] = '=';
+    }
+    out[o] = '\0';
+    return out;
+}
+
+char* cryptography_base64_encode_raw(const char* data, int length) {
+    return ae_b64_encode(data, length, 0);
+}
+
+char* cryptography_base64_encode_padded_raw(const char* data, int length) {
+    return ae_b64_encode(data, length, 1);
+}
+
+/* Thread-local decode buffer, mirroring std.fs.read_binary's split-accessor
+ * shape: the result lives until the next decode on the same thread, and the
+ * Aether wrapper copies it out. */
+static __thread unsigned char* g_b64_buf = NULL;
+static __thread size_t         g_b64_cap = 0;
+static __thread int            g_b64_len = 0;
+
+static void release_b64_locked(void) {
+    if (g_b64_buf) aether_caps_free(g_b64_buf, g_b64_cap);
+    g_b64_buf = NULL;
+    g_b64_cap = 0;
+    g_b64_len = 0;
+}
+
+void cryptography_release_base64_decode(void) {
+    release_b64_locked();
+}
+
+int cryptography_base64_decode_raw(const char* b64) {
+    release_b64_locked();
+    if (!b64) return 0;
+
+    size_t in_len;
+    const unsigned char* in = cryptography_unwrap_bytes(b64, -1, &in_len);
+    if (in_len > 0 && !in) return 0;
+
+    /* Decoding "" is a valid request yielding zero bytes; allocate one byte
+     * so the caller can tell "decoded nothing" from "no data". */
+    size_t out_alloc = (in_len / 4) * 3 + 3;
+    if (out_alloc == 0) out_alloc = 1;
+    unsigned char* out = (unsigned char*)aether_caps_malloc(out_alloc);
+    if (!out) return 0;
+
+    unsigned acc = 0;
+    int nbits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = in[i];
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        int v = ae_b64_value(c);
+        if (v < 0) { aether_caps_free(out, out_alloc); return 0; }
+        acc = (acc << 6) | (unsigned)v;
+        nbits += 6;
+        if (nbits >= 8) {
+            nbits -= 8;
+            if (o < out_alloc) out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
+        }
+    }
+
+    g_b64_buf = out;
+    g_b64_cap = out_alloc;
+    g_b64_len = (int)o;
+    return 1;
+}
+
+const char* cryptography_get_base64_decode(void) {
+    return g_b64_buf ? (const char*)g_b64_buf : "";
+}
+
+int cryptography_get_base64_decode_length(void) {
+    return g_b64_len;
+}
+
 
 /* ===================================================================
  * CSPRNG (#630). Sits OUTSIDE the AETHER_HAS_OPENSSL branch because the

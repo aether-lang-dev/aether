@@ -40,14 +40,21 @@ on:
 # later on green runs — worth it, since a compile break surfaces at minute
 # ~4 instead of ~20.
 #
-# NOT running tests under Wine here is deliberate (#1593 tried it). `ae` is a
-# compile-and-run driver: `ae run` under Wine needs a WINDOWS C toolchain
-# inside the Wine prefix to compile the C it emits — it tried to download
-# 250 MB of MinGW-w64 mid-job. Driving the native `ae` with
-# AE_CC="zig cc -target ..." instead needs a Windows libaether.a living
-# beside the native one, which one build/ tree cannot hold. Executing tests
-# on a Linux runner is therefore a separate piece of work, tracked in its
-# own issue; the compile half stands on its own.
+#   3. windows-wine — RUNS the tests, on a Linux runner (#1876).
+#
+# #1593 tried the Wine half and failed on one detail: it ran `ae` ITSELF
+# inside Wine. `ae` is a compile-and-run driver, so it went looking for a PE
+# gcc.exe in the prefix and tried to download 250 MB of MinGW-w64 mid-job.
+# The blocker is specific to that, and disappears when the split is drawn
+# differently: cross-build each test to a .exe on the LINUX HOST (native `ae`
+# + `zig cc -target x86_64-windows-gnu`), then let Wine merely EXECUTE the
+# finished binary. Wine never compiles anything, so no toolchain is needed in
+# the prefix and no Windows libaether.a has to live beside the native one.
+#
+# This lane does not gate build-mingw, so a green run is no slower than
+# before. What it changes is time-to-signal on Windows RUNTIME breakage:
+# behaviour that compiles fine and then differs on Windows previously had no
+# signal until the MSYS2 legs finished, ~25 minutes in.
 
 jobs:
   # ============================================================
@@ -136,6 +143,44 @@ jobs:
   # Once per CRT: MINGW64 links msvcrt.dll, UCRT64 links the UCRT, and their
   # export sets differ (#1494).
   # ============================================================
+  # ============================================================
+  # RUNTIME LANE — cross-build on Linux, execute under Wine (#1876)
+  # ============================================================
+  windows-wine:
+    name: Windows / runtime under Wine (x86_64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Deliberately NOT a dependency of build-mingw: this is extra signal, not
+    # a gate, so it must not add latency to an otherwise green run.
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: |
+        sudo apt-get update
+        sudo -E apt-get install -y --no-install-recommends \
+          build-essential wine file
+
+    - name: Provision zig
+      id: prov
+      run: |
+        ZIG_VER=0.13.0
+        curl -fsSL "https://ziglang.org/download/${ZIG_VER}/zig-linux-x86_64-${ZIG_VER}.tar.xz" \
+          | tar -xJ -C "$RUNNER_TEMP"
+        echo "$RUNNER_TEMP/zig-linux-x86_64-${ZIG_VER}" >> "$GITHUB_PATH"
+
+    # The NATIVE toolchain: the cross build is driven by a host `ae`, which is
+    # exactly what keeps Wine out of the compile path.
+    - name: Build the native toolchain
+      run: make compiler ae stdlib -j"$(nproc)"
+
+    - name: Run the Windows runtime sweep under Wine
+      run: |
+        zig version
+        wine --version
+        JOBS="$(nproc)" bash tests/scripts/windows_wine_sweep.sh
+
   build-mingw:
     name: Build + Test (Windows / ${{ matrix.msystem }})
     runs-on: windows-latest

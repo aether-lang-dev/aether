@@ -1,0 +1,22 @@
+# Tests excluded from the Windows/Wine runtime sweep (#1876).
+#
+# One reason per entry, and the reason has to be about the TEST, not about
+# Wine being inconvenient. A test that fails here because Windows genuinely
+# behaves differently is the whole point of the lane and must NOT be listed.
+#
+# Anything added here should say which of the two it is:
+#   LINUX-ONLY  — the test asserts a Linux interface that Windows does not have
+#   WINE-GAP    — real on Windows, but Wine's emulation is not faithful enough
+
+# LINUX-ONLY: reads /proc and calls statvfs, neither of which exists on Windows.
+tests/regression/test_read_proc_and_statvfs.ae
+
+# LINUX-ONLY: asserts POSIX process/exit-code semantics through os.system.
+tests/regression/test_os_system_exit_code.ae
+
+# LINUX-ONLY: the std.os surface it walks is POSIX (uname, getuid, paths).
+tests/regression/test_os_module.ae
+
+# WINE-GAP: needs a working TLS stack and outbound network; Wine's socket
+# layer plus a CI sandbox is not a fair test of the client.
+tests/regression/test_https_client.ae
