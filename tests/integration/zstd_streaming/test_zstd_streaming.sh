@@ -46,6 +46,15 @@ fi
 # (Written rather than sed-patched: BSD `sed -i` needs a backup suffix and
 # GNU sed does not, so a substitution here breaks on one platform or the
 # other -- the same trap tests/integration/cache_symlinked_lib_edit notes.)
+# The fixture writes through the NATIVE `ae`, which on MSYS does not understand
+# an /tmp/... MSYS path -- fs.write_binary just reports "binary write failed".
+# Convert with cygpath where it exists, as http_middleware_d2 does.
+if command -v cygpath >/dev/null 2>&1; then
+    OUT_ZST="$(cygpath -m "$TMP")/out.zst"
+else
+    OUT_ZST="$TMP/out.zst"
+fi
+
 cat > "$TMP/emit.ae" <<AEOF
 import std.zstd
 import std.string
@@ -68,7 +77,7 @@ main() {
     t, tn, e3 = zstd.stream_finish(s)
     if tn > 0 { all = string.concat(all, t) }
     zstd.stream_free(s)
-    werr = fs.write_binary("$TMP/out.zst", all, string.length(all))
+    werr = fs.write_binary("$OUT_ZST", all, string.length(all))
     if werr != "" { println("write: \${werr}") return 1 }
     return 0
 }
