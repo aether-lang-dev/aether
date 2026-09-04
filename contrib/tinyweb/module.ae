@@ -27,6 +27,7 @@ exports (
     end_point, filter, filter_all, web_socket, serve_static, path,
     web_server, web_server_host, web_server_with_ws, web_server_full,
     with_timeout, with_backlog, with_ws_backlog, with_keep_alive,
+    with_tls,
     on_error, on_server_error, on_ws_timeout, on_ws_error,
     on_stats,
     stats_record, stats_add_filter,
@@ -359,6 +360,9 @@ web_server(port: int) {
     map_put(srv, "web_backlog", 50)
     map_put(srv, "ws_backlog", 50)
     map_put(srv, "keep_alive", 1)
+    // TLS is off until with_tls supplies a cert/key pair.
+    map_put(srv, "tls_cert", "")
+    map_put(srv, "tls_key", "")
     // Error handling callbacks
     map_put(srv, "on_error", 0)
     map_put(srv, "on_server_error", 0)
@@ -394,6 +398,21 @@ web_server_full(host: string, port: int, ws_port: int, sse_port: int) {
 // ---------------------------------------------------------------------------
 // Config extras — server tuning parameters
 // ---------------------------------------------------------------------------
+
+// Serve over HTTPS with the given PEM cert and key.
+//
+//     server = tinyweb.web_server_host("0.0.0.0", 443) { ... }
+//     _ = tinyweb.with_tls(server, "/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+//
+// Paths are recorded here and applied by tw_start, which reports a bad pair as
+// a start-up error rather than serving plaintext on a port a caller believes
+// is encrypted. That failure mode is why this is not a silent no-op: a server
+// that quietly downgrades to HTTP is worse than one that refuses to start.
+with_tls(srv: ptr, cert_path: string, key_path: string) {
+    map_put(srv, "tls_cert", cert_path)
+    map_put(srv, "tls_key", key_path)
+    return srv
+}
 
 // Set socket timeout in milliseconds
 with_timeout(srv: ptr, ms: int) {
@@ -940,6 +959,22 @@ tw_start(srv: ptr) -> string {
     bind_err = http.server_bind(raw, host, port)
     if bind_err != "" {
         return "failed to bind ${host}:${port}: ${bind_err}"
+    }
+
+    // TLS, when with_tls supplied a pair. Applied before the routes so a bad
+    // cert fails start-up rather than after the server looks ready -- and
+    // deliberately NOT silently skipped, because a server that downgrades to
+    // plaintext on a port the caller believes is HTTPS is the worse outcome.
+    tls_cert, _ = map.get(srv, "tls_cert")
+    tls_key, _ = map.get(srv, "tls_key")
+    if string.length(tls_cert) > 0 || string.length(tls_key) > 0 {
+        if string.length(tls_cert) == 0 || string.length(tls_key) == 0 {
+            return "with_tls needs BOTH a cert and a key"
+        }
+        tls_err = http.server_set_tls(raw, tls_cert, tls_key)
+        if tls_err != "" {
+            return "TLS setup failed: ${tls_err}"
+        }
     }
 
     // Register all routes with the C server
