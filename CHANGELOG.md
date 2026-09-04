@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.632.0]
+
 ### Added
 
 - **Windows RUNTIME coverage, from a Linux runner.** Nothing ran Windows
