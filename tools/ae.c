@@ -2493,6 +2493,15 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* pcre2_libs = "";
 #endif
+#ifdef AETHER_BROTLI_LIBS
+    /* libbrotlienc powers std.brotli. Empty when not detected, and that
+     * emptiness is load-bearing: a box without the library must not get a
+     * -lbrotlienc it cannot resolve. The std.brotli surface stays valid and
+     * reports "brotli unavailable". */
+    const char* brotli_libs = AETHER_BROTLI_LIBS;
+#else
+    const char* brotli_libs = "";
+#endif
     /* Source-fallback (no libaether.a): compile the VENDORED pcre2
      * engine (#1389) instead of trusting this box to have the library
      * the toolchain's build box had. The defines turn the MANIFEST's
@@ -2748,6 +2757,14 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* pcre2_libs = "";
 #endif
+    // libbrotlienc powers std.brotli. Empty when not detected, and that
+    // emptiness is load-bearing: a box without the library must not be handed
+    // a -lbrotlienc it cannot resolve.
+#ifdef AETHER_BROTLI_LIBS
+    const char* brotli_libs = AETHER_BROTLI_LIBS;
+#else
+    const char* brotli_libs = "";
+#endif
     // Source-fallback (no libaether.a): compile the VENDORED pcre2 engine
     // (#1389) — see the Windows branch above for the full rationale. The
     // defines activate aether_pcre2_vendored.c from the MANIFEST list; the
@@ -2813,8 +2830,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         else
             contrib_L[0] = '\0';
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "
@@ -2827,8 +2844,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             fprintf(stderr,
                 "Warning: gcc link command truncated at %d bytes (buffer %zu), "

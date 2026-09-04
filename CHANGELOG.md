@@ -13,6 +13,36 @@ version number before tagging the release.
 
 ### Added
 
+- **`std.brotli` — Brotli compression (RFC 7932), streaming and one-shot**
+  (#1891). `br` is what current browsers actually prefer: every modern browser
+  lists it ahead of `gzip` in `Accept-Encoding`, and it typically beats gzip by
+  15–25% on text at comparable speed.
+
+  The streaming surface deliberately mirrors `std.zlib`'s, so a server
+  negotiating `br` against `gzip` writes the same shape either way:
+  `stream_new` → `stream_write` → `stream_flush` → `stream_finish` →
+  `stream_free`. As there, `stream_write` usually emits nothing and
+  `stream_flush` is what emits a decodable boundary while keeping the window —
+  three repetitive events compress to 31, 13 and 13 bytes.
+
+  This wraps the system **libbrotlienc** rather than vendoring an
+  implementation. The reference encoder carries a mandatory ~120k-line static
+  dictionary that is part of the *format*, so vendoring means carrying that
+  whichever route is taken, plus transliterating ~17k lines of bit-exact
+  entropy coding; the library ships in every mainstream distro and exposes
+  exactly the streaming encoder this needs. Detected by pkg-config as
+  `AETHER_HAS_BROTLI`, the same shape as zlib/nghttp2/PCRE2; without it,
+  `available()` returns 0 and `stream_new` reports "brotli unavailable" so a
+  server falls back to gzip.
+
+  Verified against an **independent** `libbrotlidec` decoder, not our own
+  encoder: the test asserts that every flushed chunk concatenated decodes as
+  one stream, and that later events cost far less than the first — a shared
+  window rather than N independent streams. Compression only; nothing in-tree
+  needs to decode `br`.
+
+### Added
+
 - **Streaming deflate in `std.zlib`** (#1890) — a handle that stays open across
   writes, so a long-lived response is ONE compressed stream rather than many.
 
