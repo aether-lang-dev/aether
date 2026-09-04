@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.634.0]
+
 ### Added
 
 - **`http.response_upgrade_sse` — turn an in-flight response into an SSE
