@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.634.0]
+
 ### Added
 
 - **The website's first demo is now a test.** A Windows user (MSYS2 / ucrt64)
