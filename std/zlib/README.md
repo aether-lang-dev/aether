@@ -53,7 +53,39 @@ an unchecked caller gets an error rather than a wrong result — but checking
 Unlike `std.lzf`, deflating an incompressible input succeeds and simply
 produces slightly more bytes than it consumed.
 
+## Streaming deflate
+
+The calls above are one-shot: each emits a **complete** stream. That is wrong
+for a long-lived response. An SSE connection carrying many small events needs
+ONE deflate stream held open for the life of the connection, flushed at each
+event boundary, so the client sees a single continuous stream. Compressing each
+event independently produces N complete streams concatenated, which no
+`Content-Encoding: gzip` client will decode.
+
+```
+s, err = zlib.stream_new(zlib.GZIP, 6)      // RAW / ZLIB / GZIP
+chunk, n, err = zlib.stream_write(s, ev, string.length(ev))
+chunk, n, err = zlib.stream_flush(s)        // send these bytes now
+// ... more events, same stream ...
+tail, n, err = zlib.stream_finish(s)        // at connection close
+zlib.stream_free(s)
+```
+
+`stream_write` usually returns **0 bytes** — deflate buffers internally for
+compression ratio. `stream_flush` is what emits a decodable boundary while
+keeping the window, so later events cost far less than the first: three
+repetitive events in the test compress to 34, 12 and 11 bytes. Emit whatever
+each call returns, and always `stream_free` the handle.
+
+A handle owns its own output buffer, so two streams may be open on one thread
+(two SSE connections on one event loop) without fighting over it.
+
+Streaming *inflate* is not implemented; the one-shot `inflate` / `gzip_inflate`
+read a complete stream, including one assembled from flushed chunks.
+
 ## Exports
 
-`available`, `deflate`, `inflate`, `gzip_deflate`, `gzip_inflate`, plus the
-`zlib_*` raw forms.
+`available`, `deflate`, `inflate`, `gzip_deflate`, `gzip_inflate`,
+`stream_new`, `stream_write`, `stream_flush`, `stream_finish`, `stream_free`
+(and the `RAW` / `ZLIB` / `GZIP` format constants), plus the `zlib_*` raw
+forms.

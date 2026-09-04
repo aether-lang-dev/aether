@@ -60,4 +60,62 @@ void        zlib_release_inflate(void);
 int zlib_try_gzip_deflate(const char* data, int length, int level);
 int zlib_try_gzip_inflate(const char* data, int length);
 
+/* ---- Streaming deflate (#1890) ---------------------------------
+ *
+ * The one-shot calls above run deflateInit2 -> deflate(Z_FINISH) ->
+ * deflateEnd inside a single call, so each one necessarily emits a
+ * COMPLETE stream. That is wrong for a long-lived response: an SSE
+ * connection carrying many small events needs ONE deflate stream held
+ * open for the life of the connection, flushed at each event boundary,
+ * so the client sees a single continuous stream. Compressing each event
+ * independently produces N complete streams concatenated, which no
+ * `Content-Encoding: gzip` client will decode.
+ *
+ * The handle owns its own output buffer rather than sharing the TLS
+ * slots above: two streams may be open on one thread (two SSE
+ * connections served by one event loop), and TLS slots would let them
+ * overwrite each other's pending bytes.
+ *
+ * Lifecycle mirrors std.cryptography's streaming hashes:
+ *   s = stream_new(format, level)
+ *   stream_write(s, data, len)      -- buffer input, may emit nothing
+ *   stream_flush(s)                 -- Z_SYNC_FLUSH: emit a decodable
+ *                                      boundary, KEEP the window
+ *   stream_finish(s)                -- Z_FINISH: emit the tail
+ *   stream_free(s)
+ *
+ * After any of write/flush/finish returning 1, the bytes produced by
+ * THAT call are read with stream_get_bytes / stream_get_length. They
+ * stay valid until the next call on the same handle.
+ *
+ * `format`: 0 = raw deflate, 1 = zlib wrapper, 2 = gzip wrapper. These
+ * match the windowBits selection the one-shot calls already use. */
+#define AETHER_ZLIB_FORMAT_RAW  0
+#define AETHER_ZLIB_FORMAT_ZLIB 1
+#define AETHER_ZLIB_FORMAT_GZIP 2
+
+/* Returns an opaque handle, or NULL when zlib is absent, the format or
+ * level is out of range, or allocation fails. */
+void* zlib_try_stream_new(int format, int level);
+
+/* Feed `length` bytes. Returns 1 on success (possibly emitting nothing
+ * -- deflate buffers internally), 0 on error. */
+int zlib_try_stream_write(void* handle, const char* data, int length);
+
+/* Z_SYNC_FLUSH: emit everything buffered so far and end on a byte
+ * boundary the decoder can consume, WITHOUT ending the stream. This is
+ * the call that makes the whole thing work. Returns 1 on success. */
+int zlib_try_stream_flush(void* handle);
+
+/* Z_FINISH: emit the tail (and the gzip/zlib trailer). The handle
+ * accepts no further writes afterwards. Returns 1 on success. */
+int zlib_try_stream_finish(void* handle);
+
+/* Bytes produced by the most recent write/flush/finish on this handle.
+ * Borrowed; valid until the next call on the same handle. */
+const char* zlib_get_stream_bytes(void* handle);
+int         zlib_get_stream_length(void* handle);
+
+void zlib_release_stream(void* handle);
+
 #endif /* AETHER_ZLIB_H */

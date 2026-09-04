@@ -11,6 +11,85 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.zstd` — Zstandard compression (RFC 8878), streaming and one-shot**
+  (#1891). A different *format* from DEFLATE, not a faster zlib: this wraps
+  libzstd and is unrelated to `std.zlib` beyond the similar library name. Its
+  case is strongest away from the browser — archives, logs, snapshots,
+  internal RPC — since `Content-Encoding: zstd` support is thinner than `br`
+  and `gzip`.
+
+  Same streaming surface as `std.zlib` and `std.brotli`, so a caller choosing
+  an encoding writes one shape whichever it picks. The drain loop is the one
+  thing NOT shared: zstd terminates on `ZSTD_compressStream2` returning 0
+  ("bytes remaining to flush"), a third condition distinct from zlib's spare
+  `avail_out` and brotli's `HasMoreOutput` — reusing either would truncate the
+  frame. Level is 1–22 with 3 the default.
+
+  Verified against an **independent** libzstd streaming decoder, and gated by
+  `AETHER_HAS_ZSTD` like the rest; without it, `available()` returns 0 and
+  `stream_new` reports "zstd unavailable".
+
+- **`std.brotli` — Brotli compression (RFC 7932), streaming and one-shot**
+  (#1891). `br` is what current browsers actually prefer: every modern browser
+  lists it ahead of `gzip` in `Accept-Encoding`, and it typically beats gzip by
+  15–25% on text at comparable speed.
+
+  The streaming surface deliberately mirrors `std.zlib`'s, so a server
+  negotiating `br` against `gzip` writes the same shape either way:
+  `stream_new` → `stream_write` → `stream_flush` → `stream_finish` →
+  `stream_free`. As there, `stream_write` usually emits nothing and
+  `stream_flush` is what emits a decodable boundary while keeping the window —
+  three repetitive events compress to 31, 13 and 13 bytes.
+
+  This wraps the system **libbrotlienc** rather than vendoring an
+  implementation. The reference encoder carries a mandatory ~120k-line static
+  dictionary that is part of the *format*, so vendoring means carrying that
+  whichever route is taken, plus transliterating ~17k lines of bit-exact
+  entropy coding; the library ships in every mainstream distro and exposes
+  exactly the streaming encoder this needs. Detected by pkg-config as
+  `AETHER_HAS_BROTLI`, the same shape as zlib/nghttp2/PCRE2; without it,
+  `available()` returns 0 and `stream_new` reports "brotli unavailable" so a
+  server falls back to gzip.
+
+  Verified against an **independent** `libbrotlidec` decoder, not our own
+  encoder: the test asserts that every flushed chunk concatenated decodes as
+  one stream, and that later events cost far less than the first — a shared
+  window rather than N independent streams. Compression only; nothing in-tree
+  needs to decode `br`.
+
+### Added
+
+- **Streaming deflate in `std.zlib`** (#1890) — a handle that stays open across
+  writes, so a long-lived response is ONE compressed stream rather than many.
+
+  The existing calls are one-shot: each runs `deflateInit2` →
+  `deflate(Z_FINISH)` → `deflateEnd` and so emits a *complete* stream. That is
+  wrong for an SSE connection carrying many small events, which needs one
+  deflate stream held open and flushed at each event boundary. Compressing each
+  event independently produces N complete streams concatenated, which no
+  `Content-Encoding: gzip` client will decode — so the failure is a response
+  the browser rejects, not merely a worse ratio.
+
+  `stream_new(format, level)` → `stream_write` → `stream_flush` →
+  `stream_finish` → `stream_free`, with `RAW` / `ZLIB` / `GZIP` framing.
+  `stream_write` usually emits nothing (deflate buffers for ratio);
+  `stream_flush` is what emits a decodable boundary while keeping the window,
+  so later events cost far less than the first — three repetitive events
+  compress to 34, 12 and 11 bytes. Each handle owns its output buffer, so two
+  streams can be open on one thread without fighting over it.
+
+  Verified against **real `gunzip`**, not only our own inflate: our decoder
+  agreeing with our encoder would prove little, since the point of RFC 1952
+  framing is that a foreign decoder reads it. Streaming *inflate* is not
+  included; the one-shot readers handle a complete stream, including one
+  assembled from flushed chunks.
+
+  This also unblocks compressing a chunked or streaming HTTP response: the
+  gzip middleware in `std/http/middleware` compresses a complete `res->body`
+  in one call and has the same limitation from the other direction.
+
 ## [0.632.0]
 
 ### Added

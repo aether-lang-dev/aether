@@ -1,0 +1,134 @@
+// std.zstd — Zstandard compression (RFC 8878), streaming and one-shot.
+//
+// Zstandard is a different FORMAT from DEFLATE, not a faster implementation of
+// it: this wraps libzstd and has nothing to do with std.zlib beyond the
+// similar library name. Its case is strongest away from the browser —
+// archives, logs, snapshots, internal RPC — because `Content-Encoding: zstd`
+// support is thinner than `br` and `gzip`. It compresses harder than gzip at
+// comparable speed and decompresses faster than both.
+//
+// The streaming surface mirrors std.zlib's and std.brotli's, so a caller
+// choosing an encoding writes the same shape whichever it picks:
+//
+//   s, err = zstd.stream_new(zstd.DEFAULT_LEVEL)
+//   chunk, n, err = zstd.stream_write(s, ev, string.length(ev))
+//   chunk, n, err = zstd.stream_flush(s)     // send these bytes now
+//   tail,  n, err = zstd.stream_finish(s)    // close the frame
+//   zstd.stream_free(s)
+//
+// Compression only, as with std.brotli: nothing in-tree needs to decode zstd.
+
+exports(
+    zstd_backend_available,
+    zstd_try_stream_new, zstd_try_stream_write, zstd_try_stream_flush,
+    zstd_try_stream_finish, zstd_get_stream_bytes, zstd_get_stream_length,
+    zstd_release_stream,
+    zstd_try_compress, zstd_get_compress_bytes, zstd_get_compress_length,
+    zstd_release_compress,
+    available, compress,
+    stream_new, stream_write, stream_flush, stream_finish, stream_free
+)
+
+extern zstd_backend_available() -> int
+
+extern zstd_try_stream_new(level: int) -> ptr
+extern zstd_try_stream_write(handle: ptr, data: string, length: int) -> int
+extern zstd_try_stream_flush(handle: ptr) -> int
+extern zstd_try_stream_finish(handle: ptr) -> int
+extern zstd_get_stream_bytes(handle: ptr) -> string
+extern zstd_get_stream_length(handle: ptr) -> int
+extern zstd_release_stream(handle: ptr)
+
+extern zstd_try_compress(data: string, length: int, level: int) -> int
+extern zstd_get_compress_bytes() -> string
+extern zstd_get_compress_length() -> int
+extern zstd_release_compress()
+
+// Length-preserving string constructor from std.string — takes an explicit
+// byte count so binary payloads with embedded NULs survive the copy out of
+// the borrowed C buffer into an owned AetherString.
+extern string_new_with_length(data: string, length: int) -> ptr
+
+// libzstd's own range. 3 is its default and a good general choice; higher
+// levels cost markedly more time for modest gains.
+const MIN_LEVEL = 1
+const MAX_LEVEL = 22
+const DEFAULT_LEVEL = 3
+
+// 1 when the toolchain was built with libzstd detected. Use it to skip a test
+// or pick a fallback encoding rather than threading an error everywhere.
+available() -> int { return zstd_backend_available() }
+
+// One-shot: compress a body already in memory. Returns (bytes, count, "") on
+// success, ("", 0, error) otherwise. Level out of range is clamped.
+compress(data: string, length: int, level: int) -> {
+    if zstd_backend_available() == 0 {
+        return "", 0, "zstd unavailable"
+    }
+    ok = zstd_try_compress(data, length, level)
+    if ok == 0 {
+        return "", 0, "zstd compress failed"
+    }
+    raw = zstd_get_compress_bytes()
+    n = zstd_get_compress_length()
+    owned = string_new_with_length(raw, n)
+    zstd_release_compress()
+    return owned, n, ""
+}
+
+// Open a stream. Returns (handle, "") or (null, error) — an unavailable
+// backend fails HERE, not silently later, because every other stream call
+// needs the handle.
+stream_new(level: int) -> {
+    if zstd_backend_available() == 0 {
+        return null, "zstd unavailable"
+    }
+    h = zstd_try_stream_new(level)
+    if h == null {
+        return null, "zstd stream_new failed"
+    }
+    return h, ""
+}
+
+// Feed bytes. Returns (bytes, count, "") — the count is usually 0, because
+// the encoder buffers internally for compression ratio. Emit whatever comes
+// back, then stream_flush when the event is complete.
+stream_write(handle: ptr, data: string, length: int) -> {
+    if handle == null { return "", 0, "zstd stream: null handle" }
+    ok = zstd_try_stream_write(handle, data, length)
+    if ok == 0 { return "", 0, "zstd stream_write failed" }
+    return stream_take(handle)
+}
+
+// Emit everything buffered so far at a boundary the decoder can consume,
+// WITHOUT ending the frame. This is what makes per-event streaming work.
+stream_flush(handle: ptr) -> {
+    if handle == null { return "", 0, "zstd stream: null handle" }
+    ok = zstd_try_stream_flush(handle)
+    if ok == 0 { return "", 0, "zstd stream_flush failed" }
+    return stream_take(handle)
+}
+
+// Close the frame. The handle takes no further writes; calling it twice is
+// harmless and yields no bytes the second time. Still needs stream_free.
+stream_finish(handle: ptr) -> {
+    if handle == null { return "", 0, "zstd stream: null handle" }
+    ok = zstd_try_stream_finish(handle)
+    if ok == 0 { return "", 0, "zstd stream_finish failed" }
+    return stream_take(handle)
+}
+
+// Copy the borrowed C buffer into an owned, length-aware AetherString.
+// Shared by write/flush/finish so the ownership rule lives in one place.
+stream_take(handle: ptr) -> {
+    raw = zstd_get_stream_bytes(handle)
+    n = zstd_get_stream_length(handle)
+    if n == 0 { return "", 0, "" }
+    owned = string_new_with_length(raw, n)
+    return owned, n, ""
+}
+
+// Release the handle. Safe on null.
+stream_free(handle: ptr) {
+    if handle != null { zstd_release_stream(handle) }
+}
