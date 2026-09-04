@@ -455,7 +455,13 @@ ifeq ($(BROTLI),0)
   BROTLI_LDFLAGS :=
 else
   BROTLI_CFLAGS := $(shell pkg-config --cflags libbrotlienc 2>/dev/null)
-  BROTLI_LDFLAGS := $(shell pkg-config --libs libbrotlienc 2>/dev/null)
+  # --static so libbrotlicommon comes with it. It is a Requires.private of
+  # libbrotlienc, so a plain --libs omits it -- fine when the loader resolves
+  # a shared object, fatal on a static link: MinGW's ld then reports a wall of
+  # undefined BrotliGetDictionary / BrotliDefaultAllocFunc / _kBrotli*
+  # references from inside libbrotlienc.a itself. Found on a real MSYS2 box;
+  # a Linux shared link hides it entirely.
+  BROTLI_LDFLAGS := $(shell pkg-config --static --libs libbrotlienc 2>/dev/null)
 endif
 ifneq ($(BROTLI_LDFLAGS),)
   BROTLI_CFLAGS += -DAETHER_HAS_BROTLI
