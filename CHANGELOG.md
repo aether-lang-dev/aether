@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`ae add <pkg>@<tag>` never pinned the tag, and left an unpinned clone
+  behind on failure.** The checkout ran through the argv-spawning `run_cmd`,
+  which uses no shell, so `cd "dir" && git checkout ... 2>/dev/null || ...` was
+  handed to a program literally named `cd` and failed every time — the version
+  pin has never worked. The clone (a lone `git clone`, no shell metacharacters)
+  succeeded, so `ae add @tag` exited 1 having left a clone of the *default
+  branch* in the package cache; a later `ae run` / `ae lib-path` then resolved
+  the dependency to that unpinned tree and went green against the wrong code —
+  the exact reproducibility hole the dependency-resolution work set out to
+  close. The checkout now uses `git -C` (no shell), both `@v1.2.3` and `@1.2.3`
+  resolve, a failed pin removes the partial clone so nothing half-installed is
+  resolvable, and the "Available versions:" list — empty before, since it ran in
+  the wrong place — now names the tags. `AE_RELEASE_BASE_URL` additionally
+  redirects the git origin, mirroring the release-artifact path, so the clone is
+  testable without the public internet. Reported from the datastar-aether line
+  while pinning selaenium 0.2.1.
+
 ## [0.639.0]
 
 ### Fixed

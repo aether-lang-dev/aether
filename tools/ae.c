@@ -7400,6 +7400,20 @@ static int ae_try_release_asset(const char* package, const char* version,
     return 0;                            /* nothing published for us */
 }
 
+/* Remove a half-installed package clone. A failed `ae add` must leave nothing
+ * resolvable at the final cache path (report: ae-add-tag-pin-fails). Mirrors
+ * the rm -rf idiom used in ae_cache.c / ae_version.c, with the Windows arm. */
+static void ae_add_rmrf(const char* dir) {
+    if (!dir || !*dir) return;
+    char cmd[1200];
+#ifdef _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", dir);
+#else
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", dir);
+#endif
+    if (system(cmd) != 0) { /* best-effort */ }
+}
+
 static int cmd_add(int argc, char** argv) {
     if (argc < 1 || argv[0][0] == '-') {
         fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version] [--source]\n");
@@ -7482,36 +7496,78 @@ static int cmd_add(int argc, char** argv) {
         if (slash) { *slash = '\0'; mkdirs(parent); }
 
         char cmd[4096];
-        if (version) {
-            snprintf(cmd, sizeof(cmd), "git clone https://%s %s", package, pkg_dir);
+        /* AE_RELEASE_BASE_URL also redirects the git origin, mirroring the
+         * release-artifact path above: an internal mirror or a file:// tree
+         * can serve the clone, and it is what makes this path testable
+         * without the public internet. `<origin>/<package>` so a bare git repo
+         * at that layout is reachable. */
+        const char* git_origin = getenv("AE_RELEASE_BASE_URL");
+        char clone_url[1600];
+        if (git_origin && *git_origin) {
+            snprintf(clone_url, sizeof(clone_url), "%s/%s", git_origin, package);
         } else {
-            snprintf(cmd, sizeof(cmd), "git clone --depth 1 https://%s %s", package, pkg_dir);
+            snprintf(clone_url, sizeof(clone_url), "https://%s", package);
+        }
+        if (version) {
+            snprintf(cmd, sizeof(cmd), "git clone %s %s", clone_url, pkg_dir);
+        } else {
+            snprintf(cmd, sizeof(cmd), "git clone --depth 1 %s %s", clone_url, pkg_dir);
         }
         if (run_cmd(cmd) != 0) {
             fprintf(stderr, "Failed to download package.\n");
             fprintf(stderr, "Check that the repository exists: https://%s\n", package);
+            /* git clone may have created a partial directory before failing;
+             * do not leave it resolvable. */
+            ae_add_rmrf(pkg_dir);
             return 1;
         }
 
         // Checkout specific version tag if requested
         if (version) {
-            char tag[128];
-            if (version[0] == 'v') {
-                snprintf(tag, sizeof(tag), "%s", version);
-            } else {
-                snprintf(tag, sizeof(tag), "v%s", version);
+            /* #1879-adjacent (ae-add-tag-pin report): the checkout ran through
+             * run_cmd, whose tokenizer posix_spawns argv directly with NO
+             * shell -- so `cd "dir" && git checkout ... 2>/dev/null || ...`
+             * was handed to a program literally named `cd`, and `&&`, `||`,
+             * `2>/dev/null` were argv words. The whole line failed every time;
+             * the tag pin has never actually worked. The clone succeeded only
+             * because a lone `git clone` has no shell metacharacters.
+             *
+             * Use `git -C <dir>` (a real git flag, no shell needed) so the
+             * checkout runs, and normalise the tag so both `@v0.2.1` and
+             * `@0.2.1` resolve. */
+            const char* bare = (version[0] == 'v') ? version + 1 : version;
+            char vtag[128];
+            snprintf(vtag, sizeof(vtag), "v%s", bare);
+
+            /* Try the v-prefixed tag, then the bare form for repos that tag
+             * without the `v`. run_cmd_quiet only to avoid the noise of the
+             * first miss; the real error is surfaced below if both fail. */
+            snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout %s", pkg_dir, vtag);
+            int co = run_cmd_quiet(cmd);
+            if (co != 0) {
+                snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout %s", pkg_dir, bare);
+                co = run_cmd_quiet(cmd);
             }
-            snprintf(cmd, sizeof(cmd), "cd \"%s\" && git checkout %s 2>/dev/null || git checkout v%s 2>/dev/null",
-                     pkg_dir, tag, version);
-            if (run_cmd_quiet(cmd) != 0) {
+            if (co != 0) {
                 fprintf(stderr, "Error: Version '%s' not found.\n", version);
-                // List available tags
-                snprintf(cmd, sizeof(cmd), "cd \"%s\" && git tag -l 'v*' | sort -V | tail -10", pkg_dir);
+                /* A failed pin MUST NOT leave an unpinned clone behind: a
+                 * later `ae run` / `ae lib-path` would resolve the dependency
+                 * to this main checkout and go green against the wrong tree --
+                 * the exact reproducibility hole this feature set closes. So
+                 * list the tags first (with -C, against the clone that has
+                 * them -- the old `cd` form left this empty too), THEN remove
+                 * the partial clone. */
+                /* No pipe: run_cmd has no shell, so `| sort | tail` would
+                 * be argv to `git tag`. git sorts natively; the newest tags
+                 * sort first, so the first handful is the useful part. */
+                snprintf(cmd, sizeof(cmd),
+                         "git -C \"%s\" tag -l --sort=-v:refname v*", pkg_dir);
                 fprintf(stderr, "Available versions:\n");
                 (void)run_cmd(cmd);
+                ae_add_rmrf(pkg_dir);
                 return 1;
             }
-            printf("Checked out %s\n", tag);
+            printf("Checked out %s\n", vtag);
         }
     }
 
