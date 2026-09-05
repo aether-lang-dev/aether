@@ -8034,7 +8034,15 @@ static int cmd_lib_path(int argc, char** argv) {
 #endif
     /* #1901: resolved dependencies join the chain too, so
      * `ae run x.ae --lib "$(ae lib-path)"` works and the package-cache layout
-     * lives here rather than in every consumer's hand-written shell script. */
+     * lives here rather than in every consumer's hand-written shell script.
+     *
+     * Walk up to the manifest first, exactly as `ae build` does. Without it
+     * `ae lib-path` reports the dependencies only when run from the project
+     * root and prints a bare `lib` from any subdirectory -- while `ae build`
+     * from that same subdirectory resolves them fine. That inconsistency is
+     * worst for the shell-script fallback above, which would silently hand
+     * `--lib` an empty chain. */
+    find_and_chdir_to_aether_toml(NULL);
     ae_resolve_dependencies();
     if (tc.lib_dir_count == 0) {
         fputs("lib\n", stdout);

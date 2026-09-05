@@ -447,7 +447,7 @@ Inputs are merged in the same priority order the build path uses: explicit `--li
 "github.com/aether-lang-dev/selaenium" = "0.2.0"
 ```
 
-`ae run`, `ae build` and `ae lib-path` read that section and join the package's modules to the search path. **No `--lib` is needed to import from a declared dependency.**
+`ae run`, `ae build` and `ae lib-path` read that section and join the package's modules to the search path. **No `--lib` is needed to import from a declared dependency.** All three walk up to the project's manifest first, so they behave the same from a subdirectory as from the project root.
 
 The publishing package decides what it exports, in its own `aether.toml`:
 

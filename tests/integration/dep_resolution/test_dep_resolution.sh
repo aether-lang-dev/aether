@@ -106,6 +106,20 @@ done
 echo "$OUT" | grep -q "widgets/docs" && {
     echo "  [FAIL] dep_resolution: a non-module directory reached the search path"; exit 1; }
 
+# --- 1c. lib-path agrees from a subdirectory ---------------------------
+# `ae build` walks up to the manifest, so it resolves from anywhere in the
+# project. `ae lib-path` did not, and printed a bare `lib` from a
+# subdirectory while `ae build` in that same directory worked. The documented
+# fallback `ae run x.ae --lib "$(ae lib-path)"` would then silently get an
+# empty chain -- a wrong answer that looks like a valid one.
+mkdir -p "$PROJ/deep"
+SUBOUT=$(cd "$PROJ/deep" && "$AE" lib-path 2>/dev/null || true)
+echo "$SUBOUT" | grep -qE "widgets$" || {
+    echo "  [FAIL] dep_resolution: lib-path from a subdirectory lost the dependencies"
+    echo "    --- from subdirectory ---"; echo "$SUBOUT" | sed 's/^/    /' | head -6
+    echo "    --- from project root ---"; echo "$OUT" | sed 's/^/    /' | head -6
+    exit 1; }
+
 # --- 2. an import resolves with NO --lib -------------------------------
 RUN=$("$AE" run use.ae 2>&1 || true)
 case "$RUN" in
