@@ -11,6 +11,55 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`[dependencies]` resolve onto the module search path.** `ae add` installed
+  packages that nothing read back: `ae lib-path` printed `lib`, and
+  `[dependencies]` appeared in the tree only where it was *written*, never
+  parsed for a build. Every consumer therefore hand-wrote a shell script to
+  guess the cache layout and spell out each importable subdirectory as
+  `--lib`. `ae run`, `ae build` and `ae lib-path` now read the section and join
+  the dependency's modules themselves — importing from a declared dependency
+  needs no `--lib` at all.
+
+  The publishing package declares what it exports, in its own `aether.toml`
+  (`[package] modules = "aether, selenium_core, selenium_core/drivermgr"`), so
+  a package can rearrange its directories in a patch release without any
+  consumer changing a path — the consumer names the dependency and nothing
+  else. Entries name importable modules, and each module's *parent* joins the
+  path, matching what `--lib` has always meant. A package root is never joined
+  speculatively: a real package is a whole repository whose root holds docs and
+  scripts too.
+
+  A declared-but-missing dependency now fails as `dependency 'X' is not
+  installed. Run: ae add X` rather than as an unresolved-import error naming a
+  module the user never typed.
+
+  This was reported from the datastar-aether line, where a hand-written
+  resolver globbed two path levels instead of three, silently fell through to a
+  sibling checkout that happened to exist locally, and stayed green for weeks
+  while the package path had never once worked.
+
+- **`--override` and `[patch]` for redirecting a dependency.**
+  `ae run x.ae --override <dep>=<path>` overrides per invocation, leaving no
+  trace in the manifest; `[patch]` does the same from the manifest in a stanza
+  separate from `[dependencies]`, so an override cannot ship by accident inside
+  a dependency line, in either a bare-path or Cargo's `{ path = "..." }` form.
+  `--override` wins where both name a dependency. Both
+  print `Overriding <dep> -> <path>`: an override that applied silently means a
+  green local build against a working copy CI does not have.
+
+### Fixed
+
+- **CI runs were never cancelled when superseded.** Neither `ci.yml` nor
+  `windows.yml` carried a `concurrency:` block — only `release.yml` did — so
+  every push left the previous run's jobs racing to completion. Two branches
+  accumulated 12 and 18 concurrent runs during one day's work, and a stale run
+  kept reporting failure against a commit nobody was on any more, one of them
+  sitting open for six hours after its last job had finished. Superseded runs
+  on a branch are now cancelled. `main` is deliberately exempt: a push there is
+  a merge whose result is worth recording even if another lands seconds later.
+
 ## [0.636.0]
 
 ### Fixed

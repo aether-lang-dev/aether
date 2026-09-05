@@ -21,6 +21,23 @@ on:
     paths-ignore: [ 'CHANGELOG.md', 'VERSION' ]
   workflow_dispatch:
 
+
+# Cancel a superseded run when a new commit lands on the same ref. Without
+# this, every push left the previous run's jobs racing to completion: two
+# branches accumulated 12 and 18 runs during one day's work, and a stale run
+# kept reporting failure for a commit nobody was on any more (one such run sat
+# open for six hours after its last job finished).
+#
+# Keyed by workflow + ref so different workflows and different branches never
+# cancel each other. For a PR, github.ref is refs/pull/N/merge -- stable across
+# every push to that PR, which is the accumulation case this fixes, and distinct
+# from a branch push so the two never cancel one another. NOT applied to main:
+# a push there is a merge whose result is worth recording even if another lands
+# seconds later.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # ============================================================
   # Full CI suite — Linux (GCC), Linux (Clang), macOS (Clang)
