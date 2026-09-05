@@ -1470,10 +1470,82 @@ static int is_ptr_struct_param(CodeGenerator* gen, const char* name) {
     return 0;
 }
 
+/* #1879: emit a NESTED-path field assignment (`o.inner.name = ...`).
+ *
+ * The identifier-only path below cannot serve this: it splices `obj->value`
+ * into the generated C as a bare name, and here the object is itself a member
+ * access. The result was a plain store with no `_heap_<field>` tracker, so the
+ * inner struct's destructor believed it owned nothing and the string leaked --
+ * while the identical write spelled on the inner pointer released correctly.
+ * Ownership followed how the assignment was SPELLED rather than the type.
+ *
+ * The object expression is bound to a temporary first: it is emitted three
+ * times (store, tracker, and the field read) and re-evaluating it would run
+ * any side effects more than once.
+ *
+ * The previous value is NOT freed here, for the #1873 reason. Reading
+ * `_heap_<field>` is only safe on a box we can SEE was zero-initialised by
+ * heap.new, and an inner struct reached through a pointer field is not
+ * visible that way -- it may have come from `malloc(n) as *T`, whose tracker
+ * is garbage, and acting on that frees a garbage pointer. Setting the tracker
+ * is safe regardless and is what stops the leak; a repeated assignment
+ * through a nested path can still drop the earlier value, which is strictly
+ * better than a segfault and matches what a pointer parameter already does. */
+static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
+                                         ASTNode* rhs, ASTNode* obj) {
+    Type* obj_type = obj->node_type;
+    if (!obj_type) return 0;
+    /* Only a struct POINTER: a nested value struct is reached by "." and is
+     * covered by the identifier path when written on a local. */
+    if (obj_type->kind != TYPE_PTR || !obj_type->element_type ||
+        obj_type->element_type->kind != TYPE_STRUCT ||
+        !obj_type->element_type->struct_name) return 0;
+    if (!gen->program) return 0;
+
+    ASTNode* sdef = find_struct_definition_by_name(gen->program,
+                                                   obj_type->element_type->struct_name);
+    if (!sdef) return 0;
+    ASTNode* matching_field = NULL;
+    for (int fi = 0; fi < sdef->child_count; fi++) {
+        ASTNode* f = sdef->children[fi];
+        if (f && f->type == AST_STRUCT_FIELD &&
+            f->value && strcmp(f->value, lhs->value) == 0) {
+            matching_field = f;
+            break;
+        }
+    }
+    if (!matching_field || !matching_field->node_type ||
+        matching_field->node_type->kind != TYPE_STRING) return 0;
+    if (!struct_has_heap_string_field(sdef)) return 0;
+
+    int rhs_is_heap = is_heap_string_expr(gen, rhs);
+    /* Unique per emission: these blocks nest (an argument to the RHS may
+     * itself be a nested-path assignment), and a fixed name would shadow. */
+    static int nested_tgt_seq = 0;
+    char tgt[32];
+    snprintf(tgt, sizeof(tgt), "_ae_ntgt%d", nested_tgt_seq++);
+
+    print_indent(gen);
+    fprintf(gen->output, "{ %s* %s = ",
+            obj_type->element_type->struct_name, tgt);
+    generate_expression(gen, obj);
+    fprintf(gen->output, "; %s->%s = ", tgt, lhs->value);
+    generate_expression(gen, rhs);
+    fprintf(gen->output, "; %s->_heap_%s = %d; }\n",
+            tgt, lhs->value, rhs_is_heap ? 1 : 0);
+    return 1;
+}
+
 static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (!gen || !lhs || !rhs) return 0;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
     if (lhs->child_count != 1 || !lhs->children[0]) return 0;
+    /* #1879: a nested path (`o.inner.name`) has a MEMBER_ACCESS object rather
+     * than a bare identifier. Handle it separately -- the code below splices
+     * the object in as a name. */
+    if (lhs->children[0]->type == AST_MEMBER_ACCESS) {
+        return emit_nested_field_heap_assign(gen, lhs, rhs, lhs->children[0]);
+    }
     if (lhs->children[0]->type != AST_IDENTIFIER || !lhs->children[0]->value) return 0;
     ASTNode* obj = lhs->children[0];
     Type* obj_type = obj->node_type;
@@ -1495,9 +1567,17 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
         struct_name = obj_type->struct_name;
     } else if (obj_type->kind == TYPE_PTR && obj_type->element_type &&
                obj_type->element_type->kind == TYPE_STRUCT &&
-               obj_type->element_type->struct_name &&
-               (is_heap_box_var(gen, obj->value) ||
-                is_ptr_struct_param(gen, obj->value))) {
+               obj_type->element_type->struct_name) {
+        /* #1879: ANY struct pointer, not only a heap.new local or a pointer
+         * parameter. A local ALIAS (`p = o.inner; p.name = ...`) is neither,
+         * so it used to fall through to a bare store and leak -- the same
+         * "ownership depends on how you spell it" defect as the nested path,
+         * reached by binding the inner pointer to a name first.
+         *
+         * Widening is safe because the trustworthiness check below, not this
+         * guard, is what decides whether the previous value may be FREED.
+         * Claiming ownership is sound for any struct pointer; reading a
+         * possibly-garbage tracker is not, and that stays gated. */
         /* #1873: a PARAMETER is not a promise that the box was zeroed — the
          * caller may have handed us `malloc(n) as *T`, whose `_heap_<field>`
          * tracker is garbage. Reading it to decide whether to free the

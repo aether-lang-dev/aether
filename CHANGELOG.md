@@ -11,6 +11,38 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`heap.free` leaked a string field assigned through a nested path (#1879).**
+  Follow-up to #1866. `o.inner.name = ...` emitted a bare store with no
+  `_heap_<field>` tracker, so the inner struct's destructor believed it owned
+  nothing and the string leaked — while the identical write spelled on the
+  inner pointer, `i.name = ...`, released correctly. Ownership followed how the
+  assignment was *spelled* rather than the type, and nothing warned. The
+  ownership wrapper only recognised an object that was a bare identifier; a
+  nested path presents a member access instead, so it fell through to the plain
+  assignment.
+
+  Reaching a field through an owned sub-object is ordinary — a model holds a
+  material, the material holds a texture path — so `model_set_texture(m, path)`
+  writing `m.material.texture_path` silently leaked.
+
+  A **local alias** leaked for the same reason: `p = o.inner; p.name = ...` is
+  a bare identifier but neither a `heap.new` box nor a pointer parameter, so it
+  missed the wrapper too. The wrapper now accepts any struct pointer — safe
+  because whether the *previous* value may be freed is decided separately, and
+  that check is unchanged.
+
+  One limit remains, deliberately: the previous value is not freed when a
+  nested field is *re-assigned*, so `o.inner.name = a` followed by
+  `o.inner.name = b` still drops `a`. Freeing it means reading the existing
+  `_heap_<field>`, which is only sound on a box the compiler can see was
+  zero-initialised by `heap.new`; an inner struct reached through a pointer
+  field is not visible that way and may have come from `malloc(n) as *T`, whose
+  tracker is garbage. Acting on that frees a garbage pointer, so this matches
+  what a pointer parameter already does (#1873): claim ownership, do not
+  release the old value.
+
 ## [0.638.0]
 
 ### Fixed
