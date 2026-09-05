@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.638.0]
+
 ### Fixed
 
 - **A single-file module could not be declared in `[package] modules`.** The
