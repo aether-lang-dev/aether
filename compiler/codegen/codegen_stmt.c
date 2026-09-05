@@ -1474,7 +1474,15 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     if (!gen || !lhs || !rhs) return 0;
     if (lhs->type != AST_MEMBER_ACCESS || !lhs->value) return 0;
     if (lhs->child_count != 1 || !lhs->children[0]) return 0;
-    if (lhs->children[0]->type != AST_IDENTIFIER || !lhs->children[0]->value) return 0;
+    if (!lhs->children[0]->value) return 0;
+    /* #1879: the object may itself be a member access (`o.inner.name = ...`).
+     * Requiring a bare identifier here meant a nested path fell through to a
+     * plain store with NO `_heap_<field>` tracker set, so the destructor
+     * skipped the field and the string leaked, while the identical write
+     * spelled `inner.name = ...` was reclaimed. Ownership followed how the
+     * assignment was spelled rather than the type. */
+    int obj_is_nested = (lhs->children[0]->type == AST_MEMBER_ACCESS);
+    if (lhs->children[0]->type != AST_IDENTIFIER && !obj_is_nested) return 0;
     ASTNode* obj = lhs->children[0];
     Type* obj_type = obj->node_type;
     if (!obj_type) return 0;
@@ -1496,7 +1504,8 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     } else if (obj_type->kind == TYPE_PTR && obj_type->element_type &&
                obj_type->element_type->kind == TYPE_STRUCT &&
                obj_type->element_type->struct_name &&
-               (is_heap_box_var(gen, obj->value) ||
+               (obj_is_nested ||
+                is_heap_box_var(gen, obj->value) ||
                 is_ptr_struct_param(gen, obj->value))) {
         /* #1873: a PARAMETER is not a promise that the box was zeroed — the
          * caller may have handed us `malloc(n) as *T`, whose `_heap_<field>`
@@ -1531,6 +1540,26 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
 
     int rhs_is_heap = is_heap_string_expr(gen, rhs);
     print_indent(gen);
+    if (obj_is_nested) {
+        /* The owner is reached through an expression, so bind it ONCE: the
+         * store and the tracker must not evaluate the path twice.
+         *
+         * The tracker is SET but the previous value is not read, for #1873's
+         * reason: nothing here proves the inner box came from heap.new, and
+         * on a hand-malloc'd box the tracker is uninitialised, so acting on
+         * it would free a garbage pointer. Setting it is what reclaims the
+         * field; not reading it can leak a previous value on a box that was
+         * genuinely zeroed, which is strictly better than a segfault. */
+        fprintf(gen->output, "{ %s* _ae_owner = ", struct_name);
+        if (acc[0] == '.') fprintf(gen->output, "&(");
+        generate_expression(gen, obj);
+        if (acc[0] == '.') fprintf(gen->output, ")");
+        fprintf(gen->output, "; _ae_owner->%s = ", lhs->value);
+        generate_expression(gen, rhs);
+        fprintf(gen->output, "; _ae_owner->_heap_%s = %d; }\n",
+                lhs->value, rhs_is_heap ? 1 : 0);
+        return 1;
+    }
     if (!tracker_is_trustworthy) {
         /* #1873: store and SET the tracker (so the destructor still reclaims
          * this value — #1866's leak fix is preserved), but do not read the

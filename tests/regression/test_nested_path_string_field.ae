@@ -1,0 +1,75 @@
+// Regression (#1879, follow-up to #1866): a heap STRING field assigned
+// through a NESTED path (`o.inner.name = ...`) must be reclaimed by the
+// destructor, exactly as one assigned on the inner pointer directly.
+//
+// Pre-fix, codegen only recognised an assignment whose object was a bare
+// identifier. `o.inner.name = ...` has a member access as its object, so it
+// fell through to a plain store with no `_heap_name` tracker set, and
+// `heap.free(o.inner)` then skipped the field: the string leaked. The
+// identical write spelled `inner.name = ...` was reclaimed, so ownership
+// followed how the assignment was SPELLED rather than the type, which is
+// what made it undiscoverable.
+//
+// This is a LEAK gate, so the assertion that matters is made by the leak
+// checkers that run this suite (macOS leaks(1), Linux valgrind and ASan).
+// The behavioural half here guards the other direction: reclaiming the
+// field must not corrupt or double-free it, so both values are read back
+// after every assignment and compared.
+
+import std.heap
+import std.string
+
+extern exit(code: int)
+
+struct Inner { name: string }
+struct Outer { inner: *Inner }
+
+own(previous: string, value: string) -> string {
+    if previous != null { string.free(previous) }
+    return string.copy(value)
+}
+
+set_through_outer(o: *Outer, v: string) {
+    o.inner.name = own(o.inner.name, v)
+}
+
+set_direct(i: *Inner, v: string) {
+    i.name = own(i.name, v)
+}
+
+check(got: string, want: string, what: string) {
+    if got != want {
+        println("FAIL: ${what}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+main() {
+    a = heap.new(Outer)
+    a.inner = heap.new(Inner)
+    set_through_outer(a, "assigned-through-a-nested-path")
+    check(a.inner.name, "assigned-through-a-nested-path", "nested path stores the value")
+    // Re-assign: the second write must not disturb the first's ownership.
+    set_through_outer(a, "nested-again")
+    check(a.inner.name, "nested-again", "nested path re-assigns")
+    heap.free(a.inner)
+    heap.free(a)
+
+    b = heap.new(Outer)
+    b.inner = heap.new(Inner)
+    set_direct(b.inner, "assigned-on-the-inner-pointer")
+    check(b.inner.name, "assigned-on-the-inner-pointer", "direct pointer stores the value")
+    heap.free(b.inner)
+    heap.free(b)
+
+    // Inline, with no function boundary: the report notes the leak is the
+    // path shape, not the call, so the inline form is gated too.
+    c = heap.new(Outer)
+    c.inner = heap.new(Inner)
+    c.inner.name = string.copy("assigned-inline-through-a-nested-path")
+    check(c.inner.name, "assigned-inline-through-a-nested-path", "inline nested path")
+    heap.free(c.inner)
+    heap.free(c)
+
+    println("nested path string field ownership OK")
+}

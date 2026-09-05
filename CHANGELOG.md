@@ -11,6 +11,26 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A heap string field assigned through a nested path is reclaimed** (#1879,
+  follow-up to #1866). Codegen recognised a field assignment only when its
+  object was a bare identifier, so `o.inner.name = ...`, whose object is itself
+  a member access, fell through to a plain store that set no
+  `_heap_<field>` tracker. `heap.free(o.inner)` then skipped the field and the
+  string leaked, while the identical write spelled `inner.name = ...` was
+  reclaimed: ownership followed how the assignment was SPELLED rather than the
+  type, which is what made it undiscoverable. Reaching a field through an owned
+  sub-object is ordinary, so this was reachable from any
+  `model.material.texture_path = ...`.
+
+  The owner is now bound once, so the store and the tracker cannot evaluate the
+  path twice, and the tracker is set without reading the previous value. That
+  last part is #1873's rule: nothing here proves the inner box came from
+  `heap.new`, and on a hand-malloc'd box the tracker is uninitialised, so acting
+  on it would free a garbage pointer.
+
+
 ## [0.635.0]
 
 ### Added
