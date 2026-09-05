@@ -120,6 +120,31 @@ echo "$SUBOUT" | grep -qE "widgets$" || {
     echo "    --- from project root ---"; echo "$OUT" | sed 's/^/    /' | head -6
     exit 1; }
 
+# --- 1d. a SINGLE-FILE module can be declared --------------------------
+# `--lib D` resolves both `D/<name>/module.ae` and `D/<name>.ae`, so a
+# declaration has to accept both -- checking only for a directory makes
+# single-file modules undeclarable. The selaenium package this issue came
+# from is exactly that shape (`aether/webdriver.ae`, no directory), so the
+# first cut rejected the very package it was written for.
+printf 'exports(solo)\nsolo() -> int { return 42 }\n' > "$PKGS/engine/solo.ae"
+cat > "$PKGS/aether.toml" <<'TOMLEOF'
+[package]
+name = "widgets"
+modules = "frontend, engine, engine/util, engine/solo"
+TOMLEOF
+SOLO=$("$AE" lib-path 2>&1 || true)
+case "$SOLO" in
+    *"neither"*|*"does not"*)
+        echo "  [FAIL] dep_resolution: a single-file module was rejected"
+        echo "$SOLO" | sed 's/^/    /' | head -6; exit 1 ;;
+esac
+# Restore the manifest the rest of the test expects.
+cat > "$PKGS/aether.toml" <<'TOMLEOF'
+[package]
+name = "widgets"
+modules = "frontend, engine, engine/util"
+TOMLEOF
+
 # --- 2. an import resolves with NO --lib -------------------------------
 RUN=$("$AE" run use.ae 2>&1 || true)
 case "$RUN" in

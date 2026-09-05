@@ -457,7 +457,7 @@ name = "selaenium"
 modules = "aether, selenium_core, selenium_core/drivermgr"
 ```
 
-Each entry names an **importable module**, and what joins the search path is that module's parent directory — because `--lib D` means "D contains modules" (`D/<name>.ae` or `D/<name>/module.ae`). So `selenium_core/drivermgr` puts `<package>/selenium_core` on the path and `import drivermgr` resolves.
+Each entry names an **importable module**, and what joins the search path is that module's parent directory — because `--lib D` means "D contains modules" (`D/<name>.ae` or `D/<name>/module.ae`). So `selenium_core/drivermgr` puts `<package>/selenium_core` on the path and `import drivermgr` resolves. Either module form counts: `aether/webdriver` names a single-file `aether/webdriver.ae` just as readily as a directory holding `module.ae`.
 
 This is why the declaration lives with the publisher rather than the consumer: a package can move its directories in a patch release without any consumer changing a path. A consumer names the dependency and nothing else. A package with no `aether.toml`, or none with a `modules` key, exports nothing and says so — the package root is never joined speculatively, since a real package is a whole repository whose root holds docs, scripts and tests as well as modules.
 

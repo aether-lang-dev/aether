@@ -11,6 +11,16 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A single-file module could not be declared in `[package] modules`.** The
+  check accepted only a directory, while `--lib D` has always resolved both
+  `D/<name>/module.ae` and `D/<name>.ae`. So a package exporting
+  `aether/webdriver.ae` was told the module "does not exist" and could export
+  nothing. Found against the real installed `selaenium` package — the one the
+  dependency-resolution issue was reported from — which is exactly that shape,
+  so the first cut rejected the very package it was written for.
+
 ## [0.637.0]
 
 ### Added
