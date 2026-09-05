@@ -66,6 +66,10 @@ cross targets still reject it. The dylib is linked with
 expects; without it the load command would record the build-machine path and the
 library would fail to load from inside the bundle.
 
+For a step-by-step walkthrough of wiring one of these into an actual app —
+bridging header, calling from SwiftUI, bundling, and the mistakes that cost
+the most time — see **[swiftui-ios-app.md](swiftui-ios-app.md)**.
+
 The exported symbols are the ordinary `aether_<name>()` C ABI (see
 [emit-lib.md](emit-lib.md)), so Swift and Objective-C call them through a
 bridging header with no glue. Note that `--emit=lib` writes only the library —
@@ -81,8 +85,10 @@ ae build --target=aarch64-ios --emit=csrc mylib.ae -o mylib   # -> mylib.h
 let sum = aether_add(2, 3)
 ```
 
-A `-> string` export returns an `AetherString*`, not a `char*`; read its bytes
-with `aether_string_data()`.
+A `-> string` export surfaces as `const char*`: the generated `aether_<name>()`
+wrapper calls `aether_string_data()` on the `AetherString*` for you, so Swift
+receives a NUL-terminated C string. Copy it (`String(cString:)`) rather than
+retaining the pointer.
 
 ## Deployment target
 
