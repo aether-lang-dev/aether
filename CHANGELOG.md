@@ -51,6 +51,21 @@ version number before tagging the release.
 
 ### Fixed
 
+- **MinGW: `cannot find -lfyaml` and `__imp_nghttp2_*` link failures (#1896).**
+  Building `ae` on MSYS2/MinGW failed at link, which made a real Windows box
+  unusable as a proving ground. Both errors came from the same cause: the
+  Windows link line carries `-static` (to avoid libwinpthread/libgcc DLL
+  dependencies in release binaries) and two dependencies were not told about
+  it. `-static` is not positional for library *resolution*, so `ld` demanded
+  `libfyaml.a` while MSYS2 ships only `libfyaml.dll.a` — the library was
+  installed and `pkg-config` correct, which is why it looked like a missing
+  package and was not. fyaml is the only dependency with no static archive
+  there, so it now links dynamically inside `-Wl,-Bdynamic` / `-Wl,-Bstatic`
+  rather than `-static` being dropped for everything. Separately, `nghttp2.h`
+  declares its API `__declspec(dllimport)` unless `NGHTTP2_STATICLIB` is
+  defined, so every call compiled to an `__imp_` reference the static archive
+  could not satisfy; the headers are now told what the linker was told.
+
 - **CI runs were never cancelled when superseded.** Neither `ci.yml` nor
   `windows.yml` carried a `concurrency:` block — only `release.yml` did — so
   every push left the previous run's jobs racing to completion. Two branches

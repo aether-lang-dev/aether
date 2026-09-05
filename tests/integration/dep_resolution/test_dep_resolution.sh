@@ -31,6 +31,15 @@ trap 'rm -rf "$TMPDIR_T"' EXIT
 # never depends on what happens to be installed on the machine.
 PKGS="$TMPDIR_T/home/.aether/packages/example.com/acme/widgets"
 mkdir -p "$PKGS/frontend" "$PKGS/engine/util" "$PKGS/docs"
+# Verify the fixture actually landed before asserting anything about it. A
+# deep `mkdir -p` under a dot-directory silently fails on some MSYS2 setups
+# (observed on a real Win11/MSYS2 box: step-by-step mkdir works, one-shot
+# `mkdir -p a/.hidden/b/c/d` does not), and a fixture that was never created
+# would otherwise surface as a confusing resolver failure rather than as the
+# environment problem it is.
+for d in "$PKGS/frontend" "$PKGS/engine/util" "$PKGS/docs"; do
+    [ -d "$d" ] || { echo "  [SKIP] dep_resolution: cannot create fixture dir $d"; exit 0; }
+done
 cat > "$PKGS/aether.toml" <<'TOMLEOF'
 [package]
 name = "widgets"
@@ -78,11 +87,21 @@ export USERPROFILE
 # as its PARENT: `frontend` and `engine` put the package root on, and
 # `engine/util` puts `<root>/engine` on. Asserting the leaves instead would
 # pass a resolver that makes every module unimportable.
-OUT=$("$AE" lib-path 2>/dev/null || true)
+OUT=$("$AE" lib-path 2>&1 || true)
 for m in "widgets$" "widgets/engine$"; do
     echo "$OUT" | grep -qE "$m" || {
         echo "  [FAIL] dep_resolution: no search path matching '$m'"
-        echo "$OUT" | sed 's/^/    /' | head -8; exit 1; }
+        # CI logs for the Windows legs come back empty from the API, so the
+        # test has to carry its own diagnosis or a failure is unactionable.
+        echo "    --- lib-path output ---"
+        echo "$OUT" | sed 's/^/    /' | head -10
+        echo "    --- environment ---"
+        echo "    HOME=$HOME"
+        echo "    USERPROFILE=${USERPROFILE:-<unset>}"
+        echo "    pkg dir exists: $([ -d "$PKGS" ] && echo yes || echo NO) ($PKGS)"
+        echo "    pkg manifest:   $([ -f "$PKGS/aether.toml" ] && echo yes || echo NO)"
+        echo "    cwd=$(pwd)"
+        exit 1; }
 done
 echo "$OUT" | grep -q "widgets/docs" && {
     echo "  [FAIL] dep_resolution: a non-module directory reached the search path"; exit 1; }
@@ -92,7 +111,11 @@ RUN=$("$AE" run use.ae 2>&1 || true)
 case "$RUN" in
     *painted*) ;;
     *) echo "  [FAIL] dep_resolution: import did not resolve without --lib"
-       echo "$RUN" | sed 's/^/    /' | head -10; exit 1 ;;
+       echo "$RUN" | sed 's/^/    /' | head -12
+       echo "    --- lib-path at this point ---"
+       "$AE" lib-path 2>&1 | sed 's/^/    /' | head -8
+       echo "    HOME=$HOME USERPROFILE=${USERPROFILE:-<unset>}"
+       exit 1 ;;
 esac
 
 # --- 3. a missing dependency names itself and the fix -------------------
