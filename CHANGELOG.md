@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.639.0]
+
 ### Fixed
 
 - **`heap.free` leaked a string field assigned through a nested path (#1879).**
