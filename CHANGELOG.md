@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.640.0]
+
 ### Fixed
 
 - **`ae add <pkg>@<tag>` never pinned the tag, and left an unpinned clone
