@@ -1818,10 +1818,19 @@ static int dep_append_module_roots(const char* root, const char* name) {
     for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
         char full[3072];
         snprintf(full, sizeof(full), "%s/%s", root, tok);
-        if (!dir_exists(full)) {
+        /* A module is either a DIRECTORY holding module.ae or a single .ae
+         * FILE -- `--lib D` resolves both `D/<name>/module.ae` and
+         * `D/<name>.ae`, so a declaration must accept both or single-file
+         * modules become undeclarable. The selaenium package that prompted
+         * this issue is exactly that shape: `aether/webdriver.ae`, no
+         * directory. Checking only for a directory rejected it. */
+        char as_file[3072];
+        snprintf(as_file, sizeof(as_file), "%s.ae", full);
+        if (!dir_exists(full) && !path_exists(as_file)) {
             fprintf(stderr,
-                "Warning: dependency '%s' declares module '%s', which does not\n"
-                "         exist in the installed package.\n", name, tok);
+                "Warning: dependency '%s' declares module '%s', but neither\n"
+                "         %s/ nor %s.ae exists in the installed package.\n",
+                name, tok, tok, tok);
             continue;
         }
         /* `modules` names IMPORTABLE MODULES, not search paths. `--lib D`
