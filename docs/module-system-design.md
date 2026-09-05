@@ -438,6 +438,59 @@ lib
 
 Inputs are merged in the same priority order the build path uses: explicit `--lib` flags first, then `AETHER_LIB_DIR`, then the default `lib`.
 
+#### Dependencies resolve onto the search path
+
+`ae add` installs into `~/.aether/packages/<host>/<owner>/<name>` and records the dependency:
+
+```toml
+[dependencies]
+"github.com/aether-lang-dev/selaenium" = "0.2.0"
+```
+
+`ae run`, `ae build` and `ae lib-path` read that section and join the package's modules to the search path. **No `--lib` is needed to import from a declared dependency.** All three walk up to the project's manifest first, so they behave the same from a subdirectory as from the project root.
+
+The publishing package decides what it exports, in its own `aether.toml`:
+
+```toml
+[package]
+name = "selaenium"
+modules = "aether, selenium_core, selenium_core/drivermgr"
+```
+
+Each entry names an **importable module**, and what joins the search path is that module's parent directory — because `--lib D` means "D contains modules" (`D/<name>.ae` or `D/<name>/module.ae`). So `selenium_core/drivermgr` puts `<package>/selenium_core` on the path and `import drivermgr` resolves.
+
+This is why the declaration lives with the publisher rather than the consumer: a package can move its directories in a patch release without any consumer changing a path. A consumer names the dependency and nothing else. A package with no `aether.toml`, or none with a `modules` key, exports nothing and says so — the package root is never joined speculatively, since a real package is a whole repository whose root holds docs, scripts and tests as well as modules.
+
+A dependency that is declared but not installed fails by name:
+
+```
+Error: dependency 'github.com/aether-lang-dev/selaenium' is not installed. Run:
+    ae add github.com/aether-lang-dev/selaenium
+```
+
+rather than as an unresolved-import error naming a module the user never typed.
+
+#### Overriding a dependency
+
+Two forms, both of which **announce themselves** — an override that applied silently would mean a green local build against a working copy that CI does not have:
+
+```sh
+ae run x.ae --override github.com/aether-lang-dev/selaenium=../selaenium
+```
+
+per-invocation, leaving no trace in the manifest — right for "just this once" and for CI proving a change against an unpublished branch. And in the manifest, a separate stanza so an override cannot be shipped by accident inside a `[dependencies]` line:
+
+```toml
+[patch]
+"github.com/aether-lang-dev/selaenium" = "../selaenium"
+# or Cargo's table form, which means the same thing:
+"github.com/aether-lang-dev/other" = { path = "../other" }
+```
+
+Only a local path override is supported. A table naming anything else (a git URL, say) is an error rather than a silently-ignored line.
+
+Either way the build prints `Overriding <dep> -> <path>`. A `--override` for a dependency also overridden by `[patch]` wins, since the invocation is the more specific instruction. The override target is read exactly like an installed package: it needs its own `[package] modules` declaration.
+
 ### Namespace Convention
 
 Function names must be prefixed with the namespace:

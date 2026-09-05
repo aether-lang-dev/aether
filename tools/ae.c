@@ -1682,6 +1682,229 @@ static void expand_env_vars(const char* src, char* dst, size_t dst_size) {
  * -D. A space-separated string rather than a TOML array because the toml
  * reader here returns scalars, and because these are bare names with no
  * spaces in them. Command-line -D adds to whatever the file declares. */
+/* ---- Dependency resolution (#1901) ------------------------------ *
+ *
+ * `ae add` installs a package under ~/.aether/packages/<host>/<owner>/<repo>
+ * and writes it into [dependencies], and until now nothing read it back: a
+ * consumer had to know the cache layout and spell every importable
+ * subdirectory in --lib by hand. The datastar-aether line reported this after
+ * a hand-written resolver guessed the layout wrong (two path levels, not
+ * three), silently fell through to a sibling checkout that happened to exist,
+ * and stayed green for weeks while the package path had never once worked.
+ *
+ * The consumer therefore names ONLY the dependency. Where its importable
+ * modules live is the PUBLISHING package's business, declared in its own
+ * aether.toml:
+ *
+ *     [package]
+ *     modules = "aether, selenium_core, selenium_core/drivermgr"
+ *
+ * so a package can rearrange directories in a patch release without breaking
+ * anyone. There is deliberately NO fallback to the package root: real
+ * packages are whole repositories (the reporter's has clojure/, crystal/, ci/
+ * beside its Aether code), so joining the root would put non-module
+ * directories on the search path and reintroduce exactly the layout coupling
+ * this removes. A package that declares nothing exports nothing, and says so.
+ */
+
+/* Where `ae add` puts packages. Mirrors apkg's own layout. */
+static void dep_packages_root(char* out, size_t osz) {
+    snprintf(out, osz, "%s/.aether/packages", get_home_dir());
+}
+
+/* Per-invocation overrides from --override name=path (#1901 part 2).
+ * Bazel's --override_repository shape: leaves no trace in the manifest, which
+ * is what "just this once" and "CI proving an unpublished branch" want. */
+#define AE_MAX_OVERRIDES 32
+static char g_ovr_name[AE_MAX_OVERRIDES][512];
+static char g_ovr_path[AE_MAX_OVERRIDES][1024];
+static int  g_ovr_count = 0;
+
+void ae_dep_override_append(const char* spec) {
+    const char* eq = strchr(spec, '=');
+    if (!eq || eq == spec || !eq[1]) {
+        fprintf(stderr, "Error: --override wants <dependency>=<path>, got '%s'\n", spec);
+        return;
+    }
+    if (g_ovr_count >= AE_MAX_OVERRIDES) {
+        fprintf(stderr, "Error: too many --override flags (max %d)\n", AE_MAX_OVERRIDES);
+        return;
+    }
+    size_t nlen = (size_t)(eq - spec);
+    if (nlen >= sizeof(g_ovr_name[0])) nlen = sizeof(g_ovr_name[0]) - 1;
+    memcpy(g_ovr_name[g_ovr_count], spec, nlen);
+    g_ovr_name[g_ovr_count][nlen] = '\0';
+    snprintf(g_ovr_path[g_ovr_count], sizeof(g_ovr_path[0]), "%s", eq + 1);
+    g_ovr_count++;
+}
+
+/* A [patch] value is either a bare path string or Cargo's inline table,
+ * `{ path = "../selaenium" }` -- the shape the reporting ask quoted, so it
+ * WILL be written. The TOML parser hands back the raw text for a table, so
+ * pull `path` out of it here rather than letting the whole brace expression
+ * reach dir_exists as a filename. Returns the input unchanged when it is not
+ * a table, and NULL for a table with no usable `path` key -- a table naming
+ * something else (a git URL, say) is not an override we can honour, and
+ * quietly treating it as "no override" would be a silent wrong build. */
+static const char* dep_unwrap_patch_value(const char* v, char* buf, size_t bsz,
+                                          const char* name) {
+    while (*v == ' ' || *v == '\t') v++;
+    if (*v != '{') return v;
+    const char* k = strstr(v, "path");
+    const char* q = k ? strchr(k, '"') : NULL;
+    const char* e = q ? strchr(q + 1, '"') : NULL;
+    if (!e) {
+        fprintf(stderr,
+            "Error: [patch] entry for '%s' is a table with no path = \"...\" key;\n"
+            "       only a local path override is supported. Got: %s\n", name, v);
+        return NULL;
+    }
+    size_t n = (size_t)(e - q - 1);
+    if (n >= bsz) n = bsz - 1;
+    memcpy(buf, q + 1, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* An override for `name`, from --override (highest) or the manifest's
+ * [patch] section. Returns NULL when the dependency is not overridden. */
+static const char* dep_override_for(TomlDocument* doc, const char* name) {
+    for (int i = 0; i < g_ovr_count; i++) {
+        if (strcmp(g_ovr_name[i], name) == 0) return g_ovr_path[i];
+    }
+    if (doc) {
+        /* [patch] keys are quoted in the file exactly as [dependencies] keys
+         * are, and the parser keeps the quotes -- so look up both spellings
+         * rather than silently never matching. */
+        static char unwrapped[1024];
+        const char* p = toml_get_value(doc, "patch", name);
+        if (!p || !*p) {
+            char quoted[520];
+            snprintf(quoted, sizeof(quoted), "\"%s\"", name);
+            p = toml_get_value(doc, "patch", quoted);
+        }
+        if (p && *p) return dep_unwrap_patch_value(p, unwrapped, sizeof(unwrapped), name);
+    }
+    return NULL;
+}
+
+/* Append every module root a package declares. `root` is the package's
+ * directory (cache or override). Returns the number appended, or -1 when the
+ * package has no manifest / declares nothing. */
+static int dep_append_module_roots(const char* root, const char* name) {
+    char manifest[2048];
+    snprintf(manifest, sizeof(manifest), "%s/aether.toml", root);
+    if (!path_exists(manifest)) {
+        fprintf(stderr,
+            "Warning: dependency '%s' has no aether.toml, so it declares no\n"
+            "         importable modules. Its maintainer needs a [package]\n"
+            "         modules = \"...\" entry naming the directories to export.\n",
+            name);
+        return -1;
+    }
+    TomlDocument* pdoc = toml_parse_file(manifest);
+    if (!pdoc) return -1;
+    const char* mods = toml_get_value(pdoc, "package", "modules");
+    if (!mods || !*mods) {
+        fprintf(stderr,
+            "Warning: dependency '%s' declares no [package] modules, so nothing\n"
+            "         from it is importable.\n", name);
+        toml_free_document(pdoc);
+        return -1;
+    }
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "%s", mods);
+    int n = 0;
+    for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
+        char full[3072];
+        snprintf(full, sizeof(full), "%s/%s", root, tok);
+        if (!dir_exists(full)) {
+            fprintf(stderr,
+                "Warning: dependency '%s' declares module '%s', which does not\n"
+                "         exist in the installed package.\n", name, tok);
+            continue;
+        }
+        /* `modules` names IMPORTABLE MODULES, not search paths. `--lib D`
+         * means "D contains modules" -- aetherc looks for D/<name>.ae and
+         * D/<name>/module.ae -- so what joins the path is each module's
+         * PARENT. A package exporting `engine/util` puts `<root>/engine` on
+         * the path, and `import util` resolves; appending the leaf itself
+         * would make the module invisible under every spelling.
+         *
+         * Parents repeat (`frontend` and `engine` share the root), and
+         * tc_lib_dir_append_one already drops duplicates. */
+        char* slash = strrchr(full, '/');
+        if (slash && slash > full) *slash = '\0'; else snprintf(full, sizeof(full), "%s", root);
+        tc_lib_dir_append_one(full);
+        n++;
+    }
+    toml_free_document(pdoc);
+    return n;
+}
+
+/* Resolve [dependencies] from the project manifest onto the module search
+ * path. Safe to call when there is no manifest and no dependencies. */
+void ae_resolve_dependencies(void) {
+    if (!path_exists("aether.toml")) return;
+    TomlDocument* doc = toml_parse_file("aether.toml");
+    if (!doc) return;
+
+    int count = 0;
+    TomlKeyValue* deps = toml_get_section_entries(doc, "dependencies", &count);
+    if (!deps || count <= 0) { toml_free_document(doc); return; }
+
+    char pkgroot[1024];
+    dep_packages_root(pkgroot, sizeof(pkgroot));
+
+    for (int i = 0; i < count; i++) {
+        /* Quoted keys keep their quotes through the parser, and a
+         * dependency name is a path with dots so it is ALWAYS quoted in
+         * practice. Strip them, or every lookup and every message carries
+         * literal quote characters. */
+        char name_buf[512];
+        {
+            const char* k = deps[i].key;
+            if (!k || !*k) continue;
+            size_t kl = strlen(k);
+            if (kl >= 2 && k[0] == '"' && k[kl-1] == '"') {
+                snprintf(name_buf, sizeof(name_buf), "%.*s", (int)(kl - 2), k + 1);
+            } else {
+                snprintf(name_buf, sizeof(name_buf), "%s", k);
+            }
+        }
+        const char* name = name_buf;
+        if (!*name) continue;
+
+        const char* ovr = dep_override_for(doc, name);
+        char root[2048];
+        if (ovr) {
+            snprintf(root, sizeof(root), "%s", ovr);
+            /* An overridden build MUST say so. The failure this prevents is a
+             * green local run against a working copy CI does not have --
+             * named explicitly in the reporting ask, and the reason Cargo
+             * prints its "Patching ..." line. */
+            fprintf(stderr, "Overriding %s -> %s\n", name, root);
+            if (!dir_exists(root)) {
+                fprintf(stderr,
+                    "Error: override path for '%s' does not exist: %s\n", name, root);
+                continue;
+            }
+        } else {
+            snprintf(root, sizeof(root), "%s/%s", pkgroot, name);
+            if (!dir_exists(root)) {
+                /* Name the missing dependency and the fix, rather than
+                 * letting it surface later as an unknown-module error. */
+                fprintf(stderr,
+                    "Error: dependency '%s' is not installed. Run:\n"
+                    "    ae add %s\n", name, name);
+                continue;
+            }
+        }
+        dep_append_module_roots(root, name);
+    }
+    toml_free_document(doc);
+}
+
 static void load_defines_from_toml(void) {
     if (!path_exists("aether.toml")) return;
     TomlDocument* doc = toml_parse_file("aether.toml");
@@ -2039,9 +2262,15 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
     strncpy(walk, start_cwd, sizeof(walk) - 1);
     walk[sizeof(walk) - 1] = '\0';
 
-    /* Walk up to /. POSIX `dirname` mutates; compose by truncating
-     * at the last '/'. Stop when we either find aether.toml or hit
-     * the root. */
+    /* Walk up to the root. POSIX `dirname` mutates; compose by truncating
+     * at the last separator. Stop when we either find aether.toml or hit
+     * the root.
+     *
+     * BOTH separators, because _getcwd() on native Windows returns
+     * backslashes ("C:\Users\paul\proj\sub"). Scanning for '/' alone found
+     * nothing there, so the loop broke on its first pass and the walk-up
+     * silently did nothing -- `ae build` from a subdirectory missed the
+     * project manifest on Windows while working everywhere else. */
     while (1) {
         char probe[1040];
         snprintf(probe, sizeof(probe), "%s/aether.toml", walk);
@@ -2058,7 +2287,8 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
                     /* relative — splice the subdir we walked out of */
                     size_t walk_len = strlen(walk);
                     if (strncmp(start_cwd, walk, walk_len) == 0 &&
-                        start_cwd[walk_len] == '/') {
+                        (start_cwd[walk_len] == '/' ||
+                         start_cwd[walk_len] == '\\')) {
                         const char* sub = start_cwd + walk_len + 1;
                         static char rebased[1024];
                         snprintf(rebased, sizeof(rebased), "%s/%s", sub, f);
@@ -2068,10 +2298,22 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
             }
             return 1;
         }
-        /* Step up one directory by truncating at the last '/'. Stop
+        /* Step up one directory by truncating at the last separator. Stop
          * when we hit the root marker (just "/" or empty). */
         char* slash = strrchr(walk, '/');
+        char* bslash = strrchr(walk, '\\');
+        if (bslash > slash) slash = bslash;
         if (!slash) break;
+        /* "C:\" / "C:/" is the Windows root -- truncating at that separator
+         * would leave a bare "C:", which names the drive's CURRENT directory
+         * rather than its root, so probe there and stop. */
+        if (slash > walk && slash[-1] == ':') {
+            slash[1] = '\0';
+            char root_probe[1040];
+            snprintf(root_probe, sizeof(root_probe), "%saether.toml", walk);
+            if (path_exists(root_probe) && chdir(walk) == 0) return 1;
+            break;
+        }
         if (slash == walk) {
             /* At "/X" — the parent is "/". One more probe at "/". */
             walk[1] = '\0';
@@ -3496,6 +3738,12 @@ static int cmd_run(int argc, char** argv) {
         } else if (strcmp(argv[i], "--extra") == 0 && i + 1 < argc) {
             if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
             strncat(extra_files, argv[++i], sizeof(extra_files) - strlen(extra_files) - 1);
+        } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
+            /* #1901 part 2: --override <dep>=<path>, Bazel's
+             * --override_repository shape. Leaves no trace in the manifest,
+             * which is what "just this once" and "CI proving an unpublished
+             * branch" want. The resolver announces every override it applies. */
+            ae_dep_override_append(argv[++i]);
         } else if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
             /* Issue #413: each `--lib X` appends to the lib search
              * path with the platform separator. A single value may
@@ -3507,6 +3755,10 @@ static int cmd_run(int argc, char** argv) {
             file = argv[i];
         }
     }
+
+    /* #1901: [dependencies] join the module search path, after the caller's
+     * own --lib flags so an explicit path still wins. */
+    ae_resolve_dependencies();
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
     if (file && dir_exists(file)) {
@@ -5512,6 +5764,12 @@ static int cmd_build(int argc, char** argv) {
         } else if (strcmp(argv[i], "--extra") == 0 && i + 1 < argc) {
             if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
             strncat(extra_files, argv[++i], sizeof(extra_files) - strlen(extra_files) - 1);
+        } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
+            /* #1901 part 2: --override <dep>=<path>, Bazel's
+             * --override_repository shape. Leaves no trace in the manifest,
+             * which is what "just this once" and "CI proving an unpublished
+             * branch" want. The resolver announces every override it applies. */
+            ae_dep_override_append(argv[++i]);
         } else if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
             /* Issue #413: same append semantics as `ae run` — see
              * cmd_run's --lib handler for the full rationale.
@@ -5702,6 +5960,12 @@ static int cmd_build(int argc, char** argv) {
     // works the same as if the user had run `ae build` from the
     // project root. Closes #280 (2).
     find_and_chdir_to_aether_toml(&file);
+
+    /* #1901: resolve [dependencies] AFTER the walk-up, not with the other
+     * flag handling. `ae build sub/thing.ae` from a subdirectory chdirs to
+     * the project root here; resolving before that would read no manifest
+     * (or the wrong one) and silently produce an empty search path. */
+    ae_resolve_dependencies();
 
     // Read target from aether.toml if not specified on CLI
     if (!target && path_exists("aether.toml")) {
@@ -6429,7 +6693,14 @@ static int cmd_init(int argc, char** argv) {
     fprintf(f, "name = \"%s\"\n", name);
     fprintf(f, "version = \"0.1.0\"\n");
     fprintf(f, "description = \"A new Aether project\"\n");
-    fprintf(f, "license = \"MIT\"\n\n");
+    fprintf(f, "license = \"MIT\"\n");
+    /* #1901: a scaffolded project is an application, so it exports nothing by
+     * default. The commented key is the only place a would-be PUBLISHER finds
+     * out the declaration exists -- without it, a package installs fine and
+     * then exports nothing, which reads as a resolver bug rather than a
+     * missing line in the publisher's own manifest. */
+    fprintf(f, "# modules = \"mylib, mylib/internal\"  "
+               "# Importable modules, if this is a library\n\n");
     fprintf(f, "[[bin]]\n");
     fprintf(f, "name = \"%s\"\n", name);
     fprintf(f, "path = \"src/main.ae\"\n\n");
@@ -7740,6 +8011,10 @@ static int cmd_lib_path(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--lib") == 0 && i + 1 < argc) {
             tc_lib_dir_append(argv[++i]);
+        } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
+            /* Accepted here too, so `ae lib-path --override ...` shows the
+             * same chain the equivalent `ae run` would use. */
+            ae_dep_override_append(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: ae lib-path [--lib <dir>%c<dir>...]...\n",
                    AETHER_LIB_PATH_SEP_CHAR);
@@ -7776,6 +8051,18 @@ static int cmd_lib_path(int argc, char** argv) {
 #ifdef _WIN32
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
+    /* #1901: resolved dependencies join the chain too, so
+     * `ae run x.ae --lib "$(ae lib-path)"` works and the package-cache layout
+     * lives here rather than in every consumer's hand-written shell script.
+     *
+     * Walk up to the manifest first, exactly as `ae build` does. Without it
+     * `ae lib-path` reports the dependencies only when run from the project
+     * root and prints a bare `lib` from any subdirectory -- while `ae build`
+     * from that same subdirectory resolves them fine. That inconsistency is
+     * worst for the shell-script fallback above, which would silently hand
+     * `--lib` an empty chain. */
+    find_and_chdir_to_aether_toml(NULL);
+    ae_resolve_dependencies();
     if (tc.lib_dir_count == 0) {
         fputs("lib\n", stdout);
         return 0;

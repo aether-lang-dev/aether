@@ -449,6 +449,16 @@ else
 endif
 ifneq ($(NGHTTP2_LDFLAGS),)
   NGHTTP2_CFLAGS += -DAETHER_HAS_NGHTTP2
+  # #1896: nghttp2.h declares its API __declspec(dllimport) unless
+  # NGHTTP2_STATICLIB is defined (nghttp2.h:58-65). Without it every call
+  # compiles to an __imp_nghttp2_* reference, which the static libnghttp2.a
+  # the link actually uses cannot satisfy -- hence dozens of
+  # "undefined reference to `__imp_nghttp2_session_*'" on MinGW/MSYS2. The
+  # Windows link line is -static (WIN_LINK_LIBS), so the headers have to be
+  # told the same thing the linker was told.
+  ifneq ($(findstring MINGW,$(DETECTED_OS))$(findstring MSYS,$(DETECTED_OS))$(findstring CYGWIN,$(DETECTED_OS)),)
+    NGHTTP2_CFLAGS += -DNGHTTP2_STATICLIB
+  endif
 endif
 
 # Brotli detection: enables std.brotli (RFC 7932). `br` is what current
@@ -550,6 +560,19 @@ endif
 ifneq ($(YAML_LDFLAGS),)
   # libfyaml found (auto/1): compile the real bindings + link it.
   YAML_CFLAGS += -DAETHER_HAS_YAML
+  # #1896: on MinGW/MSYS2 the link line carries -static (WIN_LINK_LIBS below),
+  # which avoids libwinpthread/libgcc DLL dependencies in release binaries.
+  # -static is NOT positional for library resolution -- it governs the whole
+  # link -- so ld demands libfyaml.a. MSYS2's mingw-w64-x86_64-libfyaml ships
+  # ONLY libfyaml.dll.a, so the link fails with "cannot find -lfyaml" even
+  # though the library is installed and pkg-config reports it correctly.
+  # fyaml is the only one of our dependencies with no static archive there
+  # (openssl, zlib, nghttp2, pcre2, brotli and zstd all have both), so scope
+  # the exception to it rather than dropping -static and giving every Windows
+  # binary a DLL tail.
+  ifneq ($(findstring MINGW,$(DETECTED_OS))$(findstring MSYS,$(DETECTED_OS))$(findstring CYGWIN,$(DETECTED_OS)),)
+    YAML_LDFLAGS := -Wl,-Bdynamic $(YAML_LDFLAGS) -Wl,-Bstatic
+  endif
 else
   # libfyaml absent (or YAML=0): define NOTHING and link NOTHING, so
   # aether_yaml.c compiles its unavailable-stub path and the build works
