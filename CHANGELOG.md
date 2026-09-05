@@ -51,6 +51,21 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The `aether.toml` walk-up did nothing on native Windows.** `ae build` from
+  a subdirectory is supposed to find the project's manifest in an ancestor
+  directory and chdir there. The walk stepped up by scanning for `/` only,
+  while `_getcwd()` on native Windows returns backslashes, so the loop broke on
+  its first pass and the walk-up silently did nothing — a build that behaved as
+  though the project had no manifest, with no error, so `extra_sources` and
+  `cflags` were dropped for anyone building from a subdirectory on Windows.
+  Both separators are now handled, including the `C:\` root case.
+
+  (Separately and still open: `ae build <bin-name>` from a subdirectory fails
+  on every platform, because the positional argument is rebased onto the
+  subdirectory as though it were a file path — `sub/widget` — when it is a
+  `[[bin]]` name. Pre-existing, unrelated to the separator bug, and not fixed
+  here.)
+
 - **MinGW: `cannot find -lfyaml` and `__imp_nghttp2_*` link failures (#1896).**
   Building `ae` on MSYS2/MinGW failed at link, which made a real Windows box
   unusable as a proving ground. Both errors came from the same cause: the

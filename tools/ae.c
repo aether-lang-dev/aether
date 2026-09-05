@@ -2262,9 +2262,15 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
     strncpy(walk, start_cwd, sizeof(walk) - 1);
     walk[sizeof(walk) - 1] = '\0';
 
-    /* Walk up to /. POSIX `dirname` mutates; compose by truncating
-     * at the last '/'. Stop when we either find aether.toml or hit
-     * the root. */
+    /* Walk up to the root. POSIX `dirname` mutates; compose by truncating
+     * at the last separator. Stop when we either find aether.toml or hit
+     * the root.
+     *
+     * BOTH separators, because _getcwd() on native Windows returns
+     * backslashes ("C:\Users\paul\proj\sub"). Scanning for '/' alone found
+     * nothing there, so the loop broke on its first pass and the walk-up
+     * silently did nothing -- `ae build` from a subdirectory missed the
+     * project manifest on Windows while working everywhere else. */
     while (1) {
         char probe[1040];
         snprintf(probe, sizeof(probe), "%s/aether.toml", walk);
@@ -2281,7 +2287,8 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
                     /* relative — splice the subdir we walked out of */
                     size_t walk_len = strlen(walk);
                     if (strncmp(start_cwd, walk, walk_len) == 0 &&
-                        start_cwd[walk_len] == '/') {
+                        (start_cwd[walk_len] == '/' ||
+                         start_cwd[walk_len] == '\\')) {
                         const char* sub = start_cwd + walk_len + 1;
                         static char rebased[1024];
                         snprintf(rebased, sizeof(rebased), "%s/%s", sub, f);
@@ -2291,10 +2298,22 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
             }
             return 1;
         }
-        /* Step up one directory by truncating at the last '/'. Stop
+        /* Step up one directory by truncating at the last separator. Stop
          * when we hit the root marker (just "/" or empty). */
         char* slash = strrchr(walk, '/');
+        char* bslash = strrchr(walk, '\\');
+        if (bslash > slash) slash = bslash;
         if (!slash) break;
+        /* "C:\" / "C:/" is the Windows root -- truncating at that separator
+         * would leave a bare "C:", which names the drive's CURRENT directory
+         * rather than its root, so probe there and stop. */
+        if (slash > walk && slash[-1] == ':') {
+            slash[1] = '\0';
+            char root_probe[1040];
+            snprintf(root_probe, sizeof(root_probe), "%saether.toml", walk);
+            if (path_exists(root_probe) && chdir(walk) == 0) return 1;
+            break;
+        }
         if (slash == walk) {
             /* At "/X" — the parent is "/". One more probe at "/". */
             walk[1] = '\0';
