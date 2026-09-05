@@ -1,0 +1,76 @@
+// #1879: a string field assigned through a NESTED path is owned the same way
+// as one assigned on the inner pointer directly.
+//
+// `o.inner.name = ...` emitted a bare store with no `_heap_name` tracker, so
+// Inner's destructor believed it owned nothing and the string leaked, while
+// the identical write spelled `i.name = ...` released correctly. Ownership
+// followed how the assignment was SPELLED rather than the type.
+import std.heap
+import std.string
+
+struct Inner { name: string }
+struct Outer { inner: *Inner }
+
+struct Leaf { tag: string }
+struct Mid { leaf: *Leaf }
+struct Top { mid: *Mid }
+
+own(previous: string, value: string) -> string {
+    if previous != null { string.free(previous) }
+    return string.copy(value)
+}
+
+set_through_outer(o: *Outer, v: string) {
+    o.inner.name = own(o.inner.name, v)
+}
+
+set_direct(i: *Inner, v: string) {
+    i.name = own(i.name, v)
+}
+
+main() {
+    // The reported case: assigned through a nested path inside a function.
+    a = heap.new(Outer)
+    a.inner = heap.new(Inner)
+    set_through_outer(a, "assigned-through-a-nested-path")
+    heap.free(a.inner)
+    heap.free(a)
+
+    // The case that already worked -- must keep working, and must not
+    // double-free now that the nested form also claims ownership.
+    b = heap.new(Outer)
+    b.inner = heap.new(Inner)
+    set_direct(b.inner, "assigned-on-the-inner-pointer")
+    heap.free(b.inner)
+    heap.free(b)
+
+    // The report notes that inlining the same write into main also leaked,
+    // so it is the path shape rather than the function boundary.
+    c = heap.new(Outer)
+    c.inner = heap.new(Inner)
+    c.inner.name = string.copy("assigned-inline-in-main")
+    heap.free(c.inner)
+    heap.free(c)
+
+    // Three levels: the object expression is itself a nested access.
+    t = heap.new(Top)
+    t.mid = heap.new(Mid)
+    t.mid.leaf = heap.new(Leaf)
+    t.mid.leaf.tag = string.copy("three-levels-deep")
+    heap.free(t.mid.leaf)
+    heap.free(t.mid)
+    heap.free(t)
+
+    // A local ALIAS to the inner pointer: a bare identifier, but neither a
+    // heap.new box nor a pointer parameter, so it used to miss the ownership
+    // wrapper too. Same defect as the nested path, reached by naming the
+    // inner pointer first.
+    d = heap.new(Outer)
+    d.inner = heap.new(Inner)
+    alias = d.inner
+    alias.name = string.copy("assigned-through-a-local-alias")
+    heap.free(d.inner)
+    heap.free(d)
+
+    println("all freed")
+}
