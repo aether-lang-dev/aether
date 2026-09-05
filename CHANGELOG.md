@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.637.0]
+
 ### Added
 
 - **`[dependencies]` resolve onto the module search path.** `ae add` installed
