@@ -138,6 +138,14 @@ case "$SOLO" in
         echo "  [FAIL] dep_resolution: a single-file module was rejected"
         echo "$SOLO" | sed 's/^/    /' | head -6; exit 1 ;;
 esac
+# Its PARENT joins the path, same as a directory module -- not the file, and
+# not the name with .ae stripped. `engine/solo.ae` means `<pkg>/engine`.
+echo "$SOLO" | grep -qE "widgets/engine$" || {
+    echo "  [FAIL] dep_resolution: single-file module gave the wrong search path"
+    echo "$SOLO" | sed 's/^/    /' | head -6; exit 1; }
+echo "$SOLO" | grep -q "solo" && {
+    echo "  [FAIL] dep_resolution: the single-file module itself reached the path"
+    echo "$SOLO" | sed 's/^/    /' | head -6; exit 1; }
 # Restore the manifest the rest of the test expects.
 cat > "$PKGS/aether.toml" <<'TOMLEOF'
 [package]
