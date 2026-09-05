@@ -55,7 +55,23 @@ TOMLEOF
 printf 'import frontend\nmain() {\n    println(frontend.paint())\n    return 0\n}\n' > "$PROJ/use.ae"
 
 cd "$PROJ"
+
+# The package cache is found via get_home_dir(), which on Windows prefers
+# USERPROFILE and only falls back to HOME (tools/ae_cache.c). Setting HOME
+# alone leaves a native ae.exe reading the REAL user profile, where the
+# fixture does not exist. On a dev box HOME and USERPROFILE usually name the
+# same directory in two spellings, so that failure appears only in CI --
+# exactly how the cache_subdir_entry_root_module test was caught.
+#
+# A native ae.exe also cannot resolve an MSYS /tmp/... path, so hand it the
+# Windows spelling, the same way http_middleware_d2 does.
 export HOME="$TMPDIR_T/home"
+if command -v cygpath >/dev/null 2>&1; then
+    USERPROFILE="$(cygpath -m "$TMPDIR_T/home")"
+else
+    USERPROFILE="$TMPDIR_T/home"
+fi
+export USERPROFILE
 
 # --- 1. the declared modules become search paths -----------------------
 # `--lib D` means "D CONTAINS modules", so a declared module joins the path
@@ -116,6 +132,14 @@ echo "$QUIET" | grep -q "silent/lib" && {
 # --- 5. --override redirects, and SAYS so -------------------------------
 FAKE="$TMPDIR_T/fake"
 mkdir -p "$FAKE/frontend"
+# The override path is handed to ae and echoed back in its announcement, so on
+# Windows both the value we pass and the string we match must be the native
+# spelling -- a native ae.exe cannot resolve an MSYS /tmp/... path.
+if command -v cygpath >/dev/null 2>&1; then
+    FAKE_N="$(cygpath -m "$FAKE")"
+else
+    FAKE_N="$FAKE"
+fi
 printf '[package]\nmodules = "frontend"\n' > "$FAKE/aether.toml"
 printf 'exports(paint)\npaint() -> string { return "OVERRIDDEN" }\n' > "$FAKE/frontend/module.ae"
 cat > "$PROJ/aether.toml" <<'TOMLEOF'
@@ -125,7 +149,7 @@ name = "consumer"
 [dependencies]
 "example.com/acme/widgets" = "1.0.0"
 TOMLEOF
-OVR=$("$AE" run use.ae --override "example.com/acme/widgets=$FAKE" 2>&1 || true)
+OVR=$("$AE" run use.ae --override "example.com/acme/widgets=$FAKE_N" 2>&1 || true)
 case "$OVR" in
     *OVERRIDDEN*) ;;
     *) echo "  [FAIL] dep_resolution: --override did not redirect the build"
@@ -141,7 +165,7 @@ esac
 cat >> "$PROJ/aether.toml" <<TOMLEOF
 
 [patch]
-"example.com/acme/widgets" = "$FAKE"
+"example.com/acme/widgets" = "$FAKE_N"
 TOMLEOF
 PATCHED=$("$AE" run use.ae 2>&1 || true)
 case "$PATCHED" in
@@ -165,7 +189,7 @@ name = "consumer"
 "example.com/acme/widgets" = "1.0.0"
 
 [patch]
-"example.com/acme/widgets" = { path = "$FAKE" }
+"example.com/acme/widgets" = { path = "$FAKE_N" }
 TOMLEOF
 TBL=$("$AE" run use.ae 2>&1 || true)
 case "$TBL" in
@@ -175,7 +199,7 @@ case "$TBL" in
 esac
 # The announced path must be the unwrapped one, not the raw braces.
 case "$TBL" in
-    *"Overriding example.com/acme/widgets -> $FAKE"*) ;;
+    *"Overriding example.com/acme/widgets -> $FAKE_N"*) ;;
     *) echo "  [FAIL] dep_resolution: inline-table override announced the raw table"
        echo "$TBL" | sed 's/^/    /' | head -4; exit 1 ;;
 esac
