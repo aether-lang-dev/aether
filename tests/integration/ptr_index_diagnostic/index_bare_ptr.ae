@@ -1,0 +1,12 @@
+// Indexing a bare `ptr` (a std.intarr handle is one) must be REJECTED with a
+// clean Aether diagnostic, not leak `error: void value not ignored as it ought
+// to be` from the C compiler. See asks/index-sugar-for-intarr-floatarr-longarr.md.
+// This file is expected NOT to compile; the harness inspects the diagnostic.
+import std.intarr
+
+main() {
+    a = intarr.intarr_new_raw(4)
+    intarr.intarr_set_unchecked(a, 0, 7)
+    x = a[0] // bare `ptr` index — the diagnostic under test
+    println("${x}")
+}

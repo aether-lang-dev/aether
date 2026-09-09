@@ -7158,6 +7158,23 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = clone_type(arr_type->element_type);
                 }
+
+                // Indexing a bare `ptr` (void*, element_type == NULL) has no
+                // element type: it lowers to a C index on `void*` and leaks
+                // `error: void value not ignored as it ought to be` from the C
+                // compiler. A typed pointer (`*T`, element_type populated),
+                // an array, and a string all index legitimately and are left
+                // alone. The packed-buffer handles (std.intarr / floatarr /
+                // longarr) are bare `ptr`, so `a[i]` on one lands here; steer
+                // the caller to the accessor rather than emitting raw C.
+                if (arr_type && arr_type->kind == TYPE_PTR && !arr_type->element_type) {
+                    type_error("`[]` indexing is not defined for `ptr`; a bare "
+                               "pointer has no element type. For std.intarr / "
+                               "floatarr / longarr use the accessor, e.g. "
+                               "`intarr.intarr_get_unchecked(a, i)` / "
+                               "`intarr.intarr_set_unchecked(a, i, v)`",
+                               expr->line, expr->column);
+                }
             }
             return 1;
 
