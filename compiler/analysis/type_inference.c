@@ -238,6 +238,21 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
             left->kind == TYPE_DURATION && right->kind == TYPE_DURATION) {
             return create_type(TYPE_FLOAT);
         }
+        /* Floating wins over every integer kind, which is both what C's usual
+         * arithmetic conversions say and what typechecker.c already did. This
+         * pass had the int64 rule FIRST, so `long * 1.0` inferred int64 and
+         * the float was discarded: the following division became integer
+         * division and `(t * 1.0) / (n * 1.0)` printed 0 instead of 0.51,
+         * with nothing warning. The same ordering also let int64 beat
+         * longdouble. `int * 1.0` was unaffected and correct, so the two
+         * spellings of the same arithmetic disagreed depending only on
+         * whether the left operand came from a `long` (#1965). */
+        if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
+            return create_type(TYPE_LONGDOUBLE);
+        }
+        if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
+            return create_type(TYPE_FLOAT);
+        }
         // If either is int64 (long), promote to int64
         if (left->kind == TYPE_INT64 || right->kind == TYPE_INT64) {
             return create_type(TYPE_INT64);
@@ -274,14 +289,6 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
         // If both are int, result is int
         if (left->kind == TYPE_INT && right->kind == TYPE_INT) {
             return create_type(TYPE_INT);
-        }
-        // #749: longdouble is the widest numeric — wins over float/int.
-        if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
-            return create_type(TYPE_LONGDOUBLE);
-        }
-        // If either is float, result is float
-        if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
-            return create_type(TYPE_FLOAT);
         }
         // String concatenation for +
         if (strcmp(operator, "+") == 0 && 
