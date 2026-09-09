@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.662.0]
+
 ### Fixed
 
 - **`a[i]` on a bare `ptr` now gives an Aether diagnostic, not a leaked C
