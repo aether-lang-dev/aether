@@ -984,6 +984,18 @@ Type* infer_return_type_from_body(ASTNode* body, SymbolTable* symbols) {
 // definitions, externs, imports) are added by other code paths before any
 // function body is visited, so they sit beneath the snapshot and are
 // unaffected.
+/* Was `sym` added to `t` since `saved_head`, i.e. by the walk currently in
+ * progress? Symbols beneath the snapshot belong to an enclosing scope and must
+ * not be mutated: the unwind that trims back to `saved_head` can remove what we
+ * added but cannot restore what we overwrote. */
+static int symbol_added_since(SymbolTable* t, Symbol* sym, Symbol* saved_head) {
+    if (!t || !sym) return 0;
+    for (Symbol* s = t->symbols; s && s != saved_head; s = s->next) {
+        if (s == sym) return 1;
+    }
+    return 0;
+}
+
 void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
 
@@ -1006,16 +1018,32 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
         ASTNode* param = node->children[i];
         if (param && param->value && param->node_type &&
             (param->type == AST_VARIABLE_DECLARATION || param->type == AST_PATTERN_VARIABLE)) {
-            // Check if parameter already exists in symbol table
+            /* #1967: refine only a symbol THIS walk added. The unwind below
+             * removes symbols added since `saved_head`, which is what keeps a
+             * local in one function from colliding with a local in the next.
+             * It cannot undo a MUTATION, so overwriting a symbol that sits
+             * beneath the snapshot edits something the unwind will not restore.
+             *
+             * A function's own name is such a symbol. A module with a parameter
+             * called `channel` overwrote the importing program's `channel()`
+             * with the parameter's type, so `r = channel(a, b)` was typed
+             * `*AnimChannel` and codegen assigned an int to a pointer, with no
+             * diagnostic from aetherc at all. The two files shared no
+             * identifier deliberately, and the module was three imports away.
+             *
+             * A parameter that shadows an outer name gets a fresh entry
+             * instead. add_symbol prepends, so it wins lookups inside the body,
+             * and the unwind removes it on the way out, which is what shadowing
+             * should do anyway. */
             Symbol* existing = lookup_symbol(ctx->symbols, param->value);
-            if (existing) {
-                // Update existing symbol's type if we now have a more specific type
+            if (existing && symbol_added_since(ctx->symbols, existing, saved_head)) {
+                // Ours, from an earlier pass over this same function: refine it
+                // when we now have a more specific type.
                 if (param->node_type->kind != TYPE_UNKNOWN) {
                     if (existing->type) free_type(existing->type);
                     existing->type = clone_type(param->node_type);
                 }
             } else {
-                // Add new symbol
                 add_symbol(ctx->symbols, param->value, clone_type(param->node_type), 0, 0, 0);
             }
         }

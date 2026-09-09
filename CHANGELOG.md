@@ -11,6 +11,35 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A parameter name in an imported module retyped a same-named function in
+  the importing program** (#1967). The inference pass adds a function's
+  parameters to the shared symbol table and unwinds them by trimming back to a
+  snapshot. That removes what it added but cannot undo a MUTATION, and the
+  parameter branch overwrote the type of any symbol that already carried the
+  name, including a function sitting beneath the snapshot, which the pass's own
+  comment says is left unaffected. A module with a parameter called `channel`
+  retyped the importing program's `channel()` to the parameter's type, so
+  `r = channel(a, b)` came out as `AnimChannel*`; codegen then assigned an int
+  to a pointer and `aetherc` reported nothing, leaving a C warning against
+  generated code as the only sign. It acted at a distance: the two files shared
+  no identifier deliberately and the module was three imports away. A parameter
+  that shadows an outer name now gets its own entry, which the unwind removes,
+  so the outer symbol is untouched.
+
+- **A parameter inferred from call sites took the first call site's type and
+  truncated every later one** (#1972). `propagate_call_types_in_tree` wrote the
+  parameter's type once and ignored the rest, so `f(2)` followed by
+  `f(9000000000)` pinned the parameter to `int` and printed 410065409 instead
+  of 9000000001. `ae check` reported no errors, and the answer depended on the
+  order of the call sites: `f(3)` then `f(1.5)` truncated, while `f(1.5)` then
+  `f(3)` was correct, for the same program. The parameter now takes the widest
+  numeric kind any call site supplies, which is the direction that cannot lose
+  information. Widening only, and only among the ranked numeric kinds, so an
+  incompatible pair is still left for the type checker; signed and unsigned
+  64-bit share a rank and do not widen into each other, because that swap
+  changes what a value means rather than how much of it fits.
 ## [0.660.0]
 
 ### Fixed
