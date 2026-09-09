@@ -1,5 +1,19 @@
 name: Aether CI
 
+# Every `apt-get update` below first drops the runner's Google Chrome apt
+# source. Nothing in this repository installs from it, and no workflow here
+# uses a browser at all, but the GitHub images ship the source and when its
+# index is briefly inconsistent EVERY apt-get update in the matrix fails:
+#
+#   E: Failed to fetch .../google-chrome/.../Packages.gz  Hash Sum mismatch
+#   ##[error]Process completed with exit code 100
+#
+# and each Linux leg goes red in setup, before compiling a line. That took
+# main and every open PR down on 2026-09-09: 15 legs on main, 10 on a PR that
+# had touched only the type checker. Removing a third party we never asked
+# for from the critical path costs nothing and cannot regress a build that
+# never installed from it.
+
 # A change that touches only VERSION and CHANGELOG.md is a release bump, and
 # that tree was already built and tested on main before the release was cut.
 # Running the full matrix on it again gains nothing and costs twice over: the
@@ -57,13 +71,13 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: Linux / Clang
             os: ubuntu-22.04
             cc: clang
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           # Hardened gcc build (issue #396). Same OS + compiler as
           # Linux / GCC but with HARDEN=1 set in the environment, which
@@ -77,7 +91,7 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "1"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: macOS / Clang (ARM64)
             os: macos-latest
@@ -350,7 +364,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
     # zig cc bundles no FreeBSD libc, so the base sysroot is what makes the
     # FreeBSD headers visible. Same source as the release leg.
@@ -450,7 +464,7 @@ jobs:
 
     - name: Install host language dev libraries
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y \
           gcc make bc pkg-config \
           liblua5.3-dev \
@@ -490,7 +504,7 @@ jobs:
 
     - name: Install build deps
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make valgrind
         pip install --break-system-packages websockets 2>/dev/null || pip install websockets
         # contrib/vulkan needs the headers to build and a driver to run.
@@ -669,7 +683,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
 
     - name: Run cooperative scheduler CI
       run: make ci-coop
@@ -689,7 +703,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
 
     - name: Build without OpenSSL
       run: make -j"$(nproc)" OPENSSL=0
@@ -729,7 +743,7 @@ jobs:
         version: 3.1.51
 
     - name: Install native GCC
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
     # Still needed after #1648 wired wasm32-wasi into `ae build`, and worth
     # saying why: `ae build --target=wasm32-wasi --emit=obj` compiles the
@@ -806,7 +820,7 @@ jobs:
 
     - name: Install ARM cross-compiler
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
 
     - name: Run embedded CI
@@ -829,7 +843,7 @@ jobs:
 
     - name: Install RISC-V cross-toolchain + qemu
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y \
           gcc-riscv64-linux-gnu \
           libc6-dev-riscv64-cross \
@@ -853,7 +867,7 @@ jobs:
 
     - name: Install tools
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y valgrind gcc-multilib
 
     - name: Valgrind — runtime test suite
