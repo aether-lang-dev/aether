@@ -1,0 +1,56 @@
+// Regression: a parameter name inside an imported module's function
+// overwrote a same-named FUNCTION in the importing program, silently
+// mistyping every call to it.
+//
+// The inference pass adds a function's parameters to the shared symbol
+// table and unwinds them afterwards by trimming back to a snapshot. That
+// removes what it added but cannot undo a MUTATION, and the parameter
+// branch overwrote the type of any symbol that already had its name,
+// including a function sitting beneath the snapshot. A module three
+// imports away with a parameter called `channel` retyped this program's
+// `channel()` to the parameter's type; codegen then assigned an int to a
+// pointer and aetherc reported nothing, leaving a C warning against
+// generated code as the only sign.
+//
+// A parameter that shadows an outer name now gets its own entry, which
+// the unwind removes, so the outer symbol is left alone.
+//
+// The test would have failed pre-fix by computing a wrong value (the call
+// was typed as a pointer), and on a -Werror build by not compiling at all.
+
+import std.string
+
+extern exit(code: int)
+
+// Same name as the parameter in the helper below, and nothing to do with it.
+channel(pixel: int, shift: int) -> int {
+    return (pixel >> shift) & 0xFF
+}
+
+// A function whose PARAMETER is called `channel`. Before the fix, merely
+// existing was enough to retype every call to channel() above.
+consume_channel(channel: ptr) -> int {
+    if channel == null { return 0 }
+    return 1
+}
+
+main() {
+    println("=== test_imported_param_shadows_function ===")
+
+    r = channel(0xAABBCC, 16)
+    if r != 170 {
+        println("  FAIL: channel(0xAABBCC, 16) = ${r}, want 170")
+        exit(1)
+    }
+    g = channel(0xAABBCC, 8)
+    if g != 187 {
+        println("  FAIL: channel(0xAABBCC, 8) = ${g}, want 187")
+        exit(1)
+    }
+    if consume_channel(null) != 0 {
+        println("  FAIL: the parameter-named function stopped working")
+        exit(1)
+    }
+    println("  PASS: a parameter named like a function leaves that function's type alone")
+    println("=== test_imported_param_shadows_function passed ===")
+}
