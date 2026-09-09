@@ -11,7 +11,35 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.659.0]
+### Fixed
+
+- **`a[i]` on a bare `ptr` now gives an Aether diagnostic, not a leaked C
+  error.** Indexing a `void*` (which is what the `std.intarr` / `floatarr` /
+  `longarr` handles are) produced no element type, so it lowered to a C index on
+  `void*` and surfaced as `error: void value not ignored as it ought to be` from
+  the C compiler — undecodable for a first-time porter. The typechecker now
+  rejects it up front with a message that names the fix
+  (`intarr.intarr_get_unchecked(a, i)` / `..._set_unchecked(a, i, v)`). A typed
+  pointer (`*T`), a real array and a string all still index normally; the check
+  keys on a pointer with no element type, so it fires only on a bare `void*`.
+
+### Changed
+
+- **`std.strbuilder` documents the O(n²) scan trap on `finish()`.** The string
+  `finish()` returns has no length header, so `string.char_at` / `substring` /
+  `length` each pay a `strlen` per call — a char-by-char scan of a finished
+  string is quadratic, instant on a test input and a hang on a production one,
+  with correct results throughout. The `finish()` comment and
+  `std/strbuilder/README.md` now flag this (previously only the NUL-truncation
+  angle was noted) and steer scanning-heavy code to `finish_with_length()` plus
+  the length-carrying `string.string_char_at_n` / `string_substring_n`
+  accessors.
+- **`LLM.md` no longer claims "there is no `sizeof`".** `sizeof(T)` exists and
+  is the recommended form (the compiler warns on the hand-counted
+  `malloc(24) as *T` literal); the "Idioms that keep biting" bullet now teaches
+  `malloc(sizeof(T)) as *T` and calls the byte-literal the anti-pattern, rather
+  than steering porters into the heap-corruption footgun it was meant to warn
+  about.
 
 ### Fixed
 

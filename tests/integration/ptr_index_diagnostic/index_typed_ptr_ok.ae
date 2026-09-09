@@ -1,0 +1,16 @@
+// Positive control: indexing a TYPED pointer (`*T`, element type known) must
+// keep compiling — the bare-ptr diagnostic must not over-reject. A real array
+// and a string are likewise fine (checked in the .sh). This file MUST compile.
+extern malloc(size: int) -> ptr
+
+struct P {
+    a: int
+    b: int
+}
+
+main() {
+    p = malloc(sizeof(P)) as *P
+    p[0].a = 5
+    x = p[0].a
+    println("${x}")
+}

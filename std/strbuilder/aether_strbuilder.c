@@ -251,7 +251,20 @@ void* aether_strbuilder_finish(AetherStrBuilder* b) {
      * side (e.g. string_length_n, string_substring_n) if the caller
      * carries the length themselves. The ASCII / UTF-8 case — JSON,
      * log lines, templates, paths — is the overwhelming majority of
-     * the motivating use cases. */
+     * the motivating use cases.
+     *
+     * PERFORMANCE trap (not just the NUL angle): because the buffer
+     * has no length header, str_len() takes its strlen() fallback
+     * every call, so string.char_at / string.substring / string.length
+     * are each O(n) on a finish()'d string. A char-by-char scan is
+     * therefore O(n²) — instant on a test input, a hang on a
+     * production one, with correct results throughout (so it never
+     * looks like a bug). Scanning-heavy consumers (tokenizers,
+     * interpreters, template renderers) should take the length ONCE
+     * and use the length-carrying accessors — string_char_at_n(s,
+     * len, i), string_substring_n(s, len, a, b) — or finish with
+     * finish_with_length() and thread that length through. See
+     * std/strbuilder/README.md. */
     if (!b->data) {
         char* empty = (char*)aether_caps_malloc(1);
         aether_caps_free(b, sizeof(AetherStrBuilder));
