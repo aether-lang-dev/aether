@@ -1169,6 +1169,33 @@ void report_ambiguous_types(InferenceContext* ctx) {
 int propagate_function_call_types(ASTNode* program, SymbolTable* table);
 int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count);
 
+/* Widening rank for the call-site parameter unification below.
+ *
+ * A parameter whose type is inferred from call sites used to keep whatever
+ * the FIRST call site said and ignore every later one, so `f(2)` followed by
+ * `f(9000000000)` pinned the parameter to `int` and truncated the second
+ * argument to 410065409 -- a wrong number, order-dependent, with `ae check`
+ * reporting no errors (#1972). Ranking the numeric kinds lets a later, wider
+ * call site win, which is the direction that cannot lose information.
+ *
+ * 0 means "not a numeric kind this may widen through": those are left to the
+ * first-writer rule, so nothing silently reinterprets a pointer or a string.
+ * Signed and unsigned 64-bit share a rank deliberately -- neither widens into
+ * the other, because that swap changes what a value means rather than how
+ * much of it fits. */
+static int param_widening_rank(TypeKind k) {
+    switch (k) {
+        case TYPE_BYTE:       return 1;
+        case TYPE_INT:        return 2;
+        case TYPE_INT64:      return 3;
+        case TYPE_UINT64:     return 3;
+        case TYPE_FLOAT32:    return 4;
+        case TYPE_FLOAT:      return 5;
+        case TYPE_LONGDOUBLE: return 6;
+        default:              return 0;
+    }
+}
+
 // Helper to recursively find function calls and propagate types
 int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count) {
     if (!tree || !func_name) return 0;
@@ -1212,7 +1239,30 @@ int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* 
                     arg->node_type && arg->node_type->kind != TYPE_UNKNOWN) {
                     if (param->node_type) free_type(param->node_type);
                     param->node_type = clone_type(arg->node_type);
+                    /* Record that THIS pass supplied the type. Only a type we
+                     * inferred may be widened below; one the author wrote is
+                     * authoritative, and widening it would change documented
+                     * semantics -- `expect(got: int, ...)` relies on `int`
+                     * wrapping at 32 bits, and promoting it to int64 stops the
+                     * wrap the test exists to check. */
+                    param->type_inferred = 1;
                     changed++;
+                } else if (param->type_inferred && param->node_type && arg && arg->node_type) {
+                    /* Already pinned by an earlier call site. Take the wider
+                     * numeric kind rather than keeping whichever was seen
+                     * first: the narrow one truncates this argument, and
+                     * which call site the compiler happens to reach first is
+                     * not something the author controls (#1972). Only widens,
+                     * only among the ranked numeric kinds, and only over a
+                     * type this pass inferred, so an annotated parameter and a
+                     * genuinely incompatible pair are both left alone. */
+                    int cur = param_widening_rank(param->node_type->kind);
+                    int inc = param_widening_rank(arg->node_type->kind);
+                    if (cur > 0 && inc > cur) {
+                        free_type(param->node_type);
+                        param->node_type = clone_type(arg->node_type);
+                        changed++;
+                    }
                 }
             }
         }
