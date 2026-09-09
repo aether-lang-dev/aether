@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.660.0]
+
 ### Fixed
 
 - **A third-party apt source took CI down**, main and every open PR at once. The
