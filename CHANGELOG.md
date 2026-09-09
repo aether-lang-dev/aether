@@ -15,6 +15,18 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`long` was not promoted in mixed arithmetic with a float, and the wrong
+  result was silent** (#1965). The pre-typecheck pass checked "either side is
+  int64 -> int64" *before* it checked for a floating operand, so `long * 1.0`
+  inferred int64 and discarded the float; the division that followed became
+  integer division. `(elapsed * 1.0) / (n * 1.0)` printed 0 rather than 0.51,
+  and in the benchmark it was found in, that zero read as "too fast to
+  measure". The same ordering also let int64 beat `longdouble`. The int
+  spelling of the identical arithmetic was always correct, so the two
+  disagreed depending only on whether the operand came from a `long`.
+  `typechecker.c` already ordered these correctly -- longdouble, then float,
+  then the integer kinds, which is what C's usual arithmetic conversions say --
+  and the two passes now agree.
 - **A parameter inferred from call sites took the first call site's type and
   truncated every later one** (#1972). `propagate_call_types_in_tree` wrote the
   parameter's type once and ignored the rest, so `f(2)` followed by
