@@ -28,6 +28,19 @@ version number before tagging the release.
   that shadows an outer name now gets its own entry, which the unwind removes,
   so the outer symbol is untouched.
 
+- **A parameter inferred from call sites took the first call site's type and
+  truncated every later one** (#1972). `propagate_call_types_in_tree` wrote the
+  parameter's type once and ignored the rest, so `f(2)` followed by
+  `f(9000000000)` pinned the parameter to `int` and printed 410065409 instead
+  of 9000000001. `ae check` reported no errors, and the answer depended on the
+  order of the call sites: `f(3)` then `f(1.5)` truncated, while `f(1.5)` then
+  `f(3)` was correct, for the same program. The parameter now takes the widest
+  numeric kind any call site supplies, which is the direction that cannot lose
+  information. Widening only, and only among the ranked numeric kinds, so an
+  incompatible pair is still left for the type checker; signed and unsigned
+  64-bit share a rank and do not widen into each other, because that swap
+  changes what a value means rather than how much of it fits.
+
 ## [0.658.0]
 
 ### Fixed

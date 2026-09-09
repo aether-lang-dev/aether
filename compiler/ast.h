@@ -483,13 +483,18 @@ typedef struct ASTNode {
                                // synthetic nodes the parser/typechecker invent
                                // out of thin air; codegen falls back to the last
                                // known file in that case.
-    int type_inferred;         // AST_VARIABLE_DECLARATION only: 1 when the
+    int type_inferred;         // AST_VARIABLE_DECLARATION: 1 when the
                                // declaration had NO explicit type annotation
                                // (Python-style `x = expr`), so its type is
                                // inferred from the initializer. Survives the
                                // pre-typecheck inference that fills node_type,
                                // unlike a TYPE_UNKNOWN sentinel. Drives the
                                // #698 silent-narrowing guard.
+                               // Also set on a function PARAMETER whose type
+                               // was supplied by call-site propagation rather
+                               // than written down, which is the same
+                               // distinction: only an inferred parameter may
+                               // be widened by a later call site (#1972).
 
     /* Allocated slots in `children`. Only add_child maintains this;
      * code that replaces the array wholesale resets it to 0, which
