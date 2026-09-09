@@ -1,0 +1,54 @@
+// A parameter inferred from call sites takes the WIDEST numeric kind any
+// call site supplies, not whichever one the compiler reached first (#1972).
+//
+// Before this, propagate_call_types_in_tree wrote the parameter's type once
+// and ignored every later call site. `f(2)` followed by `f(9000000000)`
+// pinned the parameter to `int`, truncated the second argument, and printed
+// 410065409. `ae check` reported no errors, and moving the two calls past
+// each other changed the answer -- the float-first spelling was right and the
+// int-first spelling was wrong, for the same program.
+//
+// Widening is the direction that cannot lose information, which is why the
+// fix widens rather than picking a winner.
+
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("  FAIL: ${msg}")
+    exit(1)
+}
+
+// Inferred from its call sites: int at one, int64 at another.
+bump(a) { return a + 1 }
+
+// Inferred int at one call site, float at another.
+twice(a) { return a * 2 }
+
+// The issue's own repro, with two parameters.
+add(a, b) { return a + b }
+
+main() {
+    // int64 after int. The narrow spelling truncated to 32 bits.
+    small = bump(2)
+    big = bump(9000000000)
+    if small != 3 { fail("bump(2) = ${small}, want 3") }
+    if big != 9000000001 { fail("bump(9000000000) = ${big}, want 9000000001") }
+
+    // float after int. 1.5 * 2 is 3, not 2.
+    i2 = twice(3)
+    f2 = twice(1.5)
+    if i2 != 6.0 { fail("twice(3) = ${i2}, want 6") }
+    if f2 < 2.9 { fail("twice(1.5) = ${f2}, want 3 -- the argument was truncated") }
+    if f2 > 3.1 { fail("twice(1.5) = ${f2}, want 3") }
+
+    // Two parameters, both widened. This is the report's first example.
+    x = add(1, 2)
+    y = add(1.5, 2.5)
+    if x != 3.0 { fail("add(1, 2) = ${x}, want 3") }
+    if y < 3.9 { fail("add(1.5, 2.5) = ${y}, want 4 -- both arguments truncated") }
+    if y > 4.1 { fail("add(1.5, 2.5) = ${y}, want 4") }
+
+    println("All parameter-widening cases pass")
+}
