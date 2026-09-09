@@ -86,7 +86,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+      run: .github/scripts/ci-apt-update.sh && sudo apt-get install -y gcc make bc curl xz-utils
 
     # Restore on every run, save only on a main-merge miss. Zig bundles the
     # mingw-w64 headers + CRT sources, so there is no sysroot to fetch.
@@ -175,7 +175,7 @@ jobs:
 
     - name: Install toolchain
       run: |
-        sudo apt-get update
+        .github/scripts/ci-apt-update.sh
         sudo -E apt-get install -y --no-install-recommends \
           build-essential wine file
 
