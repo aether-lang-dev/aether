@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A parameter name in an imported module retyped a same-named function in
+  the importing program** (#1967). The inference pass adds a function's
+  parameters to the shared symbol table and unwinds them by trimming back to a
+  snapshot. That removes what it added but cannot undo a MUTATION, and the
+  parameter branch overwrote the type of any symbol that already carried the
+  name, including a function sitting beneath the snapshot, which the pass's own
+  comment says is left unaffected. A module with a parameter called `channel`
+  retyped the importing program's `channel()` to the parameter's type, so
+  `r = channel(a, b)` came out as `AnimChannel*`; codegen then assigned an int
+  to a pointer and `aetherc` reported nothing, leaving a C warning against
+  generated code as the only sign. It acted at a distance: the two files shared
+  no identifier deliberately and the module was three imports away. A parameter
+  that shadows an outer name now gets its own entry, which the unwind removes,
+  so the outer symbol is untouched.
+
 ## [0.658.0]
 
 ### Fixed
