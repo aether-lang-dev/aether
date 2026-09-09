@@ -40,6 +40,18 @@ version number before tagging the release.
   incompatible pair is still left for the type checker; signed and unsigned
   64-bit share a rank and do not widen into each other, because that swap
   changes what a value means rather than how much of it fits.
+## [0.660.0]
+
+### Fixed
+
+- **A third-party apt source took CI down**, main and every open PR at once. The
+  GitHub runner images ship an apt source for Google Chrome. Nothing here
+  installs from it and no workflow uses a browser, but when its index went
+  briefly inconsistent every `apt-get update` in the matrix failed with
+  `Hash Sum mismatch` and each Linux leg went red during setup, before
+  compiling a line: 15 legs on main, 10 on a PR that had touched only the type
+  checker. Every `apt-get update` now drops that source first, which cannot
+  regress a build that never installed from it.
 
 ## [0.659.0]
 

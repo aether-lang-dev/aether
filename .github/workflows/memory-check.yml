@@ -32,7 +32,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make valgrind
 
     - name: Build with debug symbols
@@ -108,7 +108,7 @@ jobs:
     - name: Setup GCC
       if: matrix.os == 'ubuntu-latest'
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make
 
     - name: Setup Clang
@@ -173,7 +173,7 @@ jobs:
 
     - name: Install dependencies
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make valgrind
 
     - name: Build with memory tracking
@@ -227,7 +227,7 @@ jobs:
 
     - name: Setup GCC
       run: |
-        sudo apt-get update || brew update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update || brew update
         sudo apt-get install -y gcc make || brew install gcc make
 
     - name: Verify 64-bit compilation
