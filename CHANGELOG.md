@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.661.0]
+
 ### Fixed
 
 - **A parameter name in an imported module retyped a same-named function in
