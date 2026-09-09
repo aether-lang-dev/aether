@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.659.0]
+
 ### Fixed
 
 - **A parameter inferred from call sites took the first call site's type and
