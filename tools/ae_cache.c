@@ -174,6 +174,15 @@ static unsigned long long fnv64_file(const char* path) {
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
         for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
     }
+    /* CRITICAL: fread returns 0 for both EOF and a read error, so without this
+     * an I/O error partway through hashes the bytes read so far and hands that
+     * back as if it were the file's hash. This value keys the build cache, and
+     * a hash over partial content is exactly how a stale binary gets served.
+     * Report it the same way an unopenable file is reported. */
+    if (ferror(f)) {
+        fclose(f);
+        return 0;
+    }
     fclose(f);
     return h;
 }

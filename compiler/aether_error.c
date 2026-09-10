@@ -210,17 +210,42 @@ void aether_error_report(AetherError* error) {
             // Line number width
             int line_num_width = snprintf(NULL, 0, "%d", error->line);
             
+            /* A long line is windowed around the caret rather than echoed
+             * whole. Generated or minified source reaches thousands of columns,
+             * and printing all of it (plus one space per column on the caret
+             * line) buries the message it is supposed to illustrate. */
+            const int MAX_SNIPPET = 160;
+            int col0 = error->column > 0 ? error->column - 1 : 0;
+            int win_start = 0;
+            int win_len = line_length;
+            int elided_left = 0, elided_right = 0;
+            if (line_length > MAX_SNIPPET) {
+                win_start = col0 - MAX_SNIPPET / 2;
+                if (win_start > line_length - MAX_SNIPPET)
+                    win_start = line_length - MAX_SNIPPET;
+                if (win_start < 0) win_start = 0;
+                win_len = MAX_SNIPPET;
+                if (win_start + win_len > line_length)
+                    win_len = line_length - win_start;
+                elided_left  = win_start > 0;
+                elided_right = win_start + win_len < line_length;
+            }
+
             // Print line with line number
             fprintf(stderr, "%s%*d |%s ", 
                     AETHER_COLOR_BLUE,
                     line_num_width, error->line,
                     AETHER_COLOR_RESET);
-            fwrite(line, 1, line_length, stderr);
+            if (elided_left) fprintf(stderr, "...");
+            fwrite(line + win_start, 1, (size_t)win_len, stderr);
+            if (elided_right) fprintf(stderr, "...");
             fprintf(stderr, "\n");
             
             // Print caret (^) pointing to error column
             fprintf(stderr, "%*s |%s ", line_num_width, "", AETHER_COLOR_BLUE);
-            for (int i = 0; i < error->column - 1; i++) {
+            int caret_col = col0 - win_start + (elided_left ? 3 : 0);
+            if (caret_col < 0) caret_col = 0;
+            for (int i = 0; i < caret_col; i++) {
                 fprintf(stderr, " ");
             }
             fprintf(stderr, "%s%s^%s", AETHER_COLOR_RED, AETHER_COLOR_BOLD, AETHER_COLOR_RESET);
