@@ -11,6 +11,46 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Deeply nested source crashed the compiler instead of reporting an error.**
+  The recursive-descent parser had no depth bound, so nesting deep enough
+  exhausted the C stack and `aetherc` died of SIGSEGV with nothing printed.
+  Measured: about 2000 nested `(` or `if`, about 4000 nested `{`. Found by
+  fuzzing. Parsing now stops at a bounded depth and reports one error naming
+  the limit. The bound is 512, roughly twenty times the deepest nesting in this
+  repository (22 braces, 9 parens) and a quarter of the shallowest measured
+  crash, so it stays clear of real code and of a thread with a small stack.
+
+- **A struct literal leaked its name on every occurrence.** The parser
+  `strdup`ed the type name and handed it to `create_ast_node`, which keeps its
+  own copy, so the original was never freed. Measured with `leaks(1)`: a file
+  with 400 struct literals leaked exactly 400 allocations before, 0 after.
+
+- **`arg_drain_bind` freed its caller's buffer and returned on allocation
+  failure**, and `emit_closure_env_drained_call` keeps using that pointer to
+  emit the closure teardown, so the out-of-memory path read freed memory.
+  Continuing was never recoverable either, since the substitution it failed to
+  record is what the emitted call depends on. It now fails the way `add_child`
+  does for the same situation.
+
+- **A read error while hashing a file for the build cache produced a hash over
+  partial content.** `fread` returns 0 for both EOF and failure, so the loop
+  ended either way and the partial hash was returned as if it were the file's.
+  That value keys the build cache, which is how a stale binary gets served. A
+  read error is now reported the same way an unopenable file is.
+
+### Performance
+
+- **Compiles are 7 to 10 percent faster.** A profile of a stdlib module put
+  `strcmp` at the top, reached through the symbol table and the codegen
+  lookups, which are linear scans. Nearly every candidate differs in its first
+  byte, so the four hottest scans settle that inline before calling out, and
+  `lookup_qualified_symbol` no longer mallocs, copies and frees the name on
+  every call just to split it on the dot. Measured over five large real modules,
+  fifteen interleaved runs against `main`: 10.4 percent on the minimum, 9.0
+  percent on the median, 7.2 percent at the first quartile.
+
 ## [0.662.0]
 
 ### Fixed

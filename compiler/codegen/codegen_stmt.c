@@ -700,11 +700,16 @@ static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def)
 static ASTNode* find_function_definition_by_name(ASTNode* program,
                                                  const char* name) {
     if (!program || !name) return NULL;
+    /* Called per call site from several codegen paths, each time scanning
+     * every top-level node, so it lands in the profile next to lookup_symbol.
+     * Settling the common mismatch on the first byte avoids the call. */
+    int c0 = (unsigned char)name[0];
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && (c->type == AST_FUNCTION_DEFINITION ||
                   c->type == AST_BUILDER_FUNCTION) &&
-            c->value && strcmp(c->value, name) == 0) {
+            c->value && (unsigned char)c->value[0] == c0 &&
+            strcmp(c->value, name) == 0) {
             return c;
         }
     }

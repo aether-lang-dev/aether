@@ -192,7 +192,16 @@ static void arg_drain_bind(ASTNode* node, char* name) {
         int new_cap = g_arg_drain_cap ? g_arg_drain_cap * 2 : 8;
         ArgDrainSub* bigger = (ArgDrainSub*)realloc(g_arg_drain_subs,
                                                     sizeof(ArgDrainSub) * (size_t)new_cap);
-        if (!bigger) { free(name); return; }
+        /* CRITICAL: this used to free `name` and return. The caller in
+         * emit_closure_env_drained_call keeps using that pointer to emit the
+         * env teardown, so the failure path handed it freed memory. Returning
+         * without binding is not recoverable either: the substitution never
+         * happens and the call is emitted against a temp that was never
+         * declared. Fail the way add_child does for the same situation. */
+        if (!bigger) {
+            fprintf(stderr, "Fatal: out of memory binding a call argument\n");
+            exit(1);
+        }
         g_arg_drain_subs = bigger;
         g_arg_drain_cap  = new_cap;
     }

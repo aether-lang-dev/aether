@@ -1242,7 +1242,11 @@ int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* 
     // Also match qualified calls: "mymath.double_it" matches definition "mymath_double_it"
     int is_match = 0;
     if (tree->type == AST_FUNCTION_CALL && tree->value) {
-        if (strcmp(tree->value, func_name) == 0) {
+        /* This runs once per AST node per function definition, so it is the
+         * busiest comparison in the pass. Settle the common mismatch on the
+         * first byte before calling out. */
+        if ((unsigned char)tree->value[0] == (unsigned char)func_name[0] &&
+            strcmp(tree->value, func_name) == 0) {
             is_match = 1;
         } else if (strchr(tree->value, '.')) {
             // Convert dots to underscores and check
