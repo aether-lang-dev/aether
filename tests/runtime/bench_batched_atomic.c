@@ -67,7 +67,7 @@ void* new_actor_thread(void* arg) {
     return NULL;
 }
 
-int main() {
+int main(void) {
     printf("=== Batched Atomic Optimization Benchmark ===\n");
     printf("Messages: %d\n\n", MESSAGES);
     

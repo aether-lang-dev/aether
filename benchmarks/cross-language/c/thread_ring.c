@@ -66,7 +66,7 @@ void* node_thread(void* arg) {
     return NULL;
 }
 
-int main() {
+int main(void) {
     const char* env = getenv("BENCHMARK_MESSAGES");
     if (env) NUM_HOPS = atoi(env);
 

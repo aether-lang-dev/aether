@@ -25,20 +25,20 @@ typedef struct {
 
 int apkg_init(const char* name);
 int apkg_install(const char* package);
-int apkg_publish();
-int apkg_build();
-int apkg_test();
+int apkg_publish(void);
+int apkg_build(void);
+int apkg_test(void);
 int apkg_search(const char* query);
-int apkg_update();
-int apkg_run();
+int apkg_update(void);
+int apkg_run(void);
 
 void apkg_free_package(Package* pkg);
 
 PackageInfo apkg_find_package(const char* name);
 int apkg_download_package(const char* name, const char* version);
 
-void apkg_print_help();
-void apkg_print_version();
+void apkg_print_help(void);
+void apkg_print_version(void);
 
 #endif
 

@@ -39,11 +39,11 @@ typedef struct {
 
 // Profiler API
 void profiler_init(ProfilerConfig* config);
-void profiler_shutdown();
-void profiler_start_server();
-void profiler_stop_server();
+void profiler_shutdown(void);
+void profiler_start_server(void);
+void profiler_stop_server(void);
 void profiler_record_event(ProfilerEvent* event);
-int profiler_is_enabled();
+int profiler_is_enabled(void);
 
 // Metric snapshot for JSON export
 typedef struct {
@@ -71,12 +71,12 @@ typedef struct {
     double timestamp_ms;
 } MetricsSnapshot;
 
-MetricsSnapshot profiler_get_current_metrics();
+MetricsSnapshot profiler_get_current_metrics(void);
 const char* profiler_metrics_to_json(MetricsSnapshot* metrics);
 const char* profiler_events_to_json(int count, int offset);
 
 // Helper function
-double profiler_get_time_ms();
+double profiler_get_time_ms(void);
 
 #endif // AETHER_PROFILER_SERVER_H
 

@@ -14,7 +14,7 @@
 
 #define ITERATIONS 10000000
 
-int main() {
+int main(void) {
     printf("=== Atomic Overhead Benchmark ===\n");
     printf("Iterations: %d\n\n", ITERATIONS);
     

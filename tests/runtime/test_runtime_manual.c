@@ -21,7 +21,7 @@ void Counter_step(Counter* self) {
     (self->count = (self->count + 1));
 }
 
-Counter* spawn_Counter() {
+Counter* spawn_Counter(void) {
     Counter* actor = malloc(sizeof(Counter));
     actor->id = 1;
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
@@ -41,7 +41,7 @@ void send_message(void* actor_ptr, int type, int payload) {
     atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
 }
 
-int main() {
+int main(void) {
     Counter* c = spawn_Counter();
     
     send_message(c, 1, 0);

@@ -15,7 +15,7 @@
 // Test: Counter Increment Overhead
 // ============================================================================
 
-void bench_counter_overhead() {
+void bench_counter_overhead(void) {
     printf("\n=== Counter Increment Overhead ===\n");
     
     const int ITERATIONS = 10000000;  // 10M iterations
@@ -46,7 +46,7 @@ void bench_counter_overhead() {
 // Test: Mailbox Operation Overhead
 // ============================================================================
 
-void bench_mailbox_operations() {
+void bench_mailbox_operations(void) {
     printf("\n=== Mailbox Operation Overhead ===\n");
     
     const int ITERATIONS = 1000000;  // 1M iterations
@@ -88,7 +88,7 @@ void bench_mailbox_operations() {
 // Test: Message Copy Overhead
 // ============================================================================
 
-void bench_message_copy() {
+void bench_message_copy(void) {
     printf("\n=== Message Copy Overhead ===\n");
     
     const int ITERATIONS = 10000000;
@@ -128,7 +128,7 @@ typedef struct {
     _Atomic int message_count;  // Atomic int
 } AtomicActor;
 
-void bench_actor_loop() {
+void bench_actor_loop(void) {
     printf("\n=== Actor Message Processing Loop ===\n");
     
     const int MESSAGES = 1000000;
@@ -189,7 +189,7 @@ void bench_actor_loop() {
 // Main
 // ============================================================================
 
-int main() {
+int main(void) {
     printf("===============================================================\n");
     printf("     Aether Micro-Benchmarks: Atomic Operation Overhead\n");
     printf("===============================================================\n");

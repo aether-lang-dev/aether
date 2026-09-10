@@ -30,7 +30,7 @@ void handle_sigint(int sig) {
     }
 }
 
-int main() {
+int main(void) {
     signal(SIGINT, handle_sigint);
 
     server = http_server_create(8080);

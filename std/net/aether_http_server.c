@@ -112,7 +112,7 @@ const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; r
 const char* http_get_query_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 void http_request_free(HttpRequest* r) { (void)r; }
-HttpServerResponse* http_response_create() { return NULL; }
+HttpServerResponse* http_response_create(void) { return NULL; }
 void http_response_set_status(HttpServerResponse* r, int c) { (void)r; (void)c; }
 void http_response_set_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_add_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }

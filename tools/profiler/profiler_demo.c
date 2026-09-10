@@ -16,7 +16,7 @@
 #endif
 
 // Simulate actor activity for profiling
-void simulate_actor_activity() {
+void simulate_actor_activity(void) {
     printf("Simulating actor activity for profiling...\n");
     
     Arena* arena = arena_create(1024 * 1024); // 1MB arena

@@ -127,7 +127,7 @@ void process_batch_zerocopy(
 }
 
 // Main example
-int main() {
+int main(void) {
     printf("High-Throughput Actor Example\n");
     printf("Optimizations: SIMD + Coalescing + Zero-Copy\n\n");
     

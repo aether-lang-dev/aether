@@ -19,7 +19,7 @@ void Counter_step(Counter* self) {
     (self->count = (self->count + 1));
 }
 
-Counter* spawn_Counter() {
+Counter* spawn_Counter(void) {
     Counter* actor = malloc(sizeof(Counter));
     actor->id = 0;
     actor->active = 1;
@@ -38,7 +38,7 @@ void send_Counter(Counter* actor, int type, int payload) {
     actor->active = 1;
 }
 
-int main() {
+int main(void) {
     Counter* c1 = spawn_Counter();
     Counter* c2 = spawn_Counter();
     

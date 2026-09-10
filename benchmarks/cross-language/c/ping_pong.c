@@ -77,7 +77,7 @@ static inline uint64_t get_time_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-int main() {
+int main(void) {
     // Read message count from environment
     const char* env = getenv("BENCHMARK_MESSAGES");
     if (env) MESSAGES = atoi(env);

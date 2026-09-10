@@ -42,7 +42,7 @@ static struct {
 } g_profiler = {0};
 
 // Helper functions
-double profiler_get_time_ms() {
+double profiler_get_time_ms(void) {
     struct timespec ts;
     #ifdef _WIN32
     timespec_get(&ts, TIME_UTC);
@@ -52,11 +52,11 @@ double profiler_get_time_ms() {
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
 }
 
-static double get_current_time_ms() {
+static double get_current_time_ms(void) {
     return profiler_get_time_ms();
 }
 
-static void init_winsock() {
+static void init_winsock(void) {
     #ifdef _WIN32
     static int winsock_initialized = 0;
     if (!winsock_initialized) {
@@ -232,7 +232,7 @@ void profiler_init(ProfilerConfig* config) {
     printf("[Profiler] Initialized with max %d events\n", config->max_events);
 }
 
-void profiler_shutdown() {
+void profiler_shutdown(void) {
     if (!g_profiler.initialized) return;
     
     profiler_stop_server();
@@ -244,7 +244,7 @@ void profiler_shutdown() {
     printf("[Profiler] Shutdown complete\n");
 }
 
-void profiler_start_server() {
+void profiler_start_server(void) {
     if (!g_profiler.initialized || g_profiler.server_running) return;
     
     init_winsock();
@@ -287,7 +287,7 @@ void profiler_start_server() {
     printf("\n");
 }
 
-void profiler_stop_server() {
+void profiler_stop_server(void) {
     if (!g_profiler.server_running) return;
     
     g_profiler.server_running = 0;
@@ -321,11 +321,11 @@ void profiler_record_event(ProfilerEvent* event) {
     pthread_mutex_unlock(&g_profiler.event_mutex);
 }
 
-int profiler_is_enabled() {
+int profiler_is_enabled(void) {
     return g_profiler.initialized && g_profiler.config.enabled;
 }
 
-MetricsSnapshot profiler_get_current_metrics() {
+MetricsSnapshot profiler_get_current_metrics(void) {
     MetricsSnapshot metrics = {0};
     
     // Get memory stats
