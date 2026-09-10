@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.663.0]
+
 ### Fixed
 
 - **A function named after a libc symbol emitted C that did not compile**
