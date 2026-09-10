@@ -227,6 +227,10 @@ void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 void mark_escaped_capture_boxes(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+/* The program's own definition of `name`, or NULL. Shared rather than
+   duplicated: the builtin fast-paths need it to know when a program has
+   defined a function of its own with a builtin's name. */
+ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
 
 /* Push function-exit defer-free statements for every hoisted
  * heap-string var that's NOT escaped. Closes the single-call

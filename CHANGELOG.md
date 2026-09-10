@@ -11,6 +11,28 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A function named after a libc symbol emitted C that did not compile**
+  (#1993). `remove()`, `div()`, `index()`, `abs()` and two dozen more reached C
+  unmangled, and the only diagnostic came from the C compiler, naming a system
+  header and a type the source never wrote. `is_c_reserved_word` already
+  mangled `read`, `write` and `bind` for exactly this reason; its curated list
+  was missing the rest of `<stdio.h>`, `<stdlib.h>` and `<string.h>`. These are
+  ordinary domain verbs, which is what makes them worth listing: an undo pair
+  is naturally `add`/`remove`, a list editor has `remove` and `index`.
+
+  A name absent from that list was not safe, it was lucky: it survived only
+  while its signature happened to match libc's, so `rand() -> int` compiled and
+  `rand(seed: int) -> int` did not. The names are listed regardless.
+
+- **`atoi` is a builtin, and it did not yield to a program's own function.**
+  With the reserved-name entry alone, the definition was mangled while every
+  call still went to the builtin, so the program's function became dead code
+  and the call carried libc's signature. The builtin now steps aside when the
+  program defines a function of that name, which is the rule #1967 settled for
+  types. `atoi("41")` still reaches the builtin in a program that defines none.
+
 ## [0.662.0]
 
 ### Fixed

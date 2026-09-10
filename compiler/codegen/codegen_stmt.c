@@ -697,8 +697,8 @@ static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def)
 // (K < 200) this is well under a millisecond. If the count grows,
 // promote to a hash via gen->fn_def_lookup; the static here is the
 // O(1)-amortised refactor seam.
-static ASTNode* find_function_definition_by_name(ASTNode* program,
-                                                 const char* name) {
+ASTNode* find_function_definition_by_name(ASTNode* program,
+                                          const char* name) {
     if (!program || !name) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
