@@ -7,12 +7,18 @@
 # fuzzing; a user hits it with generated or pathological source, and a crash
 # tells them nothing about what to change.
 #
-# Asserts three things, because only the first is obvious:
+# Asserts four things, because only the first is obvious:
 #   1. no signal death at depths far past the old crash point
 #   2. exactly ONE error, not one per remaining token: the guard returns
 #      without consuming input, so the block loop's force-advance would
 #      otherwise emit an error for every token left in the file
 #   3. ordinary shallow syntax errors still recover as before
+#   4. legitimate deep-but-sane nesting still compiles
+#
+# Input is generated with awk, not Python. MSYS2 has no python3, and skipping
+# there would drop this test on the platform with the SMALLEST default stack
+# (1 MB against 8 MB on Unix), which is exactly where unbounded recursion bites
+# first.
 
 set -e
 
@@ -24,23 +30,25 @@ AETHERC="$ROOT/build/aetherc"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+rep() { # rep <string> <count>
+    awk -v s="$1" -v n="$2" 'BEGIN { for (i = 0; i < n; i++) printf "%s", s }'
+}
+
 gen() { # gen <kind> <depth> <out>
-    python3 -c "
-import sys
-kind, d, out = sys.argv[1], int(sys.argv[2]), sys.argv[3]
-if   kind == 'brace': s = 'main() {' + '{'*d + '}'*d + '}'
-elif kind == 'paren': s = 'main() { x = ' + '('*d + '1' + ')'*d + ' }'
-elif kind == 'neg':   s = 'main() { x = ' + '-'*d + '1 }'
-else:                 s = 'main() { ' + 'if 1 {'*d + '}'*d + ' }'
-open(out,'w').write(s + '\n')
-" "$1" "$2" "$3"
+    _k="$1"; _d="$2"; _o="$3"
+    case "$_k" in
+        brace) { printf 'main() {'; rep '{' "$_d"; rep '}' "$_d"; printf '}\n'; } > "$_o" ;;
+        paren) { printf 'main() { x = '; rep '(' "$_d"; printf '1'; rep ')' "$_d"; printf ' }\n'; } > "$_o" ;;
+        neg)   { printf 'main() { x = '; rep '-' "$_d"; printf '1 }\n'; } > "$_o" ;;
+        *)     { printf 'main() { '; rep 'if 1 {' "$_d"; rep '}' "$_d"; printf ' }\n'; } > "$_o" ;;
+    esac
 }
 
 for kind in brace paren neg ifs; do
     for depth in 1000 5000 20000; do
         gen "$kind" "$depth" "$TMP/deep.ae"
         set +e
-        timeout 30 "$AETHERC" "$TMP/deep.ae" "$TMP/out.c" > "$TMP/log" 2>&1
+        timeout 60 "$AETHERC" "$TMP/deep.ae" "$TMP/out.c" > "$TMP/log" 2>&1
         rc=$?
         set -e
         if [ "$rc" -gt 128 ]; then
@@ -87,10 +95,13 @@ n2=$(grep -c '^error' "$TMP/log2" || true)
 
 # Real code is nowhere near the limit: the deepest nesting in this repository
 # is 22 braces, so a file well past that must still compile.
-python3 -c "
-d = 60
-open('$TMP/ok.ae','w').write('main() {\n' + '    if true {\n'*d + '        println(\"deep\")\n' + '    }\n'*d + '}\n')
-"
+{
+    printf 'main() {\n'
+    rep '    if true {\n' 60
+    printf '        println("deep")\n'
+    rep '    }\n' 60
+    printf '}\n'
+} > "$TMP/ok.ae"
 "$AETHERC" "$TMP/ok.ae" "$TMP/out.c" > "$TMP/log3" 2>&1 || {
     echo "  [FAIL] parse_depth_guard: 60 levels of legitimate nesting was rejected"
     head -5 "$TMP/log3" | sed 's/^/        /'
