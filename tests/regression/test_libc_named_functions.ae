@@ -1,0 +1,57 @@
+// Regression: a function named after a libc symbol the prelude includes
+// emitted C that did not compile, and aetherc reported nothing.
+//
+// The generated file includes <stdio.h>, <stdlib.h> and <string.h>, so a
+// program-level `remove()` reached C unmangled and clang rejected the
+// redeclaration, naming a system header and a type the source never wrote.
+// A curated reserved-name list already mangled `read`, `write` and `bind`
+// for exactly this reason; it was missing the rest of those three headers.
+//
+// These are ordinary domain verbs, which is what makes them worth listing: an
+// undo pair is naturally add/remove, a list editor has remove and index, a
+// numeric helper has abs or div.
+//
+// An absent name was not safe, it was LUCKY: it survived only while its
+// signature happened to match libc's. So every name here takes an argument
+// and returns a value, which libc's counterpart does not, and pre-fix each
+// one failed to compile.
+//
+// `atoi` additionally needed the builtin fast-path to yield: the definition
+// was mangled while every call still went to the builtin, so the function was
+// dead code. A program's own function wins.
+
+extern exit(code: int)
+
+remove(x: int) -> int { return x + 1 }
+index(x: int) -> int { return x + 2 }
+div(x: int) -> int { return x + 3 }
+abs(x: int) -> int { return x + 4 }
+rand(x: int) -> int { return x + 5 }
+qsort(x: int) -> int { return x + 6 }
+atoi(x: int) -> int { return x + 7 }
+getline(x: int) -> int { return x + 8 }
+difftime(x: int) -> int { return x + 9 }
+setbuf(x: int) -> int { return x + 10 }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== test_libc_named_functions ===")
+    check("remove", remove(0), 1)
+    check("index", index(0), 2)
+    check("div", div(0), 3)
+    check("abs", abs(0), 4)
+    check("rand", rand(0), 5)
+    check("qsort", qsort(0), 6)
+    check("atoi", atoi(0), 7)
+    check("getline", getline(0), 8)
+    check("difftime", difftime(0), 9)
+    check("setbuf", setbuf(0), 10)
+    println("  PASS: a libc-named function is the program's own")
+    println("=== test_libc_named_functions passed ===")
+}

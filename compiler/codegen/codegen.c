@@ -1958,8 +1958,29 @@ int is_c_reserved_word(const char* name) {
         // ── libc time + env + misc ─────────────────────────────
         "time", "clock", "gettimeofday", "clock_gettime", "clock_settime",
         "gmtime", "localtime", "mktime", "asctime", "ctime", "strftime",
+        "difftime",
         "getenv", "setenv", "unsetenv", "putenv", "clearenv",
         "getcwd", "chdir", "fchdir", "system",
+        /* #1993: the rest of <stdio.h>/<stdlib.h>/<string.h>, which the
+           prelude includes. These are ORDINARY DOMAIN VERBS, which is what
+           makes them worth listing: an undo pair is naturally written
+           add/remove, a list editor has remove and index, a numeric helper
+           has abs or div. Found by an aether-ui README snippet whose undo
+           example was `|| { remove() }`, the obvious thing to write, which
+           did not compile.
+
+           A name absent from this list is not safe, it is LUCKY: it survives
+           only while its signature happens to match libc's. `rand() -> int`
+           compiles because that is libc's exact signature, and `rand(seed:
+           int) -> int` does not. So these are listed regardless of whether
+           any one probe collided. */
+        "remove", "rename", "tmpfile", "tmpnam", "setbuf", "setvbuf",
+        "getline", "getdelim", "fgetpos", "fsetpos", "clearerr",
+        "abs", "labs", "llabs", "div", "ldiv", "lldiv",
+        "rand", "srand", "random", "srandom",
+        "qsort", "bsearch",
+        "atoi", "atol", "atoll", "atof",
+        "index", "rindex",
         NULL
     };
     for (int i = 0; reserved[i]; i++) {
