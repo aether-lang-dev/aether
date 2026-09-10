@@ -1,194 +1,268 @@
 # GPU strategy: what to build, what to borrow, where the border is
 
-A design note, not a commitment. It answers two questions that keep coming up
-once you notice that Aether's builder-style DSL lowers a declarative-looking
-tree to plain sequential C: *could that same pseudo-declarative feel reach GPU
-constructs?* And *if we go there, do we need our own equivalents of everything,
-or can we bootstrap off Mojo?*
+A design note, not a commitment or a shipped API. Reviewed on 2026-09-10 against
+Aether's compiler and closure documentation, and the local Modular checkout at
+`b61be59` (2026-09-09). External references describe the versions reviewed;
+recheck dependency and distribution details when implementing.
 
-The short version: the CPU side is already done (that is what
-[`closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) describes); the
-GPU **launch site** is a natural extension of the builder flavour we already
-have; the GPU **kernel body** is the one genuinely new piece of work; and
-"bootstrapping off Mojo" is the wrong frame — you borrow Mojo's *rules* (which
-are language-agnostic and hard-won), reuse the *vendor C runtimes beneath* Mojo
-(the stable layer), and write the thin Aether-shaped pieces yourself. You do
-not link, transpile, or lower through Mojo itself, because its reusable core is
-MLIR, and MLIR is the one thing a readable-C compiler cannot absorb.
+Aether's builder-style DSL is a good fit for **configuring GPU launches**. Its
+existing host C backend can call a device runtime through an FFI layer. Neither
+property supplies a GPU runtime contract or makes ordinary Aether closures
+executable on a device.
 
-## 1. The CPU side is the existence proof, not the question
+The recommended first step is a library that loads and launches externally
+compiled kernels on one backend, with explicit argument layouts, buffer
+ownership, completion and errors. A restricted Aether kernel language can follow
+once that contract works. Emitting device source for a vendor compiler is a
+credible route; integrating Mojo through a compiled C-ABI wrapper is another
+option to evaluate, not a technical impossibility.
 
-Aether's "DSL with scope" is a source-to-source transform. `frame { panel {
-button } }` lowers to ordinary C with `_aether_ctx_push/pop` around sequential
-calls — no runtime interpreter, no reflection, just readable emitted C (see the
-generated-code sections of the closures doc). That property is the whole reason
-the GPU question is even askable: because the DSL is *lowering*, in principle it
-can lower to any backend text, not only host C.
+## 1. What the existing DSL gives us
 
-So the GPU question is not "can the DSL express it" — the DSL can express almost
-any nested structure. It is "what does the emitted target look like, and where
-does the host/device border fall." Those are the parts a widget-tree builder
-never had to model.
+[`closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) describes two
+independent choices: the caller's trailing-block form and the function's regular
+or `builder` flavour. For a launch descriptor, the useful combination is an
+**immediate trailing block attached to a builder function**:
 
-## 2. What a GPU program has that a CPU builder DSL does not
+1. A zero-argument factory creates the configuration object.
+2. The compiler pushes it onto the host builder context stack.
+3. Ordinary `_ctx: ptr` setters execute inline and fill the configuration.
+4. The compiler pops the context and calls the builder function to execute it.
 
-Three things, and each one is a place where "seamless" quietly stops being true.
+That mechanism already exists and emits readable sequential C. A launch library
+can use it without new syntax. The factory, setters and launch implementation
+still need an agreed protocol, including configuration cleanup on early exits.
+The builder context itself is an untyped host pointer; it does not enforce GPU
+argument types or resource lifetimes.
 
-**(a) Two address spaces, and the boundary is not free.** A host pointer and a
-device pointer are different things, and — the detail worth tattooing on the
-wall — they may not even be the same *width*. Mojo shipped platform-sized `int`
-into GPU kernels, used it in production, and then in 1.0 **removed** that ability
-because host-int vs device-int width mismatches were a miscompilation source;
-developers must now use fixed-width types such as `int32` at the boundary. That
-is a language *retracting* seamlessness on purpose, after production taught it
-where convenience became dangerous. Aether's `ref()` cells are literally
-`malloc(sizeof(intptr_t))` and its `_ctx: ptr` injection assumes one flat host
-heap — both are host-C-shaped to the bone and mean nothing on a device.
+Launch configuration can describe grid/block dimensions and dynamic shared-memory
+size. Thread indexing, shared-memory accesses, atomics, barriers and warp/subgroup
+collectives belong to the **kernel body**. Nested builder syntax does not provide
+their execution semantics.
 
-**(b) The block body must lower to a different language, not just different C.**
-A kernel body compiles to PTX / SPIR-V / AMDGPU, not to the host's
-`_closure_fn_N` hoisted statics with heap environment structs. There is no
-`malloc` on the device, function pointers do not work the CPU way, and captured
-variables must become explicit kernel arguments in constant/global memory. "The
-same trailing block runs on the GPU" is therefore not a lowering tweak; it is a
-second code generator.
+## 2. The host/device contract comes before kernel syntax
 
-**(c) The declarative part that matters on GPU is the launch geometry, not the
-tree.** Where a CPU builder DSL declares *structure* (widgets, config), the GPU
-equivalent declares *iteration space and memory placement*: grid/block
-dimensions, shared vs. global memory, warp-level collectives. That is a good fit
-for a builder-with-config DSL — but it is a *different* DSL than the widget-tree
-one, and it is closer to our `builder … with <factory>` shape (fill a config
-object first, then "execute" = launch) than to the immediate-block shape.
+### Argument representation and validation
 
-## 3. The three layers, and why "bootstrap off Mojo" splits across them
+Host addresses are not automatically usable by a device. Even on systems with
+unified addressing or shared physical memory, accessibility, ownership and
+synchronization remain explicit concerns. An initial API should accept device
+buffer handles obtained from its allocator, with explicit upload/download
+operations; mapped or managed memory can be a later, separately specified mode.
 
-Mojo open-sourced its compiler and toolchain (Apache-2.0 with LLVM exceptions)
-one week after 1.0. That sounds like a reuse opportunity. It mostly is not, and
-the reason is structural, not legal. "Reuse Mojo" means one of three different
-things depending on which layer you point at.
+Mojo 1.0 removed `DevicePassable` conformance from its platform-sized `Int` and
+`UInt` because passing them to kernels could miscompile when host and device
+widths differed. That is useful precedent for an explicit ABI, not a rule to
+copy by spelling alone: Aether's numeric types have their own representations.
+See the [Mojo 1.0 release notes](https://mojolang.org/releases/v1.0.0/).
 
-### Layer 1 — the compiler / codegen (the part that emits PTX): **No.**
+For Aether, fixed-width setters establish how bytes are packed, but their names
+do not prevent implicit numeric conversion. During this review, a function
+`arg_scalar_i32(v: int32_t)` accepted a `long` containing `4294967297` and received
+`1`. This follows the current numeric compatibility rules in
+[`typechecker.c`](../../compiler/analysis/typechecker.c).
 
-This is the valuable, hard part Mojo opened. But it is an **MLIR/LLVM dialect
-stack** — Mojo source → MLIR → LLVM → PTX / SPIR-V / AMDGPU. To reuse it, Aether
-would have to lower to MLIR, which means abandoning "emit readable C" for the
-GPU path and taking LLVM as a hard build dependency. That is not bootstrapping
-*off* Mojo; it is *becoming a different compiler* for that path, and it
-contradicts the spine of the project (readable C, no externs, runtime stays C).
-Rejected on identity grounds, before cost even enters.
+The launch contract therefore needs:
 
-### Layer 2 — the stdlib GPU library (`_gpu`, warp primitives, `DeviceContext`): **No.**
+- A kernel signature/schema covering argument count, order, scalar width and
+  signedness, floating-point representation, and backend-required alignment.
+  Packing must be checked against that schema. For external kernels, supply
+  metadata produced with the artifact or a trusted explicit declaration; do not
+  assume every backend can recover a complete source signature from a binary.
+- Checked scalar conversions before narrowing. Nominal wrappers using Aether's
+  `distinct` types can require callers to cross an explicit type boundary, but
+  an `as` cast alone is not a range check. Checked constructors must define their
+  accepted input types and reject values they cannot represent.
+- Distinguishable kernel, context and device-buffer handles. Validate buffer
+  bounds and context/device association. A raw host `ptr` must not accidentally
+  satisfy an ordinary device-buffer parameter.
+- Explicit buffer element types and lengths, including whether a length is in
+  bytes or elements. Initially reject aggregates containing pointers, strings,
+  closures or other host runtime objects. Define aggregate layout before adding
+  by-value structs. Aether's `float` emits C `double`, so an f32 boundary needs
+  its own representation and conversion policy too.
 
-Legally readable, practically unusable to us:
+These checks establish a launch ABI. They do not prove that an arbitrary external
+kernel respects buffer bounds or that independently supplied metadata is true.
 
-- It is `.mojo` source written against Mojo's type system, and its intrinsics
-  *are* MLIR ops (`_gpu/intrinsics.mojo` uses `external_call` plus
-  `is_nvidia_gpu` / `is_amd_gpu` compile-time branches that resolve inside Layer
-  1). It is not C, it does not link into C, and there is nothing to transpile
-  into Aether-emitted C.
-- It is `stdlib/std/_gpu` — the underscore means private — and per Mojo's own
-  1.0 notes the accelerator-facing APIs **moved out of the Mojo stdlib into the
-  MAX package**, which is a commercial product, not the open compiler. The
-  launch/kernel surface you would actually want to reuse is behind Modular's
-  (now Qualcomm's) product line.
+### Completion, ownership and errors
 
-### Layer 3 — the design: the boundary rules and idioms: **Yes. Borrow freely.**
+For the first version, prefer **synchronous public operations**: upload completes
+before returning; launch waits for its submitted work; download returns only when
+host data is available. The implementation may use a stream internally, but it
+must complete or safely drain outstanding work before releasing its resources,
+including on failure paths.
 
-This is the real bootstrap, and it is worth a lot. Mojo spent a production 1.0
-cycle *discovering the rules*, and rules are language-agnostic knowledge, not
-code:
+The launch configuration owns copies of scalar argument values. It must keep
+buffers, the kernel module and the context valid through completion. Define who
+frees the configuration and what happens if its block exits before launch. A
+setter failure should be recorded in the descriptor and prevent submission;
+launch returns the error through Aether's ordinary error-return convention.
 
-- **Fixed-width-at-the-boundary** — `int32`, never platform `int`, into kernels.
-  Adopt verbatim, and bake it into the DSL's *type surface* (below) so the seam
-  cannot be crossed silently.
-- **Interior origins** — reject a reference that points into storage a later
-  mutation may reallocate, *at compile time*. That is the *shape* of the safety
-  check to want on the device side; Aether's existing closure escape-walk is the
-  host-lifetime cousin of the same idea.
-- **Compile-time target branching** — `is_nvidia_gpu` / `is_amd_gpu`. Aether
-  already owns the equivalent machinery: `--target` plus emit-mode selection, and
-  the `--emit=csrc`/`--emit=lib` cross work from #1648, where the emitted C is
-  target-neutral and the consumer compiles it. GPU target selection maps onto
-  machinery that already exists.
-- **Host/device as an explicit border** — Mojo's MAX-vs-stdlib split is the
-  same conclusion this note reaches independently: orchestration in-language,
-  kernel body as a separate construct.
+Distinguish validation and submission errors from errors discovered while waiting
+for device execution. Document whether a failed context remains usable. Validate
+launch dimensions and shared-memory requests against the selected device's limits.
 
-## 4. What we would actually build ourselves
+An asynchronous extension would need explicit streams/events or completion
+handles, ordering rules, retention until completion, and a policy for freeing or
+mutating in-flight buffers. Scope exit alone is insufficient. Mojo's
+`max.gpu.host.DeviceContext` is a useful implementation reference: its buffer
+destructors schedule release on the stream, and its copy documentation requires
+synchronization before reading results. See the
+[DeviceContext source](https://github.com/modular/modular/blob/b61be59/max/mojo/max/gpu/host/device_context.mojo).
 
-Almost all of the *mechanism*, almost none of the *design thinking*.
+Mojo's experimental interior origins detect references invalidated by collection
+mutation. Aether's closure escape analysis and `@scoped` checks do not supply that
+analysis, and neither lexical non-escape nor fixed-width arguments establish
+asynchronous completion. Do not promise equivalent compile-time safety without
+designing and implementing the required checks.
 
-| Piece | Bootstrap off Mojo? | Why |
+## 3. What can be reused from Mojo
+
+There are three different reuse decisions. Keeping them separate makes both the
+cost and the remaining dependencies clearer.
+
+| Route | What it provides | Assessment |
 |---|---|---|
-| Launch-DSL ergonomics (builder blocks) | **Already ours** | It is the existing trailing-block / `builder … with` machinery |
-| Boundary rules (`int32`, no host-ptr to device) | **Yes — copy the rules** | Pure design knowledge, hard-won by Mojo in production |
-| Host→device runtime calls | **Reuse the vendor runtime, not Mojo** | FFI to the CUDA driver / HIP / Metal C ABIs directly — the same runtimes `DeviceContext` wraps — emitting readable C that calls them |
-| Kernel-body codegen (→ PTX / SPIR-V) | **Build our own, or defer** | The one genuinely large piece; Mojo's is MLIR-locked and unusable to a C emitter |
+| Study or adapt GPU library source | Buffer/stream protocols, argument encoding, device primitives and algorithms | Useful reference material; adaptation must replace dependencies on Mojo's types, intrinsics and runtime |
+| Compile a Mojo wrapper with a C ABI | A host-callable entry point that can hide Mojo-specific implementation details | Technically possible; GPU operation, runtime initialization, packaging and redistribution need a concrete integration probe |
+| Integrate compiler internals | A route into Mojo's MLIR/LLVM compilation machinery | A substantial additional backend and dependency commitment; defer unless measured benefits justify it |
 
-### The launch DSL is the piece that is genuinely in reach
+The GPU-facing library moved largely into `max.gpu`, but package placement is not
+the same as source licensing. The reviewed `max.gpu` source, including
+`host/device_context.mojo` and `host/compile.mojo`, has Apache-2.0-with-LLVM-exceptions
+headers. Modular explicitly states that the moved accelerator source remains
+available under Apache. The repository README separately identifies terms for
+MAX usage and distribution. Assess the exact source and binary dependencies of a
+proposed integration, rather than inferring their status from the package name.
+See [Modular's clarification](https://forum.modular.com/t/open-source-device-codegen/3429/2)
+and the [repository licensing summary](https://github.com/modular/modular/blob/b61be59/README.md#license).
 
-It is our builder flavour verbatim: block-first, fill a launch config, then the
-function performs the launch. It lowers to readable host C that calls a device
-runtime — an FFI-shaped launch descriptor, squarely in scope.
+Mojo supports `@export` functions with a C calling convention and
+`mojo build --emit shared-lib`. Aether could call such a wrapper from emitted C;
+it would not have to lower its own host code to MLIR. The wrapper must initialize
+the Mojo runtime where required, and the GPU-specific build and runtime path
+still needs verification. This is a supported interop mechanism, not evidence
+that every GPU dependency is independently reusable. See
+[Mojo's shared-library documentation](https://mojolang.org/docs/tools/compilation/#call-a-mojo-shared-library-from-c-or-c).
+
+Direct integration of compiler internals is a different proposition: it adds
+MLIR/LLVM integration and maintenance work. It need not replace Aether's host C
+backend, but it is much larger than an FFI library. Defer it on scope and cost
+grounds. Aether already uses externs; their existence is not an architectural
+objection to either runtime route.
+
+The package split also does not establish that kernels require a separate
+language construct. That is an Aether design choice. Borrow concrete lessons
+from Mojo, and evaluate API stability, supported hardware and deployment cost
+for the versions actually used.
+
+## 4. The proposed launch library
+
+Start with one backend selected for available hardware and a concrete workload.
+CUDA's driver API is a plausible first candidate for NVIDIA hardware; HIP is a
+separate integration. Metal's main host interfaces are Objective-C and C++ and
+need a C-facing bridge for a conventional Aether FFI surface. It should not be
+costed as another drop-in vendor C API. See
+[Apple's Metal-cpp documentation](https://developer.apple.com/metal/cpp/).
+
+The following is an **illustrative proposed API**, not runnable shipped code.
+Assume the kernel and its signature have been loaded together, `x`, `y` and `out`
+are device buffers, and `n_i32` came from a successful checked conversion. The
+kernel computes `out[i] = x[i] + y[i]` and guards `i < n`.
 
 ```aether,fragment
-// builder gpu_launch(kernel: ptr) with launch_config_new { ... }
-gpu_launch(saxpy, grid = (256, 1, 1), block = (64, 1, 1)) {
-    arg_buffer(x, n)          // block fills a launch config
-    arg_buffer(y, n)
-    arg_scalar_i32(n)         // fixed-width AT THE BOUNDARY (Mojo's retracted-then-mandated rule)
-    shared_mem(4096)
+// Proposed: builder launch_sync(kernel: Kernel) with launch_config_new
+err = gpu.launch_sync(vector_add) {
+    grid(block_count, 1, 1)
+    block(64, 1, 1)
+    arg_buffer(x)
+    arg_buffer(y)
+    arg_buffer(out)
+    arg_i32(n_i32)
+    shared_mem_bytes(0)
 }
+if err != "" { println(err); return }
+// Device execution has completed. Download out explicitly to read it on the CPU.
 ```
 
-The setters are ordinary `_ctx: ptr` DSL functions. The type surface is where we
-encode Mojo's boundary rule so it is unbreakable rather than advisory: there is
-an `arg_scalar_i32` and an `arg_scalar_i64`, and there is deliberately **no**
-`arg_scalar_int` — a platform-width scalar simply cannot be named at the launch
-boundary. Lowered, it is a sequence of `device_set_arg_*` calls followed by a
-`device_launch` — plain C against whichever driver we target.
+This is ordinary host-side configuration followed by validation, argument
+packing, submission and completion. It needs no GPU closure syntax. The API
+specification must also cover allocation, transfer, module loading, signature
+creation and destruction; the launch example is only one part of that lifecycle.
 
-### The kernel body is a separate construct, not a reused trailing block
+Keep the optional GPU dependency out of ordinary CPU-only and WASM builds.
+Specify how the module fits Aether's capability-empty `--emit=lib` mode before
+shipping it: driver access must not become an implicit capability bypass, and
+the host libc sandbox should not be assumed to contain arbitrary device code.
+The module's capability policy remains an implementation design decision.
 
-Be explicit that closures, `ref()` cells and boxed closures are **host-only**.
-The kernel body wants a `@gpu` / `kernel` construct with its own backend and its
-own rules (captures become explicit arguments; the interior-origins-style check
-applies; no host heap). The pragmatic lowering that stays true to Aether is to
-**emit for the vendor's own toolchain** — lower a `@gpu` body to CUDA-C and hand
-it to `nvcc`, exactly the compile-on-install model `--emit=csrc` already
-established (#1648): we emit the source, the consumer's device toolchain
-compiles it. That calls the *same C runtimes Mojo calls*, without routing
-through Mojo, and without taking on MLIR.
+## 5. A later Aether kernel language
 
-## 5. Why not just depend on Mojo directly
+A separate `@gpu` or `kernel` declaration is a candidate, not a settled spelling.
+Its body needs a restricted type and execution model, validation of the entire
+reachable device call graph, and device-specific lowering. The existing host
+closure representation, `ref()` cells and boxed closures are not device values.
+Initially require explicit kernel parameters and reject implicit captures.
 
-Beyond the layer analysis, the ecosystem facts argue against a load-bearing
-dependency: Mojo is pre-2.0 (its own roadmap flags a possible source-breaking
-2.0), the accelerator APIs have already migrated *out* of the open stdlib into a
-commercial package, and the whole thing is now Qualcomm-owned. Mojo 1.0's own
-framing is that betting a serious project on a still-moving, recently-acquired
-stack is the risk to avoid. Borrowing its *rules* carries none of that risk;
-depending on its *code* carries all of it.
+Specify at least these rules before implementing the syntax:
 
-## Recommendation
+- Supported scalar types and arithmetic semantics, including overflow, shifts,
+  floating-point contraction and narrowing.
+- Device pointer/address-space types, indexing, local and shared storage, and
+  which helper functions are callable. Reject transitive calls to host-only
+  externs, allocation, string/collection runtimes and actor operations.
+- Thread/block indexing, supported atomics, barrier participation and memory
+  ordering. Define any subgroup operations against actual target capabilities;
+  a target branch does not make subgroup widths or collective semantics uniform.
+- Diagnostics for unsupported operations and source mapping through the device
+  compiler. State which bounds, race and synchronization errors remain the
+  programmer's responsibility.
 
-1. **Launch DSL: do it** as a builder-flavour extension, with the fixed-width
-   boundary enforced in the *type surface*, lowering to readable host C that
-   calls a vendor device runtime by FFI.
-2. **Kernel body: a separate `@gpu` construct** with its own backend; emit
-   vendor C (CUDA-C via `nvcc`, the `--emit=csrc` compile-on-install model)
-   rather than reusing host closures or routing through MLIR.
-3. **Do not promise "seamless."** Mojo tried the seamless version (platform int
-   into kernels), shipped it, and retracted it under production pressure. Adopt
-   the boundary they landed on, not the one they abandoned.
+Device allocation is not universally absent: CUDA supports device-side `malloc`
+and `free`. The relevant limitation is that Aether's current host allocation and
+closure machinery cannot simply execute there. A first kernel subset can exclude
+allocation as an explicit scope choice. See
+[CUDA's device-allocation documentation](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-c-programming-guide/index.html#dynamic-global-memory-allocation-and-operations).
+
+Emitting CUDA C++ for `nvcc` is a practical candidate for an NVIDIA backend. HIP
+and Metal require their own lowering and toolchain work. This preserves readable
+host C and inspectable device source, but extends the build beyond plain C. It
+does not require implementing PTX or another device ISA directly.
+
+The existing `--emit=csrc` workflow is a useful precedent for handing source to
+another toolchain. GPU builds additionally need separate host and device target
+selection, architecture/features, artifact loading and packaging, toolchain
+versioning and cache keys. A single host `--target` does not supply those rules.
+
+## 6. Recommended sequence and acceptance criteria
+
+1. **Prove one runtime integration with external kernels.** Choose hardware,
+   load a separately compiled vector-add kernel and its signature, allocate and
+   upload inputs, launch synchronously, download and compare with a CPU result.
+   Include non-multiple block sizes, an empty workload, invalid arguments and
+   cleanup on errors. Decide whether the initial dependency is a vendor runtime
+   binding or a Mojo wrapper using an actual build/deployment probe.
+2. **Put the builder facade over the proven operations.** Specify handle types,
+   checked conversions, descriptor ownership and error propagation. Exercise the
+   implicit-narrowing case above, wrong signatures and buffer/context mismatches.
+   Keep host validation testable without a GPU; gate execution tests on hardware.
+3. **Specify and implement a small Aether kernel subset.** Lower to one vendor
+   source language, with diagnostics for unsupported host features. Check results
+   against CPU and external-kernel references before adding more targets or
+   language features.
+4. **Add asynchronous execution and additional backends when workloads need
+   them.** Define completion and retention contracts first. Measure transfers,
+   submission and synchronization as well as kernel time, and include a workload
+   that keeps data on the device across several launches.
+
+The launch DSL is the part Aether already has the language machinery to express.
+The work to design and implement the GPU ABI, resource lifecycle and kernel
+semantics remains substantial even when borrowing another system's lessons.
 
 ## See also
 
-- [`../closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) — the CPU
-  pseudo-declarative mechanism this note extends, and the builder flavour the
-  launch DSL reuses.
+- [`../closures-and-builder-dsl.md`](../closures-and-builder-dsl.md) — the
+  immediate trailing-block and builder mechanisms used by the proposed facade.
 - [`closure-lineage-and-runtime-tradeoffs.md`](closure-lineage-and-runtime-tradeoffs.md)
-  — why Aether closures compile to plain C data and functions rather than
-  assuming a runtime that owns every environment; the same "no seamless heap on
-  the other side" reasoning is what breaks host closures on a device.
+  — the host closure representation and its lifetime tradeoffs.
