@@ -1,0 +1,54 @@
+// Regression (#1991): a LOCAL variable whose name is the tail of a name
+// exported by an imported module retyped an unrelated symbol, and the error
+// surfaced on a line in a different function.
+//
+// std.os exports `run_full`, declared with no return type (`-> {`). A local
+// named `full` in one function reached that declaration through the resolver
+// and — via the same shared-symbol-table mutation as #1967, but triggered by a
+// local binding rather than a parameter — mistyped the program elsewhere. The
+// user saw `error[E0200]: Type mismatch in variable initialization` on the
+// `g_out = env(null)` line, two functions away from the `full` that caused it.
+//
+// Fixed by #1967 (a name that shadows another must get its own symbol entry
+// that the inference unwind removes, instead of overwriting the outer one).
+// This test pins the local-variable-across-an-import manifestation: it fails
+// to compile pre-fix (E0200 on a line that has nothing to do with the local)
+// and compiles + runs correctly after.
+
+import std.os
+import std.string
+
+var g_out: string = ""
+
+// Binds a local named `full` — the tail of std.os.run_full. Need not be
+// reachable for the pre-fix error to appear; called here so the run also
+// checks the value is right.
+held(s: string) -> string {
+    full = string.concat(s, "!")
+    return full
+}
+
+// The line `g_out = env(null)` is what pre-fix reported the E0200 against,
+// though neither this function nor that line has anything to do with `full`.
+env(v: ptr) -> string {
+    return v as string
+}
+
+main() {
+    println("=== test_local_shadows_suffixed_import ===")
+
+    // The bug was a COMPILE error (E0200) on this line; reaching runtime at
+    // all is the pass. env(null) casts a null ptr to string, so the value
+    // itself is not the point — that this function type-checks is.
+    g_out = env(null)
+    println("ok   env(null) line type-checks and runs")
+
+    h = held("a")
+    if string.equals(h, "a!") == 1 {
+        println("ok   held(\"a\") == \"a!\" (local `full` resolved correctly)")
+    } else {
+        println("FAIL held: ${h}")
+    }
+
+    println("test_local_shadows_suffixed_import passed")
+}
