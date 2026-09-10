@@ -2012,26 +2012,41 @@ static const char* get_link_flags(void) {
 // aether.toml's link_flags on the command line. `-L` search paths stay the
 // consumer's job — those are site-specific in a way a module cannot know.
 //
-// The header carries two kinds of token and only one of them is ours to use.
-// Besides module-declared `@link`, emit_link_requirements() also unions rows
-// from its static g_link_reqs table (std.http -> "-lssl -lcrypto -lnghttp2",
-// std.regex -> "-lpcre2-8", ...). Those are for downstream C builds, which
-// have no other way to learn them. `ae` must NOT take them: it already passes
-// the same libraries from AETHER_*_LIBS, which the Makefile fills in from
-// pkg-config at `ae` build time and leaves EMPTY when the library is absent.
-// That emptiness is load-bearing — on a box without libnghttp2, std.http links
-// without it and the h2 surface degrades to its "unavailable" stub. Taking the
-// static row instead would put `-lnghttp2` back unconditionally and fail the
-// link with `cannot find -lnghttp2`, turning a graceful degradation into a
-// build error on exactly the machines the capability probe exists to serve.
-//
-// So: drop any token already governed by a capability macro, and keep the
-// rest. A module's own `@link` names something the toolchain does not probe
-// for (that is why the module had to declare it), so it survives the filter.
+// Toolchain-managed tokens SELECT their AETHER_*_LIBS group (#1988). The
+// group retains pkg-config's search paths and static-link dependencies, and
+// remains empty for a toolchain built with that backend disabled. Previously
+// we discarded the tokens and appended every group unconditionally: even a
+// hello-world needed all the optional dev libraries on the release runner.
+enum {
+    LINK_OPENSSL = 1u << 0,
+    LINK_ZLIB    = 1u << 1,
+    LINK_NGHTTP2 = 1u << 2,
+    LINK_PCRE2   = 1u << 3,
+    LINK_BROTLI  = 1u << 4,
+    LINK_ZSTD    = 1u << 5,
+    LINK_YAML    = 1u << 6,
+};
+
+static unsigned optional_link_requirement(const char* tok, size_t len) {
+    static const struct { const char* token; unsigned requirement; } libs[] = {
+        { "-lssl", LINK_OPENSSL }, { "-lcrypto", LINK_OPENSSL },
+        { "-lz", LINK_ZLIB }, { "-lnghttp2", LINK_NGHTTP2 },
+        { "-lpcre2-8", LINK_PCRE2 },
+        { "-lbrotlienc", LINK_BROTLI }, { "-lbrotlicommon", LINK_BROTLI },
+        { "-lzstd", LINK_ZSTD }, { "-lfyaml", LINK_YAML },
+    };
+    for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++) {
+        if (strlen(libs[i].token) == len &&
+            strncmp(libs[i].token, tok, len) == 0)
+            return libs[i].requirement;
+    }
+    return 0;
+}
+
 static bool token_is_toolchain_managed(const char* tok, size_t len) {
-    // Libraries `ae` supplies itself from AETHER_*_LIBS, keyed on the -l name.
+    if (optional_link_requirement(tok, len)) return true;
+    // Platform runtime libraries remain unconditional.
     static const char* managed[] = {
-        "-lssl", "-lcrypto", "-lnghttp2", "-lpcre2-8", "-lz",
         "-lpthread", "-ldl", "-lm",
     };
     for (size_t i = 0; i < sizeof(managed) / sizeof(managed[0]); i++) {
@@ -2041,9 +2056,10 @@ static bool token_is_toolchain_managed(const char* tok, size_t len) {
     return false;
 }
 
-static const char* get_aether_link_flags(const char* c_file) {
+static const char* get_aether_link_flags(const char* c_file, unsigned* required) {
     static char flags[1024] = "";
     flags[0] = '\0';
+    *required = 0;
     if (!c_file) return flags;
 
     FILE* f = fopen(c_file, "r");
@@ -2062,8 +2078,7 @@ static const char* get_aether_link_flags(const char* c_file) {
         size_t n = strlen(p);
         while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
             n--;
-        // Copy token by token, dropping the ones `ae` already supplies from
-        // AETHER_*_LIBS (see token_is_toolchain_managed above).
+        // Record optional groups, then keep only non-managed tokens here.
         size_t out = 0;
         size_t i = 0;
         while (i < n) {
@@ -2072,6 +2087,7 @@ static const char* get_aether_link_flags(const char* c_file) {
             size_t start = i;
             while (i < n && p[i] != ' ') i++;
             size_t tlen = i - start;
+            *required |= optional_link_requirement(p + start, tlen);
             if (token_is_toolchain_managed(p + start, tlen)) continue;
             if (out + tlen + 2 >= sizeof(flags)) break;
             if (out) flags[out++] = ' ';
@@ -2747,7 +2763,8 @@ void build_gcc_cmd(char* cmd, size_t size,
     // Module-declared native deps from `@link`, via the generated C's
     // `// aether-link:` header (#1549). Empty when nothing in the import
     // closure declares one, which is the common case.
-    const char* ae_link = get_aether_link_flags(c_file);
+    unsigned required_libs;
+    const char* ae_link = get_aether_link_flags(c_file, &required_libs);
 
     // User cflags from aether.toml apply to every build path — `ae build`,
     // `ae run`, and any internal invocation. Previously they were gated
@@ -2775,12 +2792,12 @@ void build_gcc_cmd(char* cmd, size_t size,
     // -static links libwinpthread/libgcc into the binary so it runs without MinGW DLLs.
     // Quote s_gcc_bin in case the path contains spaces.
 #ifdef AETHER_OPENSSL_LIBS
-    const char* openssl_libs = AETHER_OPENSSL_LIBS;
+    const char* openssl_libs = (required_libs & LINK_OPENSSL) ? AETHER_OPENSSL_LIBS : "";
 #else
     const char* openssl_libs = "";
 #endif
 #ifdef AETHER_ZLIB_LIBS
-    const char* zlib_libs = AETHER_ZLIB_LIBS;
+    const char* zlib_libs = (required_libs & LINK_ZLIB) ? AETHER_ZLIB_LIBS : "";
 #else
     const char* zlib_libs = "";
 #endif
@@ -2789,7 +2806,7 @@ void build_gcc_cmd(char* cmd, size_t size,
      * Empty when the build didn't detect nghttp2 — the server
      * surface stays valid (http_server_set_h2 returns the
      * "unavailable" sentinel) but the link doesn't pull the lib. */
-    const char* nghttp2_libs = AETHER_NGHTTP2_LIBS;
+    const char* nghttp2_libs = (required_libs & LINK_NGHTTP2) ? AETHER_NGHTTP2_LIBS : "";
 #else
     const char* nghttp2_libs = "";
 #endif
@@ -2797,7 +2814,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* libpcre2-8 powers std.regex. Empty when not detected; the
      * std.regex surface stays valid and every entry point returns
      * a clean "built without libpcre2-8" via regex.last_error(). */
-    const char* pcre2_libs = AETHER_PCRE2_LIBS;
+    const char* pcre2_libs = (required_libs & LINK_PCRE2) ? AETHER_PCRE2_LIBS : "";
 #else
     const char* pcre2_libs = "";
 #endif
@@ -2806,7 +2823,7 @@ void build_gcc_cmd(char* cmd, size_t size,
      * emptiness is load-bearing: a box without the library must not get a
      * -lbrotlienc it cannot resolve. The std.brotli surface stays valid and
      * reports "brotli unavailable". */
-    const char* brotli_libs = AETHER_BROTLI_LIBS;
+    const char* brotli_libs = (required_libs & LINK_BROTLI) ? AETHER_BROTLI_LIBS : "";
 #else
     const char* brotli_libs = "";
 #endif
@@ -2814,7 +2831,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* libzstd powers std.zstd. Empty when not detected, and that emptiness is
      * load-bearing: a box without the library must not be handed a -lzstd it
      * cannot resolve. */
-    const char* zstd_libs = AETHER_ZSTD_LIBS;
+    const char* zstd_libs = (required_libs & LINK_ZSTD) ? AETHER_ZSTD_LIBS : "";
 #else
     const char* zstd_libs = "";
 #endif
@@ -2841,7 +2858,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* audio_libs = "";
 #endif
 #ifdef AETHER_YAML_LIBS
-    const char* yaml_libs = AETHER_YAML_LIBS;
+    const char* yaml_libs = (required_libs & LINK_YAML) ? AETHER_YAML_LIBS : "";
 #else
     const char* yaml_libs = "";
 #endif
@@ -3050,7 +3067,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // pkg-config. When OpenSSL wasn't detected, this is an empty string
     // and HTTPS calls error cleanly at runtime.
 #ifdef AETHER_OPENSSL_LIBS
-    const char* openssl_libs = AETHER_OPENSSL_LIBS;
+    const char* openssl_libs = (required_libs & LINK_OPENSSL) ? AETHER_OPENSSL_LIBS : "";
 #else
     const char* openssl_libs = "";
 #endif
@@ -3059,7 +3076,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // when zlib wasn't detected; std.zlib wrappers then report
     // "zlib unavailable" at runtime.
 #ifdef AETHER_ZLIB_LIBS
-    const char* zlib_libs = AETHER_ZLIB_LIBS;
+    const char* zlib_libs = (required_libs & LINK_ZLIB) ? AETHER_ZLIB_LIBS : "";
 #else
     const char* zlib_libs = "";
 #endif
@@ -3068,7 +3085,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // when nghttp2 wasn't detected; http_server_set_h2 then
     // returns "HTTP/2 unavailable: built without libnghttp2".
 #ifdef AETHER_NGHTTP2_LIBS
-    const char* nghttp2_libs = AETHER_NGHTTP2_LIBS;
+    const char* nghttp2_libs = (required_libs & LINK_NGHTTP2) ? AETHER_NGHTTP2_LIBS : "";
 #else
     const char* nghttp2_libs = "";
 #endif
@@ -3077,7 +3094,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // $-substitutions, Unicode). Empty when not detected; std.regex
     // surfaces a clean "built without libpcre2-8" via last_error().
 #ifdef AETHER_PCRE2_LIBS
-    const char* pcre2_libs = AETHER_PCRE2_LIBS;
+    const char* pcre2_libs = (required_libs & LINK_PCRE2) ? AETHER_PCRE2_LIBS : "";
 #else
     const char* pcre2_libs = "";
 #endif
@@ -3085,7 +3102,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // emptiness is load-bearing: a box without the library must not be handed
     // a -lbrotlienc it cannot resolve.
 #ifdef AETHER_BROTLI_LIBS
-    const char* brotli_libs = AETHER_BROTLI_LIBS;
+    const char* brotli_libs = (required_libs & LINK_BROTLI) ? AETHER_BROTLI_LIBS : "";
 #else
     const char* brotli_libs = "";
 #endif
@@ -3093,7 +3110,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* libzstd powers std.zstd. Empty when not detected, and that emptiness is
      * load-bearing: a box without the library must not be handed a -lzstd it
      * cannot resolve. */
-    const char* zstd_libs = AETHER_ZSTD_LIBS;
+    const char* zstd_libs = (required_libs & LINK_ZSTD) ? AETHER_ZSTD_LIBS : "";
 #else
     const char* zstd_libs = "";
 #endif
@@ -3124,7 +3141,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* audio_libs = "";
 #endif
 #ifdef AETHER_YAML_LIBS
-    const char* yaml_libs = AETHER_YAML_LIBS;
+    const char* yaml_libs = (required_libs & LINK_YAML) ? AETHER_YAML_LIBS : "";
 #else
     const char* yaml_libs = "";
 #endif

@@ -4291,8 +4291,17 @@ static const AetherLinkReq g_link_reqs[] = {
     { "std.http.client",      "-lssl -lcrypto" },
     { "std.http.server.h2",   "-lnghttp2 -lssl -lcrypto" },
     { "std.cryptography",     "-lssl -lcrypto" },
+    /* Base64 entry points share aether_cryptography.o with OpenSSL users. */
+    { "std.encoding",         "-lssl -lcrypto" },
     { "std.zlib",             "-lz" },
-    { "std.http.middleware",  "-lz" },
+    { "std.brotli",           "-lbrotlienc -lbrotlicommon" },
+    { "std.zstd",             "-lzstd" },
+    { "std.yaml",             "-lfyaml" },
+    /* These veneers reference the HTTP server/client objects from C, not
+     * through Aether imports. Account for those archive dependencies too. */
+    { "std.http.middleware",  "-lz -lssl -lcrypto -lnghttp2" },
+    { "std.http.proxy",       "-lssl -lcrypto -lnghttp2" },
+    { "std.http.script_gateway", "-lssl -lcrypto -lnghttp2" },
     { "std.audio",            "-lpthread -ldl -lm" },
     /* contrib.sqlite's row moved into contrib/sqlite/module.ae as
      * `@link(...)` (#1259): the module owns its native deps, the compiler
