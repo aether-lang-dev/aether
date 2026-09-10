@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.665.0]
+
 ### Added
 
 - **`std.resp` — a RESP codec (Redis Serialization Protocol).** RESP3-native and
