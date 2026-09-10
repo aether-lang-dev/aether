@@ -18,7 +18,7 @@ void perform_task(int task_id) {
     LOG_INFO("Task %d completed successfully", task_id);
 }
 
-int main() {
+int main(void) {
     printf("Aether Logging System Demo\n");
     printf("===========================\n\n");
     

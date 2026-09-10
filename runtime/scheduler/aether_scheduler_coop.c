@@ -70,19 +70,19 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
 // Lifecycle — mostly no-ops in cooperative mode
 // ============================================================================
 
-void scheduler_start() {
+void scheduler_start(void) {
     // No threads to start
 }
 
-void scheduler_ensure_threads_running() {
+void scheduler_ensure_threads_running(void) {
     // No threads in cooperative mode — this is a no-op
 }
 
-void scheduler_stop() {
+void scheduler_stop(void) {
     // No threads to stop
 }
 
-void scheduler_cleanup() {
+void scheduler_cleanup(void) {
     if (schedulers[0].actors) {
         free(schedulers[0].actors);
         schedulers[0].actors = NULL;
@@ -90,7 +90,7 @@ void scheduler_cleanup() {
     schedulers[0].actor_count = 0;
 }
 
-void scheduler_shutdown() {
+void scheduler_shutdown(void) {
     // Drain all remaining messages
     int drained;
     do {
@@ -206,7 +206,7 @@ void scheduler_send_batch_flush(void) {
 // Wait for quiescence — poll until no messages remain
 // ============================================================================
 
-void scheduler_wait() {
+void scheduler_wait(void) {
     // Drain all pending messages cooperatively
     // Also wait for active timeouts to fire
     int idle_rounds = 0;

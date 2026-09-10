@@ -232,103 +232,12 @@ jobs:
         if printf '%s\n' "$changed" | grep -q '^CHANGELOG\.md$'; then
           echo "CHANGELOG.md is updated."
 
-          # ... and the entry has to be somewhere the release can find it.
-          # The release job renames the FIRST '## [current]' into the version
-          # heading, so an entry that is not under one ships nowhere.
-          #
-          # This is not hypothetical, and it is not about forgetting the
-          # heading either. When main cuts a release while a branch is open,
-          # main's '## [current]' becomes '## [0.N.0]'; merging the branch
-          # then folds its entry under that already-tagged heading and leaves
-          # the file with no '[current]' at all. That has now happened twice
-          # (0.539.0 and 0.549.0 both failed to bump), each time discovered
-          # only when the release broke. Checking it here moves the discovery
-          # to the PR that causes it.
-          if ! grep -q '^## \[current\]$' CHANGELOG.md; then
-            echo "::error::CHANGELOG.md has no '## [current]' section."
-            echo ""
-            echo "The release job renames the first '## [current]' heading into"
-            echo "the new version, so an entry outside one is not released."
-            echo "If main cut a release while this branch was open, the merge"
-            echo "folded your entry under that version's heading: move it back"
-            echo "under a fresh '## [current]' and leave the tagged section as"
-            echo "it shipped (compare with \`git show vX.Y.Z:CHANGELOG.md\`)."
-            exit 1
-          fi
-          echo "The entry is under '## [current]'."
-
-          # Exactly one, too. A second '## [current]' is not cosmetic: the
-          # release job renames the FIRST one into the version, so a stray
-          # later one sits between two released sections and the NEXT release
-          # renames that -- burying entries inside an already-shipped version.
-          # This happened on main between 0.596.0 and 0.597.0, when a PR added
-          # a '[current]' without noticing the release job now leaves one.
-          n_current=$(grep -cE '^## \[current\]$' CHANGELOG.md || true)
-          if [ "$n_current" != "1" ]; then
-            echo "::error::CHANGELOG.md has $n_current '## [current]' headings; expected exactly 1."
-            echo ""
-            echo "The release job renames the FIRST '## [current]' into the new"
-            echo "version. A second one further down then gets renamed by the"
-            echo "NEXT release, which buries entries inside a section that has"
-            echo "already shipped."
-            echo ""
-            echo "Since the release now leaves a '[current]' behind, a PR should"
-            echo "add its entry UNDER the existing heading rather than adding a"
-            echo "new one. Merge the sections into one."
-            exit 1
-          fi
-
-          # Second half of the same failure. The check above catches a merge
-          # that left NO '[current]' behind; this catches the one that folded
-          # this branch's entry into an ALREADY-RELEASED section while leaving
-          # a '[current]' in place. That version is silent -- git auto-merges
-          # it without a conflict and nothing in the output hints at it -- so
-          # the corruption ships and cannot be repaired later without
-          # rewriting a tag.
-          #
-          # Compared against origin/main rather than the git tags. Editing a
-          # released section AFTER its tag is legitimate and routine here (3
-          # of the last 8 releases have such edits, e.g. 9b6c5580 recording
-          # shipped work against 0.584.0), so "differs from the tag" would red
-          # a third of all PRs and be switched off. The real invariant is
-          # narrower and is exactly the fold: THIS branch must not change a
-          # section that main already released.
-          #
-          # Whitespace is normalised so a merge that only reflowed spacing
-          # does not read as a fold. cksum rather than cmp: MSYS2 ships no
-          # diffutils, and `cmp -s` exits non-zero both when files differ AND
-          # when cmp is missing, reporting a false failure instead of a
-          # missing tool.
-          git fetch --quiet origin main || true
-          norm() { sed -e 's/[[:space:]]*$//' | cat -s; }
-          folded=""
-          for v in $(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
-                       | tr -d '#[] ' | head -8); do
-            a=$(git show "origin/main:CHANGELOG.md" 2>/dev/null \
-                  | sed -n "/^## \[$v\]/,/^## \[/{/^## \[$v\]/!{/^## \[/q};p}" | norm)
-            [ -z "$a" ] && continue
-            b=$(sed -n "/^## \[$v\]/,/^## \[/{/^## \[$v\]/!{/^## \[/q};p}" CHANGELOG.md | norm)
-            if [ "$(printf '%s' "$a" | cksum)" != "$(printf '%s' "$b" | cksum)" ]; then
-              folded="$folded $v"
-            fi
-          done
-          if [ -n "$folded" ]; then
-            echo "::error::This PR rewrites already-released CHANGELOG section(s):$folded"
-            echo ""
-            echo "A release was almost certainly cut while this branch was open."
-            echo "The release job renames '## [current]' into the version"
-            echo "heading, so merging main folds this branch's entry INTO that"
-            echo "released section -- usually with no git conflict, which is why"
-            echo "nothing flagged it."
-            echo ""
-            echo "Move the entry back under a fresh '## [current]' and restore"
-            echo "the released section as main has it:"
-            for v in $folded; do
-              echo "  git show origin/main:CHANGELOG.md   # section [$v]"
-            done
-            exit 1
-          fi
-          echo "Released sections match main."
+          # The entry has to be somewhere the release can find it, and this
+          # branch must not have folded it into an already-released section.
+          # Both checks live in tests/scripts/check_changelog_fold.sh so that
+          # `make check-changelog` runs the identical logic before a push and
+          # this gate can never drift from it.
+          sh tests/scripts/check_changelog_fold.sh || exit 1
           exit 0
         fi
 

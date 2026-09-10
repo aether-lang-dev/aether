@@ -8,7 +8,7 @@
 
 OptimizationStats global_opt_stats = {0, 0, 0, 0, 0};
 
-void reset_optimization_stats() {
+void reset_optimization_stats(void) {
     global_opt_stats.constants_folded = 0;
     global_opt_stats.dead_code_removed = 0;
     global_opt_stats.tail_calls_detected = 0;
@@ -16,7 +16,7 @@ void reset_optimization_stats() {
     global_opt_stats.linear_loops_collapsed = 0;
 }
 
-void print_optimization_stats() {
+void print_optimization_stats(void) {
     printf("Optimization Statistics:\n");
     printf("  Constants folded: %d\n", global_opt_stats.constants_folded);
     printf("  Dead code removed: %d\n", global_opt_stats.dead_code_removed);

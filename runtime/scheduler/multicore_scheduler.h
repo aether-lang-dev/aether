@@ -16,7 +16,7 @@
 #define MAX_ACTORS_PER_CORE 10000
 #define MAX_CORES 16
 #define BATCH_SIZE 64  // Process up to 64 messages per batch for better throughput
-#define COALESCE_THRESHOLD 512  // Drain this many messages at once for high throughput
+#define SCHEDULER_DRAIN_BATCH 512  // Drain this many messages at once for high throughput
 #ifndef AETHER_IO_MAX_FDS
 #define AETHER_IO_MAX_FDS 4096  // Initial I/O fd map capacity per core (grows on demand)
 #endif
@@ -169,8 +169,8 @@ typedef struct {
 
     // Message coalescing buffer — amortises enqueue atomics across bursts
     struct {
-        void* actors[COALESCE_THRESHOLD];
-        Message messages[COALESCE_THRESHOLD];
+        void* actors[SCHEDULER_DRAIN_BATCH];
+        Message messages[SCHEDULER_DRAIN_BATCH];
         int count;
     } coalesce_buffer;
 
@@ -202,12 +202,12 @@ void scheduler_init(int cores);
 // Initialize with explicit optimization flags
 void scheduler_init_with_opts(int cores, AetherOptFlags opts);
 
-void scheduler_start();
-void scheduler_ensure_threads_running();  // Start threads if not already started (for main-thread mode transition)
-void scheduler_stop();
-void scheduler_wait();      // Wait for quiescence (all pending messages processed). Non-destructive.
-void scheduler_shutdown();  // Wait + stop + join threads. Call once at program exit.
-void scheduler_cleanup();
+void scheduler_start(void);
+void scheduler_ensure_threads_running(void);  // Start threads if not already started (for main-thread mode transition)
+void scheduler_stop(void);
+void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
+void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
+void scheduler_cleanup(void);
 
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
 void scheduler_deregister_actor(ActorBase* actor);

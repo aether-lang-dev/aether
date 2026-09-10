@@ -42,7 +42,7 @@ void ring_step(void* self) {
     }
 }
 
-int main() {
+int main(void) {
     printf("Multicore Ring Benchmark with Buffered Sends\n");
     printf("============================================\n\n");
     

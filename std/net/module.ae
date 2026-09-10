@@ -39,7 +39,7 @@ exports(
 extern tcp_connect_raw(host: string, port: int) -> ptr
 extern tcp_send_raw(sock: ptr, data: string) -> int
 extern tcp_send_n_raw(sock: ptr, data: string, length: int) -> int
-extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
+extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_close(sock: ptr) -> int
 

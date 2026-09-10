@@ -13,7 +13,7 @@ typedef struct {
     int32_t payload;
 } SimpleMessage;
 
-int main() {
+int main(void) {
     printf("===========================================\n");
     printf("  SIMD Batch Processing Example\n");
     printf("===========================================\n\n");

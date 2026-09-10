@@ -3975,9 +3975,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         if (arg->type == AST_IDENTIFIER && arg->value &&
                             is_heap_string_var(gen, arg->value)) {
                             fprintf(gen->output,
+                                /* The else arm matters: a tracked local can hold a value the
+                                 * tracker does not own, the ordinary case being one
+                                 * read out of a struct field. The flag is 0 there, so
+                                 * without this the release silently did nothing and
+                                 * the caller's explicit free never happened (#1977).
+                                 * string_release is literal-safe, so the fallback
+                                 * cannot hurt a borrowed literal, and it is what the
+                                 * untracked-identifier path a few lines down already
+                                 * does. string.free below has had this arm all along. */
                                 "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
-                                "%s = NULL; _heap_%s = 0; } })",
-                                arg->value, arg->value, arg->value, arg->value);
+                                "%s = NULL; _heap_%s = 0; } else { string_release(%s); } })",
+                                arg->value, arg->value, arg->value, arg->value, arg->value);
                         } else {
                             fprintf(gen->output, "string_release(");
                             generate_expression(gen, arg);
@@ -4021,9 +4030,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * both the magic and plain-char* representations. */
                     ASTNode* arg = expr->children[0];
                     fprintf(gen->output,
+                        /* Same else arm as the bare release() above: a tracked local
+                         * holding a field-read value has a 0 flag, and the release
+                         * has to still happen (#1977). */
                         "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
-                        "%s = NULL; _heap_%s = 0; } })",
-                        arg->value, arg->value, arg->value, arg->value);
+                        "%s = NULL; _heap_%s = 0; } else { string_release(%s); } })",
+                        arg->value, arg->value, arg->value, arg->value, arg->value);
                 }
                 // string.free(X) frees what the runtime cannot: given a
                 // plain malloc'd payload, string_release cannot tell a heap

@@ -43,7 +43,7 @@ typedef struct {
 
 // Initialization
 void arena_manager_init(int max_threads);
-void arena_manager_shutdown();
+void arena_manager_shutdown(void);
 
 // Fast path allocation (thread-local, no locks)
 void* arena_alloc_fast(size_t bytes);
@@ -53,7 +53,7 @@ void* arena_alloc_fast_aligned(size_t bytes, size_t alignment);
 void arena_get_thread_stats(uint64_t* allocated_bytes, uint64_t* allocation_count);
 
 // Reset thread-local arena (for per-request allocations)
-void arena_reset_thread();
+void arena_reset_thread(void);
 
 // Get total memory statistics
 typedef struct {

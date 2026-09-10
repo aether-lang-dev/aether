@@ -35,7 +35,7 @@ void* counter_thread(void* arg) {
     return NULL;
 }
 
-int main() {
+int main(void) {
     const char* env = getenv("BENCHMARK_MESSAGES");
     if (env) MESSAGES = atoi(env);
 

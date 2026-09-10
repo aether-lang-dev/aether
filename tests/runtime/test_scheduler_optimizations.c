@@ -346,7 +346,7 @@ TEST_CATEGORY(direct_send_stats, TEST_CATEGORY_RUNTIME) {
 }
 
 // Note: Tests are auto-registered via TEST_CATEGORY macro
-void register_scheduler_optimization_tests() {
+void register_scheduler_optimization_tests(void) {
     // Empty - tests registered by constructor
 }
 

@@ -52,7 +52,7 @@ AetherString* string_new(const char* cstr);
 AetherString* string_from_cstr(const char* cstr);  // Alias for new
 AetherString* string_from_literal(const char* cstr);  // Alias for new
 AetherString* string_new_with_length(const char* data, size_t length);
-AetherString* string_empty();
+AetherString* string_empty(void);
 
 // Reference counting — safe to call with plain char* (no-op)
 void string_retain(const void* str);

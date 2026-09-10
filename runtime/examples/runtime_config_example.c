@@ -5,7 +5,7 @@
 #include "../aether_runtime.h"
 #include "../utils/aether_cpu_detect.h"
 
-void print_examples() {
+void print_examples(void) {
     printf("========================================\n");
     printf("  Aether Runtime Configuration Examples\n");
     printf("========================================\n\n");
@@ -48,7 +48,7 @@ void print_examples() {
     printf("========================================\n\n");
 }
 
-int main() {
+int main(void) {
     print_examples();
     
     // Example 1: Auto-detect (best for most users)

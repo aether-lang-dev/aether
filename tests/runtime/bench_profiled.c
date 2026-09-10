@@ -8,7 +8,7 @@
 #include "../../runtime/actors/actor_state_machine.h"
 #include "../../runtime/utils/aether_runtime_profile.h"
 
-int main() {
+int main(void) {
     printf("===============================================================\n");
     printf("     Aether Profiled Benchmark - Continuous Monitoring\n");
     printf("===============================================================\n");

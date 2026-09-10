@@ -112,7 +112,7 @@ const char* http_get_header(HttpRequest* r, const char* k) { (void)r; (void)k; r
 const char* http_get_query_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 const char* http_get_path_param(HttpRequest* r, const char* k) { (void)r; (void)k; return NULL; }
 void http_request_free(HttpRequest* r) { (void)r; }
-HttpServerResponse* http_response_create() { return NULL; }
+HttpServerResponse* http_response_create(void) { return NULL; }
 void http_response_set_status(HttpServerResponse* r, int c) { (void)r; (void)c; }
 void http_response_set_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
 void http_response_add_header(HttpServerResponse* r, const char* k, const char* v) { (void)r; (void)k; (void)v; }
@@ -799,7 +799,7 @@ static const char* http_strcasestr(const char* haystack, const char* needle) {
 
 static int http_server_initialized = 0;
 
-static void http_server_init() {
+static void http_server_init(void) {
     if (http_server_initialized) return;
     #ifdef _WIN32
     WSADATA wsa_data;
@@ -1986,7 +1986,7 @@ void http_request_free(HttpRequest* req) {
 }
 
 // Response building
-HttpServerResponse* http_response_create() {
+HttpServerResponse* http_response_create(void) {
     HttpServerResponse* res = (HttpServerResponse*)calloc(1, sizeof(HttpServerResponse));
     if (!res) return NULL;
     res->status_code = 200;

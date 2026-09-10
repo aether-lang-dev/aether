@@ -60,7 +60,7 @@ void* worker_thread(void* arg) {
     return NULL;
 }
 
-int main() {
+int main(void) {
     const char* env = getenv("BENCHMARK_MESSAGES");
     if (env) MESSAGES_PER_WORKER = atoi(env) / NUM_WORKERS;
 

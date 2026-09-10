@@ -282,7 +282,7 @@ TEST_CATEGORY(send_buffer_flush_no_double_send, TEST_CATEGORY_RUNTIME) {
     // N is chosen large enough that SPSC + mailbox can't hold all
     // of them: 5 SPSC slots + 32 mailbox slots = 37 max in flight,
     // so 50 input messages forces the partial-send / leftover path.
-    const int N = 50;
+    enum { N = 50 };
     g_send_buffer.target = actor;
     g_send_buffer.count = N;
     for (int i = 0; i < N; i++) {

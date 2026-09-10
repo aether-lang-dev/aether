@@ -33,7 +33,7 @@ void Node_step(Node* self) {
     }
 }
 
-int main() {
+int main(void) {
     Node** actors = malloc(NUM_ACTORS * sizeof(Node*));
     
     for (int i = 0; i < NUM_ACTORS; i++) {

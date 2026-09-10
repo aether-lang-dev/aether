@@ -634,7 +634,7 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 # silently delete the other.
 AETHER_REQUIRED_CFLAGS = -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS)
 
-CFLAGS = -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function $(EXTRA_CFLAGS)
+CFLAGS = -O2 -Wall -Wextra -Wstrict-prototypes -Wno-unused-parameter -Wno-unused-function $(EXTRA_CFLAGS)
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
 # passwd / sysctl past Capsicum capability mode. libcasper + the
 # per-service libs ship in the FreeBSD base system. We resolve them by
@@ -2525,6 +2525,7 @@ help:
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
+	@echo "  make check-changelog  - Catch a CHANGELOG release-fold before pushing"
 	@echo "  make test-fast      - Run C tests (monolithic build)"
 	@echo "  make test-install   - Install smoke test (init + run)"
 	@echo "  make test-valgrind  - Run tests with Valgrind"
@@ -2780,7 +2781,11 @@ CONTRIB_HOST_STRICT ?= 0
 # module. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
 # README that is labelled complete, and asserts the ones labelled `fails`
 # still fail.
-.PHONY: check-docs
+.PHONY: check-docs check-changelog
+
+check-changelog:
+	@sh tests/scripts/check_changelog_fold.sh
+
 check-docs: compiler ae stdlib
 	@echo "==================================="
 	@echo "  documentation examples"

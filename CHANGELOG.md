@@ -11,6 +11,59 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`tcp_receive_raw` leaked every buffer it returned** (#1987). The extern
+  declared an owned heap buffer as a borrowed one, so nothing ever freed it.
+  Three `std.casper` externs had the same annotation gap and leaked their
+  results: `aether_casper_resolve`, `aether_casper_pwd_home` and
+  `aether_casper_sysctl_str`.
+
+- **`string.release()` silently did nothing when the value was not tracked as
+  heap-owned** (#1977). The release now frees an untracked value through
+  `string_release` rather than skipping it, so a string handed over by a call
+  the ownership tracker did not follow is still freed at the point the program
+  asks for it.
+
+- **A long build path truncated the C compiler command into `error: no input
+  files`** (#1974). The four sites that assembled a compiler command line
+  warned and carried on with a truncated command; they now fail with the
+  length they needed and the limit they hit. The buffer size is defined once in
+  `tools/ae_internal.h` instead of three times, and the REPL uses the same one
+  rather than a smaller private buffer.
+
+- **Two headers defined `COALESCE_THRESHOLD` with different values**, so which
+  one a translation unit saw depended on include order: 512 in
+  `runtime/scheduler/multicore_scheduler.h` (a drain batch size, and the size
+  of two arrays) and 8 in `runtime/actors/aether_message_coalescing.h`. The
+  scheduler's is now `SCHEDULER_DRAIN_BATCH`, which is also what it means.
+
+### Changed
+
+- **Call-site type propagation no longer walks the whole program once per
+  function** (#1995). One walk builds a callee-to-call-sites index and each
+  definition resolves against its own bucket, removing a term that was
+  quadratic in the number of functions. Type checking a 1600-function file
+  drops from 0.326s to 0.072s (4.5x), and whole-compile from 0.461s to 0.185s
+  (2.5x); the gap widens with file size. Output is unchanged: 1287 of the
+  repository's `.ae` files compile to byte-identical C before and after.
+
+- **Every declaration now uses `foo(void)` rather than `foo()`, and
+  `-Wstrict-prototypes` is on** (#1996). `foo()` means "takes an unspecified
+  number of arguments", so C11 cannot check calls against it; 91 declarations
+  across the compiler, runtime, stdlib, LSP and tests were unchecked this way.
+  The warning is now part of `CFLAGS`, so it cannot come back.
+
+### Added
+
+- **`make check-changelog` catches a CHANGELOG release-fold before you push**
+  (#2001). When a release is cut while a branch is open, merging main renames
+  `## [current]` into that version and folds the branch's entry into the
+  released section with no git conflict to show for it. The check lives in
+  `tests/scripts/check_changelog_fold.sh`, and the CI job now calls that same
+  script, so the local check and the gate cannot drift apart.
+
+
 ## [0.665.0]
 
 ### Added

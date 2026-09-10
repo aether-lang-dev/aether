@@ -133,7 +133,7 @@ void handle_sigint(int sig) {
     if (server) http_server_stop(server);
 }
 
-int main() {
+int main(void) {
     signal(SIGINT, handle_sigint);
 
     // Disable inline/main-thread mode

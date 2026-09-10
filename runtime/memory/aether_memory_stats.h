@@ -16,13 +16,13 @@ typedef struct {
     uint64_t allocation_failures;
 } MemoryStats;
 
-void memory_stats_init();
+void memory_stats_init(void);
 void memory_stats_record_alloc(size_t bytes);
 void memory_stats_record_free(size_t bytes);
-void memory_stats_record_failure();
-MemoryStats memory_stats_get();
-void memory_stats_print();
-void memory_stats_reset();
+void memory_stats_record_failure(void);
+MemoryStats memory_stats_get(void);
+void memory_stats_print(void);
+void memory_stats_reset(void);
 
 #ifdef AETHER_MEMORY_TRACKING
     #define TRACK_ALLOC(bytes) memory_stats_record_alloc(bytes)

@@ -104,7 +104,7 @@ void aether_runtime_init(int num_cores, int flags) {
 }
 
 // Get current runtime configuration
-const AetherRuntimeInitConfig* aether_runtime_get_config() {
+const AetherRuntimeInitConfig* aether_runtime_get_config(void) {
     if (!g_runtime_initialized) {
         // Initialize with defaults on first access
         aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);
@@ -119,7 +119,7 @@ int aether_runtime_has_feature(int feature_flag) {
 }
 
 // Print current runtime configuration
-void aether_runtime_print_config() {
+void aether_runtime_print_config(void) {
     const AetherRuntimeInitConfig* config = aether_runtime_get_config();
     const CPUInfo* cpu = cpu_get_info();
     
@@ -162,7 +162,7 @@ void aether_runtime_print_config() {
 }
 
 // Shutdown runtime
-void aether_runtime_shutdown() {
+void aether_runtime_shutdown(void) {
     g_runtime_initialized = 0;
 }
 

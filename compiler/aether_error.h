@@ -71,9 +71,9 @@ const char* aether_color_bold(void);
 #define AETHER_COLOR_BOLD aether_color_bold()
 
 // Error statistics
-int aether_error_count();
-int aether_warning_count();
-void aether_error_reset_counts();
+int aether_error_count(void);
+int aether_warning_count(void);
+void aether_error_reset_counts(void);
 
 #endif // AETHER_ERROR_H
 

@@ -89,7 +89,7 @@ extern char** environ;
  * command there (dropping -L lib) once enough std dirs existed. 64 KiB leaves
  * generous headroom. The command runners (posix_run/win_run) use the same
  * size so a large command isn't re-truncated when handed off. */
-#define AE_CMD_BUF 65536
+/* AE_CMD_BUF lives in ae_internal.h so every caller agrees on it. */
 
 // --------------------------------------------------------------------------
 // Cross-platform temp directory
@@ -2755,6 +2755,23 @@ static const char* opt_flags(bool optimize) {
                     : "-O0 -g -Wformat" AETHER_WRAP_CFLAGS;
 }
 
+/* CRITICAL: a truncated command is never going to be right, so do not run it.
+ * Emitting it anyway turned a clear condition into "clang: error: no input
+ * files" with the real cause scrolled off above, which is how a long build
+ * path came to look like a compiler bug (#1974). Fail with our own message
+ * instead, using the same "hand back a command that fails" shape this file
+ * already uses when the toolchain is missing. */
+static void cmd_too_long(char* cmd, size_t size, int needed) {
+    fprintf(stderr,
+            "Error: the compiler command needs %d bytes and the buffer holds %zu.\n"
+            "       This is almost always a very long build path: every include\n"
+            "       flag carries the prefix, so the command grows with the depth\n"
+            "       of the tree. Build from a shorter path, or reduce\n"
+            "       extra_sources / include directories.\n",
+            needed, size);
+    snprintf(cmd, size, "exit 1");
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -2905,9 +2922,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             "\"%s\" %s %s \"%s\" %s -L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
             s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
-            fprintf(stderr,
-                "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
-                w, size);
+            cmd_too_long(cmd, size, w);
         }
     } else {
         /* Order matters, same as the POSIX branch: the host-bridge .a
@@ -2917,9 +2932,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             "\"%s\" %s %s \"%s\" %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
             s_gcc_bin, opt, tc.include_flags, c_file, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
-            fprintf(stderr,
-                "Warning: gcc link command truncated at %d bytes (buffer %zu).\n",
-                w, size);
+            cmd_too_long(cmd, size, w);
         }
     }
 #else
@@ -3182,11 +3195,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             "%s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
             cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
-            fprintf(stderr,
-                "Warning: gcc link command truncated at %d bytes (buffer %zu), "
-                "your extra_sources plus includes won't fit; rebuild `ae` with "
-                "a larger cmd buffer or split into multiple [[bin]] entries.\n",
-                w, size);
+            cmd_too_long(cmd, size, w);
         }
     } else {
         // Order matters: host-bridge .a files reference runtime
@@ -3196,11 +3205,7 @@ void build_gcc_cmd(char* cmd, size_t size,
             "%s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
             cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
-            fprintf(stderr,
-                "Warning: gcc link command truncated at %d bytes (buffer %zu), "
-                "your extra_sources plus includes won't fit; rebuild `ae` with "
-                "a larger cmd buffer or split into multiple [[bin]] entries.\n",
-                w, size);
+            cmd_too_long(cmd, size, w);
         }
     }
 #endif

@@ -38,7 +38,7 @@ The actor runtime includes several performance optimizations applied automatical
 
 **Message Coalescing:**
 - Batch dequeue drains multiple messages in a single atomic operation
-- Configurable threshold (COALESCE_THRESHOLD = 512)
+- Configurable threshold (SCHEDULER_DRAIN_BATCH = 512)
 
 **Thread-Local Message Pools:**
 - Per-thread pool of 256 pre-allocated buffers (up to 256 bytes each)

@@ -56,7 +56,7 @@ static int repl_eval(const char* ae_file, const char* c_file,
     fprintf(f, "}\n");
     fclose(f);
 
-    char cmd[16384];
+    char cmd[AE_CMD_BUF];
     build_aetherc_cmd(cmd, sizeof(cmd), ae_file, c_file);
     if (run_cmd_quiet(cmd) != 0) {
         run_cmd(cmd);

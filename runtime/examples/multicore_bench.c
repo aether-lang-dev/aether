@@ -92,7 +92,7 @@ void send_Node(Node* actor, int type) {
     }
 }
 
-int main() {
+int main(void) {
     int cores = 4;
     current_core_id = 0;  // Main thread acts as core 0
     

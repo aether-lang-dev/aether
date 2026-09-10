@@ -1,0 +1,30 @@
+// string.release on a heap-tracked local that currently holds an untracked
+// value still releases it (#1977).
+//
+// A struct field is the ordinary way to hold a string across calls. Reading
+// one back into a local leaves the local's `_heap_` flag at 0, because the
+// tracker does not consider a field read owned. The release was lowered to a
+// free guarded by that flag alone, so it silently did nothing in exactly the
+// case where the caller has to release by hand.
+//
+// string.free had carried the matching `else` arm all along; release had not.
+
+import std.string
+import std.io
+
+struct Holder { s: string }
+
+extern malloc(size: int) -> ptr
+
+main() {
+    h = malloc(sizeof(Holder)) as *Holder
+    h.s = ""
+    i = 0
+    while i < 200 {
+        prev = h.s
+        h.s = string.to_lower("VALUE ${i}")
+        string.string_release(prev)
+        i = i + 1
+    }
+    println("done: ${h.s}")
+}

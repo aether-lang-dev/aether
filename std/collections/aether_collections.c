@@ -74,7 +74,7 @@ ArrayList* list_new_in(AetherAllocator* alloc) {
     return list;
 }
 
-ArrayList* list_new() {
+ArrayList* list_new(void) {
     return list_new_in(NULL);
 }
 
@@ -379,7 +379,7 @@ static int key_equals(const HashMapEntry* e, const char* b, unsigned int b_len) 
     return memcmp(e->key->data, b, b_len) == 0;
 }
 
-HashMap* map_new() {
+HashMap* map_new(void) {
     HashMap* map = (HashMap*)aether_caps_malloc(sizeof(HashMap));
     if (!map) return NULL;
     map->_kind_magic = AETHER_KIND_MAP_MAGIC;

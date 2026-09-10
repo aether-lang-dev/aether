@@ -27,7 +27,7 @@ typedef struct {
 // log file could not be opened (logging still works via stderr).
 int log_init_raw(const char* filename, LogLevel min_level);
 void log_init_with_config(LogConfig* config);
-void log_shutdown();
+void log_shutdown(void);
 
 // Core logging functions
 void log_write(LogLevel level, const char* fmt, ...);
@@ -62,8 +62,8 @@ typedef struct {
     size_t fatal_count;
 } LogStats;
 
-LogStats* log_get_stats();
-void log_print_stats();
+LogStats* log_get_stats(void);
+void log_print_stats(void);
 
 #endif // AETHER_LOG_H
 

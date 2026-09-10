@@ -196,6 +196,6 @@ TEST_CATEGORY(pool_alignment_odd_object_size, TEST_CATEGORY_MEMORY) {
 }
 
 // Note: Tests are auto-registered via TEST_CATEGORY macro
-void register_memory_pool_tests() {
+void register_memory_pool_tests(void) {
     // Empty - tests registered by constructor
 }

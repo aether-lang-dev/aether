@@ -118,7 +118,7 @@ void log_init_with_config(LogConfig* config) {
     g_log.initialized = 1;
 }
 
-void log_shutdown() {
+void log_shutdown(void) {
     if (g_log.initialized && g_log.config.output_file &&
         g_log.config.output_file != stderr && g_log.config.output_file != stdout) {
         fclose(g_log.config.output_file);
@@ -244,11 +244,11 @@ void log_set_format(const char* format) {
 }
 
 // Statistics
-LogStats* log_get_stats() {
+LogStats* log_get_stats(void) {
     return &g_log.stats;
 }
 
-void log_print_stats() {
+void log_print_stats(void) {
     fprintf(stderr, "\n========== Logging Statistics ==========\n");
     fprintf(stderr, "DEBUG: %zu\n", g_log.stats.debug_count);
     fprintf(stderr, "INFO:  %zu\n", g_log.stats.info_count);

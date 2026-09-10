@@ -45,7 +45,7 @@ void bench_actor_step(BenchActor* self) {
     atomic_store_explicit(&self->active, (self->mailbox.count > 0), memory_order_relaxed);
 }
 
-void benchmark_small_messages() {
+void benchmark_small_messages(void) {
     printf("\n=== Benchmark: Small Messages (64 bytes, inline) ===\n");
 
     scheduler_init(1);
@@ -88,7 +88,7 @@ void benchmark_small_messages() {
     free(actor);
 }
 
-void benchmark_large_messages() {
+void benchmark_large_messages(void) {
     printf("\n=== Benchmark: Large Messages (1KB, zero-copy) ===\n");
     
     scheduler_init(1);
@@ -139,7 +139,7 @@ void benchmark_large_messages() {
     free(actor);
 }
 
-void benchmark_mixed_messages() {
+void benchmark_mixed_messages(void) {
     printf("\n=== Benchmark: Mixed Messages (33%% large) ===\n");
     
     scheduler_init(1);
@@ -192,7 +192,7 @@ void benchmark_mixed_messages() {
     free(actor);
 }
 
-int main() {
+int main(void) {
     printf("Zero-Copy Message Passing Performance Benchmark\n");
     printf("================================================\n");
     
