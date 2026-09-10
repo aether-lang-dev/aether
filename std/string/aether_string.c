@@ -78,7 +78,7 @@ AetherString* string_new_with_length(const char* data, size_t length) {
     return str;
 }
 
-AetherString* string_empty() {
+AetherString* string_empty(void) {
     return string_new_with_length("", 0);
 }
 

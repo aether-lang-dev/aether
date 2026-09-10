@@ -634,7 +634,7 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 # silently delete the other.
 AETHER_REQUIRED_CFLAGS = -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS)
 
-CFLAGS = -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function $(EXTRA_CFLAGS)
+CFLAGS = -O2 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -Wstrict-prototypes $(EXTRA_CFLAGS)
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
 # passwd / sysctl past Capsicum capability mode. libcasper + the
 # per-service libs ship in the FreeBSD base system. We resolve them by

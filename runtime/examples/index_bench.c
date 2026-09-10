@@ -105,7 +105,7 @@ double bench_index_passing(int num_actors, int msgs_per_actor) {
     return tput;
 }
 
-int main() {
+int main(void) {
     printf("Message Index Passing vs Copy Benchmark\n");
     printf("=======================================\n");
     

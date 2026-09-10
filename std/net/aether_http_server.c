@@ -799,7 +799,7 @@ static const char* http_strcasestr(const char* haystack, const char* needle) {
 
 static int http_server_initialized = 0;
 
-static void http_server_init() {
+static void http_server_init(void) {
     if (http_server_initialized) return;
     #ifdef _WIN32
     WSADATA wsa_data;
@@ -1986,7 +1986,7 @@ void http_request_free(HttpRequest* req) {
 }
 
 // Response building
-HttpServerResponse* http_response_create() {
+HttpServerResponse* http_response_create(void) {
     HttpServerResponse* res = (HttpServerResponse*)calloc(1, sizeof(HttpServerResponse));
     if (!res) return NULL;
     res->status_code = 200;

@@ -46,7 +46,7 @@ static char* json_extract_string(const char* json, const char* key) {
 }
 
 // LSP Server lifecycle
-LSPServer* lsp_server_create() {
+LSPServer* lsp_server_create(void) {
     LSPServer* server = (LSPServer*)malloc(sizeof(LSPServer));
     if (!server) return NULL;
     server->input = stdin;

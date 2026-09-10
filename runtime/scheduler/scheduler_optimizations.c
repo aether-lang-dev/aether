@@ -4,7 +4,7 @@
 // Global optimization statistics
 OptimizationStats g_opt_stats;
 
-void scheduler_opts_global_init() {
+void scheduler_opts_global_init(void) {
     atomic_store(&g_opt_stats.use_direct_send, true);
     atomic_store(&g_opt_stats.use_adaptive_batching, true);
     atomic_store(&g_opt_stats.use_message_dedup, false);

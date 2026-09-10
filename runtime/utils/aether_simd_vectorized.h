@@ -5,10 +5,10 @@
 #include <stdint.h>
 
 // Initialize SIMD system (detects AVX2)
-void aether_simd_init();
+void aether_simd_init(void);
 
 // Check if AVX2 is available
-int aether_simd_is_available();
+int aether_simd_is_available(void);
 
 // Vectorized operations (8-wide AVX2 or scalar fallback)
 void extract_message_ids_avx2(const void** msg_data, int32_t* msg_ids, int count);

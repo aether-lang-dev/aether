@@ -37,8 +37,8 @@ typedef struct {
 extern ModuleRegistry* global_module_registry;
 
 // Module management
-void module_registry_init();
-void module_registry_shutdown();
+void module_registry_init(void);
+void module_registry_shutdown(void);
 
 AetherModule* module_create(const char* name, const char* file_path);
 void module_free(AetherModule* module);
@@ -70,7 +70,7 @@ typedef struct {
     int node_count;
 } DependencyGraph;
 
-DependencyGraph* dependency_graph_create();
+DependencyGraph* dependency_graph_create(void);
 void dependency_graph_free(DependencyGraph* graph);
 DependencyNode* dependency_graph_add_node(DependencyGraph* graph, const char* module_name);
 void dependency_graph_add_edge(DependencyGraph* graph, const char* from, const char* to);

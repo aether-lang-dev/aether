@@ -230,7 +230,7 @@ void cpu_detect_features(CPUInfo* info) {
 }
 
 // Initialize and cache CPU info
-const CPUInfo* cpu_get_info() {
+const CPUInfo* cpu_get_info(void) {
     if (!g_cpu_info_initialized) {
         cpu_detect_features(&g_cpu_info);
         g_cpu_info_initialized = 1;
@@ -239,27 +239,27 @@ const CPUInfo* cpu_get_info() {
 }
 
 // Check if AVX2 is available
-int cpu_has_avx2() {
+int cpu_has_avx2(void) {
     return cpu_get_info()->avx2_supported;
 }
 
 // Check if AVX-512 is available
-int cpu_has_avx512() {
+int cpu_has_avx512(void) {
     return cpu_get_info()->avx512f_supported;
 }
 
 // Check if MONITOR/MWAIT is available
-int cpu_has_mwait() {
+int cpu_has_mwait(void) {
     return cpu_get_info()->mwait_supported;
 }
 
 // Check if SSE4.2 is available
-int cpu_has_sse42() {
+int cpu_has_sse42(void) {
     return cpu_get_info()->sse42_supported;
 }
 
 // Print CPU capabilities
-void cpu_print_info() {
+void cpu_print_info(void) {
     const CPUInfo* info = cpu_get_info();
     
     printf("=== CPU Information ===\n");
@@ -304,7 +304,7 @@ void cpu_print_info() {
 }
 
 // Recommend optimal core count
-int cpu_recommend_cores() {
+int cpu_recommend_cores(void) {
     const CPUInfo* info = cpu_get_info();
 
     // Use all logical cores, but cap at 16 for diminishing returns

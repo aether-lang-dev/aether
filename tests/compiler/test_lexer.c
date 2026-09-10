@@ -57,6 +57,6 @@ TEST_CATEGORY(lexer_strings, TEST_CATEGORY_COMPILER) {
 }
 
 // Note: Tests are auto-registered via TEST_CATEGORY macro
-void register_lexer_tests() {
+void register_lexer_tests(void) {
     // Empty - tests registered by constructor
 }

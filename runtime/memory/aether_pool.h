@@ -21,7 +21,7 @@ typedef struct {
     MemoryPool* pool_256;
 } StandardPools;
 
-StandardPools* standard_pools_create();
+StandardPools* standard_pools_create(void);
 void* standard_pools_alloc(StandardPools* pools, size_t size);
 void standard_pools_free(StandardPools* pools, void* ptr, size_t size);
 void standard_pools_destroy(StandardPools* pools);

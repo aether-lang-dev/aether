@@ -166,7 +166,7 @@ double bench_buffered(int num_actors, int messages_per_actor) {
     return throughput;
 }
 
-int main() {
+int main(void) {
     printf("Sender-Side Message Batching Benchmark\n");
     printf("======================================\n");
     

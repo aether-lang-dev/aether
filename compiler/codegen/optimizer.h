@@ -40,8 +40,8 @@ typedef struct {
 
 extern OptimizationStats global_opt_stats;
 
-void reset_optimization_stats();
-void print_optimization_stats();
+void reset_optimization_stats(void);
+void print_optimization_stats(void);
 
 #endif // OPTIMIZER_H
 

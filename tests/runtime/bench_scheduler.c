@@ -77,7 +77,7 @@ void bench_actor_step(BenchActor* self) {
 // Benchmark Functions
 // ============================================================================
 
-void bench_single_core_throughput() {
+void bench_single_core_throughput(void) {
     printf("\n=== Single Core Throughput ===\n");
 
     scheduler_init(1);
@@ -192,7 +192,7 @@ void bench_multi_core_throughput(int cores) {
     free(actors);
 }
 
-void bench_cross_core_overhead() {
+void bench_cross_core_overhead(void) {
     printf("\n=== Cross-Core Messaging Overhead ===\n");
     
     scheduler_init(4);
@@ -252,7 +252,7 @@ actor1->count_local = 0;
     }
 }
 
-void bench_scalability() {
+void bench_scalability(void) {
     printf("\n=== Scalability Analysis ===\n");
     printf("Cores | Throughput (msg/sec) | Efficiency\n");
     printf("------|----------------------|-----------\n");
@@ -327,7 +327,7 @@ void bench_scalability() {
         free(actors);
     }
 }
-void bench_latency() {
+void bench_latency(void) {
     printf("\n=== Latency Test ===");
     
     scheduler_init(2);
@@ -383,7 +383,7 @@ void bench_latency() {
     free(schedulers[1].actors);
 }
 
-void bench_contention() {
+void bench_contention(void) {
     printf("\n=== Contention Test (Many-to-One) ===");
     
     scheduler_init(4);
@@ -439,7 +439,7 @@ void bench_contention() {
     }
 }
 
-void bench_burst_patterns() {
+void bench_burst_patterns(void) {
     printf("\n=== Burst Pattern Test ===");
     
     scheduler_init(2);
@@ -496,7 +496,7 @@ void bench_burst_patterns() {
     free(schedulers[0].actors);
     free(schedulers[1].actors);
 }
-void bench_mailbox_saturation() {
+void bench_mailbox_saturation(void) {
     printf("\n=== Mailbox Saturation Test ===\n");
     
     scheduler_init(2);
@@ -551,7 +551,7 @@ void bench_mailbox_saturation() {
 // Main
 // ============================================================================
 
-int main() {
+int main(void) {
     printf("===============================================================\n");
     printf("        Aether Scheduler Performance Benchmarks               \n");
     printf("===============================================================\n");

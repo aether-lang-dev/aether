@@ -16,7 +16,7 @@
 #endif
 
 // CPU feature detection (extern from aether_cpu_detect.c)
-int cpu_supports_avx2() {
+int cpu_supports_avx2(void) {
 #ifdef __AVX2__
     // Simplified check - assume available if compiled with AVX2
     return 1;
@@ -185,7 +185,7 @@ int count_active_actors_avx2(const uint8_t* active_flags, int count) {
 // Public API with runtime dispatch
 static int g_avx2_available = -1;  // -1 = not checked, 0 = no, 1 = yes
 
-void aether_simd_init() {
+void aether_simd_init(void) {
     if (g_avx2_available == -1) {
         g_avx2_available = cpu_supports_avx2();
         if (g_avx2_available) {
@@ -196,7 +196,7 @@ void aether_simd_init() {
     }
 }
 
-int aether_simd_is_available() {
+int aether_simd_is_available(void) {
     if (g_avx2_available == -1) {
         aether_simd_init();
     }

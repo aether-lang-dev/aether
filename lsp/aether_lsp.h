@@ -19,7 +19,7 @@ typedef struct {
 } LSPServer;
 
 // LSP Server lifecycle
-LSPServer* lsp_server_create();
+LSPServer* lsp_server_create(void);
 void lsp_server_free(LSPServer* server);
 void lsp_server_run(LSPServer* server);
 

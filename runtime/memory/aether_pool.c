@@ -93,7 +93,7 @@ void pool_destroy(MemoryPool* pool) {
     aether_caps_free(pool, sizeof(MemoryPool));
 }
 
-StandardPools* standard_pools_create() {
+StandardPools* standard_pools_create(void) {
     StandardPools* pools = (StandardPools*)aether_caps_malloc(sizeof(StandardPools));
     if (!pools) return NULL;
     

@@ -100,7 +100,7 @@ static void thread_arena_destructor(void* arg) {
 }
 
 // Get or create thread-local arena
-static ThreadLocalArena* get_thread_arena() {
+static ThreadLocalArena* get_thread_arena(void) {
     if (tl_arena) return tl_arena;
     
     tl_arena = (ThreadLocalArena*)calloc(1, sizeof(ThreadLocalArena));
@@ -132,7 +132,7 @@ void arena_manager_init(int max_threads) {
     pthread_key_create(&global_manager.thread_key, thread_arena_destructor);
 }
 
-void arena_manager_shutdown() {
+void arena_manager_shutdown(void) {
     if (!global_manager.thread_arenas) return;
     
     pthread_key_delete(global_manager.thread_key);
@@ -185,7 +185,7 @@ void arena_get_thread_stats(uint64_t* allocated_bytes, uint64_t* allocation_coun
     }
 }
 
-void arena_reset_thread() {
+void arena_reset_thread(void) {
     ThreadLocalArena* arena = tl_arena;
     if (!arena) return;
     

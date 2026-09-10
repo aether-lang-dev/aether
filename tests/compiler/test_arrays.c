@@ -36,7 +36,7 @@ static Parser* create_test_parser(Token** tokens, int token_count) {
 } while(0)
 
 // Test array literal parsing
-int test_array_literal_parsing() {
+int test_array_literal_parsing(void) {
     const char* code = "main() { let arr = [1, 2, 3]; }";
     
     lexer_init(code);
@@ -78,7 +78,7 @@ int test_array_literal_parsing() {
 }
 
 // Test array indexing parsing
-int test_array_indexing_parsing() {
+int test_array_indexing_parsing(void) {
     const char* code = "main() { let x = arr[0]; }";
     
     lexer_init(code);
@@ -112,7 +112,7 @@ int test_array_indexing_parsing() {
 }
 
 // Test fixed array type parsing
-int test_fixed_array_type() {
+int test_fixed_array_type(void) {
     const char* code = "main() { let nums = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; }";
     
     lexer_init(code);
@@ -148,7 +148,7 @@ int test_fixed_array_type() {
 }
 
 // Test make() for dynamic arrays
-int test_make_dynamic_array() {
+int test_make_dynamic_array(void) {
     const char* code = "main() { let buf = make([]int, 100); }";
     
     lexer_init(code);
@@ -185,7 +185,7 @@ int test_make_dynamic_array() {
 }
 
 // Test multi-dimensional arrays
-int test_multidimensional_arrays() {
+int test_multidimensional_arrays(void) {
     const char* code = "main() { let matrix = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]; }";
     
     lexer_init(code);
@@ -225,7 +225,7 @@ int test_multidimensional_arrays() {
     return 1;
 }
 
-int main() {
+int main(void) {
     int passed = 0;
     int total = 0;
     

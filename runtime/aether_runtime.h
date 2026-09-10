@@ -30,7 +30,7 @@ typedef struct {
 
 // Runtime initialization
 void aether_runtime_init(int num_cores, int flags);
-void aether_runtime_shutdown();
+void aether_runtime_shutdown(void);
 
 // Command-line arguments (set by main, accessible from anywhere)
 extern int aether_argc;
@@ -79,9 +79,9 @@ void aether_args_seal(void);
 int  aether_args_sealed(void);
 
 // Configuration queries
-const AetherRuntimeInitConfig* aether_runtime_get_config();
+const AetherRuntimeInitConfig* aether_runtime_get_config(void);
 int aether_runtime_has_feature(int feature_flag);
-void aether_runtime_print_config();
+void aether_runtime_print_config(void);
 
 // Aether built-in `sleep(ms)` lowers to a call to this — a stable,
 // prefixed symbol that won't collide with libc's `sleep` if user code
@@ -89,11 +89,11 @@ void aether_runtime_print_config();
 void aether_sleep_ms(int ms);
 
 // Legacy compatibility
-static inline void aether_init() {
+static inline void aether_init(void) {
     aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);
 }
 
-static inline void aether_cleanup() {
+static inline void aether_cleanup(void) {
     aether_runtime_shutdown();
 }
 

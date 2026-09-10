@@ -202,12 +202,12 @@ void scheduler_init(int cores);
 // Initialize with explicit optimization flags
 void scheduler_init_with_opts(int cores, AetherOptFlags opts);
 
-void scheduler_start();
-void scheduler_ensure_threads_running();  // Start threads if not already started (for main-thread mode transition)
-void scheduler_stop();
-void scheduler_wait();      // Wait for quiescence (all pending messages processed). Non-destructive.
-void scheduler_shutdown();  // Wait + stop + join threads. Call once at program exit.
-void scheduler_cleanup();
+void scheduler_start(void);
+void scheduler_ensure_threads_running(void);  // Start threads if not already started (for main-thread mode transition)
+void scheduler_stop(void);
+void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
+void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.
+void scheduler_cleanup(void);
 
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
 void scheduler_deregister_actor(ActorBase* actor);

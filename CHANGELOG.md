@@ -11,6 +11,17 @@ version number before tagging the release.
 
 ## [current]
 
+### Changed
+
+- **The build now checks that no-argument functions are declared `foo(void)`,
+  not `foo()`** (#1996). In C before C23, `foo()` means "unspecified arguments",
+  not "no arguments", so the compiler cannot check a call against it — a call
+  passing arguments to a `foo()`-declared function is accepted silently. Every
+  such declaration across the compiler, runtime, stdlib and LSP now uses
+  `(void)`, and `-Wstrict-prototypes` is added to `CFLAGS` so the gap cannot
+  reopen. Mechanical, no behaviour change; it closes a real argument-checking
+  hole on the C11 toolchains the project builds with (GCC, Clang, MSYS2).
+
 ## [0.665.0]
 
 ### Added

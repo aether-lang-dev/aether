@@ -100,7 +100,7 @@ void counter_actor_step(Actor* self) {
 
 Actor* actors;
 
-int main() {
+int main(void) {
     printf("Allocating %d actors...\n", ACTOR_COUNT);
     actors = malloc(sizeof(Actor) * ACTOR_COUNT);
     
