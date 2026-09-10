@@ -26,6 +26,8 @@ Parser* create_parser(Token** tokens, int token_count) {
     parser->parsing_builder = 0;
     parser->in_condition = 0;
     parser->when_top_level = 0;
+    parser->depth = 0;
+    parser->depth_exceeded = 0;
     return parser;
 }
 
@@ -1088,7 +1090,44 @@ ASTNode* parse_closure_expression(Parser* parser) {
     return closure;
 }
 
+static ASTNode* parse_expression_inner(Parser* parser);
+static ASTNode* parse_unary_expression_inner(Parser* parser);
+static ASTNode* parse_statement_inner(Parser* parser);
+static ASTNode* parse_primary_expression_inner(Parser* parser);
+
+/* CRITICAL: bounds the mutually recursive descent. Exceeding the C stack is a
+ * SIGSEGV, not a diagnostic, so the depth is checked on the way in and the
+ * error is reported once at the boundary rather than at every frame. */
+static int parse_depth_enter(Parser* parser) {
+    if (!parser) return 1;
+    if (parser->depth >= AETHER_MAX_PARSE_DEPTH) {
+        if (!parser->depth_exceeded) {
+            parser->depth_exceeded = 1;
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "nested too deeply (limit %d); simplify the expression or "
+                     "split the block into smaller functions",
+                     AETHER_MAX_PARSE_DEPTH);
+            parser_error(parser, msg);
+        }
+        return 0;
+    }
+    parser->depth++;
+    return 1;
+}
+
+static void parse_depth_leave(Parser* parser) {
+    if (parser && parser->depth > 0) parser->depth--;
+}
+
 ASTNode* parse_primary_expression(Parser* parser) {
+    if (!parse_depth_enter(parser)) return NULL;
+    ASTNode* _r = parse_primary_expression_inner(parser);
+    parse_depth_leave(parser);
+    return _r;
+}
+
+static ASTNode* parse_primary_expression_inner(Parser* parser) {
     Token* token = peek_token(parser);
     if (!token) return NULL;
 
@@ -1396,6 +1435,10 @@ ASTNode* parse_primary_expression(Parser* parser) {
                         advance_token(parser);  /* { */
 
                         ASTNode* struct_lit = create_ast_node(AST_STRUCT_LITERAL, struct_name, s_line, s_col);
+                        /* create_ast_node keeps its own copy, so this one is
+                         * dead the moment it returns. Leaked once per struct
+                         * literal in the program before this. */
+                        free(struct_name);
                         if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
                             do {
                                 // #880: accept value-identifier keyword field names
@@ -1460,6 +1503,7 @@ ASTNode* parse_primary_expression(Parser* parser) {
                 advance_token(parser); // consume '{'
 
                 ASTNode* struct_lit = create_ast_node(AST_STRUCT_LITERAL, struct_name, line, column);
+                free(struct_name);
 
                 // Parse field initializers
                 if (!match_token(parser, TOKEN_RIGHT_BRACE)) {
@@ -1743,6 +1787,13 @@ static int operator_starts_newline(Parser* parser, Token* op) {
 }
 
 ASTNode* parse_expression(Parser* parser) {
+    if (!parse_depth_enter(parser)) return NULL;
+    ASTNode* _r = parse_expression_inner(parser);
+    parse_depth_leave(parser);
+    return _r;
+}
+
+static ASTNode* parse_expression_inner(Parser* parser) {
     ASTNode* expr = parse_binary_expression(parser, 0);
     if (!expr) return NULL;
     // #913: postfix error handler `expr or { … }` / `expr or <default>`. `or`
@@ -2318,6 +2369,13 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
 }
 
 ASTNode* parse_unary_expression(Parser* parser) {
+    if (!parse_depth_enter(parser)) return NULL;
+    ASTNode* _r = parse_unary_expression_inner(parser);
+    parse_depth_leave(parser);
+    return _r;
+}
+
+static ASTNode* parse_unary_expression_inner(Parser* parser) {
     Token* operator = peek_token(parser);
     if (!operator) return NULL;
     
@@ -2382,6 +2440,13 @@ int get_operator_precedence(AeTokenType type) {
 }
 
 ASTNode* parse_statement(Parser* parser) {
+    if (!parse_depth_enter(parser)) return NULL;
+    ASTNode* _r = parse_statement_inner(parser);
+    parse_depth_leave(parser);
+    return _r;
+}
+
+static ASTNode* parse_statement_inner(Parser* parser) {
     Token* token = peek_token(parser);
     if (!token) return NULL;
 
@@ -4191,6 +4256,10 @@ ASTNode* parse_block(Parser* parser) {
     ASTNode* block = create_ast_node(AST_BLOCK, NULL, 0, 0);
     
     while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+        /* CRITICAL: the depth guard returns without consuming a token, so the
+         * force-advance below would otherwise emit one error per remaining
+         * token. The file is already known unparseable at this point. */
+        if (parser->depth_exceeded) break;
         if (at_when_region(parser)) {
             parse_when_region_stmts(parser, block);
             continue;
@@ -6886,6 +6955,7 @@ ASTNode* parse_program(Parser* parser) {
     const int MAX_ITERATIONS = 10000;
 
     while (!is_at_end(parser) && safety_counter < MAX_ITERATIONS) {
+        if (parser->depth_exceeded) break;
         safety_counter++;
 
         if (at_when_region(parser)) {

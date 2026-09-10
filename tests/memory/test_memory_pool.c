@@ -1,4 +1,5 @@
 #include "../runtime/test_harness.h"
+#include <stdint.h>
 #include "../../runtime/memory/aether_pool.h"
 #include <string.h>
 
@@ -166,6 +167,31 @@ TEST_CATEGORY(pool_data_integrity, TEST_CATEGORY_MEMORY) {
         ASSERT_EQ(i * 10, *nums[i]);
     }
     
+    pool_destroy(pool);
+}
+
+/* Every slot is cast to FreeNode* while it is on the free list, so the stride
+ * between slots has to keep them pointer-aligned. An object size that clears
+ * the minimum but is not a multiple of that alignment used to put every odd
+ * slot on a misaligned address: undefined behaviour that x86 and ARM64 absorb
+ * and a strict target does not. 12 is the smallest such size. */
+TEST_CATEGORY(pool_alignment_odd_object_size, TEST_CATEGORY_MEMORY) {
+    MemoryPool* pool = pool_create(12, 8);
+    ASSERT_TRUE(pool != NULL);
+
+    void* slots[8];
+    int n = 0;
+    for (int i = 0; i < 8; i++) {
+        slots[i] = pool_alloc(pool);
+        if (slots[i]) n++;
+    }
+    ASSERT_TRUE(n > 1);
+
+    for (int i = 0; i < n; i++) {
+        uintptr_t addr = (uintptr_t)slots[i];
+        ASSERT_EQ(0, (int)(addr % sizeof(void*)));
+    }
+
     pool_destroy(pool);
 }
 

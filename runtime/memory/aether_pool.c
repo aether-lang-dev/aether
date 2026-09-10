@@ -19,6 +19,17 @@ MemoryPool* pool_create(size_t object_size, int initial_count) {
     if (object_size < sizeof(FreeNode)) {
         object_size = sizeof(FreeNode);
     }
+    /* CRITICAL: every slot is cast to FreeNode* while it sits on the free
+     * list, so the stride between slots has to keep them pointer-aligned. A
+     * size that clears the minimum but is not a multiple of the alignment (12,
+     * say) put every odd slot on a misaligned address: undefined behaviour
+     * that x86 and ARM64 absorb silently and a strict target does not.
+     * Confirmed with -fsanitize=alignment before this rounding was added. */
+    {
+        size_t align = sizeof(void*);
+        size_t rem = object_size % align;
+        if (rem != 0) object_size += align - rem;
+    }
 
     /* #343: cap-aware. Both the MemoryPool struct and the backing
      * memory block are accounted; pool_destroy frees both with
