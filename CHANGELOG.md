@@ -23,6 +23,19 @@ version number before tagging the release.
   error), so a socket reader can accumulate bytes and retry a partial frame. All
   RESP3 types are covered (null, boolean, double, big number, verbatim string,
   map, set, push), with binary-safe bulk strings and whole-tree `free_value`.
+
+### Fixed
+
+- **`ae build` and `ae run` link optional libraries only when the program's
+  imports require them** (#1988). A hello-world no longer needs the OpenSSL,
+  zlib, nghttp2, PCRE2, Brotli, Zstandard or YAML development libraries that
+  happened to be installed on the toolchain's build machine. Link requirements
+  follow transitive and conditional imports, retaining each enabled backend's
+  detected search paths and static dependencies, and preserving disabled-backend
+  stubs. The emitted C metadata now also covers Brotli, Zstandard, YAML and the
+  dependencies introduced by the C backing of encoding, HTTP middleware, proxy
+  and script-gateway modules.
+
 ## [0.664.0]
 
 ### Fixed
