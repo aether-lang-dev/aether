@@ -160,6 +160,13 @@ Type* infer_from_literal(const char* value) {
     for (const char* p = value; *p; p++) {
         if (*p == '.') {
             is_float = 1;
+        } else if (*p == 'e' || *p == 'E') {
+            /* An exponent makes it a float, and it has to be recognised here
+             * or `1e30` is not classified as a number at all: the letter fell
+             * to the `else` below, which clears is_number and breaks (#1954).
+             * Prefixed 0x / 0o / 0b literals return before this loop, so the
+             * `E` in `0x1E` never reaches it. */
+            is_float = 1;
         } else if (isdigit((unsigned char)*p)) {
             is_number = 1;
         } else if (*p != '-' && *p != '+') {
@@ -231,6 +238,21 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
             left->kind == TYPE_DURATION && right->kind == TYPE_DURATION) {
             return create_type(TYPE_FLOAT);
         }
+        /* Floating wins over every integer kind, which is both what C's usual
+         * arithmetic conversions say and what typechecker.c already did. This
+         * pass had the int64 rule FIRST, so `long * 1.0` inferred int64 and
+         * the float was discarded: the following division became integer
+         * division and `(t * 1.0) / (n * 1.0)` printed 0 instead of 0.51,
+         * with nothing warning. The same ordering also let int64 beat
+         * longdouble. `int * 1.0` was unaffected and correct, so the two
+         * spellings of the same arithmetic disagreed depending only on
+         * whether the left operand came from a `long` (#1965). */
+        if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
+            return create_type(TYPE_LONGDOUBLE);
+        }
+        if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
+            return create_type(TYPE_FLOAT);
+        }
         // If either is int64 (long), promote to int64
         if (left->kind == TYPE_INT64 || right->kind == TYPE_INT64) {
             return create_type(TYPE_INT64);
@@ -267,14 +289,6 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
         // If both are int, result is int
         if (left->kind == TYPE_INT && right->kind == TYPE_INT) {
             return create_type(TYPE_INT);
-        }
-        // #749: longdouble is the widest numeric — wins over float/int.
-        if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
-            return create_type(TYPE_LONGDOUBLE);
-        }
-        // If either is float, result is float
-        if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
-            return create_type(TYPE_FLOAT);
         }
         // String concatenation for +
         if (strcmp(operator, "+") == 0 && 
@@ -970,6 +984,18 @@ Type* infer_return_type_from_body(ASTNode* body, SymbolTable* symbols) {
 // definitions, externs, imports) are added by other code paths before any
 // function body is visited, so they sit beneath the snapshot and are
 // unaffected.
+/* Was `sym` added to `t` since `saved_head`, i.e. by the walk currently in
+ * progress? Symbols beneath the snapshot belong to an enclosing scope and must
+ * not be mutated: the unwind that trims back to `saved_head` can remove what we
+ * added but cannot restore what we overwrote. */
+static int symbol_added_since(SymbolTable* t, Symbol* sym, Symbol* saved_head) {
+    if (!t || !sym) return 0;
+    for (Symbol* s = t->symbols; s && s != saved_head; s = s->next) {
+        if (s == sym) return 1;
+    }
+    return 0;
+}
+
 void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
 
@@ -992,16 +1018,32 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
         ASTNode* param = node->children[i];
         if (param && param->value && param->node_type &&
             (param->type == AST_VARIABLE_DECLARATION || param->type == AST_PATTERN_VARIABLE)) {
-            // Check if parameter already exists in symbol table
+            /* #1967: refine only a symbol THIS walk added. The unwind below
+             * removes symbols added since `saved_head`, which is what keeps a
+             * local in one function from colliding with a local in the next.
+             * It cannot undo a MUTATION, so overwriting a symbol that sits
+             * beneath the snapshot edits something the unwind will not restore.
+             *
+             * A function's own name is such a symbol. A module with a parameter
+             * called `channel` overwrote the importing program's `channel()`
+             * with the parameter's type, so `r = channel(a, b)` was typed
+             * `*AnimChannel` and codegen assigned an int to a pointer, with no
+             * diagnostic from aetherc at all. The two files shared no
+             * identifier deliberately, and the module was three imports away.
+             *
+             * A parameter that shadows an outer name gets a fresh entry
+             * instead. add_symbol prepends, so it wins lookups inside the body,
+             * and the unwind removes it on the way out, which is what shadowing
+             * should do anyway. */
             Symbol* existing = lookup_symbol(ctx->symbols, param->value);
-            if (existing) {
-                // Update existing symbol's type if we now have a more specific type
+            if (existing && symbol_added_since(ctx->symbols, existing, saved_head)) {
+                // Ours, from an earlier pass over this same function: refine it
+                // when we now have a more specific type.
                 if (param->node_type->kind != TYPE_UNKNOWN) {
                     if (existing->type) free_type(existing->type);
                     existing->type = clone_type(param->node_type);
                 }
             } else {
-                // Add new symbol
                 add_symbol(ctx->symbols, param->value, clone_type(param->node_type), 0, 0, 0);
             }
         }
@@ -1155,6 +1197,33 @@ void report_ambiguous_types(InferenceContext* ctx) {
 int propagate_function_call_types(ASTNode* program, SymbolTable* table);
 int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count);
 
+/* Widening rank for the call-site parameter unification below.
+ *
+ * A parameter whose type is inferred from call sites used to keep whatever
+ * the FIRST call site said and ignore every later one, so `f(2)` followed by
+ * `f(9000000000)` pinned the parameter to `int` and truncated the second
+ * argument to 410065409 -- a wrong number, order-dependent, with `ae check`
+ * reporting no errors (#1972). Ranking the numeric kinds lets a later, wider
+ * call site win, which is the direction that cannot lose information.
+ *
+ * 0 means "not a numeric kind this may widen through": those are left to the
+ * first-writer rule, so nothing silently reinterprets a pointer or a string.
+ * Signed and unsigned 64-bit share a rank deliberately -- neither widens into
+ * the other, because that swap changes what a value means rather than how
+ * much of it fits. */
+static int param_widening_rank(TypeKind k) {
+    switch (k) {
+        case TYPE_BYTE:       return 1;
+        case TYPE_INT:        return 2;
+        case TYPE_INT64:      return 3;
+        case TYPE_UINT64:     return 3;
+        case TYPE_FLOAT32:    return 4;
+        case TYPE_FLOAT:      return 5;
+        case TYPE_LONGDOUBLE: return 6;
+        default:              return 0;
+    }
+}
+
 // Helper to recursively find function calls and propagate types
 int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count) {
     if (!tree || !func_name) return 0;
@@ -1198,7 +1267,30 @@ int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* 
                     arg->node_type && arg->node_type->kind != TYPE_UNKNOWN) {
                     if (param->node_type) free_type(param->node_type);
                     param->node_type = clone_type(arg->node_type);
+                    /* Record that THIS pass supplied the type. Only a type we
+                     * inferred may be widened below; one the author wrote is
+                     * authoritative, and widening it would change documented
+                     * semantics -- `expect(got: int, ...)` relies on `int`
+                     * wrapping at 32 bits, and promoting it to int64 stops the
+                     * wrap the test exists to check. */
+                    param->type_inferred = 1;
                     changed++;
+                } else if (param->type_inferred && param->node_type && arg && arg->node_type) {
+                    /* Already pinned by an earlier call site. Take the wider
+                     * numeric kind rather than keeping whichever was seen
+                     * first: the narrow one truncates this argument, and
+                     * which call site the compiler happens to reach first is
+                     * not something the author controls (#1972). Only widens,
+                     * only among the ranked numeric kinds, and only over a
+                     * type this pass inferred, so an annotated parameter and a
+                     * genuinely incompatible pair are both left alone. */
+                    int cur = param_widening_rank(param->node_type->kind);
+                    int inc = param_widening_rank(arg->node_type->kind);
+                    if (cur > 0 && inc > cur) {
+                        free_type(param->node_type);
+                        param->node_type = clone_type(arg->node_type);
+                        changed++;
+                    }
                 }
             }
         }

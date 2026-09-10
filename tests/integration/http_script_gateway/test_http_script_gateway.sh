@@ -116,8 +116,11 @@ fi
 "$TMPDIR/host" "$PORT" "$SO_PATH" >"$TMPDIR/host.log" 2>&1 &
 HOST_PID=$!
 
-# Poll the listener — expect READY in the host's log within 5s.
-deadline=$(($(date +%s) + 5))
+# Poll the listener — expect READY in the host's log. 15s, the deadline the
+# rest of the integration suite uses: this ran with 5s and timed out whenever
+# the parallel sweep loaded the box, reporting a startup that had in fact
+# succeeded. A deadline costs nothing when the host starts promptly.
+deadline=$(($(date +%s) + 15))
 ready=0
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if grep -q '^READY$' "$TMPDIR/host.log" 2>/dev/null; then
@@ -138,7 +141,7 @@ if [ "$ready" != "1" ]; then
 fi
 
 # Need a few more ms for the listen socket to actually accept.
-deadline=$(($(date +%s) + 5))
+deadline=$(($(date +%s) + 15))
 while [ "$(date +%s)" -lt "$deadline" ]; do
     if curl -s -o /dev/null --max-time 1 --connect-timeout 0.3 "$URL/static" 2>/dev/null; then
         break

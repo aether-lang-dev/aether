@@ -1,0 +1,60 @@
+// `long` participates in float promotion the same way `int` does (#1965).
+//
+// infer_binary_type checked "either side is int64 -> int64" BEFORE it checked
+// for a floating operand, so `long * 1.0` inferred int64 and discarded the
+// float. The division that followed became integer division: a per-call
+// timing computed as `(elapsed * 1.0) / (n * 1.0)` printed 0, and the zero
+// read as "too fast to measure" rather than "the arithmetic is wrong".
+//
+// The two spellings below differ only in whether the left operand came from a
+// function returning `long` or from an `int`. They have to agree.
+//
+// typechecker.c already had the correct order (longdouble, then float, then
+// the integer kinds, which is what C's usual arithmetic conversions say). The
+// pre-typecheck pass disagreed with it; this pins them together.
+
+import std.io
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("  FAIL: ${msg}")
+    exit(1)
+}
+
+as_long() -> long { return 102000 }
+odd_long() -> long { return 102001 }
+
+main() {
+    t = as_long()
+    n = 200000
+
+    // The report's own case: 0.51, not 0.
+    per = (t * 1.0) / (n * 1.0)
+    if per < 0.509 { fail("long path = ${per}, want 0.51 -- integer division truncated it") }
+    if per > 0.511 { fail("long path = ${per}, want 0.51") }
+
+    // The int spelling was always right; it must stay right.
+    i = 102000
+    per2 = (i * 1.0) / (n * 1.0)
+    if per2 < 0.509 { fail("int path = ${per2}, want 0.51") }
+    if per2 > 0.511 { fail("int path = ${per2}, want 0.51") }
+
+    // A fraction that cannot survive an integer result, so this cannot pass
+    // by accident the way a whole-numbered one could.
+    o = odd_long()
+    half = o * 0.5
+    if half < 51000.4 { fail("long * 0.5 = ${half}, want 51000.5") }
+    if half > 51000.6 { fail("long * 0.5 = ${half}, want 51000.5") }
+
+    quarter = (o * 1.0) / 4.0
+    if quarter < 25500.2 { fail("long / 4 = ${quarter}, want 25500.25") }
+    if quarter > 25500.3 { fail("long / 4 = ${quarter}, want 25500.25") }
+
+    // Integer-only arithmetic must NOT have been promoted: `long` still wins
+    // over `int`, and the result stays integral.
+    sum = t + 1
+    if sum != 102001 { fail("long + 1 = ${sum}, want 102001") }
+
+    println("All long/float promotion cases pass")
+}

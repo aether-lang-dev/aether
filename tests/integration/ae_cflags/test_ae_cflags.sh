@@ -50,8 +50,26 @@ if ! printf %s "$flags" | grep -q -- "-laether"; then
     fi
 fi
 
+# -fwrapv: `int` wraps in Aether and is undefined in C, so the flag that makes
+# the generated C mean what the language reference says has to travel with the
+# include paths (#1957). Without it a downstream build compiling `aetherc`
+# output at -O2 gets a different program -- which is how ae3d's black_hole
+# example came to draw a black window on Windows.
+if ! printf %s "$flags" | grep -q -- "-fwrapv"; then
+    echo "  [FAIL] ae_cflags: -fwrapv missing; generated C would be compiled with signed overflow undefined"
+    echo "  ---- output ----"
+    echo "$flags"
+    exit 1
+fi
+
 # --cflags subset: must be -I-only, no -L / -l flags.
 cflags_only="$("$AE" cflags --cflags 2>/dev/null)"
+if ! printf %s "$cflags_only" | grep -q -- "-fwrapv"; then
+    echo "  [FAIL] ae_cflags --cflags: -fwrapv missing from the compile-only subset"
+    echo "  ---- output ----"
+    echo "$cflags_only"
+    exit 1
+fi
 if printf %s "$cflags_only" | grep -qE -- "(^|[[:space:]])-(L|l)"; then
     echo "  [FAIL] ae_cflags --cflags: leaked link flags into the compile-only subset"
     echo "  ---- output ----"
@@ -129,5 +147,5 @@ if [ "$actual" != "ae_cflags ok" ]; then
     exit 1
 fi
 
-echo "  [PASS] ae_cflags: full / --cflags / --libs subsets correct, transitive deps present, gcc \$(ae cflags) builds"
+echo "  [PASS] ae_cflags: full / --cflags / --libs subsets correct, -fwrapv present, transitive deps present, gcc \$(ae cflags) builds"
 exit 0

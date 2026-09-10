@@ -25,6 +25,73 @@
 
 ModuleRegistry* global_module_registry = NULL;
 
+/* --- Dependency recording (#1882) -------------------------------------------
+ * A build launched with --emit-deps records, in first-seen order, every path
+ * the resolver probed (found or absent) and every file it parsed. Deduped by
+ * exact path. Kept deliberately simple — a build resolves a few dozen paths,
+ * not thousands, so a linear-scan dedupe over a growable array is ample. */
+typedef struct { char* path; int found; int is_read; } DepEntry;
+static DepEntry* g_deps = NULL;
+static int g_dep_count = 0, g_dep_cap = 0;
+static int g_dep_recording = 0;
+
+void module_dep_recording_enable(void) { g_dep_recording = 1; }
+
+static DepEntry* dep_find(const char* path) {
+    for (int i = 0; i < g_dep_count; i++)
+        if (strcmp(g_deps[i].path, path) == 0) return &g_deps[i];
+    return NULL;
+}
+
+/* Record one path. `found` = the probe saw it on disk; `is_read` = its CONTENTS
+ * were read (a parsed module file), which the manifest content-hashes. A path
+ * can be upgraded absent->found and probe->read as more is learned about it. */
+static void dep_record(const char* path, int found, int is_read) {
+    if (!g_dep_recording || !path || !path[0]) return;
+    DepEntry* e = dep_find(path);
+    if (e) {
+        if (found) e->found = 1;
+        if (is_read) e->is_read = 1;
+        return;
+    }
+    if (g_dep_count == g_dep_cap) {
+        int ncap = g_dep_cap ? g_dep_cap * 2 : 32;
+        DepEntry* nd = realloc(g_deps, (size_t)ncap * sizeof(DepEntry));
+        if (!nd) return;   /* best-effort: a dropped entry over-invalidates, never under */
+        g_deps = nd; g_dep_cap = ncap;
+    }
+    g_deps[g_dep_count].path = strdup(path);
+    g_deps[g_dep_count].found = found;
+    g_deps[g_dep_count].is_read = is_read;
+    g_dep_count++;
+}
+
+int module_probe(const char* path) {
+    int found = (access(path, F_OK) == 0);
+    dep_record(path, found, 0);
+    return found;
+}
+
+void module_dep_record_read(const char* path) { dep_record(path, 1, 1); }
+
+int module_dep_write(const char* out_path) {
+    FILE* f = fopen(out_path, "w");
+    if (!f) return 1;
+    /* v1 header lets the reader reject a format it doesn't understand and fall
+     * back to the tree hash rather than trust a stale/foreign layout. */
+    fprintf(f, "# aether-deps v1\n");
+    for (int i = 0; i < g_dep_count; i++) {
+        if (g_deps[i].is_read)      fprintf(f, "read %s\n", g_deps[i].path);
+        else if (!g_deps[i].found)  fprintf(f, "absent %s\n", g_deps[i].path);
+        /* a probed-and-found path that was never parsed (e.g. a directory
+         * existence check) is neither read nor absent — its presence is
+         * captured by the sibling `absent` lines it would flip, so it needs
+         * no line of its own. */
+    }
+    fclose(f);
+    return 0;
+}
+
 void module_set_source_dir(const char* source_path) {
     module_registry_init();
     if (!source_path) { global_module_registry->source_dir[0] = '\0'; return; }
@@ -641,15 +708,15 @@ static char* resolve_pkg_path(const char* root, const char* converted) {
 
     // Try 1: Local development path (relative to CWD)
     snprintf(path, sizeof(path), "%s/%s/module.ae", root, converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 
     // Try 2: Installed path via AETHER_HOME
     const char* aether_home = getenv("AETHER_HOME");
     if (aether_home && aether_home[0]) {
         snprintf(path, sizeof(path), "%s/share/aether/%s/%s/module.ae", aether_home, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/%s/%s/module.ae", aether_home, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
 
     // Try 3: Relative to the running aetherc binary. This is the
@@ -661,24 +728,24 @@ static char* resolve_pkg_path(const char* root, const char* converted) {
     char exe_dir[512];
     if (get_exe_directory(exe_dir, sizeof(exe_dir))) {
         snprintf(path, sizeof(path), "%s/../share/aether/%s/%s/module.ae", exe_dir, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/../%s/%s/module.ae", exe_dir, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/../lib/%s/%s/module.ae", exe_dir, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
 
     // Try 4: User home directory (~/.aether)
     const char* home = get_user_home_dir();
     if (home && home[0]) {
         snprintf(path, sizeof(path), "%s/.aether/share/aether/%s/%s/module.ae", home, root, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
 
 #ifndef _WIN32
     // Try 5: System install locations (POSIX only)
     snprintf(path, sizeof(path), "/usr/local/share/aether/%s/%s/module.ae", root, converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 #endif
 
     return NULL;
@@ -733,20 +800,20 @@ static char* pkg_probe_root(const char* root, const char* sub_path) {
     char path[4096];
     if (sub_path) {
         snprintf(path, sizeof(path), "%s/src%s/module.ae", root, sub_path);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/src%s.ae", root, sub_path);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/lib%s/module.ae", root, sub_path);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s%s/module.ae", root, sub_path);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s%s.ae", root, sub_path);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     } else {
         snprintf(path, sizeof(path), "%s/src/module.ae", root);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/module.ae", root);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
     return NULL;
 }
@@ -772,26 +839,26 @@ char* module_resolve_local_path(const char* module_path) {
     for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
         const char* lib = global_module_registry->lib_dirs[li];
         snprintf(path, sizeof(path), "%s/%s/module.ae", lib, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s/%s.ae", lib, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
 
     // Try 3: src/module_path/module.ae
     snprintf(path, sizeof(path), "src/%s/module.ae", converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 
     // Try 4: src/module_path.ae
     snprintf(path, sizeof(path), "src/%s.ae", converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 
     // Try 5: module_path/module.ae (project root)
     snprintf(path, sizeof(path), "%s/module.ae", converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 
     // Try 6: module_path.ae (single file in root)
     snprintf(path, sizeof(path), "%s.ae", converted);
-    if (access(path, F_OK) == 0) return strdup(path);
+    if (module_probe(path)) return strdup(path);
 
     // Try 6b: Search relative to source file directory
     if (global_module_registry->source_dir[0]) {
@@ -801,18 +868,18 @@ char* module_resolve_local_path(const char* module_path) {
         for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
             const char* lib = global_module_registry->lib_dirs[li];
             snprintf(path, sizeof(path), "%s%s/%s/module.ae", global_module_registry->source_dir, lib, converted);
-            if (access(path, F_OK) == 0) return strdup(path);
+            if (module_probe(path)) return strdup(path);
             snprintf(path, sizeof(path), "%s%s/%s.ae", global_module_registry->source_dir, lib, converted);
-            if (access(path, F_OK) == 0) return strdup(path);
+            if (module_probe(path)) return strdup(path);
         }
         snprintf(path, sizeof(path), "%ssrc/%s/module.ae", global_module_registry->source_dir, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%ssrc/%s.ae", global_module_registry->source_dir, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s%s/module.ae", global_module_registry->source_dir, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
         snprintf(path, sizeof(path), "%s%s.ae", global_module_registry->source_dir, converted);
-        if (access(path, F_OK) == 0) return strdup(path);
+        if (module_probe(path)) return strdup(path);
     }
 
     // Try 7-9: Search installed packages at ~/.aether/packages/
@@ -927,6 +994,10 @@ char* module_resolve_local_path(const char* module_path) {
 ASTNode* module_parse_file(const char* file_path) {
     FILE* f = fopen(file_path, "r");
     if (!f) return NULL;
+    /* This file's CONTENTS drive codegen, so a `read` entry (content-hashed on
+     * a warm run) is the correct dependency, upgrading whatever `probe` the
+     * resolver already recorded for it. */
+    module_dep_record_read(file_path);
 
     fseek(f, 0, SEEK_END);
     long size = ftell(f);

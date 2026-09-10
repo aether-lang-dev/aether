@@ -1,0 +1,78 @@
+// Float literals in scientific notation are one token (#1954).
+//
+// `1.0e30` used to lex as the float `1.0` followed by the identifier `e30`.
+// In expression position that surfaced as "undefined variable 'e30'"; in
+// statement position it silently swallowed the FOLLOWING line into the
+// expression, so a program lost a statement and still compiled clean. That
+// second shape is why this is a correctness bug and not an ergonomics one.
+//
+// Two halves had to agree: the lexer consumes the exponent, and the literal
+// classifier in type inference treats `e`/`E` as making the number a float.
+// Without the second, `1e30` is not classified as a number at all.
+//
+// The negative half matters as much: hex (`0x1E` contains an E), durations
+// (`500ms`), and ranges (`1..4`) must lex exactly as they did.
+
+import std.io
+import std.string
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("  FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    // Every spelling from the report.
+    a = 1.0e30
+    b = 1e30
+    c = 1.5E-3
+    d = 2.0e+8
+
+    if a != b { fail("1.0e30 != 1e30") }
+    if a < 9.9e29 { fail("1.0e30 came out too small") }
+    if a > 1.1e30 { fail("1.0e30 came out too large") }
+
+    // 1.5E-3 is 0.0015: uppercase E and a negative exponent.
+    if c > 0.0016 { fail("1.5E-3 too large") }
+    if c < 0.0014 { fail("1.5E-3 too small") }
+
+    // 2.0e+8 is 200000000: an explicit + sign.
+    if d > 200000001.0 { fail("2.0e+8 too large") }
+    if d < 199999999.0 { fail("2.0e+8 too small") }
+
+    // Comparison position: the report's original repro.
+    v = 2.0
+    if v >= 1.0e30 { fail("2.0 < 1.0e30 was false") }
+
+    // The statement AFTER a scientific literal must survive. When the
+    // exponent lexed as an identifier this line was swallowed into the
+    // expression above and never ran.
+    reached = 0
+    _x = 1.0e30
+    reached = 1
+    if reached != 1 { fail("the statement after a scientific literal was lost") }
+
+    // --- the forms that must NOT have changed ---
+
+    // Hex: the E in 0x1E is a hex digit, not an exponent.
+    h = 0x1E
+    if h != 30 { fail("0x1E is ${h}, want 30") }
+
+    // A duration keeps its unit suffix.
+    dur = 500ms
+    if dur.ms != 500 { fail("500ms is ${dur.ms}ms, want 500") }
+
+    // A range's dots are not part of the number.
+    sum = 0
+    for i in 1..4 { sum = sum + i }
+    if sum != 6 { fail("1..4 summed to ${sum}, want 6") }
+
+    // An `e` that is not an exponent is still an identifier.
+    e = 7
+    one = 1
+    if e + one != 8 { fail("bare identifier 'e' broke") }
+
+    println("All scientific-notation cases pass")
+}

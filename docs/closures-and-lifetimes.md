@@ -184,6 +184,32 @@ lifetime"):
   (the `fn → ptr` coercion) and the list owns the box; `list.free` now
   reclaims the captured env as well as the box (`owned_flags == 2`).
 
+## Mutated-capture cell lifetime
+
+A capture the closure assigns to is heap-promoted: the enclosing binding
+and the closure env share one cell (see "Capture semantics" above). That
+cell is reclaimed at the exit of the scope that declares it, which is only
+sound while no capturing closure is still alive to write through it.
+
+The verdict reuses the transient-callback proof above. A cell captured
+only by closures the env-drain already frees after the call dies with its
+scope. A cell captured by anything else, a widget handler, a timer, a
+callee whose body the escape walk cannot see, is left alone and outlives
+the scope. `mark_escaped_capture_boxes` (`compiler/codegen/codegen_stmt.c`)
+computes this before the body is generated, and both it and the drain read
+the same `transient_closure_arg` helper so the two verdicts cannot drift
+apart.
+
+The direction of the approximation is deliberate: a cell wrongly called
+escaping leaks a few bytes, a cell wrongly called transient is freed while
+a live callback still writes through it.
+
+A builder block (`window(...) { ... }`, `vstack(4) { ... }`) is a scope
+like any other here. Its body is emitted inside C braces and now opens a
+matching defer scope, so a cell, or a heap string, declared in the block
+is reclaimed at the end of the block rather than at the end of the
+enclosing function.
+
 Two shapes defeat these paths and leak the env — both bit `std.spec`
 (#1577):
 

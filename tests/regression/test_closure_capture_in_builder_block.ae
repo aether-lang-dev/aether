@@ -1,0 +1,77 @@
+// Regression: a variable a closure mutates, declared inside a builder
+// block (`widget(...) { ... }`), emitted C that did not compile, and the
+// cell it lives in was freed while a stored callback still wrote through
+// it.
+//
+// A mutated capture is promoted to a heap cell (`int* n = malloc(...)`)
+// and its free is queued as a scope-exit defer. Builder blocks opened a
+// C `{ ... }` without opening a matching defer scope, so the free was
+// emitted after the closing brace: `error: use of undeclared identifier`
+// on a name the generated C had just scoped out. Suppressing the free
+// instead would have left the second half of the bug in place, a cell
+// freed at scope exit while a widget handler or timer still held it.
+//
+// The fix gives a builder block its own defer scope, and suppresses the
+// free only for cells shared with a closure that outlives the scope
+// (anything but the transient-callback shape the env-drain already
+// proves dead after the call).
+//
+// Exercises both halves: a transient callback whose cell IS reclaimed at
+// block exit, and a stored callback whose cell must survive it. Compiling
+// is half the assertion; the counters are the other half.
+
+extern exit(code: int)
+
+run(cb: fn) { cb() }
+keep(cb: fn) -> fn { return cb }
+
+// A builder block: a call with a trailing block, whose body runs inline.
+group(name: string) -> int { return 1 }
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+main() {
+    println("=== test_closure_capture_in_builder_block ===")
+
+    later = keep() callback {}
+    // Written only from inside the stored callback, so main can see what the
+    // cell held when that callback ran after its block had ended.
+    witness = 0
+
+    group("transient") {
+        // Mutated capture declared inside the builder block, handed to a
+        // callee that neither stores nor returns it. Its cell is freed
+        // when the block ends, which is only valid C if the free lands
+        // inside the block's braces.
+        hits = 0
+        run() callback { hits = hits + 1 }
+        run() callback { hits = hits + 1 }
+        check("transient capture mutated through the block", hits, 2)
+    }
+
+    group("stored") {
+        // Same shape, but the closure is kept. Its cell must outlive the
+        // block, so no free may be queued for it here.
+        total = 0
+        total = total + 5
+        later = keep() callback {
+            total = total + 1
+            witness = total
+        }
+        check("stored capture before the block ends", total, 5)
+    }
+
+    // Writing through the cell after its declaring block has ended is the
+    // use-after-free the suppression exists to prevent.
+    later()
+    later()
+    check("stored cell survived the block that declared it", witness, 7)
+    println("  PASS: builder-block captures scope and outlive correctly")
+
+    println("=== test_closure_capture_in_builder_block passed ===")
+}

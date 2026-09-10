@@ -328,6 +328,9 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         if (arm_body && arm_body->type == AST_BLOCK) {
                             hoist_heap_string_trackers(gen, arm_body);
                         }
+                        if (arm_body && arm_body->type == AST_BLOCK) {
+                            mark_escaped_capture_boxes(gen, arm_body);
+                        }
 
                         // Generate handler body
                         if (arm_body && arm_body->type == AST_BLOCK) {

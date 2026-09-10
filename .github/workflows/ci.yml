@@ -1,5 +1,19 @@
 name: Aether CI
 
+# Every `apt-get update` below first drops the runner's Google Chrome apt
+# source. Nothing in this repository installs from it, and no workflow here
+# uses a browser at all, but the GitHub images ship the source and when its
+# index is briefly inconsistent EVERY apt-get update in the matrix fails:
+#
+#   E: Failed to fetch .../google-chrome/.../Packages.gz  Hash Sum mismatch
+#   ##[error]Process completed with exit code 100
+#
+# and each Linux leg goes red in setup, before compiling a line. That took
+# main and every open PR down on 2026-09-09: 15 legs on main, 10 on a PR that
+# had touched only the type checker. Removing a third party we never asked
+# for from the critical path costs nothing and cannot regress a build that
+# never installed from it.
+
 # A change that touches only VERSION and CHANGELOG.md is a release bump, and
 # that tree was already built and tested on main before the release was cut.
 # Running the full matrix on it again gains nothing and costs twice over: the
@@ -57,13 +71,13 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: Linux / Clang
             os: ubuntu-22.04
             cc: clang
             harden: "0"
-            install: sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           # Hardened gcc build (issue #396). Same OS + compiler as
           # Linux / GCC but with HARDEN=1 set in the environment, which
@@ -77,7 +91,7 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "1"
-            install: sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
+            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --break-system-packages websockets 2>/dev/null || pip install websockets
 
           - name: macOS / Clang (ARM64)
             os: macos-latest
@@ -350,7 +364,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
     # zig cc bundles no FreeBSD libc, so the base sysroot is what makes the
     # FreeBSD headers visible. Same source as the release leg.
@@ -450,7 +464,7 @@ jobs:
 
     - name: Install host language dev libraries
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y \
           gcc make bc pkg-config \
           liblua5.3-dev \
@@ -490,7 +504,7 @@ jobs:
 
     - name: Install build deps
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make valgrind
         pip install --break-system-packages websockets 2>/dev/null || pip install websockets
         # contrib/vulkan needs the headers to build and a driver to run.
@@ -597,17 +611,26 @@ jobs:
         Write-Host "Windows Defender exclusions applied (best-effort)."
 
     - name: Run CI suite
-      # 45-min backstop — a true safety net, not a tuning knob. The suite
-      # runs ~32-36 min on this runner (a handful of HTTP tests that
-      # statically link openssl/nghttp2/zlib/pcre2 dominate the .ae phase),
-      # so the cap sits above the natural runtime and only fires on a real
-      # hang, never on a slow-but-progressing run. (An earlier 30-min cap
-      # killed a healthy ~32-min run.) NPROC is left at the runner default
-      # (nproc=4): oversubscribing to 8 made it WORSE, because 8 of those
-      # heavy static links running at once thrash the 4-vCPU runner's RAM
-      # (one link ballooned to 11 min). Meaningfully cutting this needs a
-      # faster linker / fewer per-test relinks, tracked separately.
-      timeout-minutes: 45
+      # 70-min backstop — a true safety net, not a tuning knob. It must sit
+      # well ABOVE the natural runtime so it only fires on a real hang, never
+      # on a slow-but-progressing run, and the natural runtime keeps growing
+      # with the suite: the cap was 30 when the step took ~32 min and killed a
+      # healthy run, then 45 when the comment here recorded ~32-36 min. The
+      # step now takes 42 min on main, so 45 left three minutes of headroom on
+      # a shared runner and started killing healthy runs again (a PR adding one
+      # .ae test tipped it over, 39 seconds into the last of ten phases).
+      #
+      # A cap set just above the current measurement is a cap that expires. 70
+      # is chosen to still catch a hang, which runs unbounded, while surviving
+      # both a slow runner and the suite's ordinary growth.
+      #
+      # NPROC is left at the runner default (nproc=4): oversubscribing to 8
+      # made it WORSE, because 8 of the heavy static links (openssl/nghttp2/
+      # zlib/pcre2, which dominate the .ae phase) running at once thrash the
+      # 4-vCPU runner's RAM (one link ballooned to 11 min). Meaningfully
+      # cutting the 42 min needs a faster linker / fewer per-test relinks,
+      # tracked separately.
+      timeout-minutes: 70
       # The hardcoded `C:\msys64\...` probe in aether_http.c::load_windows_ca_bundle
       # doesn't match the GitHub runner's MSYS2 path (it's installed under a
       # temp dir, not C:\msys64). Export SSL_CERT_FILE explicitly using
@@ -660,10 +683,52 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Install toolchain
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
 
     - name: Run cooperative scheduler CI
       run: make ci-coop
+
+  ci-no-openssl:
+    name: Source build without OpenSSL
+    runs-on: ubuntu-22.04
+
+    # std.cryptography falls back to pure-Aether implementations when the
+    # toolchain is built without libcrypto -- the default for a Windows source
+    # build, and the configuration that leaves sha256(), std.cas and every
+    # caller that hashes either working or permanently broken. Every other leg
+    # in this matrix installs OpenSSL, so nothing exercised that fallback: it
+    # could rot to a stub and stay green everywhere. OPENSSL=0 forces the
+    # detection off regardless of what is installed on the runner.
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc
+
+    - name: Build without OpenSSL
+      run: make -j"$(nproc)" OPENSSL=0
+
+    - name: Confirm the build really has no libcrypto
+      run: |
+        if nm -u build/libaether.a 2>/dev/null | grep -q EVP_DigestInit; then
+          echo "OPENSSL=0 still linked libcrypto - this leg would prove nothing"
+          exit 1
+        fi
+        echo "confirmed: no OpenSSL symbols"
+
+    - name: Unit tests
+      run: make test
+
+    # The suites that must work on the pure path. They assert digests against
+    # published vectors and no longer accept a skip, so a fallback that stops
+    # answering fails here rather than reporting "skipped".
+    - name: Digest suites on the pure backend
+      run: |
+        set -e
+        for t in cryptography_digest_stream cryptography_sha cryptography_v2 \
+                 cryptography_random_hex; do
+          sh "tests/integration/$t/test_$t.sh"
+        done
 
   ci-wasm:
     name: WebAssembly (Emscripten)
@@ -678,7 +743,7 @@ jobs:
         version: 3.1.51
 
     - name: Install native GCC
-      run: sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
 
     # Still needed after #1648 wired wasm32-wasi into `ae build`, and worth
     # saying why: `ae build --target=wasm32-wasi --emit=obj` compiles the
@@ -755,7 +820,7 @@ jobs:
 
     - name: Install ARM cross-compiler
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
 
     - name: Run embedded CI
@@ -778,7 +843,7 @@ jobs:
 
     - name: Install RISC-V cross-toolchain + qemu
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y \
           gcc-riscv64-linux-gnu \
           libc6-dev-riscv64-cross \
@@ -802,7 +867,7 @@ jobs:
 
     - name: Install tools
       run: |
-        sudo apt-get update
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y valgrind gcc-multilib
 
     - name: Valgrind — runtime test suite

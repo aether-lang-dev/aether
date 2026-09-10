@@ -350,6 +350,12 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *EdPt {
 // SHA-512 of a bytes buffer -> 64-byte bytes.
 sha512(b: ptr, len: int) -> ptr {
     ctx, err = sha2.new("sha512")
+    // sha2.new returns (null, "allocation failed"). Dropping the error here
+    // fed a null context to update_bytes, which is the one input it cannot
+    // take; the rest of the digest wrappers in this family check (#1947).
+    if err != "" {
+        return null
+    }
     sha2.update_bytes(ctx, b, len)
     return sha2.final_bytes(ctx)
 }

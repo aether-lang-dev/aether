@@ -23,6 +23,386 @@ version number before tagging the release.
   error), so a socket reader can accumulate bytes and retry a partial frame. All
   RESP3 types are covered (null, boolean, double, big number, verbatim string,
   map, set, push), with binary-safe bulk strings and whole-tree `free_value`.
+## [0.663.0]
+
+### Fixed
+
+- **A function named after a libc symbol emitted C that did not compile**
+  (#1993). `remove()`, `div()`, `index()`, `abs()` and two dozen more reached C
+  unmangled, and the only diagnostic came from the C compiler, naming a system
+  header and a type the source never wrote. `is_c_reserved_word` already
+  mangled `read`, `write` and `bind` for exactly this reason; its curated list
+  was missing the rest of `<stdio.h>`, `<stdlib.h>` and `<string.h>`. These are
+  ordinary domain verbs, which is what makes them worth listing: an undo pair
+  is naturally `add`/`remove`, a list editor has `remove` and `index`.
+
+  A name absent from that list was not safe, it was lucky: it survived only
+  while its signature happened to match libc's, so `rand() -> int` compiled and
+  `rand(seed: int) -> int` did not. The names are listed regardless.
+
+- **`atoi` is a builtin, and it did not yield to a program's own function.**
+  With the reserved-name entry alone, the definition was mangled while every
+  call still went to the builtin, so the program's function became dead code
+  and the call carried libc's signature. The builtin now steps aside when the
+  program defines a function of that name, which is the rule #1967 settled for
+  types. `atoi("41")` still reaches the builtin in a program that defines none.
+
+## [0.662.0]
+
+### Fixed
+
+- **`a[i]` on a bare `ptr` now gives an Aether diagnostic, not a leaked C
+  error.** Indexing a `void*` (which is what the `std.intarr` / `floatarr` /
+  `longarr` handles are) produced no element type, so it lowered to a C index on
+  `void*` and surfaced as `error: void value not ignored as it ought to be` from
+  the C compiler — undecodable for a first-time porter. The typechecker now
+  rejects it up front with a message that names the fix
+  (`intarr.intarr_get_unchecked(a, i)` / `..._set_unchecked(a, i, v)`). A typed
+  pointer (`*T`), a real array and a string all still index normally; the check
+  keys on a pointer with no element type, so it fires only on a bare `void*`.
+
+### Changed
+
+- **`std.strbuilder` documents the O(n²) scan trap on `finish()`.** The string
+  `finish()` returns has no length header, so `string.char_at` / `substring` /
+  `length` each pay a `strlen` per call — a char-by-char scan of a finished
+  string is quadratic, instant on a test input and a hang on a production one,
+  with correct results throughout. The `finish()` comment and
+  `std/strbuilder/README.md` now flag this (previously only the NUL-truncation
+  angle was noted) and steer scanning-heavy code to `finish_with_length()` plus
+  the length-carrying `string.string_char_at_n` / `string_substring_n`
+  accessors.
+- **`LLM.md` no longer claims "there is no `sizeof`".** `sizeof(T)` exists and
+  is the recommended form (the compiler warns on the hand-counted
+  `malloc(24) as *T` literal); the "Idioms that keep biting" bullet now teaches
+  `malloc(sizeof(T)) as *T` and calls the byte-literal the anti-pattern, rather
+  than steering porters into the heap-corruption footgun it was meant to warn
+  about.
+
+## [0.661.0]
+
+### Fixed
+
+- **A parameter name in an imported module retyped a same-named function in
+  the importing program** (#1967). The inference pass adds a function's
+  parameters to the shared symbol table and unwinds them by trimming back to a
+  snapshot. That removes what it added but cannot undo a MUTATION, and the
+  parameter branch overwrote the type of any symbol that already carried the
+  name, including a function sitting beneath the snapshot, which the pass's own
+  comment says is left unaffected. A module with a parameter called `channel`
+  retyped the importing program's `channel()` to the parameter's type, so
+  `r = channel(a, b)` came out as `AnimChannel*`; codegen then assigned an int
+  to a pointer and `aetherc` reported nothing, leaving a C warning against
+  generated code as the only sign. It acted at a distance: the two files shared
+  no identifier deliberately and the module was three imports away. A parameter
+  that shadows an outer name now gets its own entry, which the unwind removes,
+  so the outer symbol is untouched.
+
+- **A parameter inferred from call sites took the first call site's type and
+  truncated every later one** (#1972). `propagate_call_types_in_tree` wrote the
+  parameter's type once and ignored the rest, so `f(2)` followed by
+  `f(9000000000)` pinned the parameter to `int` and printed 410065409 instead
+  of 9000000001. `ae check` reported no errors, and the answer depended on the
+  order of the call sites: `f(3)` then `f(1.5)` truncated, while `f(1.5)` then
+  `f(3)` was correct, for the same program. The parameter now takes the widest
+  numeric kind any call site supplies, which is the direction that cannot lose
+  information. Widening only, and only among the ranked numeric kinds, so an
+  incompatible pair is still left for the type checker; signed and unsigned
+  64-bit share a rank and do not widen into each other, because that swap
+  changes what a value means rather than how much of it fits.
+## [0.660.0]
+
+### Fixed
+
+- **A third-party apt source took CI down**, main and every open PR at once. The
+  GitHub runner images ship an apt source for Google Chrome. Nothing here
+  installs from it and no workflow uses a browser, but when its index went
+  briefly inconsistent every `apt-get update` in the matrix failed with
+  `Hash Sum mismatch` and each Linux leg went red during setup, before
+  compiling a line: 15 legs on main, 10 on a PR that had touched only the type
+  checker. Every `apt-get update` now drops that source first, which cannot
+  regress a build that never installed from it.
+
+## [0.659.0]
+
+### Fixed
+
+- **`long` was not promoted in mixed arithmetic with a float, and the wrong
+  result was silent** (#1965). The pre-typecheck pass checked "either side is
+  int64 -> int64" *before* it checked for a floating operand, so `long * 1.0`
+  inferred int64 and discarded the float; the division that followed became
+  integer division. `(elapsed * 1.0) / (n * 1.0)` printed 0 rather than 0.51,
+  and in the benchmark it was found in, that zero read as "too fast to
+  measure". The same ordering also let int64 beat `longdouble`. The int
+  spelling of the identical arithmetic was always correct, so the two
+  disagreed depending only on whether the operand came from a `long`.
+  `typechecker.c` already ordered these correctly -- longdouble, then float,
+  then the integer kinds, which is what C's usual arithmetic conversions say --
+  and the two passes now agree.
+- **A parameter inferred from call sites took the first call site's type and
+  truncated every later one** (#1972). `propagate_call_types_in_tree` wrote the
+  parameter's type once and ignored the rest, so `f(2)` followed by
+  `f(9000000000)` pinned the parameter to `int` and printed 410065409 instead
+  of 9000000001. `ae check` reported no errors, and the answer depended on the
+  order of the call sites: `f(3)` then `f(1.5)` truncated, while `f(1.5)` then
+  `f(3)` was correct, for the same program. The parameter now takes the widest
+  numeric kind any call site supplies, which is the direction that cannot lose
+  information. Widening only, and only among the ranked numeric kinds, so an
+  incompatible pair is still left for the type checker; signed and unsigned
+  64-bit share a rank and do not widen into each other, because that swap
+  changes what a value means rather than how much of it fits.
+
+## [0.658.0]
+
+### Fixed
+
+- **The Windows CI suite's timeout was killing healthy runs.** The step's cap
+  is meant to be a hang detector sitting well above the natural runtime, but
+  the suite has grown into it twice now: the cap was 30 when the step took
+  ~32 min, then 45 when it was recorded as ~32-36 min. It takes 42 min on main
+  today, so 45 left three minutes of headroom on a shared runner, and a PR
+  adding a single `.ae` test tipped it over, timing out 39 seconds into the
+  last of ten phases with everything green behind it. Raised to 70, which
+  still catches a hang (a hang runs unbounded) while surviving a slow runner
+  and the suite's ordinary growth.
+
+## [0.657.0]
+
+### Fixed
+
+- **A variable a callback mutates, declared inside a builder block, did not
+  compile.** A mutated capture is promoted to a heap cell and its `free` is
+  queued as a scope-exit defer, but a builder block (`window(...) { ... }`)
+  opened a C `{ ... }` without opening a matching defer scope. The free was
+  emitted after the closing brace, naming a variable the generated C had just
+  scoped out: `error: use of undeclared identifier`. Builder blocks now carry
+  their own defer scope, so cleanup queued inside one lands inside it. The same
+  omission also let a block-local heap string outlive its block in the
+  generated C.
+
+- **A cell shared with a stored callback was freed when its scope ended.**
+  Independent of where the free landed, freeing the cell at scope exit dangles
+  it for every callback that outlives the scope, a widget handler, a timer, any
+  callee whose body the escape walk cannot see. The scope-exit free is now
+  suppressed for those, and kept only where codegen already proves the closure
+  dead after the call, the transient-callback shape the closure-env drain fires
+  on. Leaking one cell is the fail-safe direction; freeing a cell a live
+  callback still writes through is not. The drain's own soundness gate is now a
+  single shared helper rather than two copies that could drift apart.
+
+## [0.656.0]
+
+### Changed
+
+- **The stdlib really is warning-clean under `ae check` now** (#1942). 0.655.0
+  swept `tls13_cert`, `tls13_client`, `pem` and `tls13_server` and reported
+  zero, but the sweep had only visited the crypto modules: seven
+  unused-variable warnings were still live in `cbor`, `sm3`, `number` (two),
+  `tar`, `worker` and one remaining `tls13_client` site. Each is a genuinely
+  unread binding — an unread tuple slot, a `w as *Writer` cast nothing uses, an
+  error from a `list.get` that is in bounds by construction — and is prefixed
+  with the documented `_`, except `tar`'s `ext_err`, a `var` no longer assigned
+  anywhere, which is removed. `ae check` over all 74 stdlib modules now reports
+  zero for real, so the next genuine unused variable, or the next dropped
+  error, has nothing to hide behind.
+
+### Fixed
+
+- **The X.509 truncation fix had no test that a valid certificate still
+  parses** (#1942). The regression added in 0.655.0 asserts only that a
+  certificate whose TBS ends after `serialNumber` is refused, and every other
+  `parse_certificate` call in the `crypto_tls13_cert` suite discards the error
+  string it returns — so a change that refused *every* certificate would have
+  passed the whole suite. The suite now asserts a real leaf DER parses cleanly
+  alongside the refusal, which is the half that pins the six new error returns
+  to rejecting only what is actually malformed.
+
+## [0.655.0]
+
+### Fixed
+
+- **`ae run prog.ae -- args` dropped the arguments on every run after the
+  first.** `ae run` runs the cached exe when it has one, and that path ran it
+  bare: the arguments reached the program on the cold build and silently
+  vanished from then on, which is exactly the shape a config-is-code entry
+  point (`ae run supervisor.ae -- make -j8`) runs in. The cache-hit path now
+  builds the same command as the cold path, through one shared helper, so it
+  also regains the signal forwarding and the `AE_TEST_RUNNER` prefix it was
+  missing. The integration test now covers the cached run, not just the cold
+  one.
+
+- **A test that timed out under load reported a startup that had succeeded.**
+  The script-gateway integration test waited 5s for its host to print `READY`
+  while the rest of the suite waits 15s, so the parallel sweep could load the
+  box past its deadline. Raised to the suite's deadline.
+
+- **Float literals in scientific notation were lexed as a number followed by
+  an identifier** (#1954). `1.0e30` became the float `1.0` and the identifier
+  `e30`. In expression position that surfaced as "undefined variable 'e30'";
+  in statement position it silently swallowed the FOLLOWING line into the
+  expression, so a program lost a statement, reported only an unused-variable
+  warning for the swallowed call, and produced no binary. Two halves had to
+  agree: the lexer now consumes `e`/`E` with an optional sign and at least one
+  digit, and the literal classifier treats an exponent as making the number a
+  float, without which `1e30` was not classified as a number at all. The full
+  shape is required before anything is consumed, so a bare `e`, hex (`0x1E`),
+  durations (`500ms`) and ranges (`1..4`) lex exactly as before.
+
+- **`asn1.encode_oid` encoded strings that are not OIDs** (#1947). `""`, `"1"`,
+  `"1..2"`, `"1.2."`, `".1.2"` and `"1.2.x"` all produced well-formed DER that
+  decodes as a *different* identifier than the caller named, which is worse
+  than refusing them, and this is a function reached with strings from
+  configuration. The `have` flag that catches the empty-arc cases was already
+  there, set and cleared and never read. It now rejects a non-digit, an empty
+  arc, a first arc outside 0..2, a second arc over 39 under arcs 0 and 1, and
+  input with fewer than two arcs. The folded first subidentifier is also
+  emitted base128 rather than as a single byte: under arc 2 it exceeds 127
+  (`2.999` folds to 1079) and a one-byte store truncated it into another OID.
+
+- **The X.509 parser accepted certificates it could not read** (#1942).
+  `parse_tbs_fields` dropped the error from six TBSCertificate reads --
+  version, signature algorithm, issuer, validity, subject and
+  subjectPublicKeyInfo -- and stored whatever the failed read returned. A
+  truncated or malformed certificate therefore parsed "successfully" into a
+  `LeafCert` whose issuer, subject, validity or SPKI came from a read that did
+  not succeed, while the neighbouring serialNumber and notBefore/notAfter
+  reads in the same function did check. All six now return the error.
+
+- **Three digest wrappers used a context whose constructor had failed**
+  (#1947, #1942). `ed25519.sha512`, `ed448.shake` and `rsa.sha256b` dropped the
+  error from `sha2.new` / `sha3.new`, which answer `(null, "allocation
+  failed")`, and passed the null context to `update_bytes`. The rest of the
+  family checked; these three did not.
+
+- **A trust-store failure reported no reason** (#1942).
+  `tls13_client` discarded the error from `trust_store_load` and reported a
+  bare "cannot load trust store" for a missing file, an unreadable one, and one
+  nothing parsed out of. The reason is now included.
+
+- **56 unused-variable warnings across the crypto stdlib are gone** (#1942), 48
+  distinct sites in `tls13_cert`, `tls13_client`, `pem` and `tls13_server`.
+  They were invisible until warnings gained a location, because a warning
+  raised inside an imported module was reported against the importing file.
+  Those four modules now report zero; the sweep of the remaining non-crypto
+  modules follows in 0.656.0.
+
+- **The `ae cflags` build emitted a `-Wstring-plus-int` warning.** The
+  intentional `AETHER_WRAP_CFLAGS + 1` that skips the macro's leading space is
+  written `&AETHER_WRAP_CFLAGS[1]`, which states the same intent in a spelling
+  clang does not read as the string-plus-integer mistake.
+
+## [0.654.0]
+
+### Fixed
+
+- **A warning from an imported module named the importing file** (#1946), and
+  printed that file's line N underneath as the snippet. A module's AST is
+  merged into the importing program before the unused-variable pass runs, and
+  that pass built its diagnostic with no filename, so the renderer fell back to
+  the active source context, which by then is the entry file again. The reader
+  was shown a line with no such variable on it and told to prefix a name that
+  is not there. When the module's line was past the entry file's end there was
+  no snippet at all: `asn1/module.ae:613` was reported against a 175-line test
+  file. It is also why the 56 stdlib warnings in #1942 were unactionable, four
+  of their five files never being named.
+
+  The pass now carries the declaring node's own `source_file`, which the nodes
+  already hold for codegen's `#line`. The fallback buffer is used only when the
+  diagnostic names the file that buffer belongs to, so a buffer never renders
+  another file's line. A diagnostic naming a file whose buffer is gone, which
+  is every imported module after its parse, has that one line read from the
+  file itself.
+
+## [0.653.0]
+
+### Changed
+
+- **The build cache now keys on an exact dependency manifest, not whole
+  directory-tree hashes (#1882).** `compute_cache_key` used to hash every `.ae`
+  under the entry directory, the working directory, and each `--lib` dir — a
+  conservative over-approximation that both invalidated on edits to files a
+  build never imported (slow) and kept missing resolution roots nobody
+  remembered to hash (five bugs of the same shape: #623, #1025, #1421, #1882).
+  `aetherc --emit-deps=<path>` now writes, for each build, the files it read and
+  the paths it probed-and-did-not-find; a warm run hashes that manifest and
+  skips the tree walk. Editing an *imported* module invalidates; editing an
+  unimported sibling does not. Recording the negative probes is load-bearing: a
+  module dropped in at a path an earlier resolver `Try` missed shadows the one
+  that resolved, and only the recorded miss makes that insertion bust the cache.
+  Cold build writes the manifest and today's tree hash is the fallback (missing
+  or unreadable manifest → rebuild), so behaviour is unchanged on the first
+  build and strictly more precise thereafter. Implements the direction ratified
+  in `docs/notes/import-closure-cache-key.md`.
+
+### Fixed
+
+- **`int` did not wrap at runtime: generated C was compiled with signed
+  overflow left undefined (#1957).** Aether's `int` wraps, and the constant
+  folder already wrapped to match (W1003) precisely so that a literal and the
+  same expression over variables could not disagree. The runtime broke that
+  promise: `int` is emitted as C `int`, signed overflow is undefined in C, and
+  nothing on the compile line said otherwise. GCC 15.2 at `-O2` folded
+  `g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF` down to a three-value
+  cycle — the mask proves `g_seed >= 0`, "a signed multiply does not overflow"
+  then proves `g_seed <= 2^31 / 1103515245`, and value-range propagation
+  finishes it. Any LCG, hash or checksum written in Aether could compute
+  different values in a shipped build than under `ae run`, which compiles at
+  `-O0` and was unaffected. Every command line that compiles generated C now
+  carries `-fwrapv`: all five `opt_flags` modes and the `-pipe` mainline in
+  `ae build`, both `zig cc` cross paths, the wasm/emcc backend, and `ae cflags`
+  so external build systems compiling `aetherc` output inherit the same
+  semantics. Found as a black window in ae3d's `black_hole` example on Windows,
+  where all 200,000 particles were seeded from the collapsed generator and
+  landed on one pixel; macOS looked correct only because Apple Clang does not
+  make the same deduction for that loop.
+
+## [0.652.0]
+
+### Fixed
+
+- **Every `*_hex` call in `std.cryptography` leaked its result.** The C side
+  returns a `malloc`'d hex buffer the caller owns, but the extern was declared
+  without `@heap`, so the compiler classified the result as borrowed, copied it
+  into a fresh owned string at the boundary, and never freed the original. One
+  80-byte buffer per call, on the hot path of anything that hashes: `sha1_hex`,
+  `sha256_hex`, `hash_hex`, `md4_hex`, `md5_hex`, `hmac_sha256_hex` and
+  `digest_final_hex`. Measured under `leaks(1)`: a 50-round loop over four of
+  them leaked 200 allocations before, 0 after. The seven externs now carry the
+  `@heap` annotation that exists for exactly this, which is also why the fix is
+  a declaration change rather than a new copy-and-release dance in each wrapper.
+  Found while adding the streaming fallback below; it predates that work and
+  was not caused by it.
+
+### Added
+
+- **The streaming digest API works without OpenSSL.** `digest_new` /
+  `digest_update` / `digest_final_*` were libcrypto-only, so on a build without
+  it -- the default for a Windows source build -- they returned "openssl
+  unavailable" while the one-shot digests had already grown a pure-Aether
+  fallback. The gap mattered most to the caller who cannot work around it: you
+  reach for a streaming context precisely when the object is too big to hold
+  whole, so "use the one-shot form instead" is not advice that applies.
+
+  A digest handle now carries its backend, and update / final dispatch on it.
+  The pure path reuses the streaming contexts already in
+  `std.cryptography.{sha1,sha2,md5,md4}` rather than adding a second
+  implementation of anything, and covers the same algorithm set as the one-shot
+  fallback: an algorithm you can one-shot without OpenSSL is one you can stream
+  without OpenSSL.
+
+  The regression test no longer accepts a skip. It used to pass by not running
+  when there was no backend, which would have been a green tick for a fallback
+  nobody exercised. A new `ci-no-openssl` job builds with `OPENSSL=0` and runs
+  the digest suites against the pure path, because every other leg in the
+  matrix installs OpenSSL and none of them covered it.
+- **`cache_dir_override` now covers the `cache` command, not only the build
+  path.** The #1032 override was fixed in `cmd_cache` without a test reaching
+  it, and that is how the bug lived: the existing case proved `ae build`
+  honours `AETHER_CACHE_DIR`, while `ae cache` composed `$HOME/.aether/cache`
+  by hand, so it reported on a directory the build was not using and
+  `ae cache clear` deleted the contents of the wrong one. Verified against a
+  binary without the fix, where clear prints "Cleared 85 cached build(s) from
+  <the default cache>" for a request to clear an override.
 
 ## [0.651.0]
 
@@ -119,7 +499,6 @@ version number before tagging the release.
   runners have no Vulkan device and MSYS2 packages no CPU driver; the leg says
   which entries ran and which skipped rather than leaving that to be found
   later. (#1511)
-
 
 ## [0.650.0]
 

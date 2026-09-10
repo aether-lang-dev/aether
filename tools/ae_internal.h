@@ -14,6 +14,32 @@
 
 #include "../compiler/aether_lib_path.h"
 
+/* Aether `int` wraps; C `int` overflow is undefined. -fwrapv is what closes
+ * that gap, and it belongs on every command line that compiles generated C.
+ *
+ * docs/language-reference.md (W1003) already states the contract: a constant
+ * fold "wraps exactly as the runtime would", specifically so that the literal
+ * form and the same expression written over `int` variables cannot disagree.
+ * Without this flag they did, from -O2 upward. GCC 15.2 folded
+ *
+ *     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+ *
+ * down to a three-value cycle: the mask proves g_seed >= 0, "a signed multiply
+ * does not overflow" then proves g_seed <= 2^31 / 1103515245, and value-range
+ * propagation takes it from there. `ae run` was unaffected (-O0), so the
+ * miscompile reached shipped binaries only -- #1957, found as a black window in
+ * ae3d's black_hole example, whose 200,000 particles were all seeded from the
+ * collapsed generator.
+ *
+ * Every GCC and Clang the project targets accepts it, zig cc included. What it
+ * costs is a narrow class of loop optimisations that rely on a signed
+ * induction variable not wrapping; the shape most exposed to that -- a 200M
+ * iteration `int` loop doing multiply, divide and modulo -- measured 199 ms
+ * either way on GCC 15.2 x86_64. The hand-written runtime is compiled by the
+ * Makefile, not through here, and is unaffected: signed overflow there is a
+ * bug rather than a defined operation. */
+#define AETHER_WRAP_CFLAGS " -fwrapv"
+
 typedef struct {
     char root[1024];           // Aether root directory (dev: repo root;
                                // installed: the PREFIX, e.g. ~/.local)
@@ -123,6 +149,10 @@ void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
 unsigned long long compute_cache_key(const char* ae_file, const char* extra_files,
                                      const char* opt_level, const char* extra_salt);
+/* #1882: the stable depfile slot for an entry source, under the cache dir.
+ * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
+ * folds it on the next run for exact, tree-walk-free invalidation. */
+void cache_depfile_path(const char* ae_file, char* out, size_t outsz);
 
 /* ae_cross.c — cross-compilation via the zig cc backend (#1105), plus the
  * Xcode/xcrun backend for Apple targets that zig cannot serve. */

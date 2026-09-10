@@ -338,6 +338,11 @@ pt_decode(b: ptr, p: ptr, d: ptr) -> *Pt {
 // also call free_ctx (that would double-free and segfault).
 shake(b: ptr, len: int, out_len: int) -> ptr {
     ctx, err = sha3.new("shake256")
+    // Same as ed25519.sha512: sha3.new answers (null, "allocation failed"),
+    // and update_bytes cannot take a null context (#1947).
+    if err != "" {
+        return null
+    }
     sha3.update_bytes(ctx, b, len)
     out = sha3.final_bytes(ctx, out_len)
     return out

@@ -2704,6 +2704,15 @@ long span = 250000000 - 200000000
 cv = span * 50 / 225000000          // 11, no warning
 ```
 
+The runtime is held to the same rule. Aether compiles to C, where signed
+overflow is *undefined behaviour* rather than a wrap, so every command line the
+toolchain uses to compile generated code carries `-fwrapv` — `ae run`,
+`ae build` at any optimisation level, the cross and wasm backends, and
+`ae cflags` for build systems that compile `aetherc` output themselves. Two's
+complement wrapping is the specified behaviour of `int`, not an artifact of the
+optimiser: an LCG, a hash, or a checksum written in Aether computes the same
+values on every target.
+
 Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`.
 
 ---

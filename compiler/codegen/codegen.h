@@ -389,6 +389,17 @@ typedef struct {
     char** escaped_string_vars;
     int escaped_string_var_count;
 
+    // Names whose closure-capture box (`T* n = malloc(...)`, emitted for a
+    // variable a closure mutates) is shared with a closure that outlives the
+    // scope declaring it: a stored callback, a widget handler, a timer, or any
+    // callee whose body the escape walk cannot see. Freeing such a box at
+    // scope exit dangles a cell a live callback still writes through, so the
+    // free is suppressed for these. Populated by mark_escaped_capture_boxes
+    // (codegen_stmt.c) before the body is generated, alongside
+    // mark_escaped_heap_string_vars.
+    char** escaped_capture_boxes;
+    int escaped_capture_box_count;
+
     // Subset of `heap_string_vars`: names whose ONLY escape is via a
     // `return <name>;` statement — no container, struct-field, or
     // closure-capture site stores the pointer. The two-set split is

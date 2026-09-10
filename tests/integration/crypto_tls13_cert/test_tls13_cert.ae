@@ -396,6 +396,48 @@ main() {
     } else { println("FAIL malformed OCSP accepted"); total_ok = 0 }
     bytes.free(ocsp_good); bytes.free(ocsp_rev); bytes.free(ocsp_bad)
 
+    // --- malformed-cert parse must be REFUSED, not accepted (#1942) ---
+    // parse_tbs_fields dropped the error half of six TBS field reads (version,
+    // signature algId, issuer, validity, subject, SPKI), so a certificate
+    // truncated mid-TBS parsed "successfully" into a LeafCert built from a read
+    // that failed. Two assertions, and the pair is the point: a real
+    // certificate must still parse, and a truncated one must not. Every other
+    // parse_certificate call in this file discards the error it returns, so on
+    // its own the refusal check would also pass a fix that refused everything.
+    good_der = from_hex("308201af30820155a0030201020214795024acd1f59d13ea26ee4bba4c458593d6f63b300a06082a8648ce3d040302302c3115301306035504030c0c4543205465737420526f6f7431133011060355040a0c0a41657468657254657374301e170d3236303732383231333633325a170d3237303732383231333633325a30293112301006035504030c096c6f63616c686f737431133011060355040a0c0a416574686572546573743059301306072a8648ce3d020106082a8648ce3d030107034200042b3e0fe701f9228fee88ca310d6b4ccde616ad50d7be20f226738027d49f9b691db45e3360408187f8d4e117773919fbc4821ebe52298e8144057d2dda935cc5a358305630140603551d11040d300b82096c6f63616c686f7374301d0603551d0e041604149d72e1349a900b4c8b972c2f2699c448425be1d2301f0603551d230418301680140096d04dcc2db8b08fb4a70f34d2431d03fe10b9300a06082a8648ce3d0403020348003045022100c3ed2bce214ebe239a7f3728b4d527751fb6e727a24ae305777c1ea66fbc7fbe022066eabc2c915a2de69eb7fe673beeb4875bd2c579299178fe8c1cd8b1a40e5d8a")
+    good_len = bytes.length(good_der)
+    // Sanity: the untruncated cert parses cleanly, so a later failure is the
+    // truncation talking, not a bad fixture.
+    base = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    if string.equals(tls13_cert.parse_certificate(good_der, good_len, &base), "") == 1 {
+        println("ok   full leaf DER parses (baseline)")
+    } else { println("FAIL baseline leaf DER did not parse"); total_ok = 0 }
+    tls13_cert.free_leaf(&base)
+    bytes.free(good_der)
+
+    // A Certificate whose TBS content stops after version + serialNumber. The
+    // outer Certificate SEQUENCE and the TBS SEQUENCE are both well-formed (their
+    // length headers match their bodies), so parse_certificate reaches
+    // parse_tbs_fields — but the TBS body ends before the signature-algId field,
+    // so that inner read_tlv hits end-of-input. Before the fix, parse_tbs_fields
+    // discarded that error and returned "", accepting a cert with empty issuer /
+    // subject / validity / SPKI; now the error propagates.
+    //   Certificate SEQUENCE (0x30 len)
+    //     TBS SEQUENCE (0x30 0x08)
+    //       [0] { INTEGER 2 }   A0 03 02 01 02   (version)
+    //       INTEGER 1           02 01 01         (serialNumber)
+    //   (no signatureAlgorithm / issuer / validity / subject / SPKI)
+    short_tbs = from_hex("300a3008a003020102020101")
+    stlf = tls13_cert.LeafCert { tbs: null, tbs_len: 0, sig_alg_oid: null, signature: null, signature_len: 0, spki_algo_oid: null, spki_key: null, spki_key_len: 0, issuer: null, issuer_len: 0, subject: null, subject_len: 0, not_before: null, not_before_len: 0, not_after: null, not_after_len: 0, dns_names: null }
+    sterr = tls13_cert.parse_certificate(short_tbs, bytes.length(short_tbs), &stlf)
+    if string.equals(sterr, "") != 1 {
+        println("ok   TBS truncated after serialNumber is refused")
+    } else {
+        println("FAIL cert with empty issuer/subject/SPKI accepted"); total_ok = 0
+    }
+    tls13_cert.free_leaf(&stlf)
+    bytes.free(short_tbs)
+
     if total_ok == 0 {
         println("tls13_cert: FAILURES")
         exit(1)

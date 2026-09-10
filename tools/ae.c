@@ -414,6 +414,11 @@ static bool g_profile = false;
 static bool g_size = false;
 
 // Build an aetherc command string with optional --lib flag
+/* #1882: when a cached build is in flight, ae points aetherc's --emit-deps at
+ * the source's stable depfile slot so the NEXT run can key on it. Set by the
+ * build/run sites right before build_aetherc_cmd; empty (skip) otherwise. */
+static char g_emit_deps_path[1200] = "";
+
 void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char* output) {
     const char* emit_flag = "";
     if (g_emit_csrc)                   emit_flag = " --emit=csrc";
@@ -474,9 +479,14 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
         if (w < 0 || (size_t)w >= sizeof(lib_flags) - lf_off) break;
         lf_off += (size_t)w;
     }
-    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s \"%s\" \"%s\"",
+    char deps_flag[1240] = "";
+    if (g_emit_deps_path[0]) {
+        snprintf(deps_flag, sizeof(deps_flag), " --emit-deps=%s", g_emit_deps_path);
+    }
+
+    snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s \"%s\" \"%s\"",
              tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
-             g_defines, lib_flags, input, output);
+             g_defines, lib_flags, deps_flag, input, output);
 }
 
 // --------------------------------------------------------------------------
@@ -2708,12 +2718,12 @@ static const char* opt_flags(bool optimize) {
      * extern calls; #line directives map its warning to the user's .ae
      * source. User cflags from aether.toml append after these flags, so
      * -Wno-format remains available to opt out. */
-    if (g_coverage) return "-O0 -g --coverage -Wformat";
+    if (g_coverage) return "-O0 -g --coverage -Wformat" AETHER_WRAP_CFLAGS;
     /* --profile keeps -O2 so the profile describes the code that ships,
      * and adds what a sampling profiler needs to attribute it. Checked
      * after coverage because --coverage's -O0 is a correctness
      * requirement for gcov, not a preference. */
-    if (g_profile) return "-O2 -g -fno-omit-frame-pointer -Wformat";
+    if (g_profile) return "-O2 -g -fno-omit-frame-pointer -Wformat" AETHER_WRAP_CFLAGS;
     /* --size optimises for bytes: -Os over -O2, and -g0 to suppress debug
      * info the compiler would otherwise emit. Checked after --profile
      * because asking for both is contradictory and the debug-oriented mode
@@ -2724,8 +2734,9 @@ static const char* opt_flags(bool optimize) {
      * -Os is supported by every gcc and clang we target and gives nearly the
      * same result. The CROSS path can and does use -Oz, because zig bundles
      * its own clang and the version is not the host's to vary. */
-    if (g_size) return "-Os -g0 -Wformat";
-    return optimize ? "-O2 -Wformat" : "-O0 -g -Wformat";
+    if (g_size) return "-Os -g0 -Wformat" AETHER_WRAP_CFLAGS;
+    return optimize ? "-O2 -Wformat" AETHER_WRAP_CFLAGS
+                    : "-O0 -g -Wformat" AETHER_WRAP_CFLAGS;
 }
 
 void build_gcc_cmd(char* cmd, size_t size,
@@ -2971,7 +2982,8 @@ void build_gcc_cmd(char* cmd, size_t size,
     // remains an opt-out.
     const char* base_opt = (g_coverage || g_profile || g_size)
                           ? opt_flags(optimize)
-                          : (optimize ? "-O2 -pipe -Wformat" : "-O0 -g -pipe -Wformat");
+                          : (optimize ? "-O2 -pipe -Wformat" AETHER_WRAP_CFLAGS
+                                      : "-O0 -g -pipe -Wformat" AETHER_WRAP_CFLAGS);
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* The link-side flags ride in the same blob: gcc accepts -Wl,... anywhere
      * on the line, and threading them through four separate link-command
@@ -3281,8 +3293,12 @@ static int build_wasm_cmd(char* cmd, size_t size,
         }
     }
 
+    /* AETHER_WRAP_CFLAGS: emcc is clang, and the wasm build compiles the same
+     * generated C as every other target, so it owes the same `int` semantics
+     * (#1957). */
     snprintf(cmd, size,
-        "emcc -O2 -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
+        "emcc -O2" AETHER_WRAP_CFLAGS
+        " -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
         "%s %s \"%s\" %s -o \"%s\" -lm "
         "-Wall -Wextra -Wno-unused-parameter -Wno-unused-function "
         "-Wno-unused-variable -Wno-missing-field-initializers -Wno-unused-label",
@@ -3793,6 +3809,34 @@ static void prepare_host_bridge_imports(const char* main_file) {
 // Commands
 // --------------------------------------------------------------------------
 
+/* Build the command that runs a program `ae run` just produced or found in
+ * the cache: the exe, then every post-`--` argument, each double-quoted so an
+ * argument containing spaces stays one token through run_cmd's tokenizer
+ * (posix_run / win_run). Arguments containing a literal double-quote are not
+ * representable through this path, rare for a build command line; build the
+ * binary and invoke it directly if you need that.
+ *
+ * AE_TEST_RUNNER, when set, is spliced in ahead of the exe so the program runs
+ * under a wrapper (wine, qemu-user, ...). Empty by default, see
+ * test_runner_prefix().
+ *
+ * CRITICAL: the cache-hit and cache-miss paths must both go through this. A
+ * cache hit that ran the exe bare dropped every forwarded argument, so
+ * `ae run supervisor.ae -- make -j8` worked once and then silently ran with an
+ * empty argv on every later invocation. */
+static void build_run_cmd(char* cmd, size_t cap, const char* exe,
+                          int argc, char** argv, int prog_args_start) {
+    const char* runner = test_runner_prefix();
+    snprintf(cmd, cap, "%s%s\"%s\"", runner, *runner ? " " : "", exe);
+    if (prog_args_start < 0) return;
+    size_t off = strlen(cmd);
+    for (int i = prog_args_start; i < argc && off < cap - 1; i++) {
+        int w = snprintf(cmd + off, cap - off, " \"%s\"", argv[i]);
+        if (w < 0 || (size_t)w >= cap - off) break;  /* truncated, stop cleanly */
+        off += (size_t)w;
+    }
+}
+
 static int cmd_run(int argc, char** argv) {
     const char* file = NULL;
     /* 8 KiB matches toml_extra below + the fgets line buffer in
@@ -3910,8 +3954,8 @@ static int cmd_run(int argc, char** argv) {
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
         if (path_exists(cached_exe)) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
-            snprintf(cmd, sizeof(cmd), "%s", cached_exe);
-            int rc = run_cmd(cmd);
+            build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
+            int rc = run_cmd_forwarding(cmd);
             if (rc < 0) {
                 fprintf(stderr, "Program crashed (signal %d", -rc);
                 if (-rc == 11) fprintf(stderr, ": segmentation fault");
@@ -3922,6 +3966,10 @@ static int cmd_run(int argc, char** argv) {
         }
         if (tc.verbose) fprintf(stderr, "[cache] miss: %016llx\n", cache_key);
         using_cache = true;
+        /* #1882: on this (cold) build, have aetherc write the dependency
+         * manifest to the source's stable depfile slot, so the next run keys
+         * on exact deps rather than the conservative tree walk. */
+        cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
     }
 
     // Determine temp .c file path and exe path
@@ -3975,6 +4023,22 @@ static int cmd_run(int argc, char** argv) {
     }
     remove(clog);
 
+    /* #1882: aetherc has now written the depfile, so recompute the cache key —
+     * this time compute_cache_key folds the exact deps and yields the SAME key
+     * the next run will compute. Publish the artifact under THAT key, not the
+     * cold tree-walk key, or every warm run would miss (the artifact would sit
+     * under a key nobody computes again). Only when we were already caching and
+     * the recompute succeeds; otherwise keep the original slot. */
+    if (using_cache && g_emit_deps_path[0]) {
+        unsigned long long dk = compute_cache_key(file, extra_files, "O0",
+                                    ae_define_salt("run", run_salt, sizeof(run_salt)));
+        if (dk != 0) {
+            cache_key = dk;
+            snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
+            snprintf(exe_file, sizeof(exe_file), "%s.tmp.%d", cached_exe, (int)getpid());
+        }
+    }
+
     // Step 2: Compile .c to executable with runtime (-O0 for fast dev builds).
     // toml [[bin]] extra_sources were already merged into extra_files above
     // (before the cache check), so no further reading is needed here.
@@ -4017,29 +4081,8 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
-    // Step 3: Run, forwarding any post-`--` args to the program. Each is
-    // wrapped in double quotes so a single arg with spaces stays one
-    // token through run_cmd's tokenizer (posix_run / win_run). Args
-    // containing a literal double-quote aren't representable through this
-    // path — rare for a build command line; build the binary and invoke
-    // it directly if you need that.
-    //
-    // AE_TEST_RUNNER, when set, is spliced in ahead of the exe so the
-    // program runs under a wrapper (wine, qemu-user, ...). Empty by
-    // default — see test_runner_prefix().
-    {
-        const char* runner = test_runner_prefix();
-        snprintf(cmd, sizeof(cmd), "%s%s\"%s\"",
-                 runner, *runner ? " " : "", exe_file);
-    }
-    if (prog_args_start >= 0) {
-        size_t off = strlen(cmd);
-        for (int i = prog_args_start; i < argc && off < sizeof(cmd) - 1; i++) {
-            int w = snprintf(cmd + off, sizeof(cmd) - off, " \"%s\"", argv[i]);
-            if (w < 0 || (size_t)w >= sizeof(cmd) - off) break;  /* truncated — stop cleanly */
-            off += (size_t)w;
-        }
-    }
+    // Step 3: run it, forwarding any post-`--` args (see build_run_cmd).
+    build_run_cmd(cmd, sizeof(cmd), exe_file, argc, argv, prog_args_start);
     int rc = run_cmd_forwarding(cmd);
 
     if (rc < 0) {
@@ -6530,6 +6573,10 @@ static int cmd_build(int argc, char** argv) {
             } else if (tc.verbose) {
                 fprintf(stderr, "[cache] miss: %016llx\n", cache_key);
             }
+            /* #1882: cold build — aetherc writes the dep manifest to the
+             * source's stable slot for the next run's exact key. Set whether
+             * or not the copy above failed; a rebuild still wants the deps. */
+            cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
         }
     }
 
@@ -8011,9 +8058,26 @@ static int cmd_cflags(int argc, char** argv) {
 
     int wrote_anything = 0;
 
-    if (want_cflags && tc.include_flags[0]) {
-        fputs(tc.include_flags, stdout);
+    if (want_cflags) {
+        /* Semantics before paths. -fwrapv is what makes the generated C
+         * implement Aether's wrapping `int` (#1957); a build system that
+         * compiles `aetherc` output without it gets a different program from
+         * -O2 upward, which is how ae3d's black_hole example came to draw a
+         * black window on Windows. Emitted unconditionally, so the documented
+         * `gcc your.c $(ae cflags)` recipe is right even on an install whose
+         * include list came back empty.
+         *
+         * &[1] skips the macro's leading space: it is written to be appended
+         * to an existing flag string, and here it starts the line. Indexed
+         * rather than `+ 1`, which clang reads as the string-plus-integer
+         * mistake and warns about (-Wstring-plus-int); the intent is the same
+         * and this spelling states it. */
+        fputs(&AETHER_WRAP_CFLAGS[1], stdout);
         wrote_anything = 1;
+        if (tc.include_flags[0]) {
+            fputc(' ', stdout);
+            fputs(tc.include_flags, stdout);
+        }
     }
 
     if (want_libs) {

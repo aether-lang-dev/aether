@@ -1024,7 +1024,6 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
     var parent_part: string = ""
     var name: string = ""
     var linkname: string = ""
-    var ext_err: string = ""
     var mkdir_err: string = ""
     var write_open_err: string = ""
     var write_err_str: string = ""

@@ -20,22 +20,14 @@ extern exit(code: int)
 main() {
     print("=== std.cryptography streaming digest context ===\n\n")
 
-    // Skip probe. This asks the STREAMING api whether it works, rather than
-    // asking sha256_hex — which it used to, as a proxy for "is OpenSSL here".
-    // That proxy broke the moment sha256_hex grew a pure-Aether fallback: the
-    // one-shot hash started succeeding without OpenSSL while digest_new(),
-    // which is still libcrypto-only, did not, so the skip stopped firing and
-    // the test failed at the first context it opened.
-    //
-    // Probe the capability under test, not a neighbour that happens to share
-    // a backend today.
-    probe_ctx, probe_err = cryptography.digest_new("sha256")
-    if probe_err != "" {
-        println("SKIP cryptography_digest_stream: ${probe_err} (streaming digests need OpenSSL)")
-        print("\n=== streaming digest tests skipped (no backend) ===\n")
-        return
-    }
-    cryptography.digest_free(probe_ctx)
+    // No skip. There used to be one, because the streaming API was
+    // OpenSSL-only and a build without it could not answer at all. It now
+    // falls back to the pure-Aether streaming contexts over the same
+    // algorithm set as the one-shot digests, so there is no build left where
+    // digest_new("sha256") legitimately fails -- and a skip that can no
+    // longer fire is a test that stops running the day the fallback breaks.
+    // Every case below is expected to pass on every platform, with or
+    // without libcrypto.
 
     // ---- Test 1: md5("abc") in two chunks == one-shot == vector ----
     print("Test 1: md5 streamed in two chunks\n")
@@ -107,6 +99,22 @@ main() {
         println("  FAIL: md5 raw length = ${n3}, want 16")
         exit(1)
     }
+    // The BYTES, not just how many of them. Sixteen zero bytes have the right
+    // length and the wrong value, and a length-only check cannot tell the two
+    // apart -- which is exactly the failure a second backend could introduce.
+    // md5("abc") = 90 01 50 98 3c d2 4f b0 d6 96 3f 7d 28 e1 7f 72.
+    if string.char_at_n(raw, n3, 0) != 144 {
+        println("  FAIL: md5 raw byte 0 = ${string.char_at_n(raw, n3, 0)}, want 144")
+        exit(1)
+    }
+    if string.char_at_n(raw, n3, 1) != 1 {
+        println("  FAIL: md5 raw byte 1 = ${string.char_at_n(raw, n3, 1)}, want 1")
+        exit(1)
+    }
+    if string.char_at_n(raw, n3, 15) != 114 {
+        println("  FAIL: md5 raw byte 15 = ${string.char_at_n(raw, n3, 15)}, want 114")
+        exit(1)
+    }
     print("  PASS\n")
 
     // ---- Test 4: empty input (no update) == md5("") ----
@@ -132,6 +140,13 @@ main() {
     ctx5, e5 = cryptography.digest_new("not-a-real-algo")
     if string.equals(e5, "unknown algorithm") != 1 {
         println("  FAIL: expected 'unknown algorithm', got '${e5}'")
+        exit(1)
+    }
+    // And the handle is null on that path. A rejected algorithm that still
+    // handed back a context would leak it, and every caller checks the error
+    // slot rather than the pointer.
+    if ctx5 != null {
+        println("  FAIL: unknown algorithm returned a non-null context")
         exit(1)
     }
     print("  PASS\n")

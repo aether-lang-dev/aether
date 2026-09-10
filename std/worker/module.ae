@@ -183,7 +183,7 @@ map(items: ptr, f: fn) -> ptr {
     }
     i = 0
     while i < n {
-        item, ierr = list.get(items, i)
+        item, _ierr = list.get(items, i)
         slot = i
         worker.run(
             || { return call(f, item) },

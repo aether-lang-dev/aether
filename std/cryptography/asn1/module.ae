@@ -602,11 +602,22 @@ encode_boolean(v: int) -> ptr {
 
 // OBJECT IDENTIFIER from a dotted-decimal string.
 encode_oid(dotted: string) -> ptr {
-    // parse arcs
+    // A dotted OID, or null. The validation is the point: every rejected
+    // form below used to encode successfully as a DIFFERENT identifier than
+    // the caller named, which is worse than refusing it, and this is a
+    // function callers reach with strings from configuration (#1947).
+    //
+    //   ""      -> a single empty arc, nothing to fold, empty OID
+    //   "1"     -> one arc, nothing to fold with, empty OID
+    //   "1..2"  -> the empty middle arc contributed a zero
+    //   "1.2."  -> trailing empty arc, same
+    //   "1.2.x" -> `cur*10 + (ch - 48)` ran on a letter and kept the result
+    //
+    // The `have` flag that catches the empty-arc cases was already here,
+    // set and cleared and never read.
     content = bytes.new(0)
     clen = 0
     n = string.length(dotted)
-    // collect arcs into a small list via repeated parse
     arc1 = -1
     arc2 = -1
     cur = 0
@@ -620,14 +631,30 @@ encode_oid(dotted: string) -> ptr {
             ch = 46 // force flush of last arc
         }
         if ch == 46 {
+            if have == 0 {
+                return null // empty arc: "", "1..2", "1.2.", ".1.2"
+            }
             if arccount == 0 {
                 arc1 = cur
+                // X.660: the first arc is 0, 1 or 2. Anything else has no
+                // encoding -- 40*arc1 + arc2 would land in another arc's
+                // range and decode as a different OID.
+                if arc1 < 0 || arc1 > 2 {
+                    return null
+                }
             } else {
                 if arccount == 1 {
                     arc2 = cur
-                    // emit first byte = 40*arc1 + arc2
-                    bytes.set(content, clen, (40 * arc1) + arc2)
-                    clen = clen + 1
+                    // Under arcs 0 and 1 the second arc is limited to 0..39,
+                    // which is what makes the 40*arc1 + arc2 folding
+                    // reversible. Only arc 2 is open-ended.
+                    if arc1 < 2 && arc2 > 39 {
+                        return null
+                    }
+                    // base128, not a single byte: under arc 2 the folded
+                    // value exceeds 127 (2.999 folds to 1079) and a
+                    // one-byte store silently truncated it to another OID.
+                    clen = emit_base128(content, clen, (40 * arc1) + arc2)
                 } else {
                     clen = emit_base128(content, clen, cur)
                 }
@@ -636,10 +663,18 @@ encode_oid(dotted: string) -> ptr {
             cur = 0
             have = 0
         } else {
+            if ch < 48 || ch > 57 {
+                return null // not a digit: "1.2.x", "1.2-3"
+            }
             cur = (cur * 10) + (ch - 48)
             have = 1
         }
         i = i + 1
+    }
+    // Two arcs minimum: the first two fold into one subidentifier, so a
+    // single-arc input has nothing to fold and encoded as an empty OID.
+    if arccount < 2 {
+        return null
     }
     return wrap_tlv(0x06, content)
 }

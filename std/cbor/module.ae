@@ -676,7 +676,7 @@ write_string(w: ptr, s: string, len: int) {
 }
 
 encode_header(w: ptr, major: int, val: long) {
-    writer = w as *Writer
+    _writer = w as *Writer
     base = major << 5
     if val < 24 {
         write_byte(w, base | (val as int))

@@ -194,6 +194,42 @@ If you run `ae build` from a subdirectory and there's no `aether.toml` in the cu
 
 ---
 
+## Integer semantics (`-fwrapv`)
+
+Aether's `int` is 32 bits and **wraps**: `2147483647 + 1` is `-2147483648`, and
+the compiler's constant folder says so out loud
+([W1003](language-reference.md#constant-expression-overflow-w1003)). The code
+generator emits it as a C `int`, and C leaves signed overflow *undefined* — so
+the flag that makes the two agree has to be on every command line that compiles
+generated C:
+
+| flag | what it buys | where |
+|---|---|---|
+| `-fwrapv` | signed overflow wraps in two's complement, as the language reference specifies | every compile of generated C: `ae run`, `ae build`, `--profile`, `--size`, `--coverage`, `ae build --target=<triple>`, the wasm/emcc backend, and `ae cflags` |
+
+Without it the guarantee held only up to `-O1`. At `-O2` GCC 15.2 folded
+
+```c
+g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF;
+```
+
+down to a three-value cycle — the mask proves `g_seed >= 0`, "a signed multiply
+does not overflow" then proves `g_seed <= 2^31 / 1103515245`, and value-range
+propagation finishes the job. `ae run` compiles at `-O0` and was unaffected, so
+the disagreement appeared only in shipped binaries.
+
+`ae cflags` emits `-fwrapv` too, ahead of the include flags, so a build system
+that compiles `aetherc` output itself gets the same language:
+
+```bash
+aetherc app.ae app.c
+gcc app.c $(ae cflags) -o app        # -fwrapv arrives with the -I flags
+```
+
+The hand-written runtime and compiler are built by the Makefile rather than
+through `ae`, and are deliberately left out: signed overflow in that C is a bug
+to fix, not an operation with a defined result.
+
 ## Binary Hardening
 
 `ae build` asks the C toolchain for the mitigations whose cost is a rounding

@@ -558,7 +558,7 @@ fn format_decimal_string(locale: string, decimal: string, options: FormatOptions
         return "", err
     }
 
-    decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing = get_locale_info(locale)
+    decimal_sep, group_sep, percent_spacing, _currency_prefix, currency_spacing = get_locale_info(locale)
 
     rounded_int, rounded_frac = round_and_pad_decimal(int_part, frac_part, options.min_fraction_digits, options.max_fraction_digits)
 
@@ -660,7 +660,7 @@ fn format_percent_string(locale: string, decimal: string, options: FormatOptions
         }
     }
 
-    decimal_sep, group_sep, percent_spacing, currency_prefix, currency_spacing = get_locale_info(locale)
+    decimal_sep, group_sep, percent_spacing, _currency_prefix, currency_spacing = get_locale_info(locale)
 
     rounded_int, rounded_frac = round_and_pad_decimal(curr_int, curr_frac, options.min_fraction_digits, options.max_fraction_digits)
 

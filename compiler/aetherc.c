@@ -48,6 +48,10 @@ static bool verbose_mode = false;
 static bool dump_ast_mode = false;
 static bool emit_c_mode = false;
 static const char* csrc_header_path = NULL;  // #996 --emit-header=<path>
+static const char* emit_deps_path = NULL;     // #1882 --emit-deps=<path>: write the
+                                              // resolver dependency manifest (files
+                                              // read + paths probed-and-absent) for
+                                              // the warm-cache key.
 static const char* csrc_catalog_path = NULL; // #996 --emit-catalog-json=<path>
 static bool check_only_mode = false;
 static bool preempt_mode = false;
@@ -1392,6 +1396,20 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     if (verbose_mode) printf("Module resolution successful\n");
 
+    /* #1882: write the dependency manifest for the warm-cache key. The entry
+     * file is read by aetherc directly (not through module_parse_file), so
+     * record it explicitly; every imported module and every probed-absent path
+     * was recorded during orchestration above. Emitting it here — before
+     * typecheck/codegen — means a build that later fails still leaves no
+     * manifest that could outlive a partial artifact (we only write the cached
+     * .c/.o after success; a stray manifest with no artifact is harmless, but
+     * keeping them paired is cleaner). */
+    if (emit_deps_path) {
+        module_dep_record_read(input_path);
+        if (module_dep_write(emit_deps_path) != 0 && verbose_mode)
+            fprintf(stderr, "warning: could not write --emit-deps to '%s'\n", emit_deps_path);
+    }
+
     /* #953: surface parse/annotation errors from IMPORTED modules. The
      * entry file's own parse errors are gated above (the aether_error_count
      * check after parse_program), but module_orchestrate parses every
@@ -2058,6 +2076,8 @@ void print_help(const char* program_name) {
     printf("  --verbose                        Show detailed compilation phases and timing\n");
     printf("  --emit-c                         Print generated C code to stdout\n");
     printf("  --emit-header [path]             Generate C header for embedding (default: auto)\n");
+    printf("  --emit-deps=<path>              Write the resolver dependency manifest (files read +\n");
+    printf("                                   paths probed-and-absent) for the build cache (#1882)\n");
     printf("  --emit=<exe|lib|both|csrc>       Output artifact (exe default; lib → .so/.dylib; csrc → portable .c + catalog .h + .catalog.json)\n");
     printf("  --emit=ast|inspect|effects       Analysis to stdout, no codegen: AST JSON / declaration\n");
     printf("                                   summary / derived per-function effect+purity JSON (#889)\n");
@@ -2169,6 +2189,14 @@ int main(int argc, char *argv[]) {
             // machine-readable JSON to this path (functions/closures/constants +
             // capability provenance) so binding generators can consume it.
             csrc_catalog_path = argv[arg_offset] + 20;
+            arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--emit-deps=", 12) == 0) {
+            // #1882: record the resolver's dependency manifest for this build
+            // (files parsed + paths probed-and-absent) and write it here after
+            // orchestration. Enable recording NOW so probes made during
+            // module_orchestrate() below are captured.
+            emit_deps_path = argv[arg_offset] + 12;
+            module_dep_recording_enable();
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--dump-ast") == 0) {
             dump_ast_mode = true;

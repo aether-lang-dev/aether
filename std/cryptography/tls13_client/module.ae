@@ -536,7 +536,7 @@ fn send_plaintext_handshake(sock: ptr, msg: ptr, msg_len: int) -> string {
 
 // Fill a std.bytes buffer of length n with CSPRNG bytes.
 fn rand_into(n: int) -> ptr {
-    s, sn, err = cryptography.random_bytes(n)
+    s, _sn, err = cryptography.random_bytes(n)
     b = bytes.new(n)
     if n > 0 { bytes.set(b, n - 1, 0) }
     if string.equals(err, "") == 1 {
@@ -687,7 +687,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
     x_pub, x_pub_len = keyshare_for_group(tls13_hs.GROUP_X25519, x25519_priv)
     p_pub, p_pub_len = keyshare_for_group(tls13_hs.GROUP_SECP256R1, p256_priv)
     pub = x_pub // primary keyshare (x25519); cleanup frees this
-    pub_len = x_pub_len
+    _pub_len = x_pub_len
     rnd = rand_into(32)
     sid = rand_into(32)
     ch = tls13_hs.client_hello_full(rnd, sid, 32, tls13_hs.GROUP_X25519, x_pub, x_pub_len, tls13_hs.GROUP_SECP256R1, p_pub, p_pub_len, host)
@@ -808,7 +808,7 @@ fn connect_full(host: string, port: int, x25519_priv: ptr, client_cert: ptr, cli
         return null, agerr
     }
     // Negotiate the record AEAD + key-schedule hash from the chosen suite.
-    rec_aead, rec_key_len, hash_algo, hash_len, suite_err = suite_params(parsed.cipher_suite)
+    _rec_aead, _rec_key_len, _hash_algo, _hash_len, suite_err = suite_params(parsed.cipher_suite)
     if string.equals(suite_err, "") != 1 {
         if parsed.key_share != null { bytes.free(parsed.key_share) }
         bytes.free(shared); bytes.free(sh); bytes.free(shrec)
@@ -975,7 +975,7 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
     th_before_finished = null
     th_through_cert = null
     server_verify_data = null
-    svd_len = 0
+    _svd_len = 0
     done = 0
     ferr = ""
     guard = 0
@@ -1004,7 +1004,7 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
 
     if string.equals(ferr, "") == 1 {
         th_before_finished, th_through_cert = add_flight_capture_prefinished(tr, fl, fllen, hash_algo)
-        server_verify_data, svd_len = extract_server_finished(fl, fllen)
+        server_verify_data, _svd_len = extract_server_finished(fl, fllen)
     }
 
     result = null
@@ -1022,7 +1022,14 @@ fn run_handshake_tail(sock: ptr, rio: ptr, tr: ptr, host: string,
             if string.equals(cafile, "") != 1 { store = cafile }
             anchors, tsErr = tls13_cert.trust_store_load(store)
             if anchors == null {
+                // Say WHY. trust_store_load reports the reason (missing file,
+                // unreadable, nothing parsed out of it) and that was dropped,
+                // leaving an operator with a bare "cannot load trust store"
+                // for every one of those causes (#1942).
                 auth_err = "cannot load trust store"
+                if string.equals(tsErr, "") != 1 {
+                    auth_err = "cannot load trust store: ${tsErr}"
+                }
             } else {
                 auth_err = authenticate_server(fl, fllen, th_through_cert, hash_len, host, anchors)
                 tls13_cert.free_anchors(anchors)
@@ -1853,7 +1860,7 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     result_err = ferr
     if string.equals(ferr, "") == 1 {
         th_before_finished, th_through_cert = add_flight_capture_prefinished(tr, fl, fllen, hash_algo)
-        server_verify_data, svd_len = extract_server_finished(fl, fllen)
+        server_verify_data, _svd_len = extract_server_finished(fl, fllen)
         // Verify server Finished (no cert auth on resume — the PSK binds identity).
         expected = finished_verify_data_algo(hs_server_secret(keys), th_before_finished, hash_len, hash_algo, hash_len)
         if bytes_equal(expected, server_verify_data, hash_len) != 1 {
@@ -2010,7 +2017,7 @@ fn extract_stapled_ocsp(body: ptr, body_len: int) -> (ptr, int) {
     ctx_len = bytes.get(body, 0) & 0xFF
     p = 1 + ctx_len
     if p + 3 > body_len { return null, 0 }
-    list_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
+    _list_len = ((bytes.get(body, p) & 0xFF) << 16) | ((bytes.get(body, p + 1) & 0xFF) << 8) | (bytes.get(body, p + 2) & 0xFF)
     p = p + 3
     // First CertificateEntry: cert_data<3>, then extensions<2>.
     if p + 3 > body_len { return null, 0 }
@@ -2166,7 +2173,7 @@ fn authenticate_server(fl: ptr, flen: int, th_thru_cert: ptr, th_len: int, host:
                             // Extract the EC point only if the SPKI is one; a
                             // non-EC (RSA) leaf leaves leaf_px null, which the
                             // RSA-PSS dispatch handles. Not an error here.
-                            px, py, coordw, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
+                            px, py, _coordw, sperr = split_ec_point(leaf.spki_key, leaf.spki_key_len)
                             if string.equals(sperr, "") == 1 {
                                 leaf_px = px
                                 leaf_py = py

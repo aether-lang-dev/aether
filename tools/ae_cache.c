@@ -178,6 +178,73 @@ static unsigned long long fnv64_file(const char* path) {
     return h;
 }
 
+/* #1882: the exact-dependency cache key.
+ *
+ * On a warm run we prefer a depfile aetherc wrote on the previous (cold) build
+ * — a manifest of every file it READ and every path it PROBED-AND-MISSED —
+ * over walking whole directory trees. Hashing the manifest gives exact
+ * invalidation with no duplicated resolver knowledge (Nic's chosen option 3).
+ *
+ * The depfile lives at a path derived from the ENTRY file's absolute path, so
+ * it's stable across content edits (the edit changes a `read` line's hash, not
+ * the manifest's location) and found before the content-key is known. */
+static void abspath_of(const char* p, char* out, size_t outsz) {
+    if (p && p[0] == '/') { snprintf(out, outsz, "%s", p); return; }
+    char cwd[1024];
+    if (getcwd(cwd, sizeof(cwd))) snprintf(out, outsz, "%s/%s", cwd, p ? p : "");
+    else snprintf(out, outsz, "%s", p ? p : "");
+}
+
+// The stable depfile path for an entry source, under the cache dir.
+void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
+    char abs[1024];
+    abspath_of(ae_file, abs, sizeof(abs));
+    init_cache_dir();
+    snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, fnv64_str(abs));
+}
+
+/* Fold a depfile's contents into `acc`. Returns 1 if a valid v1 manifest was
+ * read (so the caller uses this key and SKIPS the tree walk), 0 otherwise
+ * (missing/unreadable/wrong-version → caller falls back to the tree hash).
+ *
+ *   read <path>    → path string + its content hash (an edit busts the key)
+ *   absent <path>  → path string + a presence bit; the bit is 1 once the file
+ *                    EXISTS, so a module dropped in at a previously-missed
+ *                    probe flips the key and busts the cache (the shadowing
+ *                    case Nic flagged). */
+static int fold_depfile(const char* depfile, unsigned long long* acc) {
+    FILE* f = fopen(depfile, "r");
+    if (!f) return 0;
+    char line[2048];
+    if (!fgets(line, sizeof(line), f) || strncmp(line, "# aether-deps v1", 16) != 0) {
+        fclose(f);
+        return 0;   /* unknown/foreign format — do not trust it */
+    }
+    int any = 0;
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strlen(line);
+        while (n > 0 && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+        if (n == 0) continue;
+        char* sp = strchr(line, ' ');
+        if (!sp) continue;
+        *sp = '\0';
+        const char* kind = line;
+        const char* path = sp + 1;
+        *acc ^= fnv64_str(path);
+        if (strcmp(kind, "read") == 0) {
+            *acc = (*acc * 1099511628211ULL) ^ fnv64_file(path);
+            any = 1;
+        } else if (strcmp(kind, "absent") == 0) {
+            /* presence bit: 1 iff the once-missing path now exists */
+            unsigned long long present = (access(path, F_OK) == 0) ? 0x9E3779B1ULL : 0ULL;
+            *acc = (*acc * 1099511628211ULL) ^ present;
+            any = 1;
+        }
+    }
+    fclose(f);
+    return any;
+}
+
 // Compute a cache key from: source content + compiler mtime + lib mtime +
 // every --extra C file's content + optimisation level + arbitrary salt.
 // Returns 0 if the source can't be read (caching disabled for this build).
@@ -333,6 +400,25 @@ unsigned long long compute_cache_key(const char* ae_file,
         }
     }
 
+    /* #1882: exact dependencies from a prior build's depfile, in preference to
+     * hashing whole directory trees. When aetherc last built this entry it
+     * wrote sysroot-of-imports manifest (files read + paths probed-and-absent);
+     * folding it in gives precise invalidation and skips the conservative tree
+     * walk below. On the FIRST build (no depfile yet) fold_depfile returns 0 and
+     * we fall through to the tree hash — which is also what aetherc's own
+     * --emit-deps run keys on, so the cold key and the tree-walk key agree. */
+    int used_depfile = 0;
+    {
+        char depfile[1200];
+        cache_depfile_path(ae_file, depfile, sizeof(depfile));
+        unsigned long long dep_acc = 1469598103934665603ULL;
+        if (fold_depfile(depfile, &dep_acc)) {
+            pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":deps=%016llx", dep_acc);
+            used_depfile = 1;
+        }
+    }
+
+    if (!used_depfile) {
     /* #1421: the entry file's OWN directory tree.
      *
      * The key hashed the entry file's content and the lib dirs, but a
@@ -416,6 +502,8 @@ unsigned long long compute_cache_key(const char* ae_file,
             }
         }
     }
+    }   /* end if (!used_depfile) — the entry-dir + cwd tree walk the depfile
+         * replaces. The --lib identity below always runs. */
 
     /* Issue #413: include the --lib search path in the cache key.
      * Two builds of the same source with different lib paths must
@@ -444,8 +532,10 @@ unsigned long long compute_cache_key(const char* ae_file,
          * src/main.ae + lib/<name>/module.ae package layout. Without this walk
          * the key ignored that dir entirely, so editing a module under the
          * default lib/ served a stale binary until `ae cache clear`. Walk it
-         * exactly as an explicit lib dir; no contribution when it's absent. */
-        {
+         * exactly as an explicit lib dir; no contribution when it's absent.
+         * Content walk only when no depfile — the depfile records the lib files
+         * actually read. */
+        if (!used_depfile) {
             unsigned long long entry_hash = 0;
             int n = 0;
             hash_lib_dir_entries(AETHER_DEFAULT_LIB_DIR, "", &entry_hash, &n, 0);
@@ -456,6 +546,13 @@ unsigned long long compute_cache_key(const char* ae_file,
         }
     }
     for (int i = 0; i < tc.lib_dir_count; i++) {
+        /* The lib-dir PATH IDENTITY (paths + order) is always part of the key,
+         * depfile or not: two builds with different --lib sets or a different
+         * --override (overrides join as lib dirs) are materially different even
+         * when the resolved files hash the same, and the depfile is keyed only
+         * on the entry source, so it cannot carry this distinction. Dropping it
+         * on the depfile path let an `--override` build reuse the
+         * non-overridden slot (#1882 depfile regression). */
         pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
                         ":lib[%d]=%s", i, tc.lib_dirs[i]);
         struct stat lst;
@@ -463,10 +560,11 @@ unsigned long long compute_cache_key(const char* ae_file,
             pos += snprintf(key_buf + pos, sizeof(key_buf) - pos,
                             ":lmt=%lld", (long long)lst.st_mtime);
         }
-        /* Recurse the whole lib-dir tree — modules live in subdirectories
-         * (#623 follow-up: a top-level-only walk missed every std/contrib
-         * module in a subdir, so editing one served a stale cached binary). */
-        {
+        /* The CONTENT walk is what the depfile replaces (it records the lib
+         * files actually read). Recurse the whole lib-dir tree only when there
+         * is no depfile — modules live in subdirectories (#623 follow-up: a
+         * top-level-only walk missed every std/contrib module in a subdir). */
+        if (!used_depfile) {
             unsigned long long entry_hash = 0;
             int n = 0;
             hash_lib_dir_entries(tc.lib_dirs[i], "", &entry_hash, &n, 0);

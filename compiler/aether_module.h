@@ -125,6 +125,26 @@ int module_orchestrate(ASTNode* program);
 // Parse a single module file into an AST. Saves/restores lexer state.
 ASTNode* module_parse_file(const char* file_path);
 
+// --- Dependency recording (issue #1882, depfile cache key) --------------------
+// The resolver records every path it PROBES (whether the file was there or not)
+// and every file it PARSES, so `aetherc --emit-deps` can write an exact
+// invalidation manifest. The cache key on a warm run hashes that manifest
+// instead of walking whole directory trees. Recording the MISSES matters: a
+// module dropped in at a path an earlier resolver `Try` probed-and-missed
+// shadows the one that resolved, and only a recorded miss makes that
+// insertion bust the cache (Nic's requirement — see
+// docs/notes/import-closure-cache-key.md).
+//
+// Off by default; module_dep_recording_enable() turns it on for a build that
+// asked for --emit-deps. module_probe() is the wrapper the resolver's access()
+// checks go through: it records `path` (found or not) and returns 1 if present.
+void module_dep_recording_enable(void);
+int  module_probe(const char* path);            // access(F_OK)==0, and record
+void module_dep_record_read(const char* path);  // a file whose CONTENTS matter
+// Write the manifest: two sections, "read <path>" (content-hashed on reuse) and
+// "absent <path>" (a newly-present file busts the cache). Returns 0 on success.
+int  module_dep_write(const char* out_path);
+
 // Resolve module name to file path. Returns malloc'd path or NULL. Caller frees.
 char* module_resolve_stdlib_path(const char* module_name);  // "fs" -> path
 char* module_resolve_contrib_path(const char* module_name); // "sqlite" -> path

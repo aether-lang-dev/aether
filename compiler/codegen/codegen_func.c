@@ -1444,6 +1444,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             // message fields/etc. Conservative — alias-safe at the
             // cost of leaking the value over the function's lifetime.
             mark_escaped_heap_string_vars(gen, body);
+            mark_escaped_capture_boxes(gen, body);
             mark_escaped_seq_vars(gen, body);
             mark_escaped_opt_str_vars(gen, body);
             // Push a function-exit defer-free for every non-escaped

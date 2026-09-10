@@ -22,13 +22,15 @@ if ! "$TMPDIR/probe" >"$TMPDIR/run.log" 2>&1; then
     exit 1
 fi
 
+# No skip branch. The streaming API used to be OpenSSL-only, so a build
+# without libcrypto could only report "skipped" and this test passed by not
+# running. It now falls back to the pure-Aether streaming contexts, so every
+# case is expected to pass on every platform -- and a skip that is still
+# accepted is a green tick for a fallback nobody exercised.
 if grep -q "All streaming digest tests passed" "$TMPDIR/run.log"; then
     echo "  [PASS] cryptography_digest_stream: 6 cases"
-elif grep -q "streaming digest tests skipped" "$TMPDIR/run.log"; then
-    reason=$(grep '^SKIP cryptography_digest_stream:' "$TMPDIR/run.log" | head -1)
-    echo "  [PASS] cryptography_digest_stream: ${reason:-skipped (no OpenSSL backend)}"
 else
-    echo "  [FAIL] cryptography_digest_stream: didn't reach final PASS or SKIP line"
+    echo "  [FAIL] cryptography_digest_stream: didn't reach the final PASS line"
     sed 's/^/    /' "$TMPDIR/run.log" | head -30
     exit 1
 fi

@@ -1,0 +1,117 @@
+// Regression: an `int` expression that overflows must wrap at runtime (#1957).
+//
+// The code generator emits Aether `int` as C `int`, and signed overflow is
+// undefined in C. Nothing on the compile line said otherwise, so GCC 15.2 at
+// -O2 was free to reason about this generator:
+//
+//     g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+//
+// From the mask it knows g_seed is non-negative; from "a signed multiply does
+// not overflow" it derives g_seed <= 2^31 / 1103515245, i.e. 0 or 1 -- and
+// folds the generator down to a three-value cycle. `ae run` was unaffected
+// (-O0), so only shipped builds were wrong.
+//
+// docs/language-reference.md (W1003) already promises the opposite: the
+// constant folder "wraps exactly as the runtime would", precisely so that the
+// literal form and the same expression over variables cannot disagree. The fix
+// is -fwrapv on every command line that compiles generated C.
+//
+// Found through ae3d's black_hole example, where every one of 200,000 particles
+// was seeded from the collapsed generator and landed on the same pixel: a black
+// window on Windows, correct on macOS, because Apple Clang happens not to make
+// the same deduction. The bug was never platform-specific -- only the
+// optimiser's choice was.
+//
+// The shape below is the one that collapsed: a helper drawing three numbers,
+// called from a long loop, each draw consumed as a double. A single call to
+// next_random() in main() is NOT enough to reproduce it.
+
+extern exit(code: int)
+
+const ROUNDS = 100000
+
+var g_seed = 987654321
+var g_x = 0.0
+var g_y = 0.0
+var g_z = 0.0
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+expect(got: int, want: int, label: string) {
+    if got != want {
+        fail("${label}: got ${got}, want ${want}")
+    }
+}
+
+next_random() -> int {
+    g_seed = (g_seed * 1103515245 + 12345) & 0x7FFFFFFF
+    return g_seed
+}
+
+scaled() -> float {
+    return (next_random() * 1.0) / 2147483647.0
+}
+
+draw_triple() {
+    g_x = 140.0 + scaled() * 620.0
+    g_y = scaled() * 6.283185307179586
+    g_z = (scaled() - 0.5) * 90.0
+}
+
+main() {
+    // The first eight draws, as two's-complement wrapping produces them. Every
+    // one of these overflows the 32-bit multiply.
+    expect(next_random(), 1048490390, "draw 1")
+    expect(next_random(), 638681367, "draw 2")
+    expect(next_random(), 965945604, "draw 3")
+    expect(next_random(), 390061805, "draw 4")
+    expect(next_random(), 1953255714, "draw 5")
+    expect(next_random(), 1965234099, "draw 6")
+    expect(next_random(), 1486606704, "draw 7")
+    expect(next_random(), 550010089, "draw 8")
+    println("PASS 1: the first eight draws wrap as documented")
+
+    // The same generator driven the way the miscompile needed: 300,000 draws
+    // through a three-call helper in a loop. Under the collapsed generator the
+    // third component of every triple was the bare `+ 12345` term, so g_z was
+    // (12345 / 2^31 - 0.5) * 90 = -44.9995 on the first iteration and on the
+    // last. Pinning the seed after the loop catches any drift, not just that
+    // one shape.
+    g_seed = 987654321
+    first_z = 0.0
+    i = 0
+    while i < ROUNDS {
+        draw_triple()
+        if i == 0 { first_z = g_z }
+        i = i + 1
+    }
+    expect(g_seed, 1758132689, "seed after ${ROUNDS} triples")
+    println("PASS 2: 300,000 draws through a helper leave the documented seed")
+
+    if g_z == first_z {
+        fail("the last triple repeats the first: the generator has collapsed")
+    }
+    if first_z < 0.0 - 5.0 {
+        fail("first triple's third draw is ${first_z}, the collapsed value")
+    }
+    println("PASS 3: the triples differ, so the generator did not cycle")
+
+    // A wrap that is not a multiply, and one that is negative.
+    a = 2147483647
+    a = a + 1
+    expect(a, 0 - 2147483648, "INT_MAX + 1 wraps to INT_MIN")
+
+    b = 0 - 2147483648
+    b = b - 1
+    expect(b, 2147483647, "INT_MIN - 1 wraps to INT_MAX")
+
+    c = 65536
+    c = c * 65536
+    expect(c, 0, "65536 * 65536 wraps to 0")
+    println("PASS 4: add, subtract and multiply all wrap")
+
+    println("=== All cases passed ===")
+}

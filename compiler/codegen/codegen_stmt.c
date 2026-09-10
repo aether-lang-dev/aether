@@ -697,8 +697,8 @@ static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def)
 // (K < 200) this is well under a millisecond. If the count grows,
 // promote to a hash via gen->fn_def_lookup; the static here is the
 // O(1)-amortised refactor seam.
-static ASTNode* find_function_definition_by_name(ASTNode* program,
-                                                 const char* name) {
+ASTNode* find_function_definition_by_name(ASTNode* program,
+                                          const char* name) {
     if (!program || !name) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
@@ -3136,6 +3136,192 @@ void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body) {
     escape_walk(gen, body, NULL);
 }
 
+/* Emit a builder block's body as its own C scope.
+ *
+ * CRITICAL: the `{ ... }` braces must be matched by a defer scope. Cleanup
+ * queued inside the block (a heap string, a closure-capture cell) names a C
+ * variable declared between those braces; emitting it at the enclosing
+ * function's exit instead puts the free where the name is out of scope, and
+ * the generated C does not compile. */
+static void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
+    if (!gen || !body) return;
+    int saved_var_count = gen->declared_var_count;
+    print_indent(gen);
+    fprintf(gen->output, "{\n");
+    gen->indent_level++;
+    enter_scope(gen);
+    gen->in_trailing_block++;
+    for (int si = 0; si < body->child_count; si++) {
+        generate_statement(gen, body->children[si]);
+    }
+    gen->in_trailing_block--;
+    exit_scope(gen);
+    gen->indent_level--;
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    truncate_declared_vars(gen, saved_var_count);
+}
+
+/* The one closure-argument shape codegen can prove is dead after the call:
+ * a non-trailing closure passed to a parameter that provably neither stores
+ * nor returns it. Returns that closure node, or NULL when no such proof
+ * exists. Two callers depend on the same verdict: the env-drain that frees
+ * the closure's heap env after the call, and the capture-box escape walk
+ * that frees the cells that env points at.
+ *
+ * Transient capturing-closure argument: a closure passed to a parameter that
+ * neither stores nor returns it (callback pattern, run(cb){ cb() }) is dead
+ * after the call, so its heap env must be freed or it leaks. Find the first
+ * non-trailing closure arg (trailing blocks are inlined at the call site, not
+ * passed by value) and check whether its parameter provably does not escape.
+ *
+ * Soundness gate (closure-env-freed-when-passed-to-extern): the drain is only
+ * safe with *proof* the callee neither stores nor returns the closure. The
+ * `callee_param_escapes_via_body` walk requires a visible body to be
+ * authoritative; for an extern callee the walk silently defaults to "does not
+ * escape", which is exactly wrong for the common extern-callback-registry
+ * pattern (the C side keeps the boxed closure and invokes it later). Treat
+ * unknown-body callees as escaping, the fail-safe direction (leak >> UAF).
+ * When the future `@retains` annotation lands, opt-in non-escaping externs
+ * can re-enable the drain. */
+ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
+    if (!gen || !call || call->type != AST_FUNCTION_CALL || !call->value) return NULL;
+
+    ASTNode* cclos = NULL; int cclos_idx = -1;
+    for (int ai = 0; ai < call->child_count; ai++) {
+        ASTNode* a = call->children[ai];
+        if (a && a->type == AST_CLOSURE &&
+            !(a->value && strcmp(a->value, "trailing") == 0)) {
+            cclos = a; cclos_idx = ai; break;
+        }
+    }
+    if (!cclos || cclos_idx < 0) return NULL;
+
+    /* Map AST arg index -> function-def param index. When the callee is a
+     * `_ctx: ptr` builder and the user omitted `_ctx`, codegen auto-injects
+     * `_aether_ctx_get()` at position 0; the AST args are then shifted left by
+     * one relative to the callee's declared params. Without this shift the
+     * escape walk checks the wrong param (e.g. the label, which provably does
+     * not escape) and the drain fires under a false-non-escape verdict -> UAF.
+     *
+     * Look the callee up by its normalised (dot->underscore) name, which is how
+     * cross-module functions land in the merged program AST. Without
+     * normalisation an imported `aether_ui.btn` call site looks up
+     * "aether_ui.btn" but the merged AST has node value "aether_ui_btn", the
+     * lookup misses, the `_ctx`-injection shift is skipped, and the escape walk
+     * checks the wrong param (label, read-only -> false non-escape -> UAF). */
+    int param_idx = cclos_idx;
+    char fn_norm[256];
+    const char* fn = codegen_normalise_callee(call->value, fn_norm, sizeof(fn_norm));
+    ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
+    if (fdef) {
+        int declared_params = 0;
+        for (int pi = 0; pi < fdef->child_count; pi++) {
+            ASTNode* p = fdef->children[pi];
+            if (!p) continue;
+            if (p->type == AST_GUARD_CLAUSE) continue;
+            if (p->type == AST_BLOCK) continue;
+            declared_params++;
+        }
+        int user_args = 0;
+        for (int ai = 0; ai < call->child_count; ai++) {
+            ASTNode* a = call->children[ai];
+            if (a && a->type == AST_CLOSURE && a->value &&
+                strcmp(a->value, "trailing") == 0) continue;
+            user_args++;
+        }
+        if (user_args == declared_params - 1 && declared_params > 0) {
+            ASTNode* p0 = fdef->children[0];
+            if (p0 && p0->value && strcmp(p0->value, "_ctx") == 0) {
+                param_idx = cclos_idx + 1;
+            }
+        }
+    }
+
+    if (callee_has_visible_body(gen, call->value) &&
+        callee_param_escapes_via_body(gen, call->value, param_idx, 0) == 0) {
+        return cclos;
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------
+ * Closure-capture box lifetime
+ *
+ * A variable a closure mutates is promoted to a heap cell (`T* n =
+ * malloc(...)`) that the closure's env points at. The cell is therefore
+ * shared, and freeing it when its declaring scope ends is only sound if
+ * no capturing closure outlives that scope.
+ *
+ * Exactly one shape carries that proof, and codegen already computes it:
+ * the transient callback the env-drain fires on (see
+ * emit_closure_env_drained_call) — a bare expression statement whose
+ * closure parameter provably neither stores nor returns it. The env is
+ * freed on the next line, so the cell it points at can go with the scope.
+ *
+ * Every other closure (handed to a widget, a timer, a callee with no
+ * visible body) is still reachable after the statement, so its cell must
+ * outlive the scope and the scope-exit free is suppressed.
+ *
+ * CRITICAL: the fail-safe direction is "escapes". Marking a transient box
+ * as escaping leaks one cell; missing a real escape frees a cell a live
+ * callback still writes through. Both the capture test and the walk
+ * over-approximate on purpose.
+ * ------------------------------------------------------------------ */
+
+/* Conservative capture test: any mention of the name anywhere under the
+ * closure counts, including in a nested closure. */
+static int subtree_mentions_name(ASTNode* node, const char* name) {
+    if (!node || !name) return 0;
+    if (node->value && strcmp(node->value, name) == 0) return 1;
+    for (int i = 0; i < node->child_count; i++) {
+        if (subtree_mentions_name(node->children[i], name)) return 1;
+    }
+    return 0;
+}
+
+static void mark_boxes_captured_by(CodeGenerator* gen, ASTNode* closure) {
+    for (int i = 0; i < gen->current_promoted_capture_count; i++) {
+        const char* nm = gen->current_promoted_captures[i];
+        if (nm && subtree_mentions_name(closure, nm)) {
+            mark_escaped_capture_box(gen, nm);
+        }
+    }
+}
+
+static void capture_box_escape_walk(CodeGenerator* gen, ASTNode* node,
+                                    ASTNode* transient) {
+    if (!node) return;
+
+    ASTNode* t = transient;
+    if (node->type == AST_EXPRESSION_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type == AST_FUNCTION_CALL) {
+        ASTNode* c = transient_closure_arg(gen, node->children[0]);
+        if (c) t = c;
+    }
+
+    /* A trailing block is inlined into the enclosing scope, not lowered to a
+     * closure with an env, so it captures nothing and outlives nothing. Only
+     * a real closure argument keeps a cell alive past the statement. */
+    int is_trailing_block = (node->value && strcmp(node->value, "trailing") == 0);
+    if (node->type == AST_CLOSURE && node != t && !is_trailing_block) {
+        mark_boxes_captured_by(gen, node);
+    }
+
+    for (int i = 0; i < node->child_count; i++) {
+        capture_box_escape_walk(gen, node->children[i], t);
+    }
+}
+
+/* Additive, like mark_escaped_heap_string_vars: a closure body runs this
+ * again, nested inside the enclosing function's own generation, and must add
+ * to that function's verdicts rather than replace them. clear_declared_vars
+ * resets the set per function. */
+void mark_escaped_capture_boxes(CodeGenerator* gen, ASTNode* body) {
+    if (!gen || !body) return;
+    capture_box_escape_walk(gen, body, NULL);
+}
+
 /* Push function-exit defer-free statements for every hoisted
  * heap-string variable that's not escaped (issue #420 follow-up).
  *
@@ -4770,7 +4956,13 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         }
                         fprintf(gen->output, ";\n");
                         mark_var_declared(gen, stmt->value);
-                        // Defer free(name) at scope exit.
+                        /* Defer free(name) at scope exit -- but only when no
+                         * closure capturing this cell outlives the scope. See
+                         * mark_escaped_capture_boxes: a stored callback still
+                         * writes through the cell after the scope ends, so
+                         * freeing it there dangles. Leaking one cell is the
+                         * fail-safe direction. */
+                        if (is_escaped_capture_box(gen, stmt->value)) break;
                         ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, "free",
                             stmt->line, stmt->column);
                         ASTNode* arg = create_ast_node(AST_IDENTIFIER, stmt->value,
@@ -5213,18 +5405,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                                     get_builder_factory(gen, reinit_call->value));
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                            print_indent(gen);
-                                            fprintf(gen->output, "{\n");
-                                            gen->indent_level++;
-                                            gen->in_trailing_block++;
-                                            ASTNode* body = trailing->children[bi];
-                                            for (int si = 0; si < body->child_count; si++) {
-                                                generate_statement(gen, body->children[si]);
-                                            }
-                                            gen->in_trailing_block--;
-                                            gen->indent_level--;
-                                            print_indent(gen);
-                                            fprintf(gen->output, "}\n");
+                                            emit_trailing_block_body(gen, trailing->children[bi]);
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_pop();\n");
                                             print_indent(gen);
@@ -5264,18 +5445,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
                                                     safe_c_name(stmt->value));
-                                            print_indent(gen);
-                                            fprintf(gen->output, "{\n");
-                                            gen->indent_level++;
-                                            gen->in_trailing_block++;
-                                            ASTNode* body = trailing->children[bi];
-                                            for (int si = 0; si < body->child_count; si++) {
-                                                generate_statement(gen, body->children[si]);
-                                            }
-                                            gen->in_trailing_block--;
-                                            gen->indent_level--;
-                                            print_indent(gen);
-                                            fprintf(gen->output, "}\n");
+                                            emit_trailing_block_body(gen, trailing->children[bi]);
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_pop();\n");
                                             break;
@@ -5657,18 +5827,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
                                             // Run trailing block
-                                            print_indent(gen);
-                                            fprintf(gen->output, "{\n");
-                                            gen->indent_level++;
-                                            gen->in_trailing_block++;
-                                            ASTNode* body = trailing->children[bi];
-                                            for (int si = 0; si < body->child_count; si++) {
-                                                generate_statement(gen, body->children[si]);
-                                            }
-                                            gen->in_trailing_block--;
-                                            gen->indent_level--;
-                                            print_indent(gen);
-                                            fprintf(gen->output, "}\n");
+                                            emit_trailing_block_body(gen, trailing->children[bi]);
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_pop();\n");
                                             // Reassign variable with defer config
@@ -5714,18 +5873,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_push((void*)(intptr_t)%s);\n",
                                                     safe_c_name(stmt->value));
-                                            print_indent(gen);
-                                            fprintf(gen->output, "{\n");
-                                            gen->indent_level++;
-                                            gen->in_trailing_block++;
-                                            ASTNode* body = trailing->children[bi];
-                                            for (int si = 0; si < body->child_count; si++) {
-                                                generate_statement(gen, body->children[si]);
-                                            }
-                                            gen->in_trailing_block--;
-                                            gen->indent_level--;
-                                            print_indent(gen);
-                                            fprintf(gen->output, "}\n");
+                                            emit_trailing_block_body(gen, trailing->children[bi]);
                                             print_indent(gen);
                                             fprintf(gen->output, "_aether_ctx_pop();\n");
                                             break;
@@ -5871,18 +6019,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                                 get_builder_factory(gen, rhs->value));
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_push(_bcfg);\n");
-                                        print_indent(gen);
-                                        fprintf(gen->output, "{\n");
-                                        gen->indent_level++;
-                                        gen->in_trailing_block++;
-                                        ASTNode* body = trailing->children[bi];
-                                        for (int si = 0; si < body->child_count; si++) {
-                                            generate_statement(gen, body->children[si]);
-                                        }
-                                        gen->in_trailing_block--;
-                                        gen->indent_level--;
-                                        print_indent(gen);
-                                        fprintf(gen->output, "}\n");
+                                        emit_trailing_block_body(gen, trailing->children[bi]);
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_pop();\n");
                                         // Reassign with config
@@ -5934,18 +6071,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                         generate_expression(gen, lhs);
                                         gen->generating_lvalue = 0;
                                         fprintf(gen->output, ");\n");
-                                        print_indent(gen);
-                                        fprintf(gen->output, "{\n");
-                                        gen->indent_level++;
-                                        gen->in_trailing_block++;
-                                        ASTNode* body = trailing->children[bi];
-                                        for (int si = 0; si < body->child_count; si++) {
-                                            generate_statement(gen, body->children[si]);
-                                        }
-                                        gen->in_trailing_block--;
-                                        gen->indent_level--;
-                                        print_indent(gen);
-                                        fprintf(gen->output, "}\n");
+                                        emit_trailing_block_body(gen, trailing->children[bi]);
                                         print_indent(gen);
                                         fprintf(gen->output, "_aether_ctx_pop();\n");
                                         break;
@@ -7245,18 +7371,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                             for (int bi = 0; bi < trailing->child_count; bi++) {
                                 if (trailing->children[bi] &&
                                     trailing->children[bi]->type == AST_BLOCK) {
-                                    print_indent(gen);
-                                    fprintf(gen->output, "{\n");
-                                    gen->indent_level++;
-                                    gen->in_trailing_block++;
-                                    ASTNode* body = trailing->children[bi];
-                                    for (int si = 0; si < body->child_count; si++) {
-                                        generate_statement(gen, body->children[si]);
-                                    }
-                                    gen->in_trailing_block--;
-                                    gen->indent_level--;
-                                    print_indent(gen);
-                                    fprintf(gen->output, "}\n");
+                                    emit_trailing_block_body(gen, trailing->children[bi]);
                                     break;
                                 }
                             }
@@ -7371,65 +7486,8 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                      * escaping — fail-safe direction (leak ≫ UAF). When
                      * the future `@retains` annotation lands, opt-in
                      * non-escaping externs can re-enable the drain. */
-                    ASTNode* cclos = NULL; int cclos_idx = -1;
-                    if (inner && inner->type == AST_FUNCTION_CALL && inner->value) {
-                        for (int ai = 0; ai < inner->child_count; ai++) {
-                            ASTNode* a = inner->children[ai];
-                            if (a && a->type == AST_CLOSURE &&
-                                !(a->value && strcmp(a->value, "trailing") == 0)) {
-                                cclos = a; cclos_idx = ai; break;
-                            }
-                        }
-                    }
-                    /* Map AST arg index → function-def param index. When the
-                     * callee is a `_ctx: ptr` builder and the user omitted
-                     * `_ctx`, codegen auto-injects `_aether_ctx_get()` at
-                     * position 0; the AST args are then shifted left by one
-                     * relative to the callee's declared params. Without this
-                     * shift the escape walk checks the wrong param (e.g. the
-                     * label, which provably doesn't escape) and the drain
-                     * fires under a false-non-escape verdict → UAF. */
-                    int param_idx = cclos_idx;
-                    if (cclos && cclos_idx >= 0 && inner && inner->value) {
-                        /* Look up the callee by its normalised (dot→underscore)
-                         * name — that's how cross-module functions land in the
-                         * merged program AST. Without normalisation an imported
-                         * `aether_ui.btn` call site looks up "aether_ui.btn"
-                         * but the merged AST has node value "aether_ui_btn",
-                         * the lookup misses, the `_ctx`-injection shift is
-                         * skipped, and the escape walk checks the wrong param
-                         * (label, read-only → false non-escape → UAF). */
-                        char fn_norm[256];
-                        const char* fn = codegen_normalise_callee(inner->value, fn_norm, sizeof(fn_norm));
-                        ASTNode* fdef = find_function_definition_by_name(gen->program, fn);
-                        if (fdef) {
-                            int declared_params = 0;
-                            for (int pi = 0; pi < fdef->child_count; pi++) {
-                                ASTNode* p = fdef->children[pi];
-                                if (!p) continue;
-                                if (p->type == AST_GUARD_CLAUSE) continue;
-                                if (p->type == AST_BLOCK) continue;
-                                declared_params++;
-                            }
-                            int user_args = 0;
-                            for (int ai = 0; ai < inner->child_count; ai++) {
-                                ASTNode* a = inner->children[ai];
-                                if (a && a->type == AST_CLOSURE && a->value &&
-                                    strcmp(a->value, "trailing") == 0) continue;
-                                user_args++;
-                            }
-                            if (user_args == declared_params - 1 && declared_params > 0) {
-                                ASTNode* p0 = fdef->children[0];
-                                if (p0 && p0->value && strcmp(p0->value, "_ctx") == 0) {
-                                    param_idx = cclos_idx + 1;
-                                }
-                            }
-                        }
-                    }
-                    if (cclos && cclos_idx >= 0 &&
-                        callee_has_visible_body(gen, inner->value) &&
-                        callee_param_escapes_via_body(gen, inner->value,
-                                                      param_idx, 0) == 0) {
+                    ASTNode* cclos = transient_closure_arg(gen, inner);
+                    if (cclos) {
                         emit_closure_env_drained_call(gen, inner, cclos);
                         fprintf(gen->output, "\n");
                     } else {
@@ -7493,18 +7551,7 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                             for (int bi = 0; bi < trailing->child_count; bi++) {
                                 if (trailing->children[bi] &&
                                     trailing->children[bi]->type == AST_BLOCK) {
-                                    print_indent(gen);
-                                    fprintf(gen->output, "{\n");
-                                    gen->indent_level++;
-                                    gen->in_trailing_block++;
-                                    ASTNode* body = trailing->children[bi];
-                                    for (int si = 0; si < body->child_count; si++) {
-                                        generate_statement(gen, body->children[si]);
-                                    }
-                                    gen->in_trailing_block--;
-                                    gen->indent_level--;
-                                    print_indent(gen);
-                                    fprintf(gen->output, "}\n");
+                                    emit_trailing_block_body(gen, trailing->children[bi]);
 
                                     // Pop the builder context
                                     if (has_trailing) {

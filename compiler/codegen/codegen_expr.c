@@ -2050,6 +2050,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             enter_scope(gen);
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
+            mark_escaped_capture_boxes(gen, body);
             push_heap_string_exit_free_defers(gen, body);
             for (int i = 0; i < body->child_count; i++) {
                 generate_statement(gen, body->children[i]);
@@ -3884,7 +3885,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
-                else if (strcmp(func_name, "atoi") == 0 && expr->child_count == 1) {
+                /* #1993: the builtin only claims this name while the program
+                   has not defined one of its own. `atoi` is an ordinary
+                   identifier, and a program that defines it had the definition
+                   emitted (mangled, since atoi is a reserved libc name) while
+                   every CALL still went to the builtin, so the function was
+                   dead code and the call carried libc's signature. A program's
+                   own function wins, which is the same rule #1967 settled for
+                   types. */
+                else if (strcmp(func_name, "atoi") == 0 && expr->child_count == 1 &&
+                         !find_function_definition_by_name(gen->program, "atoi")) {
                     fprintf(gen->output, "atoi(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");

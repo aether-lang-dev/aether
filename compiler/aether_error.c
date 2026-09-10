@@ -100,6 +100,42 @@ void aether_error_set_source(const char* filename, const char* source) {
     current_source = source;
 }
 
+
+/* The snippet source for a diagnostic, and NEVER another file's.
+ *
+ * #1946: the fallback buffer belongs to whichever file is being compiled, so
+ * using it for a diagnostic that names a different file renders line N of the
+ * wrong source. A warning from an imported module printed the importing file's
+ * line N underneath it, and when N was past that file's end it printed nothing
+ * at all: asn1/module.ae:613 was shown as a 175-line test file's line 613.
+ *
+ * So the buffer is used only when the diagnostic names the file it belongs to,
+ * and otherwise the one line is read from the file itself. A module's buffer is
+ * freed after its parse, which is exactly the case that needs the read. The
+ * caller frees a non-NULL *owned. */
+static const char* snippet_source_for(const char* file, const char* explicit_src,
+                                      char** owned) {
+    *owned = NULL;
+    if (explicit_src) return explicit_src;
+    if (!file) return NULL;
+    if (current_source && current_filename && strcmp(file, current_filename) == 0)
+        return current_source;
+
+    FILE* f = fopen(file, "rb");
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    long n = ftell(f);
+    if (n < 0 || n > (16L * 1024 * 1024)) { fclose(f); return NULL; }
+    rewind(f);
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { fclose(f); return NULL; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = '\0';
+    *owned = buf;
+    return buf;
+}
+
 // Get a specific line from source code
 static const char* get_line(const char* source, int line_num, int* line_length) {
     if (!source) return NULL;
@@ -138,7 +174,8 @@ void aether_error_report(AetherError* error) {
      * compiles hundreds of modules. Fall back to the active source context,
      * which is exactly the file being compiled when the diagnostic fires. */
     const char* e_file = error->filename ? error->filename : current_filename;
-    const char* e_src  = error->source_code ? error->source_code : current_source;
+    char* e_owned = NULL;
+    const char* e_src = snippet_source_for(e_file, error->source_code, &e_owned);
     
     // Print error header with code
     if (error->code != AETHER_ERR_NONE) {
@@ -213,6 +250,7 @@ void aether_error_report(AetherError* error) {
     }
     
     fprintf(stderr, "\n");
+    free(e_owned);
 }
 
 void aether_warning_report(AetherError* warning) {
@@ -223,7 +261,8 @@ void aether_warning_report(AetherError* warning) {
     /* Same fallback as aether_error_report: a warning that knows its line but
      * not its file still names the file being compiled. */
     const char* w_file = warning->filename ? warning->filename : current_filename;
-    const char* w_src  = warning->source_code ? warning->source_code : current_source;
+    char* w_owned = NULL;
+    const char* w_src = snippet_source_for(w_file, warning->source_code, &w_owned);
     
     // Print warning header (yellow instead of red)
     if (warning->code >= 1000) {
@@ -281,6 +320,7 @@ void aether_warning_report(AetherError* warning) {
     }
     
     fprintf(stderr, "\n");
+    free(w_owned);
 }
 
 // Helper functions

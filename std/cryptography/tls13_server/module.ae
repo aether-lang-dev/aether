@@ -513,7 +513,7 @@ parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
         if e < 0 { break }
         block_end = e + mlen
         block = string.substring_n(pem_text, tlen, pos, block_end)
-        der, label, perr = pem.parse(block)
+        der, _label, perr = pem.parse(block)
         if string.equals(perr, "") == 1 && der != null {
             list_add_raw(chain, der)
             list_add_raw(lens, null)

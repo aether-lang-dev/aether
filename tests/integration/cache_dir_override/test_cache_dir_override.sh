@@ -68,5 +68,51 @@ case "$out3" in
        echo "$out3" | sed 's/^/        /'; exit 1 ;;
 esac
 
-echo "  [PASS] AETHER_CACHE_DIR overrides the cache location (incl. read-only \$HOME)"
+# 4. `ae cache` must mean the SAME directory `ae build` writes to. It composed
+#    "$HOME/.aether/cache" by hand and so ignored the override: it reported on
+#    a directory the build path was not using, and `ae cache clear` deleted the
+#    contents of the wrong one. On a box where the override exists precisely
+#    because $HOME is read-only, that is a destructive answer to a read-only
+#    problem: it discards the real cache while claiming to clear this one.
+#
+#    The "was the default left alone" half uses a FAKE home with a sentinel in
+#    it, never the real cache. The real one is shared with every other test in
+#    the sweep, which runs in parallel, so its entry count moves under this
+#    test for reasons that have nothing to do with the clear.
+entries() { sed -n 's/^Cache: *\([0-9][0-9]*\) build.*/\1/p'; }
+
+FAKE_HOME="$TMPDIR_T/fake-home"
+mkdir -p "$FAKE_HOME/.aether/cache"
+SENTINEL="$FAKE_HOME/.aether/cache/sentinel"
+: > "$SENTINEL"
+
+n=$(AETHER_CACHE_DIR="$CACHE" "$AE" cache 2>/dev/null | entries)
+if [ "${n:-0}" -lt 1 ]; then
+    echo "  [FAIL] ae cache reported ${n:-0} entries in the override after runs"
+    echo "         that populated it -- it is reading some other directory"
+    exit 1
+fi
+
+clear_out=$(HOME="$FAKE_HOME" USERPROFILE="$FAKE_HOME" \
+            AETHER_CACHE_DIR="$CACHE" "$AE" cache clear 2>&1)
+case "$clear_out" in
+    *"$CACHE"*) ;;
+    *) echo "  [FAIL] ae cache clear did not name the override directory:"
+       echo "$clear_out" | sed 's/^/        /'; exit 1 ;;
+esac
+
+after=$(AETHER_CACHE_DIR="$CACHE" "$AE" cache 2>/dev/null | entries)
+if [ "${after:-1}" -ne 0 ]; then
+    echo "  [FAIL] the override still holds ${after} entries after clear"
+    exit 1
+fi
+
+if [ ! -f "$SENTINEL" ]; then
+    echo "  [FAIL] clearing the override emptied the DEFAULT cache instead"
+    echo "         (the sentinel under \$HOME/.aether/cache is gone)"
+    exit 1
+fi
+
+echo "  [PASS] AETHER_CACHE_DIR overrides the cache location (incl. read-only \$HOME),"
+echo "         and ae cache reports and clears that same directory"
 exit 0

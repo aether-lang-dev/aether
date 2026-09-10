@@ -204,12 +204,17 @@ plays that role), no interfaces.
   prominently for the direct-write idiom, which is correct there and misleading
   as a general habit. This cost five failed attempts to call shipped APIs with
   the source open.
-- **`malloc(N) as *T` is sized BY HAND; adding a field to `T` corrupts the
-  heap.** There is no `sizeof` in Aether, so heap-allocated structs carry a
-  literal byte count at each allocation site — `malloc(128) as *Sha`,
-  `malloc(136) as *LeafCert` — and 40+ crypto modules do this. Add one pointer
-  and the struct outgrows the number while the allocation does not, which
-  surfaces as a **double-free inside the free function, far from the edit**.
+- **Heap-allocate structs with `malloc(sizeof(T)) as *T` — never a hand-counted
+  byte literal.** `sizeof(T)` exists and is the recommended form; the stdlib
+  uses it uniformly (`malloc(sizeof(HttpResponse)) as *HttpResponse`,
+  `malloc(sizeof(BN)) as *BN`), and the compiler *warns* on the literal form
+  (`malloc(24) as *T` → "sizes the allocation by a literal byte count; use
+  `malloc(sizeof(T))` so a struct-layout change cannot silently under-allocate").
+  A hand-counted `malloc(128) as *Sha` is the anti-pattern, not the model: add
+  one field and the struct outgrows the number while the allocation does not,
+  which surfaces as a **double-free inside the free function, far from the
+  edit**. Some older crypto modules still hand-size; those are the sites to
+  migrate, not the habit to copy.
   Before adding a field: grep for *every* `malloc(` of that type (there are
   usually several, in more than one module) and every initialiser that clears
   its fields (a missed one leaves the field holding whatever `malloc` returned).

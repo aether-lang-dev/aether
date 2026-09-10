@@ -16,10 +16,13 @@
 // to the pure-Aether implementations under std.cryptography.*, so they keep
 // working and hash_supported() answers for them either way.
 //
+// The STREAMING context API (digest_new / digest_update / digest_final_*)
+// falls back the same way, over the same algorithm set, so hashing a large
+// object in windows keeps working without OpenSSL too.
+//
 // Still OpenSSL-only, and still returning a non-empty error rather than
-// crashing: the STREAMING context API (digest_new / digest_update /
-// digest_final_*) and any algorithm without a pure implementation. Callers
-// should check the error slot.
+// crashing: any algorithm without a pure implementation. Callers should check
+// the error slot.
 
 import std.string
 import std.bytes
@@ -59,9 +62,9 @@ exports(
     digest_free
 )
 
-extern cryptography_sha1_hex_raw(data: string, length: int) -> string
-extern cryptography_sha256_hex_raw(data: string, length: int) -> string
-extern cryptography_hash_hex_raw(algo: string, data: string, length: int) -> string
+extern cryptography_sha1_hex_raw(data: string, length: int) -> string @heap
+extern cryptography_sha256_hex_raw(data: string, length: int) -> string @heap
+extern cryptography_hash_hex_raw(algo: string, data: string, length: int) -> string @heap
 // Bound under a _raw name like its siblings. The module function below is
 // called `hash_supported`, which mangles to `cryptography_hash_supported` --
 // exactly this C symbol. The two collided, and the extern won, so every
@@ -69,10 +72,10 @@ extern cryptography_hash_hex_raw(algo: string, data: string, length: int) -> str
 // the source read as though it worked. Invisible until the body did more than
 // forward to the extern, which is why it survived this long.
 extern cryptography_hash_supported_raw(algo: string) -> int
-extern cryptography_md4_hex_raw(data: string, length: int) -> string
-extern cryptography_md5_hex_raw(data: string, length: int) -> string
+extern cryptography_md4_hex_raw(data: string, length: int) -> string @heap
+extern cryptography_md5_hex_raw(data: string, length: int) -> string @heap
 extern cryptography_hmac_sha256_hex_raw(key: string, key_len: int,
-    msg: string, msg_len: int) -> string
+    msg: string, msg_len: int) -> string @heap
 extern cryptography_hmac_sha256_bytes_raw(key: string, key_len: int,
     msg: string, msg_len: int) -> int
 extern cryptography_md4_bytes_raw(data: string, length: int) -> int
@@ -90,9 +93,11 @@ extern cryptography_release_random_bytes()
 
 extern cryptography_digest_new_raw(algo: string) -> ptr
 extern cryptography_digest_update_raw(handle: ptr, data: string, length: int) -> int
-extern cryptography_digest_final_hex_raw(handle: ptr) -> string
+extern cryptography_digest_final_hex_raw(handle: ptr) -> string @heap
 extern cryptography_digest_final_bytes_raw(handle: ptr) -> int
 extern cryptography_digest_free_raw(handle: ptr)
+extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 extern string_new_with_length(data: string, length: int) -> ptr
 
@@ -525,6 +530,90 @@ random_base64(n: int) -> {
 // no explicit free; call digest_free only when bailing out before
 // finalizing (e.g. an aborted upload).
 
+// A digest handle carries its backend, because there are two and the caller
+// must not have to care which one answered. `inner` is an OpenSSL EVP context
+// or a pure-Aether streaming context; `kind` says whose it is so update and
+// final can dispatch. Wrapping BOTH backends keeps the handle opaque exactly
+// as documented, rather than making the pure path a special case a caller
+// could stumble into.
+struct DigestCtx {
+    kind: int
+    inner: ptr
+    dlen: int
+}
+
+// Backend tags. 0 is OpenSSL; the rest name the pure module that owns `inner`.
+// Kept as ints rather than strings so dispatch is a compare, not a strcmp, on
+// a path that runs once per chunk.
+
+// Open a pure streaming context for `algo`. Returns (kind, ctx, "") on
+// success and (0, null, err) when no pure implementation covers `algo`.
+// The set matches pure_hash_hex deliberately: an algorithm you can one-shot
+// without OpenSSL is one you can stream without OpenSSL.
+pure_digest_new(algo: string) -> {
+    if algo == "sha1" {
+        c, e = sha1.new()
+        if e != "" { return 0, null, 0, e }
+        return 1, c, 20, ""
+    }
+    if algo == "sha256" {
+        c, e = sha2.new(algo)
+        if e != "" { return 0, null, 0, e }
+        return 2, c, 32, ""
+    }
+    if algo == "sha224" {
+        c, e = sha2.new(algo)
+        if e != "" { return 0, null, 0, e }
+        return 2, c, 28, ""
+    }
+    if algo == "sha384" {
+        c, e = sha2.new(algo)
+        if e != "" { return 0, null, 0, e }
+        return 2, c, 48, ""
+    }
+    if algo == "sha512" {
+        c, e = sha2.new(algo)
+        if e != "" { return 0, null, 0, e }
+        return 2, c, 64, ""
+    }
+    if algo == "md5" {
+        c, e = md5.new()
+        if e != "" { return 0, null, 0, e }
+        return 3, c, 16, ""
+    }
+    if algo == "md4" {
+        c, e = md4.new()
+        if e != "" { return 0, null, 0, e }
+        return 4, c, 16, ""
+    }
+    return 0, null, 0, "unknown algorithm"
+}
+
+// Wrap a backend handle so update / final can dispatch on it.
+digest_wrap(kind: int, inner: ptr, dlen: int) -> ptr {
+    w = malloc(sizeof(DigestCtx)) as *DigestCtx
+    if w == null {
+        return null
+    }
+    w.kind = kind
+    w.inner = inner
+    w.dlen = dlen
+    return w as ptr
+}
+
+// Release a pure context that will never be finalized (the bail-out path).
+// The pure final_* calls free their own context, so this is only for
+// abandonment, exactly like digest_free is for the OpenSSL handle.
+pure_digest_free(kind: int, inner: ptr) {
+    if inner == null {
+        return
+    }
+    if kind == 1 { sha1.free_ctx(inner) }
+    if kind == 2 { sha2.free_ctx(inner) }
+    if kind == 3 { md5.free_ctx(inner) }
+    if kind == 4 { md4.free_ctx(inner) }
+}
+
 // Create a streaming digest context for `algo` ("md5", "sha256",
 // "sha1", "md4", or any name OpenSSL's by-name lookup recognizes —
 // same rules as hash_hex). Returns (ctx, "") on success, (null, error)
@@ -532,13 +621,28 @@ random_base64(n: int) -> {
 // opaque; thread it through digest_update / digest_final_*.
 digest_new(algo: string) -> {
     ctx = cryptography_digest_new_raw(algo)
-    if ctx == null {
-        if cryptography_hash_supported_raw(algo) == 0 {
-            return null, "unknown algorithm"
+    if ctx != null {
+        w = digest_wrap(0, ctx, 0)
+        if w == null {
+            cryptography_digest_free_raw(ctx)
+            return null, "allocation failed"
         }
-        return null, "openssl unavailable"
+        return w, ""
     }
-    return ctx, ""
+    // No OpenSSL in this build, or OpenSSL does not carry this algorithm:
+    // stream it in Aether instead of failing. The one-shot digests already
+    // fall back this way; a caller hashing a 4GB upload in windows is exactly
+    // the one who cannot switch to the one-shot form as a workaround.
+    kind, inner, dlen, perr = pure_digest_new(algo)
+    if perr != "" {
+        return null, perr
+    }
+    w = digest_wrap(kind, inner, dlen)
+    if w == null {
+        pure_digest_free(kind, inner)
+        return null, "allocation failed"
+    }
+    return w, ""
 }
 
 // Feed `length` bytes of `data` into the context. Binary-safe (`data`
@@ -546,10 +650,21 @@ digest_new(algo: string) -> {
 // NULs survive). Returns (1, "") on success, (0, error) on failure.
 // Feeding 0 bytes is a no-op success. Does NOT free the context.
 digest_update(ctx: ptr, data: string, length: int) -> {
-    ok = cryptography_digest_update_raw(ctx, data, length)
-    if ok == 0 {
+    if ctx == null {
         return 0, "digest update failed"
     }
+    w = ctx as *DigestCtx
+    if w.kind == 0 {
+        ok = cryptography_digest_update_raw(w.inner, data, length)
+        if ok == 0 {
+            return 0, "digest update failed"
+        }
+        return 1, ""
+    }
+    if w.kind == 1 { sha1.update(w.inner, data, length) }
+    if w.kind == 2 { sha2.update(w.inner, data, length) }
+    if w.kind == 3 { md5.update(w.inner, data, length) }
+    if w.kind == 4 { md4.update(w.inner, data, length) }
     return 1, ""
 }
 
@@ -558,8 +673,30 @@ digest_update(ctx: ptr, data: string, length: int) -> {
 // call — do not reuse or free it again. Returns (hex, "") on success,
 // ("", error) on failure.
 digest_final_hex(ctx: ptr) -> {
-    out = cryptography_digest_final_hex_raw(ctx)
-    if out == 0 {
+    if ctx == null {
+        return "", "digest finalize failed"
+    }
+    w = ctx as *DigestCtx
+    kind = w.kind
+    inner = w.inner
+    if kind == 0 {
+        out = cryptography_digest_final_hex_raw(inner)
+        free(ctx)
+        if out == 0 {
+            return "", "digest finalize failed"
+        }
+        return out, ""
+    }
+    // The pure final_hex frees the inner context, matching the OpenSSL
+    // contract that a successful final_* consumes the handle; the wrapper is
+    // this layer's to release.
+    out = ""
+    if kind == 1 { out = sha1.final_hex(inner) }
+    if kind == 2 { out = sha2.final_hex(inner) }
+    if kind == 3 { out = md5.final_hex(inner) }
+    if kind == 4 { out = md4.final_hex(inner) }
+    free(ctx)
+    if string.length(out) == 0 {
         return "", "digest finalize failed"
     }
     return out, ""
@@ -571,15 +708,38 @@ digest_final_hex(ctx: ptr) -> {
 // subsequent step (SigV4 payload hashing). Returns (bytes, length, "")
 // on success, ("", 0, error) on failure.
 digest_final_bytes(ctx: ptr) -> {
-    ok = cryptography_digest_final_bytes_raw(ctx)
-    if ok == 0 {
+    if ctx == null {
         return "", 0, "digest finalize failed"
     }
-    raw = cryptography_get_binary_digest()
-    n = cryptography_get_binary_digest_length()
-    owned = string_new_with_length(raw, n)
-    cryptography_release_binary_digest()
-    return owned, n, ""
+    w = ctx as *DigestCtx
+    kind = w.kind
+    inner = w.inner
+    dlen = w.dlen
+    if kind == 0 {
+        ok = cryptography_digest_final_bytes_raw(inner)
+        free(ctx)
+        if ok == 0 {
+            return "", 0, "digest finalize failed"
+        }
+        raw = cryptography_get_binary_digest()
+        n = cryptography_get_binary_digest_length()
+        owned = string_new_with_length(raw, n)
+        cryptography_release_binary_digest()
+        return owned, n, ""
+    }
+    // The pure final_bytes hands back a std.bytes buffer of dlen bytes and
+    // frees the inner context; bytes.finish turns it into the owned string
+    // this API returns.
+    buf = null
+    if kind == 1 { buf = sha1.final_bytes(inner) }
+    if kind == 2 { buf = sha2.final_bytes(inner) }
+    if kind == 3 { buf = md5.final_bytes(inner) }
+    if kind == 4 { buf = md4.final_bytes(inner) }
+    free(ctx)
+    if buf == null {
+        return "", 0, "digest finalize failed"
+    }
+    return bytes.finish(buf, dlen), dlen, ""
 }
 
 // Abandon a context without finalizing — the cleanup path for an
@@ -587,5 +747,14 @@ digest_final_bytes(ctx: ptr) -> {
 // successful digest_final_* the context is already freed, so this is
 // only for the bail-out-before-final case.
 digest_free(ctx: ptr) {
-    cryptography_digest_free_raw(ctx)
+    if ctx == null {
+        return
+    }
+    w = ctx as *DigestCtx
+    if w.kind == 0 {
+        cryptography_digest_free_raw(w.inner)
+    } else {
+        pure_digest_free(w.kind, w.inner)
+    }
+    free(ctx)
 }

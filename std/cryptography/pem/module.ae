@@ -139,7 +139,7 @@ emit_b64_char(sb: ptr, alpha: string, v: int) {
 // Parse the first PEM block in `text`. Returns (der_bytes, label, "") on
 // success, (null, "", err) otherwise. Whitespace before/after is tolerated.
 parse(text: string) -> (ptr, string, string) {
-    n = string.length(text)
+    _n = string.length(text)
     begin = "-----BEGIN "
     bidx = string.index_of(text, begin)
     if bidx < 0 {

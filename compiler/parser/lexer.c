@@ -332,10 +332,53 @@ Token* read_number() {
         buffer[i++] = advance();
     }
 
+    /* Scientific notation: `e` or `E`, an optional sign, then at least one
+     * digit. Without this the exponent was left behind as a separate
+     * identifier: `1.0e30` lexed as the float `1.0` followed by `e30`. In
+     * expression position that surfaced as "undefined variable 'e30'"; in
+     * statement position it silently swallowed the FOLLOWING line into the
+     * expression, so a program lost a statement and still compiled clean
+     * (#1954).
+     *
+     * The full shape is required before anything is consumed, so a bare `e`
+     * or a trailing `1e` is left exactly as it lexed before and the letter
+     * stays available to whatever follows. Hex, octal and binary literals
+     * return earlier and never reach here, so the `E` in `0x1E` is safe. */
+    int has_exponent = 0;
+    if (current_pos < source_length && (peek() == 'e' || peek() == 'E')) {
+        int look = current_pos + 1;
+        if (look < source_length && (source[look] == '+' || source[look] == '-')) look++;
+        if (look < source_length && isdigit((unsigned char)source[look])) {
+            int take = (look - current_pos) + 1;   /* e[, sign], first digit */
+            for (int k = 0; k < take; k++) {
+                if (i >= capacity - 1) {
+                    capacity *= 2;
+                    char* new_buf = realloc(buffer, capacity);
+                    if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
+                    buffer = new_buf;
+                }
+                buffer[i++] = advance();
+            }
+            while (current_pos < source_length && isdigit((unsigned char)peek())) {
+                if (i >= capacity - 1) {
+                    capacity *= 2;
+                    char* new_buf = realloc(buffer, capacity);
+                    if (!new_buf) { free(buffer); return create_token(TOKEN_ERROR, "out of memory", token_start_line, token_start_column); }
+                    buffer = new_buf;
+                }
+                buffer[i++] = advance();
+            }
+            has_exponent = 1;
+        }
+    }
+
     // Duration suffixes: ns, us, ms, s, m, h, d. Compound forms
     // (`2m30s`, `1h15m`) stay a single numeric token so parser
     // precedence remains ordinary literal precedence.
-    while (current_pos < source_length) {
+    //
+    // Not after an exponent: `1e3` is a float, and `s`/`m`/`h`/`d` after one
+    // would read a unit off a number that is not a duration.
+    while (!has_exponent && current_pos < source_length) {
         int unit_len = 0;
         if (current_pos + 1 < source_length &&
             ((source[current_pos] == 'n' && source[current_pos + 1] == 's') ||

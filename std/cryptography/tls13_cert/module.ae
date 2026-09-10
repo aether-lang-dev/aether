@@ -499,7 +499,7 @@ parse_certificate(der: ptr, len: int, out: *LeafCert) -> string {
         asn1.reader_free(salg_body)
         bytes.free(salg_full)
     }
-    sigbits, snbits, sberr = asn1.read_bit_string(cert)
+    sigbits, _snbits, sberr = asn1.read_bit_string(cert)
     if string.equals(sberr, "") == 1 {
         out.signature = sigbits
         out.signature_len = bytes.length(sigbits)
@@ -528,6 +528,12 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     v, verr = asn1.read_tlv(tbsr)
     vtag = asn1.last_tag(tbsr)
     bytes.free(v)
+    // Every read below used to drop its error, so a truncated or malformed
+    // certificate parsed "successfully" into a LeafCert whose fields came
+    // from reads that failed -- an issuer, subject, validity or SPKI the
+    // certificate does not actually carry. The neighbouring serialNumber /
+    // notBefore / notAfter reads already checked; these six did not (#1942).
+    if string.equals(verr, "") != 1 { return verr }
     if vtag != 0xA0 {
         // `v` was actually serialNumber; the field after version is
         // serialNumber, so if there was no version we've now consumed
@@ -545,14 +551,17 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
     // signature AlgorithmIdentifier (SEQUENCE) — skip.
     sa, saerr = asn1.read_tlv(tbsr)
     bytes.free(sa)
+    if string.equals(saerr, "") != 1 { return saerr }
 
     // issuer Name (SEQUENCE) — capture raw DER (tag+len+content).
     iss, ierr = read_tlv_full(tbsr)
+    if string.equals(ierr, "") != 1 { bytes.free(iss); return ierr }
     out.issuer = iss
     out.issuer_len = bytes.length(iss)
 
     // validity SEQUENCE { notBefore, notAfter }.
     val_content, valerr = asn1.read_tlv(tbsr)
+    if string.equals(valerr, "") != 1 { bytes.free(val_content); return valerr }
     vr = asn1.reader_new(val_content)
     nb, nberr = asn1.read_tlv(vr)
     if string.equals(nberr, "") == 1 { out.not_before = nb; out.not_before_len = bytes.length(nb) }
@@ -563,11 +572,13 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
 
     // subject Name (SEQUENCE) — capture raw DER.
     subj, suberr = read_tlv_full(tbsr)
+    if string.equals(suberr, "") != 1 { bytes.free(subj); return suberr }
     out.subject = subj
     out.subject_len = bytes.length(subj)
 
     // subjectPublicKeyInfo SEQUENCE { algorithm AlgId, subjectPublicKey BIT }.
     spki_content, spkierr = asn1.read_tlv(tbsr)
+    if string.equals(spkierr, "") != 1 { bytes.free(spki_content); return spkierr }
     sr = asn1.reader_new(spki_content)
     algo_body, algo_full, ae = asn1.read_sequence(sr)
     if string.equals(ae, "") == 1 {
@@ -576,7 +587,7 @@ fn parse_tbs_fields(tbsr: ptr, out: *LeafCert) -> string {
         asn1.reader_free(algo_body)
         bytes.free(algo_full)
     }
-    bitkey, nbits, berr = asn1.read_bit_string(sr)
+    bitkey, _nbits, berr = asn1.read_bit_string(sr)
     if string.equals(berr, "") == 1 {
         out.spki_key = bitkey
         out.spki_key_len = bytes.length(bitkey)
@@ -1074,7 +1085,7 @@ fn der_tlv(buf: ptr, p: int, end: int) -> (int, int, int, int) {
 // malformed / unsuccessful response.
 parse_ocsp_status(der: ptr, len: int) -> int {
     // OCSPResponse ::= SEQUENCE { responseStatus ENUMERATED, responseBytes [0] }
-    t0, c0, l0, n0 = der_tlv(der, 0, len)
+    t0, c0, l0, _n0 = der_tlv(der, 0, len)
     if t0 != 0x30 { return OCSP_ERROR }
     end0 = c0 + l0
     // responseStatus ENUMERATED — must be 0 (successful).
@@ -1083,15 +1094,15 @@ parse_ocsp_status(der: ptr, len: int) -> int {
     if ls < 1 { return OCSP_ERROR }
     if (bytes.get(der, cs) & 0xFF) != 0 { return OCSP_ERROR }
     // responseBytes [0] EXPLICIT SEQUENCE { responseType OID, response OCTET STRING }
-    tb, cb, lb2, nb = der_tlv(der, ns, end0)
+    tb, cb, lb2, _nb = der_tlv(der, ns, end0)
     if tb != 0xA0 { return OCSP_ERROR }
     endb = cb + lb2
-    trb, crb, lrb, nrb = der_tlv(der, cb, endb) // inner SEQUENCE
+    trb, crb, lrb, _nrb = der_tlv(der, cb, endb) // inner SEQUENCE
     if trb != 0x30 { return OCSP_ERROR }
     endrb = crb + lrb
-    toid, coid, loid, noid = der_tlv(der, crb, endrb) // responseType OID (skip)
+    toid, _coid, _loid, noid = der_tlv(der, crb, endrb) // responseType OID (skip)
     if toid != 0x06 { return OCSP_ERROR }
-    toct, coct, loct, noct = der_tlv(der, noid, endrb) // response OCTET STRING
+    toct, coct, loct, _noct = der_tlv(der, noid, endrb) // response OCTET STRING
     if toct != 0x04 { return OCSP_ERROR }
     // The OCTET STRING content is the DER of BasicOCSPResponse.
     return parse_basic_ocsp(der, coct, coct + loct)
@@ -1101,12 +1112,12 @@ parse_ocsp_status(der: ptr, len: int) -> int {
 //                                  signature, certs [0] }
 // We only need tbsResponseData -> responses -> [0].certStatus.
 fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
-    tb, cb, lb, nb = der_tlv(buf, start, end)
+    tb, cb, lb, _nb = der_tlv(buf, start, end)
     if tb != 0x30 { return OCSP_ERROR }
     endb = cb + lb
     // tbsResponseData ::= SEQUENCE { version? [0], responderID, producedAt,
     //                                responses SEQUENCE OF SingleResponse, ... }
-    tt, ct, lt, nt = der_tlv(buf, cb, endb)
+    tt, ct, lt, _nt = der_tlv(buf, cb, endb)
     if tt != 0x30 { return OCSP_ERROR }
     endt = ct + lt
     // Walk tbsResponseData's fields to the first SEQUENCE OF (the `responses`).
@@ -1124,13 +1135,13 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
     }
     if resp_seq < 0 { return OCSP_ERROR }
     // First SingleResponse ::= SEQUENCE { certID, certStatus, thisUpdate, ... }
-    ts1, cs1, ls1, ns1 = der_tlv(buf, resp_seq, resp_end)
+    ts1, cs1, ls1, _ns1 = der_tlv(buf, resp_seq, resp_end)
     if ts1 != 0x30 { return OCSP_ERROR }
     end_sr = cs1 + ls1
     // certID ::= SEQUENCE (skip it); certStatus is the NEXT element.
-    tcid, ccid, lcid, ncid = der_tlv(buf, cs1, end_sr)
+    tcid, _ccid, _lcid, ncid = der_tlv(buf, cs1, end_sr)
     if tcid != 0x30 { return OCSP_ERROR }
-    tcs, ccs, lcs, ncs = der_tlv(buf, ncid, end_sr)
+    tcs, _ccs, _lcs, _ncs = der_tlv(buf, ncid, end_sr)
     if tcs < 0 { return OCSP_ERROR }
     // certStatus CHOICE: good [0] IMPLICIT NULL (0x80), revoked [1] (0xA1),
     // unknown [2] IMPLICIT NULL (0x82).
@@ -1144,25 +1155,25 @@ fn parse_basic_ocsp(buf: ptr, start: int, end: int) -> int {
 // (content_start, content_end) of that SEQUENCE's body or (-1,-1) on a
 // malformed / non-successful response. Mirrors parse_ocsp_status's descent.
 fn ocsp_basic_bounds(der: ptr, len: int) -> (int, int) {
-    t0, c0, l0, n0 = der_tlv(der, 0, len)
+    t0, c0, l0, _n0 = der_tlv(der, 0, len)
     if t0 != 0x30 { return -1, -1 }
     end0 = c0 + l0
     ts, cs, ls, ns = der_tlv(der, c0, end0)
     if ts != 0x0A { return -1, -1 }
     if ls < 1 { return -1, -1 }
     if (bytes.get(der, cs) & 0xFF) != 0 { return -1, -1 }
-    tb, cb, lb2, nb = der_tlv(der, ns, end0)
+    tb, cb, lb2, _nb = der_tlv(der, ns, end0)
     if tb != 0xA0 { return -1, -1 }
     endb = cb + lb2
-    trb, crb, lrb, nrb = der_tlv(der, cb, endb)
+    trb, crb, lrb, _nrb = der_tlv(der, cb, endb)
     if trb != 0x30 { return -1, -1 }
     endrb = crb + lrb
-    toid, coid, loid, noid = der_tlv(der, crb, endrb)
+    toid, _coid, _loid, noid = der_tlv(der, crb, endrb)
     if toid != 0x06 { return -1, -1 }
-    toct, coct, loct, noct = der_tlv(der, noid, endrb)
+    toct, coct, loct, _noct = der_tlv(der, noid, endrb)
     if toct != 0x04 { return -1, -1 }
     // OCTET STRING content == DER of BasicOCSPResponse SEQUENCE.
-    tbr, cbr, lbr, nbr = der_tlv(der, coct, coct + loct)
+    tbr, cbr, lbr, _nbr = der_tlv(der, coct, coct + loct)
     if tbr != 0x30 { return -1, -1 }
     return cbr, cbr + lbr
 }
@@ -1200,7 +1211,7 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
     //                                  signature BIT STRING, [0] certs OPTIONAL }
     // tbsResponseData: capture the FULL DER (tag+len+content) — that is the
     // signed message.
-    tt, ct, lt, nt = der_tlv(der, bstart, bend)
+    tt, _ct, _lt, nt = der_tlv(der, bstart, bend)
     if tt != 0x30 { return 0 }
     tbs_full_len = nt - bstart
     tbs = bytes.new(tbs_full_len)
@@ -1210,7 +1221,7 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
     // signatureAlgorithm ::= SEQUENCE { algorithm OID, ... }
     ta, ca, la, na = der_tlv(der, nt, bend)
     if ta != 0x30 { bytes.free(tbs); return 0 }
-    toi, coi, loi, noi = der_tlv(der, ca, ca + la)
+    toi, coi, loi, _noi = der_tlv(der, ca, ca + la)
     if toi != 0x06 { bytes.free(tbs); return 0 }
     sig_alg_oid = oid_der_to_dotted_bytes(der, coi, loi)
 
@@ -1228,17 +1239,17 @@ verify_ocsp_signature(der: ptr, len: int, issuer: *LeafCert) -> int {
     delegated = null as *LeafCert
     have_delegated = 0
     if nsg < bend {
-        tc, cc, lc, nc = der_tlv(der, nsg, bend)
+        tc, cc, lc, _nc = der_tlv(der, nsg, bend)
         if tc == 0xA0 {
             // certs [0] EXPLICIT wraps a SEQUENCE OF Certificate; step INTO that
             // SEQUENCE OF, then read the first Certificate SEQUENCE inside it.
-            tso, cso, lso, nso = der_tlv(der, cc, cc + lc)
+            tso, cso, lso, _nso = der_tlv(der, cc, cc + lc)
             tcs2 = 0
-            ccs2 = 0
-            lcs2 = 0
+            _ccs2 = 0
+            _lcs2 = 0
             ncs2 = 0
             if tso == 0x30 {
-                tcs2, ccs2, lcs2, ncs2 = der_tlv(der, cso, cso + lso)
+                tcs2, _ccs2, _lcs2, ncs2 = der_tlv(der, cso, cso + lso)
             }
             if tcs2 == 0x30 {
                 cert_der_len = ncs2 - cso
@@ -1320,7 +1331,7 @@ fn cert_has_ocsp_signing_eku(c: *LeafCert) -> int {
     buf = c.tbs
     end = c.tbs_len
     // tbsCertificate ::= SEQUENCE { ... extensions [3] EXPLICIT SEQUENCE OF Extension }
-    tt, ct, lt, nt = der_tlv(buf, 0, end)
+    tt, ct, lt, _nt = der_tlv(buf, 0, end)
     if tt != 0x30 { return 0 }
     endt = ct + lt
     // Find the [3] context tag (0xA3) holding the extensions.
@@ -1332,7 +1343,7 @@ fn cert_has_ocsp_signing_eku(c: *LeafCert) -> int {
         if ti < 0 { p = endt } else {
             if ti == 0xA3 {
                 // [3] EXPLICIT wraps a SEQUENCE OF Extension.
-                ts, cs, ls, ns = der_tlv(buf, ci, ci + li)
+                ts, cs, ls, _ns = der_tlv(buf, ci, ci + li)
                 if ts == 0x30 { ext_seq = cs; ext_end = cs + ls }
                 p = endt
             } else { p = ni }
@@ -1373,7 +1384,7 @@ fn cert_has_ocsp_signing_eku(c: *LeafCert) -> int {
 // Scan a DER ExtKeyUsageSyntax (SEQUENCE OF KeyPurposeId OID) in
 // buf[start..end) for id-kp-OCSPSigning (1.3.6.1.5.5.7.3.9). Returns 1 if found.
 fn eku_octets_have_ocsp_signing(buf: ptr, start: int, end: int) -> int {
-    ts, cs, ls, ns = der_tlv(buf, start, end)
+    ts, cs, ls, _ns = der_tlv(buf, start, end)
     if ts != 0x30 { return 0 }
     p = cs
     seq_end = cs + ls
@@ -1774,7 +1785,7 @@ trust_store_load(path: string) -> (ptr, string) {
         if e < 0 { break }
         block_end = e + mlen
         block = string.substring_n(text, tlen, pos, block_end)
-        der, label, perr = pem.parse(block)
+        der, _label, perr = pem.parse(block)
         if string.equals(perr, "") == 1 {
             if der != null {
                 // sizeof(LeafCert) = 136 on LP64 (9 ptr @8 + 8 int @4, C-packed;

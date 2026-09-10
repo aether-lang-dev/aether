@@ -273,7 +273,7 @@ push_pad_byte(c: *Sm3Ctx, b: int) {
 
 finalize_to_bytes(c: *Sm3Ctx) -> ptr {
     bit_lo = c.count_lo << 3
-    bit_hi = (c.count_hi << 3) | bits.lsr64(c.count_lo, 61)
+    _bit_hi = (c.count_hi << 3) | bits.lsr64(c.count_lo, 61)
 
     push_pad_byte(c, 0x80)
     while c.block_len != 56 {
