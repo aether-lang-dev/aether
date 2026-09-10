@@ -13,6 +13,20 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`ae build` and `ae run` link optional libraries only when the program's
+  imports require them** (#1988). A hello-world no longer needs the OpenSSL,
+  zlib, nghttp2, PCRE2, Brotli, Zstandard or YAML development libraries that
+  happened to be installed on the toolchain's build machine. Link requirements
+  follow transitive and conditional imports, retaining each enabled backend's
+  detected search paths and static dependencies, and preserving disabled-backend
+  stubs. The emitted C metadata now also covers Brotli, Zstandard, YAML and the
+  dependencies introduced by the C backing of encoding, HTTP middleware, proxy
+  and script-gateway modules.
+
+## [0.664.0]
+
+### Fixed
+
 - **Deeply nested source crashed the compiler instead of reporting an error.**
   The recursive-descent parser had no depth bound, so nesting deep enough
   exhausted the C stack and `aetherc` died of SIGSEGV with nothing printed.
@@ -55,16 +69,6 @@ version number before tagging the release.
   ended either way and the partial hash was returned as if it were the file's.
   That value keys the build cache, which is how a stale binary gets served. A
   read error is now reported the same way an unopenable file is.
-
-- **`ae build` and `ae run` link optional libraries only when the program's
-  imports require them** (#1988). A hello-world no longer needs the OpenSSL,
-  zlib, nghttp2, PCRE2, Brotli, Zstandard or YAML development libraries that
-  happened to be installed on the toolchain's build machine. Link requirements
-  follow transitive and conditional imports, retaining each enabled backend's
-  detected search paths and static dependencies, and preserving disabled-backend
-  stubs. The emitted C metadata now also covers Brotli, Zstandard, YAML and the
-  dependencies introduced by the C backing of encoding, HTTP middleware, proxy
-  and script-gateway modules.
 
 ### Performance
 
