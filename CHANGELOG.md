@@ -23,6 +23,63 @@ version number before tagging the release.
   error), so a socket reader can accumulate bytes and retry a partial frame. All
   RESP3 types are covered (null, boolean, double, big number, verbatim string,
   map, set, push), with binary-safe bulk strings and whole-tree `free_value`.
+## [0.664.0]
+
+### Fixed
+
+- **Deeply nested source crashed the compiler instead of reporting an error.**
+  The recursive-descent parser had no depth bound, so nesting deep enough
+  exhausted the C stack and `aetherc` died of SIGSEGV with nothing printed.
+  Measured: about 2000 nested `(` or `if`, about 4000 nested `{`. Found by
+  fuzzing. Parsing now stops at a bounded depth and reports one error naming
+  the limit. The bound is 512, roughly twenty times the deepest nesting in this
+  repository (22 braces, 9 parens) and a quarter of the shallowest measured
+  crash, so it stays clear of real code and of a thread with a small stack.
+
+- **A struct literal leaked its name on every occurrence.** The parser
+  `strdup`ed the type name and handed it to `create_ast_node`, which keeps its
+  own copy, so the original was never freed. Measured with `leaks(1)`: a file
+  with 400 struct literals leaked exactly 400 allocations before, 0 after.
+
+- **`arg_drain_bind` freed its caller's buffer and returned on allocation
+  failure**, and `emit_closure_env_drained_call` keeps using that pointer to
+  emit the closure teardown, so the out-of-memory path read freed memory.
+  Continuing was never recoverable either, since the substitution it failed to
+  record is what the emitted call depends on. It now fails the way `add_child`
+  does for the same situation.
+
+- **A memory pool with an object size that was not a multiple of the pointer
+  alignment put every other slot on a misaligned address.** Each slot is cast
+  to `FreeNode*` while it sits on the free list, so the stride has to keep them
+  aligned; a size clearing the minimum but not a multiple of it (12, say) did
+  not. Confirmed with `-fsanitize=alignment`, which reports the access before
+  the fix and nothing after. x86 and ARM64 absorb it silently, a strict target
+  does not, and this repository has RISC-V CI.
+
+- **A long source line made its own diagnostic unreadable.** The renderer
+  echoed the whole line and then emitted one space per column on the caret
+  line, so an error at column 3000 produced two 3000-character lines around a
+  one-line message. Generated and minified sources reach that easily. The
+  snippet is now windowed around the caret, marked with an ellipsis on the
+  side that was cut. Lines that already fit are untouched, and the caret still
+  lands on the same character.
+
+- **A read error while hashing a file for the build cache produced a hash over
+  partial content.** `fread` returns 0 for both EOF and failure, so the loop
+  ended either way and the partial hash was returned as if it were the file's.
+  That value keys the build cache, which is how a stale binary gets served. A
+  read error is now reported the same way an unopenable file is.
+
+### Performance
+
+- **Compiles are 7 to 10 percent faster.** A profile of a stdlib module put
+  `strcmp` at the top, reached through the symbol table and the codegen
+  lookups, which are linear scans. Nearly every candidate differs in its first
+  byte, so the four hottest scans settle that inline before calling out, and
+  `lookup_qualified_symbol` no longer mallocs, copies and frees the name on
+  every call just to split it on the dot. Measured over five large real modules,
+  fifteen interleaved runs against `main`: 10.4 percent on the minimum, 9.0
+  percent on the median, 7.2 percent at the first quartile.
 ## [0.663.0]
 
 ### Fixed

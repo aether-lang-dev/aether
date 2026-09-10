@@ -19,7 +19,29 @@ typedef struct {
                           // sits at top level, so its arm items are parsed as
                           // declarations (parse_top_level_decl) rather than
                           // statements. Saved/restored around nested `when`s.
+    int depth;            // CRITICAL: recursion depth of the mutually recursive
+                          // descent (statement / expression / unary). Without a
+                          // bound, nesting deep enough overflows the C stack and
+                          // the compiler dies with SIGSEGV instead of reporting
+                          // a syntax error. Measured: ~2000 nested `(` or `if`,
+                          // ~4000 nested `{`. See AETHER_MAX_PARSE_DEPTH.
+    int depth_exceeded;   // CRITICAL: set once the limit is hit, and the
+                          // top-level loop stops on it. Tracking it here rather
+                          // than by nudging `depth` past the limit keeps the
+                          // counter balanced; an unbalanced one stays over the
+                          // limit for the rest of the file and turns every
+                          // later expression into a silent NULL. Stopping
+                          // matters too: the guard returns without consuming a
+                          // token, so the loop's force-advance would otherwise
+                          // emit one error per remaining token.
 } Parser;
+
+// The deepest real nesting in this repository is 22 braces and 9 parens, so
+// this is roughly twenty times what hand-written code reaches, and a quarter
+// of the shallowest measured crash. Frames here are small, but a thread with a
+// 512 KB stack must survive the limit too, which is why it is not raised to
+// meet the crash point.
+#define AETHER_MAX_PARSE_DEPTH 512
 
 // Parser functions
 Parser* create_parser(Token** tokens, int token_count);

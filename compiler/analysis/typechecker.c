@@ -234,8 +234,16 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
 
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name) {
     Symbol* current = table->symbols;
+    /* The scope chain is a linked list and this is the compiler's hottest
+     * loop: a profile of one stdlib module puts strcmp at the top, reached
+     * from here. Nearly every candidate differs in its first byte, so testing
+     * that inline settles the comparison without a call. Both strings are
+     * NUL-terminated, so index 0 is always readable, and a differing first
+     * byte is exactly the case where strcmp would have returned non-zero. */
+    int c0 = (unsigned char)name[0];
     while (current) {
-        if (strcmp(current->name, name) == 0) {
+        if ((unsigned char)current->name[0] == c0 &&
+            strcmp(current->name, name) == 0) {
             return current;
         }
         current = current->next;
@@ -438,7 +446,21 @@ int is_imported_namespace(const char* name) {
 Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) {
     if (!table || !qualified_name) return NULL;
     // Split qualified name on '.'
-    char* name_copy = strdup(qualified_name);
+    /* Every qualified lookup used to malloc, copy and free the name just to
+     * split it on the dot. Identifiers are short, so the copy lives on the
+     * stack unless it genuinely does not fit. */
+    char name_stack[256];
+    char* name_copy;
+    int name_heap = 0;
+    size_t qn_len = strlen(qualified_name);
+    if (qn_len < sizeof(name_stack)) {
+        memcpy(name_stack, qualified_name, qn_len + 1);
+        name_copy = name_stack;
+    } else {
+        name_copy = strdup(qualified_name);
+        if (!name_copy) return NULL;
+        name_heap = 1;
+    }
     char* dot = strchr(name_copy, '.');
 
     if (dot) {
@@ -450,7 +472,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         // `hide http` must block both bare `http` AND `http.get(url)`.
         if (scope_name_is_hidden(table, prefix) ||
             (table->is_sealed && !scope_name_in_whitelist(table, prefix))) {
-            free(name_copy);
+            if (name_heap) free(name_copy);
             return NULL;
         }
 
@@ -461,7 +483,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
             char resolved_name[512];
             snprintf(resolved_name, sizeof(resolved_name), "%s.%s",
                     alias_sym->alias_target, suffix);
-            free(name_copy);
+            if (name_heap) free(name_copy);
             return lookup_symbol(table, resolved_name);
         }
 
@@ -474,7 +496,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         if (is_visible_namespace(prefix, table)) {
             // Enforce export visibility
             if (is_export_blocked(prefix, suffix)) {
-                free(name_copy);
+                if (name_heap) free(name_copy);
                 return NULL;
             }
             // #878: no selective-import gate here — the qualified `X.fn()`
@@ -511,12 +533,12 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                     sym = lookup_symbol(table, suffix);
                 }
             }
-            free(name_copy);
+            if (name_heap) free(name_copy);
             return sym;
         }
     }
 
-    free(name_copy);
+    if (name_heap) free(name_copy);
     return lookup_symbol(table, qualified_name);
 }
 
