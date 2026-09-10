@@ -1,0 +1,636 @@
+// std.resp — the Redis Serialization Protocol (RESP), RESP3-native and
+// RESP2-compatible.
+//
+// RESP3 is a strict SUPERSET of RESP2: every RESP2 marker (`+ - : $ *`) is
+// valid RESP3, which merely ADDS types (`_ # , ( = % ~ > ( |`). So there is one
+// DECODER — it recognises the full RESP3 grammar and therefore parses any RESP2
+// stream too — and one ENCODER whose `resp3` flag selects the dialect for the
+// handful of types whose wire form differs (null, map, set, double, boolean,
+// big number, verbatim string). A codec, not two protocols. RESP3 is opt-in
+// per connection (`HELLO 3`), which is exactly why a client/server must still
+// speak RESP2 by default; this module lets the caller choose per encode.
+//
+// Transport-agnostic, like std.json / std.cbor: it encodes/decodes over byte
+// buffers and never touches a socket. The parser is RESUMABLE — parse_prefix
+// reports "incomplete" (consumed == 0, no error) distinctly from "malformed"
+// (a non-empty error), so a caller reading a socket can accumulate bytes and
+// retry a partial frame rather than mis-framing it.
+//
+// Memory model (mirrors std.cbor): a RespValue is malloc-backed with owned
+// AetherBytes payloads and std.list children; free_value reclaims the whole
+// tree. String payloads are stored as bytes (not heap.new string fields, which
+// leak — see std.cbor's note), and read back as a caller-owned string via the
+// non-consuming bytes.to_string.
+
+import std.list
+import std.string
+import std.bytes
+import std.strbuilder
+import std.mem
+import std.io
+
+exports(
+    // type tags
+    RESP_SIMPLE, RESP_ERROR, RESP_INTEGER, RESP_BULK, RESP_ARRAY,
+    RESP_NULL, RESP_BOOL, RESP_DOUBLE, RESP_BIGNUM, RESP_VERBATIM,
+    RESP_MAP, RESP_SET, RESP_PUSH,
+    // constructors
+    new_simple, new_error, new_integer, new_bulk, new_null, new_bool,
+    new_double, new_array, new_map, new_set, new_push,
+    // builders
+    array_add, map_add,
+    // predicates + accessors
+    value_type, is_null, as_integer, as_bool, as_double,
+    str_value, array_size, array_get, map_size, map_key, map_value,
+    // codec
+    parse, parse_prefix, encode, encode_resp2, free_value,
+)
+
+// RESP type tags. The value matches the wire marker byte where one exists, so
+// a decoder can set `type` straight from the marker and an encoder can emit it.
+const RESP_SIMPLE = 43 // '+'  simple string
+const RESP_ERROR = 45 // '-'  error
+const RESP_INTEGER = 58 // ':'  integer
+const RESP_BULK = 36 // '$'  bulk string
+const RESP_ARRAY = 42 // '*'  array
+const RESP_NULL = 95 // '_'  RESP3 null (RESP2: $-1 / *-1)
+const RESP_BOOL = 35 // '#'  RESP3 boolean
+const RESP_DOUBLE = 44 // ','  RESP3 double
+const RESP_BIGNUM = 40 // '('  RESP3 big number (payload is its decimal text)
+const RESP_VERBATIM = 61 // '='  RESP3 verbatim string (3-char fmt + ':' + data)
+const RESP_MAP = 37 // '%'  RESP3 map
+const RESP_SET = 126 // '~'  RESP3 set
+const RESP_PUSH = 62 // '>'  RESP3 push (out-of-band)
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+extern string_length(s: string) -> int
+
+// A decoded/constructed RESP value. Aggregate children live in std.list; scalar
+// text (simple/error/bulk/verbatim/bignum) lives in an owned bytes buffer.
+struct RespValue {
+    type: int
+    int_val: long // RESP_INTEGER, and the length/element-count during decode
+    dbl_val: float // RESP_DOUBLE
+    bool_val: int // RESP_BOOL (0/1)
+    str_bytes: ptr // owned AetherBytes for text payloads; null when empty
+    str_len: int
+    verb_fmt: ptr // RESP_VERBATIM: owned 3-byte format tag (e.g. "txt"); null otherwise
+    items: ptr // std.list of *RespValue (array/set/push), else null
+    map_keys: ptr // std.list of *RespValue, else null
+    map_vals: ptr // std.list of *RespValue, else null
+}
+
+// ---- allocation / teardown -------------------------------------------------
+
+fn alloc_value(t: int) -> *RespValue {
+    v = malloc(sizeof(RespValue)) as *RespValue
+    v.type = t
+    v.int_val = 0
+    v.dbl_val = 0.0
+    v.bool_val = 0
+    v.str_bytes = null
+    v.str_len = 0
+    v.verb_fmt = null
+    v.items = null
+    v.map_keys = null
+    v.map_vals = null
+    return v
+}
+
+// Store `len` bytes of `src` (an AetherString) as v's owned payload. Empty
+// payload records str_bytes = null (no allocation), like std.cbor.
+fn set_str(v: *RespValue, src: string, len: int) {
+    if len <= 0 {
+        v.str_bytes = null
+        v.str_len = 0
+        return
+    }
+    b = bytes.new(len)
+    _ = bytes.copy_from_string(b, 0, src, len)
+    v.str_bytes = b
+    v.str_len = len
+}
+
+// Free a value tree: every owned bytes payload and every std.list child.
+free_value(vp: ptr) {
+    if vp == null { return }
+    v = vp as *RespValue
+    if v.str_bytes != null { bytes.free(v.str_bytes) }
+    if v.verb_fmt != null { bytes.free(v.verb_fmt) }
+    free_list(v.items)
+    free_list(v.map_keys)
+    free_list(v.map_vals)
+    libc_free(vp)
+}
+
+fn free_list(l: ptr) {
+    if l == null { return }
+    n = list.size(l)
+    i = 0
+    while i < n {
+        free_value(list.get_raw(l, i))
+        i = i + 1
+    }
+    list.free(l)
+}
+
+// ---- constructors ----------------------------------------------------------
+// Each returns a `ptr` the caller owns and frees with free_value (freeing a
+// value that was added to an array/map/set is a double free — ownership
+// transfers to the aggregate).
+
+new_simple(s: string) -> ptr {
+    v = alloc_value(RESP_SIMPLE)
+    set_str(v, s, string_length(s))
+    return v as ptr
+}
+new_error(s: string) -> ptr {
+    v = alloc_value(RESP_ERROR)
+    set_str(v, s, string_length(s))
+    return v as ptr
+}
+new_integer(n: long) -> ptr {
+    v = alloc_value(RESP_INTEGER)
+    v.int_val = n
+    return v as ptr
+}
+// A bulk string of `len` bytes (binary-safe; may contain NUL / CRLF).
+new_bulk(s: string, len: int) -> ptr {
+    v = alloc_value(RESP_BULK)
+    set_str(v, s, len)
+    return v as ptr
+}
+new_null() -> ptr { return alloc_value(RESP_NULL) as ptr }
+new_bool(b: int) -> ptr {
+    v = alloc_value(RESP_BOOL)
+    if b != 0 { v.bool_val = 1 } else { v.bool_val = 0 }
+    return v as ptr
+}
+new_double(d: float) -> ptr {
+    v = alloc_value(RESP_DOUBLE)
+    v.dbl_val = d
+    return v as ptr
+}
+// Empty aggregates; add children with array_add / map_add.
+new_array() -> ptr {
+    v = alloc_value(RESP_ARRAY)
+    v.items = list.new()
+    return v as ptr
+}
+new_set() -> ptr {
+    v = alloc_value(RESP_SET)
+    v.items = list.new()
+    return v as ptr
+}
+new_push() -> ptr {
+    v = alloc_value(RESP_PUSH)
+    v.items = list.new()
+    return v as ptr
+}
+new_map() -> ptr {
+    v = alloc_value(RESP_MAP)
+    v.map_keys = list.new()
+    v.map_vals = list.new()
+    return v as ptr
+}
+
+// Append a child to an array/set/push (ownership moves into the aggregate).
+array_add(agg: ptr, child: ptr) {
+    a = agg as *RespValue
+    if a.items != null { list.list_add_raw(a.items, child) }
+}
+// Append a key/value pair to a map (ownership of both moves into the map).
+map_add(m: ptr, key: ptr, val: ptr) {
+    mv = m as *RespValue
+    if mv.map_keys != null { list.list_add_raw(mv.map_keys, key) }
+    if mv.map_vals != null { list.list_add_raw(mv.map_vals, val) }
+}
+
+// ---- predicates / accessors ------------------------------------------------
+
+value_type(vp: ptr) -> int { return (vp as *RespValue).type }
+is_null(vp: ptr) -> int { if (vp as *RespValue).type == RESP_NULL { return 1 } return 0 }
+as_integer(vp: ptr) -> long { return (vp as *RespValue).int_val }
+as_bool(vp: ptr) -> int { return (vp as *RespValue).bool_val }
+as_double(vp: ptr) -> float { return (vp as *RespValue).dbl_val }
+
+// The text payload (simple/error/bulk/verbatim/bignum) as a caller-owned
+// string. Empty payload yields "". Non-consuming — the value keeps ownership.
+str_value(vp: ptr) -> string {
+    v = vp as *RespValue
+    if v.str_bytes == null || v.str_len <= 0 { return string.concat("", "") }
+    return bytes.to_string(v.str_bytes, v.str_len)
+}
+
+array_size(vp: ptr) -> int {
+    v = vp as *RespValue
+    if v.items == null { return 0 }
+    return list.size(v.items)
+}
+array_get(vp: ptr, i: int) -> ptr {
+    v = vp as *RespValue
+    if v.items == null { return null }
+    return list.get_raw(v.items, i)
+}
+map_size(vp: ptr) -> int {
+    v = vp as *RespValue
+    if v.map_keys == null { return 0 }
+    return list.size(v.map_keys)
+}
+map_key(vp: ptr, i: int) -> ptr {
+    v = vp as *RespValue
+    if v.map_keys == null { return null }
+    return list.get_raw(v.map_keys, i)
+}
+map_value(vp: ptr, i: int) -> ptr {
+    v = vp as *RespValue
+    if v.map_vals == null { return null }
+    return list.get_raw(v.map_vals, i)
+}
+
+// ---- decode ----------------------------------------------------------------
+//
+// The parser is resumable: it works over (data, len) with a running index and
+// distinguishes three outcomes at every level —
+//   incomplete : not enough bytes yet for a full frame (caller reads more)
+//   malformed  : the bytes present cannot be a valid frame (a protocol error)
+//   ok         : a value + the index just past its final CRLF
+// carried as a small tri-state so recursion propagates it cleanly.
+//
+// PS_* are the parse states; a parse helper returns (value, next_index, state).
+const PS_OK = 0
+const PS_INCOMPLETE = 1
+const PS_MALFORMED = 2
+
+// Find the index just past the next CRLF at/after `from`, or -1 if no complete
+// line is present yet. RESP lines end in "\r\n"; a lone '\r' at end-of-buffer
+// is incomplete, not malformed.
+fn find_crlf_end(data: string, len: int, from: int) -> int {
+    i = from
+    while i + 1 < len {
+        if string_char_at_n(data, len, i) == 13 &&
+        string_char_at_n(data, len, i + 1) == 10 {
+            return i + 2
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+// Parse the base-10 (optionally signed) integer that a line's payload holds,
+// i.e. the bytes in [from, crlf_start). Returns (value, ok). RESP counts and
+// integers are ASCII decimal; anything else is malformed.
+fn parse_line_int(data: string, len: int, from: int, crlf_start: int) -> (long, int) {
+    if from >= crlf_start { return 0, 0 }
+    neg = 0
+    i = from
+    c0 = string_char_at_n(data, len, i)
+    if c0 == 45 { neg = 1 i = i + 1 } // '-'
+    else if c0 == 43 { i = i + 1 } // '+'
+    if i >= crlf_start { return 0, 0 }
+    acc = 0
+    while i < crlf_start {
+        c = string_char_at_n(data, len, i)
+        if c < 48 || c > 57 { return 0, 0 }
+        acc = acc * 10 + (c - 48)
+        i = i + 1
+    }
+    if neg == 1 { return 0 - acc, 1 }
+    return acc, 1
+}
+
+// Copy the raw bytes [from, to) out of `data` into a fresh AetherString slice
+// via a bytes buffer (binary-safe). Returns the slice (caller: it is set as a
+// value's payload, or freed).
+fn slice_bytes(data: string, len: int, from: int, to: int) -> (ptr, int) {
+    n = to - from
+    if n <= 0 { return null, 0 }
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at_n(data, len, from + i))
+        i = i + 1
+    }
+    return b, n
+}
+
+// Parse one value starting at `pos`. Returns (value, next_pos, state). On
+// PS_INCOMPLETE/PS_MALFORMED the value is null and next_pos is `pos`.
+fn parse_one(data: string, len: int, pos: int) -> (ptr, int, int) {
+    if pos >= len { return null, pos, PS_INCOMPLETE }
+    marker = string_char_at_n(data, len, pos)
+    line_end = find_crlf_end(data, len, pos + 1) // end of the marker's own line
+    if line_end < 0 { return null, pos, PS_INCOMPLETE }
+    crlf_start = line_end - 2 // index of the '\r'
+    body_from = pos + 1
+
+    // --- simple scalars whose whole payload is the marker line ---
+    if marker == RESP_SIMPLE || marker == RESP_ERROR {
+        v = alloc_value(marker)
+        sl, n = slice_bytes(data, len, body_from, crlf_start)
+        if sl != null { adopt_payload(v, sl, n) }
+        return v as ptr, line_end, PS_OK
+    }
+    if marker == RESP_INTEGER {
+        iv, ok = parse_line_int(data, len, body_from, crlf_start)
+        if ok == 0 { return null, pos, PS_MALFORMED }
+        v = alloc_value(RESP_INTEGER) v.int_val = iv
+        return v as ptr, line_end, PS_OK
+    }
+    if marker == RESP_NULL { // RESP3 `_\r\n`
+        if crlf_start != body_from { return null, pos, PS_MALFORMED }
+        return alloc_value(RESP_NULL) as ptr, line_end, PS_OK
+    }
+    if marker == RESP_BOOL { // RESP3 `#t\r\n` / `#f\r\n`
+        if crlf_start - body_from != 1 { return null, pos, PS_MALFORMED }
+        c = string_char_at_n(data, len, body_from)
+        if c != 116 && c != 102 { return null, pos, PS_MALFORMED } // 't'/'f'
+        v = alloc_value(RESP_BOOL)
+        if c == 116 { v.bool_val = 1 } else { v.bool_val = 0 }
+        return v as ptr, line_end, PS_OK
+    }
+    if marker == RESP_DOUBLE { // RESP3 `,3.14\r\n` (incl inf/nan)
+        v = alloc_value(RESP_DOUBLE)
+        v.dbl_val = parse_double_span(data, len, body_from, crlf_start)
+        return v as ptr, line_end, PS_OK
+    }
+    if marker == RESP_BIGNUM { // RESP3 `(1234...\r\n` — keep the text
+        v = alloc_value(RESP_BIGNUM)
+        sl, n = slice_bytes(data, len, body_from, crlf_start)
+        if sl != null { adopt_payload(v, sl, n) }
+        return v as ptr, line_end, PS_OK
+    }
+
+    // --- length-prefixed bulk / verbatim ---
+    if marker == RESP_BULK || marker == RESP_VERBATIM {
+        blen, ok = parse_line_int(data, len, body_from, crlf_start)
+        if ok == 0 { return null, pos, PS_MALFORMED }
+        if blen < 0 { // RESP2 null bulk: $-1\r\n
+            return alloc_value(RESP_NULL) as ptr, line_end, PS_OK
+        }
+        // Need blen data bytes + trailing CRLF after the length line.
+        data_from = line_end
+        need_end = data_from + (blen as int) + 2
+        if need_end > len { return null, pos, PS_INCOMPLETE }
+        if string_char_at_n(data, len, need_end - 2) != 13 ||
+        string_char_at_n(data, len, need_end - 1) != 10 {
+            return null, pos, PS_MALFORMED
+        }
+        v = alloc_value(marker)
+        if marker == RESP_VERBATIM {
+            // "=15\r\ntxt:Some string\r\n": first 3 bytes fmt, then ':' , then data.
+            if (blen as int) < 4 || string_char_at_n(data, len, data_from + 3) != 58 {
+                free_value(v as ptr) return null, pos, PS_MALFORMED
+            }
+            fb, _fn = slice_bytes(data, len, data_from, data_from + 3)
+            v.verb_fmt = fb
+            sl, n = slice_bytes(data, len, data_from + 4, data_from + (blen as int))
+            if sl != null { adopt_payload(v, sl, n) }
+        } else {
+            sl, n = slice_bytes(data, len, data_from, data_from + (blen as int))
+            if sl != null { adopt_payload(v, sl, n) }
+        }
+        return v as ptr, need_end, PS_OK
+    }
+
+    // --- aggregates: array / set / push (count of elements) ---
+    if marker == RESP_ARRAY || marker == RESP_SET || marker == RESP_PUSH {
+        cnt, ok = parse_line_int(data, len, body_from, crlf_start)
+        if ok == 0 { return null, pos, PS_MALFORMED }
+        if cnt < 0 { // RESP2 null array: *-1\r\n
+            return alloc_value(RESP_NULL) as ptr, line_end, PS_OK
+        }
+        v = alloc_value(marker) v.items = list.new()
+        cur = line_end
+        k = 0
+        while k < (cnt as int) {
+            child, np, st = parse_one(data, len, cur)
+            if st != PS_OK { free_value(v as ptr) return null, pos, st }
+            list.list_add_raw(v.items, child)
+            cur = np
+            k = k + 1
+        }
+        return v as ptr, cur, PS_OK
+    }
+
+    // --- map (count of PAIRS) ---
+    if marker == RESP_MAP {
+        cnt, ok = parse_line_int(data, len, body_from, crlf_start)
+        if ok == 0 || cnt < 0 { return null, pos, PS_MALFORMED }
+        v = alloc_value(RESP_MAP) v.map_keys = list.new() v.map_vals = list.new()
+        cur = line_end
+        k = 0
+        while k < (cnt as int) {
+            key, np1, st1 = parse_one(data, len, cur)
+            if st1 != PS_OK { free_value(v as ptr) return null, pos, st1 }
+            val, np2, st2 = parse_one(data, len, np1)
+            if st2 != PS_OK { free_value(key) free_value(v as ptr) return null, pos, st2 }
+            list.list_add_raw(v.map_keys, key)
+            list.list_add_raw(v.map_vals, val)
+            cur = np2
+            k = k + 1
+        }
+        return v as ptr, cur, PS_OK
+    }
+
+    return null, pos, PS_MALFORMED // unknown marker
+}
+
+// Adopt an already-owned bytes buffer as v's payload (transfers ownership).
+fn adopt_payload(v: *RespValue, b: ptr, len: int) {
+    v.str_bytes = b
+    v.str_len = len
+}
+
+// Parse a RESP3 double span (ASCII, may be "inf"/"-inf"/"nan" or decimal).
+// Falls back to 0.0 on an unrecognised body — the frame still parses.
+fn parse_double_span(data: string, len: int, from: int, to: int) -> float {
+    sl, n = slice_bytes(data, len, from, to)
+    if sl == null { return 0.0 }
+    s = bytes.to_string(sl, n)
+    bytes.free(sl)
+    if string.equals(s, "inf") == 1 { return 1.0 / 0.0 }
+    if string.equals(s, "-inf") == 1 { return 0.0 - (1.0 / 0.0) }
+    if string.equals(s, "nan") == 1 { return 0.0 / 0.0 }
+    d, _e = string.to_float(s)
+    return d
+}
+
+// ---- public decode ---------------------------------------------------------
+
+// Parse ONE value from the front of `data` (len bytes). Returns
+//   (value, consumed, "")  on success — consumed bytes were used, the rest is
+//                           the next frame(s); free the value with free_value.
+//   (null, 0, "")          INCOMPLETE — not enough bytes yet; read more and
+//                           retry with the fuller buffer. Distinct from error.
+//   (null, 0, msg)         MALFORMED — a protocol error; msg says why.
+// This is the resumable entry point for a socket reader.
+parse_prefix(data: string, len: int) -> (ptr, int, string) {
+    v, np, st = parse_one(data, len, 0)
+    if st == PS_OK { return v, np, string.concat("", "") }
+    if st == PS_INCOMPLETE { return null, 0, string.concat("", "") }
+    return null, 0, string.concat("malformed RESP frame", "")
+}
+
+// Parse a buffer expected to hold EXACTLY one complete value. Returns the value
+// on success, or errors (`ptr!`) on incomplete/malformed/trailing-garbage. Use
+// parse_prefix for a stream where more frames follow.
+parse(data: string) -> ptr! {
+    len = string_length(data)
+    v, np, err = parse_prefix(data, len)
+    if err != "" { return null, err }
+    if v == null { return null, "incomplete RESP frame" }
+    if np != len {
+        free_value(v)
+        return null, "trailing bytes after RESP frame"
+    }
+    return v, string.concat("", "")
+}
+
+// ---- encode ----------------------------------------------------------------
+//
+// Two public entry points differing only in dialect:
+//   encode(v)        — RESP3 wire form (native markers for null/bool/double/
+//                      map/set/push/bignum/verbatim).
+//   encode_resp2(v)  — RESP2 wire form: null → $-1, bool → :0/:1, double →
+//                      a bulk string, map/set/push → array, bignum → bulk.
+// A client/server picks based on the connection's negotiated protocol.
+
+encode(v: ptr) -> string! {
+    b = strbuilder.new(64)
+    enc_into(b, v, 1)
+    return strbuilder.finish(b), string.concat("", "")
+}
+encode_resp2(v: ptr) -> string! {
+    b = strbuilder.new(64)
+    enc_into(b, v, 0)
+    return strbuilder.finish(b), string.concat("", "")
+}
+
+fn append_line(b: ptr, marker: int, payload: string) {
+    strbuilder.append(b, string.from_char(marker))
+    strbuilder.append(b, payload)
+    strbuilder.append(b, "\r\n")
+}
+
+// Append a value's payload bytes verbatim (binary-safe) into the builder.
+fn append_payload(b: ptr, v: *RespValue) {
+    if v.str_bytes == null || v.str_len <= 0 { return }
+    s = bytes.to_string(v.str_bytes, v.str_len)
+    strbuilder.append_n(b, s, v.str_len)
+}
+
+fn enc_into(b: ptr, vp: ptr, resp3: int) {
+    v = vp as *RespValue
+    t = v.type
+    if t == RESP_SIMPLE || t == RESP_ERROR {
+        strbuilder.append(b, string.from_char(t))
+        append_payload(b, v)
+        strbuilder.append(b, "\r\n")
+        return
+    }
+    if t == RESP_INTEGER {
+        append_line(b, RESP_INTEGER, string.from_long(v.int_val))
+        return
+    }
+    if t == RESP_BULK || t == RESP_BIGNUM || t == RESP_VERBATIM {
+        // BIGNUM/VERBATIM downgrade to a bulk string under RESP2.
+        enc_bulk_like(b, v, resp3)
+        return
+    }
+    if t == RESP_NULL {
+        if resp3 == 1 { strbuilder.append(b, "_\r\n") }
+        else { strbuilder.append(b, "$-1\r\n") }
+        return
+    }
+    if t == RESP_BOOL {
+        if resp3 == 1 {
+            if v.bool_val != 0 { strbuilder.append(b, "#t\r\n") }
+            else { strbuilder.append(b, "#f\r\n") }
+        } else {
+            if v.bool_val != 0 { strbuilder.append(b, ":1\r\n") }
+            else { strbuilder.append(b, ":0\r\n") }
+        }
+        return
+    }
+    if t == RESP_DOUBLE {
+        ds = fmt_double(v.dbl_val)
+        if resp3 == 1 { append_line(b, RESP_DOUBLE, ds) }
+        else {
+            // RESP2 has no double: emit as a bulk string of the same text.
+            append_line(b, RESP_BULK, string.from_int(string_length(ds)))
+            strbuilder.append(b, ds)
+            strbuilder.append(b, "\r\n")
+        }
+        return
+    }
+    if t == RESP_ARRAY || t == RESP_SET || t == RESP_PUSH {
+        n = 0
+        if v.items != null { n = list.size(v.items) }
+        // Under RESP2, set/push collapse to a plain array marker.
+        m = t
+        if resp3 == 0 { m = RESP_ARRAY }
+        append_line(b, m, string.from_int(n))
+        i = 0
+        while i < n { enc_into(b, list.get_raw(v.items, i), resp3) i = i + 1 }
+        return
+    }
+    if t == RESP_MAP {
+        n = 0
+        if v.map_keys != null { n = list.size(v.map_keys) }
+        if resp3 == 1 {
+            append_line(b, RESP_MAP, string.from_int(n))
+        } else {
+            // RESP2 map: a flat array of 2*n elements (k,v,k,v,...).
+            append_line(b, RESP_ARRAY, string.from_int(n * 2))
+        }
+        i = 0
+        while i < n {
+            enc_into(b, list.get_raw(v.map_keys, i), resp3)
+            enc_into(b, list.get_raw(v.map_vals, i), resp3)
+            i = i + 1
+        }
+        return
+    }
+}
+
+// Bulk-string family: a RESP_BULK, or a RESP3 bignum/verbatim that downgrades
+// to a bulk string under RESP2.
+fn enc_bulk_like(b: ptr, v: *RespValue, resp3: int) {
+    if v.type == RESP_BIGNUM && resp3 == 1 {
+        strbuilder.append(b, "(")
+        append_payload(b, v)
+        strbuilder.append(b, "\r\n")
+        return
+    }
+    if v.type == RESP_VERBATIM && resp3 == 1 {
+        // "=<len>\r\n<fmt>:<data>\r\n"; len counts fmt(3) + ':' + data.
+        fmt_len = 0
+        if v.verb_fmt != null { fmt_len = 3 }
+        total = fmt_len + 1 + v.str_len
+        append_line(b, RESP_VERBATIM, string.from_int(total))
+        if v.verb_fmt != null {
+            fs = bytes.to_string(v.verb_fmt, 3)
+            strbuilder.append_n(b, fs, 3)
+        }
+        strbuilder.append(b, ":")
+        append_payload(b, v)
+        strbuilder.append(b, "\r\n")
+        return
+    }
+    // Plain bulk (also the RESP2 downgrade target for bignum/verbatim data).
+    append_line(b, RESP_BULK, string.from_int(v.str_len))
+    append_payload(b, v)
+    strbuilder.append(b, "\r\n")
+}
+
+// Format a double for the RESP3 `,` line: inf/-inf/nan spelled per spec.
+fn fmt_double(d: float) -> string {
+    if d != d { return string.concat("nan", "") } // NaN
+    inf = 1.0 / 0.0
+    if d == inf { return string.concat("inf", "") }
+    if d == 0.0 - inf { return string.concat("-inf", "") }
+    return string.from_float(d)
+}

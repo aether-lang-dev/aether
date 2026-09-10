@@ -11,6 +11,19 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.resp` — a RESP codec (Redis Serialization Protocol).** RESP3-native and
+  RESP2-compatible: because RESP3 is a strict superset of RESP2, one decoder reads
+  the full RESP3 grammar (and therefore any RESP2 stream) and one encoder selects
+  the dialect (`encode` for RESP3, `encode_resp2` for the RESP2 wire form of the
+  same value). Transport-agnostic like `std.json`/`std.cbor` — it works over byte
+  buffers and never touches a socket. The decoder is resumable: `parse_prefix`
+  reports *incomplete* (needs more bytes) distinctly from *malformed* (a protocol
+  error), so a socket reader can accumulate bytes and retry a partial frame. All
+  RESP3 types are covered (null, boolean, double, big number, verbatim string,
+  map, set, push), with binary-safe bulk strings and whole-tree `free_value`.
+
 ### Fixed
 
 - **`ae build` and `ae run` link optional libraries only when the program's
