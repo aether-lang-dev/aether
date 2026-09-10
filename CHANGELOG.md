@@ -34,6 +34,22 @@ version number before tagging the release.
   record is what the emitted call depends on. It now fails the way `add_child`
   does for the same situation.
 
+- **A memory pool with an object size that was not a multiple of the pointer
+  alignment put every other slot on a misaligned address.** Each slot is cast
+  to `FreeNode*` while it sits on the free list, so the stride has to keep them
+  aligned; a size clearing the minimum but not a multiple of it (12, say) did
+  not. Confirmed with `-fsanitize=alignment`, which reports the access before
+  the fix and nothing after. x86 and ARM64 absorb it silently, a strict target
+  does not, and this repository has RISC-V CI.
+
+- **A long source line made its own diagnostic unreadable.** The renderer
+  echoed the whole line and then emitted one space per column on the caret
+  line, so an error at column 3000 produced two 3000-character lines around a
+  one-line message. Generated and minified sources reach that easily. The
+  snippet is now windowed around the caret, marked with an ellipsis on the
+  side that was cut. Lines that already fit are untouched, and the caret still
+  lands on the same character.
+
 - **A read error while hashing a file for the build cache produced a hash over
   partial content.** `fread` returns 0 for both EOF and failure, so the loop
   ended either way and the partial hash was returned as if it were the file's.
