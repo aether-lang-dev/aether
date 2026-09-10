@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.664.0]
+
 ### Fixed
 
 - **Deeply nested source crashed the compiler instead of reporting an error.**
