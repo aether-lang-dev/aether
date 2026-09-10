@@ -1,0 +1,7 @@
+// Parameters are deliberately unannotated: their types come only from the
+// consumer's call sites, and the consumer writes those calls qualified
+// (`mathmod.scale`) while the compiler names this definition `mathmod_scale`.
+
+scale(a, b) {
+    return a * b
+}

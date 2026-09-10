@@ -97,7 +97,7 @@ static void cascade_step(CascadeActor* self) {
 // Stress Tests
 // ============================================================================
 
-void test_rapid_init_shutdown() {
+void test_rapid_init_shutdown(void) {
     // Test multiple init/shutdown cycles
     for (int cycle = 0; cycle < 5; cycle++) {
         scheduler_init(2);
@@ -108,7 +108,7 @@ void test_rapid_init_shutdown() {
     }
 }
 
-void test_zero_message_workload() {
+void test_zero_message_workload(void) {
     scheduler_init(2);
     scheduler_start();
     
@@ -119,7 +119,7 @@ void test_zero_message_workload() {
     scheduler_cleanup();
 }
 
-void test_single_message() {
+void test_single_message(void) {
     scheduler_init(1);
     
     StressActor* actor = malloc(sizeof(StressActor));
@@ -150,7 +150,7 @@ void test_single_message() {
     free(actor);
 }
 
-void test_many_actors_single_core() {
+void test_many_actors_single_core(void) {
     scheduler_init(1);
     
     const int NUM_ACTORS = 100;
@@ -195,7 +195,7 @@ void test_many_actors_single_core() {
     free(actors);
 }
 
-void test_burst_then_idle() {
+void test_burst_then_idle(void) {
     scheduler_init(2);
     
     StressActor* actor = malloc(sizeof(StressActor));
@@ -247,7 +247,7 @@ void test_burst_then_idle() {
     free(actor);
 }
 
-void test_max_cores() {
+void test_max_cores(void) {
     int max = MAX_CORES;
     if (max > 16) max = 16;  // Limit for test speed
     
@@ -297,7 +297,7 @@ void test_max_cores() {
     free(actors);
 }
 
-void test_alternating_load() {
+void test_alternating_load(void) {
     scheduler_init(4);
     
     StressActor** actors = malloc(4 * sizeof(StressActor*));
@@ -348,7 +348,7 @@ void test_alternating_load() {
     free(actors);
 }
 
-void test_immediate_shutdown() {
+void test_immediate_shutdown(void) {
     scheduler_init(2);
     
     StressActor* actor = malloc(sizeof(StressActor));
@@ -378,7 +378,7 @@ void test_immediate_shutdown() {
     free(actor);
 }
 
-void test_concurrent_sends_same_actor() {
+void test_concurrent_sends_same_actor(void) {
     scheduler_init(4);
 
     StressActor* actor = malloc(sizeof(StressActor));
@@ -418,7 +418,7 @@ void test_concurrent_sends_same_actor() {
     }
 }
 
-void test_priority_inversion() {
+void test_priority_inversion(void) {
     scheduler_init(2);
     
     StressActor* slow = malloc(sizeof(StressActor));
@@ -473,7 +473,7 @@ void test_priority_inversion() {
     free(fast);
 }
 
-void test_message_ordering_under_load() {
+void test_message_ordering_under_load(void) {
     scheduler_init(1);
 
     OrderActor* actor = malloc(sizeof(OrderActor));
@@ -515,7 +515,7 @@ void test_message_ordering_under_load() {
     schedulers[0].actors = NULL;
 }
 
-void test_cascading_messages() {
+void test_cascading_messages(void) {
     scheduler_init(2);
 
     CascadeActor* actors[3];
@@ -572,7 +572,7 @@ void test_cascading_messages() {
     }
 }
 
-void test_memory_pressure() {
+void test_memory_pressure(void) {
     scheduler_init(2);
     
     const int MANY = 50;

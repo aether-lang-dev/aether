@@ -4,7 +4,7 @@
 
 static MemoryStats g_stats = {0};
 
-void memory_stats_init() {
+void memory_stats_init(void) {
     memset(&g_stats, 0, sizeof(MemoryStats));
 }
 
@@ -34,15 +34,15 @@ void memory_stats_record_free(size_t bytes) {
     }
 }
 
-void memory_stats_record_failure() {
+void memory_stats_record_failure(void) {
     g_stats.allocation_failures++;
 }
 
-MemoryStats memory_stats_get() {
+MemoryStats memory_stats_get(void) {
     return g_stats;
 }
 
-void memory_stats_print() {
+void memory_stats_print(void) {
     printf("\n========== Memory Statistics ==========\n");
     printf("Allocations:\n");
     printf("  Total:   %llu\n", (unsigned long long)g_stats.total_allocations);
@@ -74,7 +74,7 @@ void memory_stats_print() {
     printf("=======================================\n\n");
 }
 
-void memory_stats_reset() {
+void memory_stats_reset(void) {
     memset(&g_stats, 0, sizeof(MemoryStats));
 }
 

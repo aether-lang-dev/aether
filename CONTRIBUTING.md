@@ -764,6 +764,20 @@ After merge, the pipeline transforms this into:
 - If `[current]` is missing, create it at the top (below the header)
 - Keep entries concise but specific, mention what changed and why
 
+**Run `make check-changelog` before you push.** If a release is cut while your
+branch is open, merging main renames `## [current]` into that version and folds
+your entry into the released section, with no git conflict to warn you. CI reds
+on it, but only after a full matrix run. `make check-changelog` is the identical
+check (`tests/scripts/check_changelog_fold.sh`, which the CI job calls), so it
+gives the same answer in under a second:
+
+```bash
+make check-changelog
+```
+
+It fails if the released sections no longer match `origin/main`, or if there is
+not exactly one `## [current]`.
+
 ### `### Upgrade notes` for memory-fix releases
 
 When a PR touches `compiler/codegen/codegen_stmt.c` (the heap-string-tracker wrapper), `std/string/aether_string.c` (the refcount allocator), or anything else that changes when the runtime frees a heap-allocated value, add an `### Upgrade notes` block to the same `[current]` entry. The block names the alias / ownership patterns whose downstream behaviour the change can break, and gives a recommended pre-upgrade play.

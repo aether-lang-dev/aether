@@ -97,7 +97,7 @@ Because each pool is thread-local, acquisition and release use plain loads and s
 The scheduler drains multiple messages from the lock-free incoming queue in a single batch dequeue operation. This reduces atomic operations from one-per-message to one-per-batch.
 
 ```c
-#define COALESCE_THRESHOLD 512
+#define SCHEDULER_DRAIN_BATCH 512
 
 // Single batch dequeue: 1 atomic store for entire batch
 count = queue_dequeue_batch(&incoming_queue, buffer.actors, buffer.messages, batch_size);

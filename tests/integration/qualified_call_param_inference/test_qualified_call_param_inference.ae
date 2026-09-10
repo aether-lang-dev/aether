@@ -1,0 +1,34 @@
+// Regression: a qualified call site (`mod.fn`) must reach the definition the
+// compiler names `mod_fn` when it infers parameter types from call sites
+// (#1995, the call-site index).
+//
+// The index keys every call under both its written name and its
+// dot-to-underscore spelling. Keying only the written name still compiles,
+// still passes `ae check`, and prints the wrong number, so the values below
+// are the assertion rather than the exit status of the build.
+
+import mathmod
+
+extern exit(code: int)
+
+main() {
+    println("=== test_qualified_call_param_inference ===")
+
+    // Narrow site first. If it were the only site consulted, `a` pins to
+    // int and the wide site below truncates.
+    small = mathmod.scale(3, 4)
+    if small != 12 {
+        println("FAIL: expected 12, got ${small}")
+        exit(1)
+    }
+    println("  PASS: narrow qualified call site")
+
+    big = mathmod.scale(3000000000, 2)
+    if big != 6000000000 {
+        println("FAIL: expected 6000000000, got ${big}")
+        exit(1)
+    }
+    println("  PASS: wide qualified call site widens the inferred parameter")
+
+    println("All qualified-call inference cases pass")
+}

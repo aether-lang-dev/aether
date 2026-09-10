@@ -1195,7 +1195,6 @@ void report_ambiguous_types(InferenceContext* ctx) {
 
 // Propagate types from function call sites to function definitions
 int propagate_function_call_types(ASTNode* program, SymbolTable* table);
-int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count);
 
 /* Widening rank for the call-site parameter unification below.
  *
@@ -1224,85 +1223,176 @@ static int param_widening_rank(TypeKind k) {
     }
 }
 
-// Helper to recursively find function calls and propagate types
-int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* func_def, int param_count) {
-    if (!tree || !func_name) return 0;
-    int changed = 0;
+/* Call-site index for the propagation pass below.
+ *
+ * CRITICAL: the traversal here must stay identical to the one the
+ * unification loop expects. It skips a function definition's parameter
+ * nodes and descends only into the body, and it records nodes in
+ * pre-order within each top-level node, in ascending top-level order.
+ * The first call site to supply a type wins (later ones may only widen),
+ * so a different visit order silently changes which type a parameter
+ * gets. */
+typedef struct {
+    ASTNode* call;
+    const char* key;
+    unsigned hash;
+    int top_index;
+    int next;
+} CallRef;
 
-    // For function definitions: skip parameter nodes but recurse into the body
+typedef struct {
+    CallRef* refs;
+    int count;
+    int capacity;
+    int* buckets;
+    int* tails;
+    int bucket_count;
+    char** owned;
+    int owned_count;
+    int owned_capacity;
+} CallIndex;
+
+static unsigned call_index_hash(const char* s) {
+    unsigned h = 2166136261u;
+    while (*s) { h ^= (unsigned char)*s++; h *= 16777619u; }
+    return h;
+}
+
+static void call_index_free(CallIndex* ix) {
+    if (!ix) return;
+    for (int i = 0; i < ix->owned_count; i++) free(ix->owned[i]);
+    free(ix->owned);
+    free(ix->refs);
+    free(ix->buckets);
+    free(ix->tails);
+}
+
+static int call_index_add(CallIndex* ix, ASTNode* call, const char* key, int top_index) {
+    if (ix->count == ix->capacity) {
+        int cap = ix->capacity ? ix->capacity * 2 : 64;
+        CallRef* grown = (CallRef*)realloc(ix->refs, (size_t)cap * sizeof(CallRef));
+        if (!grown) return 0;
+        ix->refs = grown;
+        ix->capacity = cap;
+    }
+    CallRef* r = &ix->refs[ix->count];
+    r->call = call;
+    r->key = key;
+    r->hash = call_index_hash(key);
+    r->top_index = top_index;
+    r->next = -1;
+    ix->count++;
+    return 1;
+}
+
+static int call_index_own(CallIndex* ix, char* s) {
+    if (ix->owned_count == ix->owned_capacity) {
+        int cap = ix->owned_capacity ? ix->owned_capacity * 2 : 16;
+        char** grown = (char**)realloc(ix->owned, (size_t)cap * sizeof(char*));
+        if (!grown) return 0;
+        ix->owned = grown;
+        ix->owned_capacity = cap;
+    }
+    ix->owned[ix->owned_count++] = s;
+    return 1;
+}
+
+static int call_index_collect(CallIndex* ix, ASTNode* tree, int top_index) {
+    if (!tree) return 1;
+
     if (tree->type == AST_FUNCTION_DEFINITION || tree->type == AST_BUILDER_FUNCTION) {
         int body_idx = tree->child_count - 1;
         if (body_idx >= 0 && tree->children[body_idx]) {
-            changed += propagate_call_types_in_tree(tree->children[body_idx], func_name, func_def, param_count);
+            return call_index_collect(ix, tree->children[body_idx], top_index);
         }
-        return changed;
+        return 1;
     }
-    
-    // Check if this is a function call to our target function
-    // Also match qualified calls: "mymath.double_it" matches definition "mymath_double_it"
-    int is_match = 0;
+
     if (tree->type == AST_FUNCTION_CALL && tree->value) {
-        /* This runs once per AST node per function definition, so it is the
-         * busiest comparison in the pass. Settle the common mismatch on the
-         * first byte before calling out. */
-        if ((unsigned char)tree->value[0] == (unsigned char)func_name[0] &&
-            strcmp(tree->value, func_name) == 0) {
-            is_match = 1;
-        } else if (strchr(tree->value, '.')) {
-            // Convert dots to underscores and check
+        if (!call_index_add(ix, tree, tree->value, top_index)) return 0;
+        /* A qualified call `mymath.double_it` also matches the definition
+         * `mymath_double_it`, so it is indexed under both spellings. The
+         * 512-byte cap and its truncation match what the linear scan did. */
+        if (strchr(tree->value, '.')) {
             char mangled[512];
             strncpy(mangled, tree->value, sizeof(mangled) - 1);
             mangled[sizeof(mangled) - 1] = '\0';
             for (char* p = mangled; *p; p++) { if (*p == '.') *p = '_'; }
-            if (strcmp(mangled, func_name) == 0) is_match = 1;
+            char* copy = strdup(mangled);
+            if (!copy) return 0;
+            if (!call_index_own(ix, copy)) { free(copy); return 0; }
+            if (!call_index_add(ix, tree, copy, top_index)) return 0;
         }
     }
-    if (is_match) {
-        // This is a call to our function - propagate argument types to parameters
-        int arg_count = tree->child_count;
-        for (int i = 0; i < arg_count && i < param_count; i++) {
-            ASTNode* arg = tree->children[i];
-            ASTNode* param = func_def->children[i];
 
-            if (arg && param &&
-                (param->type == AST_VARIABLE_DECLARATION || param->type == AST_PATTERN_VARIABLE)) {
-                // If parameter type is unknown and argument type is known, propagate it
-                if ((!param->node_type || param->node_type->kind == TYPE_UNKNOWN) &&
-                    arg->node_type && arg->node_type->kind != TYPE_UNKNOWN) {
-                    if (param->node_type) free_type(param->node_type);
-                    param->node_type = clone_type(arg->node_type);
-                    /* Record that THIS pass supplied the type. Only a type we
-                     * inferred may be widened below; one the author wrote is
-                     * authoritative, and widening it would change documented
-                     * semantics -- `expect(got: int, ...)` relies on `int`
-                     * wrapping at 32 bits, and promoting it to int64 stops the
-                     * wrap the test exists to check. */
-                    param->type_inferred = 1;
-                    changed++;
-                } else if (param->type_inferred && param->node_type && arg && arg->node_type) {
-                    /* Already pinned by an earlier call site. Take the wider
-                     * numeric kind rather than keeping whichever was seen
-                     * first: the narrow one truncates this argument, and
-                     * which call site the compiler happens to reach first is
-                     * not something the author controls (#1972). Only widens,
-                     * only among the ranked numeric kinds, and only over a
-                     * type this pass inferred, so an annotated parameter and a
-                     * genuinely incompatible pair are both left alone. */
-                    int cur = param_widening_rank(param->node_type->kind);
-                    int inc = param_widening_rank(arg->node_type->kind);
-                    if (cur > 0 && inc > cur) {
-                        free_type(param->node_type);
-                        param->node_type = clone_type(arg->node_type);
-                        changed++;
-                    }
-                }
+    for (int i = 0; i < tree->child_count; i++) {
+        if (!call_index_collect(ix, tree->children[i], top_index)) return 0;
+    }
+    return 1;
+}
+
+static int call_index_build(CallIndex* ix, ASTNode* program) {
+    memset(ix, 0, sizeof(*ix));
+    for (int j = 0; j < program->child_count; j++) {
+        if (!call_index_collect(ix, program->children[j], j)) return 0;
+    }
+
+    int n = 64;
+    while (n < ix->count) n <<= 1;
+    ix->bucket_count = n;
+    ix->buckets = (int*)malloc((size_t)n * sizeof(int));
+    ix->tails = (int*)malloc((size_t)n * sizeof(int));
+    if (!ix->buckets || !ix->tails) return 0;
+    for (int i = 0; i < n; i++) { ix->buckets[i] = -1; ix->tails[i] = -1; }
+
+    for (int i = 0; i < ix->count; i++) {
+        unsigned b = ix->refs[i].hash & (unsigned)(n - 1);
+        if (ix->tails[b] < 0) ix->buckets[b] = i;
+        else ix->refs[ix->tails[b]].next = i;
+        ix->tails[b] = i;
+    }
+    return 1;
+}
+
+/* Unify one call site's argument types into the definition's parameters. */
+static int propagate_call_site(ASTNode* call, ASTNode* func_def, int param_count) {
+    int changed = 0;
+    int arg_count = call->child_count;
+    for (int i = 0; i < arg_count && i < param_count; i++) {
+        ASTNode* arg = call->children[i];
+        ASTNode* param = func_def->children[i];
+        if (!arg || !param) continue;
+        if (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE) continue;
+
+        if ((!param->node_type || param->node_type->kind == TYPE_UNKNOWN) &&
+            arg->node_type && arg->node_type->kind != TYPE_UNKNOWN) {
+            if (param->node_type) free_type(param->node_type);
+            param->node_type = clone_type(arg->node_type);
+            /* Record that THIS pass supplied the type. Only a type we
+             * inferred may be widened below; one the author wrote is
+             * authoritative, and widening it would change documented
+             * semantics: `expect(got: int, ...)` relies on `int` wrapping
+             * at 32 bits, and promoting it to int64 stops the wrap the
+             * test exists to check. */
+            param->type_inferred = 1;
+            changed++;
+        } else if (param->type_inferred && param->node_type && arg->node_type) {
+            /* Already pinned by an earlier call site. Take the wider
+             * numeric kind rather than keeping whichever was seen first:
+             * the narrow one truncates this argument, and which call site
+             * the compiler happens to reach first is not something the
+             * author controls (#1972). Only widens, only among the ranked
+             * numeric kinds, and only over a type this pass inferred, so
+             * an annotated parameter and a genuinely incompatible pair are
+             * both left alone. */
+            int cur = param_widening_rank(param->node_type->kind);
+            int inc = param_widening_rank(arg->node_type->kind);
+            if (cur > 0 && inc > cur) {
+                free_type(param->node_type);
+                param->node_type = clone_type(arg->node_type);
+                changed++;
             }
         }
-    }
-
-    // Recursively process all children
-    for (int i = 0; i < tree->child_count; i++) {
-        changed += propagate_call_types_in_tree(tree->children[i], func_name, func_def, param_count);
     }
     return changed;
 }
@@ -1312,29 +1402,43 @@ int propagate_call_types_in_tree(ASTNode* tree, const char* func_name, ASTNode* 
 int propagate_function_call_types(ASTNode* program, SymbolTable* table) {
     (void)table;  // Unused for now
     if (!program) return 0;
-    int total_changed = 0;
 
-    // Find all function calls and match them with definitions
+    /* CRITICAL: one walk builds the callee -> call-sites index, then each
+     * definition resolves against its own bucket. The previous shape walked
+     * every top-level node once per definition, which is quadratic in the
+     * number of functions and was measurable well inside the token cap
+     * (#1995). The index is rebuilt per pass because the fixpoint loop
+     * calls this repeatedly; only node types change between passes, never
+     * the shape of the tree, so the walk order stays the one described on
+     * call_index_collect. */
+    CallIndex ix;
+    if (!call_index_build(&ix, program)) {
+        call_index_free(&ix);
+        fprintf(stderr, "aetherc: out of memory building the call-site index\n");
+        exit(1);
+    }
+
+    int total_changed = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* node = program->children[i];
         if (!node) continue;
+        if ((node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION) || !node->value) continue;
 
-        // Look for function definitions
-        if ((node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) && node->value) {
-            const char* func_name = node->value;
-            int param_count = node->child_count - 1; // Last child is body
+        const char* func_name = node->value;
+        int param_count = node->child_count - 1; // Last child is body
 
-            // Search every other top-level node (including other function bodies)
-            for (int j = 0; j < program->child_count; j++) {
-                if (i != j) {
-                    total_changed += propagate_call_types_in_tree(program->children[j], func_name, node, param_count);
-                }
-            }
+        unsigned h = call_index_hash(func_name);
+        for (int r = ix.buckets[h & (unsigned)(ix.bucket_count - 1)]; r >= 0; r = ix.refs[r].next) {
+            CallRef* ref = &ix.refs[r];
+            if (ref->top_index == i) continue;  // a function's own body is not scanned for calls to itself
+            if (ref->hash != h || strcmp(ref->key, func_name) != 0) continue;
+            total_changed += propagate_call_site(ref->call, node, param_count);
         }
     }
+
+    call_index_free(&ix);
     return total_changed;
 }
-
 // Infer return types for all functions
 // Scan AST for multi-return statements and fill UNKNOWN tuple elements
 static void merge_tuple_returns(ASTNode* node, Type* merged) {

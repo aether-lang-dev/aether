@@ -59,18 +59,18 @@ extern aether_casper_close(chan: ptr)
 
 // Resolve a hostname to its first IP via a "system.net" channel.
 // Returns the address string, or null on failure.
-extern aether_casper_resolve(netchan: ptr, hostname: string) -> string
+extern aether_casper_resolve(netchan: ptr, hostname: string) -> string @heap
 
 // Look up a username's uid via a "system.pwd" channel. -1 if absent.
 extern aether_casper_pwd_uid(pwdchan: ptr, username: string) -> int
 
 // Look up a username's home directory via a "system.pwd" channel.
 // Returns the path, or null on failure.
-extern aether_casper_pwd_home(pwdchan: ptr, username: string) -> string
+extern aether_casper_pwd_home(pwdchan: ptr, username: string) -> string @heap
 
 // Read a string-valued sysctl via a "system.sysctl" channel.
 // Returns the value, or null on failure.
-extern aether_casper_sysctl_str(sysctlchan: ptr, name: string) -> string
+extern aether_casper_sysctl_str(sysctlchan: ptr, name: string) -> string @heap
 
 // ---- Ergonomic wrappers (casper.* namespace) ----
 

@@ -196,7 +196,7 @@ void module_set_lib_dir(const char* lib_dir) {
 }
 
 // Module management
-void module_registry_init() {
+void module_registry_init(void) {
     if (!global_module_registry) {
         global_module_registry = (ModuleRegistry*)malloc(sizeof(ModuleRegistry));
         global_module_registry->modules = NULL;
@@ -216,7 +216,7 @@ void module_registry_init() {
     }
 }
 
-void module_registry_shutdown() {
+void module_registry_shutdown(void) {
     if (global_module_registry) {
         for (int i = 0; i < global_module_registry->module_count; i++) {
             module_free(global_module_registry->modules[i]);
@@ -476,7 +476,7 @@ void package_manifest_free(PackageManifest* manifest) {
 
 // Dependency Graph Implementation
 
-DependencyGraph* dependency_graph_create() {
+DependencyGraph* dependency_graph_create(void) {
     DependencyGraph* graph = malloc(sizeof(DependencyGraph));
     graph->nodes = NULL;
     graph->node_count = 0;

@@ -32,7 +32,7 @@ typedef struct {
 extern OptimizationStats g_opt_stats;
 
 // Initialize optimization subsystem
-static inline void scheduler_opts_init() {
+static inline void scheduler_opts_init(void) {
     atomic_store(&g_opt_stats.use_direct_send, true);
     atomic_store(&g_opt_stats.use_adaptive_batching, true);
     atomic_store(&g_opt_stats.use_message_dedup, false);  // Opt-in per actor
@@ -170,7 +170,7 @@ static inline void optimized_process_batch_simd(
 }
 
 // Print optimization statistics
-static inline void scheduler_opts_print_stats() {
+static inline void scheduler_opts_print_stats(void) {
     printf("\n=== Scheduler Optimization Statistics ===\n");
     printf("Direct Send:  %d hits, %d misses (%.1f%% hit rate)\n",
         atomic_load(&g_opt_stats.direct_send_hits),

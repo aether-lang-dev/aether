@@ -445,7 +445,7 @@ const char* http_get_path_param(HttpRequest* req, const char* key);
 void http_request_free(HttpRequest* req);
 
 // Response building
-HttpServerResponse* http_response_create();
+HttpServerResponse* http_response_create(void);
 void http_response_set_status(HttpServerResponse* res, int code);
 void http_response_set_header(HttpServerResponse* res, const char* key, const char* value);
 /* Append a header verbatim, even if a header with the same name

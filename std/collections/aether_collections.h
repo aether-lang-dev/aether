@@ -11,7 +11,7 @@ typedef struct IntArray IntArray;
 typedef struct FloatArray FloatArray;
 typedef struct LongArray LongArray;
 
-ArrayList* list_new();
+ArrayList* list_new(void);
 ArrayList* list_new_in(AetherAllocator* alloc);
 int list_add_raw(ArrayList* list, void* item);
 
@@ -48,7 +48,7 @@ void list_remove(ArrayList* list, int index);
 void list_clear(ArrayList* list);
 void list_free(ArrayList* list);
 
-HashMap* map_new();
+HashMap* map_new(void);
 int map_put_raw(HashMap* map, const char* key, void* value);
 
 /* Heap-string-aware put (#467). Retains the value and tags the

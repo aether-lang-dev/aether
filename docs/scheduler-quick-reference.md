@@ -130,7 +130,7 @@ sender -> scheduler_send_local -> mailbox (direct) -> actor step
 
 ### Message Coalescing
 ```c
-#define COALESCE_THRESHOLD 512  // In multicore_scheduler.h
+#define SCHEDULER_DRAIN_BATCH 512  // In multicore_scheduler.h
 ```
 
 ### Adaptive Batch Size
@@ -204,7 +204,7 @@ Both migration and work stealing use ascending core-id lock ordering to prevent 
 - Verify core count matches available hardware
 
 ### High Latency
-- Tune `COALESCE_THRESHOLD` for latency-sensitive workloads (lower = less batching delay)
+- Tune `SCHEDULER_DRAIN_BATCH` for latency-sensitive workloads (lower = less batching delay)
 - Check progressive backoff thresholds
 - Avoid blocking operations in actor step functions
 

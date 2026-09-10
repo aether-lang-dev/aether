@@ -50,12 +50,12 @@ void lexer_restore(const LexerState* in) {
     current_column = in->current_column;
 }
 
-char peek() {
+char peek(void) {
     if (current_pos >= source_length) return '\0';
     return source[current_pos];
 }
 
-char advance() {
+char advance(void) {
     if (current_pos >= source_length) return '\0';
     char c = source[current_pos++];
     if (c == '\n') {
@@ -73,7 +73,7 @@ char advance() {
     return c;
 }
 
-void skip_whitespace() {
+void skip_whitespace(void) {
     while (current_pos < source_length) {
         char c = peek();
         if (c == ' ' || c == '\t' || c == '\r') {
@@ -86,7 +86,7 @@ void skip_whitespace() {
     }
 }
 
-int skip_comment() {
+int skip_comment(void) {
     if (peek() == '/' && current_pos + 1 < source_length && source[current_pos + 1] == '/') {
         // Single line comment
         while (current_pos < source_length && peek() != '\n') {
@@ -115,7 +115,7 @@ int skip_comment() {
     return 0;
 }
 
-Token* read_string() {
+Token* read_string(void) {
     advance(); // skip opening quote
     int capacity = MAX_IDENTIFIER_LENGTH;
     char* buffer = malloc(capacity);
@@ -270,7 +270,7 @@ Token* read_string() {
     return token;
 }
 
-Token* read_number() {
+Token* read_number(void) {
     int capacity = MAX_IDENTIFIER_LENGTH;
     char* buffer = malloc(capacity);
     int i = 0;
@@ -423,7 +423,7 @@ Token* read_number() {
     return token;
 }
 
-Token* read_identifier() {
+Token* read_identifier(void) {
     int capacity = MAX_IDENTIFIER_LENGTH;
     char* buffer = malloc(capacity);
     int i = 0;
@@ -555,7 +555,7 @@ Token* read_raw_identifier(void) {
     return token;
 }
 
-Token* next_token() {
+Token* next_token(void) {
     skip_whitespace();
 
     token_start_line = current_line;

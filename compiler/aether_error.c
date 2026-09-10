@@ -425,15 +425,15 @@ void aether_error_with_code(const char* message, int line, int column, AetherErr
 }
 
 // Error statistics
-int aether_error_count() {
+int aether_error_count(void) {
     return error_count_global;
 }
 
-int aether_warning_count() {
+int aether_warning_count(void) {
     return warning_count_global;
 }
 
-void aether_error_reset_counts() {
+void aether_error_reset_counts(void) {
     error_count_global = 0;
     warning_count_global = 0;
 }

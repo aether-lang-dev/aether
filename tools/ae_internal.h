@@ -92,6 +92,12 @@ void discover_toolchain(void);
 extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) */
 
 /* ae.c helpers shared across TUs. */
+/* Size of a built compiler/linker command line. One definition, because the
+ * REPL had its own 16 KB array while everything else used this: a build path
+ * long enough to push the command past 16 KB truncated it mid-argument, and
+ * the compiler then failed with "no input files" (#1974). */
+#define AE_CMD_BUF 65536
+
 int  run_cmd_show_warnings(const char* cmd);
 int  run_cmd_capture_stdout(const char* cmd, const char* path);
 void dump_captured_stdout(const char* path);

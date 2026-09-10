@@ -76,7 +76,7 @@ struct TcpServer {
 
 static int net_initialized = 0;
 
-static void net_init() {
+static void net_init(void) {
     if (net_initialized) return;
     #ifdef _WIN32
     WSADATA wsa_data;
