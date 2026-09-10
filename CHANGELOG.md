@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.666.0]
+
 ### Fixed
 
 - **`tcp_receive_raw` leaked every buffer it returned** (#1987). The extern
