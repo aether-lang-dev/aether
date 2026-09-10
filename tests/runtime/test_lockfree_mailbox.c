@@ -156,6 +156,6 @@ TEST_CATEGORY(lockfree_mailbox_thread_safety, TEST_CATEGORY_RUNTIME) {
 }
 
 // Note: Tests are auto-registered via TEST_CATEGORY macro
-void register_lockfree_mailbox_tests() {
+void register_lockfree_mailbox_tests(void) {
     // Empty - tests registered by constructor
 }

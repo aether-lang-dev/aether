@@ -1140,7 +1140,7 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts) {
     scheduler_init(cores);
 }
 
-void scheduler_start() {
+void scheduler_start(void) {
     // MAIN THREAD MODE: Single-actor programs don't need scheduler threads
     // All message processing happens synchronously on the main thread
     if (aether_main_thread_mode_active()) {
@@ -1186,7 +1186,7 @@ void scheduler_ensure_threads_running(void) {
     scheduler_start();
 }
 
-void scheduler_stop() {
+void scheduler_stop(void) {
     // Set all running flags to 0 with release semantics
     for (int i = 0; i < num_cores; i++) {
         atomic_store_explicit(&schedulers[i].running, 0, memory_order_release);
@@ -1257,7 +1257,7 @@ static int has_pending_actor_timeout(void) {
     return 0;
 }
 
-void scheduler_wait() {
+void scheduler_wait(void) {
     // MAIN THREAD MODE: All messages processed synchronously, nothing to wait for
     // This is the fastest path for single-actor programs (counting benchmark)
     if (aether_main_thread_mode_active()) {
@@ -1355,7 +1355,7 @@ void scheduler_wait() {
 // Full shutdown: wait for quiescence, stop threads, join them.
 // Called once at program exit.  Safe to call even if threads were never
 // started (main-thread mode) or already shut down.
-void scheduler_shutdown() {
+void scheduler_shutdown(void) {
     // Wait for any in-flight messages first
     scheduler_wait();
 
@@ -1384,7 +1384,7 @@ void scheduler_shutdown() {
     AETHER_TRACE_FLUSH();
 }
 
-void scheduler_cleanup() {
+void scheduler_cleanup(void) {
     // Free allocated scheduler resources
     for (int i = 0; i < num_cores; i++) {
         // Clean up thread resources

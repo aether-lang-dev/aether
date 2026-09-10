@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void test_zerocopy_message_creation() {
+void test_zerocopy_message_creation(void) {
     // Test small message (no zero-copy)
     Message msg1 = message_create_simple(MSG_INCREMENT, 1, 42);
     ASSERT_EQ(msg1.type, MSG_INCREMENT);
@@ -34,7 +34,7 @@ void test_zerocopy_message_creation() {
     message_free(&msg2);
 }
 
-void test_zerocopy_message_transfer() {
+void test_zerocopy_message_transfer(void) {
     int size = 1024;
     void* data = malloc(size);
     memset(data, 0xCD, size);
@@ -59,7 +59,7 @@ void test_zerocopy_message_transfer() {
     message_free(&dest);
 }
 
-void test_zerocopy_mailbox_operations() {
+void test_zerocopy_mailbox_operations(void) {
     Mailbox mbox;
     mailbox_init(&mbox);
     
@@ -93,7 +93,7 @@ void test_zerocopy_mailbox_operations() {
     ASSERT_EQ(mbox.count, 0);
 }
 
-void test_zerocopy_threshold() {
+void test_zerocopy_threshold(void) {
     // Messages below threshold should not allocate
     Message small = message_create_simple(MSG_INCREMENT, 1, 100);
     ASSERT_TRUE(small.zerocopy.data == NULL);
@@ -109,7 +109,7 @@ void test_zerocopy_threshold() {
     message_free(&large);
 }
 
-void test_zerocopy_batch_operations() {
+void test_zerocopy_batch_operations(void) {
     Mailbox mbox;
     mailbox_init(&mbox);
     
@@ -148,7 +148,7 @@ void test_zerocopy_batch_operations() {
     ASSERT_EQ(zerocopy_count, 2);
 }
 
-void test_zerocopy_message_free() {
+void test_zerocopy_message_free(void) {
     // Test freeing null/unowned message (should be safe)
     Message msg1 = message_create_simple(MSG_INCREMENT, 1, 42);
     message_free(&msg1);  // Should be no-op
@@ -162,7 +162,7 @@ void test_zerocopy_message_free() {
     ASSERT_TRUE(msg2.zerocopy.data == NULL);
 }
 
-void register_zerocopy_tests() {
+void register_zerocopy_tests(void) {
     register_test_with_category("Zero-copy message creation", test_zerocopy_message_creation, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Zero-copy message transfer", test_zerocopy_message_transfer, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Zero-copy mailbox operations", test_zerocopy_mailbox_operations, TEST_CATEGORY_RUNTIME);

@@ -240,7 +240,7 @@ int apkg_install(const char* package) {
     return 0;
 }
 
-int apkg_publish() {
+int apkg_publish(void) {
     printf("Publishing package...\n");
     
     FILE* manifest = fopen("aether.toml", "r");
@@ -312,7 +312,7 @@ int apkg_publish() {
     return 0;
 }
 
-int apkg_build() {
+int apkg_build(void) {
     printf("Building package...\n");
     
     FILE* manifest = fopen("aether.toml", "r");
@@ -380,7 +380,7 @@ int apkg_build() {
     return 0;
 }
 
-int apkg_test() {
+int apkg_test(void) {
     printf("Running tests...\n");
     
     // Check if tests directory exists
@@ -572,7 +572,7 @@ int apkg_search(const char* query) {
     return 0;
 }
 
-int apkg_update() {
+int apkg_update(void) {
     printf("Updating dependencies...\n\n");
     
     FILE* manifest = fopen("aether.toml", "r");
@@ -659,7 +659,7 @@ int apkg_update() {
     return 0;
 }
 
-int apkg_run() {
+int apkg_run(void) {
     printf("Running package...\n");
     
     // Check if we need to build
@@ -723,7 +723,7 @@ int apkg_run() {
     return result;
 }
 
-void apkg_print_help() {
+void apkg_print_help(void) {
     printf("apkg - Aether Package Manager v%s\n\n", APKG_VERSION);
     printf("USAGE:\n");
     printf("    apkg <command> [options]\n\n");
@@ -741,7 +741,7 @@ void apkg_print_help() {
     printf("For more information, see: https://github.com/aether-lang-dev/aether\n");
 }
 
-void apkg_print_version() {
+void apkg_print_version(void) {
     printf("apkg %s\n", APKG_VERSION);
 }
 

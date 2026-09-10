@@ -71,7 +71,7 @@ static inline int atomic_fetch_add_asm(atomic_int* ptr, int value) {
 }
 
 // Optimized spin-lock using PAUSE instruction
-static inline void spin_pause() {
+static inline void spin_pause(void) {
     __asm__ volatile("pause" ::: "memory");
 }
 
@@ -140,7 +140,7 @@ static inline int atomic_fetch_add_asm(atomic_int* ptr, int value) {
     return atomic_fetch_add_explicit(ptr, value, memory_order_acq_rel);
 }
 
-static inline void spin_pause() {
+static inline void spin_pause(void) {
 #if defined(__aarch64__) || defined(__arm64__)
     // ARM64: yield gives up CPU time slice to other threads
     __asm__ volatile("yield" ::: "memory");

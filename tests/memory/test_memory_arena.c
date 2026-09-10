@@ -160,6 +160,6 @@ TEST_CATEGORY(arena_nested_scopes, TEST_CATEGORY_MEMORY) {
 }
 
 // Note: Tests are auto-registered via TEST_CATEGORY macro
-void register_memory_arena_tests() {
+void register_memory_arena_tests(void) {
     // Empty - tests registered by constructor
 }
