@@ -1,0 +1,155 @@
+// std.resp round-trip + edge-case tests. Run: ae run std/resp/test_resp.ae
+import std.resp
+import std.string
+import std.io
+
+extern exit(code: int)
+extern string_length(s: string) -> int
+
+var fails: int = 0
+
+fn check(name: string, got: string, want: string) {
+    if string.equals(got, want) == 1 {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}: got [${got}] want [${want}]")
+        fails = fails + 1
+    }
+}
+
+fn check_int(name: string, got: int, want: int) {
+    if got == want { println("  ok   ${name}") }
+    else { println("  FAIL ${name}: got ${got} want ${want}"); fails = fails + 1 }
+}
+
+// Encode a value (RESP3), compare, then free the value (consumes ownership).
+fn enc3(name: string, v: ptr, want: string) {
+    s, _e = resp.encode(v)
+    check(name, s, want)
+    resp.free_value(v)
+}
+fn enc2(name: string, v: ptr, want: string) {
+    s, _e = resp.encode_resp2(v)
+    check(name, s, want)
+    resp.free_value(v)
+}
+
+// Non-consuming encoders (caller still owns v).
+fn enc3_str(v: ptr) -> string {
+    s, _e = resp.encode(v)
+    return s
+}
+fn enc2_str(v: ptr) -> string {
+    s, _e = resp.encode_resp2(v)
+    return s
+}
+
+main() {
+    println("=== std.resp ===")
+
+    // --- encode: simple scalars ---
+    enc3("simple", resp.new_simple("OK"), "+OK\r\n")
+    enc3("error", resp.new_error("ERR bad"), "-ERR bad\r\n")
+    enc3("integer", resp.new_integer(1000), ":1000\r\n")
+    enc3("neg integer", resp.new_integer(0 - 5), ":-5\r\n")
+    enc3("bulk", resp.new_bulk("hello", 5), "$5\r\nhello\r\n")
+    enc3("empty bulk", resp.new_bulk("", 0), "$0\r\n\r\n")
+
+    // --- null: RESP3 vs RESP2 dialect ---
+    enc3("null resp3", resp.new_null(), "_\r\n")
+    enc2("null resp2", resp.new_null(), "$-1\r\n")
+
+    // --- bool: RESP3 vs RESP2 ---
+    enc3("bool true resp3", resp.new_bool(1), "#t\r\n")
+    enc3("bool false resp3", resp.new_bool(0), "#f\r\n")
+    enc2("bool true resp2", resp.new_bool(1), ":1\r\n")
+
+    // --- build an array with array_add, then encode ---
+    built = resp.new_array()
+    resp.array_add(built, resp.new_bulk("foo", 3))
+    resp.array_add(built, resp.new_integer(42))
+    enc3("built array", built, "*2\r\n$3\r\nfoo\r\n:42\r\n")
+
+    // --- decode round-trips (the resumable parser) ---
+    v1, n1, _e1 = resp.parse_prefix("+PONG\r\n", 7)
+    check_int("decode simple type", resp.value_type(v1), resp.RESP_SIMPLE)
+    check("decode simple str", resp.str_value(v1), "PONG")
+    check_int("decode simple consumed", n1, 7)
+    resp.free_value(v1)
+
+    v2, _n2, _e2 = resp.parse_prefix(":42\r\n", 5)
+    check_int("decode integer", resp.as_integer(v2) as int, 42)
+    resp.free_value(v2)
+
+    v3, _n3, _e3 = resp.parse_prefix("$5\r\nhello\r\n", 11)
+    check("decode bulk", resp.str_value(v3), "hello")
+    resp.free_value(v3)
+
+    // null bulk ($-1) decodes to RESP_NULL
+    v4, _n4, _e4 = resp.parse_prefix("$-1\r\n", 5)
+    check_int("decode null bulk -> null", resp.is_null(v4), 1)
+    resp.free_value(v4)
+
+    // array of [bulk "foo", int 42]
+    arr = "*2\r\n$3\r\nfoo\r\n:42\r\n"
+    v5, _n5, _e5 = resp.parse_prefix(arr, string_length(arr))
+    check_int("decode array type", resp.value_type(v5), resp.RESP_ARRAY)
+    check_int("decode array size", resp.array_size(v5), 2)
+    check("decode array[0]", resp.str_value(resp.array_get(v5, 0)), "foo")
+    check_int("decode array[1]", resp.as_integer(resp.array_get(v5, 1)) as int, 42)
+    // re-encode round-trips byte-identical (RESP3)
+    check("array round-trip", enc3_str(v5), arr)
+    resp.free_value(v5)
+
+    // RESP3 map %1 {"a" => 1}
+    mp = "%1\r\n$1\r\na\r\n:1\r\n"
+    v6, _n6, _e6 = resp.parse_prefix(mp, string_length(mp))
+    check_int("decode map type", resp.value_type(v6), resp.RESP_MAP)
+    check_int("decode map size", resp.map_size(v6), 1)
+    check("decode map key", resp.str_value(resp.map_key(v6, 0)), "a")
+    check("map round-trip resp3", enc3_str(v6), mp)
+    // RESP2 dialect: map -> flat array of 2 elems
+    check("map -> resp2 array", enc2_str(v6), "*2\r\n$1\r\na\r\n:1\r\n")
+    resp.free_value(v6)
+
+    // --- resumability: a partial frame reports incomplete, not malformed ---
+    vp, np, ep = resp.parse_prefix("$5\r\nhel", 7) // only 3 of 5 data bytes
+    if vp == null && np == 0 && string.equals(ep, "") == 1 {
+        println("  ok   partial bulk -> incomplete")
+    } else {
+        println("  FAIL partial bulk: expected incomplete (null,0,\"\")"); fails = fails + 1
+    }
+
+    // partial array (header says 2, only 1 present)
+    vpa, npa, epa = resp.parse_prefix("*2\r\n:1\r\n", 8)
+    if vpa == null && npa == 0 && string.equals(epa, "") == 1 {
+        println("  ok   partial array -> incomplete")
+    } else {
+        println("  FAIL partial array: expected incomplete"); fails = fails + 1
+    }
+
+    // --- malformed: a bad integer body is an error, not incomplete ---
+    vm, _nm, em = resp.parse_prefix(":12x\r\n", 6)
+    if vm == null && string.equals(em, "") == 0 {
+        println("  ok   malformed integer -> error")
+    } else {
+        println("  FAIL malformed integer: expected an error"); fails = fails + 1
+    }
+
+    // --- RESP3 null decode ---
+    vn, _nn, _en = resp.parse_prefix("_\r\n", 3)
+    check_int("decode resp3 null", resp.is_null(vn), 1)
+    resp.free_value(vn)
+
+    // --- RESP3 boolean decode ---
+    vb, _nb, _eb = resp.parse_prefix("#t\r\n", 4)
+    check_int("decode resp3 bool", resp.as_bool(vb), 1)
+    resp.free_value(vb)
+
+    if fails == 0 {
+        println("ALL PASS")
+    } else {
+        println("${fails} FAILED")
+        exit(1)
+    }
+}

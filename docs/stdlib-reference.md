@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (74 modules)
+## Module index (75 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -63,6 +63,7 @@ header comment is the authoritative description.
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 45 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
+| `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 31 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 23 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
