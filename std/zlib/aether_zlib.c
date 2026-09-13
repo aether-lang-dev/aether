@@ -238,6 +238,15 @@ int zlib_try_gzip_inflate(const char* data, int length) {
     return inflate_with_window_bits(data, length, 15 + 16);
 }
 
+/* Raw DEFLATE (RFC 1951, no zlib/gzip wrapper): windowBits -15. This is
+ * the framing ZIP entries store (method 8), where the container carries
+ * the sizes and CRC separately, so the stream has no header of its own.
+ * Shares the tls_inflate_* result buffer with the wrapped inflaters, so
+ * zlib_get_inflate_bytes / _length / zlib_release_inflate all apply. */
+int zlib_try_inflate_raw(const char* data, int length) {
+    return inflate_with_window_bits(data, length, -15);
+}
+
 /* ---- Streaming deflate (#1890) ---------------------------------- */
 
 typedef struct {
@@ -400,6 +409,9 @@ int zlib_try_gzip_deflate(const char* data, int length, int level) {
     (void)data; (void)length; (void)level; return 0;
 }
 int zlib_try_gzip_inflate(const char* data, int length) {
+    (void)data; (void)length; return 0;
+}
+int zlib_try_inflate_raw(const char* data, int length) {
     (void)data; (void)length; return 0;
 }
 
