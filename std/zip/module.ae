@@ -1,0 +1,477 @@
+// std.zip — a ZIP archive READER over an in-memory byte buffer (#2010).
+//
+// A .zip is a CONTAINER, not a compressed blob: a set of entries (each
+// `stored` or `deflate`d) indexed by a Central Directory whose location is
+// found from an End-Of-Central-Directory (EOCD) record at the tail of the
+// file, extended by the ZIP64 records for archives that exceed the 32-bit
+// fields. std.zlib supplies the decompression (raw inflate, RFC 1951); this
+// module parses the container.
+//
+// Buffer, not filesystem: `open(data, len)` reads a .zip already in memory —
+// downloaded over HTTP, unpacked from another archive, embedded in a payload.
+// There is no path/fd here, matching std.json / std.cbor / std.resp. (An
+// extract-to-disk layer belongs on top and is a separate concern.)
+//
+// The Central Directory is the source of truth for entry metadata (a local
+// file header may zero its sizes and defer them to a trailing data
+// descriptor, which streaming writers rely on). Names are decoded as UTF-8
+// when the entry's flag bit 11 is set, else treated as raw bytes.
+//
+// Coverage: `stored` (method 0) and `deflate` (method 8); ZIP64 sizes,
+// offsets and entry counts; per-entry CRC-32 verification on read. Encrypted
+// entries, multi-disk archives, and other compression methods are REFUSED
+// with a clear error rather than silently mis-decoded.
+//
+//   ar, err = zip.open(data, len)
+//   n = zip.count(ar)
+//   i = 0
+//   while i < n {
+//       name = zip.entry_name(ar, i)
+//       body, blen, rerr = zip.entry_read(ar, i)   // decompressed + CRC-checked
+//       // ... use body ...
+//       i = i + 1
+//   }
+//   zip.close(ar)
+
+import std.list
+import std.string
+import std.bytes
+import std.zlib
+import std.io
+
+exports(
+    // compression methods
+    METHOD_STORED, METHOD_DEFLATE,
+    // lifecycle
+    open, close,
+    // directory
+    count, find,
+    // per-entry metadata
+    entry_name, entry_size, entry_compressed_size, entry_method, entry_crc32,
+    entry_is_dir, entry_is_encrypted,
+    // per-entry data
+    entry_read,
+)
+
+extern malloc(size: int) -> ptr
+@extern("free") libc_free(p: ptr)
+extern string_length(s: string) -> int
+
+const METHOD_STORED = 0
+const METHOD_DEFLATE = 8
+
+// Signatures (little-endian on the wire).
+const SIG_EOCD = 0x06054b50 // "PK\5\6"  end of central directory
+const SIG_EOCD64 = 0x06064b50 // "PK\6\6"  ZIP64 EOCD record
+const SIG_EOCD64_LOC = 0x07064b50 // "PK\6\7"  ZIP64 EOCD locator
+const SIG_CDH = 0x02014b50 // "PK\1\2"  central directory header
+const SIG_LFH = 0x04034b50 // "PK\3\4"  local file header
+
+// One decoded central-directory entry. Sizes/offset are `long` because ZIP64
+// carries 64-bit values.
+struct ZipEntry {
+    name: ptr // owned AetherBytes holding the UTF-8/raw name
+    name_len: int
+    method: int
+    flags: int
+    crc32: int // stored as the wire's unsigned 32-bit value in an int slot
+    comp_size: long
+    uncomp_size: long
+    lfh_offset: long // offset of this entry's local file header
+}
+
+// An opened archive: the whole file buffered, plus the parsed entry list.
+struct ZipArchive {
+    buf: ptr // owned AetherBytes: the entire .zip
+    buf_len: int
+    entries: ptr // std.list of *ZipEntry
+}
+
+// ---- CRC-32 (IEEE 802.3, the ZIP polynomial) -------------------------------
+// Pure Aether so std.zip carries its own integrity check rather than reaching
+// into zlib internals. Table built once on first use.
+
+var g_crc_table: ptr = null
+
+fn crc_table() -> ptr {
+    if g_crc_table != null { return g_crc_table }
+    t = bytes.new(256 * 4)
+    bytes.set(t, 256 * 4 - 1, 0)
+    // CRC-32 polynomial (reflected). Held in an int; the mask keeps it 32-bit
+    // (bit 31 is set, so the literal is wide — the & pins it back to int).
+    poly = 0xEDB88320 & 0xFFFFFFFF
+    n = 0
+    while n < 256 {
+        var c: int = n
+        k = 0
+        while k < 8 {
+            if (c & 1) == 1 {
+                c = poly ^ ((c >> 1) & 0x7FFFFFFF)
+            } else {
+                c = (c >> 1) & 0x7FFFFFFF
+            }
+            k = k + 1
+        }
+        bytes.set_le32(t, n * 4, c)
+        n = n + 1
+    }
+    g_crc_table = t
+    return t
+}
+
+// CRC-32 of `len` bytes of `src` starting at `off` in an AetherBytes buffer.
+fn crc32_bytes(src: ptr, off: int, len: int) -> int {
+    t = crc_table()
+    var crc: int = 0xFFFFFFFF & 0xFFFFFFFF
+    i = 0
+    while i < len {
+        b = bytes.get(src, off + i) & 0xFF
+        idx = (crc ^ b) & 0xFF
+        // logical >> 8: mask off the sign bits an arithmetic shift would carry.
+        crc = bytes.get_le32(t, idx * 4) ^ ((crc >> 8) & 0x00FFFFFF)
+        i = i + 1
+    }
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+}
+
+// ---- little helpers over the archive buffer --------------------------------
+
+fn u16(b: ptr, at: int) -> int { return bytes.get_le16(b, at) }
+fn u32(b: ptr, at: int) -> int { return bytes.get_le32(b, at) }
+fn u64(b: ptr, at: int) -> long { return bytes.get_le64(b, at) }
+
+// get_le32 returns a signed int, so a 32-bit field with the high bit set (any
+// value >= 0x80000000, and notably the 0xFFFFFFFF ZIP64 sentinel) comes back
+// negative. Read it as an unsigned 32-bit value widened into a long.
+fn u32l(b: ptr, at: int) -> long {
+    v = bytes.get_le32(b, at)
+    return (v as long) & 0xFFFFFFFF
+}
+
+// True when a 32-bit field holds the "see ZIP64" sentinel 0xFFFFFFFF.
+const U32_MAX: long = 4294967295
+
+// ---- EOCD + ZIP64 discovery ------------------------------------------------
+
+// Find the EOCD record by scanning backward from the end for its signature.
+// The record is 22 bytes plus a variable-length comment (<= 65535), so the
+// signature lies within the last 65557 bytes. Returns the offset or -1.
+fn find_eocd(b: ptr, blen: int) -> int {
+    if blen < 22 { return -1 }
+    max_back = 65557
+    start = blen - max_back
+    if start < 0 { start = 0 }
+    // Scan from the latest possible position backward so a comment that itself
+    // contains the signature does not win over the real record.
+    pos = blen - 22
+    while pos >= start {
+        if u32(b, pos) == SIG_EOCD {
+            return pos
+        }
+        pos = pos - 1
+    }
+    return -1
+}
+
+// ---- central-directory parse -----------------------------------------------
+
+fn alloc_entry() -> *ZipEntry {
+    e = malloc(sizeof(ZipEntry)) as *ZipEntry
+    e.name = null
+    e.name_len = 0
+    e.method = 0
+    e.flags = 0
+    e.crc32 = 0
+    e.comp_size = 0
+    e.uncomp_size = 0
+    e.lfh_offset = 0
+    return e
+}
+
+fn free_entry(e: *ZipEntry) {
+    if e.name != null { bytes.free(e.name) }
+    libc_free(e as ptr)
+}
+
+// Parse the central directory starting at `cd_off`, `total` entries expected.
+// Returns (list_of_*ZipEntry, "") or (null, err).
+fn parse_central_dir(b: ptr, blen: int, cd_off: long, total: long) -> (ptr, string) {
+    lst = list.new()
+    pos = cd_off as int
+    i = 0
+    while i < total {
+        if pos + 46 > blen { free_entries(lst); return null, "zip: central directory truncated" }
+        if u32(b, pos) != SIG_CDH {
+            free_entries(lst)
+            return null, "zip: bad central directory header signature"
+        }
+        flags = u16(b, pos + 8)
+        method = u16(b, pos + 10)
+        crc = u32(b, pos + 16)
+        comp = u32l(b, pos + 20)
+        uncomp = u32l(b, pos + 24)
+        name_len = u16(b, pos + 28)
+        extra_len = u16(b, pos + 30)
+        comment_len = u16(b, pos + 32)
+        lfh = u32l(b, pos + 42)
+
+        name_at = pos + 46
+        if name_at + name_len > blen { free_entries(lst); return null, "zip: entry name truncated" }
+
+        e = alloc_entry()
+        e.flags = flags
+        e.method = method
+        e.crc32 = crc
+        e.comp_size = comp
+        e.uncomp_size = uncomp
+        e.lfh_offset = lfh
+        if name_len > 0 {
+            nb = bytes.new(name_len)
+            bytes.set(nb, name_len - 1, 0)
+            bytes.copy_from_bytes(nb, 0, b, name_at, name_len)
+            e.name = nb
+            e.name_len = name_len
+        }
+
+        // ZIP64 extra field (id 0x0001): replaces any 0xFFFFFFFF fields, in the
+        // fixed order uncompressed, compressed, lfh offset, disk#.
+        extra_at = name_at + name_len
+        parse_zip64_extra(b, extra_at, extra_len, e)
+
+        list.list_add_raw(lst, e as ptr)
+
+        pos = extra_at + extra_len + comment_len
+        i = i + 1
+    }
+    return lst, ""
+}
+
+// Walk the extra-field blocks looking for the ZIP64 record, and pull the
+// 64-bit values in for any field the 32-bit slot flagged as 0xFFFFFFFF.
+fn parse_zip64_extra(b: ptr, at: int, total_len: int, e: *ZipEntry) {
+    p = at
+    stop = at + total_len
+    while p + 4 <= stop {
+        hid = u16(b, p)
+        hsz = u16(b, p + 2)
+        body = p + 4
+        if hid == 0x0001 {
+            q = body
+            if e.uncomp_size == U32_MAX && q + 8 <= stop { e.uncomp_size = u64(b, q); q = q + 8 }
+            if e.comp_size == U32_MAX && q + 8 <= stop { e.comp_size = u64(b, q); q = q + 8 }
+            if e.lfh_offset == U32_MAX && q + 8 <= stop { e.lfh_offset = u64(b, q); q = q + 8 }
+        }
+        p = body + hsz
+    }
+}
+
+fn free_entries(lst: ptr) {
+    if lst == null { return }
+    n = list.size(lst)
+    i = 0
+    while i < n {
+        free_entry(list.get_raw(lst, i) as *ZipEntry)
+        i = i + 1
+    }
+    list.free(lst)
+}
+
+// ---- public: open / close --------------------------------------------------
+
+// Open a ZIP archive held entirely in `data` (`len` bytes). Returns
+// (archive_ptr, "") or (null, err). The archive owns a copy of the bytes;
+// free it with close().
+open(data: string, len: int) -> (ptr, string) {
+    if len < 22 { return null, "zip: too small to be a zip archive" }
+    buf = bytes.new(len)
+    bytes.set(buf, len - 1, 0)
+    bytes.copy_from_string(buf, 0, data, len)
+
+    eocd = find_eocd(buf, len)
+    if eocd < 0 {
+        bytes.free(buf)
+        return null, "zip: no end-of-central-directory record (not a zip, or truncated)"
+    }
+
+    disk = u16(buf, eocd + 4)
+    cd_disk = u16(buf, eocd + 6)
+    total = u16(buf, eocd + 10) as long
+    cd_off = u32l(buf, eocd + 16)
+
+    // ZIP64: any of these fields at their 0xFFFF/0xFFFFFFFF sentinel means the
+    // real values live in the ZIP64 EOCD record, located via the ZIP64 EOCD
+    // locator which sits 20 bytes before the EOCD.
+    need64 = 0
+    if total == 0xFFFF { need64 = 1 }
+    if cd_off == U32_MAX { need64 = 1 }
+    if disk == 0xFFFF { need64 = 1 }
+    if need64 == 1 {
+        loc = eocd - 20
+        if loc >= 0 && u32(buf, loc) == SIG_EOCD64_LOC {
+            z64 = u64(buf, loc + 8)
+            zi = z64 as int
+            if zi >= 0 && zi + 56 <= len && u32(buf, zi) == SIG_EOCD64 {
+                total = u64(buf, zi + 32)
+                cd_off = u64(buf, zi + 48)
+                cd_disk = u16(buf, zi + 16)
+                disk = cd_disk
+            }
+        }
+    }
+
+    if disk != cd_disk {
+        bytes.free(buf)
+        return null, "zip: multi-disk / spanned archives are not supported"
+    }
+    if cd_off < 0 || cd_off as int > len {
+        bytes.free(buf)
+        return null, "zip: central directory offset out of range"
+    }
+
+    entries, perr = parse_central_dir(buf, len, cd_off, total)
+    if string.equals(perr, "") != 1 {
+        bytes.free(buf)
+        return null, perr
+    }
+
+    ar = malloc(sizeof(ZipArchive)) as *ZipArchive
+    ar.buf = buf
+    ar.buf_len = len
+    ar.entries = entries
+    return ar as ptr, ""
+}
+
+close(arp: ptr) {
+    if arp == null { return }
+    ar = arp as *ZipArchive
+    free_entries(ar.entries)
+    if ar.buf != null { bytes.free(ar.buf) }
+    libc_free(arp)
+}
+
+// ---- directory access ------------------------------------------------------
+
+count(arp: ptr) -> int {
+    ar = arp as *ZipArchive
+    return list.size(ar.entries)
+}
+
+fn entry_at(arp: ptr, i: int) -> *ZipEntry {
+    ar = arp as *ZipArchive
+    return list.get_raw(ar.entries, i) as *ZipEntry
+}
+
+// Index of the entry named `name`, or -1. Exact byte match on the stored name.
+find(arp: ptr, name: string) -> int {
+    ar = arp as *ZipArchive
+    n = list.size(ar.entries)
+    i = 0
+    while i < n {
+        en = entry_name(arp, i)
+        if string.equals(en, name) == 1 { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+// ---- per-entry metadata ----------------------------------------------------
+
+entry_name(arp: ptr, i: int) -> string {
+    e = entry_at(arp, i)
+    if e.name == null || e.name_len == 0 { return string.concat("", "") }
+    return bytes.to_string(e.name, e.name_len)
+}
+
+entry_size(arp: ptr, i: int) -> long { return entry_at(arp, i).uncomp_size }
+entry_compressed_size(arp: ptr, i: int) -> long { return entry_at(arp, i).comp_size }
+entry_method(arp: ptr, i: int) -> int { return entry_at(arp, i).method }
+entry_crc32(arp: ptr, i: int) -> int { return entry_at(arp, i).crc32 }
+
+// A directory entry is conventionally a zero-size name ending in '/'.
+entry_is_dir(arp: ptr, i: int) -> int {
+    e = entry_at(arp, i)
+    if e.name == null || e.name_len == 0 { return 0 }
+    last = bytes.get(e.name, e.name_len - 1) & 0xFF
+    if last == 47 { return 1 } // '/'
+    return 0
+}
+
+// General-purpose bit 0 set = the entry is encrypted.
+entry_is_encrypted(arp: ptr, i: int) -> int {
+    e = entry_at(arp, i)
+    if (e.flags & 1) == 1 { return 1 }
+    return 0
+}
+
+// ---- per-entry data --------------------------------------------------------
+
+// Read and decompress entry `i`, verifying its CRC-32. Returns
+// (bytes_as_string, length, "") or ("", 0, err). The local file header is
+// consulted only to skip its variable name+extra fields to reach the data;
+// the sizes/CRC come from the central directory.
+entry_read(arp: ptr, i: int) -> (string, int, string) {
+    ar = arp as *ZipArchive
+    b = ar.buf
+    blen = ar.buf_len
+    e = entry_at(arp, i)
+
+    if (e.flags & 1) == 1 {
+        return "", 0, "zip: entry is encrypted; not supported"
+    }
+    if e.method != METHOD_STORED && e.method != METHOD_DEFLATE {
+        return "", 0, "zip: unsupported compression method"
+    }
+
+    lfh = e.lfh_offset as int
+    if lfh < 0 || lfh + 30 > blen || u32(b, lfh) != SIG_LFH {
+        return "", 0, "zip: bad local file header"
+    }
+    lname = u16(b, lfh + 26)
+    lextra = u16(b, lfh + 28)
+    data_at = lfh + 30 + lname + lextra
+    comp = e.comp_size as int
+    if data_at < 0 || data_at + comp > blen {
+        return "", 0, "zip: entry data out of range"
+    }
+
+    if e.method == METHOD_STORED {
+        // No compression: data is the content verbatim.
+        got = crc32_bytes(b, data_at, comp)
+        if (got & 0xFFFFFFFF) != (e.crc32 & 0xFFFFFFFF) {
+            return "", 0, "zip: CRC mismatch (stored entry)"
+        }
+        out = slice_string(b, data_at, comp)
+        return out, comp, ""
+    }
+
+    // DEFLATE (method 8): the compressed span is a raw deflate stream.
+    comp_str = slice_string(b, data_at, comp)
+    body, blen2, ie = zlib.inflate_raw(comp_str, comp)
+    if string.equals(ie, "") != 1 {
+        return "", 0, ie
+    }
+    // Verify against the central-directory CRC and size.
+    if blen2 as long != e.uncomp_size {
+        return "", 0, "zip: decompressed size mismatch"
+    }
+    chk = bytes.new(blen2)
+    if blen2 > 0 { bytes.set(chk, blen2 - 1, 0) }
+    bytes.copy_from_string(chk, 0, body, blen2)
+    got = crc32_bytes(chk, 0, blen2)
+    bytes.free(chk)
+    if (got & 0xFFFFFFFF) != (e.crc32 & 0xFFFFFFFF) {
+        return "", 0, "zip: CRC mismatch (deflate entry)"
+    }
+    return body, blen2, ""
+}
+
+// Copy the [off, off+len) span of an AetherBytes buffer out as an owned
+// string (binary-safe: the length is carried, not strlen-derived).
+fn slice_string(b: ptr, off: int, len: int) -> string {
+    tmp = bytes.new(len)
+    if len > 0 { bytes.set(tmp, len - 1, 0) }
+    bytes.copy_from_bytes(tmp, 0, b, off, len)
+    s = bytes.to_string(tmp, len)
+    bytes.free(tmp)
+    return s
+}

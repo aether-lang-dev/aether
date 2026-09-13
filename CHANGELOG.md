@@ -11,6 +11,21 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.zip` — a ZIP archive reader over a byte buffer** (#2010). `.zip` is a
+  container, not a compressed blob: entries indexed by a central directory found
+  from an EOCD record at the tail. `zip.open(data, len)` reads an archive already
+  in memory — over HTTP, out of another archive, embedded in a payload — with no
+  path or fd, the same posture as `std.json`/`std.cbor`/`std.resp`. Covers
+  `stored` and `deflate` (method 8 via a new `std.zlib.inflate_raw`), ZIP64 sizes
+  / offsets / entry counts, and per-entry CRC-32 verification on read; encrypted
+  entries, multi-disk archives and other methods are refused with a clear error
+  rather than silently mis-decoded. Reader-first — a writer and an extract-to-disk
+  layer (with traversal / zip-bomb guards) are tracked follow-ups.
+- **`std.zlib.inflate_raw`** — one-shot raw DEFLATE (RFC 1951, no zlib/gzip
+  wrapper), the framing a ZIP entry stores. `std.zip` is the primary caller.
+
 ## [0.666.0]
 
 ### Fixed
