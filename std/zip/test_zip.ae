@@ -1,0 +1,105 @@
+// std.zip reader tests. Self-contained: a small reference archive (produced by
+// system `zip`, a stored a.txt + a deflate b.txt) is embedded as hex and
+// decoded in-code, so the test needs no filesystem fixtures and runs anywhere.
+// Run: ae run std/zip/test_zip.ae
+import std.zip
+import std.string
+import std.bytes
+import std.io
+
+extern exit(code: int)
+extern string_char_at_n(str: string, known_length: int, index: int) -> int
+
+var fails: int = 0
+
+fn check(name: string, got: string, want: string) {
+    if string.equals(got, want) == 1 { println("  ok   ${name}") }
+    else { println("  FAIL ${name}: got [${got}] want [${want}]"); fails = fails + 1 }
+}
+fn check_int(name: string, got: int, want: int) {
+    if got == want { println("  ok   ${name}") }
+    else { println("  FAIL ${name}: got ${got} want ${want}"); fails = fails + 1 }
+}
+
+fn hexval(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+// Decode a hex string into a raw byte string of length n/2.
+fn from_hex(h: string) -> (string, int) {
+    hn = string.length(h)
+    n = hn / 2
+    b = bytes_new_str(n)
+    i = 0
+    while i < n {
+        hi = hexval(string_char_at_n(h, hn, i * 2))
+        lo = hexval(string_char_at_n(h, hn, i * 2 + 1))
+        bytes_set_str(b, i, (hi << 4) | lo)
+        i = i + 1
+    }
+    return bytes_finish_str(b, n), n
+}
+
+// Tiny helpers over std.bytes to assemble the decoded buffer as a string.
+fn bytes_new_str(n: int) -> ptr {
+    bb = bytes.new(n)
+    if n > 0 { bytes.set(bb, n - 1, 0) }
+    return bb
+}
+fn bytes_set_str(bb: ptr, i: int, v: int) { bytes.set(bb, i, v) }
+fn bytes_finish_str(bb: ptr, n: int) -> string {
+    s = bytes.to_string(bb, n)
+    bytes.free(bb)
+    return s
+}
+
+// A 2-entry .zip (stored "a.txt" = "hi\n"; deflate "b.txt" = "xyz " * 40),
+// produced by system `zip` and embedded verbatim.
+const ZIP_HEX = "504b03040a0000000000ccac2d5d7a7a6fed030000000300000005001c00612e7478745554090003bf09a76abf09a76a75780b000104e803000004e803000068690a504b0304140000000800ccac2d5df533001c09000000a000000005001c00622e7478745554090003bf09a76abf09a76a75780b000104e803000004e8030000aba8ac52a818c41800504b01021e030a0000000000ccac2d5d7a7a6fed0300000003000000050018000000000001000000a48100000000612e7478745554050003bf09a76a75780b000104e803000004e8030000504b01021e03140000000800ccac2d5df533001c09000000a0000000050018000000000001000000a48142000000622e7478745554050003bf09a76a75780b000104e803000004e8030000504b05060000000002000200960000008a0000000000"
+
+main() {
+    println("=== std.zip ===")
+
+    data, len = from_hex(ZIP_HEX)
+    ar, oerr = zip.open(data, len)
+    if string.equals(oerr, "") != 1 { println("open FAIL: ${oerr}"); exit(1) }
+
+    check_int("count", zip.count(ar), 2)
+
+    // stored entry
+    si = zip.find(ar, "a.txt")
+    check_int("find a.txt", si >= 0, 1)
+    check_int("a.txt method stored", zip.entry_method(ar, si), zip.METHOD_STORED)
+    sb, _sl, serr = zip.entry_read(ar, si)
+    check("a.txt read err empty", serr, "")
+    check("a.txt content", sb, "hi\n")
+
+    // deflate entry
+    di = zip.find(ar, "b.txt")
+    check_int("find b.txt", di >= 0, 1)
+    check_int("b.txt method deflate", zip.entry_method(ar, di), zip.METHOD_DEFLATE)
+    db, dl, derr = zip.entry_read(ar, di)
+    check("b.txt read err empty", derr, "")
+    check_int("b.txt length", dl, 160)
+    check("b.txt head", string.substring(db, 0, 4), "xyz ")
+
+    // missing name
+    check_int("find missing -> -1", zip.find(ar, "nope"), -1)
+    // not a dir
+    check_int("a.txt not dir", zip.entry_is_dir(ar, si), 0)
+    // not encrypted
+    check_int("a.txt not encrypted", zip.entry_is_encrypted(ar, si), 0)
+
+    zip.close(ar)
+
+    // not a zip
+    _na, naerr = zip.open("plainly not a zip archive at all, no sir", 39)
+    if string.equals(naerr, "") == 0 { println("  ok   non-zip rejected") }
+    else { println("  FAIL non-zip accepted"); fails = fails + 1 }
+
+    if fails == 0 { println("ALL PASS") }
+    else { println("${fails} FAILED"); exit(1) }
+}

@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (75 modules)
+## Module index (76 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -83,7 +83,8 @@ header comment is the authoritative description.
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
-| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
+| `std.zip` | ZIP archive reader over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 14 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
+| `std.zlib` | One-shot zlib and gzip deflate and inflate. | 30 | [full section](#compression-stdzlib) |
 | `std.brotli` | Brotli compression, streaming and one-shot, for `Content-Encoding: br`. | 19 | — |
 | `std.zstd` | Zstandard compression, streaming and one-shot, for archives and internal transports. | 19 | — |
 
