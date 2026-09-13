@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.667.0]
+
 ### Added
 
 - **`std.zip` — a ZIP archive reader over a byte buffer** (#2010). `.zip` is a
