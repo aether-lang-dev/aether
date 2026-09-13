@@ -1004,6 +1004,53 @@ static int has_ctx_first_param(ASTNode* func) {
     return 0;
 }
 
+/* Does the module that DEFINES `callee_def` also declare at least one
+ * `builder` function? "Same module" is matched by `source_file`: every node
+ * keeps the .ae path it was parsed from.
+ *
+ * This scans the MODULE REGISTRY's un-pruned per-module ASTs rather than the
+ * merged program AST. The program AST is not a reliable source here: it is
+ * tree-shaken (module_prune_unreachable) before typecheck runs, so a builder
+ * the entry file never calls has already been removed — exactly the misuse
+ * case, where `mod.rspec() {...}` is written INSTEAD of `mod.bundle() {...}`
+ * and so `bundle` is unreferenced and pruned. The registry holds each
+ * module's full parsed AST (AetherModule.ast, file_path == the nodes'
+ * source_file), so the builder is always visible there.
+ *
+ * This is the discriminator for the "setter called as node builder"
+ * diagnostic below: a widget-style DSL module (panel/button, no builders)
+ * must never be flagged, whereas a builder-DSL module (which has at least
+ * one `builder`) is the only place a `_ctx`-first plain function is a
+ * block SETTER meant to run inside a builder's trailing block. */
+static int builder_in_module_ast(ASTNode* mod_ast, const char* src) {
+    if (!mod_ast) return 0;
+    for (int i = 0; i < mod_ast->child_count; i++) {
+        ASTNode* c = mod_ast->children[i];
+        if (c && c->type == AST_BUILDER_FUNCTION && c->source_file && src &&
+            strcmp(c->source_file, src) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int module_defines_a_builder(ASTNode* callee_def) {
+    if (!callee_def || !callee_def->source_file) return 0;
+    const char* src = callee_def->source_file;
+    if (global_module_registry) {
+        for (int m = 0; m < global_module_registry->module_count; m++) {
+            AetherModule* mod = global_module_registry->modules[m];
+            if (mod && builder_in_module_ast(mod->ast, src)) return 1;
+        }
+    }
+    /* Fallback: the entry file itself is not a registry module, so also
+     * consult the merged program AST for a same-file builder (covers a
+     * setter and builder both defined in the top-level program). */
+    ASTNode* program = aether_typecheck_program_node();
+    if (program && builder_in_module_ast(program, src)) return 1;
+    return 0;
+}
+
 /* Returns 1 if `init` is an integer literal whose value is outside
  * 0..255, which would silently truncate when assigned to a `byte`-
  * typed slot. Returns 0 if it's in range, not a literal, or not an
@@ -8233,6 +8280,54 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                              "function can hold and call later",
                              call->value ? call->value : "function");
                     type_error(cb_msg, call->line, call->column);
+                    return 0;
+                }
+            }
+        }
+
+        /* A block SETTER called as a top-level node BUILDER silently no-ops.
+         *
+         * In a builder DSL, a plain `_ctx`-first function whose body only
+         * records config (e.g. `rspec(_ctx: ptr) { map.put(_ctx, ...) }`)
+         * is meant to be CALLED INSIDE a builder's trailing block:
+         * `mod.bundle() { rspec() }`. Written the old way — as a top-level
+         * node with its OWN trailing block, `mod.rspec() { ... }` — it
+         * compiles clean but runs nothing: the setter takes no closure, so
+         * the block is a DSL container that is never entered.
+         *
+         * The check is deliberately NARROW to stay false-positive-free. A
+         * legitimate DSL container (`panel(_ctx, title) { button() }`) has
+         * the same shape, so we require ALL of:
+         *   1. the callee is a plain AST_FUNCTION_DEFINITION (not a builder),
+         *      whose first param is `_ctx: ptr` (has_ctx_first_param);
+         *   2. this call carries its OWN trailing block (an AST_CLOSURE
+         *      argument valued "trailing"); and
+         *   3. the callee's module ALSO defines at least one `builder`.
+         * Condition 3 is the discriminator: a widget-style DSL module has no
+         * builders and is never flagged; only a builder-DSL module — where a
+         * `_ctx`-first plain function IS a block setter — is. */
+        if (symbol->node->type == AST_FUNCTION_DEFINITION &&
+            has_ctx_first_param(symbol->node) &&
+            module_defines_a_builder(symbol->node)) {
+            for (int i = 0; i < call->child_count; i++) {
+                ASTNode* c = call->children[i];
+                if (c && c->type == AST_CLOSURE && c->value &&
+                    strcmp(c->value, "trailing") == 0) {
+                    /* Prefer the bare setter name (after any `mod.`) for the
+                     * suggested fix; keep the qualified name for the builder
+                     * hint's `mod.` prefix. */
+                    const char* qual = call->value ? call->value : "function";
+                    const char* bare = qual;
+                    const char* dot = strrchr(qual, '.');
+                    if (dot && dot[1]) bare = dot + 1;
+                    char setter_msg[400];
+                    snprintf(setter_msg, sizeof(setter_msg),
+                             "'%s' is a block setter, not a node builder; call "
+                             "it inside a builder's block (e.g. "
+                             "`mod.bundle() { %s() }`), not as a top-level "
+                             "`%s() { ... }`",
+                             bare, bare, qual);
+                    type_error(setter_msg, call->line, call->column);
                     return 0;
                 }
             }
