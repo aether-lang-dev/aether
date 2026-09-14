@@ -5,12 +5,15 @@
 // Cleans up after itself.
 
 import std.fs
+import std.os
 import std.string
 
 extern exit(code: int)
 
 main() {
-    base = "/tmp/ae_fs_cmdalikes_test"
+    // Use the platform's temp dir, not a hardcoded /tmp (which does not exist
+    // on Windows) — os.temp_dir() resolves per-OS (GetTempPath / TMPDIR / /tmp).
+    base = "${os.temp_dir()}/ae_fs_cmdalikes_test"
     _r0 = fs.remove_tree(base) // fresh start (idempotent on a missing path)
 
     // --- build a small tree under base/src -----------------------------------

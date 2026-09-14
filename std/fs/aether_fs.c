@@ -772,14 +772,22 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
     if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
 #if defined(_WIN32) || defined(_WIN64)
-    /* Windows has no mkdtemp: name with _mktemp_s, then create it; loop a few
-     * times in case of a collision (the window is tiny — best effort). */
+    /* Windows has no mkdtemp: derive a unique name with _mktemp_s (it edits the
+     * trailing XXXXXX in place), then create the directory. Retry on a
+     * collision. */
     for (int attempt = 0; attempt < 64; attempt++) {
         char cand[4096];
         memcpy(cand, tmpl, (size_t)w + 1);
         if (_mktemp_s(cand, (size_t)w + 1) != 0) return NULL;
         if (_mkdir(cand) == 0) return strdup(cand);
     }
+    return NULL;
+#elif defined(__wasi__)
+    /* wasi-libc does not declare mkdtemp; the WASI filesystem is
+     * capability-scoped and a fresh temp dir under an arbitrary path is not a
+     * well-defined operation there. Report failure, which the .ae wrapper
+     * turns into a "cannot create temp dir" error. */
+    (void)tmpl;
     return NULL;
 #else
     if (mkdtemp(tmpl) == NULL) return NULL;
@@ -806,6 +814,10 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
         FILE* f = fopen(cand, "wxb");   /* x = fail if exists */
         if (f) { fclose(f); return strdup(cand); }
     }
+    return NULL;
+#elif defined(__wasi__)
+    /* wasi-libc does not declare mkstemp; see fs_make_temp_dir_raw. */
+    (void)tmpl;
     return NULL;
 #else
     int fd = mkstemp(tmpl);
