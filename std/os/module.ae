@@ -630,8 +630,11 @@ now_local_iso8601() -> string {
 // net.pipe_open() < 0) gives a sharper answer than the platform
 // name alone. See CONTRIBUTING.md "Coding for portability" for
 // the broader pattern.
-extern os_platform_raw() -> string
-extern os_temp_dir_raw() -> string
+// Both strdup a fresh char* (or null); `@heap` so the heap-tracker frees it.
+// Without it the string_concat below leaked the original (the macOS leaks gate
+// caught this via a test that calls temp_dir()).
+extern os_platform_raw() -> string @heap
+extern os_temp_dir_raw() -> string @heap
 extern os_cpu_count_raw() -> int
 
 platform() -> string {
@@ -639,7 +642,7 @@ platform() -> string {
     if s == null {
         return "unknown"
     }
-    return string_concat(s, "")
+    return s
 }
 
 // The directory for scratch files, with no trailing separator.
@@ -658,7 +661,7 @@ temp_dir() -> string {
     if s == null {
         return "/tmp"
     }
-    return string_concat(s, "")
+    return s
 }
 
 // cpu_count() — number of online logical CPUs (the `nproc` value), for sizing

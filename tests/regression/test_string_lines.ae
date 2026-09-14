@@ -26,7 +26,9 @@ main() {
     string.seq_free(three)
 
     // round-trips with join
-    j = string.join(string.lines("p\nq\nr"), "\n")
+    rt = string.lines("p\nq\nr")
+    j = string.join(rt, "\n")
+    string.seq_free(rt)
     if string.equals(j, "p\nq\nr") == 0 { println("FAIL lines→join round-trip: got '${j}'"); exit(1) }
 
     println("PASS test_string_lines")

@@ -148,8 +148,11 @@ extern fs_mkdir_p_raw(path: string) -> int
 //   fs_unlink_raw    — remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string
-extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string
-extern fs_make_temp_file_raw(dir: string, prefix: string) -> string
+// Both return a fresh strdup'd path (or null). `@heap` so the heap-tracker
+// frees the C allocation — without it the returned path leaks (caught by the
+// macOS leaks gate).
+extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string @heap
+extern fs_make_temp_file_raw(dir: string, prefix: string) -> string @heap
 extern fs_is_symlink(path: string) -> int
 //   fs_is_socket     — 1 if the path is a UNIX-domain socket (follows
 //                      symlinks). POSIX only; returns 0 on Windows. Pure
@@ -545,7 +548,7 @@ readlink(path: string) -> {
 make_temp_dir(dir: string, prefix: string) -> {
     p = fs_make_temp_dir_raw(dir, prefix)
     if p == null { return "", "cannot create temp dir" }
-    return string_concat(p, ""), ""
+    return p, ""
 }
 
 // make_temp_file(dir, prefix) — atomically create and return a uniquely-named
@@ -554,7 +557,9 @@ make_temp_dir(dir: string, prefix: string) -> {
 make_temp_file(dir: string, prefix: string) -> {
     p = fs_make_temp_file_raw(dir, prefix)
     if p == null { return "", "cannot create temp file" }
-    return string_concat(p, ""), ""
+    // p is @heap-owned; hand it straight back (string_concat here would leak
+    // the original and double-allocate).
+    return p, ""
 }
 
 // Remove a file or symlink. Refuses to remove a directory — use
@@ -1155,10 +1160,14 @@ find_ext_excluding(root: string, ext: string, exclude: string) -> string {
             if kind == STAT_KIND_FILE {
                 if _str_ends_with(path, ext) == 1 {
                     if _ends_any(path, exclude) == 0 {
+                        // Append a newline separator then the walk path.
+                        // string_concat reads `path` (borrowed, rewritten on the
+                        // next entry) directly — pre-copying it with
+                        // string_concat(path,"") made a temp that was never freed.
+                        // Each reassignment of `acc` lets the tracker free the
+                        // previous accumulator.
                         if cnt > 0 { acc = string_concat(acc, "\n") }
-                        // copy the BORROWED walk path (string_concat(x,"") is fs's
-                        // copy idiom — the buffer is rewritten for the next entry).
-                        acc = string_concat(acc, string_concat(path, ""))
+                        acc = string_concat(acc, path)
                         cnt = cnt + 1
                     }
                 }
