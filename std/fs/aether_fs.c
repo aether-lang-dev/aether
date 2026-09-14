@@ -768,28 +768,33 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-    char tmpl[4096];
-    int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
-    if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
 #if defined(_WIN32) || defined(_WIN64)
-    /* Windows has no mkdtemp: derive a unique name with _mktemp_s (it edits the
-     * trailing XXXXXX in place), then create the directory. Retry on a
-     * collision. */
-    for (int attempt = 0; attempt < 64; attempt++) {
-        char cand[4096];
-        memcpy(cand, tmpl, (size_t)w + 1);
-        if (_mktemp_s(cand, (size_t)w + 1) != 0) return NULL;
-        if (_mkdir(cand) == 0) return strdup(cand);
-    }
-    return NULL;
+    /* No mkdtemp on Windows. GetTempFileNameA is the OS primitive for a unique
+     * temp NAME in a directory (it uses only the first 3 chars of the prefix,
+     * and with uUnique=0 it CREATES a unique empty file). We want a directory,
+     * so: get a unique name, delete the file GetTempFileNameA made, then mkdir
+     * the same name. The name's uniqueness comes from the API; the tiny
+     * file->dir window is the standard Windows idiom.
+     *
+     * This replaces a _mktemp_s + retry loop that failed on every Windows
+     * toolchain: _mktemp_s does not re-randomise across calls with the same
+     * template, so the loop could not recover a name and returned NULL. */
+    char out[MAX_PATH];
+    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+    DeleteFileA(out);            /* drop the placeholder file */
+    if (_mkdir(out) != 0) return NULL;
+    return strdup(out);
 #elif defined(__wasi__)
     /* wasi-libc does not declare mkdtemp; the WASI filesystem is
      * capability-scoped and a fresh temp dir under an arbitrary path is not a
      * well-defined operation there. Report failure, which the .ae wrapper
      * turns into a "cannot create temp dir" error. */
-    (void)tmpl;
+    (void)dir; (void)prefix;
     return NULL;
 #else
+    char tmpl[4096];
+    int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
+    if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
     if (mkdtemp(tmpl) == NULL) return NULL;
     return strdup(tmpl);
 #endif
@@ -803,23 +808,26 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
+#if defined(_WIN32) || defined(_WIN64)
+    /* No mkstemp on Windows. GetTempFileNameA with uUnique=0 atomically CREATES
+     * a unique empty file under `dir` (name derived from the first 3 chars of
+     * `prefix`) and returns its path — exactly mktemp(1)'s "created, caller
+     * writes via the path" contract, with no TOCTOU race.
+     *
+     * This replaces a _mktemp_s + fopen("wxb") loop that failed on every
+     * Windows toolchain: _mktemp_s edits the template in place and does not
+     * re-randomise across calls, so the loop could not recover from a clash. */
+    char out[MAX_PATH];
+    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+    return strdup(out);
+#elif defined(__wasi__)
+    /* wasi-libc does not declare mkstemp; see fs_make_temp_dir_raw. */
+    (void)dir; (void)prefix;
+    return NULL;
+#else
     char tmpl[4096];
     int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
     if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
-#if defined(_WIN32) || defined(_WIN64)
-    for (int attempt = 0; attempt < 64; attempt++) {
-        char cand[4096];
-        memcpy(cand, tmpl, (size_t)w + 1);
-        if (_mktemp_s(cand, (size_t)w + 1) != 0) return NULL;
-        FILE* f = fopen(cand, "wxb");   /* x = fail if exists */
-        if (f) { fclose(f); return strdup(cand); }
-    }
-    return NULL;
-#elif defined(__wasi__)
-    /* wasi-libc does not declare mkstemp; see fs_make_temp_dir_raw. */
-    (void)tmpl;
-    return NULL;
-#else
     int fd = mkstemp(tmpl);
     if (fd < 0) return NULL;
     close(fd);
