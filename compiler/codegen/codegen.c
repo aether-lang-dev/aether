@@ -2458,6 +2458,12 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         int ok = 1;
         const char* param_types[32];
         const char* param_names[32];
+        /* When a parameter's real type is a TYPED pointer (`*Struct`), the ABI
+         * type stays the opaque `AetherValue*` (a C consumer cannot know the
+         * struct), but the real function takes `Struct*` — so the wrapper must
+         * CAST at the call, or GCC 14+ rejects the incompatible pointer. NULL
+         * here means "pass through unchanged". */
+        const char* param_casts[32];
         int param_count = 0;
         for (int p = 0; p < fn->child_count; p++) {
             ASTNode* c = fn->children[p];
@@ -2468,6 +2474,14 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                 if (!t || strcmp(t, "void") == 0 || param_count >= 32) { ok = 0; break; }
                 param_types[param_count] = t;
                 param_names[param_count] = c->value ? c->value : "_unnamed";
+                /* Typed struct pointer: ABI is AetherValue*, real is Struct* —
+                 * record the real C type so the call can cast to it. */
+                param_casts[param_count] = NULL;
+                if (c->node_type && c->node_type->kind == TYPE_PTR &&
+                    c->node_type->element_type &&
+                    c->node_type->element_type->kind == TYPE_STRUCT) {
+                    param_casts[param_count] = get_c_type(c->node_type);
+                }
                 param_count++;
             } else {
                 // Pattern literals, struct patterns, list patterns — not ABI-safe.
@@ -2552,7 +2566,14 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         fprintf(gen->output, "%s(", fn->value);
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s", param_names[k]);
+            /* Cast the opaque AetherValue* back to the real `Struct*` the
+             * function declares, so a typed struct-pointer parameter links
+             * cleanly under -Wincompatible-pointer-types (GCC 14+ -Werror). */
+            if (param_casts[k]) {
+                fprintf(gen->output, "(%s)%s", param_casts[k], param_names[k]);
+            } else {
+                fprintf(gen->output, "%s", param_names[k]);
+            }
         }
         fprintf(gen->output, ")");
         if (ret_is_string) fprintf(gen->output, "))");

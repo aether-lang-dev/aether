@@ -27,6 +27,20 @@ version number before tagging the release.
   recursive copy/delete, unique temp names, exclude-filtered find), with
   self-asserting regression tests.
 
+## [0.669.0]
+
+### Fixed
+
+- **`--emit=lib` failed to compile a function taking a typed struct pointer.**
+  The exported `aether_<name>` wrapper presents a pointer parameter as the
+  opaque ABI handle `AetherValue*`, but the real function takes `Struct*`, so
+  the wrapper's call passed an incompatible pointer — a warning on older GCC,
+  a hard build failure on GCC 14+ (`-Wincompatible-pointer-types` promoted to
+  an error). The wrapper now casts the opaque handle back to the real
+  `Struct*` at the call, so a typed struct-pointer parameter links cleanly
+  while the public ABI stays opaque. Found from selenium's native Aether
+  WebDriver client, whose one non-FFI binding couldn't be built as a library.
+
 ## [0.668.0]
 
 ### Fixed

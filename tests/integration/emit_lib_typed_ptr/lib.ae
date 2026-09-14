@@ -1,0 +1,22 @@
+// --emit=lib fixture: a top-level function whose parameter is a TYPED struct
+// pointer (`*Thing`). The export wrapper used to emit this parameter as
+// `AetherValue*` and call `bump(t)` where the real function takes `Thing*`,
+// which GCC 14+ rejects under -Wincompatible-pointer-types (a hard --emit=lib
+// build failure). The wrapper now casts the opaque handle back to `Thing*` at
+// the call. See asks/typed-struct-pointer-param-erased-in-export-wrapper.md.
+
+struct Thing {
+    n: int
+}
+
+// A C host allocates a Thing, sets n, then calls aether_bump(handle): it must
+// return the old n and increment the field in place.
+bump(t: *Thing) -> int {
+    v = t.n
+    t.n = v + 1
+    return v
+}
+
+main() {
+    println("unused under --emit=lib")
+}
