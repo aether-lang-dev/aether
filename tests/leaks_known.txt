@@ -25,3 +25,15 @@ test_cryptography_hmac_md4_md5 122
 # codegen (nested tuple-destructure error slots are heap-classified), so the
 # remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
 test_rsa_pkcs1 130
+
+# ── COMPILER BUG: borrowed closure-param string from a C callback (#2019) ──
+# fs.find_ext walks the tree and appends each matching path (the borrowed
+# `path` parameter the fs.walk C callback hands its closure) to a strbuilder.
+# A borrowed string parameter used inside a C-callback closure leaks a small
+# tracking cell per matching entry — a codegen/heap-tracker gap isolated to a
+# ~20-line repro in #2019, NOT a fault in find_ext's Aether code (verified:
+# the same walk without appending `path` is leak-clean). The cap is the bug's
+# fingerprint (a handful of matched files across the test's find_ext calls)
+# with headroom; a regression that leaks more still fails the gate. Remove
+# this entry when #2019 is fixed.
+test_fs_command_alikes 16

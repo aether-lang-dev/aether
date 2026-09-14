@@ -1,6 +1,10 @@
 // std.fs - File System Module
 // Import with: import std.fs
 //
+// Note: fs is otherwise extern-only (no std.string import) to stay a thin
+// syscall layer. find_ext is the exception — it produces a string result and
+// accumulates it with std.strbuilder (leak-free across the C walk callback).
+//
 // Provides file, directory, path, glob, and copy/move/realpath/chmod
 // operations.
 //
@@ -21,6 +25,8 @@
 // to an 8 MiB read/write loop on filesystems that reject the kernel
 // primitives. `move` is rename(2) with transparent EXDEV →
 // copy + unlink fallback. See aether_fs.c for the full hierarchy.
+
+import std.strbuilder
 
 exports(
     file_open_raw, file_close, file_read_all_raw, file_write_raw,
@@ -1153,28 +1159,37 @@ find_ext(root: string, ext: string) -> string {
     return find_ext_excluding(root, ext, "")
 }
 
-find_ext_excluding(root: string, ext: string, exclude: string) -> string {
-    acc = ""
+// Do the walk + accumulation and return the filled strbuilder handle (a `ptr`).
+// The `finish` (which produces the heap string) is kept OUT of this function on
+// purpose: a function that both creates a capturing closure (the walk callback)
+// AND returns a heap string mis-tracks that return — the caller's binding leaks
+// (a compiler heap-tracker gap; see the ask). Returning a plain `ptr` here
+// side-steps it, and find_ext_excluding below finishes it with no closure in
+// scope, where the heap-string return is tracked correctly.
+_find_ext_collect(root: string, ext: string, exclude: string) -> ptr {
+    sb = strbuilder.new(256)
     cnt = 0
     _n, _e = walk(root, | path: string, kind: int, depth: int | {
             if kind == STAT_KIND_FILE {
                 if _str_ends_with(path, ext) == 1 {
                     if _ends_any(path, exclude) == 0 {
-                        // Append a newline separator then the walk path.
-                        // string_concat reads `path` (borrowed, rewritten on the
-                        // next entry) directly — pre-copying it with
-                        // string_concat(path,"") made a temp that was never freed.
-                        // Each reassignment of `acc` lets the tracker free the
-                        // previous accumulator.
-                        if cnt > 0 { acc = string_concat(acc, "\n") }
-                        acc = string_concat(acc, path)
+                        // strbuilder is a `ptr` capture appended in place (never
+                        // reassigned), so the per-entry concat does not leak the
+                        // way `acc = concat(acc, …)` on a captured string did.
+                        if cnt > 0 { strbuilder.append(sb, "\n") }
+                        strbuilder.append(sb, path)
                         cnt = cnt + 1
                     }
                 }
             }
             return 0
         })
-    return acc
+    return sb
+}
+
+find_ext_excluding(root: string, ext: string, exclude: string) -> string {
+    sb = _find_ext_collect(root, ext, exclude)
+    return strbuilder.finish(sb)
 }
 
 // _is_dot_entry(name) — 1 if name is "." or "..". Char-based (fs is extern-only,
