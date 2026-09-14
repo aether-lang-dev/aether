@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.670.0]
+
 ### Added
 
 - **Eight stdlib "command-alike" functions**, so a program can stop shelling out
