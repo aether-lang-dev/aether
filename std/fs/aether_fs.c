@@ -768,23 +768,7 @@ char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-#if defined(_WIN32) || defined(_WIN64)
-    /* No mkdtemp on Windows. GetTempFileNameA is the OS primitive for a unique
-     * temp NAME in a directory (it uses only the first 3 chars of the prefix,
-     * and with uUnique=0 it CREATES a unique empty file). We want a directory,
-     * so: get a unique name, delete the file GetTempFileNameA made, then mkdir
-     * the same name. The name's uniqueness comes from the API; the tiny
-     * file->dir window is the standard Windows idiom.
-     *
-     * This replaces a _mktemp_s + retry loop that failed on every Windows
-     * toolchain: _mktemp_s does not re-randomise across calls with the same
-     * template, so the loop could not recover a name and returned NULL. */
-    char out[MAX_PATH];
-    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
-    DeleteFileA(out);            /* drop the placeholder file */
-    if (_mkdir(out) != 0) return NULL;
-    return strdup(out);
-#elif defined(__wasi__)
+#if defined(__wasi__)
     /* wasi-libc does not declare mkdtemp; the WASI filesystem is
      * capability-scoped and a fresh temp dir under an arbitrary path is not a
      * well-defined operation there. Report failure, which the .ae wrapper
@@ -808,19 +792,7 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (!dir) dir = "/tmp";
     if (!prefix) prefix = "ae";
     if (!aether_sandbox_check("fs_write", dir)) return NULL;
-#if defined(_WIN32) || defined(_WIN64)
-    /* No mkstemp on Windows. GetTempFileNameA with uUnique=0 atomically CREATES
-     * a unique empty file under `dir` (name derived from the first 3 chars of
-     * `prefix`) and returns its path — exactly mktemp(1)'s "created, caller
-     * writes via the path" contract, with no TOCTOU race.
-     *
-     * This replaces a _mktemp_s + fopen("wxb") loop that failed on every
-     * Windows toolchain: _mktemp_s edits the template in place and does not
-     * re-randomise across calls, so the loop could not recover from a clash. */
-    char out[MAX_PATH];
-    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
-    return strdup(out);
-#elif defined(__wasi__)
+#if defined(__wasi__)
     /* wasi-libc does not declare mkstemp; see fs_make_temp_dir_raw. */
     (void)dir; (void)prefix;
     return NULL;
@@ -876,8 +848,42 @@ int fs_unlink_raw(const char* path) {
 // PR can add CreateSymbolicLinkW + a junction fallback for directories.
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
-char* fs_make_temp_dir_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
-char* fs_make_temp_file_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
+
+/* Windows has no mkdtemp/mkstemp. GetTempFileNameA(dir, prefix, 0, out) is the
+ * OS primitive: with uUnique=0 it derives a unique name in `dir` (using only
+ * the first 3 chars of `prefix`) AND atomically CREATES that empty file, then
+ * writes the full path into `out` (which must be >= MAX_PATH). It requires
+ * `dir` to already exist and to be no longer than MAX_PATH-14. GetTempFileNameA
+ * returns 0 on failure.
+ *
+ * These used to be NULL stubs — that is why make_temp_dir/make_temp_file failed
+ * on every Windows target: the real bodies lived under `#ifndef _WIN32` and the
+ * Windows build only ever saw "return NULL". */
+char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
+    if (!dir) dir = ".";
+    if (!prefix) prefix = "ae";
+    if (!aether_sandbox_check("fs_write", dir)) return NULL;
+    /* GetTempFileNameA makes a FILE; we want a DIRECTORY. Take its unique name,
+     * delete the placeholder file, then _mkdir the same name (standard Windows
+     * file->dir idiom). Retry to close the tiny unlink/mkdir race. */
+    for (int attempt = 0; attempt < 64; attempt++) {
+        char out[MAX_PATH];
+        if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+        DeleteFileA(out);
+        if (_mkdir(out) == 0) return strdup(out);
+        /* name got taken between delete and mkdir — try a fresh one */
+    }
+    return NULL;
+}
+char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
+    if (!dir) dir = ".";
+    if (!prefix) prefix = "ae";
+    if (!aether_sandbox_check("fs_write", dir)) return NULL;
+    char out[MAX_PATH];
+    /* uUnique=0 => the file is created here, atomically; mktemp(1)'s contract. */
+    if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
+    return strdup(out);
+}
 int fs_is_symlink(const char* p) { (void)p; return 0; }
 int fs_is_socket(const char* p) { (void)p; return 0; }
 int fs_unlink_raw(const char* path) {
