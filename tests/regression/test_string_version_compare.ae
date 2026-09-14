@@ -92,6 +92,13 @@ main() {
     _lt("x-1.0.bz2", "x-1.0.gz") // bases tie → extensions decide
     _lt("foo-1.11.tar.gz", "foo-1.11.1.tar.gz") // multi-segment ext stripped
 
+    // --- documented CAVEAT: whole-string, prefix-first. These pin the behavior
+    // a caller must design around (partition by family before max-ing). "groovy-"
+    // sorts before "groovy-all-", so the prefix decides BEFORE the version — a
+    // naive max across both families would pick the older -all jar.
+    _lt("groovy-2.4.21.jar", "groovy-all-2.4.21.jar") // same ver, prefix decides
+    _lt("groovy-4.0.15.jar", "groovy-all-2.4.21.jar") // NEWER plain < OLDER -all!
+
     newest = "clojure-1.9.0.jar"
     if string.version_compare("clojure-1.11.1.jar", newest) > 0 { newest = "clojure-1.11.1.jar" }
     if string.version_compare("clojure-1.10.0.jar", newest) > 0 { newest = "clojure-1.10.0.jar" }

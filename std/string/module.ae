@@ -735,6 +735,17 @@ _ver_suffix_start(s: string, len: int) -> int {
 // comparator has no business replicating — here a leading '.' is just ordinary
 // punctuation, still yielding a stable total order. Targets version strings and
 // artifact filenames (which never start with '.'), not hidden-file listings.
+//
+// CAVEAT — this compares the WHOLE string, prefix first. To pick "newest by
+// version" across names, every candidate must share one prefix, or the prefix
+// decides before the version does. Two footguns:
+//   - Pass BASENAMES, not full paths: "/a/x-2.jar" vs "/b/x-9.jar" compares the
+//     directory ("/a" < "/b") before the version. Use path.basename first.
+//   - Partition by artifact FAMILY before max-ing: "groovy-" sorts before
+//     "groovy-all-", so version_compare("groovy-4.0.jar","groovy-all-2.4.jar")
+//     is < 0 — it calls the OLDER -all jar "greater" on the prefix alone. Keep
+//     one family (all the groovy-all-*, else all the groovy-*), THEN max within
+//     it, where the prefix is constant and only the version varies.
 version_compare(a: string, b: string) -> int {
     la = string_length(a)
     lb = string_length(b)
