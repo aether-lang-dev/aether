@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.668.0]
+
 ### Fixed
 
 - **A block setter called as a top-level node builder now errors instead of
