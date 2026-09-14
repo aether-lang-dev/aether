@@ -401,7 +401,11 @@ open(path: string, mode: string) -> {
 // `string.concat(err, "")`, before issuing another read — do NOT hold it across
 // one. Do not free it. (The success value IS owned and must be freed.)
 read(path: string) -> {
-    handle = file_open_raw(path, "r")
+    // "rb", not "r": Windows text mode collapses "\r\n" back to "\n" and stops
+    // at the first Ctrl-Z (0x1A) byte, neither of which fs.read should do — it
+    // returns verbatim bytes on POSIX and must match. (read_binary already uses
+    // "rb".) The 'b' is a no-op on POSIX.
+    handle = file_open_raw(path, "rb")
     if handle == 0 {
         // Was the bare "cannot open file" — no path, no reason, so a missing
         // file, a permission error and a sandbox denial were indistinguishable.
@@ -421,7 +425,11 @@ read(path: string) -> {
 // Write `content` to a file at `path`. Opens in write mode, writes, closes.
 // Returns "" on success, error string on failure.
 write(path: string, content: string) -> {
-    handle = file_open_raw(path, "w")
+    // "wb", not "w": on Windows text mode translates every '\n' into "\r\n",
+    // so fs.write would silently corrupt exact/binary content (e.g. writing
+    // "hello world\n" produced 13 bytes and a different sha256 than on POSIX).
+    // The 'b' is a no-op on POSIX, so this is verbatim-bytes on every platform.
+    handle = file_open_raw(path, "wb")
     if handle == 0 {
         return "cannot open file for writing"
     }

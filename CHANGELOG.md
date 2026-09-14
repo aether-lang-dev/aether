@@ -27,6 +27,18 @@ version number before tagging the release.
   recursive copy/delete, unique temp names, exclude-filtered find), with
   self-asserting regression tests.
 
+### Fixed
+
+- **`std.fs.read` / `std.fs.write` did text-mode translation on Windows.** They
+  opened files with `"r"` / `"w"`, so the Windows CRT rewrote every `\n` as
+  `\r\n` on write (and collapsed it back, stopping at a Ctrl-Z byte, on read) —
+  silently corrupting exact and binary content (writing `"hello world\n"`
+  produced 13 bytes and a different SHA-256 than POSIX). Both now open in binary
+  (`"rb"` / `"wb"`; a no-op on POSIX), so bytes round-trip verbatim on every
+  platform. `std.fs.make_temp_dir` / `make_temp_file` also returned failure on
+  Windows (their real bodies had been compiled out under `#ifndef _WIN32`); they
+  now use `GetTempFileNameA`. Both found by the Wine runtime CI lane.
+
 ## [0.669.0]
 
 ### Fixed
