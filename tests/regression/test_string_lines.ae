@@ -1,0 +1,36 @@
+// Regression: string.lines — empty-safe newline split to a *StringSeq. The
+// beeline from a newline-joined string (fs.find_ext / any `> argfile` output)
+// to an iterable sequence, WITHOUT the phantom "" cell that split_to_seq("","\n")
+// returns. Self-asserting: FAIL + exit(1), PASS at the end.
+
+import std.string
+
+extern exit(code: int)
+
+main() {
+    // empty → EMPTY seq (the fix), not the single "" cell split_to_seq gives
+    e = string.lines("")
+    if string.seq_length(e) != 0 { println("FAIL lines(''): length=${string.seq_length(e)}, expected 0"); exit(1) }
+    string.seq_free(e)
+
+    // one line → 1
+    one = string.lines("a")
+    if string.seq_length(one) != 1 { println("FAIL lines('a'): length=${string.seq_length(one)}, expected 1"); exit(1) }
+    string.seq_free(one)
+
+    // three lines → 3, order preserved
+    three = string.lines("x\ny\nz")
+    if string.seq_length(three) != 3 { println("FAIL lines('x\\ny\\nz'): length=${string.seq_length(three)}, expected 3"); exit(1) }
+    h = string.seq_head(three)
+    if string.equals(h, "x") == 0 { println("FAIL lines: first element = '${h}', expected 'x'"); exit(1) }
+    string.seq_free(three)
+
+    // round-trips with join
+    rt = string.lines("p\nq\nr")
+    j = string.join(rt, "\n")
+    string.seq_free(rt)
+    if string.equals(j, "p\nq\nr") == 0 { println("FAIL lines→join round-trip: got '${j}'"); exit(1) }
+
+    println("PASS test_string_lines")
+    return 0
+}

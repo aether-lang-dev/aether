@@ -22,7 +22,7 @@ exports(
     string_char_at_n, string_index_of_from_n,
     string_from_char, string_to_upper, string_to_lower, string_trim,
     string_split, string_array_size, string_array_get, string_array_free,
-    string_split_to_seq, string_join,
+    string_split_to_seq, string_join, lines,
     string_seq_empty, string_seq_cons, string_seq_head, string_seq_tail,
     string_seq_is_empty, string_seq_length, string_seq_retain, string_seq_free,
     string_seq_from_array, string_seq_to_array,
@@ -258,6 +258,18 @@ extern string_array_free(arr: ptr)
 // with "", delimiter longer than input → single-cell list with the
 // whole input, trailing/leading delimiters produce empty pieces.
 extern string_split_to_seq(str: string, delimiter: string) -> *StringSeq
+
+// lines(s) — split on "\n" into a *StringSeq, EMPTY-SAFE: "" → an empty
+// sequence (length 0), not the single "" cell split_to_seq("","\n") returns.
+// This is the beeline from a newline-joined string (e.g. fs.find_ext's result,
+// or any `... > argfile` output) to an iterable list of items, with no phantom
+// empty entry to guard against at the call site:
+//   files = string.lines(fs.find_ext(root, ".java"))   // 0 items when none
+//   string.seq_each(files, |f| { compile(f) })
+lines(s: string) -> *StringSeq {
+    if string_length(s) == 0 { return string_seq_empty() }
+    return string_split_to_seq(s, "\n")
+}
 
 // Join a sequence into one string with `sep` between elements — the
 // linear-cost complement to string_split (issue #1346). O(total bytes):

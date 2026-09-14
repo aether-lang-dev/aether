@@ -26,14 +26,14 @@ header comment is the authoritative description.
 | `std.clapae` | Command-line argument parser, modelled on clap. | 32 | [guide](../std/clapae/README.md) · [source](../std/clapae/module.ae) |
 | `std.collections` | Dynamic list, hash map and packed int array, with the raw externs the alias modules re-export. | 43 | [guide](../std/collections/README.md) · [source](../std/collections/module.ae) |
 | `std.config` | Process-global immutable string to string store. | 12 | [guide](../std/config/README.md) · [source](../std/config/module.ae) |
-| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 46 | [full section](#cryptography-stdcryptography) |
+| `std.cryptography` | Cryptographic hashes, HMAC, and the Base64 codec. | 47 | [full section](#cryptography-stdcryptography) |
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 13 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 147 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 155 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 163 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
@@ -58,7 +58,7 @@ header comment is the authoritative description.
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 10 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 77 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 79 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -71,7 +71,7 @@ header comment is the authoritative description.
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 92 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 93 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |

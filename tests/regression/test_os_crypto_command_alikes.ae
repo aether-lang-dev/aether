@@ -1,0 +1,40 @@
+// Regression: os.cpu_count and cryptography.sha256_file — the `nproc` and
+// `sha256sum` command-alikes. Self-asserting: FAIL + exit(1), PASS at the end.
+
+import std.os
+import std.cryptography
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+main() {
+    // --- os.cpu_count: always >= 1 -------------------------------------------
+    n = os.cpu_count()
+    if n < 1 { println("FAIL cpu_count: got ${n}, expected >= 1"); exit(1) }
+    // stable across calls
+    if os.cpu_count() != n { println("FAIL cpu_count: not stable across calls"); exit(1) }
+
+    // --- cryptography.sha256_file: matches the known digest of "hello world\n"
+    // sha256sum of the exact bytes "hello world\n" (12 bytes):
+    //   a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447
+    tmp, terr = fs.make_temp_file(os.temp_dir(), "ae-sha-")
+    if terr != "" { println("FAIL setup: make_temp_file ${terr}"); exit(1) }
+    werr = fs.write(tmp, "hello world\n")
+    if werr != "" { println("FAIL setup: write ${werr}"); exit(1) }
+
+    got, herr = cryptography.sha256_file(tmp)
+    if herr != "" { println("FAIL sha256_file: ${herr}"); exit(1) }
+    want = "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447"
+    if string.equals(got, want) == 0 {
+        println("FAIL sha256_file: got ${got}"); println("             want ${want}"); exit(1)
+    }
+
+    // a missing file → error, not a bogus hash
+    _h2, e2 = cryptography.sha256_file("/tmp/ae-definitely-not-a-file-xyz-987")
+    if string.length(e2) == 0 { println("FAIL sha256_file: missing file should error"); exit(1) }
+
+    _d = fs.delete(tmp)
+    println("PASS test_os_crypto_command_alikes")
+    return 0
+}

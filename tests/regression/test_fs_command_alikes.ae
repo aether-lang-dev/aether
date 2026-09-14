@@ -1,0 +1,96 @@
+// Regression: std.fs command-alikes — copy_tree, remove_tree, make_temp_dir,
+// make_temp_file, find_ext, find_ext_excluding. These replace the `cp -R`,
+// `rm -rf`, `mktemp`, and `find … -name` shell-outs a build tool otherwise
+// leans on. Self-asserting: FAIL + exit(1) on any mismatch, PASS at the end.
+// Cleans up after itself.
+
+import std.fs
+import std.os
+import std.string
+
+extern exit(code: int)
+
+main() {
+    // Use the platform's temp dir, not a hardcoded /tmp (which does not exist
+    // on Windows) — os.temp_dir() resolves per-OS (GetTempPath / TMPDIR / /tmp).
+    base = "${os.temp_dir()}/ae_fs_cmdalikes_test"
+    _r0 = fs.remove_tree(base) // fresh start (idempotent on a missing path)
+
+    // --- build a small tree under base/src -----------------------------------
+    _m1 = fs.mkdir_p("${base}/src/sub/deep")
+    w1 = fs.write("${base}/src/a.txt", "aaa")
+    if w1 != "" { println("FAIL setup: cannot write a.txt (${w1})"); exit(1) }
+    _w2 = fs.write("${base}/src/sub/b.txt", "bbb")
+    _w3 = fs.write("${base}/src/sub/deep/c.txt", "ccc")
+
+    // --- copy_tree: recursive copy, nested dirs preserved --------------------
+    cterr = fs.copy_tree("${base}/src", "${base}/dst")
+    if cterr != "" { println("FAIL copy_tree: ${cterr}"); exit(1) }
+    if fs.exists("${base}/dst/a.txt") == 0 { println("FAIL copy_tree: dst/a.txt missing"); exit(1) }
+    if fs.exists("${base}/dst/sub/b.txt") == 0 { println("FAIL copy_tree: dst/sub/b.txt missing"); exit(1) }
+    if fs.exists("${base}/dst/sub/deep/c.txt") == 0 { println("FAIL copy_tree: dst/sub/deep/c.txt missing"); exit(1) }
+    // content preserved
+    c_a, _la, ea = fs.read_binary("${base}/dst/a.txt")
+    if ea != "" { println("FAIL copy_tree: cannot read copied a.txt"); exit(1) }
+    if string.equals(c_a, "aaa") == 0 { println("FAIL copy_tree: a.txt content = '${c_a}', expected 'aaa'"); exit(1) }
+
+    // --- remove_tree: deletes a POPULATED tree (rmdir would refuse) ----------
+    rterr = fs.remove_tree("${base}/dst")
+    if rterr != "" { println("FAIL remove_tree: ${rterr}"); exit(1) }
+    if fs.exists("${base}/dst") == 1 { println("FAIL remove_tree: dst still exists"); exit(1) }
+    // idempotent on an already-gone path
+    rt2 = fs.remove_tree("${base}/dst")
+    if rt2 != "" { println("FAIL remove_tree: not idempotent on a missing path (${rt2})"); exit(1) }
+
+    // --- make_temp_dir / make_temp_file: unique + created --------------------
+    td1, e1 = fs.make_temp_dir(base, "t-")
+    if e1 != "" { println("FAIL make_temp_dir: ${e1}"); exit(1) }
+    if fs.exists(td1) == 0 { println("FAIL make_temp_dir: ${td1} not created"); exit(1) }
+    td2, _e2 = fs.make_temp_dir(base, "t-")
+    if string.equals(td1, td2) == 1 { println("FAIL make_temp_dir: two calls returned the same path ${td1}"); exit(1) }
+    tf1, e3 = fs.make_temp_file(base, "f-")
+    if e3 != "" { println("FAIL make_temp_file: ${e3}"); exit(1) }
+    if fs.exists(tf1) == 0 { println("FAIL make_temp_file: ${tf1} not created"); exit(1) }
+
+    // --- find_ext / find_ext_excluding ---------------------------------------
+    // A source-tree shape: prod + *Test / *Tests files.
+    _fm = fs.mkdir_p("${base}/proj/deep")
+    _s1 = fs.write("${base}/proj/Main.scala", "x")
+    _s2 = fs.write("${base}/proj/deep/Util.scala", "x")
+    _s3 = fs.write("${base}/proj/FooTest.scala", "x")
+    _s4 = fs.write("${base}/proj/BarTests.scala", "x")
+    _s5 = fs.write("${base}/proj/notes.txt", "x")
+
+    all = fs.find_ext("${base}/proj", ".scala")
+    // 4 .scala files → 3 newlines between them
+    if _count_lines(all) != 4 { println("FAIL find_ext: expected 4 .scala, got:\n${all}"); exit(1) }
+
+    prod = fs.find_ext_excluding("${base}/proj", ".scala", "Test.scala\nTests.scala")
+    if _count_lines(prod) != 2 { println("FAIL find_ext_excluding: expected 2 prod .scala, got:\n${prod}"); exit(1) }
+    // and the excluded ones must NOT appear
+    if string.index_of(prod, "FooTest.scala") >= 0 { println("FAIL find_ext_excluding: FooTest.scala leaked in"); exit(1) }
+    if string.index_of(prod, "BarTests.scala") >= 0 { println("FAIL find_ext_excluding: BarTests.scala leaked in"); exit(1) }
+    // no matches → empty string
+    no_rs = fs.find_ext("${base}/proj", ".rs")
+    if string.length(no_rs) != 0 { println("FAIL find_ext: expected empty for .rs"); exit(1) }
+
+    // --- cleanup -------------------------------------------------------------
+    _rf = fs.remove_tree(base)
+    if fs.exists(base) == 1 { println("FAIL cleanup: base still exists"); exit(1) }
+
+    println("PASS test_fs_command_alikes")
+    return 0
+}
+
+// Count non-empty lines in a newline-joined string ("" → 0, "a" → 1, "a\nb" → 2).
+_count_lines(s: string) -> int {
+    if string.length(s) == 0 { return 0 }
+    n = 1
+    i = 0
+    len = string.length(s)
+    while i < len {
+        if string.char_at(s, i) == 10 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}

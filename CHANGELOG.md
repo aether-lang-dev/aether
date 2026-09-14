@@ -11,6 +11,34 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **Eight stdlib "command-alike" functions**, so a program can stop shelling out
+  to `cp -R` / `rm -rf` / `mktemp` / `nproc` / `sha256sum` / `find`:
+  `std.fs.copy_tree`, `remove_tree`, `make_temp_dir`, `make_temp_file`,
+  `find_ext`, `find_ext_excluding`; `std.os.cpu_count`;
+  `std.cryptography.sha256_file`; and `std.string.lines`. Pure Aether where it
+  can be (`copy_tree` / `remove_tree` / `find_ext` / `sha256_file` / `lines`),
+  with small cross-platform C only for the race-sensitive primitives
+  (`mkdtemp` / `mkstemp`, `sysconf` / `GetSystemInfo`). `find_ext` returns a
+  newline-joined, argfile-ready string; `string.lines` is the empty-safe path
+  from it to a `StringSeq`, so one value feeds both the compiler `@argfile` and
+  iteration. Each verified against its coreutil (byte-identical SHA-256,
+  recursive copy/delete, unique temp names, exclude-filtered find), with
+  self-asserting regression tests.
+
+### Fixed
+
+- **`std.fs.read` / `std.fs.write` did text-mode translation on Windows.** They
+  opened files with `"r"` / `"w"`, so the Windows CRT rewrote every `\n` as
+  `\r\n` on write (and collapsed it back, stopping at a Ctrl-Z byte, on read) —
+  silently corrupting exact and binary content (writing `"hello world\n"`
+  produced 13 bytes and a different SHA-256 than POSIX). Both now open in binary
+  (`"rb"` / `"wb"`; a no-op on POSIX), so bytes round-trip verbatim on every
+  platform. `std.fs.make_temp_dir` / `make_temp_file` also returned failure on
+  Windows (their real bodies had been compiled out under `#ifndef _WIN32`); they
+  now use `GetTempFileNameA`. Both found by the Wine runtime CI lane.
+
 ## [0.669.0]
 
 ### Fixed
