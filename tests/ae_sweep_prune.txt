@@ -60,6 +60,7 @@ tests/integration/emit_csrc_cross/
 tests/integration/emit_lib_const/
 tests/integration/emit_lib_deadline/
 tests/integration/emit_lib_net/
+tests/integration/emit_lib_typed_ptr/
 tests/integration/emit_link_requirements/
 tests/integration/emit_obj/
 tests/integration/enum_sum_cross_module/
