@@ -122,6 +122,7 @@ char* os_now_local_iso8601_raw(void) { return NULL; }
 void os_now_local_fill_raw(void* out) { (void)out; }
 char* os_platform_raw(void) { return NULL; }
 char* os_temp_dir_raw(void) { return NULL; }
+int os_cpu_count_raw(void) { return 1; }
 int os_getpid_raw(void) { return 0; }
 int os_user_id_raw(void) { return -1; }
 int64_t os_wall_seconds_raw(void) { return 0; }
@@ -541,6 +542,19 @@ char* os_temp_dir_raw(void) {
         return out;
     }
     return strdup("/tmp");
+#endif
+}
+
+/* Online logical CPU count (the `nproc` value), always >= 1. */
+int os_cpu_count_raw(void) {
+#if defined(_WIN32) || defined(_WIN64)
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    long n = (long)si.dwNumberOfProcessors;
+    return n > 0 ? (int)n : 1;
+#else
+    long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
 #endif
 }
 

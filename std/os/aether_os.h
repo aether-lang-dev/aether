@@ -144,6 +144,11 @@ char* os_now_local_iso8601_raw(void);
 // fails. Returns a strdup'd copy.
 char* os_platform_raw(void);
 
+// Number of online logical CPUs (the `nproc` value) — for sizing build
+// parallelism / worker pools. sysconf(_SC_NPROCESSORS_ONLN) on POSIX,
+// GetSystemInfo on Windows. Returns at least 1; never 0 or negative.
+int os_cpu_count_raw(void);
+
 // Process identifier for the current process. Useful for tmpfile
 // names, per-process locks, log prefixes. POSIX getpid(2); Windows
 // _getpid(). Returns 0 on platforms without filesystem (no-op stub).

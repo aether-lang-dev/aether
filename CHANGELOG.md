@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **Eight stdlib "command-alike" functions**, so a program can stop shelling out
+  to `cp -R` / `rm -rf` / `mktemp` / `nproc` / `sha256sum` / `find`:
+  `std.fs.copy_tree`, `remove_tree`, `make_temp_dir`, `make_temp_file`,
+  `find_ext`, `find_ext_excluding`; `std.os.cpu_count`;
+  `std.cryptography.sha256_file`; and `std.string.lines`. Pure Aether where it
+  can be (`copy_tree` / `remove_tree` / `find_ext` / `sha256_file` / `lines`),
+  with small cross-platform C only for the race-sensitive primitives
+  (`mkdtemp` / `mkstemp`, `sysconf` / `GetSystemInfo`). `find_ext` returns a
+  newline-joined, argfile-ready string; `string.lines` is the empty-safe path
+  from it to a `StringSeq`, so one value feeds both the compiler `@argfile` and
+  iteration. Each verified against its coreutil (byte-identical SHA-256,
+  recursive copy/delete, unique temp names, exclude-filtered find), with
+  self-asserting regression tests.
+
 ## [0.668.0]
 
 ### Fixed

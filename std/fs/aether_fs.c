@@ -24,6 +24,8 @@ int dir_delete_raw(const char* p) { (void)p; return 0; }
 int fs_mkdir_p_raw(const char* p) { (void)p; return 0; }
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
+char* fs_make_temp_dir_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
+char* fs_make_temp_file_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
 int fs_is_symlink(const char* p) { (void)p; return 0; }
 int fs_is_socket(const char* p) { (void)p; return 0; }
 int fs_unlink_raw(const char* p) { (void)p; return 0; }
@@ -759,6 +761,60 @@ char* fs_readlink_raw(const char* path) {
     return strdup(buf);
 }
 
+/* Create a uniquely-named temp DIRECTORY under `dir` whose name starts with
+ * `prefix`, atomically (mkdtemp — no TOCTOU race). Returns the created path
+ * (strdup'd, caller frees) or NULL on failure. */
+char* fs_make_temp_dir_raw(const char* dir, const char* prefix) {
+    if (!dir) dir = "/tmp";
+    if (!prefix) prefix = "ae";
+    if (!aether_sandbox_check("fs_write", dir)) return NULL;
+    char tmpl[4096];
+    int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
+    if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
+#if defined(_WIN32) || defined(_WIN64)
+    /* Windows has no mkdtemp: name with _mktemp_s, then create it; loop a few
+     * times in case of a collision (the window is tiny — best effort). */
+    for (int attempt = 0; attempt < 64; attempt++) {
+        char cand[4096];
+        memcpy(cand, tmpl, (size_t)w + 1);
+        if (_mktemp_s(cand, (size_t)w + 1) != 0) return NULL;
+        if (_mkdir(cand) == 0) return strdup(cand);
+    }
+    return NULL;
+#else
+    if (mkdtemp(tmpl) == NULL) return NULL;
+    return strdup(tmpl);
+#endif
+}
+
+/* Create a uniquely-named temp FILE under `dir` whose name starts with
+ * `prefix`, atomically (mkstemp — creates + opens O_EXCL, no race). Returns
+ * the created path (strdup'd, caller frees) or NULL on failure. The fd is
+ * closed here — the caller writes via the returned path, matching mktemp(1). */
+char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
+    if (!dir) dir = "/tmp";
+    if (!prefix) prefix = "ae";
+    if (!aether_sandbox_check("fs_write", dir)) return NULL;
+    char tmpl[4096];
+    int w = snprintf(tmpl, sizeof(tmpl), "%s/%sXXXXXX", dir, prefix);
+    if (w <= 0 || (size_t)w >= sizeof(tmpl)) return NULL;
+#if defined(_WIN32) || defined(_WIN64)
+    for (int attempt = 0; attempt < 64; attempt++) {
+        char cand[4096];
+        memcpy(cand, tmpl, (size_t)w + 1);
+        if (_mktemp_s(cand, (size_t)w + 1) != 0) return NULL;
+        FILE* f = fopen(cand, "wxb");   /* x = fail if exists */
+        if (f) { fclose(f); return strdup(cand); }
+    }
+    return NULL;
+#else
+    int fd = mkstemp(tmpl);
+    if (fd < 0) return NULL;
+    close(fd);
+    return strdup(tmpl);
+#endif
+}
+
 // Returns 1 if `path` is a symlink (does NOT follow the link to check
 // the target). Returns 0 otherwise — including when the path doesn't
 // exist.
@@ -800,6 +856,8 @@ int fs_unlink_raw(const char* path) {
 // PR can add CreateSymbolicLinkW + a junction fallback for directories.
 int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
 char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
+char* fs_make_temp_dir_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
+char* fs_make_temp_file_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
 int fs_is_symlink(const char* p) { (void)p; return 0; }
 int fs_is_socket(const char* p) { (void)p; return 0; }
 int fs_unlink_raw(const char* path) {

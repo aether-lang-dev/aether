@@ -28,6 +28,8 @@ exports(
     dir_exists, dir_create_raw, dir_delete_raw, dir_list_raw,
     fs_mkdir_p_raw,
     fs_symlink_raw, fs_readlink_raw, fs_is_symlink, fs_is_socket, fs_unlink_raw,
+    fs_make_temp_dir_raw, fs_make_temp_file_raw,
+    make_temp_dir, make_temp_file,
     STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK, STAT_KIND_OTHER,
     STAT_KIND_SOCKET, STAT_KIND_FIFO, STAT_KIND_DEVICE,
     fs_write_binary_raw, fs_write_atomic_raw, fs_rename_raw,
@@ -59,6 +61,8 @@ exports(
     write_binary, write_atomic, rename, file_stat, read_binary,
     fs_copy_raw, fs_move_raw, fs_realpath_raw, fs_chmod_raw,
     copy, move, realpath, chmod,
+    copy_tree, remove_tree,
+    find_ext, find_ext_excluding,
     KIND_OK, KIND_NOT_FOUND, KIND_PERMISSION_DENIED, KIND_EXISTS,
     KIND_CROSS_DEVICE, KIND_IO, KIND_INVALID, KIND_LOOP,
     KIND_NAME_TOO_LONG, KIND_NO_SPACE, KIND_IS_DIR, KIND_NOT_DIR,
@@ -144,6 +148,8 @@ extern fs_mkdir_p_raw(path: string) -> int
 //   fs_unlink_raw    — remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
 extern fs_readlink_raw(path: string) -> string
+extern fs_make_temp_dir_raw(dir: string, prefix: string) -> string
+extern fs_make_temp_file_raw(dir: string, prefix: string) -> string
 extern fs_is_symlink(path: string) -> int
 //   fs_is_socket     — 1 if the path is a UNIX-domain socket (follows
 //                      symlinks). POSIX only; returns 0 on Windows. Pure
@@ -530,6 +536,25 @@ readlink(path: string) -> {
     }
     target_copy = string_concat(target, "")
     return target_copy, ""
+}
+
+// make_temp_dir(dir, prefix) — atomically create and return a uniquely-named
+// temp DIRECTORY under `dir`, name starting `prefix` (mkdtemp — no race). The
+// caller owns it: clean up with remove_tree(). Returns (path, "") or ("", err).
+// Empty `dir` → the OS temp dir (os.temp_dir); empty `prefix` → "ae".
+make_temp_dir(dir: string, prefix: string) -> {
+    p = fs_make_temp_dir_raw(dir, prefix)
+    if p == null { return "", "cannot create temp dir" }
+    return string_concat(p, ""), ""
+}
+
+// make_temp_file(dir, prefix) — atomically create and return a uniquely-named
+// temp FILE under `dir` (mkstemp — created O_EXCL, no race). The caller owns
+// it: delete() when done. Returns (path, "") or ("", err).
+make_temp_file(dir: string, prefix: string) -> {
+    p = fs_make_temp_file_raw(dir, prefix)
+    if p == null { return "", "cannot create temp file" }
+    return string_concat(p, ""), ""
 }
 
 // Remove a file or symlink. Refuses to remove a directory — use
@@ -1053,4 +1078,180 @@ fsync(file: ptr) -> string {
 // never call fd() on a handle that has been closed.
 fd(file: ptr) -> int {
     return file_fd_raw(file)
+}
+
+// --- Recursive directory operations (#command-alikes) ------------------------
+//
+// copy_tree / remove_tree are the recursive counterparts to copy() (single
+// file) and delete_dir() (empty dir only). Pure Aether over dir_list_raw +
+// copy/mkdir_p/delete — no `cp -R` / `rm -rf` shell-out. They walk with the
+// module's own dir listing (kind from readdir's d_type, no per-entry stat) so
+// fs stays dependency-free. Symlinks are copied/removed as entries, never
+// followed into (no cycles). Both return "" on success, an error string
+// otherwise.
+
+// --- Scoped source discovery (the `find … -name '*.ext'` replacement) --------
+//
+// find_ext(root, ext) collects every file under `root` whose name ends with
+// `ext` (e.g. ".java"), recursively — the declarative form of
+// `find <root> -name '*.<ext>'`. find_ext_excluding additionally drops files
+// whose name ends with any of the newline-separated `exclude` suffixes (the
+// `! -name '*Test.scala'` filters). Both return the matches as a
+// newline-separated string (one path per line, no trailing newline) — the
+// argfile shape a compiler `@file` wants — or "" when none match. Built on
+// fs.walk (one readdir sweep per dir, no shell-out). For an arbitrary
+// predicate, use fs.walk with a closure directly; these are the common case.
+
+// _ends_any(name, suffixes) — 1 if name ends with any '\n'-separated suffix.
+_ends_any(name: string, suffixes: string) -> int {
+    if string_length(suffixes) == 0 { return 0 }
+    n = string_length(suffixes)
+    start = 0
+    i = 0
+    while i <= n {
+        at_end = 0
+        if i == n { at_end = 1 }
+        is_nl = 0
+        if i < n {
+            if string_char_at(suffixes, i) == 10 { is_nl = 1 }
+        }
+        if at_end == 1 { is_nl = 1 }
+        if is_nl == 1 {
+            if i > start {
+                suf = string_substring(suffixes, start, i)
+                if _str_ends_with(name, suf) == 1 { return 1 }
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// _str_ends_with(s, suffix) — 1 if s ends with suffix. Char-based (no
+// std.string import in fs).
+_str_ends_with(s: string, suffix: string) -> int {
+    ls = string_length(s)
+    lf = string_length(suffix)
+    if lf > ls { return 0 }
+    if lf == 0 { return 1 }
+    off = ls - lf
+    j = 0
+    while j < lf {
+        if string_char_at(s, off + j) != string_char_at(suffix, j) { return 0 }
+        j = j + 1
+    }
+    return 1
+}
+
+find_ext(root: string, ext: string) -> string {
+    return find_ext_excluding(root, ext, "")
+}
+
+find_ext_excluding(root: string, ext: string, exclude: string) -> string {
+    acc = ""
+    cnt = 0
+    _n, _e = walk(root, | path: string, kind: int, depth: int | {
+            if kind == STAT_KIND_FILE {
+                if _str_ends_with(path, ext) == 1 {
+                    if _ends_any(path, exclude) == 0 {
+                        if cnt > 0 { acc = string_concat(acc, "\n") }
+                        // copy the BORROWED walk path (string_concat(x,"") is fs's
+                        // copy idiom — the buffer is rewritten for the next entry).
+                        acc = string_concat(acc, string_concat(path, ""))
+                        cnt = cnt + 1
+                    }
+                }
+            }
+            return 0
+        })
+    return acc
+}
+
+// _is_dot_entry(name) — 1 if name is "." or "..". Char-based (fs is extern-only,
+// no std.string import); "." is 46.
+_is_dot_entry(name: string) -> int {
+    n = string_length(name)
+    if n == 1 {
+        if string_char_at(name, 0) == 46 { return 1 }
+    }
+    if n == 2 {
+        if string_char_at(name, 0) == 46 {
+            if string_char_at(name, 1) == 46 { return 1 }
+        }
+    }
+    return 0
+}
+
+// remove_tree(path) — delete `path` and everything beneath it (rm -rf). A file
+// is unlinked; a directory has its contents removed bottom-up, then itself. A
+// missing path is success (idempotent, like `rm -rf`). Returns "" or an error.
+remove_tree(path: string) -> string {
+    // Not present → nothing to do.
+    if fs_path_exists(path) == 0 { return "" }
+    // A plain file (or symlink): unlink it.
+    k, _s, _m, serr = file_stat(path)
+    if string_length(serr) == 0 {
+        if k != STAT_KIND_DIR {
+            return delete(path)
+        }
+    }
+    // Directory: remove each child first, then the (now-empty) dir.
+    lst = dir_list_raw(path)
+    if lst != null {
+        cnt = dir_list_count(lst)
+        i = 0
+        while i < cnt {
+            name = dir_list_get(lst, i)
+            i = i + 1
+            if string_length(name) == 0 { continue }
+            if _is_dot_entry(name) == 1 { continue }
+            child = path_join(path, name)
+            cerr = remove_tree(child)
+            if string_length(cerr) > 0 {
+                dir_list_free(lst)
+                return cerr
+            }
+        }
+        dir_list_free(lst)
+    }
+    return delete_dir(path)
+}
+
+// copy_tree(src, dst) — recursively copy the tree at `src` into `dst`,
+// creating `dst` and every subdirectory. A regular file is copied with copy()
+// (mode bits preserved); a directory is created then recursed. `dst` is
+// created if absent. Returns "" or an error. (Does not delete extra files
+// already under `dst` — it overlays; remove_tree(dst) first for a clean copy.)
+copy_tree(src: string, dst: string) -> string {
+    k, _s, _m, serr = file_stat(src)
+    if string_length(serr) > 0 { return serr }
+    if k != STAT_KIND_DIR {
+        // Single file (or symlink target): copy it directly.
+        _n, _ck, cmsg = copy(src, dst)
+        return cmsg
+    }
+    // Directory: ensure dst exists, then copy each child.
+    merr = mkdir_p(dst)
+    if string_length(merr) > 0 { return merr }
+    lst = dir_list_raw(src)
+    if lst == null { return "cannot list directory" }
+    cnt = dir_list_count(lst)
+    i = 0
+    out_err = ""
+    while i < cnt {
+        name = dir_list_get(lst, i)
+        i = i + 1
+        if string_length(name) == 0 { continue }
+        if _is_dot_entry(name) == 1 { continue }
+        s_child = path_join(src, name)
+        d_child = path_join(dst, name)
+        cerr = copy_tree(s_child, d_child)
+        if string_length(cerr) > 0 {
+            out_err = cerr
+            i = cnt
+        }
+    }
+    dir_list_free(lst)
+    return out_err
 }

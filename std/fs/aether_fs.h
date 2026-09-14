@@ -92,6 +92,12 @@ int fs_mkdir_p_raw(const char* path);
 //                0 on failure.
 int   fs_symlink_raw(const char* target, const char* link_path);
 char* fs_readlink_raw(const char* path);
+
+// Atomically create a uniquely-named temp dir / file under `dir` with name
+// starting `prefix` (mkdtemp / mkstemp — no TOCTOU race). Returns the created
+// path (caller frees) or NULL on failure. NULL dir → "/tmp", NULL prefix → "ae".
+char* fs_make_temp_dir_raw(const char* dir, const char* prefix);
+char* fs_make_temp_file_raw(const char* dir, const char* prefix);
 int   fs_is_symlink(const char* path);
 int   fs_is_socket(const char* path);
 

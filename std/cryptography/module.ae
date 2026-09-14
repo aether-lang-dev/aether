@@ -27,6 +27,7 @@
 import std.string
 import std.bytes
 import std.encoding
+import std.fs
 import std.cryptography.hmac
 // Pure-Aether SHA-1/SHA-2, used as the fallback when the toolchain was built
 // without OpenSSL — the default for a Windows source build, where this
@@ -54,7 +55,7 @@ exports(
     cryptography_digest_new_raw, cryptography_digest_update_raw,
     cryptography_digest_final_hex_raw, cryptography_digest_final_bytes_raw,
     cryptography_digest_free_raw,
-    sha1_hex, sha256_hex, hash_hex, hash_supported,
+    sha1_hex, sha256_hex, sha256_file, hash_hex, hash_supported,
     md4_hex, md5_hex, hmac_sha256_hex, hmac_sha256_bytes,
     md4_bytes, md5_bytes, sha1_bytes, sha256_bytes, hash_bytes,
     random_bytes, random_hex, random_base64,
@@ -137,6 +138,17 @@ sha256_hex(data: string, length: int) -> {
         return pure, ""
     }
     return out, ""
+}
+
+// sha256_file(path) — the SHA-256 of a whole file, as lowercase hex. Reads the
+// file's bytes (binary-safe, via std.fs) then digests them with sha256_hex, so
+// it matches `sha256sum <path>`'s hash. Returns (hex, "") on success, ("", err)
+// when the file can't be read or the digest is unavailable. The one-shot form
+// callers reach for instead of shelling out to `sha256sum`.
+sha256_file(path: string) -> {
+    data, len, rerr = fs.read_binary(path)
+    if string.length(rerr) > 0 { return "", rerr }
+    return sha256_hex(data, len)
 }
 
 // Algorithm-by-name digest dispatch. `algo` is a string like "sha1"
