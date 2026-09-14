@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.669.0]
+
 ### Fixed
 
 - **`--emit=lib` failed to compile a function taking a typed struct pointer.**
