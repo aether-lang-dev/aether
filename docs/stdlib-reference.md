@@ -71,7 +71,7 @@ header comment is the authoritative description.
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 93 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
