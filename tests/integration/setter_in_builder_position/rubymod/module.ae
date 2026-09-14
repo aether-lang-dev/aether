@@ -1,0 +1,25 @@
+// Builder-DSL module (models the `ruby` SDK module from the ask):
+//   - `builder bundle(...)` is a real node builder that takes a trailing block.
+//   - `rspec(_ctx: ptr)` is a block SETTER: `_ctx`-first, body only records
+//     config, meant to be CALLED INSIDE `bundle`'s block, e.g.
+//     `rubymod.bundle() { rspec() }`.
+//
+// Because this module DEFINES a builder, calling the setter `rspec` as a
+// top-level node with its OWN trailing block — `rubymod.rspec() { ... }` —
+// must be rejected by the compiler (it would silently no-op).
+
+exports(bundle, rspec, env)
+
+import std.map
+
+builder bundle(name: string) {
+    println("bundle ${name}")
+}
+
+rspec(_ctx: ptr) {
+    map_put(_ctx, "ruby_do_rspec", "1")
+}
+
+env(_ctx: ptr, key: string, val: string) {
+    map_put(_ctx, key, val)
+}

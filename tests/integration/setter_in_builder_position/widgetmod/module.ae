@@ -1,0 +1,15 @@
+// Widget-style DSL module (NO builder functions). `panel` is a `_ctx`-first
+// plain function that LEGITIMATELY takes a trailing block — a container into
+// which child widgets are placed. Structurally identical to a misused setter,
+// but because this module defines NO `builder`, the setter diagnostic must
+// NOT fire here (condition 3 is false).
+
+exports(panel, button)
+
+panel(_ctx: ptr, title: string) {
+    println("panel ${title}")
+}
+
+button(_ctx: ptr, label: string) {
+    println("button ${label}")
+}

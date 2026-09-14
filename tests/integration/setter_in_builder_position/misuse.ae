@@ -1,0 +1,14 @@
+// MISUSE (must ERROR): a block setter called as a top-level node builder.
+//
+// `rspec` is a `_ctx`-first block setter in a module that also defines the
+// `bundle` builder. Calling it as a top-level node with its own trailing
+// block compiles clean but runs nothing — the diagnostic must fire and name
+// the fix (`rubymod.bundle() { rspec() }`).
+
+import rubymod
+
+main() {
+    rubymod.rspec() {
+        env("X", "1")
+    }
+}

@@ -1,0 +1,13 @@
+// LEGIT B (must COMPILE, NO false positive): a widget-style DSL container.
+//
+// `panel` is a `_ctx`-first plain function that takes a trailing block, just
+// like a misused setter — but its module defines no `builder`, so the setter
+// diagnostic must NOT fire. This is the case the narrow rule protects.
+
+import widgetmod
+
+main() {
+    widgetmod.panel("main") {
+        button("ok")
+    }
+}

@@ -1,0 +1,10 @@
+// LEGIT A (must COMPILE): the same setter called correctly — INSIDE the
+// builder's trailing block, with no trailing block of its own.
+
+import rubymod
+
+main() {
+    rubymod.bundle("app") {
+        rspec()
+    }
+}

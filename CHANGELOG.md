@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A block setter called as a top-level node builder now errors instead of
+  silently doing nothing.** In a builder DSL, a plain `_ctx`-first function that
+  only records config (e.g. `rspec(_ctx: ptr) { … }`) is meant to be called
+  *inside* a builder's block — `mod.bundle() { rspec() }`. Written the old way,
+  as a top-level node with its own trailing block (`mod.rspec() { … }`), it
+  compiled clean and ran nothing: a false green, since the block is a DSL
+  container the setter never enters. The typechecker now rejects it with a
+  message naming the fix. The check is deliberately narrow to stay
+  false-positive-free — it fires only when the callee is a plain `_ctx`-first
+  function, the call carries its own trailing block, and the callee's module
+  also defines at least one `builder` (so a widget-style DSL container like
+  `panel(…) { button() }`, whose module has no builders, is never flagged).
+  Filed from the aeb line after a v0.303 ruby-grammar change turned four
+  builders into block setters.
+
 ## [0.667.0]
 
 ### Added
