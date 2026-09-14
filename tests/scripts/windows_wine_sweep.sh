@@ -110,10 +110,16 @@ if command -v file > /dev/null 2>&1; then
         exit 0
     fi
 fi
-if "$wine" "$exe" > "$tmpdir/$name.run" 2>&1; then
+"$wine" "$exe" > "$tmpdir/$name.run" 2>&1
+rc=$?
+if [ "$rc" -eq 0 ]; then
     printf 'PASS %s\n' "$f" >> "$tmpdir/results"
 else
-    printf 'RUNFAIL %s\n' "$f" >> "$tmpdir/results"
+    # Record the Wine exit code alongside the status: it is the fastest triage
+    # signal. 1 = the program's own exit(1) (a real Windows-behaviour finding);
+    # a large value (e.g. 3221225477 = 0xC0000005) is a crash; a DLL/loader
+    # error shows up as its own code. Without it, RUNFAIL is undifferentiated.
+    printf 'RUNFAIL %s (exit %s)\n' "$f" "$rc" >> "$tmpdir/results"
 fi
 ONE
 chmod +x "$runner"
@@ -121,10 +127,14 @@ chmod +x "$runner"
 : > "$tmpdir/results"
 xargs -a "$tmpdir/todo.txt" -P "$JOBS" -I{} "$runner" "{}" "$tmpdir" "$ROOT" "$AE" "$WINE"
 
-pass=$(grep -c '^PASS '      "$tmpdir/results" 2>/dev/null || echo 0)
-runf=$(grep -c '^RUNFAIL '   "$tmpdir/results" 2>/dev/null || echo 0)
-bldf=$(grep -c '^BUILDFAIL ' "$tmpdir/results" 2>/dev/null || echo 0)
-notpe=$(grep -c '^NOTPE '    "$tmpdir/results" 2>/dev/null || echo 0)
+# grep -c exits non-zero on a zero count, so `|| echo 0` used to APPEND a second
+# "0" to the captured value (printing "0\n0"). Count with a pipe into `grep -c`
+# whose exit status we ignore via the surrounding $(...) newline-collapsing, and
+# guard with `|| true` on the whole pipe so a zero count is a clean "0".
+pass=$( { grep -c '^PASS '      "$tmpdir/results" || true; } 2>/dev/null)
+runf=$( { grep -c '^RUNFAIL '   "$tmpdir/results" || true; } 2>/dev/null)
+bldf=$( { grep -c '^BUILDFAIL ' "$tmpdir/results" || true; } 2>/dev/null)
+notpe=$({ grep -c '^NOTPE '    "$tmpdir/results" || true; } 2>/dev/null)
 
 echo ""
 echo "  PASS      $pass"
@@ -135,12 +145,19 @@ echo "  NOT-PE    $notpe"
 if [ "$runf" -gt 0 ] || [ "$bldf" -gt 0 ] || [ "$notpe" -gt 0 ]; then
     echo ""
     echo "=== failures ==="
-    grep -vE '^PASS ' "$tmpdir/results" | sort | while read -r status f; do
-        printf '  %-10s %s\n' "$status" "$f"
+    # Line shape: "STATUS path" or "RUNFAIL path (exit N)". Print the whole
+    # line (so the exit code is visible), then dump a generous tail of the
+    # captured build/run log — enough to see an assertion FAIL and the lines
+    # around it, since this canary is the only Windows-runtime signal before
+    # the ~25-min MSYS2 lane, and its log is all a reviewer gets.
+    grep -vE '^PASS ' "$tmpdir/results" | sort | while read -r status rest; do
+        printf '  %-10s %s\n' "$status" "$rest"
+        # strip a trailing " (exit N)" to recover the bare path for the log name
+        f=${rest% (exit *)}
         name=$(printf '%s' "$f" | tr '/.' '__')
         case "$status" in
-            BUILDFAIL) tail -4 "$tmpdir/$name.build" 2>/dev/null | sed 's/^/             /' ;;
-            RUNFAIL)   tail -4 "$tmpdir/$name.run"   2>/dev/null | sed 's/^/             /' ;;
+            BUILDFAIL) tail -20 "$tmpdir/$name.build" 2>/dev/null | sed 's/^/             /' ;;
+            RUNFAIL)   tail -20 "$tmpdir/$name.run"   2>/dev/null | sed 's/^/             /' ;;
         esac
     done
     exit 1
