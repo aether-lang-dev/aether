@@ -11,6 +11,18 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.fs.WALK_CONTINUE` / `WALK_SKIP_SUBTREE` / `WALK_STOP`** — named
+  constants for the value an `fs.walk` callback returns to steer traversal. The
+  0/1/2 prune/stop contract already worked, but lived only in the doc comment
+  (the callback is an opaque `ptr`, so nothing in the signature revealed it) — an
+  aeb sweep re-asked for a prune signal that was already there. `return
+  fs.WALK_SKIP_SUBTREE` on a directory now reads self-documentingly at the call
+  site and is the `find -prune` of `! -path '*/node_modules/*'` without walking
+  the excluded subtree. Doc comment, stdlib-reference example, and the fs.walk
+  regression test switched to the named forms.
+
 ## [0.672.0]
 
 ### Fixed
