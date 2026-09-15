@@ -1,0 +1,92 @@
+// Regression: every way of reaping a child agrees about a child killed by a
+// signal (#2008).
+//
+// std/os/aether_os.c mapped a waitpid status to (exit, err) in five places by
+// hand, and the copies drifted. os.wait and os.wait_any reported a signalled
+// child as 128+signo with no error -- the shell convention, 137 for SIGKILL --
+// while os.run_pipe_drain_and_wait, os.run_capture_status and os.wait_pid had
+// no WIFSIGNALED branch at all and reported the same event as -1 with an opaque
+// "child terminated abnormally".
+//
+// The consequence reached std.mutation: its oracle treated a non-empty error
+// from run_pipe_drain_and_wait as NOCOMPILE, so the one mutant a suite actually
+// killed -- by making the test binary die -- was dropped from the score as
+// "never compiled", and 100% read as 0%.
+//
+// There is one mapper now, and this pins every entry point to it. A child that
+// kills itself with SIGKILL has to come back as (137, "") whichever way it was
+// reaped, and a child that exits 3 has to come back as (3, "") the same way --
+// the ordinary case must not have moved either.
+//
+// Windows has no signals to be killed by, and the entry points under test are
+// documented as unsupported there; the test says so and stops.
+
+import std.os
+import std.list
+import std.string
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+shell(script: string) -> ptr {
+    argv = list.new()
+    list.add(argv, "-c")
+    list.add(argv, script)
+    return argv
+}
+
+main() {
+    if string.equals(os.platform(), "windows") == 1 {
+        println("wait_status_signalled: SKIP no signals to be killed by on Windows")
+        return
+    }
+
+    // (1) run_pipe_drain_and_wait -- the entry point std.mutation uses, and
+    //     the one that had no signal branch.
+    _out, rc, err = os.run_pipe_drain_and_wait("/bin/sh", shell("kill -KILL $$"), null)
+    check("drain_and_wait: SIGKILL reads as 137, the shell convention", rc == 137)
+    check("drain_and_wait: and carries no error, because it is not one",
+          string.equals(err, "") == 1)
+
+    _out2, rc2, err2 = os.run_pipe_drain_and_wait("/bin/sh", shell("exit 3"), null)
+    check("drain_and_wait: a plain exit still reads as its code", rc2 == 3)
+    check("drain_and_wait: with no error", string.equals(err2, "") == 1)
+
+    // (2) run_pipe + wait_pid -- the other pair that had no signal branch.
+    pid, _fd, spawn_err = os.run_pipe("/bin/sh", shell("kill -TERM $$"), null)
+    check("run_pipe: the child spawned", pid > 0 && string.equals(spawn_err, "") == 1)
+    rc3, err3 = os.wait_pid(pid)
+    check("wait_pid: SIGTERM reads as 143", rc3 == 143)
+    check("wait_pid: with no error", string.equals(err3, "") == 1)
+
+    // (3) spawn_proc + wait -- the pair that was already right, kept as the
+    //     reference the others now have to match.
+    token, terr = os.spawn_proc("/bin/sh", shell("kill -KILL $$"), null)
+    check("spawn_proc: the child spawned", token > 0 && string.equals(terr, "") == 1)
+    rc4, err4 = os.wait(token)
+    check("wait: SIGKILL reads as 137 here too", rc4 == 137)
+    check("wait: with no error here too", string.equals(err4, "") == 1)
+
+    // (4) run_capture, which is os_run_capture_status_raw underneath -- the last
+    //     of the three that had drifted.
+    _cap, rc5, err5 = os.run_capture("/bin/sh", shell("kill -KILL $$"), null)
+    check("run_capture: SIGKILL reads as 137", rc5 == 137)
+    check("run_capture: with no error", string.equals(err5, "") == 1)
+
+    if failures == 0 {
+        println("wait_status_signalled: all checks passed")
+    } else {
+        println("wait_status_signalled: ${failures} failure(s)")
+        exit(1)
+    }
+}
