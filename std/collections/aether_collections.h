@@ -10,6 +10,7 @@ typedef struct HashMap HashMap;
 typedef struct IntArray IntArray;
 typedef struct FloatArray FloatArray;
 typedef struct LongArray LongArray;
+typedef struct StrArray StrArray;
 
 ArrayList* list_new(void);
 ArrayList* list_new_in(AetherAllocator* alloc);
@@ -140,6 +141,20 @@ void intarr_fill(IntArray* arr, int value);
 
 // Release the backing buffer and the struct. Idempotent on NULL.
 void intarr_free(IntArray* arr);
+
+// StrArray — a GROWABLE array of borrowed string pointers whose backing IS a
+// `string[]` (const char**), so it feeds std.sort.strings_by directly. The
+// string companion to IntArray, except it grows (push) because the count is
+// runtime-determined. Borrows its elements (never frees them); strarr_free
+// releases only the spine. See aether_strarr.c.
+StrArray* strarr_new_raw(int hint);
+int strarr_size(StrArray* a);
+int strarr_push_raw(StrArray* a, const char* s);
+int strarr_push_copy_raw(StrArray* a, const char* s);
+const char* strarr_get_raw(StrArray* a, int i);
+void strarr_set_raw(StrArray* a, int i, const char* s);
+const char** strarr_data(StrArray* a);
+void strarr_free(StrArray* a);
 
 // -------------------------------------------------------------------
 // FloatArray — fixed-size packed double buffer with O(1) random access.

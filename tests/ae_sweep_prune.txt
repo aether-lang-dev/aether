@@ -160,6 +160,7 @@ tests/integration/panic_categories/
 tests/integration/panic_stack_trace/
 tests/integration/panic_unwind_no_leak/
 tests/integration/ptr_index_diagnostic/
+tests/integration/ptr_to_array_arg_diagnostic/
 tests/integration/ptr_return_int_zero_inference/
 tests/integration/qualified_type_name/
 tests/integration/regex_crossbuild/

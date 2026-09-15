@@ -11,6 +11,21 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.strarr` — a growable string array whose backing IS a `string[]`.** The
+  missing piece for sorting a runtime-built list of strings: `string[]` is a
+  compile-time literal only, and the runtime producers give other shapes
+  (`string.split` → an opaque handle, `fs.glob` → a `dir_list`), so there was no
+  way to feed N globbed paths to `std.sort.strings_by`. `strarr` is the string
+  companion to `std.intarr`/`longarr`/`floatarr`, except it grows (`push`); its
+  `array()` view is a real `string[]` that `std.sort` sorts in place. `push`
+  borrows (matching how a `string[]` literal points at caller-owned strings);
+  `push_copy` takes an owned reference and frees it in `free`, for the "I built
+  this string, take it" case (a per-iteration concat/basename) so a reused loop
+  local can't dangle. From the aeb command-alike sweep, to move the `sort -V`
+  version-sort finders off the shell.
+
 ### Fixed
 
 - **`strbuilder.finish` returned a length-less string, so reading it was
@@ -38,6 +53,28 @@ version number before tagging the release.
   header. Conversely, a `string.free` on a tracked `finish` result used to be
   a silent no-op and is now a real release — `std.language`'s test double-
   freed that way and was corrected.
+
+- **A closure-local heap string published through a captured cell was freed too
+  early (use-after-free).** A heap string allocated inside a closure (a
+  `concat`/`copy`/`substring` result) and assigned to a captured outer variable
+  — the running-max / accumulator shape over `seq_each` / `fs.walk` — was freed
+  on the closure's own exit while the captured cell still pointed at it, so the
+  read after the closure ran was garbage (non-deterministic). #2019 fixed the
+  sibling case (reassigning the closure parameter); this closure-local-alloc
+  face slipped through. The assignment-through-a-captured-cell is now recognised
+  as an escape, and a string-valued capture cell owns its value (freed once when
+  the last reference dies; the prior value freed on each reassignment, so a
+  per-iteration accumulator no longer leaks). Magic-header-guarded so a literal
+  is never freed. One bounded residual remains — the extern-callback closure env
+  is not drained (leak >> UAF, awaits a `@retains` annotation).
+
+- **Passing a bare `ptr` where a `T[]` array is expected is now a clean type
+  error, not a silent coerce-then-segfault.** `sort.strings_by(parts, …)` with a
+  `string.split` `ptr` type-checked (the `ptr` coerced), then crashed at runtime
+  because the callee indexed the opaque handle as a contiguous `element*`. The
+  boundary now rejects a bare `ptr` for an array parameter and names the
+  `as T[]` cast — the same class as the `[]`-on-ptr diagnostic. A real `string[]`
+  (a literal, or `strarr.array()`) still passes.
 
 ## [0.674.0]
 

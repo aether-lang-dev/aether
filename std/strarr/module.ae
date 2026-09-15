@@ -1,0 +1,125 @@
+// std.strarr - a growable array of string pointers whose backing IS a
+// `string[]`, so it feeds std.sort directly.
+//
+// Import with: import std.strarr
+//
+// Why it exists: `string[]` is a compile-time literal (`["a","b"]`), and the
+// runtime producers give other shapes — `string.split` → an opaque array
+// handle, `fs.glob` → a dir_list. There was no way to build a `string[]` of
+// runtime-determined length to hand to `std.sort.strings_by`. strarr is the
+// string companion to `std.intarr` / `longarr` / `floatarr`, except it GROWS
+// (push), because the whole point is a count you don't know up front:
+//
+//     sa = strarr.new()
+//     // ... push each globbed path ...
+//     i = 0
+//     while i < dir.count(jars) {
+//         _p = strarr.push(sa, dir.name_at(jars, i))
+//         i = i + 1
+//     }
+//     sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+//     newest = strarr.get(sa, strarr.size(sa) - 1)   // strings_by sorts in place
+//     strarr.free(sa)
+//
+// OWNERSHIP: strarr BORROWS the strings pushed into it (like a `string[]`
+// literal, which points at strings the caller owns). It never frees an element;
+// `free` releases only its own spine. Keep the pushed strings alive as long as
+// the strarr (or a sort result taken from it) is read.
+
+import std.sort
+
+exports(
+    new, new_hint, push, push_copy, get, set, size, array, free,
+    strarr_new_raw, strarr_push_raw, strarr_push_copy_raw, strarr_get_raw,
+    strarr_set_raw, strarr_size, strarr_data, strarr_free
+)
+
+// ---- Raw externs (also the hot-path API) ----
+
+// Allocate an empty array with room for `hint` elements (0 = first push
+// allocates). Returns null on OOM.
+extern strarr_new_raw(hint: int) -> ptr
+
+// Number of elements. -1 if null.
+extern strarr_size(arr: ptr) -> int
+
+// Append `s` (borrowed). Grows 2× when full. 1 on success, 0 on OOM.
+extern strarr_push_raw(arr: ptr, s: string) -> int
+
+// Append an OWNED reference to `s` (retains a managed string / copies a
+// literal), freed at strarr.free. 1 on success, 0 on OOM.
+extern strarr_push_copy_raw(arr: ptr, s: string) -> int
+
+// Read at `i`. null if out of range.
+extern strarr_get_raw(arr: ptr, i: int) -> string
+
+// Overwrite at `i` (borrowed). No-op if out of range.
+extern strarr_set_raw(arr: ptr, i: int, s: string)
+
+// The raw `string[]` backing — a bare array of `strarr_size` elements, so
+// `sort.strings_by` sorts it in place. Valid until the next push (may realloc)
+// or free.
+extern strarr_data(arr: ptr) -> string[]
+
+// Free the spine only; borrowed elements are the caller's.
+extern strarr_free(arr: ptr)
+
+// ---- Go-style wrappers ----
+
+// A fresh empty growable string array.
+new() -> ptr {
+    return strarr_new_raw(0)
+}
+
+// Empty array pre-sized for `hint` elements (avoids early regrowth when you
+// know roughly how many you'll push).
+new_hint(hint: int) -> ptr {
+    return strarr_new_raw(hint)
+}
+
+// Append `s` BORROWED — the string must outlive the array (and any sorted read
+// of it). Returns "" on success, an error string on OOM.
+push(arr: ptr, s: string) -> string {
+    ok = strarr_push_raw(arr, s)
+    if ok == 0 {
+        return "strarr.push: out of memory"
+    }
+    return ""
+}
+
+// Append an OWNED copy of `s` — the array takes its own reference and frees it
+// in `free`, so you can push a string you just built (a per-iteration concat /
+// basename) without keeping it alive yourself. Returns "" on success, an error
+// string on OOM.
+push_copy(arr: ptr, s: string) -> string {
+    ok = strarr_push_copy_raw(arr, s)
+    if ok == 0 {
+        return "strarr.push_copy: out of memory"
+    }
+    return ""
+}
+
+// Element at `i` (null if out of range).
+get(arr: ptr, i: int) -> string {
+    return strarr_get_raw(arr, i)
+}
+
+// Overwrite element at `i`.
+set(arr: ptr, i: int, s: string) {
+    strarr_set_raw(arr, i, s)
+}
+
+// Element count.
+size(arr: ptr) -> int {
+    return strarr_size(arr)
+}
+
+// The `string[]` view for std.sort (sorts in place) / std.sort.string_search.
+array(arr: ptr) -> string[] {
+    return strarr_data(arr)
+}
+
+// Free the spine.
+free(arr: ptr) {
+    strarr_free(arr)
+}

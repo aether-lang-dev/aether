@@ -23,10 +23,10 @@ main() {
     // --- single reassignment: concat result published through the cell -------
     items = string.split_to_seq("hello", ",")
     out = ""
-    string.seq_each(items, |it: string| {
-        c = string.concat(it, "!")   // heap alloc INSIDE the closure
-        out = c                       // publish through the captured cell
-    })
+    string.seq_each(items, | it: string | {
+            c = string.concat(it, "!") // heap alloc INSIDE the closure
+            out = c // publish through the captured cell
+        })
     string.seq_free(items)
     if string.equals(out, "hello!") == 0 {
         println("FAIL single: out='${out}', expected 'hello!'")
@@ -39,19 +39,19 @@ main() {
     jars = string.split_to_seq("clojure-1.9.jar,clojure-1.12.0.jar,clojure-1.11.jar", ",")
     newest = ""
     nb = ""
-    string.seq_each(jars, |it: string| {
-        cand = string.concat(it, "")
-        cb = string.concat(cand, "")
-        if string.length(newest) == 0 {
-            newest = cand
-            nb = cb
-        } else {
-            if string.version_compare(cb, nb) > 0 {
+    string.seq_each(jars, | it: string | {
+            cand = string.concat(it, "")
+            cb = string.concat(cand, "")
+            if string.length(newest) == 0 {
                 newest = cand
                 nb = cb
+            } else {
+                if string.version_compare(cb, nb) > 0 {
+                    newest = cand
+                    nb = cb
+                }
             }
-        }
-    })
+        })
     string.seq_free(jars)
     if string.equals(newest, "clojure-1.12.0.jar") == 0 {
         println("FAIL newest: got '${newest}', expected 'clojure-1.12.0.jar'")
@@ -61,9 +61,9 @@ main() {
     // --- accumulate a whole string across the callback (concat-in-place) -----
     letters = string.split_to_seq("a,b,c,d", ",")
     acc = ""
-    string.seq_each(letters, |it: string| {
-        acc = "${acc}${it}|"   // interp result (heap) published each iteration
-    })
+    string.seq_each(letters, | it: string | {
+            acc = "${acc}${it}|" // interp result (heap) published each iteration
+        })
     string.seq_free(letters)
     if string.equals(acc, "a|b|c|d|") == 0 {
         println("FAIL accumulate: acc='${acc}', expected 'a|b|c|d|'")
