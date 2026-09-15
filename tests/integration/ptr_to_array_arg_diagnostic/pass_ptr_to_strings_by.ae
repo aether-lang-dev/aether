@@ -1,0 +1,10 @@
+// A bare ptr (string.split result) passed to a string[] parameter must be a
+// clean type error, not a silent coerce-then-segfault.
+import std.string
+import std.sort
+_vc(a: string, b: string) -> int { return string.version_compare(a, b) }
+main() {
+    parts = string.split("c\na\nb", "\n") // ptr (AetherStringArray*)
+    sort.strings_by(parts, string.array_size(parts), _vc) // ← must error
+    return 0
+}

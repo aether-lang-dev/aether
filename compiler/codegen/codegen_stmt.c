@@ -3004,6 +3004,33 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         node->child_count > 0) {
         const char* lhs = node->value;
+        /* When `lhs` is a CAPTURED variable (env capture or promoted
+         * capture in the current closure), `V = <expr>` writes THROUGH the
+         * captured cell (emitted as `*V = ...`), which outlives this
+         * closure's activation. So a heap-string assigned to it escapes,
+         * exactly like the non-local `s.field = expr` case below — mark it,
+         * or the closure-exit defer-free reclaims the buffer while the cell
+         * still points at it (closure-local-alloc -> captured-outer ->
+         * read-after-walk UAF; #2019 handled the param-reassign face only).
+         * A bare `V = other_heap_var` (identifier RHS) is caught here; a
+         * `V = string.concat(...)` RHS is caught because the call's result
+         * is bound to a heap-tracked temp whose reassign-wrapper honours the
+         * same escaped mark on `V`. */
+        int lhs_is_capture = 0;
+        for (int e = 0; e < gen->current_env_capture_count; e++) {
+            if (gen->current_env_captures[e] &&
+                strcmp(gen->current_env_captures[e], lhs) == 0) {
+                lhs_is_capture = 1; break;
+            }
+        }
+        if (!lhs_is_capture && is_promoted_capture(gen, lhs)) lhs_is_capture = 1;
+        if (lhs_is_capture) {
+            ASTNode* rhs = node->children[node->child_count - 1];
+            if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
+                is_heap_string_var(gen, rhs->value)) {
+                mark_escaped_string_var(gen, rhs->value);
+            }
+        }
         for (int i = 0; i < node->child_count; i++) {
             escape_walk(gen, node->children[i], lhs);
         }
@@ -3236,7 +3263,13 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     }
     fprintf(gen->output, "\n");
     mark_var_declared(gen, name);
-    ASTNode* release_call = create_ast_node(AST_FUNCTION_CALL, "_aether_cell_release",
+    /* A string-valued cell owns its heap string, so its scope-exit release
+     * must free the pointee at refcount 0 (mirrors the env-destructor choice
+     * in codegen_expr.c). An int/ptr cell uses the plain release. */
+    const char* release_fn = (c_type && strcmp(c_type, "const char*") == 0)
+                                 ? "_aether_cell_release_str"
+                                 : "_aether_cell_release";
+    ASTNode* release_call = create_ast_node(AST_FUNCTION_CALL, release_fn,
                                             line, column);
     ASTNode* arg = create_ast_node(AST_IDENTIFIER, name, line, column);
     /* The release takes the cell pointer itself, not `*name`: the
@@ -4894,13 +4927,25 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->child_count > 0 ? stmt->children[0] : NULL, "0",
                             stmt->line, stmt->column);
                     } else {
-                        // Reassignment: write through the pointer.
-                        fprintf(gen->output, "*%s", stmt->value);
-                        if (stmt->child_count > 0) {
-                            fprintf(gen->output, " = ");
+                        // Reassignment: write through the pointer. A string
+                        // cell OWNS its value, so free the superseded string
+                        // before storing the new one (else a per-iteration
+                        // running-max / accumulator leaks every prior value).
+                        const char* ct = get_c_type(stmt->node_type);
+                        int str_cell = (ct && strcmp(ct, "const char*") == 0
+                                        && stmt->child_count > 0);
+                        if (str_cell) {
+                            fprintf(gen->output, "_aether_str_cell_set(%s, ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
+                            fprintf(gen->output, ");\n");
+                        } else {
+                            fprintf(gen->output, "*%s", stmt->value);
+                            if (stmt->child_count > 0) {
+                                fprintf(gen->output, " = ");
+                                generate_expression(gen, stmt->children[0]);
+                            }
+                            fprintf(gen->output, ";\n");
                         }
-                        fprintf(gen->output, ";\n");
                     }
                     break;
                 }

@@ -1,0 +1,98 @@
+// Regression: std.strarr — a growable string array whose backing IS a
+// `string[]`, so it feeds std.sort.strings_by directly. The missing piece for
+// sorting N runtime-produced strings (globbed jars, split output) that a
+// `string[]` literal can't express. Self-asserting: FAIL + exit(1), PASS at end.
+
+import std.strarr
+import std.sort
+import std.string
+
+extern exit(code: int)
+
+_by_version(a: string, b: string) -> int { return string.version_compare(a, b) }
+
+main() {
+    // --- build, size, get -----------------------------------------------------
+    sa = strarr.new()
+    if strarr.size(sa) != 0 { println("FAIL new size=${strarr.size(sa)}"); exit(1) }
+    _p1 = strarr.push(sa, "clojure-1.9.jar")
+    _p2 = strarr.push(sa, "clojure-1.12.0.jar")
+    _p3 = strarr.push(sa, "clojure-1.11.jar")
+    _p4 = strarr.push(sa, "clojure-1.10.0.jar")
+    if strarr.size(sa) != 4 { println("FAIL size=${strarr.size(sa)}"); exit(1) }
+    if string.equals(strarr.get(sa, 1), "clojure-1.12.0.jar") == 0 {
+        println("FAIL get(1)=${strarr.get(sa, 1)}"); exit(1)
+    }
+
+    // --- sort in place via the string[] view + version_compare ---------------
+    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_version)
+    if string.equals(strarr.get(sa, 0), "clojure-1.9.jar") == 0 {
+        println("FAIL oldest=${strarr.get(sa, 0)}"); exit(1)
+    }
+    if string.equals(strarr.get(sa, 3), "clojure-1.12.0.jar") == 0 {
+        println("FAIL newest=${strarr.get(sa, 3)}"); exit(1)
+    }
+
+    // --- set overwrites in place ---------------------------------------------
+    strarr.set(sa, 0, "clojure-2.0.jar")
+    if string.equals(strarr.get(sa, 0), "clojure-2.0.jar") == 0 {
+        println("FAIL set: ${strarr.get(sa, 0)}"); exit(1)
+    }
+
+    // --- out-of-range reads are safe (null, not a crash) ---------------------
+    oob = strarr.get(sa, 99)
+    if string.length(oob) != 0 { println("FAIL oob should be empty/null"); exit(1) }
+
+    strarr.free(sa)
+
+    // --- growth across reallocs (8 -> 16 -> 32) keeps every element ----------
+    // 20 elements from a split, so the strings are heap-owned and stay alive.
+    seq = string.split_to_seq("m,d,q,a,z,f,k,b,y,c,t,e,w,g,r,h,x,i,s,j", ",")
+    n = string.seq_length(seq)
+    arr = string.seq_to_array(seq)
+    big = strarr.new()
+    i = 0
+    while i < n {
+        _pn = strarr.push(big, string.array_get(arr, i))
+        i = i + 1
+    }
+    if strarr.size(big) != 20 { println("FAIL grow size=${strarr.size(big)}"); exit(1) }
+    sort.strings_by(strarr.array(big), strarr.size(big), _by_version)
+    if string.equals(strarr.get(big, 0), "a") == 0 { println("FAIL grow lo=${strarr.get(big, 0)}"); exit(1) }
+    if string.equals(strarr.get(big, 19), "z") == 0 { println("FAIL grow hi=${strarr.get(big, 19)}"); exit(1) }
+    strarr.free(big)
+    string.array_free(arr)
+    string.seq_free(seq)
+
+    // --- pre-sized (new_hint) behaves the same -------------------------------
+    h = strarr.new_hint(2)
+    _h1 = strarr.push(h, "b")
+    _h2 = strarr.push(h, "a")
+    _h3 = strarr.push(h, "c") // crosses the hint, forces a grow
+    if strarr.size(h) != 3 { println("FAIL hint size=${strarr.size(h)}"); exit(1) }
+    strarr.free(h)
+
+    // --- push_copy: the array OWNS its elements, so a reused per-iteration -----
+    // local is safe (the borrow footgun that bit the naive accumulator). Build
+    // each element from a reused `built` local; the array must keep correct,
+    // distinct copies, survive a sort, and free them exactly once (valgrind).
+    src = string.split_to_seq("m,z,a,q,c", ",")
+    sn = string.seq_length(src)
+    sarr = string.seq_to_array(src)
+    oc = strarr.new()
+    k = 0
+    while k < sn {
+        built = string.concat(string.array_get(sarr, k), "!") // reused each pass
+        _pc = strarr.push_copy(oc, built)
+        k = k + 1
+    }
+    string.array_free(sarr)
+    string.seq_free(src) // the SOURCE is freed — push_copy must have copied
+    sort.strings_by(strarr.array(oc), strarr.size(oc), _by_version)
+    if string.equals(strarr.get(oc, 0), "a!") == 0 { println("FAIL copy lo=${strarr.get(oc, 0)}"); exit(1) }
+    if string.equals(strarr.get(oc, 4), "z!") == 0 { println("FAIL copy hi=${strarr.get(oc, 4)}"); exit(1) }
+    strarr.free(oc)
+
+    println("PASS test_strarr")
+    return 0
+}

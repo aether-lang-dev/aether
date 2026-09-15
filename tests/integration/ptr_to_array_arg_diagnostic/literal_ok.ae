@@ -1,0 +1,9 @@
+import std.string
+import std.sort
+_vc(a: string, b: string) -> int { return string.version_compare(a, b) }
+main() {
+    arr = ["1.9", "1.10", "1.2"]
+    sort.strings_by(arr, 3, _vc)
+    println("${arr[0]} ${arr[2]}") // 1.2 ... 1.10
+    return 0
+}

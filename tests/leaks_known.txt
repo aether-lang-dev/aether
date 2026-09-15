@@ -25,3 +25,13 @@ test_cryptography_hmac_md4_md5 122
 # codegen (nested tuple-destructure error slots are heap-classified), so the
 # remaining count is the OpenSSL atexit artifact only. Cap kept as a ceiling.
 test_rsa_pkcs1 130
+
+# The closure UAF fix (a heap string allocated in a closure and published
+# through a captured cell) reclaims the string correctly now — the prior
+# per-iteration leak is gone. The residual is one bounded env-cell-plus-string
+# per seq_each/fs.walk call: those are EXTERN callbacks, so the codegen cannot
+# prove the callee does not retain the boxed closure and conservatively does
+# NOT drain its heap env after the call (leak >> UAF; awaits a `@retains`/
+# transient-extern annotation to opt in). Bounded (does not scale with element
+# count), and unrelated to the value-correctness this test asserts.
+test_closure_local_alloc_capture 20

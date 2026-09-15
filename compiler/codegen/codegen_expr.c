@@ -1797,7 +1797,14 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
                 released = 1;
             }
             if (promoted) {
-                fprintf(gen->output, "    _aether_cell_release(_e->%s);\n", captures[i]);
+                /* A string-valued cell owns its heap string: the last releaser
+                 * frees the pointee. An int/ptr cell uses the plain release. */
+                const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
+                if (ctype && strcmp(ctype, "const char*") == 0) {
+                    fprintf(gen->output, "    _aether_cell_release_str(_e->%s);\n", captures[i]);
+                } else {
+                    fprintf(gen->output, "    _aether_cell_release(_e->%s);\n", captures[i]);
+                }
             } else {
                 fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
             }

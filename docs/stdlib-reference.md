@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (76 modules)
+## Module index (77 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -70,6 +70,7 @@ header comment is the authoritative description.
 | `std.snapshot` | Copy-on-write snapshot cell for read-mostly shared data. | 10 | [guide](../std/snapshot/README.md) · [source](../std/snapshot/module.ae) |
 | `std.sort` | In-place sort and binary search over packed numeric arrays and string arrays, with optional comparators. | 12 | [guide](../std/sort/README.md) · [source](../std/sort/module.ae) |
 | `std.spec` | BDD test framework: describe and it, hooks, assertions, structured reports. | 46 | [guide](../std/spec/README.md) · [source](../std/spec/module.ae) |
+| `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |

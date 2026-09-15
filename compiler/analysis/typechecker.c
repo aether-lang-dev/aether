@@ -8909,6 +8909,50 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     if (da) free_type(da);
                 }
             }
+
+            /* A bare `ptr` passed to a `T[]` (array) parameter is a silent,
+             * dangerous coercion: the callee indexes it as a contiguous
+             * `element*`, but a `ptr` from e.g. `string.split` is an opaque
+             * handle (an AetherStringArray*, not the bare `AetherString**`), so
+             * `arr[i]` reads past the struct header and segfaults with no
+             * diagnostic. Reject it here and point at the `as` cast — the same
+             * shape as the intarr `[]`-on-ptr error, and symmetric with the
+             * array→ptr decay that IS allowed (that direction is safe). A `ptr`
+             * that genuinely names the backing (e.g. `strarr.array(...)` returns
+             * `string[]`, or `handle as string[]`) is already TYPE_ARRAY here
+             * and passes. */
+            if (param_type && param_type->kind == TYPE_ARRAY) {
+                ASTNode* aarg = call->children[arg_slot];
+                if (aarg) {
+                    Type* aa = infer_type(aarg, table);
+                    if (aa && aa->kind == TYPE_PTR) {
+                        /* Render the array type as `elem[]` (e.g. "string[]")
+                         * rather than the bare "array" type_name gives, so the
+                         * message matches the source spelling. */
+                        char aty[64];
+                        snprintf(aty, sizeof(aty), "%s[]",
+                            param_type->element_type
+                                ? type_name(param_type->element_type) : "");
+                        /* Sized for the fixed template (~230 chars) + three
+                         * `aty` (<=64 each) + the param and call names; kept
+                         * comfortably above the worst case so -Werror=format-
+                         * truncation is satisfied without a runtime clamp. */
+                        char emsg[768];
+                        snprintf(emsg, sizeof(emsg),
+                            "Argument %d '%s' of '%s': expected %s, got a bare "
+                            "ptr. A ptr does not carry an array length or layout, "
+                            "so indexing it as %s would read past the object and "
+                            "crash. Cast it explicitly with `as %s` only if you "
+                            "know it points at a contiguous buffer of that type.",
+                            arg_slot + 1, param->value ? param->value : "?",
+                            call->value ? call->value : "?",
+                            aty, aty, aty);
+                        type_error(emsg, aarg->line, aarg->column);
+                    }
+                    if (aa) free_type(aa);
+                }
+            }
+
             if (!param_type || param_type->kind != TYPE_DURATION) continue;
 
             ASTNode* arg = call->children[arg_slot];
