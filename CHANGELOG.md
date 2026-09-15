@@ -11,6 +11,34 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`strbuilder.finish` returned a length-less string, so reading it was
+  quadratic.** Every `string.length` / `char_at` / `substring` on the result
+  re-ran `strlen`, and a character-by-character scan of a finished string was
+  O(n²) — instant on a test input, a hang on a production one, with the right
+  answer throughout (three LangArena benchmark ports timed out on it;
+  `asks/strbuilder-finish-headerless-string-is-on2-to-scan.md`). The builder
+  now writes into a block laid out as an inline `AetherString` from its first
+  byte, and `finish` fills in the header and hands the block over: no copy,
+  and the result carries its length, so the scan is linear (400 000 bytes:
+  4.8s → 42ms). The heap tracker already frees through the magic-header
+  dispatch, so ownership is unchanged. Two things fall out of the header:
+  content with embedded NULs appended via `append_n` now survives `finish`
+  in full, and `strbuilder.append` of a string that carries a length (a
+  finished builder, a heap string) appends all of it, not up to the first
+  NUL. `finish_with_length` keeps its raw-bytes contract by shifting the
+  payload down over the header (one `memmove`, no allocation).
+  `tests/regression/test_strbuilder_finish_length.ae`.
+
+  One contract does change: a `finish` result is a string, and is released
+  like one. Code that punned it to a `ptr` and handed it to libc `free`
+  (`std.jsonpath` did, for AST names and normalized paths) now frees an
+  interior pointer; those sites use `string.free`, which dispatches on the
+  header. Conversely, a `string.free` on a tracked `finish` result used to be
+  a silent no-op and is now a real release — `std.language`'s test double-
+  freed that way and was corrected.
+
 ## [0.674.0]
 
 ### Fixed

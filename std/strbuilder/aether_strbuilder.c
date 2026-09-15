@@ -10,13 +10,33 @@
 
 #define AETHER_STRBUILDER_DEFAULT_CAP 64
 
+/* The builder writes into ONE block laid out as an inline AetherString --
+ * [header][payload] -- from the first byte on, so `finish` can hand the
+ * block over as a length-carrying string without copying it: it fills in
+ * the header and returns the block. `data` points at the payload, just
+ * past the header, and is re-derived after every realloc.
+ *
+ * It used to be a bare buffer returned as a header-less char*. That was
+ * correct, and quadratic to read: every `string.char_at`, `substring` or
+ * `length` on the result took the strlen fallback, so a character-by-
+ * character scan of a finished string was O(n) calls x O(n) strlen --
+ * instant on a test input, a hang on a production one, with the right
+ * answer throughout (asks/strbuilder-finish-headerless-string-is-on2-to-
+ * scan.md). With the header in place those are O(1), and the result is
+ * freed by whoever owns it exactly as before: the codegen's heap tracker
+ * already dispatches on the magic header (string_release for a string,
+ * free for a buffer), and string_release recognises the inline layout by
+ * position and releases the block whole. `capacity` is the payload
+ * capacity; the block is sizeof(AetherString) + capacity bytes, which is
+ * also what string_release credits back. */
 struct AetherStrBuilder {
-    char*  data;
+    AetherString* block; /* NULL until the first reserve */
+    char*  data;         /* (char*)(block + 1) */
     size_t length;
-    size_t capacity;
+    size_t capacity;     /* payload bytes available after the header */
 };
 
-/* Grow the underlying buffer so it has at least `min_capacity` bytes.
+/* Grow the block so the payload has at least `min_capacity` bytes.
  * Doubles each step to keep amortised-O(1) append cost; falls back to
  * `min_capacity` directly once doubling stops being enough or would
  * overflow. Returns 1 on success, 0 on OOM / cap exceeded. */
@@ -27,9 +47,14 @@ static int strbuilder_reserve(AetherStrBuilder* b, size_t min_capacity) {
                                               AETHER_STRBUILDER_DEFAULT_CAP,
                                               min_capacity, 1);
     if (!new_cap) return 0;
-    char* new_data = (char*)aether_caps_realloc(b->data, b->capacity, new_cap);
-    if (!new_data) return 0;
-    b->data = new_data;
+    if (new_cap > (size_t)-1 - sizeof(AetherString)) return 0;
+    AetherString* nb = (AetherString*)aether_caps_realloc(
+        b->block,
+        b->block ? sizeof(AetherString) + b->capacity : 0,
+        sizeof(AetherString) + new_cap);
+    if (!nb) return 0;
+    b->block = nb;
+    b->data = (char*)(nb + 1);
     b->capacity = new_cap;
     return 1;
 }
@@ -37,6 +62,7 @@ static int strbuilder_reserve(AetherStrBuilder* b, size_t min_capacity) {
 AetherStrBuilder* aether_strbuilder_new(int cap_hint) {
     AetherStrBuilder* b = (AetherStrBuilder*)aether_caps_malloc(sizeof(AetherStrBuilder));
     if (!b) return NULL;
+    b->block = NULL;
     b->data = NULL;
     b->length = 0;
     b->capacity = 0;
@@ -229,80 +255,58 @@ int aether_strbuilder_clear(AetherStrBuilder* b) {
 
 void* aether_strbuilder_finish(AetherStrBuilder* b) {
     if (!b) return NULL;
-    /* Hand the data buffer off to the caller as a plain libc-freeable
-     * char* and free only the wrapper. This matches the @heap-extern
-     * contract used by the rest of the stdlib (cf. make_owned in
-     * tests/integration/extern_single_value_heap): the
-     * heap-string-tracker's reassignment-wrapper emits a plain libc
-     * free on the previous value, which on an AetherString* would
-     * free the 24-byte header struct and dangle the data buffer
-     * (the uniform-heap return shim passes is_heap=1 through
-     * unchanged for heap-flagged returns, so we can't piggy-back on
-     * its struct-aware path either). A plain char* sidesteps both:
-     * libc-free reclaims the whole allocation, the cap drift on the
-     * single transfer is acceptable (caps API explicitly allows
-     * libc-free of caps-malloc'd memory, header-comment in
-     * runtime/aether_resource_caps.h:89-94).
-     *
-     * Trade-off: the returned char* has no length-bearing header, so
-     * downstream operations that use strlen will truncate at the
-     * first NUL. Binary content with embedded NULs needs append_n
-     * on the input side AND length-aware consumers on the output
-     * side (e.g. string_length_n, string_substring_n) if the caller
-     * carries the length themselves. The ASCII / UTF-8 case — JSON,
-     * log lines, templates, paths — is the overwhelming majority of
-     * the motivating use cases.
-     *
-     * PERFORMANCE trap (not just the NUL angle): because the buffer
-     * has no length header, str_len() takes its strlen() fallback
-     * every call, so string.char_at / string.substring / string.length
-     * are each O(n) on a finish()'d string. A char-by-char scan is
-     * therefore O(n²) — instant on a test input, a hang on a
-     * production one, with correct results throughout (so it never
-     * looks like a bug). Scanning-heavy consumers (tokenizers,
-     * interpreters, template renderers) should take the length ONCE
-     * and use the length-carrying accessors — string_char_at_n(s,
-     * len, i), string_substring_n(s, len, a, b) — or finish with
-     * finish_with_length() and thread that length through. See
-     * std/strbuilder/README.md. */
-    if (!b->data) {
-        char* empty = (char*)aether_caps_malloc(1);
+    /* Hand the block over as a length-carrying string: NUL-terminate the
+     * payload, fill in the header the block has carried since its first
+     * reserve, free only the wrapper. No copy. The caller owns the result
+     * under the @heap contract and the codegen's heap tracker releases it
+     * through string_release, which frees the block whole. Embedded NULs
+     * survive too, since every string-aware consumer reads `length`. */
+    if (!b->block) {
+        /* An empty builder: mint the smallest inline string. */
+        AetherString* empty = string_alloc_inline(0);
         aether_caps_free(b, sizeof(AetherStrBuilder));
-        if (!empty) return NULL;
-        empty[0] = '\0';
         return empty;
     }
-    /* Grow to fit the NUL terminator if the buffer is exactly full. */
+    /* Grow to fit the NUL terminator if the payload is exactly full. */
     if (b->length + 1 > b->capacity) {
         if (!strbuilder_reserve(b, b->length + 1)) {
-            aether_caps_free(b->data, b->capacity);
+            aether_caps_free(b->block, sizeof(AetherString) + b->capacity);
             aether_caps_free(b, sizeof(AetherStrBuilder));
             return NULL;
         }
     }
     b->data[b->length] = '\0';
-    char* out = b->data;
+    AetherString* out = b->block;
+    out->magic = AETHER_STRING_MAGIC;
+    out->ref_count = 1;
+    out->length = b->length;
+    out->capacity = b->capacity;
+    out->data = b->data;
     aether_caps_free(b, sizeof(AetherStrBuilder));
     return out;
 }
 
 _tuple_ptr_int aether_strbuilder_finish_with_length(AetherStrBuilder* b) {
-    /* Binary-safe finalise: hand back the raw data buffer and its
-     * exact byte length, with NO NUL terminator appended. This is the
-     * shape binary protocol assembly needs (CBOR / msgpack / frame
-     * encoders) where embedded NULs are content, not terminators —
-     * the v1 `finish` would round-trip them but a strlen-based
-     * consumer downstream would truncate. The caller owns the
-     * returned pointer and frees it with a plain libc free(); it is
+    /* Binary-safe finalise: hand back a raw data buffer and its exact
+     * byte length, with NO NUL terminator appended. This is the shape
+     * binary protocol assembly needs (CBOR / msgpack / frame encoders)
+     * where embedded NULs are content, not terminators. The caller owns
+     * the returned pointer and frees it with a plain libc free(); it is
      * NOT heap-tracked by the codegen (position 0 is `ptr`, not
-     * `string`). Same buffer-handoff + free-the-wrapper-only
-     * discipline as `finish`. After this call `b` is invalid. */
+     * `string`).
+     *
+     * The block carries an inline-string header ahead of the payload
+     * (see the struct comment), and a buffer the caller will free() has
+     * to start at the allocation, so the payload is shifted down over
+     * the header first. One memmove of the content, no allocation; the
+     * few bytes of header at the tail are slack. After this call `b` is
+     * invalid. */
     if (!b) {
         _tuple_ptr_int err = { NULL, -1 };
         return err;
     }
-    if (!b->data) {
-        /* Empty builder — return a non-null 1-byte buffer with
+    if (!b->block) {
+        /* Empty builder -- return a non-null 1-byte buffer with
          * length 0 so the caller's free() has something valid to
          * reclaim and never sees a NULL data pointer for a
          * successful finish. */
@@ -312,13 +316,15 @@ _tuple_ptr_int aether_strbuilder_finish_with_length(AetherStrBuilder* b) {
         _tuple_ptr_int out = { empty, empty ? 0 : -1 };
         return out;
     }
-    _tuple_ptr_int out = { b->data, (int)b->length };
+    char* raw = (char*)b->block;
+    memmove(raw, b->data, b->length);
+    _tuple_ptr_int out = { raw, (int)b->length };
     aether_caps_free(b, sizeof(AetherStrBuilder));
     return out;
 }
 
 void aether_strbuilder_free(AetherStrBuilder* b) {
     if (!b) return;
-    aether_caps_free(b->data, b->capacity);
+    if (b->block) aether_caps_free(b->block, sizeof(AetherString) + b->capacity);
     aether_caps_free(b, sizeof(AetherStrBuilder));
 }
