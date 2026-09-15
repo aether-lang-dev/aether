@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.673.0]
+
 ### Added
 
 - **`std.fs.WALK_CONTINUE` / `WALK_SKIP_SUBTREE` / `WALK_STOP`** — named
