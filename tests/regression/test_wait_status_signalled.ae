@@ -24,6 +24,7 @@
 import std.os
 import std.list
 import std.string
+import std.io
 
 extern exit(code: int)
 
@@ -56,16 +57,18 @@ main() {
     _out, rc, err = os.run_pipe_drain_and_wait("/bin/sh", shell("kill -KILL $$"), null)
     check("drain_and_wait: SIGKILL reads as 137, the shell convention", rc == 137)
     check("drain_and_wait: and carries no error, because it is not one",
-          string.equals(err, "") == 1)
+        string.equals(err, "") == 1)
 
     _out2, rc2, err2 = os.run_pipe_drain_and_wait("/bin/sh", shell("exit 3"), null)
     check("drain_and_wait: a plain exit still reads as its code", rc2 == 3)
     check("drain_and_wait: with no error", string.equals(err2, "") == 1)
 
     // (2) run_pipe + wait_pid -- the other pair that had no signal branch.
-    pid, _fd, spawn_err = os.run_pipe("/bin/sh", shell("kill -TERM $$"), null)
+    //     run_pipe returns (read_fd, pid, err), in that order.
+    fd, pid, spawn_err = os.run_pipe("/bin/sh", shell("kill -TERM $$"), null)
     check("run_pipe: the child spawned", pid > 0 && string.equals(spawn_err, "") == 1)
     rc3, err3 = os.wait_pid(pid)
+    _ = io.fd_close(fd)
     check("wait_pid: SIGTERM reads as 143", rc3 == 143)
     check("wait_pid: with no error", string.equals(err3, "") == 1)
 
