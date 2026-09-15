@@ -187,22 +187,26 @@ lifetime"):
 ## Mutated-capture cell lifetime
 
 A capture the closure assigns to is heap-promoted: the enclosing binding
-and the closure env share one cell (see "Capture semantics" above). That
-cell is reclaimed at the exit of the scope that declares it, which is only
-sound while no capturing closure is still alive to write through it.
+and the closure env share one cell (see "Capture semantics" above). The
+cell is **reference-counted** (#2019). The declaring scope holds one
+reference from the declaration to its exit; every env built from a
+closure that captures the cell takes one when it is constructed and gives
+it back in its generated destructor (`_closure_env_N_free`, the same
+member-aware teardown that releases retained string captures); the last
+holder to release frees the cell.
 
-The verdict reuses the transient-callback proof above. A cell captured
-only by closures the env-drain already frees after the call dies with its
-scope. A cell captured by anything else, a widget handler, a timer, a
-callee whose body the escape walk cannot see, is left alone and outlives
-the scope. `mark_escaped_capture_boxes` (`compiler/codegen/codegen_stmt.c`)
-computes this before the body is generated, and both it and the drain read
-the same `transient_closure_arg` helper so the two verdicts cannot drift
-apart.
+That makes the scope-exit release unconditional. Whether the closure was
+drained right after a transient call, handed to `fs.walk` inside a tuple
+destructure, stored by a widget, kept in a list, or returned from the
+function, the cell lives exactly as long as something can still reach it
+— no escape analysis decides, so there is nothing to get wrong in either
+direction. (Before #2019 the cell was plain-freed at scope exit only when
+an escape walk could prove no env outlived the scope, and every shape the
+walk could not see through — a callback passed inside a tuple destructure,
+a closure owned and freed by an extern — leaked one cell per call.)
 
-The direction of the approximation is deliberate: a cell wrongly called
-escaping leaks a few bytes, a cell wrongly called transient is freed while
-a live callback still writes through it.
+The count is a plain integer, like the string reference count it mirrors:
+a closure env is not shared between threads.
 
 A builder block (`window(...) { ... }`, `vstack(4) { ... }`) is a scope
 like any other here. Its body is emitted inside C braces and now opens a

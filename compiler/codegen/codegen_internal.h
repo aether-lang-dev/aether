@@ -45,9 +45,6 @@ void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void clear_heap_string_vars(CodeGenerator* gen);
 int is_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_escaped_string_var(CodeGenerator* gen, const char* var_name);
-int is_escaped_capture_box(CodeGenerator* gen, const char* var_name);
-void mark_escaped_capture_box(CodeGenerator* gen, const char* var_name);
-void clear_escaped_capture_boxes(CodeGenerator* gen);
 void clear_escaped_string_vars(CodeGenerator* gen);
 int is_return_escaped_string_var(CodeGenerator* gen, const char* var_name);
 void mark_return_escaped_string_var(CodeGenerator* gen, const char* var_name);
@@ -219,14 +216,15 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
    the function's lifetime. Run after hoist_heap_string_trackers so
    the heap-string-var registry is populated. */
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
-/* Closure-capture cell lifetime: mark every promoted capture in `body` whose
- * cell is shared with a closure outliving the scope that declares it, so the
- * scope-exit free is suppressed for those. Run alongside
- * mark_escaped_heap_string_vars, after the function's promoted-capture set is
- * published. */
-void mark_escaped_capture_boxes(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+/* #2019: declare the shared heap cell for a promoted capture and queue its
+ * scope-exit release. The initial value is `init_expr` when given, else the
+ * C text `init_text`. The cell is reference-counted, so the release is
+ * always sound; see the _AeCellHeader helpers in the generated prologue. */
+void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
+                                    const char* c_type, ASTNode* init_expr,
+                                    const char* init_text, int line, int column);
 /* The program's own definition of `name`, or NULL. Shared rather than
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */

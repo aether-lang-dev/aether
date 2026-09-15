@@ -1274,20 +1274,11 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 if (child->node_type && child->node_type->kind != TYPE_UNKNOWN) {
                     c_type = get_c_type(child->node_type);
                 }
+                char init[300];
+                snprintf(init, sizeof(init), "_param_%s", child->value);
                 print_indent(gen);
-                fprintf(gen->output, "%s* %s = malloc(sizeof(%s)); *%s = _param_%s;\n",
-                        c_type, child->value, c_type, child->value, child->value);
-                // Defer free(name) at function exit.
-                ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, "free",
-                    child->line, child->column);
-                ASTNode* arg = create_ast_node(AST_IDENTIFIER, child->value,
-                    child->line, child->column);
-                arg->annotation = strdup("raw_promoted");
-                add_child(free_call, arg);
-                ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                    child->line, child->column);
-                add_child(expr_stmt, free_call);
-                push_defer(gen, expr_stmt);
+                emit_promoted_cell_declaration(gen, child->value, c_type, NULL, init,
+                                               child->line, child->column);
             }
         }
     }
@@ -1444,7 +1435,6 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             // message fields/etc. Conservative — alias-safe at the
             // cost of leaking the value over the function's lifetime.
             mark_escaped_heap_string_vars(gen, body);
-            mark_escaped_capture_boxes(gen, body);
             mark_escaped_seq_vars(gen, body);
             mark_escaped_opt_str_vars(gen, body);
             // Push a function-exit defer-free for every non-escaped

@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A mutated closure capture leaked its heap cell whenever the compiler
+  could not see who freed the closure (#2019).** A variable a closure
+  assigns to lives in a heap cell the declaring scope and the closure's env
+  share. The cell was plain-freed at scope exit only when an escape walk
+  could prove no env outlived the scope, and every shape the walk could not
+  see through leaked one cell per call: a callback passed inside a tuple
+  destructure (`_n, _e = fs.walk(root, |p, k, d| { cnt = cnt + 1 ... })`),
+  a closure handed to an extern that owns and frees it, a returned closure.
+  `fs.find_ext` leaked one cell per call this way and shipped behind a cap
+  in `tests/leaks_known.txt`. The cell is reference-counted now: the scope
+  releases at exit, each env retains when built and releases in its
+  generated destructor, and the last holder frees — so the scope-exit
+  release is unconditional and the escape walk that decided it is gone. The
+  `find_ext` cap is removed. `tests/regression/test_capture_cell_lifetime.ae`
+  runs every shape a cell can take and is leak-clean under the gates. In
+  passing, the MSVC closure-constructor helper now takes a promoted capture
+  as the cell pointer it is (`int*`), not as `int`.
 ### Added
 
 - **`std.string.version_compare(a, b) -> int`** — a version-aware comparator

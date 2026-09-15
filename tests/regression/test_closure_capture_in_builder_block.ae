@@ -11,14 +11,17 @@
 // instead would have left the second half of the bug in place, a cell
 // freed at scope exit while a widget handler or timer still held it.
 //
-// The fix gives a builder block its own defer scope, and suppresses the
-// free only for cells shared with a closure that outlives the scope
-// (anything but the transient-callback shape the env-drain already
-// proves dead after the call).
+// The fix gave a builder block its own defer scope, and at first
+// suppressed the free for cells shared with a closure that outlives the
+// scope. Since #2019 the cell is reference-counted instead: the block
+// releases its reference at exit and the stored callback's env holds its
+// own, so the cell lives exactly as long as the callback does.
 //
 // Exercises both halves: a transient callback whose cell IS reclaimed at
 // block exit, and a stored callback whose cell must survive it. Compiling
 // is half the assertion; the counters are the other half.
+
+import std.list
 
 extern exit(code: int)
 
@@ -56,7 +59,7 @@ main() {
 
     group("stored") {
         // Same shape, but the closure is kept. Its cell must outlive the
-        // block, so no free may be queued for it here.
+        // block: the block's release at its end leaves the env's reference.
         total = 0
         total = total + 5
         later = keep() callback {
@@ -72,6 +75,17 @@ main() {
     later()
     check("stored cell survived the block that declared it", witness, 7)
     println("  PASS: builder-block captures scope and outlive correctly")
+
+    // A closure variable assigned from a call carries no env-free defer,
+    // so hand the env to a list and free it: the env's destructor gives
+    // back its references to `total` and `witness`, and with #2019 those
+    // cells are freed by whichever holder releases last -- here the env,
+    // since `witness` is still held by main. Deterministic, rather than
+    // leaving the env for the macOS leaks gate to find or not find still
+    // referenced from a dead frame.
+    owners = list.new()
+    _ = list.add(owners, later)
+    list.free(owners)
 
     println("=== test_closure_capture_in_builder_block passed ===")
 }
