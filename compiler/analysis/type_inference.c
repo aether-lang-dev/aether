@@ -1055,18 +1055,12 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     }
 
     // Unwind any symbols this function added so they don't pollute sibling
-    // functions' lookups.
+    // functions' lookups. Through pop_symbol, so the scope's hash index
+    // (#2007) is unlinked in step with the list.
     if (ctx->symbols) {
-        Symbol* current = ctx->symbols->symbols;
-        while (current && current != saved_head) {
-            Symbol* next = current->next;
-            if (current->name) free(current->name);
-            if (current->type) free_type(current->type);
-            if (current->alias_target) free(current->alias_target);
-            free(current);
-            current = next;
+        while (ctx->symbols->symbols && ctx->symbols->symbols != saved_head) {
+            pop_symbol(ctx->symbols);
         }
-        ctx->symbols->symbols = saved_head;
     }
 
     if (ctx->symbols) ctx->symbols->inside_merged_body = saved_inside_merged;

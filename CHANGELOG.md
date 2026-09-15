@@ -13,6 +13,26 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Type checking and code generation grew quadratically in the number of
+  functions (#2007).** A function-heavy file paid for three walks of the
+  whole top level per unit of work: every identifier resolution that missed
+  its local scope walked the file scope's symbol list (all functions),
+  every identifier emitted scanned every top-level function to ask whether
+  it was a `@c_callback`, and every call site, clause count, extern check
+  and forward declaration scanned the same list again. Profiled on the
+  issue's reproducer at 6400 functions, those three were three quarters of
+  the compile. Each scope's symbol table now carries a hash index
+  (`lookup_symbol_local` is O(1) once a scope has 16 symbols; the unwind
+  goes through `pop_symbol` so the index stays in step), and codegen keeps
+  one `ProgramIndex` — clauses by name, externs, callbacks, `main` — built
+  in a single pass and consulted by every former scan. The dead-code prune
+  hashes its reachable set and indexes definitions by name and by
+  `_`-suffix, and the constant-folder's builtin-shadow check runs only for
+  calls that spell a whitelisted builtin, memoised per program. Measured:
+  the 6400-function reproducer 5.1s → 0.48s, growth per doubling 3.4–3.9×
+  → 2.1×; the largest stdlib module (`tls13_client`, 2512 lines) 617ms →
+  237ms. `compiler/aether_strmap.[ch]` is the shared string map behind it.
+
 - **A mutated capture first assigned inside a loop body or an if-arm did
   not compile (#2024).** A variable a closure assigns to lives in a heap
   cell, and every write to it is `*name = ...`. The three pre-passes that
@@ -31,6 +51,20 @@ version number before tagging the release.
   `main()` ran every other one but not it, so `if flag { x = 3 }` followed
   by a read of `x` compiled in a function and failed with `'x' undeclared`
   in `main()`. `main()` now runs the same pass in the same position.
+
+## [0.673.0]
+
+### Added
+
+- **`std.fs.WALK_CONTINUE` / `WALK_SKIP_SUBTREE` / `WALK_STOP`** — named
+  constants for the value an `fs.walk` callback returns to steer traversal. The
+  0/1/2 prune/stop contract already worked, but lived only in the doc comment
+  (the callback is an opaque `ptr`, so nothing in the signature revealed it) — an
+  aeb sweep re-asked for a prune signal that was already there. `return
+  fs.WALK_SKIP_SUBTREE` on a directory now reads self-documentingly at the call
+  site and is the `find -prune` of `! -path '*/node_modules/*'` without walking
+  the excluded subtree. Doc comment, stdlib-reference example, and the fs.walk
+  regression test switched to the named forms.
 
 ## [0.672.0]
 

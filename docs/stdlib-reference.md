@@ -33,7 +33,7 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 14 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 13 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 155 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 158 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes: FNV, MurmurHash3, SipHash. | 4 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 17 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 163 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
@@ -911,10 +911,10 @@ n, err = fs.walk(root, |path: string, kind: int, depth: int| {
     // kind: 1 file / 2 dir / 3 symlink / 4 other / 5 socket / 6 fifo / 7 device
     // (same encoding as file_stat; see fs.STAT_KIND_*)
     if kind == 2 && string.ends_with(path, "/node_modules") == 1 {
-        return 1                 // skip this subtree
+        return fs.WALK_SKIP_SUBTREE   // prune: don't descend into it
     }
     println("${depth} ${path}")
-    return 0                     // 0 continue · 1 skip subtree · 2 stop walk
+    return fs.WALK_CONTINUE           // WALK_CONTINUE 0 · WALK_SKIP_SUBTREE 1 · WALK_STOP 2
 })
 
 // Collecting paths: `path` is borrowed, so copy the bytes at the boundary.

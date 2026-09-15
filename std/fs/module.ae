@@ -38,6 +38,7 @@ exports(
     make_temp_dir, make_temp_file,
     STAT_KIND_FILE, STAT_KIND_DIR, STAT_KIND_SYMLINK, STAT_KIND_OTHER,
     STAT_KIND_SOCKET, STAT_KIND_FIFO, STAT_KIND_DEVICE,
+    WALK_CONTINUE, WALK_SKIP_SUBTREE, WALK_STOP,
     fs_write_binary_raw, fs_write_atomic_raw, fs_rename_raw,
     fs_try_stat, fs_get_stat_kind, fs_get_stat_size, fs_get_stat_mtime,
     fs_try_statvfs, fs_get_statvfs_total, fs_get_statvfs_free, fs_get_statvfs_avail,
@@ -207,6 +208,18 @@ const STAT_KIND_OTHER = 4
 const STAT_KIND_SOCKET = 5
 const STAT_KIND_FIFO = 6
 const STAT_KIND_DEVICE = 7
+
+// fs.walk callback RETURN values — steer the traversal. Return one of these
+// from the walk closure; they read at the call site so the prune/stop
+// affordance is visible without hunting the doc comment (return 0 is the
+// implicit "keep going" if you return nothing meaningful):
+//   WALK_CONTINUE (0)      descend/visit normally
+//   WALK_SKIP_SUBTREE (1)  on a directory, do NOT descend into it (prune) —
+//                          the `find -prune` of `! -path '*/node_modules/*'`
+//   WALK_STOP (2)          end the whole walk immediately
+const WALK_CONTINUE = 0
+const WALK_SKIP_SUBTREE = 1
+const WALK_STOP = 2
 // size/mtime are `long` (#1021): 64-bit sizes (no >= 2 GiB wrap) and
 // Y2038-safe mtimes.
 extern fs_get_stat_size() -> long
@@ -621,8 +634,13 @@ glob_multi(patterns: ptr) -> {
 //
 //     n, err = fs.walk(root, |path: string, kind: int, depth: int| {
 //         // kind: 1 file / 2 dir / 3 symlink / 4 other (same as file_stat)
-//         return 0     // 0 = continue, 1 = skip this dir's subtree, 2 = stop
+//         return fs.WALK_CONTINUE   // or WALK_SKIP_SUBTREE (prune this dir) /
+//                                   // WALK_STOP (end the walk). Raw: 0 / 1 / 2.
 //     })
+//
+// The callback's return PRUNES: WALK_SKIP_SUBTREE (1) on a directory means "do
+// not descend into it" — the `find -prune` of `! -path '*/node_modules/*'`,
+// without walking the excluded subtree first. WALK_STOP (2) ends the walk.
 //
 // One readdir sweep per directory — entry kinds come from d_type (#966), so
 // nothing is stat'ed unless the filesystem doesn't report a type. Symlinks

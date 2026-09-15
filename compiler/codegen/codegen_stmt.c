@@ -648,35 +648,15 @@ static int has_list_patterns(ASTNode* match_stmt) {
 // Forward declarations.
 static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
 
-// Linear scan over program-root children matching by `value`. Mirror
-// of count_function_clauses in codegen.c (kept module-local here to
-// avoid an internal-header churn). Returns the first match — for
-// pattern-matched multi-clause functions, the first clause's body is
-// representative for return-type purposes.
-//
-// Cost note: O(K) per call where K is the number of top-level fn
-// definitions. Called once per user-fn-call-site during codegen, so
-// total codegen-time cost is O(call_sites × K). For typical programs
-// (K < 200) this is well under a millisecond. If the count grows,
-// promote to a hash via gen->fn_def_lookup; the static here is the
-// O(1)-amortised refactor seam.
+// The first top-level definition named `name` — for a pattern-matched
+// multi-clause function, the first clause, whose body is representative
+// for return-type purposes. Called once per user-fn call site from
+// several codegen paths; #2007 routed it through the program index, so
+// it no longer scans the top level per call.
 ASTNode* find_function_definition_by_name(ASTNode* program,
                                           const char* name) {
-    if (!program || !name) return NULL;
-    /* Called per call site from several codegen paths, each time scanning
-     * every top-level node, so it lands in the profile next to lookup_symbol.
-     * Settling the common mismatch on the first byte avoids the call. */
-    int c0 = (unsigned char)name[0];
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (c && (c->type == AST_FUNCTION_DEFINITION ||
-                  c->type == AST_BUILDER_FUNCTION) &&
-            c->value && (unsigned char)c->value[0] == c0 &&
-            strcmp(c->value, name) == 0) {
-            return c;
-        }
-    }
-    return NULL;
+    const DefClauses* dc = program_index_clauses(program, name);
+    return (dc && dc->count > 0) ? dc->nodes[0] : NULL;
 }
 
 // Sibling of find_function_definition_by_name for AST_EXTERN_FUNCTION

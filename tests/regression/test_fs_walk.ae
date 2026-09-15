@@ -101,14 +101,16 @@ main() {
     string_list_free(L)
     string_list_free(E)
 
-    // 2. Prune: returning 1 on `sub` skips its whole subtree.
+    // 2. Prune: WALK_SKIP_SUBTREE on `sub` skips its whole subtree. Uses the
+    //    named constants (== 1 / 0) so the affordance is self-documenting and
+    //    the constant values stay pinned to the raw contract.
     P = string_list_new()
     np, perr = fs.walk(base, | path: string, kind: int, depth: int | {
             _sa15 = string_list_add(P, path)
             if string.equals(path, "${base}/sub") == 1 {
-                return 1
+                return fs.WALK_SKIP_SUBTREE
             }
-            return 0
+            return fs.WALK_CONTINUE
         })
     if perr != "" {
         println("FAIL prune walk: ${perr}")
@@ -133,9 +135,9 @@ main() {
     }
     string_list_free(P)
 
-    // 3. Stop: returning 2 on the root ends the walk after one visit.
+    // 3. Stop: WALK_STOP on the root ends the walk after one visit.
     ns, serr = fs.walk(base, | path: string, kind: int, depth: int | {
-            return 2
+            return fs.WALK_STOP
         })
     if serr != "" {
         println("FAIL stop walk: ${serr}")

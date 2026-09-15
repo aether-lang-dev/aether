@@ -436,8 +436,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->emit_exe = 1;
     gen->emit_lib = 0;
     gen->emit_main_target = NULL;
-    gen->generated_functions = NULL;
-    gen->generated_function_count = 0;
+    strmap_init(&gen->generated_functions);
     // Initialize defer tracking
     gen->defer_count = 0;
     gen->scope_depth = 0;
@@ -594,6 +593,7 @@ CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, con
 
 void free_code_generator(CodeGenerator* gen) {
     if (gen) {
+        program_index_reset();
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -644,12 +644,7 @@ void free_code_generator(CodeGenerator* gen) {
         if (gen->message_registry) {
             free_message_registry(gen->message_registry);
         }
-        if (gen->generated_functions) {
-            for (int i = 0; i < gen->generated_function_count; i++) {
-                free(gen->generated_functions[i]);
-            }
-            free(gen->generated_functions);
-        }
+        strmap_free(&gen->generated_functions);
         if (gen->extern_registry) {
             for (int i = 0; i < gen->extern_registry_count; i++) {
                 free(gen->extern_registry[i].name);
@@ -1048,55 +1043,111 @@ const char* codegen_normalise_callee(const char* raw, char* out, size_t out_size
 
 // Helper: check if a function was already generated
 int is_function_generated(CodeGenerator* gen, const char* func_name) {
-    for (int i = 0; i < gen->generated_function_count; i++) {
-        if (strcmp(gen->generated_functions[i], func_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return strmap_has(&gen->generated_functions, func_name);
 }
 
 // Helper: mark a function as generated
 void mark_function_generated(CodeGenerator* gen, const char* func_name) {
-    char** new_funcs = realloc(gen->generated_functions,
-                               sizeof(char*) * (gen->generated_function_count + 1));
-    if (!new_funcs) return;
-    gen->generated_functions = new_funcs;
-    gen->generated_functions[gen->generated_function_count] = strdup(func_name);
-    gen->generated_function_count++;
+    strmap_put(&gen->generated_functions, func_name, NULL);
+}
+
+/* ---- the program index (#2007); see codegen_internal.h ---- */
+static ProgramIndex g_program_index;
+
+static void program_index_add_extern(ProgramIndex* ix, ASTNode* decl) {
+    if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
+        !strmap_has(&ix->externs, decl->value)) {
+        strmap_put(&ix->externs, decl->value, decl);
+    }
+}
+
+static void program_index_build(ProgramIndex* ix, ASTNode* program) {
+    program_index_reset();
+    ix->program = program;
+    ix->child_count = program->child_count;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if ((c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) && c->value) {
+            DefClauses* dc = strmap_get(&ix->defs, c->value);
+            if (!dc) {
+                dc = calloc(1, sizeof(DefClauses));
+                if (!dc) continue;
+                strmap_put(&ix->defs, c->value, dc);
+            }
+            if (dc->count >= dc->capacity) {
+                int cap = dc->capacity ? dc->capacity * 2 : 2;
+                ASTNode** nn = realloc(dc->nodes, sizeof(ASTNode*) * (size_t)cap);
+                if (!nn) continue;
+                dc->nodes = nn;
+                dc->capacity = cap;
+            }
+            dc->nodes[dc->count++] = c;
+            if (is_c_callback(c)) strmap_put(&ix->c_callbacks, c->value, (void*)c_callback_symbol(c));
+        } else if (c->type == AST_MAIN_FUNCTION) {
+            if (!ix->main_fn) ix->main_fn = c;
+        } else if (c->type == AST_EXTERN_FUNCTION) {
+            program_index_add_extern(ix, c);
+        } else if (c->type == AST_IMPORT_STATEMENT && c->value) {
+            /* Imported modules' externs land as declarations in this TU too;
+               they stay in the module's own AST (aether_module.c), so they
+               are read from there. */
+            AetherModule* mod_entry = module_find(c->value);
+            ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
+            if (!mod_ast) continue;
+            for (int j = 0; j < mod_ast->child_count; j++) {
+                program_index_add_extern(ix, mod_ast->children[j]);
+            }
+        }
+    }
+}
+
+ProgramIndex* program_index(ASTNode* program) {
+    if (!program) return NULL;
+    if (g_program_index.program != program ||
+        g_program_index.child_count != program->child_count) {
+        program_index_build(&g_program_index, program);
+    }
+    return &g_program_index;
+}
+
+void program_index_reset(void) {
+    ProgramIndex* ix = &g_program_index;
+    for (int i = 0; i < strmap_count(&ix->defs); i++) {
+        DefClauses* dc = strmap_value_at(&ix->defs, i);
+        if (dc) { free(dc->nodes); free(dc); }
+    }
+    strmap_free(&ix->defs);
+    strmap_free(&ix->externs);
+    strmap_free(&ix->c_callbacks);
+    ix->program = NULL;
+    ix->child_count = 0;
+    ix->main_fn = NULL;
+}
+
+const DefClauses* program_index_clauses(ASTNode* program, const char* name) {
+    ProgramIndex* ix = program_index(program);
+    if (!ix || !name) return NULL;
+    return strmap_get(&ix->defs, name);
 }
 
 // Helper: count how many function clauses exist with the same name
 int count_function_clauses(ASTNode* program, const char* func_name) {
-    int count = 0;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if ((child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION) &&
-            child->value && strcmp(child->value, func_name) == 0) {
-            count++;
-        }
-    }
-    return count;
+    const DefClauses* dc = program_index_clauses(program, func_name);
+    return dc ? dc->count : 0;
 }
 
 // Helper: collect all function clauses with the same name
 ASTNode** collect_function_clauses(ASTNode* program, const char* func_name, int* out_count) {
-    int count = count_function_clauses(program, func_name);
-    if (count == 0) {
+    const DefClauses* dc = program_index_clauses(program, func_name);
+    if (!dc || dc->count == 0) {
         *out_count = 0;
         return NULL;
     }
-
-    ASTNode** clauses = malloc(sizeof(ASTNode*) * count);
-    int idx = 0;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if ((child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION) &&
-            child->value && strcmp(child->value, func_name) == 0) {
-            clauses[idx++] = child;
-        }
-    }
-    *out_count = count;
+    ASTNode** clauses = malloc(sizeof(ASTNode*) * (size_t)dc->count);
+    if (!clauses) { *out_count = 0; return NULL; }
+    memcpy(clauses, dc->nodes, sizeof(ASTNode*) * (size_t)dc->count);
+    *out_count = dc->count;
     return clauses;
 }
 
@@ -4043,27 +4094,8 @@ static int is_stdlib_c_symbol(const char* name) {
 static int tu_declares_extern(ASTNode* program, const char* name) {
     if (!program || !name) return 0;
     if (is_stdlib_c_symbol(name)) return 1;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if (!child) continue;
-        if (child->type == AST_EXTERN_FUNCTION && child->value &&
-            strcmp(child->value, name) == 0) {
-            return 1;
-        }
-        if (child->type == AST_IMPORT_STATEMENT && child->value) {
-            AetherModule* mod_entry = module_find(child->value);
-            ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
-            if (!mod_ast) continue;
-            for (int j = 0; j < mod_ast->child_count; j++) {
-                ASTNode* decl = mod_ast->children[j];
-                if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
-                    strcmp(decl->value, name) == 0) {
-                    return 1;
-                }
-            }
-        }
-    }
-    return 0;
+    ProgramIndex* ix = program_index(program);
+    return ix && strmap_has(&ix->externs, name);
 }
 
 /* #1598: a renamed function is referenced in two shapes, and both have to
@@ -4383,6 +4415,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     mangle_keyword_value_idents(program);
     rename_leading_underscore_functions(program);
     rename_extern_colliding_functions(program);
+    /* The rename changed definition names, which are the index's keys,
+       without changing the child count it is keyed on. */
+    program_index_reset();
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
     // here means every per-fn codegen pass beyond this point can
@@ -5608,17 +5643,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         codegen_note_diag_pos(child);
         codegen_note_diag_func(child->value);
 
-        // Skip if already forward-declared (pattern matching generates combined functions)
-        int already_declared = 0;
-        for (int j = 0; j < i; j++) {
-            ASTNode* prev = program->children[j];
-            if (prev && (prev->type == AST_FUNCTION_DEFINITION || prev->type == AST_BUILDER_FUNCTION) &&
-                prev->value && strcmp(prev->value, child->value) == 0) {
-                already_declared = 1;
-                break;
-            }
-        }
-        if (already_declared) continue;
+        // Skip if already forward-declared (pattern matching generates combined
+        // functions): only the first clause of a name declares it. Through the
+        // program index (#2007); scanning the earlier children for each
+        // function made this loop quadratic.
+        if (find_function_definition_by_name(program, child->value) != child) continue;
 
         // Imported functions are emitted as `static` in their definitions
         // (see generate_function_definition / generate_combined_function),
