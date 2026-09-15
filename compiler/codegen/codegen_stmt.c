@@ -35,6 +35,10 @@ static void add_protected_name(char*** names, int* count, int* cap, const char* 
 // (`return box_closure(bump)`), and nested calls. Then transitively expands:
 // if `bump` captures `digit` and `digit` is also a closure variable, `digit`'s
 // env must be protected too.
+//
+// Promoted cells the returned closure captures are not collected: the env
+// owns a reference to each (#2019), so the scope's release at the return
+// is correct and nothing about it has to be held back.
 static void collect_returned_closures(CodeGenerator* gen, ASTNode* expr,
                                       char*** names, int* count, int* cap) {
     if (!expr) return;
@@ -43,55 +47,14 @@ static void collect_returned_closures(CodeGenerator* gen, ASTNode* expr,
         if (lookup_closure_var(gen, expr->value, &cid)) {
             add_protected_name(names, count, cap, expr->value);
             // Transitive: any capture of this closure that is itself a
-            // closure variable must also be protected. Likewise, any
-            // capture of this closure that is a Route 1 promoted cell
-            // must have its free suppressed — the cell's pointer is
-            // inside the returned closure's env.
+            // closure variable must also be protected.
             for (int ci = 0; ci < gen->closure_count; ci++) {
                 if (gen->closures[ci].id != cid) continue;
-                const char* pfn = gen->closures[ci].parent_func;
-                char** promoted = NULL;
-                int promoted_count = 0;
-                get_promoted_names_for_func(gen, pfn, &promoted, &promoted_count);
                 for (int k = 0; k < gen->closures[ci].capture_count; k++) {
                     const char* cap_name = gen->closures[ci].captures[k];
                     if (!cap_name) continue;
                     if (lookup_closure_var(gen, cap_name, NULL)) {
                         add_protected_name(names, count, cap, cap_name);
-                    }
-                    for (int pp = 0; pp < promoted_count; pp++) {
-                        if (promoted[pp] && strcmp(promoted[pp], cap_name) == 0) {
-                            add_protected_name(names, count, cap, cap_name);
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-        }
-    }
-    // Inline closure literal in the return expression (e.g.
-    // `return || { count = count + 1; return count }`). Protect any
-    // promoted captures this closure carries — the pointer lives inside
-    // the returned closure's env and must not be freed before the
-    // caller uses it.
-    if (expr->type == AST_CLOSURE && expr->value) {
-        int cid = atoi(expr->value);
-        if (cid >= 0) {
-            for (int ci = 0; ci < gen->closure_count; ci++) {
-                if (gen->closures[ci].id != cid) continue;
-                const char* pfn = gen->closures[ci].parent_func;
-                char** promoted = NULL;
-                int promoted_count = 0;
-                get_promoted_names_for_func(gen, pfn, &promoted, &promoted_count);
-                for (int k = 0; k < gen->closures[ci].capture_count; k++) {
-                    const char* cap_name = gen->closures[ci].captures[k];
-                    if (!cap_name) continue;
-                    for (int pp = 0; pp < promoted_count; pp++) {
-                        if (promoted[pp] && strcmp(promoted[pp], cap_name) == 0) {
-                            add_protected_name(names, count, cap, cap_name);
-                            break;
-                        }
                     }
                 }
                 break;
@@ -3251,80 +3214,52 @@ ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* ------------------------------------------------------------------
- * Closure-capture box lifetime
+ * Closure-capture cell lifetime (#2019)
  *
- * A variable a closure mutates is promoted to a heap cell (`T* n =
- * malloc(...)`) that the closure's env points at. The cell is therefore
- * shared, and freeing it when its declaring scope ends is only sound if
- * no capturing closure outlives that scope.
+ * A variable a closure mutates is promoted to a heap cell (`T* n = ...`)
+ * that the closure's env points at. The cell is shared between the
+ * declaring scope and every env built from it, and neither side knows
+ * how long the other lives: a callback passed to fs.walk is gone when the
+ * call returns, a handler handed to a widget or a timer fires long after
+ * the scope has ended, and a closure that is returned outlives its whole
+ * function.
  *
- * Exactly one shape carries that proof, and codegen already computes it:
- * the transient callback the env-drain fires on (see
- * emit_closure_env_drained_call) — a bare expression statement whose
- * closure parameter provably neither stores nor returns it. The env is
- * freed on the next line, so the cell it points at can go with the scope.
+ * So the cell is reference-counted. The scope holds one reference from
+ * declaration to exit; each env takes one when it is built and gives it
+ * back in its generated destructor; whoever releases last frees. That
+ * makes the scope-exit release below unconditional — there is no escape
+ * analysis to get wrong in either direction, no cell freed under a live
+ * callback and no cell leaked because a walk could not see through a
+ * tuple destructure or an extern that owns the closure.
  *
- * Every other closure (handed to a widget, a timer, a callee with no
- * visible body) is still reachable after the statement, so its cell must
- * outlive the scope and the scope-exit free is suppressed.
- *
- * CRITICAL: the fail-safe direction is "escapes". Marking a transient box
- * as escaping leaks one cell; missing a real escape frees a cell a live
- * callback still writes through. Both the capture test and the walk
- * over-approximate on purpose.
+ * The three places that declare a cell (a first assignment, a tuple
+ * destructure slot, a promoted parameter) all come through here so the
+ * shape is written once.
  * ------------------------------------------------------------------ */
-
-/* Conservative capture test: any mention of the name anywhere under the
- * closure counts, including in a nested closure. */
-static int subtree_mentions_name(ASTNode* node, const char* name) {
-    if (!node || !name) return 0;
-    if (node->value && strcmp(node->value, name) == 0) return 1;
-    for (int i = 0; i < node->child_count; i++) {
-        if (subtree_mentions_name(node->children[i], name)) return 1;
+void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
+                                    const char* c_type, ASTNode* init_expr,
+                                    const char* init_text, int line, int column) {
+    if (!c_type || c_type[0] == 0) c_type = "int";
+    fprintf(gen->output, "%s* %s = (%s*)_aether_cell_new(sizeof(%s)); *%s = ",
+            c_type, name, c_type, c_type, name);
+    if (init_expr) {
+        generate_expression(gen, init_expr);
+    } else {
+        fprintf(gen->output, "%s", init_text ? init_text : "0");
     }
-    return 0;
-}
-
-static void mark_boxes_captured_by(CodeGenerator* gen, ASTNode* closure) {
-    for (int i = 0; i < gen->current_promoted_capture_count; i++) {
-        const char* nm = gen->current_promoted_captures[i];
-        if (nm && subtree_mentions_name(closure, nm)) {
-            mark_escaped_capture_box(gen, nm);
-        }
-    }
-}
-
-static void capture_box_escape_walk(CodeGenerator* gen, ASTNode* node,
-                                    ASTNode* transient) {
-    if (!node) return;
-
-    ASTNode* t = transient;
-    if (node->type == AST_EXPRESSION_STATEMENT && node->child_count > 0 &&
-        node->children[0] && node->children[0]->type == AST_FUNCTION_CALL) {
-        ASTNode* c = transient_closure_arg(gen, node->children[0]);
-        if (c) t = c;
-    }
-
-    /* A trailing block is inlined into the enclosing scope, not lowered to a
-     * closure with an env, so it captures nothing and outlives nothing. Only
-     * a real closure argument keeps a cell alive past the statement. */
-    int is_trailing_block = (node->value && strcmp(node->value, "trailing") == 0);
-    if (node->type == AST_CLOSURE && node != t && !is_trailing_block) {
-        mark_boxes_captured_by(gen, node);
-    }
-
-    for (int i = 0; i < node->child_count; i++) {
-        capture_box_escape_walk(gen, node->children[i], t);
-    }
-}
-
-/* Additive, like mark_escaped_heap_string_vars: a closure body runs this
- * again, nested inside the enclosing function's own generation, and must add
- * to that function's verdicts rather than replace them. clear_declared_vars
- * resets the set per function. */
-void mark_escaped_capture_boxes(CodeGenerator* gen, ASTNode* body) {
-    if (!gen || !body) return;
-    capture_box_escape_walk(gen, body, NULL);
+    fprintf(gen->output, ";\n");
+    mark_var_declared(gen, name);
+    ASTNode* release_call = create_ast_node(AST_FUNCTION_CALL, "_aether_cell_release",
+                                            line, column);
+    ASTNode* arg = create_ast_node(AST_IDENTIFIER, name, line, column);
+    /* The release takes the cell pointer itself, not `*name`: the
+     * annotation tells the AST_IDENTIFIER emission not to dereference. */
+    if (arg->annotation) free(arg->annotation);
+    arg->annotation = strdup("raw_promoted");
+    add_child(release_call, arg);
+    ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, line, column);
+    add_child(expr_stmt, release_call);
+    push_defer(gen, expr_stmt);
 }
 
 /* Push function-exit defer-free statements for every hoisted
@@ -3386,8 +3321,8 @@ void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
         if (is_return_escaped_string_var(gen, name)) continue;
         /* Skip closure-env vars and promoted captures — they have
          * their own defer-free shapes via the existing closure /
-         * promoted-cell paths (see is_env_free_for /
-         * is_promoted_free_for in codegen.c). Adding a heap-
+         * promoted-cell paths (see is_env_free_for in codegen.c and
+         * emit_promoted_cell_declaration below). Adding a heap-
          * string-exit defer on top would emit a free on a name
          * that doesn't live as a `const char*` at function
          * scope. */
@@ -4572,22 +4507,10 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                 // tuple-destructure targets as writes.
                 if (is_promoted_capture(gen, var->value)) {
                     if (!is_var_declared(gen, var->value)) {
-                        const char* c_type = var_type && var_type[0] ? var_type : "int";
-                        fprintf(gen->output,
-                                "%s* %s = malloc(sizeof(%s)); *%s = _tup%d._%d;\n",
-                                c_type, var->value, c_type, var->value, tmp_id, j);
-                        mark_var_declared(gen, var->value);
-                        ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, "free",
-                            stmt->line, stmt->column);
-                        ASTNode* arg = create_ast_node(AST_IDENTIFIER, var->value,
-                            stmt->line, stmt->column);
-                        if (arg->annotation) free(arg->annotation);
-                        arg->annotation = strdup("raw_promoted");
-                        add_child(free_call, arg);
-                        ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                            stmt->line, stmt->column);
-                        add_child(expr_stmt, free_call);
-                        push_defer(gen, expr_stmt);
+                        char init[64];
+                        snprintf(init, sizeof(init), "_tup%d._%d", tmp_id, j);
+                        emit_promoted_cell_declaration(gen, var->value, var_type, NULL, init,
+                                                       stmt->line, stmt->column);
                     } else {
                         fprintf(gen->output, "*%s = _tup%d._%d;\n", var->value, tmp_id, j);
                     }
@@ -4949,38 +4872,12 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                 if (is_promoted_capture(gen, stmt->value)) {
                     if (!is_var_declared(gen, stmt->value)) {
                         // First occurrence in this scope — declaration:
-                        // allocate, initialise, defer the free.
-                        const char* c_type = get_c_type(stmt->node_type);
-                        if (!c_type || c_type[0] == 0) c_type = "int";
-                        fprintf(gen->output, "%s* %s = malloc(sizeof(%s)); *%s = ",
-                                c_type, stmt->value, c_type, stmt->value);
-                        if (stmt->child_count > 0) {
-                            generate_expression(gen, stmt->children[0]);
-                        } else {
-                            fprintf(gen->output, "0");
-                        }
-                        fprintf(gen->output, ";\n");
-                        mark_var_declared(gen, stmt->value);
-                        /* Defer free(name) at scope exit -- but only when no
-                         * closure capturing this cell outlives the scope. See
-                         * mark_escaped_capture_boxes: a stored callback still
-                         * writes through the cell after the scope ends, so
-                         * freeing it there dangles. Leaking one cell is the
-                         * fail-safe direction. */
-                        if (is_escaped_capture_box(gen, stmt->value)) break;
-                        ASTNode* free_call = create_ast_node(AST_FUNCTION_CALL, "free",
+                        // allocate the shared cell, initialise it, and
+                        // defer the scope's release (#2019).
+                        emit_promoted_cell_declaration(gen, stmt->value,
+                            get_c_type(stmt->node_type),
+                            stmt->child_count > 0 ? stmt->children[0] : NULL, "0",
                             stmt->line, stmt->column);
-                        ASTNode* arg = create_ast_node(AST_IDENTIFIER, stmt->value,
-                            stmt->line, stmt->column);
-                        // Mark so the AST_IDENTIFIER emission doesn't dereference it
-                        // (free takes the pointer itself, not `*name`).
-                        if (arg->annotation) free(arg->annotation);
-                        arg->annotation = strdup("raw_promoted");
-                        add_child(free_call, arg);
-                        ASTNode* expr_stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
-                            stmt->line, stmt->column);
-                        add_child(expr_stmt, free_call);
-                        push_defer(gen, expr_stmt);
                     } else {
                         // Reassignment: write through the pointer.
                         fprintf(gen->output, "*%s", stmt->value);
@@ -7001,6 +6898,10 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                     // escapes and bump captures digit, digit's captures
                     // must also be protected. collect_returned_closures
                     // only handled the first hop; iterate until stable.
+                    // Promoted cells the returned closure captures are not
+                    // protected: its env owns a reference to each (#2019),
+                    // so the scope's release here is what keeps the count
+                    // right rather than what has to be held back.
                     int scan_idx = 0;
                     while (scan_idx < protected_count) {
                         int start_count = protected_count;
@@ -7011,23 +6912,12 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                             if (!lookup_closure_var(gen, name, &cid)) continue;
                             for (int ci = 0; ci < gen->closure_count; ci++) {
                                 if (gen->closures[ci].id != cid) continue;
-                                const char* pfn = gen->closures[ci].parent_func;
-                                char** promoted = NULL;
-                                int promoted_count = 0;
-                                get_promoted_names_for_func(gen, pfn, &promoted, &promoted_count);
                                 for (int k = 0; k < gen->closures[ci].capture_count; k++) {
                                     const char* cap_name = gen->closures[ci].captures[k];
                                     if (!cap_name) continue;
                                     if (lookup_closure_var(gen, cap_name, NULL)) {
                                         add_protected_name(&protected_names, &protected_count,
                                                            &protected_cap, cap_name);
-                                    }
-                                    for (int pp = 0; pp < promoted_count; pp++) {
-                                        if (promoted[pp] && strcmp(promoted[pp], cap_name) == 0) {
-                                            add_protected_name(&protected_names, &protected_count,
-                                                               &protected_cap, cap_name);
-                                            break;
-                                        }
                                     }
                                 }
                                 break;

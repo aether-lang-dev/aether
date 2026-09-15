@@ -518,8 +518,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->heap_string_var_count = 0;
     gen->escaped_string_vars = NULL;
     gen->escaped_string_var_count = 0;
-    gen->escaped_capture_boxes = NULL;
-    gen->escaped_capture_box_count = 0;
     gen->return_escaped_string_vars = NULL;
     gen->return_escaped_string_var_count = 0;
     gen->return_escaped_struct_vars = NULL;
@@ -745,40 +743,6 @@ void clear_declared_vars(CodeGenerator* gen) {
     }
     gen->heap_box_vars = NULL;
     gen->heap_box_var_count = 0;
-    clear_escaped_capture_boxes(gen);
-}
-
-/* A closure-capture box outliving its scope: see the field comment in
- * codegen.h and mark_escaped_capture_boxes in codegen_stmt.c. */
-int is_escaped_capture_box(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return 0;
-    for (int i = 0; i < gen->escaped_capture_box_count; i++) {
-        if (strcmp(gen->escaped_capture_boxes[i], var_name) == 0) return 1;
-    }
-    return 0;
-}
-
-void mark_escaped_capture_box(CodeGenerator* gen, const char* var_name) {
-    if (!gen || !var_name) return;
-    if (is_escaped_capture_box(gen, var_name)) return;
-    char** nv = realloc(gen->escaped_capture_boxes,
-                        sizeof(char*) * (gen->escaped_capture_box_count + 1));
-    if (!nv) return;
-    gen->escaped_capture_boxes = nv;
-    gen->escaped_capture_boxes[gen->escaped_capture_box_count] = strdup(var_name);
-    gen->escaped_capture_box_count++;
-}
-
-void clear_escaped_capture_boxes(CodeGenerator* gen) {
-    if (!gen) return;
-    if (gen->escaped_capture_boxes) {
-        for (int i = 0; i < gen->escaped_capture_box_count; i++) {
-            free(gen->escaped_capture_boxes[i]);
-        }
-        free(gen->escaped_capture_boxes);
-    }
-    gen->escaped_capture_boxes = NULL;
-    gen->escaped_capture_box_count = 0;
 }
 
 // #790: is `var_name` currently bound to a heap.new(T) box?
@@ -1421,31 +1385,16 @@ static int is_env_free_for(ASTNode* deferred, const char* name) {
     return 1;
 }
 
-// Is `deferred` the synthetic "free(<name>)" defer for a Route 1 promoted
-// cell? Shape: EXPRESSION_STATEMENT > FUNCTION_CALL "free" > IDENTIFIER
-// "<name>" where the arg was marked `raw_promoted` by codegen_stmt.c.
-static int is_promoted_free_for(ASTNode* deferred, const char* name) {
-    if (!deferred || !name) return 0;
-    if (deferred->type != AST_EXPRESSION_STATEMENT || deferred->child_count < 1) return 0;
-    ASTNode* call = deferred->children[0];
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
-        strcmp(call->value, "free") != 0 || call->child_count < 1) return 0;
-    ASTNode* arg = call->children[0];
-    if (!arg || arg->type != AST_IDENTIFIER || !arg->value) return 0;
-    if (!arg->annotation || strcmp(arg->annotation, "raw_promoted") != 0) return 0;
-    return strcmp(arg->value, name) == 0;
-}
-
 // Emit ALL deferred statements (for return - unwinds entire function).
 // `protected_names` and `protected_count` list closure variable names whose
 // env-free defer should be suppressed — used at return sites where the
 // closure's env is still live through the returned value.
 void emit_all_defers_protected(CodeGenerator* gen, char** protected_names, int protected_count) {
     // Emit all defers in LIFO order across all scopes. A defer is suppressed
-    // when either (a) it frees the env of a closure variable in the protected
-    // list, or (b) it frees a Route 1 promoted cell whose name matches a
-    // protected name (because the escaping closure's env captures the
-    // pointer, and the caller now owns the cell).
+    // when it frees the env of a closure variable in the protected list. The
+    // promoted cells that env captures are NOT suppressed: the env holds its
+    // own reference to each (#2019), so the scope's release at this return
+    // leaves the cell alive for exactly as long as the returned closure.
     for (int i = gen->defer_count - 1; i >= 0; i--) {
         ASTNode* deferred = gen->defer_stack[i];
         if (!deferred) continue;
@@ -1454,8 +1403,7 @@ void emit_all_defers_protected(CodeGenerator* gen, char** protected_names, int p
         int skip = 0;
         for (int p = 0; p < protected_count; p++) {
             if (!protected_names[p]) continue;
-            if (is_env_free_for(deferred, protected_names[p]) ||
-                is_promoted_free_for(deferred, protected_names[p])) {
+            if (is_env_free_for(deferred, protected_names[p])) {
                 skip = 1;
                 break;
             }
@@ -3920,7 +3868,6 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
             hoist_seq_trackers(gen, main->children[0]);
             hoist_opt_str_trackers(gen, main->children[0]);
             mark_escaped_heap_string_vars(gen, main->children[0]);
-            mark_escaped_capture_boxes(gen, main->children[0]);
             mark_escaped_seq_vars(gen, main->children[0]);
             mark_escaped_opt_str_vars(gen, main->children[0]);
             /* Mirror the regular-function path in
@@ -4752,6 +4699,33 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_string_release_captured(const char*);");
     print_line(gen, "static inline const char* aether_str_capture(const char* s) {");
     print_line(gen, "    return aether_string_capture_owned(s);");
+    print_line(gen, "}");
+    /* #2019: a captured variable a closure ASSIGNS to is promoted to a heap
+     * cell that the declaring scope and every capturing env share. The cell
+     * is reference-counted, so its lifetime is the union of theirs and no
+     * one has to guess: the scope releases at exit, each env retains when
+     * it is built and releases in its generated destructor, and the last
+     * holder frees. The previous scheme freed the cell at scope exit only
+     * when an escape walk could prove no env outlived the scope, and every
+     * shape the walk could not see through — a callback passed inside a
+     * tuple destructure, a closure handed to an extern that owns and frees
+     * it — leaked one cell per call. The count is not atomic, like the
+     * string count it mirrors: a closure env is not shared across threads. */
+    print_line(gen, "typedef union { long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
+    print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)malloc(sizeof(_AeCellHeader) + size);");
+    print_line(gen, "    if (!h) aether_panic(\"out of memory allocating a captured variable\");");
+    print_line(gen, "    h->_refs = 1;");
+    print_line(gen, "    return (void*)(h + 1);");
+    print_line(gen, "}");
+    print_line(gen, "static inline void* _aether_cell_retain(void* cell) {");
+    print_line(gen, "    if (cell) ((_AeCellHeader*)cell - 1)->_refs++;");
+    print_line(gen, "    return cell;");
+    print_line(gen, "}");
+    print_line(gen, "static inline void _aether_cell_release(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (--h->_refs == 0) free(h);");
     print_line(gen, "}");
     /* Prototypes for the magic-aware string builtins the codegen emits
      * directly (char_at -> string_char_at, str_eq / match-on-string ->

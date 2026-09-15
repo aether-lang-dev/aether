@@ -1711,21 +1711,31 @@ static const char* resolve_closure_return_type(CodeGenerator* gen, int ci) {
     return ret_type;
 }
 
+// True when a captured variable is PROMOTED: the closure assigns to it, so
+// it lives in a reference-counted heap cell the env points at (#2019). The
+// env field is `ctype*`, the env takes a reference when it is built and
+// gives it back in its destructor.
+static int capture_is_promoted(CodeGenerator* gen, const char* name,
+                               const char* parent_func) {
+    char** promoted = NULL;
+    int promoted_count = 0;
+    get_promoted_names_for_func(gen, parent_func, &promoted, &promoted_count);
+    for (int p = 0; p < promoted_count; p++) {
+        if (promoted[p] && strcmp(promoted[p], name) == 0) return 1;
+    }
+    return 0;
+}
+
 // True when a captured variable is a READ-ONLY string capture — the case
 // whose env store must go through aether_str_capture() so the env owns a
 // reference (asks/closure-captured-heap-string-dangles.md: the enclosing
 // scope releases its own reference on loop-carried reassignment and at
 // scope exit, so a borrowed pointer dangles by the time a stored closure
 // fires). Promoted (assigned-to) captures share a heap cell — the env
-// field is `ctype*` and must NOT be routed through the retain.
+// field is `ctype*` and must NOT be routed through the string retain.
 static int capture_is_retained_string(CodeGenerator* gen, const char* name,
                                       const char* parent_func) {
-    char** promoted = NULL;
-    int promoted_count = 0;
-    get_promoted_names_for_func(gen, parent_func, &promoted, &promoted_count);
-    for (int p = 0; p < promoted_count; p++) {
-        if (promoted[p] && strcmp(promoted[p], name) == 0) return 0;
-    }
+    if (capture_is_promoted(gen, name, parent_func)) return 0;
     const char* ctype = lookup_var_c_type(gen, name, parent_func);
     return ctype && (strcmp(ctype, "const char*") == 0 ||
                      strcmp(ctype, "char*") == 0);
@@ -1756,9 +1766,6 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     char** captures = gen->closures[ci].captures;
     int cap_count = gen->closures[ci].capture_count;
     const char* parent_func = gen->closures[ci].parent_func;
-    char** parent_promoted = NULL;
-    int parent_promoted_count = 0;
-    get_promoted_names_for_func(gen, parent_func, &parent_promoted, &parent_promoted_count);
     /* Captured-variable C names are emitted RAW throughout the closure
      * lowering — env struct field, prologue alias, `_aether_make_
      * closure` param, the `_e->field = value` stores, and the
@@ -1784,14 +1791,7 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     } else {
         for (int i = 0; i < cap_count; i++) {
             const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
-            int is_promoted = 0;
-            for (int p = 0; p < parent_promoted_count; p++) {
-                if (parent_promoted[p] && strcmp(parent_promoted[p], captures[i]) == 0) {
-                    is_promoted = 1;
-                    break;
-                }
-            }
-            if (is_promoted) {
+            if (capture_is_promoted(gen, captures[i], parent_func)) {
                 fprintf(gen->output, "    %s* %s;\n", ctype, captures[i]);
             } else {
                 fprintf(gen->output, "    %s %s;\n", ctype, captures[i]);
@@ -1800,28 +1800,26 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
     }
     fprintf(gen->output, "} _closure_env_%d;\n\n", id);
 
-    /* #1398: the env owns a reference per retained-string capture, so teardown
-       has to be member-aware. Promoted captures share a heap cell rather than
-       owning a reference and are skipped. */
+    /* The env owns a reference per retained-string capture (#1398) and per
+       promoted cell (#2019), so teardown has to be member-aware: each is
+       given back here, and the cell is freed by whichever holder — this env
+       or the declaring scope — releases last. */
     fprintf(gen->output, "static void _closure_env_%d_free(void* _p) {\n", id);
     fprintf(gen->output, "    if (!_p) return;\n");
     {
         int released = 0;
         for (int i = 0; i < cap_count; i++) {
-            int is_promoted = 0;
-            for (int p2 = 0; p2 < parent_promoted_count; p2++) {
-                if (parent_promoted[p2] && strcmp(parent_promoted[p2], captures[i]) == 0) {
-                    is_promoted = 1;
-                    break;
-                }
-            }
-            if (is_promoted) continue;
-            if (!capture_is_retained_string(gen, captures[i], parent_func)) continue;
+            int promoted = capture_is_promoted(gen, captures[i], parent_func);
+            if (!promoted && !capture_is_retained_string(gen, captures[i], parent_func)) continue;
             if (!released) {
                 fprintf(gen->output, "    _closure_env_%d* _e = (_closure_env_%d*)_p;\n", id, id);
                 released = 1;
             }
-            fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
+            if (promoted) {
+                fprintf(gen->output, "    _aether_cell_release(_e->%s);\n", captures[i]);
+            } else {
+                fprintf(gen->output, "    aether_string_release_captured(_e->%s);\n", captures[i]);
+            }
         }
     }
     fprintf(gen->output, "    free(_p);\n");
@@ -2059,7 +2057,6 @@ void emit_closure_definitions(CodeGenerator* gen) {
             enter_scope(gen);
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
-            mark_escaped_capture_boxes(gen, body);
             push_heap_string_exit_free_defers(gen, body);
             for (int i = 0; i < body->child_count; i++) {
                 generate_statement(gen, body->children[i]);
@@ -2099,13 +2096,22 @@ void emit_closure_definitions(CodeGenerator* gen) {
             for (int i = 0; i < cap_count; i++) {
                 if (i > 0) fprintf(gen->output, ", ");
                 const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
-                fprintf(gen->output, "%s %s", ctype, captures[i]);
+                /* A promoted capture arrives as the cell pointer, `ctype*`,
+                 * which is also what the env field is. */
+                fprintf(gen->output, "%s%s %s", ctype,
+                        capture_is_promoted(gen, captures[i], parent_func) ? "*" : "",
+                        captures[i]);
             }
             fprintf(gen->output, ") {\n");
             fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
             fprintf(gen->output, "    _e->_dtor = _closure_env_%d_free;\n", id);
             for (int i = 0; i < cap_count; i++) {
-                if (capture_is_retained_string(gen, captures[i], parent_func)) {
+                if (capture_is_promoted(gen, captures[i], parent_func)) {
+                    /* env owns a reference to the shared cell (#2019) */
+                    const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
+                    fprintf(gen->output, "    _e->%s = (%s*)_aether_cell_retain(%s);\n",
+                            captures[i], ctype, captures[i]);
+                } else if (capture_is_retained_string(gen, captures[i], parent_func)) {
                     /* env owns a reference — see aether_str_capture preamble */
                     const char* ctype = lookup_var_c_type(gen, captures[i], parent_func);
                     fprintf(gen->output, "    _e->%s = (%s)aether_str_capture(%s);\n",
@@ -6043,7 +6049,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
                 fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); _e->_dtor = _closure_env_%d_free; ", id, id, id);
                 for (int i = 0; i < cap_count; i++) {
-                    if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {
+                    if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
+                        /* env owns a reference to the shared cell (#2019) */
+                        const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);
+                        fprintf(gen->output, "_e->%s = (%s*)_aether_cell_retain(%s); ",
+                                captures[i], ctype, captures[i]);
+                    } else if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference — see aether_str_capture preamble */
                         const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);
                         fprintf(gen->output, "_e->%s = (%s)aether_str_capture(%s); ",

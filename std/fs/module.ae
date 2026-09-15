@@ -1174,6 +1174,12 @@ find_ext(root: string, ext: string) -> string {
 // (a compiler heap-tracker gap; see the ask). Returning a plain `ptr` here
 // side-steps it, and find_ext_excluding below finishes it with no closure in
 // scope, where the heap-string return is tracked correctly.
+//
+// `cnt` is a capture the callback assigns to, so it lives in a heap cell the
+// walk closure and this scope share. That cell used to leak once per call
+// (#2019): fs_walk_raw owns and frees the closure before returning, and the
+// scope-exit free was withheld because the compiler could not see that.
+// The cell is reference-counted now and needs no care here.
 _find_ext_collect(root: string, ext: string, exclude: string) -> ptr {
     sb = strbuilder.new(256)
     cnt = 0

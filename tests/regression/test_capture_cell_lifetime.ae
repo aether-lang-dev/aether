@@ -1,0 +1,150 @@
+// Regression: the heap cell behind a mutated capture lives exactly as long
+// as its last holder (#2019).
+//
+// A variable a closure assigns to is promoted to a heap cell that the
+// declaring scope and the closure's env share. The cell used to be freed
+// at scope exit only when an escape walk could prove no env outlived the
+// scope, and every shape the walk could not see through leaked one cell
+// per call. The issue's shape was fs.walk: its callback is passed inside a
+// tuple destructure, which the walk never looked at, and fs.walk owns and
+// frees the closure before it returns — so the cell had no holder left and
+// nobody to free it. fs.find_ext leaked one cell per call for the same
+// reason, and shipped behind a cap in tests/leaks_known.txt.
+//
+// The cell is reference-counted now: the scope releases at exit, each env
+// retains when built and releases in its destructor, and the last one
+// frees. This test runs every shape a cell can take. The printed values
+// are half the assertion — a cell freed too early reads garbage or crashes
+// under ASan — and the leak gates (macOS leaks(1), Valgrind, LSan) are the
+// other half: every shape here has to be leak-clean with no cap.
+
+import std.fs
+import std.os
+import std.path
+import std.string
+import std.strbuilder
+import std.list
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, got: int, want: int) {
+    if got == want {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}: got ${got}, want ${want}")
+        failures = failures + 1
+    }
+}
+
+// (1) The issue's shape: the callback rides inside a tuple destructure and
+//     the callee (fs.walk, via an extern) owns and frees it before
+//     returning. The scope's release is then the last one.
+count_files(root: string) -> int {
+    sb = strbuilder.new(16)
+    cnt = 0
+    _n, _e = fs.walk(root, | p: string, k: int, d: int | {
+            if k == fs.STAT_KIND_FILE {
+                if cnt > 0 { strbuilder.append(sb, "\n") }
+                strbuilder.append(sb, p)
+                cnt = cnt + 1
+            }
+            return 0
+        })
+    joined = strbuilder.finish(sb)
+    if string.length(joined) == 0 { return 0 }
+    return cnt
+}
+
+// (2) A closure handed to a callee that neither stores nor returns it:
+//     the env is drained right after the call, the scope releases at exit.
+run(cb: fn) { cb() }
+
+// (3) A closure that is returned: the env outlives the whole function, so
+//     the env's reference is the one that keeps the cell alive, and the
+//     scope's release at `return` must not free it.
+make_counter(start: int) -> fn {
+    n = start
+    return || {
+        n = n + 1
+        return n
+    }
+}
+
+// (4) A promoted parameter: the cell is declared from the parameter value.
+bump_twice(n: int) -> int {
+    run() callback { n = n + 1 }
+    run() callback { n = n + 1 }
+    return n
+}
+
+// (5) A closure stored into a list: list.free runs the env destructor,
+//     which releases the cell after the declaring scope already has.
+stash(l: ptr, cb: fn) {
+    _ = list.add(l, cb)
+}
+
+main() {
+    println("=== capture cell lifetime (#2019) ===")
+
+    // (1) — once per iteration, so one leaked cell per call would show as
+    //       a count the gates cannot miss.
+    root = path.join(os.temp_dir(), "ae_capture_cell_${os.getpid()}")
+    _m = fs.mkdir_p(root)
+    _w1 = fs.write(path.join(root, "a.txt"), "a")
+    _w2 = fs.write(path.join(root, "b.txt"), "b")
+    walked = 0
+    i = 0
+    while i < 50 {
+        walked = walked + count_files(root)
+        i = i + 1
+    }
+    _d = fs.remove_tree(root)
+    check("walk callback in a tuple destructure counts every file, 50 times", walked, 100)
+
+    // (2)
+    hits = 0
+    run() callback { hits = hits + 1 }
+    run() callback { hits = hits + 1 }
+    check("transient callback writes through the cell", hits, 2)
+
+    // (3) — two independent counters prove each env owns its own cell, and
+    //       calling them after make_counter returned proves the cell
+    //       survived that scope's release.
+    c1 = make_counter(10)
+    c2 = make_counter(100)
+    int a = call(c1)
+    int b = call(c1)
+    int c = call(c2)
+    check("returned closure keeps its cell alive: first counter", b, 12)
+    check("returned closure keeps its cell alive: second counter", c, 101)
+    check("and the first call was right too", a, 11)
+    // Hand both envs to a list and free it: the env destructors run, each
+    // gives back its reference, and the cells go with them. Deterministic,
+    // rather than leaving the envs for the leak gate to find still pointed
+    // at from main's frame.
+    owners = list.new()
+    stash(owners, c1)
+    stash(owners, c2)
+    list.free(owners)
+
+    // (4)
+    check("promoted parameter", bump_twice(5), 7)
+
+    // (5)
+    total = 0
+    l = list.new()
+    stash(l) callback { total = total + 3 }
+    stash(l) callback { total = total + 4 }
+    list.free(l)
+    total = total + 1
+    check("cell shared with list-owned closures is still writable after list.free", total, 1)
+
+    if failures == 0 {
+        println("capture cell lifetime: all checks passed")
+    } else {
+        println("capture cell lifetime: ${failures} failure(s)")
+        exit(1)
+    }
+}
