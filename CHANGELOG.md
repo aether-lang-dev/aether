@@ -23,6 +23,23 @@ version number before tagging the release.
   ones across the language SDKs. Pure Aether, no allocation; fuzzed to zero
   disagreements with `sort -V -s` over thousands of random version/filename
   pairs. From the aeb round-2 command-alike sweep.
+## [0.671.0]
+
+### Fixed
+
+- **A binding named `none` could be declared but never read (#2018).** `none`
+  is the empty-optional literal, and the parser turns every bare `none` in
+  expression position into it — so `none = 5` followed by `${none}` read the
+  literal, not the variable, and failed two concepts away as "cannot
+  interpolate this value" or "invalid operation for given types", or in one
+  shape reached codegen as malformed C with the variable and the literal both
+  trying to own the name. The language reference already said `none` cannot be
+  a variable name; the compiler now enforces it, at the declaration: a
+  variable, parameter, closure parameter, tuple-destructure slot, constant or
+  global spelt `none` is refused with a diagnostic that names the collision
+  and points at the binding. A `match` arm spelt `none` is the literal pattern
+  and is untouched. `tests/integration/none_is_not_a_name` covers seven
+  binding positions and the literal.
 
 ## [0.670.0]
 
