@@ -23,7 +23,12 @@
 # an exclusion.
 #
 # Usage:  bash tests/scripts/windows_wine_sweep.sh [dir ...]
-# Env:    WINE=wine    ZIG=zig    JOBS=$(nproc)
+# Env:    WINE=wine    ZIG=zig    JOBS=$(nproc)    TMPDIR=<where the .exe go>
+#
+# No x86 Wine on the host (an arm64 Mac, say)? WINE=tests/scripts/wine_in_container.sh
+# forwards each run into the container tests/scripts/winebox.sh starts, and
+# TMPDIR must then sit inside the directory that container has mounted.
+# docs/build-system.md, "Reproducing the Wine lane locally", has the recipe.
 
 set -u
 cd "$(dirname "$0")/../.." || exit 1
@@ -54,7 +59,10 @@ if ! command -v "${ZIG:-zig}" > /dev/null 2>&1; then
     exit 0
 fi
 
-tmpdir="$(mktemp -d)"
+# Explicit template rather than bare `mktemp -d`: macOS mktemp ignores TMPDIR
+# without one, and the arm64 recipe in docs/build-system.md depends on
+# TMPDIR placing the .exe files where the Wine container can see them.
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/wine-sweep.XXXXXX")"
 trap 'rm -rf "$tmpdir"' EXIT
 
 # Wine writes to its prefix on first use; do that once, serially, rather than
@@ -125,7 +133,9 @@ ONE
 chmod +x "$runner"
 
 : > "$tmpdir/results"
-xargs -a "$tmpdir/todo.txt" -P "$JOBS" -I{} "$runner" "{}" "$tmpdir" "$ROOT" "$AE" "$WINE"
+# stdin rather than `xargs -a`: -a is GNU-only, and on BSD xargs (macOS) it is
+# a usage error that processes nothing.
+xargs -P "$JOBS" -I{} "$runner" "{}" "$tmpdir" "$ROOT" "$AE" "$WINE" < "$tmpdir/todo.txt"
 
 # grep -c exits non-zero on a zero count, so `|| echo 0` used to APPEND a second
 # "0" to the captured value (printing "0\n0"). Count with a pipe into `grep -c`
@@ -141,6 +151,18 @@ echo "  PASS      $pass"
 echo "  RUNFAIL   $runf"
 echo "  BUILDFAIL $bldf"
 echo "  NOT-PE    $notpe"
+
+# CRITICAL: every file in todo.txt must have produced exactly one result line.
+# A harness fault (xargs rejecting a flag, a runner that could not start) used
+# to fall through to "All 0 files built ... and ran under Wine" with exit 0,
+# which is a green report of a sweep that ran nothing.
+seen=$((pass + runf + bldf + notpe))
+if [ "$seen" -ne "$total" ]; then
+    echo ""
+    echo "HARNESS FAULT: $total files selected but $seen results recorded."
+    echo "The sweep did not run; nothing above is evidence about Windows."
+    exit 1
+fi
 
 if [ "$runf" -gt 0 ] || [ "$bldf" -gt 0 ] || [ "$notpe" -gt 0 ]; then
     echo ""

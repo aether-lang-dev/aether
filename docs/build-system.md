@@ -497,18 +497,79 @@ Layer an extra exclusion list onto a sweep with
 `make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
 `.sh` sweeps).
 
-**Wine and the Windows cross lane.** CI's `windows-cross` job
-(`.github/workflows/windows.yml`) currently cross-builds only — it does not
-run the suite under Wine. That was attempted and deferred for a structural
-reason worth knowing before trying again: `ae` is a *compile-and-run* driver,
-so `ae run`/`ae test` inside a Wine prefix want a **Windows** C toolchain
-there to compile the C the compiler emits (the driver tries to fetch
-MinGW-w64). Driving the *native* `ae` with `AE_CC="zig cc -target
-x86_64-windows-gnu"` avoids that, but then needs a Windows `libaether.a`
-kept alongside the native one — and one `build/` tree holds exactly one
-target's archives. `tests/ae_sweep_prune_wine.txt` records which areas such
-a lane must never claim to cover (fs/path semantics, sockets/h2, actor
-timing, the LD_PRELOAD sandbox).
+**Wine and the Windows lanes.** `.github/workflows/windows.yml` has two
+shapes of Windows coverage from a Linux runner. `windows-cross` cross-builds
+only. `windows-wine` ("Windows / runtime under Wine (x86_64)") goes one step
+further: it cross-builds each test to a PE on the Linux host with `ae build
+--target=x86_64-windows` (zig), then *executes* the PE under Wine. Wine never
+compiles anything, which is what an earlier attempt got wrong: `ae` is a
+compile-and-run driver, so `ae run` inside a Wine prefix goes looking for a
+Windows C toolchain and tries to fetch MinGW-w64. Keeping the compile on the
+host and handing Wine only finished binaries is the split that makes the lane
+work. The sweep is `tests/scripts/windows_wine_sweep.sh`; exclusions live in
+`tests/windows_wine_exclude.txt`, one path per line, each with a reason.
+
+What the lane catches that nothing else does: Windows behaviour that
+*compiles*. A stub on the wrong side of `#ifndef _WIN32`, or `fs.write`
+opening in text mode so `"hello world\n"` lands as 13 bytes on disk, is
+invisible on Linux and macOS and only runs wrong on Windows.
+
+### Reproducing the Wine lane locally
+
+CI takes about ten minutes to answer. The same loop runs on a workstation in
+seconds per file, and prints the actual bytes rather than PASS/FAIL, which is
+how the two bugs above were found. Two ingredients: a native `ae` plus `zig`
+for the cross-build (any zig `ae build --target` accepts; CI pins one, a
+developer's Homebrew zig works), and an x86_64 Wine for the run.
+
+**x86_64 Linux host.** Install `wine` and `file` from the distro, then:
+
+```bash
+make compiler ae stdlib
+bash tests/scripts/windows_wine_sweep.sh              # tests/regression, compiler, syntax
+bash tests/scripts/windows_wine_sweep.sh tests/regression
+```
+
+**arm64 host (Apple Silicon Mac, arm64 Linux).** The PE is x86_64 and so is the
+Wine that runs it, so the run half goes through an emulated x86_64 container;
+the cross-build stays native and is the slow part anyway. Docker Desktop or
+Podman machine with Rosetta enabled is enough. Two scripts do the plumbing:
+`winebox.sh` starts an Ubuntu 24.04 container with the distro Wine (the same
+Wine CI installs) and mounts a scratch directory at the same absolute path on
+both sides; `wine_in_container.sh` is a `wine` that forwards every call into
+it.
+
+```bash
+make compiler ae stdlib
+SP=/private/tmp/wine-scratch                  # any dir; the container sees it at this path
+tests/scripts/winebox.sh up "$SP"
+
+# one file, by hand:
+ae build --target=x86_64-windows tests/regression/test_fs_command_alikes.ae -o "$SP/t.exe"
+tests/scripts/wine_in_container.sh "$SP/t.exe"
+
+# the CI sweep, verbatim:
+TMPDIR="$SP" WINE=tests/scripts/wine_in_container.sh \
+    bash tests/scripts/windows_wine_sweep.sh tests/regression
+
+tests/scripts/winebox.sh down
+```
+
+`TMPDIR` must point inside the mounted directory: the sweep writes every
+`.exe` under `mktemp -d`, and a path the container cannot see fails as a
+loader error, not a finding. On macOS use `/private/tmp/...` rather than
+`/tmp/...`: `/tmp` is a symlink there, `pwd -P` resolves it, and the two
+sides of the mount have to agree on the string.
+
+Measured on an M1 with Docker Desktop: `winebox.sh up` provisions the
+container from nothing in about 85 seconds, a single PE runs in about half a
+second through the wrapper, and `tests/regression` (323 files) completes in
+13 minutes at `JOBS=6`, almost all of it the native cross-build. That run was
+323/323, the same result CI reports.
+
+Without a container engine, Podman on Linux is the same recipe with
+`CONTAINER_ENGINE=podman`. Wine on arm64 executing x86 PEs through box64 is
+not something this document has validated.
 
 ### Docker-Based Cross-Compilation
 
