@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.675.0]
+
 ### Added
 
 - **`std.strarr` — a growable string array whose backing IS a `string[]`.** The
