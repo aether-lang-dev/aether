@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.676.0]
+
 ### Fixed
 
 - **A spawned child inherited the parent's blocked signal mask, so `os.kill`
