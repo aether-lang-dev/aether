@@ -133,7 +133,22 @@ _oracle(test_path: string, incl: string, bin: string) -> int {
     list.add(argv, "AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT='${rpt}' exec '${bin}' >/dev/null 2>&1")
     _pipe, _rc, drain_err = os.run_pipe_drain_and_wait("/bin/sh", argv, null)
     if string.equals(drain_err, "") == 0 {
-        return NOCOMPILE
+        // The harness could not run the test at all -- a failed spawn, a
+        // failed waitpid. That is not a compile failure: both gates above
+        // passed, and the mutant is exactly as compiled as every other one.
+        // Calling it NOCOMPILE dropped it from the denominator and quietly
+        // deflated the score (#2008). It is an inconclusive run, and this
+        // module's rule for an inconclusive run is already written in the
+        // step above: lean SURVIVED, so it stays in the count, appears in the
+        // survivors list, and is looked at. Said out loud rather than
+        // silently, because a harness that cannot spawn /bin/sh has a
+        // problem the score should not paper over.
+        //
+        // A test binary that dies of a signal does NOT come through here any
+        // more: the os layer now reports that as 128+signo with no error, so
+        // the report file decides, as it should.
+        println("  (could not run the test: ${drain_err})")
+        return SURVIVED
     }
     report, _rerr = fs.read(rpt)
     os.system("rm -f '${rpt}'")

@@ -1000,6 +1000,20 @@ char* os_which(const char* name) {
 
 #ifndef _WIN32
 
+/* Declared at the top of the POSIX block rather than beside the wait family,
+ * because the run_capture and run_pipe entry points above that family return
+ * its fields through posix_status_to_tuple. */
+typedef struct { int _0; const char* _1; } _tuple_int_string;
+
+/* Every waitpid status in this file goes through this one mapper. It used to be
+ * copied by hand into three more places, and the copies drifted: two of them
+ * had no WIFSIGNALED branch, so the same event -- a child killed by a signal --
+ * came back as 137 with no error through os_wait and as -1 with an opaque
+ * "child terminated abnormally" through os_run_pipe_drain_and_wait (#2008).
+ * Defined further down beside the wait family; declared here so the earlier
+ * entry points can share it. */
+static _tuple_int_string posix_status_to_tuple(int st);
+
 /* Change the process working directory. POSIX chdir(2). Gated under the
  * "fs" capability bucket: it repositions every subsequent relative path
  * the process touches, so it's a filesystem-scoped action. */
@@ -1313,14 +1327,10 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
     }
     free((void*)out._0);
     out._0 = result;
-    if (WIFEXITED(st)) {
-        out._1 = WEXITSTATUS(st);
-    } else {
-        /* Killed by signal, stopped, or otherwise abnormal — surface
-         * as -1 and non-empty err so the caller can distinguish from
-         * a real-but-non-zero exit code. */
-        out._1 = -1;
-        out._2 = "child terminated abnormally";
+    {
+        _tuple_int_string s = posix_status_to_tuple(st);
+        out._1 = s._0;
+        out._2 = s._1;
     }
     return out;
 }
@@ -1366,7 +1376,6 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
  * ============================================================ */
 
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
-typedef struct { int _0; const char* _1; } _tuple_int_string;
 typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
@@ -1468,13 +1477,7 @@ _tuple_int_string os_wait_pid_raw(int pid) {
         out._1 = "waitpid failed";
         return out;
     }
-    if (WIFEXITED(st)) {
-        out._0 = WEXITSTATUS(st);
-    } else {
-        out._0 = -1;
-        out._1 = "child terminated abnormally";
-    }
-    return out;
+    return posix_status_to_tuple(st);
 }
 
 /* ============================================================
@@ -1495,7 +1498,10 @@ _tuple_int_string os_wait_pid_raw(int pid) {
  * Each spawned token MUST be reaped exactly once (via wait or wait_any)
  * or it leaks a zombie (POSIX) / handle (Windows). ============ */
 
-/* Map a waitpid status to (exit, err), shared by wait and wait_any. */
+/* Map a waitpid status to (exit, err). The ONLY such mapping in this file:
+ * wait, wait_any, wait_pid, run_capture_status and run_pipe_drain_and_wait all
+ * come through here, so a child killed by a signal reads the same -- 128+signo,
+ * no error -- whichever entry point reaped it. */
 static _tuple_int_string posix_status_to_tuple(int st) {
     _tuple_int_string out = { -1, "" };
     if (WIFEXITED(st)) {
@@ -1504,8 +1510,7 @@ static _tuple_int_string posix_status_to_tuple(int st) {
         /* Killed by a signal: report 128+signo (the shell convention) with
          * NO error, so a caller that kills a token (e.g. after a wait_any_
          * timeout) can reap a distinguishable status — 137 for SIGKILL,
-         * 143 for SIGTERM — rather than an opaque "abnormal" error. Matches
-         * os_wait_pid_timeout_raw's mapping (#1278). */
+         * 143 for SIGTERM — rather than an opaque "abnormal" error (#1278). */
         out._0 = 128 + WTERMSIG(st);
     } else {
         out._0 = -1;
@@ -1705,11 +1710,10 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
     }
     free((void*)out._0);
     out._0 = result;
-    if (WIFEXITED(st)) {
-        out._1 = WEXITSTATUS(st);
-    } else {
-        out._1 = -1;
-        out._2 = "child terminated abnormally";
+    {
+        _tuple_int_string s = posix_status_to_tuple(st);
+        out._1 = s._0;
+        out._2 = s._1;
     }
     return out;
 }
@@ -1774,13 +1778,10 @@ _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
         (void)reaped;
     }
 
-    if (WIFEXITED(st)) {
-        out._0 = WEXITSTATUS(st);
-    } else if (WIFSIGNALED(st)) {
-        out._0 = 128 + WTERMSIG(st);
-    } else {
-        out._0 = -1;
-        out._2 = "child terminated abnormally";
+    {
+        _tuple_int_string s = posix_status_to_tuple(st);
+        out._0 = s._0;
+        out._2 = s._1;
     }
     return out;
 }

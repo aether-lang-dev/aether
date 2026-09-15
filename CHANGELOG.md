@@ -23,6 +23,25 @@ version number before tagging the release.
   ones across the language SDKs. Pure Aether, no allocation; fuzzed to zero
   disagreements with `sort -V -s` over thousands of random version/filename
   pairs. From the aeb round-2 command-alike sweep.
+
+### Fixed
+
+- **A child killed by a signal read differently depending on which `std.os`
+  call reaped it, and `std.mutation` scored a killed mutant as never compiled
+  (#2008).** `std/os/aether_os.c` mapped a `waitpid` status to `(exit, err)` in
+  five hand-written copies, and they had drifted: `os.wait` and `os.wait_any`
+  reported a signalled child as `128+signo` with no error — the shell
+  convention, 137 for SIGKILL — while `os.run_pipe_drain_and_wait`,
+  `os.run_capture` and `os.wait_pid` had no `WIFSIGNALED` branch at all and
+  reported the same event as `-1` with an opaque `"child terminated
+  abnormally"`. There is one mapper now and every entry point goes through it.
+  `std.mutation`'s oracle then treated that non-empty error as `NOCOMPILE`,
+  dropping from the score the one mutant a suite had actually killed by making
+  the test binary die; a harness failure to run a test is now an inconclusive
+  run, which the module already leans `SURVIVED` on, said out loud rather than
+  folded away. `tests/regression/test_wait_status_signalled.ae` pins all four
+  entry points to the same answer for SIGKILL, SIGTERM and a plain exit.
+
 ## [0.671.0]
 
 ### Fixed
