@@ -25,6 +25,10 @@ typedef struct Symbol {
                                 // a later bare re-bind can preserve the declared
                                 // width instead of re-narrowing it.
     struct Symbol* next;
+    // #2007: chain within the scope's hash bucket. A symbol is at the head
+    // of its bucket chain exactly when it is the newest of its name in the
+    // scope, which is the one lookup_symbol_local must return.
+    struct Symbol* hash_next;
 } Symbol;
 
 // Linked list of identifier names, used for hide / seal-except sets.
@@ -36,6 +40,16 @@ typedef struct NameNode {
 typedef struct SymbolTable {
     Symbol* symbols;
     struct SymbolTable* parent;
+    // #2007: hash index over `symbols`, so a lookup is O(1) rather than a
+    // walk of the whole list. The file scope holds every top-level function,
+    // and every identifier resolution that misses a local scope walked it,
+    // which made type checking quadratic in the number of functions. Kept in
+    // step with `symbols` by add_symbol / add_module_alias / pop_symbol;
+    // nothing else may splice the list. NULL until the scope has enough
+    // symbols for the index to pay for itself.
+    Symbol** buckets;
+    int bucket_count;
+    int symbol_count;
     // Hide / seal directives that apply to this scope. They affect
     // lookups that would otherwise resolve to the parent chain — local
     // bindings in `symbols` are always visible regardless.
@@ -70,6 +84,9 @@ void free_symbol_table(SymbolTable* table);
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state);
 Symbol* lookup_symbol(SymbolTable* table, const char* name);
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name);
+/* #2007: unlink and free the newest symbol of `table`. The one way to remove
+ * a symbol, so the hash index stays in step with the list. */
+void pop_symbol(SymbolTable* table);
 
 // Hide / seal directive helpers
 void scope_hide_name(SymbolTable* table, const char* name);

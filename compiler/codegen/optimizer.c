@@ -197,15 +197,45 @@ static int user_shadows_builtin(const char* name) {
     return 0;
 }
 
-static int is_whitelisted_string_call(const char* name, const char* dotted) {
-    if (!name) return 0;
-    if (user_shadows_builtin(name)) return 0;
+/* #2007: the shadow scan walks every top-level function, and it used to run
+ * first -- for every call in the program, four times, whichever name the
+ * call had. It is now the last test, reached only by a call that spells one
+ * of the whitelisted conversions, and its answer is remembered per program:
+ * whether the user shadows `string.from_int` does not change between two
+ * call sites. */
+static struct { const char* dotted; int shadowed; } g_shadow_memo[8];
+static int g_shadow_memo_count;
+
+static int builtin_is_shadowed(const char* dotted) {
+    for (int i = 0; i < g_shadow_memo_count; i++) {
+        if (strcmp(g_shadow_memo[i].dotted, dotted) == 0) return g_shadow_memo[i].shadowed;
+    }
     char buf[64];
     snprintf(buf, sizeof(buf), "string.%s", dotted);
-    if (strcmp(name, buf) == 0) return 1;
-    snprintf(buf, sizeof(buf), "string_%s", dotted);
-    if (strcmp(name, buf) == 0) return 1;
-    return 0;
+    int shadowed = user_shadows_builtin(buf);
+    if (!shadowed) {
+        snprintf(buf, sizeof(buf), "string_%s", dotted);
+        shadowed = user_shadows_builtin(buf);
+    }
+    if (g_shadow_memo_count < (int)(sizeof(g_shadow_memo) / sizeof(g_shadow_memo[0]))) {
+        g_shadow_memo[g_shadow_memo_count].dotted = dotted;
+        g_shadow_memo[g_shadow_memo_count].shadowed = shadowed;
+        g_shadow_memo_count++;
+    }
+    return shadowed;
+}
+
+static int is_whitelisted_string_call(const char* name, const char* dotted) {
+    if (!name) return 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "string.%s", dotted);
+    int spelled = strcmp(name, buf) == 0;
+    if (!spelled) {
+        snprintf(buf, sizeof(buf), "string_%s", dotted);
+        spelled = strcmp(name, buf) == 0;
+    }
+    if (!spelled) return 0;
+    return !builtin_is_shadowed(dotted);
 }
 
 // Helper: create a string literal node (value carries the raw bytes; the
@@ -762,6 +792,7 @@ ASTNode* optimize_ast(ASTNode* node) {
     if (!node) return NULL;
 
     g_opt_program = node;
+    g_shadow_memo_count = 0;
     reset_optimization_stats();
     
     // Apply optimizations in order

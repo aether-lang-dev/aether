@@ -396,6 +396,39 @@ int contains_send_expression(ASTNode* node);
 const char* get_single_int_field(MessageDef* msg_def);
 void generate_default_return_value(CodeGenerator* gen, Type* type);
 int is_function_generated(CodeGenerator* gen, const char* func_name);
+/* ------------------------------------------------------------------
+ * #2007: the program index.
+ *
+ * Codegen asks the top level the same few questions over and over: the
+ * clauses of a function by name, the first definition by name, whether a
+ * name is an extern this TU declares, whether it is a @c_callback. Each
+ * used to be a walk of every top-level node, once per call site or per
+ * identifier, and together they made codegen quadratic in the number of
+ * functions. The index answers all of them from one pass over the
+ * program. It is keyed to the program node and its child_count and
+ * rebuilt when either changes; generate_program resets it after the
+ * pre-passes that rename definitions, since those change keys without
+ * changing the count.
+ * ------------------------------------------------------------------ */
+typedef struct {
+    ASTNode** nodes;           /* AST_FUNCTION_DEFINITION / AST_BUILDER_FUNCTION, program order */
+    int count;
+    int capacity;
+} DefClauses;
+
+typedef struct {
+    ASTNode* program;
+    int child_count;
+    ASTNode* main_fn;          /* the AST_MAIN_FUNCTION, or NULL */
+    StrMap defs;               /* name -> DefClauses* */
+    StrMap externs;            /* name -> ASTNode* (own or imported AST_EXTERN_FUNCTION) */
+    StrMap c_callbacks;        /* name -> const char* C symbol */
+} ProgramIndex;
+
+ProgramIndex* program_index(ASTNode* program);
+void program_index_reset(void);
+/* The clauses defined under `name`, or NULL. */
+const DefClauses* program_index_clauses(ASTNode* program, const char* name);
 void mark_function_generated(CodeGenerator* gen, const char* func_name);
 int count_function_clauses(ASTNode* program, const char* func_name);
 ASTNode** collect_function_clauses(ASTNode* program, const char* func_name, int* out_count);

@@ -3,6 +3,7 @@
 #include <string.h>
 #include "typechecker.h"
 #include "type_inference.h"
+#include "../aether_strmap.h"
 #include "actor_reply.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
@@ -53,6 +54,9 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     SymbolTable* table = malloc(sizeof(SymbolTable));
     table->symbols = NULL;
     table->parent = parent;
+    table->buckets = NULL;
+    table->bucket_count = 0;
+    table->symbol_count = 0;
     table->hidden_names = NULL;
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
@@ -96,6 +100,7 @@ void free_symbol_table(SymbolTable* table) {
     free_name_list(table->hidden_names);
     free_name_list(table->seal_whitelist);
     if (table->dsl_receiver) free(table->dsl_receiver);
+    free(table->buckets);
 
     free(table);
 }
@@ -160,6 +165,89 @@ static int name_blocked_by_hide(SymbolTable* table, const char* name) {
     return 0;
 }
 
+/* ------------------------------------------------------------------
+ * #2007: the per-scope hash index.
+ *
+ * `symbols` stays the linked list every reader walks (newest first, so a
+ * name bound twice in one scope resolves to the newer binding), and the
+ * index mirrors it: each bucket is a chain of the symbols hashing there,
+ * also newest first. Because both orders are insertion order, the list
+ * head is always the head of its own bucket chain, which is what lets
+ * pop_symbol remove it from both in O(1).
+ *
+ * A scope below SYMTAB_INDEX_MIN symbols is looked up by walking the
+ * list, as before: a function body with four locals does not need a
+ * table. The index is built the first time a scope crosses the
+ * threshold and rebuilt when it outgrows its load.
+ * ------------------------------------------------------------------ */
+#define SYMTAB_INDEX_MIN 16
+
+#define symtab_hash strmap_hash
+
+static void symtab_rebuild_index(SymbolTable* table, int bucket_count) {
+    Symbol** buckets = calloc((size_t)bucket_count, sizeof(Symbol*));
+    if (!buckets) return;                     /* keep the old index or none */
+    free(table->buckets);
+    table->buckets = buckets;
+    table->bucket_count = bucket_count;
+    /* Chain oldest first so that each chain ends up newest-first, the
+     * same order as the list. */
+    int n = table->symbol_count;
+    Symbol** order = malloc(sizeof(Symbol*) * (size_t)(n > 0 ? n : 1));
+    if (!order) { free(table->buckets); table->buckets = NULL; table->bucket_count = 0; return; }
+    int i = 0;
+    for (Symbol* s = table->symbols; s && i < n; s = s->next) order[i++] = s;
+    for (int k = i - 1; k >= 0; k--) {
+        Symbol* s = order[k];
+        unsigned b = symtab_hash(s->name) & (unsigned)(bucket_count - 1);
+        s->hash_next = buckets[b];
+        buckets[b] = s;
+    }
+    free(order);
+}
+
+/* Link a freshly created symbol at the head of the list and of its bucket. */
+static void symtab_link(SymbolTable* table, Symbol* symbol) {
+    symbol->next = table->symbols;
+    symbol->hash_next = NULL;
+    table->symbols = symbol;
+    table->symbol_count++;
+    if (!table->buckets) {
+        if (table->symbol_count >= SYMTAB_INDEX_MIN) symtab_rebuild_index(table, 64);
+        return;
+    }
+    if (table->symbol_count * 4 > table->bucket_count * 3) {
+        symtab_rebuild_index(table, table->bucket_count * 2);
+        return;                               /* the rebuild chained it */
+    }
+    unsigned b = symtab_hash(symbol->name) & (unsigned)(table->bucket_count - 1);
+    symbol->hash_next = table->buckets[b];
+    table->buckets[b] = symbol;
+}
+
+void pop_symbol(SymbolTable* table) {
+    if (!table || !table->symbols) return;
+    Symbol* symbol = table->symbols;
+    table->symbols = symbol->next;
+    table->symbol_count--;
+    if (table->buckets) {
+        unsigned b = symtab_hash(symbol->name) & (unsigned)(table->bucket_count - 1);
+        if (table->buckets[b] == symbol) {
+            table->buckets[b] = symbol->hash_next;
+        } else {
+            /* Cannot happen while the list is only ever changed through
+             * this file, but a chain walk is the safe answer if it did. */
+            for (Symbol* s = table->buckets[b]; s; s = s->hash_next) {
+                if (s->hash_next == symbol) { s->hash_next = symbol->hash_next; break; }
+            }
+        }
+    }
+    if (symbol->name) free(symbol->name);
+    if (symbol->type) free_type(symbol->type);
+    if (symbol->alias_target) free(symbol->alias_target);
+    free(symbol);
+}
+
 void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, int is_function, int is_state) {
     Symbol* symbol = malloc(sizeof(Symbol));
     symbol->name = strdup(name);
@@ -172,8 +260,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->node = NULL;  // Initialize to NULL
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
-    symbol->next = table->symbols;
-    table->symbols = symbol;
+    symtab_link(table, symbol);
 }
 
 Symbol* lookup_symbol(SymbolTable* table, const char* name) {
@@ -233,6 +320,16 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
 }
 
 Symbol* lookup_symbol_local(SymbolTable* table, const char* name) {
+    if (table->buckets) {
+        /* #2007: the indexed path. The chain is newest-first like the
+         * list, so the first hit is the binding the list walk would
+         * have returned. */
+        unsigned b = symtab_hash(name) & (unsigned)(table->bucket_count - 1);
+        for (Symbol* s = table->buckets[b]; s; s = s->hash_next) {
+            if (strcmp(s->name, name) == 0) return s;
+        }
+        return NULL;
+    }
     Symbol* current = table->symbols;
     /* The scope chain is a linked list and this is the compiler's hottest
      * loop: a profile of one stdlib module puts strcmp at the top, reached
@@ -262,8 +359,9 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->is_module_alias = 1;
     symbol->alias_target = strdup(module_name);
     symbol->node = NULL;
-    symbol->next = table->symbols;
-    table->symbols = symbol;
+    symbol->type_inferred = 0;
+    symbol->width_explicit = 0;
+    symtab_link(table, symbol);
 }
 
 Symbol* resolve_module_alias(SymbolTable* table, const char* name) {

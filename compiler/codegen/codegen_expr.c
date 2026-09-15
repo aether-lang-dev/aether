@@ -135,13 +135,7 @@ static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
      * parameter shadowed from a DIFFERENT module, which survived that fix. */
     if (name_is_enclosing_param(gen, node->value) ||
         is_var_declared(gen, node->value)) return NULL;
-    for (int i = 0; i < gen->program->child_count; i++) {
-        ASTNode* pc = gen->program->children[i];
-        if (pc && (pc->type == AST_FUNCTION_DEFINITION ||
-                   pc->type == AST_BUILDER_FUNCTION) &&
-            pc->value && strcmp(pc->value, node->value) == 0) return pc;
-    }
-    return NULL;
+    return find_function_definition_by_name(gen->program, node->value);
 }
 
 /* #1240: is `macc` a field of a C-owned struct (`extern struct`, with or
@@ -1059,16 +1053,7 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
             // a closure variable, bind this var to that closure's id too.
             // Example: w = build_pair() where build_pair ends in `return wrapped`
             // and wrapped is a known closure variable.
-            ASTNode* target_fn = NULL;
-            for (int i = 0; i < gen->program->child_count; i++) {
-                ASTNode* top = gen->program->children[i];
-                if (top && (top->type == AST_FUNCTION_DEFINITION ||
-                            top->type == AST_BUILDER_FUNCTION) &&
-                    top->value && strcmp(top->value, rhs->value) == 0) {
-                    target_fn = top;
-                    break;
-                }
-            }
+            ASTNode* target_fn = find_function_definition_by_name(gen->program, rhs->value);
             if (target_fn) {
                 for (int i = 0; i < target_fn->child_count; i++) {
                     ASTNode* body = target_fn->children[i];
@@ -1591,23 +1576,19 @@ static const char* lookup_var_c_type(CodeGenerator* gen, const char* var_name, c
         }
         return "int";
     }
-    // Parent-function-first lookup
+    // Parent-function-first lookup, through the program index (#2007).
     if (parent_func) {
-        for (int i = 0; i < gen->program->child_count; i++) {
-            ASTNode* top = gen->program->children[i];
-            if (!top) continue;
-            int matches = 0;
-            if (strcmp(parent_func, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
-                matches = 1;
-            } else if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
-                       top->value && strcmp(top->value, parent_func) == 0) {
-                matches = 1;
-            }
-            if (matches) {
-                const char* t = lookup_in_function(top, var_name);
-                if (t) return t;
-                break; // don't scan other functions — captured names resolve lexically
-            }
+        ASTNode* top = NULL;
+        if (strcmp(parent_func, "main") == 0) {
+            ProgramIndex* ix = program_index(gen->program);
+            top = ix ? ix->main_fn : NULL;
+        } else {
+            top = find_function_definition_by_name(gen->program, parent_func);
+        }
+        if (top) {
+            const char* t = lookup_in_function(top, var_name);
+            if (t) return t;
+            // don't scan other functions — captured names resolve lexically
         }
     }
     // Fallback: program-wide search (kept for safety when parent_func is NULL
@@ -4525,16 +4506,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                            extern; redirecting past it would call the raw extern and
                            skip the wrapper's ownership handling. */
                         int qknown = is_extern_func(gen, c_func_name);
-                        if (!qknown && gen->program) {
-                            for (int qk = 0; qk < gen->program->child_count; qk++) {
-                                ASTNode* qd = gen->program->children[qk];
-                                if (qd && (qd->type == AST_FUNCTION_DEFINITION ||
-                                           qd->type == AST_BUILDER_FUNCTION) &&
-                                    qd->value && strcmp(qd->value, c_func_name) == 0) {
-                                    qknown = 1;
-                                    break;
-                                }
-                            }
+                        if (!qknown && gen->program &&
+                            find_function_definition_by_name(gen->program, c_func_name)) {
+                            qknown = 1;
                         }
                         if (qdot && qdot[1] && !qknown) {
                             const char* after = qdot + 1;
@@ -5010,10 +4984,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             // Check if function expects this arg as fn type
                             // by looking up the function definition
                             int func_wants_fn = 0;
-                            for (int fi = 0; fi < gen->program->child_count; fi++) {
-                                ASTNode* fdef = gen->program->children[fi];
-                                if (fdef && (fdef->type == AST_FUNCTION_DEFINITION || fdef->type == AST_BUILDER_FUNCTION) &&
-                                    fdef->value && strcmp(fdef->value, func_name) == 0) {
+                            {
+                                ASTNode* fdef = find_function_definition_by_name(gen->program, func_name);
+                                if (fdef) {
                                     int pi = 0;
                                     for (int fj = 0; fj < fdef->child_count; fj++) {
                                         ASTNode* p = fdef->children[fj];
@@ -5024,7 +4997,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                         }
                                         pi++;
                                     }
-                                    break;
                                 }
                             }
                             if (!func_wants_fn) continue; // skip DSL trailing block
@@ -5049,12 +5021,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             // dot-normalized C name so merged stdlib wrappers
                             // (e.g. list.add -> list_add in the program AST)
                             // also get their ptr params auto-cast.
-                            for (int fi = 0; fi < gen->program->child_count; fi++) {
-                                ASTNode* fdef = gen->program->children[fi];
-                                if (fdef && (fdef->type == AST_FUNCTION_DEFINITION || fdef->type == AST_BUILDER_FUNCTION) &&
-                                    fdef->value &&
-                                    (strcmp(fdef->value, func_name) == 0 ||
-                                     strcmp(fdef->value, c_func_name) == 0)) {
+                            /* A definition is never spelt with a dot in the
+                               merged program, so the dotted call-site name can
+                               only match through its normalised form. */
+                            {
+                                ASTNode* fdef = find_function_definition_by_name(gen->program, func_name);
+                                if (!fdef) fdef = find_function_definition_by_name(gen->program, c_func_name);
+                                if (fdef) {
                                     int pi = 0;
                                     for (int fj = 0; fj < fdef->child_count; fj++) {
                                         ASTNode* fp = fdef->children[fj];
@@ -5065,7 +5038,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                         }
                                         pi++;
                                     }
-                                    break;
                                 }
                             }
                         }

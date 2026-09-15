@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include "../ast.h"
+#include "../aether_strmap.h"
 #include "../../runtime/actors/aether_message_registry.h"
 
 // Maximum defer nesting depth (scope depth * statements per scope)
@@ -117,9 +118,10 @@ typedef struct {
     // NULL when not requested.
     const char* emit_main_target;
 
-    // Track generated pattern matching functions to avoid duplicates
-    char** generated_functions;
-    int generated_function_count;
+    // Track generated pattern matching functions to avoid duplicates.
+    // #2007: a set, asked once per top-level definition; a list walk made
+    // that quadratic in the number of functions.
+    StrMap generated_functions;
 
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
     ASTNode* defer_stack[MAX_DEFER_STACK];
