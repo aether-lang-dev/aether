@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.671.0]
+
 ### Fixed
 
 - **A binding named `none` could be declared but never read (#2018).** `none`
