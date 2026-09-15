@@ -3220,14 +3220,21 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
                                     const char* c_type, ASTNode* init_expr,
                                     const char* init_text, int line, int column) {
     if (!c_type || c_type[0] == 0) c_type = "int";
-    fprintf(gen->output, "%s* %s = (%s*)_aether_cell_new(sizeof(%s)); *%s = ",
-            c_type, name, c_type, c_type, name);
-    if (init_expr) {
-        generate_expression(gen, init_expr);
-    } else {
-        fprintf(gen->output, "%s", init_text ? init_text : "0");
+    fprintf(gen->output, "%s* %s = (%s*)_aether_cell_new(sizeof(%s));",
+            c_type, name, c_type, c_type);
+    /* No initialiser is the hoisted shape (#2024): the cell is declared
+     * ahead of the loop or branch that first assigns it, and the
+     * allocation is zero-filled, so the value is defined until then. */
+    if (init_expr || init_text) {
+        fprintf(gen->output, " *%s = ", name);
+        if (init_expr) {
+            generate_expression(gen, init_expr);
+        } else {
+            fprintf(gen->output, "%s", init_text);
+        }
+        fprintf(gen->output, ";");
     }
-    fprintf(gen->output, ";\n");
+    fprintf(gen->output, "\n");
     mark_var_declared(gen, name);
     ASTNode* release_call = create_ast_node(AST_FUNCTION_CALL, "_aether_cell_release",
                                             line, column);
@@ -3657,7 +3664,6 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
          * local — the write is routed to the file-scope static by the
          * variable-declaration emitter. */
         if (is_module_global_var(gen, n)) continue;
-        mark_var_declared(gen, n);
 
         // Recover a usable type from either branch's initializer.
         ASTNode* decl = find_branch_decl(then_body, n);
@@ -3677,6 +3683,15 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
             }
         }
         print_indent(gen);
+        /* #2024: a mutated capture is hoisted as its cell, not as a plain
+         * value -- see hoist_loop_vars. */
+        if (is_promoted_capture(gen, n)) {
+            emit_promoted_cell_declaration(gen, n, get_c_type(var_type), NULL, NULL,
+                                           decl ? decl->line : then_body->line,
+                                           decl ? decl->column : then_body->column);
+            continue;
+        }
+        mark_var_declared(gen, n);
         emit_hoisted_local_decl(gen, var_type, n);
     }
 }
@@ -3695,7 +3710,6 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
              * scoped local — it would shadow the file-scope static. */
             if (!is_var_declared(gen, child->value) &&
                 !is_module_global_var(gen, child->value)) {
-                mark_var_declared(gen, child->value);
                 // Determine type
                 Type* var_type = child->node_type;
                 if ((!var_type || var_type->kind == TYPE_VOID || var_type->kind == TYPE_UNKNOWN)
@@ -3704,6 +3718,20 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
                 }
                 const char* c_type = get_c_type(var_type);
                 print_indent(gen);
+                /* #2024: a variable a closure mutates lives in a heap
+                 * cell, not a plain value, and every later write to it
+                 * is `*name = ...`. Hoisting it as `T name;` declared
+                 * the wrong thing and the first assignment in the body
+                 * then dereferenced an int. The cell is hoisted instead
+                 * -- same scope as any other hoisted loop variable, so
+                 * one cell across iterations, and its release is queued
+                 * at this scope's exit like a first assignment would. */
+                if (is_promoted_capture(gen, child->value)) {
+                    emit_promoted_cell_declaration(gen, child->value, c_type, NULL, NULL,
+                                                   child->line, child->column);
+                    continue;
+                }
+                mark_var_declared(gen, child->value);
                 /* Zero-initialize struct hoists so the first-iteration
                  * struct-destroy call (#465) sees zero `_heap_<field>`
                  * trackers instead of stack-uninitialised garbage.
@@ -4038,6 +4066,13 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
         }
         const char* c_type = get_c_type(var_type);
         print_indent(gen);
+        /* #2024: same as hoist_loop_vars -- a mutated capture is hoisted
+         * as its cell, not as a plain value. */
+        if (is_promoted_capture(gen, name)) {
+            emit_promoted_cell_declaration(gen, name, c_type, NULL, NULL,
+                                           first_decl->line, first_decl->column);
+            continue;
+        }
         fprintf(gen->output, "%s %s;\n", c_type, name);
         mark_var_declared(gen, name);
     }

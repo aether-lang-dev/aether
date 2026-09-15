@@ -3911,6 +3911,12 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
         // because the lazy tracker init was scope-local. Mirror of
         // the call in codegen_func.c::generate_function_definition.
         if (main->children[0] && main->children[0]->type == AST_BLOCK) {
+            /* #2029: same pre-pass the regular-function path runs (#278),
+             * and in the same position -- before hoist_heap_string_trackers,
+             * which skips the names this one has already declared. A name
+             * first assigned inside an if-arm and read after the if needs
+             * a declaration at this scope, in main() as anywhere else. */
+            hoist_if_branch_vars(gen, main->children[0]);
             /* Issue #501 follow-up: mark try-clobbered vars in main()
              * so the `volatile` prefix is applied at decl sites for
              * locals modified inside a try body. */
@@ -4748,7 +4754,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * string count it mirrors: a closure env is not shared across threads. */
     print_line(gen, "typedef union { long _refs; long double _ld; void* _p; long long _ll; } _AeCellHeader;");
     print_line(gen, "static inline void* _aether_cell_new(size_t size) {");
-    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)malloc(sizeof(_AeCellHeader) + size);");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)calloc(1, sizeof(_AeCellHeader) + size);");
     print_line(gen, "    if (!h) aether_panic(\"out of memory allocating a captured variable\");");
     print_line(gen, "    h->_refs = 1;");
     print_line(gen, "    return (void*)(h + 1);");
