@@ -143,6 +143,36 @@ static int token_is_reserved_keyword(Token* token) {
 // position) and `union` (a C keyword, so a value named `union` would emit
 // invalid C — supporting it needs value-identifier mangling in codegen, a
 // separate change).
+// #340 made `none` the empty-optional literal: any bare identifier spelt `none`
+// in expression position IS the literal. That makes the spelling unusable as a
+// name, and not in a way the use can warn about -- the use simply reads as the
+// literal, and the error arrives two concepts away ("cannot interpolate this
+// value", "invalid operation for given types") or, in one shape, as malformed C
+// out of codegen, where the variable and the literal both try to own the name
+// (#2018). So it is refused where it is BOUND, which is the one place the
+// diagnostic can point at something the user actually wrote.
+//
+// Returns 1 and reports when `token` is the identifier `none`; the caller
+// abandons the declaration. Only binding positions call this. A `match` arm
+// spelt `none` is the literal pattern and goes through parse_expression, so it
+// never arrives here. The backtick escape is deliberately not offered: it yields
+// the same identifier token, which expression position would still read as the
+// literal.
+static int reject_none_binding(Parser* parser, const Token* token, const char* what) {
+    if (!token || token->type != TOKEN_IDENTIFIER || !token->value ||
+        strcmp(token->value, "none") != 0) return 0;
+    if (!parser->suppress_errors) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+            "'none' is the empty-optional literal and cannot be used as a %s: every "
+            "later use of it would read as the literal, not the binding", what);
+        aether_error_full(msg, token->line, token->column,
+                          "rename it (e.g. 'nothing', 'absent' or 'none_')",
+                          NULL, AETHER_ERR_SYNTAX);
+    }
+    return 1;
+}
+
 static int token_is_value_ident(const Token* token) {
     if (!token) return 0;
     switch (token->type) {
@@ -1003,7 +1033,7 @@ ASTNode* parse_closure_expression(Parser* parser) {
             // Parse parameters
             do {
                 Token* param_name = expect_token(parser, TOKEN_IDENTIFIER);
-                if (!param_name) {
+                if (!param_name || reject_none_binding(parser, param_name, "parameter name")) {
                     free_ast_node(closure);
                     return NULL;
                 }
@@ -2527,6 +2557,7 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             advance_token(parser); // consume 'const'
             Token* cname = expect_token(parser, TOKEN_IDENTIFIER);
             if (!cname) return NULL;
+            if (reject_none_binding(parser, cname, "constant name")) return NULL;
 
             // Check for array form: const NAME[] = [...]
             int is_array = 0;
@@ -2848,6 +2879,7 @@ ASTNode* parse_variable_declaration_with_semicolon(Parser* parser, bool expect_s
     Type* type = parse_type(parser);  // parse_type will advance past type
     Token* name = expect_token(parser, TOKEN_IDENTIFIER);
     if (!name) return NULL;
+    if (reject_none_binding(parser, name, "variable name")) return NULL;
     
     ASTNode* decl = create_ast_node(AST_VARIABLE_DECLARATION, name->value, name->line, name->column);
     decl->node_type = type;
@@ -2909,6 +2941,7 @@ ASTNode* parse_python_style_declaration(Parser* parser) {
         parser_error(parser, "Expected identifier");
         return NULL;
     }
+    if (reject_none_binding(parser, name, "variable name")) return NULL;
     advance_token(parser);
 
     // Check for tuple destructuring: a, b = func()
@@ -2934,6 +2967,10 @@ ASTNode* parse_python_style_declaration(Parser* parser) {
                 discard->node_type = create_type(TYPE_UNKNOWN);
                 add_child(destructure, discard);
             } else if (token_is_value_ident(next_name)) {
+                if (reject_none_binding(parser, next_name, "variable name")) {
+                    free_ast_node(destructure);
+                    return NULL;
+                }
                 advance_token(parser);
                 ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, next_name->value, next_name->line, next_name->column);
                 var->node_type = create_type(TYPE_UNKNOWN);
@@ -4803,6 +4840,7 @@ ASTNode* parse_extern_declaration(Parser* parser) {
         advance_token(parser);  // consume 'const'
         Token* cname = expect_token(parser, TOKEN_IDENTIFIER);
         if (!cname) return NULL;
+        if (reject_none_binding(parser, cname, "constant name")) return NULL;
         if (!expect_token(parser, TOKEN_COLON)) return NULL;
         Type* ctype = parse_type(parser);
         if (!ctype) return NULL;
@@ -5408,6 +5446,7 @@ ASTNode* parse_pattern(Parser* parser) {
             }
 
             // Regular variable pattern
+            if (reject_none_binding(parser, token, "parameter name")) return NULL;
             advance_token(parser);
             ASTNode* pattern = create_ast_node(AST_PATTERN_VARIABLE, token->value,
                                               token->line, token->column);
@@ -6515,6 +6554,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 advance_token(parser); // consume 'var'
                 Token* vname = expect_token(parser, TOKEN_IDENTIFIER);
                 if (!vname) { advance_token(parser); return NULL; }
+                if (reject_none_binding(parser, vname, "variable name")) { advance_token(parser); return NULL; }
                 Type* vtype = NULL;
                 if (peek_token(parser) && peek_token(parser)->type == TOKEN_COLON) {
                     advance_token(parser); // consume ':'
@@ -6549,6 +6589,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 advance_token(parser); // consume 'const'
                 Token* cname = expect_token(parser, TOKEN_IDENTIFIER);
                 if (!cname) { advance_token(parser); return NULL; }
+                if (reject_none_binding(parser, cname, "constant name")) { advance_token(parser); return NULL; }
 
                 int is_array = 0;
                 /* #745: explicit element type for a module-level const

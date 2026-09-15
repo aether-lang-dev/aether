@@ -1273,7 +1273,7 @@ let empty: int? = none      // the absent sentinel
 
 ### `none` and equality
 
-`none` is a reserved literal (like `true`, `false`, and `null`), it cannot be used as a variable name. Compare against it with `==` / `!=`:
+`none` is a reserved literal (like `true`, `false`, and `null`), it cannot be used as a variable, parameter or constant name — the compiler refuses the declaration, because every later use of such a binding would read as the literal instead. Compare against it with `==` / `!=`:
 
 ```aether,fragment
 if empty == none {
