@@ -1,0 +1,146 @@
+// Regression: a mutated capture first assigned inside a loop body or an
+// if-arm is hoisted as its heap cell, not as a plain value (#2024), and
+// main() hoists if-arm variables like any other function (#2029).
+//
+// A variable a closure assigns to lives in a heap cell (`int* n`), and
+// every write to it is `*n = ...`. The three hoists that pre-declare a
+// variable ahead of the loop or branch that first assigns it -- the loop
+// hoist, the if/else common-name hoist, the if-arm-referenced-outside
+// hoist -- declared it as `int n;`, so the first assignment in the body
+// dereferenced an int and the generated C did not compile:
+//
+//     error: invalid type argument of unary '*' (have 'int')
+//
+// The hoists now declare the cell (zero-filled, released at the hoisting
+// scope's exit) and the body writes through it. One cell across
+// iterations, the same scope any other hoisted variable gets.
+//
+// main() separately never ran the if-arm hoist at all (#2029), so even a
+// plain `only = 3` inside an if, read after it, failed to compile there
+// while the same body in a function was fine.
+//
+// Each shape below is checked by value; the leak gates check that every
+// hoisted cell is released.
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, got: int, want: int) {
+    if got == want {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}: got ${got}, want ${want}")
+        failures = failures + 1
+    }
+}
+
+run(cb: fn) { cb() }
+
+// (1) The issue's shape: first assigned in a while body, mutated by a
+//     callback, read after the callback in the same iteration.
+while_body() -> int {
+    seen = 0
+    j = 0
+    while j < 20 {
+        local = j
+        run() callback { local = local * 2 }
+        seen = seen + local
+        j = j + 1
+    }
+    return seen
+}
+
+// (2) Same in a for loop.
+for_body() -> int {
+    acc = 0
+    for i in 0..4 {
+        step = i
+        run() callback { step = step + 100 }
+        acc = acc + step
+    }
+    return acc
+}
+
+// (3) First assigned in both arms of an if/else -- the common-name hoist.
+if_else_arms(flag: int) -> int {
+    if flag == 1 {
+        tally = 10
+        run() callback { tally = tally + 5 }
+    } else {
+        tally = 20
+        run() callback { tally = tally + 7 }
+    }
+    return tally
+}
+
+// (4) First assigned in one arm and read after the if -- the
+//     referenced-outside hoist.
+then_arm_only() -> int {
+    flag = 1
+    if flag == 1 {
+        only = 3
+        run() callback { only = only * 10 }
+    }
+    return only
+}
+
+// (5) The loop hoist inside a closure body, with a nested callback
+//     mutating the loop variable.
+in_closure() -> int {
+    outer = || {
+        total = 0
+        k = 0
+        while k < 3 {
+            piece = k
+            run() callback { piece = piece * 2 }
+            total = total + piece
+            k = k + 1
+        }
+        return total
+    }
+    int r = call(outer)
+    return r
+}
+
+main() {
+    println("=== hoisted capture cells (#2024, #2029) ===")
+
+    check("while body", while_body(), 380)
+    check("for body", for_body(), 406)
+    check("if/else, then arm taken", if_else_arms(1), 15)
+    check("if/else, else arm taken", if_else_arms(0), 27)
+    check("then arm only, read after the if", then_arm_only(), 30)
+    check("loop hoist inside a closure body", in_closure(), 6)
+
+    // (6) The same shapes directly in main(), which has its own codegen
+    //     path and its own hoist pre-passes (#2029).
+    flag = 1
+    if flag == 1 {
+        plain = 3
+    }
+    check("main: plain if-arm variable read after the if", plain, 3)
+
+    if flag == 1 {
+        cell = 4
+        run() callback { cell = cell + 1 }
+    }
+    check("main: mutated if-arm capture read after the if", cell, 5)
+
+    sum = 0
+    n = 0
+    while n < 5 {
+        v = n
+        run() callback { v = v + 1 }
+        sum = sum + v
+        n = n + 1
+    }
+    check("main: while-body capture", sum, 15)
+
+    if failures == 0 {
+        println("hoisted capture cells: all checks passed")
+    } else {
+        println("hoisted capture cells: ${failures} failure(s)")
+        exit(1)
+    }
+}

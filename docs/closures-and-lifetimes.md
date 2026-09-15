@@ -208,6 +208,12 @@ a closure owned and freed by an extern — leaked one cell per call.)
 The count is a plain integer, like the string reference count it mirrors:
 a closure env is not shared between threads.
 
+A cell first assigned inside a loop body or an if-arm is hoisted ahead of
+that loop or branch like any other such variable (#2024): declared as the
+cell, zero-filled, at the hoisting scope, and released when that scope
+ends — so it is one cell across the iterations, exactly as the hoisted
+plain variable is one variable.
+
 A builder block (`window(...) { ... }`, `vstack(4) { ... }`) is a scope
 like any other here. Its body is emitted inside C braces and now opens a
 matching defer scope, so a cell, or a heap string, declared in the block

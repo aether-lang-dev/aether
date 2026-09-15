@@ -11,6 +11,27 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A mutated capture first assigned inside a loop body or an if-arm did
+  not compile (#2024).** A variable a closure assigns to lives in a heap
+  cell, and every write to it is `*name = ...`. The three pre-passes that
+  hoist a variable ahead of the loop or branch that first assigns it — the
+  loop hoist, the if/else common-name hoist, the if-arm-referenced-outside
+  hoist — declared it as a plain value, so the body's first assignment
+  dereferenced an `int` and the generated C failed with `invalid type
+  argument of unary '*'`. The hoists now declare the cell, zero-filled and
+  released at the hoisting scope's exit, exactly as a first assignment
+  would. `tests/regression/test_capture_cell_hoisted.ae` covers a while
+  body, a for body, both if/else arms, a then-arm read after the if, and
+  the loop hoist inside a closure body.
+
+- **`main()` did not hoist a variable first assigned inside an if-arm and
+  read after the if (#2029).** Regular functions run that pre-pass (#278);
+  `main()` ran every other one but not it, so `if flag { x = 3 }` followed
+  by a read of `x` compiled in a function and failed with `'x' undeclared`
+  in `main()`. `main()` now runs the same pass in the same position.
+
 ## [0.672.0]
 
 ### Fixed
