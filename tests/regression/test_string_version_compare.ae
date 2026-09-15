@@ -1,0 +1,113 @@
+// Regression: string.version_compare — GNU `sort -V` (dpkg verrevcmp / coreutils
+// filevercmp) semantics. The aeb SDK finders pick the newest-version jar off
+// disk (was `ls … | sort -Vr | head -1`); this must match `sort -V` byte-for-
+// byte so the in-process max-by-version picks the same jar the shell did.
+//
+// The adjacent pairs below trace the ascending order the version comparator
+// itself produces, verified against `sort -V -s` (the -s suppresses sort's
+// whole-line lexical TIEBREAK, exposing filevercmp's own verdict):
+//   0.9 < 1.0~rc1 < 1.0 (== 1.00) < 1.0a < 1.0b < 1.0-SNAPSHOT < 1.0-rc1 <
+//   1.0.0 < 1.01 < 1.2.3 < 1.2.3.4 < 1.9 < 1.10 < 1.10.1 < 1.11 < 1.11.1 <
+//   2.0 < 9.0 < 10.0
+// filevercmp treats 1.0 and 1.00 as EQUAL (both value 0 after zero-stripping);
+// plain `sort -V` only appears to order them because it then falls back to a
+// lexical compare of the whole line. The primitive returns the version verdict
+// (0 for the tie); a caller picking "newest" doesn't care which tie-member wins.
+// Each strict pair is asserted < 0 forward and > 0 backward; the tie and a few
+// self-pairs check == 0. Self-asserting: FAIL + exit(1), PASS at the end.
+
+import std.string
+
+extern exit(code: int)
+
+// Assert version_compare(a, b) has the expected SIGN (-1 / 0 / 1).
+_cmp(a: string, b: string, want: int) {
+    got = string.version_compare(a, b)
+    s = 0
+    if got < 0 { s = 0 - 1 }
+    if got > 0 { s = 1 }
+    if s != want {
+        println("FAIL version_compare('${a}', '${b}') = ${got} (sign ${s}), want ${want}")
+        exit(1)
+    }
+}
+
+// Assert a < b (forward < 0, backward > 0). The workhorse for the ordered chain.
+_lt(a: string, b: string) {
+    _cmp(a, b, 0 - 1)
+    _cmp(b, a, 1)
+}
+
+main() {
+    // --- the canonical `sort -V` ascending chain (adjacent pairs) ------------
+    _lt("0.9", "1.0~rc1")
+    _lt("1.0~rc1", "1.0") // '~' sorts before end-of-string
+    _cmp("1.0", "1.00", 0) // EQUAL: both value 0 after zero-strip
+    _cmp("1.00", "1.0", 0) // symmetric
+    _lt("1.0", "1.0a") // letter sorts after end-of-string
+    _lt("1.00", "1.0a") // same, from the tie's other member
+    _lt("1.0a", "1.0b")
+    _lt("1.0b", "1.0-SNAPSHOT") // '-' punctuation sorts after letters
+    _lt("1.0-SNAPSHOT", "1.0-rc1") // 'S'(83) < 'r'(114)
+    _lt("1.0-rc1", "1.0.0") // '-'(45)+256 vs '.'(46)+256
+    _lt("1.0.0", "1.01")
+    _lt("1.01", "1.2.3")
+    _lt("1.2.3", "1.2.3.4")
+    _lt("1.2.3.4", "1.9")
+    _lt("1.9", "1.10") // numeric, not lexical
+    _lt("1.10", "1.10.1")
+    _lt("1.10.1", "1.11")
+    _lt("1.11", "1.11.1") // real on-disk: clojure-1.11 vs 1.11.1
+    _lt("1.11.1", "2.0")
+    _lt("2.0", "9.0")
+    _lt("9.0", "10.0") // numeric across the major segment
+
+    // --- reflexivity --------------------------------------------------------
+    _cmp("1.0", "1.0", 0)
+    _cmp("1.10.1", "1.10.1", 0)
+    _cmp("", "", 0)
+    _cmp("clojure-1.11.1.jar", "clojure-1.11.1.jar", 0)
+
+    // --- transitivity spot-checks across non-adjacent members ---------------
+    _lt("1.9", "1.11")
+    _lt("1.0~rc1", "10.0")
+    _lt("0.9", "2.0")
+
+    // --- the cases the ask names explicitly ---------------------------------
+    _lt("1.9", "1.10") // numeric segment
+    _lt("1.11", "1.11.1")
+    _lt("1.0", "1.0.0") // distinct (sort -V), NOT Maven-equal
+
+    // --- the real aeb payload: pick the newest clojure jar ------------------
+    // Whole filenames compare correctly under plain verrevcmp: common prefix
+    // "clojure-", then version digits, then ".jar". This is exactly the
+    // max-by-version aeb runs in place of `ls … | sort -Vr | head -1`.
+    _lt("clojure-1.9.0.jar", "clojure-1.10.0.jar")
+    _lt("clojure-1.10.0.jar", "clojure-1.11.jar")
+    _lt("clojure-1.11.jar", "clojure-1.11.1.jar") // ".jar" stripped: 1.11 < 1.11.1
+
+    // --- file-extension awareness (filevercmp), verified vs `sort -V -s` -----
+    _lt("x-1.11.jar", "x-1.11.1.jar") // .jar is an ext (starts with letter)
+    _cmp("x-1.11.7z", "x-1.11.1.7z", 1) // .7z is NOT an ext (digit) → numeric, 7>1
+    _lt("x-1.0.bz2", "x-1.0.gz") // bases tie → extensions decide
+    _lt("foo-1.11.tar.gz", "foo-1.11.1.tar.gz") // multi-segment ext stripped
+
+    // --- documented CAVEAT: whole-string, prefix-first. These pin the behavior
+    // a caller must design around (partition by family before max-ing). "groovy-"
+    // sorts before "groovy-all-", so the prefix decides BEFORE the version — a
+    // naive max across both families would pick the older -all jar.
+    _lt("groovy-2.4.21.jar", "groovy-all-2.4.21.jar") // same ver, prefix decides
+    _lt("groovy-4.0.15.jar", "groovy-all-2.4.21.jar") // NEWER plain < OLDER -all!
+
+    newest = "clojure-1.9.0.jar"
+    if string.version_compare("clojure-1.11.1.jar", newest) > 0 { newest = "clojure-1.11.1.jar" }
+    if string.version_compare("clojure-1.10.0.jar", newest) > 0 { newest = "clojure-1.10.0.jar" }
+    if string.version_compare("clojure-1.11.jar", newest) > 0 { newest = "clojure-1.11.jar" }
+    if string.equals(newest, "clojure-1.11.1.jar") == 0 {
+        println("FAIL newest-jar: got '${newest}', want 'clojure-1.11.1.jar'")
+        exit(1)
+    }
+
+    println("PASS test_string_version_compare")
+    return 0
+}
