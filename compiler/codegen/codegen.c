@@ -4768,6 +4768,39 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (--h->_refs == 0) free(h);");
     print_line(gen, "}");
+    /* String-valued capture cell: the cell OWNS the heap string it holds, so
+     * the last releaser frees that string before freeing the cell. Used for a
+     * promoted capture whose C type is `const char*` — a closure that writes a
+     * heap string through the shared cell (running-max / accumulator). Without
+     * this the string the cell points at leaks once the (correct) suppression
+     * of the closure-exit free lands; with a naive free-in-generic-release it
+     * would instead free an int cell's bit pattern. `_aether_str_cell_set`
+     * frees the previous value before storing a new one, so a per-iteration
+     * reassignment does not leak the superseded string either. */
+    /* Free a value held in a string cell ONLY if it is a refcounted
+     * AetherString (magic header). A bare C literal ("" init, an interpolated
+     * ${..} char*) or a plain malloc'd buffer is NOT owned by the cell and
+     * must not be freed here — freeing a literal segfaults. This mirrors
+     * aether_heap_str_free's magic check but omits its free()-the-rest branch,
+     * because the cell only ever OWNS the magic-headed strings the codegen
+     * routes through it (string_concat / copy / substring results); anything
+     * else it merely points at. */
+    print_line(gen, "static inline void _aether_str_cell_free_val(const char* s) {");
+    print_line(gen, "    if (!s) return;");
+    print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
+    print_line(gen, "    if (_hp[0]==0xDE && _hp[1]==0xC0 && _hp[2]==0x57 && _hp[3]==0xAE) {");
+    print_line(gen, "        aether_unwind_forget(s); string_release(s);");
+    print_line(gen, "    }");
+    print_line(gen, "}");
+    print_line(gen, "static inline void _aether_cell_release_str(void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (--h->_refs == 0) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
+    print_line(gen, "}");
+    print_line(gen, "static inline void _aether_str_cell_set(const char** cell, const char* v) {");
+    print_line(gen, "    if (*cell != v) _aether_str_cell_free_val(*cell);");
+    print_line(gen, "    *cell = v;");
+    print_line(gen, "}");
     /* Prototypes for the magic-aware string builtins the codegen emits
      * directly (char_at -> string_char_at, str_eq / match-on-string ->
      * string_equals). These are not routed through the normal extern-call
