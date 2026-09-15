@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.672.0]
+
 ### Fixed
 
 - **A mutated closure capture leaked its heap cell whenever the compiler
@@ -30,6 +32,7 @@ version number before tagging the release.
   runs every shape a cell can take and is leak-clean under the gates. In
   passing, the MSVC closure-constructor helper now takes a promoted capture
   as the cell pointer it is (`int*`), not as `int`.
+
 ### Added
 
 - **`std.string.version_compare(a, b) -> int`** — a version-aware comparator
