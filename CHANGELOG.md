@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.674.0]
+
 ### Fixed
 
 - **Type checking and code generation grew quadratically in the number of
