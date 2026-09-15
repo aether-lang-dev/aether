@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A spawned child inherited the parent's blocked signal mask, so `os.kill`
+  could not reach it.** POSIX inherits the signal mask across `fork`+`execve`
+  and a `SIG_IGN` disposition across `execve`, so a child spawned from a
+  signal-masking parent — the JVM, .NET, Ruby and Julia runtimes all block
+  signals in their threads — started life with, e.g., SIGTERM blocked;
+  `os.kill(token, 15)` was then delivered but never acted on and an unbounded
+  `os.wait` on the child hung forever (surfaced porting Selenium from the Julia
+  binding: `SigBlk: 0000000000004206` on the child, SIGTERM masked). Every
+  `os` spawn path (`spawn_proc`, `run`, `run_capture`, the pipe/IPC and
+  supervised variants) now gives the child a clean slate before `exec` —
+  unblock every signal and reset any inherited `SIG_IGN` back to `SIG_DFL` —
+  exactly what `posix_spawn` (SETSIGMASK|SETSIGDEF), Python `subprocess`
+  (`restore_signals`) and Go `os/exec` do by default. Verified against the real
+  spawn path with a masking parent (`tests/integration/spawn_signal_mask_reset`).
+  From the selaenium port.
+
 ## [0.675.0]
 
 ### Added

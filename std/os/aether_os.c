@@ -1077,6 +1077,38 @@ static char** build_envp_array(void* env_list) {
     return envp;
 }
 
+/* Give a freshly-forked child a clean signal slate before exec.
+ *
+ * POSIX inherits the signal MASK across both fork and execve, and inherits a
+ * SIG_IGN disposition across execve (handlers reset to SIG_DFL automatically,
+ * but "ignore" does not). So a child spawned from a signal-masking parent — the
+ * JVM, .NET, Ruby, and Julia runtimes all block signals in their threads —
+ * starts life with, e.g., SIGTERM blocked, and a later os.kill(token, SIGTERM)
+ * is delivered but never acted on: the child never dies and an unbounded
+ * os.wait on it blocks forever (asks/spawn-child-inherits-blocked-signal-mask).
+ *
+ * Every spawn path owes the child the clean slate posix_spawn gives with
+ * SETSIGMASK|SETSIGDEF, and that Python subprocess (restore_signals) and Go
+ * os/exec apply by default: unblock everything, and reset any inherited
+ * SIG_IGN back to SIG_DFL. Async-signal-safe (only sigprocmask/sigaction), so
+ * it is legal between fork and exec even in a threaded parent. */
+static void aether_child_reset_signals(void) {
+    sigset_t empty;
+    sigemptyset(&empty);
+    sigprocmask(SIG_SETMASK, &empty, NULL);
+    for (int sig = 1; sig < NSIG; sig++) {
+        struct sigaction cur;
+        if (sigaction(sig, NULL, &cur) != 0) continue;   /* skip invalid/uncatchable */
+        if (cur.sa_handler == SIG_IGN) {
+            struct sigaction dfl;
+            memset(&dfl, 0, sizeof dfl);
+            dfl.sa_handler = SIG_DFL;
+            sigemptyset(&dfl.sa_mask);
+            sigaction(sig, &dfl, NULL);                  /* no-op on SIGKILL/SIGSTOP */
+        }
+    }
+}
+
 int os_run(const char* prog, void* argv_list, void* env_list) {
     if (!prog) return -1;
     if (!aether_sandbox_check("exec", prog)) return -1;
@@ -1093,6 +1125,7 @@ int os_run(const char* prog, void* argv_list, void* env_list) {
     }
     if (pid == 0) {
         // Child
+        aether_child_reset_signals();
         if (envp) {
             execve(prog, av, envp);
         } else {
@@ -1138,6 +1171,7 @@ char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list) {
     }
     if (pid == 0) {
         // Child: redirect stdout to pipe write end, close read end
+        aether_child_reset_signals();
         close(pipefd[0]);
         if (dup2(pipefd[1], 1) < 0) _exit(127);
         close(pipefd[1]);
@@ -1257,6 +1291,7 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
         return out;
     }
     if (pid == 0) {
+        aether_child_reset_signals();
         close(pipefd[0]);
         if (dup2(pipefd[1], 1) < 0) _exit(127);
         close(pipefd[1]);
@@ -1428,6 +1463,7 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     }
     if (pid == 0) {
         /* Child — wire pipefd[1] to fd 3 and tell child where it is. */
+        aether_child_reset_signals();
         close(pipefd[0]);
         if (dup2(pipefd[1], 3) < 0) _exit(127);
         /* Close the original write end if dup2 didn't already (it
@@ -1536,6 +1572,7 @@ _tuple_int_string os_spawn_raw(const char* prog, void* argv_list, void* env_list
     }
     if (pid == 0) {
         /* Child — no pipe, no fd 3, no AETHER_IPC_FD. Plain exec. */
+        aether_child_reset_signals();
         if (envp) {
             execve(prog, av, envp);
             /* execve doesn't PATH-resolve; fall back to execvp so a bare
@@ -1839,6 +1876,7 @@ _tuple_int_string os_run_supervised_raw(const char* prog, void* argv_list, void*
         return out;
     }
     if (pid == 0) {
+        aether_child_reset_signals();
         /* Child: become our own process-group leader before exec so the
          * parent can address the whole subtree as -pid. Setting it in
          * both child and parent (below) closes the fork/exec race. */
@@ -2041,6 +2079,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
     }
     if (pid == 0) {
         /* Child: wire stdin/stdout/stderr to the pipes, close the rest. */
+        aether_child_reset_signals();
         close(in_pipe[1]); close(out_pipe[0]); close(err_pipe[0]);
         if (dup2(in_pipe[0], 0) < 0)  _exit(127);
         if (dup2(out_pipe[1], 1) < 0) _exit(127);
