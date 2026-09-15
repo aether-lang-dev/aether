@@ -1,0 +1,111 @@
+// Regression: strbuilder.finish returns a length-carrying string, so
+// reading it is linear and embedded NULs survive.
+//
+// finish used to hand back a header-less char*. Every string.length /
+// char_at / substring on it then took the strlen fallback, so a
+// character-by-character scan of a finished string was O(n) calls x O(n)
+// strlen: instant on a test input, a hang on a production one, with the
+// right answer throughout (asks/strbuilder-finish-headerless-string-is-
+// on2-to-scan.md -- three LangArena benchmarks timed out on it). The
+// builder now writes into a block laid out as an inline string from its
+// first byte, and finish fills in the header and hands the block over.
+//
+// The scan below is the ask's repro at 400 000 bytes: 4.8s before, 42ms
+// after. It is not timed here -- a wall-clock assertion is a flake on a
+// loaded runner -- but it is the loop that used to hang, and it has to
+// finish with the right sum. The other checks pin what the header makes
+// true: the length is exact through an embedded NUL, a finished string
+// appends into another builder byte for byte, an empty finish is "", and
+// finish_with_length keeps its raw-bytes contract.
+
+import std.strbuilder
+import std.string
+import std.mem
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+main() {
+    println("=== strbuilder.finish carries its length ===")
+
+    // (1) The scan that used to be quadratic.
+    b = strbuilder.new(0)
+    i = 0
+    while i < 400000 {
+        strbuilder.append(b, "x")
+        i = i + 1
+    }
+    s = strbuilder.finish(b)
+    n = string.length(s)
+    sum = 0
+    j = 0
+    while j < n {
+        sum = sum + string.char_at(s, j)
+        j = j + 1
+    }
+    check("400k-byte finished string: length is exact", n == 400000)
+    check("and a char_at scan over it completes with the right sum", sum == 400000 * 120)
+
+    // (2) An embedded NUL is content: the length travels with the string.
+    b2 = strbuilder.new(8)
+    strbuilder.append_byte(b2, 65)
+    strbuilder.append_byte(b2, 0)
+    strbuilder.append_byte(b2, 66)
+    s2 = strbuilder.finish(b2)
+    check("finish keeps an embedded NUL: length 3", string.length(s2) == 3)
+    check("and the byte after it", string.char_at(s2, 2) == 66)
+
+    // (3) A finished string appended into another builder round-trips,
+    //     including the NUL, because append reads the header's length.
+    b3 = strbuilder.new(8)
+    strbuilder.append(b3, "[")
+    strbuilder.append(b3, s2)
+    strbuilder.append(b3, "]")
+    s3 = strbuilder.finish(b3)
+    check("a finished string appends whole into another builder", string.length(s3) == 5)
+    check("with its bytes in place",
+        string.char_at(s3, 0) == 91 && string.char_at(s3, 2) == 0 && string.char_at(s3, 4) == 93)
+
+    // (4) An empty builder finishes to "".
+    b4 = strbuilder.new(4)
+    s4 = strbuilder.finish(b4)
+    check("empty builder finishes to the empty string", string.length(s4) == 0)
+    check("which compares equal to \"\"", string.equals(s4, "") == 1)
+
+    // (5) finish_with_length: raw bytes, exact length, no terminator
+    //     required, freed by the caller. The content is shifted down over
+    //     the block's header, so the bytes must still be where the
+    //     pointer says.
+    b5 = strbuilder.new(4)
+    k = 0
+    while k < 300 {
+        strbuilder.append_byte(b5, k % 256)
+        k = k + 1
+    }
+    raw, len5 = strbuilder.finish_with_length(b5)
+    ok5 = len5 == 300
+    m = 0
+    while m < 300 {
+        if mem.get_byte(raw, m) != m % 256 { ok5 = false }
+        m = m + 1
+    }
+    free(raw)
+    check("finish_with_length returns every byte at its offset", ok5)
+
+    if failures == 0 {
+        println("strbuilder finish length: all checks passed")
+    } else {
+        println("strbuilder finish length: ${failures} failure(s)")
+        exit(1)
+    }
+}

@@ -23,8 +23,10 @@
 //
 // Convention: append-family fns return 1 on success, 0 on failure
 // (matches std.bytes). `finish` is `string @heap` — caller owns the
-// returned buffer; the codegen's heap-tracker reclaims it at scope
-// exit.
+// returned string; the codegen's heap-tracker reclaims it at scope
+// exit. The result carries its length (it is an inline AetherString,
+// handed over without a copy), so string.length / char_at / substring
+// on it are O(1) and a scan of it is linear.
 
 import std.string
 
@@ -46,7 +48,11 @@ exports(
 
 // ---- Raw externs ----
 extern aether_strbuilder_new(cap_hint: int) -> ptr
-extern aether_strbuilder_append(b: ptr, s: string) -> int
+// `s` keeps its AetherString header across the extern boundary (#297's
+// `@aether`), so the C side appends by the string's own length and an
+// embedded NUL survives; a plain literal still arrives as a `char*` and
+// is measured with strlen, as before.
+extern aether_strbuilder_append(b: ptr, s: @aether string) -> int
 extern aether_strbuilder_append_n(b: ptr, s: string, n: int) -> int
 extern aether_strbuilder_append_byte(b: ptr, c: int) -> int
 extern aether_strbuilder_append_int(b: ptr, v: int) -> int
@@ -70,10 +76,11 @@ new(cap_hint: int) -> ptr {
     return aether_strbuilder_new(cap_hint)
 }
 
-// Append a string. Length is taken from the AetherString header if
-// present, else via strlen — so a plain `const char*` containing
-// embedded NULs truncates at the first NUL. For binary-safe content,
-// use `append_n` with an explicit length. Returns 1 on success, 0 on
+// Append a string. Length is taken from the AetherString header when
+// the value carries one (a heap string, a finished builder, a slice),
+// else via strlen — so only a plain literal with embedded NULs
+// truncates at the first NUL. For content you hold as raw bytes, use
+// `append_n` with an explicit length. Returns 1 on success, 0 on
 // failure.
 append(b: ptr, s: string) -> int {
     return aether_strbuilder_append(b, s)

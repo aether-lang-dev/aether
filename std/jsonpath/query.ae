@@ -22,17 +22,17 @@ import std.list
 import std.string
 import std.strbuilder
 import std.regex
-import std.mem
 import model
 import parser
 
-// Normalized paths are plain char* buffers (strbuilder.finish); freed with a
-// raw libc free. Bound as `ptr` and punned from string via `_free_path` so the
-// emitted free takes void*, not const char* (see model.ae for the rationale).
-@extern("free") _free_plain_path(path: ptr)
-
+// Normalized paths come from strbuilder.finish: length-carrying strings
+// whose header and bytes are one block. list_add_string_owned retains such
+// a string rather than copying it, so this release is the builder's own
+// reference going away and the list's reference keeps the path alive. A raw
+// libc free of the bytes here would be an interior pointer into the block
+// -- see model.ae.
 _free_path(path: string) {
-    _free_plain_path(mem.long_to_ptr(mem.ptr_to_long(path)))
+    string.free(path)
 }
 
 exports(
@@ -190,8 +190,8 @@ _push(cursors: ptr, value: ptr, path: string) {
     list.list_add_string_owned(c.paths, path)
 }
 
-// _push for a freshly built plain libc string: stores a managed copy and
-// releases the builder buffer after the list has copied it.
+// _push for a freshly finished path string: the list takes its own
+// reference, then the builder's reference is released.
 _push_owned(cursors: ptr, value: ptr, path: string) {
     c = cursors as *Cursor
     list.list_add_raw(c.values, value)

@@ -15,18 +15,15 @@
 
 import std.list
 import std.string
-import std.mem
 
-// AST names are plain libc-freeable char* buffers from strbuilder.finish (no
-// AetherString header), so string.release/free would no-op and leak them — a
-// raw libc free is required. Bound as `ptr`, not `string`: a string param lowers
-// to `free(const char*)`, which warns under -Wdiscarded-qualifiers on Linux and
-// is a hard error under macOS clang -Werror. `_free_cstr` puns the string to a
-// bare ptr (mem round-trip) so the emitted free takes a void*.
-@extern("free") _free_model_string_memory(p: ptr)
-
+// AST names come from strbuilder.finish, which hands back a length-carrying
+// string (an inline AetherString: header and bytes in one block). They are
+// released through string.free, which dispatches on the header and frees the
+// block whole. A raw libc free of the *bytes* would be an interior pointer
+// into that block -- which is what this did when finish returned a bare
+// buffer, and what corrupted the heap the day it stopped.
 _free_cstr(s: string) {
-    _free_model_string_memory(mem.long_to_ptr(mem.ptr_to_long(s)))
+    string.free(s)
 }
 
 exports(

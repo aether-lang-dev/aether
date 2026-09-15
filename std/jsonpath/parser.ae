@@ -20,18 +20,16 @@
 import std.string
 import std.strbuilder
 import std.list
-import std.mem
 import model
 
 @extern("free") _free_parser_memory(p: ptr)
-// Plain char* buffer (strbuilder.finish); raw libc free. Bound as `ptr` and
-// punned from string via `_free_pstr` so the emitted free takes void*, not
-// const char* — see model.ae for why binding it as `string` warns/errors.
-@extern("free") _free_parser_string_memory(s: ptr)
+// Parser strings come from strbuilder.finish, a length-carrying string whose
+// header and bytes are one block; string_free releases the block whole. See
+// model.ae for why a raw free of the bytes is wrong.
 @extern("string_free") _release_parser_error_string(s: string)
 
 _free_pstr(s: string) {
-    _free_parser_string_memory(mem.long_to_ptr(mem.ptr_to_long(s)))
+    _release_parser_error_string(s)
 }
 
 exports(

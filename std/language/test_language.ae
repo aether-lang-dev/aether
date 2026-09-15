@@ -7,6 +7,12 @@ import std.string
 // codegen bug where the inner cons temporaries' refs are never dropped (they
 // leak even with string_seq_free); build via explicit cons + tail-drop instead.
 // (Tracked as a compiler bug; unrelated to std.language.)
+//
+// The strings parse/base return are heap-tracked: the compiler frees them at
+// scope exit. They must not ALSO be string_free'd here. That used to be
+// harmless only because strbuilder.finish returned a header-less buffer on
+// which string_free was a no-op; now that finish returns a real string the
+// second free would be a double free.
 fn seq3(a: string, b: string, c: string) -> *StringSeq {
     t0 = string_seq_empty()
     t1 = string_seq_cons(c, t0)
@@ -36,7 +42,6 @@ main() {
         exit(1)
     }
     t1 = t1_str as Tag
-    defer string_free(t1 as string)
     if string_equals(t1 as string, "en-US") != 1 {
         print("FAIL: parse(\"en-us\") canonicalized to ${t1 as string}\n")
         exit(1)
@@ -49,7 +54,6 @@ main() {
         exit(1)
     }
     t2 = t2_str as Tag
-    defer string_free(t2 as string)
     if string_equals(t2 as string, "zh-Hans-CN") != 1 {
         print("FAIL: parse(\"ZH-HANS-cn\") canonicalized to ${t2 as string}\n")
         exit(1)
@@ -62,7 +66,6 @@ main() {
         exit(1)
     }
     t3 = t3_str as Tag
-    defer string_free(t3 as string)
     if string_equals(t3 as string, "x-private-tag") != 1 {
         print("FAIL: parse(\"X-private-tag\") canonicalized to ${t3 as string}\n")
         exit(1)
@@ -75,7 +78,6 @@ main() {
         exit(1)
     }
     t4 = t4_str as Tag
-    defer string_free(t4 as string)
     if string_equals(t4 as string, "en-US") != 1 {
         print("FAIL: parse(\"en_US\") canonicalized to ${t4 as string}\n")
         exit(1)
@@ -148,6 +150,8 @@ main() {
     print("PASS: extract region\n")
 
     base_t2 = language.base(t2)
+    // `base` returns a Tag, which the tracker does not own; this is its
+    // only release.
     defer string_free(base_t2 as string)
     if string_equals(base_t2 as string, "zh") != 1 {
         print("FAIL: base(zh-Hans-CN)=${base_t2 as string}\n")
