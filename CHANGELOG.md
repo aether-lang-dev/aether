@@ -11,6 +11,28 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Type checking and code generation grew quadratically in the number of
+  functions (#2007).** A function-heavy file paid for three walks of the
+  whole top level per unit of work: every identifier resolution that missed
+  its local scope walked the file scope's symbol list (all functions),
+  every identifier emitted scanned every top-level function to ask whether
+  it was a `@c_callback`, and every call site, clause count, extern check
+  and forward declaration scanned the same list again. Profiled on the
+  issue's reproducer at 6400 functions, those three were three quarters of
+  the compile. Each scope's symbol table now carries a hash index
+  (`lookup_symbol_local` is O(1) once a scope has 16 symbols; the unwind
+  goes through `pop_symbol` so the index stays in step), and codegen keeps
+  one `ProgramIndex` — clauses by name, externs, callbacks, `main` — built
+  in a single pass and consulted by every former scan. The dead-code prune
+  hashes its reachable set and indexes definitions by name and by
+  `_`-suffix, and the constant-folder's builtin-shadow check runs only for
+  calls that spell a whitelisted builtin, memoised per program. Measured:
+  the 6400-function reproducer 5.1s → 0.48s, growth per doubling 3.4–3.9×
+  → 2.1×; the largest stdlib module (`tls13_client`, 2512 lines) 617ms →
+  237ms. `compiler/aether_strmap.[ch]` is the shared string map behind it.
+
 ## [0.673.0]
 
 ### Added

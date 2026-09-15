@@ -53,19 +53,14 @@ const char* c_callback_symbol(ASTNode* func) {
 // the bare name for in-file ones) and return the C symbol it's bound
 // to. Returns NULL when no such callback exists, so the caller can
 // fall through to the default identifier-emission path.
+//
+// #2007: through the program index. This is asked for every identifier
+// emitted, and a scan of the top level each time made codegen quadratic
+// in the number of functions.
 const char* lookup_c_callback_symbol(CodeGenerator* gen, const char* name) {
     if (!gen || !gen->program || !name) return NULL;
-    for (int i = 0; i < gen->program->child_count; i++) {
-        ASTNode* top = gen->program->children[i];
-        if (!top || !top->value) continue;
-        if (top->type != AST_FUNCTION_DEFINITION &&
-            top->type != AST_BUILDER_FUNCTION) continue;
-        if (!is_c_callback(top)) continue;
-        if (strcmp(top->value, name) == 0) {
-            return c_callback_symbol(top);
-        }
-    }
-    return NULL;
+    ProgramIndex* ix = program_index(gen->program);
+    return ix ? strmap_get(&ix->c_callbacks, name) : NULL;
 }
 
 // Extract the C symbol bound by `@extern("c_symbol")` into `buf`.
@@ -211,14 +206,8 @@ int is_builder_func_reg(CodeGenerator* gen, const char* func_name) {
  * the bare-fn-adapter discovery pre-pass. */
 static ASTNode* find_user_function_by_name(CodeGenerator* gen, const char* name) {
     if (!gen || !gen->program || !name) return NULL;
-    for (int i = 0; i < gen->program->child_count; i++) {
-        ASTNode* c = gen->program->children[i];
-        if (c && (c->type == AST_FUNCTION_DEFINITION ||
-                  c->type == AST_BUILDER_FUNCTION) &&
-            c->value && strcmp(c->value, name) == 0) {
-            return c;
-        }
-    }
+    ASTNode* direct = find_function_definition_by_name(gen->program, name);
+    if (direct) return direct;
     /* #940: a qualified call `mod.fn(...)` keeps its dotted name on the AST,
      * but the merged definition is `<namespace>_fn` — where the namespace is
      * the LAST segment of the module path (module_get_namespace's rule:

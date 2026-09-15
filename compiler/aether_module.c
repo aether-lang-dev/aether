@@ -1,5 +1,6 @@
 #include "aether_module.h"
 #include "aether_error.h"
+#include "aether_strmap.h"
 #include "parser/lexer.h"
 #include "parser/parser.h"
 #include <stdlib.h>
@@ -3325,61 +3326,125 @@ void module_merge_into_program(ASTNode* program) {
 // `module_merge_into_program` produced (`os_argv0`).
 // ----------------------------------------------------------------------------
 
-typedef struct {
-    char** names;
-    int count;
-    int capacity;
-} NameSet;
+/* #2007: the reachable set is a hash set, and the worklist a plain stack.
+ *
+ * The set holds every reachable function name and is probed once per call
+ * site in the program; a linear scan made the prune quadratic in the
+ * number of functions. Names are normalised on the way in -- a dotted
+ * call `os.argv0` files as the merged definition's `os_argv0` -- so both
+ * structures take the same key. */
+typedef StrMap NameSet;
 
-static int nameset_contains(const NameSet* s, const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < s->count; i++) {
-        if (strcmp(s->names[i], name) == 0) return 1;
-    }
-    return 0;
+static const char* prune_normalise(const char* name, char* buf, size_t bufsz) {
+    if (!strchr(name, '.')) return name;
+    size_t n = strlen(name);
+    if (n >= bufsz) n = bufsz - 1;
+    for (size_t i = 0; i < n; i++) buf[i] = (name[i] == '.') ? '_' : name[i];
+    buf[n] = '\0';
+    return buf;
 }
 
+static int nameset_contains(const NameSet* s, const char* name) {
+    return name && strmap_has(s, name);
+}
+
+/* Adds the normalised name; returns 1 when it was new. */
 static int nameset_add(NameSet* s, const char* name) {
     if (!name) return 0;
     char buf[256];
-    const char* key = name;
-    if (strchr(name, '.')) {
-        size_t n = strlen(name);
-        if (n >= sizeof(buf)) n = sizeof(buf) - 1;
-        for (size_t i = 0; i < n; i++) {
-            char c = name[i];
-            buf[i] = (c == '.') ? '_' : c;
-        }
-        buf[n] = '\0';
-        key = buf;
-    }
-    if (nameset_contains(s, key)) return 0;
-    if (s->count >= s->capacity) {
-        int new_cap = s->capacity ? s->capacity * 2 : 64;
-        char** nn = realloc(s->names, sizeof(char*) * new_cap);
-        if (!nn) return 0;
-        s->names = nn;
-        s->capacity = new_cap;
-    }
-    s->names[s->count++] = strdup(key);
+    const char* key = prune_normalise(name, buf, sizeof(buf));
+    if (strmap_has(s, key)) return 0;
+    strmap_put(s, key, NULL);
     return 1;
 }
 
 static void nameset_free(NameSet* s) {
-    for (int i = 0; i < s->count; i++) free(s->names[i]);
-    free(s->names);
-    s->names = NULL;
-    s->count = s->capacity = 0;
+    strmap_free(s);
 }
 
-/* #934 UFCS reachability: a `recv.method(...)` UFCS call is rewritten (at
- * typecheck, AFTER this prune) to an imported `mod.method(recv, ...)` when a
- * module exports a `method` whose first param matches typeof(recv). At prune
- * time the receiver type isn't known, so over-approximate: for a bare method
- * name, seed `mod.method` for EVERY module that exports it. Sound (keeps a
- * few extra bodies); the typechecker still resolves the single real target. */
+/* Every push is gated by a successful nameset_add on the reachable set,
+ * so the stack never sees a duplicate and needs no membership test: it
+ * is the names still to be walked, popped from the top. */
+typedef struct {
+    char** names;
+    int count;
+    int capacity;
+} NameStack;
+
+static void namestack_push(NameStack* s, const char* name) {
+    if (!name) return;
+    char buf[256];
+    const char* key = prune_normalise(name, buf, sizeof(buf));
+    if (s->count >= s->capacity) {
+        int new_cap = s->capacity ? s->capacity * 2 : 64;
+        char** nn = realloc(s->names, sizeof(char*) * new_cap);
+        if (!nn) return;
+        s->names = nn;
+        s->capacity = new_cap;
+    }
+    s->names[s->count++] = strdup(key);
+}
+
+/* #2007: what the worklist drain asks of the program, indexed once.
+ *
+ * For each name popped it needs (a) the first definition with that name,
+ * and (b) every imported definition whose prefixed form ends in `_<name>`
+ * -- the glob-import / selective-import case where user code calls the
+ * merged `mathlist_cube` as `cube`. Both were linear scans of the top
+ * level per popped name, which made the drain quadratic. The index maps a
+ * key to the first definition spelt exactly so, and to the list of
+ * imported definitions for which the key is a `_`-delimited suffix; an
+ * imported `a_b_c` is filed under `b_c` and `c`. */
+typedef struct {
+    ASTNode* first_def;
+    ASTNode** suffix_defs;
+    int suffix_count;
+    int suffix_cap;
+} PruneEntry;
+
+static PruneEntry* prune_index_entry(StrMap* ix, const char* key) {
+    PruneEntry* e = strmap_get(ix, key);
+    if (e) return e;
+    e = calloc(1, sizeof(PruneEntry));
+    if (!e) return NULL;
+    strmap_put(ix, key, e);
+    return e;
+}
+
+static void prune_index_build(StrMap* ix, ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || !c->value) continue;
+        if (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION) continue;
+        PruneEntry* e = prune_index_entry(ix, c->value);
+        if (e && !e->first_def) e->first_def = c;
+        if (!c->is_imported) continue;
+        for (const char* p = strchr(c->value, '_'); p; p = strchr(p + 1, '_')) {
+            if (!p[1]) break;
+            PruneEntry* se = prune_index_entry(ix, p + 1);
+            if (!se) continue;
+            if (se->suffix_count >= se->suffix_cap) {
+                int new_cap = se->suffix_cap ? se->suffix_cap * 2 : 4;
+                ASTNode** nd = realloc(se->suffix_defs, sizeof(ASTNode*) * (size_t)new_cap);
+                if (!nd) continue;
+                se->suffix_defs = nd;
+                se->suffix_cap = new_cap;
+            }
+            se->suffix_defs[se->suffix_count++] = c;
+        }
+    }
+}
+
+static void prune_index_free(StrMap* ix) {
+    for (int k = 0; k < strmap_count(ix); k++) {
+        PruneEntry* e = strmap_value_at(ix, k);
+        if (e) { free(e->suffix_defs); free(e); }
+    }
+    strmap_free(ix);
+}
+
 static void prune_seed_ufcs_method(const char* method, NameSet* seen,
-                                   NameSet* worklist) {
+                                   NameStack* worklist) {
     if (!method || !global_module_registry) return;
     for (int mi = 0; mi < global_module_registry->module_count; mi++) {
         AetherModule* m = global_module_registry->modules[mi];
@@ -3387,15 +3452,15 @@ static void prune_seed_ufcs_method(const char* method, NameSet* seen,
         if (!module_is_exported(m, method)) continue;
         char q[256];
         snprintf(q, sizeof(q), "%s.%s", m->name, method);
-        if (nameset_add(seen, q)) nameset_add(worklist, q);
+        if (nameset_add(seen, q)) namestack_push(worklist, q);
     }
 }
 
-static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist) {
+static void prune_collect_calls(ASTNode* node, NameSet* seen, NameStack* worklist) {
     if (!node) return;
     if (node->type == AST_FUNCTION_CALL && node->value) {
         if (nameset_add(seen, node->value)) {
-            nameset_add(worklist, node->value);
+            namestack_push(worklist, node->value);
         }
         /* #924 re-export: a `hub.fn(...)` call is cloned under the DEFINING
          * module's name (`<origin>_fn`). Seed the origin-qualified form so
@@ -3412,7 +3477,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
                 if (origin && origin->name) {
                     char oq[256];
                     snprintf(oq, sizeof(oq), "%s.%s", origin->name, dot + 1);
-                    if (nameset_add(seen, oq)) nameset_add(worklist, oq);
+                    if (nameset_add(seen, oq)) namestack_push(worklist, oq);
                 }
                 /* #934 shape (b): `value.method(...)` where the receiver is
                  * not a module — keep every imported `mod.method` candidate
@@ -3435,7 +3500,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
     // names won't match any function definition and harmlessly dead-end.
     if (node->type == AST_IDENTIFIER && node->value) {
         if (nameset_add(seen, node->value)) {
-            nameset_add(worklist, node->value);
+            namestack_push(worklist, node->value);
         }
     }
     // Member access used as a value (no following call paren), e.g.
@@ -3450,7 +3515,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
         snprintf(qualified, sizeof(qualified), "%s.%s",
                  node->children[0]->value, node->value);
         if (nameset_add(seen, qualified)) {
-            nameset_add(worklist, qualified);
+            namestack_push(worklist, qualified);
         }
         /* #924 re-export: `hub.X` is cloned under the DEFINING module's
          * name (`<origin>_X`), not `hub_X`. Seed the origin form too so the
@@ -3460,7 +3525,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
         if (origin && origin->name) {
             char oq[256];
             snprintf(oq, sizeof(oq), "%s.%s", origin->name, node->value);
-            if (nameset_add(seen, oq)) nameset_add(worklist, oq);
+            if (nameset_add(seen, oq)) namestack_push(worklist, oq);
         }
     }
     /* `builder name(...) with <factory>` carries the factory name in
@@ -3473,7 +3538,7 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
      * call. Filed in aether/new_aevg_asks.md ASK 1. */
     if (node->type == AST_BUILDER_FUNCTION && node->annotation) {
         if (nameset_add(seen, node->annotation)) {
-            nameset_add(worklist, node->annotation);
+            namestack_push(worklist, node->annotation);
         }
     }
     for (int i = 0; i < node->child_count; i++) {
@@ -3481,24 +3546,14 @@ static void prune_collect_calls(ASTNode* node, NameSet* seen, NameSet* worklist)
     }
 }
 
-static ASTNode* prune_find_function(ASTNode* program, const char* name) {
-    if (!program || !name) return NULL;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (!c || !c->value) continue;
-        if ((c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) &&
-            strcmp(c->value, name) == 0) {
-            return c;
-        }
-    }
-    return NULL;
-}
 
 void module_prune_unreachable(ASTNode* program) {
     if (!program) return;
 
     NameSet reachable = {0};
-    NameSet worklist = {0};
+    NameStack worklist = {0};
+    StrMap index = {0};
+    prune_index_build(&index, program);
 
     // Seed: main, non-imported user functions, actor decls, exports.
     for (int i = 0; i < program->child_count; i++) {
@@ -3515,7 +3570,7 @@ void module_prune_unreachable(ASTNode* program) {
                 if (!c->is_imported || (c->annotation && strncmp(c->annotation, "c_callback:", 11) == 0)) {
                     if (c->value) {
                         if (nameset_add(&reachable, c->value)) {
-                            nameset_add(&worklist, c->value);
+                            namestack_push(&worklist, c->value);
                         }
                     }
                     prune_collect_calls(c, &reachable, &worklist);
@@ -3535,26 +3590,18 @@ void module_prune_unreachable(ASTNode* program) {
     // though user code does call them.
     while (worklist.count > 0) {
         char* name = worklist.names[--worklist.count];
-        ASTNode* fn = prune_find_function(program, name);
-        if (fn) prune_collect_calls(fn, &reachable, &worklist);
-
-        size_t name_len = strlen(name);
-        for (int i = 0; i < program->child_count; i++) {
-            ASTNode* c = program->children[i];
-            if (!c || !c->value || !c->is_imported) continue;
-            if (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION) continue;
-            size_t cv_len = strlen(c->value);
-            if (cv_len > name_len + 1 &&
-                c->value[cv_len - name_len - 1] == '_' &&
-                strcmp(c->value + cv_len - name_len, name) == 0) {
-                if (nameset_add(&reachable, c->value)) {
-                    nameset_add(&worklist, c->value);
-                }
+        PruneEntry* e = strmap_get(&index, name);
+        if (e && e->first_def) prune_collect_calls(e->first_def, &reachable, &worklist);
+        for (int k = 0; e && k < e->suffix_count; k++) {
+            ASTNode* c = e->suffix_defs[k];
+            if (nameset_add(&reachable, c->value)) {
+                namestack_push(&worklist, c->value);
             }
         }
         free(name);
     }
     free(worklist.names);
+    prune_index_free(&index);
 
     // Sweep: drop imported functions/builders that the closure never
     // reached. Compaction is in-place; freeing the dead AST sub-trees
