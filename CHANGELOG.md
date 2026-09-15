@@ -11,6 +11,18 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.string.version_compare(a, b) -> int`** — a version-aware comparator
+  with GNU `sort -V` (coreutils/gnulib filevercmp) semantics: digit runs compare
+  numerically (`1.9 < 1.10`, `1.11 < 1.11.1`), `~` sorts before everything, and a
+  trailing file extension is split off so whole filenames sort right
+  (`clojure-1.11.jar < clojure-1.11.1.jar`). Lets a build tool pick the newest
+  jar off disk in-process (the `ls … | sort -Vr | head -1` idiom) instead of
+  shelling out to `sort -V` — one audited primitive in place of N hand-rolled
+  ones across the language SDKs. Pure Aether, no allocation; fuzzed to zero
+  disagreements with `sort -V -s` over thousands of random version/filename
+  pairs. From the aeb round-2 command-alike sweep.
 ## [0.671.0]
 
 ### Fixed
