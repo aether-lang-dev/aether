@@ -1000,6 +1000,11 @@ char* os_which(const char* name) {
 
 #ifndef _WIN32
 
+/* Declared at the top of the POSIX block rather than beside the wait family,
+ * because the run_capture and run_pipe entry points above that family return
+ * its fields through posix_status_to_tuple. */
+typedef struct { int _0; const char* _1; } _tuple_int_string;
+
 /* Every waitpid status in this file goes through this one mapper. It used to be
  * copied by hand into three more places, and the copies drifted: two of them
  * had no WIFSIGNALED branch, so the same event -- a child killed by a signal --
@@ -1371,7 +1376,6 @@ _tuple_string_int_string os_run_capture_status_raw(const char* prog, void* argv_
  * ============================================================ */
 
 typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
-typedef struct { int _0; const char* _1; } _tuple_int_string;
 typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_string;
 
 /* Spawn child with a back-channel pipe at fd 3 (write end), set
