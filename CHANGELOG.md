@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`ae build --emit=lib --target=*-freebsd` failed to link with a wall of
+  `ld.lld: error: relocation R_X86_64_32/32S/PC32 … recompile with -fPIC` (and a
+  TLS `R_X86_64_TPOFF32 against tls_depth`).** The `-shared -fPIC` added for the
+  FreeBSD `--emit=lib` link in 0.679.0 was only on the final LINK line; the
+  runtime+stdlib objects that go into `libaether.a` were still compiled by
+  `zig cc -c` WITHOUT `-fPIC`, so on a FreeBSD 15 target (whose zig target does
+  not default to PIC, unlike linux/macos) those objects carried absolute
+  relocations ld.lld refuses to put in a shared object — which `-fPIC` at link
+  time cannot retroactively fix. The object compiles now also get `-fPIC` for
+  `--emit=lib`/`--emit=staticlib` on every ELF/PE target, which additionally
+  switches the default x86_64 TLS model from initial-exec to the dynamic model
+  the `AETHER_TLS_SHARED` annotation already requests, clearing the `tls_depth`
+  TLS relocation too. Verified end to end against a real FreeBSD 15 base sysroot:
+  the pure-Aether selaenium engine (`embed.ae`, `--with=net,os,fs --lib drivermgr
+  --size`) that failed on 0.679.0 now links a stripped ELF shared object.
+  (Continuation of PR #2047; selaenium FreeBSD release leg.)
+
 ## [0.679.0]
 
 ### Fixed
