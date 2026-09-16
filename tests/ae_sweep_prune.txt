@@ -43,7 +43,9 @@ tests/integration/closure_extern_retains_no_uaf/
 tests/integration/closure_qualified_ctx_inject_no_uaf/
 tests/integration/contract_fold_reject/
 tests/integration/cross_emit_lib/
+tests/integration/cross_freebsd_emit_lib_no_main/
 tests/integration/cross_ios/
+tests/integration/cross_lib_no_spurious_unresolved/
 tests/integration/cross_module_actor/
 tests/integration/cryptography_random_hex/
 tests/integration/cryptography_sha/

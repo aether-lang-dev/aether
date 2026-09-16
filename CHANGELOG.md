@@ -11,6 +11,38 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`ae build --emit=lib --target=x86_64-freebsd` (any `*-freebsd`) failed to
+  link with `ld.lld: error: undefined symbol: main`.** The FreeBSD cross-link
+  branch (`tools/ae_cross.c`) was written for the executable path and never
+  passed `-shared -fPIC` for `--emit=lib` — the Tier-A (linux/macos/windows)
+  branch computed those, but FreeBSD, which shipped no library artifact until it
+  was tried downstream, fell through without them. Missing `-shared`, the link
+  pulled `crt1.o` and demanded a `main` a library has not got, so no shared
+  object was produced (every other target linked `--emit=lib` with no `main` and
+  succeeded). The FreeBSD branch now applies the same ELF `-shared -fPIC` (and
+  `--size` strip flags) as the Linux path. Verified end to end against a real
+  FreeBSD 15 base sysroot: a shared object with the exported `aether_*` catalog
+  symbols and no `main`. (Reported by selaenium's FreeBSD release leg.)
+
+- **A cross build (`ae build --target=<triple> …`) of a program importing a
+  bare-name module reachable only through a `--lib` search dir printed a
+  spurious `error: unresolved import '<mod>'`.** The cross path's
+  feature-availability prepass (`cross_uses_unsupported_module`, which runs
+  `aetherc --emit=inspect` to warn about library-backed stdlib modules a
+  sysroot-less cross link stubs out) invoked aetherc WITHOUT the caller's
+  `--lib` dirs, so a `--lib`-backed import came back unresolved and printed to
+  stderr — even though the real compile, which does pass `--lib`, resolved it
+  and the build succeeded. The prepass now forwards the same `--lib` search
+  path as the real compile (`tools/ae.c`), so the diagnostic matches the build.
+  A side effect fixed too: the cross feature-availability `Note` under-reported,
+  because it could not see stdlib modules imported *transitively* through a
+  `--lib`-backed module. (Reported by selaenium as `--lib` being dropped for
+  `*-freebsd`; in fact this spurious line prints for every cross target while the
+  build still succeeds — the real FreeBSD blocker was the `--emit=lib` link, fixed
+  above.)
+
 ## [0.678.0]
 
 ### Fixed

@@ -1125,6 +1125,21 @@ int run_cross_build(const char* c_file, const char* out_file,
             break;
         }
 
+        /* --emit=lib on an ELF target (FreeBSD included) needs -shared -fPIC, or
+         * the link runs as an executable: crt1.o is pulled in and ld.lld demands
+         * a `main` a library has not got. FreeBSD is ELF, so it takes the same
+         * flags Linux does — the Tier-A branch below computes this for
+         * linux/macos/windows/wasm; the FreeBSD branch needs it too. Apple and
+         * wasm have their own lib flags and are never on the FreeBSD path, so a
+         * plain ELF `-shared -fPIC` is right for every fbsd_link case. (#1648 got
+         * --emit=lib working for the Tier-A targets but never exercised FreeBSD,
+         * which shipped no library until selaenium's cross build.) */
+        const char* fbsd_lib_flags = emit_lib ? "-shared -fPIC" : "";
+        /* --size strips at link time as well: same GNU/LLD spellings the Tier-A
+         * ELF/PE path uses (FreeBSD's ld.lld takes them). */
+        const char* fbsd_size_link = !ae_build_size_mode() ? ""
+            : "-Wl,--strip-all -Wl,--gc-sections";
+
         /* 3. Link the program against the archive. FreeBSD adds libthr and its
          *    platform libraries from the base sysroot. */
         if (fbsd_link[0]) {
@@ -1132,8 +1147,9 @@ int run_cross_build(const char* c_file, const char* out_file,
              * symbols (casper's cap_*, openssl's SSL_*, …), so they must
              * follow it on the link line for ld.lld's single-pass resolution. */
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
-                cc_cmd, sysroot_flag, fbsd_link, opt, feature_defs, tc.include_flags,
+                "%s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
+                cc_cmd, sysroot_flag, fbsd_lib_flags, fbsd_size_link, fbsd_link,
+                opt, feature_defs, tc.include_flags,
                 c_file, ex, objdir, fbsd_platform_libs, crossbuild_libs, out_file) ? 1 : -1;
         } else {
             /* Tier A (linux/macos/windows): compact form + any CROSSBUILD_SYSROOT
