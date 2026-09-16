@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.677.0]
+
 ### Fixed
 
 - **Two translation units that both pull a `@c_callback` failed to link
