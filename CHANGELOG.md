@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.680.0]
+
 ### Fixed
 
 - **`ae build --emit=lib --target=*-freebsd` failed to link with a wall of
