@@ -1,0 +1,1 @@
+n_0() -> int { return 0 }

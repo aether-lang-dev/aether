@@ -1,0 +1,83 @@
+import m0
+import m1
+import m2
+import m3
+import m4
+import m5
+import m6
+import m7
+import m8
+import m9
+import m10
+import m11
+import m12
+import m13
+import m14
+import m15
+import m16
+import m17
+import m18
+import m19
+import m20
+import m21
+import m22
+import m23
+import m24
+import m25
+import m26
+import m27
+import m28
+import m29
+import m30
+import m31
+import m32
+import m33
+import m34
+import m35
+import m36
+import m37
+import m38
+import m39
+import m40
+import m41
+import m42
+import m43
+import m44
+import m45
+import m46
+import m47
+import m48
+import m49
+import m50
+import m51
+import m52
+import m53
+import m54
+import m55
+import m56
+import m57
+import m58
+import m59
+import m60
+import m61
+import m62
+import m63
+import m64
+import m65
+import m66
+import m67
+import m68
+import m69
+import zlate
+
+extern exit(code: int)
+
+probe() -> int { return zlate.shout(m0.n_0() + m69.n_69()) }
+
+main() {
+    got = probe()
+    // 0 + 69 = 69, zlate.shout adds 1 -> 70
+    if got != 70 { println("FAIL: got ${got}, expected 70"); exit(1) }
+    println("PASS many_namespaces_qualified_call")
+    return 0
+}

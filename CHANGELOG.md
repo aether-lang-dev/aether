@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A whole-program `--emit=lib` build with more than 64 imported namespaces
+  emitted spurious `E0301: Undefined function` errors.** The type checker tracked
+  imported namespaces in a fixed `char* imported_namespaces[64]`, so a merged
+  unit whose transitive import graph registered more than 64 namespaces silently
+  dropped every one past the 64th. A qualified call into a dropped namespace then
+  failed to resolve — including a compiler-GENERATED cleanup such as
+  `sha1.free_ctx` for a `Sha1Ctx` reached transitively through the
+  `std.http`/`std.cryptography` graph, pointing at a merged-unit line that
+  matches no source. It presented as a graph-SIZE threshold: adding one more
+  module to a large library broke a build that had compiled. Both namespace
+  tables now grow dynamically. Surfaced by the selaenium engine's `--emit=lib`
+  build; `tests/integration/many_namespaces_qualified_call` pins a 70-namespace
+  merge with a late qualified call.
+
 ## [0.677.0]
 
 ### Fixed

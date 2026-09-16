@@ -1,0 +1,1 @@
+n_8() -> int { return 8 }
