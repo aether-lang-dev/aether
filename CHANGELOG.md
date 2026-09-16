@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Two translation units that both pull a `@c_callback` failed to link
+  ("multiple definition").** A `@c_callback` symbol is external by design — a C
+  caller binds it by name, so it can't be `static` — but when the module holding
+  it lands in more than one TU (two programs that both transitively import
+  `std.http.client`, which carries `std.cryptography.tls13_client`'s
+  `aether_pure_tls_client_*` bridge), each TU emitted the same external
+  definition and they collided at link (the five `aether_pure_tls_client_*`
+  symbols, always those five). The `@c_callback` definition is now emitted weak,
+  so duplicate copies dedupe at link while the symbol stays externally
+  addressable for the C bridge. `tests/integration/c_callback_multi_tu`. From
+  the selaenium port (native Aether client, `aeb aether/.tests.ae`).
+
 ## [0.676.0]
 
 ### Fixed

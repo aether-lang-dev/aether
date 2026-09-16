@@ -1033,6 +1033,17 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // generated C colliding at link time. Closes #279.
     if (fn_has_internal_linkage(func)) {
         fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
+    } else if (is_c_callback(func)) {
+        // A @c_callback keeps an external, verbatim C symbol so the C side can
+        // bind it by name — it CANNOT be static. But when a module carrying one
+        // (e.g. std.cryptography.tls13_client's aether_pure_tls_client_* bridge)
+        // is pulled into more than one translation unit — two TUs that both
+        // transitively import std.http.client — each emits the same external
+        // definition and they collide at link ("multiple definition of
+        // aether_pure_tls_client_send"). Emit the definition weak so duplicate
+        // copies dedupe at link while the symbol stays externally addressable.
+        // (#2041-adjacent: asks/pure-tls-client-defined-non-static-in-every-tu.)
+        fprintf(gen->output, "AETHER_WEAK_DEF ");
     }
 
     // Determine return type:
