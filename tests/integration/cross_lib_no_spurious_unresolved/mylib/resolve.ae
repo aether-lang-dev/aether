@@ -1,0 +1,5 @@
+// A bare-name module reachable only through a `--lib` search dir. The cross
+// build's inspect prepass (cross_uses_unsupported_module) must resolve it via
+// the same `--lib` path the real compile uses, or it prints a spurious
+// `unresolved import 'resolve'` that looks like `--lib` being target-dropped.
+resolve_it() -> int { return 42 }

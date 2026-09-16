@@ -190,6 +190,25 @@ void tc_lib_dir_append(const char* spec) {
     }
 }
 
+/* Write the ` --lib "<dir>"` search-path flags (one per `tc.lib_dirs` entry)
+ * into `out`. Same one-flag-per-entry shape build_aetherc_cmd emits — see the
+ * #413 rationale there. A diagnostic/inspect aetherc run must resolve imports
+ * against the SAME search path as the real compile, or a bare-name module that
+ * only `--lib` makes resolvable is reported "unresolved" by the prepass even
+ * though the build itself resolves it fine (the FreeBSD cross-build red herring:
+ * cross_uses_unsupported_module's inspect ran without --lib and printed a
+ * spurious `unresolved import` that looked like `--lib` being target-dropped).
+ * Truncation just yields a shorter (still valid) flag list. */
+static void tc_lib_flags(char* out, size_t out_size) {
+    size_t off = 0;
+    if (out_size) out[0] = '\0';
+    for (int i = 0; i < tc.lib_dir_count; i++) {
+        int w = snprintf(out + off, out_size - off, " --lib \"%s\"", tc.lib_dirs[i]);
+        if (w < 0 || (size_t)w >= out_size - off) break;
+        off += (size_t)w;
+    }
+}
+
 // --with=<caps> forwarded verbatim to aetherc. Empty by default; set
 // by cmd_build's arg loop when the user passes `--with=fs` etc. Just
 // a string because the aetherc side owns parsing and validation.
@@ -4260,12 +4279,17 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
                                   const char* arg2_or_null,
                                   char* out_buf, size_t out_size) {
     char cmd[4096];
+    /* Forward the same `--lib` search path the real compile uses, so an
+     * inspect/manifest prepass resolves bare-name `--lib`-backed imports
+     * instead of falsely reporting them unresolved. See tc_lib_flags. */
+    char lib_flags[2304];
+    tc_lib_flags(lib_flags, sizeof(lib_flags));
     if (arg2_or_null) {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s \"%s\" \"%s\"",
-                 tc.compiler, arg1, in_path, arg2_or_null);
+        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" \"%s\"",
+                 tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
     } else {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s \"%s\" /dev/null",
-                 tc.compiler, arg1, in_path);
+        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" /dev/null",
+                 tc.compiler, arg1, lib_flags, in_path);
     }
     FILE* p = popen(cmd, "r");
     if (!p) return -1;

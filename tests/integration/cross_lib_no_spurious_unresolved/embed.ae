@@ -1,0 +1,4 @@
+// Imports a bare-name module that ONLY a `--lib` search dir makes resolvable.
+import resolve
+
+setup() -> int { return resolve.resolve_it() }

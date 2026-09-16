@@ -11,6 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A cross build (`ae build --target=<triple> …`) of a program importing a
+  bare-name module reachable only through a `--lib` search dir printed a
+  spurious `error: unresolved import '<mod>'`.** The cross path's
+  feature-availability prepass (`cross_uses_unsupported_module`, which runs
+  `aetherc --emit=inspect` to warn about library-backed stdlib modules a
+  sysroot-less cross link stubs out) invoked aetherc WITHOUT the caller's
+  `--lib` dirs, so a `--lib`-backed import came back unresolved and printed to
+  stderr — even though the real compile, which does pass `--lib`, resolved it
+  and the build succeeded. The prepass now forwards the same `--lib` search
+  path as the real compile (`tools/ae.c`), so the diagnostic matches the build.
+  A side effect fixed too: the cross feature-availability `Note` under-reported,
+  because it could not see stdlib modules imported *transitively* through a
+  `--lib`-backed module. (Reported by selaenium: the message read as `--lib`
+  being dropped for `*-freebsd`; on that target it merely coincided with a
+  separate sysroot-header link failure — `mcontext_t` in the FreeBSD base
+  sysroot — which is a crossbuild-sysroot packaging matter, not a `--lib` drop.)
+
 ## [0.678.0]
 
 ### Fixed
