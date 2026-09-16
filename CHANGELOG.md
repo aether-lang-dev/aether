@@ -13,6 +13,19 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`ae build --emit=lib --target=x86_64-freebsd` (any `*-freebsd`) failed to
+  link with `ld.lld: error: undefined symbol: main`.** The FreeBSD cross-link
+  branch (`tools/ae_cross.c`) was written for the executable path and never
+  passed `-shared -fPIC` for `--emit=lib` — the Tier-A (linux/macos/windows)
+  branch computed those, but FreeBSD, which shipped no library artifact until it
+  was tried downstream, fell through without them. Missing `-shared`, the link
+  pulled `crt1.o` and demanded a `main` a library has not got, so no shared
+  object was produced (every other target linked `--emit=lib` with no `main` and
+  succeeded). The FreeBSD branch now applies the same ELF `-shared -fPIC` (and
+  `--size` strip flags) as the Linux path. Verified end to end against a real
+  FreeBSD 15 base sysroot: a shared object with the exported `aether_*` catalog
+  symbols and no `main`. (Reported by selaenium's FreeBSD release leg.)
+
 - **A cross build (`ae build --target=<triple> …`) of a program importing a
   bare-name module reachable only through a `--lib` search dir printed a
   spurious `error: unresolved import '<mod>'`.** The cross path's
@@ -25,10 +38,10 @@ version number before tagging the release.
   path as the real compile (`tools/ae.c`), so the diagnostic matches the build.
   A side effect fixed too: the cross feature-availability `Note` under-reported,
   because it could not see stdlib modules imported *transitively* through a
-  `--lib`-backed module. (Reported by selaenium: the message read as `--lib`
-  being dropped for `*-freebsd`; on that target it merely coincided with a
-  separate sysroot-header link failure — `mcontext_t` in the FreeBSD base
-  sysroot — which is a crossbuild-sysroot packaging matter, not a `--lib` drop.)
+  `--lib`-backed module. (Reported by selaenium as `--lib` being dropped for
+  `*-freebsd`; in fact this spurious line prints for every cross target while the
+  build still succeeds — the real FreeBSD blocker was the `--emit=lib` link, fixed
+  above.)
 
 ## [0.678.0]
 

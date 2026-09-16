@@ -1,0 +1,5 @@
+// A dependency-light library for a FreeBSD --emit=lib cross build. No `main`:
+// a shared library must link without one. The exported functions become
+// aether_add / aether_double_it in the .so.
+add(a: int, b: int) -> int { return a + b }
+double_it(x: int) -> int { return x * 2 }
