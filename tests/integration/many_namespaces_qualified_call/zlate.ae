@@ -1,0 +1,2 @@
+exports(shout)
+shout(x: int) -> int { return x + 1 }

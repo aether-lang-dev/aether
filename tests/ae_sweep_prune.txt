@@ -210,3 +210,4 @@ tests/integration/condition_continuation_pipe/
 tests/integration/self_shadowing_import/
 tests/integration/tuple_through_fn/
 tests/integration/crypto_tls13_server_hs/
+tests/integration/many_namespaces_qualified_call/

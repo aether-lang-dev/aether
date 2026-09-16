@@ -1,0 +1,1 @@
+n_7() -> int { return 7 }

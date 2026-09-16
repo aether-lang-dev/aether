@@ -390,10 +390,19 @@ Symbol* resolve_module_alias(SymbolTable* table, const char* name) {
 //     skipped. User-code qualified calls resolve against this stricter
 //     set so a user can't accidentally call into a transitively-pulled-
 //     in module they never asked for.
-static char* imported_namespaces[64];
+// Grown dynamically: a whole-program `--emit=lib` merge can register well over
+// 64 namespaces via the transitive import BFS (e.g. std.http.client pulls the
+// entire std.cryptography/TLS graph). A fixed cap silently dropped every
+// namespace past the 64th, so a compiler-generated qualified call into a
+// dropped namespace — an auto `sha1.free_ctx` cleanup for a transitively-reached
+// Sha1Ctx — failed to resolve with a spurious E0301 once the graph crossed the
+// threshold. The bug presented as "add one more module and it breaks."
+static char** imported_namespaces = NULL;
 static int namespace_count = 0;
-static char* user_explicit_namespaces[64];
+static int namespace_cap = 0;
+static char** user_explicit_namespaces = NULL;
 static int user_explicit_namespace_count = 0;
+static int user_explicit_namespace_cap = 0;
 
 // Import alias table: maps short names to dotted qualified names
 // for selective imports (e.g. "release" -> "build.release")
@@ -422,13 +431,18 @@ static const char* find_import_alias(const char* name) {
 }
 
 void register_namespace(const char* ns) {
-    if (namespace_count < 64) {
-        // Check if already registered
-        for (int i = 0; i < namespace_count; i++) {
-            if (strcmp(imported_namespaces[i], ns) == 0) return;
-        }
-        imported_namespaces[namespace_count++] = strdup(ns);
+    // Check if already registered
+    for (int i = 0; i < namespace_count; i++) {
+        if (strcmp(imported_namespaces[i], ns) == 0) return;
     }
+    if (namespace_count == namespace_cap) {
+        int newcap = namespace_cap ? namespace_cap * 2 : 64;
+        char** grown = (char**)realloc(imported_namespaces, (size_t)newcap * sizeof(char*));
+        if (!grown) return;   /* OOM: skip rather than crash; worst case a spurious E0301 */
+        imported_namespaces = grown;
+        namespace_cap = newcap;
+    }
+    imported_namespaces[namespace_count++] = strdup(ns);
 }
 
 // Issue #243 sealed-scope follow-up. Records that the user *explicitly*
@@ -439,12 +453,17 @@ void register_namespace(const char* ns) {
 // pass. Used by user-code qualified-call resolution to reject
 // `lib_b.shout()` when the user only wrote `import lib_a`.
 static void register_user_explicit_namespace(const char* ns) {
-    if (user_explicit_namespace_count < 64) {
-        for (int i = 0; i < user_explicit_namespace_count; i++) {
-            if (strcmp(user_explicit_namespaces[i], ns) == 0) return;
-        }
-        user_explicit_namespaces[user_explicit_namespace_count++] = strdup(ns);
+    for (int i = 0; i < user_explicit_namespace_count; i++) {
+        if (strcmp(user_explicit_namespaces[i], ns) == 0) return;
     }
+    if (user_explicit_namespace_count == user_explicit_namespace_cap) {
+        int newcap = user_explicit_namespace_cap ? user_explicit_namespace_cap * 2 : 64;
+        char** grown = (char**)realloc(user_explicit_namespaces, (size_t)newcap * sizeof(char*));
+        if (!grown) return;
+        user_explicit_namespaces = grown;
+        user_explicit_namespace_cap = newcap;
+    }
+    user_explicit_namespaces[user_explicit_namespace_count++] = strdup(ns);
 }
 
 static int is_user_explicit_namespace(const char* name) {

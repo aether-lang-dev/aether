@@ -1,0 +1,1 @@
+n_4() -> int { return 4 }
