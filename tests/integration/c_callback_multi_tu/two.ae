@@ -1,0 +1,2 @@
+import shared
+main() { println("${shared.touch()}"); return 0 }

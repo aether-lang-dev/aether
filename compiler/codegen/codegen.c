@@ -4559,6 +4559,19 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_MAYBE_UNUSED");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* Weak linkage for a @c_callback DEFINITION: the symbol stays external (a C
+       caller binds it by name), but if the module carrying it lands in more than
+       one translation unit, the duplicate definitions dedupe at link instead of
+       colliding with "multiple definition". No-op where weak is unsupported —
+       there a single-TU build still links, and the multi-TU case was already
+       impossible on that toolchain. */
+    print_line(gen, "#ifndef AETHER_WEAK_DEF");
+    print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
+    print_line(gen, "#    define AETHER_WEAK_DEF __attribute__((weak))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_WEAK_DEF");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     print_line(gen, "#ifndef AETHER_GCC_COMPAT");
     print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__)");
     print_line(gen, "#    define AETHER_GCC_COMPAT 1");

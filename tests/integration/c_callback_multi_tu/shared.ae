@@ -1,0 +1,11 @@
+// A module carrying a @c_callback LEAF (defined as an FFI entry point, never
+// called from Aether — the shape of std.cryptography.tls13_client's
+// aether_pure_tls_client_* bridge). When two programs both import this module,
+// each generated TU emits the callback's definition; without weak linkage the
+// two external definitions collide at link. `touch` keeps the module reachable.
+exports(touch)
+
+@c_callback("shared_cb_symbol")
+_leaf_cb(x: int) -> int { return x * 3 }
+
+touch() -> int { return 1 }

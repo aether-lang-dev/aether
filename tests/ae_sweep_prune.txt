@@ -25,6 +25,7 @@ tests/integration/build_surfaces_import_error/
 tests/integration/builder_int_factory_void_ptr_cast/
 tests/integration/bytes_finish_return_no_leak/
 tests/integration/c_callback/
+tests/integration/c_callback_multi_tu/
 tests/integration/c_callback_table/
 tests/integration/c_import_const/
 tests/integration/c_import_extern_proto/
