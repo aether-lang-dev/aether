@@ -1,5 +1,15 @@
 // A dependency-light library for a FreeBSD --emit=lib cross build. No `main`:
 // a shared library must link without one. The exported functions become
 // aether_add / aether_double_it in the .so.
+//
+// `import std.os` is deliberate: it pulls the runtime objects (the sandbox
+// checker, the actor/unwind TLS `tls_depth`, locale helpers) into libaether.a,
+// which is what carries the absolute (R_X86_64_32/32S/PC32) and initial-exec TLS
+// relocations that a shared object rejects unless those objects were compiled
+// -fPIC. A trivial arithmetic-only lib does not reference them, so the linker
+// GC's them and the reloc bug hides — importing std.os keeps the test honest.
+import std.os
+
 add(a: int, b: int) -> int { return a + b }
 double_it(x: int) -> int { return x * 2 }
+current_pid() -> int { return os.getpid() }

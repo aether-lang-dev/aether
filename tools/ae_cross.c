@@ -744,6 +744,24 @@ int run_cross_build(const char* c_file, const char* out_file,
     const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS
                     : (optimize ? "-O2" AETHER_WRAP_CFLAGS
                                 : "-O0 -g" AETHER_WRAP_CFLAGS);
+    /* For --emit=lib / --emit=staticlib the runtime+stdlib objects that go into
+     * libaether.a are linked into a SHARED object, so every one must be built
+     * -fPIC — `-shared -fPIC` on the final link cannot retroactively fix an
+     * object compiled with absolute (R_X86_64_32/32S/PC32) relocations, and
+     * ld.lld rejects such an object in a .so. -fPIC also switches the default
+     * x86_64 TLS model from initial-exec (R_X86_64_TPOFF32, illegal in a .so)
+     * to a dynamic model the AETHER_TLS_SHARED annotation already asks for, so
+     * it clears the `tls_depth` TLS relocation too. Applied to every ELF/PE
+     * target: linux/macos happen to default to PIC on their zig targets and so
+     * never hit this, but FreeBSD 15's target does not, so its --emit=lib link
+     * failed with a wall of "recompile with -fPIC" until the OBJECTS got it
+     * (the final-link -fPIC from the earlier fix was necessary but not
+     * sufficient). Harmless where PIC is already the default. Apple/wasm have
+     * their own object models and don't need the flag added here. (selaenium
+     * FreeBSD release leg on ae 0.679.0; asks/aether-freebsd-crossbuild-*.) */
+    const char* lib_pic =
+        (emit_lib || emit_staticlib) && !is_apple && !strstr(ztriple, "wasm")
+            ? " -fPIC" : "";
     const char* ex = extra ? extra : "";
     /* std.audio's vendored miniaudio auto-selects a backend by platform macro:
      * on a macos target it #includes <CoreAudio/CoreAudio.h>, an APPLE FRAMEWORK
@@ -1042,8 +1060,8 @@ int run_cross_build(const char* c_file, const char* out_file,
             snprintf(objpath, sizeof(objpath), "%s/%.*so", objdir,
                      (int)(strlen(bn) - 1), bn);
             if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
-                cc_cmd, sysroot_flag, opt, feature_defs, user_cflags, tc.include_flags,
+                "%s %s%s %s %s %s %s -c \"%s\" -o \"%s\"",
+                cc_cmd, sysroot_flag, lib_pic, opt, feature_defs, user_cflags, tc.include_flags,
                 srcs[i], objpath)) {
                 fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
                 compile_failed = true;
@@ -1098,8 +1116,8 @@ int run_cross_build(const char* c_file, const char* out_file,
             char user_obj[2048];
             snprintf(user_obj, sizeof(user_obj), "%s/__aether_program.o", objdir);
             if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
-                cc_cmd, sysroot_flag, opt, feature_defs, user_cflags,
+                "%s %s%s %s %s %s %s -c \"%s\" -o \"%s\"",
+                cc_cmd, sysroot_flag, lib_pic, opt, feature_defs, user_cflags,
                 tc.include_flags, c_file, user_obj)) {
                 fprintf(stderr, "Error: out of memory building the static-library compile command.\n");
                 break;
