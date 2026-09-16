@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.678.0]
+
 ### Fixed
 
 - **A whole-program `--emit=lib` build with more than 64 imported namespaces
