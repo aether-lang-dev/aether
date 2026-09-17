@@ -279,8 +279,9 @@ ptr p = call(y, 5)
 float f = y(9)
 ```
 
-An untyped binding keeps the `int` result the language has always defaulted
-to, and the compiler now says so at the site:
+Anywhere else — an untyped binding, an argument, an operand — the call is
+the `int` the language has always defaulted to, and an untyped binding is
+told so at the site:
 
 ```
 warning: the closure called here has no known result type, so 'r' is

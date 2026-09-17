@@ -1381,22 +1381,35 @@ static int fn_type_is_erased(const Type* t) {
 }
 
 /* #2054: the type of `call(f, ...)`. The result slot of f's signature when f
- * carries one, otherwise unknown -- never a fixed `int`, which is what the
- * builtin's registered type says and what made a string-returning closure
- * come back as its pointer truncated to int. A closure reached through an
- * erased `fn` still has no result type here; a typed binding supplies it
- * (see the declaration path) and an untyped one is told what it is getting. */
+ * carries one. A closure reached through an erased `fn` has none, and the
+ * language's answer for that has always been int: the call is typed int and
+ * marked `erased_call`, so the two contexts that can do better -- a typed
+ * binding, a return from a function with a declared result -- recognise it
+ * and retype it, and everything else (an argument, an operand) sees the int
+ * it always saw. A fixed int with no mark was the bug: nothing could tell a
+ * known int result from a guess. */
 static int function_value_annotate(ASTNode* ident, SymbolTable* table);
 
 static Type* call_builtin_result_type(ASTNode* call, SymbolTable* table) {
     if (call->child_count < 1 || !call->children[0]) return create_type(TYPE_UNKNOWN);
     function_value_annotate(call->children[0], table);   /* call(add_fn, ...) */
     Type* callee = infer_type(call->children[0], table);
-    Type* out = (callee && callee->kind == TYPE_FUNCTION && callee->return_type)
-                    ? clone_type(callee->return_type)
-                    : create_type(TYPE_UNKNOWN);
+    Type* out;
+    if (callee && callee->kind == TYPE_FUNCTION && callee->return_type) {
+        out = clone_type(callee->return_type);
+    } else {
+        out = create_type(TYPE_INT);
+        if (!call->annotation) call->annotation = strdup("erased_call");
+    }
     if (callee) free_type(callee);
     return out;
+}
+
+/* An erased call whose int is the default, not a known result. */
+static int is_erased_call(const ASTNode* n) {
+    return n && n->type == AST_FUNCTION_CALL && n->value &&
+           strcmp(n->value, "call") == 0 &&
+           n->annotation && strcmp(n->annotation, "erased_call") == 0;
 }
 
 /* #2055: a top-level function named in value position -- `op = add_fn`,
@@ -5844,12 +5857,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * the `int` the language has always defaulted to, and hears
                  * about it: for any other result that default is a truncated
                  * pointer, not a wrong type. */
-                int init_is_untyped_call = init && init->type == AST_FUNCTION_CALL &&
-                    init->value && strcmp(init->value, "call") == 0 &&
-                    (!init_type || init_type->kind == TYPE_UNKNOWN);
-                if (init_is_untyped_call) {
+                if (is_erased_call(init)) {
                     if (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN) {
                         set_node_type(init, clone_type(stmt->node_type));
+                        if (init_type) free_type(init_type);
+                        init_type = clone_type(stmt->node_type);
                     } else {
                         char wmsg[320];
                         snprintf(wmsg, sizeof(wmsg),
@@ -5858,9 +5870,6 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             "call(...)`) for any other result",
                             stmt->value, stmt->value);
                         type_warning(wmsg, stmt->line, stmt->column);
-                        set_node_type(init, create_type(TYPE_INT));
-                        if (init_type) free_type(init_type);
-                        init_type = create_type(TYPE_INT);
                     }
                 }
 
@@ -6834,12 +6843,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             /* #2054: `return call(f, ...)` through an erased fn takes the
              * function's declared result type, as a typed binding would;
              * the declaration is the annotation. */
-            if (stmt->child_count == 1 && stmt->children[0] &&
-                stmt->children[0]->type == AST_FUNCTION_CALL &&
-                stmt->children[0]->value &&
-                strcmp(stmt->children[0]->value, "call") == 0 &&
-                (!stmt->children[0]->node_type ||
-                 stmt->children[0]->node_type->kind == TYPE_UNKNOWN) &&
+            if (stmt->child_count == 1 && is_erased_call(stmt->children[0]) &&
                 g_tc_return_type && !g_tc_return_type->is_result &&
                 g_tc_return_type->kind != TYPE_VOID &&
                 g_tc_return_type->kind != TYPE_UNKNOWN &&

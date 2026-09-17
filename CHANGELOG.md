@@ -19,11 +19,13 @@ version number before tagging the release.
   fixed registration and the trampoline was cast to `int`, so a string or
   pointer result came back truncated — silently — and the typed binding
   that should have said otherwise (`string r = call(f, 7)`) was refused as
-  a mismatch. `call` is now typed from its callee (the signature's result
-  when known, unknown when erased), an unknown call takes the type of the
-  binding it initialises, and a bare `fn` is compatible with a signed
-  closure type in both directions. An untyped binding keeps the `int`
-  default and gets a warning naming the annotation. A closure returned
+  a mismatch. `call` is now typed from its callee: the signature's result
+  when known; when erased, the `int` the language has always defaulted to,
+  but marked as a default, so a typed binding (`string r = call(f, 7)`) or a
+  return from a function with a declared result retypes the call and the
+  trampoline is cast to match — everywhere else the call is the int it
+  always was. A bare `fn` is compatible with a signed closure type in both
+  directions. An untyped binding gets a warning naming the annotation. A closure returned
   directly (`return |x| { … }`) is also now checked in its own scope; the
   statement walker used to check its body in the enclosing scope and refuse
   a call that used a parameter.
