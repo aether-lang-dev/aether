@@ -144,6 +144,15 @@ char* os_now_local_iso8601_raw(void);
 // fails. Returns a strdup'd copy.
 char* os_platform_raw(void);
 
+// CPU architecture of the build target, normalized to the ecosystem
+// vocabulary (the release assets / aeb / aeo): "x86_64", "arm64",
+// "i386", "arm", "riscv64", "ppc64le", "s390x", "wasm32", "wasm64",
+// or "unknown". The companion to os_platform_raw(); together they form
+// the "<os>-<arch>" release-asset token. Decided at compile time via
+// toolchain-predefined macros (so it reports the TARGET arch under a
+// cross-compile, unlike `uname -m`); never fails. strdup'd copy.
+char* os_arch_raw(void);
+
 // Number of online logical CPUs (the `nproc` value) — for sizing build
 // parallelism / worker pools. sysconf(_SC_NPROCESSORS_ONLN) on POSIX,
 // GetSystemInfo on Windows. Returns at least 1; never 0 or negative.

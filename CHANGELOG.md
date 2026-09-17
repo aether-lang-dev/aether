@@ -11,6 +11,24 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`os.arch()` — the CPU-architecture companion to `os.platform()`.** Returns a
+  normalized token from the ecosystem vocabulary the release assets, aeb, and aeo
+  already use: `"x86_64"` (never `"amd64"`), `"arm64"` (never `"aarch64"`),
+  `"i386"`, `"arm"`, `"riscv64"`, `"ppc64le"`, `"s390x"`, `"wasm32"`, `"wasm64"`,
+  or `"unknown"`. Together, `os.platform() + "-" + os.arch()` reconstruct the
+  `"<os>-<arch>"` release-asset token (e.g. `"linux-x86_64"`, `"macos-arm64"`)
+  with no shell — the value a "fetch the prebuilt for this platform" step needs.
+  Like `os.platform()`, it is decided at COMPILE time from the toolchain's arch
+  predefines, deliberately not `uname -m`: no process spawn (works with no shell,
+  in a sandbox), and it reports the TARGET arch under a cross-compile
+  (`ae build --target=aarch64-linux` yields `"arm64"`), where `uname -m` on the
+  build host would give the wrong answer. Consolidates a compile-time-`#if`
+  arch-detection pattern that until now was duplicated privately in the driver
+  and re-implemented via `uname -m` shell-outs by downstream builders (aeb's
+  `bldr._host_arch`, selaenium's engine-fetch node).
+
 ## [0.680.0]
 
 ### Fixed

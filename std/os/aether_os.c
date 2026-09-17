@@ -121,6 +121,7 @@ char* os_now_utc_iso8601_raw(void) { return NULL; }
 char* os_now_local_iso8601_raw(void) { return NULL; }
 void os_now_local_fill_raw(void* out) { (void)out; }
 char* os_platform_raw(void) { return NULL; }
+char* os_arch_raw(void) { return NULL; }
 char* os_temp_dir_raw(void) { return NULL; }
 int os_cpu_count_raw(void) { return 1; }
 int os_getpid_raw(void) { return 0; }
@@ -577,6 +578,44 @@ char* os_platform_raw(void) {
     return strdup("solaris");
 #elif defined(__EMSCRIPTEN__) || defined(__wasi__) || defined(__wasm__)
     return strdup("wasm");
+#else
+    return strdup("unknown");
+#endif
+}
+
+/* CPU architecture of the build target, normalized to the ecosystem vocabulary
+ * the release assets, aeb, and aeo already use: "x86_64" (never "amd64"),
+ * "arm64" (never "aarch64"), "i386", "arm", "riscv64", "ppc64le", "s390x",
+ * "wasm32"/"wasm64", else "unknown". The companion to os_platform_raw() —
+ * os.platform() + os.arch() reconstruct the "<os>-<arch>" release-asset token.
+ *
+ * Resolved at COMPILE time from the compiler's arch predefines, deliberately
+ * NOT `uname -m`. Two reasons this is better than the shell-out its callers
+ * (aeb bldr._host_arch, selaenium's engine-fetch) do today: (1) no process
+ * spawn, so it works with no shell and inside a sandbox; (2) it reports the
+ * TARGET arch under cross-compilation — `zig cc -target aarch64-linux` defines
+ * __aarch64__, so a cross build picks the right asset, whereas `uname -m` on the
+ * build host would pick the host's. The macro set covers GCC/Clang/zig
+ * (__x86_64__ etc.) and MSVC (_M_*). */
+char* os_arch_raw(void) {
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
+    return strdup("x86_64");
+#elif defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64)
+    return strdup("arm64");
+#elif defined(__i386__) || defined(_M_IX86)
+    return strdup("i386");
+#elif defined(__arm__) || defined(_M_ARM)
+    return strdup("arm");
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    return strdup("riscv64");
+#elif defined(__powerpc64__) && (defined(__LITTLE_ENDIAN__) || defined(_LITTLE_ENDIAN))
+    return strdup("ppc64le");
+#elif defined(__s390x__)
+    return strdup("s390x");
+#elif defined(__wasm64__)
+    return strdup("wasm64");
+#elif defined(__wasm__) || defined(__wasm32__) || defined(__EMSCRIPTEN__) || defined(__wasi__)
+    return strdup("wasm32");
 #else
     return strdup("unknown");
 #endif

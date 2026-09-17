@@ -37,5 +37,44 @@ main() {
     }
 
     println("  PASS: platform() == '${p}'")
+
+    // os.arch() — the companion CPU-arch accessor. Same strategy: verify the
+    // value is in the documented, normalized set and never empty. The CI matrix
+    // (x86_64 + ARM64 hosts) exercises the two common values. Decided at compile
+    // time, so under a cross-compile it is the TARGET arch, not the host's.
+    a = os.arch()
+    if string.length(a) == 0 {
+        println("FAIL: arch() returned empty string")
+        exit(1)
+    }
+
+    arch_known = 0
+    if a == "x86_64" { arch_known = 1 }
+    if a == "arm64" { arch_known = 1 }
+    if a == "i386" { arch_known = 1 }
+    if a == "arm" { arch_known = 1 }
+    if a == "riscv64" { arch_known = 1 }
+    if a == "ppc64le" { arch_known = 1 }
+    if a == "s390x" { arch_known = 1 }
+    if a == "wasm32" { arch_known = 1 }
+    if a == "wasm64" { arch_known = 1 }
+    if a == "unknown" { arch_known = 1 }
+
+    if arch_known == 0 {
+        println("FAIL: arch() returned unrecognized value '${a}'")
+        exit(1)
+    }
+
+    // The normalized vocabulary is the point: never the raw uname spellings.
+    if a == "amd64" {
+        println("FAIL: arch() must normalize amd64 -> x86_64")
+        exit(1)
+    }
+    if a == "aarch64" {
+        println("FAIL: arch() must normalize aarch64 -> arm64")
+        exit(1)
+    }
+
+    println("  PASS: arch() == '${a}'")
     println("OK")
 }

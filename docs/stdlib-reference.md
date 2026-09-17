@@ -58,7 +58,7 @@ header comment is the authoritative description.
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
 | `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 10 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 79 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 81 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 19 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 18 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |

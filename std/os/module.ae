@@ -14,14 +14,14 @@ exports(
     os_now_monotonic_ms_raw, os_now_monotonic_ns_raw,
     os_now_unix_ms_raw,
     os_now_local_fill_raw, os_now_local_iso8601_raw,
-    os_platform_raw, os_temp_dir_raw, os_cpu_count_raw,
+    os_platform_raw, os_arch_raw, os_temp_dir_raw, os_cpu_count_raw,
     io_setenv_raw, io_unsetenv_raw,
     exec, run_capture, argv0, now_utc_iso8601, getpid, user_id,
     wall_seconds, wall_micros,
     now_monotonic_ms, now_monotonic_ns,
     now_unix_ms,
     now_local, now_local_iso8601, LocalTime,
-    platform, temp_dir, cpu_count,
+    platform, arch, temp_dir, cpu_count,
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     spawn_proc, wait, wait_any, wait_any_timeout,
@@ -634,11 +634,35 @@ now_local_iso8601() -> string {
 // Without it the string_concat below leaked the original (the macOS leaks gate
 // caught this via a test that calls temp_dir()).
 extern os_platform_raw() -> string @heap
+extern os_arch_raw() -> string @heap
 extern os_temp_dir_raw() -> string @heap
 extern os_cpu_count_raw() -> int
 
 platform() -> string {
     s = os_platform_raw()
+    if s == null {
+        return "unknown"
+    }
+    return s
+}
+
+// arch() — the CPU architecture of the build target, the companion to
+// platform(). Returns a normalized token from the ecosystem vocabulary the
+// release assets, aeb, and aeo already use:
+//   "x86_64" (never "amd64"), "arm64" (never "aarch64"), "i386", "arm",
+//   "riscv64", "ppc64le", "s390x", "wasm32", "wasm64", or "unknown".
+//
+// So platform() + arch() reconstruct the "<os>-<arch>" release-asset token
+// (e.g. "linux-x86_64", "macos-arm64") with no shell — the thing a fetch-a-
+// prebuilt node needs to pick the right download.
+//
+// Decided at COMPILE time from the toolchain's arch predefines, deliberately
+// not `uname -m`: it needs no process spawn (works with no shell, in a sandbox)
+// AND it reports the TARGET arch under a cross-compile (`ae build
+// --target=aarch64-linux` yields "arm64"), where `uname -m` would report the
+// build host's. Never fails.
+arch() -> string {
+    s = os_arch_raw()
     if s == null {
         return "unknown"
     }
