@@ -1,0 +1,116 @@
+// Regression: a closure called through an erased `fn` value returns what
+// it returns, when the binding says what that is (#2054), and a function
+// named as a value is a closure value (#2055).
+//
+// A closure that crossed a `fn` parameter or return, box_closure, or a
+// list has lost its signature. call(f, ...) on it was typed as int from a
+// fixed registration, and the trampoline was cast to int, so a string or
+// pointer result came back as a truncated number and a typed binding
+// (`string r = call(f, 7)`) was refused as a mismatch. The call is typed
+// from the callee now, unknown when erased, and an unknown call takes the
+// type of the binding it initialises. An untyped binding keeps the int
+// default the language has always had, now with a warning saying so; one
+// such binding is here so the default stays what it was.
+//
+// Each shape below reaches the closure through a different erasure and
+// asks for a string, a pointer, a float and an int, via both call(f, ...)
+// and the direct f(...) form.
+
+import std.string
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+// (a) erased at a `fn` return
+make_greeter() -> fn { return | x: int | { return string.concat("hello-", string.from_int(x)) } }
+make_boxer() -> fn { return | x: int | { return mem.long_to_ptr(x) } }
+make_halver() -> fn { return | x: int | { return x / 2.0 } }
+make_doubler() -> fn { return | x: int | { return x * 2 } }
+
+// (b) erased at a `fn` parameter
+same(f: fn) -> fn { return f }
+
+// (d) a function named as a value (#2055): a binding, an if-expression
+//     branch, and call()'s callee
+add_fn(a: int, b: int) -> int { return a + b }
+mul_fn(a: int, b: int) -> int { return a * b }
+name_fn(a: int, b: int) -> string { return "sum=${a + b}" }
+
+pick(want_add: int) -> fn {
+    return if want_add == 1 { add_fn } else { mul_fn }
+}
+
+// (c) erased through a list
+first_of(l: ptr) -> fn { return unbox_closure(list.get_raw(l, 0)) }
+
+main() {
+    println("=== call through an erased fn (#2054) ===")
+
+    // (a)
+    g = make_greeter()
+    string s1 = call(g, 7)
+    check("fn return, string via call()", string.equals(s1, "hello-7") == 1)
+    string s2 = g(8)
+    check("fn return, string via f()", string.equals(s2, "hello-8") == 1)
+    b = make_boxer()
+    let p1: ptr = call(b, 4096)
+    check("fn return, ptr via call()", mem.ptr_to_long(p1) == 4096)
+    h = make_halver()
+    float f1 = call(h, 9)
+    check("fn return, float via call()", f1 > 4.49 && f1 < 4.51)
+    d = make_doubler()
+    int i1 = call(d, 21)
+    check("fn return, int via call()", i1 == 42)
+    i2 = call(d, 5)
+    check("fn return, int via the untyped default", i2 == 10)
+
+    // (b)
+    g2 = same(g)
+    string s3 = call(g2, 9)
+    check("fn parameter, string via call()", string.equals(s3, "hello-9") == 1)
+    string s4 = g2(10)
+    check("fn parameter, string via f()", string.equals(s4, "hello-10") == 1)
+    b2 = same(b)
+    let p2: ptr = b2(77)
+    check("fn parameter, ptr via f()", mem.ptr_to_long(p2) == 77)
+
+    // (c)
+    l = list.new()
+    _ = list.add(l, g)
+    g3 = first_of(l)
+    string s5 = call(g3, 11)
+    check("list, string via call()", string.equals(s5, "hello-11") == 1)
+    string s6 = g3(12)
+    check("list, string via f()", string.equals(s6, "hello-12") == 1)
+    list.free(l)
+
+    // (d)
+    op = add_fn
+    check("a function bound as a value", call(op, 3, 4) == 7)
+    chosen = if 1 == 1 { add_fn } else { mul_fn }
+    check("a function chosen by an if-expression", chosen(3, 4) == 7)
+    other = pick(0)
+    int prod = call(other, 3, 4)
+    check("chosen in a callee and returned through fn", prod == 12)
+    string named = call(name_fn, 3, 4)
+    check("call() on a function name, string result", string.equals(named, "sum=7") == 1)
+
+    if failures == 0 {
+        println("erased fn call result: all checks passed")
+    } else {
+        println("erased fn call result: ${failures} failure(s)")
+        exit(1)
+    }
+}

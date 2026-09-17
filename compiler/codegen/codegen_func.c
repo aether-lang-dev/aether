@@ -296,6 +296,12 @@ static void discover_bare_fn_adapters_walk(CodeGenerator* gen, ASTNode* node) {
             }
         }
     }
+    /* #2055: an identifier the typechecker marked as a function value. */
+    if (node->type == AST_IDENTIFIER && node->value && node->annotation &&
+        strcmp(node->annotation, "fn_value") == 0 &&
+        find_user_function_by_name(gen, node->value)) {
+        register_bare_fn_adapter(gen, node->value);
+    }
     /* AST_BINARY_EXPRESSION with op="=": register bare-fn RHS into a
      * ptr-typed LHS struct field. Conservative: also register for any
      * RHS that's a bare named function regardless of LHS — false

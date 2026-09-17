@@ -11,6 +11,39 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A closure called through an erased `fn` value could only return `int`
+  (#2054).** Once a closure had crossed a `fn` parameter or return,
+  `box_closure`, or a list, `call(f, …)` on it was typed as `int` from a
+  fixed registration and the trampoline was cast to `int`, so a string or
+  pointer result came back truncated — silently — and the typed binding
+  that should have said otherwise (`string r = call(f, 7)`) was refused as
+  a mismatch. `call` is now typed from its callee (the signature's result
+  when known, unknown when erased), an unknown call takes the type of the
+  binding it initialises, and a bare `fn` is compatible with a signed
+  closure type in both directions. An untyped binding keeps the `int`
+  default and gets a warning naming the annotation. A closure returned
+  directly (`return |x| { … }`) is also now checked in its own scope; the
+  statement walker used to check its body in the enclosing scope and refuse
+  a call that used a parameter.
+  `tests/regression/test_erased_fn_call_result.ae` reaches a closure through
+  each erasure and asks for a string, a pointer, a float and an int, via
+  both `call(f, …)` and `f(…)`.
+
+- **A function named as a value emitted C that did not compile (#2055).**
+  `op = add_fn`, `if c { add_fn } else { mul_fn }` and `call(add_fn, …)`
+  typed the name as the function's *return* type — the inference pass gave
+  every identifier its symbol's type, and a function symbol's type is what
+  a call yields — so `op` was an `int` holding a C function pointer. A
+  function in value position is now a closure-shaped `fn(params) -> R`
+  assembled from its definition, and lowers through the same bare-fn
+  adapter a function passed as a `fn` argument already used; the
+  if-expression's type follows. An if-expression or closure in return
+  position is now checked as the expression it is rather than walked as a
+  statement, which is what let the branch typing (and #2054's scope) be
+  skipped there.
+
 ## [0.681.0]
 
 ### Added

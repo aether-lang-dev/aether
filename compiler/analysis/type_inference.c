@@ -457,10 +457,12 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
         }
             
         case AST_IDENTIFIER:
-            // Look up in symbol table
+            // Look up in symbol table. A function's symbol type is what a
+            // call to it yields; an identifier is not a call, so a function
+            // named as a value is left for the checker to type (#2055).
             if (ctx->symbols) {
                 Symbol* sym = lookup_symbol(ctx->symbols, node->value);
-                if (sym && sym->type && sym->type->kind != TYPE_UNKNOWN) {
+                if (sym && sym->type && sym->type->kind != TYPE_UNKNOWN && !sym->is_function) {
                     if (!node->node_type || is_type_inferrable(node->node_type)) {
                         if (node->node_type) free_type(node->node_type);
                         node->node_type = clone_type(sym->type);
