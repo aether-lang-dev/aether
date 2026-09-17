@@ -474,6 +474,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->last_line_num = 0;
     gen->match_result_var = NULL;
     gen->preempt_loops = 0;
+    gen->in_string_closure = 0;
     gen->current_func_return_type = NULL;
     gen->current_function = NULL;
     gen->no_contracts = 0;

@@ -1878,6 +1878,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         const char* ret_type = resolve_closure_return_type(gen, ci);
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, " {\n");
+        gen->in_string_closure = strcmp(ret_type, "const char*") == 0;
 
         // Find body first so we can detect which captures are mutated.
         ASTNode* body = NULL;
@@ -2072,6 +2073,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->in_trailing_block--;
             gen->indent_level = 0;
         }
+        gen->in_string_closure = 0;
 
         free(env_captures);
 

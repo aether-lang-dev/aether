@@ -25,7 +25,11 @@ version number before tagging the release.
   return from a function with a declared result retypes the call and the
   trampoline is cast to match — everywhere else the call is the int it
   always was. A bare `fn` is compatible with a signed closure type in both
-  directions. An untyped binding gets a warning naming the annotation. A closure returned
+  directions. An untyped binding gets a warning naming the annotation. A string
+  reached this way is owned by the caller: a string-returning closure, and
+  the adapter behind a function used as a `fn` value, hand every result
+  over owned (copying a literal, passing a heap result through) and the
+  caller frees it — before, nobody did. A closure returned
   directly (`return |x| { … }`) is also now checked in its own scope; the
   statement walker used to check its body in the enclosing scope and refuse
   a call that used a parameter.

@@ -432,16 +432,28 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
         if (!fdef) continue;  /* Shouldn't happen; registration gate
                                * already confirmed existence. */
         Type* rt = fdef->node_type;
+        /* A string result is handed over owned, as a closure's is (#2054):
+         * the caller of a fn value cannot tell which return sites of the
+         * function behind it are heap, so it frees every string result.
+         * Wrapped the way the function's own callers see it -- passed
+         * through when the function returns owned strings, copied when it
+         * returns a literal or a borrow. */
+        int owned_string = rt && rt->kind == TYPE_STRING;
         fprintf(gen->output, " {\n    (void)_env;\n    ");
         if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) {
             fprintf(gen->output, "return ");
         }
+        if (owned_string) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
         fprintf(gen->output, "%s(", fname);
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
             fprintf(gen->output, "_a%d", k);
         }
-        fprintf(gen->output, ");\n}\n");
+        fprintf(gen->output, ")");
+        if (owned_string) {
+            fprintf(gen->output, "), %d)", function_def_returns_heap_string(gen, fdef) ? 1 : 0);
+        }
+        fprintf(gen->output, ";\n}\n");
     }
 }
 

@@ -218,6 +218,10 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body);
 void mark_escaped_heap_string_vars(CodeGenerator* gen, ASTNode* body);
 /* The closure argument a call provably drops on return, or NULL. */
 ASTNode* transient_closure_arg(CodeGenerator* gen, ASTNode* call);
+/* Does some return site of `fn_def` hand back a heap string? Memoised on
+ * the definition; the callers' ownership decisions and the bare-fn adapter
+ * read the same verdict. */
+int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
 /* #2019: declare the shared heap cell for a promoted capture and queue its
  * scope-exit release. The initial value is `init_expr` when given, else the
  * C text `init_text`. The cell is reference-counted, so the release is
