@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.681.0]
+
 ### Added
 
 - **`os.arch()` — the CPU-architecture companion to `os.platform()`.** Returns a
