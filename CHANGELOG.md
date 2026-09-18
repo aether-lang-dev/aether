@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.685.0]
+
 ### Fixed
 
 - **A source file is no longer capped at a token count (#2059).** The main
