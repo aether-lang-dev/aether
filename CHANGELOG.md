@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`fs.symlink`, `fs.readlink` and `fs.is_symlink` work on Windows.** They
+  were stubs that failed every call, which the reference described as
+  "POSIX-only". `symlink` is `CreateSymbolicLinkW` — a relative target is
+  resolved against the link's directory to decide whether it is a directory
+  link, separators are stored as backslashes, and the unprivileged-create
+  flag Developer Mode honours is tried first; `readlink` reads the link's
+  own reparse data and hands back the target as stored (a junction is not a
+  symlink); `is_symlink` reads the directory entry's reparse tag;
+  `unlink` removes a directory link with `RemoveDirectoryW`. Creating a
+  link still needs the privilege administrators hold and Developer Mode
+  grants everyone. On every platform `readlink` no longer leaks: the raw
+  extern's `strdup` result is now `@heap` and handed back directly instead
+  of copied and dropped. `tests/regression/test_fs_symlink.ae`.
+
 ## [0.684.0]
 
 ### Fixed
