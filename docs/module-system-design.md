@@ -461,6 +461,30 @@ Each entry names an **importable module**, and what joins the search path is tha
 
 This is why the declaration lives with the publisher rather than the consumer: a package can move its directories in a patch release without any consumer changing a path. A consumer names the dependency and nothing else. A package with no `aether.toml`, or none with a `modules` key, exports nothing and says so — the package root is never joined speculatively, since a real package is a whole repository whose root holds docs, scripts and tests as well as modules.
 
+### Exporting the package root: `modules = "."`
+
+The parent-of-each-module rule leaves one shape undeclarable: a package whose modules live in a subdirectory and import **each other with a dotted package prefix**. For example, a package laid out as `core/*.ae` whose modules do `import core.metadata`, `import core.phonenumber`:
+
+```
+phonelib/
+  aether.toml
+  core/
+    phonenumber.ae    # import core.metadata
+    metadata.ae
+```
+
+A dotted `import core.phonenumber` resolves only when the **package root** is on the search path (so `core/` is a subdirectory under it). But there is no `.ae` module at the root to name, so no ordinary `modules` entry joins the root — and the package's *own* internal `import core.metadata` needs the root too, so even a flat-importing consumer cannot help. Such a package could be `ae add`-consumable only by flattening its namespace to `import phonenumber` throughout.
+
+`modules = "."` is the explicit opt-in that joins the package **root** onto the consumer's search path:
+
+```toml
+[package]
+name = "phonelib"
+modules = "."
+```
+
+With it, a consumer does `import core.phonenumber` through a normal `ae add` dependency — no `--lib`, no path knowledge — and the package keeps its dotted namespacing. This is a deliberate, publisher-chosen export, so the "root is never joined **speculatively**" principle holds: the root joins only because the author wrote `.`, never as a guess by the toolchain. Combine it with named entries when a package exports both a rooted dotted package and other modules (`modules = ".", widgets`).
+
 A dependency that is declared but not installed fails by name:
 
 ```

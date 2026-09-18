@@ -25,6 +25,17 @@ version number before tagging the release.
   same shape `std/http/proxy/aether_proxy_lb.c` uses in C, lifted into `.ae`.
   Deliberately minimal (not a mutex, not a general lock). The `std.sync` README
   carries the snapshot retire-ring pattern end to end.
+- **`modules = "."` exports the package root** for `ae add` consumers. A package
+  laid out as `core/*.ae` whose modules import each other with a dotted package
+  prefix (`import core.metadata`) had no way to declare itself consumable: no
+  `.ae` module sits at the root for an ordinary `modules` entry to name, yet a
+  dotted `core.*` import — including the package's own internal ones — only
+  resolves with the root on the search path. `modules = "."` is the explicit,
+  publisher-chosen opt-in that joins the package root, so such a package is
+  `ae add`-consumable without flattening its namespace. The "root is never joined
+  *speculatively*" principle is preserved — the root joins only because the author
+  wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
+  engine as Aether source.)
 
 ### Docs
 - `docs/http-server.md`: mark the "Per-connection actor dispatch" section as a
@@ -34,6 +45,19 @@ version number before tagging the release.
   state instead (pool-thread `std.snapshot` COW). `std.actors`' module header
   gains the matching caveat: a `!` send from an off-scheduler `std.http` handler
   is currently dropped (aether#2083). No code change.
+
+## [0.689.0]
+
+### Fixed
+
+- **An interpolation nested inside a `println` segment printed itself and
+  crashed the call around it.** `print`/`println` lower their interpolation
+  straight to `printf`, and that mode stayed on while the segments were
+  generated, so in `println("${takes("${base}/x")}")` the inner string was
+  lowered to `printf` too: `abc/x` went to stdout on its own and `takes`
+  received printf's return count cast to a pointer (a C warning, then an
+  access violation). The same call outside `println` was fine. The mode now
+  covers the outer interpolation alone. `tests/integration/interp_nested_in_print`.
 
 ## [0.688.0]
 
