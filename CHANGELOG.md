@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.685.0]
+
 ### Fixed
 
 - **`fs.realpath` on Windows returned a UNC path as the relative
