@@ -11,6 +11,19 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+- **`modules = "."` exports the package root** for `ae add` consumers. A package
+  laid out as `core/*.ae` whose modules import each other with a dotted package
+  prefix (`import core.metadata`) had no way to declare itself consumable: no
+  `.ae` module sits at the root for an ordinary `modules` entry to name, yet a
+  dotted `core.*` import — including the package's own internal ones — only
+  resolves with the root on the search path. `modules = "."` is the explicit,
+  publisher-chosen opt-in that joins the package root, so such a package is
+  `ae add`-consumable without flattening its namespace. The "root is never joined
+  *speculatively*" principle is preserved — the root joins only because the author
+  wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
+  engine as Aether source.)
+
 ## [0.687.0]
 
 ### Fixed
