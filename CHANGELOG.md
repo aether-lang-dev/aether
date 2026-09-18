@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.682.0]
+
 ### Fixed
 
 - **A closure called through an erased `fn` value could only return `int`
