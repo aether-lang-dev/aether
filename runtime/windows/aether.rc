@@ -1,0 +1,3 @@
+// RT_MANIFEST (type 24), id 1: the application manifest Windows reads at
+// process start. See aether.manifest for what it declares.
+1 24 "aether.manifest"

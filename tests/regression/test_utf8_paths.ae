@@ -1,0 +1,61 @@
+// Non-ASCII paths and arguments are UTF-8 on every platform (#2077).
+//
+// On Windows the C runtime and the narrow Win32 calls decode a char* with
+// the process's ANSI code page. Aether strings are UTF-8, so until every
+// executable carried a manifest declaring the UTF-8 code page,
+// fs.write("café.txt") created a file whose real name was "cafÃ©.txt" — the
+// UTF-8 bytes of é read as two Latin-1 characters — and the wide calls
+// (fs.realpath, fs.copy, fs.move, fs.chmod), which decode UTF-8 properly,
+// could not find it. argv came through the same decoding, so a non-ASCII
+// argument arrived as a different string than the one passed.
+//
+// Two checks, both trivially true on POSIX:
+//   1. a file created through the narrow path is found through the wide
+//      path, and the resolved path carries the UTF-8 name;
+//   2. a non-ASCII argument reaches a child unchanged.
+
+import std.fs
+import std.os
+import std.list
+import std.string
+
+extern exit(code: int)
+
+check(label: string, ok: int) {
+    if ok == 0 {
+        println("FAIL: ${label}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    if os.args_count() > 1 {
+        println(os.args_get(1))
+        return
+    }
+    println("=== UTF-8 paths and arguments ===")
+    base = "${os.temp_dir()}/aether_utf8_paths_ünï_日本"
+    fs.remove_tree(base)
+    check("create a directory with a non-ASCII name", fs.create_dir(base) == "")
+    file = "${base}/café.txt"
+    check("write through the narrow path", fs.write(file, "x") == "")
+    check("the narrow path sees it", fs.file_exists(file) == 1)
+
+    resolved, kind, msg = fs.realpath(file)
+    check("the wide path finds the same file (${msg})", kind == fs.KIND_OK)
+    check("the resolved name is the UTF-8 name (${resolved})", string.ends_with(resolved, "café.txt") == 1)
+
+    copied, _, cmsg = fs.copy(file, "${base}/copié.txt")
+    check("copy through the wide path (${cmsg})", copied > 0)
+    check("the copy is there through the narrow path", fs.file_exists("${base}/copié.txt") == 1)
+
+    av = list.new()
+    list.add(av, "héllo wörld 日本語")
+    out, code, err = os.run_capture(os.args_get(0), av, null)
+    check("a non-ASCII argument reaches a child unchanged (${string.trim(out)})",
+        code == 0 && err == "" && string.trim(out) == "héllo wörld 日本語")
+
+    fs.remove_tree(base)
+    println("=== All cases passed ===")
+}

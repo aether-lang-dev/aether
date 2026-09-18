@@ -379,6 +379,20 @@ ifdef IS_WINDOWS
 EXTRA_CFLAGS += -D__USE_MINGW_ANSI_STDIO=1
 endif
 
+# Windows application manifest (#2077): declares the UTF-8 process code page
+# so the C runtime and the narrow Win32 calls read Aether's UTF-8 strings as
+# UTF-8. Compiled with windres into one resource object that is linked into
+# ae.exe, aetherc.exe and, by `ae build`/`ae run`, into every executable they
+# produce (it is looked up beside libaether.a). Native MSYS2 builds only:
+# the zig cross build has no windres, and its output carries no manifest.
+MANIFEST_OBJ :=
+ifdef IS_WINDOWS
+  ifneq ($(WINDOWS),1)
+    WINDRES ?= windres
+    MANIFEST_OBJ := build/aether_manifest.o
+  endif
+endif
+
 # Optional OpenSSL detection (enables HTTPS client). Probes pkg-config;
 # falls back silently if OpenSSL isn't installed — the HTTP client still
 # works for `http://` URLs and returns a clean error for `https://`.
@@ -1060,9 +1074,9 @@ compiler: build/aetherc$(EXE_EXT)
 # the binary other tests were executing at that moment: macOS kills a process
 # whose text file changed under it, which is a SIGKILL in a test that never
 # went near the build system.
-build/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
+build/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(OBJ_DIR)/runtime/aether_sandbox.o $(OBJ_DIR)/runtime/aether_resource_caps.o $(OBJ_DIR)/runtime/aether_locale_num.o $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o build/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds)
@@ -1685,7 +1699,7 @@ lsp: compiler stdlib
 	@echo "==================================="
 	@echo "Building Aether LSP Server ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c build/libaether_compiler.a build/libaether.a -Icompiler -Ilsp -Istd -Istd/collections -o build/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c build/libaether_compiler.a build/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o build/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "✓ LSP Server built successfully: build/aether-lsp$(EXE_EXT)"
 
 apkg:
@@ -1706,11 +1720,11 @@ ae: build/ae$(EXE_EXT)
 
 # A file target for the same reason as build/aetherc: `ae` was phony, so every
 # `make` relinked the binary the rest of the test sweep is running.
-build/ae$(EXE_EXT): build/aetherc$(EXE_EXT) $(TOOLS_OBJS)
+build/ae$(EXE_EXT): build/aetherc$(EXE_EXT) $(TOOLS_OBJS) $(MANIFEST_OBJ)
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	@$(CC) $(TOOLS_OBJS) -o build/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
+	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o build/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
 	@echo "✓ Built successfully: build/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
@@ -1767,7 +1781,11 @@ docs-serve: docs docs-server
 	./build/docs-server$(EXE_EXT)
 
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: build/libaether.a
+stdlib: build/libaether.a $(MANIFEST_OBJ)
+
+build/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
+	@echo "Compiling the Windows application manifest..."
+	@$(WINDRES) -I runtime/windows runtime/windows/aether.rc -O coff -o $@
 
 # The archive is a FILE target, not a phony one. As a phony `stdlib` it was
 # re-archived on every invocation, so anything that runs `make` in this tree
@@ -2023,7 +2041,7 @@ release-build: build/aetherc-release$(EXE_EXT)
 
 # A file target as well, so `make install` on a current tree does not spend a
 # minute recompiling the whole compiler in one LTO link before copying.
-build/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c $(STDLIB_SYMS_HEADER) $(VERSION_HEADER) Makefile
+build/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c runtime/aether_locale_num.c $(STDLIB_SYMS_HEADER) $(VERSION_HEADER) $(MANIFEST_OBJ) Makefile
 	@echo "==================================="
 	@echo "Building Optimized Release"
 	@echo "==================================="
@@ -2048,7 +2066,7 @@ build/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) r
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
 		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) runtime/aether_resource_caps.c \
-		runtime/aether_locale_num.c \
+		runtime/aether_locale_num.c $(MANIFEST_OBJ) \
 		-o build/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."

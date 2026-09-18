@@ -469,6 +469,18 @@ a mismatching build stops immediately with an actionable error rather than
 failing deep in the link; `make clean` between targets is the fix (and `clean`
 itself is never blocked by the guard).
 
+The cross build also carries no **application manifest**: a native MSYS2
+build compiles `runtime/windows/aether.manifest` with `windres` into
+`build/aether_manifest.o`, links it into `ae.exe`, `aetherc.exe` and
+`aether-lsp.exe`, and `ae build`/`ae run` link it (from beside
+`libaether.a`, where `install.sh` also ships it) into every executable they
+produce. The manifest declares the UTF-8 process code page, so the C
+runtime and every narrow Win32 call — `fopen`, `_stat`, `FindFirstFileA`,
+`argv`, the environment — read Aether's UTF-8 strings as UTF-8 (Windows 10
+1903+; older kernels ignore it). Without it a program that writes
+`café.txt` creates `cafÃ©.txt`. An external build that links `libaether.a`
+by hand should add that object too.
+
 **Testing a cross-built toolchain**: see `AE_TEST_RUNNER` in the next
 section.
 
