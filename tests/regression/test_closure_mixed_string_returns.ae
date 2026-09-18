@@ -46,7 +46,7 @@ main() {
     // First return site is the `-> ptr` builtin; the second is a string
     // field that holds a literal. Pre-fix: typed void* by the first site,
     // the literal reached the caller unwrapped and was freed.
-    cell = |item: ptr, c: int| {
+    cell = | item: ptr, c: int | {
         q = item as *Person
         if c == 1 { return string.from_int(q.kb) }
         return q.name
