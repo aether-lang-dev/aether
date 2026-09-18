@@ -1001,6 +1001,40 @@ void free_token(Token* token) {
     }
 }
 
+void free_tokens(Token** tokens, int count) {
+    if (!tokens) return;
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+}
+
+Token** lexer_tokenize(const char* src, int* out_count) {
+    lexer_init(src);
+    int capacity = 4096;
+    int count = 0;
+    Token** tokens = malloc(sizeof(Token*) * capacity);
+    if (!tokens) return NULL;
+    for (;;) {
+        if (count == capacity) {
+            Token** grown = realloc(tokens, sizeof(Token*) * (size_t)capacity * 2);
+            if (!grown) {
+                free_tokens(tokens, count);
+                return NULL;
+            }
+            tokens = grown;
+            capacity *= 2;
+        }
+        Token* token = next_token();
+        if (!token) {
+            free_tokens(tokens, count);
+            return NULL;
+        }
+        tokens[count++] = token;
+        if (token->type == TOKEN_EOF || token->type == TOKEN_ERROR) break;
+    }
+    *out_count = count;
+    return tokens;
+}
+
 const char* token_type_to_string(AeTokenType type) {
     switch (type) {
         case TOKEN_ACTOR: return "ACTOR";

@@ -27,6 +27,88 @@ version number before tagging the release.
   extern's `strdup` result is now `@heap` and handed back directly instead
   of copied and dropped. `tests/regression/test_fs_symlink.ae`.
 
+## [0.687.0]
+
+### Fixed
+
+- **A chain of more than 256 operators failed to compile under clang
+  (#2071).** Codegen parenthesised every binary node, so `x0 + x1 + … + xN`
+  lowered to N nested brackets and clang's limit of 256 turned a long sum
+  into "bracket nesting level exceeded" deep in the generated C. A left
+  operand that is a link of the same precedence level on plain numbers now
+  goes unbracketed — C groups `a - b - c` as `(a - b) - c` already — so
+  nesting follows the expression's depth, not its length; a link with a
+  cast prefixed to it keeps its brackets so the cast covers the whole link.
+  `tests/integration/operator_chain_nesting`.
+
+## [0.686.0]
+
+### Tests
+
+- **`std.snapshot` gains a concurrent copy-on-write test.** The existing
+  `snapshot_cow` regression test exercises the store/cas/load/reclaim sequence
+  single-threaded, and the #841 concurrent-cache benchmark's COW design uses
+  `store()` (unconditional overwrite) — so nothing in-tree proved the property a
+  real many-writer user relies on: a `snapshot.cas` retry loop must never lose an
+  update under concurrent publishers. The new `snapshot_concurrent` test drives
+  `std.worker` (a real thread pool) at one cell — 500 concurrent CAS increments
+  must land exactly 500 (no lost updates), and 300 writers racing 300 lock-free
+  readers must still reach 300 with no torn reads. (Surfaced by selaenium's Grid
+  hub registry, `std.snapshot`'s first concurrent-CAS-writer consumer.)
+
+## [0.685.0]
+
+### Fixed
+
+- **`tests/integration/cache_dir_override` failed on Windows (#2069).** It
+  checked that `ae cache clear` names the override directory by looking for
+  the shell's `/tmp/...` spelling, but MSYS2 hands a native executable the
+  converted `C:/...` form and that is what `ae` prints. The comparison is
+  now made against the spelling `ae` receives, the way `ae_add_tag_pin`
+  already does it. The only failure in a full Windows sweep.
+
+- **`fs.realpath` on Windows returned a UNC path as the relative
+  `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in
+  the `\\?\` namespace and the resolver stripped four characters from
+  whatever came back; only a drive path survives that. A UNC result now
+  keeps its `\\server\share` root. Failures name the kind the way the
+  POSIX branch does (`path not found`, `access denied`, `name too long`,
+  `symlink cycle`) instead of `CreateFileW failed`, and `fs.chmod` likewise
+  instead of `GetFileAttributesW failed`. `test_fs_realpath` now runs on
+  Windows — paths from `os.temp_dir()`, separators folded for the suffix
+  checks, the UNC case through the local administrative share where it is
+  reachable — after skipping there since it was written.
+
+- **Constant folding computed integer literals in a double.** Every literal
+  went through `atof` and the fold ran in floating point, so a `long`
+  expression lost its low bits past 2^53 (`9007199254740993 + 0` was
+  `9007199254740992`, `9223372036854775807 - 1` was `LLONG_MIN`), the int
+  overflow warning quoted the double's idea of both the exact and the
+  wrapped value (`1000000007 * 1000000007` was reported as
+  `1000000014000000000` wrapping to `-371520512`; it is `…049` and
+  `-371520463`), `0b` and `0o` spellings read as 0 (`0b11 * 2` was 0,
+  `0o17 - 1` was -1), and a duration literal read as its leading digits
+  (`1s + 500ms` was 501ns, `2 * 250ms` was 500ns). The folder now computes
+  in the kind the generated C computes in — `int` wrapping at 32 bits with
+  W1003, `long` at 64 with a warning of its own, `uint64` unsigned, double
+  only when a float is involved — parses every radix, and leaves durations
+  to the runtime. A decimal literal past `LLONG_MAX` is emitted with `ULL`,
+  which removes the "integer constant is so large that it is unsigned"
+  warning from the generated C. `tests/regression/test_const_fold_integer_kinds.ae`,
+  `tests/integration/const_overflow_warning_exact`.
+
+- **A source file is no longer capped at a token count (#2059).** The main
+  file was lexed into a 50,000-entry stack array and refused past it ("split
+  into multiple files using imports" — no help to a generated single-entry
+  program such as aeb's orchestrator); an imported module was cut off at
+  100,000 tokens with its tail declarations silently missing; and a `${...}`
+  expression was cut off at 512 tokens, so `${x0 + ... + x300}` printed the
+  sum of the first 255 terms with no diagnostic. All four sites (the LSP had
+  its own 4,096) now go through one `lexer_tokenize` that grows with the
+  input, so a file's size is bounded by memory. Verbose output still reports
+  the count. `tests/integration/source_size_unbounded` drives each former
+  cap past its old limit from generated sources.
+
 ## [0.684.0]
 
 ### Fixed

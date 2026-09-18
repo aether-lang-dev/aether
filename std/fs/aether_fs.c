@@ -2476,9 +2476,10 @@ static _tuple_string_int_string aether_fs_sks_ok(const char* resolved) {
  * POSIX: realpath(path, NULL) allocates a fresh buffer (POSIX.1-2008
  * extension; available in glibc 2.3+, every modern BSD, macOS).
  * Windows: GetFinalPathNameByHandleW after CreateFileW with
- * FILE_FLAG_BACKUP_SEMANTICS so it works on directories. The
- * \\?\ prefix that GetFinalPathNameByHandleW prepends is stripped
- * before returning so callers get plain forward-slash paths. */
+ * FILE_FLAG_BACKUP_SEMANTICS so it works on directories. It answers in
+ * the \\?\ namespace; that prefix is taken back off so the caller gets
+ * the path as the OS spells it (backslashes, drive letter upper-cased):
+ * \\?\D:\p → D:\p and \\?\UNC\server\share\p → \\server\share\p. */
 _tuple_string_int_string fs_realpath_raw(const char* path) {
     s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) {
@@ -2512,13 +2513,20 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
     if (h == INVALID_HANDLE_VALUE) {
         DWORD win_err = GetLastError();
         aether_fs_note_os_error((int)win_err);
-        int kind = (win_err == ERROR_FILE_NOT_FOUND ||
-                    win_err == ERROR_PATH_NOT_FOUND)
-                   ? AETHER_FS_KIND_NOT_FOUND
-                   : (win_err == ERROR_ACCESS_DENIED
-                      ? AETHER_FS_KIND_PERMISSION_DENIED
-                      : AETHER_FS_KIND_IO);
-        return aether_fs_sks_err(kind, "CreateFileW failed");
+        int kind = AETHER_FS_KIND_IO;
+        const char* msg = "realpath failed";
+        switch (win_err) {
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                kind = AETHER_FS_KIND_NOT_FOUND; msg = "path not found"; break;
+            case ERROR_ACCESS_DENIED:
+                kind = AETHER_FS_KIND_PERMISSION_DENIED; msg = "access denied"; break;
+            case ERROR_FILENAME_EXCED_RANGE:
+                kind = AETHER_FS_KIND_NAME_TOO_LONG; msg = "name too long"; break;
+            case ERROR_CANT_RESOLVE_FILENAME:
+                kind = AETHER_FS_KIND_LOOP; msg = "symlink cycle"; break;
+        }
+        return aether_fs_sks_err(kind, msg);
     }
     /* GetFinalPathNameByHandleW: first call with cb=0 returns required size. */
     DWORD need = GetFinalPathNameByHandleW(h, NULL, 0, FILE_NAME_NORMALIZED);
@@ -2540,10 +2548,15 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
         aether_caps_free(wresult, wresult_bytes);
         return aether_fs_sks_err(AETHER_FS_KIND_IO, "GetFinalPathNameByHandleW size race");
     }
-    /* Strip the \\?\ prefix (4 wchars) so callers see a plain path. */
+    /* Take the \\?\ namespace prefix back off. A UNC path comes back as
+     * \\?\UNC\server\share\...; only "\\?\UNC" is prefix, and the
+     * backslash after it is one of the two that spell a UNC root; the
+     * other is written over the "C". */
     const wchar_t* wstart = wresult;
-    if (got >= 4 && wresult[0] == L'\\' && wresult[1] == L'\\' &&
-        wresult[2] == L'?'  && wresult[3] == L'\\') {
+    if (wcsncmp(wresult, L"\\\\?\\UNC\\", 8) == 0) {
+        wresult[6] = L'\\';
+        wstart = wresult + 6;
+    } else if (wcsncmp(wresult, L"\\\\?\\", 4) == 0) {
         wstart = wresult + 4;
     }
     int u8_len = WideCharToMultiByte(CP_UTF8, 0, wstart, -1, NULL, 0, NULL, NULL);
@@ -2612,11 +2625,16 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
         aether_caps_free(wpath, wpath_bytes);
         DWORD win_err = GetLastError();
         aether_fs_note_os_error((int)win_err);
-        int kind = (win_err == ERROR_FILE_NOT_FOUND ||
-                    win_err == ERROR_PATH_NOT_FOUND)
-                   ? AETHER_FS_KIND_NOT_FOUND
-                   : AETHER_FS_KIND_IO;
-        return aether_fs_iks_err(kind, "GetFileAttributesW failed");
+        int kind = AETHER_FS_KIND_IO;
+        const char* msg = "chmod failed";
+        switch (win_err) {
+            case ERROR_FILE_NOT_FOUND:
+            case ERROR_PATH_NOT_FOUND:
+                kind = AETHER_FS_KIND_NOT_FOUND; msg = "path not found"; break;
+            case ERROR_ACCESS_DENIED:
+                kind = AETHER_FS_KIND_PERMISSION_DENIED; msg = "access denied"; break;
+        }
+        return aether_fs_iks_err(kind, msg);
     }
     /* Owner-write (0o200) sets clear; all other bits ignored. */
     if (mode & 0200) {
@@ -2627,11 +2645,12 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     BOOL ok = SetFileAttributesW(wpath, attrs);
     aether_caps_free(wpath, wpath_bytes);
     if (!ok) {
-        aether_fs_note_os_error((int)GetLastError());
-        int kind = (GetLastError() == ERROR_ACCESS_DENIED)
-                   ? AETHER_FS_KIND_PERMISSION_DENIED
-                   : AETHER_FS_KIND_IO;
-        return aether_fs_iks_err(kind, "SetFileAttributesW failed");
+        DWORD win_err = GetLastError();
+        aether_fs_note_os_error((int)win_err);
+        if (win_err == ERROR_ACCESS_DENIED) {
+            return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
+        }
+        return aether_fs_iks_err(AETHER_FS_KIND_IO, "chmod failed");
     }
     _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
