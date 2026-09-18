@@ -13,6 +13,23 @@ version number before tagging the release.
 
 ### Fixed
 
+- **E0200 "block setter called as a node builder" rejected every container
+  of a widget DSL that also declares a `builder`.** The rule from 0.667
+  used "the callee's module also defines a `builder`" as its whole
+  discriminator between a block setter and a DSL container, on the premise
+  that a widget-style module has no builders. aether-ui's `ui` module has
+  four (`window`, `render_to`, `record`, `nav_page`) beside some fifty
+  `_ctx`-first containers, so `ui.vstack(10) { ... }` — every app in that
+  repository — became a compile error the moment it moved past 0.666
+  (aether-ui#147). The rule now also requires that the callee yield no
+  value: a container RETURNS the handle its block runs inside (that value
+  is the block's `_ctx`), while a block setter records config and returns
+  nothing, which is exactly why its own trailing block can never be
+  entered. aeb's setters are all void, so the misuse it was written for
+  is still caught. `tests/integration/setter_in_builder_position` gains
+  `uimod` (a builder beside handle-returning containers and one void
+  setter): the container compiles, the setter still errors.
+
 - **A closure called through an erased `fn` value could only return `int`
   (#2054).** Once a closure had crossed a `fn` parameter or return,
   `box_closure`, or a list, `call(f, …)` on it was typed as `int` from a

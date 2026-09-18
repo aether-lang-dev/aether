@@ -1373,6 +1373,7 @@ static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
 /* Defined below, beside typecheck_function_call — used by the
  * variable-declaration arm, which appears earlier in this file. */
 static int call_yields_no_value(ASTNode* call, SymbolTable* table);
+static int fn_yields_no_value(ASTNode* fn);
 
 // Type compatibility functions
 /* A `fn` with no signature: nothing known about parameters or result. */
@@ -8221,11 +8222,8 @@ static int tc_has_return_value(ASTNode* node) {
  * Returns 1 when `call` names a user-defined function that lowers to void.
  * Externs are excluded: their declared type is the only truth available, and
  * an `extern f() -> int` may well front a real int-returning C function. */
-static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
-    Symbol* sym = lookup_symbol(table, call->value);
-    if (!sym || !sym->node) return 0;
-    ASTNode* fn = sym->node;
+static int fn_yields_no_value(ASTNode* fn) {
+    if (!fn) return 0;
     if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION)
         return 0;
     /* An annotated return type is authoritative, whatever the body does. */
@@ -8235,6 +8233,13 @@ static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
      * has_return_value is the same predicate codegen uses to decide, so the
      * two cannot disagree. */
     return !tc_has_return_value(fn);
+}
+
+static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
+    Symbol* sym = lookup_symbol(table, call->value);
+    if (!sym || !sym->node) return 0;
+    return fn_yields_no_value(sym->node);
 }
 
 int typecheck_function_call(ASTNode* call, SymbolTable* table) {
@@ -8569,14 +8574,28 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
          *   1. the callee is a plain AST_FUNCTION_DEFINITION (not a builder),
          *      whose first param is `_ctx: ptr` (has_ctx_first_param);
          *   2. this call carries its OWN trailing block (an AST_CLOSURE
-         *      argument valued "trailing"); and
-         *   3. the callee's module ALSO defines at least one `builder`.
-         * Condition 3 is the discriminator: a widget-style DSL module has no
-         * builders and is never flagged; only a builder-DSL module — where a
-         * `_ctx`-first plain function IS a block setter — is. */
+         *      argument valued "trailing");
+         *   3. the callee's module ALSO defines at least one `builder`; and
+         *   4. the callee yields NO value (fn_yields_no_value on the
+         *      resolved definition — `symbol` already went through the
+         *      qualified lookup, which a fresh lookup by `mod.name` would not).
+         * Condition 3 was the original discriminator: a widget-style DSL
+         * module has no builders and is never flagged. It is not enough on
+         * its own. A widget DSL can carry a few builders alongside dozens of
+         * `_ctx`-first containers — aether-ui's `ui` module has `builder
+         * window(...)` next to `vstack(_ctx, spacing)` — and under 3 alone
+         * every `ui.vstack(10) { ... }` in every app was rejected as a
+         * setter (aether-ui#147, the 0.667 pin bump). Condition 4 is the
+         * semantic difference: a container RETURNS the handle its block runs
+         * inside (that value is the block's `_ctx`), while a block setter
+         * records config and returns nothing — which is exactly why its own
+         * trailing block can never be entered. A void `_ctx`-first function
+         * with a trailing block in a builder module is the misuse; one that
+         * returns a value is a container whatever its module also declares. */
         if (symbol->node->type == AST_FUNCTION_DEFINITION &&
             has_ctx_first_param(symbol->node) &&
-            module_defines_a_builder(symbol->node)) {
+            module_defines_a_builder(symbol->node) &&
+            fn_yields_no_value(symbol->node)) {
             for (int i = 0; i < call->child_count; i++) {
                 ASTNode* c = call->children[i];
                 if (c && c->type == AST_CLOSURE && c->value &&

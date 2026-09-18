@@ -1,0 +1,32 @@
+// Widget-style DSL module that ALSO defines a builder — aether-ui's shape.
+//
+// `window` is a real `builder`. `vstack` is a `_ctx`-first plain function
+// that LEGITIMATELY takes a trailing block: it creates a container and
+// RETURNS its handle, which is the `_ctx` the block's children attach to.
+// Under conditions 1-3 alone this module looks exactly like rubymod, and
+// `uimod.vstack(10) { ... }` was rejected as a misused setter. Condition 4
+// tells them apart: a container yields a value, a block setter yields none.
+//
+// `font_size` is the module's genuine block setter: `_ctx`-first, void,
+// records config on the container. Called with a trailing block of its own
+// it must still be flagged, builder-module or not.
+
+exports(window, vstack, label, font_size)
+
+builder window(title: string) {
+    println("window ${title}")
+}
+
+vstack(_ctx: ptr, spacing: int) {
+    println("vstack ${spacing}")
+    return 42
+}
+
+label(_ctx: ptr, text: string) {
+    println("label ${text}")
+    return 43
+}
+
+font_size(_ctx: ptr, px: int) {
+    println("font_size ${px}")
+}
