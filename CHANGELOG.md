@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.688.0]
+
 ### Fixed
 
 - **`fs.symlink`, `fs.readlink` and `fs.is_symlink` work on Windows.** They
