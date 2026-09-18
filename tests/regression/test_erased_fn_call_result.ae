@@ -55,6 +55,10 @@ pick(want_add: int) -> fn {
 // (c) erased through a list
 first_of(l: ptr) -> fn { return unbox_closure(list.get_raw(l, 0)) }
 
+// (e) the direct form nested: f(f(v)) on a bare fn parameter types both
+//     calls the same way call(f, ...) would (the int default, marked).
+apply_twice(f: fn, v: int) -> int { return f(f(v)) }
+
 main() {
     println("=== call through an erased fn (#2054) ===")
 
@@ -106,6 +110,9 @@ main() {
     check("chosen in a callee and returned through fn", prod == 12)
     string named = call(name_fn, 3, 4)
     check("call() on a function name, string result", string.equals(named, "sum=7") == 1)
+
+    // (e)
+    check("nested direct calls on a bare fn parameter", apply_twice(| x: int | { return x * 3 }, 2) == 18)
 
     if failures == 0 {
         println("erased fn call result: all checks passed")
