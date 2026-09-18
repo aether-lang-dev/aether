@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.684.0]
+
 ### Fixed
 
 - **A closure that returned a string on one path and a `-> ptr` builtin's
