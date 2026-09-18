@@ -31,7 +31,7 @@ case "$(uname -s)" in
 esac
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # Compile the .ae as --emit=lib → .c (capability-free: std.string only).
 if ! AETHER_HOME="$ROOT" "$AETHERC" --emit=lib \

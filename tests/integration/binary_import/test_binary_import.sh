@@ -22,7 +22,7 @@ case "$(uname -s)" in
 esac
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" || true' EXIT
 cp "$SCRIPT_DIR/gizmo.ae" "$SCRIPT_DIR/app.ae" "$WORK/"
 cd "$WORK"
 

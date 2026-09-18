@@ -20,7 +20,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AETHERC="$ROOT/build/aetherc"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # --- Step 1: emit the loop fixture as C in --emit=lib mode. ---
 "$AETHERC" --emit=lib "$SCRIPT_DIR/loop.ae" "$TMPDIR/loop_lib.c" \

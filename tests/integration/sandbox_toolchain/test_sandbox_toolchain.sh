@@ -44,7 +44,7 @@ if [ ! -f "$PRELOAD_SRC" ]; then
 fi
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # 1. Build the preload (matches what install.sh does for downstreams).
 cc -shared -fPIC -o "$TMPDIR/libaether_sandbox.so" "$PRELOAD_SRC" -ldl -lrt 2>"$TMPDIR/preload-cc.log" || {

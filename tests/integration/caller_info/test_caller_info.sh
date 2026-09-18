@@ -15,7 +15,7 @@ AE="$ROOT/build/ae"
 LIB="$ROOT/build/libaether.a"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # --- Aether-side test ---
 ACTUAL="$TMPDIR/inproc.log"

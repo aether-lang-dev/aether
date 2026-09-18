@@ -25,7 +25,7 @@ fail() { echo "  FAIL: $1"; exit 1; }
 # A private cache, so this test controls cold vs warm without touching the
 # shared one the rest of the parallel sweep is using.
 TMPDIR_T=$(mktemp -d)
-trap 'rm -rf "$TMPDIR_T"' EXIT
+trap 'rm -rf "$TMPDIR_T" || true' EXIT
 export AETHER_CACHE_DIR="$TMPDIR_T/cache"
 
 # --- Case 1 + 2: forward three args, the middle one with a space -------

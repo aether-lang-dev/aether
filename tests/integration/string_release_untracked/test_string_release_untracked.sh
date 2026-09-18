@@ -16,7 +16,7 @@ AE="$ROOT/build/ae"
 [ -x "$AETHERC" ] || { echo "  [SKIP] string_release_untracked: build/aetherc missing"; exit 0; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 if ! "$AETHERC" "$SCRIPT_DIR/probe.ae" "$TMP/out.c" > "$TMP/gen.log" 2>&1; then
     echo "  [FAIL] string_release_untracked: codegen failed"

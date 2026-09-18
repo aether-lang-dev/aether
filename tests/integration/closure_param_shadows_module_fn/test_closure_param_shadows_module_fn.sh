@@ -38,7 +38,7 @@ AETHERC="$ROOT/build/aetherc"
 
 cd "$ROOT" || exit 1
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() {
     echo "  [FAIL] closure_param_shadows_module_fn: $1"

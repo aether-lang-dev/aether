@@ -26,7 +26,7 @@ SRC="$SCRIPT_DIR/mylib.ae"
 
 TMP="${TMPDIR:-/tmp}/ae_csrc_cross_$$"
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() { echo "  FAIL: $1"; exit 1; }
 

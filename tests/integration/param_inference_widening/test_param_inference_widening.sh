@@ -14,7 +14,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] param_inference_widening: build/ae missing"; exit 0; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/probe.ae" -o "$TMP/probe" > "$TMP/build.log" 2>&1; then
     echo "  [FAIL] param_inference_widening: build failed"

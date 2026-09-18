@@ -45,7 +45,7 @@ if [ ! -x "$AE" ]; then
 fi
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # find_preload_path in aether_spawn_sandboxed.c looks next to the
 # launcher binary (and at ../build/libaether_sandbox.so). Put the .so

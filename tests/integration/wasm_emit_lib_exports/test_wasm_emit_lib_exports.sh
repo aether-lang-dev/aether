@@ -49,7 +49,7 @@ command -v python3 >/dev/null 2>&1 || { echo "  [SKIP] wasm_emit_lib_exports: py
 
 TMP="${TMPDIR:-/tmp}/ae_wasmlib_$$"
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() { echo "  FAIL: $1"; exit 1; }
 has()  { grep -qx "$2" "$1"; }

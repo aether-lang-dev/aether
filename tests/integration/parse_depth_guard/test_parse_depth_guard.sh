@@ -28,7 +28,7 @@ AETHERC="$ROOT/build/aetherc"
 [ -x "$AETHERC" ] || { echo "  [SKIP] parse_depth_guard: build/aetherc missing"; exit 0; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 rep() { # rep <string> <count>
     awk -v s="$1" -v n="$2" 'BEGIN { for (i = 0; i < n; i++) printf "%s", s }'
