@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.687.0]
+
 ### Fixed
 
 - **A chain of more than 256 operators failed to compile under clang
