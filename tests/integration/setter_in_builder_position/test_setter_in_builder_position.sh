@@ -12,9 +12,13 @@
 #
 # The check is deliberately NARROW to stay false-positive-free. It fires
 # ONLY when the callee is a plain `_ctx`-first function, the call carries
-# its own trailing block, AND the callee's module also defines a `builder`.
-# A widget-style DSL container (`panel(_ctx, title) { button() }`) in a
-# module with NO builders is structurally identical but must NOT be flagged.
+# its own trailing block, the callee's module also defines a `builder`,
+# AND the callee yields no value. A widget-style DSL container
+# (`panel(_ctx, title) { button() }`) in a module with NO builders is
+# structurally identical but must NOT be flagged — and neither is one in a
+# module WITH builders when it returns the handle its block runs inside
+# (aether-ui's `ui` module: `builder window` beside `vstack(_ctx, spacing)`,
+# which rejected every app under the first cut of this rule).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -86,5 +90,7 @@ expect_ok() {
 expect_error "$SCRIPT_DIR/misuse.ae"  "MISUSE: setter called as top-level node builder must error"
 expect_ok    "$SCRIPT_DIR/legit_a.ae" "LEGIT A: same setter called inside the builder's block compiles"
 expect_ok    "$SCRIPT_DIR/legit_b.ae" "LEGIT B: widget-style DSL container (no builders) not flagged"
+expect_ok    "$SCRIPT_DIR/legit_c.ae" "LEGIT C: handle-returning container in a module WITH a builder not flagged"
+expect_error "$SCRIPT_DIR/misuse_b.ae" "MISUSE B: void setter of that same widget module still errors"
 
 exit $fail
