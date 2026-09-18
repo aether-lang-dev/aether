@@ -21,6 +21,9 @@ version number before tagging the release.
   waiting), which takes `/bin/sh` and `sleep` out of it and runs the clean
   exit, the 1 s timeout on a 30 s sleeper, the group reap of a leaked
   grandchild and the bounded wait + kill + reap against both backends.
+  `test_os_cwd` (chdir into the current drive's root on Windows) and
+  `test_run_argv_heap_string` (the child prints its own arguments instead
+  of spawning `echo`) likewise run there now.
 
 ## [0.683.0]
 
