@@ -13,6 +13,16 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`1 | 2 | 3 ->` in a match or switch arm matched only 3.** A `|` between
+  selector values is the bitwise OR, and it compiled. The parser now refuses
+  a `|` at the top of a selector and names the comma-list that was meant.
+  `tests/integration/match_pipe_selector_reject`.
+
+- **`f(f(v))` on a bare `fn` parameter warned "unresolved type in codegen".**
+  The direct-call rewrite typed an erased call as unknown while `call(f, …)`
+  typed it as the marked int default (#2054); both spellings now share one
+  rule.
+
 - **A folded float expression could come out as an int (`${2.5 * 2}` printed
   `2.47e-323`).** The constant folder wrote float results with `%.10g`, so a
   whole-number result became the C literal `5` — an int, which printf's `%g`

@@ -8447,14 +8447,10 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             typecheck_expression(call->children[i], table);
         }
 
-        // The call's return type is the function-type's return slot,
-        // when known. Otherwise leave UNKNOWN — type inference may
-        // refine it later.
-        if (symbol->type->return_type) {
-            set_node_type(call, clone_type(symbol->type->return_type));
-        } else {
-            set_node_type(call, create_type(TYPE_UNKNOWN));
-        }
+        // The call's result type: the function-type's return slot when
+        // known, else the erased-call default (#2054) -- the same rule as
+        // the explicit call(f, ...) form, so both spellings type alike.
+        set_node_type(call, call_builtin_result_type(call, table));
         return 1;
     }
 

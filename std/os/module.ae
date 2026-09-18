@@ -305,7 +305,10 @@ run_capture(prog: string, argv: ptr, env: ptr) -> {
 // os.run_pipe_drain_and_wait — same parent surface but no
 // pipe-buffer deadlock risk and no manual wait_pid call needed.
 //
-// On Windows, returns (-1, -1, "unsupported on Windows").
+// On Windows there is no back-channel: the child is spawned as
+// spawn_proc would, the read fd comes back as -1, and the pid is the
+// spawn token, which wait_pid reaps. Only the channel is missing; a
+// child that never writes to fd 3 behaves the same on both.
 run_pipe(prog: string, argv: ptr, env: ptr) -> {
     return os_run_pipe_raw(prog, argv, env)
 }
