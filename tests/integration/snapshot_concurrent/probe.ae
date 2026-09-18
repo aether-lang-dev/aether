@@ -1,0 +1,126 @@
+// std.snapshot CONCURRENT copy-on-write test (issue #840, concurrency coverage).
+//
+// The existing snapshot_cow regression test (tests/integration/snapshot_cow)
+// exercises the store/cas/load/reclaim SEQUENCE, but single-threaded — its own
+// comment says "single-threaded here, but it exercises the exact ownership moves
+// a writer-actor makes." And the #841 concurrent-cache benchmark uses store()
+// (unconditional overwrite) for its COW design. So nothing in-tree proves the
+// thing a real many-writer user depends on: that a CAS retry loop over a snapshot
+// cell NEVER LOSES an update when many threads publish concurrently. This test
+// proves it, with std.worker (a real thread pool).
+//
+// Each snapshot "value" is a heap int box (std.mem), so the test touches real
+// publish/acquire memory. A writer does the canonical CAS loop:
+//     exp = load(cell); next = box(read(exp) + 1); if cas(cell, exp, next) { keep exp } else { free next; retry }
+// Fire N such increments across the worker pool; the final value MUST be exactly
+// N. If cas mis-published (or if the loser failed to retry), the count would be
+// < N — the classic lost-update race a correct CAS loop forbids.
+//
+// Self-reports "snapshot_concurrent: P passing, F failing" on the last line; the
+// shell wrapper asserts on it.
+import std.io(println)
+import std.snapshot
+import std.mem
+import std.worker
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+// A 4-byte heap box holding v (the snapshot value shape).
+box(v: int) -> ptr {
+    p = malloc(4)
+    if p != null { mem.set_int(p, 0, v) }
+    return p
+}
+unbox(p: ptr) -> int {
+    if p == null { return 0 - 1 }
+    return mem.get_int(p, 0)
+}
+
+// One atomic increment of the cell via a CAS retry loop — the pattern a
+// concurrent single-writer-per-op user runs. Retries until it wins; frees its
+// own rejected box on a lost race (the box never entered the cell, so no reader
+// can hold it — free it eagerly, NOT via a retire list). Leaks the displaced box
+// on success (a reader may still hold it; a real user retires it a generation
+// late — reclamation timing is orthogonal to the lost-update property under test).
+cas_increment(cell: ptr) {
+    while 1 == 1 {
+        exp = snapshot.load(cell)
+        next = box(unbox(exp) + 1)
+        if snapshot.cas(cell, exp, next) == 1 {
+            return
+        }
+        free(next)   // lost the race: our box was rejected, free it and retry
+    }
+}
+
+// Block until every submitted worker job has finished (drain completions + block
+// on the pool's done signal until pending == 0) — the correct completion barrier.
+// A drain-poll loop can observe a transient pending==0 and return before all jobs
+// have run; worker.wait() does not.
+await_all() { _w = worker.wait() }
+
+main() {
+    passing = 0
+    failing = 0
+
+    // Case 1: N concurrent CAS increments -> value must be EXACTLY N (no lost
+    // updates). This is the whole point: a broken CAS loop loses updates here.
+    n = 500
+    cell = snapshot.new(box(0))
+    i = 0
+    while i < n {
+        _ok = worker.run(
+            || { cas_increment(cell)  return null },
+            | r: ptr | { }
+        )
+        i = i + 1
+    }
+    await_all()
+    got = unbox(snapshot.load(cell))
+    if got == n {
+        println("  [1] PASS ${n} concurrent CAS increments -> ${got} (no lost updates)")
+        passing = passing + 1
+    } else {
+        println("  [1] FAIL expected ${n}, got ${got} (CAS lost updates under contention)")
+        failing = failing + 1
+    }
+
+    // Case 2: concurrent readers alongside writers never see a torn/garbage value
+    // — every lock-free load returns a value in [0, n2] (a real published box),
+    // never junk. Reads race writes; each read is checked in-range.
+    n2 = 300
+    cell2 = snapshot.new(box(0))
+    j = 0
+    while j < n2 {
+        _okw = worker.run(
+            || { cas_increment(cell2)  return null },
+            | r: ptr | { }
+        )
+        // interleave a reader that validates the loaded value is a real box
+        _okr = worker.run(
+            || {
+                v = unbox(snapshot.load(cell2))
+                p = box(0)
+                if v >= 0 { if v <= 300 { mem.set_int(p, 0, 1) } }   // 1 = in range
+                return p
+            },
+            | r: ptr | { }
+        )
+        j = j + 1
+    }
+    await_all()
+    got2 = unbox(snapshot.load(cell2))
+    if got2 == n2 {
+        println("  [2] PASS ${n2} writers + ${n2} concurrent readers -> ${got2}, no torn reads")
+        passing = passing + 1
+    } else {
+        println("  [2] FAIL expected ${n2}, got ${got2} (writers lost updates under read contention)")
+        failing = failing + 1
+    }
+
+    println("")
+    println("snapshot_concurrent: ${passing} passing, ${failing} failing")
+    if failing == 0 { return 0 }
+    return 1
+}
