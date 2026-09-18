@@ -24,6 +24,8 @@ version number before tagging the release.
   wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
   engine as Aether source.)
 
+## [0.688.0]
+
 ### Fixed
 
 - **`fs.symlink`, `fs.readlink` and `fs.is_symlink` work on Windows.** They
