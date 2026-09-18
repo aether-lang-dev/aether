@@ -11,6 +11,17 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+- `std.sync`: an atomic 64-bit integer cell (`atomic_new`, `atomic_load`,
+  `atomic_store`, `atomic_add`, `atomic_sub`, `atomic_cas`, `atomic_free`)
+  exposed to `.ae` (issue #2082). `add`/`sub` return the *new* value so a
+  refcount-to-zero check is a plain `== 0`; load is acquire, store is release,
+  add/sub/cas are acq_rel. This is the missing reclamation primitive for
+  pool-owned copy-on-write structures — `std.snapshot` gives the atomic pointer
+  swap but not the counter to build a refcount / lock-free retire ring — the
+  same shape `std/http/proxy/aether_proxy_lb.c` uses in C, lifted into `.ae`.
+  Deliberately minimal (not a mutex, not a general lock).
+
 ### Docs
 - `docs/http-server.md`: mark the "Per-connection actor dispatch" section as a
   C-internal mechanism, not a usable Aether API from a release —

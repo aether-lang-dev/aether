@@ -1,0 +1,130 @@
+// std.sync — a single atomic 64-bit integer cell.
+// Import with: import std.sync
+//
+// Issue #2082.
+//
+// `.ae` already has an atomic *pointer* swap (std.snapshot) but no
+// atomic *integer*, so a reference count or a small lock-free retire
+// ring — exactly what a pool-owned copy-on-write structure needs to
+// reclaim its displaced values safely — cannot be built in pure Aether.
+// std.snapshot gives publication; it does not give reclamation. This
+// module closes that gap with the smallest primitive that does the job:
+// one atomic i64 with load / store / add / sub / compare-and-swap.
+//
+//   c  = sync.atomic_new(0)            // heap atomic i64, initial value
+//   v  = sync.atomic_load(c)           // acquire load
+//        sync.atomic_store(c, 5)       // release store
+//   n  = sync.atomic_add(c, 1)         // add, returns the NEW value
+//   n  = sync.atomic_sub(c, 1)         // subtract, returns the NEW value
+//   ok = sync.atomic_cas(c, exp, nw)   // 1 if swapped exp->nw, else 0
+//        sync.atomic_free(c)           // free the cell
+//
+// add / sub return the NEW (post-operation) value, NOT the previous one
+// (unlike C's fetch_add). The dominant use is a refcount that must act
+// exactly when it hits zero, so this reads correctly with no extra step:
+//
+//   if sync.atomic_sub(rc, 1) == 0 {
+//       // last reference gone — safe to reclaim
+//   }
+//
+// MEMORY ORDERING. load is acquire, store is release, add/sub/cas are
+// acquire+release. So an atomic that gates other data (a refcount
+// protecting the value it counts, a flag publishing a freshly-built
+// buffer) carries the publish/subscribe guarantee: a thread that
+// acquires the counter sees everything the releasing thread wrote before
+// it. Same discipline std.snapshot uses for its pointer.
+//
+// The value is a signed 64-bit integer (Aether `long`), so a refcount, a
+// generation number, or a pointer punned through mem.long_to_ptr all
+// fit. The cell is cap-accounted, consistent with the process memory
+// cap.
+//
+// WHAT THIS IS FOR. Low-level plumbing for pool-owned, C-style shared
+// state — the shape std/http/proxy/aether_proxy_lb.c already uses in C
+// (atomics + mutex), lifted into `.ae` so a pool-owned COW structure can
+// reclaim correctly without dropping to C. The motivating case: a
+// snapshot-cell retire ring (guard the displaced value with a refcount,
+// free it when the count reaches zero after a grace period).
+//
+// WHAT THIS IS NOT. It is not a mutex and not a general lock. It is
+// deliberately minimal and is not an invitation to replace the actor
+// model with lock-based sharing — actors remain the default for
+// coordinating mutable state. Reach for this only for the pool-owned
+// C-style seam actors do not cover.
+
+exports(
+    // Raw externs (over std/sync/aether_sync.c).
+    aether_sync_atomic_new, aether_sync_atomic_load,
+    aether_sync_atomic_store, aether_sync_atomic_add,
+    aether_sync_atomic_sub, aether_sync_atomic_cas,
+    aether_sync_atomic_free,
+    // Ergonomic wrappers — call as sync.atomic_new / .atomic_load / etc.
+    atomic_new, atomic_load, atomic_store, atomic_add, atomic_sub,
+    atomic_cas, atomic_free
+)
+
+// ---- Raw externs ----
+
+// Create an atomic i64 cell initialised to `initial`. Returns the cell
+// handle, or null on allocation failure / memory-cap exceeded.
+extern aether_sync_atomic_new(initial: long) -> ptr
+
+// Acquire load of the current value. A null cell returns 0.
+extern aether_sync_atomic_load(cell: ptr) -> long
+
+// Release store of `value`. A null cell is a no-op.
+extern aether_sync_atomic_store(cell: ptr, value: long)
+
+// Atomically add `delta`; returns the NEW (post-add) value. A null cell
+// returns 0.
+extern aether_sync_atomic_add(cell: ptr, delta: long) -> long
+
+// Atomically subtract `delta`; returns the NEW (post-sub) value. A null
+// cell returns 0.
+extern aether_sync_atomic_sub(cell: ptr, delta: long) -> long
+
+// Compare-and-swap: if the cell holds `expected`, replace it with
+// `desired` and return 1; else leave it and return 0. Strong (no
+// spurious failures). A null cell returns 0.
+extern aether_sync_atomic_cas(cell: ptr, expected: long, desired: long) -> int
+
+// Free the cell. A null cell is a no-op.
+extern aether_sync_atomic_free(cell: ptr)
+
+// ---- Ergonomic wrappers ----
+
+// Create an atomic i64 cell initialised to `initial`.
+atomic_new(initial: long) -> ptr {
+    return aether_sync_atomic_new(initial)
+}
+
+// Lock-free acquire load of the current value.
+atomic_load(cell: ptr) -> long {
+    return aether_sync_atomic_load(cell)
+}
+
+// Release store of `value`.
+atomic_store(cell: ptr, value: long) {
+    aether_sync_atomic_store(cell, value)
+}
+
+// Add `delta`, return the NEW value. Negative `delta` decrements.
+atomic_add(cell: ptr, delta: long) -> long {
+    return aether_sync_atomic_add(cell, delta)
+}
+
+// Subtract `delta`, return the NEW value. The refcount-release call:
+// `if sync.atomic_sub(rc, 1) == 0 { reclaim }`.
+atomic_sub(cell: ptr, delta: long) -> long {
+    return aether_sync_atomic_sub(cell, delta)
+}
+
+// Compare-and-swap exp -> desired. Returns 1 on swap, 0 otherwise.
+atomic_cas(cell: ptr, expected: long, desired: long) -> int {
+    return aether_sync_atomic_cas(cell, expected, desired)
+}
+
+// Free the cell.
+atomic_free(cell: ptr) {
+    aether_sync_atomic_free(cell)
+}
