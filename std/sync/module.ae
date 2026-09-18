@@ -66,29 +66,33 @@ exports(
 // ---- Raw externs ----
 
 // Create an atomic i64 cell initialised to `initial`. Returns the cell
-// handle, or null on allocation failure / memory-cap exceeded.
+// handle, or null on allocation failure / memory-cap exceeded. CHECK the
+// result: every op below is fatal on a null cell (a swallowed null would let
+// atomic_sub return 0 = "reclaim" and free a live value), so an unchecked
+// alloc failure crashes at first use, not silently.
 extern aether_sync_atomic_new(initial: long) -> ptr
 
-// Acquire load of the current value. A null cell returns 0.
+// Acquire load of the current value. Fatal on a null cell.
 extern aether_sync_atomic_load(cell: ptr) -> long
 
-// Release store of `value`. A null cell is a no-op.
+// Release store of `value`. Fatal on a null cell.
 extern aether_sync_atomic_store(cell: ptr, value: long)
 
-// Atomically add `delta`; returns the NEW (post-add) value. A null cell
-// returns 0.
+// Atomically add `delta`; returns the NEW (post-add) value. Fatal on a
+// null cell.
 extern aether_sync_atomic_add(cell: ptr, delta: long) -> long
 
-// Atomically subtract `delta`; returns the NEW (post-sub) value. A null
-// cell returns 0.
+// Atomically subtract `delta`; returns the NEW (post-sub) value. Fatal on
+// a null cell.
 extern aether_sync_atomic_sub(cell: ptr, delta: long) -> long
 
 // Compare-and-swap: if the cell holds `expected`, replace it with
 // `desired` and return 1; else leave it and return 0. Strong (no
-// spurious failures). A null cell returns 0.
+// spurious failures); success is acq_rel so a CAS winner that reads the
+// data it guards acquires correctly. Fatal on a null cell.
 extern aether_sync_atomic_cas(cell: ptr, expected: long, desired: long) -> int
 
-// Free the cell. A null cell is a no-op.
+// Free the cell. A null cell is a no-op (mirrors libc free).
 extern aether_sync_atomic_free(cell: ptr)
 
 // ---- Ergonomic wrappers ----

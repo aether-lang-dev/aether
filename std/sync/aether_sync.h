@@ -62,27 +62,36 @@ extern "C" {
  * NULL on allocation failure / cap-exceeded. */
 void* aether_sync_atomic_new(int64_t initial);
 
-/* Acquire load of the current value. A NULL cell returns 0. */
+/* Every operation below is FATAL (abort) on a NULL cell, not a silent no-op.
+ * The only source of a NULL cell is an unchecked atomic_new() that returned
+ * NULL on cap-exceeded / OOM, and a swallowed NULL is dangerous: 0 from
+ * atomic_sub means "refcount reached zero, reclaim", so silently returning 0
+ * would free a live value. Check atomic_new()'s result. (free() is the sole
+ * exception -- NULL there is a no-op, mirroring libc free.) */
+
+/* Acquire load of the current value. Fatal on a NULL cell. */
 int64_t aether_sync_atomic_load(void* cell);
 
-/* Release store of `value`. A NULL cell is a no-op. */
+/* Release store of `value`. Fatal on a NULL cell. */
 void aether_sync_atomic_store(void* cell, int64_t value);
 
 /* Atomically add `delta` and return the NEW (post-add) value. acq_rel.
- * A NULL cell returns 0. Use a negative delta, or atomic_sub, to
- * decrement. */
+ * Fatal on a NULL cell. Use a negative delta, or atomic_sub, to decrement. */
 int64_t aether_sync_atomic_add(void* cell, int64_t delta);
 
 /* Atomically subtract `delta` and return the NEW (post-sub) value.
- * acq_rel. A NULL cell returns 0. The canonical refcount-release call:
+ * acq_rel. Fatal on a NULL cell. The canonical refcount-release call:
  * `if (aether_sync_atomic_sub(rc, 1) == 0) reclaim();`. */
 int64_t aether_sync_atomic_sub(void* cell, int64_t delta);
 
 /* Compare-and-swap: if the cell holds `expected`, replace it with
  * `desired` and return 1; otherwise leave it unchanged and return 0.
  * Strong (no spurious failures), so an Aether-side retry loop treats a
- * 0 as a real concurrent change. Success is release, failure is acquire.
- * A NULL cell returns 0. */
+ * 0 as a real concurrent change. Success AND failure are acquire-inclusive
+ * (acq_rel on success, acquire on failure): a CAS that wins the slot then
+ * reads the data it guards must acquire, or it can miss the prior owner's
+ * writes -- release-only would be right only for a publish-only cell.
+ * Fatal on a NULL cell. */
 int aether_sync_atomic_cas(void* cell, int64_t expected, int64_t desired);
 
 /* Free the cell. NULL is a no-op (mirrors libc free). */

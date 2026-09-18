@@ -16,11 +16,15 @@ version number before tagging the release.
   `atomic_store`, `atomic_add`, `atomic_sub`, `atomic_cas`, `atomic_free`)
   exposed to `.ae` (issue #2082). `add`/`sub` return the *new* value so a
   refcount-to-zero check is a plain `== 0`; load is acquire, store is release,
-  add/sub/cas are acq_rel. This is the missing reclamation primitive for
+  add/sub/cas are acq_rel (a CAS winner that reads the state it guards
+  acquires correctly). A null cell is fatal on every op except `free` — an
+  unchecked `atomic_new` failure crashes loud rather than letting `atomic_sub`
+  return 0 and free a live value. This is the missing reclamation primitive for
   pool-owned copy-on-write structures — `std.snapshot` gives the atomic pointer
   swap but not the counter to build a refcount / lock-free retire ring — the
   same shape `std/http/proxy/aether_proxy_lb.c` uses in C, lifted into `.ae`.
-  Deliberately minimal (not a mutex, not a general lock).
+  Deliberately minimal (not a mutex, not a general lock). The `std.sync` README
+  carries the snapshot retire-ring pattern end to end.
 
 ### Fixed
 

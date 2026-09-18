@@ -71,6 +71,81 @@ published value with a refcount, and free it when the count reaches zero after
 a grace period, so a pool-owned copy-on-write structure reclaims correctly
 instead of leaking its displaced values.
 
+### The retire pattern (why this module exists)
+
+`std.snapshot` publishes an immutable value behind an atomic pointer and hands
+the writer back the **displaced** one — but it cannot free that value, because a
+reader may have loaded it microseconds before the swap. Without an atomic
+integer there was no way to know when the last reader is done, so a pure-`.ae`
+snapshot user had to leak every displaced value. A `std.sync` refcount closes
+it: each value carries a count, a reader holds a reference across its read, and
+the value frees itself the moment the count reaches zero — never while a reader
+still holds it.
+
+```aether,run
+import std.sync
+import std.snapshot
+import std.mem
+
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+// A guarded value: an int payload + a std.sync refcount. It frees itself
+// (payload box AND its count) exactly when the last holder releases.
+guarded_new(payload: int) -> ptr {
+    g = malloc(16)
+    mem.set_int(g, 0, payload)
+    rc = sync.atomic_new(1)                    // one ref: the snapshot cell
+    mem.set_long(g, 8, mem.ptr_to_long(rc))
+    return g
+}
+guarded_rc(g: ptr) -> ptr { return mem.long_to_ptr(mem.get_long(g, 8)) }
+guarded_payload(g: ptr) -> int { return mem.get_int(g, 0) }
+
+// A reader that loaded this value takes a reference.
+hold_ref(g: ptr) -> ptr { _n = sync.atomic_add(guarded_rc(g), 1)  return g }
+
+// Drop a reference. At zero, no holder remains — reclaim.
+drop_ref(g: ptr) {
+    if sync.atomic_sub(guarded_rc(g), 1) == 0 {
+        println("  freeing payload ${guarded_payload(g)} (refcount hit 0)")
+        sync.atomic_free(guarded_rc(g))
+        free(g)
+    }
+}
+
+main() {
+    cell = snapshot.new(guarded_new(100))      // v100, rc=1 (the cell's ref)
+
+    r = hold_ref(snapshot.load(cell))          // a reader loads+holds: v100 rc=2
+
+    // Publish v200; the displaced v100 comes back. The writer drops the CELL's
+    // reference — but the reader still holds one, so v100 is NOT freed yet.
+    displaced = snapshot.store(cell, guarded_new(200))
+    println("published 200, displaced ${guarded_payload(displaced)}")
+    drop_ref(displaced)                        // v100 rc=1 (reader still holds)
+
+    drop_ref(r)                                // reader done → v100 frees now
+
+    drop_ref(snapshot.load(cell))              // tear down: v200 rc=0 → frees
+    snapshot.free(cell)
+    println("done")
+}
+```
+```output
+published 200, displaced 100
+  freeing payload 100 (refcount hit 0)
+  freeing payload 200 (refcount hit 0)
+done
+```
+
+The displaced `v100` is freed only after **both** the writer's and the reader's
+references drop — never at the swap, when a reader still held it. That deferred
+free is the whole job, and it needs an atomic integer `std.snapshot` alone does
+not provide. (In a real many-thread server the reader runs on a `std.http` pool
+thread; the counting is identical, and the free happens on whichever thread
+drops the last reference.)
+
 It is **not a mutex and not a general lock**, and not an invitation to replace
 the actor model with lock-based sharing — actors remain the default for
 coordinating mutable state. Reach for `std.sync` only for the pool-owned,

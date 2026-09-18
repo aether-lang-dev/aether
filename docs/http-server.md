@@ -466,9 +466,10 @@ on the pool thread, not in an actor:** a lock-free copy-on-write cell
 `snapshot.cas` retry loop, with the cell handed to handlers through the
 `ud` slot. This is the same shape the reverse-proxy load balancer uses
 one layer down in C (`std/http/proxy/aether_proxy_lb.c`: atomics +
-mutex). Correct reclamation of the displaced value needs an atomic/lock
-primitive `.ae` does not yet expose
-([#2082](https://github.com/aether-lang-dev/aether/issues/2082)).
+mutex). Correct reclamation of the displaced value uses
+[`std.sync`](../std/sync/README.md) (issue #2082): guard each published
+value with a `std.sync` refcount and free it when the count reaches zero
+after a grace period — its README has the retire-ring pattern in full.
 
 ---
 

@@ -12,6 +12,9 @@
 #   2. a refcount released by 500 concurrent holders via atomic_sub hits
 #      0 EXACTLY ONCE — the "safe to reclaim" moment fires exactly once,
 #      never twice (double-free) and never zero (leak).
+#   3. 500 concurrent CAS-loop increments (load -> compare_exchange -> retry)
+#      land EXACTLY 500 — the only case that drives atomic_cas, exercising the
+#      acquire-on-success ordering a lock/refcount winner needs.
 #
 # The .ae driver self-reports "sync_atomic: N passing, 0 failing" on its
 # last line; this wrapper asserts on it. Skips (green) with no ae built.
@@ -38,7 +41,7 @@ if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&
     exit 1
 fi
 
-if ! grep -q "sync_atomic: 2 passing, 0 failing" "$TMPDIR/out.log"; then
+if ! grep -q "sync_atomic: 3 passing, 0 failing" "$TMPDIR/out.log"; then
     echo "  [FAIL] sync_atomic - not all cases passed"
     tail -40 "$TMPDIR/out.log" | sed 's/^/    /'
     exit 1

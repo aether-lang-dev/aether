@@ -87,6 +87,39 @@ main() {
     sync.atomic_free(rc)
     sync.atomic_free(zero_hits)
 
+    // Case 3: N concurrent CAS-loop increments -> EXACTLY N. Each worker does
+    // load -> compare_exchange(expected, expected+1) -> retry-on-miss, the
+    // canonical lock-free counter. This is the ONLY case that drives
+    // atomic_cas, and it forces the acquire-on-success ordering: a CAS winner
+    // that then reads state must see the prior winner's writes. A dropped or
+    // mis-ordered CAS shows up as a final count below N.
+    n3 = 500
+    c3 = sync.atomic_new(0)
+    k = 0
+    while k < n3 {
+        _ok3 = worker.run(
+            || {
+                while 1 == 1 {
+                    cur = sync.atomic_load(c3)
+                    if sync.atomic_cas(c3, cur, cur + 1) == 1 { return null }
+                }
+                return null
+            },
+            | r: ptr | {}
+        )
+        k = k + 1
+    }
+    await_all()
+    got3 = sync.atomic_load(c3)
+    if got3 == n3 {
+        println("  [3] PASS ${n3} concurrent CAS-loop increments -> ${got3} (no lost CAS)")
+        passing = passing + 1
+    } else {
+        println("  [3] FAIL expected ${n3}, got ${got3} (atomic_cas lost updates under contention)")
+        failing = failing + 1
+    }
+    sync.atomic_free(c3)
+
     println("")
     println("sync_atomic: ${passing} passing, ${failing} failing")
     if failing == 0 { return 0 }
