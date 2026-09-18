@@ -15,6 +15,19 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`os.run_full` and `os.run_capture` are now tested on Windows.** Both
+  have had CreateProcessW backends for some time, but their regression
+  tests still skipped Windows with comments calling them POSIX-only, so
+  the Windows implementations went unexercised by CI. `test_os_run_full`
+  is now its own child (invoked with a mode argument it echoes stdin,
+  splits stdout/stderr, exits 7), which takes `/bin/sh` and `cat` out of
+  it and runs the same five cases — including the 512 KB round trip that
+  deadlocks a naive pump — against the reader-thread implementation;
+  `test_run_capture_status` runs `cmd /c` where it ran `sh -c`. Each pins
+  the platform's missing-binary contract: exec-in-child 127 on POSIX,
+  `(-1, "spawn failed")` from CreateProcessW. `run_capture`'s doc comment
+  now states the 128+signo status from #2008 and that contract.
+
 - **`1 | 2 | 3 ->` in a match or switch arm matched only 3.** A `|` between
   selector values is the bitwise OR, and it compiled. The parser now refuses
   a `|` at the top of a selector and names the comma-list that was meant.

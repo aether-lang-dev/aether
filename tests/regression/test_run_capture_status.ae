@@ -6,20 +6,24 @@
 // Now the third slot exposes WEXITSTATUS for normal exits and -1 for
 // abnormal termination / spawn failure.
 //
-// Uses /bin/sh -c "exit N" rather than /bin/true / /bin/false directly
-// because the layout of those binaries varies by host: macOS has
-// /usr/bin/true but /bin/true is shadowed in some shells; some
-// minimal Linux containers ship only /usr/bin/true. POSIX guarantees
-// /bin/sh is present on every Unix, and `sh -c "exit N"` lets the
-// test pick the exit code explicitly.
+// Uses the platform shell with an explicit exit code rather than
+// /bin/true / /bin/false directly, because the layout of those binaries
+// varies by host: macOS has /usr/bin/true but /bin/true is shadowed in
+// some shells; some minimal Linux containers ship only /usr/bin/true.
+// POSIX guarantees /bin/sh, and `sh -c "exit N"` picks the code. On
+// Windows the same test runs against the CreateProcessW backend through
+// `cmd /c "exit N"`, so the Windows implementation is held to the same
+// (stdout, status, err) contract on every push instead of being skipped.
 //
 // Cases:
-//   1. /bin/sh -c "exit 0" — status reads 0, err is "".
-//   2. /bin/sh -c "exit 1" — status reads 1, err is "" (spawn ok,
-//      child exits non-zero).
-//   3. /no/such/binary — execvp inside the child fails with 127.
-//      err stays empty (the fork itself succeeded; the convention
-//      is that the parent sees status 127).
+//   1. shell "exit 0" — status reads 0, err is "".
+//   2. shell "exit 1" — status reads 1, err is "" (spawn ok, child exits
+//      non-zero).
+//   3. a missing binary. POSIX: execvp inside the forked child fails with
+//      _exit(127), so the parent sees a normal-exit status of 127 and err
+//      stays empty. Windows: there is no fork, CreateProcessW itself fails,
+//      so the parent sees (-1, "spawn failed"). Both are the platform's
+//      documented contract and both are pinned here.
 
 import std.os
 import std.list
@@ -29,41 +33,43 @@ extern exit(code: int)
 main() {
     println("=== os.run_capture status ===")
 
-    // Skip on Windows — /bin/sh isn't shaped this way under MSYS2.
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: /bin/sh -c is POSIX-shaped")
-        return
+    windows = os_getenv("OS") == "Windows_NT"
+    shell = "/bin/sh"
+    flag = "-c"
+    if windows {
+        shell = "cmd"
+        flag = "/c"
     }
 
     // Case 1: clean exit (status 0).
     av0 = list_new()
-    list_add(av0, "-c")
+    list_add(av0, flag)
     list_add(av0, "exit 0")
-    out0, status0, err0 = os.run_capture("/bin/sh", av0, null)
+    out0, status0, err0 = os.run_capture(shell, av0, null)
     if err0 != "" {
-        println("  FAIL 1: spawn /bin/sh: err=${err0}")
+        println("  FAIL 1: spawn ${shell}: err=${err0}")
         exit(1)
     }
     if status0 != 0 {
-        println("  FAIL 1: sh -c 'exit 0' status=${status0}, expected 0")
+        println("  FAIL 1: shell 'exit 0' status=${status0}, expected 0")
         exit(1)
     }
-    println("  PASS: sh -c 'exit 0' → status 0, no err")
+    println("  PASS: shell 'exit 0' → status 0, no err")
 
     // Case 2: non-zero exit, but spawn succeeded.
     av1 = list_new()
-    list_add(av1, "-c")
+    list_add(av1, flag)
     list_add(av1, "exit 1")
-    out1, status1, err1 = os.run_capture("/bin/sh", av1, null)
+    out1, status1, err1 = os.run_capture(shell, av1, null)
     if err1 != "" {
-        println("  FAIL 2: spawn /bin/sh: err=${err1}")
+        println("  FAIL 2: spawn ${shell}: err=${err1}")
         exit(1)
     }
     if status1 != 1 {
-        println("  FAIL 2: sh -c 'exit 1' status=${status1}, expected 1")
+        println("  FAIL 2: shell 'exit 1' status=${status1}, expected 1")
         exit(1)
     }
-    println("  PASS: sh -c 'exit 1' → status 1, no err (clean exit-non-zero)")
+    println("  PASS: shell 'exit 1' → status 1, no err (clean exit-non-zero)")
 
     // Case 3: missing binary — POSIX execvp reports failure inside the
     // *child* process via _exit(127), so the parent sees a normal-exit
@@ -73,15 +79,23 @@ main() {
     // test just pins down the current contract.
     av2 = list_new()
     out2, status2, err2 = os.run_capture("/no/such/binary", av2, null)
-    if err2 != "" {
-        println("  FAIL 3: missing-binary err=${err2}, expected empty")
-        exit(1)
+    if windows {
+        if err2 != "spawn failed" || status2 != -1 {
+            println("  FAIL 3: missing-binary status=${status2} err='${err2}', expected -1 'spawn failed'")
+            exit(1)
+        }
+        println("  PASS: missing binary → (-1, \"spawn failed\") (CreateProcessW fails in the parent)")
+    } else {
+        if err2 != "" {
+            println("  FAIL 3: missing-binary err=${err2}, expected empty")
+            exit(1)
+        }
+        if status2 != 127 {
+            println("  FAIL 3: missing-binary status=${status2}, expected 127")
+            exit(1)
+        }
+        println("  PASS: missing binary → status 127 (POSIX exec-in-child convention)")
     }
-    if status2 != 127 {
-        println("  FAIL 3: missing-binary status=${status2}, expected 127")
-        exit(1)
-    }
-    println("  PASS: missing binary → status 127 (POSIX exec-in-child convention)")
 
     println("=== All cases passed ===")
 }
