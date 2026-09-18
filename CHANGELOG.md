@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.683.0]
+
 ### Fixed
 
 - **E0200 "block setter called as a node builder" rejected every container
