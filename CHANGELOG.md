@@ -13,6 +13,40 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A folded float expression could come out as an int (`${2.5 * 2}` printed
+  `2.47e-323`).** The constant folder wrote float results with `%.10g`, so a
+  whole-number result became the C literal `5` — an int, which printf's `%g`
+  read as a double — and every folded float had already lost the digits a
+  double carries. A folded float is now spelled with 17 significant digits
+  and always as a float (`5.0`). `tests/regression/test_const_fold_float_spelling.ae`.
+
+- **`ae run` names what a crashed program died of on Windows.** The report
+  printed the negation of the process exit code as a "signal"; for a crash
+  that code is the NTSTATUS the OS terminated the process with, so a divide
+  by zero read `signal 1073741676`. It now reads `Program crashed
+  (0xC0000094: integer divide by zero)`, with access violation, stack
+  overflow, heap corruption, stack buffer overrun, illegal instruction and
+  Ctrl-C named likewise; POSIX gained the names for SIGFPE and SIGBUS.
+  `tests/integration/ae_run_crash_report`.
+
+- **A diagnostic about an expression inside `${…}` pointed at line 1.** The
+  interpolation sub-lexer counted from 1:1 of the snippet, so an undefined
+  call inside an interpolation on line 4 was reported at the `import` on
+  line 1. Every sub-token is rebased onto the string's line and the column
+  of its `${`.
+
+- **Interpolating a multi-value call (`${map.get(m, "k")}`) rendered
+  garbage.** The whole `(value, err)` struct went to printf. It is refused
+  with the destructuring spelled out; a bound name that carries a tuple type
+  is still admitted, as before.
+
+- **`int64` is accepted as a type name.** The reference writes the widening
+  as `int → int64` and doc externs spell `id: int64`, but the parser only
+  knew `long`; an unknown name in type position bound as a struct called
+  "int64", so `int64 n = 5` was a type mismatch two concepts from the cause.
+  It is the same type as `long`, the signed sibling of `uint64`.
+  `tests/regression/test_int64_type_name.ae`.
+
 - **A closure called through an erased `fn` value could only return `int`
   (#2054).** Once a closure had crossed a `fn` parameter or return,
   `box_closure`, or a list, `call(f, …)` on it was typed as `int` from a

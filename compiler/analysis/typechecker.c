@@ -774,6 +774,18 @@ static void check_interp_operand(ASTNode* child, SymbolTable* table,
     if (error_count > 0) return;
 
     Type* t = child->node_type;
+    /* A tuple-typed operand is admitted above because a BOUND name often
+     * carries a tuple type it does not hold. A call is not a binding: the
+     * whole (value, err) struct went to printf and rendered as garbage. */
+    if (t && t->kind == TYPE_TUPLE && child->type == AST_FUNCTION_CALL) {
+        char msg[320];
+        snprintf(msg, sizeof(msg),
+            "cannot interpolate a call that returns %d values: destructure it "
+            "first, e.g. `v, err = %s(...)` then `${v}`",
+            t->tuple_count, child->value ? child->value : "f");
+        type_error(msg, line, col);
+        return;
+    }
     if (!t || interp_kind_is_renderable(t->kind)) return;
 
     char msg[320];

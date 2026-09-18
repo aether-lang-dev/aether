@@ -1,0 +1,45 @@
+// Regression: `int64` names the 64-bit signed integer, the same type as
+// `long` and the signed sibling of the `uint64` keyword.
+//
+// The reference writes the widening as `int -> int64`, and extern
+// signatures in the docs spell the parameter `id: int64`, but the parser
+// only knew `long`: an unrecognised name in type position bound as a
+// struct called "int64", so `int64 n = 5` failed with a type mismatch two
+// concepts away from the cause.
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+widen(v: int64) -> int64 { return v * 2 }
+
+main() {
+    println("=== int64 as a type name ===")
+
+    int64 a = 5
+    check("declaration", a == 5)
+    let b: int64 = 5000000000
+    check("let with annotation, beyond 32 bits", b == 5000000000)
+    int64 c = -9223372036854775807
+    check("near the signed minimum", c == -9223372036854775807)
+    long d = b
+    check("same type as long", d == b && widen(d) == 10000000000)
+    check("parameter and return", widen(3) == 6)
+    check("interpolates in full", "${b}" == "5000000000")
+
+    if failures == 0 {
+        println("int64 as a type name: all checks passed")
+    } else {
+        println("int64 as a type name: ${failures} failure(s)")
+        exit(1)
+    }
+}

@@ -53,7 +53,16 @@ static ASTNode* create_numeric_literal(double value, int is_int, int line, int c
     if (is_int && value == (double)(long long)value) {
         snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
     } else {
-        snprintf(buffer, sizeof(buffer), "%.10g", value);
+        /* A float result is spelled as a float: 17 significant digits round-
+         * trip every double, and a whole-number value keeps a `.0` so the C
+         * literal is a double. `%.10g` wrote `2.5 * 2` as `5`, an int in C,
+         * which read as a double through printf's `%g` was garbage, and had
+         * already lost digits on the way. */
+        snprintf(buffer, sizeof(buffer), "%.17g", value);
+        if (!strpbrk(buffer, ".eEnN")) {
+            size_t n = strlen(buffer);
+            if (n + 2 < sizeof(buffer)) { buffer[n] = '.'; buffer[n + 1] = '0'; buffer[n + 2] = '\0'; }
+        }
     }
     ASTNode* node = create_ast_node(AST_LITERAL, buffer, line, column);
     node->node_type = create_type(is_int ? TYPE_INT : TYPE_FLOAT);

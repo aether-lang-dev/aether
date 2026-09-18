@@ -798,6 +798,42 @@ static void forward_signal_to_child(int sig) {
 /* Run the just-built program, forwarding termination signals to it.
  * Used ONLY for the program `ae run` launches — build steps (aetherc,
  * gcc) keep the plain run_cmd path, where forwarding would be wrong. */
+/* Say what a crashed child died of. run_cmd_forwarding returns the negated
+ * signal on POSIX; on Windows _spawnvp hands back the process exit code,
+ * which for a crash is the NTSTATUS the OS terminated it with (0xC0000094
+ * for an integer divide by zero, 0xC0000005 for an access violation) --
+ * negative as an int, so the same `rc < 0` test catches both, and the
+ * number is meaningless read as a signal. Both are named here. */
+static void report_crash(int rc) {
+#ifdef _WIN32
+    unsigned code = (unsigned)rc;
+    const char* what = NULL;
+    switch (code) {
+        case 0xC0000005u: what = "access violation"; break;
+        case 0xC0000094u: what = "integer divide by zero"; break;
+        case 0xC0000095u: what = "integer overflow"; break;
+        case 0xC00000FDu: what = "stack overflow"; break;
+        case 0xC0000374u: what = "heap corruption"; break;
+        case 0xC0000409u: what = "stack buffer overrun"; break;
+        case 0xC000001Du: what = "illegal instruction"; break;
+        case 0xC000013Au: what = "interrupted (Ctrl-C)"; break;
+        case 0xC0000008u: what = "invalid handle"; break;
+        case 0x80000003u: what = "breakpoint"; break;
+        default: break;
+    }
+    fprintf(stderr, "Program crashed (0x%08X", code);
+    if (what) fprintf(stderr, ": %s", what);
+    fprintf(stderr, ")\n");
+#else
+    fprintf(stderr, "Program crashed (signal %d", -rc);
+    if (-rc == 11) fprintf(stderr, ": segmentation fault");
+    else if (-rc == 6) fprintf(stderr, ": aborted");
+    else if (-rc == 8) fprintf(stderr, ": floating point exception");
+    else if (-rc == 7 || -rc == 10) fprintf(stderr, ": bus error");
+    fprintf(stderr, ")\n");
+#endif
+}
+
 int run_cmd_forwarding(const char* cmd) {
 #ifdef _WIN32
     /* Windows has no SIGTERM-to-child model that matches this; the
@@ -3998,10 +4034,7 @@ static int cmd_run(int argc, char** argv) {
             build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
             int rc = run_cmd_forwarding(cmd);
             if (rc < 0) {
-                fprintf(stderr, "Program crashed (signal %d", -rc);
-                if (-rc == 11) fprintf(stderr, ": segmentation fault");
-                else if (-rc == 6) fprintf(stderr, ": aborted");
-                fprintf(stderr, ")\n");
+                report_crash(rc);
             }
             return rc;
         }
@@ -4127,10 +4160,7 @@ static int cmd_run(int argc, char** argv) {
     int rc = run_cmd_forwarding(cmd);
 
     if (rc < 0) {
-        fprintf(stderr, "Program crashed (signal %d", -rc);
-        if (-rc == 11) fprintf(stderr, ": segmentation fault");
-        else if (-rc == 6) fprintf(stderr, ": aborted");
-        fprintf(stderr, ")\n");
+        report_crash(rc);
         // Remove crashed binary from cache so next run recompiles
         if (using_cache) remove(exe_file);
     }
