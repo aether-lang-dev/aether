@@ -1,0 +1,52 @@
+// Regression: a folded float expression stays a float, and keeps its digits.
+//
+// The constant folder wrote a float result with `%.10g`, so `2.5 * 2`
+// became the C literal `5` -- an int. Assigned to a float variable that was
+// harmless (C converts), but interpolated it went to printf's `%g` as an
+// int and rendered as 2.47e-323, and `%.10g` had already thrown away the
+// digits a double carries. A folded float is spelled with 17 significant
+// digits and always as a float (`5.0`), so the C literal is a double and
+// the value survives the round trip.
+
+extern exit(code: int)
+
+var failures = 0
+
+check(name: string, ok: bool) {
+    if ok {
+        println("  ok   ${name}")
+    } else {
+        println("  FAIL ${name}")
+        failures = failures + 1
+    }
+}
+
+main() {
+    println("=== folded float literals ===")
+
+    a = 2.5 * 2
+    check("float * int assigned", a > 4.99 && a < 5.01)
+    b = 2 * 2.5
+    check("int * float assigned", b > 4.99 && b < 5.01)
+    check("float * int interpolated", "${2.5 * 2}" == "5")
+    check("int * float interpolated", "${2 * 2.5}" == "5")
+    check("float + int interpolated", "${1.5 + 1}" == "2.5")
+    check("int / float interpolated", "${7 / 2.0}" == "3.5")
+    // The folded literal must equal the same arithmetic done at run time,
+    // which only holds if every digit of the double was written out.
+    x = 0.1
+    y = 0.2
+    c = 0.1 + 0.2
+    check("folded sum keeps double precision", c == x + y)
+    three = 3.0
+    d = 1.0 / 3.0
+    check("folded quotient keeps double precision", d == 1.0 / three)
+    check("int / int still truncates", "${7 / 2}" == "3")
+
+    if failures == 0 {
+        println("folded float literals: all checks passed")
+    } else {
+        println("folded float literals: ${failures} failure(s)")
+        exit(1)
+    }
+}
