@@ -50,7 +50,7 @@ cas_increment(cell: ptr) {
         if snapshot.cas(cell, exp, next) == 1 {
             return
         }
-        free(next)   // lost the race: our box was rejected, free it and retry
+        free(next) // lost the race: our box was rejected, free it and retry
     }
 }
 
@@ -71,8 +71,8 @@ main() {
     i = 0
     while i < n {
         _ok = worker.run(
-            || { cas_increment(cell)  return null },
-            | r: ptr | { }
+            || { cas_increment(cell) return null },
+            | r: ptr | {}
         )
         i = i + 1
     }
@@ -94,18 +94,18 @@ main() {
     j = 0
     while j < n2 {
         _okw = worker.run(
-            || { cas_increment(cell2)  return null },
-            | r: ptr | { }
+            || { cas_increment(cell2) return null },
+            | r: ptr | {}
         )
         // interleave a reader that validates the loaded value is a real box
         _okr = worker.run(
             || {
                 v = unbox(snapshot.load(cell2))
                 p = box(0)
-                if v >= 0 { if v <= 300 { mem.set_int(p, 0, 1) } }   // 1 = in range
+                if v >= 0 { if v <= 300 { mem.set_int(p, 0, 1) } } // 1 = in range
                 return p
             },
-            | r: ptr | { }
+            | r: ptr | {}
         )
         j = j + 1
     }
