@@ -55,6 +55,7 @@ main() {
     out, code, err = os.run_capture(os.args_get(0), av, null)
     check("a non-ASCII argument reaches a child unchanged (${string.trim(out)})",
         code == 0 && err == "" && string.trim(out) == "héllo wörld 日本語")
+    list.free(av)
 
     fs.remove_tree(base)
     println("=== All cases passed ===")
