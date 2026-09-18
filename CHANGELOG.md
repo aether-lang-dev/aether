@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.686.0]
+
 ### Tests
 
 - **`std.snapshot` gains a concurrent copy-on-write test.** The existing
