@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.683.0]
+
 ### Fixed
 
 - **`os.run_full` and `os.run_capture` are now tested on Windows.** Both
