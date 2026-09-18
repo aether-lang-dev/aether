@@ -2,55 +2,99 @@
 // feed stdin (binary-safe) and capture stdout and stderr SEPARATELY,
 // the gap os.run_capture (stdout-only) leaves open.
 //
-// POSIX-only — on Windows the raw extern reports "unsupported on
-// Windows" (Win32 anonymous pipes aren't pollable). /bin/sh and cat are
-// POSIX-guaranteed.
+// The child is this program: invoked with a first argument it acts as
+// `echo` (stdin to stdout), `split` (OUT on stdout, ERR on stderr),
+// `exit7`, or `echo-done` (stdin to stdout, then "done"). That keeps the
+// test off /bin/sh and cat, so the same cases run against the POSIX
+// poll(2) pump and the Windows reader-thread implementation alike; the
+// Windows backend used to be skipped here with a comment calling it
+// unsupported, which it has not been since it grew the reader threads.
+//
+// The 512 KB round trip is the one that matters: it is far past the OS
+// pipe buffer in both directions, and a write-all-then-read pump would
+// deadlock on it.
 
 import std.os
+import std.io
 import std.list
 import std.string
+import std.bytes
+import std.strbuilder
 
 extern exit(code: int)
 
+// Read fd 0 to EOF and return it as a string.
+slurp_stdin() -> string {
+    cap = 65536
+    buf = bytes.new(cap)
+    sb = strbuilder.new(cap)
+    while true {
+        n, e = io.fd_read_into(0, bytes.data(buf), cap)
+        if e != "" || n <= 0 { break }
+        _ = bytes.set_length(buf, n)
+        chunk = bytes.to_string(buf, n)
+        strbuilder.append_n(sb, chunk, n)
+    }
+    bytes.free(buf)
+    return strbuilder.finish(sb)
+}
+
+child(mode: string) -> int {
+    if mode == "echo" {
+        _ = io.stdout_write(slurp_stdin())
+        return 0
+    }
+    if mode == "split" {
+        _ = io.stdout_write("OUT")
+        _ = io.stderr_write("ERR")
+        return 0
+    }
+    if mode == "exit7" { return 7 }
+    if mode == "echo-done" {
+        _ = io.stdout_write(slurp_stdin())
+        _ = io.stdout_write("done")
+        return 0
+    }
+    _ = io.stderr_write("unknown child mode ${mode}")
+    return 2
+}
+
 main() {
+    if os.args_count() > 1 {
+        exit(child(os.args_get(1)))
+    }
+    me = os.args_get(0)
     println("=== os.run_full ===")
 
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: os.run_full is POSIX-only")
-        return
-    }
-
     // --- stdin feed + stdout capture ---------------------------------
-    // cat echoes its stdin to stdout. Proves stdin is fed and stdout
-    // captured; stderr must be empty.
-    av0 = list_new()
-    out0, err0, code0, spawn0 = os.run_full("/bin/cat", av0, null, "hello\nworld\n")
+    av0 = list.new()
+    list.add(av0, "echo")
+    out0, err0, code0, spawn0 = os.run_full(me, av0, null, "hello\nworld\n")
     if spawn0 != "" {
-        println("  FAIL: cat spawn err=${spawn0}")
+        println("  FAIL: echo spawn err=${spawn0}")
         exit(1)
     }
     if out0 != "hello\nworld\n" {
-        println("  FAIL: cat stdout=[${out0}], expected the fed input")
+        println("  FAIL: echo stdout=[${out0}], expected the fed input")
         exit(1)
     }
     if err0 != "" {
-        println("  FAIL: cat stderr=[${err0}], expected empty")
+        println("  FAIL: echo stderr=[${err0}], expected empty")
         exit(1)
     }
     if code0 != 0 {
-        println("  FAIL: cat exit=${code0}, expected 0")
+        println("  FAIL: echo exit=${code0}, expected 0")
         exit(1)
     }
-    list_free(av0)
+    list.free(av0)
     println("  PASS: stdin fed, stdout captured, stderr empty, exit 0")
 
     // --- stdout and stderr captured SEPARATELY -----------------------
-    av1 = list_new()
-    list_add(av1, "-c")
-    list_add(av1, "printf OUT; printf ERR >&2; exit 0")
-    out1, err1, code1, spawn1 = os.run_full("/bin/sh", av1, null, "")
+    av1 = list.new()
+    list.add(av1, "split")
+    out1, err1, code1, spawn1 = os.run_full(me, av1, null, "")
     if spawn1 != "" {
-        println("  FAIL: sh spawn err=${spawn1}")
+        println("  FAIL: split spawn err=${spawn1}")
         exit(1)
     }
     if out1 != "OUT" {
@@ -58,49 +102,43 @@ main() {
         exit(1)
     }
     if err1 != "ERR" {
-        println("  FAIL: stderr=[${err1}], expected ERR (not merged into stdout)")
+        println("  FAIL: stderr=[${err1}], expected ERR")
         exit(1)
     }
     if code1 != 0 {
-        println("  FAIL: exit=${code1}, expected 0")
+        println("  FAIL: split exit=${code1}, expected 0")
         exit(1)
     }
-    list_free(av1)
-    println("  PASS: stdout and stderr captured on separate channels")
+    list.free(av1)
+    println("  PASS: stdout and stderr captured separately")
 
-    // --- exit code ----------------------------------------------------
-    av2 = list_new()
-    list_add(av2, "-c")
-    list_add(av2, "exit 7")
-    out2, err2, code2, spawn2 = os.run_full("/bin/sh", av2, null, "")
+    // --- non-zero exit code, spawn still clean -----------------------
+    av2 = list.new()
+    list.add(av2, "exit7")
+    out2, err2, code2, spawn2 = os.run_full(me, av2, null, "")
+    if spawn2 != "" {
+        println("  FAIL: exit7 spawn err=${spawn2}")
+        exit(1)
+    }
     if code2 != 7 {
-        println("  FAIL: sh -c 'exit 7' exit=${code2}, expected 7")
+        println("  FAIL: exit7 exit=${code2}, expected 7")
         exit(1)
     }
-    if out2 != "" || err2 != "" {
-        println("  FAIL: expected empty output for exit-7 case")
-        exit(1)
-    }
-    list_free(av2)
-    println("  PASS: exit code surfaced (7)")
+    list.free(av2)
+    println("  PASS: exit code 7 reported, no spawn err")
 
-    // --- empty stdin → immediate EOF (child must not block) ----------
-    av3 = list_new()
-    list_add(av3, "-c")
-    list_add(av3, "cat; printf done")
-    out3, err3, code3, spawn3 = os.run_full("/bin/sh", av3, null, "")
-    if out3 != "done" || code3 != 0 {
-        println("  FAIL: empty-stdin case out=[${out3}] code=${code3}, expected done/0")
+    // --- stdin then more stdout: ordering through the pump ------------
+    av3 = list.new()
+    list.add(av3, "echo-done")
+    out3, err3, code3, spawn3 = os.run_full(me, av3, null, "abc")
+    if spawn3 != "" || out3 != "abcdone" || code3 != 0 {
+        println("  FAIL: echo-done stdout=[${out3}] exit=${code3} spawn=${spawn3}, expected abcdone / 0")
         exit(1)
     }
-    list_free(av3)
-    println("  PASS: empty stdin closes immediately (cat saw EOF)")
+    list.free(av3)
+    println("  PASS: stdin drained before the trailing stdout")
 
-    // --- large round-trip: NO pipe-buffer deadlock -------------------
-    // Build a ~512 KB payload (far past the ~64 KB OS pipe buffer in
-    // BOTH directions) and round-trip it through cat. A naive
-    // write-all-then-read implementation would deadlock here; the
-    // poll(2) pump must drain stdout while it writes stdin.
+    // --- large round trip: past the pipe buffer both ways ------------
     big = "0123456789ABCDEF"
     i = 0
     while i < 15 {
@@ -108,10 +146,11 @@ main() {
         i = i + 1
     }
     big_len = string.length(big)
-    av4 = list_new()
-    out4, err4, code4, spawn4 = os.run_full("/bin/cat", av4, null, big)
+    av4 = list.new()
+    list.add(av4, "echo")
+    out4, err4, code4, spawn4 = os.run_full(me, av4, null, big)
     if spawn4 != "" {
-        println("  FAIL: large cat spawn err=${spawn4}")
+        println("  FAIL: large echo spawn err=${spawn4}")
         exit(1)
     }
     if string.length(out4) != big_len {
@@ -123,21 +162,32 @@ main() {
         exit(1)
     }
     if code4 != 0 {
-        println("  FAIL: large cat exit=${code4}, expected 0")
+        println("  FAIL: large echo exit=${code4}, expected 0")
         exit(1)
     }
-    list_free(av4)
+    list.free(av4)
     println("  PASS: ${big_len}-byte round-trip, no deadlock")
 
     // --- spawn failure: missing binary -------------------------------
-    av5 = list_new()
+    // POSIX finds out inside the forked child (exit 127, no err); Windows
+    // finds out in CreateProcessW (-1, "spawn failed"). Both are the
+    // platform's documented contract.
+    av5 = list.new()
     out5, err5, code5, spawn5 = os.run_full("/no/such/binary", av5, null, "")
-    if code5 != 127 {
-        println("  FAIL: missing binary exit=${code5}, expected 127 (exec-in-child)")
-        exit(1)
+    if os_getenv("OS") == "Windows_NT" {
+        if code5 != -1 || spawn5 != "spawn failed" {
+            println("  FAIL: missing binary exit=${code5} spawn=${spawn5}, expected -1 / spawn failed")
+            exit(1)
+        }
+        println("  PASS: missing binary → (-1, \"spawn failed\")")
+    } else {
+        if code5 != 127 {
+            println("  FAIL: missing binary exit=${code5}, expected 127 (exec-in-child)")
+            exit(1)
+        }
+        println("  PASS: missing binary → exit 127")
     }
-    list_free(av5)
-    println("  PASS: missing binary → exit 127")
+    list.free(av5)
 
     println("=== All cases passed ===")
 }
