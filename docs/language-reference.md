@@ -2708,6 +2708,10 @@ long span = 250000000 - 200000000
 cv = span * 50 / 225000000          // 11, no warning
 ```
 
+A `long` expression is folded in 64 bits the same way — exactly, so
+`9007199254740993 + 0` keeps its low bit, and past `LLONG_MAX` it wraps with
+`long constant expression overflows 64 bits and wraps to … at runtime`.
+
 The runtime is held to the same rule. Aether compiles to C, where signed
 overflow is *undefined behaviour* rather than a wrap, so every command line the
 toolchain uses to compile generated code carries `-fwrapv` — `ae run`,
