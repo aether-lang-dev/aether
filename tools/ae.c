@@ -8656,6 +8656,15 @@ static int cmd_fmt(int argc, char** argv) {
     }
 
     if (npaths == 0) {
+#ifdef _WIN32
+        /* Byte-exact like the in-place path (which opens files "rb"/"wb"):
+         * in text mode the CRT turned every LF written to stdout into CRLF,
+         * so `ae fmt < a.ae > b.ae` produced a CRLF file from an LF one and
+         * an editor piping through the formatter got its line endings
+         * changed on every save. */
+        _setmode(_fileno(stdin), _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
         char* src = fmt_read_stdin();
         if (!src) { fprintf(stderr, "ae fmt: cannot read stdin\n"); free(paths); return 2; }
         const char* err = NULL;

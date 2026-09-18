@@ -28,6 +28,13 @@ version number before tagging the release.
   The zig cross build has no `windres` and its output keeps the legacy page,
   which `docs/build-system.md` now states. `tests/regression/test_utf8_paths.ae`.
 
+- **`ae fmt` on stdin/stdout wrote CRLF on Windows.** The in-place path opens
+  files in binary mode, but the stdin/stdout path went through the CRT's text
+  mode, so `ae fmt < a.ae > b.ae` turned an LF file into a CRLF one and an
+  editor piping through the formatter had its line endings changed on every
+  save. Both streams are binary now; the output is byte-identical to what the
+  in-place path writes.
+
 ## [0.686.0]
 
 ### Tests
