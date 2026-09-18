@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.682.0]
+
 ### Fixed
 
 - **A folded float expression could come out as an int (`${2.5 * 2}` printed
