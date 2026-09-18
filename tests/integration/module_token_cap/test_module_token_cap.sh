@@ -1,13 +1,15 @@
 #!/bin/sh
 # Regression: a module larger than the old MAX_MODULE_TOKENS (20000) must
-# import fully. module_parse_file gates imported modules on that cap; before it
-# was raised to 100000 the import was truncated mid-token-stream, silently
-# dropping the module's tail declarations.
+# import fully. module_parse_file used to gate imported modules on that cap
+# and truncate the token stream mid-file, silently dropping the module's tail
+# declarations. The cap was raised to 100000 and has since been removed
+# altogether (#2059; tests/integration/source_size_unbounded drives every
+# former cap past its limit) — this keeps the original shape as a guard.
 #
 # bigmod/module.ae is ~2200 generated functions (>20k tokens). uses_bigmod.ae
 # calls the FIRST, MIDDLE, and LAST of them — so a truncated import leaves the
-# tail fn (bigmod.add_2199) undefined and type-checking fails. Under the raised
-# cap the whole module parses and the program prints total=3302.
+# tail fn (bigmod.add_2199) undefined and type-checking fails. The whole
+# module parses and the program prints total=3302.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

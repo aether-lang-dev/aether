@@ -14,8 +14,6 @@ static void skip_braced_region(Parser* parser);
 #include "lexer.h"
 #include "../aether_error.h"
 
-#define INTERP_MAX_TOKENS 512
-
 Parser* create_parser(Token** tokens, int token_count) {
     Parser* parser = malloc(sizeof(Parser));
     if (!parser) return NULL;
@@ -930,28 +928,25 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
             // Re-lex the expression (save/restore global lexer state)
             LexerState saved;
             lexer_save(&saved);
-            lexer_init(expr_src);
-
-            Token* sub_tokens[INTERP_MAX_TOKENS];
             int sub_count = 0;
+            Token** sub_tokens = lexer_tokenize(expr_src, &sub_count);
+            lexer_restore(&saved);
+            free(expr_src);
+            if (!sub_tokens) { free(lit_buf); return interp; }
+
             /* The sub-lexer counts from 1:1 in expr_src. Rebase every token
              * onto the file: the string's line, plus the column of the `${`
              * inside the literal, so a diagnostic about an interpolated
              * expression lands on it and not on line 1 of the file. */
             int expr_col = column + (int)(expr_start - raw);
-            while (sub_count < INTERP_MAX_TOKENS - 1) {
-                Token* t = next_token();
+            for (int ti = 0; ti < sub_count; ti++) {
+                Token* t = sub_tokens[ti];
                 if (t->line == 1) t->column += expr_col;
                 t->line += line - 1;
-                sub_tokens[sub_count++] = t;
-                if (t->type == TOKEN_EOF || t->type == TOKEN_ERROR) break;
             }
-            lexer_restore(&saved);
-            free(expr_src);
 
             // Exclude trailing EOF from token count for sub-parser
-            int n = (sub_count > 0 && sub_tokens[sub_count - 1]->type == TOKEN_EOF)
-                    ? sub_count - 1 : sub_count;
+            int n = sub_tokens[sub_count - 1]->type == TOKEN_EOF ? sub_count - 1 : sub_count;
             Parser* sub = create_parser(sub_tokens, n);
             ASTNode* expr_node = parse_expression(sub);
             free(sub);
@@ -959,9 +954,7 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
              * keep no reference to the token itself, so these are ours to
              * release: every `${...}` used to leak its whole token run
              * (#1667). */
-            for (int ti = 0; ti < sub_count; ti++) {
-                free_token(sub_tokens[ti]);
-            }
+            free_tokens(sub_tokens, sub_count);
 
             if (expr_node) add_child(interp, expr_node);
         } else if (*p == '\\' && p[1]) {
