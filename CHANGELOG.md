@@ -14,6 +14,19 @@ version number before tagging the release.
 ## [0.690.0]
 
 ### Added
+- `std.sync`: an atomic 64-bit integer cell (`atomic_new`, `atomic_load`,
+  `atomic_store`, `atomic_add`, `atomic_sub`, `atomic_cas`, `atomic_free`)
+  exposed to `.ae` (issue #2082). `add`/`sub` return the *new* value so a
+  refcount-to-zero check is a plain `== 0`; load is acquire, store is release,
+  add/sub/cas are acq_rel (a CAS winner that reads the state it guards
+  acquires correctly). A null cell is fatal on every op except `free` — an
+  unchecked `atomic_new` failure crashes loud rather than letting `atomic_sub`
+  return 0 and free a live value. This is the missing reclamation primitive for
+  pool-owned copy-on-write structures — `std.snapshot` gives the atomic pointer
+  swap but not the counter to build a refcount / lock-free retire ring — the
+  same shape `std/http/proxy/aether_proxy_lb.c` uses in C, lifted into `.ae`.
+  Deliberately minimal (not a mutex, not a general lock). The `std.sync` README
+  carries the snapshot retire-ring pattern end to end.
 - **`modules = "."` exports the package root** for `ae add` consumers. A package
   laid out as `core/*.ae` whose modules import each other with a dotted package
   prefix (`import core.metadata`) had no way to declare itself consumable: no
@@ -25,6 +38,15 @@ version number before tagging the release.
   *speculatively*" principle is preserved — the root joins only because the author
   wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
   engine as Aether source.)
+
+### Docs
+- `docs/http-server.md`: mark the "Per-connection actor dispatch" section as a
+  C-internal mechanism, not a usable Aether API from a release —
+  `unwrap_msg_http_connection` and the spawn/send/release fn-pointers it needs
+  are not exposed to `.ae`. Documents the released substrate for handler-shared
+  state instead (pool-thread `std.snapshot` COW). `std.actors`' module header
+  gains the matching caveat: a `!` send from an off-scheduler `std.http` handler
+  is currently dropped (aether#2083). No code change.
 
 ## [0.689.0]
 

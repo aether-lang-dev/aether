@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (77 modules)
+## Module index (78 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -73,6 +73,7 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
+| `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |

@@ -1,0 +1,127 @@
+// std.sync atomic i64 — CONCURRENT test (issue #2082).
+//
+// std.sync is the atomic-integer primitive .ae was missing: without it a
+// reference count or a lock-free retire ring — what a pool-owned
+// copy-on-write structure needs to reclaim its displaced values — cannot
+// be built in pure Aether. This proves the two properties a concurrent
+// user depends on, driving std.worker (a real thread pool):
+//
+//   1. N concurrent atomic_add(c, 1) -> the cell is EXACTLY N. A broken
+//      (non-atomic) increment loses updates here — the classic race.
+//   2. The motivating use: a refcount released concurrently by N holders
+//      via atomic_sub(rc, 1) must hit 0 EXACTLY ONCE. That "reached zero"
+//      moment is when a retire-ring frees the displaced value; if two
+//      threads both saw 0 (or none did) reclamation would double-free or
+//      leak. atomic_sub returning the NEW value makes the check a plain
+//      `== 0`. We count how many workers observed 0; it must be 1.
+//
+// Self-reports "sync_atomic: P passing, F failing" on the last line; the
+// shell wrapper asserts on it.
+import std.io(println)
+import std.sync
+import std.worker
+
+// Block until every submitted worker job has finished (pending == 0).
+await_all() { _w = worker.wait() }
+
+main() {
+    passing = 0
+    failing = 0
+
+    // Case 1: N concurrent atomic_add(c, 1) -> cell must be EXACTLY N.
+    n = 500
+    c = sync.atomic_new(0)
+    i = 0
+    while i < n {
+        _ok = worker.run(
+            || { _v = sync.atomic_add(c, 1) return null },
+            | r: ptr | {}
+        )
+        i = i + 1
+    }
+    await_all()
+    got = sync.atomic_load(c)
+    if got == n {
+        println("  [1] PASS ${n} concurrent atomic_add -> ${got} (no lost increments)")
+        passing = passing + 1
+    } else {
+        println("  [1] FAIL expected ${n}, got ${got} (atomic_add lost updates under contention)")
+        failing = failing + 1
+    }
+    sync.atomic_free(c)
+
+    // Case 2: a refcount released concurrently by n2 holders must reach 0
+    // EXACTLY ONCE. `zero_hits` counts, itself atomically, how many
+    // workers saw the count hit 0 on their release — the "safe to
+    // reclaim" moment. Correct == 1 (no double-free, no leak).
+    n2 = 500
+    rc = sync.atomic_new(n2) // n2 outstanding references
+    zero_hits = sync.atomic_new(0) // how many workers observed rc -> 0
+    j = 0
+    while j < n2 {
+        _ok2 = worker.run(
+            || {
+                remaining = sync.atomic_sub(rc, 1)
+                if remaining == 0 { _z = sync.atomic_add(zero_hits, 1) }
+                return null
+            },
+            | r: ptr | {}
+        )
+        j = j + 1
+    }
+    await_all()
+    final_rc = sync.atomic_load(rc)
+    hits = sync.atomic_load(zero_hits)
+    if final_rc == 0 {
+        if hits == 1 {
+            println("  [2] PASS refcount ${n2} releases -> 0 seen EXACTLY once (clean reclaim)")
+            passing = passing + 1
+        } else {
+            println("  [2] FAIL refcount hit 0 but ${hits} workers observed it (double-free / leak race)")
+            failing = failing + 1
+        }
+    } else {
+        println("  [2] FAIL refcount ended at ${final_rc}, expected 0 (lost releases)")
+        failing = failing + 1
+    }
+    sync.atomic_free(rc)
+    sync.atomic_free(zero_hits)
+
+    // Case 3: N concurrent CAS-loop increments -> EXACTLY N. Each worker does
+    // load -> compare_exchange(expected, expected+1) -> retry-on-miss, the
+    // canonical lock-free counter. This is the ONLY case that drives
+    // atomic_cas, and it forces the acquire-on-success ordering: a CAS winner
+    // that then reads state must see the prior winner's writes. A dropped or
+    // mis-ordered CAS shows up as a final count below N.
+    n3 = 500
+    c3 = sync.atomic_new(0)
+    k = 0
+    while k < n3 {
+        _ok3 = worker.run(
+            || {
+                while 1 == 1 {
+                    cur = sync.atomic_load(c3)
+                    if sync.atomic_cas(c3, cur, cur + 1) == 1 { return null }
+                }
+                return null
+            },
+            | r: ptr | {}
+        )
+        k = k + 1
+    }
+    await_all()
+    got3 = sync.atomic_load(c3)
+    if got3 == n3 {
+        println("  [3] PASS ${n3} concurrent CAS-loop increments -> ${got3} (no lost CAS)")
+        passing = passing + 1
+    } else {
+        println("  [3] FAIL expected ${n3}, got ${got3} (atomic_cas lost updates under contention)")
+        failing = failing + 1
+    }
+    sync.atomic_free(c3)
+
+    println("")
+    println("sync_atomic: ${passing} passing, ${failing} failing")
+    if failing == 0 { return 0 }
+    return 1
+}

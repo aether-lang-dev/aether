@@ -29,6 +29,18 @@
 //         a ! Analyze { ... }
 //     }
 //
+// CAVEAT — off-scheduler senders (e.g. std.http handlers). `whereis`
+// works from any thread, but a `!` send only reaches the actor when it
+// originates on a scheduler thread OR the main thread. A send from a
+// foreign C thread — which is what every std.http pool-worker handler
+// runs on — is currently SILENTLY DROPPED (aether#2083): the receive
+// arm never fires, no error. So the `handle_request` shape above does
+// NOT work from a real HTTP handler today. For handler-shared state on
+// a release, keep the state on the pool thread in a lock-free
+// copy-on-write cell (std.snapshot: `snapshot.load` / `snapshot.cas`)
+// handed to the handler via its `ud` slot, rather than sending to an
+// actor. See docs/http-server.md "Handler → actor from a release".
+//
 // Storage: a single process-global hashmap behind a reader/writer
 // lock. Reads (the hot path — every C-callback handler that needs
 // to find a named actor) are concurrent. Writes serialize.
