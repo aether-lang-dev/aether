@@ -17,7 +17,7 @@ command -v cc >/dev/null 2>&1 || command -v gcc >/dev/null 2>&1 || {
 }
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 cat > "$TMPDIR/flags.h" <<'HEOF'
 #ifndef FLAGS_H

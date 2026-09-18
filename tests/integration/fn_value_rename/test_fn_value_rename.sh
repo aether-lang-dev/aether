@@ -28,7 +28,7 @@ AE="$ROOT/build/ae"
 
 cd "$ROOT" || exit 1
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() {
     echo "  [FAIL] fn_value_rename: $1"

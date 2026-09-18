@@ -41,7 +41,7 @@ fi
 
 TMP="${TMPDIR:-/tmp}/ae_ilp32_$$"
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 INC=$("$ROOT/build/ae" cflags --cflags)
 

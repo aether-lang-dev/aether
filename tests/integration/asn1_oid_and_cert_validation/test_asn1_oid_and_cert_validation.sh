@@ -15,7 +15,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] asn1_oid_and_cert_validation: build/ae missing"; exit 0; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/probe.ae" -o "$TMP/probe" > "$TMP/build.log" 2>&1; then
     echo "  [FAIL] asn1_oid_and_cert_validation: build failed"

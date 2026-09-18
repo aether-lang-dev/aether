@@ -12,7 +12,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # We need to run from the test directory so the local lib_a/ and lib_b/
 # directories resolve as importable packages. `ae run` looks up

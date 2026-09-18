@@ -7,7 +7,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)
 AE="$ROOT/build/ae"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+trap 'rm -rf "$WORK" || true' EXIT HUP INT TERM
 export AETHER_HOME="$ROOT" AETHER_CACHE_DIR="$WORK/cache"
 cd "$WORK"
 

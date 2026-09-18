@@ -21,7 +21,7 @@ AE="$ROOT/build/ae"
 SRC="$SCRIPT_DIR/loop_self_aliasing.ae"
 EXPECTED="$SCRIPT_DIR/expected_output.txt"
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 ACTUAL="$TMPDIR/actual.txt"
 if ! AETHER_HOME="$ROOT" "$AE" run "$SRC" >"$ACTUAL" 2>"$TMPDIR/err.log"; then

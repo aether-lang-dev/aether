@@ -25,7 +25,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] dep_resolution: ae not built"; exit 0; }
 
 TMPDIR_T="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR_T"' EXIT
+trap 'rm -rf "$TMPDIR_T" || true' EXIT
 
 # A private package cache, so the test never touches the real ~/.aether and
 # never depends on what happens to be installed on the machine.

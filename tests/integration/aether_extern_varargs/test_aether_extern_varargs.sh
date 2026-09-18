@@ -22,7 +22,7 @@ if [ ! -x "$AETHERC" ] || [ ! -x "$AE" ]; then
 fi
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+trap 'rm -rf "$tmpdir" || true' EXIT
 
 # Case 1: extern with named param + `...` after a comma.
 cat > "$tmpdir/case1.ae" <<'AE'

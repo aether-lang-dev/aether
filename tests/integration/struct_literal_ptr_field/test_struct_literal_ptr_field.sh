@@ -21,7 +21,7 @@ esac
 
 # Assert the ACCESSOR directly, not just that it runs: a future change could
 # make this compile by some other route and still be wrong.
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" || true' EXIT
 "$ROOT/build/aetherc" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" >/dev/null 2>&1 || {
     echo "  [FAIL] struct_literal_ptr_field: aetherc could not emit C"; exit 1; }
 if grep -qE '\.code = c\.auth_code' "$TMP/out.c"; then

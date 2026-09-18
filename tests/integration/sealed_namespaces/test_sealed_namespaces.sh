@@ -14,7 +14,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # `ae build` must FAIL — the build script wraps in cd to satisfy the
 # auto-discovered lib/ resolution that finds lib_a/ and lib_b/.

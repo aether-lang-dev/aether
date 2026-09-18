@@ -20,7 +20,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] void_value_read: ae not built"; exit 0; }
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
 # ---- 1. the bug: assigning from a value-less call is rejected -------------

@@ -13,7 +13,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 cat > "$TMPDIR/fmtbug.ae" <<'AEOF'
 extern printf(fmt: ptr, ...) -> int

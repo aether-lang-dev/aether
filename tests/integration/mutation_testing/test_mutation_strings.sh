@@ -38,7 +38,7 @@ if command -v md5sum >/dev/null; then MD5="md5sum"; else MD5="cksum"; fi
 
 cd "$ROOT" || exit 1
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # Own build cache. The mutation driver clears it so each mutant is really
 # rebuilt, and clearing the shared ~/.aether/cache would delete the linker

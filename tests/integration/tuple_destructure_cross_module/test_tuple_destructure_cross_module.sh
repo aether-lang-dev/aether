@@ -41,7 +41,7 @@ if [ ! -x "$AE" ]; then
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" || true' EXIT
 
 mkdir -p "$WORK/lib/build" "$WORK/lib/container"
 

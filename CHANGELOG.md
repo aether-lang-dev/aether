@@ -11,6 +11,18 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A shell test that passed could still fail on its own cleanup.** 82
+  integration scripts run under `set -e` and remove their temp directory
+  from an `EXIT` trap; under `errexit` a failing command inside the trap is
+  fatal, so when Windows' virus scanner still held a just-written file
+  (`rm: cannot remove …: Device or resource busy`) the script died after
+  printing `[PASS]` and the sweep counted a failure — the only red on
+  #2076's Windows leg. Cleanup is now tolerated (`|| true`) in every one of
+  them; the outcome is decided by the assertions alone.
+=======
+
 ## [0.691.0]
 
 ### Fixed

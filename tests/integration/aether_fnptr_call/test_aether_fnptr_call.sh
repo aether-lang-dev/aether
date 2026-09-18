@@ -26,7 +26,7 @@ if [ ! -x "$AETHERC" ]; then
 fi
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+trap 'rm -rf "$tmpdir" || true' EXIT
 
 # -----------------------------------------------------------------
 # Case 1: `as fn(...) -> R` cast on a ptr, then direct invocation.

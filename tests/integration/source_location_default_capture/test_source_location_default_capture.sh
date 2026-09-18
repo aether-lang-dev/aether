@@ -14,7 +14,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 ACTUAL="$TMPDIR/actual.txt"
 if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/uses_capture.ae" >"$ACTUAL" 2>"$TMPDIR/err.log"; then

@@ -28,7 +28,7 @@ if [ ! -x "$AE" ]; then
 fi
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 # Counts cache entries before and after a rebuild, which only answers the
 # question when this test is the only writer. Against the shared

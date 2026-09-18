@@ -15,7 +15,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 TMP="${TMPDIR:-/tmp}/ae_ptr_widen_$$"
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 # 1. The widening must compile AND run.
 OUT=$("$AE" run "$SCRIPT_DIR/prog.ae" 2>&1) || {

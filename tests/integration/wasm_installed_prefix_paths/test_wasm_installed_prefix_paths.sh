@@ -38,7 +38,7 @@ command -v make >/dev/null 2>&1 || { echo "  [SKIP] no make on PATH"; exit 0; }
 
 TMP="${TMPDIR:-/tmp}/ae_wasmprefix_$$"
 mkdir -p "$TMP/bin"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() { echo "  FAIL: $1"; exit 1; }
 

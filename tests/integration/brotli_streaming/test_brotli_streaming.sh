@@ -18,7 +18,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] brotli_streaming: ae not built"; exit 0; }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" || true' EXIT
 
 OUT=$("$AE" run "$SCRIPT_DIR/prog.ae" 2>&1) || {
     echo "  [FAIL] brotli_streaming: did not build/run"

@@ -26,7 +26,7 @@ case "$(uname -s 2>/dev/null)" in
         echo "  [SKIP] liquid_sandbox_gate on Windows"; exit 0 ;;
 esac
 
-TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
+TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR" || true' EXIT
 pass=0; fail=0
 
 # The probe program just imports the module and defines a no-op

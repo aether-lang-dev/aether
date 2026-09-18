@@ -29,7 +29,7 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 case "$(uname -s)" in
     Darwin) LIB_EXT=dylib ;;
