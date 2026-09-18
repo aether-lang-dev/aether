@@ -24,6 +24,19 @@ version number before tagging the release.
   wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
   engine as Aether source.)
 
+## [0.689.0]
+
+### Fixed
+
+- **An interpolation nested inside a `println` segment printed itself and
+  crashed the call around it.** `print`/`println` lower their interpolation
+  straight to `printf`, and that mode stayed on while the segments were
+  generated, so in `println("${takes("${base}/x")}")` the inner string was
+  lowered to `printf` too: `abc/x` went to stdout on its own and `takes`
+  received printf's return count cast to a pointer (a C warning, then an
+  access violation). The same call outside `println` was fine. The mode now
+  covers the outer interpolation alone. `tests/integration/interp_nested_in_print`.
+
 ## [0.688.0]
 
 ### Fixed
