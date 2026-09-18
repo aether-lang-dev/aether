@@ -11,6 +11,17 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`os.run_supervised`, `os.kill` and `os.wait_pid_timeout` are now tested
+  on Windows.** The Job Object backend has been there since the primitives
+  landed, but `test_os_run_supervised` skipped Windows with a comment calling
+  them POSIX-only, so it went unexercised by CI. The test is now its own
+  child (`exit3`, `sleep30`, `leak` — spawn a sleeper and exit without
+  waiting), which takes `/bin/sh` and `sleep` out of it and runs the clean
+  exit, the 1 s timeout on a 30 s sleeper, the group reap of a leaked
+  grandchild and the bounded wait + kill + reap against both backends.
+
 ## [0.683.0]
 
 ### Fixed
