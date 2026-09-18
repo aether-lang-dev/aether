@@ -16,7 +16,7 @@ codegen so they inline correctly and run once, not per use. It is a
 
 | Initializer | Folds to | Notes |
 |---|---|---|
-| `2 + 3 * 4` (arithmetic on numeric literals: `+ - * / %`) | `14` | Predates phase-1; in the correct width (int = 32-bit, float = double). Division/modulo by zero is *not* folded. |
+| `2 + 3 * 4` (arithmetic on numeric literals: `+ - * / %`) | `14` | Predates phase-1; in the kind the generated C computes in: `int` wraps at 32 bits (with [W1003](language-reference.md#constant-expression-overflow-w1003)), `long` at 64, `uint64` is unsigned, anything with a float is a double. `0x`/`0o`/`0b` spellings fold; a duration literal is left to the runtime. Division/modulo by zero is *not* folded. |
 | `string.from_int(<int const>)` | `"42"` | Folded in 32-bit width. |
 | `string.from_long(<int const>)` | `"9999999999"` | Folded in 64-bit width. |
 | `string.from_float(<num const>)` | `"3.14"` | `%g` formatting. |

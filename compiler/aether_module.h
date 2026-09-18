@@ -90,8 +90,6 @@ PackageManifest* package_manifest_load(const char* path);
 void package_manifest_free(PackageManifest* manifest);
 
 // Module orchestration — call between parsing and type checking
-#define MAX_MODULE_TOKENS 100000
-
 // Set the source file directory so module resolution can search lib/ relative to it.
 void module_set_source_dir(const char* source_path);
 

@@ -40,6 +40,10 @@ This document provides an overview of Aether's compiler pipeline, runtime design
 3. Classify tokens (identifier, number, string, keyword, operator)
 4. Track line and column numbers for error reporting
 
+`lexer_tokenize` lexes a whole source into a heap array that grows with the
+input; the main file, every imported module and every `${...}` expression go
+through it, so the only bound on a source file's size is memory.
+
 **Example:**
 ```aether,fragment
 x = 42 + y

@@ -20,6 +20,48 @@ version number before tagging the release.
   now made against the spelling `ae` receives, the way `ae_add_tag_pin`
   already does it. The only failure in a full Windows sweep.
 
+- **`fs.realpath` on Windows returned a UNC path as the relative
+  `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in
+  the `\\?\` namespace and the resolver stripped four characters from
+  whatever came back; only a drive path survives that. A UNC result now
+  keeps its `\\server\share` root. Failures name the kind the way the
+  POSIX branch does (`path not found`, `access denied`, `name too long`,
+  `symlink cycle`) instead of `CreateFileW failed`, and `fs.chmod` likewise
+  instead of `GetFileAttributesW failed`. `test_fs_realpath` now runs on
+  Windows — paths from `os.temp_dir()`, separators folded for the suffix
+  checks, the UNC case through the local administrative share where it is
+  reachable — after skipping there since it was written.
+
+- **Constant folding computed integer literals in a double.** Every literal
+  went through `atof` and the fold ran in floating point, so a `long`
+  expression lost its low bits past 2^53 (`9007199254740993 + 0` was
+  `9007199254740992`, `9223372036854775807 - 1` was `LLONG_MIN`), the int
+  overflow warning quoted the double's idea of both the exact and the
+  wrapped value (`1000000007 * 1000000007` was reported as
+  `1000000014000000000` wrapping to `-371520512`; it is `…049` and
+  `-371520463`), `0b` and `0o` spellings read as 0 (`0b11 * 2` was 0,
+  `0o17 - 1` was -1), and a duration literal read as its leading digits
+  (`1s + 500ms` was 501ns, `2 * 250ms` was 500ns). The folder now computes
+  in the kind the generated C computes in — `int` wrapping at 32 bits with
+  W1003, `long` at 64 with a warning of its own, `uint64` unsigned, double
+  only when a float is involved — parses every radix, and leaves durations
+  to the runtime. A decimal literal past `LLONG_MAX` is emitted with `ULL`,
+  which removes the "integer constant is so large that it is unsigned"
+  warning from the generated C. `tests/regression/test_const_fold_integer_kinds.ae`,
+  `tests/integration/const_overflow_warning_exact`.
+
+- **A source file is no longer capped at a token count (#2059).** The main
+  file was lexed into a 50,000-entry stack array and refused past it ("split
+  into multiple files using imports" — no help to a generated single-entry
+  program such as aeb's orchestrator); an imported module was cut off at
+  100,000 tokens with its tail declarations silently missing; and a `${...}`
+  expression was cut off at 512 tokens, so `${x0 + ... + x300}` printed the
+  sum of the first 255 terms with no diagnostic. All four sites (the LSP had
+  its own 4,096) now go through one `lexer_tokenize` that grows with the
+  input, so a file's size is bounded by memory. Verbose output still reports
+  the count. `tests/integration/source_size_unbounded` drives each former
+  cap past its old limit from generated sources.
+
 ## [0.684.0]
 
 ### Fixed

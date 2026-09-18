@@ -1,4 +1,4 @@
-// Regression test for fs.realpath — issue #391 + #392.
+// Regression test for fs.realpath — issue #391 + #392, Windows in #2063.
 // fs.realpath returns (resolved, KIND_OK, "") on success or
 // ("", KIND_*, msg) on failure.
 //
@@ -7,8 +7,14 @@
 //   2. Relative-style canonicalisation (./ and ../ folded out)
 //   3. Symlink follow → resolved path is the target's path, not the
 //      symlink's
-//   4. Missing path → KIND_NOT_FOUND
+//   4. Missing path → KIND_NOT_FOUND, and a message that names that
 //   5. Path through a non-directory component → KIND_NOT_DIR
+//   6. (Windows) a UNC spelling resolves to a \\server\share path, not
+//      to the relative `UNC\server\share` the \\?\ namespace strips to
+//
+// The paths are built from os.temp_dir() and compared with the
+// separators folded to `/`, so the same cases run against realpath(3)
+// and against GetFinalPathNameByHandleW, which answers with backslashes.
 
 import std.fs
 import std.string
@@ -16,22 +22,16 @@ import std.os
 
 extern exit(code: int)
 
+// The resolved form with every separator as `/`, for suffix checks.
+slashes(path: string) -> string {
+    return string.replace_all(path, "\\", "/")
+}
+
 main() {
     println("=== fs.realpath regression ===")
 
-    // Skip on Windows: the test hardcodes POSIX `/tmp/...` paths
-    // and `/`-separated suffix matching. Windows remaps `/tmp` to
-    // `D:\tmp` and returns paths with `\` separators, so the
-    // assertions don't apply. The realpath implementation itself
-    // (`GetFinalPathNameByHandleW` on Windows) is exercised at
-    // build time; this test guards POSIX realpath specifically.
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: POSIX path conventions; Windows realpath uses backslashes")
-        println("=== Skipped on Windows ===")
-        exit(0)
-    }
-
-    tmpdir = "/tmp/aether_fs_realpath_test"
+    windows = os_getenv("OS") == "Windows_NT"
+    tmpdir = "${os.temp_dir()}/aether_fs_realpath_test"
     fs.delete_dir(tmpdir)
     fs.create_dir(tmpdir)
     fs.write("${tmpdir}/probe", "x")
@@ -41,15 +41,11 @@ main() {
     if kind1 != fs.KIND_OK {
         println("FAIL 1: kind=${kind1} msg=${msg1}, expected KIND_OK"); exit(1)
     }
-    // realpath may resolve /tmp to /private/tmp on macOS; accept any
-    // resolved form that ends with /aether_fs_realpath_test/probe.
+    // realpath may resolve /tmp to /private/tmp on macOS, and Windows
+    // answers with backslashes; accept any resolved form that ends with
+    // /aether_fs_realpath_test/probe once the separators are folded.
     suffix = "/aether_fs_realpath_test/probe"
-    end_at = string.length(resolved1) - string.length(suffix)
-    if end_at < 0 {
-        println("FAIL 1: resolved=${resolved1} too short for suffix=${suffix}"); exit(1)
-    }
-    tail1 = string.substring(resolved1, end_at, string.length(resolved1))
-    if tail1 != suffix {
+    if string.ends_with(slashes(resolved1), suffix) != 1 {
         println("FAIL 1: resolved=${resolved1} does not end with ${suffix}"); exit(1)
     }
     println("  PASS 1: canonical path resolves")
@@ -66,6 +62,9 @@ main() {
     println("  PASS 2: ./.. folded out")
 
     // --- Case 3: symlink follow ---
+    // Creating a symlink needs a privilege on Windows that a plain user
+    // session lacks; the SKIP covers that, and the resolver is still held
+    // to following it wherever the link could be made.
     sym3 = "${tmpdir}/link_to_probe"
     sym_err = fs.symlink("${tmpdir}/probe", sym3)
     if sym_err != "" {
@@ -75,22 +74,7 @@ main() {
         if kind3 != fs.KIND_OK {
             println("FAIL 3: kind=${kind3} msg=${msg3}, expected KIND_OK"); exit(1)
         }
-        // The resolved path should NOT include "link_to_probe".
-        // Use a poor-man's contains check via substring scan.
-        contains_link = 0
-        max_idx = string.length(resolved3) - 13 // length of "link_to_probe"
-        if max_idx > 0 {
-            i = 0
-            while i <= max_idx {
-                if string.substring(resolved3, i, i + 13) == "link_to_probe" {
-                    contains_link = 1
-                    i = max_idx + 1
-                } else {
-                    i = i + 1
-                }
-            }
-        }
-        if contains_link != 0 {
+        if string.contains(resolved3, "link_to_probe") != 0 {
             println("FAIL 3: resolved=${resolved3} still contains 'link_to_probe' — symlink not followed"); exit(1)
         }
         println("  PASS 3: symlink followed to target")
@@ -104,21 +88,48 @@ main() {
     if resolved4 != "" {
         println("FAIL 4: resolved=${resolved4} on failure, expected empty string"); exit(1)
     }
-    println("  PASS 4: missing path → KIND_NOT_FOUND")
+    if msg4 != "path not found" {
+        println("FAIL 4: msg=${msg4}, expected 'path not found' on every platform"); exit(1)
+    }
+    println("  PASS 4: missing path → KIND_NOT_FOUND, 'path not found'")
 
     // --- Case 5: path through a non-directory ---
     not_dir = "${tmpdir}/probe/inside" // probe is a regular file
-    resolved5, kind5, msg5 = fs.realpath(not_dir)
+    _resolved5, kind5, msg5 = fs.realpath(not_dir)
     if kind5 != fs.KIND_NOT_DIR {
         // Some POSIX implementations report ENOENT for this case
-        // instead of ENOTDIR. Accept either as evidence the call
-        // correctly failed.
+        // instead of ENOTDIR, and Windows reports ERROR_PATH_NOT_FOUND
+        // for both. Accept either as evidence the call correctly failed.
         if kind5 != fs.KIND_NOT_FOUND {
             println("FAIL 5: kind=${kind5} msg=${msg5}, expected KIND_NOT_DIR or KIND_NOT_FOUND"); exit(1)
         }
-        println("  PASS 5: non-dir component → KIND_NOT_FOUND (POSIX variant)")
+        println("  PASS 5: non-dir component → KIND_NOT_FOUND (path-not-found variant)")
     } else {
         println("  PASS 5: non-dir component → KIND_NOT_DIR")
+    }
+
+    // --- Case 6 (Windows): UNC spelling keeps its \\server\share root ---
+    // GetFinalPathNameByHandleW answers \\?\UNC\server\share\...; the
+    // resolver used to strip four characters and hand back the relative
+    // path UNC\server\share\... (#2063). Reached through the local
+    // administrative share, which is not always reachable; when it is
+    // not, the case is skipped rather than failed.
+    if windows {
+        drive = string.substring(resolved1, 0, 1)
+        rest = string.substring(resolved1, 2, string.length(resolved1))
+        unc = "//localhost/${drive}$${rest}"
+        resolved6, kind6, msg6 = fs.realpath(unc)
+        if kind6 != fs.KIND_OK {
+            println("  SKIP 6: ${unc} unreachable (kind=${kind6} msg=${msg6})")
+        } else {
+            if string.starts_with(resolved6, "\\\\localhost\\") != 1 {
+                println("FAIL 6: UNC resolved=${resolved6}, expected a \\\\localhost\\ root"); exit(1)
+            }
+            if string.ends_with(slashes(resolved6), suffix) != 1 {
+                println("FAIL 6: UNC resolved=${resolved6} does not end with ${suffix}"); exit(1)
+            }
+            println("  PASS 6: UNC path keeps its \\\\server\\share root")
+        }
     }
 
     // Cleanup

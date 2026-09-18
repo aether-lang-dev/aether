@@ -514,16 +514,9 @@ void lsp_publish_diagnostics(LSPServer* server, const char* uri) {
     }
 
     /* Phase 2: If no lex errors, try parsing to catch syntax errors */
-    if (diag_count == 0) {
-        lexer_init(source);
-        Token* tokens[4096];
-        int token_count = 0;
-        while (token_count < 4095) {
-            Token* t = next_token();
-            tokens[token_count++] = t;
-            if (t->type == TOKEN_EOF || t->type == TOKEN_ERROR) break;
-        }
-
+    int token_count = 0;
+    Token** tokens = diag_count == 0 ? lexer_tokenize(source, &token_count) : NULL;
+    if (tokens) {
         /* Capture parser errors via fd-level redirection. Do NOT assign to
          * `stderr`: it is not an assignable lvalue on musl or mingw (glibc
          * and macOS merely tolerate it). dup2 onto stderr's fd is the
@@ -603,9 +596,7 @@ void lsp_publish_diagnostics(LSPServer* server, const char* uri) {
 
         if (ast) free_ast_node(ast);
         free_parser(parser);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
     }
 
     diag_items[diag_offset] = '\0';
