@@ -30,7 +30,6 @@ version number before tagging the release.
   existing `<os>-<arch>` release convention. Compile-time only; verified the
   triple selection per platform and that the FreeBSD block compiles under the
   real cross toolchain.
-=======
 
 ## [0.691.0]
 
@@ -47,7 +46,6 @@ version number before tagging the release.
   `test_os_cwd` (chdir into the current drive's root on Windows) and
   `test_run_argv_heap_string` (the child prints its own arguments instead
   of spawning `echo`) likewise run there now.
-=======
 
 - **A tuple-bound name passed where a parameter takes a scalar is refused
   at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
@@ -59,7 +57,6 @@ version number before tagging the release.
   functions and externs now report `expected ptr, got the (ptr, string)
   tuple bound to 'l' … destructure it: value, err = ...`.
   `tests/integration/tuple_argument_reject`.
-=======
 
 ## [0.690.0]
 
