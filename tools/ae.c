@@ -1880,6 +1880,20 @@ static int dep_append_module_roots(const char* root, const char* name) {
     snprintf(buf, sizeof(buf), "%s", mods);
     int n = 0;
     for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
+        /* `modules = "."` is the explicit opt-in root export: it joins the
+         * package ROOT itself onto the search path, so a package whose
+         * modules live in `core/*.ae` and import each other with a dotted
+         * package prefix (`import core.phonenumber`) is `ae add`-consumable
+         * without giving up that namespacing. A normal entry names a module
+         * and what joins is its PARENT (below); `.` has no leaf to strip and
+         * no `.ae` file to check -- the root is the exported dir directly.
+         * This stays opt-in (the publisher writes it), so the "package root
+         * is never joined SPECULATIVELY" principle holds. */
+        if (strcmp(tok, ".") == 0) {
+            tc_lib_dir_append_one(root);
+            n++;
+            continue;
+        }
         char full[3072];
         snprintf(full, sizeof(full), "%s/%s", root, tok);
         /* A module is either a DIRECTORY holding module.ae or a single .ae
@@ -6917,7 +6931,10 @@ static int cmd_init(int argc, char** argv) {
      * then exports nothing, which reads as a resolver bug rather than a
      * missing line in the publisher's own manifest. */
     fprintf(f, "# modules = \"mylib, mylib/internal\"  "
-               "# Importable modules, if this is a library\n\n");
+               "# Importable modules, if this is a library\n");
+    fprintf(f, "# modules = \".\"  "
+               "# Export the package ROOT (for a core/*.ae package whose "
+               "modules import each other as import core.*)\n\n");
     fprintf(f, "[[bin]]\n");
     fprintf(f, "name = \"%s\"\n", name);
     fprintf(f, "path = \"src/main.ae\"\n\n");

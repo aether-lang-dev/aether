@@ -1,0 +1,75 @@
+// The constant folder computes an integer expression in the kind the
+// generated C computes it in, not in a double.
+//
+// It used to turn every literal into a double with atof and fold there,
+// which went wrong four ways:
+//   - a `long` literal past 2^53 lost its low bits (9007199254740993 + 0
+//     came out 9007199254740992), and LLONG_MAX - 1 came out LLONG_MIN;
+//   - the int overflow warning quoted the double's idea of the exact and
+//     wrapped values, both wrong;
+//   - 0b and 0o spellings read as 0 (`0b11 * 2` was 0, `0o17 - 1` was -1);
+//   - a duration literal read as its leading digits (`1s + 500ms` was
+//     501ns, `2 * 250ms` was 500ns).
+// Every case here pins the value the same expression gives over variables.
+
+extern exit(code: int)
+
+check(label: string, ok: int) {
+    if ok == 0 {
+        println("FAIL: ${label}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== constant folding by integer kind ===")
+
+    // --- long: exact past 2^53 and at the 64-bit edges ---
+    long a = 9007199254740993 + 0
+    check("2^53 + 1 survives a fold", a == 9007199254740993)
+    long b = 9223372036854775807 - 1
+    check("LLONG_MAX - 1", b == 9223372036854775806)
+    long c = 0 - 9223372036854775807
+    check("0 - LLONG_MAX", c == -9223372036854775807)
+    long d = 4611686018427387904 + 4611686018427387903
+    check("sum landing exactly on LLONG_MAX", d == 9223372036854775807)
+    long e = 123456789012345678 / 7
+    check("long division truncates", e == 17636684144620811)
+    long f = 123456789012345678 % 1000
+    check("long remainder", f == 678)
+    long g = 9007199254740993 * 1
+    check("multiply keeps 2^53 + 1", g == 9007199254740993)
+
+    // --- int: wraps at 32 bits, the same as the runtime ---
+    // The literal form is the compiler proving an overflow, so it warns
+    // (W1003); the numbers in that warning are pinned by
+    // tests/integration/const_overflow_warning_exact.
+    x = 1000000007
+    y = 1000000007
+    int_runtime = x * y
+    check("int * int folds to the runtime's wrapped value", 1000000007 * 1000000007 == int_runtime)
+
+    // --- uint64 ---
+    uint64 u = 18446744073709551615 - 1
+    check("uint64 arithmetic stays unsigned", u == 18446744073709551614)
+
+    // --- radix spellings ---
+    check("binary literal folds", 0b11 * 2 == 6)
+    check("octal literal folds", 0o17 - 1 == 14)
+    check("hex literal folds", 0x10 + 1 == 17)
+    check("mixed radix", 0b1000 + 0o10 + 0x8 + 8 == 32)
+
+    // --- durations are left to the runtime ---
+    dur = 1s + 500ms
+    check("duration sum", dur == 1500ms)
+    scaled = 2 * 250ms
+    check("int times duration", scaled == 500ms)
+
+    // --- floats still fold in double ---
+    check("float with int operand", 0.5 + 1 == 1.5)
+    check("int division stays integral", 7 / 2 == 3)
+    check("float division", 7.0 / 2 == 3.5)
+
+    println("=== All cases passed ===")
+}
