@@ -11,8 +11,6 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.682.0]
-
 ### Fixed
 
 - **E0200 "block setter called as a node builder" rejected every container
@@ -31,6 +29,10 @@ version number before tagging the release.
   is still caught. `tests/integration/setter_in_builder_position` gains
   `uimod` (a builder beside handle-returning containers and one void
   setter): the container compiles, the setter still errors.
+
+## [0.682.0]
+
+### Fixed
 
 - **`1 | 2 | 3 ->` in a match or switch arm matched only 3.** A `|` between
   selector values is the bitwise OR, and it compiled. The parser now refuses
