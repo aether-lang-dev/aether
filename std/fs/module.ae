@@ -908,8 +908,11 @@ move(src: string, dst: string) -> {
 // components. Returns (resolved_path, KIND_OK, "") on success,
 // ("", KIND_*, msg) on failure (KIND_NOT_FOUND if a component is
 // missing, KIND_LOOP for symlink cycles, KIND_NAME_TOO_LONG if the
-// resolved form exceeds the OS limit). The returned path is
-// owned by the runtime; the caller does not need to free it.
+// resolved form exceeds the OS limit). The resolved path is spelled
+// the way the OS spells it: `/`-separated on POSIX; on Windows
+// backslashes with the drive letter upper-cased (`D:\dir\file`) or,
+// for a network path, its `\\server\share\...` root. The returned
+// path is owned by the runtime; the caller does not need to free it.
 realpath(path: string) -> {
     return fs_realpath_raw(path)
 }

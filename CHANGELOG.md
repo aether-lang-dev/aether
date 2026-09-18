@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`fs.realpath` on Windows returned a UNC path as the relative
+  `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in
+  the `\\?\` namespace and the resolver stripped four characters from
+  whatever came back; only a drive path survives that. A UNC result now
+  keeps its `\\server\share` root. Failures name the kind the way the
+  POSIX branch does (`path not found`, `access denied`, `name too long`,
+  `symlink cycle`) instead of `CreateFileW failed`, and `fs.chmod` likewise
+  instead of `GetFileAttributesW failed`. `test_fs_realpath` now runs on
+  Windows — paths from `os.temp_dir()`, separators folded for the suffix
+  checks, the UNC case through the local administrative share where it is
+  reachable — after skipping there since it was written.
+
 ## [0.683.0]
 
 ### Fixed
