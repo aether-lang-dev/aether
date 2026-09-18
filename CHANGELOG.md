@@ -11,8 +11,6 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.688.0]
-
 ### Fixed
 
 - **An interpolation nested inside a `println` segment printed itself and
@@ -23,6 +21,10 @@ version number before tagging the release.
   received printf's return count cast to a pointer (a C warning, then an
   access violation). The same call outside `println` was fine. The mode now
   covers the outer interpolation alone. `tests/integration/interp_nested_in_print`.
+
+## [0.688.0]
+
+### Fixed
 
 - **`fs.symlink`, `fs.readlink` and `fs.is_symlink` work on Windows.** They
   were stubs that failed every call, which the reference described as
