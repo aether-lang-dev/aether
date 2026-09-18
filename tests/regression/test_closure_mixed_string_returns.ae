@@ -1,0 +1,71 @@
+// Regression: a closure with one string-typed return site and one
+// `-> ptr` builtin return site is a string closure on every path.
+//
+// The bug: resolve_closure_return_type typed a closure by its FIRST
+// return. `string.from_int(x)` is declared `-> ptr` (an AetherString
+// behind a raw pointer), so a closure that returned it on one path and
+// a struct's string field on another was emitted `void*`, was not a
+// "string closure", and none of its returns got the uniform-heap wrap
+// of #2054. Its caller — a `-> string` function that returns `cb(...)`
+// — still took ownership of whatever came back and freed it. The
+// field path handed over a string literal, and the caller free()d it:
+// STATUS_HEAP_CORRUPTION on Windows, SIGABRT on macOS, glibc quietly
+// absorbed it. This was aether-ui's table cell callback, on every row
+// of every table, the moment that tree moved past 0.681.
+//
+// Pre-fix this crashed in the first `invoke`. Post-fix any string-typed
+// return site makes the closure `const char*`, so the literal is copied
+// on the way out and the AetherString is copied out by its header; the
+// caller owns both and frees both.
+
+import std.string
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Person { name: string, kb: int }
+
+// The shape of aether-ui's `_table_invoke_cell`: a `-> string` function
+// whose whole body is a call through a bare fn value.
+invoke(cb: fn, item: ptr, c: int) -> string {
+    return cb(item, c)
+}
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+main() {
+    print("=== closure with mixed string / ptr-builtin returns ===\n\n")
+
+    p = malloc(sizeof(Person)) as *Person
+    p.name = "zoe"
+    p.kb = 30
+
+    // First return site is the `-> ptr` builtin; the second is a string
+    // field that holds a literal. Pre-fix: typed void* by the first site,
+    // the literal reached the caller unwrapped and was freed.
+    cell = | item: ptr, c: int | {
+        q = item as *Person
+        if c == 1 { return string.from_int(q.kb) }
+        return q.name
+    }
+
+    i = 0
+    while i < 50 {
+        name = invoke(cell, p as ptr, 0)
+        if string.equals(name, "zoe") != 1 { fail("column 0 -> '${name}', want 'zoe'") }
+        size = invoke(cell, p as ptr, 1)
+        if string.equals(size, "30") != 1 { fail("column 1 -> '${size}', want '30'") }
+        i = i + 1
+    }
+    print("  PASS: 50 rounds through both return sites, no corruption\n")
+
+    // The literal itself is untouched: the struct still reads it after
+    // every copy the caller freed.
+    if string.equals(p.name, "zoe") != 1 { fail("the field's literal was damaged: '${p.name}'") }
+    print("  PASS: the field's literal survived\n")
+
+    print("\n=== mixed-return closure test passed ===\n")
+}
