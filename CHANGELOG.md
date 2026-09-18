@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.689.0]
+
 ### Fixed
 
 - **An interpolation nested inside a `println` segment printed itself and
