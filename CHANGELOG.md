@@ -31,9 +31,31 @@ version number before tagging the release.
   gains the matching caveat: a `!` send from an off-scheduler `std.http` handler
   is currently dropped (aether#2083). No code change.
 
+## [0.686.0]
+
+### Tests
+
+- **`std.snapshot` gains a concurrent copy-on-write test.** The existing
+  `snapshot_cow` regression test exercises the store/cas/load/reclaim sequence
+  single-threaded, and the #841 concurrent-cache benchmark's COW design uses
+  `store()` (unconditional overwrite) — so nothing in-tree proved the property a
+  real many-writer user relies on: a `snapshot.cas` retry loop must never lose an
+  update under concurrent publishers. The new `snapshot_concurrent` test drives
+  `std.worker` (a real thread pool) at one cell — 500 concurrent CAS increments
+  must land exactly 500 (no lost updates), and 300 writers racing 300 lock-free
+  readers must still reach 300 with no torn reads. (Surfaced by selaenium's Grid
+  hub registry, `std.snapshot`'s first concurrent-CAS-writer consumer.)
+
 ## [0.685.0]
 
 ### Fixed
+
+- **`tests/integration/cache_dir_override` failed on Windows (#2069).** It
+  checked that `ae cache clear` names the override directory by looking for
+  the shell's `/tmp/...` spelling, but MSYS2 hands a native executable the
+  converted `C:/...` form and that is what `ae` prints. The comparison is
+  now made against the spelling `ae` receives, the way `ae_add_tag_pin`
+  already does it. The only failure in a full Windows sweep.
 
 - **`fs.realpath` on Windows returned a UNC path as the relative
   `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in

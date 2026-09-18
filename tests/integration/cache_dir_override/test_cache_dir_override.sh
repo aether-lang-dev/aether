@@ -21,6 +21,15 @@ TMPDIR_T="$(mktemp -d)"
 trap 'chmod -R u+w "$TMPDIR_T" 2>/dev/null; rm -rf "$TMPDIR_T"' EXIT
 
 CACHE="$TMPDIR_T/cache-override"
+# `ae cache clear` prints the directory as the native program received it.
+# Under MSYS2 that is not "$CACHE": the shell hands a native exe the
+# converted C:/... spelling of a /tmp/... value, so the comparison below
+# is made against that spelling (same shape as ae_add_tag_pin).
+if command -v cygpath >/dev/null 2>&1; then
+    CACHE_AS_AE_SEES_IT="$(cygpath -m "$CACHE")"
+else
+    CACHE_AS_AE_SEES_IT="$CACHE"
+fi
 # Unique program text -> unique cache key -> guaranteed cold cache.
 TOKEN="cdo-$$-$(date +%s)"
 cat > "$TMPDIR_T/prog.ae" <<AE
@@ -96,7 +105,7 @@ fi
 clear_out=$(HOME="$FAKE_HOME" USERPROFILE="$FAKE_HOME" \
             AETHER_CACHE_DIR="$CACHE" "$AE" cache clear 2>&1)
 case "$clear_out" in
-    *"$CACHE"*) ;;
+    *"$CACHE_AS_AE_SEES_IT"*) ;;
     *) echo "  [FAIL] ae cache clear did not name the override directory:"
        echo "$clear_out" | sed 's/^/        /'; exit 1 ;;
 esac
