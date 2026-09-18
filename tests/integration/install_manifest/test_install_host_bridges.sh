@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 cd "$ROOT"
 if ! ./install.sh "$TMPDIR" < /dev/null > "$TMPDIR/install.log" 2>&1; then

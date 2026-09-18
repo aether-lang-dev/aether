@@ -25,7 +25,7 @@ AE="$ROOT/build/ae"
 if [ ! -x "$AE" ]; then echo "  [SKIP] cache_shadowing_probe_bust: ae not built"; exit 0; fi
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 # Isolated cache dir: the entry-count hit check needs this test to be the only
 # writer (mirrors cache_subdir_entry_root_module).
 AETHER_CACHE_DIR="$TMP/cache"; export AETHER_CACHE_DIR

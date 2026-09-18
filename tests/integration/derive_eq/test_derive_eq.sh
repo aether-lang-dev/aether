@@ -12,7 +12,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/derive.ae" >"$TMPDIR/out.log" 2>&1; then
     echo "  [FAIL] ae run derive.ae exited non-zero"

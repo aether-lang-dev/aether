@@ -33,7 +33,7 @@ fi
 CC="$(command -v gcc || command -v cc)"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 OUT="$TMPDIR/out"
 if ! "$AE" build --emit=csrc "$SCRIPT_DIR/mylib.ae" -o "$OUT" >"$TMPDIR/build.log" 2>&1; then

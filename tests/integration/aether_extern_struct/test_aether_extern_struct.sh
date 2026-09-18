@@ -30,7 +30,7 @@ if [ ! -x "$AETHERC" ] || [ ! -x "$AE" ]; then
 fi
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+trap 'rm -rf "$tmpdir" || true' EXIT
 
 # -----------------------------------------------------------------
 # Case 1: plain field layout — emit matches a regular C struct typedef.

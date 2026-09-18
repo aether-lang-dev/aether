@@ -1461,6 +1461,54 @@ static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
     return 1;
 }
 
+/* Spell a tuple type the way a signature does: `(int, string)`. */
+static void tuple_type_spell(Type* t, char* out, size_t size) {
+    size_t pos = 0;
+    if (size == 0) return;
+    out[pos++] = '(';
+    for (int i = 0; i < t->tuple_count && pos + 1 < size; i++) {
+        const char* name = t->tuple_types[i] ? type_name(t->tuple_types[i]) : "?";
+        int w = snprintf(out + pos, size - pos, "%s%s", i ? ", " : "", name);
+        if (w < 0) break;
+        pos += (size_t)w;
+        if (pos >= size) { pos = size - 1; break; }
+    }
+    if (pos + 1 < size) out[pos++] = ')';
+    out[pos] = '\0';
+}
+
+/* A multi-value return bound to ONE name is a tuple, and a tuple passed
+ * where the parameter takes a scalar is never what was meant. The front end
+ * let it through (argument checking is lenient for user functions) and the
+ * only report was the C compiler's `incompatible type for argument 1 …
+ * argument is of type '_tuple_ptr_string'`, against generated code (the
+ * same shape #1878 took out of binary operators). Name the fix: the value
+ * was to be destructured. */
+static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* arg,
+                                  Type* arg_type, Type* param_type, int index,
+                                  const char* param_name) {
+    if (!arg_type || arg_type->kind != TYPE_TUPLE || !param_type ||
+        param_type->kind == TYPE_TUPLE || param_type->kind == TYPE_UNKNOWN) {
+        return;
+    }
+    /* Only a NAME bound to a tuple. A function passed as a value
+     * (`via_fn(pair, 2, 3)`) infers to its return type, and a call in
+     * argument position is typed by the callee's own rules. */
+    if (arg->type != AST_IDENTIFIER || !arg->value) return;
+    Symbol* sym = lookup_symbol(table, arg->value);
+    if (!sym || sym->is_function) return;
+    char spelled[256];
+    tuple_type_spell(arg_type, spelled, sizeof(spelled));
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got the %s tuple bound to "
+             "'%s' — a multi-value return bound to one name stays a tuple; "
+             "destructure it: `value, err = ...`",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type), spelled, arg->value);
+    type_error(emsg, arg->line, arg->column);
+}
+
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
     
@@ -9085,6 +9133,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 ASTNode* darg = call->children[arg_slot];
                 if (darg) {
                     Type* da = infer_type(darg, table);
+                    reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
                                   (da && da->kind == TYPE_BITSTRUCT);
@@ -9238,7 +9287,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 if (param_type && param_type->kind != TYPE_UNKNOWN &&
                     call->children[param_idx] != NULL) {
                     Type* arg_type = infer_type(call->children[param_idx], table);
-                    if (arg_type && arg_type->kind != TYPE_UNKNOWN &&
+                    reject_tuple_argument(table, call, call->children[param_idx], arg_type,
+                                          param_type, param_idx + 1, param->value);
+                    if (arg_type && arg_type->kind != TYPE_TUPLE && arg_type->kind != TYPE_UNKNOWN &&
                         !is_type_compatible(arg_type, param_type)) {
                         char error_msg[256];
                         snprintf(error_msg, sizeof(error_msg),

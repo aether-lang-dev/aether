@@ -75,7 +75,9 @@ int fs_mkdir_p_raw(const char* path);
 //
 // fs_readlink_raw: read a symlink. Returns a heap-allocated string
 //                  containing the link target, or NULL if `path` is not
-//                  a symlink (or cannot be read). Caller frees.
+//                  a symlink (or cannot be read). Caller frees. Windows
+//                  reads the link's own reparse data; a junction is not
+//                  a symlink.
 //
 // fs_is_symlink: returns 1 if `path` is itself a symlink (does not
 //                follow), 0 otherwise. Pure boolean query — no wrapper

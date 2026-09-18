@@ -41,7 +41,7 @@ EXE_SRC="$SCRIPT_DIR/hello.ae"  # has main() — executable build
 
 TMP="${TMPDIR:-/tmp}/ae_cross_ios_$$"
 mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+trap 'rm -rf "$TMP" || true' EXIT
 
 fail() { echo "  FAIL: $1"; exit 1; }
 

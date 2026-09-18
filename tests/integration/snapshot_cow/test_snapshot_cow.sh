@@ -33,7 +33,7 @@ fi
 cd "$ROOT" || exit 1
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&1; then
     echo "  [FAIL] snapshot_cow: ae run exited non-zero"

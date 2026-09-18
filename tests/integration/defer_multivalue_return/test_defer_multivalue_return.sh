@@ -34,7 +34,7 @@ if [ ! -x "$AE" ]; then
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" || true' EXIT
 
 # Three repros, each a different multi-value-return shape paired
 # with defer. All three should compile + run; pre-fix all three

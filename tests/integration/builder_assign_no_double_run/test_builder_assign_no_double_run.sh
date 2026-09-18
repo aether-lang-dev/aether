@@ -30,7 +30,7 @@ esac
 # runtime check above is the real gate; this pins the mechanism so a future
 # change cannot reintroduce the duplicate call in a form that happens to be
 # idempotent for this particular body.
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" || true' EXIT
 "$ROOT/build/aetherc" "$SCRIPT_DIR/prog.ae" "$TMP/out.c" >/dev/null 2>&1 || {
     echo "  [FAIL] builder_assign_no_double_run: aetherc could not emit C"; exit 1; }
 if grep -qE 'r = mk\([^)]*, \(void\*\)0\)' "$TMP/out.c"; then

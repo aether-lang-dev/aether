@@ -73,7 +73,7 @@ if [ ! -x "$AE" ]; then
 fi
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK" || true' EXIT
 
 # Repro shape from docs/type-inference-multi-value-returns.md §"The
 # shape that triggers the cluster". hash_file:

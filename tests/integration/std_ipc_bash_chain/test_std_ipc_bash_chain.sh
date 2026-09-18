@@ -30,7 +30,7 @@ fi
 cd "$ROOT" || exit 1
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"; rm -f /tmp/std_ipc_bash_chain_child' EXIT
+trap 'rm -rf "$TMPDIR" || true; rm -f /tmp/std_ipc_bash_chain_child || true' EXIT
 
 if ! AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/probe.ae" >"$TMPDIR/out.log" 2>&1; then
     echo "  [FAIL] std_ipc_bash_chain"

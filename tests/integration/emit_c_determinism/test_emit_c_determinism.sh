@@ -21,7 +21,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AETHERC="$ROOT/build/aetherc"
 
 TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR" || true' EXIT
 
 CORPUS="examples/basics/hello.ae
 examples/basics/string-processing.ae

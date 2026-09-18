@@ -1,0 +1,39 @@
+// An interpolation nested inside a print/println interpolation's segment.
+//
+// print and println lower their interpolation straight to printf. That
+// mode was a flag on the generator that stayed up while the segments were
+// generated, so an interpolation used as an argument inside a segment —
+// `println("${takes("${base}/x")}")` — was lowered to printf too: the
+// inner string went to stdout and `takes` received printf's return count
+// cast to a pointer (a C warning, then a crash). The same expression
+// outside println was always fine. The mode now covers the outer
+// interpolation alone.
+
+import std.string
+
+extern exit(code: int)
+
+takes(s: string) -> int {
+    return string.length(s)
+}
+
+wrap(s: string) -> string {
+    return "[${s}]"
+}
+
+main() {
+    println("=== nested interpolation inside print ===")
+    base = "abc"
+
+    // Each line must print exactly one thing: the inner string must not
+    // leak to stdout on its own.
+    println("1: ${takes("${base}/x")}")
+    println("2: ${string.length("${base}/x")}")
+    println("3: ${wrap("${base}/x")}")
+    println("4: ${string.to_upper("${base}/x")} and ${takes("${base}")}")
+    print("5: ${takes("${base}/${base}")}")
+    println("")
+    n = takes("${base}/x")
+    println("6: ${n}")
+    println("=== done ===")
+}

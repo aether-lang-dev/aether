@@ -156,6 +156,7 @@ void fs_watch_close(void* w) { (void)w; }
     #include <io.h>            // _open / _unlink for atomic-write + delete
     #include <process.h>       // _getpid (for fs_write_atomic_raw tmp path)
     #include <windows.h>
+    #include <winioctl.h>      // FSCTL_GET_REPARSE_POINT for fs_readlink_raw
     #define mkdir(path, mode) _mkdir(path)
     #define rmdir _rmdir
     #define stat _stat
@@ -843,11 +844,149 @@ int fs_unlink_raw(const char* path) {
 
 #else // _WIN32
 
-// Windows symlinks need elevation or developer mode and use a different
-// API surface. For now these are stubs returning failure; a follow-up
-// PR can add CreateSymbolicLinkW + a junction fallback for directories.
-int fs_symlink_raw(const char* t, const char* l) { (void)t; (void)l; return 0; }
-char* fs_readlink_raw(const char* p) { (void)p; return NULL; }
+/* UTF-8 → UTF-16 scratch for the symlink primitives, cap-accounted like the
+ * realpath path scratch (#462). `*bytes` is what to hand aether_caps_free. */
+static wchar_t* fs_win_wide(const char* utf8, size_t* bytes) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    *bytes = (size_t)n * sizeof(wchar_t);
+    wchar_t* w = (wchar_t*)aether_caps_malloc(*bytes);
+    if (!w) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n);
+    return w;
+}
+
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
+#endif
+
+/* The symlink half of REPARSE_DATA_BUFFER (ntifs.h — a driver-kit header
+ * the SDK does not ship, so the layout is spelled here as Go, Python and
+ * Rust do). PathBuffer holds the print name and the substitute name as
+ * UTF-16 at the given byte offsets. */
+typedef struct {
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    USHORT SubstituteNameOffset;
+    USHORT SubstituteNameLength;
+    USHORT PrintNameOffset;
+    USHORT PrintNameLength;
+    ULONG  Flags;
+    WCHAR  PathBuffer[1];
+} fs_win_symlink_reparse;
+
+/* Create a symbolic link at `link_path` pointing to `target`, the way the
+ * POSIX twin does. Windows needs to know whether the link is to a
+ * directory, so a target that resolves (relative to the link's own
+ * directory, which is what a relative target means) to one is flagged as
+ * such; a target that does not exist yet becomes a file link. Separators
+ * in the target are stored as backslashes, since that is the only form
+ * the object manager resolves; the link is otherwise verbatim. Creating a
+ * link is a privilege on Windows: administrators have it, and since
+ * Windows 10 1703 Developer Mode grants it to everyone through
+ * SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE, which an older kernel
+ * rejects as an invalid parameter, in which case the call is repeated
+ * without it. */
+int fs_symlink_raw(const char* target, const char* link_path) {
+    if (!target || !link_path) return 0;
+    if (!aether_sandbox_check("fs_write", link_path)) return 0;
+    size_t wt_bytes = 0, wl_bytes = 0;
+    wchar_t* wt = fs_win_wide(target, &wt_bytes);
+    wchar_t* wl = fs_win_wide(link_path, &wl_bytes);
+    int ok = 0;
+    if (wt && wl) {
+        for (wchar_t* c = wt; *c; c++) if (*c == L'/') *c = L'\\';
+        DWORD flags = 0;
+        int absolute = (wt[0] == L'\\') || (wt[0] && wt[1] == L':');
+        size_t link_len = wcslen(wl), target_len = wcslen(wt);
+        size_t probe_bytes = (link_len + target_len + 2) * sizeof(wchar_t);
+        wchar_t* probe = (wchar_t*)aether_caps_malloc(probe_bytes);
+        if (probe) {
+            if (absolute) {
+                wcscpy(probe, wt);
+            } else {
+                wchar_t* slash = NULL;
+                for (wchar_t* c = wl; *c; c++) if (*c == L'\\' || *c == L'/') slash = c;
+                size_t dir_len = slash ? (size_t)(slash - wl) + 1 : 0;
+                memcpy(probe, wl, dir_len * sizeof(wchar_t));
+                wcscpy(probe + dir_len, wt);
+            }
+            DWORD attrs = GetFileAttributesW(probe);
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+            }
+            aether_caps_free(probe, probe_bytes);
+        }
+        ok = CreateSymbolicLinkW(wl, wt, flags | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) != 0;
+        if (!ok && GetLastError() == ERROR_INVALID_PARAMETER) {
+            ok = CreateSymbolicLinkW(wl, wt, flags) != 0;
+        }
+        /* The link the OS made must be one the OS reports: readlink, is_symlink
+         * and the directory-listing kinds all read the reparse tag, and a
+         * "symlink" without one is not a symlink under this contract. Windows
+         * always passes this; an emulation that answers CreateSymbolicLinkW
+         * with something else (Wine's, which makes a Unix link and shows no
+         * reparse point) is taken back down and reported as unsupported, the
+         * same failure a missing privilege gives. */
+        if (ok && !fs_is_symlink(link_path)) {
+            if (flags & SYMBOLIC_LINK_FLAG_DIRECTORY) RemoveDirectoryW(wl); else DeleteFileW(wl);
+            ok = 0;
+        }
+    }
+    if (wt) aether_caps_free(wt, wt_bytes);
+    if (wl) aether_caps_free(wl, wl_bytes);
+    return ok;
+}
+
+/* Read a symbolic link's target as stored, through the reparse point
+ * itself (FILE_FLAG_OPEN_REPARSE_POINT, so the link is opened and not
+ * what it points at). The print name is the target as it was given;
+ * when a link carries none, the substitute name is used with its `\??\`
+ * NT prefix taken off. Returns a fresh malloc'd UTF-8 string, or NULL when
+ * `path` is not a symlink or cannot be read — the POSIX contract. */
+char* fs_readlink_raw(const char* path) {
+    if (!path) return NULL;
+    if (!aether_sandbox_check("fs_read", path)) return NULL;
+    size_t wp_bytes = 0;
+    wchar_t* wp = fs_win_wide(path, &wp_bytes);
+    if (!wp) return NULL;
+    HANDLE h = CreateFileW(wp, 0,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    aether_caps_free(wp, wp_bytes);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    size_t buf_bytes = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
+    fs_win_symlink_reparse* rp = (fs_win_symlink_reparse*)aether_caps_malloc(buf_bytes);
+    if (!rp) { CloseHandle(h); return NULL; }
+    DWORD got = 0;
+    BOOL ok = DeviceIoControl(h, FSCTL_GET_REPARSE_POINT, NULL, 0, rp, (DWORD)buf_bytes, &got, NULL);
+    CloseHandle(h);
+    char* out = NULL;
+    if (ok && rp->ReparseTag == IO_REPARSE_TAG_SYMLINK) {
+        const wchar_t* name;
+        int len;
+        if (rp->PrintNameLength > 0) {
+            name = rp->PathBuffer + rp->PrintNameOffset / sizeof(WCHAR);
+            len = rp->PrintNameLength / sizeof(WCHAR);
+        } else {
+            name = rp->PathBuffer + rp->SubstituteNameOffset / sizeof(WCHAR);
+            len = rp->SubstituteNameLength / sizeof(WCHAR);
+            if (len >= 4 && wcsncmp(name, L"\\??\\", 4) == 0) { name += 4; len -= 4; }
+        }
+        int u8_len = WideCharToMultiByte(CP_UTF8, 0, name, len, NULL, 0, NULL, NULL);
+        if (u8_len >= 0) {
+            out = (char*)malloc((size_t)u8_len + 1);
+            if (out) {
+                WideCharToMultiByte(CP_UTF8, 0, name, len, out, u8_len, NULL, NULL);
+                out[u8_len] = '\0';
+            }
+        }
+    }
+    aether_caps_free(rp, buf_bytes);
+    return out;
+}
 
 /* Windows has no mkdtemp/mkstemp. GetTempFileNameA(dir, prefix, 0, out) is the
  * OS primitive: with uUnique=0 it derives a unique name in `dir` (using only
@@ -884,11 +1023,40 @@ char* fs_make_temp_file_raw(const char* dir, const char* prefix) {
     if (GetTempFileNameA(dir, prefix, 0, out) == 0) return NULL;
     return strdup(out);
 }
-int fs_is_symlink(const char* p) { (void)p; return 0; }
+/* 1 when `path` is a symbolic link itself, not what it points at: the
+ * directory entry's reparse tag says so without opening anything. A
+ * junction or any other reparse point is not a symlink. */
+int fs_is_symlink(const char* path) {
+    if (!path) return 0;
+    if (!aether_sandbox_check("fs_read", path)) return 0;
+    size_t wp_bytes = 0;
+    wchar_t* wp = fs_win_wide(path, &wp_bytes);
+    if (!wp) return 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wp, &fd);
+    aether_caps_free(wp, wp_bytes);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    FindClose(h);
+    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+           fd.dwReserved0 == IO_REPARSE_TAG_SYMLINK;
+}
 int fs_is_socket(const char* p) { (void)p; return 0; }
+/* Remove a file or a symlink, never a directory — the POSIX contract. A
+ * link to a directory is a directory entry to Windows, so it is removed
+ * with RemoveDirectoryW, which takes the link and leaves the target. */
 int fs_unlink_raw(const char* path) {
     if (!path) return 0;
     if (!aether_sandbox_check("fs_write", path)) return 0;
+    if (fs_is_symlink(path)) {
+        size_t wp_bytes = 0;
+        wchar_t* wp = fs_win_wide(path, &wp_bytes);
+        if (!wp) return 0;
+        DWORD attrs = GetFileAttributesW(wp);
+        BOOL ok = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+                  ? RemoveDirectoryW(wp) : DeleteFileW(wp);
+        aether_caps_free(wp, wp_bytes);
+        return ok ? 1 : 0;
+    }
     return _unlink(path) == 0 ? 1 : 0;
 }
 
