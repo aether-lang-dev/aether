@@ -11,6 +11,20 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A tuple-bound name passed where a parameter takes a scalar is refused
+  at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
+  returns to one name, and `dir.list_count(l)` then reached the C compiler:
+  "incompatible type for argument 1 … argument is of type
+  `_tuple_ptr_string`", against generated code. Argument checking is lenient
+  for user functions, but a tuple into a scalar parameter is never what was
+  meant (the shape #1878 took out of binary operators), so both user
+  functions and externs now report `expected ptr, got the (ptr, string)
+  tuple bound to 'l' … destructure it: value, err = ...`.
+  `tests/integration/tuple_argument_reject`.
+=======
+
 ## [0.690.0]
 
 ### Added
