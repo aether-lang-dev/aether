@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.692.0]
+
 ### Fixed
 
 - **A shell test that passed could still fail on its own cleanup.** 82
