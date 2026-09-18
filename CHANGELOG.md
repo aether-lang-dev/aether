@@ -15,6 +15,13 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`tests/integration/cache_dir_override` failed on Windows (#2069).** It
+  checked that `ae cache clear` names the override directory by looking for
+  the shell's `/tmp/...` spelling, but MSYS2 hands a native executable the
+  converted `C:/...` form and that is what `ae` prints. The comparison is
+  now made against the spelling `ae` receives, the way `ae_add_tag_pin`
+  already does it. The only failure in a full Windows sweep.
+
 - **`fs.realpath` on Windows returned a UNC path as the relative
   `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in
   the `\\?\` namespace and the resolver stripped four characters from
