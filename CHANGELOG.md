@@ -11,6 +11,26 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Constant folding computed integer literals in a double.** Every literal
+  went through `atof` and the fold ran in floating point, so a `long`
+  expression lost its low bits past 2^53 (`9007199254740993 + 0` was
+  `9007199254740992`, `9223372036854775807 - 1` was `LLONG_MIN`), the int
+  overflow warning quoted the double's idea of both the exact and the
+  wrapped value (`1000000007 * 1000000007` was reported as
+  `1000000014000000000` wrapping to `-371520512`; it is `…049` and
+  `-371520463`), `0b` and `0o` spellings read as 0 (`0b11 * 2` was 0,
+  `0o17 - 1` was -1), and a duration literal read as its leading digits
+  (`1s + 500ms` was 501ns, `2 * 250ms` was 500ns). The folder now computes
+  in the kind the generated C computes in — `int` wrapping at 32 bits with
+  W1003, `long` at 64 with a warning of its own, `uint64` unsigned, double
+  only when a float is involved — parses every radix, and leaves durations
+  to the runtime. A decimal literal past `LLONG_MAX` is emitted with `ULL`,
+  which removes the "integer constant is so large that it is unsigned"
+  warning from the generated C. `tests/regression/test_const_fold_integer_kinds.ae`,
+  `tests/integration/const_overflow_warning_exact`.
+
 ## [0.683.0]
 
 ### Fixed
