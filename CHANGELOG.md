@@ -31,6 +31,18 @@ version number before tagging the release.
   warning from the generated C. `tests/regression/test_const_fold_integer_kinds.ae`,
   `tests/integration/const_overflow_warning_exact`.
 
+- **A source file is no longer capped at a token count (#2059).** The main
+  file was lexed into a 50,000-entry stack array and refused past it ("split
+  into multiple files using imports" — no help to a generated single-entry
+  program such as aeb's orchestrator); an imported module was cut off at
+  100,000 tokens with its tail declarations silently missing; and a `${...}`
+  expression was cut off at 512 tokens, so `${x0 + ... + x300}` printed the
+  sum of the first 255 terms with no diagnostic. All four sites (the LSP had
+  its own 4,096) now go through one `lexer_tokenize` that grows with the
+  input, so a file's size is bounded by memory. Verbose output still reports
+  the count. `tests/integration/source_size_unbounded` drives each former
+  cap past its old limit from generated sources.
+
 ## [0.684.0]
 
 ### Fixed

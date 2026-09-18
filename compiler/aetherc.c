@@ -31,9 +31,6 @@
 #include "aether_module.h"
 #include "../lsp/aether_lsp.h"
 
-// Compiler limits
-#define MAX_TOKENS 50000
-
 // Version is set by Makefile from VERSION file
 #ifndef AETHER_VERSION
 #define AETHER_VERSION "0.0.0-dev"
@@ -1256,39 +1253,18 @@ int compile_source(const char* input_path, const char* output_path) {
         printf("[Phase 1/5] Lexical Analysis...\n");
     }
     
-    lexer_init(source);
-    
-    Token* tokens[MAX_TOKENS];
     int token_count = 0;
-    
-    while (token_count < MAX_TOKENS - 1) {
-        Token* token = next_token();
-        tokens[token_count] = token;
-        token_count++;
-        
-        if (token->type == TOKEN_EOF) {
-            break;
-        }
-        
-        if (token->type == TOKEN_ERROR) {
-            aether_error_with_code(token->value, token->line, token->column,
-                                   AETHER_ERR_SYNTAX);
-            // Cleanup tokens
-            for (int i = 0; i < token_count; i++) {
-                free_token(tokens[i]);
-            }
-            free(source);
-            return 0;
-        }
+    Token** tokens = lexer_tokenize(source, &token_count);
+    if (!tokens) {
+        fprintf(stderr, "error: out of memory while lexing %s\n", input_path);
+        free(source);
+        return 0;
     }
-    
-    // Check for token overflow (file too large)
-    if (token_count >= MAX_TOKENS - 1 && tokens[token_count - 1]->type != TOKEN_EOF) {
-        fprintf(stderr, "error: source file exceeds maximum token limit (%d tokens)\n", MAX_TOKENS);
-        fprintf(stderr, "  help: split into multiple files using imports\n");
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+    Token* last = tokens[token_count - 1];
+    if (last->type == TOKEN_ERROR) {
+        aether_error_with_code(last->value, last->line, last->column,
+                               AETHER_ERR_SYNTAX);
+        free_tokens(tokens, token_count);
         free(source);
         return 0;
     }
@@ -1309,9 +1285,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (!program) {
         report_compilation_failure(input_path);
         // Cleanup
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1326,7 +1300,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (aether_error_count() > 0) {
         report_compilation_failure(input_path);
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1338,9 +1312,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (dump_ast_mode) {
         print_ast(program, 0);
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;  // success
@@ -1351,9 +1323,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (emit_namespace_manifest) {
         emit_manifest_json(stdout, program);
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;  // success
@@ -1367,7 +1337,7 @@ int compile_source(const char* input_path, const char* output_path) {
         if (!out) {
             perror("Error opening output file");
             free_ast_node(program);
-            for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+            free_tokens(tokens, token_count);
             free_parser(parser);
             free(source);
             return 0;
@@ -1375,7 +1345,7 @@ int compile_source(const char* input_path, const char* output_path) {
         emit_describe_c(out, program);
         fclose(out);
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;
@@ -1387,9 +1357,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (!module_orchestrate(program)) {
         report_compilation_failure(input_path);
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1425,7 +1393,7 @@ int compile_source(const char* input_path, const char* output_path) {
         report_compilation_failure(input_path);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1453,7 +1421,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (derive_synthesize_pass(program) != 0) {
         module_registry_shutdown();
         free_ast_node(program);
-        for (int k = 0; k < token_count; k++) free_token(tokens[k]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1472,7 +1440,7 @@ int compile_source(const char* input_path, const char* output_path) {
         report_compilation_failure(input_path);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int k = 0; k < token_count; k++) free_token(tokens[k]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1522,7 +1490,7 @@ int compile_source(const char* input_path, const char* output_path) {
                     gated[g].module, gated[g].cap, gated[g].cap, gated[g].cap);
                 module_registry_shutdown();
                 free_ast_node(program);
-                for (int k = 0; k < token_count; k++) free_token(tokens[k]);
+                free_tokens(tokens, token_count);
                 free_parser(parser);
                 free(source);
                 return 0;
@@ -1537,9 +1505,7 @@ int compile_source(const char* input_path, const char* output_path) {
         // Cleanup
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1552,7 +1518,7 @@ int compile_source(const char* input_path, const char* output_path) {
         emit_function_list(stdout, program);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;
@@ -1565,7 +1531,7 @@ int compile_source(const char* input_path, const char* output_path) {
         codegen_diagnose_ownership(program, stdout);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;
@@ -1580,7 +1546,7 @@ int compile_source(const char* input_path, const char* output_path) {
                 total, total == 1 ? "" : "es");
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1596,9 +1562,7 @@ int compile_source(const char* input_path, const char* output_path) {
         }
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;  // success
@@ -1629,7 +1593,7 @@ int compile_source(const char* input_path, const char* output_path) {
         fflush(stdout);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;  // process exit 0 (see --emit=ast note below)
@@ -1644,7 +1608,7 @@ int compile_source(const char* input_path, const char* output_path) {
         fflush(stdout);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 1;  // process exit 0 (see --emit=ast note below)
@@ -1654,7 +1618,7 @@ int compile_source(const char* input_path, const char* output_path) {
         emit_ast_json(stdout, program);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) free_token(tokens[i]);
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         // Return value here is `compile_source`'s internal "non-zero =
@@ -1673,9 +1637,7 @@ int compile_source(const char* input_path, const char* output_path) {
         // Cleanup
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
         return 0;
@@ -1772,9 +1734,7 @@ int compile_source(const char* input_path, const char* output_path) {
         remove(output_path);
         module_registry_shutdown();
         free_ast_node(program);
-        for (int i = 0; i < token_count; i++) {
-            free_token(tokens[i]);
-        }
+        free_tokens(tokens, token_count);
         free_parser(parser);
         free_code_generator(codegen);
         free(source);
@@ -1791,9 +1751,7 @@ int compile_source(const char* input_path, const char* output_path) {
     // Cleanup
     module_registry_shutdown();
     free_ast_node(program);
-    for (int i = 0; i < token_count; i++) {
-        free_token(tokens[i]);
-    }
+    free_tokens(tokens, token_count);
     free_parser(parser);
     free_code_generator(codegen);
     free(source);

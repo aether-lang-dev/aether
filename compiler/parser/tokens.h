@@ -147,10 +147,16 @@ typedef struct {
 // Lexer functions
 void lexer_init(const char* src);
 Token* next_token(void);
+// Lex all of `src` into a heap array whose last entry is the TOKEN_EOF, or
+// the TOKEN_ERROR that stopped the scan. The array grows with the input, so
+// the only limit on a source file is memory; NULL means memory ran out.
+// Release with free_tokens.
+Token** lexer_tokenize(const char* src, int* out_count);
 
 // Token functions
 Token* create_token(AeTokenType type, const char* value, int line, int column);
 void free_token(Token* token);
+void free_tokens(Token** tokens, int count);
 const char* token_type_to_string(AeTokenType type);
 
 #endif
