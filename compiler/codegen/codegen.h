@@ -250,6 +250,13 @@ typedef struct {
     // Match-as-expression: when non-NULL, match arms assign to this variable
     const char* match_result_var;
 
+    // #2054: set while the body of a string-returning closure is emitted.
+    // A closure is called through a value its caller cannot classify, so
+    // every string it returns is handed over owned (the uniform-heap wrap
+    // a heap-returning function's returns get), and every string result of
+    // call() is tracked as owned on the caller's side.
+    int in_string_closure;
+
     // Cooperative preemption: insert sched_yield() at loop back-edges
     int preempt_loops;
 

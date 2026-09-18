@@ -646,7 +646,6 @@ static int has_list_patterns(ASTNode* match_stmt) {
 }
 
 // Forward declarations.
-static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
 
 // The first top-level definition named `name` — for a pattern-matched
 // multi-clause function, the first clause, whose body is representative
@@ -780,6 +779,15 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
 
     // String interpolation (non-printf mode) allocates via _aether_interp.
     if (expr->type == AST_STRING_INTERP) {
+        return 1;
+    }
+
+    /* A string result of call(): a string-returning closure hands every
+     * result over owned (see should_uniform_heap_return), so the caller
+     * owns what it gets, whichever return site produced it (#2054). */
+    if (expr->type == AST_FUNCTION_CALL && expr->value &&
+        strcmp(expr->value, "call") == 0 &&
+        expr->node_type && expr->node_type->kind == TYPE_STRING) {
         return 1;
     }
 
@@ -1282,7 +1290,7 @@ static void walk_returns_for_heap_check(CodeGenerator* gen, ASTNode* node,
     }
 }
 
-static int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
+int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     if (!fn_def ||
         (fn_def->type != AST_FUNCTION_DEFINITION &&
          fn_def->type != AST_BUILDER_FUNCTION)) {
@@ -1690,6 +1698,10 @@ static int should_uniform_heap_return(CodeGenerator* gen, ASTNode* stmt) {
     /* Skip the wrap for AST_PRINT_STATEMENT-as-return — that path
      * never propagates a value to the caller, only side-effects. */
     if (ret->type == AST_PRINT_STATEMENT) return 0;
+    /* A string-returning closure hands every result over owned (#2054):
+     * its caller reaches it through a value and cannot ask which return
+     * sites are heap the way it can for a named function. */
+    if (gen->in_string_closure) return 1;
     if (!gen->current_function) return 0;
     if (!function_def_returns_heap_string(gen, gen->current_function)) return 0;
     /* Static type gate. Prefer the function's declared return type

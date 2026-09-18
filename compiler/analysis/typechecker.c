@@ -1375,6 +1375,79 @@ static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
 static int call_yields_no_value(ASTNode* call, SymbolTable* table);
 
 // Type compatibility functions
+/* A `fn` with no signature: nothing known about parameters or result. */
+static int fn_type_is_erased(const Type* t) {
+    return t->param_count == 0 && t->return_type == NULL;
+}
+
+/* #2054: the type of `call(f, ...)`. The result slot of f's signature when f
+ * carries one. A closure reached through an erased `fn` has none, and the
+ * language's answer for that has always been int: the call is typed int and
+ * marked `erased_call`, so the two contexts that can do better -- a typed
+ * binding, a return from a function with a declared result -- recognise it
+ * and retype it, and everything else (an argument, an operand) sees the int
+ * it always saw. A fixed int with no mark was the bug: nothing could tell a
+ * known int result from a guess. */
+static int function_value_annotate(ASTNode* ident, SymbolTable* table);
+
+static Type* call_builtin_result_type(ASTNode* call, SymbolTable* table) {
+    if (call->child_count < 1 || !call->children[0]) return create_type(TYPE_UNKNOWN);
+    function_value_annotate(call->children[0], table);   /* call(add_fn, ...) */
+    Type* callee = infer_type(call->children[0], table);
+    Type* out;
+    if (callee && callee->kind == TYPE_FUNCTION && callee->return_type) {
+        out = clone_type(callee->return_type);
+    } else {
+        out = create_type(TYPE_INT);
+        if (!call->annotation) call->annotation = strdup("erased_call");
+    }
+    if (callee) free_type(callee);
+    return out;
+}
+
+/* An erased call whose int is the default, not a known result. */
+static int is_erased_call(const ASTNode* n) {
+    return n && n->type == AST_FUNCTION_CALL && n->value &&
+           strcmp(n->value, "call") == 0 &&
+           n->annotation && strcmp(n->annotation, "erased_call") == 0;
+}
+
+/* #2055: a top-level function named in value position -- `op = add_fn`,
+ * a branch of `if c { add_fn } else { mul_fn }` -- is a closure value. Its
+ * symbol carries only the return type (that is what a call to it yields),
+ * so the closure type is assembled from the definition: parameters in
+ * order, the return slot, closure-shaped. The identifier is annotated so
+ * codegen lowers it through the bare-fn adapter instead of naming the C
+ * function, which is a raw pointer and not an _AeClosure. Returns 0 when
+ * the name is not a function or a local shadows it. */
+static int function_value_annotate(ASTNode* ident, SymbolTable* table) {
+    if (!ident || ident->type != AST_IDENTIFIER || !ident->value) return 0;
+    Symbol* sym = lookup_symbol(table, ident->value);
+    if (!sym || !sym->is_function || !sym->node ||
+        (sym->node->type != AST_FUNCTION_DEFINITION &&
+         sym->node->type != AST_BUILDER_FUNCTION)) return 0;
+    ASTNode* def = sym->node;
+    int count = 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* p = def->children[i];
+        if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
+            p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
+    }
+    Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
+    int k = 0;
+    for (int i = 0; i < def->child_count && k < count; i++) {
+        ASTNode* p = def->children[i];
+        if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
+            p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
+        params[k++] = p->node_type ? clone_type(p->node_type) : create_type(TYPE_INT);
+    }
+    Type* ret = (sym->type && sym->type->kind != TYPE_VOID) ? clone_type(sym->type) : NULL;
+    set_node_type(ident, create_function_type(count, params, ret));
+    if (ident->annotation) free(ident->annotation);
+    ident->annotation = strdup("fn_value");
+    return 1;
+}
+
 int is_type_compatible(Type* from, Type* to) {
     if (!from || !to) return 0;
     
@@ -1432,6 +1505,17 @@ int is_type_compatible(Type* from, Type* to) {
 
     // Exact match
     if (types_equal(from, to)) return 1;
+
+    /* #2054: a bare `fn` is the erased closure type. It is what a closure
+     * becomes at a `fn` parameter or return, at box_closure, in a list; the
+     * signature is gone but the value is the same _AeClosure. So it flows
+     * into a signed `fn(T...) -> R` slot (an annotation restoring what was
+     * erased) and a signed closure flows into a bare `fn` slot (erasing
+     * again). A raw C function pointer (is_fnptr) is a different
+     * representation and stays apart. */
+    if (from->kind == TYPE_FUNCTION && to->kind == TYPE_FUNCTION &&
+        !from->is_fnptr && !to->is_fnptr &&
+        (fn_type_is_erased(from) || fn_type_is_erased(to))) return 1;
 
     // Numeric conversions
     if (from->kind == TYPE_INT && to->kind == TYPE_FLOAT) return 1;
@@ -2050,6 +2134,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             return expr->node_type ? clone_type(expr->node_type) : create_type(TYPE_UNKNOWN);
             
         case AST_IDENTIFIER: {
+            if (expr->annotation && strcmp(expr->annotation, "fn_value") == 0 && expr->node_type) {
+                return clone_type(expr->node_type);
+            }
             Symbol* symbol = lookup_symbol(table, expr->value);
             return (symbol && symbol->type) ? clone_type(symbol->type) : create_type(TYPE_UNKNOWN);
         }
@@ -2124,6 +2211,9 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                     if (arg) free_type(arg);
                     return create_type(TYPE_UNKNOWN);
                 }
+            }
+            if (expr->value && strcmp(expr->value, "call") == 0) {
+                return call_builtin_result_type(expr, table);
             }
             Symbol* symbol = lookup_qualified_symbol(table, expr->value);
             if (symbol && symbol->is_function && symbol->type
@@ -3273,8 +3363,11 @@ int typecheck_program(ASTNode* program) {
     // Closure/iteration builtins
     Type* each_type = create_type(TYPE_VOID);
     add_symbol(global_table, "each", each_type, 0, 1, 0);
-    Type* call_type = create_type(TYPE_INT);  // return type depends on closure
-    add_symbol(global_table, "call", call_type, 0, 1, 0);
+    /* #2054: the result of call(f, ...) is f's result, resolved per call
+     * site (call_builtin_result_type); a fixed int here was what the
+     * inference pass stamped on every dynamic call before the checker saw
+     * it, and a string-returning closure came back as its pointer. */
+    add_symbol(global_table, "call", create_type(TYPE_UNKNOWN), 0, 1, 0);
     Type* read_char_type = create_type(TYPE_INT);
     add_symbol(global_table, "read_char", read_char_type, 0, 1, 0);
     Type* char_at_type = create_type(TYPE_INT);
@@ -4005,6 +4098,17 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
         }
         case AST_MAIN_FUNCTION:
             return typecheck_statement(node, table);
+        case AST_CLOSURE:
+        case AST_IF_EXPRESSION:
+            /* An expression reached as a statement child (`return |x| { ... }`,
+             * `return if c { a } else { b }`) was walked by typecheck_statement's
+             * default case. For a closure that checked the body in the
+             * enclosing scope, where its parameters were undefined, so a call
+             * inside the body that used one was refused (#2054); for an
+             * if-expression it skipped the branch typing that turns a bare
+             * function name into a closure value (#2055). The expression path
+             * does both. */
+            return typecheck_expression(node, table);
         default:
             return typecheck_statement(node, table);
     }
@@ -5556,6 +5660,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     typecheck_expression(init, table);
                 }
+                if (function_value_annotate(init, table)) {
+                    /* A function is a value here, not a call. */
+                }
                 Type* init_type = infer_type(init, table);
 
                 /* `const` is substitution-at-each-use: the compiler
@@ -5741,6 +5848,29 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                   de == TYPE_UINT32 || de == TYPE_UINT16 || de == TYPE_UINT8 ||
                                   de == TYPE_BYTE);
                     array_const_int_narrow = ie_int && de_int;
+                }
+
+                /* #2054: `call(f, ...)` through an erased `fn` has no result
+                 * type of its own. A typed binding is the annotation that
+                 * restores it, so the call node takes the binding's type and
+                 * the trampoline is cast to match. An untyped binding gets
+                 * the `int` the language has always defaulted to, and hears
+                 * about it: for any other result that default is a truncated
+                 * pointer, not a wrong type. */
+                if (is_erased_call(init)) {
+                    if (stmt->node_type && stmt->node_type->kind != TYPE_UNKNOWN) {
+                        set_node_type(init, clone_type(stmt->node_type));
+                        if (init_type) free_type(init_type);
+                        init_type = clone_type(stmt->node_type);
+                    } else {
+                        char wmsg[320];
+                        snprintf(wmsg, sizeof(wmsg),
+                            "the closure called here has no known result type, so '%s' is "
+                            "assumed int; declare the binding's type (e.g. `string %s = "
+                            "call(...)`) for any other result",
+                            stmt->value, stmt->value);
+                        type_warning(wmsg, stmt->line, stmt->column);
+                    }
                 }
 
                 // If variable has no explicit type (TYPE_UNKNOWN), use initializer's type
@@ -6710,6 +6840,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 coerce_bare_enum_member(stmt->children[i], g_tc_return_type, table);
                 typecheck_node(stmt->children[i], table);
             }
+            /* #2054: `return call(f, ...)` through an erased fn takes the
+             * function's declared result type, as a typed binding would;
+             * the declaration is the annotation. */
+            if (stmt->child_count == 1 && is_erased_call(stmt->children[0]) &&
+                g_tc_return_type && !g_tc_return_type->is_result &&
+                g_tc_return_type->kind != TYPE_VOID &&
+                g_tc_return_type->kind != TYPE_UNKNOWN &&
+                g_tc_return_type->kind != TYPE_TUPLE) {
+                set_node_type(stmt->children[0], clone_type(g_tc_return_type));
+            }
             return 1;
 
         default:
@@ -7104,6 +7244,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
             }
+            for (int i = 1; i < expr->child_count && i < 3; i++) {
+                function_value_annotate(expr->children[i], table);
+            }
             if (expr->child_count >= 2) {
                 Type* then_type = infer_type(expr->children[1], table);
                 if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
@@ -7284,6 +7427,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * through. Routing the whole body through
              * `typecheck_statement` closes the class — see
              * new_string_len_something.md §4. */
+            /* A `return` inside the body returns from the closure, not from
+             * the enclosing function, so the function's return type must not
+             * reach it: it would coerce a bare enum member against the wrong
+             * type, and stamp an erased `call` in return position (#2054)
+             * with a type that belongs to the outer function. */
+            Type* enclosing_ret = g_tc_return_type;
+            g_tc_return_type = NULL;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* child = expr->children[i];
                 if (child && child->type == AST_BLOCK) {
@@ -7292,6 +7442,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                 }
             }
+            g_tc_return_type = enclosing_ret;
 
             free_symbol_table(closure_scope);
 
@@ -9083,6 +9234,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
      * (#1667). */
     set_node_type(call, symbol->type ? clone_type(symbol->type)
                                      : create_type(TYPE_UNKNOWN));
+    if (call->value && strcmp(call->value, "call") == 0) {
+        set_node_type(call, call_builtin_result_type(call, table));
+    }
 
     // select() infers its type from the first named arg's value
     if (call->value && strcmp(call->value, "select") == 0 &&

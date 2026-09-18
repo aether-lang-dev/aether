@@ -11,6 +11,45 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A closure called through an erased `fn` value could only return `int`
+  (#2054).** Once a closure had crossed a `fn` parameter or return,
+  `box_closure`, or a list, `call(f, …)` on it was typed as `int` from a
+  fixed registration and the trampoline was cast to `int`, so a string or
+  pointer result came back truncated — silently — and the typed binding
+  that should have said otherwise (`string r = call(f, 7)`) was refused as
+  a mismatch. `call` is now typed from its callee: the signature's result
+  when known; when erased, the `int` the language has always defaulted to,
+  but marked as a default, so a typed binding (`string r = call(f, 7)`) or a
+  return from a function with a declared result retypes the call and the
+  trampoline is cast to match — everywhere else the call is the int it
+  always was. A bare `fn` is compatible with a signed closure type in both
+  directions. An untyped binding gets a warning naming the annotation. A string
+  reached this way is owned by the caller: a string-returning closure, and
+  the adapter behind a function used as a `fn` value, hand every result
+  over owned (copying a literal, passing a heap result through) and the
+  caller frees it — before, nobody did. A closure returned
+  directly (`return |x| { … }`) is also now checked in its own scope; the
+  statement walker used to check its body in the enclosing scope and refuse
+  a call that used a parameter.
+  `tests/regression/test_erased_fn_call_result.ae` reaches a closure through
+  each erasure and asks for a string, a pointer, a float and an int, via
+  both `call(f, …)` and `f(…)`.
+
+- **A function named as a value emitted C that did not compile (#2055).**
+  `op = add_fn`, `if c { add_fn } else { mul_fn }` and `call(add_fn, …)`
+  typed the name as the function's *return* type — the inference pass gave
+  every identifier its symbol's type, and a function symbol's type is what
+  a call yields — so `op` was an `int` holding a C function pointer. A
+  function in value position is now a closure-shaped `fn(params) -> R`
+  assembled from its definition, and lowers through the same bare-fn
+  adapter a function passed as a `fn` argument already used; the
+  if-expression's type follows. An if-expression or closure in return
+  position is now checked as the expression it is rather than walked as a
+  statement, which is what let the branch typing (and #2054's scope) be
+  skipped there.
+
 ## [0.681.0]
 
 ### Added

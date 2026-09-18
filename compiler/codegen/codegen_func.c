@@ -296,6 +296,12 @@ static void discover_bare_fn_adapters_walk(CodeGenerator* gen, ASTNode* node) {
             }
         }
     }
+    /* #2055: an identifier the typechecker marked as a function value. */
+    if (node->type == AST_IDENTIFIER && node->value && node->annotation &&
+        strcmp(node->annotation, "fn_value") == 0 &&
+        find_user_function_by_name(gen, node->value)) {
+        register_bare_fn_adapter(gen, node->value);
+    }
     /* AST_BINARY_EXPRESSION with op="=": register bare-fn RHS into a
      * ptr-typed LHS struct field. Conservative: also register for any
      * RHS that's a bare named function regardless of LHS — false
@@ -426,16 +432,28 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
         if (!fdef) continue;  /* Shouldn't happen; registration gate
                                * already confirmed existence. */
         Type* rt = fdef->node_type;
+        /* A string result is handed over owned, as a closure's is (#2054):
+         * the caller of a fn value cannot tell which return sites of the
+         * function behind it are heap, so it frees every string result.
+         * Wrapped the way the function's own callers see it -- passed
+         * through when the function returns owned strings, copied when it
+         * returns a literal or a borrow. */
+        int owned_string = rt && rt->kind == TYPE_STRING;
         fprintf(gen->output, " {\n    (void)_env;\n    ");
         if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) {
             fprintf(gen->output, "return ");
         }
+        if (owned_string) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
         fprintf(gen->output, "%s(", fname);
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
             fprintf(gen->output, "_a%d", k);
         }
-        fprintf(gen->output, ");\n}\n");
+        fprintf(gen->output, ")");
+        if (owned_string) {
+            fprintf(gen->output, "), %d)", function_def_returns_heap_string(gen, fdef) ? 1 : 0);
+        }
+        fprintf(gen->output, ";\n}\n");
     }
 }
 

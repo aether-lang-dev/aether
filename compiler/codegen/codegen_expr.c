@@ -1878,6 +1878,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         const char* ret_type = resolve_closure_return_type(gen, ci);
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, " {\n");
+        gen->in_string_closure = strcmp(ret_type, "const char*") == 0;
 
         // Find body first so we can detect which captures are mutated.
         ASTNode* body = NULL;
@@ -2072,6 +2073,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->in_trailing_block--;
             gen->indent_level = 0;
         }
+        gen->in_string_closure = 0;
 
         free(env_captures);
 
@@ -2877,6 +2879,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "_env->%s", expr->value);
                     break;
                 }
+            }
+            /* #2055: a function named as a value -- the typechecker marked
+             * it -- is an _AeClosure over the bare-fn adapter, the same
+             * lowering a bare function gets as a `fn` argument. */
+            if (expr->annotation && strcmp(expr->annotation, "fn_value") == 0 &&
+                find_function_definition_by_name(gen->program, expr->value)) {
+                register_bare_fn_adapter(gen, expr->value);
+                fprintf(gen->output,
+                        "(_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL }",
+                        expr->value);
+                break;
             }
             // Identifier-as-value naming a @c_callback function: emit
             // the C symbol the annotation binds to (#235), so passing
@@ -4404,6 +4417,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         Type* closure_sig = (closure_arg && closure_arg->node_type &&
                                              closure_arg->node_type->kind == TYPE_FUNCTION)
                                             ? closure_arg->node_type : NULL;
+                        /* The result slot is what the typechecker stamped:
+                         * the callee's signature, or the binding / return
+                         * type that annotates an erased call (#2054). With
+                         * nothing stamped the result is int, the language's
+                         * default for an erased call, and the checker has
+                         * said so where it matters. The enclosing function's
+                         * return type is not consulted: a call compared or
+                         * combined inside a function returning a struct is
+                         * not returning that struct. */
                         Type* ret_t = NULL;
                         if (expr->node_type && expr->node_type->kind != TYPE_VOID &&
                             expr->node_type->kind != TYPE_UNKNOWN) {
@@ -4411,18 +4433,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         } else if (closure_sig && closure_sig->return_type &&
                                    closure_sig->return_type->kind != TYPE_UNKNOWN) {
                             ret_t = closure_sig->return_type;
-                        } else if (gen->current_func_return_type &&
-                                   gen->current_func_return_type->kind != TYPE_VOID &&
-                                   gen->current_func_return_type->kind != TYPE_UNKNOWN) {
-                            /* Last resort: the call is a `return
-                             * cb(...)` statement inside a typed
-                             * fn, and the enclosing fn's return
-                             * type dictates the cast's return slot.
-                             * Imperfect if the call result is
-                             * discarded or used in a non-return
-                             * position, but those cases already
-                             * have `expr->node_type` set correctly. */
-                            ret_t = gen->current_func_return_type;
                         }
                         const char* ret = ret_t ? get_c_type(ret_t) : "int";
                         fprintf(gen->output, "((%s(*)(void*", ret);

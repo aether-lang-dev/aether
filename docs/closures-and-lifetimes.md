@@ -245,71 +245,61 @@ unreachable (it may be aliased through a `box_closure` copy).
 
 ## Closure patterns and workarounds
 
-L1–L3 are ergonomic patterns with known workarounds you can apply today.
-L4 is a compile-time rejection, previously silent wrong answers, now
-surfaced at compile time with a clear error. L5 is a memory-handling
-contract around reassignment. Each has a near-term workaround; the
-"proper fix" notes describe the larger language work each leans on.
+L1–L3 are one limitation seen from three sides: a closure that has crossed
+an erasing boundary has no signature, so the compiler cannot know what a
+call to it returns. L4 is a compile-time rejection, previously silent wrong
+answers, now surfaced at compile time with a clear error. L5 is a
+memory-handling contract around reassignment.
 
-### L1. `call(x)` where `x` comes from a list
+### L1–L3. Calling a closure whose signature has been erased
+
+A closure loses its signature at a bare `fn` parameter or return, at
+`box_closure`, and in a list:
 
 ```aether,fragment
 handlers = list.new()
 list.add(handlers, box_closure(|_| { return "hello" }))
-...
-boxed = list.get(handlers, 0)
-h = unbox_closure(boxed)
-r = call(h)                   // h's return type is unknown at codegen
+h = unbox_closure(list.get_raw(handlers, 0))       // L1: from a list
+
+op = if user_wants_add { add_fn } else { mul_fn }  // L2: chosen at run time (#2055)
+
+x = setup()                   // L3: `-> fn` erases
+y = wrap(x)                   // `(f: fn) -> fn` erases again
 ```
 
-`call(h)` falls back to generic dispatch: `((int(*)(void*))h.fn)(h.env)`
-it assumes `int` return even if the stored closure returns a string
-or pointer. Strings get their pointer truncated; pointers become
-garbage.
-
-**Workaround:** use a direct-literal closure variable when possible:
-`action = |_| { ... }; call(action)` is statically resolved. Or accept
-that `int`-returning dynamic closures are the only safely dispatchable
-kind today.
-
-**Why a quick `intptr_t` widening doesn't fix it:** the obvious patch,
-emit `((intptr_t(*)(void*))h.fn)(h.env)` instead of `((int(*)(void*))`
-fixes the cast in isolation but leaves `r`'s declared C type as
-`int`, so the return narrows right back. Widening `r` requires changing
-the variable's registration in the symbol table (not just the AST
-decl); downstream `print(r)` looks up `r`'s type from the symbol table
-and picks `%d` for anything registered as `TYPE_INT`. Propagating
-`TYPE_PTR` through the AST alone was attempted, it segfaulted four
-existing tests whose `call(x)` returns are used in arithmetic or
-comparisons. A real fix threads through the typechecker.
-
-### L2. `call(x)` where `x` is chosen via `match`/`if`
+What `call(h)` returns is then unknown to the compiler. **The binding says
+what it is** (#2054): declare the type of the variable the call initialises
+and the call is emitted for that type — a string, a pointer, a float, an
+int — through either form of the call:
 
 ```aether,fragment
-op = if user_wants_add { add_fn } else { mul_fn }
-r = call(op, 3, 4)            // op's closure id is not knowable
+string greeting = call(h)
+string again = h()
+ptr p = call(y, 5)
+float f = y(9)
 ```
 
-Same failure mode as L1. `closure_var_map` records a single closure id
-per name, so branch-selected closures fall through to generic dispatch
-with the `int` default.
+Anywhere else — an untyped binding, an argument, an operand — the call is
+the `int` the language has always defaulted to, and an untyped binding is
+told so at the site:
 
-### L3. `call(x)` where `x` is threaded through intermediate functions
-
-```aether,fragment
-x = setup()                   // setup returns a closure
-y = wrap(x)                   // wrap takes fn, returns fn
-r = call(y)                   // y's underlying closure is two hops away
+```
+warning: the closure called here has no known result type, so 'r' is
+assumed int; declare the binding's type (e.g. `string r = call(...)`) for
+any other result
 ```
 
-`closure_var_map`'s `w = f()` inheritance (Bug 5's partial fix) only
-handles one hop when `f`'s body ends `return <closure_var>`. Multi-hop
-chains fall through to generic dispatch.
+Before #2054 the typed form was refused as a type mismatch and the untyped
+one returned the string's pointer truncated to an int, silently. A bare `fn`
+is now compatible with a signed closure type in both directions, so the
+erasure and its undoing are both ordinary assignments.
 
-**Proper fix for L1/L2/L3:** parameterised closure types (`fn[T]`, like
-Rust's `Fn(i32) -> i32`) or full typechecker return-type propagation.
-Either is a medium-sized language feature, until it lands, the
-workaround sections on each limit apply.
+L2's other half — an `if`-expression choosing between two named functions —
+still emits C that does not compile; that is #2055.
+
+**Proper fix:** parameterised closure types (`fn[T]`, like Rust's
+`Fn(i32) -> i32`), so the signature survives the boundary and no annotation
+is needed at the call. Until then the typed binding is the contract.
 
 ### L4. Closure inside actor handler mutating actor state
 
