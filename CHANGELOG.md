@@ -30,14 +30,6 @@ version number before tagging the release.
 
 ### Fixed
 
-- **A shell test that passed could still fail on its own cleanup.** 82
-  integration scripts run under `set -e` and remove their temp directory
-  from an `EXIT` trap; under `errexit` a failing command inside the trap is
-  fatal, so when Windows' virus scanner still held a just-written file
-  (`rm: cannot remove …: Device or resource busy`) the script died after
-  printing `[PASS]` and the sweep counted a failure — the only red on
-  #2076's Windows leg. Cleanup is now tolerated (`|| true`) in every one of
-  them; the outcome is decided by the assertions alone.
 - **`ae add` fell back to `git clone` on FreeBSD (and arm64 Windows) hosts.**
   `ae_host_triple()` mapped only linux/macOS ×64/arm64 and windows-x86_64 to a
   release-asset triple, returning `NULL` for everything else — so a FreeBSD host
@@ -47,6 +39,20 @@ version number before tagging the release.
   existing `<os>-<arch>` release convention. Compile-time only; verified the
   triple selection per platform and that the FreeBSD block compiles under the
   real cross toolchain.
+
+## [0.692.0]
+
+### Fixed
+
+- **A shell test that passed could still fail on its own cleanup.** 82
+  integration scripts run under `set -e` and remove their temp directory
+  from an `EXIT` trap; under `errexit` a failing command inside the trap is
+  fatal, so when Windows' virus scanner still held a just-written file
+  (`rm: cannot remove …: Device or resource busy`) the script died after
+  printing `[PASS]` and the sweep counted a failure — the only red on
+  #2076's Windows leg. Cleanup is now tolerated (`|| true`) in every one of
+  them; the outcome is decided by the assertions alone.
+=======
 
 ## [0.691.0]
 
@@ -63,6 +69,7 @@ version number before tagging the release.
   `test_os_cwd` (chdir into the current drive's root on Windows) and
   `test_run_argv_heap_string` (the child prints its own arguments instead
   of spawning `echo`) likewise run there now.
+=======
 
 - **A tuple-bound name passed where a parameter takes a scalar is refused
   at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
@@ -74,6 +81,7 @@ version number before tagging the release.
   functions and externs now report `expected ptr, got the (ptr, string)
   tuple bound to 'l' … destructure it: value, err = ...`.
   `tests/integration/tuple_argument_reject`.
+=======
 
 ## [0.690.0]
 
