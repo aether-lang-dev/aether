@@ -353,6 +353,42 @@ static const char* translate_integer_literal(const char* value, char* out, size_
     return value;
 }
 
+/* Is `expr`'s left operand a link of the same operator chain — a binary
+ * node whose operator sits at the same C precedence level, on plain
+ * numbers? C is left-associative at every binary level, so `a - b - c`
+ * already groups as `(a - b) - c` and the link needs no parentheses of
+ * its own. Parenthesising it anyway made every link of `x0 + x1 + … + xN`
+ * one bracket deeper, and clang stops at 256 (#2071). Numeric only:
+ * a bit_set `-`, an optional `==` or a string operand takes a lowering
+ * of its own above the generic path. */
+static int left_operand_is_chain_link(ASTNode* expr) {
+    static const char* const classes[][3] = {
+        {"+", "-", NULL}, {"*", "/", "%"}, {"<<", ">>", NULL},
+        {"&", NULL, NULL}, {"|", NULL, NULL}, {"^", NULL, NULL},
+    };
+    ASTNode* left = expr->children[0];
+    if (!expr->value || left->type != AST_BINARY_EXPRESSION || !left->value ||
+        left->child_count < 2 || !left->node_type) {
+        return 0;
+    }
+    switch (left->node_type->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_FLOAT:
+        case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_UINT32:
+            break;
+        default:
+            return 0;
+    }
+    for (size_t c = 0; c < sizeof(classes) / sizeof(classes[0]); c++) {
+        int parent = 0, child = 0;
+        for (int i = 0; i < 3 && classes[c][i]; i++) {
+            if (strcmp(expr->value, classes[c][i]) == 0) parent = 1;
+            if (strcmp(left->value, classes[c][i]) == 0) child = 1;
+        }
+        if (parent && child) return 1;
+    }
+    return 0;
+}
+
 static int duration_unit_ns_codegen(const char* unit, long long* out) {
     if (!unit || !out) return 0;
     if (strcmp(unit, "ns") == 0) { *out = 1LL; return 1; }
@@ -3470,10 +3506,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     #define AE_IS_NARROW_INT(t) ((t) && ((t)->kind == TYPE_INT || \
                         (t)->kind == TYPE_BYTE || (t)->kind == TYPE_UINT32 || \
                         (t)->kind == TYPE_UINT16 || (t)->kind == TYPE_UINT8))
+                    int left_prefixed = duration_ratio || (ptr_int_cmp && lhs_is_ptr) ||
+                                        (wide_cast && AE_IS_NARROW_INT(ltype));
                     if (duration_ratio) fprintf(gen->output, "(double)");
                     if (ptr_int_cmp && lhs_is_ptr) fprintf(gen->output, "(intptr_t)");
                     if (wide_cast && AE_IS_NARROW_INT(ltype)) fprintf(gen->output, "%s", wide_cast);
+                    /* A chain link keeps its own brackets only when a cast
+                     * was prefixed to it, so the cast still covers the
+                     * whole link. The skip rides the flag an if/while
+                     * condition uses for the same purpose. */
+                    if (!is_assignment && !left_prefixed && left_operand_is_chain_link(expr)) {
+                        gen->in_condition = 1;
+                    }
                     generate_expression(gen, expr->children[0]);
+                    gen->in_condition = 0;
                     if (is_assignment) {
                         gen->generating_lvalue = 0;
                     }
