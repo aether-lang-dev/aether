@@ -11,6 +11,15 @@ version number before tagging the release.
 
 ## [current]
 
+### Docs
+- `docs/http-server.md`: mark the "Per-connection actor dispatch" section as a
+  C-internal mechanism, not a usable Aether API from a release —
+  `unwrap_msg_http_connection` and the spawn/send/release fn-pointers it needs
+  are not exposed to `.ae`. Documents the released substrate for handler-shared
+  state instead (pool-thread `std.snapshot` COW). `std.actors`' module header
+  gains the matching caveat: a `!` send from an off-scheduler `std.http` handler
+  is currently dropped (aether#2083). No code change.
+
 ## [0.685.0]
 
 ### Fixed
