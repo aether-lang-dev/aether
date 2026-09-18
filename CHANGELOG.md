@@ -44,7 +44,6 @@ version number before tagging the release.
   nesting follows the expression's depth, not its length; a link with a
   cast prefixed to it keeps its brackets so the cast covers the whole link.
   `tests/integration/operator_chain_nesting`.
->>>>>>> origin/main
 
 ## [0.686.0]
 
