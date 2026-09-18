@@ -922,6 +922,17 @@ int fs_symlink_raw(const char* target, const char* link_path) {
         if (!ok && GetLastError() == ERROR_INVALID_PARAMETER) {
             ok = CreateSymbolicLinkW(wl, wt, flags) != 0;
         }
+        /* The link the OS made must be one the OS reports: readlink, is_symlink
+         * and the directory-listing kinds all read the reparse tag, and a
+         * "symlink" without one is not a symlink under this contract. Windows
+         * always passes this; an emulation that answers CreateSymbolicLinkW
+         * with something else (Wine's, which makes a Unix link and shows no
+         * reparse point) is taken back down and reported as unsupported, the
+         * same failure a missing privilege gives. */
+        if (ok && !fs_is_symlink(link_path)) {
+            if (flags & SYMBOLIC_LINK_FLAG_DIRECTORY) RemoveDirectoryW(wl); else DeleteFileW(wl);
+            ok = 0;
+        }
     }
     if (wt) aether_caps_free(wt, wt_bytes);
     if (wl) aether_caps_free(wl, wl_bytes);
