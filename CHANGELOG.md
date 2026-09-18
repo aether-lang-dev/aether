@@ -23,6 +23,21 @@ version number before tagging the release.
   cast prefixed to it keeps its brackets so the cast covers the whole link.
   `tests/integration/operator_chain_nesting`.
 
+## [0.686.0]
+
+### Tests
+
+- **`std.snapshot` gains a concurrent copy-on-write test.** The existing
+  `snapshot_cow` regression test exercises the store/cas/load/reclaim sequence
+  single-threaded, and the #841 concurrent-cache benchmark's COW design uses
+  `store()` (unconditional overwrite) — so nothing in-tree proved the property a
+  real many-writer user relies on: a `snapshot.cas` retry loop must never lose an
+  update under concurrent publishers. The new `snapshot_concurrent` test drives
+  `std.worker` (a real thread pool) at one cell — 500 concurrent CAS increments
+  must land exactly 500 (no lost updates), and 300 writers racing 300 lock-free
+  readers must still reach 300 with no torn reads. (Surfaced by selaenium's Grid
+  hub registry, `std.snapshot`'s first concurrent-CAS-writer consumer.)
+
 ## [0.685.0]
 
 ### Fixed
