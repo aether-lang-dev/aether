@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.691.0]
+
 ### Fixed
 
 - **A tuple-bound name passed where a parameter takes a scalar is refused
