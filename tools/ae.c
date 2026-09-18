@@ -7485,6 +7485,19 @@ static const char* ae_host_triple(void) {
 #endif
 }
 
+/* The host's shared-library file extension, for the bare-lib binary-package
+ * path. Compile-time like ae_host_triple(): a Linux/FreeBSD host wants `.so`,
+ * macOS `.dylib`, Windows `.dll`. */
+static const char* ae_host_shlib_ext(void) {
+#if defined(_WIN32)
+    return ".dll";
+#elif defined(__APPLE__)
+    return ".dylib";
+#else
+    return ".so";   /* linux, freebsd, and other ELF hosts */
+#endif
+}
+
 /* Last path component of "github.com/user/repo" -> "repo". */
 static const char* ae_pkg_basename(const char* package) {
     const char* slash = strrchr(package, '/');
@@ -7560,6 +7573,114 @@ static int ae_verify_sha256(const char* archive, const char* url_base,
     return (strcasecmp(want_hex, got_hex) == 0) ? 1 : -1;
 }
 
+/* Binary-package path (bare per-triple shared lib + a released aether.toml).
+ *
+ * A publisher that ships loose per-triple libs (libfoo-<tag>-<triple>.so /
+ * .dylib / .dll) instead of a source tree can attach the release's own
+ * `aether.toml` as a normal asset. That manifest DECLARES the shape: a
+ * `[package] binary = "<stem>"` key names the shared-lib stem, and its
+ * `modules = "."` (the root export) puts the installed lib on the search path
+ * so the binary-import prepass fires.
+ *
+ * `ae add` fetches the aether.toml first. If it carries a `binary` key, this is
+ * a binary package: build `<stem>-<tag>-<triple><ext>`, fetch + verify it, and
+ * install the lib + the aether.toml into pkg_dir. Deterministic, by name, no
+ * `--options` and NO fallback ladder — the manifest declaring `binary` is the
+ * single signal. If there is no aether.toml, or it has no `binary` key, this is
+ * not a binary package and the caller carries on with the archive path (that is
+ * the manifest saying "not a binary package", not a guess by priority order).
+ *
+ * Returns  1  installed as a binary package,
+ *          0  not a binary package (no toml / no `binary` key) — try archive,
+ *         -1  it IS a binary package but the fetch/checksum failed — fatal,
+ *             do not silently fall through to a different install shape.
+ */
+static int ae_try_binary_package(const char* package, const char* tag,
+                                 const char* triple, const char* url_base,
+                                 const char* tmp_dir, const char* pkg_dir) {
+    /* 1. Fetch the released aether.toml (a normal named asset). */
+    char toml_url[2048], toml_tmp[1024];
+    if (ae_sprintf(toml_url, sizeof(toml_url), "%s/aether.toml", url_base) != 0 ||
+        ae_sprintf(toml_tmp, sizeof(toml_tmp), "%s/aether.toml", tmp_dir) != 0) {
+        return 0;
+    }
+    remove(toml_tmp);
+    if (ae_download(toml_url, toml_tmp) != 0 || !path_exists(toml_tmp)) {
+        return 0;   /* no released aether.toml → not this path */
+    }
+
+    /* 2. Does it declare a binary package? Read `[package] binary`. */
+    TomlDocument* doc = toml_parse_file(toml_tmp);
+    if (!doc) { remove(toml_tmp); return 0; }
+    const char* stem_raw = toml_get_value(doc, "package", "binary");
+    if (!stem_raw || !*stem_raw) {
+        toml_free_document(doc);
+        remove(toml_tmp);
+        return 0;   /* an aether.toml, but not a binary package */
+    }
+    char stem[256];
+    snprintf(stem, sizeof(stem), "%s", stem_raw);
+    toml_free_document(doc);
+
+    /* 3. Name the host's lib asset: <stem>-<tag>-<triple><ext>. */
+    const char* ext = ae_host_shlib_ext();
+    char lib_asset[512], lib_url[2048], lib_path[1024];
+    if (ae_sprintf(lib_asset, sizeof(lib_asset), "%s-%s-%s%s", stem, tag, triple, ext) != 0 ||
+        ae_sprintf(lib_url, sizeof(lib_url), "%s/%s", url_base, lib_asset) != 0 ||
+        ae_sprintf(lib_path, sizeof(lib_path), "%s/%s", tmp_dir, lib_asset) != 0) {
+        remove(toml_tmp);
+        return 0;
+    }
+    remove(lib_path);
+    if (ae_download(lib_url, lib_path) != 0 || !path_exists(lib_path)) {
+        /* The manifest declared a binary package but the host's lib is not
+         * published — a real error for this host, not a reason to try a source
+         * archive that would land the uncompilable tree. */
+        fprintf(stderr,
+            "Error: %s declares a binary package but publishes no %s for this host.\n",
+            package, lib_asset);
+        remove(toml_tmp);
+        return -1;
+    }
+    printf("Found binary package %s\n", lib_asset);
+
+    /* 4. Verify the lib against its published .sha256 (same policy as archives). */
+    int v = ae_verify_sha256(lib_path, url_base, lib_asset, tmp_dir);
+    if (v < 0) {
+        fprintf(stderr, "Error: checksum MISMATCH for %s — refusing to install.\n", lib_asset);
+        remove(lib_path); remove(toml_tmp);
+        return -1;
+    }
+    if (v == 0) {
+        fprintf(stderr, "Warning: %s publishes no .sha256 — installing unverified.\n", lib_asset);
+    } else {
+        printf("Checksum verified.\n");
+    }
+
+    /* 5. Install the lib + the aether.toml into pkg_dir. The lib keeps its full
+     * asset name so the module-import prepass finds it on the `.`-exported root;
+     * the aether.toml's modules="." is what puts pkg_dir on the search path. */
+    mkdirs(pkg_dir);
+    char lib_dest[2048], toml_dest[2048];
+    if (ae_sprintf(lib_dest, sizeof(lib_dest), "%s/%s", pkg_dir, lib_asset) != 0 ||
+        ae_sprintf(toml_dest, sizeof(toml_dest), "%s/aether.toml", pkg_dir) != 0) {
+        remove(lib_path); remove(toml_tmp);
+        return -1;
+    }
+    /* copy_file preserves the source mode (keeps the .so executable bit) and
+     * works across filesystems (tmp and pkg_dir may differ); then drop the
+     * temps. Returns 1 on success. */
+    if (!copy_file(lib_path, lib_dest) || !copy_file(toml_tmp, toml_dest)) {
+        fprintf(stderr, "Error: could not install binary package into %s.\n", pkg_dir);
+        remove(lib_path); remove(toml_tmp);
+        remove(lib_dest); remove(toml_dest);   /* leave nothing half-installed */
+        return -1;
+    }
+    remove(lib_path); remove(toml_tmp);
+    printf("Installed %s@%s as a binary package.\n", package, tag);
+    return 1;
+}
+
 /* Try to install <package>@<version> from a published release asset.
  * Returns 1 when the package was installed from an artifact, 0 when no
  * matching artifact exists (caller falls back to git). */
@@ -7593,6 +7714,12 @@ static int ae_try_release_asset(const char* package, const char* version,
     char tmp_dir[1024];
     snprintf(tmp_dir, sizeof(tmp_dir), "%s/.aether/tmp", get_home_dir());
     mkdirs(tmp_dir);
+
+    /* Binary-package path first: a released aether.toml with a `binary` key is
+     * the explicit, declared signal (no fallback ladder — see the function). A
+     * 0 means "not a binary package"; carry on to the archive path below. */
+    int bp = ae_try_binary_package(package, tag, triple, url_base, tmp_dir, pkg_dir);
+    if (bp != 0) return bp;             /* 1 installed, -1 fatal */
 
     /* tar.gz first (the POSIX default), then zip (what the Windows
      * releases publish). */
@@ -7657,7 +7784,9 @@ static int cmd_add(int argc, char** argv) {
         fprintf(stderr, "  ae add github.com/user/repo@v1.2.0\n");
         fprintf(stderr, "  ae add gitlab.com/user/repo\n");
         fprintf(stderr, "\nWith @version, a matching release artifact is preferred when the\n");
-        fprintf(stderr, "package publishes one; --source forces the git clone.\n");
+        fprintf(stderr, "package publishes one: a binary package (a released aether.toml with\n");
+        fprintf(stderr, "a `binary` key naming a bare per-triple shared lib), else a source\n");
+        fprintf(stderr, "archive. --source forces the git clone.\n");
         return 1;
     }
 

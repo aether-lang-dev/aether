@@ -11,6 +11,23 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ae add` installs a binary package: a bare per-triple shared lib named by a
+  released `aether.toml`.** A package that ships loose per-triple libraries
+  (`lib<stem>-<tag>-<triple>.so`/`.dylib`/`.dll`) instead of a compilable source
+  tree can attach its release's own `aether.toml` as an asset. `ae add` fetches
+  that manifest first; a `[package] binary = "<stem>"` key declares a binary
+  package, and `ae add` then fetches + checksum-verifies `<stem>-<tag>-<triple>`
+  with the host's shared-lib extension and installs the lib **and** the
+  `aether.toml` together (the manifest's `modules = "."` puts the lib on the
+  search path so the binary-import prepass fires). Deterministic, by name, no
+  `--options` and **no fallback ladder**: the `binary` key is the single signal —
+  a manifest without it is not a binary package (carry on to the archive path),
+  and a `binary` key with no lib for the host is a hard error, never a silent
+  git clone. Removes the need to publish a redundant `.tar.gz` wrapping the same
+  `.so`. (Asked for by the libphonenumber-ae / datastar-aether line.)
+
 ### Fixed
 
 - **A shell test that passed could still fail on its own cleanup.** 82
