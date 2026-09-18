@@ -178,6 +178,45 @@ else
     fail=$((fail + 1))
 fi
 
+# A multi-value CALL interpolated directly is never a bound scalar: the whole
+# (value, err) struct went to printf. The bound-name case above stays admitted.
+cat > "$TMP/tupcall.ae" << 'EOF'
+pair() -> (int, string) { return 1, "" }
+main() {
+    println("got ${pair()}")
+}
+EOF
+out=$("$AE" build "$TMP/tupcall.ae" -o "$TMP/tupcall.bin" 2>&1)
+if echo "$out" | grep -q "cannot interpolate a call that returns 2 values"; then
+    echo "  [PASS] multi-value call rejected"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] expected the multi-value call diagnostic; got:"
+    echo "$out" | head -6 | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+
+# A diagnostic about an expression INSIDE ${...} carries the expression's
+# position in the file. The sub-lexer used to count from 1:1 of the snippet,
+# so an undefined call inside an interpolation on line 4 was reported at
+# line 1 -- the import.
+cat > "$TMP/pos.ae" << 'EOF'
+import std.string
+
+main() {
+    println("v=${string.nope(1)}")
+}
+EOF
+out=$("$AE" build "$TMP/pos.ae" -o "$TMP/pos.bin" 2>&1)
+if echo "$out" | grep -q "pos.ae:4:"; then
+    echo "  [PASS] diagnostic inside \${...} points at the interpolation's line"
+    pass=$((pass + 1))
+else
+    echo "  [FAIL] expected pos.ae:4: for an error inside the interpolation; got:"
+    echo "$out" | grep -E "^ *-->" | head -3 | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+
 echo ""
 echo "string_interp_operand_reject: $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

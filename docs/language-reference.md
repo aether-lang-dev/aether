@@ -86,7 +86,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `bool` | Boolean type | `true`, `false` |
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
 | `void`¹ | No value (for functions) | `extern free(p: ptr) -> void` |
-| `long` | 64-bit signed integer | `long x = 0` |
+| `long` (also `int64`) | 64-bit signed integer | `long x = 0`, `int64 y = 0` |
 | `longdouble` | C `long double` widest float (C interop) | `extern strtold(...) -> longdouble` |
 | `ptr` | Raw pointer (for C interop) | `null` |
 

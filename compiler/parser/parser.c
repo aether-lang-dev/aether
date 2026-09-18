@@ -764,6 +764,13 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * shapes). Aether's own float stays double; codegen
                      * casts at the FFI boundary. */
                     type = create_type(TYPE_FLOAT32);
+                } else if (strcmp(token->value, "int64") == 0) {
+                    /* The signed sibling of the `uint64` keyword, and the
+                     * name the reference uses for the widening `int -> int64`.
+                     * Same type as `long`; it was falling through to the
+                     * unknown-name path and binding as a struct called
+                     * "int64", so `int64 n = 5` was a type mismatch. */
+                    type = create_type(TYPE_INT64);
                 } else if (strcmp(token->value, "uint8") == 0 ||
                            strcmp(token->value, "uint16") == 0 ||
                            strcmp(token->value, "uint32") == 0) {
@@ -927,8 +934,15 @@ static ASTNode* parse_interp_string_expr(const char* raw, int line, int column) 
 
             Token* sub_tokens[INTERP_MAX_TOKENS];
             int sub_count = 0;
+            /* The sub-lexer counts from 1:1 in expr_src. Rebase every token
+             * onto the file: the string's line, plus the column of the `${`
+             * inside the literal, so a diagnostic about an interpolated
+             * expression lands on it and not on line 1 of the file. */
+            int expr_col = column + (int)(expr_start - raw);
             while (sub_count < INTERP_MAX_TOKENS - 1) {
                 Token* t = next_token();
+                if (t->line == 1) t->column += expr_col;
+                t->line += line - 1;
                 sub_tokens[sub_count++] = t;
                 if (t->type == TOKEN_EOF || t->type == TOKEN_ERROR) break;
             }
