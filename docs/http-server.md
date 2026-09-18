@@ -412,8 +412,26 @@ max=M` headers per response.
 
 ## Per-connection actor dispatch
 
+> **Status: C-internal mechanism, not a usable Aether API from a release.**
+> The `http_server_set_actor_handler` entry point and its `MSG_HTTP_CONNECTION`
+> protocol are compiled into a `--with=net` build, but the `.ae` surface needed
+> to *drive* them is not exposed: `unwrap_msg_http_connection` is not a released
+> `.ae` extern (it appears only in the fragment below), and the
+> `spawn_fn`/`send_fn`/`release_fn` actor primitives the entry demands are not
+> exposed either — `std.actors` gives you the registry, not the actor
+> spawn/send/release function pointers. A program written against the fragment
+> below fails with `undefined: unwrap_msg_http_connection` and cannot construct
+> the four pointers `http_server_set_actor_handler` requires. Completing the
+> `.ae` API is a subset of the send-path fix in
+> [#2083](https://github.com/aether-lang-dev/aether/issues/2083) (actor dispatch
+> "fixes" the send only because the handler then runs on-scheduler). The fragment
+> is retained only to describe the *shape* of the C-internal path, not as a
+> copyable example.
+
 ```aether,fragment
-// User actor step function, replaces the thread-pool worker path
+// SHAPE ONLY — does NOT compile from a release (unwrap_msg_http_connection
+// and the spawn/send/release fn-pointers are not exposed to .ae). See the
+// status note above.
 @c_callback worker_step(msg_ptr: ptr) {
     msg = unwrap_msg_http_connection(msg_ptr)
     http.server_drain_connection(g_server, msg.client_fd)
@@ -423,10 +441,35 @@ max=M` headers per response.
 `http.server_drain_connection(server, client_fd)` is the public
 helper that runs the full per-connection lifecycle (TLS handshake,
 keep-alive request loop, route dispatch, response emission, socket
-close). User actor step functions registered via
-`http_server_set_actor_handler` should call this on the
-`MSG_HTTP_CONNECTION` message's client_fd to get identical behaviour
-to the thread-pool worker path.
+close). *When* the actor-dispatch API is completed, user actor step
+functions registered via `http_server_set_actor_handler` would call
+this on the `MSG_HTTP_CONNECTION` message's client_fd to get identical
+behaviour to the thread-pool worker path.
+
+### Handler → actor from a release (what works today)
+
+Handlers run on an off-scheduler pthread pool (see *Why pthreads, not
+actors?* above). Two consequences follow, both tracked as bugs:
+
+- A fire-and-forget `actors.whereis(name) ! Msg{}` from a handler is
+  **silently dropped** — the send originates on a foreign C thread and
+  is lost before the actor sees it
+  ([#2083](https://github.com/aether-lang-dev/aether/issues/2083)). So
+  the `whereis`-then-send pattern in `std.actors`' own module header
+  does **not** work from an HTTP handler until that lands.
+- A synchronous handler → actor *read* is not expressible at all
+  (there is no ask/reply primitive, and the handler is off-scheduler).
+
+**The released substrate for handler-shared state is to keep the state
+on the pool thread, not in an actor:** a lock-free copy-on-write cell
+(`std.snapshot`, issue #840) read via `snapshot.load` and written via a
+`snapshot.cas` retry loop, with the cell handed to handlers through the
+`ud` slot. This is the same shape the reverse-proxy load balancer uses
+one layer down in C (`std/http/proxy/aether_proxy_lb.c`: atomics +
+mutex). Correct reclamation of the displaced value uses
+[`std.sync`](../std/sync/README.md) (issue #2082): guard each published
+value with a `std.sync` refcount and free it when the count reaches zero
+after a grace period — its README has the retire-ring pattern in full.
 
 ---
 

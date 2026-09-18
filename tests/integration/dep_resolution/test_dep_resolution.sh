@@ -323,4 +323,50 @@ for where in "$PROJ" "$PROJ/sub"; do
 done
 cd "$PROJ"
 
+# --- 8. `modules = "."` exports the package ROOT (opt-in) ----------------
+# A package organised as `core/*.ae` whose modules import each other with a
+# DOTTED package prefix (`import core.metadata`) has no `.ae` at the root to
+# name, so no ordinary `modules` entry can join the root -- and a dotted
+# `core.*` import resolves only with the root on the path. `modules = "."`
+# is the explicit publisher opt-in that joins the root, so such a package is
+# `ae add`-consumable without flattening its namespace. This keeps the "root
+# is never joined SPECULATIVELY" principle (section 4 above): the root joins
+# only because the publisher wrote `.`, never by a guess.
+DOTPKG="$TMPDIR_T/dotpkg"
+mkdir -p "$DOTPKG/core"
+printf 'exports(country_code)\ncountry_code() -> int { return 44 }\n' > "$DOTPKG/core/metadata.ae"
+# The package's OWN internal import is dotted -- this is the crux: even a
+# flat-importing consumer could not help, because core.metadata still needs
+# the root on the path.
+printf 'exports(describe)\nimport core.metadata\ndescribe() -> int { return metadata.country_code() }\n' > "$DOTPKG/core/phonenumber.ae"
+if command -v cygpath >/dev/null 2>&1; then DOTPKG_N="$(cygpath -m "$DOTPKG")"; else DOTPKG_N="$DOTPKG"; fi
+
+# 8a. WITHOUT the root export, the dotted import is unresolvable (the leaf
+# module joins `core/` and only `import phonenumber` would resolve).
+printf '[package]\nname = "phonelib"\nmodules = "core/phonenumber"\n' > "$DOTPKG/aether.toml"
+cat > "$PROJ/aether.toml" <<'TOMLEOF'
+[package]
+name = "consumer"
+
+[dependencies]
+"phonelib" = "0.1.0"
+TOMLEOF
+printf 'import core.phonenumber\nmain() {\n    println("cc=${phonenumber.describe()}")\n    return 0\n}\n' > "$PROJ/dotuse.ae"
+NOROOT=$("$AE" run dotuse.ae --override "phonelib=$DOTPKG_N" 2>&1 || true)
+case "$NOROOT" in
+    *cc=44*)
+        echo "  [FAIL] dep_resolution: dotted core.* resolved WITHOUT modules='.'; the"
+        echo "         opt-in is a no-op or the root is joined speculatively"; exit 1 ;;
+esac
+
+# 8b. WITH modules = ".", the same dotted import resolves -- including the
+# package's internal `import core.metadata` -- with no --lib path knowledge.
+printf '[package]\nname = "phonelib"\nmodules = "."\n' > "$DOTPKG/aether.toml"
+DOTRUN=$("$AE" run dotuse.ae --override "phonelib=$DOTPKG_N" 2>&1 || true)
+case "$DOTRUN" in
+    *cc=44*) ;;
+    *) echo "  [FAIL] dep_resolution: modules='.' did not make the dotted-import package consumable"
+       echo "$DOTRUN" | sed 's/^/    /' | head -10; exit 1 ;;
+esac
+
 echo "  [PASS] dep_resolution: declared roots resolve, overrides redirect and announce"

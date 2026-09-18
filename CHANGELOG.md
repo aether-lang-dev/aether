@@ -21,6 +21,144 @@ version number before tagging the release.
   printing `[PASS]` and the sweep counted a failure — the only red on
   #2076's Windows leg. Cleanup is now tolerated (`|| true`) in every one of
   them; the outcome is decided by the assertions alone.
+=======
+
+## [0.691.0]
+
+### Fixed
+
+- **`os.run_supervised`, `os.kill` and `os.wait_pid_timeout` are now tested
+  on Windows.** The Job Object backend has been there since the primitives
+  landed, but `test_os_run_supervised` skipped Windows with a comment calling
+  them POSIX-only, so it went unexercised by CI. The test is now its own
+  child (`exit3`, `sleep30`, `leak` — spawn a sleeper and exit without
+  waiting), which takes `/bin/sh` and `sleep` out of it and runs the clean
+  exit, the 1 s timeout on a 30 s sleeper, the group reap of a leaked
+  grandchild and the bounded wait + kill + reap against both backends.
+  `test_os_cwd` (chdir into the current drive's root on Windows) and
+  `test_run_argv_heap_string` (the child prints its own arguments instead
+  of spawning `echo`) likewise run there now.
+=======
+
+- **A tuple-bound name passed where a parameter takes a scalar is refused
+  at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
+  returns to one name, and `dir.list_count(l)` then reached the C compiler:
+  "incompatible type for argument 1 … argument is of type
+  `_tuple_ptr_string`", against generated code. Argument checking is lenient
+  for user functions, but a tuple into a scalar parameter is never what was
+  meant (the shape #1878 took out of binary operators), so both user
+  functions and externs now report `expected ptr, got the (ptr, string)
+  tuple bound to 'l' … destructure it: value, err = ...`.
+  `tests/integration/tuple_argument_reject`.
+=======
+
+## [0.690.0]
+
+### Added
+- `std.sync`: an atomic 64-bit integer cell (`atomic_new`, `atomic_load`,
+  `atomic_store`, `atomic_add`, `atomic_sub`, `atomic_cas`, `atomic_free`)
+  exposed to `.ae` (issue #2082). `add`/`sub` return the *new* value so a
+  refcount-to-zero check is a plain `== 0`; load is acquire, store is release,
+  add/sub/cas are acq_rel (a CAS winner that reads the state it guards
+  acquires correctly). A null cell is fatal on every op except `free` — an
+  unchecked `atomic_new` failure crashes loud rather than letting `atomic_sub`
+  return 0 and free a live value. This is the missing reclamation primitive for
+  pool-owned copy-on-write structures — `std.snapshot` gives the atomic pointer
+  swap but not the counter to build a refcount / lock-free retire ring — the
+  same shape `std/http/proxy/aether_proxy_lb.c` uses in C, lifted into `.ae`.
+  Deliberately minimal (not a mutex, not a general lock). The `std.sync` README
+  carries the snapshot retire-ring pattern end to end.
+- **`modules = "."` exports the package root** for `ae add` consumers. A package
+  laid out as `core/*.ae` whose modules import each other with a dotted package
+  prefix (`import core.metadata`) had no way to declare itself consumable: no
+  `.ae` module sits at the root for an ordinary `modules` entry to name, yet a
+  dotted `core.*` import — including the package's own internal ones — only
+  resolves with the root on the search path. `modules = "."` is the explicit,
+  publisher-chosen opt-in that joins the package root, so such a package is
+  `ae add`-consumable without flattening its namespace. The "root is never joined
+  *speculatively*" principle is preserved — the root joins only because the author
+  wrote `.`. (Surfaced by libphonenumber-ae / datastar-aether consuming the phone
+  engine as Aether source.)
+
+### Docs
+- `docs/http-server.md`: mark the "Per-connection actor dispatch" section as a
+  C-internal mechanism, not a usable Aether API from a release —
+  `unwrap_msg_http_connection` and the spawn/send/release fn-pointers it needs
+  are not exposed to `.ae`. Documents the released substrate for handler-shared
+  state instead (pool-thread `std.snapshot` COW). `std.actors`' module header
+  gains the matching caveat: a `!` send from an off-scheduler `std.http` handler
+  is currently dropped (aether#2083). No code change.
+
+## [0.689.0]
+
+### Fixed
+
+- **An interpolation nested inside a `println` segment printed itself and
+  crashed the call around it.** `print`/`println` lower their interpolation
+  straight to `printf`, and that mode stayed on while the segments were
+  generated, so in `println("${takes("${base}/x")}")` the inner string was
+  lowered to `printf` too: `abc/x` went to stdout on its own and `takes`
+  received printf's return count cast to a pointer (a C warning, then an
+  access violation). The same call outside `println` was fine. The mode now
+  covers the outer interpolation alone. `tests/integration/interp_nested_in_print`.
+
+## [0.688.0]
+
+### Fixed
+
+- **`fs.symlink`, `fs.readlink` and `fs.is_symlink` work on Windows.** They
+  were stubs that failed every call, which the reference described as
+  "POSIX-only". `symlink` is `CreateSymbolicLinkW` — a relative target is
+  resolved against the link's directory to decide whether it is a directory
+  link, separators are stored as backslashes, and the unprivileged-create
+  flag Developer Mode honours is tried first; `readlink` reads the link's
+  own reparse data and hands back the target as stored (a junction is not a
+  symlink); `is_symlink` reads the directory entry's reparse tag;
+  `unlink` removes a directory link with `RemoveDirectoryW`. Creating a
+  link still needs the privilege administrators hold and Developer Mode
+  grants everyone. On every platform `readlink` no longer leaks: the raw
+  extern's `strdup` result is now `@heap` and handed back directly instead
+  of copied and dropped. `tests/regression/test_fs_symlink.ae`.
+
+## [0.687.0]
+
+### Fixed
+
+- **A chain of more than 256 operators failed to compile under clang
+  (#2071).** Codegen parenthesised every binary node, so `x0 + x1 + … + xN`
+  lowered to N nested brackets and clang's limit of 256 turned a long sum
+  into "bracket nesting level exceeded" deep in the generated C. A left
+  operand that is a link of the same precedence level on plain numbers now
+  goes unbracketed — C groups `a - b - c` as `(a - b) - c` already — so
+  nesting follows the expression's depth, not its length; a link with a
+  cast prefixed to it keeps its brackets so the cast covers the whole link.
+  `tests/integration/operator_chain_nesting`.
+
+## [0.686.0]
+
+### Tests
+
+- **`std.snapshot` gains a concurrent copy-on-write test.** The existing
+  `snapshot_cow` regression test exercises the store/cas/load/reclaim sequence
+  single-threaded, and the #841 concurrent-cache benchmark's COW design uses
+  `store()` (unconditional overwrite) — so nothing in-tree proved the property a
+  real many-writer user relies on: a `snapshot.cas` retry loop must never lose an
+  update under concurrent publishers. The new `snapshot_concurrent` test drives
+  `std.worker` (a real thread pool) at one cell — 500 concurrent CAS increments
+  must land exactly 500 (no lost updates), and 300 writers racing 300 lock-free
+  readers must still reach 300 with no torn reads. (Surfaced by selaenium's Grid
+  hub registry, `std.snapshot`'s first concurrent-CAS-writer consumer.)
+
+## [0.685.0]
+
+### Fixed
+
+- **`tests/integration/cache_dir_override` failed on Windows (#2069).** It
+  checked that `ae cache clear` names the override directory by looking for
+  the shell's `/tmp/...` spelling, but MSYS2 hands a native executable the
+  converted `C:/...` form and that is what `ae` prints. The comparison is
+  now made against the spelling `ae` receives, the way `ae_add_tag_pin`
+  already does it. The only failure in a full Windows sweep.
 
 - **`fs.realpath` on Windows returned a UNC path as the relative
   `UNC\server\share\...` (#2063).** `GetFinalPathNameByHandleW` answers in

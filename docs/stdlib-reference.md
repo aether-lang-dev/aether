@@ -7,7 +7,7 @@ cannot leave the index behind. The sections after it cover the most-used
 modules in depth; for the others the index links to the module source, whose
 header comment is the authoritative description.
 
-## Module index (77 modules)
+## Module index (78 modules)
 
 | Module | Purpose | Exports | Detail |
 |---|---|---:|---|
@@ -73,6 +73,7 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 17 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 33 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.string` | Managed strings: construction, search, slicing, case, split and join. | 94 | [full section](#strings-stdstring) |
+| `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 14 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming POSIX ustar archives: reader and writer. | 24 | [full section](#posix-ustar-archives-stdtar) |
 | `std.tcp` | TCP sockets, re-exported from `std.net`. | 24 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 19 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
@@ -96,7 +97,7 @@ header comment is the authoritative description.
 | Target | Filesystem | Networking | Threading | Notes |
 |---|---|---|---|---|
 | Linux / macOS / BSD | full POSIX | full | full | Reference target. |
-| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec is native: `run`, `run_capture`, `spawn`, `wait`, `kill` and supervision go through `CreateProcessW` and Job Objects. Two things stay POSIX-only and say so: the back-channel pipe (`run_pipe` spawns but hands back no pipe fd, `run_pipe_drain_and_wait` returns `"unsupported on Windows"`), and `symlink` / `readlink`, which return clean errors through the Go-style wrappers. |
+| Windows (MSYS2 / mingw-w64) | partial | full | full | Process exec is native: `run`, `run_capture`, `spawn`, `wait`, `kill` and supervision go through `CreateProcessW` and Job Objects. One thing stays POSIX-only and says so: the back-channel pipe (`run_pipe` spawns but hands back no pipe fd, `run_pipe_drain_and_wait` returns `"unsupported on Windows"`). `symlink` / `readlink` / `is_symlink` are native (`CreateSymbolicLinkW`, the link's reparse data); creating a link needs the privilege administrators hold and Developer Mode grants everyone, and without it `symlink` returns its error. |
 | WASI (wasi-sdk) | per preopened paths | none | single-threaded | wasi-libc provides POSIX-compatible `fopen`/`fread`/`stat`/etc., so the normal fs code path compiles. Paths must be under a WASI preopen. |
 | Emscripten (browser WASM) | off by default | off | cooperative | Builds pass `-DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING`. File ops return `(null, "cannot open file")` via the Go-style wrappers, no silent failures. To enable, compile with `-sFORCE_FILESYSTEM=1` and drop the define; untested in CI. |
 | Bare embedded | off | off | cooperative | Same as Emscripten, stubs route all failures through the Go-style error tuples. |

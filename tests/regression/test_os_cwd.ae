@@ -1,5 +1,8 @@
 // Regression test for os.chdir / os.getcwd — process working-directory
-// accessors (POSIX chdir(2)/getcwd(3); Windows Set/GetCurrentDirectory).
+// accessors (POSIX chdir(2)/getcwd(3); Windows Set/GetCurrentDirectoryW).
+// The one platform-shaped value is the root to chdir into: `/` on POSIX,
+// the current drive's root (`C:\`) on Windows, where getcwd answers in
+// the OS spelling with backslashes.
 
 import std.os
 import std.string
@@ -9,11 +12,6 @@ extern exit(code: int)
 main() {
     println("=== os.chdir / os.getcwd ===")
 
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: paths in this test are POSIX-shaped")
-        return
-    }
-
     // getcwd returns something non-empty.
     start = os.getcwd()
     if start == "" {
@@ -22,19 +20,23 @@ main() {
     }
     println("  PASS: getcwd() = ${start}")
 
-    // chdir to root (no symlink indirection, stable across Unix) and
+    // chdir to the root (no symlink indirection, stable everywhere) and
     // confirm getcwd reflects it.
-    err = os.chdir("/")
+    root = "/"
+    if os_getenv("OS") == "Windows_NT" {
+        root = "${string.substring(start, 0, 2)}\\"
+    }
+    err = os.chdir(root)
     if err != "" {
-        println("  FAIL: chdir('/') err=${err}")
+        println("  FAIL: chdir('${root}') err=${err}")
         exit(1)
     }
     here = os.getcwd()
-    if here != "/" {
-        println("  FAIL: after chdir('/'), getcwd()=${here}, expected /")
+    if here != root {
+        println("  FAIL: after chdir('${root}'), getcwd()=${here}, expected ${root}")
         exit(1)
     }
-    println("  PASS: chdir('/') then getcwd() == /")
+    println("  PASS: chdir('${root}') then getcwd() == ${root}")
 
     // chdir back to where we started, confirm round-trip.
     err2 = os.chdir(start)
