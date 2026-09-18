@@ -809,6 +809,10 @@ A comma-list case lowers to several C `case` labels sharing one body; a `switch`
 containing any ranged case is lowered to an equivalent if-else chain (safe
 because there is no fall-through to preserve).
 
+Alternatives are the comma-list, in `switch` and `match` alike. A `|` between
+values is the bitwise OR — `1 | 2 | 3` is the number 3 — so the compiler
+refuses it in a selector and names the comma form.
+
 ### Switch vs Match
 
 | Feature | `switch` | `match` |

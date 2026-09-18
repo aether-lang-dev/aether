@@ -3358,6 +3358,21 @@ ASTNode* parse_switch_statement(Parser* parser) {
 static ASTNode* parse_one_selector(Parser* parser) {
     ASTNode* lo = parse_expression(parser);
     if (!lo) return NULL;
+    /* `1 | 2 | 3 ->` reads as alternatives and is the bitwise OR: it matched
+     * only 3, silently. Alternatives are a comma-list here, so a `|` at the
+     * top of a selector is refused with the spelling that was meant. */
+    if (lo->type == AST_BINARY_EXPRESSION && lo->value && strcmp(lo->value, "|") == 0) {
+        if (!parser->suppress_errors) {
+            aether_error_full(
+                "`|` in a match/switch selector is the bitwise OR, not an alternative: "
+                "`1 | 2 | 3` matches only 3",
+                lo->line, lo->column,
+                "write alternatives as a comma-list: `1, 2, 3 ->`",
+                NULL, AETHER_ERR_SYNTAX);
+        }
+        free_ast_node(lo);
+        return NULL;
+    }
     Token* t = peek_token(parser);
     if (t && (t->type == TOKEN_DOTDOT_EQ || t->type == TOKEN_DOTDOT_LT)) {
         int inclusive = (t->type == TOKEN_DOTDOT_EQ);
