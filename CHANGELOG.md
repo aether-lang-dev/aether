@@ -11,6 +11,18 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A chain of more than 256 operators failed to compile under clang
+  (#2071).** Codegen parenthesised every binary node, so `x0 + x1 + … + xN`
+  lowered to N nested brackets and clang's limit of 256 turned a long sum
+  into "bracket nesting level exceeded" deep in the generated C. A left
+  operand that is a link of the same precedence level on plain numbers now
+  goes unbracketed — C groups `a - b - c` as `(a - b) - c` already — so
+  nesting follows the expression's depth, not its length; a link with a
+  cast prefixed to it keeps its brackets so the cast covers the whole link.
+  `tests/integration/operator_chain_nesting`.
+
 ## [0.684.0]
 
 ### Fixed
