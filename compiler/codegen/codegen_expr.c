@@ -833,6 +833,35 @@ static ASTNode* find_first_return_expr(ASTNode* node) {
     return NULL;
 }
 
+/* Does ANY return site under `node` (not descending into nested closures)
+ * carry a `string`-typed expression?
+ *
+ * resolve_closure_return_type picks the closure's C return type from its
+ * FIRST return, which is the right type for the signature only when every
+ * return agrees. A closure that returns `string.from_int(x)` on one path and
+ * a struct's string field on another is typed by the first: `void*` (the
+ * builtin is declared `-> ptr`), so it is not a "string closure" and none of
+ * its returns get the uniform-heap wrap of #2054 — while its caller, a
+ * `-> string` function returning `cb(...)`, takes ownership of whatever
+ * comes back and frees it. The field-returning path handed over a literal,
+ * and the caller free()d it (aether-ui's table cell callback, every row;
+ * a heap-corruption abort on macOS and Windows). Any string-typed return
+ * makes the closure a string closure, so every path is wrapped. */
+static int any_return_is_string(ASTNode* node) {
+    if (!node) return 0;
+    if (node->type == AST_CLOSURE) return 0;
+    if (node->type == AST_RETURN_STATEMENT && node->child_count > 0 &&
+        node->children[0] && node->children[0]->type != AST_PRINT_STATEMENT) {
+        ASTNode* e = node->children[0];
+        if (e->node_type && e->node_type->kind == TYPE_STRING) return 1;
+        return 0;
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        if (any_return_is_string(node->children[i])) return 1;
+    }
+    return 0;
+}
+
 // Return 1 if any AST_VARIABLE_DECLARATION node under `node` assigns to
 // `name` (i.e., appears as its `value`). Used by closure codegen to detect
 // which captures are mutated inside the body — those captures cannot use
@@ -1706,6 +1735,15 @@ static const char* resolve_closure_return_type(CodeGenerator* gen, int ci) {
                 ret_type = lookup_var_c_type(gen, ret_expr->value, parent_func);
             }
         }
+    }
+    /* Mixed returns: one string-typed return site makes this a string
+     * closure whatever the first site was typed (see any_return_is_string).
+     * A `void*` first site is an AetherString from a `-> ptr` builtin, which
+     * the uniform-heap wrap copies out by its header, so `const char*` is
+     * correct for both. */
+    if (strcmp(ret_type, "const char*") != 0 && body_check &&
+        any_return_is_string(body_check)) {
+        ret_type = "const char*";
     }
     return ret_type;
 }
