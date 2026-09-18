@@ -13,6 +13,15 @@ version number before tagging the release.
 
 ### Fixed
 
+- **An interpolation nested inside a `println` segment printed itself and
+  crashed the call around it.** `print`/`println` lower their interpolation
+  straight to `printf`, and that mode stayed on while the segments were
+  generated, so in `println("${takes("${base}/x")}")` the inner string was
+  lowered to `printf` too: `abc/x` went to stdout on its own and `takes`
+  received printf's return count cast to a pointer (a C warning, then an
+  access violation). The same call outside `println` was fine. The mode now
+  covers the outer interpolation alone. `tests/integration/interp_nested_in_print`.
+
 - **A source file is no longer capped at a token count (#2059).** The main
   file was lexed into a 50,000-entry stack array and refused past it ("split
   into multiple files using imports" — no help to a generated single-entry

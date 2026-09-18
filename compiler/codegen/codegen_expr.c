@@ -5382,6 +5382,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             // Two modes:
             //   1. interp_as_printf: emit printf() directly (used by print/println)
             //   2. default: emit snprintf+malloc → returns (void*) heap string (TYPE_PTR)
+            //
+            // The printf mode is for THIS interpolation only. The flag is taken
+            // down before any segment is generated, so an interpolation nested
+            // in a segment — `println("${f("${base}/x")}")` — builds its
+            // string; left up, it printed to stdout and handed `f` printf's
+            // return count as a pointer.
+            int as_printf = gen->interp_as_printf;
+            gen->interp_as_printf = 0;
 
             // Helper macro: emit the format string for both modes
             #define EMIT_INTERP_FMT() do { \
@@ -5512,7 +5520,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 it_drain_count++;
             }
             if (it_drain_count > 0) {
-                fprintf(gen->output, gen->interp_as_printf ? "{ " : "({ ");
+                fprintf(gen->output, as_printf ? "{ " : "({ ");
                 for (int di = 0; di < expr->child_count; di++) {
                     ASTNode* ch = expr->children[di];
                     if (!ch || ch->type != AST_FUNCTION_CALL) continue;
@@ -5526,7 +5534,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     arg_drain_bind(ch, nm);
                 }
             }
-            if (gen->interp_as_printf) {
+            if (as_printf) {
                 // Mode 1: direct printf (for print/println)
                 fprintf(gen->output, "printf(\"");
                 EMIT_INTERP_FMT();
@@ -5551,13 +5559,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_heap_str_free(%s); ",
                             g_arg_drain_subs[di].name);
                 }
-                if (gen->interp_as_printf) {
+                if (as_printf) {
                     fprintf(gen->output, "}");
                 } else {
                     fprintf(gen->output, "_it_r; })");
                 }
                 arg_drain_truncate(it_saved);
             }
+            gen->interp_as_printf = as_printf;
 
             #undef EMIT_INTERP_FMT
             #undef EMIT_INTERP_ARGS
