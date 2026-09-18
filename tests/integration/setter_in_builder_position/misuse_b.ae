@@ -1,0 +1,11 @@
+// MISUSE B (must ERROR): the void block setter of a widget module, called as
+// a node with its own trailing block. Condition 4 must not let a genuine
+// setter through just because its module also has containers.
+
+import uimod
+
+main() {
+    uimod.font_size(14) {
+        label("never attached")
+    }
+}

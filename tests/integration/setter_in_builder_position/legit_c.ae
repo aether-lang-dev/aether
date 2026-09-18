@@ -1,0 +1,17 @@
+// LEGIT C (must COMPILE, NO false positive): a widget-style DSL container in
+// a module that ALSO has a builder.
+//
+// `vstack` is `_ctx`-first and takes a trailing block, and its module defines
+// `builder window` — conditions 1-3 all hold, which is why this was rejected
+// before condition 4. It RETURNS the container handle its block runs inside,
+// so it is a container, not a setter. This is every aether-ui app.
+
+import uimod
+
+main() {
+    uimod.window("app") {
+        vstack(10) {
+            label("hello")
+        }
+    }
+}
