@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.690.0]
+
 ### Added
 - **`modules = "."` exports the package root** for `ae add` consumers. A package
   laid out as `core/*.ae` whose modules import each other with a dotted package
