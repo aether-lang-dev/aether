@@ -11,8 +11,6 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.682.0]
-
 ### Fixed
 
 - **`os.run_full` and `os.run_capture` are now tested on Windows.** Both
@@ -27,6 +25,10 @@ version number before tagging the release.
   the platform's missing-binary contract: exec-in-child 127 on POSIX,
   `(-1, "spawn failed")` from CreateProcessW. `run_capture`'s doc comment
   now states the 128+signo status from #2008 and that contract.
+
+## [0.682.0]
+
+### Fixed
 
 - **`1 | 2 | 3 ->` in a match or switch arm matched only 3.** A `|` between
   selector values is the bitwise OR, and it compiled. The parser now refuses
