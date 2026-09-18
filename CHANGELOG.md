@@ -15,6 +15,19 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`os.run_supervised`, `os.kill` and `os.wait_pid_timeout` are now tested
+  on Windows.** The Job Object backend has been there since the primitives
+  landed, but `test_os_run_supervised` skipped Windows with a comment calling
+  them POSIX-only, so it went unexercised by CI. The test is now its own
+  child (`exit3`, `sleep30`, `leak` — spawn a sleeper and exit without
+  waiting), which takes `/bin/sh` and `sleep` out of it and runs the clean
+  exit, the 1 s timeout on a 30 s sleeper, the group reap of a leaked
+  grandchild and the bounded wait + kill + reap against both backends.
+  `test_os_cwd` (chdir into the current drive's root on Windows) and
+  `test_run_argv_heap_string` (the child prints its own arguments instead
+  of spawning `echo`) likewise run there now.
+=======
+
 - **A tuple-bound name passed where a parameter takes a scalar is refused
   at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
   returns to one name, and `dir.list_count(l)` then reached the C compiler:

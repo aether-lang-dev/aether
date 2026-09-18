@@ -10,6 +10,12 @@
 // Fix: route each argv entry through aether_string_data(), which
 // unwraps a magic AetherString* and passes raw const char* through
 // unchanged.
+//
+// The child is this program: invoked with `echo-args` it prints its
+// remaining arguments joined by one space, which is the `echo` the
+// test used to spawn. That keeps it off a shell builtin, so the same
+// cases run against the POSIX and the CreateProcessW argv builders —
+// the Windows one used to be skipped here.
 
 import std.os
 import std.list
@@ -25,45 +31,56 @@ _check(label: string, got: string, want: string) {
     }
 }
 
-main() {
-    println("=== test_run_argv_heap_string ===")
-
-    // Skip on Windows — `echo` here is a shell builtin under MSYS2 and
-    // isn't an external binary CreateProcessW can launch on its own. The
-    // fix being exercised (argv string-ABI dispatch) is POSIX + Win32
-    // alike; the *test harness* just can't use `echo` portably.
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: bare `echo` isn't an external on Windows")
-        return
+// Print the arguments after the mode, space-separated, like echo(1).
+echo_args() {
+    i = 2
+    while i < os.args_count() {
+        if i > 2 { print(" ") }
+        print(os.args_get(i))
+        i = i + 1
     }
+    println("")
+}
+
+main() {
+    if os.args_count() > 1 {
+        echo_args()
+        exit(0)
+    }
+    me = os.args_get(0)
+    println("=== test_run_argv_heap_string ===")
 
     // Literal control — the case that was already passing.
     argv_lit = list.new()
+    list.add(argv_lit, "echo-args")
     list.add(argv_lit, "hello")
-    out_lit, _, _ = os.run_capture("echo", argv_lit, null)
+    out_lit, _, _ = os.run_capture(me, argv_lit, null)
     out_lit_t = string.trim(out_lit)
     _check("literal argv", out_lit_t, "hello")
 
     // Heap argv — the failing case from the bug report.
     argv_heap = list.new()
+    list.add(argv_heap, "echo-args")
     list.add(argv_heap, string.concat("hel", "lo"))
-    out_heap, _, _ = os.run_capture("echo", argv_heap, null)
+    out_heap, _, _ = os.run_capture(me, argv_heap, null)
     out_heap_t = string.trim(out_heap)
     _check("heap argv (concat)", out_heap_t, "hello")
 
     // Mixed literal + heap in one argv.
     argv_mixed = list.new()
+    list.add(argv_mixed, "echo-args")
     list.add(argv_mixed, string.concat("foo", ""))
     list.add(argv_mixed, "bar")
     list.add(argv_mixed, string.concat("ba", "z"))
-    out_mixed, _, _ = os.run_capture("echo", argv_mixed, null)
+    out_mixed, _, _ = os.run_capture(me, argv_mixed, null)
     out_mixed_t = string.trim(out_mixed)
     _check("mixed argv", out_mixed_t, "foo bar baz")
 
     // Substring-derived heap string.
     argv_sub = list.new()
+    list.add(argv_sub, "echo-args")
     list.add(argv_sub, string.substring("xxworldxx", 2, 7))
-    out_sub, _, _ = os.run_capture("echo", argv_sub, null)
+    out_sub, _, _ = os.run_capture(me, argv_sub, null)
     out_sub_t = string.trim(out_sub)
     _check("substring argv", out_sub_t, "world")
 

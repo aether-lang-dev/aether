@@ -1800,8 +1800,9 @@ _tuple_string_int_string os_run_pipe_drain_and_wait_raw(const char* prog, void* 
  * (aeb-process-supervision-primitives.md): the floor any build/test
  * orchestrator hits — run a child as its own process group, forward
  * interactive signals to it, enforce a wall-clock timeout, then
- * group-reap anything the child leaked. POSIX-only; the Windows
- * branch stubs these as "unsupported".
+ * group-reap anything the child leaked. This is the POSIX branch
+ * (fork + setpgid + killpg + waitpid); the Windows branch further
+ * down maps the same shape onto a Job Object.
  * ============================================================ */
 
 /* Send `sig` to `pid`. Thin POSIX kill(2) wrapper, returning 0 on

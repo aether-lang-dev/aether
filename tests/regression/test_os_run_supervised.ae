@@ -1,16 +1,20 @@
 // Regression test for std.os process-supervision primitives:
-//   os.run_supervised  — fork + (own process group) + timeout + reap
-//   os.kill            — POSIX kill(2): negative pid = group, sig 0 = probe
-//   os.wait_pid_timeout — bounded wait on a pid
+//   os.run_supervised  — own process group + timeout + group reap
+//   os.kill            — kill(2) shape: sig 0 = existence probe
+//   os.wait_pid_timeout — bounded wait on a pid / spawn token
 // and std.signal's stable signal-number constants.
 //
 // Filed by aeb (aeb-process-supervision-primitives.md): the floor any
-// build/test orchestrator hits. POSIX-only — the Windows raw externs
-// report "unsupported on Windows".
+// build/test orchestrator hits. POSIX runs it on fork + setpgid + killpg;
+// Windows on a Job Object + WaitForSingleObject + TerminateJobObject. The
+// test used to skip Windows with a comment calling the primitives
+// POSIX-only, which they have not been since the Job Object backend
+// landed, so that backend went unexercised by CI.
 //
-// /bin/sh -c is used throughout (POSIX-guaranteed; lets the test pick
-// exit codes and sleeps explicitly) rather than /bin/true etc whose
-// layout varies by host — same rationale as test_run_capture_status.ae.
+// The child is this program: invoked with a first argument it acts as
+// `exit3`, `sleep30`, or `leak` (spawn a `sleep30` copy of itself and
+// exit 0 without waiting for it). That keeps the test off /bin/sh and
+// `sleep`, so the same cases run against both backends.
 
 import std.os
 import std.list
@@ -18,14 +22,28 @@ import std.signal
 
 extern exit(code: int)
 
-main() {
-    println("=== std.os process supervision ===")
-
-    // Skip on Windows — these primitives are POSIX-only.
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP: process supervision is POSIX-only")
-        return
+child(mode: string) -> int {
+    if mode == "exit3" { return 3 }
+    if mode == "sleep30" {
+        sleep(30000)
+        return 0
     }
+    if mode == "leak" {
+        av = list.new()
+        list.add(av, "sleep30")
+        _token, err = os.spawn_proc(os.args_get(0), av, null)
+        if err != "" { return 9 }
+        return 0
+    }
+    return 2
+}
+
+main() {
+    if os.args_count() > 1 {
+        exit(child(os.args_get(1)))
+    }
+    me = os.args_get(0)
+    println("=== std.os process supervision ===")
 
     // --- std.signal constants ----------------------------------------
     if signal.SIGINT() != 2 || signal.SIGTERM() != 15 || signal.SIGKILL() != 9 {
@@ -36,8 +54,8 @@ main() {
 
     // --- os.kill existence probe (sig 0) -----------------------------
     // Our own pid must exist; a wildly-high pid must not.
-    me = os.getpid()
-    if os.kill(me, 0) != 0 {
+    mypid = os.getpid()
+    if os.kill(mypid, 0) != 0 {
         println("  FAIL: kill(self, 0) should report alive")
         exit(1)
     }
@@ -49,93 +67,94 @@ main() {
 
     // --- run_supervised: clean exit ----------------------------------
     // Own process group, forward signals, no timeout, reap the group.
-    av0 = list_new()
-    list_add(av0, "-c")
-    list_add(av0, "exit 3")
-    code0, outcome0 = os.run_supervised("/bin/sh", av0, null, 1, 1, 0, 1)
+    av0 = list.new()
+    list.add(av0, "exit3")
+    code0, outcome0 = os.run_supervised(me, av0, null, 1, 1, 0, 1)
     if outcome0 != "exited" {
-        println("  FAIL: sh -c 'exit 3' outcome=${outcome0}, expected exited")
+        println("  FAIL: exit3 outcome=${outcome0}, expected exited")
         exit(1)
     }
     if code0 != 3 {
-        println("  FAIL: sh -c 'exit 3' code=${code0}, expected 3")
+        println("  FAIL: exit3 code=${code0}, expected 3")
         exit(1)
     }
-    list_free(av0)
+    list.free(av0)
     println("  PASS: run_supervised clean exit → outcome exited, code 3")
 
     // --- run_supervised: timeout -------------------------------------
     // Child sleeps 30s; a 1s timeout must tear it down and report 124
     // promptly (well before the 30s sleep would finish).
     t_start = os.now_monotonic_ms()
-    av1 = list_new()
-    list_add(av1, "-c")
-    list_add(av1, "sleep 30")
-    code1, outcome1 = os.run_supervised("/bin/sh", av1, null, 1, 1, 1, 1)
+    av1 = list.new()
+    list.add(av1, "sleep30")
+    code1, outcome1 = os.run_supervised(me, av1, null, 1, 1, 1, 1)
     elapsed = os.now_monotonic_ms() - t_start
     if outcome1 != "timeout" {
-        println("  FAIL: sleep 30 / 1s timeout outcome=${outcome1}, expected timeout")
+        println("  FAIL: sleep30 / 1s timeout outcome=${outcome1}, expected timeout")
         exit(1)
     }
     if code1 != 124 {
         println("  FAIL: timeout code=${code1}, expected 124")
         exit(1)
     }
-    // SIGTERM should win within the grace window; allow generous slack
-    // for loaded CI but ensure we did NOT wait out the full 30s sleep.
+    // The teardown should win within the grace window; allow generous
+    // slack for loaded CI but ensure we did NOT wait out the 30s sleep.
     if elapsed > 10000 {
         println("  FAIL: timeout took ${elapsed}ms, expected prompt teardown")
         exit(1)
     }
-    list_free(av1)
+    list.free(av1)
     println("  PASS: run_supervised timeout → outcome timeout, code 124 (${elapsed}ms)")
 
     // --- run_supervised: group-reap of a leaked child ----------------
-    // The child backgrounds a long sleep into its own process group and
-    // exits 0. With reap_group on, run_supervised group-kills the leaked
-    // sleep and returns promptly with the child's real exit code.
+    // The child spawns a 30s sleeper into its own group and exits 0
+    // without waiting. With reap_group on, run_supervised tears the
+    // leaked sleeper down and returns promptly with the child's real
+    // exit code.
     t2 = os.now_monotonic_ms()
-    av2 = list_new()
-    list_add(av2, "-c")
-    list_add(av2, "sleep 30 & exit 0")
-    code2, outcome2 = os.run_supervised("/bin/sh", av2, null, 1, 1, 0, 1)
+    av2 = list.new()
+    list.add(av2, "leak")
+    code2, outcome2 = os.run_supervised(me, av2, null, 1, 1, 0, 1)
     e2 = os.now_monotonic_ms() - t2
     if outcome2 != "exited" || code2 != 0 {
         println("  FAIL: leaked-child case outcome=${outcome2} code=${code2}, expected exited/0")
         exit(1)
     }
     if e2 > 10000 {
-        println("  FAIL: group-reap took ${e2}ms; a leaked sleep was not torn down")
+        println("  FAIL: group-reap took ${e2}ms; a leaked sleeper was not torn down")
         exit(1)
     }
-    list_free(av2)
+    list.free(av2)
     println("  PASS: run_supervised group-reap of leaked child (${e2}ms)")
 
     // --- wait_pid_timeout --------------------------------------------
-    // Spawn a 30s sleep via run_pipe, bound-wait 1s → timed_out, then
-    // kill it and reap so the test leaves nothing behind.
-    av3 = list_new()
-    list_add(av3, "-c")
-    list_add(av3, "sleep 30")
-    read_fd, pid, spawn_err = os.run_pipe("/bin/sh", av3, null)
+    // Spawn a 30s sleeper via run_pipe, bound-wait 1s → timed_out, then
+    // kill it and reap so the test leaves nothing behind. `pid` is an OS
+    // pid on POSIX and a spawn token on Windows; kill, wait_pid_timeout
+    // and wait_pid all take either.
+    av3 = list.new()
+    list.add(av3, "sleep30")
+    _read_fd, pid, spawn_err = os.run_pipe(me, av3, null)
     if spawn_err != "" {
         println("  FAIL: run_pipe spawn err=${spawn_err}")
         exit(1)
     }
-    status, timed_out, werr = os.wait_pid_timeout(pid, 1)
+    _status, timed_out, werr = os.wait_pid_timeout(pid, 1)
     if werr != "" {
         println("  FAIL: wait_pid_timeout err=${werr}")
         exit(1)
     }
     if timed_out != 1 {
-        println("  FAIL: wait_pid_timeout on a 30s sleep should time out, got timed_out=${timed_out}")
+        println("  FAIL: wait_pid_timeout on a 30s sleeper should time out, got timed_out=${timed_out}")
         exit(1)
     }
-    // Tear it down and reap.
-    os.kill(pid, signal.SIGKILL())
-    rc, _ = os.wait_pid(pid)
-    list_free(av3)
-    println("  PASS: wait_pid_timeout bounded wait timed out, child reaped")
+    if os.kill(pid, signal.SIGKILL()) != 0 {
+        println("  FAIL: kill(sleeper, SIGKILL) failed")
+        exit(1)
+    }
+    _rc, _ = os.wait_pid(pid)
+    list.free(av3)
+    println("  PASS: wait_pid_timeout bounded wait timed out, child killed and reaped")
 
     println("=== All cases passed ===")
 }
