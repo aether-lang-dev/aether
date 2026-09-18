@@ -1,0 +1,92 @@
+// fs.symlink / fs.readlink / fs.is_symlink / fs.unlink, on every platform.
+//
+// POSIX has had these since the module was written; Windows had stubs that
+// failed every call (symlink "cannot create symlink", readlink "not a
+// symlink", is_symlink 0), which the reference documented as "POSIX-only".
+// They are now CreateSymbolicLinkW, the link's own reparse data and the
+// directory entry's reparse tag, held to the same contract:
+//   - a relative target is recorded verbatim and read back verbatim
+//   - is_symlink answers for the link itself and not for a plain file
+//   - a read through a file link reaches the target
+//   - a link to a directory is a directory to dir_exists
+//   - unlink removes the link and leaves the target
+//   - a plain file is "not a symlink" to readlink
+//
+// Creating a link is a privilege on Windows (administrators, or Developer
+// Mode); when the first symlink fails the test skips rather than fails, so
+// a plain user session passes and CI's administrator session exercises
+// everything.
+
+import std.fs
+import std.os
+import std.string
+
+extern exit(code: int)
+
+check(label: string, ok: int) {
+    if ok == 0 {
+        println("FAIL: ${label}")
+        exit(1)
+    }
+    println("  PASS: ${label}")
+}
+
+main() {
+    println("=== fs symlinks ===")
+    windows = os_getenv("OS") == "Windows_NT"
+    base = "${os.temp_dir()}/aether_fs_symlink_test"
+    fs.remove_tree(base)
+    fs.create_dir(base)
+    sub = "${base}/sub"
+    fs.create_dir(sub)
+    target = "${base}/target.txt"
+    fs.write(target, "through the link")
+    file_link = "${base}/file_link"
+    dir_link = "${base}/dir_link"
+
+    err = fs.symlink("target.txt", file_link)
+    if err != "" {
+        println("  SKIP: symlink unavailable here (${err})")
+        fs.remove_tree(base)
+        println("=== Skipped ===")
+        return
+    }
+    check("relative file link created", 1)
+    check("dir link created", fs.symlink("sub", dir_link) == "")
+
+    check("is_symlink on the link", fs.is_symlink(file_link) == 1)
+    check("is_symlink on a plain file", fs.is_symlink(target) == 0)
+    check("is_symlink on a missing path", fs.is_symlink("${base}/nope") == 0)
+
+    got, rerr = fs.readlink(file_link)
+    check("readlink returns the relative target verbatim (${got})", rerr == "" && got == "target.txt")
+    got2, rerr2 = fs.readlink(dir_link)
+    check("readlink of the dir link (${got2})", rerr2 == "" && got2 == "sub")
+    _, rerr3 = fs.readlink(target)
+    check("readlink of a plain file is refused", rerr3 == "not a symlink")
+
+    content, cerr = fs.read(file_link)
+    check("read through the file link", cerr == "" && content == "through the link")
+    check("dir link is a directory", fs.dir_exists(dir_link) == 1)
+
+    if windows {
+        // Separators in a stored target are backslashes on Windows; the
+        // target was spelled with `/` here to make sure of the translation.
+        nested = "${base}/nested_link"
+        check("target with a forward slash", fs.symlink("sub/../target.txt", nested) == "")
+        got3, _ = fs.readlink(nested)
+        check("stored with backslashes (${got3})", got3 == "sub\\..\\target.txt")
+        content3, _ = fs.read(nested)
+        check("and resolves", content3 == "through the link")
+        check("unlink nested", fs.unlink(nested) == "")
+    }
+
+    check("unlink the file link", fs.unlink(file_link) == "")
+    check("unlink the dir link", fs.unlink(dir_link) == "")
+    check("target survives", fs.file_exists(target) == 1)
+    check("sub survives", fs.dir_exists(sub) == 1)
+    check("links are gone", fs.is_symlink(file_link) == 0 && fs.dir_exists(dir_link) == 0)
+
+    fs.remove_tree(base)
+    println("=== All cases passed ===")
+}

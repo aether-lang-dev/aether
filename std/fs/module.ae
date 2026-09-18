@@ -146,15 +146,19 @@ extern dir_list_raw(path: string) -> ptr
 // `mkdir_p` wrapper below in most code.
 extern fs_mkdir_p_raw(path: string) -> int
 
-// Symbolic-link operations (raw externs).
+// Symbolic-link operations (raw externs). POSIX symlink(2) / readlink(2) /
+// lstat(2); on Windows CreateSymbolicLinkW, the link's own reparse data
+// and the directory entry's reparse tag.
 //   fs_symlink_raw   — create a symlink at `link_path` pointing to `target`.
-//                      `target` is recorded verbatim (relative stays relative).
+//                      `target` is recorded verbatim (relative stays relative);
+//                      Windows stores its separators as backslashes.
 //   fs_readlink_raw  — read a symlink's target. Returns null if not a symlink.
+//                      `@heap`: a fresh strdup'd string the tracker frees.
 //   fs_is_symlink    — does NOT follow; returns 1 only for the link itself.
 //                      Pure boolean query, no wrapper (matches file_exists).
 //   fs_unlink_raw    — remove a file or symlink (NOT a directory).
 extern fs_symlink_raw(target: string, link_path: string) -> int
-extern fs_readlink_raw(path: string) -> string
+extern fs_readlink_raw(path: string) -> string @heap
 // Both return a fresh strdup'd path (or null). `@heap` so the heap-tracker
 // frees the C allocation — without it the returned path leaks (caught by the
 // macOS leaks gate).
@@ -548,7 +552,12 @@ mkdir_p(path: string) -> {
 
 // Create a symbolic link at `link_path` pointing to `target`. The target
 // is recorded verbatim — relative targets stay relative. Returns "" on
-// success, error on failure (e.g. `link_path` already exists).
+// success, error on failure (e.g. `link_path` already exists). On Windows
+// a relative target is resolved against the link's directory to decide
+// whether the link is to a directory (Windows records that), the
+// target's separators are stored as backslashes, and creating a link
+// needs the privilege administrators hold and Developer Mode grants
+// everyone; without it this fails.
 symlink(target: string, link_path: string) -> {
     ok = fs_symlink_raw(target, link_path)
     if ok == 0 {
@@ -564,8 +573,9 @@ readlink(path: string) -> {
     if target == null {
         return "", "not a symlink"
     }
-    target_copy = string_concat(target, "")
-    return target_copy, ""
+    // target is @heap-owned; hand it straight back (the copy this used to
+    // make left the C allocation to leak on every call).
+    return target, ""
 }
 
 // make_temp_dir(dir, prefix) — atomically create and return a uniquely-named
@@ -908,8 +918,11 @@ move(src: string, dst: string) -> {
 // components. Returns (resolved_path, KIND_OK, "") on success,
 // ("", KIND_*, msg) on failure (KIND_NOT_FOUND if a component is
 // missing, KIND_LOOP for symlink cycles, KIND_NAME_TOO_LONG if the
-// resolved form exceeds the OS limit). The returned path is
-// owned by the runtime; the caller does not need to free it.
+// resolved form exceeds the OS limit). The resolved path is spelled
+// the way the OS spells it: `/`-separated on POSIX; on Windows
+// backslashes with the drive letter upper-cased (`D:\dir\file`) or,
+// for a network path, its `\\server\share\...` root. The returned
+// path is owned by the runtime; the caller does not need to free it.
 realpath(path: string) -> {
     return fs_realpath_raw(path)
 }

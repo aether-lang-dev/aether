@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 
 OptimizationStats global_opt_stats = {0, 0, 0, 0, 0};
 
@@ -47,119 +48,225 @@ static double get_constant_value(ASTNode* node) {
     return atof(node->value);
 }
 
-// Helper: create a literal node with a numeric value
-static ASTNode* create_numeric_literal(double value, int is_int, int line, int column) {
+// Helper: create a literal node with a float value
+static ASTNode* create_float_literal(double value, int line, int column) {
     char buffer[64];
-    if (is_int && value == (double)(long long)value) {
-        snprintf(buffer, sizeof(buffer), "%lld", (long long)value);
-    } else {
-        /* A float result is spelled as a float: 17 significant digits round-
-         * trip every double, and a whole-number value keeps a `.0` so the C
-         * literal is a double. `%.10g` wrote `2.5 * 2` as `5`, an int in C,
-         * which read as a double through printf's `%g` was garbage, and had
-         * already lost digits on the way. */
-        snprintf(buffer, sizeof(buffer), "%.17g", value);
-        if (!strpbrk(buffer, ".eEnN")) {
-            size_t n = strlen(buffer);
-            if (n + 2 < sizeof(buffer)) { buffer[n] = '.'; buffer[n + 1] = '0'; buffer[n + 2] = '\0'; }
-        }
+    /* A float result is spelled as a float: 17 significant digits round-
+     * trip every double, and a whole-number value keeps a `.0` so the C
+     * literal is a double. `%.10g` wrote `2.5 * 2` as `5`, an int in C,
+     * which read as a double through printf's `%g` was garbage, and had
+     * already lost digits on the way. */
+    snprintf(buffer, sizeof(buffer), "%.17g", value);
+    if (!strpbrk(buffer, ".eEnN")) {
+        size_t n = strlen(buffer);
+        if (n + 2 < sizeof(buffer)) { buffer[n] = '.'; buffer[n + 1] = '0'; buffer[n + 2] = '\0'; }
     }
     ASTNode* node = create_ast_node(AST_LITERAL, buffer, line, column);
-    node->node_type = create_type(is_int ? TYPE_INT : TYPE_FLOAT);
+    node->node_type = create_type(TYPE_FLOAT);
     return node;
+}
+
+/* The numeric kinds a literal operand can have. The fold computes in the
+ * kind the generated C computes in — `int` wraps at 32 bits, `long` at
+ * 64, `uint64` is unsigned, and anything with a float is a double — so
+ * a folded expression and the same expression over variables agree. */
+typedef enum { LIT_OTHER, LIT_INT, LIT_INT64, LIT_UINT64, LIT_FLOAT } LiteralKind;
+
+/* Parse an integer literal's spelling — decimal, 0x, 0o or 0b, with an
+ * optional sign — into its magnitude. 0 when it is not one or does not
+ * fit 64 bits. */
+static int parse_integer_literal(const char* s, unsigned long long* magnitude, int* negative) {
+    *negative = 0;
+    if (*s == '-') { *negative = 1; s++; } else if (*s == '+') { s++; }
+    int base = 10;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+    else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+    else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+    if (!*s) return 0;
+    errno = 0;
+    char* end = NULL;
+    *magnitude = strtoull(s, &end, base);
+    return errno == 0 && end && *end == '\0';
+}
+
+/* The kind of a numeric literal: the type the checker stamped, or, for a
+ * literal it did not reach, the narrowest kind its spelling fits. */
+static LiteralKind literal_kind(ASTNode* node) {
+    if (!is_constant(node)) return LIT_OTHER;
+    if (node->node_type) {
+        switch (node->node_type->kind) {
+            case TYPE_INT:    return LIT_INT;
+            case TYPE_INT64:  return LIT_INT64;
+            case TYPE_UINT64: return LIT_UINT64;
+            case TYPE_FLOAT:  return LIT_FLOAT;
+            default:          return LIT_OTHER;
+        }
+    }
+    unsigned long long magnitude;
+    int negative;
+    if (parse_integer_literal(node->value, &magnitude, &negative)) {
+        if (magnitude <= (unsigned long long)INT_MAX) return LIT_INT;
+        if (magnitude <= (unsigned long long)LLONG_MAX || negative) return LIT_INT64;
+        return LIT_UINT64;
+    }
+    char* end = NULL;
+    strtod(node->value, &end);
+    return (end && end != node->value && *end == '\0') ? LIT_FLOAT : LIT_OTHER;
+}
+
+/* The value of an integer literal as the 64-bit two's-complement pattern
+ * the generated C holds, so signed and unsigned kinds share one fold. */
+static unsigned long long integer_literal_bits(ASTNode* node) {
+    unsigned long long magnitude = 0;
+    int negative = 0;
+    if (!parse_integer_literal(node->value, &magnitude, &negative)) return 0;
+    return negative ? 0ULL - magnitude : magnitude;
+}
+
+static void report_const_overflow(ASTNode* node, const char* msg) {
+    AetherError w = {NULL, NULL, node->line, node->column, msg,
+                     NULL, NULL, AETHER_WARN_CONST_OVERFLOW};
+    aether_warning_report(&w);
+}
+
+/* Fold `left op right` over two integer literals in the kind the runtime
+ * would use: uint64 if either is, else long if either is, else int.
+ * Returns NULL when the expression is left to the runtime — a division
+ * by zero, or the one signed quotient C leaves undefined. */
+static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right,
+                                    LiteralKind lk, LiteralKind rk) {
+    const char* op = node->value;
+    unsigned long long a = integer_literal_bits(left);
+    unsigned long long b = integer_literal_bits(right);
+    LiteralKind kind = (lk == LIT_UINT64 || rk == LIT_UINT64) ? LIT_UINT64
+                     : (lk == LIT_INT64 || rk == LIT_INT64)   ? LIT_INT64
+                     : LIT_INT;
+    int is_signed = kind != LIT_UINT64;
+    unsigned long long bits;
+    int overflow = 0;
+    if (strcmp(op, "+") == 0) {
+        bits = a + b;
+        if (is_signed) { long long r; overflow = __builtin_add_overflow((long long)a, (long long)b, &r); }
+    } else if (strcmp(op, "-") == 0) {
+        bits = a - b;
+        if (is_signed) { long long r; overflow = __builtin_sub_overflow((long long)a, (long long)b, &r); }
+    } else if (strcmp(op, "*") == 0) {
+        bits = a * b;
+        if (is_signed) { long long r; overflow = __builtin_mul_overflow((long long)a, (long long)b, &r); }
+    } else if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+        if (b == 0) return NULL;
+        int quotient = op[0] == '/';
+        if (!is_signed) {
+            bits = quotient ? a / b : a % b;
+        } else {
+            long long sa = (long long)a, sb = (long long)b;
+            if (sa == LLONG_MIN && sb == -1) return NULL;
+            bits = (unsigned long long)(quotient ? sa / sb : sa % sb);
+        }
+    } else {
+        return NULL;
+    }
+
+    char buffer[32];
+    TypeKind type;
+    if (kind == LIT_INT) {
+        /* The generated C computes the expression in `int`, so the fold
+         * must land on the value the runtime produces, or a literal form
+         * looks right while the identical expression over variables
+         * wraps: `(250000000 - 200000000) * 50 / 225000000` once folded
+         * to 11 against a runtime -7, which hid a benchmark runner's
+         * overflow. Wrap, and warn: an int expression whose true value
+         * does not fit is a bug essentially every time, and here the
+         * compiler can prove it. */
+        long long exact = (long long)bits;
+        int wrapped = (int)exact;
+        if ((long long)wrapped != exact) {
+            char msg[256];
+            snprintf(msg, sizeof(msg),
+                     "int constant expression overflows 32 bits: the exact value is "
+                     "%lld, which wraps to %d at runtime. Widen a term to `long` "
+                     "(e.g. `long x = a` then `x * b`) to keep the full value.",
+                     exact, wrapped);
+            report_const_overflow(node, msg);
+        }
+        snprintf(buffer, sizeof(buffer), "%d", wrapped);
+        type = TYPE_INT;
+    } else if (kind == LIT_INT64) {
+        if (overflow) {
+            char msg[160];
+            snprintf(msg, sizeof(msg),
+                     "long constant expression overflows 64 bits and wraps to %lld at runtime.",
+                     (long long)bits);
+            report_const_overflow(node, msg);
+        }
+        snprintf(buffer, sizeof(buffer), "%lld", (long long)bits);
+        type = TYPE_INT64;
+    } else {
+        snprintf(buffer, sizeof(buffer), "%llu", bits);
+        type = TYPE_UINT64;
+    }
+    ASTNode* folded = create_ast_node(AST_LITERAL, buffer, node->line, node->column);
+    folded->node_type = create_type(type);
+    return folded;
+}
+
+static double literal_as_double(ASTNode* node, LiteralKind kind) {
+    if (kind == LIT_FLOAT) return atof(node->value);
+    unsigned long long bits = integer_literal_bits(node);
+    return kind == LIT_UINT64 ? (double)bits : (double)(long long)bits;
+}
+
+/* Fold `left op right` where at least one side is a float literal, in
+ * double, the way the generated C computes it. NULL leaves it to the
+ * runtime (division by zero). */
+static ASTNode* fold_float_binary(ASTNode* node, ASTNode* left, ASTNode* right,
+                                  LiteralKind lk, LiteralKind rk) {
+    const char* op = node->value;
+    double a = literal_as_double(left, lk);
+    double b = literal_as_double(right, rk);
+    double result;
+    if (strcmp(op, "+") == 0)      result = a + b;
+    else if (strcmp(op, "-") == 0) result = a - b;
+    else if (strcmp(op, "*") == 0) result = a * b;
+    else if (strcmp(op, "/") == 0) { if (b == 0.0) return NULL; result = a / b; }
+    else if (strcmp(op, "%") == 0) { if (b == 0.0) return NULL; result = fmod(a, b); }
+    else return NULL;
+    return create_float_literal(result, node->line, node->column);
 }
 
 // Constant folding for binary expressions
 static ASTNode* fold_binary_expression(ASTNode* node) {
     if (!node || node->type != AST_BINARY_EXPRESSION) return node;
     if (node->child_count < 2) return node;
-    
+
     ASTNode* left = node->children[0];
     ASTNode* right = node->children[1];
-    
+
     // Recursively fold children first
     left = optimize_constant_folding(left);
     right = optimize_constant_folding(right);
     node->children[0] = left;
     node->children[1] = right;
-    
-    // If both operands are constants, fold the expression
-    if (is_constant(left) && is_constant(right)) {
-        double left_val = get_constant_value(left);
-        double right_val = get_constant_value(right);
-        double result = 0.0;
-        int can_fold = 1;
-        
-        const char* op = node->value;
-        if (strcmp(op, "+") == 0) {
-            result = left_val + right_val;
-        } else if (strcmp(op, "-") == 0) {
-            result = left_val - right_val;
-        } else if (strcmp(op, "*") == 0) {
-            result = left_val * right_val;
-        } else if (strcmp(op, "/") == 0) {
-            if (right_val != 0.0) {
-                result = left_val / right_val;
-            } else {
-                can_fold = 0; // Division by zero, can't fold
-            }
-        } else if (strcmp(op, "%") == 0) {
-            if (right_val != 0.0) {
-                result = fmod(left_val, right_val);
-            } else {
-                can_fold = 0;
-            }
-        } else {
-            can_fold = 0; // Unknown operator
-        }
-        
-        if (can_fold) {
-            global_opt_stats.constants_folded++;
-            // Preserve integer type if both operands are integers
-            int both_int = (left->node_type && left->node_type->kind == TYPE_INT) &&
-                           (right->node_type && right->node_type->kind == TYPE_INT);
-            // When both operands are int, use C integer division semantics (truncate)
-            // so that 10/3 = 3, not 3.333... — avoids %d format mismatch warning
-            if (both_int) {
-                long long exact = (long long)result;
-                /* The fold runs in double, which represents values far
-                 * beyond 32 bits exactly, but the emitted C computes the
-                 * same expression in `int`. Left alone, the two disagree:
-                 * `(250000000 - 200000000) * 50 / 225000000` folded to 11
-                 * while the identical expression over int VARIABLES
-                 * evaluated to -7 at runtime. That gap is what let the
-                 * benchmark runner's CV overflow hide during development
-                 * (the literal form looked right).
-                 *
-                 * Wrap to the value the runtime actually produces, so
-                 * constant folding is semantics-preserving, and warn:
-                 * an int expression whose true value does not fit is a
-                 * bug essentially every time, and here the compiler can
-                 * prove it. Widen a term to `long` to keep the value. */
-                int wrapped = (int)exact;
-                if ((long long)wrapped != exact) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
-                             "int constant expression overflows 32 bits: the exact value is "
-                             "%lld, which wraps to %d at runtime. Widen a term to `long` "
-                             "(e.g. `long x = a` then `x * b`) to keep the full value.",
-                             exact, wrapped);
-                    AetherError w = {NULL, NULL, node->line, node->column, msg,
-                                     NULL, NULL, AETHER_WARN_CONST_OVERFLOW};
-                    aether_warning_report(&w);
-                }
-                result = (double)wrapped;
-            }
-            ASTNode* folded = create_numeric_literal(result, both_int, node->line, node->column);
-            /* The whole folded subtree goes, operands included: the hand-rolled
-             * teardown here released the children ARRAY but never the child
-             * nodes, so every folded expression leaked its operands (#1667). */
-            free_ast_node(node);
-            return folded;
-        }
-    }
-    
-    return node;
+
+    /* Both operands numeric literals: fold in the kind the runtime uses.
+     * A duration, string or bool operand is left alone — a duration's
+     * spelling (`500ms`) is not a number, and folding it as one gave
+     * `1s + 500ms` the value 501. */
+    LiteralKind lk = literal_kind(left);
+    LiteralKind rk = literal_kind(right);
+    if (lk == LIT_OTHER || rk == LIT_OTHER) return node;
+
+    ASTNode* folded = (lk == LIT_FLOAT || rk == LIT_FLOAT)
+                    ? fold_float_binary(node, left, right, lk, rk)
+                    : fold_integer_binary(node, left, right, lk, rk);
+    if (!folded) return node;
+
+    global_opt_stats.constants_folded++;
+    /* The whole folded subtree goes, operands included: the hand-rolled
+     * teardown here released the children ARRAY but never the child
+     * nodes, so every folded expression leaked its operands (#1667). */
+    free_ast_node(node);
+    return folded;
 }
 
 /* ---------------------------------------------------------------------------
