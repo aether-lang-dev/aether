@@ -20,6 +20,27 @@ version number before tagging the release.
   now made against the spelling `ae` receives, the way `ae_add_tag_pin`
   already does it. The only failure in a full Windows sweep.
 
+## [0.684.0]
+
+### Fixed
+
+- **A closure that returned a string on one path and a `-> ptr` builtin's
+  result on another handed a string literal to a caller that freed it.**
+  `resolve_closure_return_type` typed a closure by its FIRST return site.
+  `string.from_int(x)` is declared `-> ptr` (an AetherString behind a raw
+  pointer), so a closure returning it on one path and a struct's string
+  field on another was emitted `void*`, was not a string closure, and none
+  of its returns got the uniform-heap wrap of #2054 — while its caller, a
+  `-> string` function returning `cb(...)`, took ownership of the result and
+  freed it. The field path returned a literal; the caller `free()`d it:
+  STATUS_HEAP_CORRUPTION on Windows, SIGABRT on macOS, silently absorbed by
+  glibc. aether-ui's table cell callback has exactly that shape, so every
+  table in that tree aborted at startup from 0.682 on. Any string-typed
+  return site now makes the closure `const char*`, so every path is
+  wrapped: the literal is copied out, the AetherString is copied out by its
+  header, and the caller owns both. `tests/regression/
+  test_closure_mixed_string_returns.ae` drives both sites fifty times.
+
 ## [0.683.0]
 
 ### Fixed
