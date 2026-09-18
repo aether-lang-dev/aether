@@ -1,6 +1,8 @@
 #include "codegen_internal.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
+#include <errno.h>
+#include <limits.h>
 
 /* Argument-temp lifetime management for nested heap-returning calls.
  *
@@ -298,6 +300,11 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  *                           for shifts at width 32+)
  *   0x...   → unchanged    (already valid C)
  *   123     → unchanged    (decimal — the C compiler widens as needed)
+ *   18446744073709551615 → ...ULL (a decimal past LLONG_MAX has no C
+ *                           type without the suffix; gcc takes it as
+ *                           unsigned with a warning, which -Werror
+ *                           builds of the generated C turn into an
+ *                           error)
  *
  * Writes the translated form into `out` (size `out_size`). Returns
  * `out` on translation, or the original `value` if no translation
@@ -307,7 +314,18 @@ static int is_stdlib_string_aware_extern(const char* c_func_name) {
  * reached codegen.
  */
 static const char* translate_integer_literal(const char* value, char* out, size_t out_size) {
-    if (!value || value[0] != '0' || !value[1]) return value;
+    if (!value || !value[0]) return value;
+    if (value[0] != '0' || !value[1]) {
+        if (value[0] < '1' || value[0] > '9') return value;
+        errno = 0;
+        char* end = NULL;
+        unsigned long long magnitude = strtoull(value, &end, 10);
+        if (errno == 0 && end && *end == '\0' && magnitude > (unsigned long long)LLONG_MAX &&
+            snprintf(out, out_size, "%sULL", value) < (int)out_size) {
+            return out;
+        }
+        return value;
+    }
     char p = value[1];
     if (p == 'x' || p == 'X') return value;
     if (p == 'o' || p == 'O') {
@@ -2435,7 +2453,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "%lldLL", parse_duration_literal_ns(expr->value));
             } else {
                 /* Numeric literals: translate 0o / 0b prefixes that C
-                 * doesn't accept. Decimal / 0x pass through unchanged. */
+                 * doesn't accept and suffix a decimal past LLONG_MAX;
+                 * everything else passes through unchanged. */
                 char buf[64];
                 fprintf(gen->output, "%s",
                         translate_integer_literal(expr->value, buf, sizeof(buf)));
