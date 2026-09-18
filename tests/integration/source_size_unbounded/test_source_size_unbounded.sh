@@ -10,7 +10,12 @@
 #
 #   main file      6,000 functions  (~72k tokens, old cap 50,000)
 #   imported module 9,000 functions (~126k tokens, old cap 100,000)
-#   interpolation   ${x0 + ... + x300} (601 tokens, old cap 512)
+#   interpolation   ${x0 * 1 + ... + x149 * 1} (600 tokens, old cap 512)
+#
+# The interpolation is spelled with a `* 1` per term rather than as a
+# longer plain sum because the generated C parenthesises every binary
+# node, and clang refuses more than 256 nested brackets (#2071); 150
+# terms stay under that while still passing the old token cap.
 #
 # The sources are generated into a temp dir so nothing this large is
 # committed. The program calls the first, middle and last function of each
@@ -32,7 +37,7 @@ mkdir -p "$WORK/bigmod"
 
 MAIN_N=6000
 MOD_N=9000
-TERMS=300
+TERMS=150
 
 awk -v n="$MOD_N" 'BEGIN {
     printf "exports("
@@ -49,7 +54,7 @@ awk -v n="$MAIN_N" -v m="$MOD_N" -v terms="$TERMS" 'BEGIN {
     printf "    b = bigmod.add_0(1) + bigmod.add_%d(1) + bigmod.add_%d(1)\n", int(m / 2), m - 1
     for (i = 0; i <= terms; i++) printf "    x%d = %d\n", i, i
     printf "    println(\"a=${a} b=${b} s=${"
-    for (i = 0; i <= terms; i++) printf "%sx%d", (i ? " + " : ""), i
+    for (i = 0; i <= terms; i++) printf "%sx%d * 1", (i ? " + " : ""), i
     print "}\")"
     print "}"
 }' > "$WORK/main.ae"
