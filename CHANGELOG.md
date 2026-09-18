@@ -26,8 +26,6 @@ version number before tagging the release.
   of spawning `echo`) likewise run there now.
 =======
 
-### Fixed
-
 - **A tuple-bound name passed where a parameter takes a scalar is refused
   at the call.** `l = dir.list(".")` binds the `(ptr, string)` the call
   returns to one name, and `dir.list_count(l)` then reached the C compiler:
