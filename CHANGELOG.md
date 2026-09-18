@@ -21,6 +21,15 @@ version number before tagging the release.
   printing `[PASS]` and the sweep counted a failure — the only red on
   #2076's Windows leg. Cleanup is now tolerated (`|| true`) in every one of
   them; the outcome is decided by the assertions alone.
+- **`ae add` fell back to `git clone` on FreeBSD (and arm64 Windows) hosts.**
+  `ae_host_triple()` mapped only linux/macOS ×64/arm64 and windows-x86_64 to a
+  release-asset triple, returning `NULL` for everything else — so a FreeBSD host
+  could never fetch a published release artifact even when the publisher ships
+  `freebsd-x86_64` / `freebsd-arm64` binaries, and silently git-cloned instead.
+  Added the `__FreeBSD__` cases (both arches) and `windows-arm64`, matching the
+  existing `<os>-<arch>` release convention. Compile-time only; verified the
+  triple selection per platform and that the FreeBSD block compiles under the
+  real cross toolchain.
 =======
 
 ## [0.691.0]

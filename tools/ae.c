@@ -7467,6 +7467,16 @@ static const char* ae_host_triple(void) {
 #elif defined(_WIN32)
 #  if defined(__x86_64__) || defined(_M_X64)
     return "windows-x86_64";
+#  elif defined(_M_ARM64) || defined(__aarch64__)
+    return "windows-arm64";
+#  else
+    return NULL;
+#  endif
+#elif defined(__FreeBSD__)
+#  if defined(__x86_64__)
+    return "freebsd-x86_64";
+#  elif defined(__aarch64__)
+    return "freebsd-arm64";
 #  else
     return NULL;
 #  endif
