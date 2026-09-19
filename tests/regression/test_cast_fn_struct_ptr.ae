@@ -1,0 +1,46 @@
+// `f as fn(..., *Struct, ...)` — a cast to a fn type whose signature
+// carries a pointer-to-struct (#2094).
+//
+// The typechecker handed the cast's inferred type back as a hand-rolled
+// shallow copy that shared each parameter's element_type with the node the
+// parser built. The caller freed that copy, taking `Thing` out of
+// `fn(ptr, *Thing, float)` from under the cast, and the next clone of the
+// node walked freed memory: aetherc died with exit 127 and no diagnostic.
+// `fn(ptr, ptr, float)` had no element types to share and was fine, which
+// is why the crash hid behind the pointer spelling.
+
+struct Thing { value: int }
+
+struct Slot {
+    hook: fn(ptr, *Thing, float)
+    peek: fn(*Thing) -> int
+}
+
+tick(state: ptr, thing: *Thing, delta: float) { thing.value = thing.value + 1 }
+peek_value(thing: *Thing) -> int { return thing.value }
+bump(thing: *Thing) -> *Thing {
+    thing.value = thing.value + 10
+    return thing
+}
+
+extern exit(code: int)
+
+main() {
+    slot = Slot { hook: null, peek: null }
+    slot.hook = tick as fn(ptr, *Thing, float)
+    slot.peek = peek_value as fn(*Thing) -> int
+    thing = Thing { value: 0 }
+    slot.hook(null, &thing, 0.5)
+    slot.hook(null, &thing, 0.5)
+    if slot.peek(&thing) != 2 {
+        println("FAIL: hook through the cast ran ${slot.peek(&thing)} times, expected 2")
+        exit(1)
+    }
+    // A struct pointer in the return position, and a local bound from the cast.
+    bumper = bump as fn(*Thing) -> *Thing
+    if bumper(&thing).value != 12 {
+        println("FAIL: cast with a *Thing return gave ${thing.value}, expected 12")
+        exit(1)
+    }
+    println("PASS: casts to fn types with struct pointers compile and run")
+}

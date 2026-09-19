@@ -2135,31 +2135,16 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                     return create_type(TYPE_UNKNOWN);
                 }
             }
-            /* The parser stashed the TYPE_FUNCTION (with signature)
-             * on the node — return it (copy preserved). */
+            /* The parser stashed the TYPE_FUNCTION (with signature) on
+             * the node; the caller owns what infer_type returns and frees
+             * it, so hand back a full clone. A hand-rolled shallow copy
+             * used to share each parameter's element_type with the node:
+             * the caller's free_type then took the `Thing` out of
+             * `fn(ptr, *Thing, float)` from under the cast, and the next
+             * clone_type of the node walked freed memory (#2094). */
             if (expr->node_type) {
-                /* Don't free — caller may inspect; return a borrow
-                 * via a shallow clone to keep ownership clean. */
-                Type* dup = create_type(TYPE_FUNCTION);
+                Type* dup = clone_type(expr->node_type);
                 dup->is_fnptr = 1;  /* cast → raw fn-pointer */
-                dup->param_count = expr->node_type->param_count;
-                if (dup->param_count > 0) {
-                    dup->param_types = malloc((size_t)dup->param_count * sizeof(Type*));
-                    for (int i = 0; i < dup->param_count; i++) {
-                        Type* src = expr->node_type->param_types[i];
-                        Type* d = create_type(src->kind);
-                        d->struct_name = src->struct_name ? strdup(src->struct_name) : NULL;
-                        d->element_type = src->element_type;  /* shallow */
-                        dup->param_types[i] = d;
-                    }
-                }
-                if (expr->node_type->return_type) {
-                    Type* src = expr->node_type->return_type;
-                    Type* d = create_type(src->kind);
-                    d->struct_name = src->struct_name ? strdup(src->struct_name) : NULL;
-                    d->element_type = src->element_type;
-                    dup->return_type = d;
-                }
                 return dup;
             }
             Type* fb = create_type(TYPE_FUNCTION);
