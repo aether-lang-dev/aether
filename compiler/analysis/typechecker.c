@@ -659,6 +659,63 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
     return lookup_symbol(table, qualified_name);
 }
 
+/* The file the top-level definition being checked came from. Modules are
+ * merged into one program before checking, so a diagnostic raised inside an
+ * imported function carried the module's line under the MAIN file's name
+ * (`main.ae:4:17` for `noise/module.ae:4:17`, #2064) — a location that
+ * exists and is wrong. typecheck_program sets this from each top-level
+ * node's source_file; the reporter reads the module file for its snippet. */
+static const char* g_tc_file = NULL;
+
+static void tc_report(const char* message, int line, int column, AetherErrorCode code) {
+    AetherError e = { g_tc_file, NULL, line, column, message, NULL, NULL, code };
+    aether_error_report(&e);
+}
+
+/* The builtins whose calls codegen lowers by NAME, with the arity its
+ * dispatch keys on (the `strcmp(func_name, "...")` chain in
+ * generate_expression's call case; max -1 = any). A user definition with a
+ * parameter count in that range would be defined and never called. A
+ * definition outside it (a two-argument `isolate`, a zero-argument
+ * `select`) is a plain function and stays legal. `atoi` yields to a user
+ * definition in codegen and is not listed. */
+static int builtin_lowered_by_name(const char* name, int params) {
+    static const struct { const char* name; int min; int max; } names[] = {
+        {"isolate", 1, 1}, {"consume", 1, 1}, {"release", 1, 1},
+        {"call", 1, -1}, {"select", 1, -1}, {"force", 1, 1}, {"lazy", 1, 1},
+        {"typeof", 0, -1}, {"is_type", 0, -1}, {"convert_type", 0, -1},
+        {"char_at", 1, -1}, {"str_eq", 2, 2},
+        {"ref", 1, 1}, {"ref_get", 1, 1}, {"ref_set", 2, 2}, {"ref_free", 1, 1},
+        {"box_closure", 1, 1}, {"unbox_closure", 1, 1},
+        {"print", 0, -1}, {"println", 0, -1}, {"print_char", 1, -1},
+        {"read_char", 0, 0}, {"raw_mode", 0, 0}, {"cooked_mode", 0, 0},
+        {"exit", 0, -1}, {"sleep", 1, 1}, {"free", 1, 1}, {"getenv", 1, 1},
+        {"clock_ns", 0, 0}, {"wait_for_idle", 0, -1},
+        {"builder_context", 0, -1}, {"builder_depth", 0, -1}, {"thunk_free", 1, 1},
+        {"string_free", 1, 1}, {"string_release", 1, 1}, {"string_seq_free", 1, 1},
+        {"sandbox_install", 0, 0}, {"sandbox_uninstall", 0, 0},
+        {"sandbox_push", 1, 1}, {"sandbox_pop", 0, 0}, {"spawn_sandboxed", 2, -1},
+        {NULL, 0, 0}
+    };
+    for (int i = 0; names[i].name; i++) {
+        if (strcmp(name, names[i].name) != 0) continue;
+        return params >= names[i].min && (names[i].max < 0 || params <= names[i].max);
+    }
+    return 0;
+}
+
+/* Parameters of a function definition: every child that is not a body,
+ * guard or contract clause. */
+static int definition_param_count(ASTNode* def) {
+    int count = 0;
+    for (int i = 0; i < def->child_count; i++) {
+        ASTNode* p = def->children[i];
+        if (p && p->type != AST_GUARD_CLAUSE && p->type != AST_BLOCK &&
+            p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
+    }
+    return count;
+}
+
 void type_error(const char* message, int line, int column) {
     AetherErrorCode code = AETHER_ERR_TYPE_MISMATCH;
     if (strstr(message, "not exported")) code = AETHER_ERR_NOT_EXPORTED;
@@ -671,7 +728,7 @@ void type_error(const char* message, int line, int column) {
         code = AETHER_ERR_UNDEFINED_TYPE;
     else if (strstr(message, "Redefinition") || strstr(message, "redefinition"))
         code = AETHER_ERR_REDEFINITION;
-    aether_error_with_code(message, line, column, code);
+    tc_report(message, line, column, code);
     error_count++;
 }
 
@@ -903,7 +960,7 @@ static void warn_conditional_defers_in_infallible(ASTNode* func, Type* ret) {
 
 void type_warning(const char* message, int line, int column) {
     AetherError w = {
-        .filename = NULL, .source_code = NULL,
+        .filename = g_tc_file, .source_code = NULL,
         .line = line, .column = column,
         .message = message, .suggestion = NULL,
         .context = NULL, .code = AETHER_ERR_NONE
@@ -1506,6 +1563,35 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
              "destructure it: `value, err = ...`",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              type_name(param_type), spelled, arg->value);
+    type_error(emsg, arg->line, arg->column);
+}
+
+/* A closure passed where the parameter is a typed C function pointer
+ * (`fn(int) -> int`, is_fnptr). The parameter is a bare pointer with no
+ * environment, so the closure cannot fit it; the front end let it through
+ * and the C compiler reported `expected 'int (*)(int)' but argument is of
+ * type '_AeClosure'` against generated code. A closure literal, or a name
+ * bound to one, is refused here with the two spellings that work. A named
+ * function passes: it lowers to its own address. */
+static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode* arg,
+                                     Type* arg_type, Type* param_type, int index,
+                                     const char* param_name) {
+    if (!param_type || param_type->kind != TYPE_FUNCTION || !param_type->is_fnptr) return;
+    int is_closure = arg->type == AST_CLOSURE;
+    if (!is_closure && arg->type == AST_IDENTIFIER && arg->value &&
+        arg_type && arg_type->kind == TYPE_FUNCTION && !arg_type->is_fnptr) {
+        Symbol* sym = lookup_symbol(table, arg->value);
+        is_closure = sym && !sym->is_function;
+    }
+    if (!is_closure) return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': a closure cannot be passed as a typed function "
+             "pointer — the parameter is a C function pointer with no environment. "
+             "Take a bare `fn` parameter and call it with `call(%s, ...)`, or pass a "
+             "named function (`f as fn(...)`).",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             param_name ? param_name : "f");
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -2121,6 +2207,23 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
              * the parser populated on expr->node_type. */
             if (expr->child_count == 0 || !expr->children[0])
                 return create_type(TYPE_UNKNOWN);
+            /* A function NAME under the cast is the function's address.
+             * Marked so codegen emits the definition's C spelling: a user
+             * function whose name is a libc symbol (`read`, `time`, ...)
+             * is defined as `ae_<name>`, and the bare name under the cast
+             * used to reach libc's function instead (#2064). */
+            {
+                ASTNode* operand_node = expr->children[0];
+                if (operand_node->type == AST_IDENTIFIER && operand_node->value) {
+                    Symbol* fsym = lookup_symbol(table, operand_node->value);
+                    if (fsym && fsym->is_function && fsym->node &&
+                        (fsym->node->type == AST_FUNCTION_DEFINITION ||
+                         fsym->node->type == AST_BUILDER_FUNCTION)) {
+                        if (operand_node->annotation) free(operand_node->annotation);
+                        operand_node->annotation = strdup("fn_addr");
+                    }
+                }
+            }
             Type* operand = infer_type(expr->children[0], table);
             if (operand) {
                 int operand_ok = operand->kind == TYPE_PTR ||
@@ -3516,6 +3619,25 @@ int typecheck_program(ASTNode* program) {
                 // dispatcher), so function-vs-function must NOT fire.
                 if (child->value) {
                     Symbol* prior = lookup_symbol(global_table, child->value);
+                    /* A call to one of these is lowered by NAME in codegen
+                     * (`isolate(x)` is the identity, `release(s)` a free,
+                     * ...), so a user definition of the same name used to
+                     * register on top of the builtin and compile while every
+                     * call still went to the builtin: the body never ran,
+                     * with no diagnostic (#2073). Refuse at the definition,
+                     * for the arity codegen intercepts. Builtins codegen does
+                     * NOT intercept (`each`, `map`, `filter`) or that yield to
+                     * a user definition (`atoi`) stay definable. */
+                    if (prior && !prior->node && prior->is_function &&
+                        builtin_lowered_by_name(child->value, definition_param_count(child))) {
+                        char msg[320];
+                        snprintf(msg, sizeof(msg),
+                            "'%s' is a builtin function and cannot be redefined: "
+                            "a call by that name is lowered to the builtin, so "
+                            "this body would never run; rename it (e.g. '%s_')",
+                            child->value, child->value);
+                        type_error(msg, child->line, child->column);
+                    }
                     if (prior && prior->node &&
                         (prior->node->type == AST_FUNCTION_DEFINITION ||
                          prior->node->type == AST_BUILDER_FUNCTION) &&
@@ -4031,8 +4153,11 @@ int typecheck_program(ASTNode* program) {
 
     // Second pass: type check all nodes
     for (int i = 0; i < program->child_count; i++) {
-        typecheck_node(program->children[i], global_table);
+        ASTNode* top = program->children[i];
+        g_tc_file = top ? top->source_file : NULL;
+        typecheck_node(top, global_table);
     }
+    g_tc_file = NULL;
 
     // Collect module-level `var` global names (#701). A bare
     // `name = expr` inside a function whose `name` is one of these is a
@@ -9119,6 +9244,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 if (darg) {
                     Type* da = infer_type(darg, table);
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
                                   (da && da->kind == TYPE_BITSTRUCT);
@@ -9274,6 +9400,8 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     Type* arg_type = infer_type(call->children[param_idx], table);
                     reject_tuple_argument(table, call, call->children[param_idx], arg_type,
                                           param_type, param_idx + 1, param->value);
+                    reject_closure_for_fnptr(table, call, call->children[param_idx], arg_type,
+                                             param_type, param_idx + 1, param->value);
                     if (arg_type && arg_type->kind != TYPE_TUPLE && arg_type->kind != TYPE_UNKNOWN &&
                         !is_type_compatible(arg_type, param_type)) {
                         char error_msg[256];

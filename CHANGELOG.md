@@ -11,6 +11,57 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A closure parameter named like a libc symbol was renamed in the
+  signature but not in the body (#2087).** `|index: int|` declared
+  `ae_index` and read `index` — libc's `index(3)` on Linux, undeclared on
+  Windows — because the closure signature used the function-name mangler
+  (keywords + libc symbols) while the body used the value-name mangler
+  (keywords only). Both use the value mangler now; a parameter may shadow a
+  libc function, only a C keyword needs the rename.
+  `tests/regression/test_closure_param_libc_name.ae`.
+
+- **A user function named after a builtin compiled and was silently
+  ignored (#2073).** `isolate(named: string) { … }` registered on top of
+  the builtin, but every call by that name is lowered to the builtin, so
+  the body never ran and nothing said so. A definition with the arity
+  codegen intercepts is refused: `'isolate' is a builtin function and
+  cannot be redefined … rename it`; one outside it (a two-argument
+  `isolate`) is the plain function it always was.
+
+- **`when = 0.0` reported "Expected statement in block" at the `=`
+  (#2073).** A statement keyword used as an assignment target is now
+  refused at the keyword, with the rename named.
+
+- **`if x { a } ; b` was refused at the `;` (#2073).** A `;` is the
+  optional terminator every simple statement already accepts; a
+  block-ending statement did not take one. A `;` at statement position
+  belongs to whatever came before.
+
+- **A closure passed where the parameter is a typed C function pointer
+  reached the C compiler.** `run(f)` with `run(cb: fn(int) -> int)` and a
+  closure `f` failed in the generated C (`expected 'int (*)(int)' but
+  argument is of type '_AeClosure'`). It is refused at the call — a
+  closure carries an environment and a C function pointer has none — with
+  the two spellings that work (a bare `fn` parameter and `call(cb, …)`, or
+  a named function `as fn(...)`). A named function still passes.
+
+- **A type error inside an imported module named the main program with the
+  module's line numbers (#2064).** Modules are merged before checking, so
+  `noise/module.ae:4:17` was reported as `main.ae:4:17` — a location that
+  exists and is wrong. Every diagnostic now carries the file of the
+  top-level definition being checked, and the snippet is read from it.
+
+- **A user function named after a libc symbol reached libc's function when
+  used as a value (#2064).** `read(thing: *Thing) -> int` is defined as
+  `ae_read` and a direct call reached it, but `read as fn(*Thing) -> int`
+  and the adapter behind `g = read` emitted the bare name: on Windows the
+  program got libc `read`'s -1, on Linux a -Wint-conversion warning and
+  wrong code. Both positions now use the definition's spelling.
+  `tests/regression/test_fn_libc_name_as_value.ae`. The diagnostics above
+  are pinned by `tests/integration/reserved_name_diagnostics`.
+
 ## [0.697.0]
 
 ### Fixed
