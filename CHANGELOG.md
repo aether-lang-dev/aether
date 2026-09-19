@@ -11,7 +11,25 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.695.0]
+### Added
+
+- **`ae add --target <triple>` fetches a foreign platform's binary package.**
+  The binary-package path fetched only the host's shared lib; `--target
+  macos-arm64` (or any release triple — `linux-x86_64`, `freebsd-x86_64`, …) now
+  fetches that platform's lib instead, with the triple's own extension
+  (`.dylib`/`.dll`/`.so`), for cross-platform bundling / release CI. A `--target`
+  that names a package with no binary declaration is a hard error, not a
+  host-source fall-through, and `--target` with `--source` is rejected. (#2108,
+  the leaf-consumer host case is unchanged.)
+
+### Changed
+
+- **A binary package now REQUIRES a published `.sha256`.** The bare-lib path
+  previously warned and installed unverified when no checksum sidecar was
+  published (matching the archive path); it now refuses. A raw shared library
+  downloaded over the network deserves mandatory verification — stricter than a
+  git tag or a source archive. A published-but-mismatched checksum stays fatal
+  as before. (#2105.)
 
 ### Fixed
 
