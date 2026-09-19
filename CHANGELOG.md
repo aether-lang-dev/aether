@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.696.0]
+
 ### Added
 
 - **`ae add --target <triple>` fetches a foreign platform's binary package.**
