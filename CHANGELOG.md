@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.694.0]
+
 ### Added
 
 - **`ae add` installs a binary package: a bare per-triple shared lib named by a
