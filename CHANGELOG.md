@@ -11,6 +11,22 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A closure's own body local sharing a name with a promoted capture of the
+  enclosing function emitted undeclared C.** When an enclosing function had a
+  local that one closure captured-and-mutated — so codegen promoted it to a heap
+  cell — a *later* closure whose own body declared a local of the **same name**
+  had that local misclassified as the promoted capture: the body emitted a
+  cell-dereferencing write (`*idx = ...`) and marked the name pre-declared, but
+  the closure never captured it and no prologue alias existed, so gcc rejected
+  the generated C with `'<name>' undeclared` (in code the author never sees,
+  with a whole-graph blast radius for a fan-out build). A parent-promoted name is
+  now inherited into a closure's promoted-capture set only if the closure
+  actually captures it; an uncaptured same-named name is a shadowing own local
+  and declares normally. Landed in 0.675; verified fixed against a minimal
+  reproducer. `tests/regression/test_closure_local_shadows_promoted_capture.ae`.
+
 ## [0.696.0]
 
 ### Added

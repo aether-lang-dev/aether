@@ -2104,6 +2104,23 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 for (int p = 0; p < parent_promoted_count; p++) {
                     if (!parent_promoted[p]) continue;
                     if (is_closure_param(closure, parent_promoted[p])) continue;
+                    // A parent-promoted name is a promoted capture of THIS
+                    // closure only if the closure actually captures it — i.e.
+                    // it has the `T* name = _env->name;` prologue alias emitted
+                    // above. A parent-promoted name the closure does NOT capture
+                    // is either unused here or SHADOWED by a same-named local of
+                    // this closure's own body; inheriting it would (a) put a
+                    // dereferencing `*name` promoted-write on that own local and
+                    // (b) mark it pre-declared, so the local is never minted and
+                    // the emitted C references an undeclared name. Exclude it so
+                    // the own local declares normally.
+                    int captured = 0;
+                    for (int c = 0; c < cap_count; c++) {
+                        if (captures[c] && strcmp(captures[c], parent_promoted[p]) == 0) {
+                            captured = 1; break;
+                        }
+                    }
+                    if (!captured) continue;
                     body_promoted[body_promoted_count++] = parent_promoted[p];
                 }
                 for (int p = 0; p < own_promoted_count; p++) {
@@ -2123,9 +2140,20 @@ void emit_closure_definitions(CodeGenerator* gen) {
             // Mark promoted captures as already-declared in this local scope
             // so writes in the body hit the reassignment branch (emits
             // *name = ...) rather than trying to declare+malloc again.
-            // The prologue alias `T* name = _env->name;` is the declaration.
+            // The prologue alias `T* name = _env->name;` is the declaration —
+            // so only names this closure actually captures are pre-declared.
+            // A parent-promoted name the closure does NOT capture has no alias
+            // and may be shadowed by a same-named own local, which must declare
+            // normally (see the body_promoted filter above).
             for (int p = 0; p < parent_promoted_count; p++) {
-                if (parent_promoted[p]) mark_var_declared(gen, parent_promoted[p]);
+                if (!parent_promoted[p]) continue;
+                int captured = 0;
+                for (int c = 0; c < cap_count; c++) {
+                    if (captures[c] && strcmp(captures[c], parent_promoted[p]) == 0) {
+                        captured = 1; break;
+                    }
+                }
+                if (captured) mark_var_declared(gen, parent_promoted[p]);
             }
             /* A closure body is its own C function — it needs the same
              * heap-string lifecycle as a top-level function, or heap

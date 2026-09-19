@@ -1,0 +1,63 @@
+// Regression: a closure's OWN body local must not be unified with a
+// same-named PROMOTED capture of the enclosing function.
+//
+// closure-locals-unified-with-outer-block-names-emit-undeclared-c.md
+// (live on 0.696, landed 0.675). When an enclosing function has a local
+// (here `idx`/`entry`) that is captured-and-mutated by one closure — so
+// codegen promotes it to a heap cell — a LATER closure whose own body
+// declares locals of the SAME NAME had those locals wrongly treated as
+// promoted captures. The closure body emitted `*idx = ...` /
+// `_aether_str_cell_set(entry, ...)` (dereferencing a cell) and marked
+// the name pre-declared, but the closure never captured it and no
+// prologue alias `T* idx = _env->idx;` existed — so the generated C
+// referenced an undeclared `idx`/`entry` (a gcc hard error in code the
+// author never sees). The fix: a parent-promoted name is inherited into a
+// closure's promoted set only if the closure actually captures it; an
+// uncaptured same-named name is a shadowing own local and declares
+// normally.
+//
+// Compiling IS the assertion (the bug was a C-compile failure); the value
+// check guards that both the promoted-capture path and the own-local path
+// still compute correctly.
+
+import std.string
+import std.collections
+
+build(items: ptr) -> int {
+    total = 0
+
+    // Earlier block: idx/entry are captured AND mutated by `bump`, so the
+    // compiler promotes them to heap cells. bump: idx 0 -> 1, returns 1.
+    if collections.list_size(items) > 0 {
+        idx = 0
+        entry = "seed"
+        bump = || {
+            idx = idx + 1
+            entry = string.concat(entry, "!")
+            return idx
+        }
+        total = total + bump()
+    }
+
+    // Later closure: `idx`/`entry` here are its OWN locals, NOT captures of
+    // the promoted names above. each: 7 + length("local")=5 => 12.
+    each = | it: string | {
+        idx = 7
+        entry = "local"
+        return idx + string.length(entry)
+    }
+    total = total + each("x")
+    return total // 1 + 12 = 13
+}
+
+main() {
+    items = collections.list_new()
+    _a = collections.list_add(items, "a")
+    got = build(items)
+    println("got=${got}")
+    if got != 13 {
+        println("FAIL: expected 13, got ${got}")
+        exit(1)
+    }
+    println("PASS: closure own-local shadows promoted capture")
+}
