@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.695.0]
+
 ### Fixed
 
 - **A binary-package `import` in a non-entry module (a wrapper/adapter) did not
