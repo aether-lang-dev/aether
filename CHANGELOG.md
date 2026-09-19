@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.693.0]
+
 ### Fixed
 
 - **The language server never answered a request.** Its method extraction
