@@ -35,3 +35,13 @@ test_rsa_pkcs1 130
 # transient-extern annotation to opt in). Bounded (does not scale with element
 # count), and unrelated to the value-correctness this test asserts.
 test_closure_local_alloc_capture 20
+
+# test_closure_local_shadows_promoted_capture: the one residual leak is the
+# promoted heap cell for the earlier block's captured-and-mutated local (a
+# `bump` closure captures it, forcing capture promotion). That 20-byte cell is
+# reclaimed a generation late by capture-promotion's RCU discipline and is
+# INHERENT to any promoted-capture program — a bump-only program with no name
+# collision leaks the identical cell. It is independent of the shadowing bug
+# this test guards (a C-compile failure, fixed in codegen), which allocates
+# nothing itself. macOS-only gate (Linux doesn't leak-check this).
+test_closure_local_shadows_promoted_capture 1

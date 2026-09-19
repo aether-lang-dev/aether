@@ -1,0 +1,61 @@
+// Regression: a closure's OWN body local must not be unified with a
+// same-named PROMOTED capture of the enclosing function.
+//
+// closure-locals-unified-with-outer-block-names-emit-undeclared-c.md
+// (live on 0.696, landed 0.675). When an enclosing function has a local
+// (here `idx`/`entry`) captured-and-mutated by one closure — so codegen
+// promotes it to a heap cell — a LATER closure whose own body declares
+// locals of the SAME NAME had those locals wrongly treated as promoted
+// captures. The closure body emitted a cell-dereferencing write
+// (`*idx = ...`) and marked the name pre-declared, but the closure never
+// captured it and no prologue alias `T* idx = _env->idx;` existed — so the
+// generated C referenced an undeclared `idx`/`entry` (a gcc hard error in
+// code the author never sees). The fix: a parent-promoted name is inherited
+// into a closure's promoted set only if the closure actually captures it; an
+// uncaptured same-named name is a shadowing own local and declares normally.
+//
+// Compiling IS the assertion (the bug was a C-compile failure); the value
+// check guards that both the promoted-capture path and the own-local path
+// still compute correctly. No heap collections/strings are allocated so the
+// only leak is the promoted cell itself (inherent to capture promotion,
+// independent of this bug — see tests/leaks_known.txt).
+
+import std.string
+
+build(n: int) -> int {
+    total = 0
+
+    // Earlier block: idx/entry are captured AND mutated by `bump`, so the
+    // compiler promotes them to heap cells. bump: idx 0 -> 1, len("bumped")=6
+    // => returns 7.
+    if n > 0 {
+        idx = 0
+        entry = "seed"
+        bump = || {
+            idx = idx + 1
+            entry = "bumped"
+            return idx + string.length(entry)
+        }
+        total = total + bump()
+    }
+
+    // Later closure: `idx`/`entry` here are its OWN locals, NOT captures of
+    // the promoted names above. each: 7 + length("local")=5 => 12.
+    each = | it: string | {
+        idx = 7
+        entry = "local"
+        return idx + string.length(entry)
+    }
+    total = total + each("x")
+    return total // 7 + 12 = 19
+}
+
+main() {
+    got = build(1)
+    println("got=${got}")
+    if got != 19 {
+        println("FAIL: expected 19, got ${got}")
+        exit(1)
+    }
+    println("PASS: closure own-local shadows promoted capture")
+}
