@@ -1,7 +1,11 @@
 # The 0.697 closure fix is PARTIAL — the original trigger still emits undeclared C
 
-Follow-up to `asks/closure-locals-unified-with-outer-block-names-emit-undeclared-c.md`
-(merged as #2114) and to the fix `055fcc7d`, which shipped in **v0.697.0**.
+**Re:** `asks/closure-locals-unified-with-outer-block-names-emit-undeclared-c.md`
+(merged as #2114) · **Fix under test:** `055fcc7d`, shipped in **v0.697.0**
+**From:** servirtium-vcr on CachyOS (2026-09-19), the reporter of that ask
+
+This is a follow-up ASK, not a REPLY — the `REPLY-` prefix in this directory is
+for the answer to an ask, and the answer to this one is not mine to write.
 
 > **The fix is real and it works — for the shape the regression test covers.**
 > It does **not** fix the case that produced the original report, so aeb's
