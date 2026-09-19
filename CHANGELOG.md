@@ -34,7 +34,6 @@ version number before tagging the release.
   editor piping through the formatter had its line endings changed on every
   save. Both streams are binary now; the output is byte-identical to what the
   in-place path writes.
-=======
 
 ## [0.692.0]
 
