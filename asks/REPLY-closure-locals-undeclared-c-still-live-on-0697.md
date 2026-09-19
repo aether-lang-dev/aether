@@ -52,20 +52,32 @@ later closure's own local.
 test_...ae:25:126: error: 'idx' undeclared (first use in this function)
 ```
 
-Bisected to a single variable — **the enclosing block**. Identical statements,
-the earlier site merely unwrapped from `if n > 0 { … }`, compiles and runs
-(`n=2`). Nesting depth is what decides whether the spurious cell lands somewhere
-that has closed by the construction site:
+Bisected to a single variable — and the trigger is narrower than "a block". It
+is specifically an enclosing **`if`**. Identical statements, identical names,
+identical closure; only the wrapper changes:
 
 | earlier site | result on 0.697 |
 |---|---|
 | inside two nested `if`s | undeclared C |
 | inside one `if` | undeclared C |
+| inside a `while` (same inner `if`) | **compiles** |
 | at function scope | **compiles** |
 
-That last row suggests the spurious promotion may still happen at function scope
-and simply not error, because the cell stays in scope — worth checking, since it
-would mean the promotion bug is wider than the compile failure that reveals it.
+The real trigger (`dotnet_build_project`) is `if` → `if` → `while` → `if`, which
+fits: an enclosing `if` anywhere above the earlier occurrence is enough, and an
+intervening `while` neither causes nor prevents it.
+
+**This distinction decides the fix.** A fix keyed on "enclosing block" or on
+nesting depth could pass a `while`-based test while leaving the `if` case
+broken — which is exactly the half-fix shape `055fcc7d` already fell into once.
+Both rows belong in the regression test.
+
+**UNVERIFIED, and it matters:** "compiles" is not the same as "not promoted". If
+the spurious promotion still happens in the `while` and function-scope cases and
+merely fails to error because the cell stays in scope, then those two rows are
+silent carriers rather than genuinely clean, and the compile failure is only the
+symptom that happens to be visible. Neither of us has read the generated C for
+them. Do not treat the passing rows as proof of correctness.
 
 Column signature is identical to the real-world case (`:126` for `idx`, `:290`
 for `entry`), which is why I am confident this is the same defect and not a
