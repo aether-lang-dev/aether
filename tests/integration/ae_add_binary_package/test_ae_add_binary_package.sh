@@ -120,7 +120,12 @@ P="$(new_proj ok)"
 grep -q "as a binary package" "$TMP/ok.log" || fail "did not report a binary-package install" "$TMP/ok.log"
 grep -q "Checksum verified" "$TMP/ok.log" || fail "lib was not checksum-verified" "$TMP/ok.log"
 INST="$P/home/.aether/packages/$PKG"
-[ -f "$INST/$STEM-v1.0.0-$TRIPLE$EXT" ] || fail "the lib was not installed at $INST" "$TMP/ok.log"
+# The lib is staged under the RESOLVER-VISIBLE name <stem><ext> (NOT the full
+# versioned asset name <stem>-<tag>-<triple><ext>): ae_find_binimport_so only
+# probes lib<mod><ext> / <mod><ext>, so the versioned name would never resolve
+# on `import`. This is the regression the end-to-end Property 5 guards.
+[ -f "$INST/$STEM$EXT" ] || fail "the lib was not installed under its resolver-visible name $STEM$EXT" "$TMP/ok.log"
+[ -f "$INST/$STEM-v1.0.0-$TRIPLE$EXT" ] && fail "the lib was installed under the full versioned asset name; import cannot resolve it"
 [ -f "$INST/aether.toml" ] || fail "the aether.toml was not installed beside the lib" "$TMP/ok.log"
 
 # ---- Property 2: binary declared but no lib for this host is FATAL --------
@@ -151,5 +156,39 @@ fi
 grep -qi "checksum MISMATCH" "$TMP/badsum.log" || fail "mismatched checksum was not reported" "$TMP/badsum.log"
 [ -d "$P/home/.aether/packages/$PKG" ] && fail "a mismatched-checksum install left files behind"
 
-echo "  [PASS] ae_add_binary_package: bare lib + released aether.toml, verified, no fallback ladder"
+# ---- Property 5: END-TO-END — a real installed lib actually IMPORTS + RUNS -
+# Properties 1-4 use a random payload (they exercise fetch/verify/install). This
+# one builds a REAL importable shared lib, publishes it as a binary package, and
+# confirms `ae run` can `import` it after `ae add` — the whole point of the
+# feature. It is the regression guard for the install-name bug: staging the lib
+# under its full versioned asset name installs fine but never resolves on import
+# (ae_find_binimport_so probes lib<mod><ext> / <mod><ext> only).
+MOD="binpkgmod"
+BSTEM="lib$MOD"     # stem carries the lib prefix, like a conventional shared lib
+BREL="$FORGE/$PKG/releases/download/v5.0.0"
+mkdir -p "$BREL" "$TMP/libsrc"
+printf 'exports(add)\nadd(a: int, b: int) -> int { return a + b }\n' > "$TMP/libsrc/$MOD.ae"
+if ! "$AE" build --emit=lib "$TMP/libsrc/$MOD.ae" -o "$TMP/libsrc/$BSTEM$EXT" >"$TMP/libbuild.log" 2>&1; then
+    echo "  [SKIP] ae_add_binary_package: could not build a lib for the e2e case"; exit 0
+fi
+printf '[package]\nname = "pkg"\nmodules = "."\nbinary = "%s"\n' "$BSTEM" > "$BREL/aether.toml"
+BASSET="$BSTEM-v5.0.0-$TRIPLE$EXT"
+cp "$TMP/libsrc/$BSTEM$EXT" "$BREL/$BASSET"
+( cd "$BREL" && $SHA "$BASSET" | awk -v n="$BASSET" '{print $1"  "n}' > "$BASSET.sha256" )
+
+P="$(new_proj e2e)"
+printf 'import %s\nmain() {\n    println("sum=${%s.add(2, 40)}")\n    return 0\n}\n' "$MOD" "$MOD" > "$P/main.ae"
+( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
+    >"$TMP/e2e_add.log" 2>&1 || fail "e2e binary-package add failed" "$TMP/e2e_add.log"
+E2E="$P/home/.aether/packages/$PKG"
+[ -f "$E2E/$BSTEM$EXT" ] || fail "e2e lib not staged under $BSTEM$EXT" "$TMP/e2e_add.log"
+RUN=$( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" run main.ae 2>&1 )
+case "$RUN" in
+    *sum=42*) ;;
+    *) echo "  [FAIL] ae_add_binary_package: installed lib did not IMPORT+RUN (the install-name bug)"
+       printf '%s\n' "$RUN" | sed 's/^/        /'
+       exit 1 ;;
+esac
+
+echo "  [PASS] ae_add_binary_package: bare lib + released aether.toml, verified, imports+runs, no fallback ladder"
 exit 0

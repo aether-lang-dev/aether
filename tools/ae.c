@@ -7670,12 +7670,17 @@ static int ae_try_binary_package(const char* package, const char* tag,
         printf("Checksum verified.\n");
     }
 
-    /* 5. Install the lib + the aether.toml into pkg_dir. The lib keeps its full
-     * asset name so the module-import prepass finds it on the `.`-exported root;
-     * the aether.toml's modules="." is what puts pkg_dir on the search path. */
+    /* 5. Install the lib + the aether.toml into pkg_dir. The lib is staged under
+     * `<stem><ext>` (dropping the -<tag>-<triple> the ASSET name carries), because
+     * the binary-import resolver (ae_find_binimport_so) only probes for
+     * `lib<mod><ext>` and `<mod><ext>` on the search path — the full versioned
+     * asset name never matches, so `import <mod>` would not resolve. The consumer
+     * imports the stem, so `<stem><ext>` is the resolver-visible name (it matches
+     * the `<mod><ext>` probe, and the `lib<mod><ext>` probe when the stem carries
+     * the `lib` prefix). The aether.toml's modules="." puts pkg_dir on the path. */
     mkdirs(pkg_dir);
     char lib_dest[2048], toml_dest[2048];
-    if (ae_sprintf(lib_dest, sizeof(lib_dest), "%s/%s", pkg_dir, lib_asset) != 0 ||
+    if (ae_sprintf(lib_dest, sizeof(lib_dest), "%s/%s%s", pkg_dir, stem, ext) != 0 ||
         ae_sprintf(toml_dest, sizeof(toml_dest), "%s/aether.toml", pkg_dir) != 0) {
         remove(lib_path); remove(toml_tmp);
         return -1;
