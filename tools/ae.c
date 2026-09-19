@@ -7590,6 +7590,17 @@ static const char* ae_host_shlib_ext(void) {
 #endif
 }
 
+/* The shared-lib extension a release TRIPLE implies, by its OS prefix:
+ * macos-* -> .dylib, windows-* -> .dll, everything else (linux-*, freebsd-*,
+ * other ELF) -> .so. Used for `ae add --target <triple>`, where the artifact
+ * to fetch is a FOREIGN platform's, so the host's own extension is wrong. */
+static const char* ae_shlib_ext_for_triple(const char* triple) {
+    if (!triple) return ae_host_shlib_ext();
+    if (strncmp(triple, "macos-", 6) == 0)   return ".dylib";
+    if (strncmp(triple, "windows-", 8) == 0) return ".dll";
+    return ".so";
+}
+
 /* Last path component of "github.com/user/repo" -> "repo". */
 static const char* ae_pkg_basename(const char* package) {
     const char* slash = strrchr(package, '/');
@@ -7689,7 +7700,8 @@ static int ae_verify_sha256(const char* archive, const char* url_base,
  */
 static int ae_try_binary_package(const char* package, const char* tag,
                                  const char* triple, const char* url_base,
-                                 const char* tmp_dir, const char* pkg_dir) {
+                                 const char* tmp_dir, const char* pkg_dir,
+                                 int foreign_target) {
     /* 1. Fetch the released aether.toml (a normal named asset). */
     char toml_url[2048], toml_tmp[1024];
     if (ae_sprintf(toml_url, sizeof(toml_url), "%s/aether.toml", url_base) != 0 ||
@@ -7714,8 +7726,10 @@ static int ae_try_binary_package(const char* package, const char* tag,
     snprintf(stem, sizeof(stem), "%s", stem_raw);
     toml_free_document(doc);
 
-    /* 3. Name the host's lib asset: <stem>-<tag>-<triple><ext>. */
-    const char* ext = ae_host_shlib_ext();
+    /* 3. Name the lib asset for the requested triple: <stem>-<tag>-<triple><ext>.
+     * The extension follows the TRIPLE's OS (not the host's), so `--target
+     * macos-arm64` on a Linux host names `<stem>-<tag>-macos-arm64.dylib`. */
+    const char* ext = ae_shlib_ext_for_triple(triple);
     char lib_asset[512], lib_url[2048], lib_path[1024];
     if (ae_sprintf(lib_asset, sizeof(lib_asset), "%s-%s-%s%s", stem, tag, triple, ext) != 0 ||
         ae_sprintf(lib_url, sizeof(lib_url), "%s/%s", url_base, lib_asset) != 0 ||
@@ -7725,18 +7739,23 @@ static int ae_try_binary_package(const char* package, const char* tag,
     }
     remove(lib_path);
     if (ae_download(lib_url, lib_path) != 0 || !path_exists(lib_path)) {
-        /* The manifest declared a binary package but the host's lib is not
-         * published — a real error for this host, not a reason to try a source
+        /* The manifest declared a binary package but the requested platform's
+         * lib is not published — a real error, not a reason to try a source
          * archive that would land the uncompilable tree. */
         fprintf(stderr,
-            "Error: %s declares a binary package but publishes no %s for this host.\n",
-            package, lib_asset);
+            "Error: %s declares a binary package but publishes no %s for %s.\n",
+            package, lib_asset, foreign_target ? triple : "this host");
         remove(toml_tmp);
         return -1;
     }
     printf("Found binary package %s\n", lib_asset);
 
-    /* 4. Verify the lib against its published .sha256 (same policy as archives). */
+    /* 4. Verify the lib against its published .sha256. A binary package REQUIRES
+     * the checksum — stricter than the archive path (which warns and installs
+     * unverified on a missing sum), because this is a raw executable shared
+     * library downloaded over the network: refusing an unverifiable one is the
+     * right supply-chain default (aether#2105). A mismatch is fatal on both
+     * paths. */
     int v = ae_verify_sha256(lib_path, url_base, lib_asset, tmp_dir);
     if (v < 0) {
         fprintf(stderr, "Error: checksum MISMATCH for %s — refusing to install.\n", lib_asset);
@@ -7744,10 +7763,14 @@ static int ae_try_binary_package(const char* package, const char* tag,
         return -1;
     }
     if (v == 0) {
-        fprintf(stderr, "Warning: %s publishes no .sha256 — installing unverified.\n", lib_asset);
-    } else {
-        printf("Checksum verified.\n");
+        fprintf(stderr,
+            "Error: binary package %s publishes no %s.sha256 — refusing to install an\n"
+            "       unverified shared library. Ask the publisher to attach the checksum.\n",
+            package, lib_asset);
+        remove(lib_path); remove(toml_tmp);
+        return -1;
     }
+    printf("Checksum verified.\n");
 
     /* 5. Install the lib + the aether.toml into pkg_dir. The lib is staged under
      * `<stem><ext>` (dropping the -<tag>-<triple> the ASSET name carries), because
@@ -7782,8 +7805,11 @@ static int ae_try_binary_package(const char* package, const char* tag,
  * Returns 1 when the package was installed from an artifact, 0 when no
  * matching artifact exists (caller falls back to git). */
 static int ae_try_release_asset(const char* package, const char* version,
-                                const char* pkg_dir) {
-    const char* triple = ae_host_triple();
+                                const char* pkg_dir, const char* target) {
+    /* `target` (from --target <triple>) fetches a FOREIGN platform's binary
+     * package instead of the host's; NULL means "this host". */
+    int foreign = (target != NULL);
+    const char* triple = target ? target : ae_host_triple();
     if (!triple) return 0;              /* unpublished host → clone */
     if (!version) return 0;             /* artifacts are per-tag */
 
@@ -7815,8 +7841,19 @@ static int ae_try_release_asset(const char* package, const char* version,
     /* Binary-package path first: a released aether.toml with a `binary` key is
      * the explicit, declared signal (no fallback ladder — see the function). A
      * 0 means "not a binary package"; carry on to the archive path below. */
-    int bp = ae_try_binary_package(package, tag, triple, url_base, tmp_dir, pkg_dir);
+    int bp = ae_try_binary_package(package, tag, triple, url_base, tmp_dir, pkg_dir, foreign);
     if (bp != 0) return bp;             /* 1 installed, -1 fatal */
+
+    /* --target names a FOREIGN platform's binary. A host source archive or a
+     * git clone would build the WRONG platform, so with an explicit target the
+     * binary package is the only correct path: fail rather than fall through. */
+    if (foreign) {
+        fprintf(stderr,
+            "Error: %s is not a binary package (no [package] binary in its released\n"
+            "       aether.toml), so there is nothing to fetch for --target %s.\n",
+            package, target);
+        return -1;
+    }
 
     /* tar.gz first (the POSIX default), then zip (what the Windows
      * releases publish). */
@@ -7875,22 +7912,45 @@ static void ae_add_rmrf(const char* dir) {
 
 static int cmd_add(int argc, char** argv) {
     if (argc < 1 || argv[0][0] == '-') {
-        fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version] [--source]\n");
+        fprintf(stderr, "Usage: ae add <host>/<user>/<repo>[@version] [--source] [--target <triple>]\n");
         fprintf(stderr, "Examples:\n");
         fprintf(stderr, "  ae add github.com/user/repo\n");
         fprintf(stderr, "  ae add github.com/user/repo@v1.2.0\n");
         fprintf(stderr, "  ae add gitlab.com/user/repo\n");
+        fprintf(stderr, "  ae add github.com/user/repo@v1.2.0 --target macos-arm64\n");
         fprintf(stderr, "\nWith @version, a matching release artifact is preferred when the\n");
         fprintf(stderr, "package publishes one: a binary package (a released aether.toml with\n");
         fprintf(stderr, "a `binary` key naming a bare per-triple shared lib), else a source\n");
-        fprintf(stderr, "archive. --source forces the git clone.\n");
+        fprintf(stderr, "archive. A binary package REQUIRES a published .sha256 (an\n");
+        fprintf(stderr, "unverifiable shared library is refused). --source forces the git\n");
+        fprintf(stderr, "clone. --target <triple> fetches a FOREIGN platform's binary package\n");
+        fprintf(stderr, "(e.g. linux-x86_64, macos-arm64, freebsd-x86_64) instead of the\n");
+        fprintf(stderr, "host's, for cross-platform bundling.\n");
         return 1;
     }
 
-    /* --source forces the historical git-clone path (#1360). */
+    /* --source forces the historical git-clone path (#1360).
+     * --target <triple> fetches a FOREIGN platform's binary package instead of
+     * the host's (for cross-platform bundling / release CI). */
     bool force_source = false;
+    const char* target = NULL;
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--source") == 0) force_source = true;
+        if (strcmp(argv[i], "--source") == 0) {
+            force_source = true;
+        } else if (strcmp(argv[i], "--target") == 0 && i + 1 < argc) {
+            target = argv[++i];
+        } else if (strncmp(argv[i], "--target=", 9) == 0) {
+            target = argv[i] + 9;
+        }
+    }
+    if (force_source && target) {
+        fprintf(stderr, "Error: --source and --target are mutually exclusive "
+                        "(--source forces the git clone; --target fetches a binary).\n");
+        return 1;
+    }
+    if (target && !*target) {
+        fprintf(stderr, "Error: --target needs a release triple, e.g. --target macos-arm64.\n");
+        return 1;
     }
 
     // Parse package@version
@@ -7945,8 +8005,8 @@ static int cmd_add(int argc, char** argv) {
          * and pins against an immutable asset rather than a movable tag.
          * Falls back to the clone when nothing is published. */
         if (!force_source) {
-            int r = ae_try_release_asset(package, version, pkg_dir);
-            if (r < 0) return 1;        /* checksum mismatch — already reported */
+            int r = ae_try_release_asset(package, version, pkg_dir, target);
+            if (r < 0) return 1;        /* checksum mismatch / target error — reported */
             if (r > 0) goto write_toml; /* installed from artifact */
         }
         printf("Downloading...\n");

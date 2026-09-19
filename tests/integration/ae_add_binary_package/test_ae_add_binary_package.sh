@@ -18,6 +18,11 @@
 #      through to the archive path (here: to git, which fails on the fake forge;
 #      we assert it did NOT install as a binary package).
 #   4. a MISMATCHED checksum on the lib is fatal — nothing installed.
+#   4b. a MISSING .sha256 on a binary package is fatal too (stricter than the
+#       archive path): a raw downloaded shared library must be verifiable.
+#   4c. `--target <triple>` fetches a FOREIGN platform's binary (right OS ext),
+#       and `--target` with `--source` is rejected.
+#   5. end-to-end: a real installed lib actually imports + runs after ae add.
 #
 # HOME is redirected per-case so the real package cache is never touched.
 
@@ -86,14 +91,26 @@ mk_binpkg() {
     head -c 4096 /dev/urandom > "$d/$asset"
     if [ "$mode" = "badsum" ]; then
         echo "0000000000000000000000000000000000000000000000000000000000000000  $asset" > "$d/$asset.sha256"
+    elif [ "$mode" = "nosum" ]; then
+        :   # lib present, NO .sha256 sidecar — a binary package must refuse this
     else
         ( cd "$d" && $SHA "$asset" | awk -v n="$asset" '{print $1"  "n}' > "$asset.sha256" )
     fi
+    # A FOREIGN-platform lib for the same release, so `ae add --target <triple>`
+    # has something to fetch. Pick a triple that is NOT this host's.
+    case "$TRIPLE" in
+        linux-x86_64) FT="macos-arm64";   FEXT=".dylib" ;;
+        *)            FT="linux-x86_64";  FEXT=".so" ;;
+    esac
+    fasset="$STEM-$tag-$FT$FEXT"
+    head -c 4096 /dev/urandom > "$d/$fasset"
+    ( cd "$d" && $SHA "$fasset" | awk -v n="$fasset" '{print $1"  "n}' > "$fasset.sha256" )
 }
 mk_binpkg v1.0.0 ok
 mk_binpkg v2.0.0 nolib
 mk_binpkg v3.0.0 nobinkey
 mk_binpkg v4.0.0 badsum
+mk_binpkg v5.0.0 nosum
 
 # ---- serve on a free loopback port ---------------------------------------
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
@@ -156,6 +173,39 @@ fi
 grep -qi "checksum MISMATCH" "$TMP/badsum.log" || fail "mismatched checksum was not reported" "$TMP/badsum.log"
 [ -d "$P/home/.aether/packages/$PKG" ] && fail "a mismatched-checksum install left files behind"
 
+# ---- Property 4b: a MISSING .sha256 on a binary package is FATAL ----------
+# A binary package REQUIRES a published checksum (stricter than the archive
+# path, which warns and installs unverified): a raw downloaded shared library
+# must be verifiable (#2105).
+P="$(new_proj nosum)"
+if ( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v5.0.0" ) \
+        >"$TMP/nosum.log" 2>&1; then
+    fail "a binary package with no .sha256 should have been refused" "$TMP/nosum.log"
+fi
+grep -qi "refusing to install an" "$TMP/nosum.log" \
+    || fail "missing-checksum was not refused with the expected message" "$TMP/nosum.log"
+[ -d "$P/home/.aether/packages/$PKG" ] && fail "a no-checksum install left files behind"
+
+# ---- Property 4c: --target fetches a FOREIGN platform's binary ------------
+# `--target <triple>` names another platform's lib (for cross-platform bundling),
+# using the triple's OS extension, not the host's. It installs it; and --target
+# on a package that isn't a binary package is an error, not a host fall-through.
+case "$(uname -s)-$(uname -m)" in
+    Linux-x86_64) FT="macos-arm64" ; FE=".dylib" ;;
+    *)            FT="linux-x86_64"; FE=".so" ;;
+esac
+P="$(new_proj target)"
+( cd "$P" && HOME="$P/home" AE_RELEASE_BASE_URL="$BASE" "$AE" add "$PKG@v1.0.0" --target "$FT" ) \
+    >"$TMP/target.log" 2>&1 || fail "--target fetch of a foreign binary failed" "$TMP/target.log"
+[ -f "$P/home/.aether/packages/$PKG/$STEM$FE" ] \
+    || fail "--target did not install the foreign lib under $STEM$FE" "$TMP/target.log"
+# --target with --source is rejected
+if ( cd "$(new_proj tconf)" && HOME="$TMP/proj_tconf/home" AE_RELEASE_BASE_URL="$BASE" \
+        "$AE" add "$PKG@v1.0.0" --target "$FT" --source ) >"$TMP/tconf.log" 2>&1; then
+    fail "--target --source together should be rejected" "$TMP/tconf.log"
+fi
+grep -qi "mutually exclusive" "$TMP/tconf.log" || fail "--target/--source conflict not reported" "$TMP/tconf.log"
+
 # ---- Property 5: END-TO-END — a real installed lib actually IMPORTS + RUNS -
 # Properties 1-4 use a random payload (they exercise fetch/verify/install). This
 # one builds a REAL importable shared lib, publishes it as a binary package, and
@@ -190,5 +240,5 @@ case "$RUN" in
        exit 1 ;;
 esac
 
-echo "  [PASS] ae_add_binary_package: bare lib + released aether.toml, verified, imports+runs, no fallback ladder"
+echo "  [PASS] ae_add_binary_package: install+import+run, require-checksum, --target foreign fetch, no fallback ladder"
 exit 0
