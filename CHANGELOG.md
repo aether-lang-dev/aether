@@ -13,6 +13,15 @@ version number before tagging the release.
 
 ### Fixed
 
+- **`f as fn(ptr, *Thing, float)` crashed the compiler (#2094).** The
+  typechecker handed the cast's inferred type back as a hand-rolled shallow
+  copy that shared each parameter's element type with the node the parser
+  built; the caller freed that copy, taking `Thing` out of the cast's own
+  type, and the next clone of the node walked freed memory — exit 127, no
+  diagnostic. `fn(ptr, ptr, float)` had nothing to share and was fine, which
+  is why the crash hid behind the pointer spelling. The inferred type is
+  now a full clone. `tests/regression/test_cast_fn_struct_ptr.ae`.
+
 - **The language server never answered a request.** Its method extraction
   found the opening quote of the key (`"method"`) and took what followed the
   key's closing quote, so every message arrived as method `:` and neither
