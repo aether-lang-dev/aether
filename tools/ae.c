@@ -3567,18 +3567,26 @@ static int ae_generate_binimport_stub(const char* so_path, FILE* out) {
 // True if a *source* module named `mod` resolves on the current search
 // path (CWD, src/, and each --lib dir). Mirrors the compiler's local
 // resolver closely enough to decide "source vs binary" for a bare import.
-static int ae_source_module_exists(const char* mod) {
-    char p[1200];
+// Resolve source module `mod` to its file path (`<base>/<mod>.ae` or
+// `<base>/<mod>/module.ae`), probing `.`, `src`, then every --lib/dependency
+// dir — the same order source-import resolution uses. Writes the path into
+// `out` and returns 1 if found, 0 otherwise.
+static int ae_source_module_path(const char* mod, char* out, size_t outcap) {
     const char* bases[] = { ".", "src" };
     for (size_t b = 0; b < sizeof(bases)/sizeof(bases[0]); b++) {
-        snprintf(p, sizeof(p), "%s/%s.ae", bases[b], mod);          if (path_exists(p)) return 1;
-        snprintf(p, sizeof(p), "%s/%s/module.ae", bases[b], mod);   if (path_exists(p)) return 1;
+        snprintf(out, outcap, "%s/%s.ae", bases[b], mod);        if (path_exists(out)) return 1;
+        snprintf(out, outcap, "%s/%s/module.ae", bases[b], mod); if (path_exists(out)) return 1;
     }
     for (int i = 0; i < tc.lib_dir_count; i++) {
-        snprintf(p, sizeof(p), "%s/%s.ae", tc.lib_dirs[i], mod);        if (path_exists(p)) return 1;
-        snprintf(p, sizeof(p), "%s/%s/module.ae", tc.lib_dirs[i], mod); if (path_exists(p)) return 1;
+        snprintf(out, outcap, "%s/%s.ae", tc.lib_dirs[i], mod);        if (path_exists(out)) return 1;
+        snprintf(out, outcap, "%s/%s/module.ae", tc.lib_dirs[i], mod); if (path_exists(out)) return 1;
     }
     return 0;
+}
+
+static int ae_source_module_exists(const char* mod) {
+    char p[1200];
+    return ae_source_module_path(mod, p, sizeof(p));
 }
 
 // Locate a binary artifact for module `mod` (libMOD.so / MOD.so /
@@ -3627,11 +3635,74 @@ static void ae_abspath(const char* path, char* out, size_t outcap) {
 // each into a shared temp dir (prepended to the module search path), and
 // record the artifact on the link line. Best-effort: any failure leaves
 // the build to proceed (and fail later) as an all-source build would.
-static void prepare_binary_imports(const char* main_file) {
-    FILE* f = fopen(main_file, "r");
-    if (!f) return;
+// Synthesize the interface stub for a binary-package module `mod` whose
+// artifact is at `so_path`, make it resolvable, and record the .so + rpath on
+// the link line. `stubdir` is the shared temp dir (created lazily on first use,
+// so an all-source build makes none). Returns 0 on success, -1 on a hard error.
+static int ae_emit_binimport_stub(const char* mod, const char* so_path,
+                                  char* stubdir, size_t stubdir_cap) {
+    if (!stubdir[0]) {
+        snprintf(stubdir, stubdir_cap, "/tmp/ae-binimport-XXXXXX");
+        if (!mkdtemp(stubdir)) { stubdir[0] = '\0'; return -1; }
+    }
+    char stub_path[512];
+    snprintf(stub_path, sizeof(stub_path), "%s/%s.ae", stubdir, mod);
+    FILE* sf = fopen(stub_path, "w");
+    if (!sf) return 0;   /* best-effort: leave the build to fail later */
+    int rc = ae_generate_binimport_stub(so_path, sf);
+    fclose(sf);
+    if (rc != 0) { remove(stub_path); return 0; }
 
-    char stubdir[256] = "";
+    // Make the stub resolvable and link the artifact (absolute path +
+    // rpath so the produced binary finds it at run time). The host's
+    // -rdynamic + static libaether satisfy the .so's runtime symbols.
+    tc_lib_dir_append_one(stubdir);
+    char abs_so[1200], dir[1200];
+    ae_abspath(so_path, abs_so, sizeof(abs_so));
+    snprintf(dir, sizeof(dir), "%s", abs_so);
+    char* slash = strrchr(dir, '/');
+    if (slash) *slash = '\0';
+    // Emit the rpath UNQUOTED — `-Wl,-rpath,<dir>`, parallel to the
+    // unquoted `-L%s` this file already uses. Quoting it
+    // (`-Wl,-rpath,"<dir>"`) leaked literal quote characters into the
+    // recorded rpath on macOS (`dyld: tried '"/.../tmp"/lib.dylib'`),
+    // so the dylib — whose install name `ae build --emit=lib` rewrites
+    // to `@rpath/<base>` on macOS — was never found at run time.
+    // Module/lib/temp dirs don't contain spaces, same assumption -L
+    // relies on. The .so itself stays quoted (it's a plain input file
+    // and links fine on both platforms).
+    size_t off = strlen(g_binimport_link);
+    snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off,
+             " \"%s\" -Wl,-rpath,%s", abs_so, dir);
+    if (tc.verbose) {
+        fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n",
+                mod, abs_so, stub_path);
+    }
+    return 0;
+}
+
+// Scan one `.ae` file's `import` lines for binary-package imports, recursing
+// into the SOURCE modules it imports so an `import <binpkg>` in a non-entry
+// module (a wrapper/adapter) is discovered too — the prepass must see the whole
+// import graph, not just the entry file. `visited` holds the resolved file
+// paths already scanned (dedupe + cycle-break). `stubdir` is the shared stub
+// dir, created lazily by ae_emit_binimport_stub.
+#define AE_BINIMPORT_MAX_FILES 512
+static void ae_scan_binary_imports(const char* file, char* stubdir,
+                                   size_t stubdir_cap,
+                                   char (*visited)[1200], int* nvisited) {
+    // Mark this file visited (by its path as given; the entry uses the passed
+    // spelling, recursions use the resolved path — both are stable enough to
+    // break cycles and avoid rescanning the same module twice).
+    for (int i = 0; i < *nvisited; i++) {
+        if (strcmp(visited[i], file) == 0) return;
+    }
+    if (*nvisited >= AE_BINIMPORT_MAX_FILES) return;   /* graph too large; stop */
+    snprintf(visited[*nvisited], 1200, "%s", file);
+    (*nvisited)++;
+
+    FILE* f = fopen(file, "r");
+    if (!f) return;
     char line[1024];
     while (fgets(line, sizeof(line), f)) {
         const char* p = line;
@@ -3640,7 +3711,8 @@ static void prepare_binary_imports(const char* main_file) {
         p += 6;
         while (*p == ' ' || *p == '\t') p++;
         // Module token: identifier chars only. A '.' means std./contrib./
-        // dotted path — never a bare binary import, skip.
+        // dotted path — never a bare binary import, and its transitive imports
+        // are the compiler's own to resolve; skip.
         char mod[128];
         size_t mi = 0;
         while (*p && (isalnum((unsigned char)*p) || *p == '_') && mi < sizeof(mod) - 1) {
@@ -3648,50 +3720,33 @@ static void prepare_binary_imports(const char* main_file) {
         }
         mod[mi] = '\0';
         if (mi == 0 || *p == '.') continue;
-        if (ae_source_module_exists(mod)) continue;
 
+        // A source module: recurse into its file so a binary import nested
+        // inside it (a wrapper importing the binary package) is discovered.
+        char src_path[1200];
+        if (ae_source_module_path(mod, src_path, sizeof(src_path))) {
+            ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+            continue;
+        }
+
+        // Not a source module — a binary-package import if a .so is on the path.
         char so_path[1200];
         if (!ae_find_binimport_so(mod, so_path, sizeof(so_path))) continue;
-
-        if (!stubdir[0]) {
-            snprintf(stubdir, sizeof(stubdir), "/tmp/ae-binimport-XXXXXX");
-            if (!mkdtemp(stubdir)) { stubdir[0] = '\0'; break; }
-        }
-        char stub_path[512];
-        snprintf(stub_path, sizeof(stub_path), "%s/%s.ae", stubdir, mod);
-        FILE* sf = fopen(stub_path, "w");
-        if (!sf) continue;
-        int rc = ae_generate_binimport_stub(so_path, sf);
-        fclose(sf);
-        if (rc != 0) { remove(stub_path); continue; }
-
-        // Make the stub resolvable and link the artifact (absolute path +
-        // rpath so the produced binary finds it at run time). The host's
-        // -rdynamic + static libaether satisfy the .so's runtime symbols.
-        tc_lib_dir_append_one(stubdir);
-        char abs_so[1200], dir[1200];
-        ae_abspath(so_path, abs_so, sizeof(abs_so));
-        snprintf(dir, sizeof(dir), "%s", abs_so);
-        char* slash = strrchr(dir, '/');
-        if (slash) *slash = '\0';
-        // Emit the rpath UNQUOTED — `-Wl,-rpath,<dir>`, parallel to the
-        // unquoted `-L%s` this file already uses. Quoting it
-        // (`-Wl,-rpath,"<dir>"`) leaked literal quote characters into the
-        // recorded rpath on macOS (`dyld: tried '"/.../tmp"/lib.dylib'`),
-        // so the dylib — whose install name `ae build --emit=lib` rewrites
-        // to `@rpath/<base>` on macOS — was never found at run time.
-        // Module/lib/temp dirs don't contain spaces, same assumption -L
-        // relies on. The .so itself stays quoted (it's a plain input file
-        // and links fine on both platforms).
-        size_t off = strlen(g_binimport_link);
-        snprintf(g_binimport_link + off, sizeof(g_binimport_link) - off,
-                 " \"%s\" -Wl,-rpath,%s", abs_so, dir);
-        if (tc.verbose) {
-            fprintf(stderr, "ae: binary import '%s' -> %s (stub %s)\n",
-                    mod, abs_so, stub_path);
-        }
+        if (ae_emit_binimport_stub(mod, so_path, stubdir, stubdir_cap) != 0) break;
     }
     fclose(f);
+}
+
+static void prepare_binary_imports(const char* main_file) {
+    char stubdir[256] = "";
+    // Visited-set of file paths, heap-allocated (512 * 1200 B is too large for
+    // the stack). Best-effort: if allocation fails, fall back to scanning only
+    // the entry file, the pre-transitive behaviour.
+    char (*visited)[1200] = malloc((size_t)AE_BINIMPORT_MAX_FILES * 1200);
+    if (!visited) { return; }
+    int nvisited = 0;
+    ae_scan_binary_imports(main_file, stubdir, sizeof(stubdir), visited, &nvisited);
+    free(visited);
 }
 #else
 static void prepare_binary_imports(const char* main_file) { (void)main_file; }

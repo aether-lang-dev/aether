@@ -1,0 +1,13 @@
+// Entry file for the transitive binary-import case. It imports ONLY the source
+// wrapper `wrap`; the `import gizmo` (a binary package) sits inside wrap.ae, not
+// here. Before the transitive-prepass fix the binary-import prepass scanned only
+// this entry file, never discovered wrap's `import gizmo`, and the build failed
+// with "unresolved import 'gizmo'". The prepass now walks into wrap.ae.
+
+import wrap
+
+extern println(s: string)
+
+main() {
+    println(wrap.wrapped_greet("world"))
+}

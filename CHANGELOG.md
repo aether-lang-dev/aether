@@ -42,6 +42,23 @@ version number before tagging the release.
   triple selection per platform and that the FreeBSD block compiles under the
   real cross toolchain.
 
+- **A binary-package `import` in a non-entry module (a wrapper/adapter) did not
+  resolve.** The binary-import prepass (`prepare_binary_imports`) scanned only
+  the entry file's `import` lines, so an `import <binpkg>` inside a module the
+  entry pulls in transitively was never discovered, its interface stub never
+  synthesized, and the build failed with `unresolved import '<binpkg>'`. Only a
+  binary import written directly in the entry file worked. The prepass now walks
+  the full source-import graph (recursing into each imported source module, with
+  a visited-set for cycles) and synthesizes a stub for every binary-package
+  import it finds — so a wrapper module importing a binary package is as ordinary
+  as one importing another source module. The walk follows **dotted** package
+  imports too (`import a.b.c` → recurse into `a/b/c.ae`), not only flat ones, so
+  a binary import nested inside a dotted-path module (`import
+  harness.components.phone.validate`) is discovered — dotted package imports are
+  exactly what the `modules = "."` root export exists to support. POSIX-only,
+  same as the rest of the binary-import path. (Reported by the datastar-aether /
+  libphonenumber-ae line: `main → phone component → validate → phonenumber_ae`.)
+
 ## [0.693.0]
 
 ### Fixed

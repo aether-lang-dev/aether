@@ -1,0 +1,12 @@
+// A NON-ENTRY wrapper/adapter module that imports the binary package `gizmo`.
+// The transitive-prepass test drives `app_transitive.ae -> wrap -> gizmo(.so)`:
+// the binary import lives here, not in the entry file, so it is only discovered
+// if the binary-import prepass walks the whole import graph (not just the entry).
+
+import gizmo
+
+exports(wrapped_greet)
+
+wrapped_greet(name: string) -> string {
+    return gizmo.greet(name)
+}
