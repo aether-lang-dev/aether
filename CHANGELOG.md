@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.698.0]
+
 ### Fixed
 
 - **A closure's own body local sharing a name with an UNCAPTURED enclosing local
