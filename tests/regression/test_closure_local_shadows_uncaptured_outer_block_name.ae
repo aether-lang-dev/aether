@@ -1,0 +1,89 @@
+// MINIMAL reproducer, ae 0.697.0: still emits undeclared C after 055fcc7d.
+//
+// TRIGGER IS SPECIFICALLY AN ENCLOSING `if`. The same statements wrapped in a
+// `while` instead, or left at function scope, compile clean on 0.697 — see
+// build_while() below, kept in the same file so a fix cannot satisfy one shape
+// and miss the other. A fix keyed on "enclosing block" or on nesting depth
+// would pass the while case and still leave this one broken.
+//
+// Differs from tests/regression/test_closure_local_shadows_promoted_capture.ae
+// in ONE way: the earlier block contains NO closure. Nothing genuinely captures
+// idx/entry, so nothing should promote them — yet the later closure's own
+// same-named locals still drive a promotion whose cell is emitted INSIDE the
+// now-closed `if` block, and is then captured outside it.
+import std.string
+import std.list
+
+build(n: int) -> int {
+    out = list.new()
+
+    if n > 0 { // <-- any enclosing block; remove it and it compiles
+        pkg = "x:1"
+        if string.contains(pkg, ":") == 1 {
+            idx = string.index_of(pkg, ":")
+            entry = string.substring(pkg, 0, idx)
+            _a = list.add(out, entry)
+        }
+    }
+
+    seq = string.lines("a~1")
+    string.seq_each(seq, | ln: string | {
+            line_r = string.trim(ln)
+            if string.length(line_r) > 0 {
+                idx = string.index_of(line_r, "~")
+                entry = string.substring(line_r, 0, idx)
+                _b = list.add(out, entry)
+            }
+        })
+    string.seq_free(seq)
+    _sz = list.size(out)
+    list.free(out)
+    return _sz
+}
+
+// Control: identical statements, `while` instead of `if`. Compiles on 0.697.
+// If a fix makes build() compile, this must keep compiling AND keep returning 2.
+build_while(n: int) -> int {
+    out = list.new()
+
+    wi = 0
+    while wi < n {
+        pkg = "x:1"
+        if string.contains(pkg, ":") == 1 {
+            idx = string.index_of(pkg, ":")
+            entry = string.substring(pkg, 0, idx)
+            _a = list.add(out, entry)
+        }
+        wi = wi + 1
+    }
+
+    seq = string.lines("a~1")
+    string.seq_each(seq, | ln: string | {
+            line_r = string.trim(ln)
+            if string.length(line_r) > 0 {
+                idx = string.index_of(line_r, "~")
+                entry = string.substring(line_r, 0, idx)
+                _b = list.add(out, entry)
+            }
+        })
+    string.seq_free(seq)
+    _sz = list.size(out)
+    list.free(out)
+    return _sz
+}
+
+main() {
+    got = build(1)
+    got_w = build_while(1)
+    println("if=${got} while=${got_w}")
+    if got != 2 {
+        println("FAIL: if-wrapped expected 2, got ${got}")
+        exit(1)
+    }
+    if got_w != 2 {
+        println("FAIL: while-wrapped expected 2, got ${got_w}")
+        exit(1)
+    }
+    println("PASS: closure own-local shadows uncaptured outer-block name")
+    return 0
+}
