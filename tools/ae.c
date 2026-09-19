@@ -3710,20 +3710,44 @@ static void ae_scan_binary_imports(const char* file, char* stubdir,
         if (strncmp(p, "import", 6) != 0 || (p[6] != ' ' && p[6] != '\t')) continue;
         p += 6;
         while (*p == ' ' || *p == '\t') p++;
-        // Module token: identifier chars only. A '.' means std./contrib./
-        // dotted path — never a bare binary import, and its transitive imports
-        // are the compiler's own to resolve; skip.
-        char mod[128];
+        // Read the whole module token, INCLUDING dots: a bare name (`validate`)
+        // OR a dotted package path (`harness.components.phone.validate`). We
+        // must follow dotted source imports too, or a binary import nested
+        // inside a dotted-path module is never discovered (a wrapper reached as
+        // `import foo.validate`). The dotted NAME is still never a binary-import
+        // candidate itself — a binary import is always a bare name — so only the
+        // recursion into its file changes.
+        char mod[256];
         size_t mi = 0;
-        while (*p && (isalnum((unsigned char)*p) || *p == '_') && mi < sizeof(mod) - 1) {
+        int dotted = 0;
+        while (*p && (isalnum((unsigned char)*p) || *p == '_' || *p == '.')
+               && mi < sizeof(mod) - 1) {
+            if (*p == '.') dotted = 1;
             mod[mi++] = *p++;
         }
         mod[mi] = '\0';
-        if (mi == 0 || *p == '.') continue;
+        if (mi == 0) continue;
 
-        // A source module: recurse into its file so a binary import nested
-        // inside it (a wrapper importing the binary package) is discovered.
         char src_path[1200];
+        if (dotted) {
+            // A dotted package import: resolve `a.b.c` -> `a/b/c` and recurse
+            // into that source file (a/b/c.ae or a/b/c/module.ae) so a binary
+            // import inside it is seen. A dotted name is never a binary import,
+            // so if it does not resolve to a source file there is nothing to do.
+            char slashed[256];
+            size_t si = 0;
+            for (size_t k = 0; k < mi && si < sizeof(slashed) - 1; k++) {
+                slashed[si++] = (mod[k] == '.') ? '/' : mod[k];
+            }
+            slashed[si] = '\0';
+            if (ae_source_module_path(slashed, src_path, sizeof(src_path))) {
+                ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
+            }
+            continue;
+        }
+
+        // A flat source module: recurse into its file so a binary import nested
+        // inside it (a wrapper importing the binary package) is discovered.
         if (ae_source_module_path(mod, src_path, sizeof(src_path))) {
             ae_scan_binary_imports(src_path, stubdir, stubdir_cap, visited, nvisited);
             continue;

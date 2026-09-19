@@ -74,4 +74,19 @@ if ! AETHER_HOME="$ROOT" "$AE" build app_transitive.ae -o app_t >build_t.log 2>&
 fi
 echo "$(./app_t 2>&1)" | grep -q "hi world" || fail "built transitive binary: greet missing"
 
-echo "  [PASS] binary_import: direct + TRANSITIVE (wrapper module) binary import, ae run + ae build"
+# 5. TRANSITIVE through a DOTTED package import. The wrapper is reached as
+#    `import pkg.dotwrap` (a dotted package path), not a flat name. The graph
+#    walk must convert `pkg.dotwrap` -> `pkg/dotwrap.ae` and recurse, or the
+#    `import gizmo` inside it is never discovered — dotted package imports
+#    (what `modules = "."` exists to support) are idiomatic, and a real
+#    consumer's chain looks like `import harness.components.phone.validate`.
+mkdir -p pkg
+printf 'import gizmo\nexports(dgreet)\ndgreet(name: string) -> string { return gizmo.greet(name) }\n' > pkg/dotwrap.ae
+printf 'import pkg.dotwrap\nextern println(s: string)\nmain() { println(dotwrap.dgreet("world")) }\n' > app_dotted.ae
+OUT4="$(AETHER_HOME="$ROOT" "$AE" run app_dotted.ae 2>run_d.log)" || {
+    echo "--- dotted run log:"; cat run_d.log
+    fail "dotted transitive binary import: prepass did not follow 'import pkg.dotwrap' (import gizmo unresolved)"; }
+echo "$OUT4" | grep -q "hi world" \
+    || { echo "$OUT4"; fail "dotted transitive binary import: dotwrap.dgreet did not reach gizmo.greet"; }
+
+echo "  [PASS] binary_import: direct + transitive (flat + DOTTED wrapper) binary import, ae run + ae build"
