@@ -11,6 +11,35 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`ae add` installs a binary package: a bare per-triple shared lib named by a
+  released `aether.toml`.** A package that ships loose per-triple libraries
+  (`lib<stem>-<tag>-<triple>.so`/`.dylib`/`.dll`) instead of a compilable source
+  tree can attach its release's own `aether.toml` as an asset. `ae add` fetches
+  that manifest first; a `[package] binary = "<stem>"` key declares a binary
+  package, and `ae add` then fetches + checksum-verifies `<stem>-<tag>-<triple>`
+  with the host's shared-lib extension and installs the lib **and** the
+  `aether.toml` together (the manifest's `modules = "."` puts the lib on the
+  search path so the binary-import prepass fires). Deterministic, by name, no
+  `--options` and **no fallback ladder**: the `binary` key is the single signal —
+  a manifest without it is not a binary package (carry on to the archive path),
+  and a `binary` key with no lib for the host is a hard error, never a silent
+  git clone. Removes the need to publish a redundant `.tar.gz` wrapping the same
+  `.so`. (Asked for by the libphonenumber-ae / datastar-aether line.)
+
+### Fixed
+
+- **`ae add` fell back to `git clone` on FreeBSD (and arm64 Windows) hosts.**
+  `ae_host_triple()` mapped only linux/macOS ×64/arm64 and windows-x86_64 to a
+  release-asset triple, returning `NULL` for everything else — so a FreeBSD host
+  could never fetch a published release artifact even when the publisher ships
+  `freebsd-x86_64` / `freebsd-arm64` binaries, and silently git-cloned instead.
+  Added the `__FreeBSD__` cases (both arches) and `windows-arm64`, matching the
+  existing `<os>-<arch>` release convention. Compile-time only; verified the
+  triple selection per platform and that the FreeBSD block compiles under the
+  real cross toolchain.
+
 ## [0.693.0]
 
 ### Fixed
