@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.692.0]
+
 ### Fixed
 
 - **Windows: non-ASCII paths and arguments are UTF-8 (#2077).** Aether
