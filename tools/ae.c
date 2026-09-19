@@ -2983,13 +2983,26 @@ void build_gcc_cmd(char* cmd, size_t size,
             snprintf(contrib_L, sizeof(contrib_L), "-L\"%s\" ", contrib_dir);
         else
             contrib_L[0] = '\0';
+        /* The application manifest (#2077): the resource object the build
+         * left beside libaether.a declares the UTF-8 process code page, so
+         * the program's narrow CRT and Win32 calls read its UTF-8 strings
+         * as UTF-8. Linked when present; a toolchain built without windres
+         * (the zig cross build) has none and its programs keep the legacy
+         * code page. */
+        char manifest_obj[1100];
+        char manifest_path[1050];
+        snprintf(manifest_path, sizeof(manifest_path), "%s/aether_manifest.o", lib_dir);
+        if (path_exists(manifest_path))
+            snprintf(manifest_obj, sizeof(manifest_obj), "\"%s\" ", manifest_path);
+        else
+            manifest_obj[0] = '\0';
         /* g_host_bridge_link mirrors the POSIX branch below: without it the
          * bridge archive was found, reported, and then never passed to the
          * linker, so `import contrib.host.tinygo` failed with undefined
          * tinygo_call_* while the .a sat in build/contrib. */
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s -L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s \"%s\" %s %s-L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -8799,6 +8812,15 @@ static int cmd_fmt(int argc, char** argv) {
     }
 
     if (npaths == 0) {
+#ifdef _WIN32
+        /* Byte-exact like the in-place path (which opens files "rb"/"wb"):
+         * in text mode the CRT turned every LF written to stdout into CRLF,
+         * so `ae fmt < a.ae > b.ae` produced a CRLF file from an LF one and
+         * an editor piping through the formatter got its line endings
+         * changed on every save. */
+        _setmode(_fileno(stdin), _O_BINARY);
+        _setmode(_fileno(stdout), _O_BINARY);
+#endif
         char* src = fmt_read_stdin();
         if (!src) { fprintf(stderr, "ae fmt: cannot read stdin\n"); free(paths); return 2; }
         const char* err = NULL;

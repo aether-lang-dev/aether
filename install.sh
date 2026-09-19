@@ -361,6 +361,11 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     if [ -f build/libaether.a ]; then
         cp build/libaether.a "$LIB_DIR/libaether.a"
     fi
+    # Windows: the application manifest object (UTF-8 process code page,
+    # #2077). `ae build`/`ae run` link it from beside libaether.a.
+    if [ -f build/aether_manifest.o ]; then
+        cp build/aether_manifest.o "$LIB_DIR/aether_manifest.o"
+    fi
 
     # Headers (preserve directory structure for relative includes).
     # Whole-tree walk rather than per-subdir enumeration so new

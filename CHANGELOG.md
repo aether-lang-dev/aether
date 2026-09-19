@@ -40,6 +40,56 @@ version number before tagging the release.
   triple selection per platform and that the FreeBSD block compiles under the
   real cross toolchain.
 
+## [0.693.0]
+
+### Fixed
+
+- **`f as fn(ptr, *Thing, float)` crashed the compiler (#2094).** The
+  typechecker handed the cast's inferred type back as a hand-rolled shallow
+  copy that shared each parameter's element type with the node the parser
+  built; the caller freed that copy, taking `Thing` out of the cast's own
+  type, and the next clone of the node walked freed memory — exit 127, no
+  diagnostic. `fn(ptr, ptr, float)` had nothing to share and was fine, which
+  is why the crash hid behind the pointer spelling. The inferred type is
+  now a full clone. `tests/regression/test_cast_fn_struct_ptr.ae`.
+
+- **The language server never answered a request.** Its method extraction
+  found the opening quote of the key (`"method"`) and took what followed the
+  key's closing quote, so every message arrived as method `:` and neither
+  `initialize` nor anything else was ever dispatched — an editor waited on
+  the handshake forever. The method now goes through the same extractor the
+  parameters use. On Windows the framing also went through the CRT's text
+  mode, which turned the `\r\n\r\n` header terminator into
+  `\r\r\n\r\r\n`; both streams are binary now. The server's only test
+  checked that it started and exited; `tests/integration/lsp_protocol_roundtrip`
+  now drives `initialize`, `didOpen` of a broken file (a
+  `publishDiagnostics` must come back), `shutdown` and `exit`, and checks
+  every `Content-Length` frame byte-exactly.
+
+### Fixed
+
+- **Windows: non-ASCII paths and arguments are UTF-8 (#2077).** Aether
+  strings are UTF-8, but the C runtime and every narrow Win32 call
+  (`fopen`, `_stat`, `FindFirstFileA`, `argv`, the environment) decoded
+  them with the system's legacy ANSI code page, so `fs.write("café.txt")`
+  created a file really named `cafÃ©.txt` while `fs.realpath`, `fs.copy`,
+  `fs.move` and `fs.chmod` — which decode UTF-8 properly — reported it
+  missing, and a non-ASCII argument reached a program as a different
+  string. Every executable now carries an application manifest declaring
+  the UTF-8 process code page (`runtime/windows/aether.manifest`, compiled
+  with `windres` into `build/aether_manifest.o`, linked into `ae`,
+  `aetherc`, `aether-lsp` and by `ae build`/`ae run` into every program;
+  `install.sh` ships it beside `libaether.a`). Windows 10 1903+ honours it.
+  The zig cross build has no `windres` and its output keeps the legacy page,
+  which `docs/build-system.md` now states. `tests/regression/test_utf8_paths.ae`.
+
+- **`ae fmt` on stdin/stdout wrote CRLF on Windows.** The in-place path opens
+  files in binary mode, but the stdin/stdout path went through the CRT's text
+  mode, so `ae fmt < a.ae > b.ae` turned an LF file into a CRLF one and an
+  editor piping through the formatter had its line endings changed on every
+  save. Both streams are binary now; the output is byte-identical to what the
+  in-place path writes.
+
 ## [0.692.0]
 
 ### Fixed
