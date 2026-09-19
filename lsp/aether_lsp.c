@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -51,6 +55,14 @@ LSPServer* lsp_server_create(void) {
     if (!server) return NULL;
     server->input = stdin;
     server->output = stdout;
+#ifdef _WIN32
+    /* The protocol's framing is byte-exact: `Content-Length: N\r\n\r\n` and
+     * exactly N bytes of body. In the CRT's text mode every `\n` written
+     * became `\r\n`, so the header terminator went out as `\r\r\n\r\r\n`
+     * and no client found the end of the headers. */
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     /* Opt-in, and to a path the caller names. An editor starts the server in
      * whatever directory it likes, so logging unconditionally dropped
      * `aether-lsp.log` into the user's project on every session. */
@@ -655,16 +667,12 @@ JSONRPCMessage* lsp_read_message(LSPServer* server) {
     msg->id = NULL;
     msg->params = NULL;
     
-    // Extract method
-    char* method_start = strstr(content, "\"method\":");
-    if (method_start) {
-        method_start = strchr(method_start, '"');
-        method_start = strchr(method_start + 1, '"') + 1;
-        char* method_end = strchr(method_start, '"');
-        if (method_end) {
-            msg->method = strndup(method_start, method_end - method_start);
-        }
-    }
+    /* The method, through the same extractor the params use. The hand-rolled
+     * scan this replaces found the opening quote of the KEY ("method") and
+     * took what followed its closing quote, so every message's method came
+     * out as ":" and no request was ever answered — an editor waited on
+     * `initialize` forever. */
+    msg->method = json_extract_string(content, "method");
 
     // Extract id (can be number or string)
     char* id_start = strstr(content, "\"id\":");

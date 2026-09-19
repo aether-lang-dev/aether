@@ -13,6 +13,21 @@ version number before tagging the release.
 
 ### Fixed
 
+- **The language server never answered a request.** Its method extraction
+  found the opening quote of the key (`"method"`) and took what followed the
+  key's closing quote, so every message arrived as method `:` and neither
+  `initialize` nor anything else was ever dispatched — an editor waited on
+  the handshake forever. The method now goes through the same extractor the
+  parameters use. On Windows the framing also went through the CRT's text
+  mode, which turned the `\r\n\r\n` header terminator into
+  `\r\r\n\r\r\n`; both streams are binary now. The server's only test
+  checked that it started and exited; `tests/integration/lsp_protocol_roundtrip`
+  now drives `initialize`, `didOpen` of a broken file (a
+  `publishDiagnostics` must come back), `shutdown` and `exit`, and checks
+  every `Content-Length` frame byte-exactly.
+
+### Fixed
+
 - **Windows: non-ASCII paths and arguments are UTF-8 (#2077).** Aether
   strings are UTF-8, but the C runtime and every narrow Win32 call
   (`fopen`, `_stat`, `FindFirstFileA`, `argv`, the environment) decoded
