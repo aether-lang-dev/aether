@@ -1,0 +1,37 @@
+// MINIMAL reproducer, ae 0.697.0: still emits undeclared C after 055fcc7d.
+//
+// Differs from tests/regression/test_closure_local_shadows_promoted_capture.ae
+// in ONE way: the earlier block contains NO closure. Nothing genuinely captures
+// idx/entry, so nothing should promote them — yet the later closure's own
+// same-named locals still drive a promotion whose cell is emitted INSIDE the
+// now-closed `if` block, and is then captured outside it.
+import std.string
+import std.list
+
+build(n: int) -> int {
+    out = list.new()
+
+    if n > 0 {                       // <-- any enclosing block; remove it and it compiles
+        pkg = "x:1"
+        if string.contains(pkg, ":") == 1 {
+            idx = string.index_of(pkg, ":")
+            entry = string.substring(pkg, 0, idx)
+            _a = list.add(out, entry)
+        }
+    }
+
+    string.seq_each(string.lines("a~1"), |ln: string| {
+        line_r = string.trim(ln)
+        if string.length(line_r) > 0 {
+            idx = string.index_of(line_r, "~")
+            entry = string.substring(line_r, 0, idx)
+            _b = list.add(out, entry)
+        }
+    })
+    return list.size(out)
+}
+
+main() {
+    println("n=${build(1)}")
+    return 0
+}
