@@ -35,6 +35,22 @@
 //   have completed). See docs/snapshot-cell.md for the full pattern and
 //   the CAS retry loop.
 //
+//   ABA WARNING (multiple concurrent writers): `cas` is a PLAIN
+//   pointer-value CAS — it compares `expected` against the stored pointer
+//   by value, with no generation tag. That is safe for the single-writer
+//   pattern above, but RECLAIMING (actually freeing displaced values)
+//   under MORE THAN ONE concurrent writer is ABA-unsafe: once the
+//   allocator can hand a just-freed address back out, writer A frees P,
+//   the next allocation reuses P for a fresh value, and a slow writer B
+//   whose `expected` is still P sees the cell holding P again and its
+//   stale `cas(P -> ...)` SPURIOUSLY SUCCEEDS, clobbering the committed
+//   value. Note this is orthogonal to reader use-after-free: a reader
+//   grace period (e.g. a std.sync reader-count epoch) closes reader UAF
+//   but does NOTHING for writer-vs-writer ABA. If you must reclaim from
+//   many writers, SERIALIZE the writers (a lock or single owner) so no
+//   other writer holds a displaced pointer as its `expected` while it is
+//   being freed. See aether#2112.
+//
 // USE / DON'T-USE:
 //   * Use for read-mostly data: tiny rebuild rate, huge read rate.
 //   * Do NOT use for write-heavy data or large values that change often
