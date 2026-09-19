@@ -20,3 +20,9 @@ tests/regression/test_os_module.ae
 # WINE-GAP: needs a working TLS stack and outbound network; Wine's socket
 # layer plus a CI sandbox is not a fair test of the client.
 tests/regression/test_https_client.ae
+
+# CROSS-BUILD: the zig cross build that feeds this lane has no windres and so
+# carries no application manifest (docs/build-system.md); its process code page
+# is the legacy one, and the UTF-8 path behaviour this test asserts exists only
+# in the native (windres) build, which the MSYS2 lanes run.
+tests/regression/test_utf8_paths.ae

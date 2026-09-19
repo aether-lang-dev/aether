@@ -11,6 +11,31 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **Windows: non-ASCII paths and arguments are UTF-8 (#2077).** Aether
+  strings are UTF-8, but the C runtime and every narrow Win32 call
+  (`fopen`, `_stat`, `FindFirstFileA`, `argv`, the environment) decoded
+  them with the system's legacy ANSI code page, so `fs.write("café.txt")`
+  created a file really named `cafÃ©.txt` while `fs.realpath`, `fs.copy`,
+  `fs.move` and `fs.chmod` — which decode UTF-8 properly — reported it
+  missing, and a non-ASCII argument reached a program as a different
+  string. Every executable now carries an application manifest declaring
+  the UTF-8 process code page (`runtime/windows/aether.manifest`, compiled
+  with `windres` into `build/aether_manifest.o`, linked into `ae`,
+  `aetherc`, `aether-lsp` and by `ae build`/`ae run` into every program;
+  `install.sh` ships it beside `libaether.a`). Windows 10 1903+ honours it.
+  The zig cross build has no `windres` and its output keeps the legacy page,
+  which `docs/build-system.md` now states. `tests/regression/test_utf8_paths.ae`.
+
+- **`ae fmt` on stdin/stdout wrote CRLF on Windows.** The in-place path opens
+  files in binary mode, but the stdin/stdout path went through the CRT's text
+  mode, so `ae fmt < a.ae > b.ae` turned an LF file into a CRLF one and an
+  editor piping through the formatter had its line endings changed on every
+  save. Both streams are binary now; the output is byte-identical to what the
+  in-place path writes.
+=======
+
 ## [0.692.0]
 
 ### Fixed

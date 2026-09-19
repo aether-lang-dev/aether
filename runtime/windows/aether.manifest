@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Application manifest embedded in every Windows executable Aether produces,
+  and in ae.exe / aetherc.exe themselves (#2077).
+
+  activeCodePage UTF-8: Aether strings are UTF-8, and the C runtime and every
+  narrow Win32 call (fopen, _stat, FindFirstFileA, CreateProcessA, argv, the
+  environment) decode char* with the process's ANSI code page. Without this
+  declaration that is the system's legacy page (1252 on a Western install),
+  so fs.write("café.txt") created a file named "cafÃ©.txt" while the wide
+  calls (realpath, copy, move) looked for the real name. Windows 10 1903+
+  honours it; older kernels ignore it and keep the legacy page.
+
+  longPathAware: lifts the 260-character MAX_PATH limit for the same narrow
+  calls, on systems where the LongPathsEnabled policy is on.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application>
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>
