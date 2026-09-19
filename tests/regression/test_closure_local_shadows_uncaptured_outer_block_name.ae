@@ -17,7 +17,7 @@ import std.list
 build(n: int) -> int {
     out = list.new()
 
-    if n > 0 {                       // <-- any enclosing block; remove it and it compiles
+    if n > 0 { // <-- any enclosing block; remove it and it compiles
         pkg = "x:1"
         if string.contains(pkg, ":") == 1 {
             idx = string.index_of(pkg, ":")
@@ -26,15 +26,19 @@ build(n: int) -> int {
         }
     }
 
-    string.seq_each(string.lines("a~1"), |ln: string| {
-        line_r = string.trim(ln)
-        if string.length(line_r) > 0 {
-            idx = string.index_of(line_r, "~")
-            entry = string.substring(line_r, 0, idx)
-            _b = list.add(out, entry)
-        }
-    })
-    return list.size(out)
+    seq = string.lines("a~1")
+    string.seq_each(seq, | ln: string | {
+            line_r = string.trim(ln)
+            if string.length(line_r) > 0 {
+                idx = string.index_of(line_r, "~")
+                entry = string.substring(line_r, 0, idx)
+                _b = list.add(out, entry)
+            }
+        })
+    string.seq_free(seq)
+    _sz = list.size(out)
+    list.free(out)
+    return _sz
 }
 
 // Control: identical statements, `while` instead of `if`. Compiles on 0.697.
@@ -53,15 +57,19 @@ build_while(n: int) -> int {
         wi = wi + 1
     }
 
-    string.seq_each(string.lines("a~1"), |ln: string| {
-        line_r = string.trim(ln)
-        if string.length(line_r) > 0 {
-            idx = string.index_of(line_r, "~")
-            entry = string.substring(line_r, 0, idx)
-            _b = list.add(out, entry)
-        }
-    })
-    return list.size(out)
+    seq = string.lines("a~1")
+    string.seq_each(seq, | ln: string | {
+            line_r = string.trim(ln)
+            if string.length(line_r) > 0 {
+                idx = string.index_of(line_r, "~")
+                entry = string.substring(line_r, 0, idx)
+                _b = list.add(out, entry)
+            }
+        })
+    string.seq_free(seq)
+    _sz = list.size(out)
+    list.free(out)
+    return _sz
 }
 
 main() {
