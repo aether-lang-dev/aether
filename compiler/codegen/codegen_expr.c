@@ -1816,6 +1816,14 @@ static int capture_is_retained_string(CodeGenerator* gen, const char* name,
 
 // Emit just the signature (no trailing `;` or `{`) of a closure function.
 // Caller appends `;\n` for forward decls or ` {\n` for bodies.
+//
+// A parameter is a VALUE name: it is spelled with safe_value_name, the same
+// mangling every reference in the body gets, so the two agree. This used
+// to go through safe_c_name — the FUNCTION-name mangler, whose list also
+// carries libc symbols — so `|index: int|` declared `ae_index` while the
+// body read `index` (#2087): libc's index() on Linux, undeclared on
+// Windows. A C parameter may shadow a libc function; only keywords need
+// the rename.
 static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_type) {
     int id = gen->closures[ci].id;
     ASTNode* closure = gen->closures[ci].closure_node;
@@ -1827,7 +1835,7 @@ static void emit_closure_signature(CodeGenerator* gen, int ci, const char* ret_t
             if (p->node_type) {
                 ptype = get_c_type(p->node_type);
             }
-            fprintf(gen->output, ", %s %s", ptype, safe_c_name(p->value));
+            fprintf(gen->output, ", %s %s", ptype, safe_value_name(p->value));
         }
     }
     fprintf(gen->output, ")");
@@ -3024,6 +3032,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "%s", cb_sym);
                     break;
                 }
+            }
+            /* A function's address under `as fn(...)`: the definition's C
+             * spelling, which safe_c_name mangles away from libc symbols.
+             * After the @c_callback lookup, whose bound symbol is the
+             * definition's spelling for those functions. */
+            if (expr->annotation && strcmp(expr->annotation, "fn_addr") == 0 &&
+                find_function_definition_by_name(gen->program, expr->value)) {
+                fprintf(gen->output, "%s", safe_c_name(expr->value));
+                break;
             }
             if (gen->current_actor) {
                 int is_state_var = 0;

@@ -4323,8 +4323,46 @@ ASTNode* parse_block(Parser* parser) {
             parse_when_region_stmts(parser, block);
             continue;
         }
+        /* `;` is an optional statement terminator: every simple statement
+         * consumes one after itself, but a block-ending statement (`if x {
+         * ... }`) did not, so `if x { a } ; b` failed at the `;` with
+         * "expected statement" (#2073). A `;` at statement position is the
+         * same terminator, belonging to whatever came before. */
+        if (match_token(parser, TOKEN_SEMICOLON)) continue;
         int start_token = parser->current_token;
         int start_errors = aether_error_count();
+        /* `when = 0.0`: a keyword that heads its own statement form, used as
+         * an assignment target. Left to parse_statement, the keyword's own
+         * parser consumed it and stopped at the `=` with the generic
+         * "expected statement" — pointing at the operator and naming
+         * nothing (#2073). A keyword followed by an assignment operator is
+         * the reserved-name mistake; say so at the keyword. */
+        {
+            Token* head = peek_token(parser);
+            Token* after = peek_ahead(parser, 1);
+            if (head && after && token_is_reserved_keyword(head) &&
+                !token_is_value_ident(head) &&
+                (after->type == TOKEN_ASSIGN || after->type == TOKEN_PLUS_ASSIGN ||
+                 after->type == TOKEN_MINUS_ASSIGN)) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                    "'%s' is a reserved keyword and cannot be used as an identifier; rename it (e.g. '%s_' or 'msg')",
+                    head->value, head->value);
+                char hint[128];
+                snprintf(hint, sizeof(hint), "rename to '%s_' or another identifier", head->value);
+                if (!parser->suppress_errors) {
+                    aether_error_full(msg, head->line, head->column, hint, NULL, AETHER_ERR_SYNTAX);
+                }
+                /* Recover past the rest of the statement, but not past a
+                 * `}` on the same line: that brace closes the block. */
+                while (!is_at_end(parser) && peek_token(parser) &&
+                       peek_token(parser)->line == head->line &&
+                       peek_token(parser)->type != TOKEN_RIGHT_BRACE) {
+                    advance_token(parser);
+                }
+                continue;
+            }
+        }
         ASTNode* stmt = parse_statement(parser);
         if (stmt) {
             add_child(block, stmt);
