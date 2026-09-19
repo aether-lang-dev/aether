@@ -11,8 +11,6 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.692.0]
-
 ### Fixed
 
 - **Windows: non-ASCII paths and arguments are UTF-8 (#2077).** Aether
@@ -37,6 +35,10 @@ version number before tagging the release.
   save. Both streams are binary now; the output is byte-identical to what the
   in-place path writes.
 =======
+
+## [0.692.0]
+
+### Fixed
 
 - **A shell test that passed could still fail on its own cleanup.** 82
   integration scripts run under `set -e` and remove their temp directory
