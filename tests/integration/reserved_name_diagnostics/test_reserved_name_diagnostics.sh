@@ -99,6 +99,19 @@ if [ "$got" != "saw x" ]; then
     echo "  [FAIL] reserved_name_diagnostics: a user-defined each (not lowered by name) was refused or misrouted (got '$got')"
     fail=1
 fi
+# A module file names its functions in its own namespace (`rs.free(x)`), so
+# a `free(rs: ptr)` there is not a builtin redefinition; `ae check` on the
+# module must stay clean.
+cat > "$tmp/module.ae" <<'AE'
+exports(free, open)
+free(rs: ptr) { println("module free") }
+open(path: string) -> ptr { return null }
+AE
+if ! AETHER_HOME="$ROOT" "$AE" check "$tmp/module.ae" >/dev/null 2>&1; then
+    echo "  [FAIL] reserved_name_diagnostics: a module's own free()/open() were refused as builtin redefinitions"
+    AETHER_HOME="$ROOT" "$AE" check "$tmp/module.ae" 2>&1 | grep "^error" | head -2 | sed 's/^/        /'
+    fail=1
+fi
 # A definition outside the arity codegen intercepts is a plain function:
 # `isolate` is lowered by name only with one argument.
 cat > "$tmp/isolate2.ae" <<'AE'

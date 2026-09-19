@@ -3567,6 +3567,18 @@ int typecheck_program(ASTNode* program) {
     add_symbol(global_table, "builder_depth", builder_depth_type, 0, 1, 0);
 
     // First pass: collect all declarations
+    /* A module file (top-level `exports(...)`, checked on its own by
+     * `ae check`) names its functions in its own namespace — `bytes.free`
+     * is never a call by bare name — so the builtin-redefinition rule
+     * below is for programs only. In a merged program a module's
+     * definitions already carry their prefix. */
+    int program_is_module = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        if (program->children[i] && program->children[i]->type == AST_EXPORTS_LIST) {
+            program_is_module = 1;
+            break;
+        }
+    }
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
 
@@ -3629,6 +3641,7 @@ int typecheck_program(ASTNode* program) {
                      * NOT intercept (`each`, `map`, `filter`) or that yield to
                      * a user definition (`atoi`) stay definable. */
                     if (prior && !prior->node && prior->is_function &&
+                        !program_is_module &&
                         builtin_lowered_by_name(child->value, definition_param_count(child))) {
                         char msg[320];
                         snprintf(msg, sizeof(msg),
