@@ -727,6 +727,13 @@ static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind a
             "its initializer, but a float is assigned here and would truncate. "
             "Annotate the declaration to keep the fraction (e.g. `float %s = ...`), "
             "or write `int %s = ...` to make the narrowing explicit.", nm, nm, nm);
+    } else if (assigned == TYPE_UINT32) {
+        snprintf(msg, size,
+            "narrowing assignment to '%s': its type was inferred as int from "
+            "its initializer, but a uint32 is assigned here and values past "
+            "2^31 would not fit. Annotate the declaration to keep it unsigned "
+            "(e.g. `uint32 %s = ...`), or write `int %s = ...` to make the "
+            "narrowing explicit.", nm, nm, nm);
     } else {
         snprintf(msg, size,
             "narrowing assignment to '%s': its type was inferred "
@@ -1053,7 +1060,11 @@ static int is_numeric_scalar(TypeKind kind) {
 static TypeKind wider_integer_kind(TypeKind a, TypeKind b) {
     if (a == TYPE_UINT64 || b == TYPE_UINT64) return TYPE_UINT64;
     if (a == TYPE_INT64 || b == TYPE_INT64) return TYPE_INT64;
-    /* uint32/16/8 all fit int's value range for arithmetic. */
+    /* C's usual arithmetic conversions: `unsigned int` wins over `int`,
+     * so `uint32 + int` IS a uint32 in the C this lowers to. Calling it
+     * int typed `y = u + 1` as `int y` and printed 4000000001 as
+     * -294967295. uint16/uint8 promote to int, so those stay int. */
+    if (a == TYPE_UINT32 || b == TYPE_UINT32) return TYPE_UINT32;
     return TYPE_INT;
 }
 
@@ -1708,6 +1719,8 @@ int is_type_compatible(Type* from, Type* to) {
                           to->kind == TYPE_UINT8);
         if (from_small && is_integer_scalar(to->kind)) return 1;
         if (to_small && is_integer_scalar(from->kind)) return 1;
+        /* ... and widen into a float losslessly, as byte and int do. */
+        if (from_small && (to->kind == TYPE_FLOAT || to->kind == TYPE_LONGDOUBLE)) return 1;
     }
     // long <-> float compatibility
     if (from->kind == TYPE_INT64 && to->kind == TYPE_FLOAT) return 1;
@@ -1770,7 +1783,11 @@ int is_type_compatible(Type* from, Type* to) {
     if (to->kind == TYPE_ACTOR_REF &&
         (from->kind == TYPE_INT || from->kind == TYPE_INT64 || from->kind == TYPE_PTR)) return 1;
 
-    // int ↔ ptr compatibility (e.g. x = 0 then x = ptr_func(), or passing 0 to ptr param)
+    // int ↔ ptr compatibility (passing 0 to a ptr param, an actor-state
+    // `ref = 0` later given a pointer). A LOCAL first bound as a number
+    // and re-bound to a pointer is refused at the re-bind: the C the
+    // local lowers to has one type, and GCC 14 makes that assignment an
+    // error (-Wint-conversion).
     if (from->kind == TYPE_INT && to->kind == TYPE_PTR) return 1;
     if (from->kind == TYPE_PTR && to->kind == TYPE_INT) return 1;
 
@@ -2811,7 +2828,15 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
                 return create_type(TYPE_INT);
             }
             if (is_integer_scalar(left_type->kind) && is_integer_scalar(right_type->kind)) {
-                return create_type(wider_integer_kind(left_type->kind, right_type->kind));
+                /* A shift has the type of its promoted LEFT operand; the
+                 * count's type does not take part (`-8 >> u32_count` is
+                 * a signed -1, not 4294967295). The 64-bit widening
+                 * through the count is kept as it was (#697 computes the
+                 * value in 64 bits). */
+                TypeKind rk = right_type->kind;
+                if ((operator == TOKEN_LSHIFT || operator == TOKEN_RSHIFT) && rk == TYPE_UINT32)
+                    rk = TYPE_INT;
+                return create_type(wider_integer_kind(left_type->kind, rk));
             }
             break;
 
@@ -5932,6 +5957,62 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * before stmt->node_type gets overwritten with the int
                  * init type below. */
                 Symbol* existing = stmt->value ? lookup_symbol(table, stmt->value) : NULL;
+
+                /* A local has one type, the one its first binding gave it.
+                 * A bare re-bind with a value of another kind used to
+                 * replace the symbol's type while the hoisted C variable
+                 * took one of the two: `x = 5` then `x = "s"` failed in the
+                 * C compiler with "assignment to 'const char *' from
+                 * 'int'", nothing in the language's terms. Refuse it here,
+                 * naming both types and the fix. Widenings and the numeric
+                 * conversions is_assignable permits are untouched (the
+                 * #698 guards below decide about those). */
+                Symbol* bound = NULL;
+                if (stmt->type_inferred && stmt->value) {
+                    /* Only a binding in an enclosing LOCAL scope is the same
+                     * variable. The early inference pass parks every local
+                     * it sees in the global table under the LAST type it
+                     * saw for the name, so the global fallback would report
+                     * `x = 5` as re-binding a string. */
+                    for (SymbolTable* t = table; t && t->parent && !bound; t = t->parent)
+                        bound = lookup_symbol_local(t, stmt->value);
+                    /* A binding in a SIBLING block is not looked at: it is
+                     * a C variable of its own unless codegen hoists it
+                     * (hoist_if_branch_vars, only when the name is used
+                     * outside the branches), and `std.cbor` binds the
+                     * same name as int in one branch and long in
+                     * another. */
+                }
+                /* Actor state is not a local: `state ref = 0` then
+                 * `ref = <ptr>` is the documented wiring pattern and is
+                 * typed by is_type_compatible's actor-ref rules. */
+                if (bound && bound->type && !bound->is_state &&
+                    !bound->is_function && !bound->is_actor && !bound->is_module_alias &&
+                    bound->type->kind != TYPE_UNKNOWN &&
+                    init_type && init_type->kind != TYPE_UNKNOWN &&
+                    init_type->kind != TYPE_VOID &&
+                    /* A string is a nullable `const char*`: `s = null` and
+                     * a raw C string pointer into it stay legal, as they
+                     * always were. */
+                    !((init_type->kind == TYPE_PTR && bound->type->kind == TYPE_STRING) ||
+                      (init_type->kind == TYPE_STRING && bound->type->kind == TYPE_PTR)) &&
+                    (!is_assignable(init_type, bound->type) ||
+                     /* int <-> ptr is assignable for C interop, but a
+                      * number local re-bound to `null` (or a pointer to a
+                      * number) is the C compiler's -Wint-conversion error. */
+                     (init_type->kind == TYPE_PTR && is_numeric_scalar(bound->type->kind)) ||
+                     (is_numeric_scalar(init_type->kind) && bound->type->kind == TYPE_PTR))) {
+                    char rmsg[400];
+                    snprintf(rmsg, sizeof(rmsg),
+                        "cannot re-bind '%s' as %s: it was bound as %s by its first "
+                        "assignment, and a local keeps that type. Use a new name for "
+                        "the %s value, or convert it to %s",
+                        stmt->value, type_name(init_type), type_name(bound->type),
+                        type_name(init_type), type_name(bound->type));
+                    type_error(rmsg, stmt->line, stmt->column);
+                    free_type(init_type);
+                    return 0;
+                }
                 if (existing && existing->type && existing->type->kind == TYPE_BYTE &&
                     byte_assignment_literal_out_of_range(init)) {
                     char msg[256];
@@ -6001,6 +6082,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     existing->type && existing->type->kind == TYPE_INT &&
                     init_type && (init_type->kind == TYPE_INT64 ||
                                   init_type->kind == TYPE_UINT64 ||
+                                  init_type->kind == TYPE_UINT32 ||
                                   init_type->kind == TYPE_FLOAT ||
                                   init_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = stmt->value ? stmt->value : "x";
@@ -6099,6 +6181,37 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (scalar_fix || array_fix) {
                         free_type(stmt->node_type);
                         stmt->node_type = clone_type(init_type);
+                    }
+                }
+                /* A bare re-bind of a local ASSIGNS to it; the local keeps
+                 * the type its first binding gave it. The binding used to
+                 * take the initializer's type instead, so `f = 1.5` then
+                 * `f = 2` went on as an int (`${f}` printed `(int)f`) and
+                 * `f = u32` printed the double through `%u`. The value was
+                 * checked assignable above; the conversion is C's, as for
+                 * an annotated slot. (#869 and #340 did this for explicit
+                 * integer widths and optionals; this is the general rule.) */
+                if (bound && stmt->type_inferred && bound->type &&
+                    bound->type->kind != TYPE_UNKNOWN) {
+                    /* A string and a raw pointer are the one case left as
+                     * it was: `v = map_get_raw(..)` (ptr) in one block and
+                     * `v = lookup(..)` (string) in another share a
+                     * `void*`/`const char*` variable C converts freely,
+                     * and the binding goes on with the value's type. */
+                    int str_ptr_mix =
+                        (bound->type->kind == TYPE_STRING && init_type->kind == TYPE_PTR &&
+                         init->type != AST_NULL_LITERAL) ||
+                        (bound->type->kind == TYPE_PTR && init_type->kind == TYPE_STRING);
+                    if (!str_ptr_mix) {
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(bound->type);
+                        /* `s = null` clears a string (a nullable `const
+                         * char*`); the literal takes the string type so
+                         * the slot check below sees a string. */
+                        if (init->type == AST_NULL_LITERAL && bound->type->kind == TYPE_STRING) {
+                            free_type(init_type);
+                            init_type = clone_type(bound->type);
+                        }
                     }
                 }
                 // If variable has no explicit type (TYPE_UNKNOWN), use initializer's type
@@ -6290,6 +6403,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     symbol->type && symbol->type->kind == TYPE_INT &&
                     right_type && (right_type->kind == TYPE_INT64 ||
                                    right_type->kind == TYPE_UINT64 ||
+                                   right_type->kind == TYPE_UINT32 ||
                                    right_type->kind == TYPE_FLOAT ||
                                    right_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = left->value ? left->value : "x";
@@ -6616,7 +6730,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     char spec = fmt[fi];
                     int mismatch = 0;
                     if ((spec == 's') && ak != TYPE_STRING && ak != TYPE_PTR) mismatch = 1;
-                    if ((spec == 'd' || spec == 'i') && ak != TYPE_INT && ak != TYPE_INT64 && ak != TYPE_BOOL) mismatch = 1;
+                    /* byte/uint8/uint16 promote to int, so %d is their
+                     * conversion and was warned about wrongly; uint32 is
+                     * not (%d shows values past 2^31 negative), and the
+                     * codegen corrects it to %u, so that one is reported. */
+                    if ((spec == 'd' || spec == 'i') && ak != TYPE_INT && ak != TYPE_INT64 && ak != TYPE_BOOL &&
+                        ak != TYPE_BYTE && ak != TYPE_UINT8 && ak != TYPE_UINT16) mismatch = 1;
+                    if ((spec == 'u') && ak != TYPE_UINT32 && ak != TYPE_UINT16 && ak != TYPE_UINT8 &&
+                        ak != TYPE_BYTE && ak != TYPE_INT) mismatch = 1;
                     if ((spec == 'f' || spec == 'g' || spec == 'e') && ak != TYPE_FLOAT && ak != TYPE_LONGDOUBLE) mismatch = 1;
                     if (mismatch) {
                         char wbuf[256];

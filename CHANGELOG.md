@@ -13,6 +13,49 @@ version number before tagging the release.
 
 ### Fixed
 
+- **Re-binding a local to another kind failed in the C compiler.**
+  `x = 5` then `x = "s"` (or `= true`, `= null`; `p = null` then
+  `p = 5`) replaced the symbol's type while the hoisted C variable took
+  one of the two, and the program died with "assignment to
+  'const char *' from 'int'" — nothing in the language's terms. A local
+  has one type, the one its first binding gave it: the re-bind is now
+  refused at its line, naming both types and the fix (a new name),
+  including from a nested block. (A binding in a *sibling* block is a
+  variable of its own unless codegen hoists it; the hoisted case is
+  #2124.) The numeric conversions and `null` into a `string`
+  stay legal — and a legal
+  re-bind now keeps the first type instead of taking the value's:
+  `f = 1.5` then `f = u32` printed the double through `%u` (0), `f = 2`
+  went on typed as an int, and `int x = 0` then `x = 2.5` narrows as the
+  annotation says. `tests/integration/local_rebind_kind`.
+
+- **A `uint32` assigned to an inferred `int` kept the int.** `k = 5` then
+  `k = <uint32>` printed the value through `%u` on `int` storage and
+  compared as a negative number. It is the #698 narrowing error now, like
+  a 64-bit value: *a uint32 is assigned here and values past 2^31 would
+  not fit; annotate `uint32 k = ...`*.
+
+- **`uint32 op int` was typed `int`.** The C computes it as `unsigned int`
+  (usual arithmetic conversions), so `y = u + 1` with `u = 4000000000`
+  emitted `int y` and printed -294967295. The result is `uint32` now;
+  `uint8`/`uint16` still promote to `int`, 64-bit operands still win, and
+  a shift keeps the type of its (promoted) left operand — `-8 >> count`
+  with a `uint32` count is -1, not 4294967295. A `uint32`/`uint16`/
+  `uint8` value also widens into a `float` slot, as `byte` and `int` do.
+
+- **`print("%d", b)` warned for a `byte`/`uint8`/`uint16` argument.**
+  "Format specifier '%d' does not match argument type 'byte'" — but `%d`
+  is exactly their conversion (they promote to `int`). The warning is
+  gone for those; `%u` is now validated too (`%u` with a string says so),
+  and `%d` with a `uint32` still reports the correction to `%u`.
+
+- **A bare expression statement swallowed the next line's binding.** `foo`
+  on a line of its own followed by `bar = 2` parsed as the declaration
+  `foo bar = 2` and failed with "Type mismatch in variable
+  initialization" at `bar`; `q.a` followed by `baz = 4` did the same
+  through the qualified-type form. The binding name of an
+  identifier-typed declaration is on the type's line.
+
 - **An array literal of float expressions came out as an int array
   (#2119).** `[0.18 * math.PI, 0.25 * math.PI]` with a module constant
   was typed from its first element by the early inference pass, before
