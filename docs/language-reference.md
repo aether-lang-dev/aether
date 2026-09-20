@@ -235,7 +235,9 @@ Variables are inferred from their initialization or usage context.
 
 **`let` / `var` are optional keywords**, accepted but not required. Bare Python-style assignment is the canonical form and is what most stdlib code uses. `let x = 10` and `var x = 10` parse identically to `x = 10`. There is no semantic distinction between `let` and `var` Aether is not Rust; mutability is a property of the binding's later use, not its declaration. There is no `mut`: `let mut x = 0` is an error, because a `let` must bind something and `mut` is not a keyword the language has. A typed declaration is written without `let` (`int n = 0`, `Pair p`), so two names after `let` is always a mistake.
 
-**Semicolons are optional.** Aether parses end-of-line as a statement terminator. The samples above use no semicolons; older samples in this doc may show `;` for clarity. Either is fine.
+**Semicolons are optional.** Aether parses end-of-line as a statement terminator. The samples above use no semicolons; older samples in this doc may show `;` for clarity. Either is fine, after any statement — `if x { a } ; b` is `if x { a }` then `b`.
+
+**Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
 ### Casting between types
 
@@ -375,6 +377,8 @@ print_hello() {
 ```
 
 There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration. The `main()` function is the entry point and is always void.
+
+**Builtin names cannot be redefined.** A call to a builtin (`isolate`, `consume`, `release`, `make`, `sizeof`, `typeof`, `sleep`, …) is lowered by name, so a user function spelled the same would compile and never run; the definition is refused instead: `'isolate' is a builtin function and cannot be redefined … rename it (e.g. 'isolate_')`. A user function whose name is a *C library* symbol (`read`, `time`, `index`, `remove`, …) is fine: it is emitted under a mangled C name in every position — direct calls, `f as fn(...)`, and as a bare `fn` value.
 
 **`main()` takes no parameters.** There is no Aether-side `main(argc, argv)` form, the signature is uniform across every program. The runtime stashes the C-side `argc` / `argv` at startup (the codegen wraps your zero-arg `main()` in a C `int main(int argc, char** argv)` that calls `aether_args_init(argc, argv)` before any user code runs), and Aether code reaches command-line arguments through `std.os`:
 
@@ -2520,7 +2524,7 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 }
 ```
 
-Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
 ### `@derive(eq)` synthesize an equality helper for a struct
 

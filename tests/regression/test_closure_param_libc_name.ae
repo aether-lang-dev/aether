@@ -1,0 +1,32 @@
+// A closure parameter named like a libc symbol or a C keyword (#2087).
+//
+// The closure's C signature was spelled with the FUNCTION-name mangler,
+// whose list carries libc symbols, while the body used the VALUE-name
+// mangler, which renames C keywords only. `|index: int|` therefore
+// declared `ae_index` and read `index` — libc's index(3) on Linux (wrong
+// code behind a -Wint-conversion warning), undeclared on Windows. Both
+// sides now use the value mangler: a keyword is renamed in both places,
+// a libc name in neither (a C parameter may shadow a libc function).
+
+run(cb: fn) -> int { return call(cb, 3) }
+
+extern exit(code: int)
+
+main() {
+    f = | index: int | { return index + 1 }
+    if run(f) != 4 {
+        println("FAIL: closure with a parameter named index")
+        exit(1)
+    }
+    g = | char: int, short: int | { return char * short }
+    if call(g, 4, 5) != 20 {
+        println("FAIL: closure with parameters named char and short")
+        exit(1)
+    }
+    h = | time: int, remove: int, abs: int | { return time + remove + abs }
+    if call(h, 1, 2, 3) != 6 {
+        println("FAIL: closure with parameters named after libc functions")
+        exit(1)
+    }
+    println("PASS: closure parameters named like libc symbols and C keywords")
+}

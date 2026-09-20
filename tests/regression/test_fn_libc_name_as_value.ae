@@ -1,0 +1,34 @@
+// A user function whose name is a libc symbol, used as a value (#2064).
+//
+// The definition is emitted as `ae_read` (safe_c_name keeps user functions
+// off libc's names), and a direct call reaches it. Under `as fn(...)`,
+// and inside the adapter a bare-fn value is wrapped in, the name was
+// emitted verbatim, so `read as fn(*Thing) -> int` was libc's
+// read(int, void*, unsigned): a -Wint-conversion warning from the C
+// compiler on Linux, and -1 at runtime. All three spellings now reach the
+// definition.
+
+struct Thing { value: int }
+
+read(thing: *Thing) -> int { return thing.value }
+
+extern exit(code: int)
+
+main() {
+    thing = Thing { value: 5 }
+    if read(&thing) != 5 {
+        println("FAIL: direct call")
+        exit(1)
+    }
+    f = read as fn(*Thing) -> int
+    if f(&thing) != 5 {
+        println("FAIL: as fn(...) reached the wrong read (${f(&thing)})")
+        exit(1)
+    }
+    g = read
+    if call(g, &thing) != 5 {
+        println("FAIL: bare fn value reached the wrong read (${call(g, &thing)})")
+        exit(1)
+    }
+    println("PASS: a function named read is the user's read in every position")
+}

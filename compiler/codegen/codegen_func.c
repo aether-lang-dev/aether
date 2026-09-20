@@ -444,7 +444,7 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
             fprintf(gen->output, "return ");
         }
         if (owned_string) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-        fprintf(gen->output, "%s(", fname);
+        fprintf(gen->output, "%s(", safe_c_name(fname));
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
             fprintf(gen->output, "_a%d", k);
