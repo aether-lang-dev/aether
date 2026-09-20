@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.700.0]
+
 ### Fixed
 
 - **An array literal of float expressions came out as an int array
