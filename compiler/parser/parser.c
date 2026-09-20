@@ -2796,7 +2796,11 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             // relies on (member access uses `.`, calls use `(`). parse_type
             // lowers a bare struct-name identifier to TYPE_STRUCT, and the
             // declaration may omit the initializer (`Pair p`).
-            if (next && next->type == TOKEN_IDENTIFIER) {
+            // The binding name is on the type's line: `foo` on a line of its
+            // own followed by `bar = 2` is two statements, and used to parse
+            // as the declaration `foo bar = 2` — a "Type mismatch in
+            // variable initialization" at `bar`.
+            if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
                 return parse_variable_declaration(parser);
             }
             // The array form of the same declaration, with an element
@@ -2838,7 +2842,8 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                 /* `off` is past the dotted type name; a binding identifier
                  * here (and not another `.`/`(`) marks a typed declaration. */
                 Token* after = peek_ahead(parser, off);
-                if (off > 1 && after && after->type == TOKEN_IDENTIFIER) {
+                if (off > 1 && after && after->type == TOKEN_IDENTIFIER &&
+                    after->line == token->line) {
                     return parse_variable_declaration(parser);
                 }
             }

@@ -119,6 +119,8 @@ main() {
 
 **Arithmetic.** `byte op byte → byte`; mixed `byte op int → int` (the wider type wins). This keeps NaN-boxing / packed-tag patterns expressible (`tag & 0x07` stays a byte) while letting general arithmetic widen naturally.
 
+The other widths follow C's usual arithmetic conversions: `uint8`/`uint16` promote to `int`, `uint32 op int → uint32` (`unsigned int` wins over `int`, so `u + 1` with `u = 4000000000` is `4000000001`, not a negative `int`), and any 64-bit operand makes the result 64-bit. A shift (`<<`, `>>`) has the type of its promoted left operand; the count's type does not take part (`-8 >> n` is `-1` whatever `n`'s width). `print("%d", b)` is the right conversion for a `byte`/`uint8`/`uint16` argument; a `uint32` takes `%u`, and the compiler corrects a mismatched specifier with a warning.
+
 #### `longdouble` C `long double`
 
 The `longdouble` type maps to C `long double`, the widest floating type, for exact-decimal numeric paths a C interop layer expects it (libc `strtold`, `INCRBYFLOAT`-style score conversion). It supports arithmetic (`+ - * /`), comparison, and conversion to/from `int` and `float`; as the widest numeric it wins promotion (`longdouble op int` / `longdouble op float` → `longdouble`). It's usable in locals, function params/returns, struct fields, and `extern` signatures. There is no `longdouble` literal, values arrive from an extern (`extern powl(x: longdouble, y: longdouble) -> longdouble`) or by widening an `int`/`float`. Declare a libc function with the signature libc actually has: `strtold`'s second parameter is `char **restrict`, which `ptr` lowers to `void*`, and the C compiler rejects the redeclaration. Interpolation and `print` format it with `%Lg`/`%Lf`.
@@ -262,6 +264,10 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error — *cannot re-bind 'x' as string: it was bound as int by its first assignment* — rather than a C error about `const char*`. Use a new name for the other value. (A name first bound inside one `if` body and again inside a sibling body is two variables, each with its own type, as long as nothing outside the bodies uses it.) The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` — a 64-bit integer, a `uint32`, a float — is the narrowing error described there.
+
+**A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
+
 ### Casting between types
 
 Aether has **no general-purpose cast operator**. The `as` keyword is reserved for module aliasing and three specific value-cast forms:
@@ -280,6 +286,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or returning from a function declared `-> string`. The returned `ptr` is treated as a borrowed C-string until it crosses into refcounted-string territory. |
 | `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). |
 | `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix — the same rule as a 64-bit value into an inferred `int` — because the truncation was never chosen. |
+| `uint32` → `int` | Explicit slots convert as in C. Into an **inferred** `int` (`k = 5` then `k = some_uint32`) it is the same narrowing error: values past 2³¹ do not fit. Annotate `uint32 k = ...` to keep it unsigned. |
 | Reinterpret a raw `ptr` as a typed struct view, function pointer, or array | `expr as *StructName`, `expr as fn(...) -> R`, or `expr as T[]` (the only `as` forms for values). |
 
 ### Null
