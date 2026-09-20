@@ -716,6 +716,28 @@ static int definition_param_count(ASTNode* def) {
     return count;
 }
 
+/* #698's narrowing message, for the two kinds of value that truncate when
+ * stored into an INFERRED 32-bit int: a 64-bit integer, and — since the
+ * same slot kept `int` storage while the checker went on typing the name
+ * as float, so `${r}` printed garbage through `%g` — a float. */
+static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind assigned) {
+    if (assigned == TYPE_FLOAT || assigned == TYPE_LONGDOUBLE) {
+        snprintf(msg, size,
+            "narrowing assignment to '%s': its type was inferred as int from "
+            "its initializer, but a float is assigned here and would truncate. "
+            "Annotate the declaration to keep the fraction (e.g. `float %s = ...`), "
+            "or write `int %s = ...` to make the narrowing explicit.", nm, nm, nm);
+    } else {
+        snprintf(msg, size,
+            "narrowing assignment to '%s': its type was inferred "
+            "as 32-bit int from its initializer, but a 64-bit "
+            "value is assigned here and would truncate. Annotate "
+            "the declaration to keep 64 bits (e.g. `long %s = ...` "
+            "or `uint64 %s = ...`), or write `int %s = ...` to "
+            "make the narrowing explicit.", nm, nm, nm, nm);
+    }
+}
+
 void type_error(const char* message, int line, int column) {
     AetherErrorCode code = AETHER_ERR_TYPE_MISMATCH;
     if (strstr(message, "not exported")) code = AETHER_ERR_NOT_EXPORTED;
@@ -5978,16 +6000,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (existing && existing->type_inferred &&
                     existing->type && existing->type->kind == TYPE_INT &&
                     init_type && (init_type->kind == TYPE_INT64 ||
-                                  init_type->kind == TYPE_UINT64)) {
+                                  init_type->kind == TYPE_UINT64 ||
+                                  init_type->kind == TYPE_FLOAT ||
+                                  init_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = stmt->value ? stmt->value : "x";
                     char msg[420];
-                    snprintf(msg, sizeof(msg),
-                        "narrowing assignment to '%s': its type was inferred "
-                        "as 32-bit int from its initializer, but a 64-bit "
-                        "value is assigned here and would truncate. Annotate "
-                        "the declaration to keep 64 bits (e.g. `long %s = ...` "
-                        "or `uint64 %s = ...`), or write `int %s = ...` to "
-                        "make the narrowing explicit.", nm, nm, nm, nm);
+                    narrowing_message(msg, sizeof(msg), nm, init_type->kind);
                     type_error(msg, stmt->line, stmt->column);
                     free_type(init_type);
                     return 0;
@@ -6057,6 +6075,32 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     }
                 }
 
+                /* The early inference pass typed a bare `x = expr` before
+                 * anything imported was resolved and before an array literal
+                 * had joined its elements, so its stamp can be the wrong
+                 * numeric kind: `xs = [1, 2.5, 3]` as an int array, and
+                 * `k = xs[1]` as an int from the same first element (#2119).
+                 * An inferred, not annotated, declaration follows the type
+                 * its initializer has now, for a numeric scalar or an array
+                 * of one. */
+                if (stmt->type_inferred && init && init_type && stmt->node_type) {
+                    Type* have = stmt->node_type;
+                    Type* want = init_type;
+                    /* Only the wider kinds the early pass could not see are
+                     * adopted; a narrow unsigned initializer keeps the int
+                     * binding it has always had. */
+                    int scalar_fix = have->kind == TYPE_INT &&
+                                     (want->kind == TYPE_FLOAT || want->kind == TYPE_LONGDOUBLE ||
+                                      want->kind == TYPE_INT64 || want->kind == TYPE_UINT64);
+                    int array_fix = init->type == AST_ARRAY_LITERAL &&
+                                    have->kind == TYPE_ARRAY && want->kind == TYPE_ARRAY &&
+                                    have->element_type && want->element_type &&
+                                    have->element_type->kind != want->element_type->kind;
+                    if (scalar_fix || array_fix) {
+                        free_type(stmt->node_type);
+                        stmt->node_type = clone_type(init_type);
+                    }
+                }
                 // If variable has no explicit type (TYPE_UNKNOWN), use initializer's type
                 if (!stmt->node_type || stmt->node_type->kind == TYPE_UNKNOWN) {
                     if (stmt->node_type) free_type(stmt->node_type);
@@ -6182,7 +6226,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * target). A later 64-bit re-bind then triggers the guard
                  * above / in AST_ASSIGNMENT. */
                 if (stmt->type_inferred && stmt->node_type &&
-                    stmt->node_type->kind == TYPE_INT) {
+                    (stmt->node_type->kind == TYPE_INT ||
+                     (stmt->node_type->kind == TYPE_ARRAY && stmt->node_type->element_type &&
+                      stmt->node_type->element_type->kind == TYPE_INT &&
+                      stmt->child_count > 0 && stmt->children[0] &&
+                      stmt->children[0]->type == AST_ARRAY_LITERAL))) {
                     Symbol* s = lookup_symbol_local(table, stmt->value);
                     if (s) s->type_inferred = 1;
                 }
@@ -6241,16 +6289,12 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (symbol->type_inferred &&
                     symbol->type && symbol->type->kind == TYPE_INT &&
                     right_type && (right_type->kind == TYPE_INT64 ||
-                                   right_type->kind == TYPE_UINT64)) {
+                                   right_type->kind == TYPE_UINT64 ||
+                                   right_type->kind == TYPE_FLOAT ||
+                                   right_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = left->value ? left->value : "x";
                     char msg[420];
-                    snprintf(msg, sizeof(msg),
-                        "narrowing assignment to '%s': its type was inferred "
-                        "as 32-bit int from its initializer, but a 64-bit "
-                        "value is assigned here and would truncate. Annotate "
-                        "the declaration to keep 64 bits (e.g. `long %s = ...` "
-                        "or `uint64 %s = ...`), or write `int %s = ...` to "
-                        "make the narrowing explicit.", nm, nm, nm, nm);
+                    narrowing_message(msg, sizeof(msg), nm, right_type->kind);
                     type_error(msg, stmt->line, stmt->column);
                     free_type(right_type);
                     return 0;
@@ -7516,12 +7560,60 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
              * Type* tree we need for codegen. */
             return 1;
 
-        case AST_ARRAY_LITERAL:
+        case AST_ARRAY_LITERAL: {
+            /* Arrays are one-dimensional. A nested literal was typed as an
+             * int array of its rows and emitted as `int grid[2] = {{...},
+             * {...}}` — C warnings about braces around a scalar, then
+             * "subscripted value is neither array nor pointer" at the
+             * first `grid[i][j]`, none of it in the language's terms. */
+            for (int i = 0; i < expr->child_count; i++) {
+                ASTNode* el = expr->children[i];
+                if (el && el->type == AST_ARRAY_LITERAL) {
+                    type_error("an array literal cannot hold an array literal: arrays are "
+                               "one-dimensional. Use a flat `T[rows * cols]` indexed as "
+                               "`row * cols + col`, or a list of arrays",
+                               el->line, el->column);
+                    return 0;
+                }
+            }
             // Type check all array elements
             for (int i = 0; i < expr->child_count; i++) {
                 typecheck_expression(expr->children[i], table);
             }
+            /* The element type was chosen by the early inference pass from
+             * the first element's type BEFORE this pass could resolve
+             * anything imported: `[0.18 * math.PI, ...]` came out as an
+             * int array (the product's type was unknown then, and unknown
+             * lowers to int) and every element was truncated with no
+             * diagnostic (#2119). Now that the elements are typed, the
+             * array's element type is the numeric join of theirs — float
+             * if any element is float — so a literal of float expressions
+             * is a `double[]` whatever its first element looked like
+             * early on. Non-numeric element kinds keep the early choice. */
+            Type* join = NULL;
+            for (int i = 0; i < expr->child_count; i++) {
+                Type* et = expr->children[i] ? expr->children[i]->node_type : NULL;
+                if (!et || !is_numeric_scalar(et->kind)) { join = NULL; break; }
+                if (!join) { join = et; continue; }
+                if (et->kind == TYPE_FLOAT || et->kind == TYPE_LONGDOUBLE) {
+                    if (join->kind != TYPE_LONGDOUBLE) join = et;
+                } else if (is_integer_scalar(join->kind)) {
+                    /* Among integers only the 64-bit kinds widen; a
+                     * uint32/uint16/byte-led literal keeps its kind (the
+                     * `uint32 x = 4000000000; [x, 0]` array stays uint32). */
+                    if (et->kind == TYPE_UINT64 ||
+                        (et->kind == TYPE_INT64 && join->kind != TYPE_UINT64)) join = et;
+                }
+            }
+            if (join) {
+                Type* have = expr->node_type;
+                if (!have || have->kind != TYPE_ARRAY || !have->element_type ||
+                    have->element_type->kind != join->kind) {
+                    set_node_type(expr, create_array_type(clone_type(join), expr->child_count));
+                }
+            }
             return 1;
+        }
 
         case AST_TUPLE_LITERAL: {
             /* #1033: `(a, b, ...)` — element expressions typecheck here;
@@ -7673,9 +7765,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
                 if (idx_type) free_type(idx_type);
 
-                // Propagate element type from the array expression.
+                // Propagate element type from the array expression. The
+                // array's element type is authoritative: the early inference
+                // pass may have stamped this access from the array's FIRST
+                // element (`m[1]` of `[1, 2.5, 3]` as int), and a stale stamp
+                // reached printf as `%d` on a double slot (#2119).
                 if (arr_type && arr_type->kind == TYPE_ARRAY && arr_type->element_type &&
-                    (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN)) {
+                    (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN ||
+                     expr->node_type->kind != arr_type->element_type->kind)) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = clone_type(arr_type->element_type);
                 }
@@ -8128,6 +8225,33 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
                 free_type(left_type);
                 free_type(right_type);
                 type_error("Type mismatch in assignment", expr->line, expr->column);
+                return 0;
+            }
+        }
+        /* #698 for an element: `xs = [1, 2]` infers an int array, and
+         * `xs[0] = 7.5` then truncated silently (is_assignable permits
+         * float->int). The element type was inferred from the literal, not
+         * chosen, so — exactly as for an inferred int local — say so and
+         * name the fix. An annotated array (`int[2] xs = ...`) narrows
+         * explicitly and is left alone. */
+        if (left->type == AST_ARRAY_ACCESS && left->child_count >= 1 &&
+            left->children[0] && left->children[0]->type == AST_IDENTIFIER &&
+            left_type && left_type->kind == TYPE_INT &&
+            right_type && (right_type->kind == TYPE_FLOAT ||
+                           right_type->kind == TYPE_LONGDOUBLE)) {
+            Symbol* arr_sym = lookup_symbol(table, left->children[0]->value);
+            if (arr_sym && arr_sym->type_inferred) {
+                const char* nm = left->children[0]->value;
+                char msg[420];
+                snprintf(msg, sizeof(msg),
+                    "narrowing assignment to an element of '%s': its element type "
+                    "was inferred as int from the array literal, but a float is "
+                    "assigned here and would truncate. Write the literal with float "
+                    "elements (e.g. `[1.0, 2.0]`), or annotate the declaration "
+                    "(`int[N] %s = ...`) to make the narrowing explicit.", nm, nm);
+                free_type(left_type);
+                free_type(right_type);
+                type_error(msg, expr->line, expr->column);
                 return 0;
             }
         }

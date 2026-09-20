@@ -3808,6 +3808,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "printf(\"%%d\", ");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
+                        } else if (arg_type->kind == TYPE_UINT32) {
+                            /* A uint32 through %d prints values past 2^31 as
+                             * negative; uint32_t is unsigned int on every
+                             * target, so %u is its conversion. */
+                            fprintf(gen->output, "printf(\"%%u\", ");
+                            generate_expression(gen, arg);
+                            fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_INT64) {
                             fprintf(gen->output, "printf(\"%%lld\", (long long)");
                             generate_expression(gen, arg);
@@ -3886,6 +3893,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
                                     else if (atype && atype->kind == TYPE_FLOAT) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
+                                    else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
                                     else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
                                     else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
                                     else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
@@ -3937,6 +3945,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         Type* arg_type = arg->node_type;
                         if (arg_type->kind == TYPE_INT) {
                             fprintf(gen->output, "printf(\"%%d\\n\", ");
+                            generate_expression(gen, arg);
+                            fprintf(gen->output, ")");
+                        } else if (arg_type->kind == TYPE_UINT32) {
+                            fprintf(gen->output, "printf(\"%%u\\n\", ");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_INT64) {
@@ -4027,6 +4039,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
                                     else if (atype && atype->kind == TYPE_FLOAT) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
+                                    else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
                                     else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
                                     else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
                                     else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
@@ -5590,6 +5603,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         switch (tk) { \
                             case TYPE_INT:    fprintf(gen->output, "%%d");  break; \
                             case TYPE_INT64:  fprintf(gen->output, "%%lld"); break; \
+                            case TYPE_UINT32: fprintf(gen->output, "%%u");  break; \
                             case TYPE_UINT64: fprintf(gen->output, "%%llu"); break; \
                             case TYPE_DURATION: fprintf(gen->output, "%%s"); break; \
                             case TYPE_FLOAT:  fprintf(gen->output, "%%g");  break; \

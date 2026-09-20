@@ -11,6 +11,60 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **An array literal of float expressions came out as an int array
+  (#2119).** `[0.18 * math.PI, 0.25 * math.PI]` with a module constant
+  was typed from its first element by the early inference pass, before
+  anything imported was resolved, so the product's type was unknown and
+  unknown lowered to int: every element truncated, no diagnostic, a sweep
+  of angles ran at 0 or 1. `[1, 2.5, 3]` was an int array for the same
+  reason. The element type is now the numeric join of all elements once
+  they are typed (float if any is float, `long` if any needs it), an
+  inferred declaration follows the retyped literal, and an index
+  expression takes the array's element type rather than the stale stamp
+  that reached printf as `%d` on a double. A bare local bound to an
+  element of such an array (`k = xs[1]`, `z = longs[0]`) follows the
+  same rule instead of keeping the early pass's `int`. A literal led by
+  a `uint32`/`uint16`/`uint8` value keeps that element kind; only a
+  64-bit element widens the join.
+  `tests/integration/array_literal_element_type`.
+
+- **A float assigned to an inferred `int` variable printed garbage.**
+  `r = 0` then `r = 2.5` kept `int r` while the checker went on typing the
+  name as float, so `${r}` went through `printf("%g", int)`
+  (`9.88131e-324`). It is now the narrowing error #698 gives for a 64-bit
+  value: *its type was inferred as int … but a float is assigned here and
+  would truncate; annotate `float r = ...`, or `int r = ...` to narrow
+  explicitly*. An element of an inferred int array (`xs = [1, 2]` then
+  `xs[0] = 7.5`) is refused the same way; annotated slots (`int k = 4.5`,
+  `int[2] xs`) still narrow on purpose.
+
+- **A `uint32` printed as a negative int.** Every print path chose `%d`
+  for `uint32` — `print(x)` / `println(x)` (statement and expression
+  forms), `print("%d", x)` and `${x}` interpolation — so
+  `uint32 x = 4000000000` came out as `-294967296` everywhere. `uint32_t`
+  is `unsigned int` on every supported target; `%u` is its conversion.
+  `tests/integration/uint32_print`.
+
+- **`uint32[4] xs = [...]` did not parse as a declaration.** `int[4] xs`
+  reaches the typed-declaration path through the `int` keyword, but
+  `uint8`/`uint16`/`uint32` and struct names are identifiers, and only the
+  `IDENT IDENT` shape (`uint32 x = ...`) was recognised: `uint32[4] xs`
+  parsed as an index into a variable called `uint32` and failed with
+  "Undefined variable 'uint32'". The shape `IDENT [N] IDENT` on one line
+  is now a declaration (`uint16[3] hs`, `Pair[8] ps`), with the element
+  type pinned in the C (`uint16_t hs[3]`, `Pair ps[8]`).
+  `tests/integration/ident_typed_array_decl`.
+
+- **A nested array literal emitted invalid C.** `[[1.0, 2.0], [3.0,
+  4.0]]` was typed as an int array of its rows and lowered to
+  `int grid[2] = {{...}, {...}}`; the C compiler reported braces around a
+  scalar and "subscripted value is neither array nor pointer" at the
+  first `grid[i][j]`. Arrays are one-dimensional; the literal is refused
+  at the inner literal with the flat-array and list-of-arrays spellings
+  named.
+
 ## [0.699.0]
 
 ### Fixed
