@@ -38,7 +38,9 @@ version number before tagging the release.
   would truncate; annotate `float r = ...`, or `int r = ...` to narrow
   explicitly*. An element of an inferred int array (`xs = [1, 2]` then
   `xs[0] = 7.5`) is refused the same way; annotated slots (`int k = 4.5`,
-  `int[2] xs`) still narrow on purpose.
+  `int[2] xs`) still narrow on purpose. The stdlib reference's math example
+  was doing exactly this — `c = math.clamp_int(...)` then
+  `c = math.cos(0.5)`, so `c` was 0 — and is corrected.
 
 - **A `uint32` printed as a negative int.** Every print path chose `%d`
   for `uint32` — `print(x)` / `println(x)` (statement and expression
