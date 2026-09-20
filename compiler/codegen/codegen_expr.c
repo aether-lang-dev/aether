@@ -505,32 +505,64 @@ static int subtree_reads(ASTNode* node, const char* name) {
     return 0;
 }
 
-// Check if a name is declared as a fresh local inside a block. A statement
-// `x = expr` is a fresh-local declaration when `x` was not previously read
-// or written in this block and when `expr` does not itself read `x`
-// (i.e., `x = x + 1` is a reassignment, not a fresh declaration).
-// Only top-level statements of the block are considered — nested blocks
-// (if/for/while bodies) have their own scopes.
+// Ordered tri-state scan of a closure body for the FIRST occurrence of `name`,
+// deciding whether the name is the closure's own fresh local or a capture of a
+// same-named enclosing binding. Result codes:
+//   FL_FRESH   (1) first occurrence is a WRITE: `name = expr` whose RHS does
+//                  not itself read `name` — a fresh local declaration.
+//   FL_CAPTURE (2) first occurrence is a READ (including a read inside the RHS
+//                  of that same `name = ...` statement, i.e. `name = name+1`) —
+//                  the closure consumes an incoming binding, so it is a capture.
+//   FL_NONE    (0) `name` does not occur in the body.
+//
+// The FIRST-occurrence rule is what discriminates the two shapes that a
+// write-anywhere test conflates:
+//   - `idx = index_of(..)` then `entry = substring(.., idx)` — idx's first
+//     occurrence is its own write; the later read is of its fresh local.  FRESH.
+//   - `if depth > max_depth { max_depth = depth }` — max_depth is READ (in the
+//     condition) before/independent of its write.  CAPTURE, must promote.
+// Descends nested if/while blocks (they hoist to the closure's C frame) but
+// stops at nested real closures; trailing blocks inline and are traversed.
+#define FL_NONE 0
+#define FL_FRESH 1
+#define FL_CAPTURE 2
+static int first_occurrence_kind(ASTNode* node, const char* name) {
+    if (!node) return FL_NONE;
+    // A nested real closure is opaque — its own uses of `name` don't count.
+    if (node->type == AST_CLOSURE &&
+        !(node->value && strcmp(node->value, "trailing") == 0)) {
+        return FL_NONE;
+    }
+    // A declaration statement `name = RHS`: the RHS is evaluated first, so a
+    // read of `name` in the RHS is the first occurrence (capture); otherwise
+    // this write is the first occurrence (fresh).
+    if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_CONST_DECLARATION) &&
+        node->value && strcmp(node->value, name) == 0) {
+        for (int c = 0; c < node->child_count; c++) {
+            if (subtree_reads(node->children[c], name)) return FL_CAPTURE;
+        }
+        return FL_FRESH;
+    }
+    // A bare read of `name`.
+    if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) {
+        return FL_CAPTURE;
+    }
+    // Otherwise recurse in source order; the first child that resolves wins.
+    for (int i = 0; i < node->child_count; i++) {
+        int r = first_occurrence_kind(node->children[i], name);
+        if (r != FL_NONE) return r;
+    }
+    return FL_NONE;
+}
+
+// Check if `name` is a fresh local of a closure body `block`, scanning the whole
+// body scope (nested blocks included). A name is the closure's own local only if
+// its FIRST occurrence in the body is a fresh write — a name read as an incoming
+// value (even if later written) is a capture, not a fresh local. See
+// first_occurrence_kind for the discriminator and why write-anywhere is wrong.
 static int is_local_var(ASTNode* block, const char* name) {
     if (!block || !name) return 0;
-    for (int i = 0; i < block->child_count; i++) {
-        ASTNode* s = block->children[i];
-        if (!s) continue;
-        if ((s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
-            s->value && strcmp(s->value, name) == 0) {
-            // If the initializer reads `name`, this is a reassignment of a
-            // captured value, not a fresh local. Otherwise a genuine local.
-            int init_reads_self = 0;
-            for (int c = 0; c < s->child_count; c++) {
-                if (subtree_reads(s->children[c], name)) {
-                    init_reads_self = 1;
-                    break;
-                }
-            }
-            if (!init_reads_self) return 1;
-        }
-    }
-    return 0;
+    return first_occurrence_kind(block, name) == FL_FRESH;
 }
 
 // Find an AST_RECEIVE_ARM anywhere in the program whose synthetic name

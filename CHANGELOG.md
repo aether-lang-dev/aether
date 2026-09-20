@@ -62,6 +62,27 @@ version number before tagging the release.
   `tests/regression/test_fn_libc_name_as_value.ae`. The diagnostics above
   are pinned by `tests/integration/reserved_name_diagnostics`.
 
+## [0.698.0]
+
+### Fixed
+
+- **A closure's own body local sharing a name with an UNCAPTURED enclosing local
+  still emitted undeclared C** (the half of the closure-name-unification bug that
+  0.697's `055fcc7d` left unfixed). When a later closure declared a local inside
+  its own nested block (e.g. `idx` inside the closure's `if`), the closure-capture
+  analysis's `is_local_var` scanned only the closure body's *top-level* statements,
+  missed the nested declaration, and fell through to treat the name as a capture
+  of a same-named enclosing binding — so codegen spuriously promoted the enclosing
+  occurrence to a heap cell and captured it, emitting `'<name>' undeclared` when
+  the cell's declaring block had already closed. `is_local_var` now recognises a
+  fresh local declared anywhere in the closure's own body (descending its nested
+  `if`/`while` blocks, stopping at inner closures, with the existing
+  reassignment-of-a-capture guard), so such a name is the closure's own local and
+  is never mistaken for a capture. A genuinely captured-and-mutated enclosing local
+  (its initializer reads itself) still promotes correctly. This also removes a
+  silent over-promotion in the `while`/function-scope shapes that compiled but
+  should not have promoted. `tests/regression/test_closure_local_shadows_uncaptured_outer_block_name.ae`.
+
 ## [0.697.0]
 
 ### Fixed
