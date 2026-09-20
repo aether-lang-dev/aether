@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.699.0]
+
 ### Fixed
 
 - **A closure parameter named like a libc symbol was renamed in the
