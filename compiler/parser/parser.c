@@ -2799,6 +2799,26 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             if (next && next->type == TOKEN_IDENTIFIER) {
                 return parse_variable_declaration(parser);
             }
+            // The array form of the same declaration, with an element
+            // type spelled by an identifier: `uint32[4] xs = [...]`,
+            // `uint16[2] hs`, `Pair[8] ps`. Shape IDENT `[` NUMBER? `]`
+            // IDENT on one line — an index expression statement (`xs[i]`)
+            // is never followed by an identifier on its own line, exactly
+            // as `IDENT IDENT` above; the line check keeps `xs[1]` followed
+            // by a statement on the next line an expression. `int[4] xs`
+            // reaches parse_variable_declaration through the keyword case;
+            // without this branch `uint32[4] xs` parsed as an index into an
+            // undefined variable `uint32`.
+            if (next && next->type == TOKEN_LEFT_BRACKET) {
+                Token* t2 = peek_ahead(parser, 2);
+                int off = (t2 && t2->type == TOKEN_NUMBER) ? 3 : 2;
+                Token* rb = peek_ahead(parser, off);
+                Token* nm = peek_ahead(parser, off + 1);
+                if (rb && rb->type == TOKEN_RIGHT_BRACKET &&
+                    nm && nm->type == TOKEN_IDENTIFIER && nm->line == rb->line) {
+                    return parse_variable_declaration(parser);
+                }
+            }
             // #946: C-style typed local with a QUALIFIED type name —
             // `mod.Type name [= expr]` (the dotted analogue of `Type name`
             // above). Shape: IDENT (`.` IDENT)+ IDENT. Disambiguated from a

@@ -7599,6 +7599,13 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "printf(\"%%lld\", (long long)");
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
+                    } else if (arg_type->kind == TYPE_UINT32) {
+                        /* Through %d a uint32 past 2^31 prints negative;
+                         * uint32_t is unsigned int on every target, so %u
+                         * is its conversion. */
+                        fprintf(gen->output, "printf(\"%%u\", ");
+                        generate_expression(gen, first_arg);
+                        fprintf(gen->output, ");\n");
                     } else if (arg_type->kind == TYPE_DURATION) {
                         fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
                         generate_expression(gen, first_arg);
@@ -7662,6 +7669,8 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                                         fprintf(gen->output, "%%f");
                                     } else if (atype && atype->kind == TYPE_INT64) {
                                         fprintf(gen->output, "%%lld");
+                                    } else if (atype && atype->kind == TYPE_UINT32) {
+                                        fprintf(gen->output, "%%u");
                                     } else if (atype && atype->kind == TYPE_DURATION) {
                                         fprintf(gen->output, "%%s");
                                     } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {

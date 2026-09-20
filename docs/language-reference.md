@@ -87,6 +87,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
 | `void`¹ | No value (for functions) | `extern free(p: ptr) -> void` |
 | `long` (also `int64`) | 64-bit signed integer | `long x = 0`, `int64 y = 0` |
+| `uint8`, `uint16`, `uint32`, `uint64` | Unsigned 8/16/32/64-bit, lowering to C `uint8_t` … `uint64_t` (`uint8` and `byte` share `uint8_t`) | `uint32 x = 4000000000` |
 | `longdouble` | C `long double` widest float (C interop) | `extern strtold(...) -> longdouble` |
 | `ptr` | Raw pointer (for C interop) | `null` |
 
@@ -150,7 +151,11 @@ main() {
 int[10] numbers;           // Array of 10 integers
 string[5] names;           // Array of 5 strings
 float[100] values;         // Array of 100 floats
+uint32[4] ids = [ 1, 2, 3, 4 ]   // element type pinned: uint32_t ids[4]
+Pair[8] pairs                    // an array of structs, by value
 ```
+
+The element type may be any type name: a keyword (`int`, `byte`, `long`), one of the unsigned widths (`uint8`, `uint16`, `uint32`, `uint64`) or a struct. The declared element type is what the C carries (`uint16_t hs[3]`), so a value that fits the width is never widened to `int`. A `uint32` prints as itself through `print`, `println`, a `%u` format and `${x}` interpolation (`4000000000`, not `-294967296`).
 
 **Array-to-pointer decay.** A named fixed-size array decays to a pointer to its first element in pointer context, when assigned to an inferred binding, passed as a `ptr`-typed argument, or compared against a pointer (the same rule C uses):
 
@@ -165,6 +170,24 @@ if id_count > 8 {
 ```
 
 This is the stack-buffer-with-heap-fallback idiom (`T buf[N]; T* p = buf; if (n > N) p = malloc(...)`). Only a *named array* decays; an array *literal* initializer (`x = [1, 2, 3]`) still binds a real array. To keep the array type, annotate the binding explicitly (`x: byte[128] = ...`).
+
+**An array literal's element type is the join of its elements.** `[1, 2.5, 3]` and `[0.18 * math.PI, 0.25 * math.PI]` are `float` arrays; an all-integer literal is `int`, widening to `long` if any element needs it. The type is decided after every element is typed, so a module constant or a call in any position counts. Arrays are one-dimensional: an array literal cannot contain an array literal (use a flat `T[rows * cols]` indexed as `row * cols + col`, or a list of arrays).
+
+```aether,run
+import std.math (math_pi)
+
+main() {
+    angles = [ 0.25 * math_pi(), 0.5 * math_pi() ]
+    println("${angles[0]} ${angles[1]}")
+    mixed = [ 1, 2.5, 3 ]
+    k = mixed[1]                 // float, like the element it is bound to
+    println("${k}")
+}
+```
+```output
+0.785398 1.5708
+2.5
+```
 
 ### Sequence Types (`*StringSeq`)
 
@@ -256,6 +279,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | `int` → `string` | `string.from_int(n)` (and `string.from_long(n)`, `string.from_float(f)`). |
 | C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or returning from a function declared `-> string`. The returned `ptr` is treated as a borrowed C-string until it crosses into refcounted-string territory. |
 | `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). |
+| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix — the same rule as a 64-bit value into an inferred `int` — because the truncation was never chosen. |
 | Reinterpret a raw `ptr` as a typed struct view, function pointer, or array | `expr as *StructName`, `expr as fn(...) -> R`, or `expr as T[]` (the only `as` forms for values). |
 
 ### Null

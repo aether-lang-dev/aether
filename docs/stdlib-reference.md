@@ -2174,7 +2174,7 @@ main() {
 
     // Trigonometry
     s = math.sin(0.5)
-    c = math.cos(0.5)
+    co = math.cos(0.5)
     t = math.tan(0.5)
 
     // Inverse trig
