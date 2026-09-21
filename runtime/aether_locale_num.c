@@ -168,38 +168,10 @@ static int aether_fix_exponent(char* buf, size_t len) {
     return (int)(len - strip);
 }
 
-// Every path must leave the thread's locale as it found it, including the two
-// that decline to switch.
-static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, double value) {
-    int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
-    if (prev_mode == -1) return snprintf(buf, n, fmt, value);
-
-    char inline_name[128];
-    char* saved = NULL;
-    if (prev_mode != _DISABLE_PER_THREAD_LOCALE) {
-        const char* cur = setlocale(LC_NUMERIC, NULL);
-        size_t len = cur ? strlen(cur) : 0;
-        // A truncated name would restore a DIFFERENT locale permanently.
-        saved = (len < sizeof inline_name) ? inline_name : (char*)malloc(len + 1);
-        if (!cur || !saved) {
-            _configthreadlocale(prev_mode);
-            return snprintf(buf, n, fmt, value);
-        }
-        memcpy(saved, cur, len + 1);
-    }
-
-    setlocale(LC_NUMERIC, "C");
-    int written = snprintf(buf, n, fmt, value);
-
-    if (saved) {
-        setlocale(LC_NUMERIC, saved);
-        if (saved != inline_name) free(saved);
-        _configthreadlocale(prev_mode);
-    } else {
-        _configthreadlocale(_DISABLE_PER_THREAD_LOCALE);
-    }
-    return written;
-}
+// (aether_win_snprintf_c_locale removed: the locale-switch-around-snprintf
+// approach it implemented did not reliably pin the radix on MSVCRT when an
+// embedding host had set a per-thread comma locale. aether_c_snprintf_double
+// now formats normally and rewrites the radix to '.' in place — see there.)
 #endif
 
 int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value) {
@@ -210,16 +182,22 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     return snprintf(buf, n, fmt, value);
 
 #elif AETHER_LOCALE_WIN32
-    // Backend 2 (Windows). The radix is the only locale-dependent element of
-    // %f/%e/%g here (no ' flag is ever passed), so bracket only when it is
-    // not '.'.
+    // Backend 2 (Windows). The radix is the ONLY locale-dependent element of
+    // %f/%e/%g here (no ' grouping flag is ever passed). We format normally,
+    // then rewrite the locale's decimal point back to '.' in place.
+    //
+    // Why rewrite rather than switch the locale around snprintf (the previous
+    // approach, `aether_win_snprintf_c_locale`): on MSVCRT the interaction of
+    // `_configthreadlocale` / `setlocale(LC_NUMERIC,"C")` with an embedding
+    // host that set a per-thread comma locale did not reliably make the very
+    // next `snprintf` use the C radix — the comma still leaked into
+    // string.from_double / json output (failed on the Windows CI legs under a
+    // German locale). Rewriting the emitted bytes is scope-independent: it
+    // cannot be defeated by whichever locale scope snprintf consulted, and it
+    // never mutates the host's global/thread locale (which is not a library's
+    // to touch). msvcrt-9c9126 #863 follow-up.
     {
-        const struct lconv* lc = localeconv();
-        const char* radix = lc ? lc->decimal_point : NULL;
-        int written = (!radix || (radix[0] == '.' && radix[1] == '\0'))
-                      ? snprintf(buf, n, fmt, value)
-                      : aether_win_snprintf_c_locale(buf, n, fmt, value);
-
+        int written = snprintf(buf, n, fmt, value);
         if (written < 0) {
             buf[0] = '\0';
             return written;
@@ -227,6 +205,26 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
         if ((size_t)written >= n) {
             buf[n - 1] = '\0';
             return written;
+        }
+        // Replace the locale's (possibly multi-byte) decimal point with '.'.
+        // '.' is never a digit or sign, so a single occurrence in a numeric
+        // conversion is unambiguous. Only act when the radix is not already '.'.
+        const struct lconv* lc = localeconv();
+        const char* radix = lc ? lc->decimal_point : NULL;
+        if (radix && !(radix[0] == '.' && radix[1] == '\0')) {
+            size_t rlen = strlen(radix);
+            if (rlen > 0) {
+                char* p = strstr(buf, radix);   // at most one radix in a number
+                if (p) {
+                    *p = '.';
+                    if (rlen > 1) {
+                        // Multi-byte radix: close the gap after the '.'.
+                        size_t tail = (size_t)written - (size_t)(p - buf) - rlen;
+                        memmove(p + 1, p + rlen, tail + 1);   // +1 for NUL
+                        written -= (int)(rlen - 1);
+                    }
+                }
+            }
         }
         // Legacy msvcrt emits "1e+010" where C99 requires "1e+10".
         return aether_fix_exponent(buf, (size_t)written);

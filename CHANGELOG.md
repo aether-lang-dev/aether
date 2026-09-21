@@ -11,7 +11,21 @@ version number before tagging the release.
 
 ## [current]
 
-## [0.702.0]
+### Fixed
+
+- **`string.from_double` / `std.json` leaked a comma decimal separator on
+  Windows under a comma-decimal locale.** When an embedding host had set a
+  per-thread comma locale (German, French, …), the Windows radix-pinning in
+  `aether_c_snprintf_double` (which switched `LC_NUMERIC` to `"C"` around the
+  `snprintf` via `_configthreadlocale`/`setlocale`) did not reliably make the
+  conversion use the C radix, so wire/serialisation text came out as `3,14` and
+  JSON as `{"x":3,14}` — invalid, and locale-dependent where it must not be
+  (issue #863's guarantee). The Windows path now formats normally and rewrites
+  the locale's decimal point back to `.` in the emitted bytes — scope-independent
+  (it can't be defeated by whichever locale scope `snprintf` consulted) and it no
+  longer mutates the host's global/thread locale. Linux/macOS (which use
+  `snprintf_l`/`uselocale`) are unchanged. Surfaced by the Windows CI legs once
+  `test_string_double_locale.ae` was made to fail on detected failures (#2132).
 
 ### Fixed
 
