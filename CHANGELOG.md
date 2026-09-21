@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.703.0]
+
 ### Fixed
 
 - **A module's fn-typed parameter named `run` hijacked an unrelated
