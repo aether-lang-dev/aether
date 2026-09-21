@@ -117,7 +117,9 @@ A function is **pure** when, transitively, it:
 The analysis is **conservative**: a function whose body it cannot see (an
 `extern`, or an unresolved name) is treated as impure, and a raw `extern` call
 inside a body is opaque and left unjudged (the same boundary the `--with=` gate
-and effect tags have). This is the determinism axis that complements the
+and effect tags have). A qualified call into an imported Aether module
+(`mod.fn()`) is followed into that module's function, so a setter reached
+through an import makes its caller impure just as a local one does. This is the determinism axis that complements the
 capability (access-control) axis, a function can be capability-empty yet
 impure (reads a clock handed to it), or hold `fs` yet be pure for fixed input.
 `__pure` resolves at compile time, so it gates optimizations and library

@@ -291,7 +291,13 @@ typedef enum {
     // replacing hardcoded per-module rows in g_link_reqs. Appended at the
     // enum END: inserting mid-enum invalidates every compiled .o (see
     // the enum-insert note in the repo docs).
-    AST_LINK_DIRECTIVE
+    AST_LINK_DIRECTIVE,
+    // #2125: top-level `@source("lanes.c")` in a module names a C file the
+    // module ships, relative to the module's own directory. Codegen resolves
+    // it and lists it in the `// aether-source:` header lines that follow
+    // `// aether-link:`; `ae` compiles those files into the build whenever
+    // the module is in the import closure. Appended at the enum END too.
+    AST_SOURCE_DIRECTIVE
 } ASTNodeType;
 
 typedef enum {

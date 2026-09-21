@@ -6375,6 +6375,26 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     return create_ast_node(AST_LINK_DIRECTIVE, flags->value,
                                            at_tok->line, at_tok->column);
                 }
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "source") == 0) {
+                    /* #2125: @source("lanes.c") — a C file this module ships,
+                     * named relative to the module's directory. Carried as an
+                     * AST_SOURCE_DIRECTIVE whose value is the path as written;
+                     * codegen resolves it against the file the node was
+                     * stamped with and lists it for the build. */
+                    advance_token(parser);  // consume 'source'
+                    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+                    Token* path = peek_token(parser);
+                    if (!path || path->type != TOKEN_STRING_LITERAL || !path->value ||
+                        !path->value[0]) {
+                        parser_error(parser, "@source expects the path of one C file, e.g. @source(\"lanes.c\")");
+                        return NULL;
+                    }
+                    advance_token(parser);
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+                    return create_ast_node(AST_SOURCE_DIRECTIVE, path->value,
+                                           at_tok->line, at_tok->column);
+                }
                                 if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
                     strcmp(attr->value, "c_struct") == 0) {
                     advance_token(parser);  // consume 'c_struct'

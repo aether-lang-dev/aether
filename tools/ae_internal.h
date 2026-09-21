@@ -155,6 +155,19 @@ void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
 unsigned long long compute_cache_key(const char* ae_file, const char* extra_files,
                                      const char* opt_level, const char* extra_salt);
+/* The extra C sources of a build (--extra, [[bin]] extra_sources) travel as
+ * ONE space-separated string that goes onto the compiler command as-is. A
+ * path with a space is stored double-quoted, so the shell sees one argument;
+ * every reader goes through extras_next, which strips the quotes again. Two
+ * functions, one format: appending a raw path elsewhere reintroduces the
+ * split at the space. extras_append returns 0 when the buffer is full (the
+ * path was dropped); extras_next returns 0 at the end of the list. */
+int extras_append(char* list, size_t cap, const char* path);
+int extras_next(const char** cursor, char* out, size_t out_size);
+/* The `// aether-source:` lines of a generated C file (#2125): the C files the
+ * modules of the import closure ship, as a quoted space-separated list ready
+ * for a compile command, "" when there are none. Static storage. */
+const char* get_aether_source_files(const char* c_file);
 /* #1882: the stable depfile slot for an entry source, under the cache dir.
  * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
  * folds it on the next run for exact, tree-walk-free invalidation. */

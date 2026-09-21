@@ -290,6 +290,24 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     ok "  make: $MAKE_VERSION"
     echo ""
 
+    # AETHER_INSTALL_NO_BUILD=1 installs the binaries already in build/
+    # without rebuilding them. For the test suite (#2142): its install
+    # drivers test the installed LAYOUT — manifest, host bridges, contrib
+    # resolution — on a tree `make` has just built, and each of them
+    # rebuilding here relinked build/ae in the shared tree; three of them
+    # on parallel workers collided on the Windows file lock. It is refused
+    # when the binaries are missing, so it can never install nothing.
+    if [ "${AETHER_INSTALL_NO_BUILD:-0}" = "1" ]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) PRE_EXE=".exe" ;;
+            *) PRE_EXE="" ;;
+        esac
+        if [ ! -x "build/ae${PRE_EXE}" ] || [ ! -x "build/aetherc${PRE_EXE}" ]; then
+            error "AETHER_INSTALL_NO_BUILD=1 but build/ae and build/aetherc are not built; run make first"
+            exit 1
+        fi
+        info "Using the existing build (AETHER_INSTALL_NO_BUILD=1)..."
+    else
     # Fetch latest tags so the Makefile picks up the correct version number.
     # Without this, make clean + rebuild uses stale local tags (e.g. 0.22.0 instead of 0.25.0).
     if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -318,6 +336,7 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     info "Building language server..."
     if ! $MAKE_CMD CC="$CC_BIN" lsp 2>&1 | tail -1; then
         warn "  lsp build failed — editor extension will fall back to syntax-only mode."
+    fi
     fi
 
     # Install

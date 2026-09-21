@@ -93,6 +93,52 @@ int module_dep_write(const char* out_path) {
     return 0;
 }
 
+char* module_resolve_source_directive(ASTNode* c) {
+    const char* rel = c->value;
+    int absolute = rel[0] == '/' || rel[0] == '\\' ||
+                   (((rel[0] >= 'A' && rel[0] <= 'Z') || (rel[0] >= 'a' && rel[0] <= 'z')) &&
+                    rel[1] == ':');
+    const char* file = c->source_file;
+    if (absolute || !file) return strdup(rel);
+    const char* cut = NULL;
+    for (const char* p = file; *p; p++)
+        if (*p == '/' || *p == '\\') cut = p;
+    if (!cut) return strdup(rel);
+    size_t dlen = (size_t)(cut - file);
+    char* out = (char*)malloc(dlen + 1 + strlen(rel) + 1);
+    if (!out) return NULL;
+    memcpy(out, file, dlen);
+    out[dlen] = '/';
+    strcpy(out + dlen + 1, rel);
+    return out;
+}
+
+int module_check_source_directives(ASTNode* ast) {
+    int ok = 1;
+    for (int i = 0; ast && i < ast->child_count; i++) {
+        ASTNode* c = ast->children[i];
+        if (!c || c->type != AST_SOURCE_DIRECTIVE || !c->value) continue;
+        char* path = module_resolve_source_directive(c);
+        if (!path) continue;
+        if (access(path, F_OK) != 0) {
+            char msg[1200];
+            snprintf(msg, sizeof(msg),
+                     "@source(\"%s\"): no such file (looked for %s, relative to the "
+                     "directory of the file that names it)", c->value, path);
+            AetherError e = { c->source_file, NULL, c->line, c->column, msg,
+                              "the path is relative to the module's own directory; "
+                              "put the C file beside module.ae or fix the name",
+                              NULL, AETHER_ERR_SYNTAX };
+            aether_error_report(&e);
+            ok = 0;
+        } else {
+            module_dep_record_read(path);
+        }
+        free(path);
+    }
+    return ok;
+}
+
 void module_set_source_dir(const char* source_path) {
     module_registry_init();
     if (!source_path) { global_module_registry->source_dir[0] = '\0'; return; }
@@ -1415,6 +1461,9 @@ static int orchestrate_module(const char* module_name, const char* file_path,
     char ctx[300];
     snprintf(ctx, sizeof(ctx), "module '%s'", module_name);
     if (!check_selective_import_shadow(ast, ctx, file_path)) return 0;
+    /* #2125: the C files this module ships must exist, and they are
+     * dependencies of the build. */
+    if (!module_check_source_directives(ast)) return 0;
 
     // Add node to dependency graph
     dependency_graph_add_node(graph, module_name);
@@ -1480,6 +1529,7 @@ int module_orchestrate(ASTNode* program) {
      * entry-point AST, so `import std.X (foo)` + local `foo(...)`
      * in main.ae itself is caught with the same diagnostic. */
     if (!check_selective_import_shadow(program, "main program", NULL)) return 0;
+    if (!module_check_source_directives(program)) return 0;   /* #2125 */
 
     DependencyGraph* graph = dependency_graph_create();
     dependency_graph_add_node(graph, "__main__");

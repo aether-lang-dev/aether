@@ -11,6 +11,70 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`@source("lanes.c")`: a module ships its own C (#2125).** A module could
+  declare its link flags (`@link`) but not the C file its externs live in,
+  so every program importing a module with a C kernel passed `--extra
+  path/to/lanes.c` or listed it under every `[[bin]]` — and the file was
+  compiled whether or not the import survived `when defined(...)`. The
+  directive names a file relative to the module's directory; orchestration
+  checks it exists (reported at the directive, not as gcc's "No such file")
+  and records it as a dependency, so a cached `ae run` rebuilds when the C
+  changes; codegen lists the resolved paths on `// aether-source:` lines
+  after the link header, one per line so a directory with a space survives;
+  `ae run` and `ae build` compile them in after `--extra` / `extra_sources`.
+  Transitive and `-D`-sensitive like `@link`; accepted in the entry file
+  too. Reference, `docs/build-system.md`, `docs/c-interop.md`,
+  `docs/module-system-design.md`. `tests/integration/source_directive`.
+
+### Fixed
+
+- **W1001 "unused variable" for a module global's setter in a large program;
+  `__pure` and effect tags blind to module calls and bare global writes
+  (#2144).** The set of module-level `var` globals — the names whose bare
+  `g = v` inside a function is a store, not a local — was capped at 256, so
+  in a program importing enough modules (ae3d's editor with ui + ae3d +
+  aephysics) every setter of a later global was reported unused, while the
+  same modules in a smaller program were clean. The set is now sized to the
+  program, as is the per-function declaration list. The purity and effect
+  walks had two gaps of their own: a bare `g = v` on a global was never
+  seen as a write (every setter folded to `__pure` true), and a qualified
+  call `mod.fn()` into an imported Aether module was not followed, so a
+  `@no_os` function reaching `os.system` through a module call compiled
+  and ran. `tests/integration/many_module_globals`.
+
+- **`ae run`, `ae check` and `ae test` take `-D` and read `[build]
+  defines`.** Only `ae build` did: `ae run -D X app.ae` reported "File not
+  found: X", `ae run app.ae -DX` skipped the flag without a word, and a
+  `when defined(TEST_SERVER)` region the manifest declares was in the binary
+  `ae build` produced and silently absent from `ae run` of the same file —
+  no error, a different program. One `-D` parser now serves the four
+  commands and each reads the project's symbols; `ae build` reads them
+  after the walk-up to `aether.toml`, so `ae build app.ae` from `src/`
+  sees them too. `tests/integration/run_build_symbols`.
+
+- **An extra C source with a space in its path builds.** `--extra "my
+  dir/shim.c"` and `extra_sources = ["my dir/shim.c"]` travelled as one
+  space-separated string that went onto the C compiler command verbatim,
+  so the path became two arguments and the build failed with
+  "cc1: fatal error: dir/shim.c: No such file" — every extra under a
+  `C:\Users\First Last\` checkout. An entry with a space is stored
+  quoted, and the compiler command, the cache key and the clobber check
+  read entries back through one tokenizer.
+  `tests/integration/extra_sources_spaces`.
+
+- **The install-layout tests no longer relink `build/ae` in parallel
+  (#2142).** `install.sh` rebuilt the toolchain on every call, and the three
+  drivers that install into a temp prefix — `install_manifest`,
+  `install_host_bridges`, `install_contrib_resolves` — each relinked
+  `build/ae` in the shared tree; on parallel workers they collided on the
+  Windows file lock and failed with "Permission denied", which
+  `run_ae_sh_dir`'s parallel phase reported as a real failure.
+  `AETHER_INSTALL_NO_BUILD=1` installs the binaries the tree already has
+  (refused when they are missing, so it can never install nothing), and the
+  three drivers use it.
+
 ## [0.704.0]
 
 ### Added

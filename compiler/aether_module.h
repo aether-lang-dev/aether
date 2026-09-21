@@ -143,6 +143,16 @@ void module_dep_record_read(const char* path);  // a file whose CONTENTS matter
 // "absent <path>" (a newly-present file busts the cache). Returns 0 on success.
 int  module_dep_write(const char* out_path);
 
+// #2125 `@source("lanes.c")`: the path of one directive, resolved against the
+// directory of the .ae file it was written in (an absolute path is kept as
+// written). Returns malloc'd memory; caller frees.
+char* module_resolve_source_directive(ASTNode* directive);
+// Every top-level @source of one AST: the file must exist (reported at the
+// directive, since the C compiler's "No such file" would name neither the
+// module nor the line) and is recorded as a `read` dependency, so a warm
+// cached build is invalidated when the C changes. Returns 1 when all resolve.
+int module_check_source_directives(ASTNode* ast);
+
 // Resolve module name to file path. Returns malloc'd path or NULL. Caller frees.
 char* module_resolve_stdlib_path(const char* module_name);  // "fs" -> path
 char* module_resolve_contrib_path(const char* module_name); // "sqlite" -> path

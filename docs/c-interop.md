@@ -443,6 +443,27 @@ Three intrinsics drive it, mirroring `<stdarg.h>`:
 
 For **checking** format strings rather than forwarding them, nothing extra is needed: a call to a printf-family extern with a literal format keeps that literal in the generated C, so the C compiler's `-Wformat` sees it and the warning is attributed back to the `.ae` line.
 
+### A module that ships its C: `@source`
+
+When the C file belongs to a module rather than to one program, the module
+names it, relative to its own directory, and every importer gets it built in
+(#2125):
+
+**lanes/module.ae:**
+```aether,fragment
+@source("lanes.c")
+exports(add4)
+extern lanes_add4(a: int, b: int) -> int
+add4(a: int, b: int) -> int { return lanes_add4(a, b) }
+```
+
+`ae run main.ae` and `ae build` compile `lanes/lanes.c` into the program
+with no `--extra` and no `extra_sources`; the compiler reports a missing
+file at the directive, a cached run rebuilds when the C changes, and an
+import dropped by `when defined(...)` takes the file with it. Libraries the
+file needs go in `@link` beside it. See
+[`docs/build-system.md`](build-system.md#c-sources-a-module-ships-source).
+
 ## Linking External Libraries
 
 Use `link_flags` in your `aether.toml` to link external C libraries:

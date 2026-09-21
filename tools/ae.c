@@ -250,6 +250,25 @@ static void ae_define_append(const char* name) {
     }
 }
 
+/* `-D NAME` / `-DNAME` at argv[*i]: append the symbol and advance past it.
+ * Returns 1 when the argument was a -D (consumed), 0 when it was not, -1
+ * when `-D` came last with no name (reported). One parser for every command
+ * that compiles — run, build, check, test — so a symbol means the same thing
+ * to each of them; aetherc owns the validation and the reject message. */
+static int ae_define_arg(int argc, char** argv, int* i) {
+    if (strncmp(argv[*i], "-D", 2) != 0) return 0;
+    const char* dname = argv[*i] + 2;
+    if (!*dname) {
+        if (*i + 1 >= argc) {
+            fprintf(stderr, "Error: -D needs a symbol name\n");
+            return -1;
+        }
+        dname = argv[++*i];
+    }
+    ae_define_append(dname);
+    return 1;
+}
+
 // --emit=<exe|lib|both> for the current build. Set by cmd_build before
 // build_aetherc_cmd / build_gcc_cmd run; both helpers read these globals
 // to decide what flags to emit.
@@ -1992,6 +2011,12 @@ void ae_resolve_dependencies(void) {
     toml_free_document(doc);
 }
 
+/* The project's `[build] defines`, appended to whatever -D the command line
+ * gave. Every command that compiles calls this: `ae run`, `ae check` and
+ * `ae test` used to compile with NO project symbols while `ae build` had
+ * them, so a `when defined(TEST_SERVER)` region the manifest declares was
+ * present in the built binary and silently absent from `ae run` of the very
+ * same file — no error, a different program. */
 static void load_defines_from_toml(void) {
     if (!path_exists("aether.toml")) return;
     TomlDocument* doc = toml_parse_file("aether.toml");
@@ -2169,6 +2194,52 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
 
     fclose(f);
     return flags;
+}
+
+// Read the `// aether-source: <path>` header lines codegen emits after the
+// link line (#2125): the C files the modules of the import closure ship
+// (`@source("lanes.c")` at the top of a module.ae, resolved by the compiler
+// against the module's directory). One path per line, so a path with spaces
+// survives; each is appended to the compile command, quoted, after the
+// --extra / extra_sources files. Derived from the AST like the link line, so
+// a `-D`-dropped import drops its sources with its libraries — a static
+// extra_sources entry cannot do that and, for a module used by twenty bins,
+// had to be restated in every one of them. Returns the space-separated,
+// quoted list (empty when nothing in the closure declares a source).
+const char* get_aether_source_files(const char* c_file) {
+    static char files[8192];
+    files[0] = '\0';
+    if (!c_file) return files;
+    FILE* f = fopen(c_file, "r");
+    if (!f) return files;
+    /* The lines sit at the top of the TU, the link line first; stop at the
+     * first line that is not a `//` comment. */
+    char line[2048];
+    size_t out = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "//", 2) != 0) break;
+        const char* p = strstr(line, "// aether-source:");
+        if (!p) continue;
+        p += strlen("// aether-source:");
+        while (*p == ' ') p++;
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' '))
+            n--;
+        if (n == 0) continue;
+        if (out + n + 4 >= sizeof(files)) {
+            fprintf(stderr, "Warning: the module @source list exceeded 8 KiB; "
+                            "the remaining files were dropped from the build.\n");
+            break;
+        }
+        if (out) files[out++] = ' ';
+        files[out++] = '"';
+        memcpy(files + out, p, n);
+        out += n;
+        files[out++] = '"';
+        files[out] = '\0';
+    }
+    fclose(f);
+    return files;
 }
 
 // --------------------------------------------------------------------------
@@ -2647,16 +2718,11 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                         char* end = strchr(frag, '"');
                         if (!end) break;   // malformed — bail out
                         *end = '\0';
-                        size_t cur = strlen(out);
-                        size_t piece = strlen(frag);
-                        size_t need = (out[0] ? 1 : 0) + piece + 1;
-                        if (cur + need > out_size) {
+                        if (!extras_append(out, out_size, frag)) {
                             truncated = 1;
                             overflowed = 1;
                             break;
                         }
-                        if (out[0]) strncat(out, " ", out_size - cur - 1);
-                        strncat(out, frag, out_size - strlen(out) - 1);
                         frag = end + 1;
                     } else {
                         frag++;
@@ -2736,9 +2802,9 @@ static int output_clobbers_input(const char* c_file, const char* exe_file,
                             "       Pick a different -o name.\n", what[i], ae_file);
             return 1;
         }
-        char list[8192];
-        snprintf(list, sizeof(list), "%s", extras ? extras : "");
-        for (char* tok = strtok(list, " "); tok; tok = strtok(NULL, " ")) {
+        const char* cursor = extras;
+        char tok[2048];
+        while (extras_next(&cursor, tok, sizeof(tok))) {
             if (!paths_same(outs[i], tok)) continue;
             fprintf(stderr, "Error: the %s would be written over an --extra "
                             "input (%s).\n"
@@ -2845,12 +2911,20 @@ void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
     const char* link_flags = get_link_flags();
-    const char* extra = extra_files ? extra_files : "";
     // Module-declared native deps from `@link`, via the generated C's
     // `// aether-link:` header (#1549). Empty when nothing in the import
     // closure declares one, which is the common case.
     unsigned required_libs;
     const char* ae_link = get_aether_link_flags(c_file, &required_libs);
+    // The --extra / extra_sources files, then the C files the modules of the
+    // closure ship (`@source`, #2125) from the `// aether-source:` lines.
+    const char* ae_sources = get_aether_source_files(c_file);
+    char extra_buf[8192 + 8192 + 2];
+    snprintf(extra_buf, sizeof(extra_buf), "%s%s%s",
+             extra_files ? extra_files : "",
+             (extra_files && extra_files[0] && ae_sources[0]) ? " " : "",
+             ae_sources);
+    const char* extra = extra_buf;
 
     // User cflags from aether.toml apply to every build path — `ae build`,
     // `ae run`, and any internal invocation. Previously they were gated
@@ -4039,8 +4113,10 @@ static int cmd_run(int argc, char** argv) {
             prog_args_start = i + 1;  /* rest are the program's args */
             break;                    /* stop flag parsing at the separator */
         } else if (strcmp(argv[i], "--extra") == 0 && i + 1 < argc) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, argv[++i], sizeof(extra_files) - strlen(extra_files) - 1);
+            if (!extras_append(extra_files, sizeof(extra_files), argv[++i])) {
+                fprintf(stderr, "Error: too many --extra files (the list exceeds 8 KiB)\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
             /* #1901 part 2: --override <dep>=<path>, Bazel's
              * --override_repository shape. Leaves no trace in the manifest,
@@ -4054,6 +4130,11 @@ static int cmd_run(int argc, char** argv) {
              * Win); the aetherc side splits before resolving.
              * Repeated flags and separator strings compose. */
             tc_lib_dir_append(argv[++i]);
+        } else if (strncmp(argv[i], "-D", 2) == 0) {
+            /* Build symbols, the same flag `ae build` takes. Before this,
+             * `ae run -D X file.ae` took X for the file and `-DX` was
+             * skipped without a word. */
+            if (ae_define_arg(argc, argv, &i) < 0) return 1;
         } else if (argv[i][0] != '-' && !file) {
             file = argv[i];
         }
@@ -4062,6 +4143,7 @@ static int cmd_run(int argc, char** argv) {
     /* #1901: [dependencies] join the module search path, after the caller's
      * own --lib flags so an explicit path still wins. */
     ae_resolve_dependencies();
+    load_defines_from_toml();
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
     if (file && dir_exists(file)) {
@@ -4281,10 +4363,13 @@ static int cmd_check(int argc, char** argv) {
     const char* file = NULL;
 
     for (int i = 0; i < argc; i++) {
-        if (argv[i][0] != '-') {
+        if (strncmp(argv[i], "-D", 2) == 0) {
+            if (ae_define_arg(argc, argv, &i) < 0) return 1;
+        } else if (argv[i][0] != '-') {
             file = argv[i];
         }
     }
+    load_defines_from_toml();
 
     // Project mode
     if (!file && path_exists("aether.toml")) {
@@ -4318,8 +4403,8 @@ static int cmd_check(int argc, char** argv) {
         lf_off += (size_t)w;
     }
     char cmd[8192];
-    snprintf(cmd, sizeof(cmd), "\"%s\"%s --check \"%s\"",
-             tc.compiler, lib_flags, file);
+    snprintf(cmd, sizeof(cmd), "\"%s\"%s%s --check \"%s\"",
+             tc.compiler, g_defines, lib_flags, file);
     return run_cmd(cmd);
 }
 
@@ -6024,10 +6109,11 @@ static int cmd_build(int argc, char** argv) {
     const char* target = NULL;
     bool quick = false;
 
-    /* Project-level symbols first, so a command-line -D adds to them rather
-     * than replacing them. */
+    /* Command-line -D symbols are collected below; the project's own
+     * `[build] defines` join them after the walk-up to aether.toml (see
+     * load_defines_from_toml), so the manifest is found from a
+     * subdirectory too. */
     g_defines[0] = '\0';
-    load_defines_from_toml();
 
     // Reset emit mode to the default (exe-only) for this build.
     g_emit_exe = true;
@@ -6063,8 +6149,10 @@ static int cmd_build(int argc, char** argv) {
         } else if (strncmp(argv[i], "--target=", 9) == 0) {
             target = argv[i] + 9;
         } else if (strcmp(argv[i], "--extra") == 0 && i + 1 < argc) {
-            if (extra_files[0]) strncat(extra_files, " ", sizeof(extra_files) - strlen(extra_files) - 1);
-            strncat(extra_files, argv[++i], sizeof(extra_files) - strlen(extra_files) - 1);
+            if (!extras_append(extra_files, sizeof(extra_files), argv[++i])) {
+                fprintf(stderr, "Error: too many --extra files (the list exceeds 8 KiB)\n");
+                return 1;
+            }
         } else if (strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
             /* #1901 part 2: --override <dep>=<path>, Bazel's
              * --override_repository shape. Leaves no trace in the manifest,
@@ -6080,15 +6168,7 @@ static int cmd_build(int argc, char** argv) {
         } else if (strncmp(argv[i], "-D", 2) == 0) {
             /* -D NAME or -DNAME, forwarded to aetherc, which owns the
              * validation and the reject message. */
-            const char* dname = argv[i] + 2;
-            if (!*dname) {
-                if (i + 1 >= argc) {
-                    fprintf(stderr, "Error: -D needs a symbol name\n");
-                    return 1;
-                }
-                dname = argv[++i];
-            }
-            ae_define_append(dname);
+            if (ae_define_arg(argc, argv, &i) < 0) return 1;
         } else if (strncmp(argv[i], "--with=", 7) == 0) {
             // Capability opt-ins for --emit=lib. Forwarded verbatim to
             // aetherc; parsing, validation, and the reject messages all
@@ -6267,6 +6347,10 @@ static int cmd_build(int argc, char** argv) {
      * the project root here; resolving before that would read no manifest
      * (or the wrong one) and silently produce an empty search path. */
     ae_resolve_dependencies();
+    /* The project's `[build] defines`, for the same reason: read before the
+     * walk-up they were found only from the project root, so the same
+     * `ae build src/app.ae` compiled a different program from `src/`. */
+    load_defines_from_toml();
 
     // Read target from aether.toml if not specified on CLI
     if (!target && path_exists("aether.toml")) {
@@ -7234,6 +7318,10 @@ static int cmd_test(int argc, char** argv) {
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--list") == 0) {
             list_only = 1;
+        } else if (strncmp(argv[i], "-D", 2) == 0) {
+            /* Build symbols for the tests, as for `ae build`; the project's
+             * `[build] defines` join them below. */
+            if (ae_define_arg(argc, argv, &i) < 0) return 1;
         } else if (strncmp(argv[i], "--format=", 9) == 0) {
             format_label = argv[i] + 9;
             if (strcmp(format_label, "tap") == 0) {
@@ -7250,6 +7338,10 @@ static int cmd_test(int argc, char** argv) {
         }
     }
     for (int i = 0; i < argc; i++) {
+        if (strncmp(argv[i], "-D", 2) == 0) {
+            if (argv[i][2] == '\0') i++;   /* `-D NAME`: the name is not the target */
+            continue;
+        }
         if (argv[i][0] != '-') {
             if (!is_safe_path(argv[i])) {
                 fprintf(stderr, "Error: Invalid characters in path\n");
@@ -7259,6 +7351,7 @@ static int cmd_test(int argc, char** argv) {
             break;
         }
     }
+    load_defines_from_toml();
 
     // Collect test files. Grown as they are found rather than capped: a fixed
     // ceiling here read the first N files and reported N as the suite total,
@@ -8577,6 +8670,8 @@ static void print_usage(void) {
     printf("  ae add github.com/u/pkg    Add a dependency\n");
     printf("\nOptions:\n");
     printf("  -v, --verbose        Show detailed output\n");
+    printf("  -D NAME              Declare a build symbol for `when defined(NAME)` (run, build,\n");
+    printf("                       check, test; adds to the manifest's [build] defines)\n");
     printf("  --lib <dir>[%c<dir>...]  Module search path (PATH-style, left-to-right;\n",
            AETHER_LIB_PATH_SEP_CHAR);
     printf("                       repeated flag also accepted: --lib a --lib b)\n");

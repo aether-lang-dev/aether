@@ -586,6 +586,16 @@ paths remain the consumer's job — those are site-specific in a way a module
 cannot know — except for `<lib_dir>/contrib`, which is added automatically so
 the veneer archives `make contrib` builds resolve without configuration.
 
+**C sources a module ships (`@source`, #2125).** The same mechanism carries
+a module's own C: `@source("lanes.c")` at the top of `module.ae` names a
+file relative to the module's directory. Orchestration resolves it, reports
+a missing file at the directive, and records it as a `read` dependency in
+the manifest (#1882) so the warm cache key changes with the C; codegen
+lists every resolved path, deduplicated, one per `// aether-source:` line
+after the link header, and `ae` compiles them into the program after
+`--extra` / `extra_sources`. One path per line because a module directory
+may contain a space. A directive in the entry file resolves beside it.
+
 **The link line is derived from the AST, which makes it transitive and
 `-D`-sensitive.** Both properties matter and neither is obvious:
 

@@ -2555,6 +2555,28 @@ format_into(buf: ptr, n: int, fmt: ptr, ...) -> int {
 
 See [`docs/c-interop.md`](c-interop.md#forwarding-a-variadic-tail-to-c-va_list) for the full treatment, including `-Wformat` checking of literal format strings.
 
+### `@source("file.c")` a C file the module ships
+
+A module whose externs are implemented in its own C file names that file at
+the top of its `module.ae`, relative to the module's directory:
+
+```aether,fragment
+@source("lanes.c")
+exports(add4)
+extern lanes_add4(a: int, b: int) -> int
+add4(a: int, b: int) -> int { return lanes_add4(a, b) }
+```
+
+Every program that imports the module gets `lanes.c` compiled in, with no
+`--extra` flag and no `extra_sources` entry; a module deeper in the import
+graph contributes its file the same way, and an import inside a losing
+`when defined(...)` region contributes nothing. The path must exist when
+the module is compiled (the error is reported at the directive), and
+editing the file rebuilds a cached `ae run`. `@link` beside it declares the
+libraries the file needs. The directive is also accepted in a program's
+entry file, resolved beside it. See
+[`docs/build-system.md`](build-system.md#c-sources-a-module-ships-source).
+
 ### `@c_callback` export an Aether function as a C callback
 
 The inverse of `@extern`. Marks an Aether function as having a stable, externally-visible C symbol so it can be passed across the linkage boundary as a function pointer to C externs that take callbacks (HTTP route handlers, signal handlers, `qsort` comparators, libcurl write callbacks, sqlite hooks):
@@ -2981,6 +3003,7 @@ A symbol is present or absent. It carries no value.
 
 ```sh
 ae build -D TEST_SERVER app.ae      # or -DTEST_SERVER
+ae run -D TEST_SERVER app.ae        # run, check and test take the same flag
 aetherc -D TEST_SERVER app.ae
 ```
 
@@ -2990,7 +3013,9 @@ aetherc -D TEST_SERVER app.ae
 defines = "TEST_SERVER VERBOSE"
 ```
 
-A command-line `-D` adds to what the file declares. A symbol must be an
+`ae run`, `ae build`, `ae check` and `ae test` all read `[build] defines`,
+from a subdirectory of the project as well, so the same file is the same
+program under each of them. A command-line `-D` adds to what the file declares. A symbol must be an
 identifier: letters, digits and underscore, not starting with a digit. `-D
 NAME=value` is rejected rather than accepted and ignored, because a symbol has
 no value to carry.
@@ -3044,8 +3069,10 @@ when defined(WITH_SQLITE) {
 
 Built without `WITH_SQLITE`, the binary does not link `libsqlite3` at all —
 `ldd` does not list it. That is usually the reason to reach for `when` in the
-first place: the measured difference on this example is 4.4x. See
-`docs/module-system-design.md` for how `@link` propagates.
+first place: the measured difference on this example is 4.4x. A C file the
+module ships (`@source("lanes.c")`) is dropped the same way: it is compiled
+into the program only while the module is in the closure. See
+`docs/module-system-design.md` for how `@link` and `@source` propagate.
 
 The corollary is that a disabled region is not type-checked. Code you never
 build is code you never check, so a symbol that is off in every CI
