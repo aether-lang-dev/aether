@@ -4,12 +4,10 @@
 # these let a poll-driven client service a server-speaks-first stream that
 # a half-duplex relay would stall on.
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP-WIN] tcp_poll_fullduplex - socket-heavy TCP behaviour is covered by POSIX matrix"
-        exit 0
-        ;;
-esac
+# Runs on Windows too: std.tcp's poll is a Winsock path of its own
+# (WSAPoll and a recv timeout that must not read as a close), which no
+# POSIX lane exercises. The skip that stood here ("covered by POSIX
+# matrix") hid exactly that half.
 
 set -e
 

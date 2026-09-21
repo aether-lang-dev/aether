@@ -11,16 +11,11 @@
 #      follow-up GET /ping on the same connection returns "pong"
 #      (proves the post-handler drain left read_pos at the next request)
 #
-# Skipped on Windows for the same reason the other curl-driven server
-# tests are (the server code under test is platform-independent C; the
-# MSYS2 curl spawn path is many times slower per request).
-
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP-WIN] http_stream_upload — covered by POSIX matrix"
-        exit 0
-        ;;
-esac
+# Runs on Windows too: the server streams the body to a file through
+# fs.open + pwrite, and that path was Windows-specific in the worst way —
+# fs.open handed the caller's "w" to fopen as a TEXT mode, so every '\n'
+# in the 3 MiB body became "\r\n" on disk and the digest never matched.
+# The skip that used to sit here ("covered by POSIX matrix") hid it.
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

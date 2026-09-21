@@ -3013,9 +3013,12 @@ aetherc -D TEST_SERVER app.ae
 defines = "TEST_SERVER VERBOSE"
 ```
 
-`ae run`, `ae build`, `ae check` and `ae test` all read `[build] defines`,
-from a subdirectory of the project as well, so the same file is the same
-program under each of them. A command-line `-D` adds to what the file declares. A symbol must be an
+`ae run`, `ae build`, `ae check` and `ae test` all read `[build] defines`
+from the `aether.toml` in the current directory, so the same file is the same
+program under each of them; `ae build` also finds the manifest from a
+subdirectory of the project (it walks up to it and builds from the project
+root), the other three read the manifest where they are run. A command-line
+`-D` adds to what the file declares. A symbol must be an
 identifier: letters, digits and underscore, not starting with a digit. `-D
 NAME=value` is rejected rather than accepted and ignored, because a symbol has
 no value to carry.

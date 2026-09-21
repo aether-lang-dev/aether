@@ -37,6 +37,12 @@ main() {
 `write_binary`, which carry an explicit length so a buffer with embedded NUL
 bytes survives intact — the text forms would stop at the first zero.
 
+Every entry point carries bytes verbatim on every platform, `open` included:
+a handle from `fs.open(path, "w")` is binary on Windows too, so a `\n` is one
+byte on disk and `pread` / `pwrite` through it are byte-exact (C's text-mode
+`\r\n` translation never applies). A mode that spells `t` explicitly
+(`"wt"`) asks for C's text mode and gets it.
+
 `write_atomic` writes to a temporary file and renames it into place, so a
 reader never observes a half-written file and a crash mid-write leaves the
 old contents rather than a truncated one. Prefer it for anything a

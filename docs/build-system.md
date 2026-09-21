@@ -216,7 +216,7 @@ ae build myapp         # [[bin]] name = "myapp"
 
 When the positional argument doesn't exist as a file, `ae` checks `aether.toml`'s `[[bin]]` entries for a matching `name = "..."` and uses that bin's `path` field. Cargo and similar build systems work the same way.
 
-If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources` declared in the toml are still applied. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins.
+If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources`, `[build] defines`, `cflags` and `link_flags` declared in the toml are still applied. The paths *you* typed keep meaning what they meant where you typed them: a relative `--extra shim.c` and a relative `-o app` resolve against the directory you ran the command from, as `cc -o` does. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins. (`ae run`, `ae check` and `ae test` read the manifest in the current directory only — #2148.)
 
 ---
 

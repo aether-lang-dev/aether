@@ -219,6 +219,23 @@ File* file_open_raw(const char* path, const char* mode) {
         if (!aether_sandbox_check("fs_write", path)) return NULL;
     }
 
+    /* Verbatim bytes on every platform. fs.read / fs.write / read_binary /
+     * write_binary / std.io all open binary; this was the one entry point
+     * that handed the caller's mode to fopen as written, so on Windows
+     * `fs.open(p, "w")` was a TEXT stream: every '\n' the handle then took
+     * through pwrite became "\r\n" on disk (6 bytes written, 8 in the
+     * file), and a "r" handle folded "\r\n" back and stopped at 0x1A —
+     * the positional family is documented binary-safe. 'b' is a no-op on
+     * POSIX; a mode that already has it is passed through. */
+    char bmode[8];
+    if (!strchr(mode, 'b') && !strchr(mode, 't') && strlen(mode) < sizeof(bmode) - 1) {
+        /* An explicit 't' is a caller asking for C's text mode and is
+         * passed through (UCRT rejects a mode with both 't' and 'b'). */
+        /* "w" -> "wb", "a+" -> "a+b", "r+" -> "r+b" (C11 7.21.5.3 allows the
+         * 'b' after the '+'). */
+        snprintf(bmode, sizeof(bmode), "%sb", mode);
+        mode = bmode;
+    }
     FILE* fp = fopen(path, mode);
     if (!fp) return NULL;
 

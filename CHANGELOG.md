@@ -28,7 +28,63 @@ version number before tagging the release.
   too. Reference, `docs/build-system.md`, `docs/c-interop.md`,
   `docs/module-system-design.md`. `tests/integration/source_directive`.
 
+### Changed
+
+- **Four Windows-skipped tests run on Windows.** Running the suite's
+  "covered by POSIX matrix" skips with the skip removed found the
+  `fs.open` text-mode bug and the four library-path failures below, so
+  the skips that hid platform-specific paths are gone: `http_stream_upload`
+  (streams a body through `fs.open` + `pwrite`), `tcp_poll_fullduplex`
+  (`WSAPoll` and the recv timeout are a Winsock path of their own),
+  `bin_name_lookup_and_walkup` (the walk-up scans both separators; its
+  skip gave no reason) and `repl` (piped input, 40/40 three runs out of
+  three under MSYS2). The remaining Windows skips are either POSIX-only
+  features (`std.ipc`, sandbox, signals) or drivers whose harness is
+  POSIX-shaped (`dlfcn.h`, `nc`, `/bin/sh`), each saying which.
+
 ### Fixed
+
+- **`ae build` from a subdirectory: a relative `--extra` and `-o` resolve
+  where they were typed.** The walk-up to the project's `aether.toml`
+  re-based only the source: `ae build ex.ae --extra shim.c -o ex1` from
+  `src/` looked for `<root>/shim.c` ("No such file or directory") and wrote
+  `<root>/ex1`. Every path the user typed is re-based onto the project root
+  after the chdir, as `cc -o` and `go build -o` name paths relative to the
+  invocation directory. `bin_name_lookup_and_walkup` gains the case and now
+  runs on Windows (its skip gave no reason and it passes).
+
+- **`fs.open` handles are binary on Windows, like every other `std.fs`
+  entry point.** `fs.read`, `fs.write`, `read_binary`, `write_binary`,
+  `write_atomic` and `std.io` all open verbatim-bytes, but `fs.open` passed
+  the caller's mode to `fopen` as written, so `fs.open(p, "w")` was a text
+  stream on Windows: a `\n` written through `pwrite` became `\r\n` on disk
+  (6 bytes written, 8 in the file) and a `"r"` handle folded `\r\n` back
+  and stopped at the first 0x1A — while `pread`/`pwrite` are documented
+  binary-safe. Found by running the Windows-skipped `http_stream_upload`
+  test: its server streamed 3 MiB to a file and hashed the wrong bytes.
+  That test now runs on Windows; `tests/integration/fs_open_binary_mode`
+  pins the handle contract. `std.fs` README says it.
+
+- **Native Windows `ae build --emit=lib`, `--emit=obj` and `--namespace`
+  work.** Four Windows-only failures on the library path, every one hidden
+  by a "covered by POSIX matrix" skip: (1) the `-shared` /
+  `--export-all-symbols` flags for a DLL lived only in the POSIX branch of
+  the link command, under an `#ifdef _WIN32` that can never be true there,
+  so `--emit=lib` linked an executable from main-less codegen and failed
+  with "undefined reference to WinMain"; (2) `-o libfoo.dll` got `.exe`
+  appended (`libfoo.dll.exe`), as the cross path had already fixed for
+  `--target=*-windows` — a library's `-o` is now honoured as written and an
+  extension-less name gets `.dll`; (3) `--emit=obj` picked its compiler
+  with `command -v gcc`, a POSIX shell builtin, so through cmd.exe it fell
+  back to a bare `cc` — it now uses the compiler every other native Windows
+  build uses; (4) `--namespace` read the manifest's name through `popen()`,
+  whose cmd.exe line-quoting rule stripped the outer quotes of the aetherc
+  command, passed `/dev/null` as an output path, and derived the directory
+  basename by scanning for `/` alone — the library was named
+  `./libD:\...\dir.c`. The capture goes through the same runner as every
+  other aetherc invocation. `tests/integration/emit_lib_windows_dll`
+  (Windows-only) builds a DLL, loads it from a C host, and builds a
+  namespace library.
 
 - **W1001 "unused variable" for a module global's setter in a large program;
   `__pure` and effect tags blind to module calls and bare global writes
