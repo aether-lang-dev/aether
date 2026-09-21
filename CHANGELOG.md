@@ -54,6 +54,14 @@ version number before tagging the release.
   after the walk-up to `aether.toml`, so `ae build app.ae` from `src/`
   sees them too. `tests/integration/run_build_symbols`.
 
+- **Two `ae test` runs at once no longer share build products.** The
+  generated C, the binary and the spec report were named by the test index
+  alone (`build/_test_0.c`, `_ae_spec_0.txt`), so a second `ae test` of the
+  same toolchain — a suite's shell drivers on parallel workers, two
+  terminals — removed or rewrote the first one's: "FAIL (build)" for a test
+  that builds clean alone. The names carry the pid, as `ae run`'s do.
+  Pinned in `tests/integration/run_build_symbols` (four concurrent runs).
+
 - **An extra C source with a space in its path builds.** `--extra "my
   dir/shim.c"` and `extra_sources = ["my dir/shim.c"]` travelled as one
   space-separated string that went onto the C compiler command verbatim,

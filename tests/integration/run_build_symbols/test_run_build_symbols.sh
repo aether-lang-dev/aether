@@ -114,7 +114,28 @@ if (cd "$tmp/proj" && "$AE" test tests/test_feature.ae >/dev/null 2>&1); then
     fail=1
 fi
 
+# 6. two `ae test` runs at once do not share build products. They used to
+#    write build/_test_0.c and _ae_spec_0.txt keyed on the test index alone,
+#    so one run's remove landed on the other's: "FAIL (build)" for a test
+#    that builds clean alone — which is how this driver failed under the
+#    parallel sweep next to the other drivers that call `ae test`.
+i=0
+while [ "$i" -lt 4 ]; do
+    (cd "$tmp/proj" && "$AE" test -D EXTRA tests/test_feature.ae > "$tmp/par_$i.log" 2>&1; echo $? > "$tmp/par_$i.rc") &
+    i=$((i + 1))
+done
+wait
+i=0
+while [ "$i" -lt 4 ]; do
+    if [ "$(cat "$tmp/par_$i.rc")" != 0 ]; then
+        echo "  [FAIL] run_build_symbols: concurrent ae test run $i failed"
+        grep "FAIL" "$tmp/par_$i.log" | head -2 | sed 's/^/        /'
+        fail=1
+    fi
+    i=$((i + 1))
+done
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] run_build_symbols: -D on run/check/test, [build] defines everywhere, build from a subdirectory"
+    echo "  [PASS] run_build_symbols: -D on run/check/test, [build] defines everywhere, build from a subdirectory, concurrent ae test"
 fi
 exit $fail

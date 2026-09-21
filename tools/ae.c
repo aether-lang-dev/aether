@@ -7490,14 +7490,22 @@ static int cmd_test(int argc, char** argv) {
         char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
         char report_file[2048];
 
+        /* The build products carry this process's pid as well as the test
+         * index: two `ae test` runs of the same toolchain at once (a test
+         * suite's shell drivers on parallel workers, two terminals) used to
+         * share `build/_test_0.c` and `_ae_spec_0.txt`, so one run's
+         * `remove` or rewrite landed on the other's — "FAIL (build)" for a
+         * test that builds clean alone. `ae run` has keyed its temp files on
+         * the pid for the same reason (#1032). */
+        int pid = (int)getpid();
         if (tc.dev_mode) {
-            snprintf(c_file, sizeof(c_file), "%s/build/_test_%d.c", tc.root, i);
-            snprintf(exe_file, sizeof(exe_file), "%s/build/_test_%d" EXE_EXT, tc.root, i);
-            snprintf(report_file, sizeof(report_file), "%s/build/_ae_spec_%d.txt", tc.root, i);
+            snprintf(c_file, sizeof(c_file), "%s/build/_test_%d_%d.c", tc.root, pid, i);
+            snprintf(exe_file, sizeof(exe_file), "%s/build/_test_%d_%d" EXE_EXT, tc.root, pid, i);
+            snprintf(report_file, sizeof(report_file), "%s/build/_ae_spec_%d_%d.txt", tc.root, pid, i);
         } else {
-            snprintf(c_file, sizeof(c_file), "%s/_ae_test_%d.c", get_temp_dir(), i);
-            snprintf(exe_file, sizeof(exe_file), "%s/_ae_test_%d" EXE_EXT, get_temp_dir(), i);
-            snprintf(report_file, sizeof(report_file), "%s/_ae_spec_%d.txt", get_temp_dir(), i);
+            snprintf(c_file, sizeof(c_file), "%s/_ae_test_%d_%d.c", get_temp_dir(), pid, i);
+            snprintf(exe_file, sizeof(exe_file), "%s/_ae_test_%d_%d" EXE_EXT, get_temp_dir(), pid, i);
+            snprintf(report_file, sizeof(report_file), "%s/_ae_spec_%d_%d.txt", get_temp_dir(), pid, i);
         }
 
         // Compile .ae to .c
