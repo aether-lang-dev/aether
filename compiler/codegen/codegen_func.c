@@ -30,6 +30,38 @@ int fn_has_internal_linkage(ASTNode* func) {
     return 0;
 }
 
+/* #2123: a small, loop-free, non-recursive function with internal
+ * linkage is emitted `static inline`. Every Aether function reached C as
+ * plain `static`, and at -O2 gcc's budget for a function not declared
+ * inline (max-inline-insns-auto, 15 insns) left the small value-returning
+ * maths of a physics engine — a 3x3 product, a quaternion rotation, a
+ * 3x3 solve — out of line: 1.6x on a joint-grid solve against the same
+ * functions marked inline. `inline` on a static function is a hint that
+ * raises the budget to max-inline-insns-single (200); the function keeps
+ * its address and its semantics. Only internal-linkage functions
+ * qualify: `inline` on an external C99 function changes what the
+ * translation unit must provide. */
+static int fn_body_is_small_leaf(ASTNode* n, const char* self, int* budget) {
+    if (!n) return 1;
+    if (n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP || n->type == AST_CLOSURE ||
+        n->type == AST_MATCH_STATEMENT) return 0;
+    if (n->type == AST_FUNCTION_CALL && n->value && self && strcmp(n->value, self) == 0) return 0;
+    if (--*budget < 0) return 0;
+    for (int i = 0; i < n->child_count; i++) {
+        if (!fn_body_is_small_leaf(n->children[i], self, budget)) return 0;
+    }
+    return 1;
+}
+
+int fn_is_inline_candidate(ASTNode* func) {
+    if (!func || !fn_has_internal_linkage(func) || is_c_callback(func)) return 0;
+    if (func->child_count == 0) return 0;
+    ASTNode* body = func->children[func->child_count - 1];
+    if (!body || body->type != AST_BLOCK) return 0;
+    int budget = 160;   /* AST nodes — a 3x3 matrix product is ~120 */
+    return fn_body_is_small_leaf(body, func->value, &budget);
+}
+
 // Returns the C symbol bound by a `@c_callback` annotation.
 //   `@c_callback("name") foo(...)` — uses "name" verbatim.
 //   `@c_callback foo(...)`         — falls back to func->value, which
@@ -1050,7 +1082,8 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     // declare their own `record_start_` / `helper_` without the
     // generated C colliding at link time. Closes #279.
     if (fn_has_internal_linkage(func)) {
-        fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
+        fprintf(gen->output, fn_is_inline_candidate(func) ? "static inline AETHER_MAYBE_UNUSED "
+                                                          : "static AETHER_MAYBE_UNUSED ");
     } else if (is_c_callback(func)) {
         // A @c_callback keeps an external, verbatim C symbol so the C side can
         // bind it by name — it CANNOT be static. But when a module carrying one

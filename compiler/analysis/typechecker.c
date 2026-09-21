@@ -723,7 +723,7 @@ static int definition_param_count(ASTNode* def) {
  * same slot kept `int` storage while the checker went on typing the name
  * as float, so `${r}` printed garbage through `%g` — a float. */
 static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind assigned) {
-    if (assigned == TYPE_FLOAT || assigned == TYPE_LONGDOUBLE) {
+    if (assigned == TYPE_FLOAT || assigned == TYPE_FLOAT32 || assigned == TYPE_LONGDOUBLE) {
         snprintf(msg, size,
             "narrowing assignment to '%s': its type was inferred as int from "
             "its initializer, but a float is assigned here and would truncate. "
@@ -1026,6 +1026,7 @@ static const char* type_name(Type* t) {
         case TYPE_DURATION: return "Duration";
         case TYPE_FLOAT:    return "float";
         case TYPE_LONGDOUBLE: return "longdouble";
+        case TYPE_FLOAT32:  return "f32";
         case TYPE_BOOL:     return "bool";
         case TYPE_BYTE:     return "byte";
         case TYPE_STRING:   return "string";
@@ -1056,7 +1057,7 @@ static int is_integer_scalar(TypeKind kind) {
 static int is_numeric_scalar(TypeKind kind) {
     return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
            kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8 ||
-           kind == TYPE_FLOAT || kind == TYPE_LONGDOUBLE;
+           kind == TYPE_FLOAT || kind == TYPE_FLOAT32 || kind == TYPE_LONGDOUBLE;
 }
 
 static TypeKind wider_integer_kind(TypeKind a, TypeKind b) {
@@ -1699,6 +1700,16 @@ int is_type_compatible(Type* from, Type* to) {
         !from->is_fnptr && !to->is_fnptr &&
         (fn_type_is_erased(from) || fn_type_is_erased(to))) return 1;
 
+    // #2134 `f32`: C `float`, the GPU's number. It converts with `float`
+    // and the integer kinds exactly as C converts float and double — a
+    // value cast (`x as f32`) is the explicit spelling, and assignment
+    // performs the same conversion, so `Viewport { x: 1.0 }` and
+    // `verts[i] = v` need no ceremony. Arithmetic on it is `float`.
+    if (from->kind == TYPE_FLOAT32 || to->kind == TYPE_FLOAT32) {
+        TypeKind other = (from->kind == TYPE_FLOAT32) ? to->kind : from->kind;
+        if (other == TYPE_FLOAT32 || other == TYPE_FLOAT || other == TYPE_LONGDOUBLE ||
+            is_integer_scalar(other) || other == TYPE_BYTE) return 1;
+    }
     // Numeric conversions
     if (from->kind == TYPE_INT && to->kind == TYPE_FLOAT) return 1;
     if (from->kind == TYPE_FLOAT && to->kind == TYPE_INT) return 1;
@@ -2745,7 +2756,10 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
             if (left_type->kind == TYPE_LONGDOUBLE || right_type->kind == TYPE_LONGDOUBLE) {
                 return create_type(TYPE_LONGDOUBLE);
             }
-            if (left_type->kind == TYPE_FLOAT || right_type->kind == TYPE_FLOAT) {
+            if (left_type->kind == TYPE_FLOAT || right_type->kind == TYPE_FLOAT ||
+                left_type->kind == TYPE_FLOAT32 || right_type->kind == TYPE_FLOAT32) {
+                /* #2134: arithmetic on an f32 is done in `float` (double); the
+                 * narrow type is storage, narrowed again at the store. */
                 return create_type(TYPE_FLOAT);
             }
             // byte arithmetic: byte op byte → byte; mixed byte/int → int
@@ -6085,6 +6099,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     init_type && (init_type->kind == TYPE_INT64 ||
                                   init_type->kind == TYPE_UINT64 ||
                                   init_type->kind == TYPE_UINT32 ||
+                                  init_type->kind == TYPE_FLOAT32 ||
                                   init_type->kind == TYPE_FLOAT ||
                                   init_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = stmt->value ? stmt->value : "x";
@@ -6406,6 +6421,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     right_type && (right_type->kind == TYPE_INT64 ||
                                    right_type->kind == TYPE_UINT64 ||
                                    right_type->kind == TYPE_UINT32 ||
+                                   right_type->kind == TYPE_FLOAT32 ||
                                    right_type->kind == TYPE_FLOAT ||
                                    right_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = left->value ? left->value : "x";
@@ -6496,6 +6512,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (symbol->type_inferred && symbol->type->kind == TYPE_INT &&
                         (result->kind == TYPE_INT64 || result->kind == TYPE_UINT64 ||
                          result->kind == TYPE_UINT32 || result->kind == TYPE_FLOAT ||
+                         result->kind == TYPE_FLOAT32 ||
                          result->kind == TYPE_LONGDOUBLE)) {
                         char msg[420];
                         narrowing_message(msg, sizeof(msg), stmt->value, result->kind);
@@ -6810,7 +6827,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         ak != TYPE_BYTE && ak != TYPE_UINT8 && ak != TYPE_UINT16) mismatch = 1;
                     if ((spec == 'u') && ak != TYPE_UINT32 && ak != TYPE_UINT16 && ak != TYPE_UINT8 &&
                         ak != TYPE_BYTE && ak != TYPE_INT) mismatch = 1;
-                    if ((spec == 'f' || spec == 'g' || spec == 'e') && ak != TYPE_FLOAT && ak != TYPE_LONGDOUBLE) mismatch = 1;
+                    if ((spec == 'f' || spec == 'g' || spec == 'e') && ak != TYPE_FLOAT && ak != TYPE_FLOAT32 && ak != TYPE_LONGDOUBLE) mismatch = 1;
                     if (mismatch) {
                         char wbuf[256];
                         snprintf(wbuf, sizeof(wbuf),
@@ -8431,6 +8448,7 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             left->children[0] && left->children[0]->type == AST_IDENTIFIER &&
             left_type && left_type->kind == TYPE_INT &&
             right_type && (right_type->kind == TYPE_FLOAT ||
+                           right_type->kind == TYPE_FLOAT32 ||
                            right_type->kind == TYPE_LONGDOUBLE)) {
             Symbol* arr_sym = lookup_symbol(table, left->children[0]->value);
             if (arr_sym && arr_sym->type_inferred) {

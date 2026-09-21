@@ -1,0 +1,9 @@
+The nine test_wycheproof*.sh drivers in this directory share nothing: each
+is `ae run <vectors>.ae` with no output paths, no ports and no build
+artifacts, so `make test-ae` schedules each as a unit of its own instead of
+running them one after another on one worker (#2132 §5). The longest,
+ecdsa_p521, then bounds the shell phase instead of the sum of all nine.
+
+A directory WITHOUT this file runs its drivers serially: two drivers in one
+directory may share fixed ports (http_reverse_proxy_pool: 19101-19103) or
+build outputs, and the per-directory unit is what keeps them apart.

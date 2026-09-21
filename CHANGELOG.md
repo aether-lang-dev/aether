@@ -11,6 +11,57 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`f32`, a 32-bit float value type (#2134).** C's `float`, the number a
+  GPU reads. `f32` existed only as a spelling for extern tuple fields:
+  `v as f32` failed ("cannot cast float to unknown"), it was not a numeric
+  kind, a float could not be assigned to it, and it printed through `%d`.
+  Now it converts with `float` and the integer kinds as C converts float
+  and double (a value cast is the explicit spelling; assignment performs
+  the same conversion), arithmetic on it is `float`, a struct field of it
+  has C's `float` layout — `struct Viewport { x: f32, ... }` is a
+  `VkViewport` — and an `f32[]` view over a `ptr` stores one C `float`
+  per element, so a vertex buffer is a loop of plain stores rather than
+  a runtime call each (`std.mem.set_float32`). Reference: `f32` in the
+  primitive types and its own section. `tests/integration/f32_value_type`.
+
+- **`std.tcp`: `listen_on(address, port)`, `server_port`, `server_poll`,
+  `set_nodelay` (#2136).** `listen` bound every interface and refused
+  port 0, `accept` could only block (closing the listener from another
+  thread does not wake it on Linux), and `TCP_NODELAY` could not be set
+  from Aether because the runtime's headers already declare `setsockopt`
+  with the platform's signature. A loopback-only channel now binds
+  `127.0.0.1` alone, an ephemeral port is read back, a serving loop
+  polls the listener with a timeout between checks of its stop flag,
+  and a connected socket takes `TCP_NODELAY`. `tests/integration/tcp_listen_on`.
+
+- **Small leaf functions from modules are emitted `static inline`
+  (#2123).** Every Aether function reached C as plain `static` (imported
+  and file-local ones), and gcc's -O2 budget for a function not declared
+  inline (`max-inline-insns-auto`, 15 insns) left a physics engine's 3x3
+  products, quaternion rotations and 3x3 solves out of line — 1.6x on a
+  joint-grid solve against the same functions marked inline by hand. An
+  internal-linkage function whose body is small (~160 AST nodes), has no
+  loop, match or closure and does not call itself is now `static inline`,
+  prototype and definition alike; `inline` on a static function is the
+  hint that raises the budget to `max-inline-insns-single`, and the
+  function keeps its address and semantics. A program's own top-level
+  functions keep external linkage. `tests/integration/static_inline_leaf`.
+
+### Fixed
+
+- **The shell-test phase spent 76% of its time on one worker (#2132
+  §5).** `make test-ae` schedules shell drivers one directory at a time,
+  and `tests/integration/wycheproof/` holds nine suites that share
+  nothing, so they ran back to back on one worker (353 s) while three
+  idled. A directory holding a `DRIVERS_INDEPENDENT` marker now hands
+  each of its drivers to the scheduler as a unit of its own, first in the
+  queue; every other directory keeps its drivers serial (two drivers in
+  `http_reverse_proxy_pool` share fixed ports, which is what the
+  per-directory unit protects). The phase is now bounded by the longest
+  suite (p521, ~92 s) instead of the sum.
+
 ## [0.703.0]
 
 ### Fixed

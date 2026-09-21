@@ -21,6 +21,20 @@ int tcp_close(TcpSocket* sock);
 
 // TCP Server
 TcpServer* tcp_listen_raw(int port);
+// #2136: listen on ONE address ("127.0.0.1" for a loopback-only debugging
+// channel, "0.0.0.0" for every interface); port 0 asks the OS for an
+// ephemeral port, readable afterwards through tcp_server_port_raw.
+TcpServer* tcp_listen_on_raw(const char* address, int port);
+// The port a server is bound to (the ephemeral one for a listen on 0),
+// or -1 for a null handle.
+int tcp_server_port_raw(TcpServer* server);
+// Wait up to timeout_ms for a connection to be waiting in accept's queue:
+// 1 = accept will not block, 0 = timeout, -1 = null handle / error. A
+// server loop with a stop flag polls this instead of blocking in accept.
+int tcp_server_poll_raw(TcpServer* server, int timeout_ms);
+// TCP_NODELAY on a connected socket: 0 on success, -1 on a null/closed
+// handle or setsockopt failure.
+int tcp_set_nodelay_raw(TcpSocket* sock, int on);
 TcpSocket* tcp_accept_raw(TcpServer* server);
 int tcp_server_close(TcpServer* server);
 

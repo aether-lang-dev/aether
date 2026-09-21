@@ -1302,6 +1302,13 @@ test-ae: compiler ae stdlib
 	fi; \
 	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
 	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
+	    > "$$tmpdir/shdirs.txt"; \
+	{ for d in $$(cat "$$tmpdir/shdirs.txt"); do \
+	    if [ -f "$$d/DRIVERS_INDEPENDENT" ]; then find "$$d" -maxdepth 1 -name 'test_*.sh' | sort; fi; \
+	  done; \
+	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
+	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
+	  done; } \
 	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \

@@ -16,6 +16,10 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* s, int m) {
 }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
 TcpServer* tcp_listen_raw(int p) { (void)p; return NULL; }
+TcpServer* tcp_listen_on_raw(const char* a, int p) { (void)a; (void)p; return NULL; }
+int tcp_server_port_raw(TcpServer* s) { (void)s; return -1; }
+int tcp_server_poll_raw(TcpServer* s, int t) { (void)s; (void)t; return -1; }
+int tcp_set_nodelay_raw(TcpSocket* s, int on) { (void)s; (void)on; return -1; }
 TcpSocket* tcp_accept_raw(TcpServer* s) { (void)s; return NULL; }
 int tcp_server_close(TcpServer* s) { (void)s; return 0; }
 int tcp_fd_raw(TcpSocket* s) { (void)s; return -1; }
@@ -45,6 +49,7 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t
     #include <netdb.h>
     #include <unistd.h>
     #include <arpa/inet.h>
+    #include <netinet/tcp.h>   /* TCP_NODELAY (#2136) */
     #include <poll.h>
     #include <fcntl.h>
 #endif
@@ -252,16 +257,33 @@ int tcp_close(TcpSocket* sock) {
     return 0;
 }
 
-TcpServer* tcp_listen_raw(int port) {
+/* One listener for both entry points (#2136). `address` NULL means every
+ * interface (INADDR_ANY, what tcp_listen_raw always did); a dotted IPv4
+ * address binds that interface alone — "127.0.0.1" for a debugging
+ * channel that must not be reachable from the network. `allow_zero`
+ * lets port 0 through, asking the OS for an ephemeral port that is read
+ * back with getsockname so tcp_server_port_raw can report it. */
+static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero) {
     // Sandbox check: is listening on this port allowed?
     if (!aether_sandbox_check("tcp_listen", "*")) return NULL;
 
     net_init();
 
-    // Validate port range (1-65535)
-    if (port < 1 || port > 65535) {
+    if (port < (allow_zero ? 0 : 1) || port > 65535) {
         return NULL;
     }
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    if (address && address[0]) {
+        if (inet_pton(AF_INET, address, &serv_addr.sin_addr) != 1) {
+            return NULL;   /* not a dotted IPv4 address */
+        }
+    } else {
+        serv_addr.sin_addr.s_addr = INADDR_ANY;
+    }
+    serv_addr.sin_port = htons((unsigned short)port);
 
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
@@ -270,12 +292,6 @@ TcpServer* tcp_listen_raw(int port) {
 
     int opt = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-
-    struct sockaddr_in serv_addr;
-    memset(&serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(port);
 
     if (bind(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         close(sockfd);
@@ -287,11 +303,43 @@ TcpServer* tcp_listen_raw(int port) {
         return NULL;
     }
 
+    int bound = port;
+    if (port == 0) {
+        struct sockaddr_in got;
+        socklen_t got_len = sizeof(got);
+        memset(&got, 0, sizeof(got));
+        if (getsockname(sockfd, (struct sockaddr*)&got, &got_len) == 0) {
+            bound = (int)ntohs(got.sin_port);
+        }
+    }
+
     TcpServer* server = (TcpServer*)malloc(sizeof(TcpServer));
     if (!server) { close(sockfd); return NULL; }
     server->fd = sockfd;
-    server->port = port;
+    server->port = bound;
     return server;
+}
+
+TcpServer* tcp_listen_raw(int port) {
+    return tcp_listen_impl(NULL, port, 0);
+}
+
+TcpServer* tcp_listen_on_raw(const char* address, int port) {
+    return tcp_listen_impl(address, port, 1);
+}
+
+int tcp_server_port_raw(TcpServer* server) {
+    return server ? server->port : -1;
+}
+
+
+int tcp_set_nodelay_raw(TcpSocket* sock, int on) {
+    if (!sock || !sock->connected) return -1;
+    int flag = on ? 1 : 0;
+    if (setsockopt(sock->fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&flag, sizeof(flag)) != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 TcpSocket* tcp_accept_raw(TcpServer* server) {
@@ -379,6 +427,21 @@ TcpSocket* tcp_socket_from_fd_owned(int fd) {
  * EOF pending — a following recv distinguishes them), 0 on timeout, -1 on
  * a null/closed handle or poll error. Does NOT read and does NOT alter the
  * socket's connected flag. */
+int tcp_server_poll_raw(TcpServer* server, int timeout_ms) {
+    if (!server) return -1;
+    AE_POLLFD pfd;
+    pfd.fd = server->fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int rc = ae_poll(&pfd, (ae_nfds_t)1, timeout_ms);
+    if (rc < 0) {
+        if (net_recv_wouldblock()) return 0;   /* EINTR: treat as no-event */
+        return -1;
+    }
+    if (rc == 0) return 0;
+    return (pfd.revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0;
+}
+
 int tcp_poll_raw(TcpSocket* sock, int timeout_ms) {
     if (!sock || !sock->connected) return -1;
     AE_POLLFD pfd;
