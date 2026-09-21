@@ -82,6 +82,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 |------|-------------|---------|
 | `int` | 32-bit signed integer | `42`, `-17`, `0xFF`, `0b1010` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
+| `f32` | 32-bit floating point (C `float`): storage for GPU buffers and C structs; arithmetic is done in `float` | `f32 x = 1.5`, `v as f32` |
 | `string` | UTF-8 encoded strings | `"Hello"` |
 | `bool` | Boolean type | `true`, `false` |
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
@@ -118,6 +119,38 @@ main() {
 **Range check on integer literals.** Assigning an out-of-range integer literal to a `byte` slot is a compile-time error: `byte b = 256` is rejected. Non-literal int → byte assignments compile and truncate at runtime (`byte b = some_int` keeps the low 8 bits), matching how other narrowings (`int64 → int`) behave.
 
 **Arithmetic.** `byte op byte → byte`; mixed `byte op int → int` (the wider type wins). This keeps NaN-boxing / packed-tag patterns expressible (`tag & 0x07` stays a byte) while letting general arithmetic widen naturally.
+
+#### `f32` 32-bit float
+
+`f32` is C's `float`: the number every GPU reads — vertex buffers, instance transforms, bone palettes, uniform blocks, `VkViewport` — and the one thing `float` (a C `double`) cannot be. It is a storage type: a struct field of it has C's layout and alignment, so an `extern` taking such a struct by pointer sees a C struct of floats; an `f32[]` view over a `ptr` stores one C `float` per element; a local or parameter of it is a C `float`.
+
+```aether,run
+struct Viewport { x: f32, y: f32, w: f32, h: f32 }
+extern malloc(n: int) -> ptr
+extern free(p: ptr)
+
+area(v: Viewport) -> float { return v.w * v.h }
+
+main() {
+    v = Viewport { x: 0.0, y: 0.0, w: 3.0, h: 2.0 }   // float literals narrow into the fields
+    verts = malloc(16) as f32[]                        // a float32 store per element
+    verts[0] = 0.25
+    verts[1] = area(v) as f32
+    scale = 1.5
+    f32 half = scale / 3.0
+    println("${area(v)} ${verts[1]} ${half} ${verts[0] as float}")
+    free(verts)
+}
+```
+```output
+6 6 0.5 0.25
+```
+
+**Conversion.** `f32` converts with `float` and the integer kinds exactly as C converts `float` and `double`: `x as f32` and `f as float` are the explicit spellings, and assignment performs the same conversion (`verts[i] = v`, `Viewport { x: 1.0 }`). A cast to or from a non-numeric kind is refused.
+
+**Arithmetic is `float`.** `a * b` on two `f32` values is a `float`; the narrow type is what is *stored*, narrowed again at the store. A physics or geometry pipeline keeps its maths in `float` and narrows once, at the buffer.
+
+**Printing** goes through `%g`/`%f` like `float` (`println(x)`, `${x}`, `print("%f", x)`).
 
 The other widths follow C's usual arithmetic conversions: `uint8`/`uint16` promote to `int`, `uint32 op int → uint32` (`unsigned int` wins over `int`, so `u + 1` with `u = 4000000000` is `4000000001`, not a negative `int`), and any 64-bit operand makes the result 64-bit. A shift (`<<`, `>>`) has the type of its promoted left operand; the count's type does not take part (`-8 >> n` is `-1` whatever `n`'s width). `print("%d", b)` is the right conversion for a `byte`/`uint8`/`uint16` argument; a `uint32` takes `%u`, and the compiler corrects a mismatched specifier with a warning.
 

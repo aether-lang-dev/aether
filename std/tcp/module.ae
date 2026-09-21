@@ -7,10 +7,11 @@
 exports(
     tcp_connect_raw, tcp_send_raw, tcp_send_n_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
-    tcp_listen_raw, tcp_accept_raw, tcp_server_close,
+    tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
+    tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
-    connect, write, write_n, read, read_n, listen, accept, fd, server_fd,
-    poll, poll2
+    connect, write, write_n, read, read_n, listen, listen_on, accept, fd, server_fd,
+    server_port, server_poll, set_nodelay, poll, poll2
 )
 
 // Raw externs - escape hatch
@@ -21,6 +22,10 @@ extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string
 extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, string)
 extern tcp_close(sock: ptr) -> int
 extern tcp_listen_raw(port: int) -> ptr
+extern tcp_listen_on_raw(address: string, port: int) -> ptr
+extern tcp_server_port_raw(server: ptr) -> int
+extern tcp_server_poll_raw(server: ptr, timeout_ms: int) -> int
+extern tcp_set_nodelay_raw(sock: ptr, on: int) -> int
 extern tcp_accept_raw(server: ptr) -> ptr
 extern tcp_server_close(server: ptr) -> int
 extern tcp_fd_raw(sock: ptr) -> int
@@ -136,6 +141,46 @@ listen(port: int) -> {
         return null, "listen failed"
     }
     return server, ""
+}
+
+// Listen on ONE address (#2136): "127.0.0.1" for a loopback-only
+// channel that the network cannot reach, "0.0.0.0" for every interface
+// (what `listen` does). Port 0 asks the OS for an ephemeral port; read it
+// back with `server_port`. Returns (server, "") or (null, error).
+listen_on(address: string, port: int) -> {
+    server = tcp_listen_on_raw(address, port)
+    if server == null {
+        return null, "listen failed"
+    }
+    return server, ""
+}
+
+// The port a server is bound to — the one the OS chose for a
+// `listen_on(addr, 0)` — or -1 for a null handle.
+server_port(server: ptr) -> int {
+    return tcp_server_port_raw(server)
+}
+
+// Wait up to timeout_ms for a connection to be waiting, so `accept` will
+// not block: 1 = a connection is queued, 0 = timeout, -1 = null handle or
+// error. A serving loop with a stop flag polls this between checks of the
+// flag instead of blocking in `accept` (closing the listener from another
+// thread does not wake `accept` on Linux).
+server_poll(server: ptr, timeout_ms: int) -> int {
+    return tcp_server_poll_raw(server, timeout_ms)
+}
+
+// TCP_NODELAY: send each write at once instead of waiting to coalesce it
+// (Nagle). Request/response lines want it on. Returns "" on success or
+// an error; `setsockopt` cannot be declared from Aether because the
+// runtime's headers already declare it with the platform's signature.
+set_nodelay(sock: ptr, on: bool) -> string {
+    flag = 0
+    if on { flag = 1 }
+    if tcp_set_nodelay_raw(sock, flag) != 0 {
+        return "set_nodelay failed"
+    }
+    return ""
 }
 
 // Accept an incoming connection. Returns (socket, "") on success,

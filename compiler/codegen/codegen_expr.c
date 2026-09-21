@@ -3926,7 +3926,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
-                        } else if (arg_type->kind == TYPE_FLOAT) {
+                        } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
                             fprintf(gen->output, "printf(\"%%f\", ");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
@@ -3990,7 +3990,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 } else if (arg_idx < expr->child_count) {
                                     Type* atype = expr->children[arg_idx]->node_type;
                                     if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
-                                    else if (atype && atype->kind == TYPE_FLOAT) fprintf(gen->output, "%%f");
+                                    else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
                                     else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
                                     else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
@@ -4062,7 +4062,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "printf(\"%%s\\n\", _aether_duration_repr(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
-                        } else if (arg_type->kind == TYPE_FLOAT) {
+                        } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
                             fprintf(gen->output, "printf(\"%%f\\n\", ");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
@@ -4136,7 +4136,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 } else if (arg_idx < expr->child_count) {
                                     Type* atype = expr->children[arg_idx]->node_type;
                                     if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
-                                    else if (atype && atype->kind == TYPE_FLOAT) fprintf(gen->output, "%%f");
+                                    else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
                                     else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
                                     else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
@@ -5713,6 +5713,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             case TYPE_UINT64: fprintf(gen->output, "%%llu"); break; \
                             case TYPE_DURATION: fprintf(gen->output, "%%s"); break; \
                             case TYPE_FLOAT:  fprintf(gen->output, "%%g");  break; \
+                            case TYPE_FLOAT32: fprintf(gen->output, "%%g");  break; \
                             case TYPE_LONGDOUBLE: fprintf(gen->output, "%%Lg"); break; \
                             case TYPE_BOOL:   fprintf(gen->output, "%%s");  break; \
                             case TYPE_STRING: fprintf(gen->output, "%%s");  break; \

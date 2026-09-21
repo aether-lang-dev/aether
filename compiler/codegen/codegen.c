@@ -5766,7 +5766,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // declaration follows suit. Trailing-underscore private helpers
         // (#279) match the same `static` rule.
         if (fn_has_internal_linkage(child)) {
-            fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
+            fprintf(gen->output, fn_is_inline_candidate(child) ? "static inline AETHER_MAYBE_UNUSED "
+                                                               : "static AETHER_MAYBE_UNUSED ");
         }
 
         // Determine return type. Mirrors generate_function_definition's

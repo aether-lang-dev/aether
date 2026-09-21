@@ -31,6 +31,7 @@ const char* get_c_operator(const char* aether_op);
 void generate_type(CodeGenerator* gen, Type* type);
 void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name);
 int is_fnptr_type(Type* t);
+int fn_is_inline_candidate(ASTNode* func);
 int is_var_declared(CodeGenerator* gen, const char* var_name);
 void mark_var_declared(CodeGenerator* gen, const char* var_name);
 void mark_var_declared_typed(CodeGenerator* gen, const char* var_name, Type* hoisted_type);

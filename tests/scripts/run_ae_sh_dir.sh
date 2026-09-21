@@ -2,10 +2,17 @@
 # Run every test_*.sh directly inside one integration directory, recording each
 # outcome as marker files in $tmpdir for `test-ae` to tally afterwards.
 #
-#   run_ae_sh_dir.sh <dir> <tmpdir> <repo-root>
+#   run_ae_sh_dir.sh <dir-or-script> <tmpdir> <repo-root>
 #
-# Invoked once per directory by `xargs -P` from the Makefile's `test-ae`
-# target. Only maxdepth 1, so each directory owns exactly its own tests.
+# Invoked once per unit by `xargs -P` from the Makefile's `test-ae` target.
+# A unit is normally a directory (only maxdepth 1, so each directory owns
+# exactly its own tests, and its drivers run one after another: two drivers
+# in one directory may share fixed ports or build outputs). A directory that
+# holds a `DRIVERS_INDEPENDENT` marker file declares its drivers free of
+# such sharing; the Makefile then hands each of its scripts over as a unit
+# of its own, so they spread across the workers (#2132 §5: the nine
+# wycheproof suites took 76% of the shell phase on one worker while three
+# idled).
 #
 # Lives in a real file rather than being generated into $tmpdir by the recipe
 # for the reason documented at length in run_ae_test.sh beside it: the
@@ -16,9 +23,16 @@
 # Behaviour is unchanged from the generated version on every platform.
 set -u
 
-dir="$1"
+unit="$1"
 tmpdir="$2"
 root="$3"
+if [ -f "$unit" ]; then
+    dir="$(dirname "$unit")"
+    scripts="$unit"
+else
+    dir="$unit"
+    scripts="$(find "$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort)"
+fi
 
 # Portable per-test timeout, same shape as run_ae_test.sh. Shell tests get a
 # longer default than .ae tests: they drive whole toolchain round-trips.
@@ -30,7 +44,7 @@ else
     TO=""
 fi
 
-for sh_test in $(find "$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort); do
+for sh_test in $scripts; do
     name=$(echo "$sh_test" | sed "s|tests/||;s|/|_|g;s|\.sh$||")
     sh "$root/tests/scripts/sweep_resource_probe.sh" "$name" 2>/dev/null
     $TO bash "$sh_test" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"

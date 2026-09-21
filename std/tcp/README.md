@@ -48,7 +48,36 @@ several sockets. For an HTTP server rather than raw sockets, use
 `std.http.server`, which handles keep-alive, parsing and connection parking
 already.
 
+## Serving on one address, without blocking in accept
+
+`listen(port)` binds every interface. A debugging or control channel with no
+authentication must bind the loopback address and nothing else:
+`listen_on("127.0.0.1", port)`. Port `0` asks the OS for an ephemeral port;
+`server_port(srv)` reads back the one it chose, so a tool that starts a
+process can ask it which port it got.
+
+`accept` blocks, and closing the listener from another thread does not wake it
+on Linux. A serving loop that has to stop polls the listener instead:
+`server_poll(srv, 50)` returns `1` when a connection is waiting (so `accept`
+will not block), `0` on timeout, `-1` on a null handle — check the stop flag
+between polls. `set_nodelay(sock, true)` turns on `TCP_NODELAY` for
+request/response lines (the runtime's headers already declare `setsockopt`
+with the platform's signature, so it cannot be declared from Aether).
+
+```aether,fragment
+srv, err = tcp.listen_on("127.0.0.1", 0)
+port = tcp.server_port(srv)
+while !stopping {
+    if tcp.server_poll(srv, 50) == 1 {
+        sock, aerr = tcp.accept(srv)
+        _ = tcp.set_nodelay(sock, true)
+        // ... read a line, answer, close
+    }
+}
+```
+
 ## Exports
 
-`connect`, `listen`, `accept`, `read`, `read_n`, `write`, `write_n`, `poll`,
+`connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `write`,
+`write_n`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `fd`, `server_fd`, `tcp_close`, `tcp_server_close`.
