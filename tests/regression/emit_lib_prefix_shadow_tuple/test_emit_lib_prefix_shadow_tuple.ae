@@ -17,6 +17,7 @@ main() {
     merged, st = textops.merge("base", 4, "ours", 4, "theirs", 6)
     if st != 1 {
         println("FAIL: expected status 1, got something else")
+        return 1
     } else {
         println("PASS: merge returned status 1 as expected")
     }
@@ -24,5 +25,6 @@ main() {
         println("PASS: merge returned ours as expected")
     } else {
         println("FAIL: merge first value mismatch")
+        return 1
     }
 }

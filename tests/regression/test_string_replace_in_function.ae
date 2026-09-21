@@ -36,6 +36,7 @@ main() {
         println("PASS: parameter reassignment works")
     } else {
         println("FAIL: got ${result}")
+        return 1
     }
     println("=== ALL DONE ===")
 }

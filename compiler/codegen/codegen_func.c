@@ -1236,6 +1236,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 last_param_cname);
     }
     clear_declared_vars(gen);  // Reset for each function
+    clear_fnptr_locals(gen);   // #2130: fn-typed parameters/locals are this function's
     clear_heap_string_vars(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);
@@ -1862,6 +1863,7 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     fprintf(gen->output, ") {\n");
     indent(gen);
     clear_declared_vars(gen);
+    clear_fnptr_locals(gen);   /* #2130: a fresh C function */
     clear_heap_string_vars(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);

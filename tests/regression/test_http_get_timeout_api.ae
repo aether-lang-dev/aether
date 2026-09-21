@@ -26,12 +26,12 @@ main() {
 
     if err == "" {
         println("FAIL: expected error for unreachable host, got success")
-        return
+        return 1
     }
 
     if string.length(body) > 0 {
         println("FAIL: expected empty body on error, got non-empty")
-        return
+        return 1
     }
 
     println("PASS")

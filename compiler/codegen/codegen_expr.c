@@ -453,6 +453,29 @@ static void collect_identifiers(ASTNode* node, char*** names, int* count, int* c
     }
 }
 
+/* Callee names of the calls in a body (`step(v)` -> "step"), appended to
+ * `names` without duplicates; see the capture filter for why they are
+ * kept apart from plain identifiers. */
+static void collect_callee_names(ASTNode* node, char*** names, int* count, int* cap) {
+    if (!node) return;
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        int seen = 0;
+        for (int i = 0; i < *count; i++) {
+            if (strcmp((*names)[i], node->value) == 0) { seen = 1; break; }
+        }
+        if (!seen) {
+            if (*count >= *cap) {
+                *cap = *cap ? *cap * 2 : 16;
+                *names = aether_xrealloc(*names, *cap * sizeof(char*));
+            }
+            (*names)[(*count)++] = strdup(node->value);
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        collect_callee_names(node->children[i], names, count, cap);
+    }
+}
+
 // Collect write-target names (AST_VARIABLE_DECLARATION.value) in a closure
 // body, stopping at nested closures. Used by the capture filter so that
 // `x = expr` in a closure body — where x never appears on a read side —
@@ -635,6 +658,65 @@ static int is_hoisted_closure(ASTNode* node) {
 // success. The scope name uses the same vocabulary as `parent_func`
 // everywhere else: a function name, "main", `__recv_arm_<ptr>`, or
 // `__closure_<ptr>`.
+/* #2130: the fn-pointer registry is per C function, and a closure body
+ * is emitted in its own pass, after every function. Rebuild the registry
+ * a closure's body sees from the scopes it sits in: every fn-typed
+ * parameter and fn-typed local of the enclosing closures and of the
+ * function / main / receive handler at the top of the chain, so a call
+ * through a captured `step: fn(int) -> int` still lowers through its
+ * type. Walks the whole body of each level (a name is one variable per
+ * function; a nested closure's own parameters would only shadow, and
+ * are registered again when that closure's body is emitted). */
+static int find_enclosing_scope_name(ASTNode* node, const char* scope,
+                                     ASTNode* target, char* out, size_t n);
+
+static void register_fnptr_decls_in(CodeGenerator* gen, ASTNode* n) {
+    if (!n) return;
+    if ((n->type == AST_VARIABLE_DECLARATION || n->type == AST_PATTERN_VARIABLE ||
+         n->type == AST_CLOSURE_PARAM) && n->value) {
+        Type* sig = NULL;
+        if (is_fnptr_type(n->node_type)) sig = n->node_type;
+        else if (n->child_count > 0 && n->children[0] &&
+                 n->children[0]->type == AST_PTR_AS_FN_CAST &&
+                 is_fnptr_type(n->children[0]->node_type)) sig = n->children[0]->node_type;
+        if (sig) register_fnptr_local(gen, n->value, sig);
+    }
+    for (int i = 0; i < n->child_count; i++) register_fnptr_decls_in(gen, n->children[i]);
+}
+
+static ASTNode* find_scope_node_by_name(ASTNode* program, const char* scope) {
+    if (!program || !scope) return NULL;
+    if (strncmp(scope, "__closure_", 10) == 0) return find_closure_by_name(program, scope);
+    if (strncmp(scope, "__recv_arm_", 11) == 0) return find_receive_arm_by_name(program, scope);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* top = program->children[i];
+        if (!top) continue;
+        if (strcmp(scope, "main") == 0 && top->type == AST_MAIN_FUNCTION) return top;
+        if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
+            top->value && strcmp(top->value, scope) == 0) return top;
+        if (top->type == AST_EXPORT_STATEMENT && top->child_count > 0 && top->children[0] &&
+            top->children[0]->type == AST_FUNCTION_DEFINITION && top->children[0]->value &&
+            strcmp(top->children[0]->value, scope) == 0) return top->children[0];
+    }
+    return NULL;
+}
+
+static void restore_fnptr_scope_for_closure(CodeGenerator* gen, const char* parent_func) {
+    clear_fnptr_locals(gen);
+    char scope[64];
+    const char* cur = parent_func;
+    for (int depth = 0; cur && depth < 16; depth++) {
+        ASTNode* owner = find_scope_node_by_name(gen->program, cur);
+        if (!owner) break;
+        register_fnptr_decls_in(gen, owner);
+        if (strncmp(cur, "__closure_", 10) != 0) break;   /* reached the function */
+        char outer[64];
+        if (!find_enclosing_scope_name(gen->program, NULL, owner, outer, sizeof(outer))) break;
+        snprintf(scope, sizeof(scope), "%s", outer);
+        cur = scope;
+    }
+}
+
 static int find_enclosing_scope_name(ASTNode* node, const char* scope,
                                      ASTNode* target, char* out, size_t n) {
     if (!node) return 0;
@@ -1038,6 +1120,16 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
         char** all_ids = NULL;
         int id_count = 0, id_cap = 0;
         collect_identifiers(body, &all_ids, &id_count, &id_cap);
+        /* A call's callee is the call node's own name, not an identifier
+         * child: `step(v)` through a captured `step: fn(int) -> int` must
+         * capture `step` too (#2130 — it was left out of the env and the
+         * body called an undeclared `step`). Unlike an identifier, a
+         * callee is a capture only when the enclosing scope is known to
+         * declare it: most callees are top-level functions, and the
+         * unknown-scope fallback below must not turn those into
+         * captures. */
+        int first_callee = id_count;
+        collect_callee_names(body, &all_ids, &id_count, &id_cap);
 
         // Filter to captures. A name is a capture iff it:
         //   - is not a parameter of this closure,
@@ -1058,7 +1150,7 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                 if (enclosing_func) {
                     is_cap = is_declared_in_function(gen->program, enclosing_func, all_ids[i]);
                 } else {
-                    is_cap = 1;
+                    is_cap = i < first_callee;
                 }
             }
             if (is_cap) {
@@ -2008,6 +2100,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
         closure_scope_name(closure, own_scope, sizeof(own_scope));
 
         const char* ret_type = resolve_closure_return_type(gen, ci);
+        restore_fnptr_scope_for_closure(gen, parent_func);
         emit_closure_signature(gen, ci, ret_type);
         fprintf(gen->output, " {\n");
         gen->in_string_closure = strcmp(ret_type, "const char*") == 0;

@@ -11,6 +11,66 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A module's fn-typed parameter named `run` hijacked an unrelated
+  program function named `run` (#2130).** Codegen's registry of
+  fn-pointer-typed locals and parameters — what makes a call through one
+  lower with the right C function-pointer cast — was never emptied
+  between functions, so `for_each(run: fn(int, int, int, ptr) -> void,
+  ...)` in a module left `run` registered for the rest of the translation
+  unit and the program's own `run("hello", 3)` was emitted as
+  `((void (*)(int, int, int, void*))&run)("hello", 3)`: a C error, or a
+  miscompile when the arity happened to match. The registry is per
+  function now (and per `main` and receive handler), and a closure body,
+  which is emitted in its own pass, rebuilds the entries of the scopes it
+  sits in. Fixing that exposed the other half: a fn-typed parameter
+  called from a closure was never captured at all — a call's callee is
+  the call node's name, not an identifier, and the capture analysis only
+  collected identifiers — so `|v| { return step(step(v)) }` called an
+  undeclared `step`. It is captured now.
+  `tests/integration/fnptr_param_name_scope`.
+
+- **Twenty-six tests printed `FAIL` and exited 0 (#2132 §1).** The bulk
+  `.ae` sweep's only oracle is the exit code, and 26 sweep-run tests —
+  among them the OCSP and ECDSA-P384 certificate checks, sixteen
+  regression tests and the scheduler idle-CPU guard — reported a failure
+  through `println` and then returned from a void `main()`, counting as a
+  pass on every run. Each failure branch now `return 1`s from `main`
+  (the exit code, with main's scope-end cleanup — `exit()` skips it and
+  the macOS leak gate sees the difference); the actor-timeout test reads
+  its verdict back from the actor. Verified by mutating two of them:
+  `FAIL: expected 1, got 1` now exits 1. `make check-tests` (in `make
+  ci`) runs `tests/scripts/check_test_verdicts.py`, which flags any
+  sweep-run test that prints a failure marker and has no way to exit
+  non-zero, so the next one cannot accumulate.
+
+- **A pruned test had not run for three weeks; five server fixtures ran
+  for 60 s each (#2132 §2, §4).** `tests/integration/crypto_tls13_server_hs`
+  was in the sweep prune list under the premise that a `test_*.sh` drove
+  it; none did, so its five assertions were dead since 29 Aug. It is
+  back in the sweep. The five `server.ae` halves of shell-driven HTTP
+  tests were NOT pruned, so the sweep ran each standalone to its 60 s
+  sleep — 300 worker-seconds a run proving nothing; they are pruned.
+  `tests/scripts/check_sweep_prune.py` (also under `make check-tests`)
+  fails when a pruned directory has no driver and warns when a sweep-run
+  directory holds a server/client half or a long sleep.
+
+- **A shell driver that skipped itself was counted as a pass (#2132
+  §3b).** `run_ae_sh_dir.sh` honoured only `[SKIP-WIN]`; `host_racket`
+  and `host_rhombus` print `[SKIP]` when Racket is not installed — which
+  is every CI runner — and were reported `[PASS]` on every run. A plain
+  `[SKIP]` is a skip now, and the sweep summary says how many tests
+  skipped (`N passed, N failed, N skipped, N total`) instead of folding
+  them into the pass count.
+
+- **The pools stress test accepted an allocator returning NULL for
+  everything (#2132 §6).** `standard_pools_stress` guarded every use with
+  `if (ptrs[i])` and asserted nothing. It now asserts the bounded-pool
+  contract: every allocation within a class's capacity succeeds, every
+  one past it is NULL, and after freeing each class is empty and
+  allocates again.
+
 ## [0.702.0]
 
 ### Fixed

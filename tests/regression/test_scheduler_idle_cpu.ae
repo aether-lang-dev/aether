@@ -71,5 +71,6 @@ main() {
         println("  FAIL idle scheduler burned ${used_us} us of CPU, budget is ${budget_us}")
         println("")
         println("1 FAILURE(S)")
+        return 1
     }
 }

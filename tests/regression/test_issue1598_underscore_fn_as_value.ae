@@ -46,19 +46,19 @@ main() {
     got_under = takes_fp(_h_under)
     if got_under != 1 {
         println("FAIL: underscore fn passed as value did not arrive")
-        return
+        return 1
     }
 
     // 2. CALL use of the same function must still resolve.
     if _h_under(41) != 42 {
         println("FAIL: underscore fn call broken")
-        return
+        return 1
     }
 
     // 3. The control: a plain function as a value.
     if takes_fp(h_plain) != 1 {
         println("FAIL: plain fn passed as value did not arrive")
-        return
+        return 1
     }
 
     println("PASS: underscore fn as value, call, and control")

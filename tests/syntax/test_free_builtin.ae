@@ -38,6 +38,7 @@ main() {
         println("PASS: os.exec success")
     } else {
         println("FAIL: os.exec returned error: ${exec_err}")
+        return 1
     }
     _ = output
 
@@ -49,6 +50,7 @@ main() {
         println("PASS: string.release with concat")
     } else {
         println("FAIL: string.concat wrong length")
+        return 1
     }
 
     // Test 5: free(NULL) is safe (C standard guarantees this)

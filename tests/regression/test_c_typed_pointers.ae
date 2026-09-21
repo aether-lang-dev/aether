@@ -45,7 +45,7 @@ main() {
     back = use_handle(hp)
     if mem.ptr_to_long(back) != mem.ptr_to_long(p) {
         println("FAIL 3: opaque handle pointer did not round-trip")
-        return
+        return 1
     }
     println("  PASS 3: opaque *handle round-trips")
 

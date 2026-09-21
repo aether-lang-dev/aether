@@ -57,7 +57,7 @@ main() {
     // Test 5: match with wildcard
     x = 42
     match x {
-        0 -> println("FAIL: matched 0")
+        0 -> { println("FAIL: matched 0"); return 1 }
         _ -> println("PASS: wildcard match")
     }
 

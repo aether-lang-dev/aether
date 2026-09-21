@@ -254,6 +254,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         // leak into the handler and produce undeclared-
                         // identifier errors in the generated C.
                         clear_declared_vars(gen);
+                        clear_fnptr_locals(gen);
                         clear_heap_string_vars(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);

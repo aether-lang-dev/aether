@@ -114,5 +114,6 @@ main() {
         println("tls13_cert_p384: all checks pass")
     } else {
         println("tls13_cert_p384: FAILURES")
+        return 1
     }
 }

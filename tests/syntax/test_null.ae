@@ -12,6 +12,7 @@ main() {
     y = null
     if y != null {
         println("ERROR: y should be null")
+        return 1
     } else {
         println("null_neq: ok")
     }

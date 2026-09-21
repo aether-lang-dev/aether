@@ -4,12 +4,15 @@ main() {
     x = 15
     if x < 5 {
         println("FAIL")
+        return 1
     } else if x < 10 {
         println("FAIL")
+        return 1
     } else if x < 20 {
         println("PASS: else-if chain")
     } else {
         println("FAIL")
+        return 1
     }
 
     // While with break
@@ -66,8 +69,8 @@ main() {
     // Match with default
     val = 42
     match val {
-        1 -> println("FAIL")
-        2 -> println("FAIL")
+        1 -> { println("FAIL"); return 1 }
+        2 -> { println("FAIL"); return 1 }
         _ -> println("PASS: match default")
     }
 }

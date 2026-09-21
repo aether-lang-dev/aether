@@ -48,6 +48,7 @@ main() {
         println("ok   held(\"a\") == \"a!\" (local `full` resolved correctly)")
     } else {
         println("FAIL held: ${h}")
+        return 1
     }
 
     println("test_local_shadows_suffixed_import passed")

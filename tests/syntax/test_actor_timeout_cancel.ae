@@ -2,16 +2,21 @@
 
 message Ping {}
 
+message Report { sink: ptr }
+
 actor Waiter {
     state count = 0
+    state timed_out = 0
 
     receive {
         Ping -> {
             count = count + 1
             println("Got ping ${count}")
         }
+        Report(sink) -> { ref_set(sink, timed_out) }
     } after 500 -> {
         println("FAIL: timeout should not fire when messages arrive")
+        timed_out = 1
     }
 }
 
@@ -20,5 +25,13 @@ main() {
     w ! Ping {}
     w ! Ping {}
     wait_for_idle()
+    // The verdict has to reach the exit code: ask the actor whether the
+    // timeout arm ran (the handler cannot return from main).
+    cell = ref(0)
+    w ! Report { sink: cell }
+    wait_for_idle()
+    if ref_get(cell) != 0 {
+        return 1
+    }
     println("PASS: timeout cancelled by messages")
 }

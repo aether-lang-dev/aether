@@ -1305,7 +1305,8 @@ test-ae: compiler ae stdlib
 	    | xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
-	total=$$((passed + failed)); \
+	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
+	total=$$((passed + failed + skipped)); \
 	echo ""; \
 	if [ "$$failed" -gt 0 ]; then \
 		echo "=== FAILURE DETAILS ==="; \
@@ -1337,7 +1338,7 @@ test-ae: compiler ae stdlib
 			echo ""; \
 		done; \
 	fi; \
-	echo "Aether Tests: $$passed passed, $$failed failed, $$total total"; \
+	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
 	rm -rf "$$tmpdir"; \
 	if [ "$$failed" -gt 0 ]; then exit 1; fi
 endif
@@ -2542,6 +2543,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Catch a CHANGELOG release-fold before pushing"
 	@echo "  make test-fast      - Run C tests (monolithic build)"
@@ -2707,6 +2709,7 @@ ci: clean
 	@$(MAKE) -j$(NPROC) test
 	@$(MAKE) check-standalone
 	@$(MAKE) check-docs
+	@$(MAKE) check-tests
 	@echo ""
 	@echo "[5/10] Running .ae integration tests..."
 	@$(MAKE) test-ae
@@ -2799,7 +2802,7 @@ CONTRIB_HOST_STRICT ?= 0
 # module. `check_doc_blocks.py` compiles every ```aether block in docs/ and the
 # README that is labelled complete, and asserts the ones labelled `fails`
 # still fail.
-.PHONY: check-docs check-changelog
+.PHONY: check-docs check-changelog check-tests
 
 check-changelog:
 	@sh tests/scripts/check_changelog_fold.sh
@@ -2840,6 +2843,29 @@ check-docs: compiler ae stdlib
 	    $$py tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — no working Python found"; \
+	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
+	fi
+
+# The test suite itself (#2132): every sweep-run .ae that prints a failure
+# marker can exit non-zero (25 could not — printed FAIL, exited 0, counted
+# as a pass on every run), and the sweep prune list is consistent with the
+# tree (a pruned directory has the driver the list promises; a fixture that
+# only makes sense under a driver is not run standalone). Python, probed the
+# same way check-docs does; the checks read the tree, so they do not vary
+# by platform and the Linux/macOS legs cover a Windows box without Python.
+check-tests:
+	@echo "==================================="
+	@echo "  test suite (verdicts, prune list)"
+	@echo "==================================="
+	@py=""; \
+	for cand in python3 python "py -3"; do \
+	    if $$cand -c "import sys" >/dev/null 2>&1; then py="$$cand"; break; fi; \
+	done; \
+	if [ -n "$$py" ]; then \
+	    $$py tests/scripts/check_test_verdicts.py && \
+	    $$py tests/scripts/check_sweep_prune.py; \
+	else \
+	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \
 	fi
 

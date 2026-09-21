@@ -24,7 +24,7 @@ main() {
     _thing = 42
     if _thing != 42 {
         println("FAIL: local shadowing a fn name was rewritten by the rename")
-        return
+        return 1
     }
     println("PASS: local shadowing a leading-underscore fn name is untouched")
 }
