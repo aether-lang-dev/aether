@@ -404,9 +404,21 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             if (node->value && node->node_type && node->node_type->kind != TYPE_UNKNOWN && ctx->symbols) {
                 Symbol* existing = lookup_symbol_local(ctx->symbols, node->value);
                 if (existing) {
-                    // Update existing symbol's type
-                    if (existing->type) free_type(existing->type);
-                    existing->type = clone_type(node->node_type);
+                    /* A name bound again: this table is flat, so the entry is
+                     * what a use AFTER sibling branches resolves to, and codegen
+                     * hoists such a local with the join of its branch types.
+                     * Widen to match (`if a { f = 1.5 } else { f = 2 }` then
+                     * `${f}` is a float, not the last branch's int printed
+                     * through %d); a binding of another kind keeps the first
+                     * (#2124 reports the clash where it is hoisted). */
+                    Type* joined = numeric_join_type(existing->type, node->node_type);
+                    if (joined) {
+                        if (existing->type) free_type(existing->type);
+                        existing->type = joined;
+                    } else if (!existing->type || existing->type->kind == TYPE_UNKNOWN) {
+                        if (existing->type) free_type(existing->type);
+                        existing->type = clone_type(node->node_type);
+                    }
                 } else {
                     // Add new symbol
                     add_symbol(ctx->symbols, node->value, clone_type(node->node_type), 0, 0, 0);

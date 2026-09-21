@@ -57,6 +57,19 @@ typedef struct {
     MessageRegistry* message_registry;
     char** declared_vars;  // Track variables declared in current function
     int declared_var_count;
+    // #2124: the type a HOISTED local was declared with (parallel to
+    // declared_vars; NULL for a local declared where it was bound). A
+    // hoisted local is one C variable for the whole function, so a later
+    // bare re-bind in a sibling branch or loop body with a value that
+    // cannot flow into that type is reported in the language's terms
+    // instead of by the C compiler.
+    Type** declared_var_types;
+    // #2124: the body of the function (or main) being generated, walked
+    // by the hoisters to find every binding of a name across sibling
+    // branches and loop bodies, so a hoisted local is declared with the
+    // numeric join of all of them (`int` in one branch, `long` in the
+    // other: `int64_t`), the type the typechecker sees for it too.
+    ASTNode* hoist_scope_body;
     // #790: names of locals currently bound to a `heap.new(T)` box (a
     // calloc'd, zero-initialised `*T`). Only these boxes have their
     // `_heap_<field>` ownership trackers guaranteed zero, so only on these is

@@ -11,6 +11,51 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A local bound in sibling branches took one branch's type in C and
+  another's in the checker (#2124).** A local first bound inside a branch
+  or loop body and used after it is hoisted to function scope. The
+  hoisted declaration took the first branch's type while the early
+  inference pass recorded the last binding's, so `if a { f = 1.5 } else
+  { f = 2 }` then `${f}` printed `1` through `%d`, and `n = 1` in one
+  branch with `n = 4000000000` in the other truncated the long. Both now
+  use the numeric join of every binding of the name in the function
+  (`int64_t n`, `double f`; a `uint32` beside an `int` stays unsigned).
+  A binding whose kind cannot flow into the hoisted variable — `v = "s"`
+  in one branch and `v = 5` in another, `p = 5` then `p = null` — used
+  to reach the C compiler ("assignment to 'const char *' from 'int'");
+  it is refused at that binding in the language's terms. A name bound
+  in sibling bodies and used only inside them stays one variable per
+  body (`std.cbor`'s `read_value` binds one name as int and as long that
+  way). `tests/integration/hoisted_local_rebind`.
+
+- **`x op= rhs` was not type-checked.** The compound-assignment statement
+  checked only its right-hand side: `s += "b"` on strings reached the C
+  compiler as an invalid pointer addition, and none of the narrowing
+  guards a plain `=` has applied — `x = 0` then `x += 2.5` stored 2,
+  `y = 1` then `y *= 4000000000` stored -294967296, silently. It is
+  checked as `x = x op rhs` now: the operator must be defined for the
+  operands and the result must fit `x`, with the same messages as the
+  `=` form. And a compound assignment to a field or an element
+  (`p.n += 2`, `xs[i] <<= 2`) did not parse at all ("Expected statement
+  in block"); it is built as `p.n = p.n + 2`, for any target the
+  language can evaluate twice (a target with a call in it is refused,
+  saying so). `tests/integration/compound_assignment_types`.
+
+- **Two modules defining one message or actor name merged silently
+  (#2129, the rest of it).** After the struct clash was diagnosed the
+  same one-namespace merge remained for `message` and `actor`: a
+  `message Ping {}` beside a `message Ping { x: int }` failed in the C
+  compiler with the error attributed to the wrong module, and two
+  modules each defining `actor Worker` compiled — the loser's
+  `spawn(Worker())` built the winner and its messages had no handler.
+  Both are reported at the second definition, naming both files (and,
+  for a message, both field lists); the same definition reached twice
+  through two import edges is still one definition.
+  `tests/integration/struct_clash_across_modules`.
+
+
 ## [0.701.0]
 
 ### Fixed

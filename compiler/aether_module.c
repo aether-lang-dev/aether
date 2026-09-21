@@ -2036,13 +2036,13 @@ static int program_has_fault_member(ASTNode* program, const char* prefixed_name)
 // consumer imports a module that exposes one. Imported structs share the
 // consumer's struct namespace (no `<ns>_` prefix) — see the design rationale
 // at the merge site.
-static ASTNode* program_find_struct(ASTNode* program, const char* name) {
+static ASTNode* program_find_def(ASTNode* program, ASTNodeType node_type, const char* name) {
     if (!program || !name) return NULL;
     for (int m = 0; m < program->child_count; m++) {
         ASTNode* existing = program->children[m];
         if (!existing) continue;
         ASTNode* unwrapped = unwrap_export(existing);
-        if (unwrapped && unwrapped->type == AST_STRUCT_DEFINITION &&
+        if (unwrapped && unwrapped->type == node_type &&
             unwrapped->value && strcmp(unwrapped->value, name) == 0) {
             return unwrapped;
         }
@@ -2050,25 +2050,23 @@ static ASTNode* program_find_struct(ASTNode* program, const char* name) {
     return NULL;
 }
 
-/* Two struct definitions are the same type when their fields agree one
- * for one: kind of field node, name, type, bit width and annotation
- * (`using`). Struct-typed fields compare by name, as the language does;
- * a differing nested struct is reported when IT is merged. */
-static int struct_defs_equal(ASTNode* a, ASTNode* b) {
+/* Structural equality of two definitions: node kind, name, annotation,
+ * bit width, type and children, one for one — what the program's text
+ * says, not where it says it. Struct-typed fields compare by name, as
+ * the language does; a differing nested struct is reported when IT is
+ * merged. */
+static int ast_defs_equal(ASTNode* a, ASTNode* b) {
     if (!a || !b) return a == b;
+    if (a->type != b->type) return 0;
+    if ((a->value == NULL) != (b->value == NULL)) return 0;
+    if (a->value && strcmp(a->value, b->value) != 0) return 0;
+    if ((a->annotation == NULL) != (b->annotation == NULL)) return 0;
+    if (a->annotation && strcmp(a->annotation, b->annotation) != 0) return 0;
+    if (a->bit_width != b->bit_width) return 0;
+    if (!types_equal(a->node_type, b->node_type)) return 0;
     if (a->child_count != b->child_count) return 0;
     for (int i = 0; i < a->child_count; i++) {
-        ASTNode* fa = a->children[i];
-        ASTNode* fb = b->children[i];
-        if (!fa || !fb) return fa == fb;
-        if (fa->type != fb->type) return 0;
-        if ((fa->value == NULL) != (fb->value == NULL)) return 0;
-        if (fa->value && strcmp(fa->value, fb->value) != 0) return 0;
-        if ((fa->annotation == NULL) != (fb->annotation == NULL)) return 0;
-        if (fa->annotation && strcmp(fa->annotation, fb->annotation) != 0) return 0;
-        if (fa->bit_width != fb->bit_width) return 0;
-        if (!types_equal(fa->node_type, fb->node_type)) return 0;
-        if (!struct_defs_equal(fa, fb)) return 0;   /* nested / union fields */
+        if (!ast_defs_equal(a->children[i], b->children[i])) return 0;
     }
     return 1;
 }
@@ -2089,44 +2087,47 @@ static void struct_fields_summary(ASTNode* def, char* out, size_t size) {
     else { out[size - 4] = '.'; out[size - 3] = '.'; out[size - 2] = '}'; out[size - 1] = 0; }
 }
 
-/* #2129: struct names are one namespace across modules, and the merge
- * keeps the first definition it saw. Two modules defining one name the
- * same way share the type; two DIFFERENT definitions used to merge
- * silently, and the loser's own code then failed in the typechecker
- * ("Struct 'Quat' has no field 's'") or the C compiler — the first the
- * author heard of it. Returns 1 when `decl` is a clash (reported) or a
- * duplicate to skip; 0 when the struct is new to the program. */
-static int struct_already_merged(ASTNode* program, ASTNode* decl) {
-    ASTNode* existing = program_find_struct(program, decl->value);
+/* #2129: struct, message and actor names are one namespace across
+ * modules, and the merge keeps the first definition it saw. Two modules
+ * defining one name the same way share the definition; two DIFFERENT
+ * definitions used to merge silently — the loser's own code then failed
+ * in the typechecker ("Struct 'Quat' has no field 's'") or the C
+ * compiler, or, for an actor, the loser's `spawn` quietly built the
+ * winner and its messages went unanswered. The same definition reached
+ * twice (a module imported directly and transitively) is the same file
+ * and line and is skipped as before. Returns 1 when `decl` is a clash
+ * (reported) or a duplicate to skip; 0 when the name is new. */
+static int definition_already_merged(ASTNode* program, ASTNode* decl, const char* what) {
+    ASTNode* existing = program_find_def(program, decl->type, decl->value);
     if (!existing) return 0;
-    if (struct_defs_equal(existing, decl)) return 1;
-    char have[256], want[256], msg[900];
-    struct_fields_summary(existing, have, sizeof(have));
-    struct_fields_summary(decl, want, sizeof(want));
-    snprintf(msg, sizeof(msg),
-             "struct '%s' is defined differently in two modules: %s in %s and %s in %s. "
-             "Struct names are one namespace across modules, so both would share "
-             "one layout; rename one of them (or make the definitions identical)",
-             decl->value, want, decl->source_file ? decl->source_file : "<module>",
-             have, existing->source_file ? existing->source_file : "<program>");
+    if (existing->source_file && decl->source_file &&
+        strcmp(existing->source_file, decl->source_file) == 0 &&
+        existing->line == decl->line) return 1;
+    if (ast_defs_equal(existing, decl)) return 1;
+    char msg[900];
+    const char* here = decl->source_file ? decl->source_file : "<module>";
+    const char* there = existing->source_file ? existing->source_file : "<program>";
+    if (decl->type == AST_ACTOR_DEFINITION) {
+        snprintf(msg, sizeof(msg),
+                 "%s '%s' is defined in two modules: %s and %s. Actor names are one "
+                 "namespace across modules, so `spawn(%s())` in either would build the "
+                 "same actor; rename one of them",
+                 what, decl->value, here, there, decl->value);
+    } else {
+        char have[256], want[256];
+        struct_fields_summary(existing, have, sizeof(have));
+        struct_fields_summary(decl, want, sizeof(want));
+        snprintf(msg, sizeof(msg),
+                 "%s '%s' is defined differently in two modules: %s in %s and %s in %s. "
+                 "%s names are one namespace across modules, so both would share "
+                 "one layout; rename one of them (or make the definitions identical)",
+                 what, decl->value, want, here, have, there,
+                 decl->type == AST_MESSAGE_DEFINITION ? "Message" : "Struct");
+    }
     AetherError e = { decl->source_file, NULL, decl->line, decl->column, msg, NULL, NULL,
                       AETHER_ERR_TYPE_MISMATCH };
     aether_error_report(&e);
     return 1;
-}
-
-static int program_has_struct(ASTNode* program, const char* name) {
-    if (!program || !name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (!existing) continue;
-        ASTNode* unwrapped = unwrap_export(existing);
-        if (unwrapped && unwrapped->type == AST_STRUCT_DEFINITION &&
-            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
 }
 
 /* #908: a `type X = distinct Base` def already present in the program (the
@@ -2186,38 +2187,6 @@ static int program_has_sum(ASTNode* program, const char* name) {
         if (!existing) continue;
         ASTNode* unwrapped = unwrap_export(existing);
         if (unwrapped && unwrapped->type == AST_SUM_TYPE_DEF &&
-            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* #1006: an `actor X { ... }` already present in the program (the consumer's
- * own, or an earlier merge). Used to dedup cross-module actor merges. */
-static int program_has_actor(ASTNode* program, const char* name) {
-    if (!program || !name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (!existing) continue;
-        ASTNode* unwrapped = unwrap_export(existing);
-        if (unwrapped && unwrapped->type == AST_ACTOR_DEFINITION &&
-            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* #1006: a `message X { ... }` already present in the program. Used to dedup
- * cross-module message merges. */
-static int program_has_message(ASTNode* program, const char* name) {
-    if (!program || !name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (!existing) continue;
-        ASTNode* unwrapped = unwrap_export(existing);
-        if (unwrapped && unwrapped->type == AST_MESSAGE_DEFINITION &&
             unwrapped->value && strcmp(unwrapped->value, name) == 0) {
             return 1;
         }
@@ -2789,7 +2758,7 @@ void module_merge_into_program(ASTNode* program) {
                 // with the same name (its own, or an earlier merge) and
                 // the same fields, it is one type and we skip; a
                 // different definition is a clash, reported (#2129).
-                if (struct_already_merged(program, decl)) continue;
+                if (definition_already_merged(program, decl, "struct")) continue;
 
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
@@ -2856,8 +2825,10 @@ void module_merge_into_program(ASTNode* program) {
                 // resolve, and codegen assigns X a runtime message-type id from
                 // the (per-program) message registry. Bypasses the selective-
                 // import filter on purpose: an imported actor's handlers cannot
-                // type-check without their message types in scope. Dedup by name.
-                if (program_has_message(program, decl->value)) continue;
+                // type-check without their message types in scope. Dedup by
+                // name; a different definition under the same name is a
+                // clash, reported (#2129).
+                if (definition_already_merged(program, decl, "message")) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
                 insert_child_at(program, clone, insert_idx++);
@@ -2868,8 +2839,9 @@ void module_merge_into_program(ASTNode* program) {
                 // message names, so the consumer needs the actor (and its
                 // messages, handled above) in scope by bare name. Bypasses the
                 // selective-import filter (same reasoning as structs/messages).
-                // Dedup by name.
-                if (program_has_actor(program, decl->value)) continue;
+                // Dedup by name; a second actor of the same name from another
+                // module is a clash, reported (#2129).
+                if (definition_already_merged(program, decl, "actor")) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
                 // Unlike structs, an actor has a body: its receive handlers may
@@ -3172,7 +3144,7 @@ void module_merge_into_program(ASTNode* program) {
                     // BFS. A merged function body that casts to `*T` needs
                     // T in scope regardless of which import edge brought
                     // the function in.
-                    if (struct_already_merged(program, decl)) continue;
+                    if (definition_already_merged(program, decl, "struct")) continue;
 
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;

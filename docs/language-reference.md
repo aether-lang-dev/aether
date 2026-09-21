@@ -264,7 +264,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error — *cannot re-bind 'x' as string: it was bound as int by its first assignment* — rather than a C error about `const char*`. Use a new name for the other value. (A name first bound inside one `if` body and again inside a sibling body is two variables, each with its own type, as long as nothing outside the bodies uses it.) The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` — a 64-bit integer, a `uint32`, a float — is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error — *cannot re-bind 'x' as string: it was bound as int by its first assignment* — rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function is the same compile error — *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A name bound in sibling bodies and used only inside them is a separate variable per body. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` — a 64-bit integer, a `uint32`, a float — is the narrowing error described there.
 
 **A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
 
@@ -2168,7 +2168,7 @@ shifted = 1 << 4        // 16
 | Operator | Description | Example |
 |----------|-------------|---------|
 | `=` | Assignment | `x = 5` |
-| `+=` | Add and assign | `x += 5` |
+| `+=` | Add and assign | `x += 5`, `p.n += 5`, `xs[i] += 5` |
 | `-=` | Subtract and assign | `x -= 5` |
 | `*=` | Multiply and assign | `x *= 5` |
 | `/=` | Divide and assign | `x /= 5` |

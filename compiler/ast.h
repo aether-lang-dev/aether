@@ -523,6 +523,12 @@ Type* create_function_type(int param_count, Type** param_types, Type* return_typ
 void free_type(Type* type);
 const char* type_to_string(Type* type);
 int types_equal(Type* a, Type* b);
+/* The wider of two numeric types, as a fresh Type, or NULL when either is
+ * not numeric: float kinds over integers, 64-bit over 32-bit, uint32 over
+ * int (C's usual arithmetic conversions). Equal rank keeps `a`. The one
+ * join rule for an array literal's elements, a local bound in several
+ * branches, and the early inference pass's view of such a local. */
+Type* numeric_join_type(Type* a, Type* b);
 Type* clone_type(Type* type);
 
 /* True when `t` is a typed pointer to the cons-cell `StringSeq`

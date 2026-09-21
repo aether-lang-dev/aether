@@ -2087,9 +2087,16 @@ void emit_closure_definitions(CodeGenerator* gen) {
             // We then register the promoted captures (they're "declared" via
             // the prologue alias) plus any closure params.
             char** prev_declared = gen->declared_vars;
+            Type** prev_declared_types = gen->declared_var_types;
             int prev_declared_count = gen->declared_var_count;
             gen->declared_vars = NULL;
+            gen->declared_var_types = NULL;
             gen->declared_var_count = 0;
+            /* #2124: the closure body is a C function of its own; its
+             * hoisted locals join over ITS bindings, not the enclosing
+             * function's. */
+            ASTNode* prev_hoist_scope = gen->hoist_scope_body;
+            gen->hoist_scope_body = body;
             // Same reset for the heap-string-tracker set. Each closure
             // body is its own C function, so its `int _heap_<name>`
             // tracker declarations must be emitted afresh. Without
@@ -2217,12 +2224,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
             gen->current_promoted_capture_count = prev_promoted_count;
             free(body_promoted);
             // Free the body's declared_vars and restore the outer scope's set.
-            if (gen->declared_vars) {
-                for (int i = 0; i < gen->declared_var_count; i++) free(gen->declared_vars[i]);
-                free(gen->declared_vars);
-            }
+            clear_declared_vars(gen);
             gen->declared_vars = prev_declared;
+            gen->declared_var_types = prev_declared_types;
             gen->declared_var_count = prev_declared_count;
+            gen->hoist_scope_body = prev_hoist_scope;
             // Free this closure body's heap-string set and restore the
             // enclosing scope's (see the matching reset above).
             clear_heap_string_vars(gen);

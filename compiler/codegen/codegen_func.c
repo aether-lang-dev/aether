@@ -1420,6 +1420,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
         // generated C scopes them too tightly and post-block reads
         // fail to compile. See #278.
         if (body->type == AST_BLOCK) {
+            gen->hoist_scope_body = body;
             hoist_if_branch_vars(gen, body);
             /* Issue #501 follow-up: mark vars modified inside any
              * try body in this function so AST_VARIABLE_DECLARATION

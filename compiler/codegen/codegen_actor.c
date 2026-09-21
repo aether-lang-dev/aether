@@ -326,6 +326,10 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                         // handler is its own C function, so it needs the same
                         // function-scope hoist pass.
                         if (arm_body && arm_body->type == AST_BLOCK) {
+                            /* #2124: the handler is the hoist scope for
+                             * its own branch-local joins, as a function
+                             * body is. */
+                            gen->hoist_scope_body = arm_body;
                             hoist_heap_string_trackers(gen, arm_body);
                         }
 
