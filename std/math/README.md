@@ -34,7 +34,7 @@ the constants `pi`, `tau`, `e`.
 
 Single precision, for `f32` code (#2151): `sqrt_f32`, `abs_f32`, `min_f32`,
 `max_f32`, `clamp_f32`, `sin_f32`, `cos_f32`, `tan_f32`, `atan2_f32`,
-`floor_f32`, `ceil_f32`, `pow_f32`, `exp_f32` — libm's `f` functions, an
+`floor_f32`, `ceil_f32`, `pow_f32`, `exp_f32` — libm's f-suffixed functions (sqrtf, fabsf, ...), an
 `f32` in and an `f32` out, so `math.sqrt_f32(dot(v, v))` in an `f32`
 pipeline is one float `sqrt`. The double functions take an `f32` too, but
 widen it and return `float`.
