@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.705.0]
+
 ### Added
 
 - **`@source("lanes.c")`: a module ships its own C (#2125).** A module could
