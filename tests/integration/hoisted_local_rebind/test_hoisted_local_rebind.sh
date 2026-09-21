@@ -149,6 +149,26 @@ main() { println("${pick(1)} ${pick(2)}") }
 AE
 expect_error "$tmp/localstr.ae" "cannot bind 'v' as int: it is bound as string in another branch" "an int binding beside a string binding of the same branch-local name was not refused"
 
+# A distinct-string value into a string local: the same kind, one C
+# variable, no diagnostic (std.language's README binds `tag = raw as
+# language.Tag`; every string local is hoisted with its heap tracker).
+cat > "$tmp/distinct.ae" <<'AE'
+type Tag = distinct string
+
+main() {
+    raw = "en-US"
+    tag = raw as Tag
+    if 1 > 0 { s = "x" }
+    if 2 > 0 { s = "y" as Tag }
+    println("${tag as string} ${s as string}")
+}
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/distinct.ae" 2>&1 | tail -1)"
+if [ "$got" != "en-US y" ]; then
+    echo "  [FAIL] hoisted_local_rebind: a distinct string into a string local was refused or misprinted (got '$got')"
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
     echo "  [PASS] hoisted_local_rebind: a hoisted local takes the join of its bindings; a binding of another kind is refused"
 fi

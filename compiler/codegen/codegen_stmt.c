@@ -5119,6 +5119,13 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
                         stmt->children[0]) here = stmt->children[0]->node_type;
                     if (stmt->type_inferred && hoisted && here &&
                         hoisted->kind != TYPE_UNKNOWN && here->kind != TYPE_UNKNOWN &&
+                        /* Same kind is the same C variable whatever the
+                         * nominal wrapper (a distinct string into a
+                         * string-hoisted local; the typechecker owns the
+                         * nominal rules). Optionals have their own re-bind
+                         * rules there too. */
+                        here->kind != hoisted->kind &&
+                        here->kind != TYPE_OPTIONAL && hoisted->kind != TYPE_OPTIONAL &&
                         !((here->kind == TYPE_PTR && hoisted->kind == TYPE_STRING) ||
                           (here->kind == TYPE_STRING && hoisted->kind == TYPE_PTR)) &&
                         (!is_type_compatible(here, hoisted) ||

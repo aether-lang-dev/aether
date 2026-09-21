@@ -627,6 +627,12 @@ void free_code_generator(CodeGenerator* gen) {
             }
             free(gen->actor_state_vars);
         }
+        if (gen->declared_var_types) {
+            for (int i = 0; i < gen->declared_var_count; i++) {
+                if (gen->declared_var_types[i]) free_type(gen->declared_var_types[i]);
+            }
+            free(gen->declared_var_types);
+        }
         if (gen->declared_vars) {
             for (int i = 0; i < gen->declared_var_count; i++) {
                 free(gen->declared_vars[i]);
