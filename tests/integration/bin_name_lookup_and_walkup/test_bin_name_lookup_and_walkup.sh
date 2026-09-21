@@ -18,10 +18,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] bin_name_lookup_and_walkup on Windows"; exit 0 ;;
-esac
+# Runs on Windows too: the walk-up is the same code (it scans both
+# separators), and the case below with a relative --extra / -o from a
+# subdirectory is exactly the kind of path handling a Windows lane should
+# see. (An earlier skip here gave no reason.)
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -89,6 +89,55 @@ if grep -q "nosuchthing" "$TMPDIR/build4.log" && \
 else
     echo "  [FAIL] unknown positional was rebased in the error message"
     cat "$TMPDIR/build4.log"
+    fail=$((fail + 1))
+fi
+
+# Case 5: a relative --extra and a relative -o typed from a subdirectory
+# mean "relative to where I stand", like `cc -o`. The walk-up re-based only
+# the source: `ae build ex.ae --extra shim.c -o ex1` from `sub/` looked for
+# `<root>/shim.c` ("No such file or directory") and wrote `<root>/ex1`.
+WORK="$TMPDIR/work"
+mkdir -p "$WORK/sub"
+printf '[[bin]]\nname = "unrelated"\npath = "unrelated.ae"\n' > "$WORK/aether.toml"
+printf 'int sub_shim(void) { return 7; }\n' > "$WORK/sub/shim.c"
+printf 'extern sub_shim() -> int\nmain() { println("${sub_shim()}") }\n' > "$WORK/sub/ex.ae"
+cd "$WORK/sub" || exit 1
+if "$AE" build ex.ae --extra shim.c -o ex1 >"$TMPDIR/build5.log" 2>&1 \
+   && { [ -x "$WORK/sub/ex1" ] || [ -x "$WORK/sub/ex1.exe" ]; }; then
+    got="$(cd "$WORK/sub" && ./ex1 2>&1)"
+    if [ "$got" = "7" ]; then
+        echo "  [PASS] a relative --extra and -o from a subdirectory resolve where they were typed"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] subdirectory build printed '$got'"
+        fail=$((fail + 1))
+    fi
+else
+    echo "  [FAIL] ae build ex.ae --extra shim.c -o ex1 from a subdirectory"
+    cat "$TMPDIR/build5.log"
+    ls "$WORK" "$WORK/sub"
+    fail=$((fail + 1))
+fi
+
+# Case 6: the same without a positional (project mode, src/main.ae): the
+# subdirectory is recorded whether or not a file was named.
+mkdir -p "$WORK/src"
+printf 'extern sub_shim() -> int\nmain() { println("${sub_shim()}") }\n' > "$WORK/src/main.ae"
+cp "$WORK/sub/shim.c" "$WORK/src/shim.c"
+cd "$WORK/src" || exit 1
+if "$AE" build -o app --extra shim.c >"$TMPDIR/build6.log" 2>&1 \
+   && { [ -x "$WORK/src/app" ] || [ -x "$WORK/src/app.exe" ]; }; then
+    got="$(cd "$WORK/src" && ./app 2>&1)"
+    if [ "$got" = "7" ]; then
+        echo "  [PASS] project-mode build from src/ re-bases -o and --extra too"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] project-mode subdirectory build printed '$got'"
+        fail=$((fail + 1))
+    fi
+else
+    echo "  [FAIL] ae build -o app --extra shim.c from src/ (project mode)"
+    cat "$TMPDIR/build6.log"
     fail=$((fail + 1))
 fi
 

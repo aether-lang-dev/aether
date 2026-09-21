@@ -398,6 +398,11 @@ extern string_new_with_length(data: string, length: int) -> ptr
 // ---- Go-style wrappers ----
 
 // Open a file. Returns (handle, "") on success, (null, error) on failure.
+// `mode` is fopen's ("r", "w", "a", "r+", ...); the handle carries bytes
+// verbatim on every platform — on Windows it is opened binary whether or
+// not the mode says 'b', like every other std.fs entry point, so a '\n'
+// written through it is one byte on disk and pread/pwrite are byte-exact.
+// A mode with an explicit 't' ("wt") asks for C's text mode and gets it.
 open(path: string, mode: string) -> {
     handle = file_open_raw(path, mode)
     if handle == null {

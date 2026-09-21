@@ -6,14 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-# Skip on Windows/MSYS2 — piped REPL testing is unreliable due to
-# terminal emulation differences in MSYS2/MinGW shells
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        echo "  [SKIP] repl tests (Windows — piped stdin unreliable in MSYS2)"
-        exit 0
-        ;;
-esac
+# Runs on Windows/MSYS2 too. An earlier skip called piped REPL input
+# "unreliable" there; the 40 cases pass three runs out of three under
+# MSYS2 (2026-09, #2145 follow-up), and a REPL that reads a pipe is what
+# an editor integration on Windows drives.
 
 pass=0
 fail=0

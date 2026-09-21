@@ -2428,7 +2428,35 @@ const char* get_cflags(void) {
 // see no behaviour change.
 static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_size);
 
+/* The subdirectory the last walk-up left, relative to the project root
+ * ("" when it did not chdir). A relative path the user typed — the source,
+ * an --extra file, the -o output — meant "relative to where I am", so each
+ * one is re-based through walkup_rebase() after the chdir. Only the source
+ * used to be: `ae build ex.ae --extra shim.c -o ex1` from `src/` looked for
+ * `<root>/shim.c` ("No such file") and wrote `<root>/ex1`. */
+static char g_walkup_sub[1024] = "";
+
+static int path_is_absolute_any(const char* p) {
+    return p && (p[0] == '/' || p[0] == '\\' ||
+                 (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':'));
+}
+
+/* `path` as typed before the walk-up, re-based onto the project root.
+ * Returns `path` itself when no walk-up happened or the path is absolute;
+ * otherwise a copy from a small ring of buffers (four live values at a
+ * time, enough for one command's arguments). */
+static const char* walkup_rebase(const char* path) {
+    if (!path || !g_walkup_sub[0] || path_is_absolute_any(path)) return path;
+    static char ring[4][2048];
+    static int slot = 0;
+    char* out = ring[slot];
+    slot = (slot + 1) % 4;
+    snprintf(out, sizeof(ring[0]), "%s/%s", g_walkup_sub, path);
+    return out;
+}
+
 static int find_and_chdir_to_aether_toml(const char** file_inout) {
+    g_walkup_sub[0] = '\0';
     if (path_exists("aether.toml")) return 0;  /* already present */
 
     char start_cwd[1024];
@@ -2457,6 +2485,18 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
              * to the new cwd. e.g. starting at /home/p/proj/ae, after
              * chdir to /home/p/proj, a positional `myprobe.ae`
              * becomes `ae/myprobe.ae`. */
+            /* The subdirectory walked out of, positional or not: `ae build
+             * -o app --extra shim.c` in project mode has paths to re-base
+             * too. */
+            {
+                size_t walk_len = strlen(walk);
+                if (strncmp(start_cwd, walk, walk_len) == 0 &&
+                    (start_cwd[walk_len] == '/' ||
+                     start_cwd[walk_len] == '\\')) {
+                    snprintf(g_walkup_sub, sizeof(g_walkup_sub), "%s",
+                             start_cwd + walk_len + 1);
+                }
+            }
             if (file_inout && *file_inout) {
                 const char* f = *file_inout;
                 /* #1905: the positional may be a [[bin]] NAME rather than a
@@ -2469,21 +2509,15 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
                 char bin_probe[1024];
                 int names_a_bin =
                     find_bin_path_by_name(f, bin_probe, sizeof(bin_probe));
-                if (!names_a_bin && f[0] != '/' && f[0] != '\\') {
+                if (!names_a_bin && f[0] != '/' && f[0] != '\\' && g_walkup_sub[0]) {
                     /* relative — splice the subdir we walked out of */
-                    size_t walk_len = strlen(walk);
-                    if (strncmp(start_cwd, walk, walk_len) == 0 &&
-                        (start_cwd[walk_len] == '/' ||
-                         start_cwd[walk_len] == '\\')) {
-                        const char* sub = start_cwd + walk_len + 1;
-                        static char rebased[1024];
-                        snprintf(rebased, sizeof(rebased), "%s/%s", sub, f);
-                        /* Only when it lands on something. Otherwise keep what
-                         * the user typed, so a typo is reported as the word
-                         * they wrote rather than as a path they never
-                         * mentioned. */
-                        if (path_exists(rebased)) *file_inout = rebased;
-                    }
+                    static char rebased[1024];
+                    snprintf(rebased, sizeof(rebased), "%s/%s", g_walkup_sub, f);
+                    /* Only when it lands on something. Otherwise keep what
+                     * the user typed, so a typo is reported as the word
+                     * they wrote rather than as a path they never
+                     * mentioned. */
+                    if (path_exists(rebased)) *file_inout = rebased;
                 }
             }
             return 1;
@@ -3024,11 +3058,21 @@ void build_gcc_cmd(char* cmd, size_t size,
 #endif
     char opt[768];
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
+    /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
+     * GCC's auto-export switches off the moment any symbol carries an
+     * explicit __declspec(dllexport) (an --extra shim, say), and the
+     * `aether_<name>` catalog exports then vanish from the DLL. This lived
+     * only in the POSIX branch below, under an #ifdef _WIN32 that can never
+     * be true there, so a native `ae build --emit=lib` linked an executable
+     * and failed with "undefined reference to WinMain". -static stays: the
+     * DLL carries its own libgcc/libwinpthread, like the executables. */
+    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe)
+        ? "-shared -Wl,--export-all-symbols " : "";
     if (user_cflags[0])
-        snprintf(opt, sizeof(opt), "-static %s%s%s %s%s", opt_flags(optimize),
+        snprintf(opt, sizeof(opt), "-static %s%s%s%s %s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), user_cflags, trace_def);
     else
-        snprintf(opt, sizeof(opt), "-static %s%s%s%s", opt_flags(optimize),
+        snprintf(opt, sizeof(opt), "-static %s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
                  harden_cflags(optimize), harden_ldflags(), trace_def);
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
@@ -3149,12 +3193,7 @@ void build_gcc_cmd(char* cmd, size_t size,
     // moment any symbol (e.g. an --extra C shim) carries an explicit
     // __declspec(dllexport). On ELF/Mach-O the catalog symbols are exported by
     // default visibility, so the flag is Windows-only.
-#ifdef _WIN32
-    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe)
-        ? "-fPIC -shared -Wl,--export-all-symbols " : "";
-#else
     const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared " : "";
-#endif
     // Coverage builds skip -pipe — gcov works fine with it, but it
     // adds nothing when -O0 -g is already forced. Keeping the flag
     // string short helps the cmd-buffer size budget.
@@ -4509,21 +4548,42 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
         snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" \"%s\"",
                  tc.compiler, arg1, lib_flags, in_path, arg2_or_null);
     } else {
-        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" /dev/null",
-                 tc.compiler, arg1, lib_flags, in_path);
+        /* The output path aetherc must be given but will not write: the
+         * platform's null device. A literal /dev/null on Windows is a file
+         * aetherc cannot open ("Error opening output file: Invalid
+         * argument"), which is how `ae build --namespace` failed there. */
+#ifdef _WIN32
+        const char* devnull = "NUL";
+#else
+        const char* devnull = "/dev/null";
+#endif
+        snprintf(cmd, sizeof(cmd), "\"%s\" %s%s \"%s\" %s",
+                 tc.compiler, arg1, lib_flags, in_path, devnull);
     }
-    FILE* p = popen(cmd, "r");
-    if (!p) return -1;
-    size_t total = 0;
-    char buf[4096];
-    while (fgets(buf, sizeof(buf), p)) {
-        size_t n = strlen(buf);
-        if (total + n + 1 >= out_size) break;
-        memcpy(out_buf + total, buf, n);
-        total += n;
+    /* Through the same runner every other aetherc invocation uses, with the
+     * output captured to a file. popen() on Windows hands the line to
+     * cmd.exe, whose rule for a command line that starts with a quote strips
+     * the first and last quote of the whole line, so
+     *   "D:\..\aetherc.exe" --emit-namespace-manifest "./manifest.ae" NUL
+     * became `D:\..\aetherc.exe" --emit-namespace-manifest "./manifest.ae`
+     * — "El sistema no puede encontrar la ruta especificada", and every
+     * `ae build --namespace` on Windows fell back to a library named after
+     * the directory. win_run tokenises and spawns directly. */
+    char capture[1024];
+    compile_log_path(capture, sizeof(capture));
+    int rc = run_cmd_capture_stdout(cmd, capture);
+    out_buf[0] = '\0';
+    /* Text mode, as popen("r") was: aetherc's stdout carries "\r\n" on
+     * Windows, and a '\r' left on the last token of a line ("string\r")
+     * fails every type lookup the namespace SDK generators do. */
+    FILE* p = fopen(capture, "r");
+    if (p) {
+        size_t total = fread(out_buf, 1, out_size - 1, p);
+        out_buf[total] = '\0';
+        fclose(p);
     }
-    out_buf[total] = '\0';
-    return pclose(p);
+    remove(capture);
+    return rc;
 }
 
 /* Tiny ad-hoc JSON-ish field extractor. The aetherc JSON format is
@@ -5989,16 +6049,20 @@ int cmd_build_namespace(int argc, char** argv) {
             base_name[sizeof(base_name) - 1] = '\0';
         } else {
             /* Fallback: directory basename. */
+            /* Both separators: _getcwd() on Windows returns backslashes,
+             * and a '/'-only scan took the whole path as the basename
+             * ("./libD:\Git\proj.c" was the output it then tried to open). */
             const char* base = target_dir;
+            static char cwd[1024];
             if (strcmp(target_dir, ".") == 0) {
-                char cwd[1024];
                 if (getcwd(cwd, sizeof(cwd))) {
-                    const char* slash = strrchr(cwd, '/');
-                    base = slash ? slash + 1 : cwd;
+                    base = cwd;
+                    for (const char* q = cwd; *q; q++)
+                        if (*q == '/' || *q == '\\') base = q + 1;
                 }
             } else {
-                const char* slash = strrchr(target_dir, '/');
-                if (slash) base = slash + 1;
+                for (const char* q = target_dir; *q; q++)
+                    if (*q == '/' || *q == '\\') base = q + 1;
             }
             strncpy(base_name, base, sizeof(base_name) - 1);
             base_name[sizeof(base_name) - 1] = '\0';
@@ -6341,6 +6405,21 @@ static int cmd_build(int argc, char** argv) {
     // works the same as if the user had run `ae build` from the
     // project root. Closes #280 (2).
     find_and_chdir_to_aether_toml(&file);
+    if (g_walkup_sub[0]) {
+        /* The other paths the user typed relative to where they stood: the
+         * --extra files (each entry, quoted ones included) and the -o
+         * output. `cc -o` and `go build -o` name a path relative to the
+         * invocation directory, and so does this. */
+        if (extra_files[0]) {
+            char rebased[8192] = "";
+            const char* cursor = extra_files;
+            char tok[2048];
+            while (extras_next(&cursor, tok, sizeof(tok)))
+                extras_append(rebased, sizeof(rebased), walkup_rebase(tok));
+            snprintf(extra_files, sizeof(extra_files), "%s", rebased);
+        }
+        if (output_name) output_name = walkup_rebase(output_name);
+    }
 
     /* #1901: resolve [dependencies] AFTER the walk-up, not with the other
      * flag handling. `ae build sub/thing.ae` from a subdirectory chdirs to
@@ -6492,7 +6571,24 @@ static int cmd_build(int argc, char** argv) {
          * this stays byte-for-byte the old behaviour everywhere else. */
         const size_t ext_len = sizeof(EXE_EXT) - 1;
         const size_t out_len = strlen(output_name);
-        if (ext_len > 0 && out_len >= ext_len &&
+        if (g_emit_lib && !g_emit_exe) {
+            /* A library, an object or emitted C is not an executable: the
+             * name is honoured as written. Appending EXE_EXT here gave a
+             * native Windows `--emit=lib -o libfoo.dll` the name
+             * `libfoo.dll.exe` — a PE DLL nothing will load — the same
+             * mistake the cross path fixed for `--target=*-windows` (#1648).
+             * A shared library named without an extension gets `.dll`, as
+             * the unnamed output does. */
+            snprintf(exe_file, sizeof(exe_file), "%s", output_name);
+#ifdef _WIN32
+            /* Native only: a cross target names its own artifact below
+             * (`.dll` for *-windows, `.wasm` as given for wasm32-*). */
+            if (!is_cross && !g_emit_obj && !g_emit_staticlib && !g_emit_csrc && !is_wasm &&
+                (out_len < 4 || strcasecmp(output_name + out_len - 4, ".dll") != 0)) {
+                strncat(exe_file, ".dll", sizeof(exe_file) - strlen(exe_file) - 1);
+            }
+#endif
+        } else if (ext_len > 0 && out_len >= ext_len &&
             strcasecmp(output_name + out_len - ext_len, EXE_EXT) == 0) {
             snprintf(exe_file, sizeof(exe_file), "%s", output_name);
         } else {
@@ -6920,7 +7016,17 @@ static int cmd_build(int argc, char** argv) {
         const char* objcc = getenv("AE_CC");
         if (!objcc || !*objcc) objcc = getenv("CC");
         if (!objcc || !*objcc) {
+#ifdef _WIN32
+            /* The compiler every other native Windows build uses ($AE_CC /
+             * $CC, then PATH, then the WinLibs download). `command -v` is a
+             * POSIX shell builtin: through cmd.exe it printed "El sistema no
+             * puede encontrar la ruta especificada" and failed, so this
+             * path fell back to a bare `cc` that only an MSYS2 shell has. */
+            if (!ensure_gcc_windows()) return 1;
+            objcc = s_gcc_bin;
+#else
             objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
+#endif
         }
         snprintf(cmd, sizeof(cmd), "\"%s\" -c %s \"%s\" -o \"%s\"",
                  objcc, tc.include_flags ? tc.include_flags : "",
