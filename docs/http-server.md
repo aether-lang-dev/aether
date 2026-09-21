@@ -449,19 +449,21 @@ behaviour to the thread-pool worker path.
 ### Handler → actor from a release (what works today)
 
 Handlers run on an off-scheduler pthread pool (see *Why pthreads, not
-actors?* above). Two consequences follow, both tracked as bugs:
+actors?* above). What that means for talking to actors:
 
-- A fire-and-forget `actors.whereis(name) ! Msg{}` from a handler is
-  **silently dropped** — the send originates on a foreign C thread and
-  is lost before the actor sees it
-  ([#2083](https://github.com/aether-lang-dev/aether/issues/2083)). So
-  the `whereis`-then-send pattern in `std.actors`' own module header
-  does **not** work from an HTTP handler until that lands.
-- A synchronous handler → actor *read* is not expressible at all
+- A fire-and-forget `actors.whereis(name) ! Msg{}` from a handler
+  **arrives**: a send from a thread that is not a scheduler core goes
+  through the target core's shared ingress channel, which serializes its
+  producers (the main thread, pool workers, `std.worker` threads,
+  C-library callback threads). Until 0.701 that channel took one
+  producer at a time and a pool worker's send raced the main thread's,
+  so the message was lost without a diagnostic
+  ([#2083](https://github.com/aether-lang-dev/aether/issues/2083)).
+- A synchronous handler → actor *read* is not expressible
   (there is no ask/reply primitive, and the handler is off-scheduler).
 
-**The released substrate for handler-shared state is to keep the state
-on the pool thread, not in an actor:** a lock-free copy-on-write cell
+**For state a handler must read as well as write, keep it on the pool
+thread rather than in an actor:** a lock-free copy-on-write cell
 (`std.snapshot`, issue #840) read via `snapshot.load` and written via a
 `snapshot.cas` retry loop, with the cell handed to handlers through the
 `ud` slot. This is the same shape the reverse-proxy load balancer uses

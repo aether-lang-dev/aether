@@ -3673,14 +3673,50 @@ static ASTNode* find_branch_decl(ASTNode* body, const char* name) {
  * emits `elem name[N];`. (Hit repeatedly by the Redis port's per-loop
  * scratch buffers; the first-statement-in-block decl path already does
  * this correctly, this fixes the not-first / hoisted path.) */
+/* The zero initializer for a hoisted local. A hoisted variable is
+ * declared at function scope and assigned inside the branch or loop
+ * body that binds it; on a path that skips the body its value is
+ * indeterminate, and reading an indeterminate value is undefined — not
+ * a garbage value, undefined: gcc's interprocedural constant
+ * propagation may treat it as whatever the other call sites pass (a
+ * literal 0), so a parameter that "genuinely varies" arrives as a
+ * constant, with no sanitizer able to say so (#2128 is the shape of that
+ * report). Initialized, the variable is 0/NULL/{0} on such a path and
+ * every read is defined. Spelled per kind rather than as a universal
+ * `{0}`, which clang flags on scalars (-Wbraced-scalar-init). */
+static const char* hoisted_zero_init(Type* t, const char* c_type) {
+    if (t) {
+        switch (t->kind) {
+            case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+            case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE: case TYPE_BOOL:
+            case TYPE_FLOAT: case TYPE_FLOAT32: case TYPE_LONGDOUBLE:
+            case TYPE_DURATION: case TYPE_ENUM:
+            case TYPE_BITSET: case TYPE_BITSTRUCT:   /* backing integers */
+                return " = 0";
+            case TYPE_ISOLATED:
+                return hoisted_zero_init(t->element_type, c_type);
+            case TYPE_PTR: case TYPE_STRING: case TYPE_ACTOR_REF:
+                return " = NULL";
+            case TYPE_FUNCTION:
+                return t->is_fnptr ? " = NULL" : " = {0}";
+            default:
+                break;
+        }
+    }
+    size_t n = c_type ? strlen(c_type) : 0;
+    if (n && c_type[n - 1] == '*') return " = NULL";
+    return " = {0}";
+}
+
 static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
                                      const char* name) {
     if (var_type && var_type->kind == TYPE_ARRAY && var_type->array_size > 0) {
         const char* elem = get_c_type(var_type->element_type);
-        fprintf(gen->output, "%s %s[%d];\n", elem, name, var_type->array_size);
+        fprintf(gen->output, "%s %s[%d] = {0};\n", elem, name, var_type->array_size);
         return;
     }
-    fprintf(gen->output, "%s %s;\n", get_c_type(var_type), name);
+    const char* c_type = get_c_type(var_type);
+    fprintf(gen->output, "%s %s%s;\n", c_type, name, hoisted_zero_init(var_type, c_type));
 }
 
 static void hoist_if_else_common_vars(CodeGenerator* gen,
@@ -4118,7 +4154,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
                                            first_decl->line, first_decl->column);
             continue;
         }
-        fprintf(gen->output, "%s %s;\n", c_type, name);
+        fprintf(gen->output, "%s %s%s;\n", c_type, name, hoisted_zero_init(var_type, c_type));
         mark_var_declared(gen, name);
     }
 }

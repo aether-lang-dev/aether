@@ -11,6 +11,56 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **A `!` send from a thread that is not a scheduler core was silently
+  lost (#2083).** Every non-scheduler producer — the main thread, a
+  `std.http` pool worker, a `std.worker` thread, a C library's callback
+  thread — enqueues into the target core's `from_queues[MAX_CORES]`
+  channel, whose SPSC producer side tolerates one writer; two such
+  threads writing it at once raced on `tail` and the message never
+  reached the receive arm, no error anywhere. The channel now serializes
+  its non-scheduler producers under a lock (scheduler-thread sends are
+  untouched). With a single actor the runtime is in main-thread mode and
+  a foreign thread's send stepped the actor inline while the main
+  thread was stepping it too — heap corruption; a thread that is not main
+  now leaves the mode, as spawning a second actor does, and the inline
+  step holds the actor's `step_lock` so the switch is safe. `std.actors`'
+  and `docs/http-server.md`'s "silently dropped" caveats are rewritten.
+  `tests/integration/foreign_thread_send`.
+
+- **A call to a user function named `spawn_*` was emitted with only its
+  first argument (#2126).** Codegen took any `spawn_` prefix for the
+  generated actor spawner (`spawn_Name(core)`), so `spawn_once(1, 2, p)`
+  became `spawn_once(1)` and the C compiler complained about the arity.
+  Only the generated spawner is treated that way now; a user function or
+  an extern that happens to start with `spawn_` is an ordinary call.
+  `tests/integration/spawn_prefixed_function`.
+
+- **Two modules defining one struct name differently merged silently
+  (#2129).** Struct names are one namespace across modules and the merge
+  kept the first definition it saw, so a program importing both saw the
+  loser's own code fail in the typechecker ("Struct 'Quat' has no field
+  's'", pointing into that module) or in the C compiler. The clash is
+  now reported at the second definition, naming both field lists and
+  both files, and stops the compile (the pruner could otherwise drop the
+  losing side and let the program build); identical definitions still
+  share one type. The two clashes inside the standard library are gone:
+  `std.cryptography.asn1`'s internal `Reader` is `Asn1Reader` and
+  `std.message`'s internal `Parser` is `MessageParser`, so `std.cbor` +
+  `std.cryptography.asn1` and `std.jsonpath` + `std.message` import
+  together. `tests/integration/struct_clash_across_modules`.
+
+- **Hoisted locals are zero-initialized.** A local first bound inside a
+  branch or loop body and used after it is declared at function scope by
+  codegen; on a path that skips the body its value was indeterminate,
+  and reading an indeterminate value is undefined — a C compiler's
+  interprocedural constant propagation may treat it as whatever the other
+  call sites pass, with no sanitizer able to say so (#2128 reports gcc 16
+  `-O2` folding a live parameter to 0). Every hoisted declaration now
+  carries `= 0` / `= NULL` / `= {0}` for its kind, so such a read is a
+  defined zero. `tests/integration/hoisted_local_zero_init`.
+
 ## [0.700.0]
 
 ### Fixed
