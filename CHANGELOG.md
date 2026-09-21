@@ -64,6 +64,18 @@ version number before tagging the release.
   skipped (`N passed, N failed, N skipped, N total`) instead of folding
   them into the pass count.
 
+- **`string.from_double` printed a comma under a comma-decimal locale on
+  the msvcrt (MINGW64) build.** The Windows backend of the locale-pinned
+  conversion asks for a per-thread locale, which msvcrt does not have
+  (`_configthreadlocale` returns -1), and then fell back to the ambient
+  `snprintf`: `0.5` came out as `0,5` into JSON and onto the wire. The
+  locale regression test had been reporting exactly this and exiting 0
+  (the bullet above); the moment it could fail, the MINGW64 lane failed.
+  Without a per-thread locale the text is now formatted with the ambient
+  radix and the radix put back to `.` — exact for `%f`/`%e`/`%g` with no
+  grouping flag, and no locale is touched. The UCRT build was never
+  affected.
+
 - **The pools stress test accepted an allocator returning NULL for
   everything (#2132 §6).** `standard_pools_stress` guarded every use with
   `if (ptrs[i])` and asserted nothing. It now asserts the bounded-pool

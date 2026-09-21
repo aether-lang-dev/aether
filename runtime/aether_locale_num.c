@@ -168,11 +168,42 @@ static int aether_fix_exponent(char* buf, size_t len) {
     return (int)(len - strip);
 }
 
+// Replace the ambient radix in a formatted number with '.', in place. The
+// radix is the only locale-dependent element of a %f/%e/%g conversion (no
+// ' flag is ever passed), and it occurs at most once, so this is exact:
+// the digits, sign, exponent and inf/nan spellings are locale-free. A
+// multi-byte radix (some code pages) shrinks the text; the NUL moves with
+// it. Returns the new length.
+static int aether_replace_radix(char* buf, size_t len, const char* radix) {
+    if (!radix || !radix[0] || (radix[0] == '.' && radix[1] == '\0')) return (int)len;
+    size_t rl = strlen(radix);
+    char* at = strstr(buf, radix);
+    if (!at) return (int)len;
+    at[0] = '.';
+    if (rl > 1) {
+        memmove(at + 1, at + rl, len - (size_t)(at - buf) - rl + 1);
+        len -= rl - 1;
+    }
+    return (int)len;
+}
+
 // Every path must leave the thread's locale as it found it, including the two
 // that decline to switch.
 static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, double value) {
     int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
-    if (prev_mode == -1) return snprintf(buf, n, fmt, value);
+    if (prev_mode == -1) {
+        // No per-thread locale on this CRT (msvcrt, the MINGW64 build):
+        // switching the process-global one is not an option (see the header),
+        // and returning the ambient text is what printed "0,5" for 0.5 under a
+        // comma-decimal locale for as long as the locale regression test was
+        // unable to fail (#2132). Format with the ambient radix and put '.'
+        // back — exact for these conversions, no locale touched.
+        const struct lconv* lc = localeconv();
+        const char* radix = lc ? lc->decimal_point : NULL;
+        int written = snprintf(buf, n, fmt, value);
+        if (written < 0 || (size_t)written >= n) return written;
+        return aether_replace_radix(buf, (size_t)written, radix);
+    }
 
     char inline_name[128];
     char* saved = NULL;
