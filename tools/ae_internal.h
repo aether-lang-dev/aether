@@ -149,6 +149,13 @@ int cmd_repl(void);
 
 /* ae_cache.c — build cache (content-hashed keys, publish, GC, ae cache). */
 int  cache_publish(const char* tmp_path, const char* final_path);
+/* The size cap (AETHER_CACHE_MAX_MB, default 5120, 0 = unlimited) and its
+ * least-recently-used eviction; a hit touches its slot so use, not build
+ * time, orders eviction. */
+unsigned long long cache_max_bytes(void);
+void cache_touch(const char* path);
+int  cache_enforce_limit(const char* keep, int force);
+void cache_usage(unsigned long long* bytes, int* slots);
 void remove_dsym_bundle(const char* exe_path);
 void gc_stale_cache_tmp(const char* dir);
 void init_cache_dir(void);

@@ -30,6 +30,17 @@ version number before tagging the release.
   too. Reference, `docs/build-system.md`, `docs/c-interop.md`,
   `docs/module-system-design.md`. `tests/integration/source_directive`.
 
+- **The build cache is bounded: `AETHER_CACHE_MAX_MB` (default 5120, 0 =
+  unlimited), least-recently-used eviction, `ae cache gc`.** Every cold
+  `ae run` / `ae build` added a static binary and nothing ever left, so a
+  machine running the test sweep reached 26,000 builds and 12.7 GB with
+  `ae cache clear` as the only remedy. A hit touches its slot, so eviction
+  is by use, not build time; a publish that takes the cache over the cap
+  evicts down to 90% of it, at most once per ten minutes per cache
+  directory, and never the build just published. `ae cache` reports the
+  limit; `ae cache gc` enforces it now (12.7 GB → 4.6 GB in 1.4 s).
+  `tests/integration/cache_size_limit`.
+
 ### Changed
 
 - **Four Windows-skipped tests run on Windows.** Running the suite's
@@ -45,6 +56,31 @@ version number before tagging the release.
   POSIX-shaped (`dlfcn.h`, `nc`, `/bin/sh`), each saying which.
 
 ### Fixed
+
+- **`ae run`, `ae check`, `ae test` and `ae inspect` read the project's
+  `aether.toml` from a subdirectory (#2148).** `ae build app.ae` from
+  `src/` found the manifest by walking up and chdir-ing to it; the other
+  commands read `aether.toml` in the current directory only, found none,
+  and compiled with no `[build] defines`, no `[[bin]] extra_sources` and no
+  `[dependencies]` roots — the same file, two programs, no diagnostic. They
+  now locate the manifest the way the walk-up does (one shared walk: a
+  manifest in the cwd wins, the walk stops at `.git`) and read it where it
+  is, without changing directory, because under `ae run` the process cwd
+  is the cwd the program starts in; a path the manifest states relative to
+  itself is resolved from the invocation directory.
+  `tests/integration/manifest_from_subdirectory`.
+
+- **`std.mutation` runs on Windows.** The oracle shelled out through
+  `/bin/sh` (`VAR=... ae check ... 2>&1 | grep -q`, `rm -f`, `test -x`,
+  `exec` under a redirect) and kept its probe binary at `/tmp/...`, so the
+  driver aborted on Windows with "the unmutated test does not compile" —
+  cmd.exe could not run the line. Every sub-process is now launched
+  argv-based through `os.run_full` (both streams captured, the `error[`
+  gate reads them directly), the sub-build's cache and search path travel
+  through the driver's own environment, the probe binary lives under
+  `os.temp_dir()` (with the `.exe` the Windows driver appends), and the
+  per-run cache is removed with `fs.remove_tree`. Both mutation drivers
+  now run on Windows. `docs/mutation-testing.md` no longer says POSIX-only.
 
 - **`ae build` from a subdirectory: a relative `--extra` and `-o` resolve
   where they were typed.** The walk-up to the project's `aether.toml`

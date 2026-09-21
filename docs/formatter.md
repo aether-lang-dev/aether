@@ -26,6 +26,11 @@ ae fmt --check src        # do not write; list files that would change, exit 1 i
 Writes are atomic (a temp file is renamed over the original), so an interrupted
 run never leaves a half-written file.
 
+Line endings are LF in the output: a CRLF file (a Windows checkout with
+`core.autocrlf`) is reported by `--check` and rewritten to LF, which is what
+this repository's `.gitattributes` pins for `*.ae` anyway. The compiler
+accepts either.
+
 ## What it does, and does not, change
 
 The formatter is deliberately conservative: it changes **only whitespace**.

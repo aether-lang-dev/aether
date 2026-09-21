@@ -94,64 +94,116 @@ _ae_bin() -> string {
 // (`rm -rf ~/.aether/cache`), which deleted the caller's build cache and, on a
 // machine compiling anything else at that moment, the output file a linker was
 // part way through writing.
+// The probe binary `ae build -o <bin>` produced: <bin> as named, or
+// <bin>.exe where the driver appends the executable suffix (Windows).
+_probe_binary(bin: string) -> string {
+    if fs.exists(bin) == 1 { return bin }
+    exe = "${bin}.exe"
+    if fs.exists(exe) == 1 { return exe }
+    return ""
+}
+
+_remove_if_present(path: string) {
+    if fs.exists(path) == 1 { _ = fs.delete(path) }
+}
+
+// The variables set for a child are this process's own environment (the
+// children inherit it), so each is put back to what it was — a driver run
+// under `ae test --format=...` keeps its own AE_SPEC_* report, and the
+// caller's AETHER_CACHE_DIR does not end up pointing at a directory this
+// run deletes. `previous` is null when the variable was unset.
+_restore_env(name: string, previous: string) {
+    if previous == null {
+        _ = os.unsetenv(name)
+    } else {
+        _ = os.setenv(name, previous)
+    }
+}
+
 _oracle(test_path: string, incl: string, bin: string) -> int {
     ae = _ae_bin()
     cache = "${bin}.cache"
 
+    // Every sub-process is launched argv-based through std.os — no shell,
+    // so the same driver runs where there is no /bin/sh (Windows). The
+    // sub-build's cache and module search path are passed through this
+    // process's own environment, which the children inherit (an env list
+    // would REPLACE the environment and lose PATH, where the C compiler
+    // is found).
+    saved_cache = os.getenv("AETHER_CACHE_DIR")
+    saved_lib = os.getenv("AETHER_LIB_DIR")
+    _ = os.setenv("AETHER_CACHE_DIR", cache)
+    _ = os.setenv("AETHER_LIB_DIR", incl)
+
     // (1) no-compile gate. We gate on the PRESENCE OF `error[` IN OUTPUT,
     // not the exit code: on this compiler both `ae check` and `ae build`
     // return exit 0 even when an imported module fails to compile — they
-    // print the diagnostic to stderr but don't fail (#953). So we grep
-    // stderr for an `error[` diagnostic; grep -q exits 0 when it finds
-    // one, which means the mutant does NOT compile.
-    chk = "AETHER_CACHE_DIR='${cache}' AETHER_LIB_DIR='${incl}' '${ae}' check '${test_path}' 2>&1 | grep -q 'error\\['"
-    if os.system(chk) == 0 {
+    // print the diagnostic to stderr but don't fail (#953). So we look for
+    // an `error[` diagnostic in either stream, which means the mutant does
+    // NOT compile.
+    chk_argv = list.new()
+    list.add(chk_argv, "check")
+    list.add(chk_argv, test_path)
+    chk_out, chk_err, _chk_rc, _chk_e = os.run_full(ae, chk_argv, null, "")
+    if string.contains(chk_out, "error[") == 1 || string.contains(chk_err, "error[") == 1 {
+        _restore_env("AETHER_CACHE_DIR", saved_cache)
+        _restore_env("AETHER_LIB_DIR", saved_lib)
         return NOCOMPILE
     }
 
     // (2) build to a fresh binary (exit code is unreliable too; we rely
     // on the check gate above and on whether a runnable binary appears).
-    os.system("rm -f '${bin}'")
-    bld = "AETHER_CACHE_DIR='${cache}' AETHER_LIB_DIR='${incl}' '${ae}' build '${test_path}' -o '${bin}' >/dev/null 2>&1"
-    os.system(bld)
-    if os.system("test -x '${bin}'") != 0 {
+    _remove_if_present(bin)
+    _remove_if_present("${bin}.exe")
+    bld_argv = list.new()
+    list.add(bld_argv, "build")
+    list.add(bld_argv, test_path)
+    list.add(bld_argv, "-o")
+    list.add(bld_argv, bin)
+    _bo, _be, _brc, _bee = os.run_full(ae, bld_argv, null, "")
+    _restore_env("AETHER_CACHE_DIR", saved_cache)
+    _restore_env("AETHER_LIB_DIR", saved_lib)
+    probe = _probe_binary(bin)
+    if string.equals(probe, "") == 1 {
         return NOCOMPILE
     }
 
-    // (3) run + read the structured report. We spawn the binary
-    // through `/bin/sh -c "... exec <bin> >/dev/null 2>&1"` so the
-    // child's own ✓/✗ test output is silenced; the AE_SPEC_* env pair
-    // (assignments before `exec` apply to the exec'd program) makes
-    // run_summary write the report to a sibling file the redirect
-    // can't touch. A mutant that crashes before run_summary leaves no
-    // file — fs.read yields "" and _report_failed returns -1, which
-    // classifies as SURVIVED, exactly as an empty report would.
+    // (3) run + read the structured report. The child's own ✓/✗ output is
+    // captured and dropped; the AE_SPEC_* env pair makes std.spec's
+    // run_summary write the `version=1` report to a sibling file. A mutant
+    // that crashes before run_summary leaves no file — fs.read yields ""
+    // and _report_failed returns -1, which classifies as SURVIVED, exactly
+    // as an empty report would.
     rpt = "${bin}.report"
-    os.system("rm -f '${rpt}'")
-    argv = list.new()
-    list.add(argv, "-c")
-    list.add(argv, "AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT='${rpt}' exec '${bin}' >/dev/null 2>&1")
-    _pipe, _rc, drain_err = os.run_pipe_drain_and_wait("/bin/sh", argv, null)
-    if string.equals(drain_err, "") == 0 {
+    _remove_if_present(rpt)
+    saved_fmt = os.getenv("AE_SPEC_FORMAT")
+    saved_rpt = os.getenv("AE_SPEC_REPORT")
+    _ = os.setenv("AE_SPEC_FORMAT", "aeocha")
+    _ = os.setenv("AE_SPEC_REPORT", rpt)
+    run_argv = list.new()
+    _ro, _re, _rrc, run_err = os.run_full(probe, run_argv, null, "")
+    _restore_env("AE_SPEC_FORMAT", saved_fmt)
+    _restore_env("AE_SPEC_REPORT", saved_rpt)
+    if string.equals(run_err, "") == 0 {
         // The harness could not run the test at all -- a failed spawn, a
-        // failed waitpid. That is not a compile failure: both gates above
+        // failed wait. That is not a compile failure: both gates above
         // passed, and the mutant is exactly as compiled as every other one.
         // Calling it NOCOMPILE dropped it from the denominator and quietly
         // deflated the score (#2008). It is an inconclusive run, and this
         // module's rule for an inconclusive run is already written in the
         // step above: lean SURVIVED, so it stays in the count, appears in the
         // survivors list, and is looked at. Said out loud rather than
-        // silently, because a harness that cannot spawn /bin/sh has a
-        // problem the score should not paper over.
+        // silently, because a harness that cannot spawn the test binary has
+        // a problem the score should not paper over.
         //
-        // A test binary that dies of a signal does NOT come through here any
-        // more: the os layer now reports that as 128+signo with no error, so
-        // the report file decides, as it should.
-        println("  (could not run the test: ${drain_err})")
+        // A test binary that dies of a signal does NOT come through here:
+        // the os layer reports that as 128+signo with no error, so the
+        // report file decides, as it should.
+        println("  (could not run the test: ${run_err})")
         return SURVIVED
     }
     report, _rerr = fs.read(rpt)
-    os.system("rm -f '${rpt}'")
+    _remove_if_present(rpt)
     failed = _report_failed(report)
     if failed > 0 { return KILLED }
     return SURVIVED
@@ -519,8 +571,9 @@ run(sut_path: string, test_path: string, lib_dir: string) -> int {
     }
 
     // A temp binary path for the per-mutant build+drain oracle,
-    // pid-suffixed so concurrent runs can't clobber each other.
-    bin = "/tmp/ae_mutate_probe_${os.getpid()}"
+    // pid-suffixed so concurrent runs can't clobber each other, under the
+    // platform's temp dir (a hardcoded /tmp does not exist on Windows).
+    bin = "${os.temp_dir()}/ae_mutate_probe_${os.getpid()}"
 
     println("Aether mutation testing (std.mutation)")
     println("  SUT:  ${sut_path}")
@@ -576,8 +629,10 @@ run(sut_path: string, test_path: string, lib_dir: string) -> int {
     // Always restore the original — even though we wrote `original`
     // after the last mutant via the loop, make it explicit.
     fs.write(sut_path, original)
-    os.system("rm -f '${bin}'")
-    os.system("rm -rf '${bin}.cache'")
+    _remove_if_present(bin)
+    _remove_if_present("${bin}.exe")
+    _remove_if_present("${bin}.report")
+    _ = fs.remove_tree("${bin}.cache")
 
     k = ref_get(killed)
     s = ref_get(survived)
