@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.701.0]
+
 ### Fixed
 
 - **A `!` send from a thread that is not a scheduler core was silently
