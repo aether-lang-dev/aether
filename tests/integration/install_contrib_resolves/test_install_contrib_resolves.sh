@@ -31,7 +31,9 @@ cd "$ROOT"
 
 # Run install.sh against the temp prefix. Quiet — we only care about
 # the resulting layout.
-if ! ./install.sh "$TMPDIR" < /dev/null > "$TMPDIR/install.log" 2>&1; then
+# The sweep has built the tree; install its binaries without rebuilding
+# them (three drivers relinking build/ae in parallel collided, #2142).
+if ! AETHER_INSTALL_NO_BUILD=1 ./install.sh "$TMPDIR" < /dev/null > "$TMPDIR/install.log" 2>&1; then
     echo "  [FAIL] install.sh exited non-zero"
     tail -20 "$TMPDIR/install.log"
     exit 1

@@ -86,9 +86,35 @@ library was not found, so `std.http` still links on a box without libnghttp2
 and the h2 surface falls back to its "unavailable" stub. A module's `@link` is
 for dependencies the toolchain does not probe for.
 
+### C sources a module ships (`@source`)
+
+The same reasoning applies to a C file a *module* owns — a SIMD kernel, an
+FFI shim written against the module's own externs. It is declared beside
+`@link`, at the top of the module's `module.ae`, relative to that directory:
+
+```aether,fragment
+@source("lanes.c")
+@link("-lm")
+```
+
+The compiler resolves the path against the module's directory, checks the
+file exists (a missing one is reported at the directive, not as the C
+compiler's "No such file"), and lists it on `// aether-source:` lines after
+the link header; `ae run` and `ae build` compile every listed file into the
+program, after `--extra` and `extra_sources`, with the build's cflags. It is
+transitive and `-D`-sensitive exactly like `@link`: a module three imports
+deep contributes its kernel, and an `import` in a losing `when defined(...)`
+region contributes nothing. The file is a dependency of the build, so a
+cached `ae run` rebuilds when it changes (#2125).
+
+Before this, every program importing such a module had to name the file
+itself, once per `[[bin]]` — twenty tests and benches, twenty entries — and
+the file was compiled whether or not the import survived.
+
 ### `extra_sources` vs `--extra`
 
-Both add C files to the build, they are additive when both are present.
+Both add C files to the build, they are additive when both are present. A
+path may contain spaces (`--extra "my dir/shim.c"`).
 
 | | `extra_sources` in `aether.toml` | `--extra file.c` CLI flag |
 |---|---|---|

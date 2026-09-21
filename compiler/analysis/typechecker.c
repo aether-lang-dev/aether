@@ -2931,8 +2931,6 @@ AeTokenType get_token_type_from_string(const char* str) {
 
 // --- Unused variable analysis ---
 
-#define MAX_TRACKED_VARS 256
-
 typedef struct {
     const char* name;
     const char* file;   /* the declaring node's own file, not the entry file */
@@ -3015,10 +3013,13 @@ static int is_module_global_name(const char** global_names, int global_count,
     return 0;
 }
 
-// Collect variable declarations from a block (non-recursive into nested functions)
+// Collect variable declarations from a block (non-recursive into nested
+// functions). `vars` NULL counts without recording, so the caller can size
+// the array to the function: a fixed cap silently stopped tracking at the
+// 257th declaration (#2144).
 static int collect_declarations(ASTNode* node, TrackedVar* vars, int var_count,
                                 const char** global_names, int global_count) {
-    if (!node || var_count >= MAX_TRACKED_VARS) return var_count;
+    if (!node) return var_count;
 
     if (node->type == AST_VARIABLE_DECLARATION && node->value) {
         // Skip _ prefixed names (intentional discard) and writes to a
@@ -3026,6 +3027,7 @@ static int collect_declarations(ASTNode* node, TrackedVar* vars, int var_count,
         // not a local declaration).
         if (node->value[0] != '_' &&
             !is_module_global_name(global_names, global_count, node->value)) {
+            if (!vars) { var_count++; goto children; }
             vars[var_count].name = node->value;
             /* #1946: an imported module's AST is merged into the importing
              * program before this pass runs, so the diagnostic must carry the
@@ -3040,6 +3042,7 @@ static int collect_declarations(ASTNode* node, TrackedVar* vars, int var_count,
         }
     }
 
+children:
     // Don't recurse into nested function definitions or actor definitions
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION || node->type == AST_ACTOR_DEFINITION) {
         return var_count;
@@ -3056,16 +3059,20 @@ static void check_unused_variables(ASTNode* body, const char** global_names,
                                    int global_count) {
     if (!body) return;
 
-    TrackedVar vars[MAX_TRACKED_VARS];
+    // Size to the function, then collect
     int var_count = 0;
-
-    // Collect declarations
+    for (int i = 0; i < body->child_count; i++) {
+        var_count = collect_declarations(body->children[i], NULL, var_count,
+                                         global_names, global_count);
+    }
+    if (var_count == 0) return;
+    TrackedVar* vars = (TrackedVar*)calloc((size_t)var_count, sizeof(TrackedVar));
+    if (!vars) return;
+    var_count = 0;
     for (int i = 0; i < body->child_count; i++) {
         var_count = collect_declarations(body->children[i], vars, var_count,
                                          global_names, global_count);
     }
-
-    if (var_count == 0) return;
 
     // Collect references
     for (int i = 0; i < body->child_count; i++) {
@@ -3091,6 +3098,40 @@ static void check_unused_variables(ASTNode* body, const char** global_names,
             warning_count++;
         }
     }
+    free(vars);
+}
+
+/* The names of every module-level `var` global in the merged program (#701),
+ * an imported module's under its prefixed name. Sized to the program: the
+ * set was capped at 256 and a program importing enough modules (ae3d's
+ * editor with ui + ae3d + aephysics) went past it, so a setter of any global
+ * beyond the cap was reported as an unused local, and a `__pure(fn)` query
+ * over a writer of one answered true (#2144). Returns malloc'd memory;
+ * caller frees the array (the names are the AST's). */
+static ASTNode* global_var_decl(ASTNode* child) {
+    if (child && child->type == AST_EXPORT_STATEMENT && child->child_count > 0) {
+        child = child->children[0];  // unwrap `export var ...`
+    }
+    if (child && child->type == AST_CONST_DECLARATION && child->value &&
+        child->annotation && strcmp(child->annotation, "global_var") == 0) {
+        return child;
+    }
+    return NULL;
+}
+
+static const char** collect_global_var_names(ASTNode* program, int* count) {
+    int n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        if (global_var_decl(program->children[i])) n++;
+    }
+    const char** names = (const char**)malloc(sizeof(char*) * (size_t)(n > 0 ? n : 1));
+    if (!names) { *count = 0; return NULL; }
+    *count = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* decl = global_var_decl(program->children[i]);
+        if (decl) names[(*count)++] = decl->value;
+    }
+    return names;
 }
 
 // --- Unreachable code analysis ---
@@ -3482,16 +3523,10 @@ int typecheck_program(ASTNode* program) {
     // is type-checked. Needs the merged call graph (all function defs), which
     // is present in `program` by now; module globals make a write impure.
     {
-        const char* pg[MAX_TRACKED_VARS];
         int npg = 0;
-        for (int i = 0; i < program->child_count; i++) {
-            ASTNode* c = program->children[i];
-            if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-            if (c && c->type == AST_CONST_DECLARATION && c->value && c->annotation &&
-                strcmp(c->annotation, "global_var") == 0 && npg < MAX_TRACKED_VARS)
-                pg[npg++] = c->value;
-        }
+        const char** pg = collect_global_var_names(program, &npg);
         resolve_purity_queries(program, program, pg, npg);
+        free(pg);
     }
 
     SymbolTable* global_table = create_symbol_table(NULL);
@@ -4239,19 +4274,8 @@ int typecheck_program(ASTNode* program) {
     // `name = expr` inside a function whose `name` is one of these is a
     // write to the file-scope static, not a local declaration — the
     // unused-variable pass must not flag write-only setters for them.
-    const char* global_var_names[MAX_TRACKED_VARS];
     int global_var_count = 0;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if (child && child->type == AST_EXPORT_STATEMENT && child->child_count > 0) {
-            child = child->children[0];  // unwrap `export var ...`
-        }
-        if (child && child->type == AST_CONST_DECLARATION && child->value &&
-            child->annotation && strcmp(child->annotation, "global_var") == 0 &&
-            global_var_count < MAX_TRACKED_VARS) {
-            global_var_names[global_var_count++] = child->value;
-        }
-    }
+    const char** global_var_names = collect_global_var_names(program, &global_var_count);
 
     // Third pass: unused variable + unreachable code analysis
     for (int i = 0; i < program->child_count; i++) {
@@ -4271,6 +4295,8 @@ int typecheck_program(ASTNode* program) {
             iso_check_function(child, main_body);  // #479 Isolated[T] move check
         }
     }
+
+    free(global_var_names);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
@@ -4852,6 +4878,29 @@ static ASTNode* effect_find_func(ASTNode* program, const char* name) {
     return NULL;
 }
 
+/* The definition a call names, or NULL when the walk cannot see one (a
+ * runtime builtin, an extern). A qualified call `ns.fn` into an imported
+ * Aether module reaches the merged program as `ns_fn` (module_get_namespace
+ * + the merger's prefix), so it is looked up under that spelling; the
+ * effect and purity walks used to stop at every dotted call that was not a
+ * capability namespace, so a module function that wrote a module global or
+ * read a file was invisible to `__pure` and to `@no_fs` (#2144). */
+static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
+    if (!name) return NULL;
+    const char* dot = strchr(name, '.');
+    if (!dot) return effect_find_func(program, name);
+    char merged[256];
+    size_t n = strlen(name);
+    if (n >= sizeof(merged)) return NULL;
+    for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
+    merged[n] = '\0';
+    /* Only a merged module function: `value.method()` (UFCS on a local) is
+     * also spelled `a.b` here, and must not be read as the program's own
+     * `a_b` if one happens to exist. */
+    ASTNode* def = effect_find_func(program, merged);
+    return (def && def->is_imported) ? def : NULL;
+}
+
 /* Walk `node`; return the first forbidden capability reached (recursing into
  * user-function callees), writing the offending `ns.fn` spelling to `outcall`.
  * `forbid` is the comma list of forbidden caps; `visited` guards recursion. */
@@ -4873,12 +4922,13 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
                     return cap;
                 }
             }
-        } else {
+        }
+        {
             int seen = 0;
             for (int i = 0; i < *nvisited; i++)
                 if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
             if (!seen && *nvisited < 512) {
-                ASTNode* def = effect_find_func(program, node->value);
+                ASTNode* def = effect_resolve_callee(program, node->value);
                 if (def && def->child_count > 0) {
                     visited[(*nvisited)++] = node->value;
                     ASTNode* body = def->children[def->child_count - 1];
@@ -4972,12 +5022,13 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
                 ns[l] = '\0';
                 if (effect_call_capability(ns)) return 1;  /* fs/net/os → impure */
             }
-        } else {
+        }
+        {
             int seen = 0;
             for (int i = 0; i < *nv; i++)
                 if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
             if (!seen && *nv < 512) {
-                ASTNode* def = effect_find_func(program, node->value);
+                ASTNode* def = effect_resolve_callee(program, node->value);
                 if (def && def->child_count > 0) {
                     visited[(*nv)++] = node->value;
                     if (purity_scan(program, def, def->children[def->child_count - 1],
@@ -4985,6 +5036,12 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
                 }
             }
         }
+    }
+    /* A bare `g = expr` on a module global parses as a declaration (#701),
+     * so the write was never seen here and every setter folded to pure. */
+    if (node->type == AST_VARIABLE_DECLARATION && node->value) {
+        for (int g = 0; g < nglobals; g++)
+            if (strcmp(globals[g], node->value) == 0) return 1;
     }
     if ((node->type == AST_ASSIGNMENT ||
          (node->type == AST_BINARY_EXPRESSION && node->value &&

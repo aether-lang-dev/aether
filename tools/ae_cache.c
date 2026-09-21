@@ -376,6 +376,45 @@ static int hash_lib_dir_entries(const char* dir, const char* rel,
 }
 #endif
 
+int extras_append(char* list, size_t cap, const char* path) {
+    if (!list || !path || !path[0]) return 0;
+    size_t used = strlen(list);
+    int quote = strchr(path, ' ') != NULL;
+    size_t need = (used ? 1 : 0) + strlen(path) + (quote ? 2 : 0);
+    if (used + need + 1 > cap) return 0;
+    if (used) list[used++] = ' ';
+    if (quote) list[used++] = '"';
+    memcpy(list + used, path, strlen(path));
+    used += strlen(path);
+    if (quote) list[used++] = '"';
+    list[used] = '\0';
+    return 1;
+}
+
+int extras_next(const char** cursor, char* out, size_t out_size) {
+    const char* p = *cursor;
+    if (!p) return 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) { *cursor = p; return 0; }
+    size_t n = 0;
+    if (*p == '"') {
+        p++;
+        while (*p && *p != '"') {
+            if (n + 1 < out_size) out[n++] = *p;
+            p++;
+        }
+        if (*p == '"') p++;
+    } else {
+        while (*p && *p != ' ' && *p != '\t') {
+            if (n + 1 < out_size) out[n++] = *p;
+            p++;
+        }
+    }
+    out[n] = '\0';
+    *cursor = p;
+    return 1;
+}
+
 unsigned long long compute_cache_key(const char* ae_file,
                                             const char* extra_files,
                                             const char* opt_level,
@@ -400,10 +439,9 @@ unsigned long long compute_cache_key(const char* ae_file,
         pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%lld", (long long)st.st_mtime);
 
     if (extra_files && extra_files[0]) {
-        char tmp[8192];
-        strncpy(tmp, extra_files, sizeof(tmp) - 1);
-        tmp[sizeof(tmp) - 1] = '\0';
-        for (char* tok = strtok(tmp, " \t"); tok; tok = strtok(NULL, " \t")) {
+        const char* cursor = extra_files;
+        char tok[2048];
+        while (extras_next(&cursor, tok, sizeof(tok))) {
             unsigned long long fh = fnv64_file(tok);
             pos += snprintf(key_buf + pos, sizeof(key_buf) - pos, ":%016llx", fh);
         }

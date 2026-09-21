@@ -762,7 +762,17 @@ int run_cross_build(const char* c_file, const char* out_file,
     const char* lib_pic =
         (emit_lib || emit_staticlib) && !is_apple && !strstr(ztriple, "wasm")
             ? " -fPIC" : "";
-    const char* ex = extra ? extra : "";
+    /* The --extra / extra_sources files, then the C files the modules of the
+     * closure ship (`@source`, #2125) — the native path's build_gcc_cmd does
+     * the same; without it a cross build of a program importing such a module
+     * fails at the link with the module's own symbols undefined. */
+    const char* ae_sources = get_aether_source_files(c_file);
+    char ex_buf[8192 + 8192 + 2];
+    snprintf(ex_buf, sizeof(ex_buf), "%s%s%s",
+             extra ? extra : "",
+             (extra && extra[0] && ae_sources[0]) ? " " : "",
+             ae_sources);
+    const char* ex = ex_buf;
     /* std.audio's vendored miniaudio auto-selects a backend by platform macro:
      * on a macos target it #includes <CoreAudio/CoreAudio.h>, an APPLE FRAMEWORK
      * header that zig's bundled macOS SDK stubs deliberately do NOT ship (the

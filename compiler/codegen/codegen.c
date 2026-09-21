@@ -3003,8 +3003,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     int has_exports_list = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
-        if (child && child->type == AST_LINK_DIRECTIVE) {
-            continue;  /* consumed by emit_link_requirements */
+        if (child && (child->type == AST_LINK_DIRECTIVE ||
+                      child->type == AST_SOURCE_DIRECTIVE)) {
+            continue;  /* consumed by emit_link_requirements / emit_source_requirements */
         }
         if (child && child->type == AST_EXPORTS_LIST) {
             has_exports_list = 1;
@@ -4463,6 +4464,44 @@ static void emit_link_requirements(CodeGenerator* gen, ASTNode* program) {
     fputc('\n', gen->output);
 }
 
+static void add_source_directive(ASTNode* c, char** paths, int* npaths, int cap) {
+    if (!c || c->type != AST_SOURCE_DIRECTIVE || !c->value) return;
+    /* Existence was checked, and the file recorded as a dependency, when the
+     * module was orchestrated (module_check_source_directives). */
+    char* path = module_resolve_source_directive(c);
+    if (!path) return;
+    for (int i = 0; i < *npaths; i++) {
+        if (strcmp(paths[i], path) == 0) { free(path); return; }
+    }
+    if (*npaths < cap) paths[(*npaths)++] = path;
+    else free(path);
+}
+
+/* #2125: module-owned C sources. Every `@source` in the entry program and in
+ * every module of the resolved import closure, deduplicated by resolved path,
+ * one per line so a path with spaces survives: the build compiles each into
+ * the program. A losing `when defined(...)` import is gone before codegen, so
+ * its sources are dropped with its `@link` flags. */
+static void emit_source_requirements(CodeGenerator* gen, ASTNode* program) {
+    char* paths[256];
+    int npaths = 0;
+    const int cap = (int)(sizeof(paths) / sizeof(paths[0]));
+    for (int i = 0; i < program->child_count; i++)
+        add_source_directive(program->children[i], paths, &npaths, cap);
+    if (global_module_registry) {
+        for (int m = 0; m < global_module_registry->module_count; m++) {
+            AetherModule* mod = global_module_registry->modules[m];
+            if (!mod || !mod->ast) continue;
+            for (int i = 0; i < mod->ast->child_count; i++)
+                add_source_directive(mod->ast->children[i], paths, &npaths, cap);
+        }
+    }
+    for (int i = 0; i < npaths; i++) {
+        fprintf(gen->output, "// aether-source: %s\n", paths[i]);
+        free(paths[i]);
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -4471,6 +4510,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * of the TU (a // comment is inert to the preprocessor, so it may precede
      * the MinGW #if below). */
     emit_link_requirements(gen, program);
+    emit_source_requirements(gen, program);
     // #976: rewrite C-keyword value identifiers to a valid C spelling before
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).
