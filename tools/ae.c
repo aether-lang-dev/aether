@@ -8652,9 +8652,11 @@ static int cmd_cache(int argc, char** argv) {
     unsigned long long bytes = 0;
     int slots = 0;
     cache_usage(&bytes, &slots);
-    if (slots == 0) {
+    if (!dir_exists(cache_path)) {
         printf("Cache: empty\nLocation: %s\n", cache_path);
     } else {
+        /* "0 build(s)" for a present-but-empty directory, as before: the
+         * cache_dir_override driver reads the count back after a clear. */
         printf("Cache: %d build(s), %.1f MB\nLocation: %s\n",
                slots, (double)bytes / (1024.0 * 1024.0), cache_path);
     }
