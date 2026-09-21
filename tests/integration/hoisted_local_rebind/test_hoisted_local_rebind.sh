@@ -169,6 +169,24 @@ if [ "$got" != "en-US y" ]; then
     fail=1
 fi
 
+# A name reused across functions is unrelated: `src` an int local in one
+# function and a `ptr` parameter in the next (std.cryptography.sha3's
+# shape) — the join is per body, not per name.
+cat > "$tmp/reuse.ae" <<'AE'
+keccak() -> int {
+    src = 3
+    xs = [ 10, 20, 30, 40 ]
+    return xs[src]
+}
+absorb(src: ptr, off: int) -> int { return off }
+main() { println("${keccak()} ${absorb(null, 5)}") }
+AE
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/reuse.ae" 2>&1 | tail -1)"
+if [ "$got" != "40 5" ]; then
+    echo "  [FAIL] hoisted_local_rebind: a name reused with another kind in another function broke (got '$got')"
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
     echo "  [PASS] hoisted_local_rebind: a hoisted local takes the join of its bindings; a binding of another kind is refused"
 fi

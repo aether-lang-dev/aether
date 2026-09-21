@@ -260,6 +260,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->node = NULL;  // Initialize to NULL
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
+    symbol->inferred_in = NULL;
     symtab_link(table, symbol);
 }
 
@@ -361,6 +362,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->node = NULL;
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
+    symbol->inferred_in = NULL;
     symtab_link(table, symbol);
 }
 

@@ -18,6 +18,7 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->constraint_capacity = 0;
     ctx->symbols = table;
     ctx->iteration_count = 0;
+    ctx->scope_owner = NULL;
     return ctx;
 }
 
@@ -404,24 +405,26 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
             if (node->value && node->node_type && node->node_type->kind != TYPE_UNKNOWN && ctx->symbols) {
                 Symbol* existing = lookup_symbol_local(ctx->symbols, node->value);
                 if (existing) {
-                    /* A name bound again: this table is flat, so the entry is
-                     * what a use AFTER sibling branches resolves to, and codegen
-                     * hoists such a local with the join of its branch types.
-                     * Widen to match (`if a { f = 1.5 } else { f = 2 }` then
-                     * `${f}` is a float, not the last branch's int printed
-                     * through %d); a binding of another kind keeps the first
-                     * (#2124 reports the clash where it is hoisted). */
-                    Type* joined = numeric_join_type(existing->type, node->node_type);
-                    if (joined) {
-                        if (existing->type) free_type(existing->type);
-                        existing->type = joined;
-                    } else if (!existing->type || existing->type->kind == TYPE_UNKNOWN) {
-                        if (existing->type) free_type(existing->type);
-                        existing->type = clone_type(node->node_type);
-                    }
+                    /* A name bound again. This table is flat: the entry is
+                     * what a use AFTER sibling branches resolves to, and
+                     * codegen hoists such a local with the join of its
+                     * branch types, so a second binding in the SAME body
+                     * widens the entry to match (`if a { f = 1.5 } else
+                     * { f = 2 }` then `${f}` is a float, not the last
+                     * branch's int printed through %d; #2124). A binding
+                     * from another function replaces it, as it always did
+                     * — `src` is an int in one function and a `ptr`
+                     * parameter in the next, and the walk is sequential. */
+                    Type* joined = (existing->inferred_in == ctx->scope_owner)
+                                   ? numeric_join_type(existing->type, node->node_type) : NULL;
+                    if (existing->type) free_type(existing->type);
+                    existing->type = joined ? joined : clone_type(node->node_type);
+                    existing->inferred_in = ctx->scope_owner;
                 } else {
                     // Add new symbol
                     add_symbol(ctx->symbols, node->value, clone_type(node->node_type), 0, 0, 0);
+                    Symbol* fresh = lookup_symbol_local(ctx->symbols, node->value);
+                    if (fresh) fresh->inferred_in = ctx->scope_owner;
                 }
             }
             break;
@@ -1065,7 +1068,10 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
 
     // Collect constraints from function body
     if (body_index >= 0 && body_index < node->child_count) {
+        ASTNode* prev_owner = ctx->scope_owner;
+        ctx->scope_owner = node;
         collect_constraints(node->children[body_index], ctx);
+        ctx->scope_owner = prev_owner;
     }
 
     // Unwind any symbols this function added so they don't pollute sibling
@@ -1115,6 +1121,15 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
         case AST_FUNCTION_DEFINITION:
             collect_function_constraints(node, ctx);
             break;
+
+        case AST_MAIN_FUNCTION:
+        case AST_CLOSURE: {
+            ASTNode* prev_owner = ctx->scope_owner;
+            ctx->scope_owner = node;
+            collect_expression_constraints(node, ctx);
+            ctx->scope_owner = prev_owner;
+            break;
+        }
 
         case AST_STRUCT_DEFINITION:
             // Struct fields with initializers
