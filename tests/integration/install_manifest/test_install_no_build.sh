@@ -21,8 +21,11 @@ trap 'rm -rf "$TMPDIR" || true' EXIT
 # (install.sh + Makefile beside each other) but has nothing built.
 mkdir -p "$TMPDIR/tree"
 cp "$ROOT/install.sh" "$ROOT/Makefile" "$TMPDIR/tree/"
+chmod +x "$TMPDIR/tree/install.sh"
 
-AETHER_INSTALL_NO_BUILD=1 sh "$TMPDIR/tree/install.sh" "$TMPDIR/prefix" \
+# Through its own shebang (bash): the script uses `set -o pipefail`, which
+# a POSIX sh such as dash rejects.
+AETHER_INSTALL_NO_BUILD=1 "$TMPDIR/tree/install.sh" "$TMPDIR/prefix" \
     < /dev/null > "$TMPDIR/install.log" 2>&1
 rc=$?
 if [ "$rc" = 0 ]; then
