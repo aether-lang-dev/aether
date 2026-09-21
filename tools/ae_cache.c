@@ -15,10 +15,12 @@
 #ifdef _WIN32
 #  include <windows.h>
 #  include <direct.h>
+#  include <sys/utime.h>
 #  define PATH_SEP "\\"
 #else
 #  include <unistd.h>
 #  include <dirent.h>
+#  include <utime.h>
 #  define PATH_SEP "/"
 #endif
 
@@ -73,6 +75,175 @@ int cache_publish(const char* tmp_path, const char* final_path) {
     }
     return -1;
 #endif
+}
+
+
+/* ---- Size cap ---------------------------------------------------------------
+ *
+ * The cache had no bound: every cold `ae run` / `ae build` added a static
+ * binary (~1-2 MB) and nothing ever left, so a machine that runs the test
+ * sweep reached 26,000 entries and 12.7 GB with `ae cache clear` as the only
+ * remedy. It is bounded now, ccache-style: AETHER_CACHE_MAX_MB (default
+ * 5120, 0 = unlimited) and least-recently-USED eviction. A hit touches the
+ * slot's mtime, so "recently used" means what it says rather than "recently
+ * built"; after a publish that takes the cache over the cap, the oldest
+ * slots go until it is under 90% of it (hysteresis, so one publish does not
+ * mean one scan-and-evict per build). The scan is rate-limited by a stamp
+ * file to once per ten minutes per cache directory, and the slot just
+ * published is never evicted, so a single binary larger than the cap still
+ * runs. Depfiles (`*.deps`, keyed by SOURCE path, a few hundred bytes) and
+ * in-flight `*.tmp.*` slots are not counted or evicted. */
+#define AETHER_CACHE_DEFAULT_MAX_MB 5120ULL
+
+unsigned long long cache_max_bytes(void) {
+    const char* v = getenv("AETHER_CACHE_MAX_MB");
+    if (v && v[0]) {
+        char* end = NULL;
+        unsigned long long mb = strtoull(v, &end, 10);
+        if (end && *end == '\0') return mb * 1024ULL * 1024ULL;   /* 0 = unlimited */
+        fprintf(stderr, "warning: AETHER_CACHE_MAX_MB='%s' is not a number; using %llu\n",
+                v, AETHER_CACHE_DEFAULT_MAX_MB);
+    }
+    return AETHER_CACHE_DEFAULT_MAX_MB * 1024ULL * 1024ULL;
+}
+
+void cache_touch(const char* path) {
+    if (!path || !path[0]) return;
+#ifdef _WIN32
+    _utime(path, NULL);
+#else
+    utime(path, NULL);
+#endif
+}
+
+typedef struct { char name[256]; unsigned long long size; time_t mtime; } CacheSlot;
+
+static int cache_slot_is_countable(const char* name) {
+    if (name[0] == '.') return 0;
+    if (strstr(name, ".tmp.")) return 0;
+    size_t n = strlen(name);
+    if (n > 5 && strcmp(name + n - 5, ".deps") == 0) return 0;
+    if (strcmp(name, "gc.stamp") == 0 || strcmp(name, "latest_release") == 0) return 0;
+    return 1;
+}
+
+static int cache_slot_older(const void* a, const void* b) {
+    const CacheSlot* x = (const CacheSlot*)a;
+    const CacheSlot* y = (const CacheSlot*)b;
+    if (x->mtime != y->mtime) return x->mtime < y->mtime ? -1 : 1;
+    return strcmp(x->name, y->name);
+}
+
+/* Every countable slot with its size and mtime; malloc'd, caller frees. */
+static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* total) {
+    CacheSlot* slots = NULL;
+    int n = 0, cap = 0;
+    *total = 0;
+#ifdef _WIN32
+    char pattern[600];
+    snprintf(pattern, sizeof(pattern), "%s\\*", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) { *count = 0; return NULL; }
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        if (!cache_slot_is_countable(fd.cFileName)) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 256;
+            CacheSlot* grown = (CacheSlot*)realloc(slots, (size_t)cap * sizeof(CacheSlot));
+            if (!grown) break;
+            slots = grown;
+        }
+        snprintf(slots[n].name, sizeof(slots[n].name), "%s", fd.cFileName);
+        slots[n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        /* FILETIME: 100 ns since 1601 -> seconds since 1970. */
+        unsigned long long ft = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                                fd.ftLastWriteTime.dwLowDateTime;
+        slots[n].mtime = (time_t)(ft / 10000000ULL - 11644473600ULL);
+        *total += slots[n].size;
+        n++;
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR* d = opendir(dir);
+    if (!d) { *count = 0; return NULL; }
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (!cache_slot_is_countable(e->d_name)) continue;
+        char p[1100];
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 256;
+            CacheSlot* grown = (CacheSlot*)realloc(slots, (size_t)cap * sizeof(CacheSlot));
+            if (!grown) break;
+            slots = grown;
+        }
+        snprintf(slots[n].name, sizeof(slots[n].name), "%s", e->d_name);
+        slots[n].size = (unsigned long long)st.st_size;
+        slots[n].mtime = st.st_mtime;
+        *total += slots[n].size;
+        n++;
+    }
+    closedir(d);
+#endif
+    *count = n;
+    return slots;
+}
+
+/* Bring the cache under its cap by evicting least-recently-used slots.
+ * `keep` is the slot just published (never evicted). Returns the number of
+ * slots removed. `force` skips the ten-minute stamp gate (`ae cache gc`). */
+int cache_enforce_limit(const char* keep, int force) {
+    unsigned long long max = cache_max_bytes();
+    if (max == 0 || !s_cache_dir[0]) return 0;
+    char stamp[600];
+    snprintf(stamp, sizeof(stamp), "%s/gc.stamp", s_cache_dir);
+    if (!force) {
+        struct stat st;
+        if (stat(stamp, &st) == 0 && time(NULL) - st.st_mtime < 600) return 0;
+    }
+    FILE* sf = fopen(stamp, "w");
+    if (sf) fclose(sf);
+
+    int count = 0;
+    unsigned long long total = 0;
+    CacheSlot* slots = cache_scan(s_cache_dir, &count, &total);
+    if (!slots) return 0;
+    int removed = 0;
+    if (total > max) {
+        unsigned long long target = max - max / 10;
+        qsort(slots, (size_t)count, sizeof(CacheSlot), cache_slot_older);
+        const char* keep_name = NULL;
+        if (keep) {
+            keep_name = strrchr(keep, '/');
+            const char* bs = strrchr(keep, '\\');
+            if (bs > keep_name) keep_name = bs;
+            keep_name = keep_name ? keep_name + 1 : keep;
+        }
+        for (int i = 0; i < count && total > target; i++) {
+            if (keep_name && strcmp(slots[i].name, keep_name) == 0) continue;
+            char p[1100];
+            snprintf(p, sizeof(p), "%s/%s", s_cache_dir, slots[i].name);
+            if (remove(p) == 0) {
+                total -= slots[i].size;
+                removed++;
+            }
+        }
+    }
+    free(slots);
+    return removed;
+}
+
+/* For `ae cache`: the countable size and slot count. */
+void cache_usage(unsigned long long* bytes, int* slots_out) {
+    int count = 0;
+    unsigned long long total = 0;
+    CacheSlot* slots = cache_scan(s_cache_dir, &count, &total);
+    free(slots);
+    *bytes = total;
+    *slots_out = count;
 }
 
 // macOS clang runs dsymutil for `-O0 -g` single-step builds, dropping a

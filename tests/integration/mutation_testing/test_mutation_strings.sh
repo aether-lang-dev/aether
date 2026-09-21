@@ -26,10 +26,8 @@ AE="$ROOT/build/ae"
 SUT="$SCRIPT_DIR/fixture_str/sut.ae"
 TEST="$SCRIPT_DIR/fixture_str/sut_test.ae"
 
-if [ "$OS" = "Windows_NT" ]; then
-    echo "  [SKIP] mutation_testing_strings: driver shells out via POSIX rm/ae"
-    exit 0
-fi
+# Runs on Windows too: the driver is argv-based through std.os (see
+# test_mutation.sh).
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] mutation_testing_strings: ae not built"
     exit 0

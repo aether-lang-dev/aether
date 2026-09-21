@@ -1851,7 +1851,11 @@ static const char* dep_unwrap_patch_value(const char* v, char* buf, size_t bsz,
 
 /* An override for `name`, from --override (highest) or the manifest's
  * [patch] section. Returns NULL when the dependency is not overridden. */
-static const char* dep_override_for(TomlDocument* doc, const char* name) {
+/* `from_manifest` (may be NULL) is set to 1 when the override came from the
+ * manifest's [patch] table rather than a --override flag: the former is a
+ * path relative to the MANIFEST, the latter one the user typed at the cwd. */
+static const char* dep_override_for(TomlDocument* doc, const char* name, int* from_manifest) {
+    if (from_manifest) *from_manifest = 0;
     for (int i = 0; i < g_ovr_count; i++) {
         if (strcmp(g_ovr_name[i], name) == 0) return g_ovr_path[i];
     }
@@ -1866,7 +1870,11 @@ static const char* dep_override_for(TomlDocument* doc, const char* name) {
             snprintf(quoted, sizeof(quoted), "\"%s\"", name);
             p = toml_get_value(doc, "patch", quoted);
         }
-        if (p && *p) return dep_unwrap_patch_value(p, unwrapped, sizeof(unwrapped), name);
+        if (p && *p) {
+            const char* v = dep_unwrap_patch_value(p, unwrapped, sizeof(unwrapped), name);
+            if (v && from_manifest) *from_manifest = 1;
+            return v;
+        }
     }
     return NULL;
 }
@@ -1948,11 +1956,141 @@ static int dep_append_module_roots(const char* root, const char* name) {
     return n;
 }
 
+static int path_is_absolute_any(const char* p) {
+    return p && (p[0] == '/' || p[0] == '\\' ||
+                 (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':'));
+}
+
+/* ---- Where the project manifest is (#2148) --------------------------------
+ *
+ * `ae build` finds an ancestor aether.toml by walking up and chdir-ing to
+ * it (find_and_chdir_to_aether_toml, #280). `ae run`, `ae check`, `ae test`
+ * and `ae inspect` cannot chdir: for `ae run` the process cwd is also the
+ * cwd the PROGRAM starts in, so a script reading ./data.txt from src/ would
+ * suddenly read <root>/data.txt. They read the manifest where it IS instead:
+ * the readers below open ae_manifest_path(), and a manifest-relative path
+ * they hand back (a [[bin]] path, an extra_sources entry, src/main.ae) goes
+ * through manifest_relative() so it resolves from the invocation directory.
+ * Before this, those four commands read aether.toml in the cwd only: the
+ * same `ae run app.ae` from src/ compiled with no project symbols, no extra
+ * sources and no dependency roots, silently a different program from
+ * `ae build app.ae` in the same directory.
+ *
+ * Same rules as the walk-up: a manifest in the cwd wins, the walk stops at a
+ * repository boundary (.git), and the drive/filesystem root is the last probe. */
+static char g_manifest_dir[1024] = "";   /* ABSOLUTE dir of the manifest, "" when it is in cwd (or absent) */
+static char g_manifest_sub[1024] = "";   /* the cwd relative to that dir, e.g. "src" */
+static int  g_manifest_located  = 0;
+
+/* Walk up from the cwd. Returns 1 with `dir` = the ancestor holding
+ * aether.toml and `sub` = the cwd's path below it; 0 when the manifest is in
+ * the cwd, absent, or beyond the repository. Shared by the chdir-ing walk-up
+ * and the no-chdir readers so the two can never disagree on which manifest
+ * a command means. */
+static int manifest_walk_up(char* dir, size_t dir_size, char* sub, size_t sub_size) {
+    dir[0] = '\0';
+    sub[0] = '\0';
+    if (path_exists("aether.toml")) return 0;
+    char start_cwd[1024];
+    if (!getcwd(start_cwd, sizeof(start_cwd))) return 0;
+    char walk[1024];
+    snprintf(walk, sizeof(walk), "%s", start_cwd);
+    while (1) {
+        char probe[1040];
+        snprintf(probe, sizeof(probe), "%s/aether.toml", walk);
+        if (path_exists(probe)) {
+            size_t walk_len = strlen(walk);
+            snprintf(dir, dir_size, "%s", walk);
+            if (strncmp(start_cwd, walk, walk_len) == 0 &&
+                (start_cwd[walk_len] == '/' || start_cwd[walk_len] == '\\'))
+                snprintf(sub, sub_size, "%s", start_cwd + walk_len + 1);
+            /* _getcwd() spells the sub-path with backslashes on Windows; the
+             * manifest spells its paths with '/', and both spellings meet in
+             * the [[bin]] path comparison. */
+            for (char* q = sub; *q; q++) if (*q == '\\') *q = '/';
+            return 1;
+        }
+        /* Do not walk OUT of a repository (see find_and_chdir_to_aether_toml
+         * for the incident). `.git` is a directory in a checkout and a file
+         * in a worktree; path_exists is regular-files-only. */
+        char git_probe[1040];
+        snprintf(git_probe, sizeof(git_probe), "%s/.git", walk);
+        if (dir_exists(git_probe) || path_exists(git_probe)) return 0;
+        char* slash = strrchr(walk, '/');
+        char* bslash = strrchr(walk, '\\');
+        if (bslash > slash) slash = bslash;
+        if (!slash) return 0;
+        if (slash > walk && slash[-1] == ':') {
+            /* "C:\" is the drive root: a bare "C:" would name the drive's
+             * current directory, so probe with the separator kept and stop. */
+            slash[1] = '\0';
+            char root_probe[1040];
+            snprintf(root_probe, sizeof(root_probe), "%saether.toml", walk);
+            if (path_exists(root_probe)) {
+                snprintf(dir, dir_size, "%s", walk);
+                size_t walk_len = strlen(walk);
+                if (strncmp(start_cwd, walk, walk_len) == 0)
+                    snprintf(sub, sub_size, "%s", start_cwd + walk_len);
+                return 1;
+            }
+            return 0;
+        }
+        if (slash == walk) {
+            /* At "/X": the parent is "/", one more probe there. */
+            walk[1] = '\0';
+            char root_probe[1040];
+            snprintf(root_probe, sizeof(root_probe), "%saether.toml", walk);
+            if (path_exists(root_probe)) {
+                snprintf(dir, dir_size, "%s", walk);
+                if (start_cwd[0] == '/') snprintf(sub, sub_size, "%s", start_cwd + 1);
+                return 1;
+            }
+            return 0;
+        }
+        *slash = '\0';
+    }
+}
+
+static void manifest_locate(void) {
+    if (g_manifest_located) return;
+    g_manifest_located = 1;
+    manifest_walk_up(g_manifest_dir, sizeof(g_manifest_dir), g_manifest_sub, sizeof(g_manifest_sub));
+}
+
+/* The manifest this command reads: "aether.toml" in the cwd, or the
+ * ancestor's, by absolute path. May not exist; callers path_exists() it. */
+static const char* ae_manifest_path(void) {
+    static char path[1100];
+    manifest_locate();
+    if (g_manifest_dir[0]) snprintf(path, sizeof(path), "%s/aether.toml", g_manifest_dir);
+    else snprintf(path, sizeof(path), "aether.toml");
+    return path;
+}
+
+/* A path the manifest states relative to itself (a [[bin]] path, an
+ * extra_sources entry, src/main.ae), made usable from the cwd. Unchanged
+ * when the manifest is in the cwd or the path is absolute. */
+static const char* manifest_relative(const char* path, char* buf, size_t buf_size) {
+    manifest_locate();
+    if (!g_manifest_dir[0] || !path || path_is_absolute_any(path)) return path;
+    snprintf(buf, buf_size, "%s/%s", g_manifest_dir, path);
+    return buf;
+}
+
+/* A path the user typed relative to the cwd, as the manifest would spell it
+ * (for matching against a [[bin]] path): "app.ae" from src/ is "src/app.ae". */
+static const char* manifest_spelling(const char* path, char* buf, size_t buf_size) {
+    manifest_locate();
+    if (!g_manifest_sub[0] || !path || path_is_absolute_any(path)) return path;
+    snprintf(buf, buf_size, "%s/%s", g_manifest_sub, path);
+    return buf;
+}
+
 /* Resolve [dependencies] from the project manifest onto the module search
  * path. Safe to call when there is no manifest and no dependencies. */
 void ae_resolve_dependencies(void) {
-    if (!path_exists("aether.toml")) return;
-    TomlDocument* doc = toml_parse_file("aether.toml");
+    if (!path_exists(ae_manifest_path())) return;
+    TomlDocument* doc = toml_parse_file(ae_manifest_path());
     if (!doc) return;
 
     int count = 0;
@@ -1981,10 +2119,15 @@ void ae_resolve_dependencies(void) {
         const char* name = name_buf;
         if (!*name) continue;
 
-        const char* ovr = dep_override_for(doc, name);
+        int ovr_from_manifest = 0;
+        const char* ovr = dep_override_for(doc, name, &ovr_from_manifest);
         char root[2048];
         if (ovr) {
-            snprintf(root, sizeof(root), "%s", ovr);
+            /* A [patch] path is stated relative to the manifest, which may be
+             * an ancestor's under the no-chdir commands (#2148). */
+            char rel[2048];
+            snprintf(root, sizeof(root), "%s",
+                     ovr_from_manifest ? manifest_relative(ovr, rel, sizeof(rel)) : ovr);
             /* An overridden build MUST say so. The failure this prevents is a
              * green local run against a working copy CI does not have --
              * named explicitly in the reporting ask, and the reason Cargo
@@ -2018,8 +2161,8 @@ void ae_resolve_dependencies(void) {
  * present in the built binary and silently absent from `ae run` of the very
  * same file — no error, a different program. */
 static void load_defines_from_toml(void) {
-    if (!path_exists("aether.toml")) return;
-    TomlDocument* doc = toml_parse_file("aether.toml");
+    if (!path_exists(ae_manifest_path())) return;
+    TomlDocument* doc = toml_parse_file(ae_manifest_path());
     if (!doc) return;
     const char* val = toml_get_value(doc, "build", "defines");
     if (val) {
@@ -2072,9 +2215,9 @@ static const char* get_link_flags(void) {
     if (checked) return flags;
     checked = true;
 
-    if (!path_exists("aether.toml")) return flags;
+    if (!path_exists(ae_manifest_path())) return flags;
 
-    TomlDocument* doc = toml_parse_file("aether.toml");
+    TomlDocument* doc = toml_parse_file(ae_manifest_path());
     if (!doc) return flags;
 
     const char* val = toml_get_value(doc, "build", "link_flags");
@@ -2377,9 +2520,9 @@ const char* get_cflags(void) {
     if (checked) return flags;
     checked = true;
 
-    if (!path_exists("aether.toml")) return flags;
+    if (!path_exists(ae_manifest_path())) return flags;
 
-    TomlDocument* doc = toml_parse_file("aether.toml");
+    TomlDocument* doc = toml_parse_file(ae_manifest_path());
     if (!doc) return flags;
 
     const char* val = toml_get_value(doc, "build", "cflags");
@@ -2436,11 +2579,6 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
  * `<root>/shim.c` ("No such file") and wrote `<root>/ex1`. */
 static char g_walkup_sub[1024] = "";
 
-static int path_is_absolute_any(const char* p) {
-    return p && (p[0] == '/' || p[0] == '\\' ||
-                 (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':'));
-}
-
 /* `path` as typed before the walk-up, re-based onto the project root.
  * Returns `path` itself when no walk-up happened or the path is absolute;
  * otherwise a copy from a small ring of buffers (four live values at a
@@ -2457,129 +2595,36 @@ static const char* walkup_rebase(const char* path) {
 
 static int find_and_chdir_to_aether_toml(const char** file_inout) {
     g_walkup_sub[0] = '\0';
-    if (path_exists("aether.toml")) return 0;  /* already present */
-
-    char start_cwd[1024];
-    if (!getcwd(start_cwd, sizeof(start_cwd))) return 0;
-
-    char walk[1024];
-    strncpy(walk, start_cwd, sizeof(walk) - 1);
-    walk[sizeof(walk) - 1] = '\0';
-
-    /* Walk up to the root. POSIX `dirname` mutates; compose by truncating
-     * at the last separator. Stop when we either find aether.toml or hit
-     * the root.
-     *
-     * BOTH separators, because _getcwd() on native Windows returns
-     * backslashes ("C:\Users\paul\proj\sub"). Scanning for '/' alone found
-     * nothing there, so the loop broke on its first pass and the walk-up
-     * silently did nothing -- `ae build` from a subdirectory missed the
-     * project manifest on Windows while working everywhere else. */
-    while (1) {
-        char probe[1040];
-        snprintf(probe, sizeof(probe), "%s/aether.toml", walk);
-        if (path_exists(probe)) {
-            if (chdir(walk) != 0) return 0;
-            /* Adjust the positional file argument: if it was a
-             * relative path, prepend the original cwd's relationship
-             * to the new cwd. e.g. starting at /home/p/proj/ae, after
-             * chdir to /home/p/proj, a positional `myprobe.ae`
-             * becomes `ae/myprobe.ae`. */
-            /* The subdirectory walked out of, positional or not: `ae build
-             * -o app --extra shim.c` in project mode has paths to re-base
-             * too. */
-            {
-                size_t walk_len = strlen(walk);
-                if (strncmp(start_cwd, walk, walk_len) == 0 &&
-                    (start_cwd[walk_len] == '/' ||
-                     start_cwd[walk_len] == '\\')) {
-                    snprintf(g_walkup_sub, sizeof(g_walkup_sub), "%s",
-                             start_cwd + walk_len + 1);
-                }
-            }
-            if (file_inout && *file_inout) {
-                const char* f = *file_inout;
-                /* #1905: the positional may be a [[bin]] NAME rather than a
-                 * path, and a name must not be rebased. `ae build widget`
-                 * from a subdirectory became `sub/widget`, which is not a
-                 * file, so it failed with "File not found: sub/widget" while
-                 * the identical command from the project root worked. The
-                 * manifest is in the directory we just chdir'd to, so the
-                 * name resolves here. */
-                char bin_probe[1024];
-                int names_a_bin =
-                    find_bin_path_by_name(f, bin_probe, sizeof(bin_probe));
-                if (!names_a_bin && f[0] != '/' && f[0] != '\\' && g_walkup_sub[0]) {
-                    /* relative — splice the subdir we walked out of */
-                    static char rebased[1024];
-                    snprintf(rebased, sizeof(rebased), "%s/%s", g_walkup_sub, f);
-                    /* Only when it lands on something. Otherwise keep what
-                     * the user typed, so a typo is reported as the word
-                     * they wrote rather than as a path they never
-                     * mentioned. */
-                    if (path_exists(rebased)) *file_inout = rebased;
-                }
-            }
-            return 1;
+    char dir[1024], sub[1024];
+    if (!manifest_walk_up(dir, sizeof(dir), sub, sizeof(sub))) return 0;
+    if (chdir(dir) != 0) return 0;
+    /* The cwd changed: whatever the no-chdir readers located is stale, and
+     * from here the manifest is simply in the cwd. */
+    g_manifest_located = 0;
+    snprintf(g_walkup_sub, sizeof(g_walkup_sub), "%s", sub);
+    if (file_inout && *file_inout) {
+        const char* f = *file_inout;
+        /* #1905: the positional may be a [[bin]] NAME rather than a
+         * path, and a name must not be rebased. `ae build widget`
+         * from a subdirectory became `sub/widget`, which is not a
+         * file, so it failed with "File not found: sub/widget" while
+         * the identical command from the project root worked. The
+         * manifest is in the directory we just chdir'd to, so the
+         * name resolves here. */
+        char bin_probe[1024];
+        int names_a_bin = find_bin_path_by_name(f, bin_probe, sizeof(bin_probe));
+        if (!names_a_bin && f[0] != '/' && f[0] != '\\' && g_walkup_sub[0]) {
+            /* relative — splice the subdir we walked out of */
+            static char rebased[1024];
+            snprintf(rebased, sizeof(rebased), "%s/%s", g_walkup_sub, f);
+            /* Only when it lands on something. Otherwise keep what
+             * the user typed, so a typo is reported as the word
+             * they wrote rather than as a path they never
+             * mentioned. */
+            if (path_exists(rebased)) *file_inout = rebased;
         }
-        /* Do not walk OUT of a repository.
-         *
-         * The probe above runs first, so a project whose aether.toml sits at
-         * its repository root still resolves, from any subdirectory. What
-         * this stops is the next step: a checkout with no manifest of its own
-         * adopting an unrelated one from an ancestor directory.
-         *
-         * That is not hypothetical. Building aether's own test suite from a
-         * checkout at D:\Git\aether, with an unrelated scratch project's
-         * aether.toml sitting at D:\Git, made `ae` chdir to D:\Git and treat
-         * it as the project root. Two consequences, both silent:
-         *
-         *   - imports resolved against D:\Git\src instead of the test's own
-         *     lib/, so tests failed with "unresolved import <name>" naming a
-         *     module that was right there beside them;
-         *   - a relative `-o build/foo` landed in D:\Git\build, so `ae build`
-         *     printed "Built: build/foo.exe" while writing somewhere else
-         *     entirely, and the caller then could not find its own output.
-         *
-         * A repository is the outermost thing that can sensibly be "the
-         * project", so the walk stops there.
-         *
-         * Both predicates, because `.git` is a DIRECTORY in an ordinary
-         * checkout and a FILE in a worktree or submodule one -- and
-         * path_exists() here is regular-files-only (it tests
-         * !FILE_ATTRIBUTE_DIRECTORY on Windows, S_ISREG on POSIX), so on its
-         * own it would miss every normal repository. */
-        char git_probe[1040];
-        snprintf(git_probe, sizeof(git_probe), "%s/.git", walk);
-        if (dir_exists(git_probe) || path_exists(git_probe)) break;
-
-        /* Step up one directory by truncating at the last separator. Stop
-         * when we hit the root marker (just "/" or empty). */
-        char* slash = strrchr(walk, '/');
-        char* bslash = strrchr(walk, '\\');
-        if (bslash > slash) slash = bslash;
-        if (!slash) break;
-        /* "C:\" / "C:/" is the Windows root -- truncating at that separator
-         * would leave a bare "C:", which names the drive's CURRENT directory
-         * rather than its root, so probe there and stop. */
-        if (slash > walk && slash[-1] == ':') {
-            slash[1] = '\0';
-            char root_probe[1040];
-            snprintf(root_probe, sizeof(root_probe), "%saether.toml", walk);
-            if (path_exists(root_probe) && chdir(walk) == 0) return 1;
-            break;
-        }
-        if (slash == walk) {
-            /* At "/X" — the parent is "/". One more probe at "/". */
-            walk[1] = '\0';
-            char root_probe[1040];
-            snprintf(root_probe, sizeof(root_probe), "%s/aether.toml", walk);
-            if (path_exists(root_probe) && chdir(walk) == 0) return 1;
-            break;
-        }
-        *slash = '\0';
     }
-    return 0;
+    return 1;
 }
 
 // Look up a [[bin]] entry by `name = "..."`. If found, copy its
@@ -2590,9 +2635,9 @@ static int find_and_chdir_to_aether_toml(const char** file_inout) {
 // the underlying file path. Closes #280 (1).
 static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_size) {
     out[0] = '\0';
-    if (!bin_name || !path_exists("aether.toml")) return 0;
+    if (!bin_name || !path_exists(ae_manifest_path())) return 0;
 
-    FILE* f = fopen("aether.toml", "r");
+    FILE* f = fopen(ae_manifest_path(), "r");
     if (!f) return 0;
 
     char line[1024];
@@ -2634,8 +2679,9 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
             if (*eq == '"') eq++;
             char* end = strrchr(eq, '"');
             if (end) *end = '\0';
-            strncpy(out, eq, out_size - 1);
-            out[out_size - 1] = '\0';
+            /* The manifest states the path relative to itself. */
+            char rel[1024];
+            snprintf(out, out_size, "%s", manifest_relative(eq, rel, sizeof(rel)));
             found = 1;
             break;
         }
@@ -2646,10 +2692,13 @@ static int find_bin_path_by_name(const char* bin_name, char* out, size_t out_siz
 
 static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_size) {
     out[0] = '\0';
-    if (!ae_file || !path_exists("aether.toml")) return 0;
+    if (!ae_file || !path_exists(ae_manifest_path())) return 0;
 
-    FILE* f = fopen("aether.toml", "r");
+    FILE* f = fopen(ae_manifest_path(), "r");
     if (!f) return 0;
+    /* "app.ae" typed in src/ is the manifest's "src/app.ae". */
+    char spelled[1200];
+    ae_file = manifest_spelling(ae_file, spelled, sizeof(spelled));
 
     int truncated = 0;
 
@@ -2752,7 +2801,8 @@ static int get_extra_sources_for_bin(const char* ae_file, char* out, size_t out_
                         char* end = strchr(frag, '"');
                         if (!end) break;   // malformed — bail out
                         *end = '\0';
-                        if (!extras_append(out, out_size, frag)) {
+                        char rel[1024];
+                        if (!extras_append(out, out_size, manifest_relative(frag, rel, sizeof(rel)))) {
                             truncated = 1;
                             overflowed = 1;
                             break;
@@ -4201,10 +4251,12 @@ static int cmd_run(int argc, char** argv) {
         }
     }
 
-    // Project mode: no file argument, look for aether.toml
-    if (!file && path_exists("aether.toml")) {
-        if (path_exists("src/main.ae"))
-            file = "src/main.ae";
+    // Project mode: no file argument, the manifest's src/main.ae (the
+    // manifest may be an ancestor's; the program still starts in this cwd)
+    static char project_main[1200];
+    if (!file && path_exists(ae_manifest_path())) {
+        if (path_exists(manifest_relative("src/main.ae", project_main, sizeof(project_main))))
+            file = manifest_relative("src/main.ae", project_main, sizeof(project_main));
         else {
             fprintf(stderr, "Error: aether.toml found but src/main.ae is missing.\n");
             fprintf(stderr, "Create src/main.ae or specify a file: ae run <file.ae>\n");
@@ -4258,6 +4310,7 @@ static int cmd_run(int argc, char** argv) {
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
         if (path_exists(cached_exe)) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
+            cache_touch(cached_exe);   /* least-recently-USED, for the cap */
             build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
             int rc = run_cmd_forwarding(cmd);
             if (rc < 0) {
@@ -4374,6 +4427,7 @@ static int cmd_run(int argc, char** argv) {
         if (cache_publish(exe_file, cached_exe) == 0) {
             strncpy(exe_file, cached_exe, sizeof(exe_file) - 1);
             exe_file[sizeof(exe_file) - 1] = '\0';
+            cache_enforce_limit(cached_exe, 0);
         } else {
             // Exotic-filesystem rename failure: run the private temp
             // exe and clean it up like an uncached build.
@@ -4411,9 +4465,10 @@ static int cmd_check(int argc, char** argv) {
     load_defines_from_toml();
 
     // Project mode
-    if (!file && path_exists("aether.toml")) {
-        if (path_exists("src/main.ae"))
-            file = "src/main.ae";
+    static char project_main[1200];
+    if (!file && path_exists(ae_manifest_path())) {
+        if (path_exists(manifest_relative("src/main.ae", project_main, sizeof(project_main))))
+            file = manifest_relative("src/main.ae", project_main, sizeof(project_main));
         else {
             fprintf(stderr, "Error: aether.toml found but src/main.ae is missing.\n");
             return 1;
@@ -4457,10 +4512,11 @@ static int cmd_inspect(int argc, char** argv) {
         if (argv[i][0] != '-') file = argv[i];
     }
 
-    // Project mode: default to src/main.ae when run inside a project.
-    if (!file && path_exists("aether.toml")) {
-        if (path_exists("src/main.ae")) {
-            file = "src/main.ae";
+    // Project mode: default to the manifest's src/main.ae when run inside a project.
+    static char project_main[1200];
+    if (!file && path_exists(ae_manifest_path())) {
+        if (path_exists(manifest_relative("src/main.ae", project_main, sizeof(project_main)))) {
+            file = manifest_relative("src/main.ae", project_main, sizeof(project_main));
         } else {
             fprintf(stderr, "Error: aether.toml found but src/main.ae is missing.\n");
             return 1;
@@ -5796,6 +5852,8 @@ static void emit_namespace_bindings(const char* manifest_path,
     strncpy(out_dir, lib_path, sizeof(out_dir) - 1);
     out_dir[sizeof(out_dir) - 1] = '\0';
     char* slash = strrchr(out_dir, '/');
+    char* bslash = strrchr(out_dir, '\\');   /* a Windows -o path */
+    if (bslash > slash) slash = bslash;
     if (slash) *slash = '\0';
     else strcpy(out_dir, ".");
 
@@ -6927,6 +6985,7 @@ static int cmd_build(int argc, char** argv) {
                      s_cache_dir, cache_key);
             if (path_exists(cached_exe)) {
                 if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
+                cache_touch(cached_exe);   /* least-recently-USED, for the cap */
                 if (copy_file(cached_exe, exe_file)) {
                     printf("Built (cache hit): %s\n", exe_file);
                     return 0;
@@ -7158,8 +7217,9 @@ static int cmd_build(int argc, char** argv) {
         } else if (cache_publish(cache_tmp, cached_exe) != 0) {
             remove(cache_tmp);
             if (tc.verbose) fprintf(stderr, "[cache] publish failed for %016llx\n", cache_key);
-        } else if (tc.verbose) {
-            fprintf(stderr, "[cache] wrote: %016llx\n", cache_key);
+        } else {
+            if (tc.verbose) fprintf(stderr, "[cache] wrote: %016llx\n", cache_key);
+            cache_enforce_limit(cached_exe, 0);
         }
     }
 
@@ -8571,53 +8631,40 @@ static int cmd_cache(int argc, char** argv) {
         return 0;
     }
 
-    // Default: show cache info
-#ifdef _WIN32
-    {
-        char pattern[600];
-        snprintf(pattern, sizeof(pattern), "%s\\*", cache_path);
-        WIN32_FIND_DATAA fd;
-        HANDLE h = FindFirstFileA(pattern, &fd);
-        if (h == INVALID_HANDLE_VALUE) {
-            printf("Cache: empty\nLocation: %s\n", cache_path);
-            return 0;
-        }
-        int count = 0;
-        long long total_bytes = 0;
-        do {
-            if (fd.cFileName[0] == '.') continue;
-            char full[1024];
-            snprintf(full, sizeof(full), "%s\\%s", cache_path, fd.cFileName);
-            struct stat st;
-            if (stat(full, &st) == 0) { total_bytes += st.st_size; count++; }
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
-        printf("Cache: %d build(s), %.1f MB\nLocation: %s\n",
-               count, (double)total_bytes / (1024.0 * 1024.0), cache_path);
+    if (strcmp(sub, "gc") == 0) {
+        /* Enforce the cap now, ignoring the ten-minute stamp. */
+        int removed = cache_enforce_limit(NULL, 1);
+        unsigned long long bytes = 0;
+        int slots = 0;
+        cache_usage(&bytes, &slots);
+        printf("Evicted %d build(s); cache now %d build(s), %.1f MB (limit %llu MB)\n",
+               removed, slots, (double)bytes / (1024.0 * 1024.0),
+               cache_max_bytes() / (1024ULL * 1024ULL));
+        return 0;
     }
-#else
-    {
-        DIR* d = opendir(cache_path);
-        if (!d) {
-            printf("Cache: empty\nLocation: %s\n", cache_path);
-            return 0;
-        }
-        int count = 0;
-        long long total_bytes = 0;
-        struct dirent* entry;
-        while ((entry = readdir(d)) != NULL) {
-            if (entry->d_name[0] == '.') continue;
-            char full[1024];
-            snprintf(full, sizeof(full), "%s/%s", cache_path, entry->d_name);
-            struct stat st;
-            if (stat(full, &st) == 0) { total_bytes += st.st_size; count++; }
-        }
-        closedir(d);
-        printf("Cache: %d build(s), %.1f MB\nLocation: %s\n",
-               count, (double)total_bytes / (1024.0 * 1024.0), cache_path);
+    if (strcmp(sub, "info") != 0) {
+        fprintf(stderr, "Usage: ae cache [info|gc|clear]\n");
+        return 1;
     }
-#endif
-    printf("Use 'ae cache clear' to free space.\n");
+
+    // Default: show cache info. The count and size are the cached builds
+    // (what the cap governs); depfiles and in-flight temps are not counted.
+    unsigned long long bytes = 0;
+    int slots = 0;
+    cache_usage(&bytes, &slots);
+    if (slots == 0) {
+        printf("Cache: empty\nLocation: %s\n", cache_path);
+    } else {
+        printf("Cache: %d build(s), %.1f MB\nLocation: %s\n",
+               slots, (double)bytes / (1024.0 * 1024.0), cache_path);
+    }
+    unsigned long long max = cache_max_bytes();
+    if (max == 0)
+        printf("Limit: unlimited (AETHER_CACHE_MAX_MB=0)\n");
+    else
+        printf("Limit: %llu MB (AETHER_CACHE_MAX_MB), least-recently-used builds are evicted past it\n",
+               max / (1024ULL * 1024ULL));
+    printf("Use 'ae cache gc' to enforce the limit now, 'ae cache clear' to empty it.\n");
     return 0;
 }
 
@@ -8762,7 +8809,7 @@ static void print_usage(void) {
     printf("  inspect [file.ae]    Show what a script declares (imports, capabilities, exports, decls)\n");
     printf("  test [file|dir]      Discover and run tests (--list, --format=tap|aeocha-v1)\n");
     printf("  add <package>        Add a dependency\n");
-    printf("  cache [clear]        Show or clear build cache\n");
+    printf("  cache [gc|clear]     Show, trim to its limit, or clear the build cache\n");
     printf("  cflags               Print -I/-L/-laether for embedding in external builds\n");
     printf("  checksec <binary>    Report the hardening a built artifact carries\n");
     printf("  lib-path             Print the resolved module-search chain\n");

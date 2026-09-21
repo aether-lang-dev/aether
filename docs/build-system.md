@@ -216,7 +216,9 @@ ae build myapp         # [[bin]] name = "myapp"
 
 When the positional argument doesn't exist as a file, `ae` checks `aether.toml`'s `[[bin]]` entries for a matching `name = "..."` and uses that bin's `path` field. Cargo and similar build systems work the same way.
 
-If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources`, `[build] defines`, `cflags` and `link_flags` declared in the toml are still applied. The paths *you* typed keep meaning what they meant where you typed them: a relative `--extra shim.c` and a relative `-o app` resolve against the directory you ran the command from, as `cc -o` does. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins. (`ae run`, `ae check` and `ae test` read the manifest in the current directory only — #2148.)
+If you run `ae build` from a subdirectory and there's no `aether.toml` in the current directory, `ae` walks up the directory tree looking for one. When it finds an ancestor `aether.toml`, it switches to that directory before resolving paths, so `cd src && ae build main.ae` works as if you had run `ae build src/main.ae` from the project root, and `extra_sources`, `[build] defines`, `cflags` and `link_flags` declared in the toml are still applied. The paths *you* typed keep meaning what they meant where you typed them: a relative `--extra shim.c` and a relative `-o app` resolve against the directory you ran the command from, as `cc -o` does. Walk-up only happens when there's no toml in the current directory; a project with a local `aether.toml` always wins, and the walk stops at a repository boundary (a `.git`), so a checkout with no manifest never adopts an unrelated ancestor's.
+
+`ae run`, `ae check`, `ae test` and `ae inspect` find the manifest the same way but do **not** change directory (#2148): under `ae run` the process cwd is also the cwd the program starts in, so a script reading `./data.txt` from `src/` keeps reading `src/data.txt`. They read the manifest where it is; a path the manifest states relative to itself — a `[[bin]] path`, an `extra_sources` entry, the project-mode `src/main.ae` — is resolved from the directory you ran the command in. `cflags` and `link_flags` are passed verbatim, so a relative `-I` in them is relative to wherever the compile runs (`ae build` runs it from the project root).
 
 ---
 
@@ -363,9 +365,20 @@ Both `ae run` and `ae build` cache compiled binaries in `~/.aether/cache/`. The 
 - First macOS run: an extra one-time pause while the OS performs its Gatekeeper check on the newly compiled binary. Subsequent runs of the same cached binary are hit-path.
 
 ```bash
-ae cache          # Show cache location and entry count
+ae cache          # Show cache location, entry count, size and limit
+ae cache gc       # Evict least-recently-used builds down to the limit, now
 ae cache clear    # Delete all cached builds
 ```
+
+**The cache is bounded.** `AETHER_CACHE_MAX_MB` caps it (default 5120; `0`
+means unlimited). A hit touches its slot, so eviction is by *least recently
+used*, not least recently built: when a publish takes the cache over the cap,
+the oldest-used builds are removed until it is under 90% of it. The scan runs
+at most once per ten minutes per cache directory (a `gc.stamp` file), and
+the build just published is never evicted, so one binary larger than the cap
+still runs. Depfiles (`*.deps`) are small and keyed by source path; they are
+neither counted nor evicted. Before this bound existed a machine that ran the
+test sweep accumulated 26,000 builds and 12.7 GB.
 
 Wasm builds, `--emit=lib`, and `--namespace` SDK generation skip the cache (different artefact shapes; each will get its own cache layout when measurement justifies it).
 

@@ -178,8 +178,10 @@ This is a Tier-1, text-based tool. Know what it does and doesn't do:
   real file in place, so if the driver is killed mid-run (Ctrl-C, OOM), the
   SUT is left mutated — recover with `git checkout <sut.ae>`. Run it on a
   clean working tree.
-- **POSIX-only.** The oracle shells out through `/bin/sh` and
-  `os.run_pipe_drain_and_wait`; Windows is not supported.
+- **Every mutant is a sub-process pair.** The oracle launches `ae check`,
+  `ae build` and the test binary argv-based through `std.os` (`os.run_full`,
+  no shell), so it runs the same on Windows; the probe binary and its
+  private build cache live under `os.temp_dir()`.
 
 ## The upgrade path (why this lives in the aether tree)
 

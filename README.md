@@ -152,6 +152,7 @@ ae examples [dir]        # Build all example programs
 ae add <host/user/repo>  # Add a dependency (any git host)
 ae repl                  # Start interactive REPL
 ae cache                 # Show build cache info
+ae cache gc              # Trim the cache to its limit (AETHER_CACHE_MAX_MB, default 5120)
 ae cache clear           # Clear the build cache
 ae inspect [file.ae]     # Show what a script declares (imports, capabilities, exports)
 ae bindgen consts <h>    # Import C macro constants from a header as Aether consts
