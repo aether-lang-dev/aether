@@ -31,7 +31,7 @@ main() {
     * Pt c = q
     if mem.ptr_to_long(c) != mem.ptr_to_long(p) {
         println("FAIL case 1: typed-pointer decl didn't round-trip")
-        return
+        return 1
     }
     println("  PASS case 1: line-leading *StructName name decl")
 
@@ -55,7 +55,7 @@ main() {
     got = mem.get_int(raw, 0)
     if got != 42 {
         println("FAIL case 2: deref-store got ${got}, want 42")
-        return
+        return 1
     }
     println("  PASS case 2: line-leading deref-store doesn't fold into previous expr")
 
@@ -67,7 +67,7 @@ main() {
     - b
     if a != 10 {
         println("FAIL case 3: line-led unary statement folded into previous expr; got ${a}, want 10")
-        return
+        return 1
     }
     println("  PASS case 3: line-leading unary statement doesn't fold")
 
@@ -77,7 +77,7 @@ main() {
     b
     if sum != 30 {
         println("FAIL case 4: trailing-operator continuation got ${sum}, want 30")
-        return
+        return 1
     }
     println("  PASS case 4: trailing-operator continuation preserved")
 

@@ -10,6 +10,7 @@ main() {
         println("PASS: 0..5 sum = 10")
     } else {
         println("FAIL: expected 10, got ${sum}")
+        return 1
     }
 
     // Variable bound
@@ -22,6 +23,7 @@ main() {
         println("PASS: variable bound n=4")
     } else {
         println("FAIL: expected 4, got ${count}")
+        return 1
     }
 
     // Nested loops
@@ -35,6 +37,7 @@ main() {
         println("PASS: nested 3x3 = 9")
     } else {
         println("FAIL: expected 9, got ${total}")
+        return 1
     }
 
     println("For-in loop tests passed!")

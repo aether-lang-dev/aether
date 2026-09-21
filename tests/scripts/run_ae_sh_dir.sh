@@ -37,11 +37,21 @@ for sh_test in $(find "$dir" -maxdepth 1 -name "test_*.sh" 2>/dev/null | sort); 
     sh_rc=$?
     if [ $sh_rc -eq 0 ]; then
         # A test that ran green but printed [SKIP-WIN] opted itself out on this
-        # platform; report it as skipped while still counting as a pass.
+        # platform, and one whose output is a [SKIP] line and no PASS at all
+        # (a host toolchain it needs is not installed) never ran its body:
+        # both are recorded as skips, so the summary line says how many tests
+        # did not run instead of folding them into the pass count (#2132). A
+        # driver that skips one CASE and passes the rest prints a PASS line
+        # and stays a pass.
         if grep -q "\[SKIP-WIN\]" "$tmpdir/run_$name.out" 2>/dev/null; then
             reason=$(grep "\[SKIP-WIN\]" "$tmpdir/run_$name.out" | head -1 | sed "s/^[[:space:]]*\[SKIP-WIN\][[:space:]]*//")
             echo "  [SKIP] $name — $reason"
-            touch "$tmpdir/PASS_$name"
+            touch "$tmpdir/SKIP_$name"
+        elif grep -q "^[[:space:]]*\[SKIP\]" "$tmpdir/run_$name.out" 2>/dev/null &&
+             ! grep -q "PASS" "$tmpdir/run_$name.out" 2>/dev/null; then
+            reason=$(grep "^[[:space:]]*\[SKIP\]" "$tmpdir/run_$name.out" | head -1 | sed "s/^[[:space:]]*\[SKIP\][[:space:]]*//")
+            echo "  [SKIP] $name — $reason"
+            touch "$tmpdir/SKIP_$name"
         else
             echo "  [PASS] $name"
             touch "$tmpdir/PASS_$name"

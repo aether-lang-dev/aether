@@ -76,28 +76,51 @@ TEST(pool_stress_alloc_free_cycles) {
 
 TEST(standard_pools_stress) {
     StandardPools* pools = standard_pools_create();
-    
+    ASSERT_NOT_NULL(pools);
+
+    /* The pools are bounded: each size class has the capacity
+     * standard_pools_create gave it, and pool_alloc returns NULL once a
+     * class is exhausted (that is the contract, not a failure). The old
+     * test tolerated NULL everywhere and so accepted an allocator that
+     * returned NULL for everything (#2132). Assert the contract instead:
+     * every allocation within a class's capacity succeeds, every one past
+     * it is NULL, and freeing returns every class to empty and usable. */
+    MemoryPool* by_class[6] = { pools->pool_8, pools->pool_16, pools->pool_32,
+                                pools->pool_64, pools->pool_128, pools->pool_256 };
+    size_t class_size[6] = { 8, 16, 32, 64, 128, 256 };
+    int handed_out[6] = { 0, 0, 0, 0, 0, 0 };
+
     void* ptrs[1000];
     size_t sizes[1000];
-    
+
     for (int i = 0; i < 1000; i++) {
-        sizes[i] = (i % 6) == 0 ? 8 :
-                   (i % 6) == 1 ? 16 :
-                   (i % 6) == 2 ? 32 :
-                   (i % 6) == 3 ? 64 :
-                   (i % 6) == 4 ? 128 : 256;
+        int cls = i % 6;
+        sizes[i] = class_size[cls];
         ptrs[i] = standard_pools_alloc(pools, sizes[i]);
-        if (ptrs[i]) {
+        if (handed_out[cls] < pool_get_capacity(by_class[cls])) {
+            ASSERT_NOT_NULL(ptrs[i]);
+            handed_out[cls]++;
             memset(ptrs[i], 0xAA, sizes[i]);
+        } else {
+            ASSERT_NULL(ptrs[i]);
         }
     }
-    
+    for (int c = 0; c < 6; c++) {
+        ASSERT_EQ(handed_out[c], pool_get_used(by_class[c]));
+    }
+
     for (int i = 0; i < 1000; i++) {
         if (ptrs[i]) {
             standard_pools_free(pools, ptrs[i], sizes[i]);
         }
     }
-    
+    for (int c = 0; c < 6; c++) {
+        ASSERT_EQ(0, pool_get_used(by_class[c]));
+        void* again = standard_pools_alloc(pools, class_size[c]);
+        ASSERT_NOT_NULL(again);
+        standard_pools_free(pools, again, class_size[c]);
+    }
+
     standard_pools_destroy(pools);
 }
 

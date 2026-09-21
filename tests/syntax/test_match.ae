@@ -4,10 +4,10 @@ main() {
     // Match as statement
     x = 2
     match x {
-        0 -> println("FAIL: should not match 0")
-        1 -> println("FAIL: should not match 1")
+        0 -> { println("FAIL: should not match 0"); return 1 }
+        1 -> { println("FAIL: should not match 1"); return 1 }
         2 -> println("PASS: statement match on 2")
-        _ -> println("FAIL: should not hit wildcard")
+        _ -> { println("FAIL: should not hit wildcard"); return 1 }
     }
 
     // Match as expression (int result)
@@ -22,6 +22,7 @@ main() {
         println("PASS: expression match int = 1")
     } else {
         println("FAIL: expected 1, got ${val}")
+        return 1
     }
 
     // Match as expression (string result)

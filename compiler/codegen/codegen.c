@@ -574,6 +574,24 @@ void register_fnptr_local(CodeGenerator* gen, const char* name, Type* sig) {
     gen->fnptr_local_count++;
 }
 
+/* #2130: the registry is per C function. It was never emptied, so a
+ * module function's `fn`-typed parameter named `run` stayed registered
+ * for the rest of the translation unit, and an unrelated program
+ * function `run(name, steps)` called later was emitted as a call through
+ * that parameter's type — `((void (*)(int, int, int, void*))&run)(..)` —
+ * which the C compiler rejected, or miscompiled when the arity happened
+ * to match. Called where a function, main or a receive handler starts;
+ * a closure keeps its enclosing function's entries (a captured
+ * fn-typed local is still called through its type inside the body). */
+void clear_fnptr_locals(CodeGenerator* gen) {
+    if (!gen) return;
+    for (int i = 0; i < gen->fnptr_local_count; i++) {
+        free(gen->fnptr_locals[i].name);
+        gen->fnptr_locals[i].name = NULL;
+    }
+    gen->fnptr_local_count = 0;
+}
+
 /* Look up an fn-pointer local by name.  Returns the TYPE_FUNCTION
  * signature (with is_fnptr=1) or NULL if not registered. */
 Type* lookup_fnptr_local(CodeGenerator* gen, const char* name) {
@@ -3878,6 +3896,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     print_line(gen, "int main(int argc, char** argv) {");
     indent(gen);
     clear_declared_vars(gen);  // Reset for main function
+    clear_fnptr_locals(gen);
     clear_heap_string_vars(gen);
     clear_seq_vars(gen);
     clear_opt_str_vars(gen);

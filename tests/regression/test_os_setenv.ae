@@ -10,25 +10,25 @@ main() {
     err = os.setenv("AE_REGRESSION_342", "found")
     if err != "" {
         println("FAIL setenv: ${err}")
-        return
+        return 1
     }
 
     val = os.getenv("AE_REGRESSION_342")
     if val != "found" {
         println("FAIL: getenv returned wrong value")
-        return
+        return 1
     }
 
     err2 = os.unsetenv("AE_REGRESSION_342")
     if err2 != "" {
         println("FAIL unsetenv: ${err2}")
-        return
+        return 1
     }
 
     val2 = os.getenv("AE_REGRESSION_342")
     if val2 != null {
         println("FAIL: variable still set after unsetenv")
-        return
+        return 1
     }
 
     println("PASS")

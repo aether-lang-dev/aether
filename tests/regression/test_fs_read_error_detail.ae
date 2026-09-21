@@ -144,5 +144,6 @@ main() {
         println("All PASS")
     } else {
         println("${fails} FAILURE(S)")
+        return 1
     }
 }

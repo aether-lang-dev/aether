@@ -14,34 +14,33 @@ main() {
     a = arena.create(0)
     if a == null {
         println("FAIL: arena.create returned null")
-        return
+        return 1
     }
     defer arena.destroy(a)
 
     initial_used = arena.used(a)
     if initial_used != 0 {
         println("FAIL: fresh arena has nonzero used")
-        return
+        return 1
     }
 
     // alloc bumps the used counter
     p1 = arena.alloc(a, 1024)
     if p1 == null {
         println("FAIL: arena.alloc returned null")
-        return
+        return 1
     }
 
     p2 = arena.alloc(a, 4096)
     if p2 == null {
         println("FAIL: arena.alloc(4096) returned null")
-        return
+        return 1
     }
 
     after_alloc = arena.used(a)
     if after_alloc != 5120 {
-        println("FAIL: expected 5120 used, got")
-        println(after_alloc)
-        return
+        println("FAIL: expected 5120 used, got ${after_alloc}")
+        return 1
     }
 
     // reset returns to zero without destroying the block
@@ -49,21 +48,21 @@ main() {
     after_reset = arena.used(a)
     if after_reset != 0 {
         println("FAIL: reset didn't return used to zero")
-        return
+        return 1
     }
 
     // Reuse after reset works
     p3 = arena.alloc(a, 256)
     if p3 == null {
         println("FAIL: alloc after reset returned null")
-        return
+        return 1
     }
 
     // Aligned alloc
     p4 = arena.alloc_aligned(a, 64, 16)
     if p4 == null {
         println("FAIL: alloc_aligned returned null")
-        return
+        return 1
     }
 
     println("PASS")

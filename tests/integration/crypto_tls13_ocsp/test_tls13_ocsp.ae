@@ -98,5 +98,5 @@ main() {
     bytes.free(issuer_der); bytes.free(resp_der); bytes.free(tamp_der); bytes.free(wrong_der)
 
     if total_ok == 1 { println("tls13_ocsp: all checks pass") }
-    else { println("tls13_ocsp: FAILURES") }
+    else { println("tls13_ocsp: FAILURES"); return 1 }
 }

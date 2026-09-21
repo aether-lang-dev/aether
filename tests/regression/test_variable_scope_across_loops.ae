@@ -58,6 +58,7 @@ main() {
         println("PASS: variable visible across while blocks in function")
     } else {
         println("FAIL: got: ${result}")
+        return 1
     }
 
     println("=== ALL DONE ===")

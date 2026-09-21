@@ -211,5 +211,12 @@ tests/integration/zlib_roundtrip/
 tests/integration/condition_continuation_pipe/
 tests/integration/self_shadowing_import/
 tests/integration/tuple_through_fn/
-tests/integration/crypto_tls13_server_hs/
 tests/integration/many_namespaces_qualified_call/
+# Server halves of shell-driven tests: each binds a port, prints READY and
+# sleeps 60 s waiting for the client its test_*.sh attaches. Run standalone
+# by the sweep they proved nothing and cost 300 worker-seconds (#2132).
+tests/integration/http_handler_user_data/
+tests/integration/http_query_param_multi/
+tests/integration/http_serve_static_range/
+tests/integration/http_server_h2/
+tests/integration/http_sse_upgrade/
