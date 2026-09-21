@@ -112,7 +112,7 @@ TAG_PC_CONSTRUCTED() -> int { return 0x20 }
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 
-struct Reader {
+struct Asn1Reader {
     buf: ptr // std.bytes (NOT owned — caller frees)
     pos: int
     len: int
@@ -123,7 +123,7 @@ struct Reader {
 }
 
 reader_new(b: ptr) -> ptr {
-    r = malloc(sizeof(Reader)) as *Reader
+    r = malloc(sizeof(Asn1Reader)) as *Asn1Reader
     r.buf = b
     r.pos = 0
     r.len = bytes.length(b)
@@ -140,13 +140,13 @@ reader_free(r: ptr) {
 }
 
 reader_eof(r: ptr) -> int {
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     if rr.pos >= rr.len { return 1 }
     return 0
 }
 
 reader_remaining(r: ptr) -> int {
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     return rr.len - rr.pos
 }
 
@@ -169,7 +169,7 @@ read_tlv(r: ptr) -> (ptr, string) {
     // heap-string-tracker gap noted above). read_tlv is on every reader's hot
     // path, so this 1-byte-per-call leak is what the macOS leaks(1) gate flags.
     ok = ""
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     if rr.pos >= rr.len {
         return null, "asn1: unexpected end of input (tag)"
     }
@@ -294,7 +294,7 @@ read_tlv(r: ptr) -> (ptr, string) {
 
 // Tag of the most recently read TLV (-1 if none read yet).
 last_tag(r: ptr) -> int {
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     return rr.last_tag
 }
 
@@ -303,7 +303,7 @@ last_tag(r: ptr) -> int {
 // TLV — needed to recover the precise DER of, e.g., tbsCertificate for
 // signature verification.
 reader_pos(r: ptr) -> int {
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     return rr.pos
 }
 
@@ -313,7 +313,7 @@ read_tagged(r: ptr, want_tag: int) -> (ptr, string) {
     if string.equals(err, "") != 1 {
         return null, err
     }
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     if rr.last_tag != want_tag {
         bytes.free(content)
         return null, "asn1: unexpected tag"
@@ -1041,10 +1041,10 @@ encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: ptr) -
     // Implicit tagging replaces the outer tag
     // Since we now support high tag number form, we must replace the outer tag completely.
     // To do this, let's find where the outer tag ends and length begins.
-    // Let's create a Reader over the content to see where it ends.
+    // Let's create a Asn1Reader over the content to see where it ends.
     // But since `content` is already a full TLV, we can parse its tag to see how many bytes it takes.
     r = reader_new(content)
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     // Read tag (this advances rr.pos)
     first_byte = bytes.get(content, rr.pos) & 0xFF
     rr.pos = rr.pos + 1
@@ -1097,7 +1097,7 @@ encode_tagged(is_explicit: int, tag_class: int, tag_number: int, content: ptr) -
 // Wait, for implicit tagging, how can we parser-unwrap?
 // If implicit, we just return the raw contents of the TLV directly.
 read_tagged_ext(r: ptr, is_explicit: int, want_class: int, want_number: int) -> (ptr, string) {
-    rr = r as *Reader
+    rr = r as *Asn1Reader
     content, err = read_tlv(r)
     if string.equals(err, "") != 1 {
         return null, err

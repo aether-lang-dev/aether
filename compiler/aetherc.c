@@ -1401,6 +1401,19 @@ int compile_source(const char* input_path, const char* output_path) {
 
     // Step 2.6: Merge pure Aether module functions into program AST
     module_merge_into_program(program);
+    /* The merge reports a struct defined differently in two modules
+     * (#2129). Nothing downstream re-checks the count before codegen, so
+     * without this gate a clash whose losing side the pruner happened to
+     * drop still compiled and ran. */
+    if (aether_error_count() > 0) {
+        report_compilation_failure(input_path);
+        module_registry_shutdown();
+        free_ast_node(program);
+        free_tokens(tokens, token_count);
+        free_parser(parser);
+        free(source);
+        return 0;
+    }
 
     // Step 2.65: Tree-shake imported functions the program never calls.
     // Reduces typecheck and gcc compile time on programs that only use

@@ -4732,9 +4732,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                     }
 
-                    // spawn_ActorName(preferred_core) — pass core hint or -1
+                    // spawn_ActorName(preferred_core) — pass core hint or -1.
+                    // Only the generated actor spawner: a user function or
+                    // an extern that merely starts with `spawn_` is an
+                    // ordinary call (#2126 — `spawn_once(1, 2, p)` was
+                    // emitted as `spawn_once(1)`, the rest dropped without
+                    // a word, and the C compiler complained).
                     if (strncmp(func_name, "spawn_", 6) == 0 &&
-                        strcmp(func_name, "spawn_sandboxed") != 0) {
+                        strcmp(func_name, "spawn_sandboxed") != 0 &&
+                        !(gen->program && find_function_definition_by_name(gen->program, func_name)) &&
+                        !is_extern_func(gen, func_name)) {
                         fprintf(gen->output, "%s(", c_func_name);
                         if (expr->child_count > 0 && expr->children[0]) {
                             generate_expression(gen, expr->children[0]);

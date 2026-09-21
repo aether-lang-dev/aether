@@ -27,7 +27,7 @@ struct Pattern {
     nodes: ptr // *List of *Node
 }
 
-struct Parser {
+struct MessageParser {
     msg: string
     len: int
     pos: int
@@ -44,7 +44,7 @@ struct MessageMapKeys {
     count: int
 }
 
-fn skip_ws(p: *Parser) {
+fn skip_ws(p: *MessageParser) {
     while p.pos < p.len {
         c = string_char_at(p.msg, p.pos)
         if c == 32 || c == 9 || c == 10 || c == 13 {
@@ -99,7 +99,7 @@ fn pattern_free(pat_ptr: ptr) {
     heap.free(pat)
 }
 
-fn parse_literal(p: *Parser) -> *Node {
+fn parse_literal(p: *MessageParser) -> *Node {
     b = strbuilder.new(32)
     defer catch strbuilder.free(b)
 
@@ -165,7 +165,7 @@ fn parse_literal(p: *Parser) -> *Node {
     return n
 }
 
-fn parse_pattern_err(p: *Parser) -> (ptr, string) {
+fn parse_pattern_err(p: *MessageParser) -> (ptr, string) {
     nodes = list_new()
     while p.pos < p.len {
         c = string_char_at(p.msg, p.pos)
@@ -201,7 +201,7 @@ fn parse_pattern_err(p: *Parser) -> (ptr, string) {
     return nodes, ""
 }
 
-fn parse_block(p: *Parser) -> (ptr, string) {
+fn parse_block(p: *MessageParser) -> (ptr, string) {
     if p.pos >= p.len || string_char_at(p.msg, p.pos) != 123 {
         return null, "expected '{'"
     }
@@ -390,7 +390,7 @@ fn parse_block(p: *Parser) -> (ptr, string) {
 }
 
 fn parse(msg: string) -> (ptr, string) {
-    p = heap.new(Parser)
+    p = heap.new(MessageParser)
     p.msg = msg
     p.len = string_length(msg)
     p.pos = 0

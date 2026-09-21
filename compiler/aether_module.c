@@ -2036,6 +2036,85 @@ static int program_has_fault_member(ASTNode* program, const char* prefixed_name)
 // consumer imports a module that exposes one. Imported structs share the
 // consumer's struct namespace (no `<ns>_` prefix) — see the design rationale
 // at the merge site.
+static ASTNode* program_find_struct(ASTNode* program, const char* name) {
+    if (!program || !name) return NULL;
+    for (int m = 0; m < program->child_count; m++) {
+        ASTNode* existing = program->children[m];
+        if (!existing) continue;
+        ASTNode* unwrapped = unwrap_export(existing);
+        if (unwrapped && unwrapped->type == AST_STRUCT_DEFINITION &&
+            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
+            return unwrapped;
+        }
+    }
+    return NULL;
+}
+
+/* Two struct definitions are the same type when their fields agree one
+ * for one: kind of field node, name, type, bit width and annotation
+ * (`using`). Struct-typed fields compare by name, as the language does;
+ * a differing nested struct is reported when IT is merged. */
+static int struct_defs_equal(ASTNode* a, ASTNode* b) {
+    if (!a || !b) return a == b;
+    if (a->child_count != b->child_count) return 0;
+    for (int i = 0; i < a->child_count; i++) {
+        ASTNode* fa = a->children[i];
+        ASTNode* fb = b->children[i];
+        if (!fa || !fb) return fa == fb;
+        if (fa->type != fb->type) return 0;
+        if ((fa->value == NULL) != (fb->value == NULL)) return 0;
+        if (fa->value && strcmp(fa->value, fb->value) != 0) return 0;
+        if ((fa->annotation == NULL) != (fb->annotation == NULL)) return 0;
+        if (fa->annotation && strcmp(fa->annotation, fb->annotation) != 0) return 0;
+        if (fa->bit_width != fb->bit_width) return 0;
+        if (!types_equal(fa->node_type, fb->node_type)) return 0;
+        if (!struct_defs_equal(fa, fb)) return 0;   /* nested / union fields */
+    }
+    return 1;
+}
+
+/* Render a definition's field list for a diagnostic: `{v: Vec3, s: float}`. */
+static void struct_fields_summary(ASTNode* def, char* out, size_t size) {
+    size_t off = 0;
+    off += (size_t)snprintf(out + off, size - off, "{");
+    for (int i = 0; i < def->child_count && off + 4 < size; i++) {
+        ASTNode* f = def->children[i];
+        if (!f) continue;
+        const char* tn = f->node_type ? type_to_string(f->node_type) : "?";
+        if (strncmp(tn, "struct ", 7) == 0) tn += 7;
+        off += (size_t)snprintf(out + off, size - off, "%s%s: %s",
+                                i ? ", " : "", f->value ? f->value : "?", tn);
+    }
+    if (off + 2 < size) snprintf(out + off, size - off, "}");
+    else { out[size - 4] = '.'; out[size - 3] = '.'; out[size - 2] = '}'; out[size - 1] = 0; }
+}
+
+/* #2129: struct names are one namespace across modules, and the merge
+ * keeps the first definition it saw. Two modules defining one name the
+ * same way share the type; two DIFFERENT definitions used to merge
+ * silently, and the loser's own code then failed in the typechecker
+ * ("Struct 'Quat' has no field 's'") or the C compiler — the first the
+ * author heard of it. Returns 1 when `decl` is a clash (reported) or a
+ * duplicate to skip; 0 when the struct is new to the program. */
+static int struct_already_merged(ASTNode* program, ASTNode* decl) {
+    ASTNode* existing = program_find_struct(program, decl->value);
+    if (!existing) return 0;
+    if (struct_defs_equal(existing, decl)) return 1;
+    char have[256], want[256], msg[900];
+    struct_fields_summary(existing, have, sizeof(have));
+    struct_fields_summary(decl, want, sizeof(want));
+    snprintf(msg, sizeof(msg),
+             "struct '%s' is defined differently in two modules: %s in %s and %s in %s. "
+             "Struct names are one namespace across modules, so both would share "
+             "one layout; rename one of them (or make the definitions identical)",
+             decl->value, want, decl->source_file ? decl->source_file : "<module>",
+             have, existing->source_file ? existing->source_file : "<program>");
+    AetherError e = { decl->source_file, NULL, decl->line, decl->column, msg, NULL, NULL,
+                      AETHER_ERR_TYPE_MISMATCH };
+    aether_error_report(&e);
+    return 1;
+}
+
 static int program_has_struct(ASTNode* program, const char* name) {
     if (!program || !name) return 0;
     for (int m = 0; m < program->child_count; m++) {
@@ -2707,10 +2786,10 @@ void module_merge_into_program(ASTNode* program) {
                 // `import handle (new_slot)` must pull in `Slot`.
                 //
                 // Dedup by name. If the consumer already has a struct
-                // with the same name (its own, or an earlier merge),
-                // we skip — name clashes between modules are out of
-                // scope here; the C compiler will surface them downstream.
-                if (program_has_struct(program, decl->value)) continue;
+                // with the same name (its own, or an earlier merge) and
+                // the same fields, it is one type and we skip; a
+                // different definition is a clash, reported (#2129).
+                if (struct_already_merged(program, decl)) continue;
 
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
@@ -3093,7 +3172,7 @@ void module_merge_into_program(ASTNode* program) {
                     // BFS. A merged function body that casts to `*T` needs
                     // T in scope regardless of which import edge brought
                     // the function in.
-                    if (program_has_struct(program, decl->value)) continue;
+                    if (struct_already_merged(program, decl)) continue;
 
                     ASTNode* clone = clone_ast_node(decl);
                     clone->is_imported = 1;

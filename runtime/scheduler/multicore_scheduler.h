@@ -150,10 +150,16 @@ typedef struct {
     ActorBase** actors;
     int actor_count;
     int capacity;
-    // Per-sender SPSC channels: from_queues[src] is written ONLY by core src
-    // (or by the main thread when src == MAX_CORES).  Each channel is a true
-    // SPSC queue, so no CAS or locks are needed on the producer side.
+    // Per-sender SPSC channels: from_queues[src] is written ONLY by core src.
+    // Each channel is a true SPSC queue, so no CAS or locks are needed on the
+    // producer side. from_queues[MAX_CORES] is the channel for every thread
+    // that is NOT a scheduler core — the main thread, a std.http pool worker,
+    // a std.worker thread, a C library's callback thread — and those are many
+    // producers, serialized by `foreign_lock` so the channel still has one
+    // producer at a time (#2083: a pool-thread `!` raced the main thread on
+    // this slot and the message was silently lost).
     LockFreeQueue from_queues[MAX_CORES + 1];
+    pthread_mutex_t foreign_lock;
     atomic_int running;
     atomic_int work_count;  // Approximate in-flight message count (used for load reporting)
     atomic_int steal_attempts;  // Cumulative count of successful work-steal operations
@@ -204,6 +210,21 @@ void scheduler_init_with_opts(int cores, AetherOptFlags opts);
 
 void scheduler_start(void);
 void scheduler_ensure_threads_running(void);  // Start threads if not already started (for main-thread mode transition)
+
+/* Main-thread mode is "one actor, every send from the thread running
+ * main()": that thread steps the actor inline at each send. A send from
+ * any other thread cannot join in — stepping the same actor from two
+ * threads is the data race #2083's second symptom (heap corruption) —
+ * so the runtime leaves the mode exactly as spawning a second actor
+ * does, and the send goes through the scheduler. */
+int  aether_on_main_mode_thread(void);
+void aether_leave_main_thread_mode(void);
+/* The inline (main-thread-mode) step holds the actor's step_lock, and a
+ * handler that sends to its own actor steps again on the same thread:
+ * acquire returns 0 when this thread already holds the lock (nothing to
+ * release), 1 when it took it. */
+int  aether_inline_lock_acquire(ActorBase* actor);
+void aether_inline_lock_release(ActorBase* actor);
 void scheduler_stop(void);
 void scheduler_wait(void);      // Wait for quiescence (all pending messages processed). Non-destructive.
 void scheduler_shutdown(void);  // Wait + stop + join threads. Call once at program exit.

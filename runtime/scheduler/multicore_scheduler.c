@@ -104,6 +104,48 @@ static void reply_slot_decref(ActorReplySlot* slot);
 // We use a function rather than a macro so the 8 step() sites stay
 // readable; `inline` lets the compiler devirtualize where it can.
 // --------------------------------------------------------------------------
+/* The thread that put the runtime into main-thread mode. */
+static aether_tid_t g_main_mode_thread;
+static atomic_int g_main_mode_thread_set = 0;
+
+int aether_on_main_mode_thread(void) {
+    if (!atomic_load_explicit(&g_main_mode_thread_set, memory_order_acquire)) return 1;
+    return aether_tid_equal(aether_tid_self(), g_main_mode_thread);
+}
+
+void aether_leave_main_thread_mode(void) {
+    ActorBase* main_actor = (ActorBase*)g_aether_config.main_actor;
+    atomic_store_explicit(&g_aether_config.main_thread_mode, false, memory_order_release);
+    g_aether_config.main_actor = NULL;
+    /* The inline step paths hold the actor's step_lock while they step,
+     * so clearing main_thread_only cannot let a scheduler thread step the
+     * actor concurrently with a step still on the main thread's stack. */
+    if (main_actor) atomic_store_explicit(&main_actor->main_thread_only, 0, memory_order_release);
+    scheduler_ensure_threads_running();
+}
+
+/* The actor whose step_lock THIS thread holds for an inline step. A
+ * handler that sends to its own actor (`self ! Tick {}`) steps again on
+ * the same thread, and step_lock is not recursive: the owner check is
+ * what keeps that from spinning on its own lock. */
+static AETHER_TLS ActorBase* g_inline_lock_owner = NULL;
+
+int aether_inline_lock_acquire(ActorBase* actor) {
+    if (g_inline_lock_owner == actor) return 0;
+    while (atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) AETHER_PAUSE();
+    g_inline_lock_owner = actor;
+    return 1;
+}
+
+void aether_inline_lock_release(ActorBase* actor) {
+    g_inline_lock_owner = NULL;
+    atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
+}
+
+/* Inline (main-thread-mode) step: hold step_lock across it so the switch
+ * out of the mode by another thread is safe. */
+static inline void aether_step_inline(ActorBase* actor);
+
 static inline void aether_step_safe(ActorBase* actor) {
     if (!actor || !actor->step) return;
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) return;
@@ -160,6 +202,12 @@ static inline void aether_step_safe(ActorBase* actor) {
     // proceed without contention. (step_lock is a TAS lock; we clear it.)
     atomic_flag_clear_explicit(&actor->step_lock, memory_order_release);
     aether_fire_death_hook(actor->id, reason);
+}
+
+static inline void aether_step_inline(ActorBase* actor) {
+    int locked = aether_inline_lock_acquire(actor);
+    aether_step_safe(actor);
+    if (locked) aether_inline_lock_release(actor);
 }
 
 /* Layout assertions to catch struct padding/size mismatches between
@@ -1130,6 +1178,7 @@ void scheduler_init(int cores) {
 
         pthread_mutex_init(&schedulers[i].park_mutex, NULL);
         pthread_cond_init(&schedulers[i].park_cond, NULL);
+        pthread_mutex_init(&schedulers[i].foreign_lock, NULL);
         atomic_store_explicit(&schedulers[i].parked, 0, memory_order_relaxed);
     }
 }
@@ -1729,12 +1778,17 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         return;
     }
     // INLINE MODE: For single-actor programs, process synchronously on the main thread.
-    // scheduler_send_batch_add has the same check; keep them in sync.
+    // scheduler_send_batch_add has the same check; keep them in sync. A
+    // thread other than main leaves the mode instead and sends through
+    // the scheduler (#2083).
     if (unlikely(aether_main_thread_mode_active())) {
-        mailbox_send(&actor->mailbox, msg);
-        aether_step_safe(actor);
-        AETHER_STAT_INC(inline_sends);
-        return;
+        if (aether_on_main_mode_thread()) {
+            mailbox_send(&actor->mailbox, msg);
+            aether_step_inline(actor);
+            AETHER_STAT_INC(inline_sends);
+            return;
+        }
+        aether_leave_main_thread_mode();
     }
 
     // Per-core sent counter - no atomic contention on hot path!
@@ -1793,6 +1847,28 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     // Enqueue to target core's per-sender SPSC channel (SPSC: only current_core_id writes here).
     int from_idx = (current_core_id >= 0 && current_core_id < MAX_CORES) ? current_core_id : MAX_CORES;
 
+    // Not a scheduler thread: the main thread, or a foreign C thread (a
+    // std.http pool worker, a std.worker thread, a library callback). They
+    // all share the [MAX_CORES] channel, whose SPSC producer side tolerates
+    // exactly one writer, so they take the channel's lock and enqueue under
+    // it (#2083: two such threads writing the slot at once lost messages
+    // with no diagnostic). Spinning here is safe — none of these threads
+    // drains from_queues, so it cannot be part of a circular wait — and a
+    // foreign thread has no TLS overflow buffer anyone would ever flush.
+    if (from_idx == MAX_CORES) {
+        pthread_mutex_lock(&schedulers[target_core].foreign_lock);
+        int retries = 0;
+        while (!queue_enqueue(&schedulers[target_core].from_queues[MAX_CORES], actor, msg)) {
+            if (++retries % 1000 == 0) aether_sched_yield();
+            AETHER_PAUSE();
+        }
+        pthread_mutex_unlock(&schedulers[target_core].foreign_lock);
+        atomic_fetch_add_explicit(&schedulers[target_core].work_count, 1, memory_order_relaxed);
+        sched_wake(&schedulers[target_core]);
+        AETHER_STAT_INC(queue_sends);
+        return;
+    }
+
     // Ordering invariant: if any messages are already pending for this target core,
     // we must defer this one too — otherwise it would arrive before the pending ones.
     if (from_core >= 0 && unlikely(tls_overflow[target_core].count > 0)) {
@@ -1814,23 +1890,10 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         AETHER_PAUSE();
     }
 
-    // Queue still full after bounded retry.
-    // Scheduler thread: defer to overflow and return — never block the loop.
-    if (from_core >= 0) {
-        overflow_append(target_core, actor, msg);
-        AETHER_STAT_INC(queue_sends);
-        return;
-    }
-
-    // Main thread (from_core < 0): original spin-retry is safe here because the
-    // main thread does not drain from_queues, so it cannot be part of a circular wait.
-    int retries = 0;
-    while (!queue_enqueue(&schedulers[target_core].from_queues[from_idx], actor, msg)) {
-        if (++retries % 1000 == 0) aether_sched_yield();
-        AETHER_PAUSE();
-    }
-    atomic_fetch_add_explicit(&schedulers[target_core].work_count, 1, memory_order_relaxed);
-    sched_wake(&schedulers[target_core]);
+    // Queue still full after bounded retry. This is a scheduler thread (the
+    // non-scheduler producers returned above): defer to overflow and return —
+    // never block the loop.
+    overflow_append(target_core, actor, msg);
     AETHER_STAT_INC(queue_sends);
 }
 
@@ -1868,10 +1931,13 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     // FAST PATH: Single-actor programs bypass batching entirely
     // Main Thread Mode = synchronous processing, zero queue overhead
     if (aether_main_thread_mode_active()) {
-        mailbox_send(&actor->mailbox, msg);
-        aether_step_safe(actor);
-        AETHER_STAT_INC(inline_sends);
-        return;
+        if (aether_on_main_mode_thread()) {
+            mailbox_send(&actor->mailbox, msg);
+            aether_step_inline(actor);
+            AETHER_STAT_INC(inline_sends);
+            return;
+        }
+        aether_leave_main_thread_mode();
     }
 
     // BATCH PATH: Multi-actor fan-out optimization
@@ -1950,13 +2016,17 @@ void scheduler_send_batch_flush(void) {
         if (cnt == 0) continue;
 
         // Batch send is always called from main thread (current_core_id = -1),
-        // so use the main-thread SPSC channel (from_queues[MAX_CORES]).
+        // so use the non-scheduler SPSC channel (from_queues[MAX_CORES]) —
+        // under its lock, since a foreign thread may be writing it too
+        // (#2083).
+        pthread_mutex_lock(&schedulers[c].foreign_lock);
         int enqueued = queue_enqueue_batch(
             &schedulers[c].from_queues[MAX_CORES],
             &sorted_actors[start],
             &sorted_msgs[start],
             cnt
         );
+        pthread_mutex_unlock(&schedulers[c].foreign_lock);
 
         // Fallback for overflow (rare) - scheduler_send_remote handles its own counting
         for (int j = enqueued; j < cnt; j++) {
@@ -2022,6 +2092,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     if (prev_count == 0 && !atomic_load(&g_aether_config.inline_mode_disabled)) {
         // First actor: enable main thread mode for synchronous processing
         aether_enable_main_thread_mode(actor);
+        g_main_mode_thread = aether_tid_self();
+        atomic_store_explicit(&g_main_mode_thread_set, 1, memory_order_release);
         atomic_store_explicit(&actor->main_thread_only, 1, memory_order_release);
     } else if (prev_count == 1 && prev_main_actor != NULL) {
         // Second actor: disable main thread mode on the first actor so scheduler
