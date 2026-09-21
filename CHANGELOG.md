@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.704.0]
+
 ### Added
 
 - **`f32`, a 32-bit float value type (#2134).** C's `float`, the number a
