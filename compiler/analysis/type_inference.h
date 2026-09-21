@@ -21,6 +21,7 @@ typedef struct InferenceContext {
     int constraint_capacity;
     SymbolTable* symbols;
     int iteration_count;
+    ASTNode* scope_owner;   // the function / main / closure body being walked (#2124)
 } InferenceContext;
 
 // Main API

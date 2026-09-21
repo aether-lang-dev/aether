@@ -260,6 +260,7 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symbol->node = NULL;  // Initialize to NULL
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
+    symbol->inferred_in = NULL;
     symtab_link(table, symbol);
 }
 
@@ -361,6 +362,7 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
     symbol->node = NULL;
     symbol->type_inferred = 0;
     symbol->width_explicit = 0;
+    symbol->inferred_in = NULL;
     symtab_link(table, symbol);
 }
 
@@ -6448,7 +6450,77 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 ASTNode* rhs = stmt->children[1];
                 typecheck_expression(rhs, table);
-                { Type* _t = infer_type(rhs, table); free_type(_t); }
+                Type* rhs_type = infer_type(rhs, table);
+                if (rhs_type && (!rhs->node_type || rhs->node_type->kind == TYPE_UNKNOWN)) {
+                    set_node_type(rhs, clone_type(rhs_type));
+                }
+                /* `x op= rhs` is `x = x op rhs` and is checked as that: the
+                 * operator must be defined for the operand types (`s += "b"`
+                 * on strings used to reach the C compiler as an invalid
+                 * pointer addition) and the result must fit `x` — into an
+                 * INFERRED int, a float, a 64-bit or a uint32 result is the
+                 * #698 narrowing error, exactly as `x = x + rhs` is
+                 * (`x = 0` then `x += 2.5` silently stored 2). */
+                const char* opstr = stmt->children[0] ? stmt->children[0]->value : NULL;
+                if (opstr && symbol->type && symbol->type->kind != TYPE_UNKNOWN &&
+                    rhs_type && rhs_type->kind != TYPE_UNKNOWN) {
+                    char base[8];
+                    snprintf(base, sizeof(base), "%.*s", (int)strlen(opstr) - 1, opstr);
+                    AeTokenType op = get_token_type_from_string(base);
+                    ASTNode lhs = { 0 };
+                    lhs.type = AST_IDENTIFIER;
+                    lhs.value = stmt->value;
+                    lhs.node_type = symbol->type;
+                    lhs.line = stmt->line;
+                    lhs.column = stmt->column;
+                    Type* result = infer_binary_type(&lhs, rhs, op);
+                    int result_ok = result && result->kind != TYPE_UNKNOWN;
+                    if (op == TOKEN_PLUS && symbol->type->kind == TYPE_STRING &&
+                        rhs_type->kind == TYPE_STRING) {
+                        type_error("'+=' is not defined for strings, use \"${a}${b}\" interpolation "
+                                   "or string.concat(a, b)", stmt->line, stmt->column);
+                        if (result) free_type(result);
+                        free_type(rhs_type);
+                        return 0;
+                    }
+                    if (!result_ok) {
+                        char emsg[300];
+                        snprintf(emsg, sizeof(emsg),
+                                 "'%s' is not defined for %s and %s",
+                                 opstr, type_name(symbol->type), type_name(rhs_type));
+                        type_error(emsg, stmt->line, stmt->column);
+                        if (result) free_type(result);
+                        free_type(rhs_type);
+                        return 0;
+                    }
+                    if (symbol->type_inferred && symbol->type->kind == TYPE_INT &&
+                        (result->kind == TYPE_INT64 || result->kind == TYPE_UINT64 ||
+                         result->kind == TYPE_UINT32 || result->kind == TYPE_FLOAT ||
+                         result->kind == TYPE_LONGDOUBLE)) {
+                        char msg[420];
+                        narrowing_message(msg, sizeof(msg), stmt->value, result->kind);
+                        type_error(msg, stmt->line, stmt->column);
+                        free_type(result);
+                        free_type(rhs_type);
+                        return 0;
+                    }
+                    if (!is_assignable(result, symbol->type)) {
+                        char emsg[300];
+                        const char* rn = result->distinct_name ? result->distinct_name : type_name(result);
+                        const char* sn = symbol->type->distinct_name ? symbol->type->distinct_name
+                                                                     : type_name(symbol->type);
+                        snprintf(emsg, sizeof(emsg),
+                                 "Type mismatch in '%s': the result is %s but '%s' is %s%s",
+                                 opstr, rn, stmt->value, sn,
+                                 symbol->type->distinct_name ? " (a distinct type; convert with `as`)" : "");
+                        type_error(emsg, stmt->line, stmt->column);
+                        free_type(result);
+                        free_type(rhs_type);
+                        return 0;
+                    }
+                    free_type(result);
+                }
+                free_type(rhs_type);
                 if (stmt->node_type && stmt->node_type->kind == TYPE_UNKNOWN && symbol->type) {
                     free_type(stmt->node_type);
                     stmt->node_type = clone_type(symbol->type);

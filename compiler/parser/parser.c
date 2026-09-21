@@ -1130,6 +1130,37 @@ ASTNode* parse_closure_expression(Parser* parser) {
 static ASTNode* parse_expression_inner(Parser* parser);
 static ASTNode* parse_unary_expression_inner(Parser* parser);
 static ASTNode* parse_statement_inner(Parser* parser);
+
+/* The compound-assignment operators (`+=` ... `>>=`). */
+static int token_is_compound_assign(Token* t) {
+    if (!t) return 0;
+    switch (t->type) {
+        case TOKEN_PLUS_ASSIGN: case TOKEN_MINUS_ASSIGN: case TOKEN_MULTIPLY_ASSIGN:
+        case TOKEN_DIVIDE_ASSIGN: case TOKEN_MODULO_ASSIGN: case TOKEN_AND_ASSIGN:
+        case TOKEN_OR_ASSIGN: case TOKEN_XOR_ASSIGN: case TOKEN_LSHIFT_ASSIGN:
+        case TOKEN_RSHIFT_ASSIGN:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* Can this lvalue be evaluated twice without observable effect? Names,
+ * fields, elements, literals and arithmetic over them — anything with a
+ * call in it cannot. */
+static int lvalue_is_repeatable(ASTNode* n) {
+    if (!n) return 1;
+    switch (n->type) {
+        case AST_IDENTIFIER: case AST_LITERAL: case AST_MEMBER_ACCESS:
+        case AST_ARRAY_ACCESS: case AST_BINARY_EXPRESSION: case AST_UNARY_EXPRESSION:
+            break;
+        default:
+            return 0;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (!lvalue_is_repeatable(n->children[i])) return 0;
+    return 1;
+}
 static ASTNode* parse_primary_expression_inner(Parser* parser);
 
 /* CRITICAL: bounds the mutually recursive descent. Exceeding the C stack is a
@@ -2881,6 +2912,44 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             // Otherwise fall through to expression statement
             ASTNode* expr = parse_expression(parser);
             if (expr) {
+                // `p.n += rhs` / `xs[i] -= rhs`: a compound assignment whose
+                // target is a field or an element. It is `p.n = p.n + rhs`
+                // and is built as that (the plain `=` form the typechecker
+                // and codegen already handle for these targets). Only a
+                // target the language can evaluate twice qualifies — a
+                // chain of names, fields, indexes and arithmetic, no call —
+                // since the desugaring repeats it. Before, the statement
+                // stopped at the operator: "Expected statement in block".
+                Token* cop = peek_token(parser);
+                if (cop && token_is_compound_assign(cop) &&
+                    (expr->type == AST_MEMBER_ACCESS || expr->type == AST_ARRAY_ACCESS)) {
+                    if (!lvalue_is_repeatable(expr)) {
+                        parser_error(parser, "the target of a compound assignment must be a variable, a field or an element with no call in it; write `target = target op value` with a temporary instead");
+                        /* Skip the rest of the statement's line so the
+                         * operator and its operand are not reported again. */
+                        int eline = cop->line;
+                        while (peek_token(parser) && peek_token(parser)->line == eline &&
+                               peek_token(parser)->type != TOKEN_RIGHT_BRACE &&
+                               peek_token(parser)->type != TOKEN_EOF) advance_token(parser);
+                        free_ast_node(expr);
+                        return NULL;
+                    }
+                    advance_token(parser);
+                    ASTNode* rhs = parse_expression(parser);
+                    if (!rhs) { free_ast_node(expr); return NULL; }
+                    char base[8];
+                    snprintf(base, sizeof(base), "%.*s", (int)strlen(cop->value) - 1, cop->value);
+                    ASTNode* op_node = create_ast_node(AST_BINARY_EXPRESSION, base, cop->line, cop->column);
+                    add_child(op_node, clone_ast_node(expr));
+                    add_child(op_node, rhs);
+                    ASTNode* assign = create_ast_node(AST_BINARY_EXPRESSION, "=", cop->line, cop->column);
+                    add_child(assign, expr);
+                    add_child(assign, op_node);
+                    match_token(parser, TOKEN_SEMICOLON);
+                    ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, token->line, token->column);
+                    add_child(stmt, assign);
+                    return stmt;
+                }
                 match_token(parser, TOKEN_SEMICOLON);
                 ASTNode* stmt = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, token->line, token->column);
                 add_child(stmt, expr);

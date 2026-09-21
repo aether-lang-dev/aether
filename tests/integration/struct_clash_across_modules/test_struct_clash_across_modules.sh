@@ -6,6 +6,12 @@
 # pointing into that module — or the C compiler. The clash is reported at
 # the second definition, naming both field lists and both files; two
 # identical definitions still share one type, silently.
+#
+# Message and actor names are the same one namespace: a `message Ping {}`
+# in one module and a `message Ping { x: int }` in another failed in the C
+# compiler, attributed to the wrong module; two modules each defining
+# `actor Worker` merged silently, and the loser's `spawn(Worker())` built
+# the winner — its messages had no handler and went unanswered.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -108,7 +114,59 @@ if [ "$got" != "7 9" ] || printf '%s' "$out" | grep -q "defined differently"; th
     fail=1
 fi
 
+# Messages and actors.
+mkdir -p "$tmp/lib/ma" "$tmp/lib/mb" "$tmp/lib/mc"
+cat > "$tmp/lib/ma/module.ae" <<'AE'
+exports(start_a)
+message Ping {}
+actor Worker {
+    state n = 0
+    receive { Ping() -> { n = n + 1 } }
+}
+start_a() -> actor_ref { w = spawn(Worker()); w ! Ping {}; return w }
+AE
+cat > "$tmp/lib/mb/module.ae" <<'AE'
+exports(start_b)
+message Ping { x: int }
+actor Runner {
+    state total = 0
+    receive { Ping(x) -> { total = total + x } }
+}
+start_b() -> actor_ref { w = spawn(Runner()); w ! Ping { x: 5 }; return w }
+AE
+cat > "$tmp/lib/mc/module.ae" <<'AE'
+exports(start_c)
+message Pong { x: int }
+actor Worker {
+    state total = 0
+    receive { Pong(x) -> { total = total + x } }
+}
+start_c() -> actor_ref { w = spawn(Worker()); w ! Pong { x: 5 }; return w }
+AE
+cat > "$tmp/msg.ae" <<'AE'
+import ma
+import mb
+main() { _ = ma.start_a(); _ = mb.start_b() }
+AE
+out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" msg.ae out.c 2>&1)"
+if ! printf '%s' "$out" | grep -q "message 'Ping' is defined differently in two modules: {x: int} in lib/mb/module.ae and {} in lib/ma/module.ae"; then
+    echo "  [FAIL] struct_clash_across_modules: a message defined differently in two modules was not reported"
+    printf '%s\n' "$out" | grep -E "^error|-->" | head -4 | sed 's/^/        /'
+    fail=1
+fi
+cat > "$tmp/act.ae" <<'AE'
+import ma
+import mc
+main() { _ = ma.start_a(); _ = mc.start_c() }
+AE
+out="$(cd "$tmp" && AETHER_HOME="$ROOT" "$AETHERC" act.ae out.c 2>&1)"
+if ! printf '%s' "$out" | grep -q "actor 'Worker' is defined in two modules: lib/mc/module.ae and lib/ma/module.ae"; then
+    echo "  [FAIL] struct_clash_across_modules: an actor defined in two modules was not reported"
+    printf '%s\n' "$out" | grep -E "^error|-->" | head -4 | sed 's/^/        /'
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] struct_clash_across_modules: differing definitions of one struct name are reported; identical ones share the type"
+    echo "  [PASS] struct_clash_across_modules: differing definitions of one struct, message or actor name are reported; identical ones share the type"
 fi
 exit $fail

@@ -318,6 +318,27 @@ int types_equal(Type* a, Type* b) {
     return types_equal(a->element_type, b->element_type);
 }
 
+static int numeric_join_rank(TypeKind k) {
+    switch (k) {
+        case TYPE_LONGDOUBLE: return 6;
+        case TYPE_FLOAT:      return 5;
+        case TYPE_FLOAT32:    return 4;
+        case TYPE_UINT64:     return 3;
+        case TYPE_INT64:      return 3;   /* signed and unsigned 64-bit share a rank: neither widens into the other */
+        case TYPE_UINT32:     return 2;
+        case TYPE_INT:        return 1;
+        case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE: return 0;
+        default:              return -1;
+    }
+}
+
+Type* numeric_join_type(Type* a, Type* b) {
+    if (!a || !b) return NULL;
+    int ra = numeric_join_rank(a->kind), rb = numeric_join_rank(b->kind);
+    if (ra < 0 || rb < 0) return NULL;
+    return clone_type(rb > ra ? b : a);
+}
+
 Type* clone_type(Type* type) {
     if (!type) return NULL;
 

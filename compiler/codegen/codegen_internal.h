@@ -33,6 +33,8 @@ void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name);
 int is_fnptr_type(Type* t);
 int is_var_declared(CodeGenerator* gen, const char* var_name);
 void mark_var_declared(CodeGenerator* gen, const char* var_name);
+void mark_var_declared_typed(CodeGenerator* gen, const char* var_name, Type* hoisted_type);
+Type* declared_var_type(CodeGenerator* gen, const char* var_name);
 void truncate_declared_vars(CodeGenerator* gen, int saved_count);
 void clear_declared_vars(CodeGenerator* gen);
 int is_heap_box_var(CodeGenerator* gen, const char* var_name);

@@ -24,6 +24,12 @@ typedef struct Symbol {
                                 // `type`/`type_inferred`, which it mutates), so
                                 // a later bare re-bind can preserve the declared
                                 // width instead of re-narrowing it.
+    // #2124: for a local the early inference pass parks in its flat table,
+    // the function (or main / closure) body it was bound in. A later
+    // binding of the same name in the SAME body widens the entry (the
+    // hoisted-local join); one from another body replaces it, as it
+    // always did — names are reused freely across functions.
+    void* inferred_in;
     struct Symbol* next;
     // #2007: chain within the scope's hash bucket. A symbol is at the head
     // of its bucket chain exactly when it is the newest of its name in the

@@ -417,6 +417,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->state_self_alias = NULL;
     gen->message_registry = create_message_registry();
     gen->declared_vars = NULL;
+    gen->declared_var_types = NULL;
+    gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
     gen->heap_box_vars = NULL;
     gen->heap_box_var_count = 0;
@@ -625,6 +627,12 @@ void free_code_generator(CodeGenerator* gen) {
             }
             free(gen->actor_state_vars);
         }
+        if (gen->declared_var_types) {
+            for (int i = 0; i < gen->declared_var_count; i++) {
+                if (gen->declared_var_types[i]) free_type(gen->declared_var_types[i]);
+            }
+            free(gen->declared_var_types);
+        }
         if (gen->declared_vars) {
             for (int i = 0; i < gen->declared_var_count; i++) {
                 free(gen->declared_vars[i]);
@@ -710,20 +718,51 @@ void register_module_global_var(CodeGenerator* gen, const char* name) {
 void truncate_declared_vars(CodeGenerator* gen, int saved_count) {
     for (int i = saved_count; i < gen->declared_var_count; i++) {
         free(gen->declared_vars[i]);
+        if (gen->declared_var_types && gen->declared_var_types[i]) {
+            free_type(gen->declared_var_types[i]);
+            gen->declared_var_types[i] = NULL;
+        }
     }
     gen->declared_var_count = saved_count;
 }
 
 void mark_var_declared(CodeGenerator* gen, const char* var_name) {
+    mark_var_declared_typed(gen, var_name, NULL);
+}
+
+/* #2124: record a hoisted local together with the type it was declared
+ * with, so a later bare re-bind in another branch or loop body can be
+ * checked against it (declared_var_type). */
+void mark_var_declared_typed(CodeGenerator* gen, const char* var_name, Type* hoisted_type) {
     char** new_vars = realloc(gen->declared_vars, sizeof(char*) * (gen->declared_var_count + 1));
     if (!new_vars) return;
     gen->declared_vars = new_vars;
+    Type** new_types = realloc(gen->declared_var_types, sizeof(Type*) * (gen->declared_var_count + 1));
+    if (!new_types) return;
+    gen->declared_var_types = new_types;
     gen->declared_vars[gen->declared_var_count] = strdup(var_name);
+    gen->declared_var_types[gen->declared_var_count] = hoisted_type ? clone_type(hoisted_type) : NULL;
     gen->declared_var_count++;
+}
+
+Type* declared_var_type(CodeGenerator* gen, const char* var_name) {
+    for (int i = 0; i < gen->declared_var_count; i++) {
+        if (strcmp(gen->declared_vars[i], var_name) == 0) {
+            return gen->declared_var_types ? gen->declared_var_types[i] : NULL;
+        }
+    }
+    return NULL;
 }
 
 // Helper: clear declared vars (call at function start)
 void clear_declared_vars(CodeGenerator* gen) {
+    if (gen->declared_var_types) {
+        for (int i = 0; i < gen->declared_var_count; i++) {
+            if (gen->declared_var_types[i]) free_type(gen->declared_var_types[i]);
+        }
+        free(gen->declared_var_types);
+        gen->declared_var_types = NULL;
+    }
     if (gen->declared_vars) {
         for (int i = 0; i < gen->declared_var_count; i++) {
             free(gen->declared_vars[i]);
@@ -731,6 +770,8 @@ void clear_declared_vars(CodeGenerator* gen) {
         free(gen->declared_vars);
     }
     gen->declared_vars = NULL;
+    gen->declared_var_types = NULL;
+    gen->hoist_scope_body = NULL;
     gen->declared_var_count = 0;
     /* #790: heap.new box provenance is per-function. */
     if (gen->heap_box_vars) {
@@ -3917,6 +3958,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
              * which skips the names this one has already declared. A name
              * first assigned inside an if-arm and read after the if needs
              * a declaration at this scope, in main() as anywhere else. */
+            gen->hoist_scope_body = main->children[0];
             hoist_if_branch_vars(gen, main->children[0]);
             /* Issue #501 follow-up: mark try-clobbered vars in main()
              * so the `volatile` prefix is applied at decl sites for

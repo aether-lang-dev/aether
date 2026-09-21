@@ -2,6 +2,8 @@
 #include "optimizer.h"
 #include "../aether_module.h"
 #include "../analysis/contract_eval.h"
+#include "../analysis/typechecker.h"
+#include "../aether_error.h"
 
 // Is `name` the variable name of a known closure? If yes, also returns the
 // closure id via *out_id. Used by return-site Bug B protection.
@@ -2291,7 +2293,11 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
 
         print_indent(gen);
         fprintf(gen->output, "const char* %s = NULL;\n", name);
-        mark_var_declared(gen, name);
+        /* #2124: hoisted as a string; a binding of another kind anywhere
+         * in the function is checked against that. */
+        Type* st = create_type(TYPE_STRING);
+        mark_var_declared_typed(gen, name, st);
+        free_type(st);
     }
 }
 
@@ -3708,6 +3714,48 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
     return " = {0}";
 }
 
+/* #2124: a local first bound inside a branch or loop body is hoisted to
+ * function scope, one variable for every binding of the name in the
+ * function. Its declared type is the numeric join of those bindings
+ * (`int` here, `long` there: `int64_t`), so none of them narrows and the
+ * type matches what the early inference pass records for a use after
+ * the branches. Non-numeric kinds keep `seed` (a clash is reported at
+ * the binding). Nested closures are their own functions and are not
+ * walked. Returns a fresh Type, or NULL when nothing widened `seed`. */
+static Type* sibling_join_type_walk(ASTNode* n, const char* name, Type* acc) {
+    if (!n) return acc;
+    if (n->type == AST_CLOSURE) return acc;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && n->type_inferred &&
+        strcmp(n->value, name) == 0) {
+        Type* t = n->node_type;
+        if ((!t || t->kind == TYPE_UNKNOWN) && n->child_count > 0 && n->children[0])
+            t = n->children[0]->node_type;
+        Type* j = numeric_join_type(acc, t);
+        if (j) { free_type(acc); acc = j; }
+    }
+    for (int i = 0; i < n->child_count; i++) acc = sibling_join_type_walk(n->children[i], name, acc);
+    return acc;
+}
+
+static Type* sibling_join_type(CodeGenerator* gen, const char* name, Type* seed) {
+    if (!gen->hoist_scope_body || !seed) return NULL;
+    Type* probe = numeric_join_type(seed, seed);
+    if (!probe) return NULL;          /* not a numeric kind: nothing to join */
+    free_type(probe);
+    Type* acc = sibling_join_type_walk(gen->hoist_scope_body, name, clone_type(seed));
+    if (acc && acc->kind == seed->kind) { free_type(acc); return NULL; }
+    return acc;
+}
+
+/* #2124: the kinds a number local holds; a pointer cannot flow into one
+ * (nor one into a pointer) whatever is_type_compatible says for the C
+ * interop cases. */
+static int rebind_is_number(TypeKind k) {
+    return k == TYPE_INT || k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_UINT32 ||
+           k == TYPE_UINT16 || k == TYPE_UINT8 || k == TYPE_BYTE || k == TYPE_BOOL ||
+           k == TYPE_FLOAT || k == TYPE_FLOAT32 || k == TYPE_LONGDOUBLE;
+}
+
 static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
                                      const char* name) {
     if (var_type && var_type->kind == TYPE_ARRAY && var_type->array_size > 0) {
@@ -3763,6 +3811,8 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
                 var_type = decl->children[0]->node_type;
             }
         }
+        Type* joined = sibling_join_type(gen, n, var_type);
+        if (joined) var_type = joined;
         print_indent(gen);
         /* #2024: a mutated capture is hoisted as its cell, not as a plain
          * value -- see hoist_loop_vars. */
@@ -3770,10 +3820,12 @@ static void hoist_if_else_common_vars(CodeGenerator* gen,
             emit_promoted_cell_declaration(gen, n, get_c_type(var_type), NULL, NULL,
                                            decl ? decl->line : then_body->line,
                                            decl ? decl->column : then_body->column);
+            if (joined) free_type(joined);
             continue;
         }
-        mark_var_declared(gen, n);
+        mark_var_declared_typed(gen, n, var_type);
         emit_hoisted_local_decl(gen, var_type, n);
+        if (joined) free_type(joined);
     }
 }
 
@@ -3797,6 +3849,8 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
                     && child->child_count > 0 && child->children[0] && child->children[0]->node_type) {
                     var_type = child->children[0]->node_type;
                 }
+                Type* joined = sibling_join_type(gen, child->value, var_type);
+                if (joined) var_type = joined;
                 const char* c_type = get_c_type(var_type);
                 print_indent(gen);
                 /* #2024: a variable a closure mutates lives in a heap
@@ -3810,9 +3864,10 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
                 if (is_promoted_capture(gen, child->value)) {
                     emit_promoted_cell_declaration(gen, child->value, c_type, NULL, NULL,
                                                    child->line, child->column);
+                    if (joined) free_type(joined);
                     continue;
                 }
-                mark_var_declared(gen, child->value);
+                mark_var_declared_typed(gen, child->value, var_type);
                 /* Zero-initialize struct hoists so the first-iteration
                  * struct-destroy call (#465) sees zero `_heap_<field>`
                  * trackers instead of stack-uninitialised garbage.
@@ -3852,6 +3907,7 @@ static void hoist_loop_vars(CodeGenerator* gen, ASTNode* body) {
                 } else {
                     emit_hoisted_local_decl(gen, var_type, child->value);
                 }
+                if (joined) free_type(joined);
             }
         }
         // Recurse into nested blocks (e.g., if inside while)
@@ -4145,6 +4201,8 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
             && first_decl->children[0]->node_type) {
             var_type = first_decl->children[0]->node_type;
         }
+        Type* joined = sibling_join_type(gen, name, var_type);
+        if (joined) var_type = joined;
         const char* c_type = get_c_type(var_type);
         print_indent(gen);
         /* #2024: same as hoist_loop_vars -- a mutated capture is hoisted
@@ -4152,10 +4210,12 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
         if (is_promoted_capture(gen, name)) {
             emit_promoted_cell_declaration(gen, name, c_type, NULL, NULL,
                                            first_decl->line, first_decl->column);
+            if (joined) free_type(joined);
             continue;
         }
         fprintf(gen->output, "%s %s%s;\n", c_type, name, hoisted_zero_init(var_type, c_type));
-        mark_var_declared(gen, name);
+        mark_var_declared_typed(gen, name, var_type);
+        if (joined) free_type(joined);
     }
 }
 
@@ -5045,6 +5105,44 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
 
                 // Check if this is a reassignment (Python-style)
                 if (is_var_declared(gen, stmt->value)) {
+                    /* #2124: a hoisted local is one C variable for the
+                     * whole function. A bare re-bind here — in a sibling
+                     * branch or loop body the typechecker could not see
+                     * as the same variable — with a value that cannot
+                     * flow into the hoisted type used to be a C error
+                     * ("assignment to 'const char *' from 'int'"); say
+                     * it in the language's terms. The numeric and
+                     * pointer conversions the language permits pass. */
+                    Type* hoisted = declared_var_type(gen, stmt->value);
+                    Type* here = stmt->node_type;
+                    if ((!here || here->kind == TYPE_UNKNOWN) && stmt->child_count > 0 &&
+                        stmt->children[0]) here = stmt->children[0]->node_type;
+                    if (stmt->type_inferred && hoisted && here &&
+                        hoisted->kind != TYPE_UNKNOWN && here->kind != TYPE_UNKNOWN &&
+                        /* Same kind is the same C variable whatever the
+                         * nominal wrapper (a distinct string into a
+                         * string-hoisted local; the typechecker owns the
+                         * nominal rules). Optionals have their own re-bind
+                         * rules there too. */
+                        here->kind != hoisted->kind &&
+                        here->kind != TYPE_OPTIONAL && hoisted->kind != TYPE_OPTIONAL &&
+                        !((here->kind == TYPE_PTR && hoisted->kind == TYPE_STRING) ||
+                          (here->kind == TYPE_STRING && hoisted->kind == TYPE_PTR)) &&
+                        (!is_type_compatible(here, hoisted) ||
+                         (here->kind == TYPE_PTR && rebind_is_number(hoisted->kind)) ||
+                         (rebind_is_number(here->kind) && hoisted->kind == TYPE_PTR))) {
+                        char msg[400];
+                        snprintf(msg, sizeof(msg),
+                                 "cannot bind '%s' as %s: it is bound as %s in another branch or "
+                                 "loop body of this function, and a local first bound inside a "
+                                 "branch or loop body is one variable for the whole function. Use "
+                                 "a new name for the %s value, or convert it to %s",
+                                 stmt->value, type_to_string(here), type_to_string(hoisted),
+                                 type_to_string(here), type_to_string(hoisted));
+                        AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,
+                                          NULL, NULL, AETHER_ERR_TYPE_MISMATCH };
+                        aether_error_report(&e);
+                    }
                     /* Self-assignment peephole. `p = p` is a no-op at
                      * the semantic level; the heap-tracker wrapper
                      * below would otherwise (a) consult
