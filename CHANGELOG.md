@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.702.0]
+
 ### Fixed
 
 - **A local bound in sibling branches took one branch's type in C and
