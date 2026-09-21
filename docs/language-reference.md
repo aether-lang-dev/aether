@@ -82,7 +82,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 |------|-------------|---------|
 | `int` | 32-bit signed integer | `42`, `-17`, `0xFF`, `0b1010` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
-| `f32` | 32-bit floating point (C `float`): storage for GPU buffers and C structs; arithmetic is done in `float` | `f32 x = 1.5`, `v as f32` |
+| `f32` | 32-bit floating point (C `float`): GPU buffers, C structs, single-precision maths; `f32 op f32` is a `float` op | `f32 x = 1.5`, `v as f32` |
 | `string` | UTF-8 encoded strings | `"Hello"` |
 | `bool` | Boolean type | `true`, `false` |
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
@@ -122,7 +122,7 @@ main() {
 
 #### `f32` 32-bit float
 
-`f32` is C's `float`: the number every GPU reads — vertex buffers, instance transforms, bone palettes, uniform blocks, `VkViewport` — and the one thing `float` (a C `double`) cannot be. It is a storage type: a struct field of it has C's layout and alignment, so an `extern` taking such a struct by pointer sees a C struct of floats; an `f32[]` view over a `ptr` stores one C `float` per element; a local or parameter of it is a C `float`.
+`f32` is C's `float`: the number every GPU reads — vertex buffers, instance transforms, bone palettes, uniform blocks, `VkViewport` — and the one thing `float` (a C `double`) cannot be. A struct field of it has C's layout and alignment, so an `extern` taking such a struct by pointer sees a C struct of floats; an `f32[]` view over a `ptr` stores one C `float` per element; a local or parameter of it is a C `float`; and arithmetic between `f32` values is a C `float` operation.
 
 ```aether,run
 struct Viewport { x: f32, y: f32, w: f32, h: f32 }
@@ -148,7 +148,20 @@ main() {
 
 **Conversion.** `f32` converts with `float` and the integer kinds exactly as C converts `float` and `double`: `x as f32` and `f as float` are the explicit spellings, and assignment performs the same conversion (`verts[i] = v`, `Viewport { x: 1.0 }`). A cast to or from a non-numeric kind is refused.
 
-**Arithmetic is `float`.** `a * b` on two `f32` values is a `float`; the narrow type is what is *stored*, narrowed again at the store. A physics or geometry pipeline keeps its maths in `float` and narrows once, at the buffer.
+**Arithmetic is single precision.** `a * b` on two `f32` values is an `f32`, computed in C `float`, and so is `f32 op <integer>` — C's usual arithmetic conversions. A numeric *literal* beside an `f32` operand takes the `f32` (an untyped constant, as in Go): `v * 0.5` — or `v * -0.5` — is one float multiply, and the literal reaches the C as `0.5f`. A `float` (double) *value* on the other side widens the expression to `float`, as in C, so a pipeline that wants double maths keeps its operands `float` and narrows once, at the buffer; one that wants single precision — a physics engine matching its reference's float solver — keeps them `f32` and gets float ops throughout. Comparison follows the same conversions.
+
+```aether,run
+main() {
+    a = 0.1 as f32
+    b = 3 as f32
+    c = 0.3 as f32
+    half = a * 0.5              // f32: the literal is a float constant
+    println("${a * b == c} ${half}")   // 0.1f * 3.0f rounds to exactly 0.3f
+}
+```
+```output
+true 0.05
+```
 
 **Printing** goes through `%g`/`%f` like `float` (`println(x)`, `${x}`, `print("%f", x)`).
 

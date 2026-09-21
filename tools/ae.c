@@ -4311,6 +4311,7 @@ static int cmd_run(int argc, char** argv) {
         if (path_exists(cached_exe)) {
             if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
             cache_touch(cached_exe);   /* least-recently-USED, for the cap */
+            cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
             build_run_cmd(cmd, sizeof(cmd), cached_exe, argc, argv, prog_args_start);
             int rc = run_cmd_forwarding(cmd);
             if (rc < 0) {
@@ -6986,6 +6987,7 @@ static int cmd_build(int argc, char** argv) {
             if (path_exists(cached_exe)) {
                 if (tc.verbose) fprintf(stderr, "[cache] hit: %016llx\n", cache_key);
                 cache_touch(cached_exe);   /* least-recently-USED, for the cap */
+                cache_touch_depfile(file); /* and its depfile, for the 30-day sweep */
                 if (copy_file(cached_exe, exe_file)) {
                     printf("Built (cache hit): %s\n", exe_file);
                     return 0;

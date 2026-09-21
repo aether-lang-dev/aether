@@ -45,6 +45,27 @@ double math_sqrt(double x) {
     return sqrt(x);
 }
 
+// Single precision (#2151). fminf/fmaxf rather than a `<` pick: they
+// return the non-NaN operand when one side is NaN, as the double
+// versions below do through fmin/fmax.
+float math_sqrt_f32(float x) { return sqrtf(x); }
+float math_abs_f32(float x) { return fabsf(x); }
+float math_min_f32(float a, float b) { return fminf(a, b); }
+float math_max_f32(float a, float b) { return fmaxf(a, b); }
+float math_clamp_f32(float x, float min, float max) {
+    if (x < min) return min;
+    if (x > max) return max;
+    return x;
+}
+float math_sin_f32(float x) { return sinf(x); }
+float math_cos_f32(float x) { return cosf(x); }
+float math_tan_f32(float x) { return tanf(x); }
+float math_atan2_f32(float y, float x) { return atan2f(y, x); }
+float math_floor_f32(float x) { return floorf(x); }
+float math_ceil_f32(float x) { return ceilf(x); }
+float math_pow_f32(float base, float exp) { return powf(base, exp); }
+float math_exp_f32(float x) { return expf(x); }
+
 double math_pow(double base, double exp) {
     return pow(base, exp);
 }

@@ -377,8 +377,9 @@ the oldest-used builds are removed until it is under 90% of it. The scan runs
 at most once per ten minutes per cache directory (a `gc.stamp` file), and
 the build just published is never evicted, so one binary larger than the cap
 still runs. Depfiles (`*.deps`) are small and keyed by source path; they are
-neither counted nor evicted. Before this bound existed a machine that ran the
-test sweep accumulated 26,000 builds and 12.7 GB.
+not counted against the cap, and one not rewritten for 30 days (its source is
+no longer being built) is removed by the same scan. Before this bound existed
+a machine that ran the test sweep accumulated 26,000 builds and 12.7 GB.
 
 Wasm builds, `--emit=lib`, and `--namespace` SDK generation skip the cache (different artefact shapes; each will get its own cache layout when measurement justifies it).
 

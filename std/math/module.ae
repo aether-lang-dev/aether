@@ -11,7 +11,10 @@ exports(
     math_floor, math_ceil, math_round, math_lrint,
     math_log, math_log10, math_exp,
     math_random_seed, math_random_int, math_random_float,
-    math_pi, math_tau, math_e, math_deg_to_rad, math_rad_to_deg
+    math_pi, math_tau, math_e, math_deg_to_rad, math_rad_to_deg,
+    math_sqrt_f32, math_abs_f32, math_min_f32, math_max_f32, math_clamp_f32,
+    math_sin_f32, math_cos_f32, math_tan_f32, math_atan2_f32,
+    math_floor_f32, math_ceil_f32, math_pow_f32, math_exp_f32
 )
 
 // Basic operations (int/float variants)
@@ -43,6 +46,24 @@ extern math_lrint(x: float) -> long
 extern math_log(x: float) -> float
 extern math_log10(x: float) -> float
 extern math_exp(x: float) -> float
+
+// Single precision (#2151). Each is libm's `f` function (sqrtf, fabsf,
+// fminf, ...): an f32 argument stays a C float and the result is f32, so
+// `math.sqrt_f32(dot(v, v))` in an f32 pipeline is one float sqrt. The
+// double functions above take an f32 too, but widen it and return float.
+extern math_sqrt_f32(x: f32) -> f32
+extern math_abs_f32(x: f32) -> f32
+extern math_min_f32(a: f32, b: f32) -> f32
+extern math_max_f32(a: f32, b: f32) -> f32
+extern math_clamp_f32(x: f32, min: f32, max: f32) -> f32
+extern math_sin_f32(x: f32) -> f32
+extern math_cos_f32(x: f32) -> f32
+extern math_tan_f32(x: f32) -> f32
+extern math_atan2_f32(y: f32, x: f32) -> f32
+extern math_floor_f32(x: f32) -> f32
+extern math_ceil_f32(x: f32) -> f32
+extern math_pow_f32(base: f32, exp: f32) -> f32
+extern math_exp_f32(x: f32) -> f32
 
 // Random numbers
 extern math_random_seed(seed: int)
