@@ -95,10 +95,21 @@ do
     module=${entry%%|*}
     ALLOWED_LIBS=${entry#*|}
     export ALLOWED_LIBS
-    printf 'import std.%s\nmain() { println("linked") }\n' "$module" > uses.ae
-    "$ROOT/build/aetherc" uses.ae uses.c > compile.log 2>&1 \
+    # One pair of filenames per module, and the output removed first. The
+    # loop used to reuse `uses.ae` / `uses.c`, so anything that left the
+    # previous module's `uses.c` in place read as a WRONG ANSWER for this
+    # one rather than as a missing file: a sweep run once reported
+    # "zstd metadata missing -lzstd" quoting brotli's link line, brotli
+    # being the entry before it. The cause was never established, and this
+    # is what makes the next occurrence name itself instead.
+    src="uses-$module.ae"
+    gen="uses-$module.c"
+    rm -f "$gen"
+    printf 'import std.%s\nmain() { println("linked") }\n' "$module" > "$src"
+    "$ROOT/build/aetherc" "$src" "$gen" > compile.log 2>&1 \
         || { cat compile.log; fail "metadata for $module"; }
-    header=$(head -n 1 uses.c)
+    [ -s "$gen" ] || fail "aetherc wrote no C for $module"
+    header=$(head -n 1 "$gen")
     for lib in $ALLOWED_LIBS; do
         case " $header " in
             *" $lib "*) ;;
@@ -106,7 +117,7 @@ do
         esac
     done
     : > "$LINK_ARGS"
-    "$AE" build uses.ae -o "uses-$module" --verbose > build.log 2>&1 \
+    "$AE" build "$src" -o "uses-$module" --verbose > build.log 2>&1 \
         || { cat build.log; fail "build std.$module"; }
     check_args build.log
     [ -f "uses-$module" ] || { cat build.log; fail "binary for std.$module missing"; }
@@ -116,7 +127,7 @@ do
         count=$(grep -Fxc -- "$lib" "$LINK_ARGS" || true)
         [ "$count" -le 1 ] || fail "$module repeats $lib"
     done
-    "$AE" run uses.ae --verbose > module-run.log 2>&1 \
+    "$AE" run "$src" --verbose > module-run.log 2>&1 \
         || { cat module-run.log; fail "ae run std.$module"; }
     check_args module-run.log
     grep -q '^linked$' module-run.log || fail "ae run output for std.$module"

@@ -4841,6 +4841,36 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_select(AeI32x4 m, AeF32x4 a, AeF32x4 b) { _AeF32x4Bits av, bv, rv; av.f = a; bv.f = b; rv.i = (m & av.i) | (~m & bv.i); return rv.f; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_min(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a < b, a, b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_max(AeF32x4 a, AeF32x4 b) { return _ae_f32x4_select(a > b, a, b); }");
+    /* #2158: a lane square root and absolute value. Both are EXACT — IEEE
+       square root is correctly rounded, and clearing the sign bit is not an
+       approximation — so the lane form changes no result. It replaces four
+       extracts, four scalar calls and a rebuild with the one instruction the
+       hardware has had since SSE2 (sqrtps / andps; vsqrt / bic on NEON).
+
+       Three spellings, because there is no one portable one. Clang has the
+       elementwise builtin. GCC does not, and its four-element loop only
+       becomes sqrtps under -fno-math-errno — a flag that changes what the
+       rest of the program's libm calls promise, so it is not ours to assume;
+       on x86 it takes the SSE2 builtin directly instead. Anywhere else the
+       loop stands: still correct, just scalar. */
+    print_line(gen, "#if defined(__clang__) && defined(__has_builtin)");
+    print_line(gen, "#  if __has_builtin(__builtin_elementwise_sqrt)");
+    print_line(gen, "#    define AETHER_LANE_ELEMENTWISE 1");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
+    print_line(gen, "#ifndef AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "#  define AETHER_LANE_ELEMENTWISE 0");
+    print_line(gen, "#endif");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_sqrt(AeF32x4 v) {");
+    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
+    print_line(gen, "#elif defined(__SSE2__)");
+    print_line(gen, "    return (AeF32x4)__builtin_ia32_sqrtps(v);");
+    print_line(gen, "#else");
+    print_line(gen, "    AeF32x4 r; for (int i = 0; i < 4; i++) r[i] = __builtin_sqrtf(v[i]); return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF32x4 _ae_f32x4_abs(AeF32x4 v) { _AeF32x4Bits b, r; b.f = v; AeI32x4 m = {0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff}; r.i = b.i & m; return r.f; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_lt(AeF32x4 a, AeF32x4 b) { return a < b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_le(AeF32x4 a, AeF32x4 b) { return a <= b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_f32x4_gt(AeF32x4 a, AeF32x4 b) { return a > b; }");
@@ -4863,6 +4893,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_min(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a < b, a, b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_max(AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(a > b, a, b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_select(AeI64x2 m, AeF64x2 a, AeF64x2 b) { return _ae_f64x2_blend(m, a, b); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_sqrt(AeF64x2 v) {");
+    print_line(gen, "#if AETHER_LANE_ELEMENTWISE");
+    print_line(gen, "    return __builtin_elementwise_sqrt(v);");
+    print_line(gen, "#elif defined(__SSE2__)");
+    print_line(gen, "    return (AeF64x2)__builtin_ia32_sqrtpd(v);");
+    print_line(gen, "#else");
+    print_line(gen, "    AeF64x2 r; for (int i = 0; i < 2; i++) r[i] = __builtin_sqrt(v[i]); return r;");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeF64x2 _ae_f64x2_abs(AeF64x2 v) { _AeF64x2Bits b, r; b.f = v; AeI64x2 m = {0x7fffffffffffffffLL, 0x7fffffffffffffffLL}; r.i = b.i & m; return r.f; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_lt(AeF64x2 a, AeF64x2 b) { return a < b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_le(AeF64x2 a, AeF64x2 b) { return a <= b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI64x2 _ae_f64x2_gt(AeF64x2 a, AeF64x2 b) { return a > b; }");

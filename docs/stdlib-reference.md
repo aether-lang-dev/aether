@@ -45,7 +45,7 @@ header comment is the authoritative description.
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
 | `std.language` | BCP 47 language tags and matching (RFC 5646, RFC 4647). | 11 | [guide](../std/language/README.md) · [source](../std/language/module.ae) |
-| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 40 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
+| `std.lanes` | SIMD lanes: four floats or two doubles in one register, with masks and select. | 44 | [guide](../std/lanes/README.md) · [source](../std/lanes/module.ae) |
 | `std.list` | Dynamic array, re-exported from `std.collections`. | 12 | [guide](../std/list/README.md) · [source](../std/list/module.ae) |
 | `std.log` | Levelled logging with timestamps, colours and counters. | 9 | [full section](#logging-stdlog) |
 | `std.longarr` | Fixed-size packed-long buffer. | 13 | [guide](../std/longarr/README.md) · [source](../std/longarr/module.ae) |
@@ -362,6 +362,59 @@ Calls on a null queue are safe: `size` reports 0, `pop` and `peek` return null.
 
 Raw externs are the `aether_pqueue_*` entry points, which return C-style ints.
 
+### Double-ended queue (`std.deque`)
+
+A fixed-capacity ring buffer of `long` values with O(1) push and pop at both
+ends — a work queue, a sliding window, an undo history. `Deque` is a *value*,
+so every mutation returns the updated deque and the result has to be rebound;
+a call whose result is dropped changes nothing. The capacity never grows:
+`push_back` on a full ring drops the value silently, while `try_push_back`
+reports it.
+
+```aether,run
+import std.deque
+
+main() {
+    // A fixed-capacity ring of longs. Every mutation RETURNS the deque —
+    // the struct is a value, so the result must be rebound, and a call
+    // whose result is dropped changes nothing.
+    d = deque.new(4)
+    d = deque.push_back(d, 10)
+    d = deque.push_back(d, 20)
+    d = deque.push_front(d, 5)
+
+    front, _ferr = deque.peek_front(d)
+    back, _berr = deque.peek_back(d)
+    println("${front}..${back} over ${deque.len(d)} of ${deque.cap(d)}")
+
+    v, d, _err = deque.pop_front(d)
+    println("popped ${v}, empty ${deque.is_empty(d)}")
+
+    // try_push_back reports a full ring instead of dropping the value.
+    d = deque.push_back(d, 30)
+    d = deque.push_back(d, 40)
+    d, perr = deque.try_push_back(d, 50)
+    println("full: ${deque.is_full(d)}, push said '${perr}'")
+
+    deque.free(d)
+}
+```
+```output
+5..20 over 3 of 4
+popped 5, empty false
+full: true, push said 'deque: full'
+```
+
+**Functions:**
+- `deque.new(capacity)` → `Deque` - Allocate a ring of `capacity` longs
+- `deque.free(d)` - Release the ring
+- `deque.push_back(d, v)` / `deque.push_front(d, v)` → `Deque` - Add at either end; a full ring drops the value
+- `deque.try_push_back(d, v)` / `deque.try_push_front(d, v)` → `(Deque, string)` - The same, reporting `"deque: full"` instead of dropping
+- `deque.pop_front(d)` / `deque.pop_back(d)` → `(long, Deque, string)` - Remove from either end; the error is non-empty when the ring was empty
+- `deque.peek_front(d)` / `deque.peek_back(d)` → `(long, string)` - Read without removing
+- `deque.len(d)` / `deque.cap(d)` → `int`, `deque.is_empty(d)` / `deque.is_full(d)` → `bool`
+- `deque.clear(d)` → `Deque` - Drop every value, keeping the capacity
+
 ### Fixed-size int array (`std.intarr`)
 
 Packed int buffer with O(1) random access. For DP tables, flat
@@ -518,6 +571,74 @@ op0_length = bytes.get_le32(b, 4)
 ```
 
 ---
+
+## Sorting and searching (`std.sort`)
+
+In-place sorting for the packed numeric arrays and for `string[]` views, plus
+the binary searches that go with them. The ordered forms take the array
+handle and read its own length; the `_by` forms take a view, a length and
+your comparator — negative when `a` sorts first, the sign convention C's
+`qsort` uses.
+
+A search returns the index of the value when present, and otherwise the
+**insertion point** — the index where it would go to keep the array sorted —
+rather than -1, so one call answers both "is it here?" and "where would it
+go?".
+
+```aether,run
+import std.sort
+import std.intarr
+import std.strarr
+import std.string
+
+_by_length(a: string, b: string) -> int {
+    return string.length(a) - string.length(b)
+}
+
+main() {
+    // The intarr / floatarr / longarr forms take the handle and sort in
+    // place; they read its length themselves.
+    nums = intarr.intarr_new_raw(5)
+    i = 0
+    while i < 5 {
+        intarr.intarr_set_unchecked(nums, i, (i * 7) % 5)
+        i = i + 1
+    }
+    sort.ints(nums)
+    println("${intarr.intarr_get_unchecked(nums, 0)}..${intarr.intarr_get_unchecked(nums, 4)}")
+    // A binary search over the sorted array. A miss returns the insertion
+    // point rather than -1, so it also answers "where would this go?".
+    println("3 is at ${sort.int_search(nums, 3)}")
+    intarr.intarr_free(nums)
+
+    // The `_by` forms take a `string[]` view plus its length and your own
+    // comparator: negative if a sorts first, as C's qsort expects.
+    sa = strarr.new()
+    _p = strarr.push_copy(sa, "medium")
+    _p = strarr.push_copy(sa, "xs")
+    _p = strarr.push_copy(sa, "largest")
+    sort.strings_by(strarr.array(sa), strarr.size(sa), _by_length)
+    println(strarr.get(sa, 0))
+    strarr.free(sa)
+}
+```
+```output
+0..4
+3 is at 3
+xs
+```
+
+**Functions:**
+- `sort.ints(arr)` / `sort.longs(arr)` / `sort.floats(arr)` - Sort an `intarr` / `longarr` / `floatarr` handle ascending, in place
+- `sort.strings(arr, n)` - Sort a `string[]` view of `n` entries, lexicographically
+- `sort.ints_by(arr, cmp)` / `sort.longs_by(arr, cmp)` / `sort.floats_by(arr, cmp)` - Sort a handle with your own comparator
+- `sort.strings_by(arr, n, cmp)` - Sort a `string[]` view with your own comparator
+- `sort.int_search(arr, x)` / `sort.long_search(arr, x)` / `sort.float_search(arr, x)` → `int` - Binary search a sorted handle; returns the index or the insertion point
+- `sort.string_search(arr, n, x)` → `int` - The same over a `string[]` view
+
+The ordering algorithm is a Shell sort over Ciura's gap sequence: no
+allocation, no recursion, and no worst-case input that turns it quadratic
+the way a naive quicksort pivot does.
 
 ## Strings (`std.string`)
 
@@ -809,6 +930,63 @@ The function-entry hoist closes the cross-block visibility gap that previously k
 For the full memory-management background, see [Memory Management](memory-management.md#string-memory-model-heap-string-tracker).
 
 ---
+
+## Regular expressions (`std.regex`)
+
+PCRE2-backed matching: compile a pattern once, then match, capture, find
+every occurrence, or replace. A compiled pattern is a handle the caller
+frees; compiling is the expensive half, so hoist it out of a loop.
+
+`compile` returns `(handle, error)` — a malformed pattern is an ordinary
+error value, not a crash — and so do `captures`, `replace` and
+`replace_all`. `find` returns the *span* of the first match as
+`(start, end, error)`, with `start == -1` for no match.
+
+```aether,run
+import std.regex
+import std.string
+
+main() {
+    re, err = regex.compile("([a-z]+)-([0-9]+)")
+    if string.length(err) > 0 { println("bad pattern: ${err}"); return }
+    defer regex.free(re)
+
+    line = "build-427 ran after build-426"
+    println("matches: ${regex.matches(re, line)}")
+
+    // find gives the span of the first match, or start == -1 for none.
+    start, end, _ferr = regex.find(re, line)
+    println("first match spans ${start}..${end}")
+
+    caps, cerr = regex.captures(re, line)
+    if string.length(cerr) == 0 {
+        println("name ${regex.capture(caps, 1)}, number ${regex.capture(caps, 2)}")
+        regex.captures_free(caps)
+    }
+
+    out, _rerr = regex.replace_all(re, line, "job")
+    println(out)
+}
+```
+```output
+matches: 1
+first match spans 0..9
+name build, number 427
+job ran after job
+```
+
+**Functions:**
+- `regex.compile(pattern)` → `(ptr, string)` - Compile; the error names what PCRE2 objected to
+- `regex.compile_flags(pattern, flags)` → `(ptr, string)` - The same, with PCRE2 option bits
+- `regex.free(re)` - Release a compiled pattern
+- `regex.matches(re, s)` → `int` - 1 when the pattern matches anywhere in `s`
+- `regex.find(re, s)` → `(int, int, string)` - Byte span of the first match; `start == -1` for none
+- `regex.captures(re, s)` → `(ptr, string)` - Capture set for the first match; `null` with an empty error means no match
+- `regex.capture(caps, i)` → `string` - Group `i` (0 = the whole match); `""` when out of range or unset
+- `regex.capture_count(caps)` → `int`, `regex.capture_start(caps, i)` / `regex.capture_end(caps, i)` → `int`
+- `regex.captures_free(caps)` - Release a capture set
+- `regex.replace(re, s, repl)` / `regex.replace_all(re, s, repl)` → `(string, string)` - Replace the first / every match
+- `regex.last_error()` → `string`, `regex.clear_last_error()` - The thread's last PCRE2 error
 
 ## File System
 
@@ -1484,6 +1662,68 @@ Public-key crypto, symmetric ciphers, and key derivation live under `std.cryptog
 
 ---
 
+## Encodings (`std.encoding`)
+
+Hex, Base64, Base32 and one-record CSV splitting. The encoders take an
+explicit byte length rather than reading to a NUL, so they are binary-safe:
+a buffer with embedded zeros encodes correctly. The decoders return
+`(value, error)` — malformed input is an error value, never a partial
+result.
+
+Base64 output is **unpadded** by default, which is what URLs, JWTs and most
+modern APIs want; `base64_encode_padded` adds the `=` run for the
+protocols that require it. `base64_decode` accepts either.
+
+```aether,run
+import std.encoding
+import std.string
+
+main() {
+    raw = "key=secret"
+    n = string.length(raw)
+
+    // The encoders take an explicit length, so they are binary-safe: the
+    // input may contain NUL bytes.
+    println(encoding.hex_encode(raw, n))
+    println(encoding.base64_encode(raw, n))
+    println(encoding.base32_encode(raw, n))
+
+    back, err = encoding.base64_decode(encoding.base64_encode(raw, n))
+    println("round trip: ${back == raw}, err '${err}'")
+
+    // One CSV record split on a separator. Deliberately simple: there is
+    // no embedded-quote handling, so a field containing the separator is
+    // not reassembled. Split multi-row input on a newline first; a
+    // trailing carriage return is trimmed for you.
+
+    rec = encoding.csv_split("id,name,3", ",")
+    println("fields ${encoding.csv_count(rec)}: ${encoding.csv_field(rec, 1)}")
+    encoding.csv_free(rec)
+}
+```
+```output
+6b65793d736563726574
+a2V5PXNlY3JldA
+NNSXSPLTMVRXEZLU
+round trip: true, err ''
+fields 3: name
+```
+
+**Functions:**
+- `encoding.hex_encode(data, length)` → `string` - Lowercase hex
+- `encoding.hex_decode(s)` → `(string, string)` - Bytes, or an error for an odd length or a non-hex digit
+- `encoding.base64_encode(data, length)` → `string` - Unpadded Base64
+- `encoding.base64_encode_padded(data, length)` → `string` - Padded Base64
+- `encoding.base64_decode(s)` → `(string, string)` - Accepts padded or unpadded input
+- `encoding.base32_encode(data, length)` → `string`, `encoding.base32_decode(s)` → `(string, string)` - RFC 4648 Base32
+- `encoding.csv_split(record, sep)` → `ptr` - Split ONE record on `sep`; a trailing carriage return is trimmed
+- `encoding.csv_count(h)` → `int`, `encoding.csv_field(h, i)` → `string` - Field count and field `i`, borrowed from the handle
+- `encoding.csv_free(h)` - Release a split record
+
+`csv_split` is deliberately simple: there is no embedded-quote handling, so
+a field containing the separator is not reassembled. Split multi-row input
+on a newline first.
+
 ## POSIX ustar archives (`std.tar`)
 
 `std.tar` reads, writes, and safely extracts uncompressed POSIX ustar archives.
@@ -1928,6 +2168,62 @@ longer part of the Aether stdlib (it had served its purpose: shaping
 Aether's HTTP server). See [`docs/http-vcr.md`](http-vcr.md) for the
 pointer and history.
 
+### URLs (`std.url`)
+
+RFC 3986 percent-encoding and query-string parsing. Three encoders, because
+the standard keeps a different reserved set for each URL component and using
+the wrong one silently corrupts a request — or, for a signed request, breaks
+the signature:
+
+- `url.encode` — query component (Go's `QueryEscape`): a space becomes `+`.
+- `url.encode_path` — path segment (Go's `PathEscape`): `$&+:=@` are kept, a
+  space is `%20`. `+` is KEPT here, because it is not a space in a path.
+- `url.encode_strict` — unreserved only, for SigV4-style canonical signing
+  where any deviation invalidates the signature.
+
+`url.decode` reverses any of them and reads `+` as a space. `parse_query`
+returns a `string_list` of decoded `key=value` entries that supports
+repeated keys, which `query_get_all` reads back.
+
+```aether,run
+import std.url
+import std.collections
+import std.string
+
+main() {
+    println(url.encode("a b&c=d"))
+    println(url.encode_path("dir name/file+1.txt"))
+    println(url.encode_strict("a b+c~d"))
+    plain, derr = url.decode("a+b%26c")
+    if string.length(derr) > 0 { println("bad escape: ${derr}"); return }
+    println(plain)
+
+    q, err = url.parse_query("tag=go&tag=rust&page=2")
+    if string.length(err) > 0 { println("bad query: ${err}"); return }
+    defer string_list_free(q)
+
+    println(url.query_get(q, "page"))
+    tags = url.query_get_all(q, "tag")
+    defer string_list_free(tags)
+    println("tags: ${string_list_size(tags)}, first ${string_list_get(tags, 0)}")
+}
+```
+```output
+a+b%26c%3Dd
+dir%20name%2Ffile+1.txt
+a%20b%2Bc~d
+a b&c
+2
+tags: 2, first go
+```
+
+**Functions:**
+- `url.encode(s)` / `url.encode_path(s)` / `url.encode_strict(s)` → `string` - The three encoders above
+- `url.decode(s)` → `(string, string)` - Decode; the error names a malformed escape
+- `url.parse_query(s)` → `(ptr, string)` - Parse a query string (a leading `?` is tolerated) into a `string_list`
+- `url.query_get(list, name)` → `string` - The first value for `name`, `""` when absent
+- `url.query_get_all(list, name)` → `ptr` - Every value for a repeated key, as a fresh `string_list`
+
 ### TCP (`std.tcp`)
 
 > **Note:** `send` and `receive` are reserved actor keywords in Aether, so
@@ -2158,6 +2454,51 @@ main() {
 
 ---
 
+## Dates and times (`std.time`)
+
+Civil date and time over Unix epoch seconds, all UTC. The canonical value is
+the epoch second; the civil fields (`year`, `month`, `day`, `hour`, `min`,
+`sec`, plus weekday and day-of-year) are a decoded view of it, converted both
+ways by an exact proleptic-Gregorian algorithm with no dependency on libc
+timezone state. That is what makes the results deterministic and testable —
+the same input gives the same answer on every machine and in every
+environment.
+
+```aether,run
+import std.time
+
+main() {
+    launch = time.from_civil(2026, 9, 22, 14, 30, 0)
+    println(time.to_iso8601(launch))
+    println("weekday ${time.weekday(launch)} of week, day ${time.day_of_year(launch)} of year")
+
+    deadline = time.add_days(launch, 30)
+    println(time.to_iso8601(deadline))
+    println("seconds between: ${time.diff_seconds(deadline, launch)}")
+    println("2026 is a leap year: ${time.is_leap_year(2026)}")
+}
+```
+```output
+2026-09-22T14:30:00Z
+weekday 2 of week, day 265 of year
+2026-10-22T14:30:00Z
+seconds between: 2592000
+2026 is a leap year: false
+```
+
+**Functions:**
+- `time.now()` → `DateTime`, `time.now_ms()` → `long` - The current UTC time
+- `time.from_civil(y, m, d, hh, mm, ss)` → `DateTime` - Build from civil fields
+- `time.from_unix(epoch)` → `DateTime`, `time.to_unix(dt)` → `long` - Convert either way
+- `time.weekday(dt)` → `int`, `time.day_of_year(dt)` → `int` - Derived fields
+- `time.is_leap_year(y)` → `bool`, `time.days_in_month(y, m)` → `int` - Calendar queries
+- `time.add_seconds(dt, n)` / `add_minutes` / `add_hours` / `add_days` → `DateTime` - Arithmetic
+- `time.diff_seconds(a, b)` → `long`, `time.is_before(a, b)` / `time.is_after(a, b)` → `bool` - Comparison
+- `time.to_iso8601(dt)` → `string`, `time.parse_iso8601(s)` → `(DateTime, string)` - ISO-8601 round trip
+
+Duration is measured in whole seconds; sub-second precision is a later
+extension.
+
 ## Math (`std.math`)
 
 Mathematical functions. Note: `abs`, `min`, `max`, and `clamp` have separate int/float variants.
@@ -2228,6 +2569,56 @@ main() {
 - `math.random_float()` - Random float 0.0-1.0
 
 ---
+
+## Number formatting (`std.number`)
+
+Locale-aware decimal, percent and currency formatting. The separators, the
+digit grouping and where the currency symbol goes all come from the locale
+tag, so the call site does not encode one country's conventions.
+
+`FormatOptions` controls the fraction digits and whether grouping is applied;
+`default_options()` is grouping on, up to three fraction digits and none
+forced. The `_string` variants take and return decimal *strings* rather than
+`float`, which is what a monetary value should be carried as — a binary
+float cannot represent 0.1 exactly, and rounding it at the last moment is
+how cents go missing.
+
+```aether,run
+import std.number
+
+main() {
+    // Locale-aware formatting: the separators and the currency placement
+    // come from the locale tag, not from the call site.
+    opts = number.default_options()
+    opts.min_fraction_digits = 2
+    opts.max_fraction_digits = 2
+
+    println(number.format_decimal("en-US", 1234567.891, opts))
+    println(number.format_decimal("de-DE", 1234567.891, opts))
+    println(number.format_currency("en-US", "USD", 1299.5))
+    println(number.format_percent("en-US", 0.4237, opts))
+
+    // The *_default forms use default_options(): grouping on, up to three
+    // fraction digits, none forced.
+    println(number.format_decimal_default("en-US", 1234.5))
+}
+```
+```output
+1,234,567.89
+1.234.567,89
+$1,299.50
+42.37%
+1,234.5
+```
+
+**Functions:**
+- `number.default_options()` → `FormatOptions` - Grouping on, 0–3 fraction digits
+- `number.format_decimal(locale, value, opts)` → `string` - Format a `float`
+- `number.format_percent(locale, value, opts)` → `string` - Format a ratio as a percentage
+- `number.format_currency(locale, currency, value)` → `string` - Format with an ISO 4217 code
+- `number.format_decimal_string(locale, decimal, opts)` → `(string, string)` - The exact-decimal form; the error names bad input
+- `number.format_percent_string(locale, decimal, opts)` / `number.format_currency_string(locale, currency, decimal)` → `(string, string)` - The same for the other two
+- `number.format_decimal_default(locale, value)` / `number.format_percent_default(locale, value)` → `string` - With `default_options()`
 
 ## I/O (`std.io`)
 
@@ -2408,6 +2799,53 @@ main() {
 The store layout is intentionally flat (one file per digest). Grow to two-level fan-out (`<digest[0:2]>/<digest[2:]>`) only if entry counts ever push filesystem dirent limits in practice.
 
 ---
+
+## Identifiers (`std.uuid`)
+
+UUID v4 and v7 (RFC 9562), both returned in the canonical 36-character
+8-4-4-4-12 form.
+
+**v4** is 122 random bits: use it when the only requirements are
+unpredictability and uniqueness. **v7** puts a 48-bit millisecond timestamp
+in front of 74 random bits, so ids sort by creation time. That is the better
+default for a primary key — v4 keys arrive in random index positions and
+fragment a B-tree, while v7 keys append — unless you specifically need the
+creation time hidden.
+
+Both draw their entropy from `std.cryptography.random_bytes` and return
+`(id, error)`; the error is non-empty only when the system entropy source
+fails.
+
+```aether,run
+import std.uuid
+import std.string
+
+main() {
+    id, err = uuid.v4()
+    if string.length(err) > 0 { println("no entropy: ${err}"); return }
+    ordered, err7 = uuid.v7()
+    if string.length(err7) > 0 { println("no entropy: ${err7}"); return }
+
+    // Both are the canonical 8-4-4-4-12 form. The version nibble sits at
+    // index 14, so a stored id says which generator made it — and a v7 id
+    // sorts by creation time where a v4 one does not.
+    println("length ${string.length(id)}")
+    println("v4 version nibble: ${string.substring(id, 14, 15)}")
+    println("v7 version nibble: ${string.substring(ordered, 14, 15)}")
+}
+```
+```output
+length 36
+v4 version nibble: 4
+v7 version nibble: 7
+```
+
+**Functions:**
+- `uuid.v4()` → `(string, string)` - Random UUID v4
+- `uuid.v7()` → `(string, string)` - Time-ordered UUID v7
+
+The version nibble at index 14 says which generator produced an id, so a
+stored value can always be told apart.
 
 ## Process state
 

@@ -34,10 +34,10 @@
 // know, as they are for `mem.get_float32`.
 
 exports(
-    f32x4, splat4, load4, store4, lane4, sum4, min4, max4, select4,
+    f32x4, splat4, load4, store4, lane4, sum4, min4, max4, select4, sqrt4, abs4,
     lt4, le4, gt4, ge4, eq4,
     mask_and, mask_or, mask_not, any4, all4, mask_lane,
-    f64x2, splat2, load2, store2, lane2, sum2, min2, max2,
+    f64x2, splat2, load2, store2, lane2, sum2, min2, max2, sqrt2, abs2,
     select2, lt2, le2, gt2, ge2, eq2,
     mask2_and, mask2_or, mask2_not, any2, all2, mask2_lane
 )
@@ -61,6 +61,15 @@ exports(
 @extern("_ae_f32x4_max") max4(a: f32x4, b: f32x4) -> f32x4
 // `a` where the mask lane is set, `b` where it is not.
 @extern("_ae_f32x4_select") select4(mask: i32x4, a: f32x4, b: f32x4) -> f32x4
+// Lane-wise square root and absolute value. Both are EXACT — an IEEE square
+// root is correctly rounded and clearing the sign bit is not an approximation
+// — so these give the same lanes as calling the scalar form four times, in
+// one instruction instead of four extracts, four calls and a rebuild. A
+// negative lane yields NaN, as `sqrt` does. (The transcendentals are a
+// different matter: `sin`/`exp` per lane are approximations with a choice to
+// make, so they are not here.)
+@extern("_ae_f32x4_sqrt") sqrt4(v: f32x4) -> f32x4
+@extern("_ae_f32x4_abs") abs4(v: f32x4) -> f32x4
 
 // Comparisons as functions, for the spelling a solver written against the C
 // intrinsics expects. `a < b` on two f32x4 values is the same mask.
@@ -91,6 +100,9 @@ exports(
 @extern("_ae_f64x2_sum") sum2(v: f64x2) -> float
 @extern("_ae_f64x2_min") min2(a: f64x2, b: f64x2) -> f64x2
 @extern("_ae_f64x2_max") max2(a: f64x2, b: f64x2) -> f64x2
+// Lane-wise square root and absolute value, the f64x2 twins of sqrt4/abs4.
+@extern("_ae_f64x2_sqrt") sqrt2(v: f64x2) -> f64x2
+@extern("_ae_f64x2_abs") abs2(v: f64x2) -> f64x2
 
 // An f64x2 comparison yields an `i64x2` — two 64-bit lanes, the width its
 // operands have. (An i32x4 there would reinterpret the same register as four
