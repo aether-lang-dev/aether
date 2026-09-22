@@ -21,6 +21,21 @@ version number before tagging the release.
   import dropped by a losing `when defined(...)` takes its include with it.
   Documented beside `@link` and `@source`, which it completes.
 
+### Fixed
+
+- **A quote is syntax anywhere in a spawned command's token, not only at
+  its start.** `ae` spawns the C compiler itself rather than through a
+  shell, so its own tokenizer is the quoting rule — and it treated a quote
+  as syntax only when the token opened with one. `-I"/path/with space"`,
+  where the quote opens after the flag letters, therefore reached the
+  compiler with the quotes still in it, and it looked for a directory of
+  that literal name. Windows hid this (the child CRT re-parses the command
+  line and strips them); every other platform failed the build. Both
+  spawners now remove quotes wherever they appear in a token, which also
+  makes a `-D` value quoted by the caller mean the same thing on every
+  platform. `tests/integration/c_include_directive` builds through a
+  module directory containing a space.
+
 ### Changed
 
 - **Packed-array element access is a load, not a call (#1986).**

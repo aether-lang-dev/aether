@@ -542,20 +542,39 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     strncpy(buf, cmd_str, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
+    /* Split into argv. There is no shell here — posix_spawnp hands the
+     * tokens to the program verbatim — so this tokenizer IS the quoting
+     * rule, and a quote it does not remove reaches the program as a
+     * character of the argument.
+     *
+     * A quote is therefore honoured ANYWHERE in a token, not only at its
+     * start: the flags this builds include `-I"/path/with space"` and
+     * `-L"..."`, where the quote opens after the flag letters. Treating
+     * only a leading quote as syntax passed `-I"/path"` to the C compiler
+     * with the quotes in it, and it looked for a directory of that literal
+     * name (#1986 — the Linux/Clang lane found it; Windows hid it, because
+     * there the child CRT re-parses the command line and strips them).
+     *
+     * Compacted in place: removing quotes only ever shortens a token, so
+     * the write cursor never passes the read cursor. */
     char* toks[512];
     int n = 0;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        if (*p == '"') {
-            p++;  // skip opening quote
-            toks[n++] = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';  // null-terminate and skip closing quote
-        } else {
-            toks[n++] = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
+    {
+        char* p = buf;
+        char* w = buf;
+        while (*p && n < 511) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            toks[n++] = w;
+            int in_quotes = 0;
+            while (*p && (in_quotes || *p != ' ')) {
+                if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
+                *w++ = *p++;
+            }
+            /* Step past the separator before terminating: w is at most p
+             * here, so the NUL lands on the space or on the existing one. */
+            if (*p == ' ') p++;
+            *w++ = '\0';
         }
     }
     toks[n] = NULL;
@@ -650,21 +669,23 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
     // fits (each token grows by 2 bytes of `"..."` wrapper).
     char qbuf[32768];
     int qoff = 0;
+    char* w = buf;
     for (char* p = buf; *p && n < 511; ) {
         while (*p == ' ') p++;
         if (!*p) break;
-        char* tok_start;
+        /* A quote is syntax wherever it appears in the token, not only at
+         * its start — `-I"C:/path with space"` opens one after the flag
+         * letters. Compacted in place; dropping quotes only shortens. */
+        char* tok_start = w;
         int had_quotes = 0;
-        if (*p == '"') {
-            had_quotes = 1;
-            p++;
-            tok_start = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';
-        } else {
-            tok_start = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
+        {
+            int in_quotes = 0;
+            while (*p && (in_quotes || *p != ' ')) {
+                if (*p == '"') { in_quotes = !in_quotes; had_quotes = 1; p++; continue; }
+                *w++ = *p++;
+            }
+            if (*p == ' ') p++;
+            *w++ = '\0';
         }
         // For the program name (toks[0]) and tokens with no spaces,
         // pass-through. For other tokens, store a re-quoted copy so

@@ -94,6 +94,29 @@ if [ "$got" != "42 plain " ]; then
     fail=1
 fi
 
+# 3b. the -I reaches the C compiler as ONE argument, quotes removed. `ae`
+#     spawns the compiler directly (no shell), so its own tokenizer is the
+#     quoting rule: a quote is syntax wherever it appears in a token, not
+#     only at its start. `-I"dir"` used to reach gcc with the quotes still
+#     in it, and it looked for a directory of that literal name -- invisible
+#     on Windows, where the child CRT re-parses the command line and strips
+#     them, and a hard failure everywhere else. A directory with a space in
+#     it needs both halves of that to be right.
+mkdir -p "$tmp/li b/spacemod"
+cp "$tmp/lib/hdrmod/api.h" "$tmp/li b/spacemod/api.h"
+cat > "$tmp/li b/spacemod/module.ae" <<'AE'
+@c_include("api.h")
+exports(twice)
+extern hdr_twice(v: int) -> int @c_import
+twice(v: int) -> int { return hdr_twice(v) }
+AE
+printf 'import spacemod\nmain() { println("${spacemod.twice(21)}") }\n' > "$tmp/proj/spaced.ae"
+got="$(cd "$tmp/proj" && "$AE" run --lib "$tmp/li b" spaced.ae 2>&1 | tail -1)"
+if [ "$got" != "42" ]; then
+    echo "  [FAIL] c_include_directive: a module directory with a space did not reach -I (got '$got')"
+    fail=1
+fi
+
 # 4. the cross path compiles the same generated C, so it needs the same -I
 cross="cross build: zig not on PATH, skipped"
 if command -v zig >/dev/null 2>&1; then
