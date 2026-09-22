@@ -11,6 +11,54 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`@c_include("header.h")`: a header a module needs in the generated
+  translation unit (#1986).** `@c_import` hands prototype ownership to a
+  header, but the header still had to be put in the TU by the consumer's
+  cflags. A module states it itself now; codegen emits the include before
+  anything it declares, once per header across the import closure, and an
+  import dropped by a losing `when defined(...)` takes its include with it.
+  Documented beside `@link` and `@source`, which it completes.
+
+### Fixed
+
+- **A quote is syntax anywhere in a spawned command's token, not only at
+  its start.** `ae` spawns the C compiler itself rather than through a
+  shell, so its own tokenizer is the quoting rule — and it treated a quote
+  as syntax only when the token opened with one. `-I"/path/with space"`,
+  where the quote opens after the flag letters, therefore reached the
+  compiler with the quotes still in it, and it looked for a directory of
+  that literal name. Windows hid this (the child CRT re-parses the command
+  line and strips them); every other platform failed the build. Both
+  spawners now remove quotes wherever they appear in a token, which also
+  makes a `-D` value quoted by the caller mean the same thing on every
+  platform. `tests/integration/c_include_directive` builds through a
+  module directory containing a space.
+
+### Changed
+
+- **Packed-array element access is a load, not a call (#1986).**
+  `floatarr_get_unchecked(a, i)` and its int/long twins were out-of-line
+  functions in `libaether`, so a hot loop paid a call per element that the
+  C compiler could not see through — no folding, no vectorisation. They are
+  `static inline` in `aether_arr_inline.h` now, which the three modules pull
+  into the translation unit with `@c_include`. A 256x256 double matmul over
+  a `floatarr`: **19.6 ms → 3.7 ms** (-O2, Windows/UCRT64, i7-1265U), and
+  the gap to the same loop over a raw `float[]` view closes from 6.8x to
+  1.6x. That is the root LangArena's Matmul / Nbody / NeuralNet cluster
+  reported. `tests/integration/packed_array_inline_access`.
+
+- **The two tests that could never run are out of the gate (#2132 §3).**
+  `host_racket` and `host_rhombus` need a built Racket CS tree
+  (`AETHER_RACKET_INCLUDE` / `_LIB` / `_BOOT_DIR`), which no workflow
+  provisions, so every CI run reported them as passes for a body that never
+  executed; since the skip accounting landed they were honest skips, but a
+  test that can only pass by skipping still does not belong in a gate. A
+  directory carrying a `NEEDS_EXTERNAL_TOOLCHAIN` marker — whose first line
+  says what it needs — is left out of `make test-ae` and run by
+  `make test-optional` instead (`AE_SWEEP_OPTIONAL=1` puts them back in).
+
 ## [0.707.0]
 
 ### Fixed

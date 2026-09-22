@@ -18,11 +18,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct LongArray {
-    long long* data;
-    int        size;
-};
-
 LongArray* longarr_new_raw(int size) {
     if (size < 0) return NULL;
     /* #463: cap-aware. The struct is sizeof(LongArray); the data
@@ -61,13 +56,9 @@ void longarr_set_raw(LongArray* arr, int i, long long value) {
     arr->data[i] = value;
 }
 
-long long longarr_get_unchecked(LongArray* arr, int i) {
-    return arr->data[i];
-}
-
-void longarr_set_unchecked(LongArray* arr, int i, long long value) {
-    arr->data[i] = value;
-}
+/* longarr_get_unchecked / _set_unchecked are `static inline` in
+ * aether_collections.h (#1986), for the same reason as the int and float
+ * twins: the definition must be visible where the indexing happens. */
 
 void longarr_fill(LongArray* arr, long long value) {
     if (!arr || arr->size == 0) return;

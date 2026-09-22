@@ -76,8 +76,14 @@ extern intarr_new_filled_raw(size: int, init: int) -> ptr
 extern intarr_size(arr: ptr) -> int
 extern intarr_get_raw(arr: ptr, i: int) -> int
 extern intarr_set_raw(arr: ptr, i: int, value: int)
-extern intarr_get_unchecked(arr: ptr, i: int) -> int
-extern intarr_set_unchecked(arr: ptr, i: int, value: int)
+@c_include("aether_arr_inline.h")
+// #1986: the unchecked accessors are `static inline` in that header,
+// so an element access is the load it names rather than a call the C
+// compiler cannot see through. A module that declares them must pull
+// the header in and mark them @c_import, or its own prototype
+// collides with the header's definition.
+extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
+extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 extern intarr_fill(arr: ptr, value: int)
 extern intarr_free(arr: ptr)
 

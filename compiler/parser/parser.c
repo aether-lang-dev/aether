@@ -6393,6 +6393,27 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                                            at_tok->line, at_tok->column);
                 }
                 if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
+                    strcmp(attr->value, "c_include") == 0) {
+                    /* #1986: @c_include("aether_collections.h") — a header
+                     * the generated C includes whenever this module is in
+                     * the import closure. The name is written as C would
+                     * write it; the include path is the build's (`ae` puts
+                     * the stdlib's directories on it, and a project adds its
+                     * own with `[build] cflags`). */
+                    advance_token(parser);  // consume 'c_include'
+                    if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
+                    Token* hdr = peek_token(parser);
+                    if (!hdr || hdr->type != TOKEN_STRING_LITERAL || !hdr->value ||
+                        !hdr->value[0]) {
+                        parser_error(parser, "@c_include expects a header name, e.g. @c_include(\"api.h\")");
+                        return NULL;
+                    }
+                    advance_token(parser);
+                    if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
+                    return create_ast_node(AST_C_INCLUDE_DIRECTIVE, hdr->value,
+                                           at_tok->line, at_tok->column);
+                }
+                if (attr && attr->type == TOKEN_IDENTIFIER && attr->value &&
                     strcmp(attr->value, "source") == 0) {
                     /* #2125: @source("lanes.c") — a C file this module ships,
                      * named relative to the module's directory. Carried as an

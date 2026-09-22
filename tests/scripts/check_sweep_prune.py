@@ -14,7 +14,9 @@ Two checks, from the repository root:
   * FAIL: a pruned directory under tests/ that exists and holds `.ae`
     files but has no `test_*.sh` — nothing runs those tests.
   * WARN: a directory the sweep runs whose `.ae` has a `server.ae` or
-    `client.ae` sibling, or sleeps for more than 10 s — a fixture the
+    `client.ae` sibling, or sleeps for more than 10 s (unless the file
+    carries a `sweep-ok:` comment saying why that sleep is not the sweep's
+    wait) — a fixture the
     sweep runs standalone to completion.
 """
 import os
@@ -67,7 +69,14 @@ def main():
                 continue
             for n in ae:
                 with open(os.path.join(dirpath, n), encoding='utf-8', errors='replace') as f:
-                    src = re.sub(r'//[^\n]*', '', f.read())
+                    raw = f.read()
+                # A long sleep the sweep does not actually wait for — a child
+                # mode the parent times out, say — says so in a `sweep-ok:`
+                # comment giving the measured runtime. The heuristic stays for
+                # every file that does not make that claim.
+                if 'sweep-ok:' in raw:
+                    continue
+                src = re.sub(r'//[^\n]*', '', raw)
                 for m in SLEEP.finditer(src):
                     if int(m.group(1)) > 10000:
                         warnings.append("%s%s sleeps %s ms in the sweep" % (rel, n, m.group(1)))

@@ -26,7 +26,9 @@ main() {
 
 `load4(buf, index)` and `store4(buf, index, v)` read and write 16 bytes at
 `index` **elements** into a raw buffer (4 bytes per element for `f32x4` and
-`i32x4`, 8 for `f64x2`). No alignment is required, and the bounds are the
+`i32x4`, 8 for `f64x2`) — an element index, like an `f32[]` view's, **not**
+the byte offset `std.mem`'s accessors take. A loop over a float buffer
+advances by 4 per `f32x4`, and by 2 per `f64x2`. No alignment is required, and the bounds are the
 caller's to know, as they are for `std.mem`'s accessors:
 
 ```aether,fragment

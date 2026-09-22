@@ -542,20 +542,39 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     strncpy(buf, cmd_str, sizeof(buf) - 1);
     buf[sizeof(buf) - 1] = '\0';
 
+    /* Split into argv. There is no shell here — posix_spawnp hands the
+     * tokens to the program verbatim — so this tokenizer IS the quoting
+     * rule, and a quote it does not remove reaches the program as a
+     * character of the argument.
+     *
+     * A quote is therefore honoured ANYWHERE in a token, not only at its
+     * start: the flags this builds include `-I"/path/with space"` and
+     * `-L"..."`, where the quote opens after the flag letters. Treating
+     * only a leading quote as syntax passed `-I"/path"` to the C compiler
+     * with the quotes in it, and it looked for a directory of that literal
+     * name (#1986 — the Linux/Clang lane found it; Windows hid it, because
+     * there the child CRT re-parses the command line and strips them).
+     *
+     * Compacted in place: removing quotes only ever shortens a token, so
+     * the write cursor never passes the read cursor. */
     char* toks[512];
     int n = 0;
-    for (char* p = buf; *p && n < 511; ) {
-        while (*p == ' ') p++;
-        if (!*p) break;
-        if (*p == '"') {
-            p++;  // skip opening quote
-            toks[n++] = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';  // null-terminate and skip closing quote
-        } else {
-            toks[n++] = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
+    {
+        char* p = buf;
+        char* w = buf;
+        while (*p && n < 511) {
+            while (*p == ' ') p++;
+            if (!*p) break;
+            toks[n++] = w;
+            int in_quotes = 0;
+            while (*p && (in_quotes || *p != ' ')) {
+                if (*p == '"') { in_quotes = !in_quotes; p++; continue; }
+                *w++ = *p++;
+            }
+            /* Step past the separator before terminating: w is at most p
+             * here, so the NUL lands on the space or on the existing one. */
+            if (*p == ' ') p++;
+            *w++ = '\0';
         }
     }
     toks[n] = NULL;
@@ -650,21 +669,23 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
     // fits (each token grows by 2 bytes of `"..."` wrapper).
     char qbuf[32768];
     int qoff = 0;
+    char* w = buf;
     for (char* p = buf; *p && n < 511; ) {
         while (*p == ' ') p++;
         if (!*p) break;
-        char* tok_start;
+        /* A quote is syntax wherever it appears in the token, not only at
+         * its start — `-I"C:/path with space"` opens one after the flag
+         * letters. Compacted in place; dropping quotes only shortens. */
+        char* tok_start = w;
         int had_quotes = 0;
-        if (*p == '"') {
-            had_quotes = 1;
-            p++;
-            tok_start = p;
-            while (*p && *p != '"') p++;
-            if (*p) *p++ = '\0';
-        } else {
-            tok_start = p;
-            while (*p && *p != ' ') p++;
-            if (*p) *p++ = '\0';
+        {
+            int in_quotes = 0;
+            while (*p && (in_quotes || *p != ' ')) {
+                if (*p == '"') { in_quotes = !in_quotes; had_quotes = 1; p++; continue; }
+                *w++ = *p++;
+            }
+            if (*p == ' ') p++;
+            *w++ = '\0';
         }
         // For the program name (toks[0]) and tokens with no spaces,
         // pass-through. For other tokens, store a re-quoted copy so
@@ -2385,6 +2406,44 @@ const char* get_aether_source_files(const char* c_file) {
     return files;
 }
 
+// Read the `// aether-include: <dir>` header lines codegen emits for the
+// modules that declared a `@c_include` (#1986), as `-I"<dir>"` flags. The
+// generated C includes the header by the name the module wrote, so the file
+// stays portable; these say where that name resolves. Empty when no module
+// in the closure asked for one, which is the common case.
+const char* get_aether_include_flags(const char* c_file) {
+    static char flags[4096];
+    flags[0] = '\0';
+    if (!c_file) return flags;
+    FILE* f = fopen(c_file, "r");
+    if (!f) return flags;
+    char line[2048];
+    size_t out = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "//", 2) != 0) break;
+        const char* p = strstr(line, "// aether-include:");
+        if (!p) continue;
+        p += strlen("// aether-include:");
+        while (*p == ' ') p++;
+        size_t n = strlen(p);
+        while (n > 0 && (p[n - 1] == '\n' || p[n - 1] == '\r' || p[n - 1] == ' ')) n--;
+        if (n == 0) continue;
+        if (out + n + 6 >= sizeof(flags)) {
+            fprintf(stderr, "Warning: the @c_include include path exceeded 4 KiB; "
+                            "the remaining directories were dropped.\n");
+            break;
+        }
+        if (out) flags[out++] = ' ';
+        flags[out++] = '-'; flags[out++] = 'I'; flags[out++] = '"';
+        memcpy(flags + out, p, n);
+        out += n;
+        flags[out++] = '"';
+        flags[out] = '\0';
+    }
+    fclose(f);
+    return flags;
+}
+
 // --------------------------------------------------------------------------
 // C-backend compiler override: honor $AE_CC then $CC (mirrors the Makefile's
 // CC=). This selects the compiler that turns Aether's generated C into the
@@ -3003,6 +3062,8 @@ void build_gcc_cmd(char* cmd, size_t size,
     // The --extra / extra_sources files, then the C files the modules of the
     // closure ship (`@source`, #2125) from the `// aether-source:` lines.
     const char* ae_sources = get_aether_source_files(c_file);
+    /* -I for each module that declared a `@c_include` (#1986). */
+    const char* ae_includes = get_aether_include_flags(c_file);
     char extra_buf[8192 + 8192 + 2];
     snprintf(extra_buf, sizeof(extra_buf), "%s%s%s",
              extra_files ? extra_files : "",
@@ -3169,8 +3230,8 @@ void build_gcc_cmd(char* cmd, size_t size,
          * linker, so `import contrib.host.tinygo` failed with undefined
          * tinygo_call_* while the .a sat in build/contrib. */
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s-L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s %s \"%s\" %s %s-L\"%s\" %s%s -laether -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, manifest_obj, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3179,8 +3240,8 @@ void build_gcc_cmd(char* cmd, size_t size,
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
-            "\"%s\" %s %s \"%s\" %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_bin, opt, tc.include_flags, c_file, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "\"%s\" %s %s %s \"%s\" %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_bin, opt, tc.include_flags, ae_includes, c_file, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3437,8 +3498,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         else
             contrib_L[0] = '\0';
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s -rdynamic -L%s %s%s -laether -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, lib_dir, contrib_L, g_host_bridge_link, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3447,8 +3508,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
-            cc, opt, tc.include_flags, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
+            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s",
+            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, g_binimport_link);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
         }
@@ -3477,6 +3538,16 @@ static int build_wasm_cmd(char* cmd, size_t size,
              * share/aether/ (see the src_root derivation). */
             snprintf(flag, sizeof(flag), "-I%s/%s ", tc.src_root, include_dirs[i]);
             strncat(includes, flag, sizeof(includes) - strlen(includes) - 1);
+        }
+    }
+
+    /* #1986: the -I for a module that declared a `@c_include`; the wasm
+     * target compiles the same generated C, so it needs the same paths. */
+    {
+        const char* extra_inc = get_aether_include_flags(c_file);
+        if (extra_inc[0]) {
+            strncat(includes, " ", sizeof(includes) - strlen(includes) - 1);
+            strncat(includes, extra_inc, sizeof(includes) - strlen(includes) - 1);
         }
     }
 
@@ -7089,8 +7160,9 @@ static int cmd_build(int argc, char** argv) {
             objcc = (system("command -v gcc >/dev/null 2>&1") == 0) ? "gcc" : "cc";
 #endif
         }
-        snprintf(cmd, sizeof(cmd), "\"%s\" -c %s \"%s\" -o \"%s\"",
+        snprintf(cmd, sizeof(cmd), "\"%s\" -c %s %s \"%s\" -o \"%s\"",
                  objcc, tc.include_flags ? tc.include_flags : "",
+                 get_aether_include_flags(c_file),   /* #1986 */
                  c_file, obj_file);
         if (tc.verbose) fprintf(stderr, "ae: %s\n", cmd);
         int orc = run_cmd(cmd);

@@ -297,7 +297,14 @@ typedef enum {
     // it and lists it in the `// aether-source:` header lines that follow
     // `// aether-link:`; `ae` compiles those files into the build whenever
     // the module is in the import closure. Appended at the enum END too.
-    AST_SOURCE_DIRECTIVE
+    AST_SOURCE_DIRECTIVE,
+    // #1986: top-level `@c_include("header.h")` in a module — the header
+    // the generated C must include for this module's externs to resolve to
+    // the definitions that header carries. A `static inline` accessor is
+    // the reason: declared out of line it is a call the C compiler cannot
+    // see through, and a hot loop over a packed buffer pays for that;
+    // included, it is the load it names and the loop vectorises.
+    AST_C_INCLUDE_DIRECTIVE
 } ASTNodeType;
 
 typedef enum {

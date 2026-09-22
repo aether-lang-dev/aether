@@ -586,6 +586,13 @@ paths remain the consumer's job — those are site-specific in a way a module
 cannot know — except for `<lib_dir>/contrib`, which is added automatically so
 the veneer archives `make contrib` builds resolve without configuration.
 
+**A header a module needs in the TU (`@c_include`, #1986).** A module whose
+externs resolve to `static inline` helpers declares the header that carries
+them: `@c_include("api.h")` makes codegen emit `#include "api.h"` before
+anything it declares itself, deduplicated across the closure, so the calls
+resolve to the definitions rather than to an out-of-line symbol. Pairs with
+`@c_import` on the externs, which suppresses Aether's own prototype.
+
 **C sources a module ships (`@source`, #2125).** The same mechanism carries
 a module's own C: `@source("lanes.c")` at the top of `module.ae` names a
 file relative to the module's directory. Orchestration resolves it, reports

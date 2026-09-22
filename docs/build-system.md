@@ -111,6 +111,31 @@ Before this, every program importing such a module had to name the file
 itself, once per `[[bin]]` — twenty tests and benches, twenty entries — and
 the file was compiled whether or not the import survived.
 
+### A header a module needs in the translation unit (`@c_include`)
+
+A module whose externs resolve to `static inline` helpers needs that header
+*in the generated C*, not merely on the include path: an out-of-line
+declaration is a call the C compiler cannot see through.
+
+```aether,fragment
+@c_include("aether_arr_inline.h")
+extern floatarr_get_unchecked(arr: ptr, i: int) -> float @c_import
+```
+
+Codegen emits `#include "aether_arr_inline.h"` before anything it declares
+itself, once per header however many modules ask for it, and `@c_import`
+keeps Aether from writing a competing prototype (see
+[`docs/c-interop.md`](c-interop.md#letting-the-header-own-the-prototype-extern--c_import)).
+Like `@link` and `@source` it is AST-derived, so an import inside a losing
+`when defined(...)` region takes its include with it. The include path is
+the build's: the stdlib's directories are on it already, and a project adds
+its own with `[build] cflags`.
+
+That is what `std.intarr` / `std.floatarr` / `std.longarr` do with their
+unchecked accessors: the same 256x256 double matmul runs 19.6 ms when each
+element access is an out-of-line call and 3.7 ms when the definition is
+visible (#1986).
+
 ### `extra_sources` vs `--extra`
 
 Both add C files to the build, they are additive when both are present. A

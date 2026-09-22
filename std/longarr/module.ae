@@ -23,6 +23,12 @@ exports(
     longarr_fill, longarr_free
 )
 
+@c_include("aether_arr_inline.h")
+// #1986: the header carries the unchecked accessors as `static
+// inline`, so an element access is the load it names rather than a
+// call the C compiler cannot see through — a matmul over a packed
+// buffer was 6.8x the same loop over a raw one before this.
+
 // ---- Raw externs (escape hatch; also the hot-path API) ----
 
 // Allocate a LongArray of `size` longs, zero-initialised. Returns
@@ -45,8 +51,8 @@ extern longarr_set_raw(arr: ptr, i: int, value: long)
 
 // Hot-path variants — caller guarantees index is in [0, size). OOB
 // access is undefined behaviour. Don't use from outside a tight loop.
-extern longarr_get_unchecked(arr: ptr, i: int) -> long
-extern longarr_set_unchecked(arr: ptr, i: int, value: long)
+extern longarr_get_unchecked(arr: ptr, i: int) -> long @c_import
+extern longarr_set_unchecked(arr: ptr, i: int, value: long) @c_import
 
 // Fill every element with `value`.
 extern longarr_fill(arr: ptr, value: long)

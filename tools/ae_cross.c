@@ -627,10 +627,12 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
 
     char* cmd = NULL;
     size_t cmd_cap = 0;
+    /* -I for the modules that declared a `@c_include` (#1986). */
+    const char* ae_includes = get_aether_include_flags(c_file);
     if (!cross_cmd_fmt(&cmd, &cmd_cap,
-            "%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
+            "%s %s %s %s %s %s %s -c \"%s\" -o \"%s\"",
             cc_cmd, sysroot_flag, opt, feature_defs, user_cflags,
-            tc.include_flags ? tc.include_flags : "",
+            tc.include_flags ? tc.include_flags : "", ae_includes,
             c_file, obj_file)) {
         fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
         free(cmd);
@@ -767,6 +769,10 @@ int run_cross_build(const char* c_file, const char* out_file,
      * the same; without it a cross build of a program importing such a module
      * fails at the link with the module's own symbols undefined. */
     const char* ae_sources = get_aether_source_files(c_file);
+    /* -I for each module that declared a `@c_include` (#1986): the generated
+     * C includes the header by the name the module wrote, and these say
+     * where that name resolves. The cross path compiles the same file. */
+    const char* ae_includes = get_aether_include_flags(c_file);
     char ex_buf[8192 + 8192 + 2];
     snprintf(ex_buf, sizeof(ex_buf), "%s%s%s",
              extra ? extra : "",
@@ -1126,9 +1132,9 @@ int run_cross_build(const char* c_file, const char* out_file,
             char user_obj[2048];
             snprintf(user_obj, sizeof(user_obj), "%s/__aether_program.o", objdir);
             if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s%s %s %s %s %s -c \"%s\" -o \"%s\"",
+                "%s %s%s %s %s %s %s %s -c \"%s\" -o \"%s\"",
                 cc_cmd, sysroot_flag, lib_pic, opt, feature_defs, user_cflags,
-                tc.include_flags, c_file, user_obj)) {
+                tc.include_flags, ae_includes, c_file, user_obj)) {
                 fprintf(stderr, "Error: out of memory building the static-library compile command.\n");
                 break;
             }
@@ -1175,9 +1181,9 @@ int run_cross_build(const char* c_file, const char* out_file,
              * symbols (casper's cap_*, openssl's SSL_*, …), so they must
              * follow it on the link line for ld.lld's single-pass resolution. */
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
+                "%s %s %s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -lm -o \"%s\"",
                 cc_cmd, sysroot_flag, fbsd_lib_flags, fbsd_size_link, fbsd_link,
-                opt, feature_defs, tc.include_flags,
+                opt, feature_defs, tc.include_flags, ae_includes,
                 c_file, ex, objdir, fbsd_platform_libs, crossbuild_libs, out_file) ? 1 : -1;
         } else {
             /* Tier A (linux/macos/windows): compact form + any CROSSBUILD_SYSROOT
@@ -1248,10 +1254,10 @@ int run_cross_build(const char* c_file, const char* out_file,
                 : (is_apple ? "-Wl,-x -Wl,-dead_strip"
                             : "-Wl,--strip-all -Wl,--gc-sections");
             w = cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s %s %s%s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
+                "%s %s %s %s%s %s %s %s %s %s %s \"%s\" %s \"%s/libaether.a\" %s %s -o \"%s\" -lm",
                 cc_cmd, sysroot_flag, apple_lib_flags, wasi_model,
                 wasm_lib_flags ? wasm_lib_flags : "", elf_pe_lib_flags, size_link,
-                opt, feature_defs, tc.include_flags, c_file, ex, objdir,
+                opt, feature_defs, tc.include_flags, ae_includes, c_file, ex, objdir,
                 crossbuild_libs, win_platform_libs, out_file) ? 1 : -1;
             free(wasm_lib_flags);
         }

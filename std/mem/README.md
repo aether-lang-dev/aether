@@ -44,6 +44,11 @@ read back: 305419896
 as int8: -1, as uint8: 255
 ```
 
+Every accessor here takes a **byte offset**, whatever its width:
+`get_float32(p, 4)` reads the second float, not the fifth. (`std.lanes`, the
+other module that reaches into a raw buffer, indexes by **element** — the
+convention an `f32[]` view uses.)
+
 Use `alloc_aligned` when the wider accessors are involved: `set_long` and the
 u64 pair at an unaligned offset are undefined on strict-alignment targets even
 where x86 tolerates them.

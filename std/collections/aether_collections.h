@@ -7,9 +7,11 @@
 
 typedef struct ArrayList ArrayList;
 typedef struct HashMap HashMap;
-typedef struct IntArray IntArray;
-typedef struct FloatArray FloatArray;
-typedef struct LongArray LongArray;
+/* #1986: the packed-array layouts and their `static inline` unchecked
+ * accessors. A program pulls in just that header through `@c_include`;
+ * this one re-exports it so every C user of the collections sees the
+ * same definitions. */
+#include "aether_arr_inline.h"
 typedef struct StrArray StrArray;
 
 ArrayList* list_new(void);
@@ -132,8 +134,6 @@ void intarr_set_raw(IntArray* arr, int i, int value);
 // Hot-path skip-the-bounds-check variants. Caller is responsible for
 // keeping the index in [0, size). Out-of-range access is undefined
 // behaviour. Used for inner loops in DP table walks.
-int  intarr_get_unchecked(IntArray* arr, int i);
-void intarr_set_unchecked(IntArray* arr, int i, int value);
 
 // Fill every element with `value`. Useful for resetting a DP table
 // between problem instances without reallocating.
@@ -190,8 +190,6 @@ void floatarr_set_raw(FloatArray* arr, int i, double value);
 
 // Hot-path skip-the-bounds-check variants. Caller is responsible for
 // keeping the index in [0, size); OOB is undefined behaviour.
-double floatarr_get_unchecked(FloatArray* arr, int i);
-void   floatarr_set_unchecked(FloatArray* arr, int i, double value);
 
 // Fill every element with `value`.
 void floatarr_fill(FloatArray* arr, double value);
@@ -233,8 +231,6 @@ void longarr_set_raw(LongArray* arr, int i, long long value);
 
 // Hot-path skip-the-bounds-check variants. Caller is responsible for
 // keeping the index in [0, size); OOB is undefined behaviour.
-long long longarr_get_unchecked(LongArray* arr, int i);
-void      longarr_set_unchecked(LongArray* arr, int i, long long value);
 
 // Fill every element with `value`.
 void longarr_fill(LongArray* arr, long long value);

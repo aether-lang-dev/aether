@@ -1,0 +1,3 @@
+The same built Racket CS tree host_racket needs (Rhombus is a #lang on
+Racket, so it shares the bridge): AETHER_RACKET_INCLUDE, AETHER_RACKET_LIB,
+AETHER_RACKET_BOOT_DIR.

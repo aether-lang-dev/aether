@@ -1302,6 +1302,8 @@ test-ae: compiler ae stdlib
 	fi; \
 	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
 	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
+	    | { if [ -n "$(AE_SWEEP_OPTIONAL)" ]; then cat; else \
+	          while read -r d; do [ -f "$$d/NEEDS_EXTERNAL_TOOLCHAIN" ] || echo "$$d"; done; fi; } \
 	    > "$$tmpdir/shdirs.txt"; \
 	{ for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    if [ -f "$$d/DRIVERS_INDEPENDENT" ]; then find "$$d" -maxdepth 1 -name 'test_*.sh' | sort; fi; \
@@ -2860,6 +2862,33 @@ check-docs: compiler ae stdlib
 # only makes sense under a driver is not run standalone). Python, probed the
 # same way check-docs does; the checks read the tree, so they do not vary
 # by platform and the Linux/macOS legs cover a Windows box without Python.
+# Test directories the default sweep leaves out because they cannot run
+# without a toolchain this repository does not provision (#2132 §3): a test
+# that can only "pass" by skipping is not a gate. They carry a
+# NEEDS_EXTERNAL_TOOLCHAIN marker file naming what they need; this target
+# runs exactly those, and reports a skip as a skip.
+#
+#   make test-optional        # what the sweep leaves out
+#   AE_SWEEP_OPTIONAL=1 make test-ae   # the whole sweep, these included
+.PHONY: test-optional
+test-optional: compiler ae stdlib
+	@tmpdir=$$(mktemp -d); \
+	root=$$(pwd); \
+	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
+	dirs=$$(find tests/integration -name NEEDS_EXTERNAL_TOOLCHAIN | xargs -n1 dirname | sort -u); \
+	if [ -z "$$dirs" ]; then echo "No optional test directories."; rm -rf "$$tmpdir"; exit 0; fi; \
+	for d in $$dirs; do \
+	  echo "--- $$d: $$(head -1 $$d/NEEDS_EXTERNAL_TOOLCHAIN)"; \
+	  sh "$$sh_script" "$$d" "$$tmpdir" "$$root"; \
+	done; \
+	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
+	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
+	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
+	echo ""; \
+	echo "Optional tests: $$passed passed, $$failed failed, $$skipped skipped"; \
+	rm -rf "$$tmpdir"; \
+	[ "$$failed" -eq 0 ]
+
 check-tests:
 	@echo "==================================="
 	@echo "  test suite (verdicts, prune list)"
