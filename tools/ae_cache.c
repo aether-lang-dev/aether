@@ -122,7 +122,24 @@ void cache_touch_depfile(const char* ae_file) {
     if (depfile[0]) cache_touch(depfile);
 }
 
-typedef struct { char name[256]; unsigned long long size; time_t mtime; } CacheSlot;
+/* mtime in nanoseconds: the eviction order is least-recently-used, and a
+ * fast machine publishes several builds within one second, so a
+ * seconds-resolution mtime made their order arbitrary (by name), and the
+ * oldest-used build could outlive a newer one. Windows' FILETIME is 100 ns;
+ * POSIX stat carries st_mtim (Linux) / st_mtimespec (macOS). */
+typedef struct { char name[256]; unsigned long long size; unsigned long long mtime_ns; } CacheSlot;
+
+#ifndef _WIN32
+static unsigned long long stat_mtime_ns(const struct stat* st) {
+#if defined(__APPLE__)
+    return (unsigned long long)st->st_mtimespec.tv_sec * 1000000000ULL +
+           (unsigned long long)st->st_mtimespec.tv_nsec;
+#else
+    return (unsigned long long)st->st_mtim.tv_sec * 1000000000ULL +
+           (unsigned long long)st->st_mtim.tv_nsec;
+#endif
+}
+#endif
 
 static int cache_slot_is_countable(const char* name) {
     if (name[0] == '.') return 0;
@@ -136,7 +153,7 @@ static int cache_slot_is_countable(const char* name) {
 static int cache_slot_older(const void* a, const void* b) {
     const CacheSlot* x = (const CacheSlot*)a;
     const CacheSlot* y = (const CacheSlot*)b;
-    if (x->mtime != y->mtime) return x->mtime < y->mtime ? -1 : 1;
+    if (x->mtime_ns != y->mtime_ns) return x->mtime_ns < y->mtime_ns ? -1 : 1;
     return strcmp(x->name, y->name);
 }
 
@@ -162,10 +179,10 @@ static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* to
         }
         snprintf(slots[n].name, sizeof(slots[n].name), "%s", fd.cFileName);
         slots[n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-        /* FILETIME: 100 ns since 1601 -> seconds since 1970. */
+        /* FILETIME: 100 ns units since 1601; only the order matters. */
         unsigned long long ft = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
                                 fd.ftLastWriteTime.dwLowDateTime;
-        slots[n].mtime = (time_t)(ft / 10000000ULL - 11644473600ULL);
+        slots[n].mtime_ns = ft * 100ULL;
         *total += slots[n].size;
         n++;
     } while (FindNextFileA(h, &fd));
@@ -188,7 +205,7 @@ static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* to
         }
         snprintf(slots[n].name, sizeof(slots[n].name), "%s", e->d_name);
         slots[n].size = (unsigned long long)st.st_size;
-        slots[n].mtime = st.st_mtime;
+        slots[n].mtime_ns = stat_mtime_ns(&st);
         *total += slots[n].size;
         n++;
     }
