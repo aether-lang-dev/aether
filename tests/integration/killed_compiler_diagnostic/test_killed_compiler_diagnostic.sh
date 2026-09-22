@@ -65,7 +65,25 @@ EOF
     fi
 fi
 
+# 3. A compile step that could not be STARTED is a third case, and the one
+#    that actually showed up: a sweep run failed with
+#    `Compilation failed. (terminated abnormally, status 0xFFFFFFFF)`, and
+#    0xFFFFFFFF is -1 -- the spawn failing, not the child dying. A child can
+#    itself exit 0xFFFFFFFF, so the two are told apart by errno rather than
+#    by the status, and the reason is printed where it is known.
+out="$(AE_CC=definitely-not-a-compiler-xyz "$AE" run "$tmp/good.ae" 2>&1)"
+if ! printf '%s\n' "$out" | grep -q "could not start 'definitely-not-a-compiler-xyz'"; then
+    echo "  [FAIL] killed_compiler_diagnostic: a compiler that cannot be started was not named"
+    printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+    fail=1
+fi
+if ! printf '%s\n' "$out" | grep -q 'nothing was compiled'; then
+    echo "  [FAIL] killed_compiler_diagnostic: a failed spawn was not distinguished from a failed compile"
+    printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] killed_compiler_diagnostic: an ordinary compile error is undecorated; $killed"
+    echo "  [PASS] killed_compiler_diagnostic: an ordinary compile error is undecorated, a compiler that cannot start is named; $killed"
 fi
 exit $fail

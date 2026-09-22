@@ -41,15 +41,24 @@ version number before tagging the release.
 
 ### Fixed
 
-- **A compile step that is killed now says so.** A compiler that rejects
-  the program exits 1 and has already explained itself; one the OS takes
-  away explains nothing, and `ae` reported only `Build failed.` /
-  `Compilation failed.` — indistinguishable from a rejected program. A
-  sweep run failed exactly that way, with no way to tell a bug in the code
-  from a machine under memory pressure. An abnormal termination now names
-  its signal (or its Windows status) and says why there was no diagnostic;
-  an ordinary non-zero exit is left undecorated, because its own output is
-  the report. `tests/integration/killed_compiler_diagnostic`.
+- **A compile step that never ran, or was killed, now says which.** A
+  compiler that rejects the program exits 1 and has already explained
+  itself; one that is killed, or that never starts, explains nothing — and
+  `ae` printed the same `Build failed.` / `Compilation failed.` for all
+  three, so there was no way to tell a bug in the code from a machine under
+  pressure. Three distinct reports now: an ordinary non-zero exit is left
+  undecorated (its own output is the report), an abnormal termination names
+  its signal or Windows status, and a step that **could not be started**
+  names the program and the reason (`could not start 'cc': Resource
+  temporarily unavailable`) and says nothing was compiled.
+
+  The third case is why this is here rather than filed for later. The
+  second fix surfaced a sweep failure as `terminated abnormally, status
+  0xFFFFFFFF` — and 0xFFFFFFFF is -1, the *spawn* failing, not the child
+  dying. A child can itself exit 0xFFFFFFFF, so the two are separated by
+  `errno` rather than by the status, and `run_cmd*` returns a sentinel no
+  child can produce. `tests/integration/killed_compiler_diagnostic` pins
+  all three.
 
 - **`std.url` said `encode_path` percent-encodes `+`. It does not, and
   should not.** `is_path_kept` keeps `$&+:=@`, which is what a path segment

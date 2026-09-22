@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <limits.h>  // INT_MIN, for AE_SPAWN_FAILED
 
 #include "../compiler/aether_lib_path.h"
 
@@ -97,6 +98,13 @@ extern char s_cache_dir[512];   /* resolved once by init_cache_dir (ae_cache.c) 
  * long enough to push the command past 16 KB truncated it mid-argument, and
  * the compiler then failed with "no input files" (#1974). */
 #define AE_CMD_BUF 65536
+
+/* run_cmd* returns this when the program could NOT BE STARTED -- as opposed
+ * to started and failed. A child's own status can be any int, including -1
+ * (a Windows child exiting 0xFFFFFFFF), so the two cases need a value no
+ * child can hand back. The runner prints the reason at the moment it has it;
+ * callers only need to know the compile never began. */
+#define AE_SPAWN_FAILED INT_MIN
 
 int  run_cmd_show_warnings(const char* cmd);
 int  run_cmd_capture_stdout(const char* cmd, const char* path);

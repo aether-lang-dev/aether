@@ -596,7 +596,14 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     pid_t pid;
     int ret = posix_spawnp(&pid, toks[0], &fa, NULL, toks, environ);
     posix_spawn_file_actions_destroy(&fa);
-    if (ret != 0) return -1;
+    if (ret != 0) {
+        /* posix_spawnp reports the reason as its return value. Printed here
+         * because this is the only place that has it, and a build that ends
+         * with "could not be started: Resource temporarily unavailable" is
+         * diagnosable where a bare failure is not. */
+        fprintf(stderr, "error: could not start '%s': %s\n", toks[0], strerror(ret));
+        return AE_SPAWN_FAILED;
+    }
 
     int status = 0;
     waitpid(pid, &status, 0);
@@ -737,12 +744,23 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
         if (nul >= 0) { _dup2(nul, 2); _close(nul); }
     }
 
+    /* _spawnvp returns the child's exit status, or -1 with errno set when
+     * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
+     * not separate the two; errno, cleared first, does. */
+    errno = 0;
     int ret = (int)_spawnvp(_P_WAIT, toks[0], (const char* const*)toks);
+    int spawn_errno = (ret == -1) ? errno : 0;
 
     // Restore
     if (saved_stdout >= 0) { _dup2(saved_stdout, 1); _close(saved_stdout); }
     if (saved_stderr >= 0) { _dup2(saved_stderr, 2); _close(saved_stderr); }
 
+    /* After the handles are back, or the message would go to nul. */
+    if (spawn_errno != 0) {
+        fprintf(stderr, "error: could not start '%s': %s\n",
+                toks[0], strerror(spawn_errno));
+        return AE_SPAWN_FAILED;
+    }
     return ret;
 }
 #endif
@@ -783,6 +801,11 @@ int run_cmd_quiet(const char* cmd) {
  * non-zero exit. */
 static const char* exit_status_note(char* buf, size_t size, int rc) {
     buf[0] = '\0';
+    if (rc == AE_SPAWN_FAILED) {
+        snprintf(buf, size, " (it could not be started -- see the error above; "
+                            "nothing was compiled)");
+        return buf;
+    }
     if (rc >= 0) return buf;
 #ifndef _WIN32
     snprintf(buf, size, " (killed by signal %d -- it printed no diagnostic "
