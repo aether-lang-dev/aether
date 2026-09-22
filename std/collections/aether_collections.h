@@ -12,6 +12,16 @@ typedef struct HashMap HashMap;
  * this one re-exports it so every C user of the collections sees the
  * same definitions. */
 #include "aether_arr_inline.h"
+
+/* The packed-array layouts live in the header above, under Aether-prefixed
+ * names, because that one is injected into user programs by `@c_include`
+ * and must not claim a common name there (#2162). These aliases are for C
+ * that includes THIS header deliberately -- an extern shim, the runtime's
+ * own sources -- where the short spelling reads better and nothing is
+ * being imposed on anybody. */
+typedef AetherIntArray   IntArray;
+typedef AetherFloatArray FloatArray;
+typedef AetherLongArray  LongArray;
 typedef struct StrArray StrArray;
 
 ArrayList* list_new(void);

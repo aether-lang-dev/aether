@@ -739,11 +739,35 @@ Aether uses [Semantic Versioning](https://semver.org/). Releases are fully autom
 
 - **Never edit the `VERSION` file manually**, it's updated automatically by the release workflow
 - **Never create `v*.*.*` tags manually**, let the workflow handle it
-- **Always update `CHANGELOG.md`** when adding features or fixes (see below)
+- **Always record what you changed** when adding features or fixes (see below)
 
-### Changelog convention: `[current]`
+### Changelog convention: a fragment of your own
 
-All new changes go under the `## [current]` section at the top of `CHANGELOG.md`. **Do not invent a version number**, just add your entry under `[current]`.
+Write your entry into a **file of its own** under `new_changelogs/`:
+
+```bash
+make add-changelog SECTION=fixed SLUG=2162-struct-collision
+$EDITOR new_changelogs/20260922T174500Z-fixed-2162-struct-collision.md
+```
+
+Put the bullet in that file exactly as it should read under the version
+heading. That is the whole obligation — a daily job folds settled fragments
+into `CHANGELOG.md`, and a release folds everything pending.
+
+**Why not edit `CHANGELOG.md` directly?** Because every PR that does is
+editing the same lines: `## [current]` at the top. Those lines are what a
+release *renames* (`[current]` → `[0.708.0]`), so when a release is cut
+while your branch is open, merging the new `main` folds your entry **into
+the released section** — and git reports no conflict, because the headings
+merge cleanly and only your bullets end up in the wrong place. That has hit
+four PRs in a row across 0.661–0.664 and several since. With a file per
+change, two PRs cannot touch the same line.
+
+Editing `## [current]` directly is still accepted (for a correction to a
+released section's wording, say), and `make check-changelog` still catches
+the fold. But a fragment cannot be folded in the first place.
+
+**Do not invent a version number.**
 
 When your PR merges to `main`, the release pipeline automatically:
 1. Computes the next version from the highest existing git tag

@@ -5,9 +5,12 @@ All notable changes to Aether are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-**Workflow**: New changes go under the `[current]` section. When a PR merges to
-`main`, the release pipeline automatically replaces `[current]` with the next
-version number before tagging the release.
+**Workflow**: A PR does not edit this file. It drops a fragment in
+`new_changelogs/` (`make add-changelog`), a daily job folds settled fragments
+into `[current]`, and the release pipeline replaces `[current]` with the next
+version number before tagging — taking any still-pending fragments with it.
+Editing `[current]` by hand still works; the fragment exists so that a release
+cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 

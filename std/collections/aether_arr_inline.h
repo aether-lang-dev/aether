@@ -22,34 +22,47 @@
 #ifndef AETHER_ARR_INLINE_H
 #define AETHER_ARR_INLINE_H
 
-struct IntArray   { int*       data; int size; };
-struct FloatArray { double*    data; int size; };
-struct LongArray  { long long* data; int size; };
+/* Aether-prefixed, and that prefix is the point (#2162).
+ *
+ * This header is not the runtime's own business: `@c_include` puts it in
+ * the TRANSLATION UNIT OF EVERY PROGRAM that imports std.intarr /
+ * std.floatarr / std.longarr. A bare `struct IntArray` there claims a
+ * common name inside someone else's program, and a module that declared
+ * its own `IntArray` stopped compiling with an error naming neither of
+ * them -- which is what happened to aephysics on 0.708.0, where the only
+ * change was that these became visible in the caller's TU at all.
+ *
+ * So a header the runtime injects declares nothing that is not prefixed.
+ * `aether_collections.h` keeps the short aliases for C code that includes
+ * it deliberately; that header is not injected into anyone. */
+struct AetherIntArray   { int*       data; int size; };
+struct AetherFloatArray { double*    data; int size; };
+struct AetherLongArray  { long long* data; int size; };
 
-typedef struct IntArray   IntArray;
-typedef struct FloatArray FloatArray;
-typedef struct LongArray  LongArray;
+typedef struct AetherIntArray   AetherIntArray;
+typedef struct AetherFloatArray AetherFloatArray;
+typedef struct AetherLongArray  AetherLongArray;
 
 /* Hot-path skip-the-bounds-check accessors. The caller keeps the index in
  * [0, size); out of range is undefined behaviour, exactly as it is for the
  * C array the buffer is. The checked forms (`*_get_raw` / `*_set_raw`, and
  * the Aether-side `get` / `set` wrappers) stay out of line in the .c. */
-static inline int intarr_get_unchecked(IntArray* arr, int i) {
+static inline int intarr_get_unchecked(AetherIntArray* arr, int i) {
     return arr->data[i];
 }
-static inline void intarr_set_unchecked(IntArray* arr, int i, int value) {
+static inline void intarr_set_unchecked(AetherIntArray* arr, int i, int value) {
     arr->data[i] = value;
 }
-static inline double floatarr_get_unchecked(FloatArray* arr, int i) {
+static inline double floatarr_get_unchecked(AetherFloatArray* arr, int i) {
     return arr->data[i];
 }
-static inline void floatarr_set_unchecked(FloatArray* arr, int i, double value) {
+static inline void floatarr_set_unchecked(AetherFloatArray* arr, int i, double value) {
     arr->data[i] = value;
 }
-static inline long long longarr_get_unchecked(LongArray* arr, int i) {
+static inline long long longarr_get_unchecked(AetherLongArray* arr, int i) {
     return arr->data[i];
 }
-static inline void longarr_set_unchecked(LongArray* arr, int i, long long value) {
+static inline void longarr_set_unchecked(AetherLongArray* arr, int i, long long value) {
     arr->data[i] = value;
 }
 

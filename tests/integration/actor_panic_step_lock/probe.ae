@@ -1,0 +1,63 @@
+// #2163: an actor that panics while other threads are sending to it.
+//
+// `aether_step_safe` used to release the actor's `step_lock` on its panic
+// path, though it never acquired it -- every call site takes the lock
+// before calling and clears it after. So a panic handed the lock away
+// while the caller still believed it held it: another thread could acquire
+// it and start stepping the same actor, the caller then cleared a lock it
+// no longer owned, and a third could enter. Two threads inside one actor's
+// step corrupt the heap, which is what `free(): invalid pointer` in the
+// #2083 regression test looked like.
+//
+// The handler allocates before it panics, so concurrent stepping corrupts
+// the allocator rather than quietly racing an integer -- that is what makes
+// the damage observable at all, and what the ASan and Valgrind lanes see.
+
+import std.actors
+import std.string
+import std.worker
+
+message Work { n: int }
+
+actor Fragile {
+    state seen = 0
+    receive {
+        Work(n) -> {
+            seen = seen + 1
+            // Allocate inside the step: the unwind journal frees this, and
+            // two threads unwinding one actor would free it twice.
+            chunk = string.concat("chunk-", string.from_int(n))
+            if string.length(chunk) > 8 {
+                panic("step boom")
+            }
+        }
+    }
+}
+
+const PER = 4000
+
+blast(job: ptr) -> ptr {
+    a = actors.whereis("fragile")
+    for (i = 0; i < PER; i = i + 1) {
+        a ! Work { n: i }
+    }
+    return null
+}
+
+main() {
+    f = spawn(Fragile())
+    actors.register("fragile", f)
+
+    // Two foreign producers and the main thread, all sending while the
+    // actor panics partway through.
+    worker.run(|| { return blast(null) }, | r: ptr | {})
+    worker.run(|| { return blast(null) }, | r: ptr | {})
+    for (i = 0; i < PER; i = i + 1) {
+        f ! Work { n: i }
+    }
+
+    wait_for_idle()
+    // Reaching here at all is the assertion: the actor died, its messages
+    // drained, and no other thread stepped it while it was unwinding.
+    println("survived")
+}

@@ -187,6 +187,17 @@ jobs:
           SKIP_CHANGELOG=1
         fi
 
+        # Take every pending fragment first, whatever its age (#2002).
+        #
+        # The daily fold holds a fragment for a cooling-off window so a
+        # change reverted soon after it lands never becomes a permanent
+        # line. A release is different: it is a deliberate "ship what is
+        # here", and a change merged minutes before one must not be missing
+        # from its release notes. So --all, and the entries land under
+        # [current] below before it is renamed to this version.
+        python3 tests/scripts/collect_changelogs.py --all
+        git add -A new_changelogs CHANGELOG.md 2>/dev/null || true
+
         if grep -q "^## \[${VERSION}\]" CHANGELOG.md; then
           echo "::error::CHANGELOG.md already has a '## [${VERSION}]' heading."
           echo "A blind rename would create a second one; ## [0.435.0] and"
