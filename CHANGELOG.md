@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.708.0]
+
 ### Added
 
 - **`@c_include("header.h")`: a header a module needs in the generated
