@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.709.0]
+
 ### Added
 
 - **`std.lanes` gains a lane square root and absolute value (#2158):
