@@ -176,6 +176,9 @@ int extras_next(const char** cursor, char* out, size_t out_size);
  * modules of the import closure ship, as a quoted space-separated list ready
  * for a compile command, "" when there are none. Static storage. */
 const char* get_aether_source_files(const char* c_file);
+/* The `-I"<dir>"` flags for the modules that declared a `@c_include`, read
+ * from the generated C's `// aether-include:` lines (#1986). "" when none. */
+const char* get_aether_include_flags(const char* c_file);
 /* #1882: the stable depfile slot for an entry source, under the cache dir.
  * ae asks aetherc to write it (--emit-deps) on a cached build; compute_cache_key
  * folds it on the next run for exact, tree-walk-free invalidation. */

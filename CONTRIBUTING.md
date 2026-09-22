@@ -256,6 +256,23 @@ The in-tree `.ae` regression suite (`tests/regression/*.ae`, run by
 `fail()` + `exit(1)`; that idiom still works and `ae test` reads its exit
 code the same way. New Aether-level tests should prefer `std.spec`.
 
+### Two marker files a shell-test directory can carry
+
+`make test-ae` hands each `tests/integration/<name>/` directory to a worker
+and runs its `test_*.sh` drivers one after another, because two drivers in
+one directory may share fixed ports or build outputs. Two markers change
+that:
+
+- **`DRIVERS_INDEPENDENT`** — the directory's drivers share nothing, so each
+  becomes its own scheduling unit (the wycheproof suites, which otherwise
+  serialise ~6 minutes onto one worker).
+- **`NEEDS_EXTERNAL_TOOLCHAIN`** — the directory cannot run without software
+  this repository does not provision, so the default sweep leaves it out and
+  `make test-optional` runs exactly those. The file's first line says what is
+  needed and is printed when the target runs. A test that can only "pass" by
+  skipping does not belong in a gate (#2132 §3); `AE_SWEEP_OPTIONAL=1 make
+  test-ae` puts them back in for a run that has the toolchain.
+
 ## Pull Request Requirements
 
 ### Docs-only PRs: skip CI with `[skip actions]`

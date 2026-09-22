@@ -27,7 +27,9 @@
 //
 // A load or a store reads or writes 16 bytes at `index` ELEMENTS into the
 // buffer (4 bytes per element for f32x4/i32x4, 8 for f64x2) and does not
-// require alignment. The buffer is a raw `ptr` — from `std.mem`, an
+// require alignment. An ELEMENT index, like an `f32[]` view's — std.mem's
+// accessors take a BYTE offset, and the two conventions meet whenever a
+// buffer is reached both ways. The buffer is a raw `ptr` — from `std.mem`, an
 // `f32[]`/`float[]` view, or an extern — and bounds are the caller's to
 // know, as they are for `mem.get_float32`.
 

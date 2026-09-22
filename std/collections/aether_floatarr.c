@@ -14,11 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct FloatArray {
-    double* data;
-    int     size;
-};
-
 FloatArray* floatarr_new_raw(int size) {
     if (size < 0) return NULL;
     FloatArray* arr = (FloatArray*)aether_caps_malloc(sizeof(*arr));
@@ -54,13 +49,9 @@ void floatarr_set_raw(FloatArray* arr, int i, double value) {
     arr->data[i] = value;
 }
 
-double floatarr_get_unchecked(FloatArray* arr, int i) {
-    return arr->data[i];
-}
-
-void floatarr_set_unchecked(FloatArray* arr, int i, double value) {
-    arr->data[i] = value;
-}
+/* floatarr_get_unchecked / _set_unchecked are `static inline` in
+ * aether_collections.h (#1986): the definition has to be visible to the
+ * translation unit doing the indexing, or the loop cannot vectorise. */
 
 void floatarr_fill(FloatArray* arr, double value) {
     if (!arr || arr->size == 0) return;

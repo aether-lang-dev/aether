@@ -443,6 +443,25 @@ Three intrinsics drive it, mirroring `<stdarg.h>`:
 
 For **checking** format strings rather than forwarding them, nothing extra is needed: a call to a printf-family extern with a literal format keeps that literal in the generated C, so the C compiler's `-Wformat` sees it and the warning is attributed back to the `.ae` line.
 
+### A module that needs a header in the TU: `@c_include`
+
+`@c_import` (above) hands prototype ownership to a header — but the header
+still has to be *in* the translation unit, which a consumer's
+`[build] cflags = "-include api.h"` is one way to arrange. A module can
+state it itself:
+
+```aether,fragment
+@c_include("api.h")
+extern api_inline_twice(v: int) -> int @c_import
+```
+
+Every program that imports the module gets `#include "api.h"` at the top of
+its generated C, once per header, before anything Aether declares. This is
+the shape for a module whose C side is inline helpers: a `static inline`
+accessor reached through an out-of-line declaration is a call the compiler
+cannot see through, and a hot loop pays for it per element (#1986 measured
+6.8x on a matmul over a packed buffer). The include path is the build's.
+
 ### A module that ships its C: `@source`
 
 When the C file belongs to a module rather than to one program, the module

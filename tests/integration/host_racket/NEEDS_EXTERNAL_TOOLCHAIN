@@ -1,0 +1,3 @@
+A built Racket CS tree: AETHER_RACKET_INCLUDE (chezscheme.h + racketcs.h),
+AETHER_RACKET_LIB (libracketcs.a) and AETHER_RACKET_BOOT_DIR (*.boot).
+See the header of test_host_racket.sh; `make cs` in a racket checkout builds them.

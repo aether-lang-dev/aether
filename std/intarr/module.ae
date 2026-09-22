@@ -21,6 +21,13 @@ exports(
     intarr_fill, intarr_free
 )
 
+@c_include("aether_arr_inline.h")
+// #1986: the header carries the unchecked accessors as `static
+// inline`, so an element access is the load it names rather than a
+// call the C compiler cannot see through — a matmul over a packed
+// buffer was 6.8x the same loop over a raw one before this.
+
+
 // ---- Raw externs (escape hatch; also the hot-path API) ----
 // The `_raw` suffix on new/get/set keeps them from colliding with
 // the mangled C names of the `new` / `get` / `set` wrappers below.
@@ -47,8 +54,8 @@ extern intarr_set_raw(arr: ptr, i: int, value: int)
 
 // Hot-path variants — caller guarantees index is in [0, size). OOB
 // access is undefined behaviour. Don't use from outside a tight loop.
-extern intarr_get_unchecked(arr: ptr, i: int) -> int
-extern intarr_set_unchecked(arr: ptr, i: int, value: int)
+extern intarr_get_unchecked(arr: ptr, i: int) -> int @c_import
+extern intarr_set_unchecked(arr: ptr, i: int, value: int) @c_import
 
 // Fill every element with `value`. Useful for resetting a DP table.
 extern intarr_fill(arr: ptr, value: int)

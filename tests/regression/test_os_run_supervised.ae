@@ -1,3 +1,5 @@
+// sweep-ok: the 30 s sleep below is a CHILD mode this test spawns and then
+// times out at 1 s; the test itself takes ~5 s in the sweep.
 // Regression test for std.os process-supervision primitives:
 //   os.run_supervised  — own process group + timeout + group reap
 //   os.kill            — kill(2) shape: sig 0 = existence probe

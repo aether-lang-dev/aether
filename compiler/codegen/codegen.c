@@ -3029,8 +3029,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (child && (child->type == AST_LINK_DIRECTIVE ||
-                      child->type == AST_SOURCE_DIRECTIVE)) {
-            continue;  /* consumed by emit_link_requirements / emit_source_requirements */
+                      child->type == AST_SOURCE_DIRECTIVE ||
+                      child->type == AST_C_INCLUDE_DIRECTIVE)) {
+            continue;  /* consumed by the header/link/source emitters */
         }
         if (child && child->type == AST_EXPORTS_LIST) {
             has_exports_list = 1;
@@ -4502,6 +4503,109 @@ static void add_source_directive(ASTNode* c, char** paths, int* npaths, int cap)
     else free(path);
 }
 
+/* #1986: the headers modules ask for, deduplicated, in first-seen order.
+ * Emitted with the other includes, before anything this file declares, so a
+ * `static inline` the header carries is the definition the calls see. Like
+ * `@link` and `@source` it is AST-derived: an import dropped by a losing
+ * `when defined(...)` region takes its include with it. */
+/* The directory a node's file sits in, "." when the path has none (an entry
+ * file named without one). "." rather than nothing: the generated C lives in
+ * a build directory, so the module's own directory has to reach the include
+ * path either way. */
+static void c_include_dir_of(const char* file, char* out, size_t out_size) {
+    const char* cut = NULL;
+    for (const char* q = file ? file : ""; *q; q++)
+        if (*q == '/' || *q == '\\') cut = q;
+    if (!cut) { snprintf(out, out_size, "."); return; }
+    size_t len = (size_t)(cut - file);
+    if (len >= out_size) len = out_size - 1;
+    memcpy(out, file, len);
+    out[len] = '\0';
+}
+
+#define AE_C_INCLUDE_MAX 64
+
+static void emit_c_include_directives(CodeGenerator* gen, ASTNode* program) {
+    /* Deduplicated by header name AND the directory it came from: two
+     * modules may each ship an `api.h`, and a single `#include "api.h"`
+     * would reach whichever -I came first. */
+    char seen[AE_C_INCLUDE_MAX][512];
+    int nseen = 0;
+    int overflowed = 0;
+    ASTNode* sources[2] = { program, NULL };
+    for (int pass = 0; pass < 2; pass++) {
+        int mods = (pass == 1 && global_module_registry) ? global_module_registry->module_count : 0;
+        for (int m = -1; m < mods; m++) {
+            ASTNode* ast = NULL;
+            if (pass == 0) { if (m >= 0) break; ast = sources[0]; }
+            else { if (m < 0) continue;
+                   AetherModule* mod = global_module_registry->modules[m];
+                   ast = mod ? mod->ast : NULL; }
+            if (!ast) continue;
+            for (int i = 0; i < ast->child_count; i++) {
+                ASTNode* c = ast->children[i];
+                if (!c || c->type != AST_C_INCLUDE_DIRECTIVE || !c->value) continue;
+                char dir[400];
+                c_include_dir_of(c->source_file, dir, sizeof(dir));
+                char key[512];
+                snprintf(key, sizeof(key), "%s|%s", dir, c->value);
+                int dup = 0;
+                for (int k = 0; k < nseen; k++)
+                    if (strcmp(seen[k], key) == 0) { dup = 1; break; }
+                if (dup) continue;
+                if (nseen >= AE_C_INCLUDE_MAX) { overflowed = 1; continue; }
+                snprintf(seen[nseen++], sizeof(seen[0]), "%s", key);
+                fprintf(gen->output, "#include \"%s\"\n", c->value);
+            }
+        }
+    }
+    if (overflowed)
+        fprintf(stderr, "warning: more than %d distinct @c_include headers in the "
+                        "import closure; the rest were not emitted\n", AE_C_INCLUDE_MAX);
+}
+
+/* #1986: the directories the `@c_include` headers live in, as
+ * `// aether-include: <dir>` lines beside the link and source ones. The
+ * generated C says `#include "api.h"` — the name as written, so the file
+ * stays portable and a `--emit=csrc` consumer sees no machine paths — and
+ * `ae` turns these lines into the `-I` flags that make that name resolve.
+ * The stdlib's own directories are on the path already; a module anywhere
+ * else would otherwise have its header found only by luck. */
+static void emit_c_include_dirs(CodeGenerator* gen, ASTNode* program) {
+    char dirs[AE_C_INCLUDE_MAX][400];
+    int ndirs = 0;
+    int overflowed = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        int mods = (pass == 1 && global_module_registry) ? global_module_registry->module_count : 0;
+        for (int m = -1; m < mods; m++) {
+            ASTNode* ast = NULL;
+            if (pass == 0) { if (m >= 0) break; ast = program; }
+            else { if (m < 0) continue;
+                   AetherModule* mod = global_module_registry->modules[m];
+                   ast = mod ? mod->ast : NULL; }
+            if (!ast) continue;
+            for (int i = 0; i < ast->child_count; i++) {
+                ASTNode* c = ast->children[i];
+                if (!c || c->type != AST_C_INCLUDE_DIRECTIVE) continue;
+                char dir[400];
+                c_include_dir_of(c->source_file, dir, sizeof(dir));
+                int dup = 0;
+                for (int k = 0; k < ndirs; k++)
+                    if (strcmp(dirs[k], dir) == 0) { dup = 1; break; }
+                if (dup) continue;
+                if (ndirs >= AE_C_INCLUDE_MAX) { overflowed = 1; continue; }
+                snprintf(dirs[ndirs++], sizeof(dirs[0]), "%s", dir);
+            }
+        }
+    }
+    for (int i = 0; i < ndirs; i++)
+        fprintf(gen->output, "// aether-include: %s\n", dirs[i]);
+    if (overflowed)
+        fprintf(stderr, "warning: more than %d distinct @c_include directories in "
+                        "the import closure; the rest are not on the include path\n",
+                AE_C_INCLUDE_MAX);
+}
+
 /* #2125: module-owned C sources. Every `@source` in the entry program and in
  * every module of the resolved import closure, deduplicated by resolved path,
  * one per line so a path with spaces survives: the build compiles each into
@@ -4536,6 +4640,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * the MinGW #if below). */
     emit_link_requirements(gen, program);
     emit_source_requirements(gen, program);
+    emit_c_include_dirs(gen, program);
     // #976: rewrite C-keyword value identifiers to a valid C spelling before
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).
@@ -4597,6 +4702,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      *      from-source fallback build) provides the symbols.
      */
     print_line(gen, "#include \"aether_stringseq.h\"");
+    /* #1986: the headers modules in the closure asked for, before anything
+     * this file declares, so a `static inline` they carry is what the calls
+     * to it resolve to. */
+    emit_c_include_directives(gen, program);
     /* Issue #343 codegen tripwire: when --emit=lib is set, the loop
      * codegen emits a check at every loop head that calls
      * aether_caps_deadline_tripped() / __aether_abort_call(). The

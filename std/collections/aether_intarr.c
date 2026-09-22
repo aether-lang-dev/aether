@@ -14,11 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct IntArray {
-    int* data;
-    int  size;
-};
-
 IntArray* intarr_new_raw(int size) {
     if (size < 0) return NULL;
     /* #463: cap-aware. The struct is sizeof(IntArray); the data
@@ -57,13 +52,9 @@ void intarr_set_raw(IntArray* arr, int i, int value) {
     arr->data[i] = value;
 }
 
-int intarr_get_unchecked(IntArray* arr, int i) {
-    return arr->data[i];
-}
-
-void intarr_set_unchecked(IntArray* arr, int i, int value) {
-    arr->data[i] = value;
-}
+/* intarr_get_unchecked / _set_unchecked are `static inline` in
+ * aether_collections.h (#1986): a call the C compiler cannot see through is
+ * what kept a loop over a packed buffer from vectorising. */
 
 void intarr_fill(IntArray* arr, int value) {
     if (!arr || arr->size == 0) return;
