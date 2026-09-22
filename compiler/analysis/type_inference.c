@@ -251,6 +251,18 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
         if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
             return create_type(TYPE_LONGDOUBLE);
         }
+        /* #2151: f32 arithmetic is f32 (see typechecker.c, which holds the
+         * literal rule as well; this pass mirrors it at the call site). */
+        if (left->kind == TYPE_FLOAT32 || right->kind == TYPE_FLOAT32) {
+            Type* other = (left->kind == TYPE_FLOAT32) ? right : left;
+            if (other->kind == TYPE_FLOAT32 || other->kind == TYPE_INT ||
+                other->kind == TYPE_INT64 || other->kind == TYPE_UINT64 ||
+                other->kind == TYPE_UINT32 || other->kind == TYPE_UINT16 ||
+                other->kind == TYPE_UINT8 || other->kind == TYPE_BYTE) {
+                return create_type(TYPE_FLOAT32);
+            }
+            return create_type(TYPE_FLOAT);
+        }
         if (left->kind == TYPE_FLOAT || right->kind == TYPE_FLOAT) {
             return create_type(TYPE_FLOAT);
         }
@@ -313,6 +325,19 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
     return create_type(TYPE_UNKNOWN);
 }
 
+/* #2151: the numeric literal an operand IS — the node itself, or the
+ * literal under a unary minus/plus (`v * -0.5` is as much a constant as
+ * `v * 0.5`). NULL for anything else. */
+static ASTNode* numeric_literal_operand(ASTNode* n) {
+    if (!n) return NULL;
+    if (n->type == AST_LITERAL) return n;
+    if (n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0) &&
+        n->children[0] && n->children[0]->type == AST_LITERAL)
+        return n->children[0];
+    return NULL;
+}
+
 // Collect constraints from literals
 void collect_literal_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || node->type != AST_LITERAL) return;
@@ -340,7 +365,30 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 
                 Type* left_type = node->children[0]->node_type;
                 Type* right_type = node->children[1]->node_type;
-                
+
+                /* #2151: a float literal beside an f32 operand counts as f32
+                 * for the result. The literal's own node_type is left alone
+                 * here: its "literal type inference" constraint holds the
+                 * type read from its text, and a node that no longer matches
+                 * its constraint never resolves. The typechecker, which runs
+                 * after the constraints are solved, retypes the literal so
+                 * codegen emits it with C's f suffix. */
+                Type lit_l, lit_r;
+                if (left_type && right_type && node->value &&
+                    (strcmp(node->value, "+") == 0 || strcmp(node->value, "-") == 0 ||
+                     strcmp(node->value, "*") == 0 || strcmp(node->value, "/") == 0 ||
+                     strcmp(node->value, "%") == 0)) {
+                    ASTNode* L = node->children[0];
+                    ASTNode* R = node->children[1];
+                    if (left_type->kind == TYPE_FLOAT32 && numeric_literal_operand(R) &&
+                        right_type->kind == TYPE_FLOAT) {
+                        lit_r = *right_type; lit_r.kind = TYPE_FLOAT32; right_type = &lit_r;
+                    } else if (right_type->kind == TYPE_FLOAT32 && numeric_literal_operand(L) &&
+                               left_type->kind == TYPE_FLOAT) {
+                        lit_l = *left_type; lit_l.kind = TYPE_FLOAT32; left_type = &lit_l;
+                    }
+                }
+
                 if (left_type && right_type && node->value) {
                     Type* result_type = infer_from_binary_op(left_type, right_type, node->value);
                     if (result_type->kind != TYPE_UNKNOWN) {

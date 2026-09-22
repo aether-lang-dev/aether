@@ -32,6 +32,21 @@ double math_log(double x);
 double math_log10(double x);
 double math_exp(double x);
 
+// Single precision (#2151): libm's f functions, f32 in and out.
+float math_sqrt_f32(float x);
+float math_abs_f32(float x);
+float math_min_f32(float a, float b);
+float math_max_f32(float a, float b);
+float math_clamp_f32(float x, float min, float max);
+float math_sin_f32(float x);
+float math_cos_f32(float x);
+float math_tan_f32(float x);
+float math_atan2_f32(float y, float x);
+float math_floor_f32(float x);
+float math_ceil_f32(float x);
+float math_pow_f32(float base, float exp);
+float math_exp_f32(float x);
+
 // Random numbers
 void math_random_seed(unsigned int seed);
 int math_random_int(int min, int max);

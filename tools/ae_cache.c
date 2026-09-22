@@ -116,7 +116,30 @@ void cache_touch(const char* path) {
 #endif
 }
 
-typedef struct { char name[256]; unsigned long long size; time_t mtime; } CacheSlot;
+void cache_touch_depfile(const char* ae_file) {
+    char depfile[1200];
+    cache_depfile_path(ae_file, depfile, sizeof(depfile));
+    if (depfile[0]) cache_touch(depfile);
+}
+
+/* mtime in nanoseconds: the eviction order is least-recently-used, and a
+ * fast machine publishes several builds within one second, so a
+ * seconds-resolution mtime made their order arbitrary (by name), and the
+ * oldest-used build could outlive a newer one. Windows' FILETIME is 100 ns;
+ * POSIX stat carries st_mtim (Linux) / st_mtimespec (macOS). */
+typedef struct { char name[256]; unsigned long long size; unsigned long long mtime_ns; } CacheSlot;
+
+#ifndef _WIN32
+static unsigned long long stat_mtime_ns(const struct stat* st) {
+#if defined(__APPLE__)
+    return (unsigned long long)st->st_mtimespec.tv_sec * 1000000000ULL +
+           (unsigned long long)st->st_mtimespec.tv_nsec;
+#else
+    return (unsigned long long)st->st_mtim.tv_sec * 1000000000ULL +
+           (unsigned long long)st->st_mtim.tv_nsec;
+#endif
+}
+#endif
 
 static int cache_slot_is_countable(const char* name) {
     if (name[0] == '.') return 0;
@@ -130,7 +153,7 @@ static int cache_slot_is_countable(const char* name) {
 static int cache_slot_older(const void* a, const void* b) {
     const CacheSlot* x = (const CacheSlot*)a;
     const CacheSlot* y = (const CacheSlot*)b;
-    if (x->mtime != y->mtime) return x->mtime < y->mtime ? -1 : 1;
+    if (x->mtime_ns != y->mtime_ns) return x->mtime_ns < y->mtime_ns ? -1 : 1;
     return strcmp(x->name, y->name);
 }
 
@@ -156,10 +179,10 @@ static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* to
         }
         snprintf(slots[n].name, sizeof(slots[n].name), "%s", fd.cFileName);
         slots[n].size = ((unsigned long long)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
-        /* FILETIME: 100 ns since 1601 -> seconds since 1970. */
+        /* FILETIME: 100 ns units since 1601; only the order matters. */
         unsigned long long ft = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
                                 fd.ftLastWriteTime.dwLowDateTime;
-        slots[n].mtime = (time_t)(ft / 10000000ULL - 11644473600ULL);
+        slots[n].mtime_ns = ft * 100ULL;
         *total += slots[n].size;
         n++;
     } while (FindNextFileA(h, &fd));
@@ -182,7 +205,7 @@ static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* to
         }
         snprintf(slots[n].name, sizeof(slots[n].name), "%s", e->d_name);
         slots[n].size = (unsigned long long)st.st_size;
-        slots[n].mtime = st.st_mtime;
+        slots[n].mtime_ns = stat_mtime_ns(&st);
         *total += slots[n].size;
         n++;
     }
@@ -192,12 +215,47 @@ static CacheSlot* cache_scan(const char* dir, int* count, unsigned long long* to
     return slots;
 }
 
+static void cache_sweep_stale_depfiles(const char* dir, long max_age) {
+    time_t now = time(NULL);
+#ifdef _WIN32
+    char pattern[600];
+    snprintf(pattern, sizeof(pattern), "%s\\*.deps", dir);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        unsigned long long ft = ((unsigned long long)fd.ftLastWriteTime.dwHighDateTime << 32) |
+                                fd.ftLastWriteTime.dwLowDateTime;
+        time_t mtime = (time_t)(ft / 10000000ULL - 11644473600ULL);
+        if (now - mtime > max_age) {
+            char p[1024];
+            snprintf(p, sizeof(p), "%s\\%s", dir, fd.cFileName);
+            remove(p);
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR* d = opendir(dir);
+    if (!d) return;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        size_t n = strlen(e->d_name);
+        if (n <= 5 || strcmp(e->d_name + n - 5, ".deps") != 0) continue;
+        char p[1100];
+        snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(p, &st) == 0 && now - st.st_mtime > max_age) remove(p);
+    }
+    closedir(d);
+#endif
+}
+
 /* Bring the cache under its cap by evicting least-recently-used slots.
  * `keep` is the slot just published (never evicted). Returns the number of
  * slots removed. `force` skips the ten-minute stamp gate (`ae cache gc`). */
 int cache_enforce_limit(const char* keep, int force) {
     unsigned long long max = cache_max_bytes();
-    if (max == 0 || !s_cache_dir[0]) return 0;
+    if (!s_cache_dir[0]) return 0;
     char stamp[600];
     snprintf(stamp, sizeof(stamp), "%s/gc.stamp", s_cache_dir);
     if (!force) {
@@ -206,6 +264,16 @@ int cache_enforce_limit(const char* keep, int force) {
     }
     FILE* sf = fopen(stamp, "w");
     if (sf) fclose(sf);
+
+    /* Depfiles are keyed by SOURCE path, so one per entry file ever built
+     * through this cache, forever: 3,000 of them had accumulated beside
+     * 23,000 builds. A cold build rewrites its entry's depfile and a warm
+     * hit touches it, so one untouched for 30 days belongs to a source
+     * that has not been built or run in a month; the next build of that
+     * source keys on the tree walk once and writes a new one. Runs for an
+     * unlimited cache too. */
+    cache_sweep_stale_depfiles(s_cache_dir, 30 * 24 * 3600);
+    if (max == 0) return 0;
 
     int count = 0;
     unsigned long long total = 0;

@@ -104,6 +104,18 @@ if ! "$AE" run "$tmp/p99.ae" --verbose 2>&1 | grep -q "\[cache\] hit"; then
     fail=1
 fi
 
+# 5. a depfile not rewritten for 30 days goes with the scan; a fresh one stays
+printf '# aether-deps v1
+' > "$tmp/cache/old.deps"
+printf '# aether-deps v1
+' > "$tmp/cache/new.deps"
+touch -d '40 days ago' "$tmp/cache/old.deps" 2>/dev/null || touch -t "$(date -d '40 days ago' +%Y%m%d%H%M 2>/dev/null || echo 202001010000)" "$tmp/cache/old.deps"
+"$AE" cache gc >/dev/null 2>&1
+if [ -f "$tmp/cache/old.deps" ] || [ ! -f "$tmp/cache/new.deps" ]; then
+    echo "  [FAIL] cache_size_limit: stale depfile sweep (old present: $([ -f "$tmp/cache/old.deps" ] && echo yes || echo no), new present: $([ -f "$tmp/cache/new.deps" ] && echo yes || echo no))"
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
     echo "  [PASS] cache_size_limit: unlimited keeps all, a 1 MB cap evicts least-recently-used first, ae cache reports the limit"
 fi

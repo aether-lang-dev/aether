@@ -11,6 +11,33 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.math` single-precision family (#2151).** `sqrt_f32`, `abs_f32`,
+  `min_f32`, `max_f32`, `clamp_f32`, `sin_f32`, `cos_f32`, `tan_f32`,
+  `atan2_f32`, `floor_f32`, `ceil_f32`, `pow_f32`, `exp_f32`: libm's `f`
+  functions, an `f32` in and an `f32` out, so `math.sqrt_f32(dot(v, v))`
+  in an `f32` pipeline is one float `sqrt` where `math.sqrt` widened to
+  double and back.
+
+### Changed
+
+- **The cache scan removes depfiles not rewritten for 30 days.** A
+  `*.deps` file is keyed by source path, one per entry file ever built
+  through the cache, and nothing removed them (3,400 beside 9,000 builds
+  here). One untouched for 30 days belongs to a source no longer built;
+  losing a live one costs a single tree-walk key and a rewrite.
+
+- **`f32` arithmetic is single precision (#2151).** `a * b` on two `f32`
+  values was computed in `double` and narrowed at the store, so an engine
+  ported from a float reference ran every vector op at twice the width;
+  only the storage was narrow. `f32 op f32` and `f32 op <integer>` are now
+  `f32`, computed in C `float`; a numeric literal beside an `f32` operand
+  takes the `f32` (`v * 0.5` is one float multiply, emitted as `0.5f`); a
+  `float` (double) value on the other side still widens, as in C. A
+  program that relied on the old widening keeps it by writing a `float`
+  operand. Reference: the `f32` section. `tests/integration/f32_arithmetic`.
+
 ## [0.705.0]
 
 ### Added

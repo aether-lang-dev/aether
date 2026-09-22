@@ -2618,6 +2618,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "\"");
             } else if (expr->node_type && expr->node_type->kind == TYPE_DURATION) {
                 fprintf(gen->output, "%lldLL", parse_duration_literal_ns(expr->value));
+            } else if (expr->node_type && expr->node_type->kind == TYPE_FLOAT32) {
+                /* #2151: a literal typed f32 (it stood beside an f32 operand)
+                 * is a C float constant, so the operation is a float one.
+                 * `0.5f` for a decimal spelling; an integer spelling cannot
+                 * take the suffix, so it is cast. */
+                if (strpbrk(expr->value, ".eE"))
+                    fprintf(gen->output, "%sf", expr->value);
+                else
+                    fprintf(gen->output, "((float)%s)", expr->value);
             } else {
                 /* Numeric literals: translate 0o / 0b prefixes that C
                  * doesn't accept and suffix a decimal past LLONG_MAX;
@@ -3382,6 +3391,40 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_BINARY_EXPRESSION:
+            if (expr->child_count >= 2 &&
+                ((expr->node_type && expr->node_type->kind == TYPE_FLOAT32) ||
+                 (expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_FLOAT32) ||
+                 (expr->children[1]->node_type && expr->children[1]->node_type->kind == TYPE_FLOAT32)) &&
+                expr->value && (strcmp(expr->value, "+") == 0 || strcmp(expr->value, "-") == 0 ||
+                                strcmp(expr->value, "*") == 0 || strcmp(expr->value, "/") == 0 ||
+                                strcmp(expr->value, "%") == 0 ||
+                                strcmp(expr->value, "<") == 0 || strcmp(expr->value, "<=") == 0 ||
+                                strcmp(expr->value, ">") == 0 || strcmp(expr->value, ">=") == 0 ||
+                                strcmp(expr->value, "==") == 0 || strcmp(expr->value, "!=") == 0)) {
+                /* #2151: an f32 operand makes the operation a C float one,
+                 * so a float literal on the other side (bare, or under a
+                 * unary minus) is emitted as a float constant. The
+                 * typechecker retypes such literals where it types the
+                 * expression; this is the authority for every context —
+                 * `return v * 0.5` reaches the statement walker and not
+                 * infer_binary_type, and a `v * -0.5` there is typed by
+                 * neither pass (the early pass does not type unary nodes),
+                 * so the decision is made from the operands. A comparison
+                 * takes it too: `v < 0.5` compares floats. */
+                for (int k = 0; k < 2; k++) {
+                    ASTNode* opnd = expr->children[k];
+                    ASTNode* lit = opnd;
+                    if (lit && lit->type == AST_UNARY_EXPRESSION && lit->child_count == 1 &&
+                        lit->value && (strcmp(lit->value, "-") == 0 || strcmp(lit->value, "+") == 0))
+                        lit = lit->children[0];
+                    if (lit && lit->type == AST_LITERAL && lit->node_type &&
+                        lit->node_type->kind == TYPE_FLOAT) {
+                        lit->node_type->kind = TYPE_FLOAT32;
+                        if (opnd != lit && opnd->node_type && opnd->node_type->kind == TYPE_FLOAT)
+                            opnd->node_type->kind = TYPE_FLOAT32;
+                    }
+                }
+            }
             if (expr->child_count >= 2) {
                 // #1046 bit_set operators lower to bitwise ops on the backing
                 // `unsigned long long`. Handled before the generic paths since a

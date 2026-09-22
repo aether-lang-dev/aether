@@ -154,6 +154,7 @@ int  cache_publish(const char* tmp_path, const char* final_path);
  * time, orders eviction. */
 unsigned long long cache_max_bytes(void);
 void cache_touch(const char* path);
+void cache_touch_depfile(const char* ae_file);   /* the entry's depfile, on a hit */
 int  cache_enforce_limit(const char* keep, int force);
 void cache_usage(unsigned long long* bytes, int* slots);
 void remove_dsym_bundle(const char* exe_path);

@@ -2645,6 +2645,19 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
     }
 }
 
+/* #2151: the numeric literal an operand IS — the node itself, or the
+ * literal under a unary minus/plus (`v * -0.5` is as much a constant as
+ * `v * 0.5`). NULL for anything else. */
+static ASTNode* numeric_literal_operand(ASTNode* n) {
+    if (!n) return NULL;
+    if (n->type == AST_LITERAL) return n;
+    if (n->type == AST_UNARY_EXPRESSION && n->child_count == 1 && n->value &&
+        (strcmp(n->value, "-") == 0 || strcmp(n->value, "+") == 0) &&
+        n->children[0] && n->children[0]->type == AST_LITERAL)
+        return n->children[0];
+    return NULL;
+}
+
 Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
     Type* left_type = left ? left->node_type : NULL;
     Type* right_type = right ? right->node_type : NULL;
@@ -2756,10 +2769,33 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
             if (left_type->kind == TYPE_LONGDOUBLE || right_type->kind == TYPE_LONGDOUBLE) {
                 return create_type(TYPE_LONGDOUBLE);
             }
-            if (left_type->kind == TYPE_FLOAT || right_type->kind == TYPE_FLOAT ||
-                left_type->kind == TYPE_FLOAT32 || right_type->kind == TYPE_FLOAT32) {
-                /* #2134: arithmetic on an f32 is done in `float` (double); the
-                 * narrow type is storage, narrowed again at the store. */
+            if (left_type->kind == TYPE_FLOAT32 || right_type->kind == TYPE_FLOAT32) {
+                /* #2151: arithmetic on f32 operands is done in C `float`.
+                 * f32 op f32 and f32 op <integer> are f32, as C's usual
+                 * conversions make them. A numeric LITERAL beside an f32
+                 * operand takes the f32 (an untyped constant, as in Go):
+                 * `v * 0.5` is one float multiply, not a double one narrowed
+                 * at the store, and the literal is emitted with C's `f`
+                 * suffix. A float (double) VALUE on the other side still
+                 * widens the expression to float, as in C. Until 0.705 every
+                 * f32 expression was computed in double, which left a
+                 * compute-bound engine where it was: only the storage was
+                 * narrow. */
+                ASTNode* other = (left_type->kind == TYPE_FLOAT32) ? right : left;
+                Type* other_t = (left_type->kind == TYPE_FLOAT32) ? right_type : left_type;
+                if (other_t->kind == TYPE_FLOAT32 || is_integer_scalar(other_t->kind) ||
+                    other_t->kind == TYPE_BYTE) {
+                    return create_type(TYPE_FLOAT32);
+                }
+                ASTNode* lit = numeric_literal_operand(other);
+                if (other_t->kind == TYPE_FLOAT && lit && lit->node_type) {
+                    lit->node_type->kind = TYPE_FLOAT32;
+                    if (other != lit && other->node_type) other->node_type->kind = TYPE_FLOAT32;
+                    return create_type(TYPE_FLOAT32);
+                }
+                return create_type(TYPE_FLOAT);
+            }
+            if (left_type->kind == TYPE_FLOAT || right_type->kind == TYPE_FLOAT) {
                 return create_type(TYPE_FLOAT);
             }
             // byte arithmetic: byte op byte → byte; mixed byte/int → int
