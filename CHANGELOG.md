@@ -58,7 +58,19 @@ version number before tagging the release.
   dying. A child can itself exit 0xFFFFFFFF, so the two are separated by
   `errno` rather than by the status, and `run_cmd*` returns a sentinel no
   child can produce. `tests/integration/killed_compiler_diagnostic` pins
-  all three.
+  all of them.
+
+- **`$AE_CC` / `$CC` is pre-flighted on Windows too.** POSIX checked the
+  override and reported `C compiler 'x' (from $AE_CC) not found` before
+  spawning anything; Windows trusted it, so the same mistake produced a
+  clear error on one platform and a failed spawn on the other. Same check,
+  same message, both.
+
+- **The internal "fail the build, the reason is already printed" command no
+  longer assumes a shell.** `ae` spawns it directly, so a bare `exit 1` —
+  what two of those paths used — reached the spawner as a program named
+  `exit` and printed a second, misleading error on top of the real one.
+  POSIX's `false` is a real program; Windows now gets `cmd /c exit 1`.
 
 - **`std.url` said `encode_path` percent-encodes `+`. It does not, and
   should not.** `is_path_kept` keeps `$&+:=@`, which is what a path segment

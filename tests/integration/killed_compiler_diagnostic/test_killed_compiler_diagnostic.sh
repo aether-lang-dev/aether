@@ -65,25 +65,49 @@ EOF
     fi
 fi
 
-# 3. A compile step that could not be STARTED is a third case, and the one
-#    that actually showed up: a sweep run failed with
-#    `Compilation failed. (terminated abnormally, status 0xFFFFFFFF)`, and
-#    0xFFFFFFFF is -1 -- the spawn failing, not the child dying. A child can
-#    itself exit 0xFFFFFFFF, so the two are told apart by errno rather than
-#    by the status, and the reason is printed where it is known.
+# 3. A compiler that is NAMED BUT ABSENT is caught before anything is
+#    spawned, with the same message on every platform. POSIX pre-flighted
+#    the override and Windows trusted it, so the same mistake produced a
+#    clear error on one and a failed spawn on the other.
 out="$(AE_CC=definitely-not-a-compiler-xyz "$AE" run "$tmp/good.ae" 2>&1)"
-if ! printf '%s\n' "$out" | grep -q "could not start 'definitely-not-a-compiler-xyz'"; then
-    echo "  [FAIL] killed_compiler_diagnostic: a compiler that cannot be started was not named"
+if ! printf '%s\n' "$out" | grep -q "C compiler 'definitely-not-a-compiler-xyz' (from \$AE_CC) not found"; then
+    echo "  [FAIL] killed_compiler_diagnostic: an absent compiler was not reported by name"
     printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
     fail=1
 fi
-if ! printf '%s\n' "$out" | grep -q 'nothing was compiled'; then
-    echo "  [FAIL] killed_compiler_diagnostic: a failed spawn was not distinguished from a failed compile"
+# ... and nothing else is reported on top of it. The failure is signalled by
+# handing back a command that RUNS and exits non-zero, which on Windows
+# cannot be a bare `exit 1`: there is no shell, so that reached the spawner
+# as a program named `exit` and printed a second, misleading error over the
+# real one.
+if printf '%s\n' "$out" | grep -q "could not start 'exit'"; then
+    echo "  [FAIL] killed_compiler_diagnostic: the failure sentinel was spawned as a program"
     printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
     fail=1
 fi
 
+# 4. A compile step that passes that check and still cannot be EXECUTED is
+#    the case that actually showed up: a sweep failure reported
+#    `Compilation failed. (terminated abnormally, status 0xFFFFFFFF)`, and
+#    0xFFFFFFFF is -1 -- the spawn failing, not the child dying. A child can
+#    itself exit 0xFFFFFFFF, so errno separates them, not the status.
+#    Staged with a file that is executable but is not an executable.
+spawn="spawn-failure case: not stageable on this platform, skipped"
+if [ "$WINDOWS" = 0 ]; then
+    printf '\000\001\002\003' > "$tmp/not-an-executable"
+    chmod +x "$tmp/not-an-executable"
+    out="$(AE_CC="$tmp/not-an-executable" "$AE" run "$tmp/good.ae" 2>&1)"
+    if printf '%s\n' "$out" | grep -q 'could not start' &&
+       printf '%s\n' "$out" | grep -q 'nothing was compiled'; then
+        spawn="a compiler that cannot be executed is named with its reason"
+    else
+        echo "  [FAIL] killed_compiler_diagnostic: a failed spawn was not distinguished from a failed compile"
+        printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+        fail=1
+    fi
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] killed_compiler_diagnostic: an ordinary compile error is undecorated, a compiler that cannot start is named; $killed"
+    echo "  [PASS] killed_compiler_diagnostic: an ordinary compile error is undecorated, an absent compiler is named before any spawn; $killed; $spawn"
 fi
 exit $fail

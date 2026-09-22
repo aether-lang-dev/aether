@@ -2538,6 +2538,32 @@ static bool ensure_gcc_windows(void) {
     //    auto-download: the user picked the C-backend compiler, so trust it.
     const char* ov = c_backend_env_override();
     if (ov) {
+        /* Pre-flight it, as the POSIX branch already does. Trusting the
+         * override unconditionally meant a compiler that is named but
+         * absent surfaced only as a failed spawn much later, with the
+         * build's own "Build failed." over the top of it; POSIX said
+         * plainly that the compiler was not found. Same message on both
+         * now. The value may carry flags ("gcc -m32"), so only its first
+         * token is a program name. */
+        char first[256];
+        size_t n = strcspn(ov, " \t");
+        if (n >= sizeof(first)) n = sizeof(first) - 1;
+        snprintf(first, sizeof(first), "%.*s", (int)n, ov);
+        /* A bare name is looked up on PATH; a path is checked where it
+         * points, because `where` searches PATH and would not find it. */
+        int ok;
+        if (strchr(first, '/') || strchr(first, '\\')) {
+            ok = _access(first, 0) == 0;
+        } else {
+            char probe[600];
+            snprintf(probe, sizeof(probe), "where \"%s\" >nul 2>&1", first);
+            ok = system(probe) == 0;
+        }
+        if (!ok) {
+            fprintf(stderr, "Error: C compiler '%s' (from $%s) not found.\n",
+                    first, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
+            return false;
+        }
         snprintf(s_gcc_bin, sizeof(s_gcc_bin), "%s", ov);
         s_gcc_ready = true;
         return true;
@@ -3092,6 +3118,21 @@ static const char* opt_flags(bool optimize) {
  * path came to look like a compiler bug (#1974). Fail with our own message
  * instead, using the same "hand back a command that fails" shape this file
  * already uses when the toolchain is missing. */
+/* The command handed back when the build must fail and the reason has
+ * already been printed. It has to be something that RUNS and exits
+ * non-zero, because `ae` spawns it directly: there is no shell to
+ * interpret a bare "exit 1", so that spelling reached the spawner as a
+ * program named `exit` and produced a second, misleading error on top of
+ * the real one ("could not start 'exit'"). `false` is a real program on
+ * POSIX; `cmd /c exit 1` is its Windows equivalent. */
+static void set_failing_cmd(char* cmd, size_t size) {
+#ifdef _WIN32
+    snprintf(cmd, size, "cmd /c exit 1");
+#else
+    snprintf(cmd, size, "false");
+#endif
+}
+
 static void cmd_too_long(char* cmd, size_t size, int needed) {
     fprintf(stderr,
             "Error: the compiler command needs %d bytes and the buffer holds %zu.\n"
@@ -3100,7 +3141,7 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
             "       of the tree. Build from a shorter path, or reduce\n"
             "       extra_sources / include directories.\n",
             needed, size);
-    snprintf(cmd, size, "exit 1");
+    set_failing_cmd(cmd, size);
 }
 
 void build_gcc_cmd(char* cmd, size_t size,
@@ -3134,7 +3175,7 @@ void build_gcc_cmd(char* cmd, size_t size,
 #ifdef _WIN32
     // Ensure GCC is available (auto-downloads WinLibs on first run if needed).
     if (!ensure_gcc_windows()) {
-        snprintf(cmd, size, "exit 1");  // will fail; error already printed
+        set_failing_cmd(cmd, size);  // will fail; error already printed
         return;
     }
     // Windows (MinGW): no -pthread (Win32 threads via aether_thread.h), no -lm (CRT).
@@ -3316,7 +3357,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (system(probe) != 0) {
             fprintf(stderr, "Error: C compiler '%s' (from $%s) not found.\n",
                     first, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
-            snprintf(cmd, size, "false");
+            set_failing_cmd(cmd, size);
             return;
         }
     } else {
