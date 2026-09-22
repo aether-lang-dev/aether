@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.707.0]
+
 ### Fixed
 
 - **`client.set_timeout` bounds the whole request, not each read.** The
