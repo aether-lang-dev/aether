@@ -3211,6 +3211,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_MEMBER_ACCESS:
             if (expr->child_count > 0) {
                 ASTNode* child = expr->children[0];
+                /* #2146: a lane read — `v.x` is the C vector's `v[0]`. */
+                if (child->node_type && expr->value) {
+                    int lane = lane_accessor_index(child->node_type->kind, expr->value);
+                    if (lane >= 0) {
+                        fprintf(gen->output, "(");
+                        generate_expression(gen, child);
+                        fprintf(gen->output, ")[%d]", lane);
+                        break;
+                    }
+                }
                 /* #891 @c_struct overlay read (handles nested chains
                  * `s.a.b.c`): flatten to the overlay-pointer root + dotted
                  * field path, then emit aether_mem_get_<width> at the

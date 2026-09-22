@@ -3702,6 +3702,8 @@ static const char* hoisted_zero_init(Type* t, const char* c_type) {
                 return " = 0";
             case TYPE_ISOLATED:
                 return hoisted_zero_init(t->element_type, c_type);
+            case TYPE_F32X4: case TYPE_F64X2: case TYPE_I32X4: case TYPE_I64X2:
+                return " = {0}";   /* #2146: a vector, not a scalar 0 */
             case TYPE_PTR: case TYPE_STRING: case TYPE_ACTOR_REF:
                 return " = NULL";
             case TYPE_FUNCTION:

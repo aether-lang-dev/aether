@@ -1012,6 +1012,16 @@ static int is_all_digits(const char* s) {
 }
 
 // Return a human-readable type name (static buffer — for error messages only)
+static const char* type_name_of_kind(TypeKind k) {
+    switch (k) {
+        case TYPE_F32X4: return "f32x4";
+        case TYPE_F64X2: return "f64x2";
+        case TYPE_I32X4: return "i32x4";
+        case TYPE_I64X2: return "i64x2";
+        default: return "a lane type";
+    }
+}
+
 static const char* type_name(Type* t) {
     if (!t) return "unknown";
     /* C ABI alias — report the spelling the user wrote (size_t, ...). */
@@ -1027,6 +1037,10 @@ static const char* type_name(Type* t) {
         case TYPE_FLOAT:    return "float";
         case TYPE_LONGDOUBLE: return "longdouble";
         case TYPE_FLOAT32:  return "f32";
+        case TYPE_F32X4:    return "f32x4";
+        case TYPE_F64X2:    return "f64x2";
+        case TYPE_I32X4:    return "i32x4";
+        case TYPE_I64X2:    return "i64x2";
         case TYPE_BOOL:     return "bool";
         case TYPE_BYTE:     return "byte";
         case TYPE_STRING:   return "string";
@@ -1052,6 +1066,36 @@ static const char* type_name(Type* t) {
 static int is_integer_scalar(TypeKind kind) {
     return kind == TYPE_INT || kind == TYPE_INT64 || kind == TYPE_UINT64 ||
            kind == TYPE_UINT32 || kind == TYPE_UINT16 || kind == TYPE_UINT8;
+}
+
+/* #2146: the vector lane types. Lane-wise arithmetic, a comparison that
+ * yields a mask rather than a bool, and no implicit conversion to or from
+ * anything — a lane value is built with `lanes.splat` / `lanes.set` and
+ * read back with `lanes.lane` / `.x`, so it can never be mistaken for a
+ * scalar the way a one-element array might. */
+static int is_lane_type(TypeKind kind) {
+    return kind == TYPE_F32X4 || kind == TYPE_F64X2 ||
+           kind == TYPE_I32X4 || kind == TYPE_I64X2;
+}
+
+/* The mask a comparison of this lane type yields: the SAME register width,
+ * one integer lane per value lane. An f64x2 compared as an i32x4 would
+ * reinterpret two 64-bit lanes as four 32-bit ones and scramble them. */
+static TypeKind lane_mask_kind(TypeKind kind) {
+    switch (kind) {
+        case TYPE_F32X4: case TYPE_I32X4: return TYPE_I32X4;
+        case TYPE_F64X2: case TYPE_I64X2: return TYPE_I64X2;
+        default: return TYPE_UNKNOWN;
+    }
+}
+
+/* The scalar a lane of this vector holds, TYPE_UNKNOWN for a non-lane. */
+static TypeKind lane_scalar_kind(TypeKind kind) {
+    if (kind == TYPE_F32X4) return TYPE_FLOAT32;
+    if (kind == TYPE_F64X2) return TYPE_FLOAT;
+    if (kind == TYPE_I32X4) return TYPE_INT;
+    if (kind == TYPE_I64X2) return TYPE_INT64;
+    return TYPE_UNKNOWN;
 }
 
 static int is_numeric_scalar(TypeKind kind) {
@@ -1710,6 +1754,13 @@ int is_type_compatible(Type* from, Type* to) {
         if (other == TYPE_FLOAT32 || other == TYPE_FLOAT || other == TYPE_LONGDOUBLE ||
             is_integer_scalar(other) || other == TYPE_BYTE) return 1;
     }
+    /* #2146: a lane type is nominal — f32x4 is not f64x2, and neither is a
+     * scalar. A scalar becomes a lane through `lanes.splat`, a lane becomes
+     * scalars through `lanes.lane` / `.x`, and both say so at the call. */
+    if (is_lane_type(from->kind) || is_lane_type(to->kind)) {
+        return from->kind == to->kind;
+    }
+
     // Numeric conversions
     if (from->kind == TYPE_INT && to->kind == TYPE_FLOAT) return 1;
     if (from->kind == TYPE_FLOAT && to->kind == TYPE_INT) return 1;
@@ -2484,6 +2535,29 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 type_error(msg, expr->line, expr->column);
                 return create_type(TYPE_UNKNOWN);
             }
+            /* #2146: `v.x` / `.y` / `.z` / `.w` on a lane value is that
+             * lane's scalar — an f32 from an f32x4, a float from an f64x2,
+             * an int from a mask. `.z` on an f64x2 is a type error (it has
+             * two lanes), not a silent zero. */
+            if (expr->child_count > 0 && expr->children[0] && expr->value) {
+                Type* obj = infer_type(expr->children[0], table);
+                if (obj && is_lane_type(obj->kind)) {
+                    int idx = lane_accessor_index(obj->kind, expr->value);
+                    TypeKind elem = lane_scalar_kind(obj->kind);
+                    TypeKind objk = obj->kind;
+                    free_type(obj);
+                    if (idx >= 0) return create_type(elem);
+                    char msg[200];
+                    snprintf(msg, sizeof(msg),
+                             "'%s' is not a lane of %s: its lanes are %s",
+                             expr->value, type_name_of_kind(objk),
+                             objk == TYPE_F64X2 ? "`.x` and `.y`"
+                                                : "`.x`, `.y`, `.z` and `.w`");
+                    type_error(msg, expr->line, expr->column);
+                    return create_type(TYPE_UNKNOWN);
+                }
+                if (obj) free_type(obj);
+            }
             // If node_type already set, use it
             if (expr->node_type && expr->node_type->kind != TYPE_UNKNOWN)
                 return clone_type(expr->node_type);
@@ -2717,6 +2791,28 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
         return create_type(TYPE_UNKNOWN);
     }
 
+    /* #2146: a comparison of lanes is lane-wise, so it yields a MASK — an
+     * i32x4 whose lane is all-ones where the comparison held — not a bool.
+     * `lanes.select(m, a, b)` consumes it; `lanes.any` / `lanes.all` reduce
+     * it to a bool where a branch is wanted. */
+    if (left_type && right_type &&
+        (is_lane_type(left_type->kind) || is_lane_type(right_type->kind))) {
+        TypeKind lane = is_lane_type(left_type->kind) ? left_type->kind : right_type->kind;
+        TypeKind other = is_lane_type(left_type->kind) ? right_type->kind : left_type->kind;
+        TypeKind elem = lane_scalar_kind(lane);
+        /* The same operand rule the arithmetic has: the other side is the
+         * same lane type, or a scalar C splats across the lanes. */
+        int operands_ok = (other == lane || other == elem || is_integer_scalar(other) ||
+                           (elem == TYPE_FLOAT32 && other == TYPE_FLOAT));
+        switch (operator) {
+            case TOKEN_EQUALS: case TOKEN_NOT_EQUALS:
+            case TOKEN_LESS: case TOKEN_LESS_EQUAL:
+            case TOKEN_GREATER: case TOKEN_GREATER_EQUAL:
+                return create_type(operands_ok ? lane_mask_kind(lane) : TYPE_UNKNOWN);
+            default: break;
+        }
+    }
+
     // Comparison and logical operators always produce bool, even with unknown operands
     switch (operator) {
         case TOKEN_EQUALS:
@@ -2768,6 +2864,21 @@ Type* infer_binary_type(ASTNode* left, ASTNode* right, AeTokenType operator) {
             // #749: longdouble is the widest numeric — wins over float/int.
             if (left_type->kind == TYPE_LONGDOUBLE || right_type->kind == TYPE_LONGDOUBLE) {
                 return create_type(TYPE_LONGDOUBLE);
+            }
+            /* #2146: lane-wise arithmetic. Two lanes of the same kind, or a
+             * lane and a scalar of its element kind (or an integer literal),
+             * which C splats across the lanes. Mixing f32x4 with f64x2, or
+             * with a scalar of another kind, is a type error rather than a
+             * silent widening: the point of the type is that the width is
+             * what the author wrote. */
+            if (is_lane_type(left_type->kind) || is_lane_type(right_type->kind)) {
+                TypeKind lane = is_lane_type(left_type->kind) ? left_type->kind : right_type->kind;
+                TypeKind other = is_lane_type(left_type->kind) ? right_type->kind : left_type->kind;
+                TypeKind elem = lane_scalar_kind(lane);
+                if (other == lane || other == elem || is_integer_scalar(other) ||
+                    (elem == TYPE_FLOAT32 && other == TYPE_FLOAT))
+                    return create_type(lane);
+                return create_type(TYPE_UNKNOWN);
             }
             if (left_type->kind == TYPE_FLOAT32 || right_type->kind == TYPE_FLOAT32) {
                 /* #2151: arithmetic on f32 operands is done in C `float`.
@@ -8111,6 +8222,36 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return 1;
             
         case AST_MEMBER_ACCESS: {
+            /* #2146: a lane read. This walk always runs, so it is where the
+             * node's type is pinned (an interpolation reads node_type to pick
+             * its format) and where `.z` on a two-lane vector is refused —
+             * otherwise it reached the C as a member of a non-struct. */
+            if (expr->child_count > 0 && expr->children[0] && expr->value) {
+                /* infer_type only: the object may be a module NAMESPACE
+                 * (`fs.read`), which is not a value and must not be
+                 * type-checked as one — doing so reported every qualified
+                 * call as an undefined variable. */
+                Type* lt = infer_type(expr->children[0], table);
+                if (lt && is_lane_type(lt->kind)) {
+                    int idx = lane_accessor_index(lt->kind, expr->value);
+                    TypeKind elem = lane_scalar_kind(lt->kind);
+                    TypeKind objk = lt->kind;
+                    free_type(lt);
+                    if (idx < 0) {
+                        char msg[200];
+                        snprintf(msg, sizeof(msg),
+                                 "'%s' is not a lane of %s: its lanes are %s",
+                                 expr->value, type_name_of_kind(objk),
+                                 objk == TYPE_F64X2 ? "`.x` and `.y`"
+                                                    : "`.x`, `.y`, `.z` and `.w`");
+                        type_error(msg, expr->line, expr->column);
+                        return 0;
+                    }
+                    set_node_type(expr, create_type(elem));
+                    return 1;
+                }
+                if (lt) free_type(lt);
+            }
             /* #1132: a bitstruct's fields are a closed, declared set, so a name
              * that isn't one of them is a typo, not an open question. Reject it
              * here (this walk always runs) rather than letting codegen fall back

@@ -2663,6 +2663,13 @@ void http_exchange_init(HttpExchange* x, Transport* t,
     x->method = method;
 }
 
+void http_exchange_set_timeout(HttpExchange* x, int64_t timeout_ns) {
+    if (!x) return;
+    x->deadline_ms = timeout_ns > 0
+        ? http_now_ms() + (timeout_ns + 999999LL) / 1000000LL
+        : 0;
+}
+
 /* Would this send/recv have blocked, rather than failed? */
 static int http_io_would_block(void) {
 #ifdef _WIN32
@@ -2696,6 +2703,12 @@ int http_exchange_send(HttpExchange* x) {
 int http_exchange_recv(HttpExchange* x) {
     char chunk[8192];
     for (;;) {
+        /* The caller's budget covers the whole response, not each recv: a
+         * peer dripping one byte per interval never trips SO_RCVTIMEO. */
+        if (x->deadline_ms && http_now_ms() >= x->deadline_ms) {
+            x->timed_out = 1;
+            return AE_X_ERROR;
+        }
         int n = transport_recv(x->t, chunk, sizeof(chunk) - 1);
         if (n == 0) { x->peer_closed = 1; return AE_X_DONE; }
         if (n < 0)  return http_io_would_block() ? AE_X_WANT_READ : AE_X_ERROR;
@@ -2895,6 +2908,8 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     size_t cap = 0;
     int    n = 0;
     int    recv_err = 0;
+    int    timed_out = 0;   /* the whole-request budget ran out mid-response */
+    int    rx_complete_at_deadline = 0;  /* ... but the response had already ended */
     int    truncated = 0;
     HttpRespFraming framing = {0};
     /* A pooled connection the peer closed while it sat idle is
@@ -3040,7 +3055,13 @@ send_request:
     {
         HttpExchange rx;
         http_exchange_init(&rx, &t, NULL, 0, NULL, 0, method);
+        /* The caller's timeout is a budget for the whole response, not for
+         * each recv: SO_RCVTIMEO alone let a peer that dribbles a byte just
+         * inside the limit hold the request open indefinitely. */
+        http_exchange_set_timeout(&rx, req->timeout_ns);
         int rc = http_exchange_recv(&rx);
+        timed_out = rx.timed_out;
+        rx_complete_at_deadline = rx.complete || rx.peer_closed;
         full_response = rx.buf;
         total_len     = rx.len;
         cap           = rx.cap;
@@ -3179,9 +3200,22 @@ send_request:
      * caller — otherwise they'd see status=0 + empty body and not
      * know whether the request even reached the server. */
     char* header_end = strstr(full_response, "\r\n\r\n");
+    /* A response framed by the close (no Content-Length, no chunked) that
+     * the deadline cut off is NOT complete: `truncated` cannot see it
+     * (nothing declared a length) and its headers did arrive, so without
+     * this it came back as a successful partial body with no error — the
+     * silent truncation the deadline exists to make visible. */
+    if (timed_out && !rx_complete_at_deadline) {
+        aether_caps_free(full_response, cap);
+        response->error = string_new(
+            "request timed out before the response ended");
+        return response;
+    }
     if (recv_err && !header_end) {
         aether_caps_free(full_response, cap);
-        response->error = string_new("recv timeout or I/O error");
+        response->error = string_new(
+            timed_out ? "request timed out before the response arrived"
+                      : "recv timeout or I/O error");
         return response;
     }
     /* A response that stopped short of the length it declared is an error
@@ -3191,8 +3225,9 @@ send_request:
     if (truncated) {
         aether_caps_free(full_response, cap);
         response->error = string_new(
-            recv_err ? "response truncated: read failed before the declared body length"
-                     : "response truncated: peer closed before the declared body length");
+            timed_out ? "request timed out: the response stopped short of its declared body length"
+            : recv_err ? "response truncated: read failed before the declared body length"
+                       : "response truncated: peer closed before the declared body length");
         return response;
     }
     /* Hand over exactly the body the response declared. A read can return

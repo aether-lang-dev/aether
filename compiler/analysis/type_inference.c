@@ -248,6 +248,18 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
          * longdouble. `int * 1.0` was unaffected and correct, so the two
          * spellings of the same arithmetic disagreed depending only on
          * whether the left operand came from a `long` (#1965). */
+        /* #2146: lane-wise arithmetic — a lane with its own kind, or with a
+         * scalar C splats across the lanes (typechecker.c is the authority;
+         * this pass mirrors it so an inferred local gets the lane type). */
+        if (left->kind == TYPE_F32X4 || right->kind == TYPE_F32X4 ||
+            left->kind == TYPE_F64X2 || right->kind == TYPE_F64X2 ||
+            left->kind == TYPE_I32X4 || right->kind == TYPE_I32X4 ||
+            left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2) {
+            TypeKind lane = (left->kind == TYPE_F32X4 || left->kind == TYPE_F64X2 ||
+                             left->kind == TYPE_I32X4 || left->kind == TYPE_I64X2)
+                            ? left->kind : right->kind;
+            return create_type(lane);
+        }
         if (left->kind == TYPE_LONGDOUBLE || right->kind == TYPE_LONGDOUBLE) {
             return create_type(TYPE_LONGDOUBLE);
         }
@@ -314,6 +326,14 @@ Type* infer_from_binary_op(Type* left, Type* right, const char* operator) {
     if (strcmp(operator, "==") == 0 || strcmp(operator, "!=") == 0 ||
         strcmp(operator, "<") == 0 || strcmp(operator, "<=") == 0 ||
         strcmp(operator, ">") == 0 || strcmp(operator, ">=") == 0) {
+        /* #2146: comparing lanes is lane-wise, so the result is the mask,
+         * not a bool (typechecker.c holds the same rule). */
+        if (left->kind == TYPE_F32X4 || right->kind == TYPE_F32X4 ||
+            left->kind == TYPE_I32X4 || right->kind == TYPE_I32X4)
+            return create_type(TYPE_I32X4);
+        if (left->kind == TYPE_F64X2 || right->kind == TYPE_F64X2 ||
+            left->kind == TYPE_I64X2 || right->kind == TYPE_I64X2)
+            return create_type(TYPE_I64X2);   /* same width as its operands */
         return create_type(TYPE_BOOL);
     }
     

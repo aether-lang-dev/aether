@@ -83,6 +83,8 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `int` | 32-bit signed integer | `42`, `-17`, `0xFF`, `0b1010` |
 | `float` | 64-bit floating point | `3.14`, `-0.5` |
 | `f32` | 32-bit floating point (C `float`): GPU buffers, C structs, single-precision maths; `f32 op f32` is a `float` op | `f32 x = 1.5`, `v as f32` |
+| `f32x4`, `f64x2` | SIMD lanes — four single-precision or two double-precision values in one register | `lanes.splat4(1.0)`, `a * b`, `v.x` |
+| `i32x4`, `i64x2` | The mask a lane comparison yields (four 32-bit or two 64-bit lanes), and integer lanes in their own right | `a > b`, `lanes.select4(m, a, b)` |
 | `string` | UTF-8 encoded strings | `"Hello"` |
 | `bool` | Boolean type | `true`, `false` |
 | `byte` | Unsigned 8-bit (0..255) | `byte b = 0xFF` |
@@ -166,6 +168,54 @@ true 0.05
 **Printing** goes through `%g`/`%f` like `float` (`println(x)`, `${x}`, `print("%f", x)`).
 
 The other widths follow C's usual arithmetic conversions: `uint8`/`uint16` promote to `int`, `uint32 op int → uint32` (`unsigned int` wins over `int`, so `u + 1` with `u = 4000000000` is `4000000001`, not a negative `int`), and any 64-bit operand makes the result 64-bit. A shift (`<<`, `>>`) has the type of its promoted left operand; the count's type does not take part (`-8 >> n` is `-1` whatever `n`'s width). `print("%d", b)` is the right conversion for a `byte`/`uint8`/`uint16` argument; a `uint32` takes `%u`, and the compiler corrects a mismatched specifier with a warning.
+
+#### `f32x4`, `f64x2`, `i32x4` SIMD lanes
+
+Four single-precision values in one register, two double-precision ones, and
+the integer vector a lane comparison yields. Arithmetic and comparison are
+written as ordinary operators and happen **lane-wise**; `std.lanes` is what a
+lane value is built from and read back through (`splat4`, `f32x4`, `load4` /
+`store4`, `lane4`, `sum4`, `min4` / `max4`, `select4`, the mask reductions).
+The types lower to the GCC/Clang vector extensions, and every `std.lanes`
+entry point is a `static inline` helper in the generated C, so a lane
+operation is the instruction it names.
+
+```aether,run
+import std.lanes
+
+main() {
+    a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+    c = a * lanes.splat4(2.0) + lanes.splat4(1.0)
+    over = c > lanes.splat4(5.0)                      // a mask, not a bool
+    kept = lanes.select4(over, c, lanes.splat4(0.0))
+    println("${c.x} ${c.w} ${lanes.sum4(c)} ${lanes.sum4(kept)}")
+}
+```
+```output
+3 9 24 16
+```
+
+**A lane type is nominal.** It converts with nothing: not with `f32`, not
+with another width, not with an array. A scalar becomes lanes through
+`splat4` (or `f32x4(a, b, c, d)`), lanes become scalars through `.x` / `.y` /
+`.z` / `.w`, `lane4` or `sum4`. `f32x4 + f64x2` is a type error, and `.z` on
+an `f64x2` names a lane it does not have.
+
+**A comparison yields a mask, not a bool.** `a < b` on lane values is an
+integer vector of the *same width* whose lane is all-ones where the
+comparison held: `i32x4` for `f32x4`, `i64x2` for `f64x2` — the widths match
+because a mask of the other width would reinterpret the same register and
+scramble the lanes. That is what `lanes.select4` / `select2` take, what
+`mask_and` / `mask_or` / `mask_not` (and their `mask2_*` siblings) combine,
+and what `any4` / `all4` / `any2` / `all2` reduce to a `bool` when a branch
+is wanted. A scalar `if` over lanes is a mistake the type catches.
+
+**A scalar operand splats.** `v * 2.0`, `v + n` (an integer) and `v > 2.0`
+apply to every lane, as in C — arithmetic and comparison alike. Mixing two
+different lane widths does not.
+
+See [`std/lanes/README.md`](../std/lanes/README.md) for the full surface and
+the measured speedup.
 
 #### `longdouble` C `long double`
 
