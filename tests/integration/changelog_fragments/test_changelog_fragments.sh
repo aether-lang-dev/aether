@@ -96,8 +96,10 @@ if ! git commit -qm "fragments" >"$tmp/commit.log" 2>&1; then
     sed 's/^/        /' "$tmp/commit.log" | head -5
     exit 1
 fi
-# ... and git can date it. This is the exact call the collector makes.
-if [ -z "$(git log -1 --format=%cI -- new_changelogs/20260101T000000Z-added-1-first.md)" ]; then
+# ... and git can date it, with the exact call the collector makes. %ct is
+# an epoch second: unlike an ISO string it has no dialect for a runner's
+# git to surprise us with.
+if [ -z "$(git log -1 --format=%ct -- new_changelogs/20260101T000000Z-added-1-first.md)" ]; then
     echo "  [FAIL] changelog_fragments: git reports no commit date for a file it just committed"
     git log --oneline | head -3 | sed 's/^/        /'
     git status --short | head -5 | sed 's/^/        /'

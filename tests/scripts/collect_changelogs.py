@@ -135,12 +135,20 @@ def committed_at(root, path):
     that never appears is the failure this whole mechanism exists to
     prevent.
     """
-    iso = run("git", "-C", root, "log", "-1", "--format=%cI", "--", path)
-    if iso:
+    # %ct -- the commit time as a Unix timestamp -- rather than %cI, the
+    # ISO string. There is nothing to misparse in an integer.
+    #
+    # %cI was tried first and failed on CI: the runners' git writes UTC as
+    # `2026-09-22T23:18:38Z`, and `datetime.fromisoformat` did not accept a
+    # `Z` suffix before Python 3.11. Special-casing that would have left the
+    # next dialect (a `+0000` without the colon, a locale-formatted date)
+    # to be found the same way. An epoch second has no dialects.
+    ct = run("git", "-C", root, "log", "-1", "--format=%ct", "--", path)
+    if ct:
         try:
-            return datetime.fromisoformat(iso), None
-        except ValueError:
-            return None, "git gave an unreadable date: %r" % iso
+            return datetime.fromtimestamp(int(ct), timezone.utc), None
+        except (ValueError, OverflowError, OSError):
+            return None, "git gave an unreadable commit time: %r" % ct
     if not tracked(root, path):
         return None, "uncommitted"
     return None, ("tracked, but git reports no commit date for it -- a "
