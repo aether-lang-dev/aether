@@ -11,6 +11,8 @@ version number before tagging the release.
 
 ## [current]
 
+## [0.706.0]
+
 ### Added
 
 - **`std.math` single-precision family (#2151).** `sqrt_f32`, `abs_f32`,
