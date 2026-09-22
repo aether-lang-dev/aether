@@ -61,14 +61,23 @@ held — `i32x4` for `f32x4`, `i64x2` for `f64x2`. Feed it to `select4` /
 splats in a comparison as it does in arithmetic: `v > 2.0` compares every
 lane against 2.
 
+`sqrt4` / `sqrt2` and `abs4` / `abs2` are the two libm shapes that belong
+here. Both are EXACT — an IEEE square root is correctly rounded, and
+clearing the sign bit is not an approximation — so the lane form gives the
+same lanes as calling the scalar function four times, in the one instruction
+the hardware has had since SSE2 rather than four extracts, four calls and a
+rebuild. The transcendentals are deliberately absent: `sin` and `exp` per
+lane are approximations with an accuracy choice to make, and a caller who
+wants one should make that choice explicitly.
+
 ## Exports
 
 `f32x4`, `splat4`, `load4`, `store4`, `lane4`, `sum4`, `min4`, `max4`,
-`select4`, `lt4`, `le4`, `gt4`, `ge4`, `eq4`; `mask_and`, `mask_or`,
-`mask_not`, `any4`, `all4`, `mask_lane`; `f64x2`, `splat2`, `load2`,
-`store2`, `lane2`, `sum2`, `min2`, `max2`, `select2`, `lt2`, `le2`, `gt2`,
-`ge2`, `eq2`, `mask2_and`, `mask2_or`, `mask2_not`, `any2`, `all2`,
-`mask2_lane`.
+`select4`, `sqrt4`, `abs4`, `lt4`, `le4`, `gt4`, `ge4`, `eq4`; `mask_and`,
+`mask_or`, `mask_not`, `any4`, `all4`, `mask_lane`; `f64x2`, `splat2`,
+`load2`, `store2`, `lane2`, `sum2`, `min2`, `max2`, `sqrt2`, `abs2`,
+`select2`, `lt2`, `le2`, `gt2`, `ge2`, `eq2`, `mask2_and`, `mask2_or`,
+`mask2_not`, `any2`, `all2`, `mask2_lane`.
 
 ## Requirements
 

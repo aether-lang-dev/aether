@@ -596,7 +596,14 @@ static int posix_run(const char* cmd_str, int quiet, const char* capture) {
     pid_t pid;
     int ret = posix_spawnp(&pid, toks[0], &fa, NULL, toks, environ);
     posix_spawn_file_actions_destroy(&fa);
-    if (ret != 0) return -1;
+    if (ret != 0) {
+        /* posix_spawnp reports the reason as its return value. Printed here
+         * because this is the only place that has it, and a build that ends
+         * with "could not be started: Resource temporarily unavailable" is
+         * diagnosable where a bare failure is not. */
+        fprintf(stderr, "error: could not start '%s': %s\n", toks[0], strerror(ret));
+        return AE_SPAWN_FAILED;
+    }
 
     int status = 0;
     waitpid(pid, &status, 0);
@@ -737,12 +744,23 @@ static int win_run(const char* cmd_str, int quiet, const char* capture) {
         if (nul >= 0) { _dup2(nul, 2); _close(nul); }
     }
 
+    /* _spawnvp returns the child's exit status, or -1 with errno set when
+     * the child never started. A child CAN exit 0xFFFFFFFF, so -1 alone does
+     * not separate the two; errno, cleared first, does. */
+    errno = 0;
     int ret = (int)_spawnvp(_P_WAIT, toks[0], (const char* const*)toks);
+    int spawn_errno = (ret == -1) ? errno : 0;
 
     // Restore
     if (saved_stdout >= 0) { _dup2(saved_stdout, 1); _close(saved_stdout); }
     if (saved_stderr >= 0) { _dup2(saved_stderr, 2); _close(saved_stderr); }
 
+    /* After the handles are back, or the message would go to nul. */
+    if (spawn_errno != 0) {
+        fprintf(stderr, "error: could not start '%s': %s\n",
+                toks[0], strerror(spawn_errno));
+        return AE_SPAWN_FAILED;
+    }
     return ret;
 }
 #endif
@@ -765,6 +783,41 @@ int run_cmd_quiet(const char* cmd) {
 }
 
 /* Where a compile step's stdout is parked so a failure can print it. */
+/* Say when the compile step did not exit normally.
+ *
+ * A compiler that rejects the program exits 1 and has already explained
+ * itself; repeating "exit status 1" under its diagnostics is noise. A
+ * compiler that is KILLED explains nothing, and "Compilation failed." was
+ * then the whole report -- not enough to tell a rejected program from a
+ * process the OS took away, which is the difference between a bug in the
+ * code and a machine under memory pressure. A sweep run hit exactly that
+ * and left nothing to diagnose.
+ *
+ * `posix_run` returns -signal for a child that died of one, and on Windows
+ * an abnormal termination carries an NTSTATUS whose high bit is set, so
+ * both land as a negative rc. That, and only that, is worth a note here.
+ *
+ * Returns a string to append to the failure line, "" for an ordinary
+ * non-zero exit. */
+static const char* exit_status_note(char* buf, size_t size, int rc) {
+    buf[0] = '\0';
+    if (rc == AE_SPAWN_FAILED) {
+        snprintf(buf, size, " (it could not be started -- see the error above; "
+                            "nothing was compiled)");
+        return buf;
+    }
+    if (rc >= 0) return buf;
+#ifndef _WIN32
+    snprintf(buf, size, " (killed by signal %d -- it printed no diagnostic "
+                        "because it never reached one)", -rc);
+#else
+    snprintf(buf, size, " (terminated abnormally, status 0x%08X -- it printed "
+                        "no diagnostic because it never reached one)",
+             (unsigned)rc);
+#endif
+    return buf;
+}
+
 static const char* compile_log_path(char* buf, size_t size) {
     snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
     return buf;
@@ -2485,6 +2538,32 @@ static bool ensure_gcc_windows(void) {
     //    auto-download: the user picked the C-backend compiler, so trust it.
     const char* ov = c_backend_env_override();
     if (ov) {
+        /* Pre-flight it, as the POSIX branch already does. Trusting the
+         * override unconditionally meant a compiler that is named but
+         * absent surfaced only as a failed spawn much later, with the
+         * build's own "Build failed." over the top of it; POSIX said
+         * plainly that the compiler was not found. Same message on both
+         * now. The value may carry flags ("gcc -m32"), so only its first
+         * token is a program name. */
+        char first[256];
+        size_t n = strcspn(ov, " \t");
+        if (n >= sizeof(first)) n = sizeof(first) - 1;
+        snprintf(first, sizeof(first), "%.*s", (int)n, ov);
+        /* A bare name is looked up on PATH; a path is checked where it
+         * points, because `where` searches PATH and would not find it. */
+        int ok;
+        if (strchr(first, '/') || strchr(first, '\\')) {
+            ok = _access(first, 0) == 0;
+        } else {
+            char probe[600];
+            snprintf(probe, sizeof(probe), "where \"%s\" >nul 2>&1", first);
+            ok = system(probe) == 0;
+        }
+        if (!ok) {
+            fprintf(stderr, "Error: C compiler '%s' (from $%s) not found.\n",
+                    first, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
+            return false;
+        }
         snprintf(s_gcc_bin, sizeof(s_gcc_bin), "%s", ov);
         s_gcc_ready = true;
         return true;
@@ -3039,6 +3118,21 @@ static const char* opt_flags(bool optimize) {
  * path came to look like a compiler bug (#1974). Fail with our own message
  * instead, using the same "hand back a command that fails" shape this file
  * already uses when the toolchain is missing. */
+/* The command handed back when the build must fail and the reason has
+ * already been printed. It has to be something that RUNS and exits
+ * non-zero, because `ae` spawns it directly: there is no shell to
+ * interpret a bare "exit 1", so that spelling reached the spawner as a
+ * program named `exit` and produced a second, misleading error on top of
+ * the real one ("could not start 'exit'"). `false` is a real program on
+ * POSIX; `cmd /c exit 1` is its Windows equivalent. */
+static void set_failing_cmd(char* cmd, size_t size) {
+#ifdef _WIN32
+    snprintf(cmd, size, "cmd /c exit 1");
+#else
+    snprintf(cmd, size, "false");
+#endif
+}
+
 static void cmd_too_long(char* cmd, size_t size, int needed) {
     fprintf(stderr,
             "Error: the compiler command needs %d bytes and the buffer holds %zu.\n"
@@ -3047,7 +3141,7 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
             "       of the tree. Build from a shorter path, or reduce\n"
             "       extra_sources / include directories.\n",
             needed, size);
-    snprintf(cmd, size, "exit 1");
+    set_failing_cmd(cmd, size);
 }
 
 void build_gcc_cmd(char* cmd, size_t size,
@@ -3081,7 +3175,7 @@ void build_gcc_cmd(char* cmd, size_t size,
 #ifdef _WIN32
     // Ensure GCC is available (auto-downloads WinLibs on first run if needed).
     if (!ensure_gcc_windows()) {
-        snprintf(cmd, size, "exit 1");  // will fail; error already printed
+        set_failing_cmd(cmd, size);  // will fail; error already printed
         return;
     }
     // Windows (MinGW): no -pthread (Win32 threads via aether_thread.h), no -lm (CRT).
@@ -3263,7 +3357,7 @@ void build_gcc_cmd(char* cmd, size_t size,
         if (system(probe) != 0) {
             fprintf(stderr, "Error: C compiler '%s' (from $%s) not found.\n",
                     first, (getenv("AE_CC") && *getenv("AE_CC")) ? "AE_CC" : "CC");
-            snprintf(cmd, size, "false");
+            set_failing_cmd(cmd, size);
             return;
         }
     } else {
@@ -4441,9 +4535,11 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
-        fprintf(stderr, "Compilation failed.\n");
+        fprintf(stderr, "Compilation failed.%s\n", note);
         ae_report_newer_release(stderr);
         return 1;
     }
@@ -4475,9 +4571,11 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(glog, sizeof(glog));
     int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, glog);
     if (gcc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), gcc_ret);
         if (!tc.verbose) dump_captured_stdout(glog);
         remove(glog);
-        fprintf(stderr, "Build failed.\n");
+        fprintf(stderr, "Build failed.%s\n", note);
         remove(c_file);
         remove(exe_file);  // partial link output, if any
         remove_dsym_bundle(exe_file);
@@ -7099,9 +7197,11 @@ static int cmd_build(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
-        fprintf(stderr, "Compilation failed.\n");
+        fprintf(stderr, "Compilation failed.%s\n", note);
         ae_report_newer_release(stderr);
         return 1;
     }

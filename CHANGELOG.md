@@ -11,6 +11,94 @@ version number before tagging the release.
 
 ## [current]
 
+### Added
+
+- **`std.lanes` gains a lane square root and absolute value (#2158):
+  `sqrt4`, `sqrt2`, `abs4`, `abs2`.** A solver normalises an impulse by the
+  square root of its squared length once per lane bundle, and without these
+  the port wrote four `lane4` extracts, four scalar `sqrtf` calls and a
+  rebuild — the one place where Aether's lanes emitted more than the C they
+  replaced. Both operations are EXACT (an IEEE square root is correctly
+  rounded; clearing the sign bit is not an approximation), so they change no
+  result: `tests/integration/lane_math` asserts the lane value equals the
+  scalar one bit for bit rather than within a tolerance, and pins the `-0.0`
+  and NaN cases. Lowered to `__builtin_elementwise_sqrt` on clang and the
+  SSE2 builtin on GCC/x86, each one instruction (`sqrtps`/`sqrtpd`,
+  `andps`/`andpd`); elsewhere a four-element loop, still correct. GCC's
+  portable loop is deliberately not relied on — it only becomes one
+  instruction under `-fno-math-errno`, which changes what the rest of the
+  program's libm calls promise.
+
+- **Worked examples for the eight `std` modules that had only an index
+  entry (#1523, the Common tier):** `time`, `url`, `uuid`, `regex`,
+  `encoding`, `sort`, `number` and `deque`. Each section in
+  `docs/stdlib-reference.md` is a compiling, running program whose output
+  the doc gate checks, plus the function list and the contract that is easy
+  to get wrong — that a `Deque` is a value and every mutation must be
+  rebound, that a `sort` search returns the insertion point rather than -1,
+  that Base64 output is unpadded by default, and that `std.time` derives
+  civil fields without libc timezone state.
+
+### Fixed
+
+- **A compile step that never ran, or was killed, now says which.** A
+  compiler that rejects the program exits 1 and has already explained
+  itself; one that is killed, or that never starts, explains nothing — and
+  `ae` printed the same `Build failed.` / `Compilation failed.` for all
+  three, so there was no way to tell a bug in the code from a machine under
+  pressure. Three distinct reports now: an ordinary non-zero exit is left
+  undecorated (its own output is the report), an abnormal termination names
+  its signal or Windows status, and a step that **could not be started**
+  names the program and the reason (`could not start 'cc': Resource
+  temporarily unavailable`) and says nothing was compiled.
+
+  The third case is why this is here rather than filed for later. The
+  second fix surfaced a sweep failure as `terminated abnormally, status
+  0xFFFFFFFF` — and 0xFFFFFFFF is -1, the *spawn* failing, not the child
+  dying. A child can itself exit 0xFFFFFFFF, so the two are separated by
+  `errno` rather than by the status, and `run_cmd*` returns a sentinel no
+  child can produce. `tests/integration/killed_compiler_diagnostic` pins
+  all of them.
+
+- **`$AE_CC` / `$CC` is pre-flighted on Windows too.** POSIX checked the
+  override and reported `C compiler 'x' (from $AE_CC) not found` before
+  spawning anything; Windows trusted it, so the same mistake produced a
+  clear error on one platform and a failed spawn on the other. Same check,
+  same message, both.
+
+- **The internal "fail the build, the reason is already printed" command no
+  longer assumes a shell.** `ae` spawns it directly, so a bare `exit 1` —
+  what two of those paths used — reached the spawner as a program named
+  `exit` and printed a second, misleading error on top of the real one.
+  POSIX's `false` is a real program; Windows now gets `cmd /c exit 1`.
+
+- **`std.url` said `encode_path` percent-encodes `+`. It does not, and
+  should not.** `is_path_kept` keeps `$&+:=@`, which is what a path segment
+  reserves and exactly what Go's `PathEscape` does — `+` is not a space
+  outside a query component, and a space there is `%20`. The code was right
+  and the header comment was wrong in two places; a reader who believed it
+  would have double-encoded every path containing a `+`. Found while
+  writing the module's worked example.
+
+- **`optional_library_linking` can no longer mistake a stale artifact for a
+  wrong answer.** The per-module loop reused one `uses.ae` / `uses.c` pair,
+  so anything that left the previous module's generated C in place read as
+  a *wrong answer* for the next one: a sweep run reported "zstd metadata
+  missing -lzstd" while quoting brotli's link line, brotli being the entry
+  before it. The cause was never reproduced (300 serial and parallel
+  attempts); the files are per-module now and the output is removed before
+  each compile, so a stale read becomes a missing file that names itself.
+
+- **`#2037` does not reproduce, and now has a guard that says so.** A
+  function referenced only as a function-value was reported pruned in a
+  separately-compiled library (`E0300 Undefined variable
+  'bldr__gsd_cmp_base'`). `tests/integration/fn_value_library_survives`
+  pins all five suspected shapes — one compilation unit, a `--lib` module,
+  two comparators chosen by a branch with neither called directly, a module
+  reached *through* another module, and the generated C itself, where the
+  prune actually decides. All pass. The issue is closed against this test
+  rather than against an absence of evidence.
+
 ## [0.708.0]
 
 ### Added

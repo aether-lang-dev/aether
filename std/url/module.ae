@@ -7,9 +7,10 @@
 //                          unreserved kept, space → '+', everything
 //                          else %-encoded.
 //   url.encode_path(s)   — path-segment (Go: url.PathEscape):
-//                          unreserved kept, plus $&+:=@, everything
-//                          else %-encoded INCLUDING '+' (which is
-//                          NOT a space in the path component).
+//                          unreserved kept, plus $&+:=@ — so '+' is
+//                          KEPT here, because it is not a space in the
+//                          path component and needs no escape. A space
+//                          is %20, never '+'. (Go keeps the same set.)
 //   url.encode_strict(s) — strict RFC 3986 unreserved-only: encodes
 //                          everything that isn't [A-Za-z0-9-._~].
 //                          Used for SigV4 canonical-request signing
@@ -61,7 +62,8 @@ fn is_path_kept(c: int) -> int {
 
 // Lower-level encoder. mode:
 //   0 = query (unreserved kept, space → '+', else %-encoded)
-//   1 = path  (path-kept set, '+' encoded)
+//   1 = path  (path-kept set: unreserved plus $&+:=@, so '+' is kept
+//              and a space is %20)
 //   2 = strict (unreserved only)
 fn encode_mode(s: string, mode: int) -> string {
     if s == 0 {
