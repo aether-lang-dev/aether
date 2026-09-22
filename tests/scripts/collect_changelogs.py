@@ -85,8 +85,26 @@ NAME_RE = re.compile(
 PLACEHOLDER = "Say what changed, and why it mattered."
 
 
+def git_env():
+    """The environment for a git call, with any inherited repository unset.
+
+    `git -C <dir>` does NOT override GIT_DIR or GIT_WORK_TREE: with either
+    set, every call below would answer about a different repository than
+    the one asked about, and a committed fragment would read as
+    uncommitted -- held back for ever, silently. Whoever invokes this (a
+    scheduled job, a release step, a test that made its own scratch repo)
+    has no reason to want that inherited.
+    """
+    env = dict(os.environ)
+    for k in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+              "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"):
+        env.pop(k, None)
+    return env
+
+
 def run(*args):
-    return subprocess.run(args, capture_output=True, text=True).stdout.strip()
+    return subprocess.run(args, capture_output=True, text=True,
+                          env=git_env()).stdout.strip()
 
 
 def fragment_files(root):
@@ -97,15 +115,36 @@ def fragment_files(root):
                   and f != "README.md")
 
 
+def tracked(root, path):
+    """Is this fragment committed at all?"""
+    return subprocess.run(["git", "-C", root, "ls-files", "--error-unmatch",
+                           "--", path],
+                          capture_output=True,
+                          env=git_env()).returncode == 0
+
+
 def committed_at(root, path):
-    """When this fragment arrived, or None if it is not committed yet."""
+    """When this fragment arrived.
+
+    Returns (datetime, None) once it is known, or (None, reason). The reason
+    matters: a fragment nobody has committed is somebody's working tree and
+    is rightly left alone, but a fragment that IS tracked and still has no
+    date is an anomaly -- a shallow clone with no history for it, a git that
+    could not run -- and must be said out loud. Silently treating it as
+    "not settled yet" would hold it back for ever, and a changelog entry
+    that never appears is the failure this whole mechanism exists to
+    prevent.
+    """
     iso = run("git", "-C", root, "log", "-1", "--format=%cI", "--", path)
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(iso)
-    except ValueError:
-        return None
+    if iso:
+        try:
+            return datetime.fromisoformat(iso), None
+        except ValueError:
+            return None, "git gave an unreadable date: %r" % iso
+    if not tracked(root, path):
+        return None, "uncommitted"
+    return None, ("tracked, but git reports no commit date for it -- a "
+                  "shallow clone, or git could not run here")
 
 
 def parse(root, name):
@@ -219,10 +258,13 @@ def main():
         if args.all:
             ready.append(e)
             continue
-        when = committed_at(root, e["path"])
+        when, why = committed_at(root, e["path"])
         if when is None:
-            # Not committed yet: it is someone's working tree, not ours to fold.
-            waiting.append((e, "uncommitted"))
+            if why != "uncommitted":
+                # Not a normal wait. Say so on stderr so a scheduled run
+                # that can never make progress is visible in its log.
+                print("warning: %s: %s" % (e["name"], why), file=sys.stderr)
+            waiting.append((e, why))
             continue
         hours = (now - when).total_seconds() / 3600.0
         if hours >= COOLING_OFF_HOURS:
@@ -256,7 +298,8 @@ def main():
     for e in ready:
         full = os.path.join(root, e["path"])
         if subprocess.run(["git", "-C", root, "rm", "-q", "--", e["path"]],
-                          capture_output=True).returncode != 0:
+                          capture_output=True,
+                          env=git_env()).returncode != 0:
             os.remove(full)
         print("folded: %s -> ### %s" % (e["name"], e["section"]))
 

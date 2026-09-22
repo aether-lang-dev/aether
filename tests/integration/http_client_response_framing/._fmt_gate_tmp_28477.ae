@@ -1,0 +1,51 @@
+// MODE=ambiguous: the response names two different body lengths, so it has not
+// said where its body ends and must be reported rather than guessed at.
+//
+// MODE=extra: the response names one length and sends more bytes than that.
+// Only the declared body belongs to it; the rest was never described.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    mode = io.getenv("MODE")
+    if port == 0 || mode == 0 {
+        println("FAIL: UPSTREAM_PORT and MODE must be set")
+        exit(1)
+    }
+    url = "http://127.0.0.1:${port}/"
+
+    req = client.request("GET", url)
+    client.set_timeout(req, 5s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+
+    if string.equals(mode, "ambiguous") != 0 {
+        if err == "" {
+            body = string.concat(client.response_body(resp), "")
+            println("FAIL: two disagreeing lengths came back as a success, body '${body}'")
+            exit(1)
+        }
+        if string.contains(err, "framing") == 0 {
+            println("FAIL: expected a framing error, got '${err}'")
+            exit(1)
+        }
+        println("PASS: a response naming two body lengths is reported")
+        return
+    }
+
+    if err != "" {
+        println("FAIL: a well-framed response was reported as '${err}'")
+        exit(1)
+    }
+    body = string.concat(client.response_body(resp), "")
+    if string.equals(body, "hello") == 0 {
+        println("FAIL: body was '${body}', want just the declared 5 bytes")
+        exit(1)
+    }
+    println("PASS: only the declared body was delivered")
+}

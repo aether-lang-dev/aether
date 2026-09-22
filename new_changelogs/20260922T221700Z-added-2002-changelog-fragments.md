@@ -23,3 +23,11 @@
   that needs no hook installed on anyone's machine, cannot be set by the
   author, and cannot mistake "written yesterday on a branch that just
   merged" for "landed an hour ago".
+
+  Every git call the collector makes unsets any inherited `GIT_DIR` /
+  `GIT_WORK_TREE` first: `git -C <dir>` does **not** override those, so a
+  caller that had one set would have every fragment answered about the
+  wrong repository, read as uncommitted, and held back for ever. A
+  fragment that is tracked yet has no commit date now says so on stderr
+  rather than waiting silently, because a changelog entry that never
+  appears is the exact failure this mechanism exists to prevent.

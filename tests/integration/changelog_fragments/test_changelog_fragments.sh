@@ -30,11 +30,31 @@ trap 'rm -rf "$tmp" || true' EXIT
 fail=0
 
 # A scratch repository with the shape the real one has.
+#
+# Everything about the cooling-off window depends on git being able to date
+# a commit here, so the setup is checked rather than assumed: a silently
+# failed `git init` or `git commit` would make the fragments read as
+# "uncommitted", which is also a hold, and the test would be asserting
+# nothing while appearing to pass.
+# A scratch repository must not inherit one. `git -C` does not override
+# these, so with any of them set every git call below -- and every one the
+# collector makes -- would answer about the outer checkout instead.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+
 mkdir -p "$tmp/new_changelogs"
 cd "$tmp" || exit 1
-git init -q . 2>/dev/null
+if ! git init -q . 2>"$tmp/git.err"; then
+    echo "  [SKIP] changelog_fragments: git init failed here"
+    sed 's/^/         /' "$tmp/git.err" | head -3
+    exit 0
+fi
+# Local identity, and no inherited hook/signing configuration: a global
+# commit.gpgsign or a template hook would fail the commit below on a
+# machine that has one.
 git config user.email t@example.com
 git config user.name Test
+git config commit.gpgsign false
+git config core.hooksPath /dev/null
 
 cat > CHANGELOG.md <<'MD'
 # Changelog
@@ -71,7 +91,18 @@ if ! printf '%s\n' "$out" | grep -q 'nothing settled yet'; then
 fi
 
 git add -A >/dev/null 2>&1
-git commit -qm "fragments" >/dev/null 2>&1
+if ! git commit -qm "fragments" >"$tmp/commit.log" 2>&1; then
+    echo "  [FAIL] changelog_fragments: the scratch commit did not take, so the window cannot be tested"
+    sed 's/^/        /' "$tmp/commit.log" | head -5
+    exit 1
+fi
+# ... and git can date it. This is the exact call the collector makes.
+if [ -z "$(git log -1 --format=%cI -- new_changelogs/20260101T000000Z-added-1-first.md)" ]; then
+    echo "  [FAIL] changelog_fragments: git reports no commit date for a file it just committed"
+    git log --oneline | head -3 | sed 's/^/        /'
+    git status --short | head -5 | sed 's/^/        /'
+    exit 1
+fi
 
 # 2. Committed but inside the cooling-off window: still not folded, so a
 #    change reverted within the window never becomes a permanent line.
