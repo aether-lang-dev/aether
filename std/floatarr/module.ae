@@ -27,7 +27,6 @@ exports(
 // call the C compiler cannot see through — a matmul over a packed
 // buffer was 6.8x the same loop over a raw one before this.
 
-
 // ---- Raw externs (escape hatch; also the hot-path API) ----
 
 // Allocate a FloatArray of `size` doubles, zero-initialised. Returns

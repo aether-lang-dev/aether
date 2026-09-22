@@ -27,7 +27,6 @@ exports(
 // call the C compiler cannot see through — a matmul over a packed
 // buffer was 6.8x the same loop over a raw one before this.
 
-
 // ---- Raw externs (escape hatch; also the hot-path API) ----
 // The `_raw` suffix on new/get/set keeps them from colliding with
 // the mangled C names of the `new` / `get` / `set` wrappers below.
