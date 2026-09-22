@@ -92,8 +92,15 @@ fi
 #    0xFFFFFFFF is -1 -- the spawn failing, not the child dying. A child can
 #    itself exit 0xFFFFFFFF, so errno separates them, not the status.
 #    Staged with a file that is executable but is not an executable.
+#
+#    Linux only, and for a reason worth recording: POSIX allows
+#    posix_spawnp to fall back to running an ENOEXEC file through /bin/sh,
+#    and macOS does exactly that -- the child DOES start (as a shell), the
+#    shell then says "cannot execute binary file" and exits non-zero, so
+#    there is no spawn failure to observe. That is correct behaviour, not a
+#    defect; it just means the case cannot be staged this way there.
 spawn="spawn-failure case: not stageable on this platform, skipped"
-if [ "$WINDOWS" = 0 ]; then
+if [ "$(uname -s)" = "Linux" ]; then
     printf '\000\001\002\003' > "$tmp/not-an-executable"
     chmod +x "$tmp/not-an-executable"
     out="$(AE_CC="$tmp/not-an-executable" "$AE" run "$tmp/good.ae" 2>&1)"
