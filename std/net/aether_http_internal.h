@@ -80,6 +80,14 @@ typedef struct {
     int    peer_closed;  /* the peer ended the response by closing */
     int    complete;     /* the response ended where its own framing said */
     int    oom;          /* the allocator refused; nothing else went wrong */
+    /* The whole exchange's deadline, in the http_now_ms clock; 0 = none.
+     * `set_timeout` is a per-request timeout, but the socket option it
+     * reaches (SO_RCVTIMEO) bounds one recv: a peer that sends a byte just
+     * under the limit, forever, kept a "1 s" request open without ever
+     * breaking that limit. The recv loop checks this too, so the request
+     * ends when the caller's budget does. */
+    int64_t deadline_ms;
+    int    timed_out;    /* the deadline passed before the response ended */
 } HttpExchange;
 
 /* An upstream connection acquired without blocking. */
@@ -104,6 +112,8 @@ void http_exchange_init(HttpExchange* x, Transport* t,
                         const char* head, size_t head_len,
                         const char* body, int body_len,
                         const char* method);
+/* Arm the whole-exchange deadline from a request timeout (ns; 0 = none). */
+void http_exchange_set_timeout(HttpExchange* x, int64_t timeout_ns);
 int  http_exchange_send(HttpExchange* x);
 int  http_exchange_recv(HttpExchange* x);
 

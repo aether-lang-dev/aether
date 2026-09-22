@@ -11,6 +11,39 @@ version number before tagging the release.
 
 ## [current]
 
+### Fixed
+
+- **`client.set_timeout` bounds the whole request, not each read.** The
+  timeout reached the socket as `SO_RCVTIMEO`, which limits one `recv`: a
+  peer that sent a byte just inside the limit, over and over, held a "1 s"
+  request open for as long as it cared to dribble — the one thing a request
+  timeout exists to prevent, and the shape a slow-loris upstream has. The
+  exchange now carries a deadline for the whole response, checked in the
+  read loop, and the error says "request timed out" rather than the generic
+  "recv timeout or I/O error".
+  `tests/integration/http_client_request_deadline` (a drip server that
+  answers one byte per 200 ms against a 1 s timeout).
+
+### Added
+
+- **SIMD lane types: `f32x4`, `f64x2`, `i32x4`, and `std.lanes` (#2146).**
+  Four single-precision values in one register, two double-precision ones,
+  and the integer vector a lane comparison yields. Arithmetic and comparison
+  are ordinary operators and happen lane-wise; `std.lanes` supplies splat,
+  set, unaligned load/store at an element offset, a lane read, the
+  horizontal sum, min/max, the select a mask drives, and the mask
+  combinators and reductions. The types lower to the GCC/Clang vector
+  extensions and every entry point is a `static inline` helper in the
+  generated translation unit, so a lane operation is the instruction it
+  names rather than a call. A lane type is nominal — it converts with no
+  scalar and no other width — and a comparison yields a mask rather than a
+  bool, so a scalar `if` over lanes is refused at the source. On a
+  clamp-and-accumulate kernel over 1 Mi floats the lane version runs 1.9x
+  the scalar one with identical results. A comparison yields a mask of the
+  operands' own width (`i32x4` for `f32x4`, `i64x2` for `f64x2`), and a
+  scalar splats in a comparison as it does in arithmetic. Reference: the
+  lane-types section; `std/lanes/README.md`. `tests/integration/lane_types`.
+
 ## [0.706.0]
 
 ### Added

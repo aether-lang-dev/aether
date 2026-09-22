@@ -1,0 +1,108 @@
+// std.lanes - SIMD lanes for the f32x4 / f64x2 / i32x4 types (#2146)
+// Import with: import std.lanes
+//
+// The lane types themselves are language types: `f32x4` is four C floats in
+// one register, `f64x2` two doubles, `i32x4` four 32-bit integers and the
+// mask a lane comparison yields. Arithmetic (`+ - * /`) and comparison are
+// lane-wise, written as ordinary operators; this module is what a lane value
+// is BUILT from and read back through — splat, set, load, store, a lane, the
+// horizontal sum, min/max, and the select that turns a mask into a choice
+// per lane:
+//
+//     import std.lanes
+//     main() {
+//         a = lanes.f32x4(1.0, 2.0, 3.0, 4.0)
+//         b = lanes.splat4(2.0)
+//         c = a * b + lanes.splat4(1.0)        // one multiply, one add
+//         big = lanes.select4(c > lanes.splat4(5.0), c, lanes.splat4(0.0))
+//         println("${lanes.sum4(big)} ${lanes.lane4(c, 0)}")
+//     }
+//
+// Every entry point is a `static inline` helper in the generated C, so a
+// lane operation is the instruction it names — nothing here is a call after
+// the C compiler has run. The types need the GCC/Clang vector extensions
+// (every compiler the toolchain drives has them); elsewhere the generated
+// file carries no lane types at all, so only a program that uses one is
+// affected.
+//
+// A load or a store reads or writes 16 bytes at `index` ELEMENTS into the
+// buffer (4 bytes per element for f32x4/i32x4, 8 for f64x2) and does not
+// require alignment. The buffer is a raw `ptr` — from `std.mem`, an
+// `f32[]`/`float[]` view, or an extern — and bounds are the caller's to
+// know, as they are for `mem.get_float32`.
+
+exports(
+    f32x4, splat4, load4, store4, lane4, sum4, min4, max4, select4,
+    lt4, le4, gt4, ge4, eq4,
+    mask_and, mask_or, mask_not, any4, all4, mask_lane,
+    f64x2, splat2, load2, store2, lane2, sum2, min2, max2,
+    select2, lt2, le2, gt2, ge2, eq2,
+    mask2_and, mask2_or, mask2_not, any2, all2, mask2_lane
+)
+
+// ---- f32x4: four single-precision lanes ---------------------------------
+
+// The four lanes, in order.
+@extern("_ae_f32x4_set") f32x4(a: f32, b: f32, c: f32, d: f32) -> f32x4
+// One value in every lane.
+@extern("_ae_f32x4_splat") splat4(v: f32) -> f32x4
+// Four consecutive floats starting at element `index` of `buf`.
+@extern("_ae_f32x4_load") load4(buf: ptr, index: long) -> f32x4
+// Write the four lanes back at element `index`.
+@extern("_ae_f32x4_store") store4(buf: ptr, index: long, v: f32x4)
+// Lane `index` (0-3) as an f32.
+@extern("_ae_f32x4_lane") lane4(v: f32x4, index: long) -> f32
+// The four lanes added together.
+@extern("_ae_f32x4_sum") sum4(v: f32x4) -> f32
+// Lane-wise minimum / maximum.
+@extern("_ae_f32x4_min") min4(a: f32x4, b: f32x4) -> f32x4
+@extern("_ae_f32x4_max") max4(a: f32x4, b: f32x4) -> f32x4
+// `a` where the mask lane is set, `b` where it is not.
+@extern("_ae_f32x4_select") select4(mask: i32x4, a: f32x4, b: f32x4) -> f32x4
+
+// Comparisons as functions, for the spelling a solver written against the C
+// intrinsics expects. `a < b` on two f32x4 values is the same mask.
+@extern("_ae_f32x4_lt") lt4(a: f32x4, b: f32x4) -> i32x4
+@extern("_ae_f32x4_le") le4(a: f32x4, b: f32x4) -> i32x4
+@extern("_ae_f32x4_gt") gt4(a: f32x4, b: f32x4) -> i32x4
+@extern("_ae_f32x4_ge") ge4(a: f32x4, b: f32x4) -> i32x4
+@extern("_ae_f32x4_eq") eq4(a: f32x4, b: f32x4) -> i32x4
+
+// ---- masks --------------------------------------------------------------
+
+@extern("_ae_i32x4_and") mask_and(a: i32x4, b: i32x4) -> i32x4
+@extern("_ae_i32x4_or") mask_or(a: i32x4, b: i32x4) -> i32x4
+@extern("_ae_i32x4_not") mask_not(a: i32x4) -> i32x4
+// Is any lane set / is every lane set — the bool a branch needs.
+@extern("_ae_i32x4_any") any4(mask: i32x4) -> bool
+@extern("_ae_i32x4_all") all4(mask: i32x4) -> bool
+// Lane `index` of a mask (or of any i32x4): 0 or -1 for a comparison result.
+@extern("_ae_i32x4_lane") mask_lane(v: i32x4, index: long) -> long
+
+// ---- f64x2: two double-precision lanes ----------------------------------
+
+@extern("_ae_f64x2_set") f64x2(a: float, b: float) -> f64x2
+@extern("_ae_f64x2_splat") splat2(v: float) -> f64x2
+@extern("_ae_f64x2_load") load2(buf: ptr, index: long) -> f64x2
+@extern("_ae_f64x2_store") store2(buf: ptr, index: long, v: f64x2)
+@extern("_ae_f64x2_lane") lane2(v: f64x2, index: long) -> float
+@extern("_ae_f64x2_sum") sum2(v: f64x2) -> float
+@extern("_ae_f64x2_min") min2(a: f64x2, b: f64x2) -> f64x2
+@extern("_ae_f64x2_max") max2(a: f64x2, b: f64x2) -> f64x2
+
+// An f64x2 comparison yields an `i64x2` — two 64-bit lanes, the width its
+// operands have. (An i32x4 there would reinterpret the same register as four
+// 32-bit lanes and scramble the answer, which is why the two mask types are
+// distinct.) Everything below is that mask's surface, mirroring the f32x4 one.
+@extern("_ae_f64x2_select") select2(mask: i64x2, a: f64x2, b: f64x2) -> f64x2
+@extern("_ae_f64x2_lt") lt2(a: f64x2, b: f64x2) -> i64x2
+@extern("_ae_f64x2_le") le2(a: f64x2, b: f64x2) -> i64x2
+@extern("_ae_f64x2_gt") gt2(a: f64x2, b: f64x2) -> i64x2
+@extern("_ae_f64x2_ge") ge2(a: f64x2, b: f64x2) -> i64x2
+@extern("_ae_f64x2_eq") eq2(a: f64x2, b: f64x2) -> i64x2
+@extern("_ae_i64x2_and") mask2_and(a: i64x2, b: i64x2) -> i64x2
+@extern("_ae_i64x2_or") mask2_or(a: i64x2, b: i64x2) -> i64x2
+@extern("_ae_i64x2_not") mask2_not(a: i64x2) -> i64x2
+@extern("_ae_i64x2_any") any2(mask: i64x2) -> bool
+@extern("_ae_i64x2_all") all2(mask: i64x2) -> bool
+@extern("_ae_i64x2_lane") mask2_lane(v: i64x2, index: long) -> long

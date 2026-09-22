@@ -134,6 +134,11 @@ set_body(req: ptr, body: string, length: int, content_type: string) -> string {
 // Per-request timeout. 0ns = block forever (preserves the
 // v1 wrapper behaviour); negative is rejected. Applied to connect,
 // send, and recv via setsockopt + non-blocking-connect-with-select.
+// The budget for the WHOLE exchange, not for each read: a peer that sends
+// a byte just inside the limit, over and over, used to hold a "1 s" request
+// open for as long as it cared to dribble (the socket option underneath
+// bounds one recv). The deadline is armed when the request is sent and the
+// error reads "request timed out ..." when it passes. 0ns = block forever.
 set_timeout(req: ptr, timeout: Duration) -> string {
     rc = http_request_set_timeout_ns_raw(req, timeout)
     if rc != 0 { return "set_timeout failed" }

@@ -583,6 +583,25 @@ void print_ast(ASTNode* node, int indent) {
     }
 }
 
+int lane_accessor_index(TypeKind kind, const char* field) {
+    int lanes;
+    switch (kind) {
+        case TYPE_F32X4: case TYPE_I32X4: lanes = 4; break;
+        case TYPE_F64X2: case TYPE_I64X2: lanes = 2; break;
+        default: return -1;
+    }
+    if (!field || !field[0] || field[1]) return -1;
+    int idx;
+    switch (field[0]) {
+        case 'x': idx = 0; break;
+        case 'y': idx = 1; break;
+        case 'z': idx = 2; break;
+        case 'w': idx = 3; break;
+        default: return -1;
+    }
+    return idx < lanes ? idx : -1;
+}
+
 const char* ast_node_type_to_string(ASTNodeType type) {
     switch (type) {
         case AST_PROGRAM: return "PROGRAM";

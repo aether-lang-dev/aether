@@ -361,7 +361,7 @@ typedef enum {
                         // zero runtime cost; set ops become bitwise ops. Appended
                         // at END to keep kind numbering stable (incremental builds
                         // need `make clean` after this edit).
-    TYPE_BITSTRUCT      // #1132 `bitstruct Name : uint8_t { ... }`. `struct_name` =
+    TYPE_BITSTRUCT,     // #1132 `bitstruct Name : uint8_t { ... }`. `struct_name` =
                         // the bitstruct name; `element_type` = the backing integer
                         // type (always an unsigned fixed-width alias). Nominal: a
                         // bitstruct is never implicitly an int, and two bitstructs
@@ -371,6 +371,15 @@ typedef enum {
                         // never a C bitfield (whose signedness and layout are
                         // implementation-defined). Appended at END to keep kind
                         // numbering stable (incremental builds need `make clean`).
+    /* #2146: fixed-width vector lanes, lowered to the GCC/Clang vector
+     * extensions (`__attribute__((vector_size(16)))`) — four f32 lanes, two
+     * float (double) lanes, and the integer vector a lane comparison yields,
+     * which is the mask `lanes.select` takes. Appended at the enum END for
+     * the same reason as the two above. */
+    TYPE_F32X4,
+    TYPE_F64X2,
+    TYPE_I32X4,
+    TYPE_I64X2          /* the mask an f64x2 comparison yields (2 x 64-bit) */
 } TypeKind;
 
 typedef struct Type {
@@ -564,6 +573,12 @@ const char* ast_node_type_to_string(ASTNodeType type);
 // parse_program returns. Codegen reads node->source_file to emit
 // `#line N "path"` directives so gcc/gdb/gcov see .ae line numbers.
 void ast_stamp_source_file(ASTNode* node, const char* path);
+
+/* #2146: the lane index `.x` / `.y` / `.z` / `.w` names on a vector type,
+ * or -1 when the name is not a lane accessor or the type has too few lanes
+ * (`.z` on an f64x2). One table, so the typechecker and codegen cannot
+ * disagree about what `v.z` means. */
+int lane_accessor_index(TypeKind kind, const char* field);
 
 // ASTNode.annotation is a single string shared by several independent markers
 // (`c_symbol:NAME`, `varargs`, `heap_return`, `c_import`), joined with `;`.

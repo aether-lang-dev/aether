@@ -762,6 +762,23 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * shapes). Aether's own float stays double; codegen
                      * casts at the FFI boundary. */
                     type = create_type(TYPE_FLOAT32);
+                } else if (strcmp(token->value, "f32x4") == 0) {
+                    /* #2146: four f32 lanes in one register, lowered to a
+                     * GCC/Clang vector type. Arithmetic is lane-wise; the
+                     * lanes are read as `.x .y .z .w`; `std.lanes` has the
+                     * loads, stores, min/max, comparisons and select. */
+                    type = create_type(TYPE_F32X4);
+                } else if (strcmp(token->value, "f64x2") == 0) {
+                    type = create_type(TYPE_F64X2);
+                } else if (strcmp(token->value, "i64x2") == 0) {
+                    /* The mask an f64x2 comparison yields — two 64-bit lanes,
+                     * the width C gives it; an i32x4 there would reinterpret
+                     * the register and scramble the lanes. */
+                    type = create_type(TYPE_I64X2);
+                } else if (strcmp(token->value, "i32x4") == 0) {
+                    /* The mask a lane comparison yields (all-ones or zero per
+                     * lane), and four 32-bit integer lanes in its own right. */
+                    type = create_type(TYPE_I32X4);
                 } else if (strcmp(token->value, "int64") == 0) {
                     /* The signed sibling of the `uint64` keyword, and the
                      * name the reference uses for the widening `int -> int64`.
