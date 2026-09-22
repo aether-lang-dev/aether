@@ -765,6 +765,36 @@ int run_cmd_quiet(const char* cmd) {
 }
 
 /* Where a compile step's stdout is parked so a failure can print it. */
+/* Say when the compile step did not exit normally.
+ *
+ * A compiler that rejects the program exits 1 and has already explained
+ * itself; repeating "exit status 1" under its diagnostics is noise. A
+ * compiler that is KILLED explains nothing, and "Compilation failed." was
+ * then the whole report -- not enough to tell a rejected program from a
+ * process the OS took away, which is the difference between a bug in the
+ * code and a machine under memory pressure. A sweep run hit exactly that
+ * and left nothing to diagnose.
+ *
+ * `posix_run` returns -signal for a child that died of one, and on Windows
+ * an abnormal termination carries an NTSTATUS whose high bit is set, so
+ * both land as a negative rc. That, and only that, is worth a note here.
+ *
+ * Returns a string to append to the failure line, "" for an ordinary
+ * non-zero exit. */
+static const char* exit_status_note(char* buf, size_t size, int rc) {
+    buf[0] = '\0';
+    if (rc >= 0) return buf;
+#ifndef _WIN32
+    snprintf(buf, size, " (killed by signal %d -- it printed no diagnostic "
+                        "because it never reached one)", -rc);
+#else
+    snprintf(buf, size, " (terminated abnormally, status 0x%08X -- it printed "
+                        "no diagnostic because it never reached one)",
+             (unsigned)rc);
+#endif
+    return buf;
+}
+
 static const char* compile_log_path(char* buf, size_t size) {
     snprintf(buf, size, "%s/ae_build_%d.out", get_temp_dir(), (int)getpid());
     return buf;
@@ -4441,9 +4471,11 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
-        fprintf(stderr, "Compilation failed.\n");
+        fprintf(stderr, "Compilation failed.%s\n", note);
         ae_report_newer_release(stderr);
         return 1;
     }
@@ -4475,9 +4507,11 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(glog, sizeof(glog));
     int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, glog);
     if (gcc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), gcc_ret);
         if (!tc.verbose) dump_captured_stdout(glog);
         remove(glog);
-        fprintf(stderr, "Build failed.\n");
+        fprintf(stderr, "Build failed.%s\n", note);
         remove(c_file);
         remove(exe_file);  // partial link output, if any
         remove_dsym_bundle(exe_file);
@@ -7099,9 +7133,11 @@ static int cmd_build(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
+        char note[96];
+        exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
-        fprintf(stderr, "Compilation failed.\n");
+        fprintf(stderr, "Compilation failed.%s\n", note);
         ae_report_newer_release(stderr);
         return 1;
     }

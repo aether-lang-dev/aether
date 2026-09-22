@@ -41,6 +41,16 @@ version number before tagging the release.
 
 ### Fixed
 
+- **A compile step that is killed now says so.** A compiler that rejects
+  the program exits 1 and has already explained itself; one the OS takes
+  away explains nothing, and `ae` reported only `Build failed.` /
+  `Compilation failed.` — indistinguishable from a rejected program. A
+  sweep run failed exactly that way, with no way to tell a bug in the code
+  from a machine under memory pressure. An abnormal termination now names
+  its signal (or its Windows status) and says why there was no diagnostic;
+  an ordinary non-zero exit is left undecorated, because its own output is
+  the report. `tests/integration/killed_compiler_diagnostic`.
+
 - **`std.url` said `encode_path` percent-encodes `+`. It does not, and
   should not.** `is_path_kept` keeps `$&+:=@`, which is what a path segment
   reserves and exactly what Go's `PathEscape` does — `+` is not a space
