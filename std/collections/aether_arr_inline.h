@@ -22,6 +22,7 @@
 #ifndef AETHER_ARR_INLINE_H
 #define AETHER_ARR_INLINE_H
 
+#include <stddef.h>   /* NULL, for the *_data view accessors below */
 #include <stdint.h>   /* int64_t: what Aether's `long` lowers to */
 
 /* Aether-prefixed, and that prefix is the point (#2162).
