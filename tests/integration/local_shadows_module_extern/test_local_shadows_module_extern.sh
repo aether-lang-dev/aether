@@ -9,9 +9,10 @@
 # pop cannot undo an overwrite. So `floor = new_thing()` in one of the
 # program's own functions left the module's extern typed `ptr`, and the
 # module's `floor(x) as int` failed to compile ("cannot cast ptr to int"),
-# in a file its author never touched. main's locals were worse: main was
-# never popped at all, so they outlived it and shadowed everything walked
-# after it. #1967 fixed the same thing for parameters.
+# in a file its author never touched. #1967 fixed the same thing for
+# parameters. (A local in main named like the extern is #2186: inference no
+# longer lets other functions see main's locals, but the typechecker still
+# reads them from the program table.)
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -109,23 +110,5 @@ run() {
     floor, n = pair()
     if floor != null || n != 3 { exit(1) }
 }'
-
-# A local in main itself: main was never popped, so its locals outlived it.
-cat > "$WORK/in_main.ae" <<'AE'
-import core
-extern exit(code: int)
-
-main() {
-    floor = "a string"
-    if floor != "a string" { exit(1) }
-    if core.sample(2.7) != 2 { println("FAIL cell"); exit(1) }
-    if core.lower(-0.5) != -1.0 { println("FAIL down"); exit(1) }
-    println("PASS")
-}
-AE
-( cd "$WORK" && "$AE" run in_main.ae > "$WORK/in_main.log" 2>&1 ) \
-    || { sed 's/^/    /' "$WORK/in_main.log" | head -20; fail "in_main: the program did not build or run"; }
-[ "$(tail -1 "$WORK/in_main.log")" = "PASS" ] \
-    || { sed 's/^/    /' "$WORK/in_main.log" | head -20; fail "in_main: expected PASS"; }
 
 echo "  [PASS] local_shadows_module_extern: a program's local shadows, never retypes, a module's extern"

@@ -12,10 +12,20 @@
 
   Locals and tuple-destructure targets now follow the rule #1967 set for
   parameters: a binding refines only a symbol its own function's walk
-  added, and otherwise shadows with a fresh entry that the pop removes.
-  `main` had never been popped at all, so its locals outlived it and
-  shadowed everything walked after it; it now gets the same push and pop as
-  any other function. `tests/integration/local_shadows_module_extern` binds
-  `floor` four ways (a pointer local, an `int` local, a destructure target,
-  a local in `main`) against a module reached through another module, and
-  checks both an `int` and a `float` use of the extern.
+  added, and otherwise shadows with a fresh entry that the pop removes. The
+  check is a per-walk stamp on the symbol, O(1), where #1967's list walk
+  made rebinding quadratic in a function's locals.
+  `main`'s locals were worse during inference: they stayed in the table
+  after its walk, so for every walk after it a local of `main` stood in for
+  any function, extern or local of the same name. A `p` that `main`
+  destructured as a pointer was what a TLS function's own `p` resolved to
+  until that function's first binding was typed, which had only been hidden
+  by the retype bug above. `main` is now walked like any function, and its
+  locals leave the table when the walk ends. They are put back once
+  inference is done, because the typechecker still reads a local bound in an
+  `if` arm or loop body of `main` from there. That also means a local in
+  `main` named like a module's extern still trips the typechecker (#2186).
+  `tests/integration/local_shadows_module_extern` binds `floor` three ways
+  (a pointer local, an `int` local, a destructure target) against a module
+  reached through another module, and checks both an `int` and a `float`
+  use of the extern.

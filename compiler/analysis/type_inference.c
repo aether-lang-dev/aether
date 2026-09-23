@@ -20,10 +20,19 @@ InferenceContext* create_inference_context(SymbolTable* table) {
     ctx->iteration_count = 0;
     ctx->scope_owner = NULL;
     ctx->walk_id = 0;
+    ctx->main_locals = NULL;
+    ctx->main_local_count = 0;
     return ctx;
 }
 
 void free_inference_context(InferenceContext* ctx) {
+    if (ctx) {
+        for (int m = 0; m < ctx->main_local_count; m++) {
+            free(ctx->main_locals[m].name);
+            if (ctx->main_locals[m].type) free_type(ctx->main_locals[m].type);
+        }
+        free(ctx->main_locals);
+    }
     if (!ctx) return;
     
     for (int i = 0; i < ctx->constraint_count; i++) {
@@ -1120,6 +1129,54 @@ Type* infer_return_type_from_body(ASTNode* body, SymbolTable* symbols) {
 // definitions, externs, imports) are added by other code paths before any
 // function body is visited, so they sit beneath the snapshot and are
 // unaffected.
+static void free_main_locals(InferenceContext* ctx) {
+    for (int i = 0; i < ctx->main_local_count; i++) {
+        free(ctx->main_locals[i].name);
+        if (ctx->main_locals[i].type) free_type(ctx->main_locals[i].type);
+    }
+    free(ctx->main_locals);
+    ctx->main_locals = NULL;
+    ctx->main_local_count = 0;
+}
+
+/* Take the symbols main's walk added (those above `saved_head`) out of the
+ * table, keeping a copy, oldest first, for restore_main_locals. A later
+ * pass's walk of main replaces the copy. */
+static void set_aside_main_locals(InferenceContext* ctx, Symbol* saved_head) {
+    free_main_locals(ctx);
+    int n = 0;
+    for (Symbol* s = ctx->symbols->symbols; s && s != saved_head; s = s->next) n++;
+    if (n > 0) {
+        ctx->main_locals = (MainLocal*)calloc((size_t)n, sizeof(MainLocal));
+        if (!ctx->main_locals) n = 0;
+    }
+    /* The list runs newest first; store oldest first. */
+    int i = n - 1;
+    for (Symbol* s = ctx->symbols->symbols; s && s != saved_head && i >= 0; s = s->next, i--) {
+        ctx->main_locals[i].name = strdup(s->name);
+        ctx->main_locals[i].type = s->type ? clone_type(s->type) : NULL;
+        ctx->main_locals[i].inferred_in = s->inferred_in;
+    }
+    ctx->main_local_count = n;
+    while (ctx->symbols->symbols && ctx->symbols->symbols != saved_head) {
+        pop_symbol(ctx->symbols);
+    }
+}
+
+/* Put main's locals from its last walk back in the table, as they stood,
+ * for the typechecker (#2186 is making it not need them). */
+static void restore_main_locals(InferenceContext* ctx) {
+    if (!ctx->symbols) return;
+    for (int i = 0; i < ctx->main_local_count; i++) {
+        MainLocal* m = &ctx->main_locals[i];
+        add_symbol(ctx->symbols, m->name, m->type, 0, 0, 0);
+        m->type = NULL;   /* the symbol owns it now */
+        Symbol* s = lookup_symbol_local(ctx->symbols, m->name);
+        if (s) s->inferred_in = m->inferred_in;
+    }
+    free_main_locals(ctx);
+}
+
 void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     if (!node || (node->type != AST_FUNCTION_DEFINITION && node->type != AST_BUILDER_FUNCTION)) return;
 
@@ -1233,11 +1290,17 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             break;
 
         case AST_MAIN_FUNCTION: {
-            /* #2173: main is a function like any other. Its locals were
-             * added to the program's table and never popped, so they
-             * outlived main and shadowed whatever was walked after it --
-             * including functions merged in from modules. Same snapshot and
-             * unwind as collect_function_constraints. */
+            /* #2173: main is walked like any function -- its bindings
+             * refine only symbols it added, and its locals leave the table
+             * when the walk ends. They used to stay, so for every walk after
+             * main's a local of main shadowed (or, once retyped, stood in
+             * for) any function, extern or local of the same name: a `p`
+             * main destructured as a pointer was what a TLS function's own
+             * `p` resolved to until that function's first binding was
+             * typed. The typechecker still reads main's locals from the
+             * program table (a local bound in an `if` arm or loop body is
+             * read after it that way, #2186), so they are set aside here
+             * and put back when inference is done (restore_main_locals). */
             Symbol* saved_head = ctx->symbols ? ctx->symbols->symbols : NULL;
             unsigned prev_walk_id = ctx->walk_id;
             ctx->walk_id = new_walk_id();
@@ -1245,18 +1308,13 @@ void collect_constraints(ASTNode* node, InferenceContext* ctx) {
             ctx->scope_owner = node;
             collect_expression_constraints(node, ctx);
             ctx->scope_owner = prev_owner;
-            if (ctx->symbols) {
-                while (ctx->symbols->symbols && ctx->symbols->symbols != saved_head) {
-                    pop_symbol(ctx->symbols);
-                }
-            }
+            if (ctx->symbols) set_aside_main_locals(ctx, saved_head);
             ctx->walk_id = prev_walk_id;
             break;
         }
 
         case AST_CLOSURE: {
-            // A closure's locals belong to the enclosing function's walk and
-            // are popped with it.
+            // A closure's locals belong to the enclosing walk.
             ASTNode* prev_owner = ctx->scope_owner;
             ctx->scope_owner = node;
             collect_expression_constraints(node, ctx);
@@ -1926,6 +1984,7 @@ int infer_all_types(ASTNode* program, SymbolTable* table) {
     // silent pointer truncation on 64-bit targets.
     widen_ptr_assigned_locals(program, table);
 
+    restore_main_locals(ctx);
     free_inference_context(ctx);
 
     return success;

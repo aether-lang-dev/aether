@@ -21,8 +21,8 @@
 //      non-zero).
 //   3. a missing binary. POSIX: execvp inside the forked child fails with
 //      _exit(127), so the parent sees a normal-exit status of 127 and err
-//      stays empty. Windows: there is no fork, CreateProcessW itself fails,
-//      so the parent sees (-1, "spawn failed"). Both are the platform's
+//      stays empty. Windows: there is no fork; std.os looks the program
+//      up in the parent (#2171), so it sees (-1, "program not found"). Both are the platform's
 //      documented contract and both are pinned here.
 
 import std.os
@@ -80,11 +80,11 @@ main() {
     av2 = list_new()
     out2, status2, err2 = os.run_capture("/no/such/binary", av2, null)
     if windows {
-        if err2 != "spawn failed" || status2 != -1 {
-            println("  FAIL 3: missing-binary status=${status2} err='${err2}', expected -1 'spawn failed'")
+        if err2 != "program not found" || status2 != -1 {
+            println("  FAIL 3: missing-binary status=${status2} err='${err2}', expected -1 'program not found'")
             exit(1)
         }
-        println("  PASS: missing binary → (-1, \"spawn failed\") (CreateProcessW fails in the parent)")
+        println("  PASS: missing binary → (-1, \"program not found\") (looked up in the parent)")
     } else {
         if err2 != "" {
             println("  FAIL 3: missing-binary err=${err2}, expected empty")

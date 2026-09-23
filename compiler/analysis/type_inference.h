@@ -14,6 +14,13 @@ typedef struct TypeConstraint {
     int resolved;  // 1 if constraint is satisfied
 } TypeConstraint;
 
+// A local of main, set aside while the other functions are walked (#2173).
+typedef struct MainLocal {
+    char* name;
+    Type* type;
+    void* inferred_in;
+} MainLocal;
+
 // Inference context
 typedef struct InferenceContext {
     TypeConstraint* constraints;
@@ -25,6 +32,12 @@ typedef struct InferenceContext {
     /* #2173: the id of the function walk in progress (0 outside one). Every
      * symbol the walk adds is stamped with it; see rebindable_symbol. */
     unsigned walk_id;
+    /* #2173: main's locals from its latest walk, oldest first. Taken out of
+     * the table when main's walk ends, so no other walk resolves a name to
+     * them, and put back once inference is done for the typechecker, which
+     * checks main against the program table. */
+    MainLocal* main_locals;
+    int main_local_count;
 } InferenceContext;
 
 // Main API
