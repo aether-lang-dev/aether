@@ -4631,6 +4631,35 @@ static void emit_source_requirements(CodeGenerator* gen, ASTNode* program) {
     }
 }
 
+/* `// aether-entry: main` when the program defines main(), nothing otherwise.
+ *
+ * Reported the way link, source and include requirements are: as a fact the
+ * driver reads from the generated file's header. `ae` needs it before it
+ * links an executable, because a program with no main() compiles cleanly and
+ * then dies in the LINKER, as `undefined reference to WinMain` from MinGW,
+ * `undefined symbol: main` from ld.lld -- a message about the C runtime that
+ * names nothing the user wrote. `--emit=both` under `--target` used to be
+ * rejected outright partly to avoid exactly that, which only hid it for one
+ * mode on one path. With this, every executable build can say what is wrong.
+ *
+ * Decided here rather than refused by the compiler, because the compiler is
+ * right to compile such a file: a library, an object, emitted C, a
+ * documentation block whose main lives in a host, and every test that runs
+ * `aetherc x.ae out.c` to inspect codegen all legitimately have none. Only
+ * the executable LINK needs one. */
+static void emit_entry_point(CodeGenerator* gen, ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c) continue;
+        if (c->type == AST_MAIN_FUNCTION ||
+            (c->type == AST_FUNCTION_DEFINITION && c->value &&
+             strcmp(c->value, "main") == 0)) {
+            fputs("// aether-entry: main\n", gen->output);
+            return;
+        }
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -4641,6 +4670,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_link_requirements(gen, program);
     emit_source_requirements(gen, program);
     emit_c_include_dirs(gen, program);
+    emit_entry_point(gen, program);
     // #976: rewrite C-keyword value identifiers to a valid C spelling before
     // any codegen pass reads their names (must run before escape analysis and
     // emission, which both key off the identifier names).

@@ -13,6 +13,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <strings.h>    /* strcasecmp: POSIX puts it here, not in <string.h> */
+#endif
 #include <sys/stat.h>   /* sysroot completeness probe, below */
 #ifdef _WIN32
 #  include <process.h>
@@ -1232,11 +1235,28 @@ int run_cross_build(const char* c_file, const char* out_file,
              * shim is enough — and the aether_<name> catalog exports
              * then vanish from the .dll. On ELF they are exported by
              * default visibility, so the flag is Windows-only. */
+            /* ...and a Windows DLL's IMPORT LIBRARY is named explicitly.
+             * Left to itself zig names it after the first INPUT file, not
+             * the output: linking app.c into libapp.dll wrote `app.lib`
+             * beside it, and `-o appw` gave `appw.dll.lib`. A consumer
+             * linking against libapp.dll looks for libapp.lib, so the
+             * import library is the DLL's own stem + `.lib`. */
+            char pe_lib_flags[2600];
             const char* elf_pe_lib_flags = "";
             if (emit_lib && !is_apple && !strstr(ztriple, "wasm")) {
-                elf_pe_lib_flags = strstr(ztriple, "windows")
-                    ? "-shared -fPIC -Wl,--export-all-symbols"
-                    : "-shared -fPIC";
+                if (strstr(ztriple, "windows")) {
+                    char implib[2048];
+                    snprintf(implib, sizeof(implib), "%s", out_file);
+                    size_t il = strlen(implib);
+                    if (il >= 4 && strcasecmp(implib + il - 4, ".dll") == 0)
+                        implib[il - 4] = '\0';
+                    snprintf(pe_lib_flags, sizeof(pe_lib_flags),
+                             "-shared -fPIC -Wl,--export-all-symbols "
+                             "-Wl,--out-implib,\"%s.lib\"", implib);
+                    elf_pe_lib_flags = pe_lib_flags;
+                } else {
+                    elf_pe_lib_flags = "-shared -fPIC";
+                }
             }
             /* --size strips at link time as well as suppressing debug info
              * at compile time: --strip-all drops the symbol table and any

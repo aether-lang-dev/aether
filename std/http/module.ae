@@ -32,9 +32,9 @@ exports(
     http_response_error, http_response_ok,
     get, get_with_timeout, post, put, delete,
     http_client_pool_configure_raw, http_client_pool_clear_raw,
-    http_client_pool_idle_count_raw,
+    http_client_pool_idle_count_raw, http_client_rx_buffer_allocs_raw,
     client_pool_configure, client_pool_disable, client_pool_clear,
-    client_pool_idle_count,
+    client_pool_idle_count, client_rx_buffer_allocs,
     http_server_create, http_server_bind_raw, http_server_port, http_server_start_raw,
     http_server_set_host, server_set_host,
     http_server_start_background_raw,
@@ -114,6 +114,7 @@ exports(
 extern http_client_pool_configure_raw(max_idle: int, max_per_host: int, idle_ns: long) -> string
 extern http_client_pool_clear_raw()
 extern http_client_pool_idle_count_raw() -> int
+extern http_client_rx_buffer_allocs_raw() -> long
 
 extern http_get_raw(url: string) -> ptr
 // http.get with a per-call timeout. 0ns blocks forever
@@ -182,6 +183,17 @@ client_pool_clear() {
 // How many idle connections are held right now.
 client_pool_idle_count() -> int {
     return http_client_pool_idle_count_raw()
+}
+
+// How many response buffers the client has had to allocate from nothing,
+// over the life of the process. A pooled connection keeps the buffer its
+// last response was read into and lends it to the next, so a run of
+// requests over one kept connection allocates once, not once per request
+// -- which is what this lets a program, or a test, check rather than
+// assume. Responses whose buffer grew past 64 KiB are not kept, so the idle
+// pool cannot pin an outsized body.
+client_rx_buffer_allocs() -> long {
+    return http_client_rx_buffer_allocs_raw()
 }
 
 // GET a URL and return the response body. Most common case.

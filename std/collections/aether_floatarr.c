@@ -9,6 +9,10 @@
  * coefficients) where going through std.list's void*-boxed items
  * would cost an allocation per entry and chase an extra pointer. */
 
+/* This TU emits the floatarr_* accessors from aether_arr_inline.h as
+ * external definitions (#2169): libaether exports them for C that calls
+ * them without the header. The bodies live in the header, once. */
+#define AETHER_ARR_EMIT_FLOATARR
 #include "aether_collections.h"
 #include "../../runtime/aether_resource_caps.h"
 #include <stdlib.h>

@@ -49,23 +49,66 @@ typedef struct AetherLongArray  AetherLongArray;
 /* Hot-path skip-the-bounds-check accessors. The caller keeps the index in
  * [0, size); out of range is undefined behaviour, exactly as it is for the
  * C array the buffer is. The checked forms (`*_get_raw` / `*_set_raw`, and
- * the Aether-side `get` / `set` wrappers) stay out of line in the .c. */
-static inline int intarr_get_unchecked(AetherIntArray* arr, int i) {
+ * the Aether-side `get` / `set` wrappers) stay out of line in the .c.
+ *
+ * ONE BODY, TWO LINKAGES (#2169).
+ *
+ * A translation unit that includes this header gets each accessor as
+ * `static inline`, which is the whole point of #1986: the C compiler sees
+ * the load and can fold and vectorise it.
+ *
+ * But these names were an exported part of libaether's ABI long before they
+ * were inline, and C outside the standard library declares and calls them
+ * without this header -- aether-ui's GTK4 and Win32 backends do
+ * `extern double floatarr_get_unchecked(void* arr, int i);`. Making them
+ * inline-only removed the symbols, and every program linking the toolkit
+ * stopped linking on 0.708.0 with `undefined reference to
+ * floatarr_get_unchecked`. An ABI break in a minor release.
+ *
+ * So each module's own .c defines AETHER_ARR_EMIT_<FAMILY> before including
+ * this, and in that one translation unit its family's bodies below become
+ * ordinary external definitions under the same names. A `static inline` in
+ * one TU and an external definition in another is plain C -- internal and
+ * external linkage never meet.
+ *
+ * Each body is written once, here. Two copies -- an inline one and an
+ * exported twin in the .c -- would drift: a guard added to one would not
+ * reach the other, and C consumers would quietly behave differently from
+ * Aether callers. tests/integration/packed_array_c_abi links a C program
+ * that only declares these, checks every one is exported, and checks that
+ * including the header still inlines. */
+#ifdef AETHER_ARR_EMIT_INTARR
+#  define AETHER_ARR_INTARR_FN
+#else
+#  define AETHER_ARR_INTARR_FN static inline
+#endif
+#ifdef AETHER_ARR_EMIT_FLOATARR
+#  define AETHER_ARR_FLOATARR_FN
+#else
+#  define AETHER_ARR_FLOATARR_FN static inline
+#endif
+#ifdef AETHER_ARR_EMIT_LONGARR
+#  define AETHER_ARR_LONGARR_FN
+#else
+#  define AETHER_ARR_LONGARR_FN static inline
+#endif
+
+AETHER_ARR_INTARR_FN int intarr_get_unchecked(AetherIntArray* arr, int i) {
     return arr->data[i];
 }
-static inline void intarr_set_unchecked(AetherIntArray* arr, int i, int value) {
+AETHER_ARR_INTARR_FN void intarr_set_unchecked(AetherIntArray* arr, int i, int value) {
     arr->data[i] = value;
 }
-static inline double floatarr_get_unchecked(AetherFloatArray* arr, int i) {
+AETHER_ARR_FLOATARR_FN double floatarr_get_unchecked(AetherFloatArray* arr, int i) {
     return arr->data[i];
 }
-static inline void floatarr_set_unchecked(AetherFloatArray* arr, int i, double value) {
+AETHER_ARR_FLOATARR_FN void floatarr_set_unchecked(AetherFloatArray* arr, int i, double value) {
     arr->data[i] = value;
 }
-static inline int64_t longarr_get_unchecked(AetherLongArray* arr, int i) {
+AETHER_ARR_LONGARR_FN int64_t longarr_get_unchecked(AetherLongArray* arr, int i) {
     return arr->data[i];
 }
-static inline void longarr_set_unchecked(AetherLongArray* arr, int i, int64_t value) {
+AETHER_ARR_LONGARR_FN void longarr_set_unchecked(AetherLongArray* arr, int i, int64_t value) {
     arr->data[i] = value;
 }
 
@@ -79,13 +122,13 @@ static inline void longarr_set_unchecked(AetherLongArray* arr, int i, int64_t va
  *
  * The view borrows: it is valid until the handle is freed or resized, and
  * bounds are the caller's, as they are for the unchecked accessors. */
-static inline int* intarr_data(AetherIntArray* arr) {
+AETHER_ARR_INTARR_FN int* intarr_data(AetherIntArray* arr) {
     return arr ? arr->data : NULL;
 }
-static inline double* floatarr_data(AetherFloatArray* arr) {
+AETHER_ARR_FLOATARR_FN double* floatarr_data(AetherFloatArray* arr) {
     return arr ? arr->data : NULL;
 }
-static inline int64_t* longarr_data(AetherLongArray* arr) {
+AETHER_ARR_LONGARR_FN int64_t* longarr_data(AetherLongArray* arr) {
     return arr ? arr->data : NULL;
 }
 

@@ -20,6 +20,11 @@ main() {
     }
     url = "http://127.0.0.1:${port}/"
 
+    // #2160: the buffer a response is read into goes back to the pool with
+    // its connection and is lent to the next response on it. Counted from
+    // here, so whatever the runtime allocated before main is not ours.
+    allocs_before = http.client_rx_buffer_allocs()
+
     first, e1 = http.get(url)
     if e1 != "" { fail("first request: ${e1}") }
     if string.equals(first, "1") == 0 { fail("first response was '${first}', want '1'") }
@@ -38,6 +43,15 @@ main() {
     if e3 != "" { fail("third request: ${e3}") }
     if string.equals(third, "3") == 0 { fail("third response was '${third}', want '3'") }
 
+    // Three responses over ONE connection -- proven above, since the
+    // upstream closed its listener after the first accept -- must have
+    // needed ONE receive buffer. Before #2160 each request allocated its
+    // own (at least 16 KiB) and freed it, so this read 3.
+    allocs = http.client_rx_buffer_allocs() - allocs_before
+    if allocs != 1 {
+        fail("three requests over one kept connection allocated ${allocs} receive buffers, want 1 (the buffer is not travelling with the connection)")
+    }
+
     // Drop the pooled connection: with the listener closed, a fresh dial has
     // nowhere to land, which is what proves the three above were reuse.
     http.client_pool_clear()
@@ -49,5 +63,5 @@ main() {
         fail("a request after client_pool_clear succeeded, so the upstream was still dialable and the test proves nothing")
     }
 
-    println("PASS: three requests over one connection, and none possible after the pool was cleared")
+    println("PASS: three requests over one connection with one receive buffer, and none possible after the pool was cleared")
 }

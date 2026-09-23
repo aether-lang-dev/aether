@@ -374,6 +374,12 @@ static int transport_recv(Transport* t, void* buf, int len) {
 }
 
 static void transport_close(Transport* t) {
+    /* A retired connection takes its kept receive buffer with it (#2160). */
+    if (t->rxbuf) {
+        aether_caps_free(t->rxbuf, t->rxcap);
+        t->rxbuf = NULL;
+        t->rxcap = 0;
+    }
 #ifdef AETHER_HAS_OPENSSL
     if (t->ssl) {
         SSL_shutdown(t->ssl);
@@ -687,7 +693,15 @@ static void http_pool_put(const char* key, Transport* t) {
     if (c->idle_since_ms + http_pool_idle_ms < http_pool_next_expiry_ms)
         http_pool_next_expiry_ms = c->idle_since_ms + http_pool_idle_ms;
     pthread_mutex_unlock(http_pool_lock());
+    /* The pool entry owns everything the Transport did now, so the
+     * caller's copy must stop pointing at any of it: a later
+     * transport_close on the caller's struct would otherwise close the
+     * socket or free the kept receive buffer (#2160) out from under
+     * the pooled connection -- a double free the next take would
+     * then walk into. */
     t->sockfd = -1;
+    t->rxbuf = NULL;
+    t->rxcap = 0;
 #ifdef AETHER_HAS_OPENSSL
     t->ssl = NULL;
     t->owned_ctx = NULL;
@@ -786,6 +800,18 @@ const char* http_client_pool_configure_raw(int max_idle, int max_per_host,
     pthread_mutex_unlock(http_pool_lock());
     if (!http_pool_enabled) http_client_pool_clear_raw();
     return "";
+}
+
+/* How many receive buffers the client has had to allocate from nothing
+ * (#2160). A response read on a pooled connection that kept its buffer does
+ * not count; one read on a fresh connection, or on one whose buffer was not
+ * worth keeping, does. It is how the reuse is observed rather than assumed:
+ * N requests over one pooled connection allocate once, and a regression that
+ * drops the buffer again shows up as N. Monotonic for the process. */
+static atomic_llong http_rx_fresh_allocs = 0;
+
+long long http_client_rx_buffer_allocs_raw(void) {
+    return (long long)atomic_load(&http_rx_fresh_allocs);
 }
 
 int http_client_pool_idle_count_raw(void) {
@@ -2532,6 +2558,10 @@ int http_upstream_acquire_ex(const char* host, int port, int allow_pool,
     out->t.sockfd = 0;
     out->t.nonblocking = 0;
     out->t.applied_timeout_ns = -1;
+    /* Set by hand like its neighbours: transport_close frees whatever is
+     * here, so an uninitialised pointer would be freed. */
+    out->t.rxbuf = NULL;
+    out->t.rxcap = 0;
 #ifdef AETHER_HAS_OPENSSL
     out->t.ssl = NULL;
     out->t.owned_ctx = NULL;
@@ -2715,6 +2745,7 @@ int http_exchange_recv(HttpExchange* x) {
 
         if (x->len + (size_t)n + 1 > x->cap) {
             size_t new_cap = x->cap ? x->cap * 2 : 16384;
+            if (x->cap == 0) atomic_fetch_add(&http_rx_fresh_allocs, 1);
             while (new_cap < x->len + (size_t)n + 1) new_cap *= 2;
             /* #461: the response body is attacker-controlled (a malicious
              * server can flood it), so the doubling buffer is gated through
@@ -2734,6 +2765,33 @@ int http_exchange_recv(HttpExchange* x) {
             return AE_X_DONE;
         }
     }
+}
+
+/* The largest receive buffer worth keeping on an idle connection (#2160).
+ *
+ * Keeping it is what makes a pooled connection stop allocating; keeping an
+ * unbounded one would let a single large response pin that much memory for
+ * as long as the connection sits idle, on every idle connection. 64 KiB
+ * holds any ordinary response in full, and bounds what the idle pool can
+ * pin at http_pool_max_idle * 64 KiB -- 4 MiB at the default 64 -- where
+ * one outsized body would otherwise pin its whole size. A bigger buffer is
+ * freed and the next request grows a fresh one, which is what every
+ * request did before. */
+#define HTTP_RX_KEEP_MAX (64u * 1024u)
+
+/* Finish with a connection the blocking path used: back to the pool with its
+ * receive buffer, or closed and the buffer freed. The one place a request's
+ * connection is disposed of once its response has been read. */
+static void http_conn_finish(int keep, const char* key, Transport* t,
+                             char* buf, size_t cap) {
+    if (keep && buf && cap <= HTTP_RX_KEEP_MAX && !t->rxbuf) {
+        t->rxbuf = buf;
+        t->rxcap = cap;
+        buf = NULL;
+    }
+    if (buf) aether_caps_free(buf, cap);
+    if (keep) http_pool_put(key, t);
+    else      transport_close(t);
 }
 
 static HttpResponse* http_request_internal(HttpClientRequest* req) {
@@ -3055,6 +3113,17 @@ send_request:
     {
         HttpExchange rx;
         http_exchange_init(&rx, &t, NULL, 0, NULL, 0, method);
+        /* A connection from the pool may carry the buffer its last response
+         * was read into (#2160). Hand it to the exchange empty, and let it
+         * grow from there instead of from nothing. Ownership moves: the
+         * connection no longer frees it. */
+        if (t.rxbuf) {
+            rx.buf = t.rxbuf;
+            rx.cap = t.rxcap;
+            rx.len = 0;
+            t.rxbuf = NULL;
+            t.rxcap = 0;
+        }
         /* The caller's timeout is a budget for the whole response, not for
          * each recv: SO_RCVTIMEO alone let a peer that dribbles a byte just
          * inside the limit hold the request open indefinitely. */
@@ -3170,6 +3239,11 @@ send_request:
         cap = 1;  /* #461: record the 1-byte size so the frees below balance */
     }
 
+    /* Whether the connection goes back to the pool is decided here, but it is
+     * DONE by http_conn_finish at each exit below, after the body has been
+     * copied out: the receive buffer goes back with it (#2160), and it is
+     * still being read until then. */
+    int keep_conn = 0;
     /* Hand the connection back only when this response ended where its own
      * framing said it would, and neither side asked to close. Anything else
      * (read-until-EOF framing, a truncated body, an I/O error) leaves the
@@ -3191,8 +3265,7 @@ send_request:
         } else {
             keep = 0;
         }
-        if (keep) http_pool_put(pool_key, &t);
-        else      transport_close(&t);
+        keep_conn = keep;
     }
 
     /* If transport_recv reported an error AND we didn't get a complete
@@ -3206,13 +3279,13 @@ send_request:
      * this it came back as a successful partial body with no error — the
      * silent truncation the deadline exists to make visible. */
     if (timed_out && !rx_complete_at_deadline) {
-        aether_caps_free(full_response, cap);
+        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             "request timed out before the response ended");
         return response;
     }
     if (recv_err && !header_end) {
-        aether_caps_free(full_response, cap);
+        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             timed_out ? "request timed out before the response arrived"
                       : "recv timeout or I/O error");
@@ -3223,7 +3296,7 @@ send_request:
      * case meant a read that died mid-body came back as a successful short
      * response, which a caller cannot tell from a complete one. */
     if (truncated) {
-        aether_caps_free(full_response, cap);
+        http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
         response->error = string_new(
             timed_out ? "request timed out: the response stopped short of its declared body length"
             : recv_err ? "response truncated: read failed before the declared body length"
@@ -3241,7 +3314,9 @@ send_request:
         deliver_len = framing.body_target;
     http_response_fill_from_bytes(response, full_response, deliver_len);
 
-    aether_caps_free(full_response, cap);
+    /* The body is a copy now, so the buffer is free to go back with the
+     * connection for the next request on it. */
+    http_conn_finish(keep_conn, pool_key, &t, full_response, cap);
     return response;
 }
 

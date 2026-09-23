@@ -9,6 +9,10 @@
  * amortised growth, no capacity-beyond-size. Callers that need
  * resize on write use std.list. */
 
+/* This TU emits the intarr_* accessors from aether_arr_inline.h as
+ * external definitions (#2169): libaether exports them for C that calls
+ * them without the header. The bodies live in the header, once. */
+#define AETHER_ARR_EMIT_INTARR
 #include "aether_collections.h"
 #include "../../runtime/aether_resource_caps.h"
 #include <stdlib.h>
