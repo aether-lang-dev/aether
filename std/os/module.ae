@@ -260,7 +260,8 @@ args_get(index: int) -> {
 // does NOT need to match `prog`). On success this call never returns;
 // on failure it returns -1 with the current process still running.
 // `prog` is looked up on PATH if it does not contain a slash.
-// Not available on Windows — returns -1 there.
+// Windows cannot replace a running process: there it runs `prog`, waits,
+// and exits with its status. -1 only when it could not be started.
 extern os_execv(prog: string, argv_list: ptr) -> int
 
 // string_concat used to detach the borrowed output string from the

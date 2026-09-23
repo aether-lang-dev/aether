@@ -2570,9 +2570,13 @@ static wchar_t* win_resolve_program(const char* prog) {
 
     wchar_t* found = NULL;
     if (has_sep) {
-        /* A path: used as written (relative ones against the current
-         * directory, which the caller named explicitly). */
+        /* A path the caller named (relative ones against the current
+         * directory). Without an extension, PATHEXT's come first, as
+         * CreateProcessW appended .exe; then the file exactly as named, so
+         * an extensionless program at an explicit path still starts (Wine
+         * runs a Unix binary that way, os_execv("/bin/echo", ...)). */
         found = win_try_dir(L"", 0, wprog, has_ext, exts);
+        if (!found && !has_ext) found = win_try_candidate(L"", 0, wprog, L"", 0);
     } else {
         /* CreateProcessW's own order, less the current directory. */
         wchar_t* app = win_app_dir();

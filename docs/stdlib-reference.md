@@ -2848,7 +2848,7 @@ main() {
 - `os.argv0()` → `string` - Convenience wrapper around `aether_argv0()` that returns `""` instead of null and hands back a fresh copy
 - `os.args_seal()` - **One-shot runtime seal** of the argv accessors. After this returns, `aether_args_count()` reports `0`, `aether_args_get(i)` returns null, `os.argv0()` returns `""`, and `aether_argv_raw()` returns null, as if argv had never been initialised. Idempotent (calling twice is a no-op); there is no unseal. Intended use: once `main()` has parsed its CLI flags into config state, call `os.args_seal()` to prevent any later code (imported libraries, plugin callbacks, untrusted Aether modules) from reading the original argv. Complements the compile-time `hide` / `seal except` scope directives, those deny *lexical* access, this denies *runtime* access. Caveat: this is a co-operative Aether-side gate, not a kernel boundary; the OS still has the original argv in process memory (Linux `/proc/self/cmdline`, macOS sysctl) and code that goes around the Aether accessors can still read it. Pair with the LD_PRELOAD libc sandbox if the threat model demands true inaccessibility.
 - `os.args_sealed()` → `int` - Returns `1` if `args_seal()` has been called in this process, `0` otherwise. Cheap; useful for cooperative callers that want to check before they call.
-- `os_execv(prog, argv_list)` → `int` - Replace the current process image with `prog`, passing an explicit `list<ptr>` argv. Uses POSIX `execvp(3)` so `prog` is looked up on `PATH` when it does not contain a slash. Flushes stdio before the exec so pre-exec output is not lost. On success this call **never returns**; on failure returns `-1` and the current process continues. Not available on Windows, use `os_run` + `exit(rc)` instead.
+- `os_execv(prog, argv_list)` → `int` - Replace the current process image with `prog`, passing an explicit `list<ptr>` argv. Uses POSIX `execvp(3)` so `prog` is looked up on `PATH` when it does not contain a slash. Flushes stdio before the exec so pre-exec output is not lost. On success this call **never returns**; on failure returns `-1` and the current process continues. Windows cannot replace a running process, so there it runs `prog`, waits for it and exits with its status, which is what a caller of exec observes.
 
 Raw extern: `os_exec_raw`.
 
@@ -2912,9 +2912,11 @@ with no error, while on Windows it fails before any child exists and comes
 back as status -1 with `err` set to `program not found`.
 
 Process execution is native on Windows (`CreateProcessW` and Job Objects),
-with two exceptions. `os_execv` does not exist there and returns -1, and the
-`std.ipc` back-channel is POSIX-only: `os.run_pipe` spawns the child without
-it, and `os.run_pipe_drain_and_wait` returns `"unsupported on Windows"`.
+with two differences. Windows cannot replace a running process, so
+`os_execv` runs the program, waits for it and exits with its status, which
+is what a caller of exec observes. And the `std.ipc` back-channel is
+POSIX-only: `os.run_pipe` spawns the child without it, and
+`os.run_pipe_drain_and_wait` returns `"unsupported on Windows"`.
 
 ```aether,run
 import std.os
@@ -2979,7 +2981,7 @@ spawned child exited 5
 - `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
 - `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`
 - `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only)
-- `os_execv(prog, argv_list)` → `int` - Replace this process (POSIX only); listed with the argv accessors above
+- `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`
 
